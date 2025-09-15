@@ -191,15 +191,16 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         if args.use_turbo_attention:
             gpt_layer_specs.TEDotProductAttention = PrimusTurboAttention
-        if args.use_turbo_row_parallel_linear:
+        if args.use_turbo_parallel_linear:
+            # TE row parallel linear
             gpt_layer_specs.TERowParallelLinear = PrimusTurboRowParallelLinear
             moe_module_specs.TERowParallelLinear = PrimusTurboRowParallelLinear
-        if args.use_turbo_layer_norm_column_parallel_linear:
+            # TE layer norn column parallel linear
             gpt_layer_specs.TELayerNormColumnParallelLinear = PrimusTurboLayerNormColumnParallelLinear
-        if args.use_turbo_column_parallel_linear:
+            # TE column parallel linear
             gpt_layer_specs.TEColumnParallelLinear = PrimusTurboColumnParallelLinear
             moe_module_specs.TEColumnParallelLinear = PrimusTurboColumnParallelLinear
-        if args.use_turbo_column_parallel_linear_torch:
+            # column parallel linear
             gpt_model.tensor_parallel.ColumnParallelLinear = PrimusTurboColumnParallelLinearTorch
         if args.use_turbo_grouped_mlp:
             moe_module_specs.GroupedMLP = PrimusTurboGroupedMLP

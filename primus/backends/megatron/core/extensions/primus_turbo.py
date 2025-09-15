@@ -3,7 +3,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Union
 
 import primus_turbo.pytorch as pt
 import torch
@@ -25,7 +25,43 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_tensor_model_parallel_group_if_none
 from megatron.training.global_vars import get_args
+from primus_turbo.pytorch.core.float8 import (
+    Float8QuantConfig,
+    Format,
+    MXQuantConfig,
+    ScalingGranularity,
+)
 from torch import Tensor
+from transformer_engine.pytorch.fp8 import Format as TEFormat
+from transformer_engine.pytorch.fp8 import (
+    FP8GlobalStateManager as TEFP8GlobalStateManager,
+)
+from transformer_engine.pytorch.fp8 import Recipe as TERecipe
+
+
+def te_recipe_to_turbo_quant_config(te_recipe: TERecipe) -> Union[Float8QuantConfig, MXQuantConfig]:
+
+    def te_fp8_format_to_turbo_fp8_format(te_format: TEFormat) -> Format:
+        format_mapping = {
+            TEFormat.E4M3: Format.E4M3,
+            TEFormat.HYBRID: Format.HYBRID,
+            TEFormat.E5M2: Format.E5M2,
+        }
+
+        return format_mapping[te_format]
+
+    format = te_fp8_format_to_turbo_fp8_format(te_recipe.fp8_format)
+    if te_recipe.delayed():
+        # NOTE: Turbo only support current scaling now. We treat delayed scaling as current scaling.
+        config = Float8QuantConfig(format=format, granularity=ScalingGranularity.TENSORWISE)
+    elif te_recipe.float8_current_scaling():
+        config = Float8QuantConfig(format=format, granularity=ScalingGranularity.TENSORWISE)
+    elif te_recipe.mxfp8():
+        config = MXQuantConfig(format=format, granularity=ScalingGranularity.BLOCKWISE)
+    else:
+        raise ValueError("Not support Transformer Engine recipe.")
+
+    return config
 
 
 class PrimusTurboAttention(te.pytorch.DotProductAttention):
@@ -187,16 +223,6 @@ class PrimusTurboRowParallelLinear(TELinear):
 
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
-        args = get_args()
-        if args.enable_turbo_gemm_float8:
-            self.gemm = lambda a, b, transA=False, transB=True, out_dtype=None, config=None: pt.ops.gemm_fp8_blockwise(
-                a, b, transA=transA, transB=transB, out_dtype=out_dtype, config=config
-            )
-        else:
-            self.gemm = lambda a, b, transA=False, transB=True, out_dtype=None: pt.ops.gemm(
-                a, b, transA=transA, transB=transB, out_dtype=out_dtype
-            )
-
         super().__init__(
             input_size=input_size,
             output_size=output_size,
@@ -230,18 +256,33 @@ class PrimusTurboRowParallelLinear(TELinear):
 
     def forward(
         self,
-        inp: torch.Tensor,
+        input_: torch.Tensor,
     ):
         # weights = [getattr(self, name) for name in self.weight_names]
         # weights = torch.cat(weights, dim=0)  # or set weights = self._parameters['weight']
         weights = self._parameters["weight"]
         if self.use_bias:
             bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
-        original_shape = inp.size()
-        if not inp.is_contiguous():
-            inp = inp.contiguous()
-        inp = inp.view(-1, original_shape[-1])
-        out = self.gemm(inp, weights)
+        original_shape = input_.size()
+        if not input_.is_contiguous():
+            input_ = input_.contiguous()
+        input_ = input_.view(-1, original_shape[-1])
+
+        if TEFP8GlobalStateManager.is_fp8_enabled():
+            quant_config = te_recipe_to_turbo_quant_config(TEFP8GlobalStateManager.get_fp8_recipe())
+            if isinstance(quant_config, MXQuantConfig):
+                out = pt.ops.gemm_fp8_blockwise(
+                    input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config
+                )
+            elif isinstance(quant_config, Float8QuantConfig):
+                out = pt.ops.gemm_fp8_tensorwise(
+                    input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config
+                )
+            else:
+                raise ValueError("Not support quant config.")
+        else:
+            out = pt.ops.gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None)
+
         out = out.view(original_shape[0], original_shape[1], -1)
         if self.te_return_bias:
             return out, bias_tensor
@@ -269,16 +310,6 @@ class PrimusTurboColumnParallelLinear(TELinear):
         if gather_output:
             raise ValueError("Transformer Engine linear layers do not support gather_output = True")
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
-
-        args = get_args()
-        if args.enable_turbo_gemm_float8:
-            self.gemm = lambda a, b, transA=False, transB=True, out_dtype=None, config=None: pt.ops.gemm_fp8_blockwise(
-                a, b, transA=transA, transB=transB, out_dtype=out_dtype, config=config
-            )
-        else:
-            self.gemm = lambda a, b, transA=False, transB=True, out_dtype=None: pt.ops.gemm(
-                a, b, transA=transA, transB=transB, out_dtype=out_dtype
-            )
 
         super().__init__(
             input_size=input_size,
@@ -314,18 +345,33 @@ class PrimusTurboColumnParallelLinear(TELinear):
 
     def forward(
         self,
-        inp: torch.Tensor,
+        input_: torch.Tensor,
     ):
         # weights = [getattr(self, name) for name in self.weight_names]
         # weights = torch.cat(weights, dim=0)  # or set weights = self._parameters['weight']
         weights = self._parameters["weight"]
         if self.use_bias:
             bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
-        original_shape = inp.size()
-        if not inp.is_contiguous():
-            inp = inp.contiguous()
-        inp = inp.view(-1, original_shape[-1])
-        out = self.gemm(inp, weights)
+        original_shape = input_.size()
+        if not input_.is_contiguous():
+            input_ = input_.contiguous()
+        input_ = input_.view(-1, original_shape[-1])
+
+        if TEFP8GlobalStateManager.is_fp8_enabled():
+            quant_config = te_recipe_to_turbo_quant_config(TEFP8GlobalStateManager.get_fp8_recipe())
+            if isinstance(quant_config, MXQuantConfig):
+                out = pt.ops.gemm_fp8_blockwise(
+                    input_, weights, trans_a=False, trans_b=True, config=quant_config
+                )
+            elif isinstance(quant_config, Float8QuantConfig):
+                out = pt.ops.gemm_fp8_tensorwise(
+                    input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config
+                )
+            else:
+                raise ValueError("Not support quant config.")
+        else:
+            out = pt.ops.gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None)
+
         out = out.view(original_shape[0], original_shape[1], -1)
         if self.te_return_bias:
             return out, bias_tensor
@@ -361,16 +407,6 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
 
-        args = get_args()
-        if args.enable_turbo_gemm_float8:
-            self.gemm = lambda a, b, transA=False, transB=True, out_dtype=None, config=None: pt.ops.gemm_fp8_blockwise(
-                a, b, transA=transA, transB=transB, out_dtype=out_dtype, config=config
-            )
-        else:
-            self.gemm = lambda a, b, transA=False, transB=True, out_dtype=None: pt.ops.gemm(
-                a, b, transA=transA, transB=transB, out_dtype=out_dtype
-            )
-
         super().__init__(
             input_size,
             output_size,
@@ -404,7 +440,21 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
         if not input_.is_contiguous():
             input_ = input_.contiguous()
         input_ = input_.view(-1, original_shape[-1])
-        out = self.gemm(input_, weight)
+
+        if TEFP8GlobalStateManager.is_fp8_enabled():
+            quant_config = te_recipe_to_turbo_quant_config(TEFP8GlobalStateManager.get_fp8_recipe())
+            if isinstance(quant_config, MXQuantConfig):
+                out = pt.ops.gemm_fp8_blockwise(
+                    input_, weight, trans_a=False, trans_b=True, out_dtype=None, config=quant_config
+                )
+            elif isinstance(quant_config, Float8QuantConfig):
+                out = pt.ops.gemm_fp8_tensorwise(
+                    input_, weight, trans_a=False, trans_b=True, out_dtype=None, config=quant_config
+                )
+            else:
+                raise ValueError("Not support quant config.")
+        else:
+            out = pt.ops.gemm(input_, weight, trans_a=False, trans_b=True, out_dtype=None)
         out = out.view(original_shape[0], original_shape[1], -1)
 
         return out, bias_tensor
@@ -451,16 +501,6 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         # ourselves. This way our forward always returns two values
         # and we don't have to deal with the zero length Tensor.
         self.te_return_bias = skip_bias_add and bias
-
-        args = get_args()
-        if args.enable_turbo_gemm_float8:
-            self.gemm = lambda a, b, transA=False, transB=True, out_dtype=None, config=None: pt.ops.gemm_fp8_blockwise(
-                a, b, transA=transA, transB=transB, out_dtype=out_dtype, config=config
-            )
-        else:
-            self.gemm = lambda a, b, transA=False, transB=True, out_dtype=None: pt.ops.gemm(
-                a, b, transA=transA, transB=transB, out_dtype=out_dtype
-            )
 
         super().__init__(
             in_features=input_size,
@@ -515,7 +555,22 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         if not norm_out.is_contiguous():
             norm_out = norm_out.contiguous()
         inp = norm_out.view(-1, original_shape[-1])
-        out = self.gemm(inp, weights)
+
+        if TEFP8GlobalStateManager.is_fp8_enabled():
+            quant_config = te_recipe_to_turbo_quant_config(TEFP8GlobalStateManager.get_fp8_recipe())
+            if isinstance(quant_config, MXQuantConfig):
+                out = pt.ops.gemm_fp8_blockwise(
+                    inp, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config
+                )
+            elif isinstance(quant_config, Float8QuantConfig):
+                out = pt.ops.gemm_fp8_tensorwise(
+                    inp, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config
+                )
+            else:
+                raise ValueError("Not support quant config.")
+        else:
+            out = pt.ops.gemm(inp, weights, trans_a=False, trans_b=True, out_dtype=None)
+
         out = out.view(original_shape[0], original_shape[1], -1)
         if self.te_return_bias:
             return out, bias_tensor
