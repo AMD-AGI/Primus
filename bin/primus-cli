@@ -93,7 +93,7 @@ case "$mode" in
         exec bash "$CONTAINER_SCRIPT" "$@"
         ;;
 
-    direct/native/host)
+    direct)
         # Direct (host) mode: run workflow directly on the host, no container
         DIRECT_SCRIPT="$SCRIPT_DIR/primus-cli-entrypoint.sh"
         if [[ ! -f "$DIRECT_SCRIPT" ]]; then
