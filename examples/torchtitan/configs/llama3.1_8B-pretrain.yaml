@@ -15,6 +15,10 @@ modules:
       file_sink_level: DEBUG
       stderr_sink_level: INFO
 
+      metrics:
+        # enable_wandb: true
+        enable_wandb: false
+
       # model:
       #   converters: ["mx"]
       primus_turbo:
