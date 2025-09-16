@@ -361,3 +361,8 @@ def validate_args_on_rocm(args):
     # Deterministic mode
     if args.deterministic_mode:
         assert not args.moe_grouped_gemm, "MoE Grouped GEMM can't be used in deterministic mode."
+
+    # dump pp data
+    if args.dump_pp_data and args.pipeline_model_parallel_size == 1:
+        args.dump_pp_data = False
+        print_rank_last(f"Disable args.dump_pp_data since args.pipeline_model_parallel_size=1")
