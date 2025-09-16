@@ -37,6 +37,8 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         if hasattr(self.titan_config, "primus_turbo") and self.titan_config.primus_turbo.enable_primus_turbo:
             self.enable_primus_turbo_extension()
+        else:
+            self.patch_torch_async_tp()
 
     def setup(self):
         pass
@@ -110,9 +112,7 @@ class TorchTitanPretrainTrainer(BaseModule):
         try:
             import primus_turbo.pytorch as pt
 
-            from primus.backends.torchtitan.tools.utils import (
-                get_backend_stream,
-            )
+            from primus.backends.torchtitan.tools.utils import get_backend_stream
 
             def _fused_all_gather_matmul_impl(
                 mm_out_op: torch._ops.OpOverload,
@@ -161,10 +161,11 @@ class TorchTitanPretrainTrainer(BaseModule):
                 group_name: str,
             ) -> torch.Tensor:
                 comm_method = "pipeline"
+                group = c10d._resolve_process_group(group_name)
                 # Move the scatter_dim to the front and flatten the tensor into a 2D matrix
                 if comm_method == "pipeline":
                     gemm_streams = [torch.cuda.current_stream()]
-                    comm_streams = get_backend_stream(size=self.tp_size, priority=0, prefix="comm")
+                    comm_streams = get_backend_stream(size=group.size(), priority=0, prefix="comm")
                 elif comm_method == "tile":
                     gemm_streams = []
                     comm_streams = []
@@ -184,8 +185,7 @@ class TorchTitanPretrainTrainer(BaseModule):
                     num_splits=4,
                     out_dtype=out_dtype,
                 )
-
-                return rs_output
+                return rs_output.contiguous()
 
             symm_module._fused_all_gather_matmul_impl = _fused_all_gather_matmul_impl
             symm_module._fused_matmul_reduce_scatter_impl = _fused_matmul_reduce_scatter_impl
