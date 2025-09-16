@@ -68,6 +68,7 @@ attention_softmax_in_fp32: false
 # fusion
 bias_gelu_fusion: true
 cross_entropy_loss_fusion: False
+cross_entropy_fusion_impl: "native" # "native", "te"
 bias_swiglu_fusion: true
 masked_softmax_fusion: true
 no_persist_layer_norm: false

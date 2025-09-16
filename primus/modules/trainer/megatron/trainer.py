@@ -1222,18 +1222,18 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         one_logger = get_one_logger()
         args = get_args()
 
-        if args.attn_warmup:
-            from .utils import warmup_attn
+        if args.pp_warmup:
+            from .utils import pp_warmup
 
             log_rank_0(
-                "warmup attn on each rank in parallel to decrease "
-                "the first iter time, especially when pp is used"
+                "warmup on each rank in parallel to decrease "
+                "the first iter time, especially when pp degree is large"
             )
             timers = get_timers()
-            timers("warmup-attn", log_level=0).start(barrier=True)
-            warmup_attn(args, self.config, self.model, self.optimizer)
-            timers("warmup-attn").stop()
-            timers.log(["warmup-attn"], barrier=True)
+            timers("pp-warmup", log_level=0).start(barrier=True)
+            pp_warmup(args, self.config, self.model, self.optimizer)
+            timers("pp-warmup").stop()
+            timers.log(["pp-warmup"], barrier=True)
 
         process_non_loss_data_func = None
         non_loss_data_func = None
@@ -1732,7 +1732,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if args.dump_pp_data:
             from .utils import dump_pp_data
 
-            pp_data_dir = "output/pp_data"
+            pp_data_dir = os.environ.get("DUMP_PP_DIR", "output/pp_data")
             dump_pp_data(args, get_num_microbatches(), pp_data_dir)
             log_rank_0(f"pp schedule data dumped to {pp_data_dir}")
 
@@ -2171,6 +2171,22 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     f"{statistics.mean(self.recent_token_throughputs):.1f} |"
                 )
                 if args.log_timers_to_tensorboard:
+                    if args.use_rocm_mem_info or iteration in args.use_rocm_mem_info_iters:
+                        mem_collector = "rocm"
+                        used_mem, free_mem, total_mem, mem_usage = (
+                            rocm_used_mem,
+                            rocm_free_mem,
+                            rocm_total_mem,
+                            rocm_mem_usage,
+                        )
+                    else:
+                        mem_collector = "hip"
+                        used_mem, free_mem, total_mem, mem_usage = (
+                            hip_used_mem,
+                            hip_free_mem,
+                            hip_total_mem,
+                            hip_mem_usage,
+                        )
                     if writer:
                         writer.add_scalar("throughput(tflops/sec/gpu)", throughput, iteration)
                         writer.add_scalar(
@@ -2179,21 +2195,21 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                             iteration,
                         )
                         writer.add_scalar(
-                            "rocm_used_mem(GB)",
-                            rocm_used_mem / 1024 / 1024 / 1024,
+                            f"{mem_collector}_used_mem(GB)",
+                            used_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         writer.add_scalar(
-                            "rocm_free_mem(GB)",
-                            rocm_free_mem / 1024 / 1024 / 1024,
+                            f"{mem_collector}_free_mem(GB)",
+                            free_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         writer.add_scalar(
-                            "rocm_total_mem(GB)",
-                            rocm_total_mem / 1024 / 1024 / 1024,
+                            f"{mem_collector}_total_mem(GB)",
+                            total_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
-                        writer.add_scalar("rocm_mem_usage(%)", rocm_mem_usage * 100.0, iteration)
+                        writer.add_scalar(f"{mem_collector}_mem_usage(%)", mem_usage * 100.0, iteration)
                     if wandb_writer:
                         wandb_writer.log({"throughput(tflops/sec/gpu)": throughput}, iteration)
                         wandb_writer.log(
@@ -2201,18 +2217,18 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                             iteration,
                         )
                         wandb_writer.log(
-                            {"rocm_used_mem(GB)": rocm_used_mem / 1024 / 1024 / 1024},
+                            {f"{mem_collector}_used_mem(GB)": used_mem / 1024 / 1024 / 1024},
                             iteration,
                         )
                         wandb_writer.log(
-                            {"rocm_free_mem(GB)": rocm_free_mem / 1024 / 1024 / 1024},
+                            {f"{mem_collector}_free_mem(GB)": free_mem / 1024 / 1024 / 1024},
                             iteration,
                         )
                         wandb_writer.log(
-                            {"rocm_total_mem(GB)": rocm_total_mem / 1024 / 1024 / 1024},
+                            {f"{mem_collector}_total_mem(GB)": total_mem / 1024 / 1024 / 1024},
                             iteration,
                         )
-                        wandb_writer.log({"rocm_mem_usage(%)": rocm_mem_usage * 100.0}, iteration)
+                        wandb_writer.log({f"{mem_collector}_mem_usage(%)": mem_usage * 100.0}, iteration)
             assert learning_rate is not None
             # Decoupled_learning_rate should be not None only on first and last pipeline stage.
             log_string += " learning rate: {:.6E} |".format(learning_rate)

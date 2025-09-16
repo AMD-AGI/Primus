@@ -1,0 +1,152 @@
+diff --git a/torchtitan/experiments/deepseek_v3/model.py b/torchtitan/experiments/deepseek_v3/model.py
+index 131b1ea..c9ffa84 100644
+--- a/torchtitan/experiments/deepseek_v3/model.py
++++ b/torchtitan/experiments/deepseek_v3/model.py
+@@ -42,9 +42,9 @@ import torch.distributed._symmetric_memory as symm_mem
+ import torch.nn.functional as F
+ import torch.utils.checkpoint
+
+-from attn_mask_utils import _prepare_4d_causal_attention_mask
++from .attn_mask_utils import _prepare_4d_causal_attention_mask
+
+-from group_gemms import (
++from .group_gemms import (
+     DSGroupGEMM,
+     TorchAOBF16GroupGEMM,
+     TorchBF16GroupGEMM,
+@@ -52,8 +52,8 @@ from group_gemms import (
+     TritonCGBF16GroupGEMM,
+ )
+
+-from model_config import ModelArgs
+-from symm_mem_recipes import OnDeviceAllToAllV
++from .model_config import ModelArgs
++from .symm_mem_recipes import OnDeviceAllToAllV
+ from torch import nn
+ from torch.distributed._functional_collectives import all_to_all_single_autograd
+
+diff --git a/torchtitan/experiments/deepseek_v3/unit_testing/permute_indices_testing.py b/torchtitan/experiments/deepseek_v3/unit_testing/permute_indices_testing.py
+index c2084bc..5a264aa 100644
+--- a/torchtitan/experiments/deepseek_v3/unit_testing/permute_indices_testing.py
++++ b/torchtitan/experiments/deepseek_v3/unit_testing/permute_indices_testing.py
+@@ -12,7 +12,7 @@ import numpy as np
+ import torch
+
+ try:
+-    from moe_kernels import fill_indices_wrapper
++    from torchtitan.experiments.deepseek_v3.moe_kernels import fill_indices_wrapper
+
+ except ImportError:
+     print("unable to import required function(s) from moe_kernels.py...")
+diff --git a/torchtitan/experiments/kernels/triton_contiguous_group_gemm/cg_backward.py b/torchtitan/experiments/kernels/triton_contiguous_group_gemm/cg_backward.py
+index 3670971..582a2f2 100644
+--- a/torchtitan/experiments/kernels/triton_contiguous_group_gemm/cg_backward.py
++++ b/torchtitan/experiments/kernels/triton_contiguous_group_gemm/cg_backward.py
+@@ -11,7 +11,7 @@ import triton.language as tl
+
+ # Import configs and utilities from cg_forward
+
+-from tma_cuda_autotune import early_config_prune, STANDARD_CONFIGS
++from .tma_cuda_autotune import early_config_prune, STANDARD_CONFIGS
+
+ # ============ Triton kernel for contiguous grouped GEMM backward inputs ============
+
+@@ -349,7 +349,7 @@ class ContiguousGroupedGEMM(torch.autograd.Function):
+     @staticmethod
+     def forward(ctx, inputs, expert_weights, expert_indices, group_size_m=128):
+         """Forward pass for contiguous grouped GEMM."""
+-        from cg_forward import cg_grouped_gemm_forward
++        from .cg_forward import cg_grouped_gemm_forward
+
+         # Save for backward
+         ctx.save_for_backward(inputs, expert_weights, expert_indices)
+diff --git a/torchtitan/experiments/kernels/triton_contiguous_group_gemm/unit_test_cg.py b/torchtitan/experiments/kernels/triton_contiguous_group_gemm/unit_test_cg.py
+index 7b2ad9e..ba4f507 100644
+--- a/torchtitan/experiments/kernels/triton_contiguous_group_gemm/unit_test_cg.py
++++ b/torchtitan/experiments/kernels/triton_contiguous_group_gemm/unit_test_cg.py
+@@ -9,10 +9,10 @@ import time
+ import unittest
+
+ import torch
+-from cg_backward import cg_grouped_gemm
++from .cg_backward import cg_grouped_gemm
+
+ # Import implementations to test
+-from cg_forward import cg_grouped_gemm_forward
++from .cg_forward import cg_grouped_gemm_forward
+
+
+ def run_tests(run_benchmarks=False):
+diff --git a/torchtitan/experiments/multimodal/__init__.py b/torchtitan/experiments/multimodal/__init__.py
+index fe08681..c619e7e 100644
+--- a/torchtitan/experiments/multimodal/__init__.py
++++ b/torchtitan/experiments/multimodal/__init__.py
+@@ -4,7 +4,7 @@
+ # This source code is licensed under the BSD-style license found in the
+ # LICENSE file in the root directory of this source tree.
+
+-from mm_dataset import build_mm_dataloader
++from .mm_dataset import build_mm_dataloader
+
+ from torchtitan.components.loss import build_cross_entropy_loss
+ from torchtitan.components.lr_scheduler import build_lr_schedulers
+diff --git a/torchtitan/experiments/multimodal/mm_collator.py b/torchtitan/experiments/multimodal/mm_collator.py
+index 98793a7..2e0c58e 100644
+--- a/torchtitan/experiments/multimodal/mm_collator.py
++++ b/torchtitan/experiments/multimodal/mm_collator.py
+@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
+ import torch
+ import torch.nn.functional as F
+
+-from tokenizer.tiktoken import IGNORE_INDEX
++from .tokenizer.tiktoken import IGNORE_INDEX
+
+ from torch.nn.utils.rnn import pad_sequence
+
+diff --git a/torchtitan/experiments/multimodal/mm_dataset.py b/torchtitan/experiments/multimodal/mm_dataset.py
+index a29627a..b379e76 100644
+--- a/torchtitan/experiments/multimodal/mm_dataset.py
++++ b/torchtitan/experiments/multimodal/mm_dataset.py
+@@ -12,12 +12,12 @@ import torch
+ from datasets import Dataset, load_dataset
+ from datasets.distributed import split_dataset_by_node
+
+-from mm_collator import MultiModalCollator
+-from tokenizer.tiktoken import IGNORE_INDEX, Tokenizer
++from .mm_collator import MultiModalCollator
++from .tokenizer.tiktoken import IGNORE_INDEX, Tokenizer
+ from torch.distributed.checkpoint.stateful import Stateful
+ from torch.utils.data import IterableDataset
+-from transform import CLIPTransform
+-from utils import load_image
++from .transform import CLIPTransform
++from .utils import load_image
+
+ from torchtitan.components.dataloader import ParallelAwareDataloader
+ from torchtitan.config_manager import JobConfig
+diff --git a/torchtitan/experiments/multimodal/tests/test_multimodal_model.py b/torchtitan/experiments/multimodal/tests/test_multimodal_model.py
+index b5acc51..a02f9c3 100644
+--- a/torchtitan/experiments/multimodal/tests/test_multimodal_model.py
++++ b/torchtitan/experiments/multimodal/tests/test_multimodal_model.py
+@@ -7,7 +7,7 @@
+ import pytest
+ import torch
+
+-from torchtitan.experiments.llama_multimodal import (
++from torchtitan.experiments.multimodal.model import (
+     ModelArgs,
+     MultimodalDecoder,
+     VisionEncoder,
+diff --git a/torchtitan/experiments/multimodal/transform.py b/torchtitan/experiments/multimodal/transform.py
+index ecb0f98..b67771a 100644
+--- a/torchtitan/experiments/multimodal/transform.py
++++ b/torchtitan/experiments/multimodal/transform.py
+@@ -11,7 +11,7 @@ import torch
+ import torchvision
+ from torchvision.transforms.v2 import functional as F
+
+-from utils import (
++from .utils import (
+     find_supported_resolutions,
+     get_canvas_best_fit,
+     resize_with_pad,

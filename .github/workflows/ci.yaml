@@ -120,15 +120,7 @@ jobs:
           mkdir -p "${{ env.UT_LOG_PATH }}"
           MASTER_PORT=10009 DATA_PATH=/apps/tas/0_public/data \
           python ./tests/run_unit_tests.py
-  clean:
-    env:
-      PRIMUS_WORKDIR: /apps/tas/0_public/primus_k8s_ci
-    needs: [ code-lint, run-unittest ]
-    runs-on: [ tas-k8s ]
-    steps:
-      - name: Clean Primus-Turbo
+      - name: Clean
         run: |
           rm -rf ${PRIMUS_WORKDIR}/Primus-Turbo
-      - name: Clean Primus
-        run: |
           rm -rf ${PRIMUS_WORKDIR}/Primus

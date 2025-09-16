@@ -1,4 +1,9 @@
 #!/bin/bash
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 set -euxo pipefail
 
 start_time=$(date +%s)
@@ -7,32 +12,11 @@ start_time=$(date +%s)
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRIMUS_PATH="$SCRIPT_PATH/../../"
 MEGATRON_PATH="$PRIMUS_PATH/third_party/Megatron-LM/"
-PRIMUS_WORKDIR="/apps/tas/0_public/primus_k8s_ci"
-HIPBLASLT_LIBDIR="$PRIMUS_WORKDIR/libhipblaslt_staggerU"
-
-# install libhipblaslt_staggerU
-if [ -e $HIPBLASLT_LIBDIR ]; then
-  echo "install libhipblaslt_staggerU"
-  pushd $HIPBLASLT_LIBDIR
-  dpkg -i hipblaslt[-_]*.deb
-  popd
-  ln -s  /opt/rocm/lib/libhipblaslt.so  /opt/rocm/lib/libhipblaslt.so.0
-  disable_moe_dispatcher_check=""
-else
-  disable_moe_dispatcher_check="--ignore tests/unit_tests/transformer/moe/test_moe_layer_discrepancy.py"
-fi
+disable_moe_dispatcher_check=""
 
 pip install mock
 # pip install multi-storage-client
 pip install pytest-asyncio==0.23.6
-
-# update apex
-pip install -v --disable-pip-version-check \
-  --cache-dir=$PRIMUS_WORKDIR/primus-cache \
-  --no-build-isolation \
-  --config-settings="--build-option=--cpp_ext" \
-  --config-settings="--build-option=--cuda_ext" \
-  "git+https://github.com/ROCm/apex.git@4b03581558a063754bc1c4c9656bf6444844568c"
 
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export HIP_FORCE_DEV_KERNARG=1

@@ -17,6 +17,7 @@ modules:
 
       training:
         batch_size: 8
+        compile: true
 
       optimizer:
         lr: 1.5e-4
@@ -26,3 +27,7 @@ modules:
 
       activation_checkpoint:
         mode: full
+
+      primus_turbo:
+        enable_primus_turbo: false
+        enable_attention_float8: false
