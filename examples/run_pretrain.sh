@@ -60,6 +60,56 @@ LOG_ERROR() {
     echo "[NODE-$NODE_RANK($HOSTNAME)] [ERROR] $*";
 }
 
+# -------------------- EXP Check --------------------
+if [ -z "${EXP:-}" ]; then
+    LOG_ERROR "EXP must be specified (e.g., examples/megatron/exp_pretrain.yaml)." \
+              "Primus will use the configuration in EXP to train the model."
+    exit 1
+fi
+
+# Ensure EXP file exists, otherwise exit with error
+if [ ! -f "${EXP}" ]; then
+    LOG_ERROR "The specified EXP file does not exist: ${EXP}" \
+              "Primus will use the configuration in EXP to train the model."
+    exit 1
+fi
+
+
+PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
+export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
+export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
+
+pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
+
+# ======= [Primus-Turbo node-wise build & environment cache config] =======
+pip install -r "$PRIMUS_PATH/third_party/Primus-Turbo/requirements.txt" --quiet
+OS_VER=$(grep ^PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"' | tr ' ' '_' | tr -d '()')
+PY_VER=$(python3 -c 'import platform; print(platform.python_version())')
+ROCM_VER=$(/opt/rocm/bin/rocminfo | grep 'ROCm version' | head -1 | awk '{print $NF}' | tr -d '()')
+HOSTNAME=$(hostname)
+if [[ -f /proc/driver/amdgpu/version ]]; then
+    AMDGPU_VER=$(head -1 < /proc/driver/amdgpu/version | awk '{print $3}' | tr -d '()')
+else
+    AMDGPU_VER="unknown"
+fi
+KERNEL_VER=$(uname -r | tr '.' '_' | tr '-' '_')
+
+HOSTNAME=$(hostname)
+export CCACHE_DIR="${DATA_PATH}/ccache/${OS_VER}_py${PY_VER}_rocm${ROCM_VER}_amdgpu${AMDGPU_VER}_kernel${KERNEL_VER}_${HOSTNAME}"
+export CCACHE_MAXSIZE=${CCACHE_MAXSIZE:-100G}
+export PATH="/usr/lib/ccache:$PATH"
+export MAX_JOBS=${MAX_JOBS:-32}
+LOG_INFO_RANK0 "[Primus Entrypoint][INFO] CCACHE_DIR=$CCACHE_DIR"
+# export CXX="ccache /opt/rocm/bin/hipcc"
+
+PRIMUS_TURBO_DIR="$PRIMUS_PATH/third_party/Primus-Turbo"
+PRIMUS_TURBO_DIR="$PRIMUS_PATH/third_party/Primus-Turbo"
+(
+    cd "$PRIMUS_TURBO_DIR" || exit 1
+    pip3 install --no-build-isolation .
+    ccache -s || true
+)
+
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 export MASTER_PORT=${MASTER_PORT:-1234}
 export NNODES=${NNODES:-1}
@@ -74,26 +124,6 @@ LOG_INFO_RANK0 "NNODES: $NNODES"
 LOG_INFO_RANK0 "NODE_RANK: $NODE_RANK"
 LOG_INFO_RANK0 "GPUS_PER_NODE: $GPUS_PER_NODE"
 LOG_INFO_RANK0 ""
-
-PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
-export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
-export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
-
-pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
-
-# -------------------- EXP Check --------------------
-if [ -z "${EXP:-}" ]; then
-    LOG_ERROR "EXP must be specified (e.g., examples/megatron/exp_pretrain.yaml)." \
-              "Primus will use the configuration in EXP to train the model."
-    exit 1
-fi
-
-# Ensure EXP file exists, otherwise exit with error
-if [ ! -f "${EXP}" ]; then
-    LOG_ERROR "The specified EXP file does not exist: ${EXP}" \
-              "Primus will use the configuration in EXP to train the model."
-    exit 1
-fi
 
 
 TRAIN_LOG=${TRAIN_LOG:-"output/log_torchrun_pretrain_$(basename "$EXP" .yaml).txt"}
