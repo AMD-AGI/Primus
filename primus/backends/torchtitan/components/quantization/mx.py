@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from primus_turbo.pytorch.core.float8 import MXQuantConfig
 from primus_turbo.pytorch.modules import MXLinear
-from torchtitan.config_manager import JobConfig
+from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
     ModelConverter,

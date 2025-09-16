@@ -6,7 +6,7 @@
 
 from dataclasses import dataclass, field
 
-from torchtitan.config_manager import JobConfig as TTJobConfig
+from torchtitan.config.job_config import JobConfig as TTJobConfig
 
 # TODO: float8 quant config
 # Tensorwise / Rowwise / Blockwise  etc.

@@ -123,7 +123,7 @@ index a29627a..b379e76 100644
 +from .utils import load_image
 
  from torchtitan.components.dataloader import ParallelAwareDataloader
- from torchtitan.config_manager import JobConfig
+ from torchtitan.config.job_config import JobConfig
 diff --git a/torchtitan/experiments/multimodal/tests/test_multimodal_model.py b/torchtitan/experiments/multimodal/tests/test_multimodal_model.py
 index b5acc51..a02f9c3 100644
 --- a/torchtitan/experiments/multimodal/tests/test_multimodal_model.py
