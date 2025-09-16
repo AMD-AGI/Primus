@@ -5,3 +5,6 @@
 	path = third_party/Megatron-LM
 	url = https://github.com/NVIDIA/Megatron-LM.git
 	branch = main
+[submodule "third_party/Primus-Turbo"]
+	path = third_party/Primus-Turbo
+	url = git@github.com:AMD-AGI/Primus-Turbo.git
