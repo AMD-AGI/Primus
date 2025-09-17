@@ -60,7 +60,7 @@ jobs:
           submodules: "recursive"
           path: Primus-Turbo
           token: ${{ secrets.PRIMUS_TURBO_SECRET }}
-          ref: 9328f030cf7d29c110b9bb1a5989160125740839 # feat: grouped gemm support num_cu (#79)
+          ref: 6d39647350baa180cccc61e701cf75281dc7e878 # feat: add TurboStream (#96)
       - run: echo "Begin Primus-Turbo Install."
       - name: Install Primus-Turbo
         run: |
