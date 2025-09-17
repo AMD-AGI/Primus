@@ -44,7 +44,7 @@ _Primus delivers a reproducible, high-performance LLM workflow with three core p
 2. **Preflight**: Cluster/environment sanity check and readiness verification—catch config, env, and cluster issues before launch.
 3. **Benchmark**: Operator-level and end-to-end performance baselining, regression tracking, and hardware feature visualization.
 
-> *“One CLI, one ecosystem, three pillars—making AMD the first-class platform for LLM training.”*
+> *“One CLI, one ecosystem, three pillars—aiming to make AMD an outstanding platform for LLM training.”*
 
 ---
 
