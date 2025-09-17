@@ -1,3 +1,2 @@
-# Primus Documentation
-
-{% include_relative index.md %}
+cd docs
+ln -s index.md README.md
