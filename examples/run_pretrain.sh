@@ -79,46 +79,55 @@ PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
 export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 
-pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
-
-# ======= [Primus-Turbo node-wise build & environment cache config] =======
-pip install -r "$PRIMUS_PATH/third_party/Primus-Turbo/requirements.txt" --quiet
-pip install "aiter @ git+https://github.com/ROCm/aiter.git@97007320d4b1d7b882d99af02cad02fbb9957559"
-OS_VER=$(grep ^PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"' | tr ' ' '_' | tr -d '()')
-PY_VER=$(python3 -c 'import platform; print(platform.python_version())')
-ROCM_VER=$(/opt/rocm/bin/rocminfo | grep 'ROCm version' | head -1 | awk '{print $NF}' | tr -d '()')
-HOSTNAME=$(hostname)
-if [[ -f /proc/driver/amdgpu/version ]]; then
-    AMDGPU_VER=$(head -1 < /proc/driver/amdgpu/version | awk '{print $3}' | tr -d '()')
-else
-    AMDGPU_VER="unknown"
-fi
-KERNEL_VER=$(uname -r | tr '.' '_' | tr '-' '_')
-
-HOSTNAME=$(hostname)
-CACHE_TAG="${OS_VER}_py${PY_VER}_rocm${ROCM_VER}_amdgpu${AMDGPU_VER}_kernel${KERNEL_VER}_${HOSTNAME}"
-export CCACHE_DIR="$PRIMUS_PATH/third_party/Primus-Turbo/build/${CACHE_TAG}"
-export CCACHE_MAXSIZE=${CCACHE_MAXSIZE:-100G}
-export PATH="/usr/lib/ccache:$PATH"
-export MAX_JOBS=${MAX_JOBS:-32}
-export AITER_JIT_DIR="$PRIMUS_PATH/third_party/Primus-Turbo/build/${CACHE_TAG}_aiter_cache"
-LOG_INFO_RANK0 "Primus-Turbo install: CCACHE_DIR=$CCACHE_DIR"
-
-PRIMUS_TURBO_DIR="$PRIMUS_PATH/third_party/Primus-Turbo"
-(
-    cd "$PRIMUS_TURBO_DIR" || exit 1
-    python3 setup.py build_ext --inplace
-    ccache -s || true
-)
-export PYTHONPATH="$PRIMUS_TURBO_DIR${PYTHONPATH:+:$PYTHONPATH}"
-echo "[Primus Entrypoint][INFO] primus-turbo .so ready, PYTHONPATH=$PYTHONPATH"
-
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 export MASTER_PORT=${MASTER_PORT:-1234}
 export NNODES=${NNODES:-1}
 export NODE_RANK=${NODE_RANK:-0}
 export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
+
+pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
+
+# ======= [Primus-Turbo node-wise build & environment cache config] =======
+PRIMUS_TURBO_PATH=${PRIMUS_TURBO_PATH:-""}
+
+if [[ -n "$PRIMUS_TURBO_PATH" ]]; then
+    HOSTNAME=$(hostname)
+    TMP_BUILD_DIR="${PRIMUS_TURBO_PATH}/build/${HOSTNAME}"
+    mkdir -p "$TMP_BUILD_DIR"
+
+    pip install -r "$PRIMUS_TURBO_PATH/requirements.txt" --quiet
+    pip install "aiter @ git+https://github.com/ROCm/aiter.git@97007320d4b1d7b882d99af02cad02fbb9957559"
+    OS_VER=$(grep ^PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"' | tr ' ' '_' | tr -d '()')
+    PY_VER=$(python3 -c 'import platform; print(platform.python_version())')
+    ROCM_VER=$(/opt/rocm/bin/rocminfo | grep 'ROCm version' | head -1 | awk '{print $NF}' | tr -d '()')
+    if [[ -f /proc/driver/amdgpu/version ]]; then
+        AMDGPU_VER=$(head -1 < /proc/driver/amdgpu/version | awk '{print $3}' | tr -d '()')
+    else
+        AMDGPU_VER="unknown"
+    fi
+    KERNEL_VER=$(uname -r | tr '.' '_' | tr '-' '_')
+
+    HOSTNAME=$(hostname)
+    CACHE_TAG="${OS_VER}_py${PY_VER}_rocm${ROCM_VER}_amdgpu${AMDGPU_VER}_kernel${KERNEL_VER}_${HOSTNAME}"
+    export CCACHE_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}"
+    export CCACHE_MAXSIZE=${CCACHE_MAXSIZE:-100G}
+    export PATH="/usr/lib/ccache:$PATH"
+    export MAX_JOBS=${MAX_JOBS:-32}
+    export AITER_JIT_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}_aiter_cache"
+    LOG_INFO_RANK0 "Primus-Turbo install: CCACHE_DIR=$CCACHE_DIR"
+
+    (
+        cd "$PRIMUS_TURBO_PATH" || exit 1
+        # python3 setup.py build_ext --build-lib="$TMP_BUILD_DIR" --build-base="$TMP_BUILD_DIR"
+        python3 setup.py build --build-base="$TMP_BUILD_DIR" build_ext --build-lib="$TMP_BUILD_DIR"
+        ccache -s || true
+    )
+    export PYTHONPATH="$TMP_BUILD_DIR${PYTHONPATH:+:$PYTHONPATH}"
+    echo "[Primus Entrypoint][INFO] primus-turbo .so ready, PYTHONPATH=$PYTHONPATH"
+else
+    LOG_INFO_RANK0 "PRIMUS_TURBO_PATH not set, skip Primus-Turbo install/check."
+fi
 
 LOG_INFO_RANK0 "==========Training cluster info=========="
 LOG_INFO_RANK0 "MASTER_ADDR: $MASTER_ADDR"
