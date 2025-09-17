@@ -16,7 +16,7 @@ Usage: bash run_local_pretrain.sh
 This script launches a Primus pretraining task inside a Docker/Podman container.
 
 Environment Variables:
-    DOCKER_IMAGE   Docker image to use [Default: docker.io/rocm/megatron-lm:v25.5_py310]
+    DOCKER_IMAGE   Docker image to use [Default: docker.io/rocm/megatron-lm:v25.7_py310]
     MASTER_ADDR    Master node IP or hostname [Default: localhost]
     MASTER_PORT    Master node port [Default: 1234]
     NNODES         Total number of nodes [Default: 1]
@@ -39,7 +39,7 @@ fi
 EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
 
 # Default docker image
-DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/megatron-lm:v25.5_py310"}
+DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/megatron-lm:v25.7_py310"}
 
 # Project root
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")

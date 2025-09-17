@@ -1,7 +1,7 @@
 bases:
   - deepseek_v2_base.yaml
 
-# 515B total params, 44B active params
+# 1T total params, 44B active params
 
 tokenizer_type: DeepSeekV2Tokenizer
 tokenizer_model: deepseek-ai/DeepSeek-V2
@@ -22,7 +22,7 @@ num_query_groups: 8
 
 # moe
 moe_layer_freq: 1
-num_experts: 112
+num_experts: 224
 moe_router_topk: 8
 # num_shared_experts: 1
 moe_ffn_hidden_size: 1920 # moe_intermediate_size

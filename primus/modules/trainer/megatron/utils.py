@@ -218,26 +218,34 @@ def set_manual_pipeline_split_patch(args):
     megatron.core.models.gpt.gpt_layer_specs.get_transformer_layer_offset = get_transformer_layer_offset_patch
 
 
-def warmup_attn(args, config, model, optimizer):
-    if model[0].use_forward_hook:
-        model[0].disable_forward_pre_hook()
-
-    attn = model[0].module.module.decoder.layers[0].self_attention
-    warmup_input = torch.randn(args.seq_length, 1, config.hidden_size, device="cuda", dtype=torch.bfloat16)
-    attention_mask = (
-        torch.tril(torch.ones((args.seq_length, args.seq_length), device="cuda")).unsqueeze(0).unsqueeze(0)
-        == 0
-    )
-
-    warmup_output = attn(warmup_input, attention_mask=attention_mask)
-    warmup_output[0].backward(torch.ones_like(warmup_output[0]))
-
+def pp_warmup(args, config, model, optimizer):
     for model_chunk in model:
-        model_chunk.zero_grad_buffer()
-    optimizer.zero_grad()
+        with model_chunk.no_sync():
+            if model_chunk.use_forward_hook:
+                model_chunk.disable_forward_pre_hook()
+            dtype = torch.float32
+            if config.bf16:
+                dtype = torch.bfloat16
+            elif config.fp16:
+                dtype = torch.float16
+            seq_len = args.seq_length // args.tensor_model_parallel_size // args.context_parallel_size
 
-    if model[0].use_forward_hook:
-        model[0].enable_forward_pre_hook()
+            for layer in model_chunk.module.module.decoder.layers:
+                attn_input = torch.randn(seq_len, 1, config.hidden_size, device="cuda", dtype=dtype)
+                attention_mask = (
+                    torch.tril(torch.ones((seq_len, seq_len), device="cuda")).unsqueeze(0).unsqueeze(0) == 0
+                )
+                attn_output = layer.self_attention(attn_input, attention_mask=attention_mask)
+                attn_output[0].backward(torch.ones_like(attn_output[0]))
+
+                mlp_input = torch.randn(seq_len, 1, config.hidden_size, device="cuda", dtype=dtype)
+                mlp_output = layer.mlp(mlp_input)
+                mlp_output[0].backward(torch.ones_like(mlp_output[0]))
+
+            if model_chunk.use_forward_hook:
+                model_chunk.enable_forward_pre_hook()
+            optimizer.zero_grad()
+    torch.cuda.empty_cache()
 
 
 def schedule_wrapper(func):
@@ -353,3 +361,8 @@ def validate_args_on_rocm(args):
     # Deterministic mode
     if args.deterministic_mode:
         assert not args.moe_grouped_gemm, "MoE Grouped GEMM can't be used in deterministic mode."
+
+    # dump pp data
+    if args.dump_pp_data and args.pipeline_model_parallel_size == 1:
+        args.dump_pp_data = False
+        print_rank_last(f"Disable args.dump_pp_data since args.pipeline_model_parallel_size=1")

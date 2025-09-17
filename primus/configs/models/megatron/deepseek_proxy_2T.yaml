@@ -27,9 +27,3 @@ moe_router_topk: 16
 # num_shared_experts: 1
 moe_ffn_hidden_size: 1920 # moe_intermediate_size
 moe_shared_expert_intermediate_size: 1920 # num_shared_experts * moe_ffn_hidden_size
-
-# device limited routing
-expert_model_parallel_size: 8
-moe_router_num_groups: 8 # int
-moe_router_group_topk: 3 # int
-moe_router_topk_scaling_factor: 16.0 # float

@@ -32,7 +32,7 @@ Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-ru
 1. Pull the latest Docker image
 
     ```bash
-    docker pull docker.io/rocm/megatron-lm:v25.5_py310
+    docker pull docker.io/rocm/megatron-lm:v25.7_py310
 
     ```
 

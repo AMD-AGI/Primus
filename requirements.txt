@@ -6,3 +6,7 @@ matplotlib
 markdown2
 weasyprint
 tyro
+torchao
+blobfile
+torchdata>=0.8.0
+datasets>=3.6.0

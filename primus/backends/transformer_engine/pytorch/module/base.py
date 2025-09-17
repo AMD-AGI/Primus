@@ -1,12 +1,15 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
+
 from typing import Optional, Union
 
 import torch
+from megatron.core.utils import is_te_min_version
 from transformer_engine.pytorch.module import base
 
 import primus.backends.transformer_engine.transformer_engine_torch as ptex
@@ -167,18 +170,39 @@ def initialize_ub(
     def get_default_config(name):
         method = get_method(name)
         is_reduce_scatter = name in layers_reduce_scatter_overlap
-        default_cfg = {
-            "method": method,
-            "is_reduce_scatter": is_reduce_scatter,
-            "num_sm": 1 if method == "ring_exchange" else 16,
-            "cga_size": 1 if method == "ring_exchange" else 2,
-            "set_sm_margin": False,
-            "num_splits": 4 if method == "pipeline" else tp_size,
-            "aggregate": False,
-            "atomic_gemm": False,
-            "use_ce": True,
-            "fp8_buf": name in layers_all_gather_overlap,
-        }
+        if is_te_min_version("2.0"):
+            if base._MIN_STREAM_PRIORITY is None or base._MAX_STREAM_PRIORITY is None:
+                base._MIN_STREAM_PRIORITY, base._MAX_STREAM_PRIORITY = (
+                    ptex.comm_overlap.get_stream_priority_range()
+                )
+            default_cfg = {
+                "method": method,
+                "is_reduce_scatter": is_reduce_scatter,
+                "num_sm": 1 if method == "ring_exchange" else 16,
+                "cga_size": 1 if method == "ring_exchange" else 2,
+                "set_sm_margin": not method == "ring_exchange",
+                "num_splits": tp_size if method == "ring_exchange" else 4,
+                "aggregate": False,
+                "atomic_gemm": False,
+                "use_ce": True,
+                "fp8_buf": name in layers_all_gather_overlap,
+                "comm_priority": base._MAX_STREAM_PRIORITY,
+                "gemm_priority": base._MIN_STREAM_PRIORITY,
+                "pipeline_rs_overlap_first_gemm": False,
+            }
+        else:
+            default_cfg = {
+                "method": method,
+                "is_reduce_scatter": is_reduce_scatter,
+                "num_sm": 1 if method == "ring_exchange" else 16,
+                "cga_size": 1 if method == "ring_exchange" else 2,
+                "set_sm_margin": False,
+                "num_splits": 4 if method == "pipeline" else tp_size,
+                "aggregate": False,
+                "atomic_gemm": False,
+                "use_ce": True,
+                "fp8_buf": name in layers_all_gather_overlap,
+            }
         return default_cfg
 
     def add_ub(
@@ -193,6 +217,9 @@ def initialize_ub(
         atomic_gemm: int = 0,
         use_ce: bool = True,
         fp8_buf: bool = False,
+        comm_priority: int = 0,
+        gemm_priority: int = 0,
+        pipeline_rs_overlap_first_gemm: bool = False,
     ) -> None:
 
         # force method to use 'pipeline', atomic_gemm=0

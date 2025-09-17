@@ -188,9 +188,9 @@ distribute_saved_activations: false
 checkpoint_activations: false # deprecated
 
 # garbage collection
-manual_gc: true # default false
+manual_gc: false # default false
 manual_gc_interval: 1 # int, default 0
-manual_gc_eval: true
+manual_gc_eval: false
 
 #data
 data_path: null

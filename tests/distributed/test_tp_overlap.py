@@ -3,13 +3,14 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-
+import functools
 from contextlib import contextmanager
 
 import torch
 import torch.distributed as dist
 import transformer_engine as te
 import transformer_engine_torch as tex
+from megatron.core.utils import is_te_min_version
 from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
     skip_if_lt_x_gpu,
@@ -22,10 +23,6 @@ from torch.testing._internal.common_utils import (
 from transformer_engine.pytorch import LayerNormLinear, Linear, fp8_autocast
 
 from primus.backends.transformer_engine import transformer_engine_torch as ptex
-from primus.backends.transformer_engine.pytorch.cpp_extensions.gemm import (
-    fp8_gemm,
-    gemm,
-)
 from primus.backends.transformer_engine.pytorch.module.base import (
     get_workspace,
     initialize_ub,
@@ -36,43 +33,84 @@ from primus.modules.module_utils import set_logging_rank
 
 @contextmanager
 def custom_te_patch():
+
     prev_CommOverlap = tex.CommOverlap
     prev_CommOverlapP2P = tex.CommOverlapP2P
-    prev_CommOverlapAlgo = tex.CommOverlapAlgo
-    prev_gemm = te.pytorch.cpp_extensions.gemm
-    prev_fp8_gemm = te.pytorch.cpp_extensions.fp8_gemm
+    if is_te_min_version("2.0"):
+        prev_general_gemm = te.pytorch.cpp_extensions.general_gemm
+    else:
+        prev_CommOverlapAlgo = tex.CommOverlapAlgo
+        prev_gemm = te.pytorch.cpp_extensions.gemm
+        prev_fp8_gemm = te.pytorch.cpp_extensions.fp8_gemm
     prev_initialize_ub = te.pytorch.module.base.initialize_ub
     prev_get_workspace = te.pytorch.module.base.get_workspace
     try:
         tex.CommOverlap = ptex.CommOverlap
         tex.CommOverlapP2P = ptex.CommOverlapP2P
         tex.CommOverlapType = ptex.CommOverlapType
-        tex.CommOverlapAlgo = ptex.CommOverlapAlgo
-        te.pytorch.cpp_extensions.gemm = gemm
-        te.pytorch.module.linear.gemm = gemm
-        te.pytorch.cpp_extensions.fp8_gemm = fp8_gemm
-        te.pytorch.module.linear.fp8_gemm = fp8_gemm
+        if is_te_min_version("2.0"):
+            from primus.backends.transformer_engine.pytorch.cpp_extensions.gemm import (
+                general_gemm,
+            )
+
+            te.pytorch.cpp_extensions.general_gemm = functools.partial(
+                general_gemm, orig_func=prev_general_gemm
+            )
+            te.pytorch.module.linear.general_gemm = functools.partial(
+                general_gemm, orig_func=prev_general_gemm
+            )
+            te.pytorch.module.layernorm_linear.general_gemm = functools.partial(
+                general_gemm, orig_func=prev_general_gemm
+            )
+        else:
+            from primus.backends.transformer_engine.pytorch.cpp_extensions.gemm import (
+                fp8_gemm,
+                gemm,
+            )
+
+            tex.CommOverlapAlgo = ptex.CommOverlapAlgo
+            te.pytorch.cpp_extensions.CommOverlapAlgo = ptex.CommOverlapAlgo
+            te.pytorch.cpp_extensions.gemm = functools.partial(gemm, orig_func=prev_gemm)
+            te.pytorch.module.linear.gemm = functools.partial(gemm, orig_func=prev_gemm)
+            te.pytorch.cpp_extensions.fp8_gemm = functools.partial(fp8_gemm, orig_func=prev_fp8_gemm)
+            te.pytorch.module.linear.fp8_gemm = functools.partial(fp8_gemm, orig_func=prev_fp8_gemm)
         te.pytorch.module.base.initialize_ub = initialize_ub
         te.pytorch.module.base.get_workspace = get_workspace
-        te.pytorch.cpp_extensions.CommOverlapAlgo = ptex.CommOverlapAlgo
+
         te.pytorch.cpp_extensions.CommOverlapType = ptex.CommOverlapType
 
         yield
     finally:
         tex.CommOverlap = prev_CommOverlap
         tex.CommOverlapP2P = prev_CommOverlapP2P
-        tex.CommOverlapAlgo = prev_CommOverlapAlgo
-        te.pytorch.cpp_extensions.gemm = prev_gemm
-        te.pytorch.module.linear.gemm = prev_gemm
-        te.pytorch.cpp_extensions.fp8_gemm = prev_fp8_gemm
-        te.pytorch.module.linear.fp8_gemm = prev_fp8_gemm
+        if is_te_min_version("2.0"):
+            te.pytorch.cpp_extensions.general_gemm = prev_general_gemm
+            te.pytorch.module.linear.general_gemm = prev_general_gemm
+            te.pytorch.module.layernorm_linear.general_gemm = prev_general_gemm
+        else:
+            tex.CommOverlapAlgo = prev_CommOverlapAlgo
+            te.pytorch.cpp_extensions.CommOverlapAlgo = prev_CommOverlapAlgo
+            te.pytorch.cpp_extensions.gemm = prev_gemm
+            te.pytorch.module.linear.gemm = prev_gemm
+            te.pytorch.cpp_extensions.fp8_gemm = prev_fp8_gemm
+            te.pytorch.module.linear.fp8_gemm = prev_fp8_gemm
         te.pytorch.module.base.initialize_ub = prev_initialize_ub
         te.pytorch.module.base.get_workspace = prev_get_workspace
-        te.pytorch.cpp_extensions.CommOverlapAlgo = prev_CommOverlapAlgo
 
 
 def te_linear(
-    seed, batch_size, seqlen, in_features, out_features, ub_overlap_ag, ub_overlap_rs, enable_fp8=False, **cfg
+    seed,
+    batch_size,
+    seqlen,
+    in_features,
+    out_features,
+    ub_overlap_ag,
+    ub_overlap_rs,
+    ub_overlap_rs_dgrad=False,
+    ub_bulk_wgrad=False,
+    ub_bulk_dgrad=False,
+    enable_fp8=False,
+    **cfg
 ):
     torch.manual_seed(seed)
     tp_size = cfg["tp_size"]
@@ -83,17 +121,30 @@ def te_linear(
         te.pytorch.module.base._ub_communicators = None
         input_shape = [seqlen * batch_size, in_features]
         te.pytorch.module.base.initialize_ub(
-            shape=input_shape, tp_size=tp_size, use_fp8=enable_fp8, dtype=torch.uint8 if enable_fp8 else dtype
+            shape=input_shape,
+            tp_size=tp_size,
+            use_fp8=enable_fp8,
+            dtype=torch.uint8 if enable_fp8 else dtype,
         )
 
     if parallel_mode == "column":
         inp_shape = (batch_size * seqlen // tp_size, in_features)
         grad_out_shape = (batch_size * seqlen, out_features // tp_size)
-        model = LayerNormLinear(in_features, out_features, ub_overlap_ag=ub_overlap_ag, **cfg)
+        model = LayerNormLinear(
+            in_features,
+            out_features,
+            ub_overlap_ag=ub_overlap_ag,
+            ub_overlap_rs_dgrad=ub_overlap_rs_dgrad,
+            ub_bulk_wgrad=ub_bulk_wgrad,
+            ub_bulk_dgrad=ub_bulk_dgrad,
+            **cfg
+        )
     else:
         inp_shape = (batch_size * seqlen, in_features // tp_size)
         grad_out_shape = (batch_size * seqlen // tp_size, in_features)
-        model = Linear(in_features, out_features, ub_overlap_rs=ub_overlap_rs, **cfg)
+        model = Linear(
+            in_features, out_features, ub_overlap_ag=ub_overlap_ag, ub_overlap_rs=ub_overlap_rs, **cfg
+        )
 
     inp = torch.rand(inp_shape, dtype=dtype, device="cuda", requires_grad=True)
     grad_output = torch.rand(grad_out_shape, dtype=dtype, device="cuda")
@@ -147,9 +198,11 @@ class TPOverlapTestCase(MultiProcessTestCase):
     @parametrize("seqlen", [8192])
     @parametrize("batch_size", [1])
     @parametrize("ub_name", ["qkv", "proj"])
-    @parametrize("parallel_mode", ["column", "row"])
     @parametrize("ub_overlap_ag", [True])
     @parametrize("ub_overlap_rs", [True])
+    @parametrize("ub_overlap_rs_dgrad", [False])
+    @parametrize("ub_bulk_wgrad", [True])
+    @parametrize("ub_bulk_dgrad", [True])
     def test_te_linear(
         self,
         batch_size,
@@ -157,9 +210,11 @@ class TPOverlapTestCase(MultiProcessTestCase):
         in_features,
         out_features,
         ub_name,
-        parallel_mode,
         ub_overlap_ag,
         ub_overlap_rs,
+        ub_overlap_rs_dgrad,
+        ub_bulk_wgrad,
+        ub_bulk_dgrad,
     ) -> None:
         self._init_process()
         group = dist.group.WORLD
@@ -169,7 +224,7 @@ class TPOverlapTestCase(MultiProcessTestCase):
         cfg = {
             "tp_group": group,
             "tp_size": self.world_size,
-            "parallel_mode": parallel_mode,
+            "parallel_mode": "column" if ub_name in ["qkv", "fc1"] else "row",
             "sequence_parallel": True,
             "bias": False,
             "ub_name": ub_name,
@@ -196,6 +251,9 @@ class TPOverlapTestCase(MultiProcessTestCase):
                 out_features,
                 ub_overlap_ag=ub_overlap_ag,
                 ub_overlap_rs=ub_overlap_rs,
+                ub_overlap_rs_dgrad=ub_overlap_rs_dgrad,
+                ub_bulk_wgrad=ub_bulk_wgrad,
+                ub_bulk_dgrad=ub_bulk_dgrad,
                 **cfg
             )
 
@@ -208,7 +266,6 @@ class TPOverlapTestCase(MultiProcessTestCase):
     @parametrize("seqlen", [4096])
     @parametrize("batch_size", [1])
     @parametrize("ub_name", ["qkv", "proj"])
-    @parametrize("parallel_mode", ["column", "row"])
     @parametrize("ub_overlap_ag", [True])
     @parametrize("ub_overlap_rs", [False])
     @parametrize("dtype", [torch.bfloat16])
@@ -219,7 +276,6 @@ class TPOverlapTestCase(MultiProcessTestCase):
         in_features,
         out_features,
         ub_name,
-        parallel_mode,
         ub_overlap_ag,
         ub_overlap_rs,
         dtype,
@@ -232,7 +288,7 @@ class TPOverlapTestCase(MultiProcessTestCase):
         cfg = {
             "tp_group": group,
             "tp_size": self.world_size,
-            "parallel_mode": parallel_mode,
+            "parallel_mode": "column" if ub_name in ["qkv", "fc1"] else "row",
             "sequence_parallel": True,
             "bias": False,
             "ub_name": ub_name,
