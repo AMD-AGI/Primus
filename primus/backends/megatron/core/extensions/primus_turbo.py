@@ -3,7 +3,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-from typing import Callable, List, Optional, Union
+from typing import Callable, List, Optional
 
 import primus_turbo.pytorch as pt
 import torch
@@ -23,13 +23,17 @@ from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.moe.experts import GroupedMLP
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
-from megatron.core.utils import get_tensor_model_parallel_group_if_none
+from megatron.core.utils import (
+    get_tensor_model_parallel_group_if_none,
+    is_te_min_version,
+)
 from megatron.training.global_vars import get_args
 from primus_turbo.pytorch.core.float8 import (
+    BlockQuantConfig,
     Float8QuantConfig,
     Format,
-    MXQuantConfig,
-    ScalingGranularity,
+    QuantConfig,
+    ScalingStrategy,
 )
 from torch import Tensor
 from transformer_engine.pytorch.fp8 import Format as TEFormat
@@ -39,7 +43,7 @@ from transformer_engine.pytorch.fp8 import (
 from transformer_engine.pytorch.fp8 import Recipe as TERecipe
 
 
-def te_recipe_to_turbo_quant_config(te_recipe: TERecipe) -> Union[Float8QuantConfig, MXQuantConfig]:
+def te_recipe_to_turbo_quant_config(te_recipe: TERecipe) -> QuantConfig:
 
     def te_fp8_format_to_turbo_fp8_format(te_format: TEFormat) -> Format:
         format_mapping = {
@@ -50,18 +54,28 @@ def te_recipe_to_turbo_quant_config(te_recipe: TERecipe) -> Union[Float8QuantCon
 
         return format_mapping[te_format]
 
-    format = te_fp8_format_to_turbo_fp8_format(te_recipe.fp8_format)
-    if te_recipe.delayed():
-        # NOTE: Turbo only support current scaling now. We treat delayed scaling as current scaling.
-        config = Float8QuantConfig(format=format, granularity=ScalingGranularity.TENSORWISE)
-    elif te_recipe.float8_current_scaling():
-        config = Float8QuantConfig(format=format, granularity=ScalingGranularity.TENSORWISE)
-    elif te_recipe.mxfp8():
-        config = MXQuantConfig(format=format, granularity=ScalingGranularity.BLOCKWISE)
-    else:
-        raise ValueError("Not support Transformer Engine recipe.")
+    args = get_args()
 
-    return config
+    format = te_fp8_format_to_turbo_fp8_format(te_recipe.fp8_format)
+
+    quant_config = None
+    if is_te_min_version("2.2.0.dev0"):
+        # NOTE: te not support current scaling before 2.3.0.dev0.
+        if te_recipe.float8_current_scaling():
+            quant_config = Float8QuantConfig(format=format, strategy=ScalingStrategy.DYNAMIC)
+    else:
+        if args.fp8_recipe == "tensorwise":
+            quant_config = Float8QuantConfig(format=format, strategy=ScalingStrategy.DYNAMIC)
+
+    if is_te_min_version("2.3.0.dev0"):
+        # NOTE: te not support block scaling before 2.3.0.dev0.
+        if te_recipe.float8_block_scaling():
+            quant_config = BlockQuantConfig(format=format, strategy=ScalingStrategy.DYNAMIC)
+    else:
+        if args.fp8_recipe == "blockwise":
+            quant_config = BlockQuantConfig(format=format, strategy=ScalingStrategy.DYNAMIC)
+
+    return quant_config
 
 
 class PrimusTurboAttention(te.pytorch.DotProductAttention):
@@ -270,16 +284,14 @@ class PrimusTurboRowParallelLinear(TELinear):
 
         if TEFP8GlobalStateManager.is_fp8_enabled():
             quant_config = te_recipe_to_turbo_quant_config(TEFP8GlobalStateManager.get_fp8_recipe())
-            if isinstance(quant_config, MXQuantConfig):
-                out = pt.ops.gemm_fp8_blockwise(
-                    input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config
-                )
-            elif isinstance(quant_config, Float8QuantConfig):
-                out = pt.ops.gemm_fp8_tensorwise(
-                    input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config
-                )
+            if quant_config.block_scaling():
+                fp8_gemm = pt.ops.gemm_fp8_blockwise
+            elif quant_config.current_scaling():
+                fp8_gemm = pt.ops.gemm_fp8_tensorwise
             else:
                 raise ValueError("Not support quant config.")
+
+            out = fp8_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
         else:
             out = pt.ops.gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None)
 
@@ -359,16 +371,14 @@ class PrimusTurboColumnParallelLinear(TELinear):
 
         if TEFP8GlobalStateManager.is_fp8_enabled():
             quant_config = te_recipe_to_turbo_quant_config(TEFP8GlobalStateManager.get_fp8_recipe())
-            if isinstance(quant_config, MXQuantConfig):
-                out = pt.ops.gemm_fp8_blockwise(
-                    input_, weights, trans_a=False, trans_b=True, config=quant_config
-                )
-            elif isinstance(quant_config, Float8QuantConfig):
-                out = pt.ops.gemm_fp8_tensorwise(
-                    input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config
-                )
+            if quant_config.block_scaling():
+                fp8_gemm = pt.ops.gemm_fp8_blockwise
+            elif quant_config.current_scaling():
+                fp8_gemm = pt.ops.gemm_fp8_tensorwise
             else:
                 raise ValueError("Not support quant config.")
+
+            out = fp8_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
         else:
             out = pt.ops.gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None)
 
@@ -443,16 +453,14 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
 
         if TEFP8GlobalStateManager.is_fp8_enabled():
             quant_config = te_recipe_to_turbo_quant_config(TEFP8GlobalStateManager.get_fp8_recipe())
-            if isinstance(quant_config, MXQuantConfig):
-                out = pt.ops.gemm_fp8_blockwise(
-                    input_, weight, trans_a=False, trans_b=True, out_dtype=None, config=quant_config
-                )
-            elif isinstance(quant_config, Float8QuantConfig):
-                out = pt.ops.gemm_fp8_tensorwise(
-                    input_, weight, trans_a=False, trans_b=True, out_dtype=None, config=quant_config
-                )
+            if quant_config.block_scaling():
+                fp8_gemm = pt.ops.gemm_fp8_blockwise
+            elif quant_config.current_scaling():
+                fp8_gemm = pt.ops.gemm_fp8_tensorwise
             else:
                 raise ValueError("Not support quant config.")
+
+            out = fp8_gemm(input_, weight, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
         else:
             out = pt.ops.gemm(input_, weight, trans_a=False, trans_b=True, out_dtype=None)
         out = out.view(original_shape[0], original_shape[1], -1)
@@ -558,16 +566,14 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
 
         if TEFP8GlobalStateManager.is_fp8_enabled():
             quant_config = te_recipe_to_turbo_quant_config(TEFP8GlobalStateManager.get_fp8_recipe())
-            if isinstance(quant_config, MXQuantConfig):
-                out = pt.ops.gemm_fp8_blockwise(
-                    inp, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config
-                )
-            elif isinstance(quant_config, Float8QuantConfig):
-                out = pt.ops.gemm_fp8_tensorwise(
-                    inp, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config
-                )
+            if quant_config.block_scaling():
+                fp8_gemm = pt.ops.gemm_fp8_blockwise
+            elif quant_config.current_scaling():
+                fp8_gemm = pt.ops.gemm_fp8_tensorwise
             else:
                 raise ValueError("Not support quant config.")
+
+            out = fp8_gemm(inp, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
         else:
             out = pt.ops.gemm(inp, weights, trans_a=False, trans_b=True, out_dtype=None)
 
