@@ -78,7 +78,7 @@ jobs:
           echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
           start_time=$(date +%s)
           echo "✅ [build primus-turbo] started at: $(date)"
-          python setup.py develop
+          pip3 install --no-build-isolation -e . -v
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "✅ [build primus-turbo] ended at: $(date)"
