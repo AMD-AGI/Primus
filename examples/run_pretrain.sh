@@ -88,16 +88,52 @@ export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
 pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
 
-# ======= [Primus-Turbo node-wise build & environment cache config] =======
-PRIMUS_TURBO_PATH=${PRIMUS_TURBO_PATH:-""}
+# -----------------------------------------------------------------------------
+# Function: prepare_primus_turbo
+# Purpose : Setup and build Primus-Turbo in a per-node isolated build directory
+# -----------------------------------------------------------------------------
+prepare_primus_turbo() {
+    PRIMUS_TURBO_PATH=${PRIMUS_TURBO_PATH:-""}
 
-if [[ -n "$PRIMUS_TURBO_PATH" ]]; then
+    if [[ -z "$PRIMUS_TURBO_PATH" ]]; then
+        LOG_INFO_RANK0 "PRIMUS_TURBO_PATH not set, skip Primus-Turbo install/check."
+        return 0
+    fi
+
+    # Resolve absolute path
+    PRIMUS_TURBO_PATH=$(readlink -f "$PRIMUS_TURBO_PATH")
+    LOG_INFO_RANK0 "Resolved PRIMUS_TURBO_PATH: $PRIMUS_TURBO_PATH"
+
+    # Create per-node build directory (isolated by hostname)
     HOSTNAME=$(hostname)
-    TMP_BUILD_DIR="${PRIMUS_TURBO_PATH}/build/${HOSTNAME}"
+    TMP_BUILD_DIR="${PRIMUS_PATH}/build/${HOSTNAME}"
     mkdir -p "$TMP_BUILD_DIR"
 
-    pip install -r "$PRIMUS_TURBO_PATH/requirements.txt" --quiet
+    OLD_PWD=$(pwd)
+    # Clean up old symlinks but keep build/
+    cd "$TMP_BUILD_DIR" || exit 1
+    for item in "$PRIMUS_TURBO_PATH"/*; do
+        item=$(basename "$item")
+        [ "$item" = "build" ] && continue
+
+        # If symlink already exists and points to the right target, skip
+        if [[ -L "$item" && "$(readlink -f "$item")" == "$PRIMUS_TURBO_PATH/$item" ]]; then
+            continue
+        fi
+
+        # If a wrong symlink or file exists, remove it
+        if [[ -e "$item" || -L "$item" ]]; then
+            rm -rf "$item"
+        fi
+
+        ln -s "$PRIMUS_TURBO_PATH/$item" "$item"
+    done
+
+    # Install dependencies
+    pip install -r ./requirements.txt --quiet
     pip install "aiter @ git+https://github.com/ROCm/aiter.git@97007320d4b1d7b882d99af02cad02fbb9957559"
+
+    # Collect environment info for cache tagging
     OS_VER=$(grep ^PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"' | tr ' ' '_' | tr -d '()')
     PY_VER=$(python3 -c 'import platform; print(platform.python_version())')
     ROCM_VER=$(/opt/rocm/bin/rocminfo | grep 'ROCm version' | head -1 | awk '{print $NF}' | tr -d '()')
@@ -108,26 +144,22 @@ if [[ -n "$PRIMUS_TURBO_PATH" ]]; then
     fi
     KERNEL_VER=$(uname -r | tr '.' '_' | tr '-' '_')
 
-    HOSTNAME=$(hostname)
     CACHE_TAG="${OS_VER}_py${PY_VER}_rocm${ROCM_VER}_amdgpu${AMDGPU_VER}_kernel${KERNEL_VER}_${HOSTNAME}"
-    export CCACHE_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}"
-    export CCACHE_MAXSIZE=${CCACHE_MAXSIZE:-100G}
-    export PATH="/usr/lib/ccache:$PATH"
-    export MAX_JOBS=${MAX_JOBS:-32}
-    export AITER_JIT_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}_aiter_cache"
-    LOG_INFO_RANK0 "Primus-Turbo install: CCACHE_DIR=$CCACHE_DIR"
 
-    (
-        cd "$PRIMUS_TURBO_PATH" || exit 1
-        # python3 setup.py build_ext --build-lib="$TMP_BUILD_DIR" --build-base="$TMP_BUILD_DIR"
-        python3 setup.py build --build-base="$TMP_BUILD_DIR" build_ext --build-lib="$TMP_BUILD_DIR"
-        ccache -s || true
-    )
+    export MAX_JOBS=${MAX_JOBS:-32}
+    export AITER_JIT_DIR="${TMP_BUILD_DIR}/build/${CACHE_TAG}_aiter_cache"
+    LOG_INFO_RANK0 "Primus-Turbo install: $PRIMUS_TURBO_PATH"
+    LOG_INFO_RANK0 "Primus-Turbo AITER_JIT_DIR: $AITER_JIT_DIR"
+
+    # Build Primus-Turbo extension (suppress stdout, show only errors)
+    python3 setup.py build_ext --inplace > /dev/null
     export PYTHONPATH="$TMP_BUILD_DIR${PYTHONPATH:+:$PYTHONPATH}"
     echo "[Primus Entrypoint][INFO] primus-turbo .so ready, PYTHONPATH=$PYTHONPATH"
-else
-    LOG_INFO_RANK0 "PRIMUS_TURBO_PATH not set, skip Primus-Turbo install/check."
-fi
+    cd "$OLD_PWD" || exit 1
+}
+
+prepare_primus_turbo
+
 
 LOG_INFO_RANK0 "==========Training cluster info=========="
 LOG_INFO_RANK0 "MASTER_ADDR: $MASTER_ADDR"
