@@ -65,7 +65,6 @@ modules:
 
       # use deepep
       # use_turbo_deepep: true
-      # turbo_deepep_backend: 'deepep'
       # turbo_deepep_num_cus: 80
       # moe_router_dtype: fp32
 

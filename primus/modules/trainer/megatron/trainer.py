@@ -455,7 +455,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 assert (
                     args.use_turbo_grouped_mlp
                 ), "use turbo_deepep_num_worst_tokens requires use_turbo_grouped_mlp=True"
-            PrimusTurboFlexTokenDispatcher.turbo_deepep_backend = args.turbo_deepep_backend
             PrimusTurboFlexTokenDispatcher.turbo_deepep_num_cus = args.turbo_deepep_num_cus
             PrimusTurboFlexTokenDispatcher.turbo_sync_free_moe = args.use_turbo_sync_free_moe
             PrimusTurboFlexTokenDispatcher.use_turbo_grouped_mlp = args.use_turbo_grouped_mlp

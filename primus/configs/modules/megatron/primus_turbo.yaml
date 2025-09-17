@@ -12,7 +12,6 @@ use_turbo_token_dispatcher_fp8_alltoall: false
 
 # deepep
 use_turbo_deepep: false
-turbo_deepep_backend: 'deepep'
 turbo_deepep_num_cus: 32
 turbo_deepep_num_worst_tokens: 0
 

@@ -35,6 +35,11 @@ from torch import Tensor
 from primus.backends.megatron.core.fusions.fused_indices_converter import (
     fused_indices_to_multihot,
 )
+from primus.backends.megatron.core.transformer.moe.fused_a2a import (
+    fused_combine,
+    fused_dispatch,
+    set_deepep_num_sms,
+)
 
 
 class PrimusTurboAttention(te.pytorch.DotProductAttention):
@@ -610,7 +615,6 @@ class PrimusTurboGroupedMLP(GroupedMLP):
 
 class PrimusTurboDeepepManager(_DeepepManager):
 
-    _supported_backend_type = ["deepep", "mori"]
     cuda_dtoh_stream = None
 
     def __init__(
@@ -622,7 +626,6 @@ class PrimusTurboDeepepManager(_DeepepManager):
         num_experts: Optional[int] = None,
         num_local_experts: Optional[int] = None,
         router_dtype: Optional[str] = None,
-        backend_type: str = "deepep",
         deep_num_cus: int = 64,
         use_cuda_num_token_per_expert: bool = False,
         sync_free_moe: bool = False,
@@ -645,11 +648,6 @@ class PrimusTurboDeepepManager(_DeepepManager):
         # Handle used for combine operation
         self.handle = None
 
-        if backend_type not in self._supported_backend_type:
-            raise ValueError(f"only support {self._supported_backend_type}")
-
-        self.backend_type = backend_type
-        self.deep_num_cus = deep_num_cus
         self.use_cuda_num_token_per_expert = use_cuda_num_token_per_expert
         self.sync_free_moe = sync_free_moe
 
@@ -703,19 +701,15 @@ class PrimusTurboDeepepManager(_DeepepManager):
             if self.token_probs.dtype in [torch.bfloat16, torch.float16]:
                 print("DeepEP only supports float32 probs, please set --moe-router-dtype=fp32")
             self.token_probs = self.token_probs.float()  # downcast or upcast
-        hidden_states, dispatched_indices, dispatched_probs, num_tokens_per_expert, handle = (
-            pt.ops.fused_dispatch(
-                hidden_states,
-                self.token_indices,
-                self.token_probs,
-                self.num_experts,
-                self.group,
-                use_cuda_num_token_per_expert=self.use_cuda_num_token_per_expert,
-                num_use_cus=self.deep_num_cus,
-                num_worst_tokens=self.num_worst_tokens,
-                config=self.dispatch_config,
-                backend_type=self.backend_type,
-            )
+        hidden_states, dispatched_indices, dispatched_probs, num_tokens_per_expert, handle = fused_dispatch(
+            hidden_states,
+            self.token_indices,
+            self.token_probs,
+            self.num_experts,
+            self.group,
+            use_cuda_num_token_per_expert=self.use_cuda_num_token_per_expert,
+            num_worst_tokens=self.num_worst_tokens,
+            config=self.dispatch_config,
         )
 
         # use_cuda_num_token_per_expert not support on internode deepep for now!
@@ -749,13 +743,11 @@ class PrimusTurboDeepepManager(_DeepepManager):
         return hidden_states
 
     def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states, event = pt.ops.fused_combine(
+        hidden_states, _ = fused_combine(
             hidden_states,
             self.group,
             self.handle,
-            num_use_cus=self.deep_num_cus,
             config=self.combine_config,
-            backend_type=self.backend_type,
         )
         # Release the handle after combine operation
         self.handle = None
@@ -800,7 +792,6 @@ class PrimusTurboFlexTokenDispatcher(MoEFlexTokenDispatcher):
     PrimusTurbo token dispatcher using DeepEP or MORI.
     """
 
-    turbo_deepep_backend: str = "deepep"
     turbo_deepep_num_cus: int = 64
     turbo_sync_free_moe: bool = False
     turbo_deepep_num_worst_tokens: int = 0
@@ -845,6 +836,7 @@ class PrimusTurboFlexTokenDispatcher(MoEFlexTokenDispatcher):
         assert (
             self.config.moe_pad_expert_input_to_capacity is False
         ), "PrimusTurbo token dispatcher does not support --moe-pad-expert-input-to-capacity"
+        set_deepep_num_sms(self.turbo_deepep_num_cus)
         self._comm_manager = PrimusTurboDeepepManager(
             group=self.tp_ep_group,
             router_topk=self.tp_size * self.config.moe_router_topk,
@@ -853,7 +845,6 @@ class PrimusTurboFlexTokenDispatcher(MoEFlexTokenDispatcher):
             num_experts=self.tp_size * self.config.num_moe_experts,
             num_local_experts=self.num_local_experts,
             router_dtype=self.config.moe_router_dtype,
-            backend_type=self.turbo_deepep_backend,
             deep_num_cus=self.turbo_deepep_num_cus,
             use_cuda_num_token_per_expert=self.use_turbo_grouped_mlp,
             sync_free_moe=self.turbo_sync_free_moe,
