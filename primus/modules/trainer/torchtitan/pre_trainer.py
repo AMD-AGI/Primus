@@ -37,8 +37,6 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         if hasattr(self.titan_config, "primus_turbo") and self.titan_config.primus_turbo.enable_primus_turbo:
             self.enable_primus_turbo_extension()
-        else:
-            self.patch_torch_async_tp()
 
     def setup(self):
         pass
@@ -65,6 +63,8 @@ class TorchTitanPretrainTrainer(BaseModule):
         """
         Enable Primus-Turbo features and extensions.
         """
+        from torchtitan.tools.logging import logger
+
         try:
             import primus_turbo  # noqa: F401
         except ImportError:
@@ -79,32 +79,38 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         torchtitan.protocols.model_converter.ModelConvertersContainer = ModelConvertersContainer
 
-        # ******* llama3 Attention Model *******
-        import torchtitan.models.llama3.model
+        if self.titan_config.primus_turbo.use_turbo_attention:
+            # ******* llama3 Attention Model *******
+            import torchtitan.models.llama3.model
 
-        from primus.backends.torchtitan.models.llama3.model import Attention
+            from primus.backends.torchtitan.models.llama3.model import Attention
 
-        torchtitan.models.llama3.model.Attention = Attention
+            torchtitan.models.llama3.model.Attention = Attention
+            logger.warning(f"TorchtitanPretrainTrainer: Patch Turbo Attention")
 
-        # ******* MXLinear *******
-        import torchtitan.components.quantization.mx
-        from torchtitan.protocols.model_converter import _registry_model_converter_cls
+        if self.titan_config.primus_turbo.use_turbo_mx_linear:
+            # ******* MXLinear *******
+            import torchtitan.components.quantization.mx
+            from torchtitan.protocols.model_converter import (
+                _registry_model_converter_cls,
+            )
 
-        from primus.backends.torchtitan.components.quantization.mx import (
-            PrimusTubroMXConverter,
-        )
+            from primus.backends.torchtitan.components.quantization.mx import (
+                PrimusTubroMXConverter,
+            )
 
-        _registry_model_converter_cls["mx"] = PrimusTubroMXConverter
-        torchtitan.components.quantization.mx.MXConverter = PrimusTubroMXConverter
+            _registry_model_converter_cls["mx"] = PrimusTubroMXConverter
+            torchtitan.components.quantization.mx.MXConverter = PrimusTubroMXConverter
+            logger.warning(f"TorchtitanPretrainTrainer: Patch Turbo MXLinear")
 
-        # ******* Async TP *******
-        self.patch_torch_async_tp()
+        if self.titan_config.primus_turbo.use_turbo_async_tp:
+            # ******* Async TP *******
+            self.patch_torch_async_tp()
 
     def patch_torch_async_tp(self):
         import torch
         import torch.distributed._symmetric_memory as symm_module
         import torch.distributed.distributed_c10d as c10d
-        from torchtitan.tools.logging import logger
 
         if not self.titan_config.parallelism.enable_async_tensor_parallel:
             return
