@@ -83,6 +83,7 @@ pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
 
 # ======= [Primus-Turbo node-wise build & environment cache config] =======
 pip install -r "$PRIMUS_PATH/third_party/Primus-Turbo/requirements.txt" --quiet
+pip install "aiter @ git+https://github.com/ROCm/aiter.git@97007320d4b1d7b882d99af02cad02fbb9957559"
 OS_VER=$(grep ^PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"' | tr ' ' '_' | tr -d '()')
 PY_VER=$(python3 -c 'import platform; print(platform.python_version())')
 ROCM_VER=$(/opt/rocm/bin/rocminfo | grep 'ROCm version' | head -1 | awk '{print $NF}' | tr -d '()')
@@ -95,20 +96,22 @@ fi
 KERNEL_VER=$(uname -r | tr '.' '_' | tr '-' '_')
 
 HOSTNAME=$(hostname)
-export CCACHE_DIR="${DATA_PATH}/ccache/${OS_VER}_py${PY_VER}_rocm${ROCM_VER}_amdgpu${AMDGPU_VER}_kernel${KERNEL_VER}_${HOSTNAME}"
+CACHE_TAG="${OS_VER}_py${PY_VER}_rocm${ROCM_VER}_amdgpu${AMDGPU_VER}_kernel${KERNEL_VER}_${HOSTNAME}"
+export CCACHE_DIR="$PRIMUS_PATH/third_party/Primus-Turbo/build/${CACHE_TAG}"
 export CCACHE_MAXSIZE=${CCACHE_MAXSIZE:-100G}
 export PATH="/usr/lib/ccache:$PATH"
 export MAX_JOBS=${MAX_JOBS:-32}
-LOG_INFO_RANK0 "[Primus Entrypoint][INFO] CCACHE_DIR=$CCACHE_DIR"
-# export CXX="ccache /opt/rocm/bin/hipcc"
+export AITER_JIT_DIR="$PRIMUS_PATH/third_party/Primus-Turbo/build/${CACHE_TAG}_aiter_cache"
+LOG_INFO_RANK0 "Primus-Turbo install: CCACHE_DIR=$CCACHE_DIR"
 
-PRIMUS_TURBO_DIR="$PRIMUS_PATH/third_party/Primus-Turbo"
 PRIMUS_TURBO_DIR="$PRIMUS_PATH/third_party/Primus-Turbo"
 (
     cd "$PRIMUS_TURBO_DIR" || exit 1
-    pip3 install --no-build-isolation .
+    python3 setup.py build_ext --inplace
     ccache -s || true
 )
+export PYTHONPATH="$PRIMUS_TURBO_DIR${PYTHONPATH:+:$PYTHONPATH}"
+echo "[Primus Entrypoint][INFO] primus-turbo .so ready, PYTHONPATH=$PYTHONPATH"
 
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 export MASTER_PORT=${MASTER_PORT:-1234}

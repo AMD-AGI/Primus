@@ -1084,13 +1084,13 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             if args.tensor_model_parallel_size == 1:
                 if args.enable_primus_turbo:
                     self.patch_pt_replace_te(args)
-                    log_rank_0(f"use pt backend...")
+                    log_rank_0(f"use Primus-Turbo backend...")
                 else:
-                    log_rank_0(f"use te backend...")
+                    log_rank_0(f"use TransformerEngine backend...")
             elif args.enable_primus_turbo:
-                log_rank_0(f"primus turbo does not support tp, use te backend...")
+                log_rank_0(f"Primus-Turbo does not support tp, use TransformerEngine backend...")
         else:
-            log_rank_0(f"use te backend...")
+            log_rank_0(f"use TransformerEngine backend...")
 
         log_rank_0(f"-run get_model")
         model = get_model(model_provider_func, model_type)
