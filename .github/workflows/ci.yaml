@@ -59,7 +59,6 @@ jobs:
           repository: AMD-AIG-AIMA/Primus-Turbo
           submodules: "recursive"
           path: Primus-Turbo
-          token: ${{ secrets.PRIMUS_TURBO_SECRET }}
           ref: 125da20665dea3b703b8ee7105e4189c43cc486c # feat(async-tp): remove triton-dist dependency. (#41)
       - run: echo "Begin Primus-Turbo Install."
       - name: Install Primus-Turbo
