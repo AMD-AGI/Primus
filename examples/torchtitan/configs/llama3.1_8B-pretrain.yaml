@@ -16,7 +16,6 @@ modules:
       stderr_sink_level: INFO
 
       metrics:
-        # enable_wandb: true
         enable_wandb: false
 
       # model:
