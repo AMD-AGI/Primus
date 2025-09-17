@@ -92,7 +92,7 @@ def get_forward_backward_func_zbpp():
 
     """
     if (
-        get_args().enable_zero_bubble
+        get_args().patch_zero_bubble
         or get_args().enable_1f1b_v
         or get_args().num_seq_splits > 1
         or get_args().enable_zb_runtime

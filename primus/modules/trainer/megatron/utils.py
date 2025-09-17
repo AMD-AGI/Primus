@@ -323,6 +323,8 @@ def dump_pp_data(args, num_mbs, pp_data_dir):
 
         for i in range(len(iter_events["fwd_start"])):
             for key in ["fwd_start", "fwd_end", "bwd_start", "bwd_end", "wgrad_start", "wgrad_end"]:
+                if i >= len(iter_events[key]):
+                    continue
                 event_time = iter_events["start"].elapsed_time(iter_events[key][i])
                 iter_data[key].append(event_time)
         all_iter_data[iter_idx + 1] = iter_data

@@ -499,7 +499,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
     def patch_zbpp(self):
         # patch optimizer
-        if self.module_config.enable_zero_bubble:
+        if self.module_config.patch_zero_bubble:
             warning_rank_0(f"MegatronTrainer: Patch ZeroBubble PP")
             import megatron.core.optimizer as optimizer
 
@@ -528,6 +528,35 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             ori_layers.LinearWithGradAccumulationAndAsyncCommunication = (
                 LinearWithGradAccumulationAndAsyncCommunication
             )
+
+            # patch zbv-related code
+            import megatron.core.parallel_state as ori_parallel_state
+
+            from primus.backends.megatron.core.parallel_state import (
+                default_embedding_ranks,
+                is_pipeline_last_stage,
+                is_rank_in_embedding_group,
+            )
+
+            ori_parallel_state.default_embedding_ranks = default_embedding_ranks
+            ori_parallel_state.is_pipeline_last_stage = is_pipeline_last_stage
+            ori_parallel_state.is_rank_in_embedding_group = is_rank_in_embedding_group
+
+            import megatron.core.distributed.finalize_model_grads as ori_finalize_model_grads
+
+            from primus.backends.megatron.core.distributed.finalize_model_grad import (
+                finalize_model_grads,
+            )
+
+            ori_finalize_model_grads.finalize_model_grads = finalize_model_grads
+
+            import megatron.core.transformer.transformer_layer as ori_transformer_layer
+
+            from primus.backends.megatron.core.transformer.transformer_layer import (
+                get_transformer_layer_offset,
+            )
+
+            ori_transformer_layer.get_transformer_layer_offset = get_transformer_layer_offset
 
     def init(self, *init_args, **kwargs):
         allowed_keys = {
@@ -1770,7 +1799,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         timers = get_timers()
 
         def is_pipeline_stage_containing_loss():
-            if args.enable_zero_bubble and (args.zero_bubble_v_schedule or args.enable_1f1b_v):
+            if args.patch_zero_bubble and (args.zero_bubble_v_schedule or args.enable_1f1b_v):
                 return mpu.is_pipeline_first_stage(ignore_virtual=True)
             else:
                 return mpu.is_pipeline_last_stage(ignore_virtual=True)
@@ -1825,7 +1854,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
         if get_args().profile:
             torch.cuda.nvtx.range_push("Optimizer")
-        if args.enable_zero_bubble and args.enable_optimizer_post_validation:
+        if args.patch_zero_bubble and args.enable_optimizer_post_validation:
             if optimizer.post_validation_enabled and not no_optimizer_post_validation:
                 print("debug post validation phase")
                 optimizer.pre_step(args, timers)
@@ -2235,7 +2264,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             total_loss_dict[advanced_iters_key] = 0
             total_loss_dict[skipped_iters_key] = 0
             total_loss_dict[nan_iters_key] = 0
-            log_rank_last(log_string)
+
+            if get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v:
+                log_rank_0(log_string)
+            else:
+                log_rank_last(log_string)
             if report_memory_flag and learning_rate > 0.0:
                 # Report memory after optimizer state has been initialized.
                 if torch.distributed.get_rank() == 0:
@@ -2243,7 +2276,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     report_theoretical_memory(args, num_microbatches=num_microbatches, verbose=True)
                 report_memory("(after {} iterations)".format(iteration))
                 report_memory_flag = False
-            timers.log(timers_to_log, normalizer=args.log_interval)
+
+            # Removed to avoid global sync in zero bubble schedules.
+            if not (get_args().zero_bubble_v_schedule or get_args().patch_zero_bubble):
+                timers.log(timers_to_log, normalizer=args.log_interval)
 
         return report_memory_flag
 

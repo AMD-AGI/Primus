@@ -37,7 +37,7 @@ def get_batch_func(data_iterator):
     # slice batch along sequence dimension for context parallelism
     args = get_args()
 
-    if args.enable_zero_bubble:
+    if args.patch_zero_bubble:
         global mb_batch
         # "or 0" to support original 1f1b and interleaved-1f1b in schedules.py
         seq_split_idx = get_seq_split_idx() or 0
@@ -202,7 +202,7 @@ class MegatronPretrainTrainer(MegatronTrainer):
         timers = get_timers()
 
         # Get the batch.
-        if not args.enable_zero_bubble:
+        if not args.patch_zero_bubble:
             timers("batch-generator", log_level=2).start()
             global stimer
             with stimer(bdata=True):
