@@ -17,15 +17,13 @@ from tests.utils import PrimusUT
 
 
 def run_script(ut_name: str, tag: str, exp_path: str, env_override: dict = None):
-    shell_entry = "examples/run_pretrain.sh"
+    shell_entry = "bin/primus-cli-entrypoint.sh"
     env = os.environ.copy()
     if env_override:
         env.update(env_override)
-    env["EXP"] = exp_path
 
     ut_log_path = os.environ.get("UT_LOG_PATH", "ut_out")
-    train_log_path = os.path.join(ut_log_path, "log.test_megatron_trainer.txt")
-    env["TRAIN_LOG"] = train_log_path
+    train_log_path = os.path.join(ut_log_path, f"log.{ut_name}.{tag}.txt")
 
     do_print_at_runtime = True
     run_stdout = subprocess.PIPE if not do_print_at_runtime else sys.stdout
@@ -33,8 +31,22 @@ def run_script(ut_name: str, tag: str, exp_path: str, env_override: dict = None)
     try:
         logger.info(f"Begin run {tag}...")
         start = time.time()
+
+        cmd = [
+            "bash",
+            shell_entry,
+            "--log_file",
+            train_log_path,
+            "train",
+            "pretrain",
+            "--config",
+            exp_path,
+        ]
+
+        print("[Primus UT] Will run command:")
+        print(" ".join(f"'{c}'" if " " in str(c) else str(c) for c in cmd))
         result = subprocess.run(
-            ["bash", f"{shell_entry}"],
+            cmd,
             check=True,
             stdout=run_stdout,
             stderr=run_stderr,
@@ -43,7 +55,7 @@ def run_script(ut_name: str, tag: str, exp_path: str, env_override: dict = None)
         )
         logger.info(f"End run {tag}, time={time.time()-start:.3f} s")
 
-        logger.info(f"Training log path: {ut_log_path}/logs/UT-{ut_name}")
+        logger.info(f"Training log path: {train_log_path}")
 
         with open(train_log_path, "r") as f:
             stdout_output = f.read()

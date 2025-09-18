@@ -19,6 +19,9 @@ modules:
         batch_size: 2
         compile: true
 
+      profiling:
+        enable_profiling: false
+
       optimizer:
         lr: 8e-5
 
