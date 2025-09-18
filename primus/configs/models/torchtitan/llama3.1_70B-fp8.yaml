@@ -6,4 +6,4 @@ model:
   name: "llama3"
   flavor: "70B"
   tokenizer_path: "meta-llama/Llama-3.1-8B"
-  # converters = ["float8"]
+  converters: ["float8"]
