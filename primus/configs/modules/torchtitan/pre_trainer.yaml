@@ -34,6 +34,7 @@ parallelism:
   tensor_parallel_degree: 1
   pipeline_parallel_degree: 1
   context_parallel_degree: 1
+  enable_async_tensor_parallel: false
 
 checkpoint:
   enable_checkpoint: false
@@ -50,6 +51,7 @@ activation_checkpoint:
 float8:
   enable_fsdp_float8_all_gather: false
   precompute_float8_dynamic_scale_for_fsdp: false
+  force_recompute_fp8_weight_in_bwd: false
   filter_fqns: ["output"]
 
 experimental:
@@ -58,3 +60,6 @@ experimental:
 primus_turbo:
   enable_primus_turbo : true
   enable_attention_float8 : false
+  use_turbo_attention: true
+  use_turbo_async_tp: true
+  use_turbo_mx_linear: true

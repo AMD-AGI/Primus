@@ -1,6 +1,6 @@
 work_group: ${TEAM:amd}
 user_name: ${USER:root}
-exp_name: ${EXP_NAME:llama3_8B-pretrain}
+exp_name: ${EXP_NAME:llama3_70B-pretrain}
 workspace: ./output
 
 modules:
@@ -9,19 +9,30 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: llama3.1_8B.yaml
+    model: llama3.1_70B.yaml
     overrides:
       sink_level: null
       file_sink_level: DEBUG
       stderr_sink_level: INFO
 
+      lr_scheduler:
+        # lr scheduler warm up
+        warmup_steps: 10
+
+      metrics:
+        log_freq: 1
+
       training:
         batch_size: 4
         compile: true
+        steps: 50
+
+      optimizer:
+        lr: 1.5e-4
 
       activation_checkpoint:
-        mode: "none"
+        mode: full
 
       primus_turbo:
-        enable_primus_turbo: false
-        enable_attention_float8: false
+        enable_primus_turbo : true
+        enable_attention_float8 : false
