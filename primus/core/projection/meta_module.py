@@ -5,8 +5,6 @@
 ###############################################################################
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Tuple, Union
 
 
 class BaseMetaModule(ABC):
@@ -31,7 +29,7 @@ class BaseMetaModule(ABC):
     # -------- Memory related --------
     @abstractmethod
     def estimated_memory(self, batch_size: int, seq_len: int) -> int:
-        """Return estimated memory usage in bytes (activations + params)."""
+        """Return estimated memory usage in bytes (activations)."""
         raise NotImplementedError
 
     @abstractmethod
@@ -42,12 +40,12 @@ class BaseMetaModule(ABC):
     # -------- Performance related --------
     @abstractmethod
     def estimated_forward_time(self, batch_size: int, seq_len: int) -> int:
-        """Return estimated FLOPs for forward pass."""
+        """Return estimated forward latency for forward pass in milliseconds."""
         raise NotImplementedError
 
     @abstractmethod
     def estimated_backward_time(self, batch_size: int, seq_len: int) -> int:
-        """Return estimated FLOPs for backward pass."""
+        """Return estimated latency for backward pass in milliseconds."""
         raise NotImplementedError
 
     @abstractmethod
@@ -63,30 +61,3 @@ class BaseMetaModule(ABC):
     # -------- Debugging / summary --------
     def __repr__(self):
         return f"{self.__class__.__name__}(name={self.name})"
-
-
-@dataclass
-class ModuleSpec:
-    module: Union[Tuple, type]
-    params: dict = field(default_factory=lambda: {})
-    submodules: type = None
-
-
-@dataclass
-class TransformerLayerSubmodules:
-    pass
-    # input_layernorm: Union[ModuleSpec, type] = IdentityOp
-    # input_layernorm: Optional[Union[ModuleSpec, type]] = None
-
-
-@dataclass
-class SelfAttentionSubmodules:
-    """
-    Configuration class for specifying the submodules of a self-attention.
-    """
-
-    linear_qkv: Union[ModuleSpec, type] = None
-    core_attention: Union[ModuleSpec, type] = None
-    linear_proj: Union[ModuleSpec, type] = None
-    q_layernorm: Union[ModuleSpec, type] = None
-    k_layernorm: Union[ModuleSpec, type] = None
