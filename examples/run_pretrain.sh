@@ -347,7 +347,23 @@ if [[ -f "$PRIMUS_PATCH_ARGS_FILE" ]]; then
     source_yaml_args() {
         local file=$1
         local key=$2
-        grep -E "^${key}:" "$file" | cut -d':' -f2- | xargs
+        local collect=0
+        local args=""
+        while IFS= read -r line; do
+            if [[ $collect -eq 0 && $line == "$key:"* ]]; then
+                args="${line#*:}"
+                collect=1
+                continue
+            fi
+            if [[ $collect -eq 1 ]]; then
+                if [[ $line =~ ^[[:space:]] ]]; then
+                    args="${args} ${line}"
+                else
+                    break
+                fi
+            fi
+        done < "$file"
+        echo "$args"
     }
 
     TRAIN_EXTRA_ARGS=$(source_yaml_args "$PRIMUS_PATCH_ARGS_FILE" train_args)
@@ -374,7 +390,7 @@ DISTRIBUTED_ARGS=(
 )
 
 
-CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS primus/train.py --config $EXP $TRAIN_EXTRA_ARGS $*"
+CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS $(which primus) train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
 
 LOG_INFO "Launching distributed training with command: $CMD"
 
