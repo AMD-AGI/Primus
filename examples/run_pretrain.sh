@@ -152,7 +152,8 @@ prepare_primus_turbo() {
     LOG_INFO_RANK0 "Primus-Turbo AITER_JIT_DIR: $AITER_JIT_DIR"
 
     # Build Primus-Turbo extension (suppress stdout, show only errors)
-    python3 setup.py build_ext --inplace > /dev/null
+    # python3 setup.py build_ext --inplace > /dev/null
+    pip3 install --no-build-isolation .
     export PYTHONPATH="$TMP_BUILD_DIR${PYTHONPATH:+:$PYTHONPATH}"
     echo "[Primus Entrypoint][INFO] primus-turbo .so ready, PYTHONPATH=$PYTHONPATH"
     cd "$OLD_PWD" || exit 1
