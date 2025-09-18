@@ -1,61 +1,59 @@
-# Primus
+# 🚀 Primus: Unified LLM Training on AMD GPUs
 
-**Primus** is a flexible and high-performance training framework designed for large-scale foundation model training and inference. It is designed to support **pretraining**, **posttraining**, and **reinforcement learning** workflows, and is compatible with multiple backends including [Megatron](https://github.com/NVIDIA/Megatron-LM) and ROCm-optimized components.
-
----
-
-## 🆕 What's New
-- **[2025/06/18]** Added TorchTitan backend support.
-- **[2025/05/16]** Added benchmark suite for performance evaluation across models and hardware.
-- **[2025/04/18]** Added [Preflight](./tools/preflight/README.md) cluster sanity checker to verify environment readiness.
-- **[2025/04/14]** Integrated HipblasLT autotuning for optimized GPU kernel performance.
-- **[2025/04/09]** Extended support for LLaMA2, LLaMA3, DeepSeek-V2/V3 models in [Megatron model configs](https://github.com/AMD-AIG-AIMA/Primus/tree/main/primus/configs/models/megatron).
-- **[2025/03/04]** Released Megatron trainer module for flexible and efficient large model training.
+Primus is a flexible and high-performance training framework designed for **large-scale foundation model pretraining, fine-tuning, and reinforcement learning (RLHF)** — optimized for **AMD Instinct GPUs** and **ROCm software stack**.
 
 ---
 
+## ✨ Key Features
 
-## 🚀 Setup & Deployment
-
-Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-run environment optimized for AMD GPUs. This eliminates manual dependency and environment configuration.
-
-### Prerequisites
-
-- AMD ROCm drivers (version ≥ 6.0 recommended)
-- Docker (version ≥ 24.0) with ROCm support
-- ROCm-compatible AMD GPUs (e.g., Instinct MI300 series)
-- Proper permissions for Docker and GPU device access
-
-
-### Quick Start with AMD ROCm Docker Image: Megatron Pretraining
-
-1. Pull the latest Docker image
-
-    ```bash
-    docker pull docker.io/rocm/megatron-lm:v25.7_py310
-
-    ```
-
-2. Clone the repository:
-
-    ```bash
-    git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
-
-    ```
-
-3. Run Pretraining
-
-    ```bash
-    cd Primus && pip install -r requirements.txt
-    EXP=examples/megatron/configs/llama2_7B-pretrain.yaml bash ./examples/run_local_pretrain.sh
-
-    ```
-
-For more detailed usage instructions, configuration options, and examples, please refer to the [examples/README.md](./examples/README.md).
+- 🔧 Unified CLI to train, benchmark, and validate on any cluster
+- 🧠 Supports Megatron, TorchTitan backends
+- 📦 Out-of-the-box multi-node support (Slurm & containers)
+- 🚀 Integrated benchmarking suite (GEMM / RCCL / end-to-end)
+- 🎯 ROCm-optimized for MI300/MI350 with FP8/BF16/FP16 support
 
 ---
 
-## 📝 TODOs
+## 📦 Installation
 
-- [ ] Support for Primus-RL (training/inference modules for RLHF, OnlineDPO, GRPO, etc.)
-- [ ] Add support for more model architectures and backends
+```bash
+git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
+cd Primus
+pip install -r requirements.txt
+pip install .
+```
+
+---
+
+## ⚡ Quick Start
+
+```bash
+primus-cli direct -- train --config ./examples/configs/llama3_8B-pretrain.yaml
+```
+
+Or try benchmark:
+
+```bash
+primus-cli direct -- benchmark gemm --m 4096 --n 4096 --k 4096
+```
+
+---
+
+## 📚 Full Documentation
+
+Looking for training guides, config templates, and deployment tips?
+👉 Visit our documentation: [`docs/index.md`](./docs/index.md)
+Or jump directly to [Quickstart](./docs/quickstart.md) | [CLI](./docs/cli.md) | [Benchmark](./docs/benchmark_overview.md)
+
+---
+
+## 🤝 Contributing
+
+We welcome community contributions!
+Start here → [Contributing Guide](./docs/contributing.md)
+
+---
+
+## 📜 License
+
+Apache 2.0 License © 2025 Advanced Micro Devices, Inc.
