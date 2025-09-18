@@ -1,4 +1,4 @@
-# 🚀 Primus: Unified LLM Training on AMD GPUs
+# 🚀 Primus: A Lightweight, Unified Training Framework for Large Models on AMD GPUs
 
 Primus is a flexible and high-performance training framework designed for **large-scale foundation model pretraining, fine-tuning, and reinforcement learning (RLHF)** — optimized for **AMD Instinct GPUs** and **ROCm software stack**.
 

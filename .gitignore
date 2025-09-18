@@ -11,3 +11,4 @@ local/
 output
 experiment
 data
+third_party/wheels/
