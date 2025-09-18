@@ -16,15 +16,22 @@ modules:
       stderr_sink_level: INFO
 
       metrics:
+        log_freq: 1
         enable_wandb: false
+      lr_scheduler:
+        # lr scheduler warm up
+        warmup_steps: 10
 
       training:
-        batch_size: 4
+        batch_size: 19
         compile: true
+        steps: 50
 
       activation_checkpoint:
-        mode: "none"
+        mode: "full"  # ["none", "selective", "full"]
+        selective_ac_option: "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
+
 
       primus_turbo:
-        enable_primus_turbo: false
+        enable_primus_turbo: true
         enable_attention_float8: false

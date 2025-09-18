@@ -52,6 +52,7 @@ activation_checkpoint:
 float8:
   enable_fsdp_float8_all_gather: false
   precompute_float8_dynamic_scale_for_fsdp: false
+  force_recompute_fp8_weight_in_bwd: false
   filter_fqns: ["output"]
 
 experimental:
