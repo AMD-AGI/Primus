@@ -5,7 +5,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-
 import operator
 from functools import reduce
 from typing import Dict, List, Optional, Union
@@ -390,10 +389,37 @@ class CommOverlap(CommOverlapBase):
         return False
 
     def split_overlap_rs(
-        self, A: torch.Tensor, B: torch.Tensor, layout: str, D: torch.Tensor, rs_out: torch.Tensor
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        layout: str,
+        D: torch.Tensor,
+        rs_out: torch.Tensor,
+        comm_method: str = "pipeline",
     ):
+        if comm_method == "pipeline":
+            gemm_streams = [torch.cuda.current_stream()]
+            comm_streams = get_backend_stream(size=self.tp_size, priority=0, prefix="comm")
+        elif comm_method == "tile":
+            gemm_streams = []
+            comm_streams = []
+        else:
+            raise ValueError(f"Only pipeline and tile supported, but {comm_method} provided")
+
         pt.ops.fused_matmul_reduce_scatter(
-            A, B, layout, reduce_op="sum", scatter_dim=0, group_name=self.group_name, output=D, rs_out=rs_out
+            A,
+            B,
+            layout,
+            reduce_op="sum",
+            scatter_dim=0,
+            group_name=self.group_name,
+            gemm_streams=gemm_streams,
+            comm_streams=comm_streams,
+            comm_method=comm_method,
+            num_splits=self.num_splits,
+            enable_sdma=True,
+            output=D,
+            rs_out=rs_out,
         )
 
     def split_overlap_ag(
@@ -412,7 +438,7 @@ class CommOverlap(CommOverlapBase):
         copy_streams = get_backend_stream(size=1, priority=0, prefix="copy")
         if A_copy is not None:
             if A_copy.shape != local_A.shape:
-                raise ValueError("A_copy shape is difference with local_A")
+                raise ValueError("A_copy shape is different with local_A")
             A_copy.copy_(local_A)
 
         if scaled_mm_kwargs is None:

@@ -368,3 +368,8 @@ def validate_args_on_rocm(args):
         assert (
             args.fp8_recipe in support_fp8_recipe
         ), f"{args.fp8_recipe} recipe is not support when enable `use_turbo_parallel_linear`."
+
+    # dump pp data
+    if args.dump_pp_data and args.pipeline_model_parallel_size == 1:
+        args.dump_pp_data = False
+        print_rank_last(f"Disable args.dump_pp_data since args.pipeline_model_parallel_size=1")

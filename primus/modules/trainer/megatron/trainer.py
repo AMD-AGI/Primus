@@ -1243,14 +1243,14 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             from .utils import pp_warmup
 
             log_rank_0(
-                "warmup attn on each rank in parallel to decrease "
-                "the first iter time, especially when pp is used"
+                "warmup on each rank in parallel to decrease "
+                "the first iter time, especially when pp degree is large"
             )
             timers = get_timers()
-            timers("warmup-attn", log_level=0).start(barrier=True)
+            timers("pp-warmup", log_level=0).start(barrier=True)
             pp_warmup(args, self.config, self.model, self.optimizer)
-            timers("warmup-attn").stop()
-            timers.log(["warmup-attn"], barrier=True)
+            timers("pp-warmup").stop()
+            timers.log(["pp-warmup"], barrier=True)
 
         process_non_loss_data_func = None
         non_loss_data_func = None
