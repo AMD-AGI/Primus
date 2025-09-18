@@ -41,6 +41,7 @@ jobs:
       - uses: isort/isort-action@v1
         if: always()
         with:
+          isort-version: "5.13.2"
           configuration: "--profile black --check-only --diff"
       - uses: psf/black@stable
         if: always()
