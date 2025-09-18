@@ -18,6 +18,7 @@ modules:
       metrics:
         log_freq: 1
         enable_wandb: false
+
       lr_scheduler:
         # lr scheduler warm up
         warmup_steps: 10
