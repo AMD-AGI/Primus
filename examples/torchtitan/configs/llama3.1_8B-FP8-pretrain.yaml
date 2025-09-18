@@ -8,7 +8,7 @@ modules:
     framework: torchtitan
     config: pre_trainer.yaml
 
-    # model to run 
+    # model to run
     model: llama3.1_8B-fp8.yaml
     overrides:
       sink_level: null
@@ -36,7 +36,6 @@ modules:
         precompute_float8_dynamic_scale_for_fsdp: true
         filter_fqns: ["output"]
 
-        
       primus_turbo:
         enable_primus_turbo: true
         enable_attention_float8: false

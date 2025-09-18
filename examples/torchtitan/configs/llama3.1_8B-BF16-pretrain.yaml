@@ -15,24 +15,22 @@ modules:
       file_sink_level: DEBUG
       stderr_sink_level: INFO
 
+      metrics:
+        log_freq: 1
+        enable_wandb: false
+
       lr_scheduler:
         # lr scheduler warm up
         warmup_steps: 10
 
-      metrics:
-        log_freq: 1
-
       training:
         batch_size: 19
         compile: true
-        steps: 50 
+        steps: 50
 
       activation_checkpoint:
         mode: "full"  # ["none", "selective", "full"]
         selective_ac_option: "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
-
-      # model:
-      #   converters: ["mx"]
 
       primus_turbo:
         enable_primus_turbo: true
