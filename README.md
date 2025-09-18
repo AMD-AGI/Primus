@@ -14,6 +14,19 @@ Primus is a flexible and high-performance training framework designed for **larg
 
 ---
 
+## 🆕 Recent Updates
+
+- 🔧 Integrated **TorchTitan backend** with native FP8 and GraphMode (2025/06)
+- 📊 Released **benchmark suite** for GEMM, RCCL, and end-to-end performance (2025/05)
+- 🛠️ Added **Preflight CLI** for cluster environment validation (2025/04)
+- 🚀 Enabled **HipBLASLt autotuning** for GEMM kernels on ROCm (2025/04)
+- 📚 Extended model support: **LLaMA2/3**, **DeepSeek-V3** in Megatron configs (2025/04)
+- 🧠 Introduced **Megatron trainer** with full TP/PP/EP support (2025/03)
+
+👉 Full release history → [CHANGELOG.md](./CHANGELOG.md)
+
+---
+
 ## 📦 Installation
 
 ```bash
@@ -43,7 +56,7 @@ primus-cli direct -- benchmark gemm --m 4096 --n 4096 --k 4096
 
 Looking for training guides, config templates, and deployment tips?
 👉 Visit our documentation: [`docs/index.md`](./docs/index.md)
-Or jump directly to [Quickstart](./docs/quickstart.md) | [CLI](./docs/cli.md) | [Benchmark](./docs/benchmark_overview.md)
+Or jump directly to [Quickstart](./docs/quickstart.md) | [CLI](./docs/cli.md) | [Benchmark](./docs/benchmark/overview.md)
 
 ---
 
