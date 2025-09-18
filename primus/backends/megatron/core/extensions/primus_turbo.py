@@ -3,7 +3,8 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-from typing import Callable, List, Optional
+from contextlib import contextmanager
+from typing import Callable, List, Optional, Tuple
 
 import primus_turbo.pytorch as pt
 import torch
@@ -23,59 +24,137 @@ from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.moe.experts import GroupedMLP
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
-from megatron.core.utils import (
-    get_tensor_model_parallel_group_if_none,
-    is_te_min_version,
-)
+from megatron.core.utils import get_tensor_model_parallel_group_if_none
 from megatron.training.global_vars import get_args
+from primus_turbo.pytorch.core.float8 import Float8QuantConfig
 from primus_turbo.pytorch.core.float8 import (
-    BlockQuantConfig,
-    Float8QuantConfig,
-    Format,
-    QuantConfig,
-    ScalingStrategy,
+    check_fp8_support as turbo_check_fp8_support,
+)
+from primus_turbo.pytorch.core.float8 import (
+    check_mxfp8_support as turbo_check_mxfp8_support,
 )
 from torch import Tensor
-from transformer_engine.pytorch.fp8 import Format as TEFormat
 from transformer_engine.pytorch.fp8 import (
-    FP8GlobalStateManager as TEFP8GlobalStateManager,
+    DelayedScaling,
+    FP8GlobalStateManager,
+    Recipe,
+    dist_group_type,
 )
-from transformer_engine.pytorch.fp8 import Recipe as TERecipe
 
 
-def te_recipe_to_turbo_quant_config(te_recipe: TERecipe) -> QuantConfig:
+class PrimusTurboFP8GlobalStateManager(FP8GlobalStateManager):
+    PRIMUS_TURBO_FP8_QUANT_CONFIG: Float8QuantConfig = None
+    PRIMUS_TURBO_FP8_ENABLED: bool = False
 
-    def te_fp8_format_to_turbo_fp8_format(te_format: TEFormat) -> Format:
-        format_mapping = {
-            TEFormat.E4M3: Format.E4M3,
-            TEFormat.HYBRID: Format.HYBRID,
-            TEFormat.E5M2: Format.E5M2,
-        }
+    @classmethod
+    def is_turbo_fp8_enabled(cls) -> bool:
+        """Is FP8 enabled"""
+        return cls.PRIMUS_TURBO_FP8_ENABLED
 
-        return format_mapping[te_format]
+    @classmethod
+    def reset(cls) -> None:
+        """Reset the global state"""
+        FP8GlobalStateManager.reset()
 
-    args = get_args()
+        cls.PRIMUS_TURBO_FP8_ENABLED = False
+        cls.PRIMUS_TURBO_FP8_QUANT_CONFIG = None
 
-    format = te_fp8_format_to_turbo_fp8_format(te_recipe.fp8_format)
+    @classmethod
+    def fp8_autocast_enter(
+        cls,
+        enabled: bool = False,
+        calibrating: bool = False,
+        fp8_recipe: Optional[Recipe] = None,
+        fp8_group: Optional[dist_group_type] = None,
+        _graph: bool = False,
+        enabled_turbo: bool = False,
+        turbo_fp8_quant_config: Optional[Float8QuantConfig] = None,
+    ) -> None:
+        FP8GlobalStateManager.fp8_autocast_enter(
+            enabled=enabled,
+            calibrating=calibrating,
+            fp8_recipe=fp8_recipe,
+            fp8_group=fp8_group,
+            _graph=_graph,
+        )
 
-    quant_config = None
-    if is_te_min_version("2.2.0.dev0"):
-        # NOTE: te not support current scaling before 2.3.0.dev0.
-        if te_recipe.float8_current_scaling():
-            quant_config = Float8QuantConfig(format=format, strategy=ScalingStrategy.DYNAMIC)
-    else:
-        if args.fp8_recipe == "tensorwise":
-            quant_config = Float8QuantConfig(format=format, strategy=ScalingStrategy.DYNAMIC)
+        turbo_fp8_quant_config = (
+            Float8QuantConfig() if turbo_fp8_quant_config is None else turbo_fp8_quant_config
+        )
 
-    if is_te_min_version("2.3.0.dev0"):
-        # NOTE: te not support block scaling before 2.3.0.dev0.
-        if te_recipe.float8_block_scaling():
-            quant_config = BlockQuantConfig(format=format, strategy=ScalingStrategy.DYNAMIC)
-    else:
-        if args.fp8_recipe == "blockwise":
-            quant_config = BlockQuantConfig(format=format, strategy=ScalingStrategy.DYNAMIC)
+        cls.PRIMUS_TURBO_FP8_ENABLED = enabled_turbo
+        cls.PRIMUS_TURBO_FP8_QUANT_CONFIG = turbo_fp8_quant_config
 
-    return quant_config
+        if enabled_turbo:
+            fp8_available, reason_for_no_fp8 = turbo_check_fp8_support()
+            assert fp8_available, reason_for_no_fp8
+            if turbo_fp8_quant_config.mxfp8():
+                mxfp8_available, reason_for_no_mxfp8 = turbo_check_mxfp8_support()
+                assert mxfp8_available, reason_for_no_mxfp8
+
+    @classmethod
+    def get_turbo_fp8_quant_config(cls) -> Float8QuantConfig:
+        """Return the turbo's fp8 quant_config"""
+        return cls.PRIMUS_TURBO_FP8_QUANT_CONFIG
+
+    @classmethod
+    def get_fp8_autocast_state(
+        cls,
+    ) -> Tuple[bool, bool, Recipe, dist_group_type, bool, bool, Float8QuantConfig]:
+        """FP8 autocast state getter"""
+        return (
+            cls.FP8_ENABLED,
+            cls.FP8_CALIBRATION,
+            cls.FP8_RECIPE,
+            cls.FP8_DISTRIBUTED_GROUP,
+            cls.IS_FIRST_FP8_MODULE,
+            cls.FP8_GRAPH_CAPTURING,
+            cls.PRIMUS_TURBO_FP8_ENABLED,
+            cls.PRIMUS_TURBO_FP8_QUANT_CONFIG,
+        )
+
+    @classmethod
+    def set_fp8_autocast_state(
+        cls, fp8_state: Tuple[bool, bool, DelayedScaling, dist_group_type, bool, bool, Float8QuantConfig]
+    ) -> None:
+        """FP8 autocast state setter"""
+        (
+            cls.FP8_ENABLED,
+            cls.FP8_CALIBRATION,
+            cls.FP8_RECIPE,
+            cls.FP8_DISTRIBUTED_GROUP,
+            cls.IS_FIRST_FP8_MODULE,
+            cls.FP8_GRAPH_CAPTURING,
+            cls.PRIMUS_TURBO_FP8_ENABLED,
+            cls.PRIMUS_TURBO_FP8_QUANT_CONFIG,
+        ) = fp8_state
+
+
+@contextmanager
+def primus_turbo_fp8_autocast(
+    enabled: bool = True,
+    calibrating: bool = False,
+    fp8_recipe: Optional[Recipe] = None,
+    fp8_group: Optional[dist_group_type] = None,
+    _graph: bool = False,
+    enabled_turbo: bool = False,
+    turbo_fp8_quant_config: Optional[Float8QuantConfig] = None,
+) -> None:  # type: ignore
+    fp8_state = PrimusTurboFP8GlobalStateManager.get_fp8_autocast_state()
+    PrimusTurboFP8GlobalStateManager.fp8_autocast_enter(
+        enabled=enabled,
+        calibrating=calibrating,
+        fp8_recipe=fp8_recipe,
+        fp8_group=fp8_group,
+        _graph=_graph,
+        enabled_turbo=enabled_turbo,
+        turbo_fp8_quant_config=turbo_fp8_quant_config,
+    )
+    try:
+        yield
+    finally:
+        PrimusTurboFP8GlobalStateManager.set_fp8_autocast_state(fp8_state)
+        PrimusTurboFP8GlobalStateManager.fp8_autocast_exit(enabled, _graph=_graph)
 
 
 class PrimusTurboAttention(te.pytorch.DotProductAttention):
@@ -282,12 +361,12 @@ class PrimusTurboRowParallelLinear(TELinear):
             input_ = input_.contiguous()
         input_ = input_.view(-1, original_shape[-1])
 
-        if TEFP8GlobalStateManager.is_fp8_enabled():
-            quant_config = te_recipe_to_turbo_quant_config(TEFP8GlobalStateManager.get_fp8_recipe())
+        if PrimusTurboFP8GlobalStateManager.is_turbo_fp8_enabled():
+            quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
             if quant_config.block_scaling():
                 fp8_gemm = pt.ops.gemm_fp8_blockwise
             elif quant_config.current_scaling():
-                fp8_gemm = pt.ops.gemm_fp8_tensorwise
+                fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
 
@@ -369,12 +448,12 @@ class PrimusTurboColumnParallelLinear(TELinear):
             input_ = input_.contiguous()
         input_ = input_.view(-1, original_shape[-1])
 
-        if TEFP8GlobalStateManager.is_fp8_enabled():
-            quant_config = te_recipe_to_turbo_quant_config(TEFP8GlobalStateManager.get_fp8_recipe())
+        if PrimusTurboFP8GlobalStateManager.is_turbo_fp8_enabled():
+            quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
             if quant_config.block_scaling():
                 fp8_gemm = pt.ops.gemm_fp8_blockwise
             elif quant_config.current_scaling():
-                fp8_gemm = pt.ops.gemm_fp8_tensorwise
+                fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
 
@@ -451,12 +530,12 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
             input_ = input_.contiguous()
         input_ = input_.view(-1, original_shape[-1])
 
-        if TEFP8GlobalStateManager.is_fp8_enabled():
-            quant_config = te_recipe_to_turbo_quant_config(TEFP8GlobalStateManager.get_fp8_recipe())
+        if PrimusTurboFP8GlobalStateManager.is_turbo_fp8_enabled():
+            quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
             if quant_config.block_scaling():
                 fp8_gemm = pt.ops.gemm_fp8_blockwise
             elif quant_config.current_scaling():
-                fp8_gemm = pt.ops.gemm_fp8_tensorwise
+                fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
 
@@ -564,12 +643,12 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             norm_out = norm_out.contiguous()
         inp = norm_out.view(-1, original_shape[-1])
 
-        if TEFP8GlobalStateManager.is_fp8_enabled():
-            quant_config = te_recipe_to_turbo_quant_config(TEFP8GlobalStateManager.get_fp8_recipe())
+        if PrimusTurboFP8GlobalStateManager.is_turbo_fp8_enabled():
+            quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
             if quant_config.block_scaling():
                 fp8_gemm = pt.ops.gemm_fp8_blockwise
             elif quant_config.current_scaling():
-                fp8_gemm = pt.ops.gemm_fp8_tensorwise
+                fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
 

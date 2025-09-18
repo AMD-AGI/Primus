@@ -163,6 +163,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_file_system_writer()
         self.patch_te_tp_overlap()
         self.patch_mla_attention()
+        self.patch_fp8_context()
 
         self.app_metrics = {}
 
@@ -204,6 +205,21 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             gpt_model.tensor_parallel.ColumnParallelLinear = PrimusTurboColumnParallelLinearTorch
         if args.use_turbo_grouped_mlp:
             moe_module_specs.GroupedMLP = PrimusTurboGroupedMLP
+
+    def patch_fp8_context(self):
+        from megatron.core import fp8_utils
+        from megatron.core.ssm import mamba_block
+        from megatron.core.transformer import multi_token_prediction, transformer_block
+
+        from primus.backends.megatron.core.fp8_utils import get_fp8_context
+
+        if self.module_config.fp8:
+            warning_rank_0(f"MegatronTrainer: Patch get_fp8_context...")
+            transformer_block.get_fp8_context = get_fp8_context
+            mamba_block.get_fp8_context = get_fp8_context
+            multi_token_prediction.get_fp8_context = get_fp8_context
+
+            fp8_utils.get_fp8_context = get_fp8_context
 
     def patch_te_tp_overlap(self):
         if not self.module_config.tp_comm_overlap:
