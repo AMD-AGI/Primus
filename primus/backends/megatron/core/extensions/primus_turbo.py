@@ -30,12 +30,7 @@ from primus_turbo.pytorch.core.float8 import (
     Float8QuantConfig,
     ScalingGranularity,
     ScalingStrategy,
-)
-from primus_turbo.pytorch.core.float8 import (
-    check_fp8_support as turbo_check_fp8_support,
-)
-from primus_turbo.pytorch.core.float8 import (
-    check_mxfp8_support as turbo_check_mxfp8_support,
+    check_fp8_support,
 )
 from torch import Tensor
 from transformer_engine.pytorch.fp8 import (
@@ -47,9 +42,6 @@ from transformer_engine.pytorch.fp8 import (
 
 
 class PrimusTurboFloat8QuantConfig(Float8QuantConfig):
-
-    def mxfp8_scaling(self):
-        return self.granularity == ScalingGranularity.MX_BLOCKWISE
 
     def block_scaling(self):
         return self.granularity == ScalingGranularity.BLOCKWISE
@@ -102,11 +94,8 @@ class PrimusTurboFP8GlobalStateManager(FP8GlobalStateManager):
         cls.PRIMUS_TURBO_FP8_QUANT_CONFIG = turbo_fp8_quant_config
 
         if enabled_turbo:
-            fp8_available, reason_for_no_fp8 = turbo_check_fp8_support()
+            fp8_available, reason_for_no_fp8 = check_fp8_support()
             assert fp8_available, reason_for_no_fp8
-            if turbo_fp8_quant_config.mxfp8_scaling():
-                mxfp8_available, reason_for_no_mxfp8 = turbo_check_mxfp8_support()
-                assert mxfp8_available, reason_for_no_mxfp8
 
     @classmethod
     def get_turbo_fp8_quant_config(cls) -> PrimusTurboFloat8QuantConfig:
