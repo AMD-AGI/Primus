@@ -26,7 +26,11 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_tensor_model_parallel_group_if_none
 from megatron.training.global_vars import get_args
-from primus_turbo.pytorch.core.float8 import Float8QuantConfig
+from primus_turbo.pytorch.core.float8 import (
+    Float8QuantConfig,
+    ScalingGranularity,
+    ScalingStrategy,
+)
 from primus_turbo.pytorch.core.float8 import (
     check_fp8_support as turbo_check_fp8_support,
 )
@@ -42,8 +46,20 @@ from transformer_engine.pytorch.fp8 import (
 )
 
 
+class PrimusTurboFloat8QuantConfig(Float8QuantConfig):
+
+    def mxfp8_scaling(self):
+        return self.granularity == ScalingGranularity.MX_BLOCKWISE
+
+    def block_scaling(self):
+        return self.granularity == ScalingGranularity.BLOCKWISE
+
+    def current_scaling(self):
+        return self.granularity == ScalingGranularity.TENSORWISE and self.strategy == ScalingStrategy.DYNAMIC
+
+
 class PrimusTurboFP8GlobalStateManager(FP8GlobalStateManager):
-    PRIMUS_TURBO_FP8_QUANT_CONFIG: Float8QuantConfig = None
+    PRIMUS_TURBO_FP8_QUANT_CONFIG: PrimusTurboFloat8QuantConfig = None
     PRIMUS_TURBO_FP8_ENABLED: bool = False
 
     @classmethod
@@ -68,7 +84,7 @@ class PrimusTurboFP8GlobalStateManager(FP8GlobalStateManager):
         fp8_group: Optional[dist_group_type] = None,
         _graph: bool = False,
         enabled_turbo: bool = False,
-        turbo_fp8_quant_config: Optional[Float8QuantConfig] = None,
+        turbo_fp8_quant_config: Optional[PrimusTurboFloat8QuantConfig] = None,
     ) -> None:
         FP8GlobalStateManager.fp8_autocast_enter(
             enabled=enabled,
@@ -79,7 +95,7 @@ class PrimusTurboFP8GlobalStateManager(FP8GlobalStateManager):
         )
 
         turbo_fp8_quant_config = (
-            Float8QuantConfig() if turbo_fp8_quant_config is None else turbo_fp8_quant_config
+            PrimusTurboFloat8QuantConfig() if turbo_fp8_quant_config is None else turbo_fp8_quant_config
         )
 
         cls.PRIMUS_TURBO_FP8_ENABLED = enabled_turbo
@@ -88,19 +104,19 @@ class PrimusTurboFP8GlobalStateManager(FP8GlobalStateManager):
         if enabled_turbo:
             fp8_available, reason_for_no_fp8 = turbo_check_fp8_support()
             assert fp8_available, reason_for_no_fp8
-            if turbo_fp8_quant_config.mxfp8():
+            if turbo_fp8_quant_config.mxfp8_scaling():
                 mxfp8_available, reason_for_no_mxfp8 = turbo_check_mxfp8_support()
                 assert mxfp8_available, reason_for_no_mxfp8
 
     @classmethod
-    def get_turbo_fp8_quant_config(cls) -> Float8QuantConfig:
+    def get_turbo_fp8_quant_config(cls) -> PrimusTurboFloat8QuantConfig:
         """Return the turbo's fp8 quant_config"""
         return cls.PRIMUS_TURBO_FP8_QUANT_CONFIG
 
     @classmethod
     def get_fp8_autocast_state(
         cls,
-    ) -> Tuple[bool, bool, Recipe, dist_group_type, bool, bool, Float8QuantConfig]:
+    ) -> Tuple[bool, bool, Recipe, dist_group_type, bool, bool, PrimusTurboFloat8QuantConfig]:
         """FP8 autocast state getter"""
         return (
             cls.FP8_ENABLED,
@@ -115,7 +131,10 @@ class PrimusTurboFP8GlobalStateManager(FP8GlobalStateManager):
 
     @classmethod
     def set_fp8_autocast_state(
-        cls, fp8_state: Tuple[bool, bool, DelayedScaling, dist_group_type, bool, bool, Float8QuantConfig]
+        cls,
+        fp8_state: Tuple[
+            bool, bool, DelayedScaling, dist_group_type, bool, bool, PrimusTurboFloat8QuantConfig
+        ],
     ) -> None:
         """FP8 autocast state setter"""
         (
@@ -138,7 +157,7 @@ def primus_turbo_fp8_autocast(
     fp8_group: Optional[dist_group_type] = None,
     _graph: bool = False,
     enabled_turbo: bool = False,
-    turbo_fp8_quant_config: Optional[Float8QuantConfig] = None,
+    turbo_fp8_quant_config: Optional[PrimusTurboFloat8QuantConfig] = None,
 ) -> None:  # type: ignore
     fp8_state = PrimusTurboFP8GlobalStateManager.get_fp8_autocast_state()
     PrimusTurboFP8GlobalStateManager.fp8_autocast_enter(
