@@ -1,0 +1,9 @@
+bases:
+  - gpt_oss_base.yaml
+
+# model parameter for 20B model
+num_layers: 24
+num_experts: 32
+
+tokenizer_type: DeepSeekV2Tokenizer
+tokenizer_model: openai/gpt-oss-20b
