@@ -4,10 +4,12 @@
 # See LICENSE for license information.
 ###############################################################################
 from contextlib import contextmanager
+from functools import partial
 from typing import Callable, List, Optional, Tuple
 
 import primus_turbo.pytorch as pt
 import torch
+import torch.nn.functional as F
 import transformer_engine as te
 from megatron.core import tensor_parallel
 from megatron.core.extensions.transformer_engine import TELinear, condition_init_method
@@ -22,6 +24,7 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.moe.experts import GroupedMLP
+from megatron.core.transformer.moe.token_dispatcher import MoETokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_tensor_model_parallel_group_if_none
@@ -715,6 +718,8 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
 
 
 class PrimusTurboGroupedMLP(GroupedMLP):
+    use_turbo_groupmlp_act: bool = False
+
     def __init__(
         self,
         num_local_experts: int,
@@ -733,6 +738,15 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             self.grouped_gemm = grouped_gemm_with_weight_gradient_store
         else:
             self.grouped_gemm = pt.ops.grouped_gemm
+
+        if self.use_turbo_groupmlp_act:
+            if config.activation_func == F.silu:
+                activation_func_with_probs = partial(pt.ops.activation_with_probs, act_type="silu")
+            elif config.activation_func == F.gelu:
+                activation_func_with_probs = partial(pt.ops.activation_with_probs, act_type="gelu")
+            else:
+                raise ValueError("Activation function must be silu or gelu when using GroupedMLP.")
+            self.activation_func_with_probs = activation_func_with_probs
 
     def forward(
         self,
@@ -778,17 +792,13 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 intermediate_parallel = self.activation_checkpoint.checkpoint(
                     self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
                 )
-                fc2_output = self.grouped_gemm(
-                    intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
-                )
+                fc2_output = self.grouped_gemm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
                 intermediate_parallel = self.activation_func_with_probs(
                     fc1_output, permuted_probs.unsqueeze(-1)
                 )
-                fc2_output = self.grouped_gemm(
-                    intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
-                )
+                fc2_output = self.grouped_gemm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
         else:
             # No token is allocated for local experts.
             assert torch.count_nonzero(tokens_per_expert) == 0
@@ -799,12 +809,115 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             h = torch.matmul(permuted_local_hidden_states, w1)
             if self.activation_recompute:
                 h = self.activation_checkpoint.checkpoint(
-                    self.activation_func_with_probs, h, permuted_probs.unsqueeze(-1)
+                    activation_func_with_probs, h, permuted_probs.unsqueeze(-1)
                 )
                 fc2_output = torch.matmul(h, w2)
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
-                h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
+                h = activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
                 fc2_output = torch.matmul(h, w2)
 
         return fc2_output, None
+
+
+class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
+    """
+    PrimusTurbo token dispatcher using DeepEP.
+    """
+
+    # deepep
+    turbo_deepep_num_cu: int = 32
+    turbo_deepep_use_comm_stream: bool = False
+    use_cuda_num_tokens_per_expert: bool = False
+
+    # sync-free moe
+    turbo_sync_free_moe_stage: int = 0
+
+    # megatron
+    moe_router_force_load_balancing: bool = False
+
+    def __init__(
+        self,
+        num_local_experts: int,
+        local_expert_indices: List[int],
+        config: TransformerConfig,
+        model_comm_pgs: Optional[ModelCommProcessGroups] = None,
+    ):
+        """
+        Initialize the token dispatcher.
+
+        Args:
+            num_local_experts (int): Number of local experts on the current device.
+            local_expert_indices (List[int]): Indices of local experts on the current device.
+            config (TransformerConfig): Configuration for the transformer model.
+            model_comm_pgs (ModelCommProcessGroups, optional): Process groups for MoE operations.
+        """
+        super().__init__(config=config, model_comm_pgs=model_comm_pgs)
+
+        assert self.tp_size * self.ep_size > 1, "Flex token dispatcher requires TPxEP > 1"
+        assert (
+            self.config.moe_enable_deepep
+        ), "DeepEP is not enabled. Please set --moe-enable-deepep to use DeepEP backend."
+        assert (
+            self.config.moe_pad_expert_input_to_capacity is False
+        ), "Flex token dispatcher does not support --moe-pad-expert-input-to-capacity"
+
+        self.deepep_dispatcher = pt.module.TurboDeepEPTokenDispatcher(
+            ep_group=self.tp_ep_group,
+            router_topk=config.router_topk,
+            num_experts=config.num_experts,
+            hidden_size=config.hidden_size,
+            dtype=torch.bfloat16,  # TODO
+            use_default_stream_as_comm_stream=self.turbo_deepep_use_comm_stream,
+            num_use_cu=self.turbo_deepep_num_cu,
+            use_cuda_num_tokens_per_expert=self.use_cuda_num_tokens_per_expert,
+        )
+        self.deepep_combiner = pt.modules.TurboDeepEPTokenCombiner()
+
+        self.handle = None
+
+    def token_permutation(
+        self, hidden_states: torch.Tensor, probs: torch.Tensor, routing_map: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self.hidden_shape = hidden_states.shape
+        # view as [num_tokens, hidden_size]
+        hidden_states = hidden_states.view(-1, self.config.hidden_size)
+        num_tokens = hidden_states.shape[0]
+
+        # enable sync-free moe to elimiate deepep cpu busy-wait
+        if self.turbo_sync_free_moe_stage > 1:
+            num_worst_tokens = num_tokens * self.tp_ep_group.size()
+        else:
+            num_worst_tokens = 0
+
+        if self.moe_router_force_load_balancing:
+            token_indices = (
+                torch.arange(num_tokens * self.config.router_topk, device=hidden_states.device).view(
+                    num_tokens, self.config.router_topk
+                )
+                % self.config.num_experts
+            )
+            token_probs = probs.gather(1, token_indices)
+        else:
+            token_probs, token_indices = torch.topk(probs, self.router_topk, dim=-1)
+
+        # Mask the indices of dropped tokens with -1
+        if self.config.moe_expert_capacity_factor is not None:
+            mask = token_probs == 0
+            token_indices = token_indices.masked_fill(mask, -1)
+
+        (global_input_tokens, tokens_per_expert, permuted_probs, self.handle) = self.deepep_dispatcher(
+            hidden_states,
+            token_probs=token_probs,
+            token_indices=token_indices,
+            num_worst_tokens=num_worst_tokens,
+        )
+        return global_input_tokens, tokens_per_expert, permuted_probs
+
+    def token_unpermutation(
+        self, hidden_states: torch.Tensor, bias: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        assert bias is None, "Bias is not supported in MoEFlexTokenDispatcher"
+        hidden_states, _ = self.deepep_combiner(hidden_states, handle=self.handle, bias=bias)
+        self.handle = None
+        return hidden_states.view(self.hidden_shape), None

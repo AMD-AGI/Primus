@@ -386,6 +386,32 @@ def dump_pp_data(args, num_mbs, pp_data_dir):
             json.dump(config_dict, f, indent=2)
 
 
+def _get_sync_free_moe_options(stage: int) -> dict:
+    if stage > 3 or stage < 0:
+        raise ValueError("turbo_sync_free_moe_stage only support [0-3]")
+
+    sync_free_moe = {
+        1: {"moe_use_fused_router_with_aux_score": True, "moe_permute_fusion": True},
+        2: {
+            "moe_use_fused_router_with_aux_score": True,
+            "enable_primus_turbo": True,
+            "use_turbo_deepep": True,
+            "moe_permute_fusion": True,
+            "use_turbo_grouped_mlp": True,
+        },
+        3: {
+            "moe_use_fused_router_with_aux_score": True,
+            "enable_primus_turbo": True,
+            "use_turbo_deepep": True,
+            "moe_permute_fusion": True,
+            "use_turbo_grouped_mlp": True,
+            "use_turbo_groupmlp_act": True,
+        },
+    }
+
+    return sync_free_moe[stage]
+
+
 def validate_args_on_rocm(args):
     # Deterministic mode
     if args.deterministic_mode:
@@ -402,3 +428,12 @@ def validate_args_on_rocm(args):
     if args.dump_pp_data and args.pipeline_model_parallel_size == 1:
         args.dump_pp_data = False
         print_rank_last(f"Disable args.dump_pp_data since args.pipeline_model_parallel_size=1")
+
+    # sync-free MoE
+    if args.turbo_sync_free_moe_stage > 0:
+        options = _get_sync_free_moe_options(args.turbo_sync_free_moe_stage)
+        print_rank_last("==== Enable Sync-Free MoE (Auto-Enable Options) ====")
+        for flag, value in options:
+            print_rank_last(f"{flag}={value}")
+            setattr(args, flag, value)
+        print_rank_last("==== Enable Sync-Free MoE ====")
