@@ -68,6 +68,7 @@ srun -N "${NNODES}" \
           export TORCHTITAN_PATH=\${TORCHTITAN_PATH}
           export BACKEND_PATH=\${BACKEND_PATH}
           export PRIMUS_TURBO_PATH=\${PRIMUS_TURBO_PATH}
+          export PRIMUS_TURBO_COMMIT=\${PRIMUS_TURBO_COMMIT}
           export PATH_TO_BNXT_TAR_PACKAGE=\${PATH_TO_BNXT_TAR_PACKAGE}
           bash ${SCRIPT_DIR}/run_local_pretrain.sh \"\$@\" 2>&1 | tee ${LOG_FILE}
      " bash "$@"

@@ -129,6 +129,7 @@ docker_podman_proxy run --rm \
     --env TORCHTITAN_PATH \
     --env BACKEND_PATH \
     --env PRIMUS_TURBO_PATH \
+    --env PRIMUS_TURBO_COMMIT \
     --env HF_TOKEN \
     "${ENV_ARGS[@]}" \
     --ipc=host --network=host \
