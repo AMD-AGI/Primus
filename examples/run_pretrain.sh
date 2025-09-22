@@ -74,6 +74,22 @@ if [ ! -f "${EXP}" ]; then
     exit 1
 fi
 
+TMP_BUILD_DIR="${PRIMUS_PATH}/build/${HOSTNAME}"
+mkdir -p "$TMP_BUILD_DIR"
+# Collect environment info for cache tagging
+OS_VER=$(grep ^PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"' | tr ' ' '_' | tr -d '()')
+PY_VER=$(python3 -c 'import platform; print(platform.python_version())')
+ROCM_VER=$(/opt/rocm/bin/rocminfo | grep 'ROCm version' | head -1 | awk '{print $NF}' | tr -d '()')
+if [[ -f /proc/driver/amdgpu/version ]]; then
+    AMDGPU_VER=$(head -1 < /proc/driver/amdgpu/version | awk '{print $3}' | tr -d '()')
+else
+    AMDGPU_VER="unknown"
+fi
+KERNEL_VER=$(uname -r | tr '.' '_' | tr '-' '_')
+
+CACHE_TAG="${OS_VER}_py${PY_VER}_rocm${ROCM_VER}_amdgpu${AMDGPU_VER}_kernel${KERNEL_VER}_${HOSTNAME}"
+export AITER_JIT_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}_aiter_cache"
+
 
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
 export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
