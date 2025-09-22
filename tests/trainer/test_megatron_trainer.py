@@ -24,7 +24,7 @@ def run_script(ut_name: str, tag: str, exp_path: str, env_override: dict = None)
     env["EXP"] = exp_path
 
     ut_log_path = os.environ.get("UT_LOG_PATH", "ut_out")
-    train_log_path = os.path.join(ut_log_path, "log.test_megatron_trainer.txt")
+    train_log_path = os.path.join(ut_log_path, f"log.test_megatron_trainer-{tag}.txt")
     env["TRAIN_LOG"] = train_log_path
 
     do_print_at_runtime = True
