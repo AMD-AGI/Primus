@@ -1,5 +1,3 @@
-from glob import glob
-
 from setuptools import find_packages, setup
 
 
@@ -42,7 +40,13 @@ setup(
             "primus=primus.cli.main:main",
         ]
     },
-    scripts=glob.glob("bin/*"),
+    scripts=[
+        "bin/primus-cli",
+        "bin/primus-cli-slurm.sh",
+        "bin/primus-cli-container.sh",
+        "bin/primus-cli-entrypoint.sh",
+        "bin/primus-env.sh",
+    ],
     python_requires=">=3.8",
     include_package_data=True,
     zip_safe=False,
