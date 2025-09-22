@@ -414,4 +414,23 @@ if [[ $exit_code -ne 0 ]]; then
     fi
 fi
 
+num_warmup=$(grep 'lr_warmup_iters' ${TRAIN_LOG} | sed -E 's/.*\.+ ([0-9,]+).*/\1/' | tr -d ',' 2>/dev/null)
+echo "Num warmup: $num_warmup"
+
+tps_values=$(grep 'INFO .*:  iteration' ${TRAIN_LOG} | sed -E 's/.*tokens per GPU \(tokens\/s\/GPU\): ([0-9.]+).*/\1/' 2>/dev/null)
+tflops_values=$(grep 'INFO .*:  iteration' ${TRAIN_LOG} | sed -E 's/.*throughput per GPU \(TFLOP\/s\/GPU\): ([0-9.]+).*/\1/' 2>/dev/null)
+mem_pct_values=$(grep 'usage_ratio' "${TRAIN_LOG}" \
+  | sed -En 's/.*usage_ratio:[[:space:]]*[^/]*\/[^/]*\/[^/]*\/([0-9]+(\.[0-9]+)?)%.*/\1/p' 2>/dev/null)
+elapsed_time_values=$(grep 'INFO .*:  iteration' ${TRAIN_LOG} | sed -E 's/.*elapsed time per iteration \(ms\): ([0-9.]+).*/\1/' 2>/dev/null)
+
+avg_tps=$(echo "$tps_values" | tail -n +$((num_warmup + 1)) | awk 'NF > 0 { if ($0 == 0) zero_found = 1; else {sum += 1/$0; count++ } } END { if (zero_found || count == 0 || sum == 0) print "N/A"; else printf "%.2f", count/sum }' 2>/dev/null)
+avg_tflops=$(echo "$tflops_values" | tail -n +$((num_warmup + 1)) | awk 'NF > 0 { if ($0 == 0) zero_found = 1; else {sum += 1/$0; count++ } } END { if (zero_found || count == 0 || sum == 0) print "N/A"; else printf "%.2f", count/sum }' 2>/dev/null)
+avg_mem_pct=$(echo "$mem_pct_values" | tail -n +$((num_warmup + 1)) | awk 'NF > 0 { sum += $0; count++ } END { if (count == 0) print "N/A"; else printf "%.4f", sum/count }' 2>/dev/null)
+avg_elapsed_time=$(echo "$elapsed_time_values" | tail -n +$((num_warmup + 1)) | awk 'NF > 0 { sum += $0; count++ } END { if (count == 0) print "N/A"; else printf "%.4f", sum/count }' 2>/dev/null)
+
+echo "Harmonic mean of TPS (excluding first $num_warmup steps): $avg_tps" | tee ${TRAIN_LOG}
+echo "Harmonic mean of TFLOPS (excluding first $num_warmup steps): $avg_tflops" | tee ${TRAIN_LOG}
+echo "Arithmetic mean of memory percentage (excluding first $num_warmup steps): $avg_mem_pct" | tee ${TRAIN_LOG}
+echo "Arithmetic mean of elapsed time (ms) (excluding first $num_warmup steps): $avg_elapsed_time" | tee ${TRAIN_LOG}
+
 exit "$exit_code"
