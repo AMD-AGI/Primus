@@ -53,36 +53,6 @@ jobs:
     needs: [code-lint]
     runs-on: [tas-k8s]
     steps:
-      - run: echo "🎉 Begin Primus-Turbo Checkout."
-      - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@v4
-        with:
-          repository: AMD-AIG-AIMA/Primus-Turbo
-          submodules: "recursive"
-          path: Primus-Turbo
-          ref: 6d39647350baa180cccc61e701cf75281dc7e878 # feat: add TurboStream (#96)
-      - run: echo "Begin Primus-Turbo Install."
-      - name: Install Primus-Turbo
-        run: |
-          mv Primus-Turbo /tmp/
-          echo "Primus-Turbo dir: /tmp/Primus-Turbo"
-          git config --global --add safe.directory /tmp/Primus-Turbo
-          cd /tmp/Primus-Turbo
-          start_time=$(date +%s)
-          echo "✅ [Pip install requirements] started at: $(date)"
-          mkdir -p ./pip_cache
-          MAX_JOBS=128 pip install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --no-build-isolation --no-clean -r requirements.txt
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "✅ [Pip install requirements] ended at: $(date)"
-          echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
-          start_time=$(date +%s)
-          echo "✅ [build primus-turbo] started at: $(date)"
-          pip3 install --no-build-isolation -e . -v
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "✅ [build primus-turbo] ended at: $(date)"
-          echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
       - run: echo "🎉 Begin Primus Unit Test."
       - uses: actions/checkout@v4
         with:
@@ -122,5 +92,4 @@ jobs:
           python ./tests/run_unit_tests.py
       - name: Clean
         run: |
-          rm -rf ${PRIMUS_WORKDIR}/Primus-Turbo
           rm -rf ${PRIMUS_WORKDIR}/Primus
