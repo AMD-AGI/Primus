@@ -63,49 +63,44 @@ if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
     exit 0
 fi
 
+SCRIPT_DIR="$(dirname "$0")"
+
+# Try PATH first, fallback to local ./bin directory
+run_subscript() {
+    local script="$1"
+    shift
+    if command -v "$script" >/dev/null 2>&1; then
+        echo "[primus-cli] Executing from PATH: $script $*"
+        exec "$script" "$@"
+    elif [[ -f "$SCRIPT_DIR/$script" ]]; then
+        echo "[primus-cli] Executing from local repo: $SCRIPT_DIR/$script $*"
+        exec bash "$SCRIPT_DIR/$script" "$@"
+    else
+        echo "[primus-cli][ERROR] Subscript not found: $script"
+        exit 2
+    fi
+}
+
 # # Check argument count, print usage if not enough arguments
 [[ $# -ge 1 ]] || { echo "Usage: primus-cli {launch|slurm|direct} ..."; exit 2; }
 mode="$1"; shift
 
-SCRIPT_DIR="$(dirname "$0")"
-
 case "$mode" in
     slurm)
-        # Slurm mode: Dispatch to primus-cli-slurm.sh for distributed job submission via Slurm scheduler.
-        SLURM_SCRIPT="$SCRIPT_DIR/primus-cli-slurm.sh"
-        if [[ ! -f "$SLURM_SCRIPT" ]]; then
-            echo "[primus-cli][ERROR] Slurm script not found: $SLURM_SCRIPT"
-            exit 2
-        fi
-        echo "[primus-cli] Executing: bash $SLURM_SCRIPT $*"
-        exec bash "$SLURM_SCRIPT" "$@"
+        run_subscript "primus-cli-slurm.sh" "$@"
         ;;
-
     container)
-        # Container mode: dispatch to primus-cli-container.sh for containerized execution
-        CONTAINER_SCRIPT="$SCRIPT_DIR/primus-cli-container.sh"
-        if [[ ! -f "$CONTAINER_SCRIPT" ]]; then
-            echo "[primus-cli][ERROR] Container script not found: $CONTAINER_SCRIPT"
-            exit 2
-        fi
-
-        echo "[primus-cli] Executing: bash $CONTAINER_SCRIPT $*"
-        exec bash "$CONTAINER_SCRIPT" "$@"
+        run_subscript "primus-cli-container.sh" "$@"
         ;;
-
     direct)
-        # Direct (host) mode: run workflow directly on the host, no container
-        DIRECT_SCRIPT="$SCRIPT_DIR/primus-cli-entrypoint.sh"
-        if [[ ! -f "$DIRECT_SCRIPT" ]]; then
-            echo "[primus-cli][ERROR] Entrypoint script not found: $DIRECT_SCRIPT"
-            exit 2
-        fi
-        echo "[primus-cli] Executing: bash $DIRECT_SCRIPT $*"
-        exec bash "$DIRECT_SCRIPT" "$@"
+        run_subscript "primus-cli-entrypoint.sh" "$@"
         ;;
-
+    ""|-h|--help|help)
+        print_help
+        exit 0
+        ;;
     *)
-        echo "[primus-cli][ERROR] Unknown mode: $mode"
+        echo "[primus-cli][ERROR] Unknown mode: ${1:-}"
         print_help
         exit 2
         ;;
