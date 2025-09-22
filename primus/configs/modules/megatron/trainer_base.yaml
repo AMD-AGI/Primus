@@ -185,10 +185,10 @@ deterministic_mode: false
 check_weight_hash_across_dp_replicas_interval: null
 
 train_iters: null
-eval_iters: 100
+eval_iters: 32
 full_validation: false
 multiple_validation_sets: false
-eval_interval: 1000
+eval_interval: 2000
 skip_train: false
 train_sync_interval: null # int
 
@@ -293,7 +293,6 @@ enable_experimental: false
 hybrid_attention_ratio: 0.0 # float range [0,0, 1.0]
 hybrid_mlp_ratio: 0.0 # float range [0,0, 1.0]
 hybrid_override_pattern: null # str
-is_hybrid_model: false
 
 # Mamba layer configuration
 mamba_state_dim: 128
@@ -393,6 +392,7 @@ parallel_output: false
 enable_ft_package: false
 calc_ft_timeouts: false
 run_workload_inspector_server: false
+is_hybrid_model: false
 
 
 heterogeneous_layers_config_path: null
