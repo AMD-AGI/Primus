@@ -18,9 +18,6 @@ import torch.distributed as dist
 from megatron.core import mpu, parallel_state, tensor_parallel
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import finalize_model_grads
-from megatron.core.distributed.custom_fsdp import (
-    FullyShardedDataParallel as custom_FSDP,
-)
 from megatron.core.distributed.distributed_data_parallel_config import (
     DistributedDataParallelConfig,
 )
@@ -33,6 +30,8 @@ from megatron.training.checkpointing import (
     load_checkpoint,
     save_checkpoint,
 )
+
+from primus.core.utils.import_utils import get_custom_fsdp, get_model_provider
 
 try:
     pass
@@ -130,7 +129,6 @@ from megatron.training.utils import (
     update_use_dist_ckpt,
 )
 from megatron.training.yaml_arguments import validate_yaml
-from pretrain_gpt import model_provider
 
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
@@ -157,7 +155,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         super().__init__(*args, **kwargs)
 
         # monkey patch modules
-        self.patch_moe_layer()
+        # self.patch_moe_layer()
         self.patch_torch_fsdp()
         self.patch_get_extra_te_kwargs()
         self.patch_file_system_writer()
@@ -814,7 +812,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.app_metrics["app_build_optimizer_start_time"] = one_logger_utils.get_timestamp_in_ms()
         log_rank_0(f"-setup_model_and_optimizer...")
         self.model, self.optimizer, self.opt_param_scheduler = self.setup_model_and_optimizer(
-            model_provider,
+            get_model_provider(),
             ModelType.encoder_or_decoder,
             checkpointing_context=self.checkpointing_context,
         )
@@ -1416,7 +1414,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # Setup some training config params.
         config.grad_scale_func = optimizer.scale_loss
         config.timers = timers
-        if isinstance(model[0], (custom_FSDP, DDP)) and args.overlap_grad_reduce:
+
+        if isinstance(model[0], (get_custom_fsdp(), DDP)) and args.overlap_grad_reduce:
             assert config.no_sync_func is None, (
                 "When overlap_grad_reduce is True, config.no_sync_func must be None; "
                 "a custom no_sync_func is not supported when overlapping grad-reduce"
