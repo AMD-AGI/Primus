@@ -97,10 +97,8 @@ This is useful for mounting datasets, configs, or setting custom environment var
 primus-cli container --mount /mnt/data:/data -- train pretrain --config ./examples/megatron/configs/llama3_8B-pretrain.yaml --data_path ./data
 ```
 
-- Use `--mount` to bind host directories (e.g., datasets, configs, output).
-  ```bash
-  primus-cli container -- train pretrain --config exp.yaml
-  ```
+Tips:
+- `--mount host_dir:container_dir` must point to existing host paths.(e.g., datasets, configs, output).
 
 ---
 
