@@ -8,7 +8,6 @@
 def run(args, overrides):
     """
     Entry point for the 'train' subcommand.
-    Dispatch to pretrain, prepare, etc.
     """
     if args.suite == "pretrain":
         from primus.pretrain import launch_pretrain_from_cli
@@ -24,12 +23,12 @@ def register_subcommand(subparsers):
 
     Supported suites (training workflows):
         - pretrain: Pre-training workflow (Megatron, TorchTitan, etc.)
-        # Future extensions:
-        - finetune: Fine-tuning workflow
-        - evaluate: Evaluation workflow
+
+    Future extensions:
+        - posttrain: Post-training workflow (alignment, preference tuning, etc.)
 
     Example:
-        primus-cli train pretrain --config exp.yaml --backend-path /path/to/megatron
+        primus train pretrain --config exp.yaml --backend-path /path/to/megatron
 
     Args:
         subparsers: argparse subparsers object from main.py
@@ -38,7 +37,11 @@ def register_subcommand(subparsers):
         parser: The parser for this subcommand
     """
 
-    parser = subparsers.add_parser("train", help="Launch Primus pretrain with Megatron or TorchTitan")
+    parser = subparsers.add_parser(
+        "train",
+        help="Launch Primus pretrain with Megatron or TorchTitan",
+        description="Primus training entry. Supports pretrain now; posttrain/finetune/evaluate reserved for future use.",
+    )
     suite_parsers = parser.add_subparsers(dest="suite", required=True)
 
     # ---------- pretrain ----------

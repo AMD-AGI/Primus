@@ -20,9 +20,7 @@ def main():
     - preflight: Environment and configuration checks.
       ...
     """
-    parser = argparse.ArgumentParser(
-        prog="primus-cli", description="Primus Unified CLI for Training & Utilities"
-    )
+    parser = argparse.ArgumentParser(prog="primus", description="Primus Unified CLI for Training & Utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     from primus.cli import train_cli
