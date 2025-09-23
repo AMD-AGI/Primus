@@ -267,7 +267,7 @@ class TPOverlapTestCase(MultiProcessTestCase):
     @parametrize("batch_size", [1])
     @parametrize("ub_name", ["qkv", "proj"])
     @parametrize("ub_overlap_ag", [True])
-    @parametrize("ub_overlap_rs", [False])
+    @parametrize("ub_overlap_rs", [True])
     @parametrize("dtype", [torch.bfloat16])
     def test_fp8_te_linear(
         self,

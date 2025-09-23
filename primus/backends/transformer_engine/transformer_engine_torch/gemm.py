@@ -291,8 +291,9 @@ if is_te_min_version("2.0"):
                 args = tuple(args + (extra_output, kwargs))
             elif comm_type == ptex.CommOverlapType.RS:
                 fn = comm_overlap.split_overlap_rs
+                comm_method = "pipeline"
                 assert extra_output is not None, "split_overlap_rs requires extra output"
-                args = tuple(args + (extra_output,))
+                args = tuple(args + (extra_output, comm_method, kwargs))
             else:
                 raise ValueError(
                     f"TP comm overlap on, but provided {bulk_overlap=} and {comm_type=} are invalid"

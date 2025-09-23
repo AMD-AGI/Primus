@@ -396,6 +396,7 @@ class CommOverlap(CommOverlapBase):
         D: torch.Tensor,
         rs_out: torch.Tensor,
         comm_method: str = "pipeline",
+        scaled_mm_kwargs: Optional[Dict] = None,
     ):
         if comm_method == "pipeline":
             gemm_streams = [torch.cuda.current_stream()]
@@ -406,21 +407,52 @@ class CommOverlap(CommOverlapBase):
         else:
             raise ValueError(f"Only pipeline and tile supported, but {comm_method} provided")
 
-        pt.ops.fused_matmul_reduce_scatter(
-            A,
-            B,
-            layout,
-            reduce_op="sum",
-            scatter_dim=0,
-            group_name=self.group_name,
-            gemm_streams=gemm_streams,
-            comm_streams=comm_streams,
-            comm_method=comm_method,
-            num_splits=self.num_splits,
-            enable_sdma=True,
-            output=D,
-            rs_out=rs_out,
-        )
+        if scaled_mm_kwargs is None:
+            pt.ops.fused_matmul_reduce_scatter(
+                A,
+                B,
+                layout,
+                reduce_op="sum",
+                scatter_dim=0,
+                group_name=self.group_name,
+                gemm_streams=gemm_streams,
+                comm_streams=comm_streams,
+                comm_method=comm_method,
+                num_splits=self.num_splits,
+                enable_sdma=True,
+                output=D,
+                rs_out=rs_out,
+            )
+        else:
+            A_scale = scaled_mm_kwargs["scale_a"]
+            B_scale = scaled_mm_kwargs["scale_b"]
+            bias = scaled_mm_kwargs["bias"]
+            scale_result = scaled_mm_kwargs["scale_result"]
+            out_dtype = scaled_mm_kwargs["out_dtype"]
+            use_fast_accum = scaled_mm_kwargs["use_fast_accum"]
+            pt.ops.fused_scaled_matmul_reduce_scatter(
+                A,
+                B,
+                layout="NN",
+                A_scale=A_scale,
+                B_scale=B_scale,
+                reduce_op="sum",
+                orig_scatter_dim=0,
+                scatter_dim_after_maybe_reshape=0,
+                group_name=self.group_name,
+                output_shape=list(D.shape),
+                bias=bias,
+                result_scale=scale_result,
+                out_dtype=out_dtype,
+                use_fast_accum=use_fast_accum,
+                gemm_streams=gemm_streams,
+                comm_streams=comm_streams,
+                comm_method=comm_method,
+                num_splits=self.num_splits,
+                enable_sdma=True,
+                output=D,
+                rs_out=rs_out,
+            )
 
     def split_overlap_ag(
         self,

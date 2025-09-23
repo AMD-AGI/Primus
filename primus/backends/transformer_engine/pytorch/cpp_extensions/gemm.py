@@ -251,6 +251,8 @@ else:
                 args = tuple(args + (extra_output_tensor, kwargs))
             elif ub_algo == ptex.CommOverlapAlgo.SPLIT_PIPELINED_RS:
                 fn = ub.split_overlap_rs
+                comm_method = "pipeline"
+                args = tuple(args + (extra_output_tensor, comm_method, kwargs))
             elif ub_algo == ptex.CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P:
                 fn = ub.split_overlap_rs
 
