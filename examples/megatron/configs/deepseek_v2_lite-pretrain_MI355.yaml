@@ -67,7 +67,7 @@ modules:
       # 20250321: need latest megatron docker image
       moe_permute_fusion: false
       # 20250317: need latest apex in docker image
-      gradient_accumulation_fusion: true
+      gradient_accumulation_fusion: false
       # fused topk router with aux score
       moe_use_fused_router_with_aux_score: false
       # pad 192/128 for deepseek attention
