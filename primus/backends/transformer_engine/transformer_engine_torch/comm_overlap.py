@@ -7,7 +7,7 @@
 
 import operator
 from functools import reduce
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import primus_turbo.pytorch as pt
 import torch
@@ -396,6 +396,7 @@ class CommOverlap(CommOverlapBase):
         D: torch.Tensor,
         rs_out: torch.Tensor,
         comm_method: str = "pipeline",
+        A_scale: torch.Tensor = None,
         scaled_mm_kwargs: Optional[Dict] = None,
     ):
         if comm_method == "pipeline":
@@ -424,27 +425,18 @@ class CommOverlap(CommOverlapBase):
                 rs_out=rs_out,
             )
         else:
-            A_scale = scaled_mm_kwargs["scale_a"]
-            B_scale = scaled_mm_kwargs["scale_b"]
-            bias = scaled_mm_kwargs["bias"]
-            scale_result = scaled_mm_kwargs["scale_result"]
-            out_dtype = scaled_mm_kwargs["out_dtype"]
-            use_fast_accum = scaled_mm_kwargs["use_fast_accum"]
             pt.ops.fused_scaled_matmul_reduce_scatter(
                 A,
                 B,
                 layout="NN",
                 A_scale=A_scale,
-                B_scale=B_scale,
+                kwargs=scaled_mm_kwargs,
                 reduce_op="sum",
                 orig_scatter_dim=0,
                 scatter_dim_after_maybe_reshape=0,
                 group_name=self.group_name,
                 output_shape=list(D.shape),
-                bias=bias,
-                result_scale=scale_result,
-                out_dtype=out_dtype,
-                use_fast_accum=use_fast_accum,
+                out_dtype=scaled_mm_kwargs["out_dtype"],
                 gemm_streams=gemm_streams,
                 comm_streams=comm_streams,
                 comm_method=comm_method,
@@ -461,7 +453,8 @@ class CommOverlap(CommOverlapBase):
         layout: str,
         D: torch.Tensor,
         A_copy: Optional[torch.Tensor] = None,
-        scaled_mm_kwargs: Optional[Dict] = None,
+        A_scale: torch.Tensor = None,
+        scaled_mm_kwargs_list: list[dict[str, Any]] = None,
     ):
         local_A = self.get_buffer(local_chunk=True)
         gemm_streams = [torch.cuda.current_stream()]
@@ -473,7 +466,7 @@ class CommOverlap(CommOverlapBase):
                 raise ValueError("A_copy shape is different with local_A")
             A_copy.copy_(local_A)
 
-        if scaled_mm_kwargs is None:
+        if scaled_mm_kwargs_list is None:
             pt.ops.fused_all_gather_matmul(
                 local_A,
                 [B],
@@ -492,27 +485,18 @@ class CommOverlap(CommOverlapBase):
             )
         else:
             local_A = local_A.view(A_out.dtype)
-            A_scale = scaled_mm_kwargs["scale_a"]
-            B_scale = scaled_mm_kwargs["scale_b"]
-            bias = scaled_mm_kwargs["bias"]
-            scale_result = scaled_mm_kwargs["scale_result"]
-            out_dtype = scaled_mm_kwargs["out_dtype"]
-            use_fast_accum = scaled_mm_kwargs["use_fast_accum"]
             pt.ops.fused_all_gather_scaled_matmul(
                 local_A,
                 [B],
                 [layout],
                 A_scale,
-                [B_scale],
+                scaled_mm_kwargs_list,
                 gather_dim=0,
                 group_name=self.group_name,
                 gemm_streams=gemm_streams,
                 comm_streams=comm_streams,
                 copy_streams=copy_streams,
-                biases=[bias],
-                result_scales=[scale_result],
-                out_dtypes=[out_dtype],
-                use_fast_accum=[use_fast_accum],
+                out_dtypes=[scaled_mm_kwargs["out_dtype"] for scaled_mm_kwargs in scaled_mm_kwargs_list],
                 skip_copy_local_ag_out=True,
                 A_out=A_out,
                 mm_out=[D],

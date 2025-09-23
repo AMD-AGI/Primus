@@ -226,15 +226,15 @@ else:
         out = out.view(out_dtype)
 
         args = (B, A.T)
+        A_scale = B_scale_inv
         kwargs = {
-            "scale_a": B_scale_inv,
             "scale_b": A_scale_inv,
             "scale_result": D_scale,
             "out_dtype": out_dtype,
             "bias": bias,
             "use_fast_accum": not use_split_accumulator,
         }
-
+        kwargs_list = [kwargs]
         fn = torch._scaled_mm
 
         if ub_algo is not None:
@@ -248,11 +248,11 @@ else:
                 args = tuple(args + (ptex.CommOverlapType.RS, kwargs))
             elif ub_algo == ptex.CommOverlapAlgo.SPLIT_PIPELINED_AG_P2P:
                 fn = ub.split_overlap_ag
-                args = tuple(args + (extra_output_tensor, kwargs))
+                args = tuple(args + (extra_output_tensor, A_scale, kwargs_list))
             elif ub_algo == ptex.CommOverlapAlgo.SPLIT_PIPELINED_RS:
                 fn = ub.split_overlap_rs
                 comm_method = "pipeline"
-                args = tuple(args + (extra_output_tensor, comm_method, kwargs))
+                args = tuple(args + (extra_output_tensor, comm_method, A_scale, kwargs))
             elif ub_algo == ptex.CommOverlapAlgo.SPLIT_PIPELINED_RS_P2P:
                 fn = ub.split_overlap_rs
 

@@ -256,14 +256,15 @@ if is_te_min_version("2.0"):
                 else None
             )
             layout = "NN"
+            A_scale = B_scale_inv
             kwargs = {
-                "scale_a": B_scale_inv,
                 "scale_b": A_scale_inv,
                 "scale_result": D_scale,
                 "out_dtype": out_dtype,
                 "bias": bias,
                 "use_fast_accum": not use_split_accumulator,
             }
+            kwargs_list = [kwargs]
             # Only multiplication of row-major and column-major matrices is supported by cuBLASLt
             args = (
                 B.contiguous(),
@@ -273,7 +274,9 @@ if is_te_min_version("2.0"):
         elif not isinstance(A, QuantizedTensor) and not isinstance(B, QuantizedTensor):
             B = B.T if transB else B
             layout = "NT" if transA else "NN"
+            A_scale = None
             kwargs = None
+            kwargs_list = None
             args = (B, A)
         else:
             raise ValueError("Async tp does not support only A or B is QuantizedTensor")
@@ -288,12 +291,12 @@ if is_te_min_version("2.0"):
                 args = tuple(args + (comm_type,))
             elif comm_type == ptex.CommOverlapType.AG:
                 fn = comm_overlap.split_overlap_ag
-                args = tuple(args + (extra_output, kwargs))
+                args = tuple(args + (extra_output, A_scale, kwargs_list))
             elif comm_type == ptex.CommOverlapType.RS:
                 fn = comm_overlap.split_overlap_rs
                 comm_method = "pipeline"
                 assert extra_output is not None, "split_overlap_rs requires extra output"
-                args = tuple(args + (extra_output, comm_method, kwargs))
+                args = tuple(args + (extra_output, comm_method, A_scale, kwargs))
             else:
                 raise ValueError(
                     f"TP comm overlap on, but provided {bulk_overlap=} and {comm_type=} are invalid"
