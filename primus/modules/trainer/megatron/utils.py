@@ -362,6 +362,13 @@ def validate_args_on_rocm(args):
     if args.deterministic_mode:
         assert not args.moe_grouped_gemm, "MoE Grouped GEMM can't be used in deterministic mode."
 
+    # Turbo FP8 linear check
+    if args.fp8 and args.use_turbo_parallel_linear:
+        support_fp8_recipe = ["tensorwise", "blockwise"]
+        assert (
+            args.fp8_recipe in support_fp8_recipe
+        ), f"{args.fp8_recipe} recipe is not support when enable `use_turbo_parallel_linear`."
+
     # dump pp data
     if args.dump_pp_data and args.pipeline_model_parallel_size == 1:
         args.dump_pp_data = False
