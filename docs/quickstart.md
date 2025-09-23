@@ -1,37 +1,68 @@
 # Quickstart
 
-This quickstart guide will help you set up Primus and run your first large language model (LLM) training or benchmarking job on AMD ROCm-based GPUs—whether on a single node, across a cluster, or inside a container.
+This guide helps you set up Primus and run your first LLM training or benchmarking job on AMD ROCm-based GPUs—whether on a single node, across a cluster, or inside a container.
 
 ---
 
-## 🚀 1. Installation
+## 🚀 1.Installation / Environment Setup
 
-Primus is best used in an ROCm-enabled environment (**ROCm 6.3+ recommended**).
+Primus requires **Python 3.10+** and an ROCm-enabled environment (**ROCm 6.3+**, ROCm 6.4 recommended).
+The easiest way to get a ready-to-use environment is via AMD’s pre-built ROCm container images, which already include Python and PyTorch.
+
+There are two typical usage modes:
+
+- **Single node (development / testing)**: run inside a pre-built AMD ROCm container.
+- **Slurm cluster (multi-node training)**: submit jobs via Slurm, which launches containers automatically. No need to `docker run` manually.
+
+### Option A: Start a development container
+```bash
+# Example: pull AMD ROCm + PyTorch base image
+docker pull rocm/megatron-lm:v25.8_py310
+```
+
+Run the container:
+```bash
+# Launch container with GPU and shared memory
+docker run -it --rm --device=/dev/kfd --device=/dev/dri \
+    --group-add video --ipc=host --shm-size 16G \
+    -v /mnt/data:/data \
+    rocm/megatron-lm:v25.8_py310 bash
+```
+
+Inside the container, clone and install Primus:
+
 
 ```bash
-# Clone Primus repository
-git clone https://github.com/amd/primus.git
+# Clone with submodules
+git clone --recurse-submodules git@github.com:AMD-AIG-AIMA/Primus.git
+
+# Or initialize submodules if already cloned
+git submodule update --init --recursive
+
 cd primus
 
 # Install Python dependencies (suggest using a fresh conda or venv)
 pip install -r requirements.txt
-
-# (Optional) Install ROCm-specific dependencies
-# Example (PyTorch ROCm wheels):
-pip install torch==2.3.0+rocm6.3 --extra-index-url https://download.pytorch.org/whl/rocm6.3
-
-# Install Primus itself
-pip install .
 ```
+
+> 💡 Advanced users can also use a fresh **conda** or **venv** on bare metal if not running inside Docker/Podman.
+
+
+### Option B: Use on a Slurm cluster
+
+On Slurm clusters, you don’t need to start containers manually.
+Primus jobs will run inside the default ROCm image (`rocm/megatron-lm:v25.8_py310`) unless another image is specified.
+
+
 
 ---
 
-## ⚡ 2. Your First Primus Job (Single Node)
+## ⚡ 2. Your First Primus Job (Single Node, inside container)
 
-Run a quick Llama3-8B pretraining example using Primus CLI:
+Once inside a container (Option A), you can launch a quick Llama3-8B pretraining example using Primus CLI:
 
 ```bash
-primus-cli direct -- train --config ./examples/configs/llama3_8B-pretrain.yaml
+primus-cli direct -- train pretrain --config ./examples/configs/llama3_8B-pretrain.yaml
 ```
 
 - `direct` mode runs on the current host with ROCm GPUs.
@@ -39,68 +70,51 @@ primus-cli direct -- train --config ./examples/configs/llama3_8B-pretrain.yaml
 
 ---
 
-## 🖥️ 3. Distributed Training on a Slurm Cluster
+## 🖥️ 3. Distributed Training (Slurm, auto-container)
 
-Primus integrates with **Slurm** for multi-node training.
+For multi-node jobs, just use **Slurm**—Primus scripts handle containers automatically.
 
 ### Interactive run with `srun` (4 nodes):
 
 ```bash
-primus-cli slurm srun -N 4 -p AIG_Model -- train --config ./examples/configs/llama3_8B-pretrain.yaml
+primus-cli slurm srun -N 4 -p AIG_Model -- train pretrain --config ./examples/megatron/configs/llama3_8B-pretrain.yaml
 ```
 
 ### Batch job with `sbatch` (8 nodes):
 
-Create a script `run_slurm_job.sh`:
-
 ```bash
-#!/bin/bash
-#SBATCH --job-name=primus-llama
-#SBATCH --nodes=8
-#SBATCH --ntasks-per-node=8
-#SBATCH --partition=AIG_Model
-#SBATCH --output=primus-%j.out
-
-module load rocm/6.4
-
-primus-cli direct -- train --config /mnt/data/exp.yaml
-```
-
-Submit it:
-
-```bash
-sbatch run_slurm_job.sh
+primus-cli slurm sbatch -N 8 -p AIG_Model -- train pretrain --config ./examples/megatron/configs/llama3_8B-pretrain.yaml
 ```
 
 ---
 
 ## 🐳 4. Training Inside a Container (Docker/Podman)
 
-Primus supports containerized workflows:
+Primus can also be launched directly in containers via the CLI.
+This is useful for mounting datasets, configs, or setting custom environment variables.
 
 ```bash
-primus-cli container --mount /mnt/data:/data -- train --config /data/exp.yaml --data-path /data
+primus-cli container --mount /mnt/data:/data -- train pretrain --config ./examples/megatron/configs/llama3_8B-pretrain.yaml --data_path ./data
 ```
 
 - Use `--mount` to bind host directories (e.g., datasets, configs, output).
-- Use `--env` to pass environment variables:
   ```bash
-  primus-cli container --env MASTER_ADDR=10.1.1.1 -- train --config exp.yaml
+  primus-cli container -- train pretrain --config exp.yaml
   ```
 
 ---
 
-## 🧪 5. Benchmarking and Preflight
+## 🧪 5. Benchmarking & Preflight
 
 Primus includes **benchmarking** and **preflight** checks.
 
-### Preflight (cluster/env sanity check):
+### 5.1 Preflight (cluster/env check)
 
 ```bash
 primus-cli direct -- preflight --config preflight.yaml
 ```
 
-### GEMM Benchmark:
+### 5.2 GEMM Benchmark
 
 ```bash
 primus-cli direct -- benchmark gemm --m 4096 --n 4096 --k 4096
@@ -126,4 +140,4 @@ Next, explore the docs for supported models, advanced features, and performance 
 
 ---
 
-_Last updated: 2025-09-17_
+_Last updated: 2025-09-23_
