@@ -28,17 +28,17 @@ def run_script(ut_name: str, tag: str, exp_path: str, env_override: dict = None)
     env["TRAIN_LOG"] = train_log_path
 
     do_print_at_runtime = True
-    run_stdout = subprocess.PIPE if not do_print_at_runtime else sys.stdout
-    run_stderr = subprocess.PIPE if not do_print_at_runtime else sys.stderr
+    subprocess.PIPE if not do_print_at_runtime else sys.stdout
+    subprocess.PIPE if not do_print_at_runtime else sys.stderr
     try:
         logger.info(f"Begin run {tag}...")
         start = time.time()
         result = subprocess.run(
             ["bash", f"{shell_entry}"],
             check=True,
-            stdout=run_stdout,
-            stderr=run_stderr,
-            text=True,
+            # stdout=run_stdout,
+            # stderr=run_stderr,
+            # text=True,
             env=env,
         )
         logger.info(f"End run {tag}, time={time.time()-start:.3f} s")
@@ -72,7 +72,19 @@ def run_script(ut_name: str, tag: str, exp_path: str, env_override: dict = None)
     return stdout_output, stderr_output
 
 
-class TestMegatronTrainer(PrimusUT):
+class PrimusTurboUT(PrimusUT):
+    @classmethod
+    def setUpClass(cls):
+        if not hasattr(PrimusTurboUT, "_turbo_installed"):
+            subprocess.run(["bash", "examples/setup_turbo.sh"], check=True)
+            PrimusTurboUT._turbo_installed = True
+        else:
+            logger.info("[UT-Setup] primus_turbo already installed, skip.")
+        os.environ.pop("PRIMUS_TURBO_COMMIT", None)
+        os.environ.pop("PRIMUS_TURBO_PATH", None)
+
+
+class TestMegatronTrainer(PrimusTurboUT):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -190,9 +202,20 @@ class TestMegatronTrainer(PrimusUT):
         )
 
 
-class TestMegatronTrainerDeterministic(PrimusUT):
+class TestMegatronTrainerDeterministic(PrimusTurboUT):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            logger.info("[UT-Setup] primus_turbo already installed, skip.")
+        except ImportError:
+            logger.info("[UT-Setup] Installing primus_turbo once for all tests...")
+            subprocess.run(["bash", "scripts/install_turbo.sh"], check=True)
+
+    def setUp(self):
+        pass
 
     def setUp(self):
         pass
