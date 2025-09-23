@@ -4,13 +4,27 @@
 
 ---
 
-## 🆕 What's New
-- **[2025/06/18]** Added TorchTitan backend support.
-- **[2025/05/16]** Added benchmark suite for performance evaluation across models and hardware.
-- **[2025/04/18]** Added [Preflight](./tools/preflight/README.md) cluster sanity checker to verify environment readiness.
-- **[2025/04/14]** Integrated HipblasLT autotuning for optimized GPU kernel performance.
-- **[2025/04/09]** Extended support for LLaMA2, LLaMA3, DeepSeek-V2/V3 models in [Megatron model configs](https://github.com/AMD-AIG-AIMA/Primus/tree/main/primus/configs/models/megatron).
-- **[2025/03/04]** Released Megatron trainer module for flexible and efficient large model training.
+## ✨ Key Features
+
+- 🔧 Unified CLI to train, benchmark, and validate on any cluster
+- 🧠 Supports Megatron, TorchTitan backends
+- 📦 Out-of-the-box multi-node support (Slurm & containers)
+- 🚀 Integrated benchmarking suite (GEMM / RCCL / end-to-end)
+- ⚡ **Primus Turbo**: ROCm-optimized custom kernels with caching & JIT for maximum performance
+- 🎯 ROCm-optimized for MI300/MI350 with FP8/BF16/FP16 support
+
+
+## 🆕 Recent Updates
+
+- ⚡ **Primus Turbo**: ROCm-optimized kernels with JIT compilation and caching for maximum performance (2025/09)
+- 🔧 **TorchTitan backend** support with native FP8 and GraphMode (2025/06)
+- 📊 **Benchmark suite** covering GEMM, RCCL, and end-to-end training performance (2025/05)
+- 🛠️ **Preflight CLI** for cluster environment validation (2025/04)
+- 🚀 **HipBLASLt autotuning** integrated for optimized GEMM kernels (2025/04)
+- 📚 Extended model configs for **LLaMA2/3** and **DeepSeek-V3** in Megatron (2025/04)
+- 🧠 **Megatron backend** support, enabling seamless integration with Primus CLI and workflows (2025/03)
+
+👉 Full release history → [CHANGELOG.md](./CHANGELOG.md)
 
 ---
 
@@ -26,36 +40,51 @@ Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-ru
 - ROCm-compatible AMD GPUs (e.g., Instinct MI300 series)
 - Proper permissions for Docker and GPU device access
 
+## 🐳 Quick Start with AMD ROCm Docker Image
 
-### Quick Start with AMD ROCm Docker Image: Megatron Pretraining
-
-1. Pull the latest Docker image
+1. **Pull the latest ROCm Megatron image**
 
     ```bash
     docker pull docker.io/rocm/megatron-lm:v25.8_py310
-
     ```
 
-2. Clone the repository:
+2. **Clone the Primus repository**
 
     ```bash
     git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
-
+    cd Primus
     ```
 
-3. Run Pretraining
+3. **Install dependencies (host or container)**
 
     ```bash
-    cd Primus && pip install -r requirements.txt
-    EXP=examples/megatron/configs/llama2_7B-pretrain.yaml bash ./examples/run_local_pretrain.sh
-
+    pip install -e .
     ```
 
-For more detailed usage instructions, configuration options, and examples, please refer to the [examples/README.md](./examples/README.md).
+4. **Run pretraining (Megatron backend example)**
+
+    ```bash
+    EXP=examples/megatron/configs/llama2_7B-pretrain.yaml \
+    bash ./examples/run_local_pretrain.sh
+    ```
 
 ---
 
-## 📝 TODOs
+## 📚 Full Documentation
 
-- [ ] Support for Primus-RL (training/inference modules for RLHF, OnlineDPO, GRPO, etc.)
-- [ ] Add support for more model architectures and backends
+Looking for training guides, config templates, and deployment tips?
+👉 Visit our documentation: [`docs/index.md`](./docs/index.md)
+Or jump directly to [Quickstart](./docs/quickstart.md) | [CLI](./docs/cli.md) | [Benchmark](./docs/benchmark/overview.md)
+
+---
+
+## 🤝 Contributing
+
+We welcome community contributions!
+Start here → [Contributing Guide](./docs/contributing.md)
+
+---
+
+## 📜 License
+
+Apache 2.0 License © 2025 Advanced Micro Devices, Inc.
