@@ -24,7 +24,7 @@ Primus is a flexible and high-performance training framework designed for **larg
 - 📚 Extended model configs for **LLaMA2/3** and **DeepSeek-V3** in Megatron (2025/04)
 - 🧠 **Megatron backend** support, enabling seamless integration with Primus CLI and workflows (2025/03)
 
-👉 Full release history → [CHANGELOG.md](./CHANGELOG.md)
+👉 Full release history → [CHANGELOG.md](./docs/CHANGELOG.md)
 
 ---
 
