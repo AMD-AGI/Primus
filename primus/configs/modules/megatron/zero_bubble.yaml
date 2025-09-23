@@ -1,0 +1,46 @@
+patch_zero_bubble: false
+
+# Use an unified runtime supporting zero_bubble and other schedules.
+enable_zb_runtime: true
+# By default zb runtime dispatches a tiny communication before the real communication to optimize computation
+pre_communication_optimization: false
+# The starting iteration that start timers for auto scheduling of zero_bubble pipeline parallel
+zero_bubble_pipeline_timers_start_iter: 100
+# The starting iteration that stop timers for auto scheduling of zero_bubble pipeline parallel
+zero_bubble_pipeline_timers_end_iter: 110
+# Maximum number of pending backward for zero-bubble. E.g. when number of stages are 8, setting to 16 will use zb2p and setting to 8 will use zb1p. Setting to auto will enable adaptive memory limit
+zero_bubble_max_pending_backward: auto
+# Adaptively set the memory limit of ZB schedules so all pytorch mem allocations will use up to this percentile of total GPU memory. Currently ZBV is not supported.
+zero_bubble_adaptive_memory_limit_percentile: 85
+# enable post validation for optimizer step (need FSDP)
+enable_optimizer_post_validation: false
+# whether to make optimizer post validation exactly numeric match baseline
+enable_exactly_numeric_match: true
+# Use zero bubble pipeline.
+enable_zero_bubble: true
+# Use zero bubble v schedule pipeline. This method achieves zero-bubble without more memory overhead
+zero_bubble_v_schedule: false
+# Use zero bubble v schedule pipeline with memory setup.
+zero_bubble_v_schedule_mem_setup: half # half, min, zb
+# Use 1F1B V schedule.
+enable_1f1b_v: false
+# Allow padding num_layers for pipeline parallelism
+allow_padding_num_layers: true
+# The iteration to profile memory.
+profile_memory_iter: -1
+# Set interleave group size
+interleave_group_size: 0
+# offload chunk number
+offload_chunk_num: 0
+# offload time cost.
+offload_time: 1.0
+# Automatically configure offload-time.
+auto_offload_time: true
+# overlap save and resume in offload
+offload_overlap_sr: true
+
+# Number of splits on sequence length.
+num_seq_splits: 1
+
+# cpu-offload
+cpu_offload: false

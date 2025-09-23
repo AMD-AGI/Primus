@@ -324,6 +324,16 @@ class PrimusTurboRowParallelLinear(TELinear):
 
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
+        args = get_args()
+        if args.patch_zero_bubble and args.enable_zero_bubble:
+            from .zbpp_gemm import gemm_with_weight_gradient_store
+
+            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+        else:
+            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
+                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
+            )
+
         super().__init__(
             input_size=input_size,
             output_size=output_size,
@@ -380,7 +390,7 @@ class PrimusTurboRowParallelLinear(TELinear):
 
             out = fp8_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
         else:
-            out = pt.ops.gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None)
+            out = self.gemm(input_, weights)
 
         out = out.view(original_shape[0], original_shape[1], -1)
         if self.te_return_bias:
@@ -406,9 +416,21 @@ class PrimusTurboColumnParallelLinear(TELinear):
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
+        print("debug init turbo linear")
         if gather_output:
             raise ValueError("Transformer Engine linear layers do not support gather_output = True")
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
+
+        args = get_args()
+
+        if args.patch_zero_bubble and args.enable_zero_bubble:
+            from .zbpp_gemm import gemm_with_weight_gradient_store
+
+            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+        else:
+            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
+                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
+            )
 
         super().__init__(
             input_size=input_size,
@@ -467,7 +489,7 @@ class PrimusTurboColumnParallelLinear(TELinear):
 
             out = fp8_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
         else:
-            out = pt.ops.gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None)
+            out = self.gemm(input_, weights)
 
         out = out.view(original_shape[0], original_shape[1], -1)
         if self.te_return_bias:
@@ -503,6 +525,16 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
         disable_grad_reduce: bool = False,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
+
+        args = get_args()
+        if args.patch_zero_bubble and args.enable_zero_bubble:
+            from .zbpp_gemm import gemm_with_weight_gradient_store
+
+            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+        else:
+            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
+                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
+            )
 
         super().__init__(
             input_size,
@@ -549,7 +581,7 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
 
             out = fp8_gemm(input_, weight, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
         else:
-            out = pt.ops.gemm(input_, weight, trans_a=False, trans_b=True, out_dtype=None)
+            out = self.gemm(input_, weight)
         out = out.view(original_shape[0], original_shape[1], -1)
 
         return out, bias_tensor
@@ -596,6 +628,17 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         # ourselves. This way our forward always returns two values
         # and we don't have to deal with the zero length Tensor.
         self.te_return_bias = skip_bias_add and bias
+
+        args = get_args()
+        if args.patch_zero_bubble and args.enable_zero_bubble:
+
+            from .zbpp_gemm import gemm_with_weight_gradient_store
+
+            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+        else:
+            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
+                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
+            )
 
         super().__init__(
             in_features=input_size,
@@ -662,7 +705,7 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
 
             out = fp8_gemm(inp, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
         else:
-            out = pt.ops.gemm(inp, weights, trans_a=False, trans_b=True, out_dtype=None)
+            out = self.gemm(inp, weights)
 
         out = out.view(original_shape[0], original_shape[1], -1)
         if self.te_return_bias:
