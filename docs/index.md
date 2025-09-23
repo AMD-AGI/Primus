@@ -24,7 +24,7 @@ Primus aims to provide a flexible, robust, and user-friendly entry point for LLM
 ## 📖 Documentation Structure
 
 - [Quickstart](./quickstart.md): Step-by-step guide to run your first Primus job
-- [CLI Usage](./cli.md): Detailed command-line interface documentation
+- [CLI Reference](./cli.md): Detailed reference manual for the unified command-line interface
 - [Slurm & Container Usage](./usage/slurm_container.md): Distributed and container-based workflow
 - [Experiment Configuration](./config/overview.md): YAML/TOML config, recommended patterns, and examples
 - [Benchmark Suite](./benchmark/overview.md): GEMM, RCCL, end-to-end benchmarks and profiling
