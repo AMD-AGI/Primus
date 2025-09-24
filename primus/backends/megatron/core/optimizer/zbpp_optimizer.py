@@ -18,6 +18,8 @@ from megatron.core.optimizer.optimizer import (
     multi_tensor_applier,
 )
 
+from primus.modules.module_utils import log_rank_all
+
 
 class ZeroBubblePPChainedOptimizer(ChainedOptimizer):
     def __init__(self, chained_optimizers: List[MegatronOptimizer]):
@@ -45,13 +47,13 @@ class ZeroBubblePPChainedOptimizer(ChainedOptimizer):
                 self.grad_norm_no_clip_recorder += 1
             if self.grad_norm_no_clip_recorder >= 10:
                 rank = parallel_state.get_pipeline_model_parallel_rank()
-                print(f"{rank}: enable optimizer post validation")
+                log_rank_all(f"{rank}: enable optimizer post validation")
                 self.post_validation_enabled = True
         else:
             if grad_norm is not None:
                 # optimizer state update successfully
                 rank = parallel_state.get_pipeline_model_parallel_rank()
-                print(f"{rank}: enable optimizer post validation")
+                log_rank_all(f"{rank}: enable optimizer post validation")
                 self.post_validation_enabled = True
 
     @torch.no_grad()

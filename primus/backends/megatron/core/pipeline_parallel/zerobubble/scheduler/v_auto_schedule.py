@@ -11,6 +11,8 @@ pattern_size = 6
 from collections import Counter, deque
 from dataclasses import dataclass
 
+from primus.modules.module_utils import log_rank_all
+
 
 @dataclass(eq=True, frozen=True)
 class ScheduledNode:
@@ -62,7 +64,6 @@ def transform_schedule(schedule, f, b, w, c):
             time = max(time, get_time(stage - 1, type, mb) + c)
         if type in "fb" and stage + 1 < len(schedule):
             time = max(time, get_time(stage + 1, type, mb) + c)
-        # print(f'{stage} {type}:{mb}', time + cost[type])
         time_map[(stage, type, mb)] = time + cost[type]
         return time_map[(stage, type, mb)]
 
@@ -121,7 +122,6 @@ def evaluate_schedule(schedule, f, b, w, c):
             time = max(time, get_time(stage - 1, type, mb) + c)
         if type in "fb" and stage + 1 < len(schedule):
             time = max(time, get_time(stage + 1, type, mb) + c)
-        # print(f'{stage} {type}:{mb}', time + cost[type])
         time_map[(stage, type, mb)] = time + cost[type]
         return time_map[(stage, type, mb)]
 
@@ -139,12 +139,12 @@ def print_schedules(schedules, msg=None, force=False):
     if not debug and not force:
         return
     if msg is not None:
-        print(msg)
+        log_rank_all(msg)
     for seq in schedules:
         _str = ""
         for v in seq:
             _str += v
-        print(_str)
+        log_rank_all(_str)
 
 
 def get_building_block_str(pos):
@@ -646,8 +646,6 @@ def reorder_greedily_without_increasing_peak_mem(
                     assert False
                 if not can_move:
                     continue
-                # if i == 0:
-                #     print(peak_mem, stage_mem[i], identifier, mem_delta)
                 schedules[i][j] = identifier
                 schedules[i][k] = " "
                 identifier_cnt[i][identifier] = _cnt + 1
@@ -823,8 +821,8 @@ def schedule_by_building_block(p, m, building_block, max_mem, keep_stable_phase=
         return None, peak_mem, [6 * m] * p
     stage_bubbles = calc_bubble(schedules)
     if debug:
-        print(peak_mem, stage_bubbles)
-        print("-" * 100)
+        log_rank_all(f"{peak_mem}, {stage_bubbles}")
+        log_rank_all("-" * 100)
     return schedules, peak_mem, stage_bubbles
 
 
@@ -923,8 +921,8 @@ def schedule(p, m, cost, max_mem):
         # expected_bubble = max(0, 6 * p - 1 - 3 * peak_mem)
         expected_bubble = 3 * p - 1 - 3 * peak_mem + max(3 * p, p - 1 + (1 + (peak_mem + 1) // 2) * 2)
         # expected_bubble = 6 * p - 1 - 3 * peak_mem
-        print(peak_mem, bubble, expected_bubble, "|", bubble - expected_bubble)
-    print(mem2bubble)
+        log_rank_all(peak_mem, bubble, expected_bubble, "|", bubble - expected_bubble)
+    log_rank_all(mem2bubble)
 
     res = transform_schedule(best_schedule, *cost)
     return res

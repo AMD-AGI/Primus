@@ -13,6 +13,8 @@ from typing import List, Set
 import pulp
 import torch
 
+from primus.modules.module_utils import log_rank_all
+
 from .graph import FuncType, GraphConfig, ScheduledNode
 
 
@@ -294,7 +296,6 @@ class Graph:
         for i in range(self.nstages):
             while w[i] < self.nmb:
                 put(i, 2)
-            # print(f"{' ' * i}{order_str[i]}  -> {e[i]}")
 
         for i in range(self.nstages):
             for j in range(self.nmb):
@@ -311,7 +312,6 @@ class Graph:
                 if i < self.nstages - 1:
                     assert t[b_id] >= t[self.get_id(1, i + 1, j)] + comm + b_cost
 
-        # print(order)
         best_time = 0
         for i in range(self.nstages):
             time_i = (
@@ -341,7 +341,7 @@ def initial_solution(graph, print_result=True):
 
     if print_result:
         print_detail(graph, complete_time)
-        print("-" * 20, best_time, "-" * 20)
+        log_rank_all("-" * 20, best_time, "-" * 20)
     return best_time, order, complete_time
 
 
@@ -375,8 +375,8 @@ def print_detail(graph, F):
             - F[graph.get_id(0, stage, 0)]
             + graph.get_cost(graph.get_id(0, stage, 0))
         )
-        print(_str)
-    print("Longest stage time: ", max(times))
+        log_rank_all(_str)
+    log_rank_all("Longest stage time: ", max(times))
 
 
 def create_schedule(config: GraphConfig, print_result=False):

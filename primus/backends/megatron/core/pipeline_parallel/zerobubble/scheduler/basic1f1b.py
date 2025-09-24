@@ -7,6 +7,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from primus.modules.module_utils import log_rank_0
+
 from .graph import BW, F, GraphConfig, ScheduledNode
 
 
@@ -25,7 +27,7 @@ def create_schedule(config: GraphConfig):
         for i in range(num_warmup):
             funcs.append((BW, num_remaining + i))
 
-        print(" ".join([f"{t.value}{mb}" for (t, mb) in funcs]))
+        log_rank_0(" ".join([f"{t.value}{mb}" for (t, mb) in funcs]))
 
         for func_type, mb in funcs:
             order.append(

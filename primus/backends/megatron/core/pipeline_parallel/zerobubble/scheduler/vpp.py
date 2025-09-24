@@ -7,6 +7,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from primus.modules.module_utils import log_rank_all
+
 from .graph import BW, F, GraphConfig, ScheduledNode
 
 
@@ -74,7 +76,7 @@ def create_schedule(config: GraphConfig):
             mb = get_microbatch_id_in_model_chunk(backward_k)
             funcs.append((BW, mb, chunk))
 
-        print(" ".join([f"{t.value}{mb}.{chunk}" for (t, mb, chunk) in funcs]))
+        log_rank_all(" ".join([f"{t.value}{mb}.{chunk}" for (t, mb, chunk) in funcs]))
 
         for func_type, mb, chunk in funcs:
             layer_group_idx = config.n_stages * chunk + stage

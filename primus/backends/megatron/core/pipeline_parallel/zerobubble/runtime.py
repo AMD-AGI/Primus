@@ -38,6 +38,7 @@ from megatron.training import get_args, print_rank_0
 
 from primus.backends.megatron.training.training import RollbackDataIteratorWrapper
 from primus.backends.megatron.training.utils import is_second_last_pipeline_stage
+from primus.modules.module_utils import log_rank_0, log_rank_all
 from primus.modules.trainer.megatron.utils import fwd_bwd_wrapper
 
 from .offload import ActivationStorePool, FakeActivationStore, partial_recompute
@@ -126,7 +127,7 @@ class ActivationPoolCache:
         for chunk, chunk_pools in enumerate(self.pools):
             for seq, seq_pool in enumerate(chunk_pools):
                 if not seq_pool.is_empty():
-                    print(
+                    log_rank_all(
                         f"ERROR: activation pool is not empty. chunk {chunk} seq {seq} queue {seq_pool._queue} pool {seq_pool._pool}"
                     )
                     all_empty = False
@@ -221,7 +222,7 @@ class TrainingIteration:
         if get_args().profile_memory_iter >= 0:
             max_allocated = torch.cuda.max_memory_allocated() // 1000000
             current_allocated = torch.cuda.memory_allocated() // 1000000
-            print(
+            log_rank_all(
                 f"MEMORY: rank {rank} iteration {self.iteration_id} max_allocated: {max_allocated} current_allocated: {current_allocated}"
             )
         if self.iteration_id == get_args().profile_memory_iter:
@@ -486,7 +487,6 @@ class TrainingIteration:
                 parallel_state.set_virtual_pipeline_model_parallel_rank(scheduled_node.chunk)
             set_seq_split_idx(scheduled_node.seq_split_idx)
             DataLoaderStore.push(conf.data_iterator[scheduled_node.chunk])
-        # print(f"{torch.distributed.get_rank()} load {len(DataLoaderStore.cache)}")
 
     def schedule_f_impl(self, scheduled_node: ScheduledNode):
         conf = self.iteration_config
@@ -705,7 +705,6 @@ class TrainingIteration:
         elif not states.w_clear_run[chunk]:
             # Clear if this is the last minibatch or there is no non-W pending
             pending_ws = WeightGradStore.queue_size(chunk, scheduled_node.seq_split_idx)
-            # print("debug-pendingws: {}".format(pending_ws))
             if get_args().profile:
                 torch.cuda.nvtx.range_push(f"W_clear.{chunk}.{scheduled_node.seq_split_idx}")
             if conf.run_timer:
@@ -1416,7 +1415,7 @@ def update_schedule(
     f, b, w, f_mem, b_mem, w_mem, mem_limit = zip(*ag_arguments)
 
     if is_second_last_pipeline_stage():
-        print(
+        log_rank_all(
             f"rank {torch.distributed.get_rank()} Performing ILP with: f={f},\n b={b},\n w={w},\n c={c},\n f_mem={f_mem},\n b_mem={b_mem},\n w_mem={w_mem},\n mem_limit={mem_limit}"
         )
         global schedule_cache
@@ -1474,7 +1473,7 @@ def get_zero_bubble_forward_backward_func():
         if ScheduleTimers.concluded and not is_auto_schedule:
             conclusion = ScheduleTimers.joint_conclusion()
             # TODO(wanxy): Maybe an all-reduce here to collect global stats?
-            print(f"rank {torch.distributed.get_rank()} profiling conclusion: {conclusion}")
+            log_rank_all(f"rank {torch.distributed.get_rank()} profiling conclusion: {conclusion}")
 
             def estimate_free_memory_on_this_rank(old_schedule):
                 (memory_free, memory_all) = [x // 1000000 for x in torch.cuda.mem_get_info()]
@@ -1496,7 +1495,7 @@ def get_zero_bubble_forward_backward_func():
                     max_activation = max(activation_cost, max_activation)
                 free_mem = memory_all - (torch.cuda.max_memory_allocated() // 1000000 - max_activation)
 
-                print(
+                log_rank_all(
                     f"estimated max free memory for activations on rank {torch.distributed.get_rank()} \
                     memory_free: {memory_free}, memory_all: {memory_all}, max_activation: {max_activation}, \
                     max_allocated: {torch.cuda.max_memory_allocated() // 1000000}, \
@@ -1504,7 +1503,7 @@ def get_zero_bubble_forward_backward_func():
                     free_mem: {free_mem}"
                 )
 
-                print(f"rank {torch.distributed.get_rank()} mem summary {torch.cuda.memory_summary()}")
+                log_rank_all(f"rank {torch.distributed.get_rank()} mem summary {torch.cuda.memory_summary()}")
                 return free_mem
 
             schedule_cache = update_schedule(
@@ -1513,7 +1512,6 @@ def get_zero_bubble_forward_backward_func():
             is_auto_schedule = True
 
         def wrap_schedule(**kwargs):
-            # print(f"DEBUG wrap_schedule data_iterator {kwargs.get('data_iterator')}")
             # assert kwargs.get('data_iterator') is not None, "data_iterator found none in wrap_schedule"
             return func(schedule=schedule_cache[parallel_state.get_pipeline_model_parallel_rank()], **kwargs)
 
@@ -1537,7 +1535,7 @@ def get_zero_bubble_forward_backward_func():
                 n_micro=nmb,
                 max_chunks=1,
             )
-            print(f"using seq 1f1b")
+            log_rank_0(f"using seq 1f1b")
             local_order = seq1f1b.create_schedule(config)
             ret = run_schedule_passes(config, local_order)
             return ret
@@ -1592,7 +1590,7 @@ def get_zero_bubble_forward_backward_func():
                 n_micro=nmb,
                 max_chunks=parallel_state.get_virtual_pipeline_model_parallel_world_size(),
             )
-            print(f"using interleaved 1f1b")
+            log_rank_0(f"using interleaved 1f1b")
             # TODO: support origin interleaved 1f1b
             # local_order = vpp.create_schedule(config)
             local_order = group_interleaved_1f1b.create_schedule(
@@ -1628,7 +1626,7 @@ def get_zero_bubble_forward_backward_func():
                 n_micro=nmb,
                 max_chunks=1,
             )
-            print(f"using 1f1b")
+            log_rank_0(f"using 1f1b")
             local_order = basic1f1b.create_schedule(config)
             ret = run_schedule_passes(config, local_order, validate=False)
             return ret
@@ -1737,10 +1735,10 @@ def get_zero_bubble_forward_backward_func():
             w_mem = [x[0] for x in w_mem]
 
             if args.zero_bubble_max_pending_backward != "auto":
-                print(f"manual mem limit: {args.zero_bubble_max_pending_backward * max(f_mem[:2])}")
+                log_rank_0(f"manual mem limit: {args.zero_bubble_max_pending_backward * max(f_mem[:2])}")
                 mem_limit = [args.zero_bubble_max_pending_backward * max(f_mem[:2])] * len(f_mem)
             else:
-                print(f"adaptive mem limit: {mem_limit}")
+                log_rank_0(f"adaptive mem limit: {mem_limit}")
 
             config = zb.GraphConfig(
                 cost_f=list(map(float, f)),

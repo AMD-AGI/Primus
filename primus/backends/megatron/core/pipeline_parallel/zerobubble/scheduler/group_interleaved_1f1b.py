@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import List
 
+from primus.modules.module_utils import log_rank_0, log_rank_all
+
 
 class PassType(Enum):
     F = "F"
@@ -90,7 +92,6 @@ class GroupBuildingBlockScheduler(object):
         gcd_kv = math.gcd(chunk_num, min_k)
         extra_offset = max(0, b_offset * device_num - 3 * min_k * group_size)
         assert extra_offset < device_num
-        print(min_k, gcd_kv, group_size, min_group_size, chunk_num)
 
         building_block: cls.Schedule
         building_block = [
@@ -135,7 +136,6 @@ class GroupBuildingBlockScheduler(object):
                     )
 
         unrolled_build_block = cls.unroll_building_block(building_block)
-        # print(len(unrolled_build_block[0]), 6 * min_k * group_size * chunk_num - 3 * group_size * min_k + offset * (device_num - 1))
         return building_block, unrolled_build_block
 
     @classmethod
@@ -305,13 +305,13 @@ class GroupBuildingBlockScheduler(object):
     def print_schedule(cls, schedule: Schedule, info: str = "", debug: bool = False):
         if not debug:
             return
-        print(">" * 50, info)
+        log_rank_all(">" * 50, info)
         for d_i in range(len(schedule)):
             str_i = ""
             for node in schedule[d_i]:
                 str_i += node.char()
-            print(str_i)
-        print(info, "<" * 50)
+            log_rank_all(str_i)
+        log_rank_all(info, "<" * 50)
 
     def __init__(
         self,
@@ -359,16 +359,16 @@ class GroupBuildingBlockScheduler(object):
         else:
             self.squeezed_schedule = self.shifted_schedule
         self.print_schedule(self.squeezed_schedule, "squeezed schedule", debug=debug)
-        print(
+        log_rank_all(
             f"min_group_size: {min_group_size}, group_size: {group_size}, chunk: {chunk_num}, recompute_chunk: {recompute_chunk_num}"
         )
-        print(
+        log_rank_all(
             f"peak memory before->after recomputation: {peak_mem_before_recomputation} -> {peak_mem_after_recomputation}"
         )
-        print(
+        log_rank_all(
             f"schedule length before->after recomputation: {schedule_len_without_recomputation} -> {len(self.squeezed_schedule[0])}"
         )
-        print("-" * 50)
+        log_rank_all("-" * 50)
 
     def get_schedule(self) -> Schedule:
         return self.squeezed_schedule
@@ -422,16 +422,13 @@ def create_schedule(
             break
             group_size += 1
         assert best_group_schedule is not None
-        print(
+        log_rank_0(
             f"best group size for recompute {best_group_size}, peak memory {min_peak_mem}, schedule length {min_schedule_len}"
         )
     else:
         group_size, recompute_chunk_num = interleave_group_size, 0
-        # if group_size < min_group_size:
-        #     print(f"min interleave_group_size should be {min_group_size}, reset it from {group_size} to {min_group_size}")
-        #     group_size = min_group_size
         if group_size > config.n_stages:
-            print(
+            log_rank_0(
                 f"max interleave_group_size should be {config.n_stages}, reset it from {group_size} to {config.n_stages}"
             )
             group_size = config.n_stages
@@ -445,7 +442,7 @@ def create_schedule(
             recompute_chunk_num=recompute_chunk_num,
         )
         best_group_schedule = group_scheduler.get_schedule()
-        print("group size:", group_size)
+        log_rank_0("group size:", group_size)
 
     GroupBuildingBlockScheduler.print_schedule(best_group_schedule, "best schedule", debug=True)
 

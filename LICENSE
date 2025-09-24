@@ -21,7 +21,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-Third-Party Dependencies
+Third-Party Software and Licenses
 
 Primus uses or references the following third-party projects:
 
@@ -37,6 +37,6 @@ Primus uses or references the following third-party projects:
    - License: BSD License
    - Repository: https://github.com/pytorch/pytorch
 
-Please comply with the respective licenses of these third-party projects when using or distributing Primus.
+User must comply with the respective licenses of these third-party projects when using or distributing Primus.
 
 --------------------------------------------------------------------------------

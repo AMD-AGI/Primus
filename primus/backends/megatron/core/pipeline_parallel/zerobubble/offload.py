@@ -15,6 +15,8 @@ from enum import Enum
 import torch
 from torch.autograd.graph import saved_tensors_hooks
 
+from primus.modules.module_utils import log_rank_all
+
 
 def checksum(tensor):
     with torch.no_grad():
@@ -227,7 +229,6 @@ class ActivationStore(saved_tensors_hooks):
         else:
             assert self._offload_tensor_info[len(self._gpu_store) - 1] == tensor_info(tensor)
         self._save_event.record()
-        # print(f"rank {torch.distributed.get_rank()} Saving tensor id {len(self._gpu_store) - 1} {id(tensor)} {tensor.shape}, dtype {tensor.dtype}, device {tensor.device} storage {tensor.storage().data_ptr()}")
         return (ActivationStore.SaveType.OFFLOAD, len(self._gpu_store) - 1)
 
     def _resume_tensor(self, packed, remove_used=True):
@@ -248,7 +249,6 @@ class ActivationStore(saved_tensors_hooks):
         if packed[0] == ActivationStore.SaveType.ALIAS:
             dtype, index, shape, stride, offset = packed[1]
             self._resume_event.wait()
-            # print(f"rank {torch.distributed.get_rank()} Resuming alias tensor id {index} {shape}, offset {offset}")
             bin, o = self.index_offset[index]
             return torch.as_strided(self._continuous_gpu_buffer[dtype][bin], shape, stride, o + offset)
         assert type == ActivationStore.SaveType.OFFLOAD
@@ -266,7 +266,6 @@ class ActivationStore(saved_tensors_hooks):
                     break
             if all_freed:
                 self._continuous_gpu_buffer[dtype][bin] = None
-        # print(f"rank {torch.distributed.get_rank()} Resuming tensor id {index} {ret.shape}, dtype {ret.dtype}, device {ret.device}")
         return ret
 
     def __init__(self, h2d_stream=None, d2h_stream=None):
@@ -332,7 +331,6 @@ class ActivationStore(saved_tensors_hooks):
                         bins[i - 1] += bin_size[i - 1]
 
                 solution_bins = [x for x in bins if x > 0]
-                # print(solution_bins)
                 if sum(solution_bins) < total_size:
                     continue
                 current_bin = [0] * len(solution_bins)
@@ -357,7 +355,7 @@ class ActivationStore(saved_tensors_hooks):
 
         import psutil
 
-        print(
+        log_rank_all(
             f"rank {torch.distributed.get_rank()} before allocation rss {psutil.Process(os.getpid()).memory_info().rss / 1000000} MB"
         )
         self._continuous_cpu_buffer = {}
@@ -376,7 +374,7 @@ class ActivationStore(saved_tensors_hooks):
             ]
             for id, (bin, offset) in solution.items():
                 self.index_offset[id] = (bin, offset)
-            print(
+            log_rank_all(
                 f"rank {torch.distributed.get_rank()} after allocation {dtype} {bins} elements rss {psutil.Process(os.getpid()).memory_info().rss / 1000000} MB"
             )
 
@@ -385,7 +383,7 @@ class ActivationStore(saved_tensors_hooks):
             total_size = sum([x[0] for x in tensors])
             allocated_size = sum([x.numel() for x in self._continuous_cpu_buffer[dtype]])
             aligned_size = sum([nearest_power_of_2(x.numel()) for x in self._continuous_cpu_buffer[dtype]])
-            print(
+            log_rank_all(
                 f"rank {torch.distributed.get_rank()} Allocated {allocated_size / 1000000} M elements for {len(tensors)} tensors of type {dtype} total length {total_size} aligned size {aligned_size}"
             )
 
@@ -414,17 +412,12 @@ class ActivationStore(saved_tensors_hooks):
                 buffer.copy_(tensor, non_blocking=True)
                 size += tensor.numel()
                 if tensor.storage().data_ptr() not in storages:
-                    # print(f"rank {torch.distributed.get_rank()} Storage of tensor {tensor.shape} size {tensor.storage().size()/1000000} MB not in set")
                     storages.add(tensor.storage().data_ptr())
                     storage_size += tensor.storage().nbytes()
                 else:
-                    # print(f"rank {torch.distributed.get_rank()} Storage of tensor {tensor.shape} size {tensor.storage().size()/1000000} MB already in set")
                     pass
-                # print(f"Saving buffer to cpu shape {buffer.shape}, dtype {buffer.dtype}, device {buffer.device}")
             PairedBarrier.record()
             self._offload_complete_event.record()
-        # print(f"rank {torch.distributed.get_rank()} Offloaded {size / 1000000000} Billion elements, {len(self._gpu_store)} tensors, storage size {storage_size / 1000000000} GBytes")
-
         self._offloaded = True
 
     @torch.no_grad()

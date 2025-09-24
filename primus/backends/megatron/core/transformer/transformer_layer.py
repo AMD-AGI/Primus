@@ -7,8 +7,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
-
 from typing import Optional
 
 from megatron.core import parallel_state

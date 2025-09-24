@@ -10,6 +10,8 @@
 # Implementation of vhalf and vmin schedules of Pipeline Parallelism
 # with Controllable Memory (https://arxiv.org/abs/2405.15362)
 # The reordering is based on a greedy algorithm.
+from primus.modules.module_utils import log_rank_all
+
 from .graph import B, F, ScheduledNode, W
 
 names = "FfBbWw"
@@ -277,7 +279,6 @@ class PipelineGraph(object):
         # Remove w decisions and split w into two chunks. Redo execution time eval.
         r2 = [schedule[:4] for schedule in r2]
         r2 = [self.put_w(schedule, split_w=True) for schedule in r2]
-        # print(r2)
         return self.eager_execution_time(r2, cost, c_cost=self.c_cost)
 
     def to_csv(self, stage_result):
@@ -287,7 +288,7 @@ class PipelineGraph(object):
                 for mb, o in enumerate(order):
                     assert not r[o], f"{r[o]}, {names[type]}{mb}"
                     r[o] = f"{names[type]}{mb}"
-            print(",".join(r))
+            log_rank_all(",".join(r))
 
     def create_schedule(self, config):
         schedulefunc = {
@@ -304,7 +305,7 @@ class PipelineGraph(object):
         expected_time = sum(self.fbw_cost) * self.n_micro * 2
         # # self.print_details(end_time, print_scaling=1)
         bubble_rate = (max_time - expected_time) / max_time
-        print(
+        log_rank_all(
             "%2d %3d, [%5d %5d %5d %5d], %s -> %6.4f"
             % (self.n_stage, self.n_micro, *self.fbw_cost, self.c_cost, self.mem_config, bubble_rate)
         )

@@ -11,6 +11,8 @@ import dataclasses
 from dataclasses import dataclass
 from typing import List
 
+from primus.modules.module_utils import log_rank_all
+
 from .graph import BW, B, F, FuncType, GraphConfig, NodeKey, ScheduledNode, W
 
 
@@ -412,7 +414,7 @@ def postpone_forward_in_warmup(config: GraphConfig, local_order: List[List[Sched
             cost = node.completion_time - node.start_time
             start_time = min(next_node.start_time - config.cost_comm - cost, cur_time - cost)
             if start_time > node.start_time:
-                print(
+                log_rank_all(
                     rank,
                     node.microbatch,
                     node.chunk,
@@ -453,6 +455,6 @@ def add_offload(
         new_local_order.append(new_stage_1)
 
     peak_memory_all_ranks = get_peak_memory(new_local_order)
-    print(f"peak memory: {peak_memory_before} -> {peak_memory_all_ranks}")
-    print(f"maximum peak memory: {max(peak_memory_before)} -> {max(peak_memory_all_ranks)}")
+    log_rank_all(f"peak memory: {peak_memory_before} -> {peak_memory_all_ranks}")
+    log_rank_all(f"maximum peak memory: {max(peak_memory_before)} -> {max(peak_memory_all_ranks)}")
     return new_local_order

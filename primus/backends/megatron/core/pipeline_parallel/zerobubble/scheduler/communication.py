@@ -12,6 +12,8 @@ import functools
 import math
 from typing import List, Tuple
 
+from primus.modules.module_utils import log_rank_all
+
 from .graph import BW, B, CommDirection, F, FuncType, GraphConfig, ScheduledNode
 
 
@@ -528,7 +530,6 @@ def reorder_communication(
                     local_order[stage][i - 1],
                     local_order[stage][i],
                 )
-        # print([(x.type, x.start_time, x.completion_time) for x in local_order[stage]])
 
         # The reordering must not reorder the origin non-comm nodes.
         new_non_comm_nodes = [
@@ -570,9 +571,6 @@ def tag_rollback_communication(
                 rollback = False
             local_order_with_rollback[rank].append(dataclasses.replace(node, rollback=rollback))
         assert len(rollback_comm) == 0
-        # for node in local_order_with_rollback[rank]:
-        #     print(f"{node.type}-{node.minibatch}-{int(node.rollback)}", end=', ')
-        # print()
     return local_order_with_rollback
 
 
@@ -641,10 +639,10 @@ def validate_communication(local_order: List[List[ScheduledNode]], debug=False):
 def print_remaining_nodes(fused_comm):
     from .passes import viz_node
 
-    print(f"=" * 30)
+    log_rank_all(f"=" * 30)
     for _stage in range(len(fused_comm)):
         ss = []
         for fused in fused_comm[_stage]:
             if fused:
                 ss.append(" ".join(viz_node(f) for f in fused))
-        print(f"{_stage}: {','.join(ss)}")
+        log_rank_all(f"{_stage}: {','.join(ss)}")

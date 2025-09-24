@@ -10,6 +10,8 @@
 import dataclasses
 from typing import List
 
+from primus.modules.module_utils import log_rank_all
+
 from .communication import (
     add_communication_nodes_without_sorting,
     validate_communication,
@@ -74,7 +76,7 @@ def viz_node(node: ScheduledNode):
 def print_schedule(res):
     for nodes in res:
         ns = " ".join(map(viz_node, nodes))
-        print(ns)
+        log_rank_all(ns)
 
 
 def pre_validate(local_order: List[List[ScheduledNode]]):
@@ -156,11 +158,11 @@ def add_time(config: GraphConfig, local_order: List[List[ScheduledNode]]) -> Lis
             found = True
             ct += 1
         if not found:
-            print(
+            log_rank_all(
                 f"ERROR: can't find next runnable node. stage_curr_index: {stage_curr_index} completed {completion_time}"
             )
             for node, prev in pending:
-                print(f"ERROR: Pending {node} {prev}")
+                log_rank_all(f"ERROR: Pending {node} {prev}")
             raise RuntimeError(f"Cannot find next runnable node.")
 
     assert len(new_local_order) == len(local_order)
