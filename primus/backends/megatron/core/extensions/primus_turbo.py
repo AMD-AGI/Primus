@@ -416,7 +416,6 @@ class PrimusTurboColumnParallelLinear(TELinear):
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
-        print("debug init turbo linear")
         if gather_output:
             raise ValueError("Transformer Engine linear layers do not support gather_output = True")
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
@@ -727,7 +726,13 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             config,
             model_comm_pgs,
         )
-        self.grouped_gemm = pt.ops.grouped_gemm
+        args = get_args()
+        if args.patch_zero_bubble and args.enable_zero_bubble:
+            from .zbpp_gemm import grouped_gemm_with_weight_gradient_store
+
+            self.grouped_gemm = grouped_gemm_with_weight_gradient_store
+        else:
+            self.grouped_gemm = pt.ops.grouped_gemm
 
     def forward(
         self,
