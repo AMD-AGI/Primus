@@ -1,9 +1,11 @@
-# import contextlib
-# from typing import Callable, Iterator, List, Optional, Union
-
-
-# import torch
-# from torch.autograd.variable import Variable
+###############################################################################
+# Some parts of this code are copied and modified from
+# Sea AI Lab's zero-bubble-pipeline-parallelism project
+# (https://github.com/sail-sg/zero-bubble-pipeline-parallelism).
+#
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+# See LICENSE for license information.
+###############################################################################
 
 from megatron.core import parallel_state
 from megatron.core.pipeline_parallel.schedules import (
