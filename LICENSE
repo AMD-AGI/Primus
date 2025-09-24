@@ -37,6 +37,10 @@ Primus uses or references the following third-party projects:
    - License: BSD License
    - Repository: https://github.com/pytorch/pytorch
 
+4. zero-bubble-pipeline-parallelism
+   - License: MIT License (Sea AI Lab, NVIDIA)
+   - Repository: https://github.com/sail-sg/zero-bubble-pipeline-parallelism
+
 User must comply with the respective licenses of these third-party projects when using or distributing Primus.
 
 --------------------------------------------------------------------------------

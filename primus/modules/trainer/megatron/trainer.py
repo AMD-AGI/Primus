@@ -34,6 +34,8 @@ from megatron.training.checkpointing import (
     save_checkpoint,
 )
 
+from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
+
 try:
     pass
 
@@ -1854,17 +1856,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         """Single training step."""
         args = get_args()
         timers = get_timers()
-
-        def is_pipeline_stage_containing_loss():
-            if (
-                args.patch_zero_bubble
-                and args.num_virtual_stages_per_pipeline_rank == 2
-                and args.enable_zero_bubble
-                and (args.zero_bubble_v_schedule or args.enable_1f1b_v)
-            ):
-                return mpu.is_pipeline_first_stage(ignore_virtual=True)
-            else:
-                return mpu.is_pipeline_last_stage(ignore_virtual=True)
 
         def run_forward_backward_func(optimizer=None):
             """Forward pass.
