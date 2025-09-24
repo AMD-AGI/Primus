@@ -12,23 +12,13 @@ def get_version():
 setup(
     name="primus",
     version=get_version(),
-    description="Primus: Unified Training Framework for AMD AI",
-    author="AMD AIG Team",
+    description="Primus: A Lightweight, Unified Training Framework for Large Models on AMD GPUs",
+    author="AMD AIG AI Brain-TAS Team",
     packages=find_packages(exclude=["tests", "tests.*"]),
-    install_requires=[
-        "loguru",
-        "wandb",
-        "pre-commit",
-        "nltk",
-        "matplotlib",
-        "markdown2",
-        "weasyprint",
-        "tyro",
-        "torchao",
-        "blobfile",
-        "torchdata>=0.8.0",
-        "datasets>=3.6.0",
-    ],
+    install_requires=[],
+    extras_require={
+        "cli": [],
+    },
     package_data={
         "primus": [
             "configs/*.yaml",
@@ -40,6 +30,13 @@ setup(
             "primus=primus.cli.main:main",
         ]
     },
+    scripts=[
+        "bin/primus-cli",
+        "bin/primus-cli-slurm.sh",
+        "bin/primus-cli-slurm-entry.sh",
+        "bin/primus-cli-container.sh",
+        "bin/primus-cli-entrypoint.sh",
+    ],
     python_requires=">=3.8",
     include_package_data=True,
     zip_safe=False,
