@@ -54,12 +54,6 @@ export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 log_exported_vars "Training cluster info" \
     MASTER_ADDR MASTER_PORT NNODES NODE_RANK GPUS_PER_NODE
 
-PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
-export PRIMUS_PATH
-export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
-export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
-log_exported_vars "Training info" PRIMUS_PATH DATA_PATH HF_HOME
-
 # -------------------- NCCL and Communication Setup --------------------
 # Set visible GPUs for the current node (0 to GPUS_PER_NODE-1)
 HIP_VISIBLE_DEVICES=$(seq -s, 0 $((GPUS_PER_NODE - 1)))
@@ -80,13 +74,13 @@ export NCCL_CROSS_NIC=0
 
 # Dynamically get InfiniBand Host Channel Adapter index for NCCL if not set
 if [ -z "${NCCL_IB_HCA}" ]; then
-    NCCL_IB_HCA=$(bash "${PRIMUS_PATH}/examples/scripts/get_nccl_ib_hca.sh")
+    NCCL_IB_HCA=$(bash "examples/scripts/get_nccl_ib_hca.sh")
 fi
 export NCCL_IB_HCA
 
 # Dynamically get network interface IP address for socket communication if not set
 if [ -z "${IP_INTERFACE}" ]; then
-    IP_INTERFACE=$(bash "${PRIMUS_PATH}/examples/scripts/get_ip_interface.sh")
+    IP_INTERFACE=$(bash "examples/scripts/get_ip_interface.sh")
 fi
 export IP_INTERFACE
 # Set network interfaces for NCCL and Gloo, fallback to detected IP_INTERFACE
@@ -149,8 +143,3 @@ log_exported_vars "Performance tuning" \
     GPU_MAX_HW_QUEUES CUDA_DEVICE_MAX_CONNECTIONS TORCH_NCCL_HIGH_PRIORITY \
     NVTE_USE_CAST_TRANSPOSE_TRITON NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE \
     NVTE_CK_USES_BWD_V3 NVTE_DEBUG NVTE_DEBUG_LEVEL NVTE_FUSED_ATTN_LOG_CONFIG PATCH_TE_FLASH_ATTN
-
-# -------------------- setup_pythonpath -------------------
-site_packages=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-export PYTHONPATH="${PRIMUS_PATH}:${site_packages}:${PYTHONPATH:-}"
-log_exported_vars "pythonpath" PYTHONPATH
