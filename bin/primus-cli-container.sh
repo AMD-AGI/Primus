@@ -64,8 +64,6 @@ while [[ $# -gt 0 ]]; do
             full_path="$(realpath -m "$raw_path")"
             PRIMUS_PATH="$full_path"
             MOUNTS+=("$full_path")
-            # PRIMUS_PATH="$2"
-            # MOUNTS+=("$2")
             shift 2
             ;;
         --clean)
@@ -109,23 +107,20 @@ for mnt in "${MOUNTS[@]}"; do
         container_path="${mnt#*:}"
         # Check that the host path exists and is a directory
         if [[ ! -d "$host_path" ]]; then
-            echo "[primus-cli-container][${HOSTNAME}][ERROR] --mount $host_path does not exist or is not a directory. Please check your path." >&2
+            echo "[primus-cli-container][${HOSTNAME}][ERROR]  invalid directory for --mount $mnt" >&2
             exit 1
         fi
         VOLUME_ARGS+=(-v "$(realpath "$host_path")":"$container_path")
     else
         # Mount to same path inside container
         if [[ ! -d "$mnt" ]]; then
-            echo "[primus-cli-container][${HOSTNAME}][ERROR] --mount $mnt does not exist or is not a directory. Please check your path." >&2
+            echo "[primus-cli-container][${HOSTNAME}][ERROR]  invalid directory for --mount $mnt" >&2
             exit 1
         fi
         abs_path="$(realpath "$mnt")"
         VOLUME_ARGS+=(-v "$abs_path":"$abs_path")
     fi
 done
-
-
-
 
 # ------------------ Optional Container Cleanup ------------------
 if command -v podman >/dev/null 2>&1; then
@@ -162,7 +157,6 @@ if [[ "$VERBOSE" == "1" ]]; then
     echo "[prinus-cli-container][${HOSTNAME}][INFO]      ${ARGS[*]}"
     echo
 fi
-
 
 # ------------------ Launch Training Container ------------------
 "${DOCKER_CLI}" run --rm \
