@@ -95,7 +95,7 @@ if [ ! -f "${EXP}" ]; then
     exit 1
 fi
 
-TMP_BUILD_DIR="/tmp/${PRIMUS_PATH}/build/${HOSTNAME}"
+TMP_BUILD_DIR="/tmp/aiter_cache/${PRIMUS_PATH}/build/${HOSTNAME}"
 mkdir -p "$TMP_BUILD_DIR"
 # Collect environment info for cache tagging
 OS_VER=$(grep ^PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"' | tr ' ' '_' | tr -d '()')
