@@ -1,0 +1,103 @@
+#!/bin/bash
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+set -euo pipefail
+
+print_usage() {
+cat << EOF
+Primus Unified Launcher CLI
+
+Usage:
+    primus-cli <mode> [mode-args] -- [primus-commands and args]
+
+Description:
+    The unified entry point for all Primus workflows: distributed launch, containerization, and direct host training.
+    Use '--' to separate mode-specific arguments from Primus Python CLI commands (train, benchmark, etc).
+
+Supported modes:
+    slurm      Launch distributed workflows via Slurm cluster (srun/sbatch)
+    container  Launch workflows in a managed Docker/Podman container
+    direct     Launch workflows directly on the current host or container
+
+Mode-specific help:
+    primus-cli slurm --help         Show usage for slurm mode
+    primus-cli container --help     Show usage for container mode (single node or debugging)
+    primus-cli direct --help        Show usage for direct mode (host/container)
+
+Examples:
+    # Distributed GEMM benchmark using srun on 4 nodes:
+    primus-cli slurm srun -N 4 -- benchmark gemm -M 4096 -N 4096 -K 4096
+
+    # Distributed pretrain using sbatch on partition "AIG_Model":
+    primus-cli slurm sbatch -N 8 -p AIG_Model -- train pretrain --config exp.yaml
+
+    # Run GEMM benchmark in a managed container (single node):
+    primus-cli container -- benchmark gemm -M 4096 -N 4096 -K 4096
+
+    # Run pretrain directly on the host or inside an existing container:
+    primus-cli direct -- train pretrain --config exp.yaml
+
+    # [Advanced] Specify --container or --host for explicit entry (slurm mode only):
+    primus-cli slurm srun --container -N 2 -- benchmark gemm ...
+    primus-cli slurm sbatch --host -N 1 -- train pretrain ...
+
+Notes:
+- [--] is required: it separates Primus launcher options (mode/mode-args) from Python CLI arguments.
+- All arguments after [--] are passed to the Primus Python CLI (see 'primus-cli direct -- --help').
+- For detailed documentation on each mode, use the '--help' flag after the mode name.
+- Primus CLI supports both training and benchmarking with Megatron, TorchTitan, and ROCm-optimized backends.
+
+To see all supported Primus Python CLI commands and options:
+    primus-cli direct -- --help
+EOF
+}
+
+# Show help if called with -h, --help, or no arguments
+if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
+    print_usage
+    exit 0
+fi
+
+# Resolve script directory robustly (handles symlinks)
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+
+# Try PATH first, fallback to local ./bin directory
+run_subscript() {
+    local script="$1"
+    shift
+    if command -v "$script" >/dev/null 2>&1; then
+        echo "[primus-cli] Executing from PATH: $script $*"
+        exec "$script" "$@"
+    elif [[ -x "$SCRIPT_DIR/$script" ]]; then
+        echo "[primus-cli] Executing from local repo: $SCRIPT_DIR/$script $*"
+        exec bash "$SCRIPT_DIR/$script" "$@"
+    else
+        echo "[primus-cli][ERROR] Subscript not found: $script" >&2
+        exit 2
+    fi
+}
+
+# # Check argument count, print usage if not enough arguments
+[[ $# -ge 1 ]] || { echo "Usage: primus-cli <mode> [mode-args] -- [primus-commands and args]"; exit 2; }
+mode="$1"; shift
+
+case "$mode" in
+    slurm)
+        run_subscript "primus-cli-slurm.sh" "$@"
+        ;;
+    container)
+        run_subscript "primus-cli-container.sh" "$@"
+        ;;
+    direct)
+        run_subscript "primus-cli-entrypoint.sh" "$@"
+        ;;
+    *)
+        echo "[primus-cli][ERROR] Unknown mode: $mode" >&2
+        print_usage
+        exit 2
+        ;;
+esac
