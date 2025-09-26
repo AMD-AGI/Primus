@@ -76,7 +76,7 @@ ENV_ARGS+=("--env" "HF_TOKEN")
 HOSTNAME=$(hostname)
 ARGS=("$@")
 
-VOLUME_ARGS=(-v "$PRIMUS_PATH":"$PRIMUS_PATH" -v "$DATA_PATH":"$DATA_PATH" -v "/tmp":"/tmp/aiter_cache")
+VOLUME_ARGS=(-v "$PRIMUS_PATH":"$PRIMUS_PATH" -v "$DATA_PATH":"$DATA_PATH" -v "/tmp":"/aiter_cache")
 if [[ -f "$PATH_TO_BNXT_TAR_PACKAGE" ]]; then
     VOLUME_ARGS+=(-v "$PATH_TO_BNXT_TAR_PACKAGE":"$PATH_TO_BNXT_TAR_PACKAGE")
 fi
