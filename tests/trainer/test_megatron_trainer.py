@@ -189,6 +189,14 @@ class TestMegatronTrainer(PrimusUT):
             },
         )
 
+    def test_zero_bubble_pipeline_parallelism(self):
+        run_script(
+            self.__class__.__name__,
+            "zero_bubble_pipeline_parallelism",
+            exp_path="tests/trainer/test_megatron_trainer_zero_bubble.yaml",
+            env_override={},
+        )
+
 
 class TestMegatronTrainerDeterministic(PrimusUT):
     def __init__(self, *args, **kwargs):
