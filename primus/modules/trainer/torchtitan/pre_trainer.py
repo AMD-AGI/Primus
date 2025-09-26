@@ -105,14 +105,16 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         if self.titan_config.primus_turbo.use_turbo_async_tp:
             # ******* Async TP *******
-            self.patch_torch_async_tp()
+            self.patch_torch_async_tp(self.titan_config.parallelism.enable_async_tensor_parallel)
 
-    def patch_torch_async_tp(self):
+    @staticmethod
+    def patch_torch_async_tp(enable_async_tensor_parallel):
         import torch
         import torch.distributed._symmetric_memory as symm_module
         import torch.distributed.distributed_c10d as c10d
+        from torchtitan.tools.logging import logger
 
-        if not self.titan_config.parallelism.enable_async_tensor_parallel:
+        if not enable_async_tensor_parallel:
             return
 
         try:
@@ -131,28 +133,44 @@ class TorchTitanPretrainTrainer(BaseModule):
                 group_name: str,
                 return_A: bool,
             ) -> tuple[Optional[torch.Tensor], list[torch.Tensor]]:
-                assert A_scale is None, "fused_all_gather_matmul not support for fp8"
 
                 layouts = ["NN" for _ in range(len(Bs))]
                 group = c10d._resolve_process_group(group_name)
                 gemm_streams = [torch.cuda.current_stream()]
                 comm_streams = get_backend_stream(size=group.size() - 1, priority=0, prefix="comm")
-
                 copy_streams = get_backend_stream(size=1, priority=0, prefix="copy")
-                A, outputs = pt.ops.fused_all_gather_matmul(
-                    A_shard,
-                    Bs,
-                    layouts,
-                    gather_dim=gather_dim,
-                    group_name=group_name,
-                    gemm_streams=gemm_streams,
-                    comm_streams=comm_streams,
-                    copy_streams=copy_streams,
-                    comm_method="pipeline",
-                    num_splits=4,
-                    return_A=return_A,
-                    out_dtypes=out_dtypes,
-                )
+
+                if A_scale is not None:
+                    A, outputs = pt.ops.fused_all_gather_scaled_matmul(
+                        A_shard,
+                        Bs,
+                        layouts,
+                        A_scale,
+                        kwargs_list,
+                        gather_dim=gather_dim,
+                        group_name=group_name,
+                        out_dtypes=out_dtypes,
+                        gemm_streams=gemm_streams,
+                        comm_streams=comm_streams,
+                        copy_streams=copy_streams,
+                        comm_method="pipeline",
+                        num_splits=4,
+                    )
+                else:
+                    A, outputs = pt.ops.fused_all_gather_matmul(
+                        A_shard,
+                        Bs,
+                        layouts,
+                        gather_dim=gather_dim,
+                        group_name=group_name,
+                        gemm_streams=gemm_streams,
+                        comm_streams=comm_streams,
+                        copy_streams=copy_streams,
+                        comm_method="pipeline",
+                        num_splits=4,
+                        return_A=return_A,
+                        out_dtypes=out_dtypes,
+                    )
 
                 return A, outputs
 
@@ -168,7 +186,7 @@ class TorchTitanPretrainTrainer(BaseModule):
             ) -> torch.Tensor:
                 comm_method = "pipeline"
                 group = c10d._resolve_process_group(group_name)
-                # Move the scatter_dim to the front and flatten the tensor into a 2D matrix
+
                 if comm_method == "pipeline":
                     gemm_streams = [torch.cuda.current_stream()]
                     comm_streams = get_backend_stream(size=group.size(), priority=0, prefix="comm")
@@ -177,7 +195,6 @@ class TorchTitanPretrainTrainer(BaseModule):
                     comm_streams = []
                 else:
                     raise ValueError(f"Only pipeline and tile supported, but {comm_method} provided")
-
                 rs_output = pt.ops.fused_matmul_reduce_scatter(
                     A,
                     B,
@@ -189,12 +206,58 @@ class TorchTitanPretrainTrainer(BaseModule):
                     comm_streams=comm_streams,
                     comm_method=comm_method,
                     num_splits=4,
+                    enable_sdma=True,
                     out_dtype=out_dtype,
                 )
                 return rs_output.contiguous()
 
+            def _fused_scaled_matmul_reduce_scatter_impl(
+                mm_out_op: torch._ops.OpOverload,
+                A: torch.Tensor,
+                B: torch.Tensor,
+                A_scale: torch.Tensor,
+                kwargs: dict[str, Any],
+                out_dtype: torch.dtype | None,
+                reduce_op: str,
+                orig_scatter_dim: int,
+                scatter_dim_after_maybe_reshape: int,
+                group_name: str,
+                output_shape: list[int],
+            ) -> torch.Tensor:
+                comm_method = "pipeline"
+                group = c10d._resolve_process_group(group_name)
+
+                if comm_method == "pipeline":
+                    gemm_streams = [torch.cuda.current_stream()]
+                    comm_streams = get_backend_stream(size=group.size(), priority=0, prefix="comm")
+                elif comm_method == "tile":
+                    gemm_streams = []
+                    comm_streams = []
+                else:
+                    raise ValueError(f"Only pipeline and tile supported, but {comm_method} provided")
+                rs_output = pt.ops.fused_scaled_matmul_reduce_scatter(
+                    A,
+                    B,
+                    layout="NN",
+                    A_scale=A_scale,
+                    kwargs=kwargs,
+                    reduce_op=reduce_op,
+                    orig_scatter_dim=orig_scatter_dim,
+                    scatter_dim_after_maybe_reshape=scatter_dim_after_maybe_reshape,
+                    group_name=group_name,
+                    output_shape=output_shape,
+                    out_dtype=out_dtype,
+                    gemm_streams=gemm_streams,
+                    comm_streams=comm_streams,
+                    comm_method=comm_method,
+                    num_splits=4,
+                    enable_sdma=True,
+                )
+                return rs_output
+
             symm_module._fused_all_gather_matmul_impl = _fused_all_gather_matmul_impl
             symm_module._fused_matmul_reduce_scatter_impl = _fused_matmul_reduce_scatter_impl
+            symm_module._fused_scaled_matmul_reduce_scatter_impl = _fused_scaled_matmul_reduce_scatter_impl
             logger.warning(f"TorchtitanPretrainTrainer: Patch Async TP")
 
         except ImportError as e:

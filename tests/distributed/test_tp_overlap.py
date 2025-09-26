@@ -5,12 +5,19 @@
 ###############################################################################
 import functools
 from contextlib import contextmanager
+from copy import deepcopy
 
 import torch
 import torch.distributed as dist
 import transformer_engine as te
 import transformer_engine_torch as tex
 from megatron.core.utils import is_te_min_version
+from torch._inductor.utils import run_and_get_triton_code
+from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import Shard
+from torch.distributed.tensor.parallel import parallelize_module
+from torch.distributed.tensor.parallel.style import ColwiseParallel, RowwiseParallel
 from torch.testing._internal.common_distributed import (
     MultiProcessTestCase,
     skip_if_lt_x_gpu,
@@ -29,6 +36,7 @@ from primus.backends.transformer_engine.pytorch.module.base import (
 )
 from primus.core.utils import logger
 from primus.modules.module_utils import set_logging_rank
+from primus.modules.trainer.torchtitan.pre_trainer import TorchTitanPretrainTrainer
 
 
 @contextmanager
@@ -153,6 +161,79 @@ def te_linear(
     out.backward(grad_output)
 
     return (out, inp.grad, model.weight.grad)
+
+
+class ToyModel(torch.nn.Module):
+    def __init__(self, in_features, out_features):
+        super(ToyModel, self).__init__()
+        self.w1 = torch.nn.Linear(in_features, out_features, bias=False)
+
+    def forward(self, x):
+        return self.w1(x)
+
+
+def torch_linear(seed, batch_size, seqlen, in_features, out_features, enable_fp8=False, **cfg):
+    torch.manual_seed(seed)
+    tp_size = cfg["tp_size"]
+    dtype = cfg.get("dtype", torch.bfloat16)
+    parallel_mode = cfg.get("parallel_mode", "row")
+    patch = cfg.get("patch", False)
+    tp_mesh = init_device_mesh("cuda", (tp_size,))
+    model = ToyModel(in_features, out_features).to("cuda")
+
+    if enable_fp8:
+
+        from torchao.float8 import Float8LinearConfig, convert_to_float8_training
+        from torchao.float8.float8_tensor_parallel import (
+            Float8ColwiseParallel,
+            Float8RowwiseParallel,
+        )
+
+        rowwise_parallel, colwise_parallel = (
+            Float8RowwiseParallel,
+            Float8ColwiseParallel,
+        )
+
+        model = convert_to_float8_training(
+            model,
+            config=Float8LinearConfig(emulate=False),
+        )
+    else:
+        rowwise_parallel, colwise_parallel = (
+            RowwiseParallel,
+            ColwiseParallel,
+        )
+        model = model.to(dtype)
+
+    if parallel_mode == "column":
+        inp_shape = (batch_size * seqlen // tp_size, in_features)
+        grad_out_shape = (batch_size * seqlen, out_features // tp_size)
+        sharded_parallel = {"w1": colwise_parallel(input_layouts=Shard(0))}
+    else:
+        inp_shape = (batch_size * seqlen, in_features // tp_size)
+        grad_out_shape = (batch_size * seqlen // tp_size, in_features)
+        sharded_parallel = {"w1": rowwise_parallel(output_layouts=Shard(0))}
+    parallelize_mod = parallelize_module(deepcopy(model), tp_mesh, sharded_parallel)
+
+    # torch._dynamo.reset()
+    parallelize_mod = torch.compile(parallelize_mod)
+
+    inp = torch.rand(inp_shape, dtype=dtype, device="cuda", requires_grad=True)
+    grad_output = torch.rand(grad_out_shape, dtype=dtype, device="cuda")
+    code = run_and_get_triton_code(parallelize_mod, inp)
+    if patch and parallel_mode == "column":
+        assert (
+            "fused_all_gather_scaled_matmul" in code or "fused_all_gather_matmul" in code
+        ), "Async TP not applied in columnwise linear"
+    elif patch and parallel_mode == "row":
+        assert (
+            "fused_scaled_matmul_reduce_scatter" in code or "fused_matmul_reduce_scatter" in code
+        ), "Async TP not applied in rowwise linear"
+
+    out = parallelize_mod(inp)
+    out.backward(grad_output)
+
+    return (out, inp.grad, parallelize_mod.w1.weight.grad)
 
 
 @instantiate_parametrized_tests
@@ -320,6 +401,48 @@ class TPOverlapTestCase(MultiProcessTestCase):
                 enable_fp8=True,
                 **cfg
             )
+
+        for base_out, patch_out in zip(base_outputs, patch_outputs):
+            torch.testing.assert_close(base_out, patch_out, atol=1e-2, rtol=1e-2)
+
+    @skip_if_lt_x_gpu(2)
+    @parametrize("out_features", [4096])
+    @parametrize("in_features", [4096])
+    @parametrize("seqlen", [8192])
+    @parametrize("batch_size", [1])
+    @parametrize("parallel_mode", ["column", "row"])
+    @parametrize("dtype", [torch.bfloat16])
+    @parametrize("enable_fp8", [True, False])
+    def test_torch_linear(
+        self,
+        batch_size,
+        seqlen,
+        in_features,
+        out_features,
+        parallel_mode,
+        enable_fp8,
+        dtype,
+    ):
+        self._init_process()
+        group = dist.group.WORLD
+        rank = self.rank
+        seed = 42 + rank
+
+        cfg = {
+            "tp_size": self.world_size,
+            "parallel_mode": parallel_mode,
+            "dtype": dtype,
+            "tp_group": group,
+            "patch": False,
+        }
+
+        base_outputs = torch_linear(seed, batch_size, seqlen, in_features, out_features, enable_fp8, **cfg)
+        cfg["patch"] = True
+
+        TorchTitanPretrainTrainer.patch_torch_async_tp(True)
+        enable_symm_mem_for_group(group.group_name)
+        torch._inductor.config._micro_pipeline_tp = True
+        patch_outputs = torch_linear(seed, batch_size, seqlen, in_features, out_features, enable_fp8, **cfg)
 
         for base_out, patch_out in zip(base_outputs, patch_outputs):
             torch.testing.assert_close(base_out, patch_out, atol=1e-2, rtol=1e-2)
