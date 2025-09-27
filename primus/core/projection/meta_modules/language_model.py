@@ -7,7 +7,10 @@
 from primus.core.projection.meta_modules.base_meta_module import BaseMetaModule
 
 
-class TransformerLayerMM(BaseMetaModule):
+class LanguageModelMM(BaseMetaModule):
+    def __init__(self, name: str):
+        self.name = name
+
     # -------- Parameter related --------
     @abstractmethod
     def estimated_num_params(self) -> int:
