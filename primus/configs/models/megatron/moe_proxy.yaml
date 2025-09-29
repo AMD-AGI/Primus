@@ -1,0 +1,24 @@
+bases:
+  - deepseek_v2_base.yaml
+
+tokenizer_type: DeepSeekV2Tokenizer
+tokenizer_model: deepseek-ai/DeepSeek-V2-Lite
+
+multi_latent_attention: false
+apply_rope_fusion: true
+
+# model
+num_layers: 64
+hidden_size: 4096
+ffn_hidden_size: 10944 # not used in moe layer
+num_attention_heads: 64
+group_query_attention: true
+num_query_groups: 8
+kv_channels: 62
+
+# moe
+moe_layer_freq: 1
+num_experts: 1024
+# num_shared_experts: 1
+moe_ffn_hidden_size: 256
+moe_shared_expert_intermediate_size: 256 # num_shared_experts * moe_ffn_hidden_size
