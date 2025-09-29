@@ -12,6 +12,7 @@ dtype = torch.bfloat16
 # moe_ffn = 4096/2048/1024/512/256,
 # num_experts_per_rank=8/16/32/64/128
 
+topk = 16
 ep = 8
 hidden_size = 4096
 seq = 4096
@@ -24,10 +25,11 @@ for i in range(len(num_experts)):
     num_experts_per_rank = num_experts[i] // ep
     moe_ffn = moe_ffns[i]
 
+    num_tokens = seq * topk
     group_lens = torch.tensor(
-        [seq // num_experts_per_rank] * num_experts_per_rank, dtype=torch.long, device=device
+        [num_tokens // num_experts_per_rank] * num_experts_per_rank, dtype=torch.long, device=device
     )
-    M = seq
+    M = num_tokens
     K = hidden_size
     G = num_experts_per_rank
     N = moe_ffn
