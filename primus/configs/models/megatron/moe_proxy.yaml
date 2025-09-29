@@ -8,7 +8,7 @@ multi_latent_attention: false
 apply_rope_fusion: true
 
 # model
-num_layers: 64
+num_layers: 32 # full 64
 hidden_size: 4096
 ffn_hidden_size: 10944 # not used in moe layer
 num_attention_heads: 64
