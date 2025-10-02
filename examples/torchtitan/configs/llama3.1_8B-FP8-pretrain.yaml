@@ -23,7 +23,7 @@ modules:
         log_freq: 1
 
       training:
-        batch_size: 8
+        batch_size: 4
         compile: true
         steps: 50
 
