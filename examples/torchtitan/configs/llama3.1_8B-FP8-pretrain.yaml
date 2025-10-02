@@ -23,12 +23,12 @@ modules:
         log_freq: 1
 
       training:
-        batch_size: 19
+        batch_size: 8
         compile: true
         steps: 50
 
       activation_checkpoint:
-        mode: "full"  # ["none", "selective", "full"]
+        mode: "none"  # ["none", "selective", "full"]
         selective_ac_option: "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
 
       float8:
