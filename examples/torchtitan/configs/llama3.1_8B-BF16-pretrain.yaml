@@ -16,7 +16,7 @@ modules:
       stderr_sink_level: INFO
 
       metrics:
-        log_freq: 1
+        log_freq: 10
         enable_wandb: false
 
       lr_scheduler:
