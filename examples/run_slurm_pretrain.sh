@@ -44,6 +44,7 @@ srun -N "${NNODES}" \
      --account=amd-rccl \
      --partition=amd-rccl \
      --gres=gpu:8 \
+     -t 03:00:00 \
      bash -c "
           readarray -t node_array < <(scontrol show hostnames \"\$SLURM_JOB_NODELIST\")
           if [ \"\$SLURM_NODEID\" = \"0\" ]; then
