@@ -5,20 +5,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-#SBATCH --job-name=multinode-torchtitan              # Job name
-#SBATCH --nodes=2                                    # Number of nodes
-#SBATCH --ntasks-per-node=1                          # One task (process) per node
-#SBATCH --cpus-per-task=128                          # Adjust based on your node's CPU count
-#SBATCH --gres=gpu:8                                 # Assuming 8 GPUs per node, adjust if different
-#SBATCH --mem=0                                      # Use all available memory
-#SBATCH --time=00-03:00:00                           # Maximum runtime in DD-HH:MM:SS
-#SBATCH --output=slurm_log/%x-%j.out                 # Standard output log
-#SBATCH --error=slurm_log/%x-%j.err                  # Standard error log
-#	#SBATCH --partition=AIG_Models
-#SBATCH --partition=amd-rccl
-#SBATCH --account=amd-rccl
-#SBATCH --exclusive 
-
 if [[ "$1" == "--help" || "$1" == "-h" ]]; then
 cat <<EOF
 Usage: run_slurm_pretrain.sh
@@ -54,7 +40,10 @@ mkdir -p "$LOG_DIR"
 srun -N "${NNODES}" \
      --exclusive \
      --ntasks-per-node=1 \
-     --cpus-per-task="${CPUS_PER_TASK:-256}" \
+     --cpus-per-task="${CPUS_PER_TASK:-224}" \
+     --account=amd-rccl \
+     --partition=amd-rccl \
+     --gres=gpu:8 \
      bash -c "
           readarray -t node_array < <(scontrol show hostnames \"\$SLURM_JOB_NODELIST\")
           if [ \"\$SLURM_NODEID\" = \"0\" ]; then
