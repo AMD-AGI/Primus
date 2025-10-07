@@ -27,6 +27,7 @@ modules:
         batch_size: 19
         compile: true
         steps: 50
+        dataset: "c4"
 
       activation_checkpoint:
         mode: "full"  # ["none", "selective", "full"]
