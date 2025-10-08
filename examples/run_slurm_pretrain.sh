@@ -40,10 +40,7 @@ mkdir -p "$LOG_DIR"
 srun -N "${NNODES}" \
      --exclusive \
      --ntasks-per-node=1 \
-     --cpus-per-task="${CPUS_PER_TASK:-128}" \
-     --partition=AIG_Models \
-     --gres=gpu:8 \
-     -t 03:00:00 \
+     --cpus-per-task="${CPUS_PER_TASK:-256}" \
      bash -c "
           readarray -t node_array < <(scontrol show hostnames \"\$SLURM_JOB_NODELIST\")
           if [ \"\$SLURM_NODEID\" = \"0\" ]; then
@@ -71,7 +68,5 @@ srun -N "${NNODES}" \
           export TORCHTITAN_PATH=\${TORCHTITAN_PATH}
           export BACKEND_PATH=\${BACKEND_PATH}
           export PATH_TO_BNXT_TAR_PACKAGE=\${PATH_TO_BNXT_TAR_PACKAGE}
-	  docker ps
-	  rocm-smi
           bash ${SCRIPT_DIR}/run_local_pretrain.sh \"\$@\" 2>&1 | tee ${LOG_FILE}
      " bash "$@"
