@@ -399,14 +399,6 @@ def _get_sync_free_moe_options(stage: int) -> dict:
             "moe_permute_fusion": True,
             "use_turbo_grouped_mlp": True,
         },
-        3: {
-            "moe_use_fused_router_with_aux_score": True,
-            "enable_primus_turbo": True,
-            "use_turbo_deepep": True,
-            "moe_permute_fusion": True,
-            "use_turbo_grouped_mlp": True,
-            "use_turbo_groupmlp_act": True,
-        },
     }
 
     return sync_free_moe[stage]
@@ -431,9 +423,18 @@ def validate_args_on_rocm(args):
 
     # sync-free MoE
     if args.turbo_sync_free_moe_stage > 0:
+        assert args.enable_primus_turbo, "use `enable_primus_turbo=True` to enable sync-free MoE."
+
+        if args.turbo_sync_free_moe_stage > 2:
+            raise NotImplementedError("not support fully sync-free moe.")
+
         options = _get_sync_free_moe_options(args.turbo_sync_free_moe_stage)
-        print_rank_last("==== Enable Sync-Free MoE (Auto-Enable Options) ====")
-        for flag, value in options:
+        print_rank_last(
+            f"========== Enable Sync-Free MoE Stage {args.turbo_sync_free_moe_stage} (Auto-Enabled Options) =========="
+        )
+        for flag, value in options.items():
             print_rank_last(f"{flag}={value}")
             setattr(args, flag, value)
-        print_rank_last("==== Enable Sync-Free MoE ====")
+        print_rank_last(
+            f"========== Enable Sync-Free MoE Stage {args.turbo_sync_free_moe_stage} (Auto-Enabled Options) =========="
+        )

@@ -5,7 +5,6 @@ enable_primus_turbo: false
 use_turbo_attention: false
 use_turbo_parallel_linear: false
 use_turbo_grouped_mlp: false
-use_turbo_groupmlp_act: false
 moe_use_fused_router_with_aux_score: false
 
 
