@@ -1571,7 +1571,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     repeat=1,
                 ),
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    args.tensorboard_dir, worker_name=worker_name, use_gzip=args.torch_profiler_use_gzip
+                    args.tensorboard_dir,
+                    worker_name=worker_name,
+                    use_gzip=args.torch_profiler_use_gzip,
                 ),
                 record_shapes=args.torch_profiler_record_shapes,
                 with_stack=args.torch_profiler_with_stack,
