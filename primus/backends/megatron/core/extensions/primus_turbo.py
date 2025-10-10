@@ -754,31 +754,46 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
+        args = get_args()
+        gemm_kargs = [dict(), dict()]
         if permuted_local_hidden_states.nelement() != 0:
             # Reshape the weights for the grouped GEMMs.
-            w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
-            w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
+            if args.patch_zero_bubble and args.enable_zero_bubble:
+                w1 = self.weight1
+                w2 = self.weight2
+
+                gemm_kargs[0]["weight_reshape_size"] = (self.num_local_experts, self.config.hidden_size, -1)
+                gemm_kargs[1]["weight_reshape_size"] = (self.num_local_experts, -1, self.config.hidden_size)
+            else:
+                w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
+                w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
 
             tokens_per_expert = tokens_per_expert.cuda()
             assert w1.is_contiguous(), "w1 must be contiguous"
             assert w2.is_contiguous(), "w2 must be contiguous"
-            fc1_output = self.grouped_gemm(permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False)
+            fc1_output = self.grouped_gemm(
+                permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, **(gemm_kargs[0])
+            )
             if self.activation_recompute:
                 intermediate_parallel = self.activation_checkpoint.checkpoint(
                     self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
                 )
-                fc2_output = self.grouped_gemm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
+                fc2_output = self.grouped_gemm(
+                    intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
+                )
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
                 intermediate_parallel = self.activation_func_with_probs(
                     fc1_output, permuted_probs.unsqueeze(-1)
                 )
-                fc2_output = self.grouped_gemm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
+                fc2_output = self.grouped_gemm(
+                    intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
+                )
         else:
             # No token is allocated for local experts.
             assert torch.count_nonzero(tokens_per_expert) == 0
-
             # Make sure params of experts still have gradients even given zero tokens.
+            assert not args.patch_zero_bubble, "Zero bubble not support torch.matmul backend yet"
             w1 = self.weight1.view(self.config.hidden_size, -1)
             w2 = self.weight2.view(-1, self.config.hidden_size)
             h = torch.matmul(permuted_local_hidden_states, w1)
