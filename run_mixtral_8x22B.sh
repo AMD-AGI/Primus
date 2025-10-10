@@ -9,10 +9,10 @@ export GLOO_SOCKET_IFNAME="enp193s0f1np1"
 
 export DOCKER_IMAGE="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"
 # export DOCKER_IMAGE="docker.io/rocm/7.0-preview:rocm7.0_preview_pytorch_training_mi35x_beta"
-export DOCKER_IMAGE="docker.io/rocm/pyt-megatron-lm-jax-nightly-private:pytorch_gfx950_20250819"
+# export DOCKER_IMAGE="docker.io/rocm/pyt-megatron-lm-jax-nightly-private:pytorch_gfx950_20250819"
 export CPUS_PER_TASK=96
 export HSA_NO_SCRATCH_RECLAIM=0 
-# export NVTE_CK_USES_BWD_V3=0
+export NVTE_CK_USES_BWD_V3=1
 
 export EXP="examples/megatron/configs/mixtral_8x22B_v0.1-pretrain.yaml"
 mkdir -p data
@@ -27,7 +27,7 @@ EP=8
 CP=1
 VPP=2
 OPTIMIZER=adam
-RECOMPUTE_LAYERS=56
+RECOMPUTE_LAYERS=8
 RECOMPUTE_ID_START=0
 BALANCE=True
 
@@ -40,7 +40,7 @@ if [ $VPP -gt 1 ]; then
     export VPP_CONFIG="--num_virtual_stages_per_pipeline_rank $VPP"
 fi
 
-export PRIMUS_WORKSPACE=output/llama3 
+export PRIMUS_WORKSPACE=output/mixtral_8x22B
 export PRIMUS_USER=qyy
 export PRIMUS_GROUP="date-$(date +%Y%m%d-%H%M%S)"
 export PRIMUS_EXP_NAME=$CONFIG

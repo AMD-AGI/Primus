@@ -12,7 +12,7 @@ export DOCKER_IMAGE="docker.io/rocm/7.0-preview:rocm7.0_preview_pytorch_training
 export DOCKER_IMAGE="docker.io/rocm/pyt-megatron-lm-jax-nightly-private:pytorch_gfx950_20250819"
 export CPUS_PER_TASK=96
 export HSA_NO_SCRATCH_RECLAIM=0 
-# export NVTE_CK_USES_BWD_V3=1
+export NVTE_CK_USES_BWD_V3=1
 
 export EXP="examples/megatron/configs/grok1-pretrain.yaml"
 mkdir -p data
@@ -40,7 +40,7 @@ if [ $VPP -gt 1 ]; then
     export VPP_CONFIG="--num_virtual_stages_per_pipeline_rank $VPP"
 fi
 
-export PRIMUS_WORKSPACE=output/llama3 
+export PRIMUS_WORKSPACE=output/grok1 
 export PRIMUS_USER=qyy
 export PRIMUS_GROUP="date-$(date +%Y%m%d-%H%M%S)"
 export PRIMUS_EXP_NAME=$CONFIG

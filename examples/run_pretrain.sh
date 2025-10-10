@@ -95,7 +95,7 @@ if [ ! -f "${EXP}" ]; then
     exit 1
 fi
 
-TMP_BUILD_DIR="${PRIMUS_PATH}/build/${HOSTNAME}"
+TMP_BUILD_DIR="$PRIMUS_BUILD_DIR/${HOSTNAME}"
 mkdir -p "$TMP_BUILD_DIR"
 # Collect environment info for cache tagging
 OS_VER=$(grep ^PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"' | tr ' ' '_' | tr -d '()')
@@ -111,6 +111,7 @@ KERNEL_VER=$(uname -r | tr '.' '_' | tr '-' '_')
 # Note: Disable the AITer cache directory, as it may cause a core dump in RoPE fusion.
 CACHE_TAG="${OS_VER}_py${PY_VER}_rocm${ROCM_VER}_amdgpu${AMDGPU_VER}_kernel${KERNEL_VER}_${HOSTNAME}"
 export AITER_JIT_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}_aiter_cache"
+echo "AITER_JIT_DIR: $AITER_JIT_DIR"
 
 
 TRAIN_LOG=${TRAIN_LOG:-"output/log_torchrun_pretrain_$(basename "$EXP" .yaml).txt"}

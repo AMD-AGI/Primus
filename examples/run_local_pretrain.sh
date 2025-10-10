@@ -43,7 +43,9 @@ DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/megatron-lm:v25.8_py310"}
 
 # Project root
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
-
+# Primus build directory
+PRIMUS_BUILD_DIR=${PRIMUS_BUILD_DIR:-"/tmp/primus/build"} # by
+mkdir -p $PRIMUS_BUILD_DIR
 # Dataset directory
 # DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 DATA_PATH=${DATA_PATH:-"$(pwd)/data"}
@@ -93,11 +95,13 @@ if [ "$USING_AINIC" == "1" ]; then
         -v "$ANP_HOME_DIR":"$ANP_HOME_DIR"
         -v /etc/libibverbs.d/:/etc/libibverbs.d
         -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/
+        -v $PRIMUS_BUILD_DIR/:$PRIMUS_BUILD_DIR/
     )
 else
     VOLUME_ARGS+=(
         -v "$PRIMUS_PATH":"$PRIMUS_PATH" 
         -v "$DATA_PATH":"$DATA_PATH"
+        -v $PRIMUS_BUILD_DIR/:$PRIMUS_BUILD_DIR/
     )
 fi
 
@@ -147,6 +151,7 @@ docker_podman_proxy run --rm \
     --env USING_AINIC \
     --env RCCL_HOME_DIR="$RCCL_HOME_DIR" \
     --env ANP_HOME_DIR="$ANP_HOME_DIR" \
+    --env PRIMUS_BUILD_DIR="$PRIMUS_BUILD_DIR" \
     --env REBUILD_BNXT \
     --env PATH_TO_BNXT_TAR_PACKAGE \
     --env MEGATRON_PATH \

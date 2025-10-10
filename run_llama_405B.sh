@@ -23,7 +23,7 @@ export NNODES=4
 export HF_TOKEN=${HF_TOKEN:="your_hf_token"}
 
 
-export PRIMUS_WORKSPACE=output/llama3 
+export PRIMUS_WORKSPACE=output/llama3-405B 
 export PRIMUS_USER=qyy
 export PRIMUS_GROUP="date-$(date +%Y%m%d-%H%M%S)"
 export PRIMUS_EXP_NAME=llama3.1_405B-FP8-pretrain
