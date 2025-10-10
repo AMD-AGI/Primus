@@ -46,10 +46,10 @@ Examples:
     primus-cli slurm sbatch --host -N 1 -- train pretrain ...
 
 Notes:
-- [--] is required: it separates Primus launcher options (mode/mode-args) from Python CLI arguments.
-- All arguments after [--] are passed to the Primus Python CLI (see 'primus-cli direct -- --help').
-- For detailed documentation on each mode, use the '--help' flag after the mode name.
-- Primus CLI supports both training and benchmarking with Megatron, TorchTitan, and ROCm-optimized backends.
+    - [--] is required: it separates Primus launcher options (mode/mode-args) from Python CLI arguments.
+    - All arguments after [--] are passed to the Primus Python CLI (see 'primus-cli direct -- --help').
+    - For detailed documentation on each mode, use the '--help' flag after the mode name.
+    - Primus CLI supports both training and benchmarking with Megatron, TorchTitan, and ROCm-optimized backends.
 
 To see all supported Primus Python CLI commands and options:
     primus-cli direct -- --help
