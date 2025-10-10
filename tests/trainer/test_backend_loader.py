@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from primus.train import load_backend_trainer, setup_backend_path
+from primus.pretrain import load_backend_trainer, setup_backend_path
 
 
 @pytest.fixture
