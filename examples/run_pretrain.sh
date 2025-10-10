@@ -60,27 +60,6 @@ LOG_ERROR() {
     echo "[NODE-$NODE_RANK($HOSTNAME)] [ERROR] $*";
 }
 
-export MASTER_ADDR=${MASTER_ADDR:-localhost}
-export MASTER_PORT=${MASTER_PORT:-1234}
-export NNODES=${NNODES:-1}
-export NODE_RANK=${NODE_RANK:-0}
-export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
-
-
-LOG_INFO_RANK0 "==========Training cluster info=========="
-LOG_INFO_RANK0 "MASTER_ADDR: $MASTER_ADDR"
-LOG_INFO_RANK0 "MASTER_PORT: $MASTER_PORT"
-LOG_INFO_RANK0 "NNODES: $NNODES"
-LOG_INFO_RANK0 "NODE_RANK: $NODE_RANK"
-LOG_INFO_RANK0 "GPUS_PER_NODE: $GPUS_PER_NODE"
-LOG_INFO_RANK0 ""
-
-PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
-export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
-export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
-
-pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
-
 # -------------------- EXP Check --------------------
 if [ -z "${EXP:-}" ]; then
     LOG_ERROR "EXP must be specified (e.g., examples/megatron/exp_pretrain.yaml)." \
@@ -111,6 +90,30 @@ fi
 # Note: Disable the AITer cache directory, as it may cause a core dump in RoPE fusion.
 # CACHE_TAG="${OS_VER}_py${PY_VER}_rocm${ROCM_VER}_amdgpu${AMDGPU_VER}_kernel${KERNEL_VER}_${HOSTNAME}"
 # export AITER_JIT_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}_aiter_cache"
+
+
+PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
+export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
+export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
+
+export MASTER_ADDR=${MASTER_ADDR:-localhost}
+export MASTER_PORT=${MASTER_PORT:-1234}
+export NNODES=${NNODES:-1}
+export NODE_RANK=${NODE_RANK:-0}
+export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
+
+
+pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
+
+bash "$PRIMUS_PATH/examples/setup_turbo.sh"
+
+LOG_INFO_RANK0 "==========Training cluster info=========="
+LOG_INFO_RANK0 "MASTER_ADDR: $MASTER_ADDR"
+LOG_INFO_RANK0 "MASTER_PORT: $MASTER_PORT"
+LOG_INFO_RANK0 "NNODES: $NNODES"
+LOG_INFO_RANK0 "NODE_RANK: $NODE_RANK"
+LOG_INFO_RANK0 "GPUS_PER_NODE: $GPUS_PER_NODE"
+LOG_INFO_RANK0 ""
 
 
 TRAIN_LOG=${TRAIN_LOG:-"output/log_torchrun_pretrain_$(basename "$EXP" .yaml).txt"}
