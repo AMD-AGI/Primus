@@ -179,6 +179,7 @@ if [[ "$CMD" == "create" && -z "$EXP_PATH" ]]; then
 fi
 
 USER_NAME=$(whoami)
+USER_ID=$(echo -n "$USER_NAME" | md5sum | awk '{print $1}')
 CUR_DIR=$(pwd)
 
 
@@ -240,23 +241,23 @@ read -r -d '' INLINE_JSON <<EOF || true
 EOF
 
 curl_post() {
-    curl -s -H "Content-Type: application/json" -H "userId: $USER_NAME" -X POST -d "$INLINE_JSON" "$API_URL/api/v1/workloads"
+    curl -s -H "Content-Type: application/json" -H "userId: $USER_ID" -X POST -d "$INLINE_JSON" "$API_URL/api/v1/workloads"
 }
 
 curl_get() {
-    curl -s -H "userId: $USER_NAME" "$API_URL/api/v1/workloads/$1"
+    curl -s -H "userId: $USER_ID" "$API_URL/api/v1/workloads/$1"
 }
 
 curl_delete() {
-    curl -s -H "userId: $USER_NAME" -X DELETE "$API_URL/api/v1/workloads/$1"
+    curl -s -H "userId: $USER_ID" -X DELETE "$API_URL/api/v1/workloads/$1"
 }
 
 curl_list() {
-    curl -s -H "userId: $USER_NAME" "$API_URL/api/v1/workloads"
+    curl -s -H "userId: $USER_ID" "$API_URL/api/v1/workloads"
 }
 
 curl_nodes() {
-    curl -s -H "userId: $USER_NAME" "$API_URL/api/v1/nodes"
+    curl -s -H "userId: $USER_ID" "$API_URL/api/v1/nodes"
 }
 
 case "$CMD" in
