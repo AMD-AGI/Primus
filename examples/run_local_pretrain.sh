@@ -77,8 +77,28 @@ HOSTNAME=$(hostname)
 ARGS=("$@")
 
 VOLUME_ARGS=(-v "$PRIMUS_PATH":"$PRIMUS_PATH" -v "$DATA_PATH":"$DATA_PATH")
+# using bnxt
 if [[ -f "$PATH_TO_BNXT_TAR_PACKAGE" ]]; then
-    VOLUME_ARGS+=(-v "$PATH_TO_BNXT_TAR_PACKAGE":"$PATH_TO_BNXT_TAR_PACKAGE")
+    VOLUME_ARGS+=(
+        -v "$PATH_TO_BNXT_TAR_PACKAGE":"$PATH_TO_BNXT_TAR_PACKAGE"
+    )
+fi
+# using ainic
+if [ "$USING_AINIC" == "1" ]; then
+
+    VOLUME_ARGS=(
+        -v "$PRIMUS_PATH":"$PRIMUS_PATH" 
+        -v "$DATA_PATH":"$DATA_PATH"
+        -v "$RCCL_HOME_DIR":"$RCCL_HOME_DIR"
+        -v "$ANP_HOME_DIR":"$ANP_HOME_DIR"
+        -v /etc/libibverbs.d/:/etc/libibverbs.d
+        -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/
+    )
+else
+    VOLUME_ARGS+=(
+        -v "$PRIMUS_PATH":"$PRIMUS_PATH" 
+        -v "$DATA_PATH":"$DATA_PATH"
+    )
 fi
 
 export CLEAN_DOCKER_CONTAINER=${CLEAN_DOCKER_CONTAINER:-0}
@@ -108,6 +128,7 @@ if [[ "${CLEAN_DOCKER_CONTAINER:-0}" == "1" ]]; then
     fi
 fi
 
+docker_podman_proxy stop $(docker_podman_proxy ps -aq) || true
 # ------------------ Launch Training Container ------------------
 docker_podman_proxy run --rm \
     --env MASTER_ADDR \
@@ -123,6 +144,9 @@ docker_podman_proxy run --rm \
     --env GPU_MAX_HW_QUEUES \
     --env GLOO_SOCKET_IFNAME \
     --env NCCL_SOCKET_IFNAME \
+    --env USING_AINIC \
+    --env RCCL_HOME_DIR="$RCCL_HOME_DIR" \
+    --env ANP_HOME_DIR="$ANP_HOME_DIR" \
     --env REBUILD_BNXT \
     --env PATH_TO_BNXT_TAR_PACKAGE \
     --env MEGATRON_PATH \

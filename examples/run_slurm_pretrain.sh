@@ -68,5 +68,8 @@ srun -N "${NNODES}" \
           export TORCHTITAN_PATH=\${TORCHTITAN_PATH}
           export BACKEND_PATH=\${BACKEND_PATH}
           export PATH_TO_BNXT_TAR_PACKAGE=\${PATH_TO_BNXT_TAR_PACKAGE}
+          export RCCL_HOME_DIR=\${RCCL_HOME_DIR}
+          export ANP_HOME_DIR=\${ANP_HOME_DIR}
+          export USING_AINIC=\${USING_AINIC}
           bash ${SCRIPT_DIR}/run_local_pretrain.sh \"\$@\" 2>&1 | tee ${LOG_FILE}
      " bash "$@"

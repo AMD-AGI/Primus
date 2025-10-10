@@ -62,3 +62,12 @@ modules:
       overlap_param_gather: true
       gradient_accumulation_fusion: true
       overlap_grad_reduce: true
+
+      # use_torch_fsdp2: true
+      # use_distributed_optimizer: false
+      # overlap_param_gather: false
+      # ckpt_format: torch_dist
+      # sequence_parallel: 1
+      # gradient_accumulation_fusion: false
+
+      fp8: hybrid

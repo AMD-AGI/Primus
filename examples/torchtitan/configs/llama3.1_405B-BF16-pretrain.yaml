@@ -16,14 +16,18 @@ modules:
       stderr_sink_level: INFO
 
       training:
-        batch_size: 2
+        batch_size: 1
         compile: true
+        steps: 10
+
+      metrics:
+        log_freq: 1
 
       optimizer:
         lr: 8e-5
 
       parallelism:
-        tensor_parallel_degree: 8
+        tensor_parallel_degree: 1
 
       activation_checkpoint:
         mode: full
