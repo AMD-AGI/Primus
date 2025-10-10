@@ -10,6 +10,8 @@
 import dataclasses
 from typing import List
 
+from megatron.training.global_vars import get_args
+
 from primus.modules.module_utils import log_rank_all
 
 from .communication import (
@@ -74,9 +76,10 @@ def viz_node(node: ScheduledNode):
 
 
 def print_schedule(res):
-    for nodes in res:
-        ns = " ".join(map(viz_node, nodes))
-        log_rank_all(ns)
+    if get_args().debug_scheduler_table:
+        for nodes in res:
+            ns = " ".join(map(viz_node, nodes))
+            log_rank_all(ns)
 
 
 def pre_validate(local_order: List[List[ScheduledNode]]):

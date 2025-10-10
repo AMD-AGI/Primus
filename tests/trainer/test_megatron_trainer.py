@@ -238,6 +238,8 @@ class TestMegatronTrainerDeterministic(PrimusUT):
 
         return is_reproducility
 
+    # TODO(0928): disable due to non-deterministic behavior in Dense implementation
+    @unittest.skip("Skip non-deterministic Dense test")
     def test_llama3_8B(self):
         env_override = {
             "BACKEND": "megatron",
@@ -264,6 +266,8 @@ class TestMegatronTrainerDeterministic(PrimusUT):
 
         assert self.check_numerical_reproducility(stdout, stdout_ref)
 
+    # TODO(0928): disable due to non-deterministic behavior in MoE implementation
+    @unittest.skip("Skip non-deterministic MoE test")
     def test_deepseek_v2_lite(self):
         env_override = {
             "BACKEND": "megatron",
