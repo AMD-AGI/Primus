@@ -25,7 +25,9 @@ def log(msg, level="INFO"):
 def main():
     parser = argparse.ArgumentParser(description="Primus Backend Preparation Entry")
     parser.add_argument("--config", required=True, help="Path to experiment YAML config file")
-    parser.add_argument("--data_path", required=True, help="Root directory for datasets and tokenizer")
+    parser.add_argument(
+        "--data_path", type=str, default="./data/", help="Root directory for datasets and tokenizer"
+    )
     parser.add_argument(
         "--patch_args",
         type=str,
@@ -38,7 +40,7 @@ def main():
         default=None,
         help="Optional path to backend (e.g., Megatron), will be added to PYTHONPATH",
     )
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
 
     primus_path = Path.cwd()
     patch_args_path = Path(args.patch_args).resolve()
@@ -81,6 +83,8 @@ def main():
 
     if args.backend_path:
         cmd += ["--backend_path", args.backend_path]
+
+    cmd += unknown
     try:
         subprocess.run(
             cmd,
