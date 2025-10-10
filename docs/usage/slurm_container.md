@@ -1,71 +1,60 @@
 # Slurm & Container Usage
 
-Primus supports running distributed training jobs via Slurm as well as containerized workflows using Docker or Podman.
+Primus supports **distributed training on Slurm clusters** and **containerized workflows** (Docker/Podman).
+This page provides practical examples and tips.
 
 ---
 
-## 🖥️ Slurm Cluster Launch
+## 🖥️ Slurm Cluster Training
 
-### Interactive Mode (srun)
+Primus integrates with Slurm to automatically launch jobs inside containers.
+By default, the ROCm image `rocm/megatron-lm:v25.8_py310` is used unless you specify another one.
 
-Use `srun` for interactive multi-node training:
+### Interactive Run (`srun`)
 
 ```bash
-primus-cli slurm srun -N 4 -p AIG_Model -- train --config ./exp.yaml
+primus-cli slurm srun -N 4 -p AIG_Model --     train pretrain --config ./examples/megatron/configs/llama3_8B-pretrain.yaml
 ```
 
 - `-N 4`: number of nodes
-- `-p AIG_Model`: specify Slurm partition
+- `-p AIG_Model`: Slurm partition
 
-### Batch Mode (sbatch)
-
-Create a batch script:
+### Batch Run (`sbatch`)
 
 ```bash
-#!/bin/bash
-#SBATCH --job-name=primus-llama
-#SBATCH --nodes=8
-#SBATCH --ntasks-per-node=8
-#SBATCH --partition=AIG_Model
-#SBATCH --output=primus-%j.out
-
-module load rocm/6.4
-
-primus-cli direct -- train --config /mnt/data/exp.yaml
+primus-cli slurm sbatch -N 8 -p AIG_Model --     train pretrain --config ./examples/megatron/configs/llama3_8B-pretrain.yaml
 ```
 
-Submit it with:
-
-```bash
-sbatch run_slurm_job.sh
-```
+Logs will be written to the Slurm output file (`slurm-%j.out`).
 
 ---
 
 ## 🐳 Container Mode (Docker / Podman)
 
-Primus supports launching training jobs inside containers for reproducibility and portability.
+Primus can also be run inside user-managed containers, useful for debugging, custom mounts, or environment variables.
+
+### Run with Mounts
 
 ```bash
-primus-cli container --mount /mnt/data:/data -- train --config /data/exp.yaml
+primus-cli container --mount /mnt/data:/data --     train pretrain --config /data/exp.yaml
 ```
 
-- `--mount`: bind host directory into the container
-- You may mount multiple volumes using repeated `--mount`
+- `--mount host_dir:container_dir` → bind host directories (datasets, configs, outputs).
+- Multiple mounts can be specified by repeating `--mount`.
 
-### Passing Environment Variables
+### Pass Environment Variables
 
 ```bash
-primus-cli container --env MASTER_ADDR=10.1.1.1 -- train --config /data/exp.yaml
+primus-cli container --env MASTER_ADDR=10.1.1.1 --     train pretrain --config /data/exp.yaml
 ```
 
 ---
 
 ## ✅ Best Practices
 
-- Always ensure mounted paths exist (`mkdir -p`)
-- For distributed jobs, ensure consistent NCCL/MASTER_ADDR settings
-- Use `--debug` to print expanded CLI commands and envs
+- Ensure mounted paths exist (`mkdir -p /mnt/data`).
+- For multi-node training, set `MASTER_ADDR` consistently across nodes.
+- Use `--debug` with `primus-cli` to print expanded commands and environment.
 
 ---
 
@@ -73,4 +62,5 @@ primus-cli container --env MASTER_ADDR=10.1.1.1 -- train --config /data/exp.yaml
 
 - [Quickstart](../quickstart.md)
 - [CLI Usage](../cli.md)
-- [Experiment Configuration](../config/overview.md)
+- [Benchmark Overview](../benchmark/overview.md)
+- [FAQ](../faq.md)
