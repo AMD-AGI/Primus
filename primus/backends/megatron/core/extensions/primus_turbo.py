@@ -324,6 +324,16 @@ class PrimusTurboRowParallelLinear(TELinear):
 
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
+        args = get_args()
+        if args.patch_zero_bubble and args.enable_zero_bubble:
+            from .zbpp_gemm import gemm_with_weight_gradient_store
+
+            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+        else:
+            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
+                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
+            )
+
         super().__init__(
             input_size=input_size,
             output_size=output_size,
@@ -380,7 +390,7 @@ class PrimusTurboRowParallelLinear(TELinear):
 
             out = fp8_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
         else:
-            out = pt.ops.gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None)
+            out = self.gemm(input_, weights)
 
         out = out.view(original_shape[0], original_shape[1], -1)
         if self.te_return_bias:
@@ -409,6 +419,17 @@ class PrimusTurboColumnParallelLinear(TELinear):
         if gather_output:
             raise ValueError("Transformer Engine linear layers do not support gather_output = True")
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
+
+        args = get_args()
+
+        if args.patch_zero_bubble and args.enable_zero_bubble:
+            from .zbpp_gemm import gemm_with_weight_gradient_store
+
+            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+        else:
+            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
+                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
+            )
 
         super().__init__(
             input_size=input_size,
@@ -467,7 +488,7 @@ class PrimusTurboColumnParallelLinear(TELinear):
 
             out = fp8_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
         else:
-            out = pt.ops.gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None)
+            out = self.gemm(input_, weights)
 
         out = out.view(original_shape[0], original_shape[1], -1)
         if self.te_return_bias:
@@ -503,6 +524,16 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
         disable_grad_reduce: bool = False,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
+
+        args = get_args()
+        if args.patch_zero_bubble and args.enable_zero_bubble:
+            from .zbpp_gemm import gemm_with_weight_gradient_store
+
+            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+        else:
+            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
+                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
+            )
 
         super().__init__(
             input_size,
@@ -549,7 +580,7 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
 
             out = fp8_gemm(input_, weight, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
         else:
-            out = pt.ops.gemm(input_, weight, trans_a=False, trans_b=True, out_dtype=None)
+            out = self.gemm(input_, weight)
         out = out.view(original_shape[0], original_shape[1], -1)
 
         return out, bias_tensor
@@ -596,6 +627,17 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         # ourselves. This way our forward always returns two values
         # and we don't have to deal with the zero length Tensor.
         self.te_return_bias = skip_bias_add and bias
+
+        args = get_args()
+        if args.patch_zero_bubble and args.enable_zero_bubble:
+
+            from .zbpp_gemm import gemm_with_weight_gradient_store
+
+            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+        else:
+            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
+                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
+            )
 
         super().__init__(
             in_features=input_size,
@@ -662,7 +704,7 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
 
             out = fp8_gemm(inp, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
         else:
-            out = pt.ops.gemm(inp, weights, trans_a=False, trans_b=True, out_dtype=None)
+            out = self.gemm(inp, weights)
 
         out = out.view(original_shape[0], original_shape[1], -1)
         if self.te_return_bias:
@@ -684,7 +726,13 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             config,
             model_comm_pgs,
         )
-        self.grouped_gemm = pt.ops.grouped_gemm
+        args = get_args()
+        if args.patch_zero_bubble and args.enable_zero_bubble:
+            from .zbpp_gemm import grouped_gemm_with_weight_gradient_store
+
+            self.grouped_gemm = grouped_gemm_with_weight_gradient_store
+        else:
+            self.grouped_gemm = pt.ops.grouped_gemm
 
     def forward(
         self,
@@ -706,31 +754,46 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
+        args = get_args()
+        gemm_kargs = [dict(), dict()]
         if permuted_local_hidden_states.nelement() != 0:
             # Reshape the weights for the grouped GEMMs.
-            w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
-            w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
+            if args.patch_zero_bubble and args.enable_zero_bubble:
+                w1 = self.weight1
+                w2 = self.weight2
+
+                gemm_kargs[0]["weight_reshape_size"] = (self.num_local_experts, self.config.hidden_size, -1)
+                gemm_kargs[1]["weight_reshape_size"] = (self.num_local_experts, -1, self.config.hidden_size)
+            else:
+                w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
+                w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
 
             tokens_per_expert = tokens_per_expert.cuda()
             assert w1.is_contiguous(), "w1 must be contiguous"
             assert w2.is_contiguous(), "w2 must be contiguous"
-            fc1_output = self.grouped_gemm(permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False)
+            fc1_output = self.grouped_gemm(
+                permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, **(gemm_kargs[0])
+            )
             if self.activation_recompute:
                 intermediate_parallel = self.activation_checkpoint.checkpoint(
                     self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
                 )
-                fc2_output = self.grouped_gemm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
+                fc2_output = self.grouped_gemm(
+                    intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
+                )
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
                 intermediate_parallel = self.activation_func_with_probs(
                     fc1_output, permuted_probs.unsqueeze(-1)
                 )
-                fc2_output = self.grouped_gemm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
+                fc2_output = self.grouped_gemm(
+                    intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
+                )
         else:
             # No token is allocated for local experts.
             assert torch.count_nonzero(tokens_per_expert) == 0
-
             # Make sure params of experts still have gradients even given zero tokens.
+            assert not args.patch_zero_bubble, "Zero bubble not support torch.matmul backend yet"
             w1 = self.weight1.view(self.config.hidden_size, -1)
             w2 = self.weight2.view(-1, self.config.hidden_size)
             h = torch.matmul(permuted_local_hidden_states, w1)

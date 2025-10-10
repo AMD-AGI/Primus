@@ -1,6 +1,6 @@
 work_group: ${TEAM:amd}
 user_name: ${USER:root}
-exp_name: ${EXP_NAME:llama3.1_8B-pretrain}
+exp_name: ${EXP_NAME:llama2_7B-pretrain}
 workspace: ./output
 
 modules:
@@ -9,7 +9,7 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: llama3.1_8B.yaml
+    model: llama2_7B.yaml
     overrides:
       # log
       wandb_project: "Primus_DeepSeek_Pretrain"
@@ -17,15 +17,17 @@ modules:
       # disable_tensorboard: false
       stderr_sink_level: DEBUG
 
+      eval_iters: 0
+
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 50
-      micro_batch_size: 2
-      global_batch_size: 128
+      train_iters: 3
+      micro_batch_size: 1
+      global_batch_size: 32
 
-      seq_length: 8192
-      max_position_embeddings: 8192
+      seq_length: 4096
+      max_position_embeddings: 4096
 
       lr: 1.0e-5
       min_lr: 0.0
@@ -39,13 +41,12 @@ modules:
       init_method_std: 0.008
       norm_epsilon: 1.0e-6
 
+      num_layers: ${PRIMUS_NUM_LAYERS:16}  
       # parallel
       tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 1
+      pipeline_model_parallel_size: 8
+      num_virtual_stages_per_pipeline_rank: 2
       expert_model_parallel_size: 1
-      overlap_grad_reduce: true
-      overlap_param_gather: true
-      gradient_accumulation_fusion: false
 
       # data
       mock_data: true
@@ -65,3 +66,19 @@ modules:
       no_save_rng: null
       disable_last_saving: true
       ckpt_format: torch
+
+      # Turbo
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: true
+
+      # transformer_impl: local
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      no_persist_layer_norm: true
+      create_attention_mask_in_dataloader: false
+      gradient_accumulation_fusion: true
+
+      patch_zero_bubble: true
+      enable_zero_bubble: true
+      zero_bubble_v_schedule: true

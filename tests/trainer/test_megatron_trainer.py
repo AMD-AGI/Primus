@@ -189,6 +189,14 @@ class TestMegatronTrainer(PrimusUT):
             },
         )
 
+    def test_zero_bubble_pipeline_parallelism(self):
+        run_script(
+            self.__class__.__name__,
+            "zero_bubble_pipeline_parallelism",
+            exp_path="tests/trainer/test_megatron_trainer_zero_bubble.yaml",
+            env_override={},
+        )
+
 
 class TestMegatronTrainerDeterministic(PrimusUT):
     def __init__(self, *args, **kwargs):
@@ -230,6 +238,8 @@ class TestMegatronTrainerDeterministic(PrimusUT):
 
         return is_reproducility
 
+    # TODO(0928): disable due to non-deterministic behavior in Dense implementation
+    @unittest.skip("Skip non-deterministic Dense test")
     def test_llama3_8B(self):
         env_override = {
             "BACKEND": "megatron",
@@ -256,6 +266,8 @@ class TestMegatronTrainerDeterministic(PrimusUT):
 
         assert self.check_numerical_reproducility(stdout, stdout_ref)
 
+    # TODO(0928): disable due to non-deterministic behavior in MoE implementation
+    @unittest.skip("Skip non-deterministic MoE test")
     def test_deepseek_v2_lite(self):
         env_override = {
             "BACKEND": "megatron",

@@ -3,7 +3,6 @@
 disable_tensorboard: true
 disable_wandb: true
 disable_compile_dependencies: true
-disable_profiler_activity_cpu: false
 # NOTE:
 # - If `use_rocm_mem_info = True`, ROCm memory information will be collected
 #   with `rocm-smi` at every iteration.
@@ -11,6 +10,12 @@ disable_profiler_activity_cpu: false
 #   at the iterations specified in `use_rocm_mem_info_iters`.
 use_rocm_mem_info: false
 use_rocm_mem_info_iters: [1,2]
+
+# profiling
+disable_profiler_activity_cpu: false
+torch_profiler_record_shapes: true
+torch_profiler_with_stack: true
+torch_profiler_use_gzip: true
 
 # continue/finetune
 auto_continue_train: false

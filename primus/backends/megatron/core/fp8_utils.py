@@ -10,6 +10,8 @@ from contextlib import nullcontext
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version
 
+from primus.modules.module_utils import warning_rank_0
+
 # Check if Transformer Engine is installed
 HAVE_TE = False
 try:
@@ -29,6 +31,11 @@ try:
 except (ImportError, ModuleNotFoundError):
     # Primus-Turbo not found
     pass
+
+
+SCALING_BLOCK_SIZE = 128
+
+WARN_ONCE = True
 
 
 if HAVE_TE and HAVE_TURBO:
@@ -95,31 +102,53 @@ if HAVE_TE and HAVE_TURBO:
                 raise ValueError("E4M3 and HYBRID are the only supported FP8 formats.")
 
             # Select TE fp8 recipe and turbo fp8 quant config
-            fp8_recipe = None
-            fp8_quant_config = None
+            fp8_recipe, fp8_recipe_none_reason = None, ""
+            fp8_quant_config, fp8_quant_config_none_reason = None, ""
             if config.fp8_recipe == Fp8Recipe.delayed:
                 fp8_recipe = TEDelayedScaling(
                     config=config,
                     fp8_format=fp8_format,
                     override_linear_precision=(False, False, not config.fp8_wgrad),
                 )
+                # NOTE: Primus-Turbo not support delayed scaling.
+                fp8_quant_config_none_reason = "Primus-Turbo not support delayed scaling."
             elif config.fp8_recipe == Fp8Recipe.tensorwise:
                 if is_te_min_version("2.2.0.dev0"):
                     fp8_recipe = transformer_engine.common.recipe.Float8CurrentScaling(fp8_format=fp8_format)
+                else:
+                    fp8_recipe_none_reason = "Transformer Engine version < 2.2.0.dev0."
                 fp8_quant_config = PrimusTurboFloat8QuantConfig(
                     granularity=ScalingGranularity.TENSORWISE, format=te_fp8_format_mapping(fp8_format)
                 )
             elif config.fp8_recipe == Fp8Recipe.blockwise:
                 if is_te_min_version("2.3.0.dev0"):
                     fp8_recipe = transformer_engine.common.recipe.Float8BlockScaling(fp8_format=fp8_format)
+                else:
+                    fp8_recipe_none_reason = "Transformer Engine version < 2.3.0.dev0."
                 fp8_quant_config = PrimusTurboFloat8QuantConfig(
                     granularity=ScalingGranularity.BLOCKWISE,
                     format=te_fp8_format_mapping(fp8_format),
-                    block_size=128,
+                    block_size=SCALING_BLOCK_SIZE,
                 )
             elif config.fp8_recipe == Fp8Recipe.mxfp8:
                 if is_te_min_version("2.1.0.dev0"):
                     fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(fp8_format=fp8_format)
+                else:
+                    fp8_recipe_none_reason = "Transformer Engine version < 2.1.0.dev0"
+                fp8_quant_config_none_reason = "Primus-Turbo not support MXFP8."
+
+            global WARN_ONCE
+            if WARN_ONCE:
+                if fp8_recipe is None:
+                    warning_rank_0(
+                        f"WARNING: TransformerEngine FP8 {config.fp8_recipe} not work since {fp8_recipe_none_reason}."
+                    )
+
+                if fp8_quant_config is None:
+                    warning_rank_0(
+                        f"WARNING: Primus-Turbo FP8 {config.fp8_recipe} not work since {fp8_quant_config_none_reason}."
+                    )
+                WARN_ONCE = False
 
             fp8_group = None
             if parallel_state.model_parallel_is_initialized():
