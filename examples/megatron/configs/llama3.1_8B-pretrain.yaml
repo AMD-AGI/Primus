@@ -65,3 +65,7 @@ modules:
       no_save_rng: null
       disable_last_saving: true
       ckpt_format: torch
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true

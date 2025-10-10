@@ -20,7 +20,7 @@ modules:
         warmup_steps: 10
 
       metrics:
-        log_freq: 1
+        log_freq: 10
 
       training:
         batch_size: 3
