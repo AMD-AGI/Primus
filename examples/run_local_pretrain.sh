@@ -151,6 +151,7 @@ docker_podman_proxy run --rm \
     --env USING_AINIC \
     --env RCCL_HOME_DIR="$RCCL_HOME_DIR" \
     --env ANP_HOME_DIR="$ANP_HOME_DIR" \
+    --env AINIC_LIB="$AINIC_LIB" \
     --env PRIMUS_BUILD_DIR="$PRIMUS_BUILD_DIR" \
     --env REBUILD_BNXT \
     --env PATH_TO_BNXT_TAR_PACKAGE \

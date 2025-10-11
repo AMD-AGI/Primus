@@ -2,6 +2,7 @@
 
 export USING_AINIC=1
 export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
+# export AINIC_LIB="/apps/gpuperf/ainic-driver-20251007/lib/"
 export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
 export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
 export NCCL_SOCKET_IFNAME="enp193s0f1np1"
@@ -17,17 +18,18 @@ export NVTE_CK_USES_BWD_V3=1
 export EXP="examples/megatron/configs/mixtral_8x22B_v0.1-pretrain.yaml"
 mkdir -p data
 # the real number of nodes to run
-export NNODES=4
-MBS=4
+export NNODES=8
+MBS=1
 TP=1
 ETP=1
-GBS=256
+GBS=$(($NNODES * 64))
+SEQ_LENGTH=8192
 PP=4
 EP=8
 CP=1
 VPP=2
 OPTIMIZER=adam
-RECOMPUTE_LAYERS=8
+RECOMPUTE_LAYERS=0
 RECOMPUTE_ID_START=0
 BALANCE=True
 
@@ -59,6 +61,7 @@ bash ./examples/run_slurm_pretrain.sh --micro_batch_size $MBS \
                                       --tensor_model_parallel_size $TP \
                                       --expert_tensor_parallel_size $ETP \
                                       --pipeline_model_parallel_size $PP \
+                                      --seq_length $SEQ_LENGTH \
                                       --expert_model_parallel_size $EP \
                                       --context_parallel_size $CP \
                                       --moe_router_force_load_balancing $BALANCE \

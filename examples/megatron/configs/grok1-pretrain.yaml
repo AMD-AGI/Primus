@@ -60,6 +60,7 @@ modules:
       moe_permute_fusion: false
       gradient_accumulation_fusion: false
       moe_use_legacy_grouped_gemm: true
+      apply_rope_fusion: false
 
       # ckpt
       finetune: false

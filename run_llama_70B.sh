@@ -16,19 +16,19 @@ export CPUS_PER_TASK=96
 export HSA_NO_SCRATCH_RECLAIM=0 
 export NVTE_CK_USES_BWD_V3=1
 
-export EXP="examples/torchtitan/configs/llama3.1_405B-FP8-pretrain.yaml"
+export EXP="examples/torchtitan/configs/llama3.1_70B-FP8-pretrain.yaml"
 mkdir -p data
 # the real number of nodes to run
-export NNODES=8
+export NNODES=4
 
 
 export HF_TOKEN=${HF_TOKEN:="your_hf_token"}
 
 
-export PRIMUS_WORKSPACE=output/llama3-405B 
+export PRIMUS_WORKSPACE=output/llama3-70B 
 export PRIMUS_USER=qyy
 export PRIMUS_GROUP="date-$(date +%Y%m%d-%H%M%S)"
-export PRIMUS_EXP_NAME=llama3.1_405B-FP8-pretrain
+export PRIMUS_EXP_NAME=llama3.1_70B-FP8-pretrain
 mkdir -p $PRIMUS_WORKSPACE
 
 

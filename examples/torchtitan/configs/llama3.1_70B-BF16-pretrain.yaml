@@ -23,7 +23,7 @@ modules:
         log_freq: 1
 
       training:
-        batch_size: 4
+        batch_size: 10
         compile: true
         steps: 50
 
@@ -35,4 +35,5 @@ modules:
 
       primus_turbo:
         enable_primus_turbo : true
+        use_turbo_attention: true
         enable_attention_float8 : false

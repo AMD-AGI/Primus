@@ -95,23 +95,28 @@ if [ ! -f "${EXP}" ]; then
     exit 1
 fi
 
-TMP_BUILD_DIR="$PRIMUS_BUILD_DIR/${HOSTNAME}"
-mkdir -p "$TMP_BUILD_DIR"
-# Collect environment info for cache tagging
-OS_VER=$(grep ^PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"' | tr ' ' '_' | tr -d '()')
-PY_VER=$(python3 -c 'import platform; print(platform.python_version())')
-ROCM_VER=$(/opt/rocm/bin/rocminfo | grep 'ROCm version' | head -1 | awk '{print $NF}' | tr -d '()')
-if [[ -f /proc/driver/amdgpu/version ]]; then
-    AMDGPU_VER=$(head -1 < /proc/driver/amdgpu/version | awk '{print $3}' | tr -d '()')
-else
-    AMDGPU_VER="unknown"
-fi
-KERNEL_VER=$(uname -r | tr '.' '_' | tr '-' '_')
+if [ "$USE_AITER_CACHE" == "1" ]; then
+    TMP_BUILD_DIR="$PRIMUS_BUILD_DIR/${HOSTNAME}"
+    mkdir -p "$TMP_BUILD_DIR"
+    # Collect environment info for cache tagging
+    OS_VER=$(grep ^PRETTY_NAME /etc/os-release | cut -d= -f2 | tr -d '"' | tr ' ' '_' | tr -d '()')
+    PY_VER=$(python3 -c 'import platform; print(platform.python_version())')
+    ROCM_VER=$(/opt/rocm/bin/rocminfo | grep 'ROCm version' | head -1 | awk '{print $NF}' | tr -d '()')
+    if [[ -f /proc/driver/amdgpu/version ]]; then
+        AMDGPU_VER=$(head -1 < /proc/driver/amdgpu/version | awk '{print $3}' | tr -d '()')
+    else
+        AMDGPU_VER="unknown"
+    fi
+    KERNEL_VER=$(uname -r | tr '.' '_' | tr '-' '_')
 
-# Note: Disable the AITer cache directory, as it may cause a core dump in RoPE fusion.
-CACHE_TAG="${OS_VER}_py${PY_VER}_rocm${ROCM_VER}_amdgpu${AMDGPU_VER}_kernel${KERNEL_VER}_${HOSTNAME}"
-export AITER_JIT_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}_aiter_cache"
-echo "AITER_JIT_DIR: $AITER_JIT_DIR"
+    # Note: Disable the AITer cache directory, as it may cause a core dump in RoPE fusion.
+    CACHE_TAG="${OS_VER}_py${PY_VER}_rocm${ROCM_VER}_amdgpu${AMDGPU_VER}_kernel${KERNEL_VER}_${HOSTNAME}"
+    export AITER_JIT_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}_aiter_cache"
+    echo "AITER_JIT_DIR: $AITER_JIT_DIR"
+else
+    # AITER_JIT_DIR=""
+    echo "not using aiter cache"
+fi
 
 
 TRAIN_LOG=${TRAIN_LOG:-"output/log_torchrun_pretrain_$(basename "$EXP" .yaml).txt"}

@@ -2,14 +2,15 @@
 
 export USING_AINIC=1
 export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
+# export AINIC_LIB="/apps/gpuperf/ainic-driver-20251007/lib/"
 export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
 export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
 export NCCL_SOCKET_IFNAME="enp193s0f1np1"
 export GLOO_SOCKET_IFNAME="enp193s0f1np1"
 
 export DOCKER_IMAGE="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"
-export DOCKER_IMAGE="docker.io/rocm/7.0-preview:rocm7.0_preview_pytorch_training_mi35x_beta"
-export DOCKER_IMAGE="docker.io/rocm/pyt-megatron-lm-jax-nightly-private:pytorch_gfx950_20250819"
+# export DOCKER_IMAGE="docker.io/rocm/7.0-preview:rocm7.0_preview_pytorch_training_mi35x_beta"
+# export DOCKER_IMAGE="docker.io/rocm/pyt-megatron-lm-jax-nightly-private:pytorch_gfx950_20250819"
 export CPUS_PER_TASK=96
 export HSA_NO_SCRATCH_RECLAIM=0 
 export NVTE_CK_USES_BWD_V3=1
@@ -17,17 +18,18 @@ export NVTE_CK_USES_BWD_V3=1
 export EXP="examples/megatron/configs/grok1-pretrain.yaml"
 mkdir -p data
 # the real number of nodes to run
-export NNODES=4
+export NNODES=8
 MBS=2
 TP=1
 ETP=1
-GBS=256
+GBS=$(($NNODES * 64))
+SEQ_LENGTH=8192
 PP=4
 EP=8
 CP=1
 VPP=2
 OPTIMIZER=adam
-RECOMPUTE_LAYERS=64
+RECOMPUTE_LAYERS=8 # use 8 for 4 nodes, 6 for 8 nodes
 RECOMPUTE_ID_START=0
 BALANCE=True
 
@@ -59,6 +61,7 @@ bash ./examples/run_slurm_pretrain.sh --micro_batch_size $MBS \
                                       --tensor_model_parallel_size $TP \
                                       --expert_tensor_parallel_size $ETP \
                                       --pipeline_model_parallel_size $PP \
+                                      --seq_length $SEQ_LENGTH \
                                       --expert_model_parallel_size $EP \
                                       --context_parallel_size $CP \
                                       --moe_router_force_load_balancing $BALANCE \
@@ -69,6 +72,8 @@ bash ./examples/run_slurm_pretrain.sh --micro_batch_size $MBS \
                                       --recompute_num_layers $RECOMPUTE_LAYERS \
                                       --moe_use_legacy_grouped_gemm False \
                                       ${VPP_CONFIG} \
+                                      --profile True \
+                                      --disable_profiler_activity_cpu False \
                                       --use_pytorch_profiler True \
                                       --profile_step_start 5 \
                                       --profile_step_end 6 \
