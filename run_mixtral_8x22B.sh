@@ -1,5 +1,9 @@
 #!/bin/bash
 
+export HF_TOKEN=${HF_TOKEN:-"your_hf_token"}
+export USE_ROCM_AITER_ROPE_BACKEND=0
+export CLEAN_DOCKER_CONTAINER=1
+
 export USING_AINIC=1
 export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
 # export AINIC_LIB="/apps/gpuperf/ainic-driver-20251007/lib/"
@@ -32,24 +36,28 @@ OPTIMIZER=adam
 RECOMPUTE_LAYERS=0
 RECOMPUTE_ID_START=0
 BALANCE=True
+LEGACY_GG=False
+FP8=True
 
 export HF_TOKEN=${HF_TOKEN:="your_hf_token"}
 
-CONFIG="GBS$GBS.PP$PP.EP$EP.CP$CP.VPP$VPP.TOPK$TOPK.rc-$RECOMPUTE_LAYERS.rcids-$RECOMPUTE_ID_START.nodes$NNODES.$OPTIMIZER.BALANCE-$BALANCE"
+CONFIG="Mixtral_8x22B-FP8-$FP8.GBS$GBS.PP$PP.EP$EP.CP$CP.VPP$VPP.TOPK$TOPK.rc-$RECOMPUTE_LAYERS.rcids-$RECOMPUTE_ID_START.nodes$NNODES.$OPTIMIZER.BALANCE-$BALANCE-legacygg-$LEGACY_GG-noturboattn-noturbogg"
 echo "config: $CONFIG"
 
 if [ $VPP -gt 1 ]; then
     export VPP_CONFIG="--num_virtual_stages_per_pipeline_rank $VPP"
 fi
 
-export PRIMUS_WORKSPACE=output/mixtral_8x22B
-export PRIMUS_USER=qyy
-export PRIMUS_GROUP="date-$(date +%Y%m%d-%H%M%S)"
-export PRIMUS_EXP_NAME=$CONFIG
-mkdir -p $PRIMUS_WORKSPACE
+if [ "$FP8" = "True" ]; then
+    export FP8_CONFIG="--fp8 hybrid"
+fi
+
+export TEAM="date-new-$(date +%Y%m%d)"
+export USER=wenx
+export EXP_NAME=$CONFIG
 
 
-LOG_DIR=./$PRIMUS_WORKSPACE/$PRIMUS_GROUP/$PRIMUS_USER/$CONFIG/
+LOG_DIR=./output/$TEAM/$USER/$EXP_NAME/
 export DUMP_PP_DIR=$LOG_DIR/pp_dump/
 mkdir -p $LOG_DIR
 LOG_FILE=$LOG_DIR/training.log
@@ -70,32 +78,12 @@ bash ./examples/run_slurm_pretrain.sh --micro_batch_size $MBS \
                                       --optimizer $OPTIMIZER \
                                       --cp_comm_type a2a \
                                       --recompute_num_layers $RECOMPUTE_LAYERS \
-                                      --moe_use_legacy_grouped_gemm False \
+                                      --moe_use_legacy_grouped_gemm $LEGACY_GG \
                                       ${VPP_CONFIG} \
+                                      ${FP8_CONFIG} \
+                                      --profile True \
+                                      --disable_profiler_activity_cpu False \
                                       --use_pytorch_profiler True \
                                       --profile_step_start 5 \
                                       --profile_step_end 6 \
                                       --train_iters 10 2>&1 | tee $LOG_FILE
-
-# bash ./examples/run_slurm_pretrain.sh --micro_batch_size $MBS \
-#                                       --global_batch_size $GBS \
-#                                       --tensor_model_parallel_size $TP \
-#                                       --expert_tensor_parallel_size $ETP \
-#                                       --pipeline_model_parallel_size $PP \
-#                                       --expert_model_parallel_size $EP \
-#                                       --context_parallel_size $CP \
-#                                       --moe_router_force_load_balancing $BALANCE \
-#                                       --manual_gc True \
-#                                       --manual_gc_interval 1 \
-#                                       --optimizer $OPTIMIZER \
-#                                       --cp_comm_type a2a \
-#                                       --recompute_num_layers $RECOMPUTE_LAYERS \
-#                                       --moe_use_legacy_grouped_gemm True \
-#                                       ${VPP_CONFIG} \
-#                                       --use_pytorch_profiler True \
-#                                       --profile_step_start 5 \
-#                                       --profile_step_end 6 \
-#                                       --export-config $EXPORT_CONFIG \
-#                                       --train_iters 10 2>&1 | tee $LOG_FILE
-
-# --num_layers 96 \

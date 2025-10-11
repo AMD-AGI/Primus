@@ -132,7 +132,7 @@ if [[ "${CLEAN_DOCKER_CONTAINER:-0}" == "1" ]]; then
     fi
 fi
 
-docker_podman_proxy stop $(docker_podman_proxy ps -aq) || true
+# docker_podman_proxy stop $(docker_podman_proxy ps -aq) || true
 # ------------------ Launch Training Container ------------------
 docker_podman_proxy run --rm \
     --env MASTER_ADDR \
@@ -159,6 +159,10 @@ docker_podman_proxy run --rm \
     --env TORCHTITAN_PATH \
     --env BACKEND_PATH \
     --env HF_TOKEN \
+    --env USE_ROCM_AITER_ROPE_BACKEND \
+    --env TEAM \
+    --env USER \
+    --env EXP_NAME \
     "${ENV_ARGS[@]}" \
     --ipc=host --network=host \
     --device=/dev/kfd --device=/dev/dri \

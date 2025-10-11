@@ -71,5 +71,9 @@ srun -N "${NNODES}" \
           export RCCL_HOME_DIR=\${RCCL_HOME_DIR}
           export ANP_HOME_DIR=\${ANP_HOME_DIR}
           export USING_AINIC=\${USING_AINIC}
+          export USE_ROCM_AITER_ROPE_BACKEND=\${USE_ROCM_AITER_ROPE_BACKEND}
+          export TEAM=\${TEAM}
+          export USER=\${USER}
+          export EXP_NAME=\${EXP_NAME}
           bash ${SCRIPT_DIR}/run_local_pretrain.sh \"\$@\" 2>&1 | tee ${LOG_FILE}
      " bash "$@"
