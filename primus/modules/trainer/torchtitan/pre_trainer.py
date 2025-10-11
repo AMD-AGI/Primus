@@ -15,7 +15,10 @@ class TorchTitanPretrainTrainer(BaseModule):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # important: make sure patch torchtitan logger first
+        # Patch selective activation checkpoint logic FIRST, before any torchtitan imports
+        self.patch_torch_selective_ac()
+        
+        # important: make sure patch torchtitan logger before using it
         self.patch_torchtitan_logger()
 
         from torchtitan.config_manager import JobConfig
@@ -106,6 +109,40 @@ class TorchTitanPretrainTrainer(BaseModule):
         if self.titan_config.primus_turbo.use_turbo_async_tp:
             # ******* Async TP *******
             self.patch_torch_async_tp()
+
+    def patch_torch_selective_ac(self):
+        """
+        Patch TorchTitan's selective activation checkpoint logic with Primus custom implementation.
+        This enables support for both int and string types for selective_ac_option,
+        and adds support for negative values (checkpoint all layers EXCEPT every N-th).
+        
+        We monkey-patch by modifying the source code dynamically before execution.
+        """
+        import sys
+        import types
+        
+        # Import Primus custom implementation first
+        from primus.backends.torchtitan.models.llama3.parallelize_llama import (
+            _apply_ac_to_transformer_block as primus_apply_ac,
+        )
+        
+        # Import or get the torchtitan module
+        if 'torchtitan.models.llama3.parallelize_llama' in sys.modules:
+            tt_module = sys.modules['torchtitan.models.llama3.parallelize_llama']
+        else:
+            import torchtitan.models.llama3.parallelize_llama as tt_module
+        
+        # Replace the function in module's globals
+        # This is the KEY: we need to update the module's __dict__ which is used by functions in that module
+        tt_module.__dict__['_apply_ac_to_transformer_block'] = primus_apply_ac
+        
+        # Also directly set the attribute (belt and suspenders approach)
+        tt_module._apply_ac_to_transformer_block = primus_apply_ac
+        
+        # Verify the patch
+        from primus.core.utils.logger import _logger
+        _logger.info(f"TorchtitanPretrainTrainer: Patched _apply_ac_to_transformer_block (id: {id(tt_module._apply_ac_to_transformer_block)})")
+
 
     def patch_torch_async_tp(self):
         import torch
