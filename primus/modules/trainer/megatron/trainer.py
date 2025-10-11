@@ -161,7 +161,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_file_system_writer()
         self.patch_te_tp_overlap()
         self.patch_mla_attention()
-        # self.patch_fp8_context()
+        self.patch_fp8_context()
         # self.patch_zbpp()
 
         self.app_metrics = {}
