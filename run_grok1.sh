@@ -24,7 +24,7 @@ export EXP="examples/megatron/configs/grok1-pretrain.yaml"
 mkdir -p data
 # the real number of nodes to run
 export NNODES=8
-MBS=1
+MBS=2
 TP=1
 ETP=1
 GBS=$(($NNODES * 64))
