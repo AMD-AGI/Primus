@@ -20,7 +20,8 @@ modules:
 
       # optimizer: adam
       moe_router_force_load_balancing: true
-      moe_router_dtype: null
+      # should be fp32 when using Primus Turbo DeepEP
+      moe_router_dtype: ${PRIMUS_MOE_ROUTER_DTYPE:null}
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 5
 
@@ -79,8 +80,11 @@ modules:
       ckpt_format: torch
 
 
-      # primus turbo
-      enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:false}
+      # should be false when using Primus Turbo DeepEP
+      moe_shared_expert_overlap: false
 
-      use_turbo_deepep: ${PRIMUS_TURBO_DEEPEP:false}
+      # primus turbo
+      enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:0}
+
+      use_turbo_deepep: ${PRIMUS_TURBO_DEEPEP:0}
       turbo_sync_free_moe_stage: ${PRIMUS_TURBO_SYNC_FREE_MOE_STAGE:0}
