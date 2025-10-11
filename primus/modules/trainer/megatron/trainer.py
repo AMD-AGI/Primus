@@ -31,6 +31,7 @@ from megatron.training.checkpointing import (
     save_checkpoint,
 )
 
+from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
 from primus.core.utils.import_utils import get_custom_fsdp, get_model_provider
 
 try:
@@ -56,7 +57,6 @@ from megatron.core.num_microbatches_calculator import (
     update_num_microbatches,
 )
 from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
-from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.core.rerun_state_machine import (
     RerunDiagnostic,
     RerunErrorInjector,
@@ -161,7 +161,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_file_system_writer()
         self.patch_te_tp_overlap()
         self.patch_mla_attention()
-        self.patch_fp8_context()
+        # self.patch_fp8_context()
+        # self.patch_zbpp()
 
         self.app_metrics = {}
 
@@ -535,6 +536,68 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         else:
             warning_rank_0("MegatronTrainer: Patch FileSystemWriterAsync successfully.")
 
+    def patch_zbpp(self):
+        # patch optimizer
+        if self.module_config.patch_zero_bubble:
+            warning_rank_0(f"MegatronTrainer: Patch ZeroBubble PP")
+            import megatron.core.optimizer as optimizer
+
+            from primus.backends.megatron.core.optimizer.zbpp_optimizer import (
+                ZeroBubblePPChainedOptimizer,
+            )
+
+            optimizer.ChainedOptimizer = ZeroBubblePPChainedOptimizer
+
+            # patch get_forward_backward_func
+            import megatron.core.pipeline_parallel as ori_pp
+
+            from primus.backends.megatron.core.pipeline_parallel.schedules import (
+                get_forward_backward_func_zbpp,
+            )
+
+            ori_pp.get_forward_backward_func = get_forward_backward_func_zbpp
+
+            # patch linear to split d_w and d_input
+            import megatron.core.tensor_parallel.layers as ori_layers
+
+            from primus.backends.megatron.core.tensor_parallel.layers import (
+                LinearWithGradAccumulationAndAsyncCommunication,
+            )
+
+            ori_layers.LinearWithGradAccumulationAndAsyncCommunication = (
+                LinearWithGradAccumulationAndAsyncCommunication
+            )
+
+            # patch zbv-related code
+            if self.module_config.zero_bubble_v_schedule or self.module_config.enable_1f1b_v:
+                import megatron.core.parallel_state as ori_parallel_state
+
+                from primus.backends.megatron.core.parallel_state import (
+                    default_embedding_ranks,
+                    is_pipeline_last_stage,
+                    is_rank_in_embedding_group,
+                )
+
+                ori_parallel_state.default_embedding_ranks = default_embedding_ranks
+                ori_parallel_state.is_pipeline_last_stage = is_pipeline_last_stage
+                ori_parallel_state.is_rank_in_embedding_group = is_rank_in_embedding_group
+
+                import megatron.core.distributed.finalize_model_grads as ori_finalize_model_grads
+
+                from primus.backends.megatron.core.distributed.finalize_model_grad import (
+                    finalize_model_grads,
+                )
+
+                ori_finalize_model_grads.finalize_model_grads = finalize_model_grads
+
+                import megatron.core.transformer.transformer_layer as ori_transformer_layer
+
+                from primus.backends.megatron.core.transformer.transformer_layer import (
+                    get_transformer_layer_offset,
+                )
+
+                ori_transformer_layer.get_transformer_layer_offset = get_transformer_layer_offset
+
     def init(self, *init_args, **kwargs):
         allowed_keys = {
             "extra_args_provider",
@@ -566,7 +629,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         )
 
         args = get_args()
-
         # There are some extra limitation on ROCm need extra validate.
         validate_args_on_rocm(args)
 
@@ -1495,6 +1557,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             activities = [torch.profiler.ProfilerActivity.CUDA]
             if not args.disable_profiler_activity_cpu:
                 activities.append(torch.profiler.ProfilerActivity.CPU)
+            worker_name = (
+                f"primus-megatron-exp[{self.exp_meta_info['exp_name']}]-rank[{torch.distributed.get_rank()}]"
+            )
             prof = torch.profiler.profile(
                 activities=activities,
                 schedule=torch.profiler.schedule(
@@ -1503,9 +1568,13 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     active=args.profile_step_end - args.profile_step_start,
                     repeat=1,
                 ),
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(args.tensorboard_dir),
-                record_shapes=True,
-                with_stack=False,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    args.tensorboard_dir,
+                    worker_name=worker_name,
+                    use_gzip=args.torch_profiler_use_gzip,
+                ),
+                record_shapes=args.torch_profiler_record_shapes,
+                with_stack=args.torch_profiler_with_stack,
             )
             prof.start()
 
@@ -1787,10 +1856,32 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         optimizer,
         opt_param_scheduler,
         config,
+        no_optimizer_post_validation=False,
     ):
         """Single training step."""
         args = get_args()
         timers = get_timers()
+
+        def run_forward_backward_func(optimizer=None):
+            """Forward pass.
+            optimizer is not None for running post validation."""
+            from megatron.core.pipeline_parallel import get_forward_backward_func
+
+            forward_backward_func = get_forward_backward_func()
+            kwargs = {}
+            if optimizer is not None:
+                kwargs["optimizer"] = optimizer
+            return forward_backward_func(
+                forward_step_func=forward_step_func,
+                data_iterator=data_iterator,
+                model=model,
+                num_microbatches=get_num_microbatches() * args.num_seq_splits,
+                seq_length=args.seq_length // args.num_seq_splits,
+                micro_batch_size=args.micro_batch_size,
+                decoder_seq_length=args.decoder_seq_length,
+                forward_only=False,
+                **kwargs,
+            )
 
         rerun_state_machine = get_rerun_state_machine()
         while rerun_state_machine.should_run_forward_backward(data_iterator):
@@ -1800,17 +1891,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             optimizer.zero_grad()
 
             # Forward pass.
-            forward_backward_func = get_forward_backward_func()
-            losses_reduced = forward_backward_func(
-                forward_step_func=forward_step_func,
-                data_iterator=data_iterator,
-                model=model,
-                num_microbatches=get_num_microbatches(),
-                seq_length=args.seq_length,
-                micro_batch_size=args.micro_batch_size,
-                decoder_seq_length=args.decoder_seq_length,
-                forward_only=False,
-            )
+            losses_reduced = run_forward_backward_func()
+
         should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
         if should_exit:
             return {}, True, should_checkpoint, should_exit, exit_code, None, None
@@ -1827,7 +1909,30 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # Update parameters.
 
         timers("optimizer", log_level=1).start(barrier=args.barrier_with_L1_time)
-        update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+        # update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+        if get_args().profile:
+            torch.cuda.nvtx.range_push("Optimizer")
+        if args.patch_zero_bubble and args.enable_optimizer_post_validation:
+            if optimizer.post_validation_enabled and not no_optimizer_post_validation:
+                optimizer.pre_step(args, timers)
+                if get_args().profile:
+                    torch.cuda.nvtx.range_pop()
+                if get_args().profile:
+                    torch.cuda.nvtx.range_push("post_validation_phase")
+                update_successful, grad_norm, num_zeros_in_grad = run_forward_backward_func(optimizer)
+                if get_args().profile:
+                    torch.cuda.nvtx.range_pop()
+                # Here num_zeros_in_grad is a fake name, representing for optimizer_rollback
+            else:
+                update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+                if get_args().profile:
+                    torch.cuda.nvtx.range_pop()
+            optimizer.record_grad_norm(grad_norm)
+        else:
+            update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+            if get_args().profile:
+                torch.cuda.nvtx.range_pop()
+
         timers("optimizer").stop()
 
         # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
@@ -1856,7 +1961,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if args.empty_unused_memory_level >= 2:
             torch.cuda.empty_cache()
 
-        if mpu.is_pipeline_last_stage(ignore_virtual=True):
+        if is_pipeline_stage_containing_loss():
             # Average loss across microbatches.
             loss_reduced = {}
             for key in losses_reduced[0].keys():
@@ -2275,7 +2380,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             total_loss_dict[advanced_iters_key] = 0
             total_loss_dict[skipped_iters_key] = 0
             total_loss_dict[nan_iters_key] = 0
-            log_rank_last(log_string)
+
+            if get_args().patch_zero_bubble and get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v:
+                log_rank_0(log_string)
+            else:
+                log_rank_last(log_string)
             if report_memory_flag and learning_rate > 0.0:
                 # Report memory after optimizer state has been initialized.
                 if torch.distributed.get_rank() == 0:
@@ -2283,7 +2392,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     report_theoretical_memory(args, num_microbatches=num_microbatches, verbose=True)
                 report_memory("(after {} iterations)".format(iteration))
                 report_memory_flag = False
-            timers.log(timers_to_log, normalizer=args.log_interval)
+
+            # Removed to avoid global sync in zero bubble schedules.
+            if not (get_args().zero_bubble_v_schedule or get_args().patch_zero_bubble):
+                timers.log(timers_to_log, normalizer=args.log_interval)
 
         return report_memory_flag
 

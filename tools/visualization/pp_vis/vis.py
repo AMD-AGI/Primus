@@ -23,6 +23,10 @@ class Pipeline_Color(str, Enum):
     green_2 = "#375623"
     green_3 = "mintcream"
     green_4 = "seagreen"
+    yellow_1 = "#d88c2b"
+    yellow_2 = "#f6eab4"
+    yellow_3 = "#d46014"
+    yellow_4 = "#d44014"
     background = "#818181"
 
 
@@ -40,6 +44,12 @@ def get_color_dict(vp_size):
             Pipeline_Color.green_3,
             Pipeline_Color.green_4,
         ],
+        "wgrad_rect_color": [
+            Pipeline_Color.yellow_1,
+            Pipeline_Color.yellow_2,
+            Pipeline_Color.yellow_3,
+            Pipeline_Color.yellow_4,
+        ],
         "fwd_text_color": [
             "white",
             "black",
@@ -51,6 +61,12 @@ def get_color_dict(vp_size):
             "white",
             "black",
             "white",
+        ],
+        "wgrad_text_color": [
+            "gray",
+            "black",
+            "gray",
+            "black",
         ],
     }
 
@@ -65,8 +81,14 @@ def get_color_dict(vp_size):
                 3,
             )
         )
+        color_dict["wgrad_rect_color"].append(
+            np.random.rand(
+                3,
+            )
+        )
         color_dict["fwd_text_color"].append("white")
         color_dict["bwd_text_color"].append("white")
+        color_dict["wgrad_text_color"].append("white")
 
     return color_dict
 
@@ -76,6 +98,9 @@ def get_bubble_ratio(data, iter_time, vp_size, num_mbs):
     for i in range(vp_size * num_mbs):
         non_bubble_time += data["fwd_end"][i] - data["fwd_start"][i]
         non_bubble_time += data["bwd_end"][i] - data["bwd_start"][i]
+        if "wgrad_start" in data and len(data["wgrad_start"]) > 0:
+            non_bubble_time += data["wgrad_end"][i] - data["wgrad_start"][i]
+
     bubble_ratio = (iter_time - non_bubble_time) / iter_time * 100
     return bubble_ratio
 
@@ -136,12 +161,28 @@ def draw_rec(ax, text, x, y, w, h, text_color, rect_color, edge_color, font_size
     ax.annotate(text, (cx, cy), color=text_color, fontsize=font_size, ha=ha, va=va)
 
 
-def draw_pipeline(ax, iter_data, pp_size, vp_size, num_mbs, chunk_info_list):
+def draw_pipeline(ax, iter_data, pp_size, vp_size, num_mbs, chunk_info_list, color_dict, draw_wgrad=False):
     series = ["fwd", "bwd"]
+    if draw_wgrad:
+        series += ["wgrad"]
     for pp_rank in range(pp_size):
         for serie in series:
             start = iter_data[pp_rank][serie + "_start"]
             end = iter_data[pp_rank][serie + "_end"]
+
+            # modify chunk id and color by minibatch and chunk info
+            minibatch_key = serie + "_minibatch"
+            if minibatch_key in iter_data[pp_rank] and len(iter_data[pp_rank][minibatch_key]) > 0:
+                for i in range(len(iter_data[pp_rank][minibatch_key])):
+                    chunk_info_list[i]["id"] = iter_data[pp_rank][minibatch_key][i]
+
+            chunk_key = serie + "_chunk"
+            if chunk_key in iter_data[pp_rank] and len(iter_data[pp_rank][chunk_key]) > 0:
+                for i in range(len(iter_data[pp_rank][chunk_key])):
+                    chunk_id = iter_data[pp_rank][chunk_key][i]
+                    chunk_info_list[i][serie + "_rect_color"] = color_dict[serie + "_rect_color"][chunk_id]
+                    chunk_info_list[i][serie + "_text_color"] = color_dict[serie + "_text_color"][chunk_id]
+
             for i in range(vp_size * num_mbs):
                 mbs_id = chunk_info_list[i]["id"]
                 x = start[i]
@@ -150,7 +191,12 @@ def draw_pipeline(ax, iter_data, pp_size, vp_size, num_mbs, chunk_info_list):
                 h = 1
                 rect_color = chunk_info_list[i][serie + "_rect_color"]
                 text_color = chunk_info_list[i][serie + "_text_color"]
-                draw_rec(ax, mbs_id, x, y, w, h, text_color, rect_color, "black", 6, "center", "center")
+
+                font_size = 3
+
+                draw_rec(
+                    ax, mbs_id, x, y, w, h, text_color, rect_color, "black", font_size, "center", "center"
+                )
 
         bubble = iter_data[pp_rank]["bubble"]
         memory = iter_data[pp_rank]["memory"]
@@ -181,8 +227,10 @@ def get_chunk_info_list(num_mbs, pp_size, vp_size, color_dict):
                 "id": id_list[i],
                 "fwd_rect_color": color_dict["fwd_rect_color"][color_idx],
                 "bwd_rect_color": color_dict["bwd_rect_color"][color_idx],
+                "wgrad_rect_color": color_dict["wgrad_rect_color"][color_idx],
                 "fwd_text_color": color_dict["fwd_text_color"][color_idx],
                 "bwd_text_color": color_dict["bwd_text_color"][color_idx],
+                "wgrad_text_color": color_dict["wgrad_text_color"][color_idx],
             }
         )
     return chunk_info_list
@@ -213,6 +261,9 @@ def draw_sub(axs, task_data, iter_time_max):
         ax.set_yticks(y_pos, labels=yaxis_list)
 
         legend_list = []
+
+        draw_wgrad = "wgrad_start" in iter_data[0] and len(iter_data[0]["wgrad_start"]) > 0
+
         for i in range(vp_size):
             fwd_rect = patches.Patch(
                 color=color_dict["fwd_rect_color"][i], label="fwd" if vp_size == 1 else "fwd_vpp_" + str(i)
@@ -222,9 +273,16 @@ def draw_sub(axs, task_data, iter_time_max):
             )
             legend_list.append(fwd_rect)
             legend_list.append(bwd_rect)
+            if draw_wgrad:
+                wgrad_rect = patches.Patch(
+                    color=color_dict["wgrad_rect_color"][i],
+                    label="wgrad" if vp_size == 1 else "wgrad_vpp_" + str(i),
+                )
+                legend_list.append(wgrad_rect)
+
         ax.legend(handles=legend_list, fontsize="6", loc="lower right")
 
-        draw_pipeline(ax, iter_data, pp_size, vp_size, num_mbs, chunk_info_list)
+        draw_pipeline(ax, iter_data, pp_size, vp_size, num_mbs, chunk_info_list, color_dict, draw_wgrad)
 
 
 def draw(task_data_list):
@@ -250,19 +308,15 @@ def draw(task_data_list):
 
 
 def main():
+    show_exps = ["1f1b", "1f1b-interleaved", "zero-bubble-1f1b", "zbv", "v-half", "v-min"]
     task_list = [
         {
-            "title": "pp8",
-            "iter_to_vis": [i for i in range(7, 8)],
-            "log_path": "pp_data_example/gpu8_layer64_gbs16/pp8",
-        },
-        {
-            "title": "pp8_vpp2",
-            "iter_to_vis": [i for i in range(7, 8)],
-            "log_path": "pp_data_example/gpu8_layer64_gbs16/pp8_vpp2",
-        },
+            "title": exp,
+            "iter_to_vis": [i for i in range(5, 6)],
+            "log_path": f"./pp_data/{exp}/",
+        }
+        for exp in show_exps
     ]
-
     matplotlib.use("WebAgg")
 
     task_data_list = get_task_data(task_list)
