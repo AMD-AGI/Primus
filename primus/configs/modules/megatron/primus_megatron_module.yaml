@@ -2,6 +2,9 @@
 # logging
 disable_tensorboard: true
 disable_wandb: true
+disable_mlflow: true
+mlflow_run_name: null
+mlflow_experiment_name: null
 disable_compile_dependencies: true
 # NOTE:
 # - If `use_rocm_mem_info = True`, ROCm memory information will be collected
