@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from primus.core.utils.import_utils import get_model_provider
 from primus.modules.base_module import BaseModule
 from primus.modules.module_utils import log_rank_0
 
@@ -31,18 +32,14 @@ class LightMegatronPretrainTrainer(BaseModule):
 
         from megatron.core.enums import ModelType
         from megatron.training import inprocess_restart, pretrain
-        from pretrain_gpt import (
-            forward_step,
-            model_provider,
-            train_valid_test_datasets_provider,
-        )
+        from pretrain_gpt import forward_step, train_valid_test_datasets_provider
 
         train_valid_test_datasets_provider.is_distributed = True
         wrapped_pretrain, store = inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
 
         wrapped_pretrain(
             train_valid_test_datasets_provider,
-            model_provider,
+            get_model_provider(),
             ModelType.encoder_or_decoder,
             forward_step,
             store=store,
