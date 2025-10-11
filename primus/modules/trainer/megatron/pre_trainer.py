@@ -37,6 +37,7 @@ def get_batch_func(data_iterator):
         from primus.backends.megatron.core.pipeline_parallel.zerobubble.zbpp_vars import (
             get_seq_split_idx,
         )
+
         global mb_batch
         # "or 0" to support original 1f1b and interleaved-1f1b in schedules.py
         seq_split_idx = get_seq_split_idx() or 0

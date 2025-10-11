@@ -193,13 +193,7 @@ class TestMegatronTrainer(PrimusUT):
             self.__class__.__name__,
             "deepseek_v3",
             exp_path="examples/megatron/configs/deepseek_v3-pretrain.yaml",
-            env_override={
-                # "PRIMUS_MODEL": "deepseek_v3",
-                # "PRIMUS_GLOBAL_BATCH_SIZE": "8",
-                # "PRIMUS_MOE_LAYER_FREQ": "[0]*3+[1]*1",
-                # "PRIMUS_EP": "8",
-                # "PRIMUS_NUM_LAYERS": "4",
-            },
+            env_override={},
             extra_args=[
                 "--num_layers",
                 "4",
@@ -224,13 +218,16 @@ class TestMegatronTrainer(PrimusUT):
             "interleaved_pipeline_parallelism",
             exp_path="tests/trainer/test_megatron_trainer.yaml",
             env_override={
-                "PRIMUS_MODEL": "deepseek_v2_lite",
-                "PRIMUS_GLOBAL_BATCH_SIZE": "16",
-                "PRIMUS_MOE_LAYER_FREQ": "[0]*1+[1]*7",
                 "PRIMUS_PP": "4",
                 "PRIMUS_VPP": "2",
                 "PRIMUS_NUM_LAYERS": "8",
             },
+            extra_args=[
+                "--global_batch_size",
+                "16",
+                "--moe_layer_freq",
+                "[0]*1+[1]*7",
+            ],
         )
 
     # def test_zero_bubble_pipeline_parallelism(self):

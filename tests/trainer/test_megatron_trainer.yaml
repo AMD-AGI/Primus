@@ -77,11 +77,3 @@ modules:
       no_save_rng: null
       disable_last_saving: true
       ckpt_format: torch
-
-
-      enable_primus_turbo: false
-      use_turbo_attention: false
-
-      bias_swiglu_fusion: false
-      bias_dropout_fusion: false
-      masked_softmax_fusion: false
