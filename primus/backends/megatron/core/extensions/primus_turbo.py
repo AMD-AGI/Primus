@@ -22,6 +22,7 @@ from megatron.core.process_groups_config import ModelCommProcessGroups
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.moe.experts import GroupedMLP
+from megatron.core.transformer.moe.token_dispatcher import MoETokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_tensor_model_parallel_group_if_none
@@ -808,3 +809,101 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 fc2_output = torch.matmul(h, w2)
 
         return fc2_output, None
+
+
+class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
+    """
+    PrimusTurbo token dispatcher using DeepEP.
+    """
+
+    def __init__(
+        self,
+        num_local_experts: int,
+        local_expert_indices: List[int],
+        config: TransformerConfig,
+        model_comm_pgs: Optional[ModelCommProcessGroups] = None,
+    ):
+        """
+        Initialize the token dispatcher.
+
+        Args:
+            num_local_experts (int): Number of local experts on the current device.
+            local_expert_indices (List[int]): Indices of local experts on the current device.
+            config (TransformerConfig): Configuration for the transformer model.
+            model_comm_pgs (ModelCommProcessGroups, optional): Process groups for MoE operations.
+        """
+        super().__init__(config=config, model_comm_pgs=model_comm_pgs)
+
+        assert self.tp_size * self.ep_size > 1, "Flex token dispatcher requires TPxEP > 1"
+        assert (
+            self.config.moe_enable_deepep
+        ), "DeepEP is not enabled. Please set --moe-enable-deepep to use DeepEP backend."
+        assert (
+            self.config.moe_pad_expert_input_to_capacity is False
+        ), "Flex token dispatcher does not support --moe-pad-expert-input-to-capacity"
+
+        args = get_args()
+
+        # enable sync-free moe to elimiate deepep cpu busy-wait
+        num_worst_tokens, permute_max_token_num = 0, 0
+        if args.turbo_sync_free_moe_stage > 1:
+            if args.sequence_parallel:
+                seq_length = args.seq_length // self.tp_size
+            else:
+                seq_length = args.seq_length
+            num_tokens = seq_length // args.context_parallel_size * args.micro_batch_size
+            num_worst_tokens = num_tokens * self.tp_ep_group.size()
+            if args.turbo_sync_free_moe_stage > 2:
+                # fully sync-free moe
+                permute_max_token_num = num_worst_tokens * config.moe_router_topk
+                raise NotImplementedError("not support fully sync-free moe.")
+
+        self.deepep_dispatcher = pt.modules.DeepEPTokenDispatcher(
+            num_experts=config.num_moe_experts,
+            router_topk=config.moe_router_topk,
+            ep_group=self.ep_group,
+            tp_group=self.tp_group,
+            tp_ep_group=self.tp_ep_group,
+            router_dtype=config.moe_router_dtype,
+            expert_capacity_factor=config.moe_expert_capacity_factor,
+            permute_fusion=config.moe_permute_fusion,
+            permute_max_token_num=permute_max_token_num,
+            deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
+            deepep_num_use_cu=args.turbo_deepep_num_cu,
+            deepep_num_worst_tokens=num_worst_tokens,
+            deepep_use_cuda_num_tokens_per_expert=args.use_turbo_grouped_mlp,
+        )
+
+        self.moe_router_force_load_balancing = args.moe_router_force_load_balancing
+
+    def token_permutation(
+        self, hidden_states: torch.Tensor, probs: torch.Tensor, routing_map: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self.hidden_shape = hidden_states.shape
+        # view as [num_tokens, hidden_size]
+        hidden_states = hidden_states.view(-1, self.config.hidden_size)
+        num_tokens = hidden_states.shape[0]
+
+        # when force_load_balancing, we use even token_indices to make sure each expert get same number of tokens
+        token_indices = None
+        if self.moe_router_force_load_balancing:
+            token_indices = (
+                torch.arange(num_tokens * self.config.moe_router_topk, device=hidden_states.device).view(
+                    num_tokens, self.config.moe_router_topk
+                )
+                % self.config.num_moe_experts
+            )
+
+        (global_input_tokens, tokens_per_expert, permuted_probs) = self.deepep_dispatcher.token_dispatch(
+            hidden_states,
+            probs=probs,
+            indices=token_indices,
+        )
+        return global_input_tokens, tokens_per_expert, permuted_probs
+
+    def token_unpermutation(
+        self, hidden_states: torch.Tensor, bias: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        assert bias is None, "Bias is not supported in MoEFlexTokenDispatcher"
+        hidden_states = self.deepep_dispatcher.token_combine(hidden_states)
+        return hidden_states.view(self.hidden_shape), None

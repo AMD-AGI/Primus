@@ -197,6 +197,23 @@ class TestMegatronTrainer(PrimusUT):
             env_override={},
         )
 
+    def test_turbo_deepep(self):
+        run_script(
+            self.__class__.__name__,
+            "turbo_deepep",
+            exp_path="tests/trainer/test_megatron_trainer.yaml",
+            env_override={
+                "PRIMUS_MODEL": "deepseek_v2_lite",
+                "PRIMUS_GLOBAL_BATCH_SIZE": "8",
+                "PRIMUS_MOE_LAYER_FREQ": "[0]*1+[1]*3",
+                "PRIMUS_EP": "8",
+                "PRIMUS_NUM_LAYERS": "4",
+                "PRIMUS_ENABLE_TURBO": "1",
+                "PRIMUS_TURBO_SYNC_FREE_MOE_STAGE": "2",
+                "PRIMUS_MOE_ROUTER_DTYPE": "fp32",
+            },
+        )
+
 
 class TestMegatronTrainerDeterministic(PrimusUT):
     def __init__(self, *args, **kwargs):

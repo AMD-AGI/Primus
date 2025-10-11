@@ -11,3 +11,12 @@ moe_use_fused_router_with_aux_score: false
 
 # inner features flags
 enable_turbo_attention_float8 : false
+
+
+# deepep
+use_turbo_deepep: false
+turbo_deepep_num_cu: 32
+turbo_deepep_use_comm_stream: false
+
+# sync-free moe
+turbo_sync_free_moe_stage: 0
