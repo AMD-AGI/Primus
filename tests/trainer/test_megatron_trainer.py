@@ -114,7 +114,9 @@ class TestMegatronTrainer(PrimusUT):
             env_override={
                 "PRIMUS_MODEL": "llama3_70B",
                 "PRIMUS_GLOBAL_BATCH_SIZE": "8",
-                "PRIMUS_NUM_LAYERS": "4",
+                "PRIMUS_NUM_LAYERS": "8",
+                "PRIMUS_SEQ_LENGTH": "8192",
+                "PRIMUS_MAX_POSITION_EMBEDDINGS": "8192",
             },
         )
 
