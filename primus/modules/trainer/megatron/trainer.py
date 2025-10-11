@@ -74,7 +74,7 @@ from megatron.training import (
     global_vars,
     one_logger_utils,
 )
-from megatron.training.arguments import moe_freq_type, validate_args
+from megatron.training.arguments import validate_args
 from megatron.training.async_utils import (
     init_persistent_async_worker,
     maybe_finalize_async_save,
@@ -155,7 +155,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         super().__init__(*args, **kwargs)
 
         # monkey patch modules
-        # self.patch_moe_layer()
+        self.patch_moe_layer()
         self.patch_torch_fsdp()
         self.patch_get_extra_te_kwargs()
         self.patch_file_system_writer()
@@ -844,7 +844,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.iterations_to_skip = []
 
         # support moe_freq_type
-        args.moe_layer_freq = moe_freq_type(args.moe_layer_freq)
+        # args.moe_layer_freq = moe_freq_type(args.moe_layer_freq)
 
         if args.mock_data:
             args.data_path = None
