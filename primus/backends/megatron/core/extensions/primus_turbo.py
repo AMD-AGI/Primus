@@ -18,7 +18,7 @@ from megatron.core.parallel_state import (
     get_hierarchical_context_parallel_groups,
     get_tensor_model_parallel_group,
 )
-from megatron.core.process_groups_config import ModelCommProcessGroups
+from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.moe.experts import GroupedMLP
@@ -186,7 +186,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         k_channels: Optional[int] = None,
         v_channels: Optional[int] = None,
         cp_comm_type: str = "p2p",
-        model_comm_pgs: ModelCommProcessGroups = None,
+        pg_collection: ProcessGroupCollection = None,
     ):
         self.config = config
         self.qkv_format: str = "sbhd"
@@ -199,24 +199,24 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         else:
             self.attn = pt.ops.flash_attn_func
             self.attention_backend = "ck"
-        if model_comm_pgs is None:
+        if pg_collection is None:
             # For backward compatibility, remove in v0.14 and raise error
-            # raise ValueError("TEDotProductAttention was called without ModelCommProcessGroups")
-            model_comm_pgs = ModelCommProcessGroups(
+            # raise ValueError("TEDotProductAttention was called without ProcessGroupCollection")
+            pg_collection = ProcessGroupCollection(
                 tp=get_tensor_model_parallel_group(check_initialized=False),
                 cp=get_context_parallel_group(check_initialized=False),
                 hcp=get_hierarchical_context_parallel_groups(check_initialized=False),
             )
         else:
-            assert hasattr(model_comm_pgs, "tp"), "TEDotProductAttention model_comm_pgs must have tp pg"
-            assert hasattr(model_comm_pgs, "cp"), "TEDotProductAttention model_comm_pgs must have cp pg"
+            assert hasattr(pg_collection, "tp"), "TEDotProductAttention pg_collection must have tp pg"
+            assert hasattr(pg_collection, "cp"), "TEDotProductAttention pg_collection must have cp pg"
             if cp_comm_type == "a2a+p2p":
                 assert hasattr(
-                    model_comm_pgs, "hcp"
-                ), "TEDotProductAttention model_comm_pgs must have hierarchical cp pg"
+                    pg_collection, "hcp"
+                ), "TEDotProductAttention pg_collection must have hierarchical cp pg"
         self.cp_param_bundle = None
         if self.config.context_parallel_size > 1:
-            self.cp_param_bundle = {"cp_group": model_comm_pgs.cp, "cp_comm_type": cp_comm_type}
+            self.cp_param_bundle = {"cp_group": pg_collection.cp, "cp_comm_type": cp_comm_type}
 
         assert config.window_size is None, "primus_turbo does not support sliding window attention"
         # Check version
@@ -240,7 +240,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             sequence_parallel=self.config.sequence_parallel,
             tp_size=self.config.tensor_model_parallel_size,
             get_rng_state_tracker=None,
-            tp_group=model_comm_pgs.tp,
+            tp_group=pg_collection.tp,
             layer_number=layer_number,
             attention_type=attention_type,
             # cp is not support
@@ -719,12 +719,12 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         self,
         num_local_experts: int,
         config: TransformerConfig,
-        model_comm_pgs: Optional[ModelCommProcessGroups] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
     ):
         super().__init__(
             num_local_experts,
             config,
-            model_comm_pgs,
+            pg_collection,
         )
         args = get_args()
         if args.patch_zero_bubble and args.enable_zero_bubble:

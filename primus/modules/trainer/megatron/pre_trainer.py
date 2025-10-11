@@ -17,10 +17,6 @@ from megatron.training.utils import get_batch_on_this_cp_rank, get_batch_on_this
 
 stimer = StragglerDetector()
 
-from primus.backends.megatron.core.pipeline_parallel.zerobubble.zbpp_vars import (
-    get_seq_split_idx,
-)
-
 from .trainer import MegatronTrainer
 
 mb_batch = None
@@ -38,6 +34,10 @@ def get_batch_func(data_iterator):
     args = get_args()
 
     if args.patch_zero_bubble:
+        from primus.backends.megatron.core.pipeline_parallel.zerobubble.zbpp_vars import (
+            get_seq_split_idx,
+        )
+
         global mb_batch
         # "or 0" to support original 1f1b and interleaved-1f1b in schedules.py
         seq_split_idx = get_seq_split_idx() or 0

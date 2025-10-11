@@ -8,7 +8,7 @@
 from typing import Optional
 
 import torch.nn.functional as F
-from megatron.core.process_groups_config import ModelCommProcessGroups
+from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.multi_latent_attention import (
     MLASelfAttention,
@@ -44,7 +44,7 @@ class PaddedMLASelfAttention(MLASelfAttention):
         layer_number: int,
         attn_mask_type=AttnMaskType.padding,
         cp_comm_type: Optional[str] = None,
-        model_comm_pgs: ModelCommProcessGroups = None,
+        pg_collection: ProcessGroupCollection = None,
     ):
         super().__init__(
             config=config,
@@ -52,7 +52,7 @@ class PaddedMLASelfAttention(MLASelfAttention):
             layer_number=layer_number,
             attn_mask_type=attn_mask_type,
             cp_comm_type=cp_comm_type,
-            model_comm_pgs=model_comm_pgs,
+            pg_collection=pg_collection,
         )
 
         if self.q_head_dim > self.config.v_head_dim:
@@ -66,7 +66,7 @@ class PaddedMLASelfAttention(MLASelfAttention):
                 k_channels=self.q_head_dim,
                 v_channels=self.q_head_dim,  # pad self.config.v_head_dim,
                 cp_comm_type=cp_comm_type,
-                model_comm_pgs=self.model_comm_pgs,
+                pg_collection=self.pg_collection,
             )
 
     def forward(
