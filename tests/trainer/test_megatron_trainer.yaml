@@ -77,3 +77,10 @@ modules:
       no_save_rng: null
       disable_last_saving: true
       ckpt_format: torch
+
+
+      # primus turbo
+      enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:false}
+
+      use_turbo_deepep: ${PRIMUS_TURBO_DEEPEP:false}
+      turbo_sync_free_moe_stage: ${PRIMUS_TURBO_SYNC_FREE_MOE_STAGE:0}

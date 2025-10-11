@@ -9,7 +9,7 @@ from typing import Callable, List, Optional, Tuple
 import primus_turbo.pytorch as pt
 import torch
 import transformer_engine as te
-from megatron.core import mpu, tensor_parallel
+from megatron.core import tensor_parallel
 from megatron.core.extensions.transformer_engine import TELinear, condition_init_method
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -848,7 +848,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         num_worst_tokens, permute_max_token_num = 0, 0
         if args.turbo_sync_free_moe_stage > 1:
             if args.sequence_parallel:
-                seq_length = args.seq_length // mpu.get_tensor_model_parallel_world_size()
+                seq_length = args.seq_length // self.tp_size
             else:
                 seq_length = args.seq_length
             num_tokens = seq_length // args.context_parallel_size * args.micro_batch_size
