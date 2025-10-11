@@ -16,7 +16,7 @@ modules:
 
       # debug
       num_layers: ${PRIMUS_NUM_LAYERS:4}
-      moe_layer_freq: ${PRIMUS_MOE_LAYER_FREQ:"[0]*1+[1]*3"}
+      moe_layer_freq: ${PRIMUS_MOE_LAYER_FREQ:[0]*1+[1]*3}
 
       # optimizer: adam
       moe_router_force_load_balancing: true

@@ -16,7 +16,7 @@ from primus.core.utils import logger
 from tests.utils import PrimusUT
 
 
-def run_script(ut_name: str, tag: str, exp_path: str, env_override: dict = None):
+def run_script(ut_name: str, tag: str, exp_path: str, env_override: dict = None,  extra_args: list[str] = None,):
     shell_entry = "examples/run_pretrain.sh"
     env = os.environ.copy()
     if env_override:
@@ -30,11 +30,16 @@ def run_script(ut_name: str, tag: str, exp_path: str, env_override: dict = None)
     do_print_at_runtime = True
     run_stdout = subprocess.PIPE if not do_print_at_runtime else sys.stdout
     run_stderr = subprocess.PIPE if not do_print_at_runtime else sys.stderr
+
+    cmd = ["bash", shell_entry]
+    if extra_args:
+        cmd.extend(extra_args)
+        
     try:
         logger.info(f"Begin run {tag}...")
         start = time.time()
         result = subprocess.run(
-            ["bash", f"{shell_entry}"],
+            cmd,
             check=True,
             stdout=run_stdout,
             stderr=run_stderr,
@@ -110,12 +115,13 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama3_70B",
-            exp_path="tests/trainer/test_megatron_trainer.yaml",
+            exp_path="examples/megatron/configs/llama3_70B-pretrain.yaml",
             env_override={
-                "PRIMUS_MODEL": "llama3_70B",
-                "PRIMUS_GLOBAL_BATCH_SIZE": "8",
-                "PRIMUS_NUM_LAYERS": "4",
+                # "PRIMUS_MODEL": "llama3_70B",
+                # "PRIMUS_GLOBAL_BATCH_SIZE": "8",
+                # "PRIMUS_NUM_LAYERS": "4",
             },
+            extra_args=["--num_layers", "4", "--train_iters", "3"], 
         )
 
     def test_deepseek_v2_lite(self):
