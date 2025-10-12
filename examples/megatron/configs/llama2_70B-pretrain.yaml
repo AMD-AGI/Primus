@@ -1,6 +1,6 @@
-work_group: ${TEAM:amd}
-user_name: ${USER:root}
-exp_name: ${EXP_NAME:llama2_70B-pretrain}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama2_70B-pretrain}
 workspace: ./output
 
 modules:
@@ -10,7 +10,7 @@ modules:
     model: llama2_70B.yaml
     overrides:
       # log
-      wandb_project: "Primus_DeepSeek_Pretrain"
+      wandb_project: "Primus_Llama2_70B_Pretrain"
       stderr_sink_level: DEBUG
 
       log_avg_skip_iterations: 2

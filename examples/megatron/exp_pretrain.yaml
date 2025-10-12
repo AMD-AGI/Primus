@@ -1,6 +1,6 @@
 work_group: ${TEAM:amd}
 user_name: ${USER:root}
-exp_name: &exp_name ${EXP_NAME:exp_pretrain}
+exp_name: &exp_name ${PRIMUS_EXP_NAME:exp_pretrain}
 workspace: ./output
 
 modules:

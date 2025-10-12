@@ -72,8 +72,8 @@ srun -N "${NNODES}" \
           export ANP_HOME_DIR=\${ANP_HOME_DIR}
           export USING_AINIC=\${USING_AINIC}
           export USE_ROCM_AITER_ROPE_BACKEND=\${USE_ROCM_AITER_ROPE_BACKEND}
-          export TEAM=\${TEAM}
-          export USER=\${USER}
-          export EXP_NAME=\${EXP_NAME}
+          export PRIMUS_TEAM=\${PRIMUS_TEAM}
+          export PRIMUS_USER=\${PRIMUS_USER}
+          export PRIMUS_EXP_NAME=\${PRIMUS_EXP_NAME}
           bash ${SCRIPT_DIR}/run_local_pretrain.sh \"\$@\" 2>&1 | tee ${LOG_FILE}
      " bash "$@"

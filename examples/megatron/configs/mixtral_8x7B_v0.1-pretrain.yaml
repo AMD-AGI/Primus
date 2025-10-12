@@ -1,6 +1,6 @@
-work_group: ${TEAM:amd}
-user_name: ${USER:root}
-exp_name: ${EXP_NAME:mixtral_8x22B_v0.1-pretrain}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:mixtral_8x22B_v0.1-pretrain}
 workspace: ./output
 
 modules:

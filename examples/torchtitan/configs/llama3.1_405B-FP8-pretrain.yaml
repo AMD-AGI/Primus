@@ -1,6 +1,6 @@
-work_group: ${TEAM:amd}
-user_name: ${USER:root}
-exp_name: ${EXP_NAME:llama3_405B-pretrain}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3_405B-pretrain}
 workspace: ./output
 
 modules:
@@ -44,5 +44,5 @@ modules:
       float8:
         enable_fsdp_float8_all_gather: true
         precompute_float8_dynamic_scale_for_fsdp: true
-        force_recompute_fp8_weight_in_bwd: true
+        force_recompute_fp8_weight_in_bwd: false
         filter_fqns: ["output"]

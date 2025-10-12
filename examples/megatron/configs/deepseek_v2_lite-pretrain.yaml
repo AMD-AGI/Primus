@@ -1,6 +1,6 @@
-work_group: ${TEAM:amd}
-user_name: ${USER:root}
-exp_name: ${EXP_NAME:deepseek_v2_lite-pretrain}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v2_lite-pretrain}
 workspace: ./output
 
 modules:
@@ -21,8 +21,8 @@ modules:
       log_avg_reset_interval: 50
 
       # hyber parameters
-      train_iters: 50
-      micro_batch_size: 4
+      train_iters: 8
+      micro_batch_size: 10
       global_batch_size: 640
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}

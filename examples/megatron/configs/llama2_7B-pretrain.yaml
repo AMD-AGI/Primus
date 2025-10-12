@@ -1,6 +1,6 @@
-work_group: ${TEAM:amd}
-user_name: ${USER:root}
-exp_name: ${EXP_NAME:llama2_7B-pretrain}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama2_7B-pretrain}
 workspace: ./output
 
 modules:
@@ -12,7 +12,7 @@ modules:
     model: llama2_7B.yaml
     overrides:
       # log
-      wandb_project: "Primus_DeepSeek_Pretrain"
+      wandb_project: "Primus_Llama2_7B_Pretrain"
       # disable_wandb: false
       # disable_tensorboard: false
       stderr_sink_level: DEBUG
