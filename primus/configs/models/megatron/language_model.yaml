@@ -61,6 +61,8 @@ vocab_extra_ids: 0 # int
 tiktoken_pattern: null # str
 tiktoken_num_special_tokens: 1000 # int
 tiktoken_special_tokens: null # str
+legacy_tokenizer: false
+trust_remote_code: false
 
 # initialization
 init_method_std: 0.02

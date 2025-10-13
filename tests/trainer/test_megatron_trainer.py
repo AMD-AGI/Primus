@@ -120,6 +120,24 @@ class TestMegatronTrainer(PrimusUT):
             extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
 
+    def test_qwen25_7B(self):
+        run_script(
+            self.__class__.__name__,
+            "qwen2.5_7B",
+            exp_path="examples/megatron/configs/qwen2.5_7B-pretrain.yaml",
+            env_override={},
+            extra_args=["--num_layers", "4", "--train_iters", "3"],
+        )
+
+    def test_qwen25_72B(self):
+        run_script(
+            self.__class__.__name__,
+            "qwen2.5_72B",
+            exp_path="examples/megatron/configs/qwen2.5_72B-pretrain.yaml",
+            env_override={},
+            extra_args=["--num_layers", "4", "--train_iters", "3"],
+        )
+
     def test_deepseek_v2_lite(self):
         run_script(
             self.__class__.__name__,
