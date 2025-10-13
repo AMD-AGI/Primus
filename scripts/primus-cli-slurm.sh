@@ -24,7 +24,7 @@ Examples:
     # Launch 4 nodes using srun and container mode
     primus-cli slurm srun -N 4 -p AIG_Model -- container -- train pretrain --config exp.yaml
 
-    # # Launch with sbatch, log to file, run benchmark
+    # Launch with sbatch, log to file, run benchmark
     primus-cli slurm sbatch --output=run.log -N 2 -- container -- benchmark gemm -M 4096 -N 4096 -K 4096
 
     # Run preflight environment check across 4 nodes
