@@ -162,6 +162,7 @@ docker_podman_proxy run --rm \
     --env PRIMUS_TEAM \
     --env PRIMUS_USER \
     --env PRIMUS_EXP_NAME \
+    --env DUMP_PP_DIR \
     "${ENV_ARGS[@]}" \
     --ipc=host --network=host \
     --device=/dev/kfd --device=/dev/dri \

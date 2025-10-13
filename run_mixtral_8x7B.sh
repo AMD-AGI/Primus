@@ -15,33 +15,35 @@ export GLOO_SOCKET_IFNAME="enp193s0f1np1"
 export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
 
 export CPUS_PER_TASK=128
-# export HSA_NO_SCRATCH_RECLAIM=0 
+export HSA_NO_SCRATCH_RECLAIM=0 
 export NVTE_CK_USES_BWD_V3=1
 
-export EXP="examples/megatron/configs/grok1-pretrain.yaml"
+export EXP="examples/megatron/configs/mixtral_8x7B_v0.1-pretrain.yaml"
 mkdir -p data
 # the real number of nodes to run
 export NNODES=8
-MBS=2
+GPUS_PER_NODE=8
+MBS=4
+GA=8
 TP=1
 ETP=1
-GBS=$(($NNODES * 64))
-SEQ_LENGTH=8192
-PP=4
+GBS=$(($NNODES * $GPUS_PER_NODE * $MBS * $GA))
+SEQ_LENGTH=4096
+PP=1
 EP=8
 CP=1
-VPP=2
+VPP=1
 OPTIMIZER=adam
-# RECOMPUTE_LAYERS=4
-RECOMPUTE_LAYERS=8
+RECOMPUTE_LAYERS=0
 RECOMPUTE_ID_START=0
 BALANCE=True
 LEGACY_GG=False
-PP_WARMUP=True
-FP8=False # True for fp8, False for bf16
+FP8=True # True for fp8, False for bf16
 
+export HF_TOKEN=${HF_TOKEN:="your_hf_token"}
 
-CONFIG="Grok1-FP8-$FP8.GBS$GBS.MBS$MBS.PP$PP.EP$EP.CP$CP.VPP$VPP.TOPK$TOPK.rc-$RECOMPUTE_LAYERS.rcids-$RECOMPUTE_ID_START.nodes$NNODES.$OPTIMIZER.BALANCE-$BALANCE-legacygg-$LEGACY_GG-noturboattn-noturbogg-ppwarmup$PP_WARMUP"
+CONFIG="Mixtral_8x7B-FP8-$FP8.GBS$GBS.MBS$MBS.PP$PP.EP$EP.CP$CP.VPP$VPP.TOPK$TOPK.rc-$RECOMPUTE_LAYERS.rcids-$RECOMPUTE_ID_START.nodes$NNODES.$OPTIMIZER.BALANCE-$BALANCE-legacygg-$LEGACY_GG-noturboattn-noturbogg"
+# CONFIG="Mixtral_8x7B-FP8-debug"
 echo "config: $CONFIG"
 
 if [ $VPP -gt 1 ]; then
@@ -52,7 +54,6 @@ if [ "$FP8" = "True" ]; then
     export FP8_CONFIG="--fp8 hybrid"
 fi
 
-# export TEAM="date-$(date +%Y%m%d)"
 export PRIMUS_TEAM="date-new-$(date +%Y%m%d)"
 export PRIMUS_USER=wenx
 export PRIMUS_EXP_NAME=$CONFIG
@@ -75,19 +76,17 @@ bash ./examples/run_slurm_pretrain.sh --micro_batch_size $MBS \
                                       --context_parallel_size $CP \
                                       --moe_router_force_load_balancing $BALANCE \
                                       --manual_gc False \
+                                      --pp_warmup True \
                                       --manual_gc_interval 1 \
-                                      --dump_pp_data True \
                                       --optimizer $OPTIMIZER \
                                       --cp_comm_type a2a \
-                                      --pp_warmup $PP_WARMUP \
                                       --recompute_num_layers $RECOMPUTE_LAYERS \
                                       --moe_use_legacy_grouped_gemm $LEGACY_GG \
                                       ${VPP_CONFIG} \
                                       ${FP8_CONFIG} \
                                       --profile True \
-                                      --disable_profiler_activity_cpu True \
+                                      --disable_profiler_activity_cpu False \
                                       --use_pytorch_profiler True \
                                       --profile_step_start 5 \
                                       --profile_step_end 6 \
                                       --train_iters 10 2>&1 | tee $LOG_FILE
-

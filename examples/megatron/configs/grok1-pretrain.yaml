@@ -78,7 +78,30 @@ modules:
       cross_entropy_loss_fusion: true
       cross_entropy_fusion_impl: te
 
-      # Turbo
-      enable_primus_turbo: false
-      use_turbo_attention: false
-      use_turbo_grouped_mlp: false
+      # # Turbo
+      # enable_primus_turbo: true
+      # use_turbo_attention: false
+      # use_turbo_grouped_mlp: false
+
+      # # fp8_recipe: tensorwise
+      # use_turbo_parallel_linear: true
+ 
+      # overlap_grad_reduce: false
+      # overlap_param_gather: false
+      # no_persist_layer_norm: true
+      # create_attention_mask_in_dataloader: false
+      # gradient_accumulation_fusion: true
+      
+      # overlap_grad_reduce: false
+      # overlap_param_gather: false
+ 
+      # dump_pp_data: true
+ 
+      # patch_zero_bubble: true
+      # # num_virtual_stages_per_pipeline_rank: 2
+      # zero_bubble_v_schedule: true
+      # zero_bubble_v_schedule_mem_setup: zb # half, min, zb
+      # enable_optimizer_post_validation: false
+ 
+      # # clip_grad: 1000
+      # debug_scheduler_table: true

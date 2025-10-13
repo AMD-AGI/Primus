@@ -75,5 +75,6 @@ srun -N "${NNODES}" \
           export PRIMUS_TEAM=\${PRIMUS_TEAM}
           export PRIMUS_USER=\${PRIMUS_USER}
           export PRIMUS_EXP_NAME=\${PRIMUS_EXP_NAME}
+          export DUMP_PP_DIR=\${DUMP_PP_DIR}
           bash ${SCRIPT_DIR}/run_local_pretrain.sh \"\$@\" 2>&1 | tee ${LOG_FILE}
      " bash "$@"
