@@ -438,3 +438,12 @@ def validate_args_on_rocm(args):
         print_rank_last(
             f"========== Enable Sync-Free MoE Stage {args.turbo_sync_free_moe_stage} (Auto-Enabled Options) =========="
         )
+
+    # turbo deepep
+    if args.use_turbo_deepep:
+        assert not args.moe_shared_expert_overlap, "MoE Shared Expert Overlap can't be used with deepep."
+        assert (
+            args.moe_router_dtype == "fp32"
+        ), "DeepEP only supports float32 probs, please set --moe-router-dtype=fp32"
+        if args.expert_model_parallel_size >= 16:
+            assert args.turbo_deepep_num_cu <= 32, "Set `turbo_deepep_num_cu<=32` when using ep_size >= 16."
