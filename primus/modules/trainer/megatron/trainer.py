@@ -19,9 +19,6 @@ import torch.distributed as dist
 from megatron.core import mpu, parallel_state, tensor_parallel
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import finalize_model_grads
-from megatron.core.distributed.custom_fsdp import (
-    FullyShardedDataParallel as custom_FSDP,
-)
 from megatron.core.distributed.distributed_data_parallel_config import (
     DistributedDataParallelConfig,
 )
@@ -36,6 +33,7 @@ from megatron.training.checkpointing import (
 )
 
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
+from primus.core.utils.import_utils import get_custom_fsdp, get_model_provider
 
 try:
     pass
@@ -76,7 +74,7 @@ from megatron.training import (
     global_vars,
     one_logger_utils,
 )
-from megatron.training.arguments import moe_freq_type, validate_args
+from megatron.training.arguments import validate_args
 from megatron.training.async_utils import (
     init_persistent_async_worker,
     maybe_finalize_async_save,
@@ -131,7 +129,6 @@ from megatron.training.utils import (
     update_use_dist_ckpt,
 )
 from megatron.training.yaml_arguments import validate_yaml
-from pretrain_gpt import model_provider
 
 from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from primus.backends.megatron.training.global_vars import (
@@ -170,7 +167,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_te_tp_overlap()
         self.patch_mla_attention()
         self.patch_fp8_context()
-        self.patch_zbpp()
+        # self.patch_zbpp()
 
         self.app_metrics = {}
 
@@ -870,7 +867,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.iterations_to_skip = []
 
         # support moe_freq_type
-        args.moe_layer_freq = moe_freq_type(args.moe_layer_freq)
+        # args.moe_layer_freq = moe_freq_type(args.moe_layer_freq)
 
         if args.mock_data:
             args.data_path = None
@@ -900,7 +897,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.app_metrics["app_build_optimizer_start_time"] = one_logger_utils.get_timestamp_in_ms()
         log_rank_0(f"-setup_model_and_optimizer...")
         self.model, self.optimizer, self.opt_param_scheduler = self.setup_model_and_optimizer(
-            model_provider,
+            get_model_provider(),
             ModelType.encoder_or_decoder,
             checkpointing_context=self.checkpointing_context,
         )
@@ -1508,7 +1505,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # Setup some training config params.
         config.grad_scale_func = optimizer.scale_loss
         config.timers = timers
-        if isinstance(model[0], (custom_FSDP, DDP)) and args.overlap_grad_reduce:
+
+        if isinstance(model[0], (get_custom_fsdp(), DDP)) and args.overlap_grad_reduce:
             assert config.no_sync_func is None, (
                 "When overlap_grad_reduce is True, config.no_sync_func must be None; "
                 "a custom no_sync_func is not supported when overlapping grad-reduce"
