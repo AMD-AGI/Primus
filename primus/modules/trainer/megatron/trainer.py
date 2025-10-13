@@ -149,7 +149,7 @@ from primus.modules.module_utils import (
 )
 from primus.modules.trainer.base_trainer import BaseTrainer
 
-from .utils import set_wandb_writer_patch, validate_args_on_rocm
+from .utils import schedule_wrapper, set_wandb_writer_patch, validate_args_on_rocm
 
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
@@ -167,7 +167,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_te_tp_overlap()
         self.patch_mla_attention()
         self.patch_fp8_context()
-        # self.patch_zbpp()
+        self.patch_zbpp()
 
         self.app_metrics = {}
 
@@ -1900,6 +1900,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             from megatron.core.pipeline_parallel import get_forward_backward_func
 
             forward_backward_func = get_forward_backward_func()
+            if optimizer is None and args.dump_pp_data:
+                forward_backward_func = schedule_wrapper(forward_backward_func)
             kwargs = {}
             if optimizer is not None:
                 kwargs["optimizer"] = optimizer

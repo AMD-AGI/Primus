@@ -41,7 +41,7 @@ modules:
       init_method_std: 0.008
       norm_epsilon: 1.0e-6
 
-      num_layers: ${PRIMUS_NUM_LAYERS:16}  
+      num_layers: ${PRIMUS_NUM_LAYERS:16}
       # parallel
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 8
