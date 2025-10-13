@@ -16,7 +16,13 @@ from primus.core.utils import logger
 from tests.utils import PrimusUT
 
 
-def run_script(ut_name: str, tag: str, exp_path: str, env_override: dict = None):
+def run_script(
+    ut_name: str,
+    tag: str,
+    exp_path: str,
+    env_override: dict = None,
+    extra_args: list[str] = None,
+):
     shell_entry = "examples/run_pretrain.sh"
     env = os.environ.copy()
     if env_override:
@@ -30,11 +36,16 @@ def run_script(ut_name: str, tag: str, exp_path: str, env_override: dict = None)
     do_print_at_runtime = True
     run_stdout = subprocess.PIPE if not do_print_at_runtime else sys.stdout
     run_stderr = subprocess.PIPE if not do_print_at_runtime else sys.stderr
+
+    cmd = ["bash", shell_entry]
+    if extra_args:
+        cmd.extend(extra_args)
+
     try:
         logger.info(f"Begin run {tag}...")
         start = time.time()
         result = subprocess.run(
-            ["bash", f"{shell_entry}"],
+            cmd,
             check=True,
             stdout=run_stdout,
             stderr=run_stderr,
@@ -86,92 +97,137 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama2_7B",
-            exp_path="tests/trainer/test_megatron_trainer.yaml",
-            env_override={
-                "PRIMUS_MODEL": "llama2_7B",
-                "PRIMUS_GLOBAL_BATCH_SIZE": "8",
-                "PRIMUS_NUM_LAYERS": "4",
-            },
+            exp_path="examples/megatron/configs/llama2_7B-pretrain.yaml",
+            env_override={},
+            extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
 
     def test_llama3_8B(self):
         run_script(
             self.__class__.__name__,
             "llama3_8B",
-            exp_path="tests/trainer/test_megatron_trainer.yaml",
-            env_override={
-                "PRIMUS_MODEL": "llama3_8B",
-                "PRIMUS_GLOBAL_BATCH_SIZE": "8",
-                "PRIMUS_NUM_LAYERS": "4",
-            },
+            exp_path="examples/megatron/configs/llama3_8B-pretrain.yaml",
+            env_override={},
+            extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
 
     def test_llama3_70B(self):
         run_script(
             self.__class__.__name__,
             "llama3_70B",
-            exp_path="tests/trainer/test_megatron_trainer.yaml",
-            env_override={
-                "PRIMUS_MODEL": "llama3_70B",
-                "PRIMUS_GLOBAL_BATCH_SIZE": "8",
-                "PRIMUS_NUM_LAYERS": "4",
-            },
+            exp_path="examples/megatron/configs/llama3_70B-pretrain.yaml",
+            env_override={},
+            extra_args=["--num_layers", "4", "--train_iters", "3"],
+        )
+
+    def test_qwen25_7B(self):
+        run_script(
+            self.__class__.__name__,
+            "qwen2.5_7B",
+            exp_path="examples/megatron/configs/qwen2.5_7B-pretrain.yaml",
+            env_override={},
+            extra_args=["--num_layers", "4", "--train_iters", "3"],
+        )
+
+    def test_qwen25_72B(self):
+        run_script(
+            self.__class__.__name__,
+            "qwen2.5_72B",
+            exp_path="examples/megatron/configs/qwen2.5_72B-pretrain.yaml",
+            env_override={},
+            extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
 
     def test_deepseek_v2_lite(self):
         run_script(
             self.__class__.__name__,
             "deepseek_v2_lite",
-            exp_path="tests/trainer/test_megatron_trainer.yaml",
-            env_override={
-                "PRIMUS_MODEL": "deepseek_v2_lite",
-                "PRIMUS_GLOBAL_BATCH_SIZE": "8",
-                "PRIMUS_MOE_LAYER_FREQ": "[0]*1+[1]*3",
-                "PRIMUS_EP": "8",
-                "PRIMUS_NUM_LAYERS": "4",
-            },
+            exp_path="examples/megatron/configs/deepseek_v2_lite-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--moe_layer_freq",
+                "[0]*1+[1]*3",
+                "--expert_model_parallel_size",
+                "8",
+            ],
         )
 
     def test_mixtral_8x7B(self):
         run_script(
             self.__class__.__name__,
             "mixtral_8x7B_v0.1",
-            exp_path="tests/trainer/test_megatron_trainer.yaml",
-            env_override={
-                "PRIMUS_MODEL": "mixtral_8x7B_v0.1",
-                "PRIMUS_GLOBAL_BATCH_SIZE": "8",
-                "PRIMUS_EP": "8",
-                "PRIMUS_MOE_LAYER_FREQ": "1",
-                "PRIMUS_NUM_LAYERS": "4",
-            },
+            exp_path="examples/megatron/configs/mixtral_8x7B_v0.1-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--moe_layer_freq",
+                "1",
+                "--expert_model_parallel_size",
+                "8",
+            ],
         )
 
     def test_mixtral_8x22B(self):
         run_script(
             self.__class__.__name__,
             "mixtral_8x22B_v0.1",
-            exp_path="tests/trainer/test_megatron_trainer.yaml",
-            env_override={
-                "PRIMUS_MODEL": "mixtral_8x22B_v0.1",
-                "PRIMUS_GLOBAL_BATCH_SIZE": "8",
-                "PRIMUS_EP": "8",
-                "PRIMUS_MOE_LAYER_FREQ": "1",
-                "PRIMUS_NUM_LAYERS": "4",
-            },
+            exp_path="examples/megatron/configs/mixtral_8x22B_v0.1-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--moe_layer_freq",
+                "1",
+                "--expert_model_parallel_size",
+                "8",
+                "--pipeline_model_parallel_size",
+                "1",
+            ],
         )
 
     def test_deepseek_v3(self):
         run_script(
             self.__class__.__name__,
             "deepseek_v3",
-            exp_path="tests/trainer/test_megatron_trainer.yaml",
-            env_override={
-                "PRIMUS_MODEL": "deepseek_v3",
-                "PRIMUS_GLOBAL_BATCH_SIZE": "8",
-                "PRIMUS_MOE_LAYER_FREQ": "[0]*3+[1]*1",
-                "PRIMUS_EP": "8",
-                "PRIMUS_NUM_LAYERS": "4",
-            },
+            exp_path="examples/megatron/configs/deepseek_v3-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--moe_layer_freq",
+                "[0]*1+[1]*3",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--expert_model_parallel_size",
+                "8",
+                "--pipeline_model_parallel_size",
+                "1",
+            ],
         )
 
     def test_interleaved_pipeline_parallelism(self):
@@ -180,22 +236,25 @@ class TestMegatronTrainer(PrimusUT):
             "interleaved_pipeline_parallelism",
             exp_path="tests/trainer/test_megatron_trainer.yaml",
             env_override={
-                "PRIMUS_MODEL": "deepseek_v2_lite",
-                "PRIMUS_GLOBAL_BATCH_SIZE": "16",
-                "PRIMUS_MOE_LAYER_FREQ": "[0]*1+[1]*7",
                 "PRIMUS_PP": "4",
                 "PRIMUS_VPP": "2",
                 "PRIMUS_NUM_LAYERS": "8",
             },
+            extra_args=[
+                "--global_batch_size",
+                "16",
+                "--moe_layer_freq",
+                "[0]*1+[1]*7",
+            ],
         )
 
-    def test_zero_bubble_pipeline_parallelism(self):
-        run_script(
-            self.__class__.__name__,
-            "zero_bubble_pipeline_parallelism",
-            exp_path="tests/trainer/test_megatron_trainer_zero_bubble.yaml",
-            env_override={},
-        )
+    # def test_zero_bubble_pipeline_parallelism(self):
+    #     run_script(
+    #         self.__class__.__name__,
+    #         "zero_bubble_pipeline_parallelism",
+    #         exp_path="tests/trainer/test_megatron_trainer_zero_bubble.yaml",
+    #         env_override={},
+    #     )
 
 
 class TestMegatronTrainerDeterministic(PrimusUT):

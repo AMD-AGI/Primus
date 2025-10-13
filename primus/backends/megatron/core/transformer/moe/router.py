@@ -4,13 +4,15 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from functools import partial
 from typing import Tuple
 
 import torch
+from megatron.core.tensor_parallel.mappings import (
+    reduce_from_tensor_model_parallel_region,
+)
 from megatron.core.transformer.moe.moe_utils import (
     get_capacity,
-    sequence_load_balancing_loss_func,
+    switch_load_balancing_loss_func,
 )
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -74,16 +76,43 @@ class PrimusTopKRouter(TopKRouter):
                 probs = probs * routing_map
 
         # cal auxiliary loss
-        aux_loss_func = partial(
-            sequence_load_balancing_loss_func,
-            probs=scores,
-            routing_map=routing_map,
-            batch_size=bsz,
-            seq_length=seq_length,
-            topk=self.topk,
+        # aux_loss_func = partial(
+        #     sequence_load_balancing_loss_func,
+        #     probs=scores,
+        #     routing_map=routing_map,
+        #     batch_size=bsz,
+        #     seq_length=seq_length,
+        #     topk=self.topk,
+        # )
+
+        # probs = self.apply_load_balancing_loss(activation=probs, load_balancing_loss_func=aux_loss_func)
+
+        seq_aux_loss_coeff = self.get_aux_loss_coeff("seq_aux_loss")
+        if seq_aux_loss_coeff == 0:
+            return probs
+
+        tokens_per_expert = routing_map.reshape(seq_length, -1).sum(dim=0)
+        tokens_per_expert = reduce_from_tensor_model_parallel_region(tokens_per_expert, self.tp_cp_group)
+
+        total_num_tokens = seq_length * self.tp_cp_group.size()
+        aux_loss = (
+            switch_load_balancing_loss_func(
+                probs=scores,
+                tokens_per_expert=tokens_per_expert,
+                total_num_tokens=total_num_tokens,
+                topk=self.topk,
+                num_experts=self.config.num_moe_experts,
+                moe_aux_loss_coeff=seq_aux_loss_coeff,
+                fused=self.config.moe_router_fusion,
+            )
+            / bsz
         )
 
-        probs = self.apply_load_balancing_loss(activation=probs, load_balancing_loss_func=aux_loss_func)
+        probs = self.attach_and_log_load_balancing_loss(
+            probs, seq_aux_loss_coeff, aux_loss, "seq_load_balancing_loss", self.tp_cp_group
+        )
+
+        return probs, routing_map
 
         return probs, routing_map
 

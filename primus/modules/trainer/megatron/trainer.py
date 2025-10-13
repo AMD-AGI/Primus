@@ -1,5 +1,6 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -18,9 +19,6 @@ import torch.distributed as dist
 from megatron.core import mpu, parallel_state, tensor_parallel
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import finalize_model_grads
-from megatron.core.distributed.custom_fsdp import (
-    FullyShardedDataParallel as custom_FSDP,
-)
 from megatron.core.distributed.distributed_data_parallel_config import (
     DistributedDataParallelConfig,
 )
@@ -35,6 +33,7 @@ from megatron.training.checkpointing import (
 )
 
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
+from primus.core.utils.import_utils import get_custom_fsdp, get_model_provider
 
 try:
     pass
@@ -66,7 +65,6 @@ from megatron.core.rerun_state_machine import (
     get_rerun_state_machine,
     initialize_rerun_state_machine,
 )
-from megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from megatron.core.utils import check_param_hashes_across_dp_replicas, get_model_config
 from megatron.training import (
     ft_integration,
@@ -76,7 +74,7 @@ from megatron.training import (
     global_vars,
     one_logger_utils,
 )
-from megatron.training.arguments import moe_freq_type, validate_args
+from megatron.training.arguments import validate_args
 from megatron.training.async_utils import (
     init_persistent_async_worker,
     maybe_finalize_async_save,
@@ -131,8 +129,12 @@ from megatron.training.utils import (
     update_use_dist_ckpt,
 )
 from megatron.training.yaml_arguments import validate_yaml
-from pretrain_gpt import model_provider
 
+from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_metrics
+from primus.backends.megatron.training.global_vars import (
+    get_mlflow_writer,
+    set_primus_global_variables,
+)
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
 from primus.core.utils.flops_estimator import num_floating_point_operations
@@ -165,7 +167,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_te_tp_overlap()
         self.patch_mla_attention()
         self.patch_fp8_context()
-        self.patch_zbpp()
+        # self.patch_zbpp()
 
         self.app_metrics = {}
 
@@ -794,10 +796,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 warning_rank_0(f"args.wandb_save_dir is deprecated, the wandb path is: {wandb_path}/wandb")
             if not hasattr(args, "wandb_project") or args.wandb_project is None:
                 args.wandb_project = f"{exp_meta_info['work_group']}_{exp_meta_info['user_name']}"
-                debug_rank_0(f" -create new wandb project name: {args.wandb_project}")
+                debug_rank_0(f"  -create new wandb project name: {args.wandb_project}")
             if not hasattr(args, "wandb_exp_name") or args.wandb_exp_name is None:
                 args.wandb_exp_name = exp_meta_info["exp_name"]
-                debug_rank_0(f" - create new exp name: {args.wandb_exp_name}")
+                debug_rank_0(f"  -create new exp name: {args.wandb_exp_name}")
             args.wandb_save_dir = wandb_path
         elif args.wandb_project is not None:
             args.wandb_project = None
@@ -812,6 +814,24 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         log_kv_rank_0(f"  -wandb_exp_name", f"{args.wandb_exp_name}")
         log_kv_rank_0(f"  -wandb_save_dir", f"{args.wandb_save_dir}")
         log_kv_rank_0(f"  -wandb_entity", f"{args.wandb_entity}")
+
+        # mlflow
+        log_kv_rank_0(f"-disable_mlflow", f"{args.disable_mlflow}")
+        if not args.disable_mlflow:
+            if not hasattr(args, "mlflow_run_name") or args.mlflow_run_name is None:
+                args.mlflow_run_name = f"{exp_meta_info['work_group']}_{exp_meta_info['user_name']}"
+                debug_rank_0(f"  -create new mlflow run name: {args.mlflow_run_name}")
+        elif args.mlflow_run_name is not None:
+            args.mlflow_run_name = None
+            args.mlflow_experiment_name = None
+            debug_rank_0(f"args.mlflow_run_name is disabled, as args.disable_mlflow=True.")
+        if not args.disable_mlflow and "DATABRICKS_HOST" not in os.environ:
+            warning_rank_0(
+                "The environment variable DATABRICKS_HOST is not set. "
+                "Please set it before proceeding or enable 'disable_mlflow' in yaml config"
+            )
+        log_kv_rank_0(f"  -mlflow_run_name", f"{args.mlflow_run_name}")
+        log_kv_rank_0(f"  -mlflow_experiment_name", f"{args.mlflow_experiment_name}")
 
         # sink_level: logging_level
         level_map = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
@@ -847,7 +867,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.iterations_to_skip = []
 
         # support moe_freq_type
-        args.moe_layer_freq = moe_freq_type(args.moe_layer_freq)
+        # args.moe_layer_freq = moe_freq_type(args.moe_layer_freq)
 
         if args.mock_data:
             args.data_path = None
@@ -877,7 +897,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.app_metrics["app_build_optimizer_start_time"] = one_logger_utils.get_timestamp_in_ms()
         log_rank_0(f"-setup_model_and_optimizer...")
         self.model, self.optimizer, self.opt_param_scheduler = self.setup_model_and_optimizer(
-            model_provider,
+            get_model_provider(),
             ModelType.encoder_or_decoder,
             checkpointing_context=self.checkpointing_context,
         )
@@ -1059,6 +1079,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # tensorboard-writer, and timers.
         log_rank_0(f"-set_global_variables...")
         set_global_variables(args, build_tokenizer=False)
+        log_rank_0(f"-set_primus_global_variables...")
+        set_primus_global_variables(args)
         args = get_args()
 
         # set tokenizer
@@ -1406,6 +1428,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         maybe_finalize_async_save(blocking=True, terminate=True)
         ft_integration.on_checkpointing_end(is_async_finalization=True)
 
+        mlflow_writer = get_mlflow_writer()
+        if mlflow_writer:
+            mlflow_writer.end_run()
+
         one_logger and one_logger.log_metrics({"app_finish_time": one_logger_utils.get_timestamp_in_ms()})
 
         ft_integration.shutdown()
@@ -1479,7 +1505,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # Setup some training config params.
         config.grad_scale_func = optimizer.scale_loss
         config.timers = timers
-        if isinstance(model[0], (custom_FSDP, DDP)) and args.overlap_grad_reduce:
+
+        if isinstance(model[0], (get_custom_fsdp(), DDP)) and args.overlap_grad_reduce:
             assert config.no_sync_func is None, (
                 "When overlap_grad_reduce is True, config.no_sync_func must be None; "
                 "a custom no_sync_func is not supported when overlapping grad-reduce"
@@ -1845,6 +1872,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             wandb_writer = get_wandb_writer()
             if wandb_writer:
                 wandb_writer.finish()
+            mlflow_writer = get_mlflow_writer()
+            if mlflow_writer:
+                mlflow_writer.end_run()
             ft_integration.shutdown()
             sys.exit(exit_code)
 
@@ -2020,6 +2050,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         timers = get_timers()
         writer = get_tensorboard_writer()
         wandb_writer = get_wandb_writer()
+        mlflow_writer = get_mlflow_writer()
         get_one_logger()
 
         # Advanced, skipped, and Nan iterations.
@@ -2093,6 +2124,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if iteration % args.tensorboard_log_interval == 0:
             if wandb_writer:
                 wandb_writer.log({"samples vs steps": args.consumed_train_samples}, iteration)
+            if mlflow_writer:
+                mlflow_writer.log_metric("samples vs steps", args.consumed_train_samples, step=iteration)
             if writer:
                 writer.add_scalar("learning-rate", learning_rate, iteration)
                 if args.decoupled_lr is not None:
@@ -2104,9 +2137,13 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 )
             if wandb_writer:
                 wandb_writer.log({"learning-rate": learning_rate}, iteration)
+            if mlflow_writer:
+                mlflow_writer.log_metric("learning-rate", learning_rate, step=iteration)
             if writer:
                 writer.add_scalar("batch-size", batch_size, iteration)
                 writer.add_scalar("batch-size vs samples", batch_size, args.consumed_train_samples)
+            if mlflow_writer:
+                mlflow_writer.log_metric("batch-size", batch_size, iteration)
             if wandb_writer:
                 wandb_writer.log({"batch-size": batch_size}, iteration)
             for key in loss_dict:
@@ -2115,12 +2152,16 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     writer.add_scalar(key + " vs samples", loss_dict[key], args.consumed_train_samples)
                 if wandb_writer:
                     wandb_writer.log({key: loss_dict[key]}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric(key, loss_dict[key], step=iteration)
             if args.log_loss_scale_to_tensorboard:
                 if writer:
                     writer.add_scalar("loss-scale", loss_scale, iteration)
                     writer.add_scalar("loss-scale vs samples", loss_scale, args.consumed_train_samples)
                 if wandb_writer:
                     wandb_writer.log({"loss-scale": loss_scale}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric("loss-scale", loss_scale, step=iteration)
             if args.log_world_size_to_tensorboard:
                 if writer:
                     writer.add_scalar("world-size", args.world_size, iteration)
@@ -2131,12 +2172,16 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     )
                 if wandb_writer:
                     wandb_writer.log({"world-size": args.world_size}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric("world-size", args.world_size, step=iteration)
             if grad_norm is not None:
                 if writer:
                     writer.add_scalar("grad-norm", grad_norm, iteration)
                     writer.add_scalar("grad-norm vs samples", grad_norm, args.consumed_train_samples)
                 if wandb_writer:
                     wandb_writer.log({"grad-norm": grad_norm}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric("grad-norm", grad_norm, step=iteration)
             if num_zeros_in_grad is not None:
                 if writer:
                     writer.add_scalar("num-zeros", num_zeros_in_grad, iteration)
@@ -2147,6 +2192,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     )
                 if wandb_writer:
                     wandb_writer.log({"num-zeros": num_zeros_in_grad}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric("num-zeros", num_zeros_in_grad, iteration)
             if params_norm is not None:
                 if writer:
                     writer.add_scalar("params-norm", params_norm, iteration)
@@ -2157,6 +2204,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     )
                 if wandb_writer:
                     wandb_writer.log({"params-norm": params_norm}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric("params-norm", params_norm, iteration)
             if args.log_memory_to_tensorboard:
                 mem_stats = torch.cuda.memory_stats()
                 if writer:
@@ -2204,6 +2253,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 iteration=iteration,
                 writer=writer,
                 wandb_writer=wandb_writer,
+                mlflow_writer=mlflow_writer,
                 total_loss_dict=total_loss_dict,
                 per_layer_logging=args.moe_per_layer_logging,
                 moe_layer_freq=args.moe_layer_freq,
@@ -2236,6 +2286,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     writer.add_scalar("iteration-time", elapsed_time_per_iteration, iteration)
                 if wandb_writer:
                     wandb_writer.log({"iteration-time": elapsed_time_per_iteration}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric("iteration-time", elapsed_time_per_iteration, iteration)
             # log_string = f" [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
             log_string = f""
             if hasattr(self, "episode_count") and self.episode_count is not None:
@@ -2352,6 +2404,31 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                             iteration,
                         )
                         wandb_writer.log({f"{mem_collector}_mem_usage(%)": mem_usage * 100.0}, iteration)
+                    if mlflow_writer:
+                        mlflow_writer.log_metric("throughput(tflops/sec/gpu)", throughput, iteration)
+                        mlflow_writer.log_metric(
+                            "token_throughput(tokens/sec/gpu)",
+                            token_throughput,
+                            iteration,
+                        )
+                        mlflow_writer.log_metric(
+                            f"{mem_collector}_used_mem(GB)",
+                            used_mem / 1024 / 1024 / 1024,
+                            iteration,
+                        )
+                        mlflow_writer.log_metric(
+                            f"{mem_collector}_free_mem(GB)",
+                            free_mem / 1024 / 1024 / 1024,
+                            iteration,
+                        )
+                        mlflow_writer.log_metric(
+                            f"{mem_collector}_total_mem(GB)",
+                            total_mem / 1024 / 1024 / 1024,
+                            iteration,
+                        )
+                        mlflow_writer.log_metric(
+                            f"{mem_collector}_mem_usage(%)", mem_usage * 100.0, iteration
+                        )
             assert learning_rate is not None
             # Decoupled_learning_rate should be not None only on first and last pipeline stage.
             log_string += " learning rate: {:.6E} |".format(learning_rate)
