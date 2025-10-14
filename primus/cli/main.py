@@ -23,10 +23,11 @@ def main():
     parser = argparse.ArgumentParser(prog="primus", description="Primus Unified CLI for Training & Utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    from primus.cli import train_cli
+    from primus.cli import benchmark_cli, train_cli
 
     # Register train subcommand (only implemented one for now)
     train_cli.register_subcommand(subparsers)
+    benchmark_cli.register_subcommand(subparsers)
 
     args, unknown_args = parser.parse_known_args()
 
