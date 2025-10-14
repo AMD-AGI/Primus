@@ -153,6 +153,7 @@ docker_podman_proxy run --rm \
     --env AINIC_LIB="$AINIC_LIB" \
     --env PRIMUS_BUILD_DIR="$PRIMUS_BUILD_DIR" \
     --env REBUILD_BNXT \
+    --env REBUILD_PRIMUS_TURBO \
     --env PATH_TO_BNXT_TAR_PACKAGE \
     --env MEGATRON_PATH \
     --env TORCHTITAN_PATH \

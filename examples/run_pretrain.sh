@@ -279,7 +279,24 @@ else
   LOG_INFO "Skip bnxt rebuild. REBUILD_BNXT=$REBUILD_BNXT, PATH_TO_BNXT_TAR_PACKAGE=$PATH_TO_BNXT_TAR_PACKAGE"
 fi
 
-
+export REBUILD_PRIMUS_TURBO=${REBUILD_PRIMUS_TURBO:-0}
+# install primus turbo from source
+if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
+    LOG_INFO "Rebuilding Primus Turbo from source..."
+    mkdir -p "/workspace/turbo"
+    cd "/workspace/turbo"
+    git clone https://github.com/AMD-AGI/Primus-Turbo.git --recursive
+    cd Primus-Turbo
+    git checkout dev/xiaobo_tmp_1014_attn
+    pip3 install -r requirements.txt
+    pip3 install --no-build-isolation .
+    # Set GPU_ARCHS to compile Turbo for multiple AMD GPU architectures.
+    GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
+    cd "${PRIMUS_PATH}"
+    LOG_INFO "Rebuilding Primus Turbo from source done."
+else
+    LOG_INFO "Skip Primus Turbo rebuild. REBUILD_PRIMUS_TURBO=$REBUILD_PRIMUS_TURBO"
+fi
 
 # -------------------- HipBLASLt Tuning --------------------
 handle_hipblaslt_tuning() {

@@ -64,6 +64,7 @@ srun -N "${NNODES}" \
           export GLOO_SOCKET_IFNAME=\${GLOO_SOCKET_IFNAME}
           export NCCL_SOCKET_IFNAME=\${NCCL_SOCKET_IFNAME}
           export REBUILD_BNXT=\${REBUILD_BNXT}
+          export REBUILD_PRIMUS_TURBO=\${REBUILD_PRIMUS_TURBO}
           export MEGATRON_PATH=\${MEGATRON_PATH}
           export TORCHTITAN_PATH=\${TORCHTITAN_PATH}
           export BACKEND_PATH=\${BACKEND_PATH}
