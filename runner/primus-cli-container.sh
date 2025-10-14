@@ -98,7 +98,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Defaults (fallback)
-DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/megatron-lm:v25.5_py310"}
+DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/megatron-lm:v25.8_py310"}
 
 # ----------------- Volume Mounts -----------------
 # Mount the project root and dataset directory into the container
@@ -177,6 +177,6 @@ fi
     "$DOCKER_IMAGE" /bin/bash -c "\
         echo '[primus-cli-container][${HOSTNAME}][INFO]: container started at $(date +"%Y.%m.%d %H:%M:%S")' && \
         [[ -d $PRIMUS_PATH ]] || { echo '$LOG_ERROR Primus not found at $PRIMUS_PATH'; exit 42; } && \
-        cd $PRIMUS_PATH && bash scripts/primus-cli-entrypoint.sh \"\$@\" 2>&1 && \
+        cd $PRIMUS_PATH && bash runner/primus-cli-entrypoint.sh \"\$@\" 2>&1 && \
         echo '[primus-cli-container][${HOSTNAME}][INFO]: container finished at $(date +"%Y.%m.%d %H:%M:%S")'
     " bash "${ARGS[@]}"
