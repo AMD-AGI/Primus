@@ -864,7 +864,6 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             ep_group=self.ep_group,
             tp_group=self.tp_group,
             tp_ep_group=self.tp_ep_group,
-            router_dtype=config.moe_router_dtype,
             expert_capacity_factor=config.moe_expert_capacity_factor,
             permute_fusion=config.moe_permute_fusion,
             permute_max_token_num=permute_max_token_num,
@@ -958,6 +957,8 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         permuted_input, tokens_per_expert, permuted_probs = self.deepep_dispatcher._post_dispatch(
             hidden_states, probs
         )
+        if self.config.moe_router_dtype == "fp64":
+            permuted_probs = permuted_probs.to(torch.float64)
         return permuted_input, tokens_per_expert, permuted_probs
 
     def combine_preprocess(self, hidden_states: torch.Tensor):
