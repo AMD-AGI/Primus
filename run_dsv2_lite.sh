@@ -37,7 +37,7 @@ RECOMPUTE_LAYERS=0
 RECOMPUTE_ID_START=0
 BALANCE=True
 LEGACY_GG=False
-FP8=True
+FP8=False
 
 export HF_TOKEN=${HF_TOKEN:="your_hf_token"}
 
@@ -64,7 +64,7 @@ LOG_FILE=$LOG_DIR/training.log
 echo $LOG_FILE
 
 EXPORT_CONFIG=$LOG_DIR/config.yaml
-bash ./examples/run_slurm_pretrain.sh --micro_batch_size $MBS \
+bash ./examples/run_local_pretrain.sh --micro_batch_size $MBS \
                                       --global_batch_size $GBS \
                                       --tensor_model_parallel_size $TP \
                                       --expert_tensor_parallel_size $ETP \
