@@ -6,3 +6,5 @@
 ###############################################################################
 
 WORLD_SIZE=72 LOCAL_RANK=0 RANK=0 python ./benchmark_allreduce.py  -dry
+WORLD_SIZE=8 LOCAL_RANK=0 RANK=0 python ./benchmark_allreduce.py  -dry
+WORLD_SIZE=4 LOCAL_RANK=0 RANK=0 python ./benchmark_allreduce.py  -dry

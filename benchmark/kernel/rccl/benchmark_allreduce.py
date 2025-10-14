@@ -30,7 +30,9 @@ ITERS = 100
 
 def test_allreduce(mbs, seq, hidden, dtype, rank, local_rank, world_size, dry_run=False):
     if local_rank == 0:
-        print("AllReduce with input size(Byte): ", mbs * seq * hidden * torch.tensor([], dtype=dtype).element_size())
+        size = mbs * seq * hidden * torch.tensor([], dtype=dtype).element_size()
+        print("AllReduce with input size(Byte): ", size)
+        print(f"Rccl-test command: \n$ mpirun -np {world_size} -N $NNODES ./build/all_reduce_perf -b {size} -e {size} -g 1")
     if dry_run:
         return 0,0
     shape = (mbs, seq, hidden)
@@ -136,6 +138,7 @@ def benchmark(test_func, output_csv_path, rank, local_rank, world_size,dry_run=F
 
     for model_name, (seq, hidden) in MODEL_PARAMS_TABLE.items():
         for mbs in MBS_LIST:
+            print(f"\nModel Name {model_name}, mbs {mbs}")
             for dtype in [torch.float16]:
                 avg_time, bandwidth = test_func(mbs, seq, hidden, dtype, rank, local_rank, world_size,dry_run)
                 if rank == 0:
@@ -173,11 +176,10 @@ if __name__ == "__main__":
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     assert world_size >= 2, "This script requires at least 2 processes."
 
-    if args.dry_run and local_rank==0:
-        benchmark(test_allreduce, args.allreduce_report_csv_path, 0, 0, world_size, True)
-        benchmark(test_allgather, args.allgather_report_csv_path, 0, 0, world_size, True)
-        benchmark(test_reducescatter, args.reducescatter_report_csv_path, 0, 0, world_size, True)
     if args.dry_run:
+        benchmark(test_allreduce, args.allreduce_report_csv_path, 0, 0, world_size, True)
+        # benchmark(test_allgather, args.allgather_report_csv_path, 0, 0, world_size, True)
+        # benchmark(test_reducescatter, args.reducescatter_report_csv_path, 0, 0, world_size, True)
         exit(0)
 
     dist.init_process_group(
