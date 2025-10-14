@@ -1,7 +1,8 @@
 #!/bin/bash
 
+######################### Training Docker and Envs #########################
 export HF_TOKEN=${HF_TOKEN:-"your_hf_token"}
-export USE_ROCM_AITER_ROPE_BACKEND=0
+export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
 export CLEAN_DOCKER_CONTAINER=1
 
 export USING_AINIC=1
@@ -11,16 +12,14 @@ export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
 export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
 export NCCL_SOCKET_IFNAME="enp193s0f1np1"
 export GLOO_SOCKET_IFNAME="enp193s0f1np1"
-
-export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
-
 export CPUS_PER_TASK=128
 # export HSA_NO_SCRATCH_RECLAIM=0 
 export NVTE_CK_USES_BWD_V3=1
+export USE_ROCM_AITER_ROPE_BACKEND=0
 
+
+######################### Training Config #########################
 export EXP="examples/megatron/configs/grok1-pretrain.yaml"
-mkdir -p data
-# the real number of nodes to run
 export NNODES=8
 MBS=2
 TP=1
@@ -32,17 +31,12 @@ EP=8
 CP=1
 VPP=2
 OPTIMIZER=adam
-# RECOMPUTE_LAYERS=4
 RECOMPUTE_LAYERS=8
 RECOMPUTE_ID_START=0
 BALANCE=True
 LEGACY_GG=False
 PP_WARMUP=True
-FP8=False # True for fp8, False for bf16
-
-
-CONFIG="Grok1-FP8-$FP8.GBS$GBS.MBS$MBS.PP$PP.EP$EP.CP$CP.VPP$VPP.TOPK$TOPK.rc-$RECOMPUTE_LAYERS.rcids-$RECOMPUTE_ID_START.nodes$NNODES.$OPTIMIZER.BALANCE-$BALANCE-legacygg-$LEGACY_GG-noturboattn-noturbogg-ppwarmup$PP_WARMUP"
-echo "config: $CONFIG"
+FP8=True # True for fp8, False for bf16
 
 if [ $VPP -gt 1 ]; then
     export VPP_CONFIG="--num_virtual_stages_per_pipeline_rank $VPP"
@@ -52,19 +46,23 @@ if [ "$FP8" = "True" ]; then
     export FP8_CONFIG="--fp8 hybrid"
 fi
 
-# export TEAM="date-$(date +%Y%m%d)"
-export PRIMUS_TEAM="date-new-$(date +%Y%m%d)"
-export PRIMUS_USER=wenx
-export PRIMUS_EXP_NAME=$CONFIG
 
+CONFIG="Grok1.FP8-$FP8.nodes$NNODES.GBS$GBS.MBS$MBS.PP$PP.EP$EP.CP$CP.VPP$VPP.rc-$RECOMPUTE_LAYERS"
+echo "config: $CONFIG"
+
+######################### Training Experiments #########################
+export PRIMUS_TEAM="date-$(date +%Y%m%d)"
+export PRIMUS_USER=user-abc
+export PRIMUS_EXP_NAME=$CONFIG
 
 LOG_DIR=./output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/
 export DUMP_PP_DIR=$LOG_DIR/pp_dump/
+export LOG_FILE=$LOG_DIR/training.log
+export EXPORT_CONFIG=$LOG_DIR/config.yaml
 mkdir -p $LOG_DIR
-LOG_FILE=$LOG_DIR/training.log
 echo $LOG_FILE
 
-EXPORT_CONFIG=$LOG_DIR/config.yaml
+######################### Training Job #########################
 bash ./examples/run_slurm_pretrain.sh --micro_batch_size $MBS \
                                       --global_batch_size $GBS \
                                       --tensor_model_parallel_size $TP \
