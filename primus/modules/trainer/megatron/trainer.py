@@ -131,7 +131,6 @@ from megatron.training.utils import (
     update_use_dist_ckpt,
 )
 from megatron.training.yaml_arguments import validate_yaml
-from pretrain_gpt import model_provider
 
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
@@ -854,6 +853,14 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.train_data_path = None
             args.valid_data_path = None
             args.test_data_path = None
+        
+        self.model_provider = None
+        if args.final_logit_softcapping is not None and args.final_logit_softcapping > 0.0:
+            log_rank_0(f" -enable final_logit_softcapping: {args.final_logit_softcapping}")
+            from primus.backends.megatron.pretrain_gpt import primus_model_provider as model_provider
+        else:
+            from pretrain_gpt import model_provider
+        self.model_provider = model_provider
 
     def vocab_size_with_padding(self, orig_vocab_size, args):
         """Pad vocab size so it is divisible by model parallel size and
@@ -877,7 +884,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.app_metrics["app_build_optimizer_start_time"] = one_logger_utils.get_timestamp_in_ms()
         log_rank_0(f"-setup_model_and_optimizer...")
         self.model, self.optimizer, self.opt_param_scheduler = self.setup_model_and_optimizer(
-            model_provider,
+            self.model_provider,
             ModelType.encoder_or_decoder,
             checkpointing_context=self.checkpointing_context,
         )

@@ -3,3 +3,8 @@ disable_primus_topk_router: false
 moe_router_force_load_balancing: false
 use_deprecated_20241209_moe_layer: false
 fused_padded_mla_attention: false
+
+# softcapping for logits (for x.ai grok2)
+final_logit_softcapping: null # float
+attn_logit_softcapping: null # float
+router_logit_softcapping: null # float
