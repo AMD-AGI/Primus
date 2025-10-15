@@ -5,211 +5,157 @@
 ###############################################################################
 
 import argparse
-import math
-from typing import Any, Dict, List, Optional
+import itertools
+from datetime import datetime
+from typing import Tuple
 
 import torch
-import torch.distributed as dist
+from git import List
+from tqdm import tqdm
 
+from primus.tools.benchmark.gemm_bench import profile_gemm
 from primus.tools.report import write_table_simple
-from primus.tools.utils import (
-    get_current_device,
-    get_hostname,
-    get_rank_world,
-    is_rank_0,
-)
-
-CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
+from primus.tools.utils import gather_records, is_rank_0
 
 
 def add_gemm_parser(parser: argparse.ArgumentParser):
-    """
-    Register DENSE-GEMM benchmark arguments to the CLI parser.
-    """
-    parser.add_argument("--M", type=int, default=4096, help="GEMM M dimension (default: 4096)")
-    parser.add_argument("--N", type=int, default=4096, help="GEMM N dimension (default: 4096)")
-    parser.add_argument("--K", type=int, default=4096, help="GEMM K dimension (default: 4096)")
-    parser.add_argument("--trans_a", action="store_true", help="Transpose A matrix")
-    parser.add_argument("--trans_b", action="store_true", help="Transpose B matrix")
-    parser.add_argument(
-        "--dtype", choices=["bf16", "fp16", "fp32"], default="bf16", help="Data type for GEMM computation."
-    )
-    parser.add_argument("--duration", type=int, default=60, help="Benchmark duration in seconds.")
-    parser.add_argument(
-        "--output_file",
-        default="",
-        help="Path to save results (.md/.csv/.tsv/.jsonl[.gz]). If not set or '-', print to stdout (Markdown).",
-    )
-
+    parser.add_argument("--model", default="llama3-7B")
+    parser.add_argument("--seqlen", type=int, default=2048)
+    parser.add_argument("--hidden-size", type=int, default=4096)
+    parser.add_argument("--intermediate-size", type=int, default=11008)
+    parser.add_argument("--num-attention-heads", type=int, default=32)
+    parser.add_argument("--num-key-value-heads", type=int, default=32)
+    parser.add_argument("--head-dim", type=int, default=128)
+    parser.add_argument("--vocab-size", type=int, default=32000)
+    parser.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
+    parser.add_argument("--mbs", type=int, default=1, help="Microbatch size")
+    parser.add_argument("--output_file", default="./gemm-dense_report.md")
+    parser.add_argument("--duration", type=int, default=3, help="Benchmark duration per shape (sec)")
     return parser
 
 
-def maybe_transpose(tensor, transpose):
-    return tensor.t() if transpose else tensor
+def profile_fwd(m, n, k, dtype, duration):
+    return profile_gemm(m, n, k, dtype, False, True, duration)
 
 
-def profile_gemm(m, n, k, dtype, trans_a, trans_b):
-    assert dtype in [torch.float16, torch.bfloat16], f"Unsupported dtype: {dtype}"
-
-    device = get_current_device()
-
-    dtype_size = torch.tensor([], dtype=dtype).element_size()
-    mem_size_bytes = (m * k + k * n + m * n) * dtype_size
-    num_rotations = math.ceil(CACHE_ROTATING_BUFFER_BYTES / mem_size_bytes) + 1
-    num_run = 100
-
-    a_shape = (k, m) if trans_a else (m, k)
-    b_shape = (n, k) if trans_b else (k, n)
-
-    a_list = [torch.randn(a_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
-    b_list = [torch.randn(b_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
-    c_list = [torch.randn((m, n), device=device, dtype=dtype) for _ in range(num_rotations)]
-
-    # Warm-up
-    for i in range(num_rotations):
-        a = maybe_transpose(a_list[i], trans_a)
-        b = maybe_transpose(b_list[i], trans_b)
-        c_list[i] = torch.matmul(a, b)
-    torch.cuda.synchronize()
-
-    # Run
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for _ in range(num_run):
-        for i in range(num_rotations):
-            a = maybe_transpose(a_list[i], trans_a)
-            b = maybe_transpose(b_list[i], trans_b)
-            c_list[i] = torch.matmul(a, b)
-    end_event.record()
-    torch.cuda.synchronize()
-
-    # result
-    avg_time_ms = start_event.elapsed_time(end_event) / (num_rotations * num_run)
-    tflop = 2 * m * n * k / 1e12
-    tflops = tflop / avg_time_ms * 1000  # Convert to TFlops
-    bandwidth = mem_size_bytes / 1e9 / avg_time_ms * 1000  # Convert to GB/s
-    return {
-        "m": m,
-        "n": n,
-        "k": k,
-        "trans_a": trans_a,
-        "trans_b": trans_b,
-        "dtype": str(dtype),
-        "avg_time_ms": avg_time_ms,
-        "tflop": tflop,
-        "tflops": tflops,
-        "bandwidth_gbps": bandwidth,
-    }
+def profile_wgrad(m, n, k, dtype, duration):
+    return profile_gemm(n, k, m, dtype, True, False, duration)
 
 
-def gather_records(record: Dict[str, Any], dst: int = 0) -> Optional[List[Dict[str, Any]]]:
-    """
-    Gather per-rank dict records to dst (root) rank only.
-    - Automatically injects 'host', 'rank', and 'world'.
-    - Returns:
-        * On root (rank==dst): List[Dict[str, Any]] of all records.
-        * On non-root: None  (change to [] if you prefer old behavior).
-    - Works even if torch.distributed is not initialized (single-process).
-    """
-    rank, world = get_rank_world()
+def profile_dgrad(m, n, k, dtype, duration):
+    return profile_gemm(m, k, n, dtype, False, False, duration)
 
-    # Inject host/rank/world into a shallow copy to avoid mutating caller's dict
-    local = dict(record)
-    local["host"] = get_hostname()
-    local["rank"] = rank
-    local["world"] = world
 
-    if world == 1 or not (dist.is_available() and dist.is_initialized()):
-        # Single process: just return a singleton list on "root"
-        return [local]
+def build_gemm_preamble(args, shape_defs: List[Tuple[str, List[int]]]) -> str:
+    lines = [
+        "# Dense GEMM Benchmark Report",
+        "",
+        f"- Model: {args.model}",
+        f"- Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Cluster: amd-aig-poolside",
+        f"- Duration per shape: {args.duration} sec",
+        "",
+        "## Configuration",
+        f"- mbs: {args.mbs}",
+        f"- num_attention_heads: {args.num_attention_heads}",
+        f"- num_key_value_heads: {args.num_key_value_heads}",
+        f"- head_dim: {args.head_dim}",
+        f"- hidden_size: {args.hidden_size}",
+        f"- intermediate_size: {args.intermediate_size}",
+        f"- vocab_size: {args.vocab_size}",
+        f"- seqlen: {args.seqlen}",
+        f"- dtype: {args.dtype}",
+        "",
+        "## GEMM Shapes (M, N, K)",
+    ]
 
-    if rank == dst:
-        # Root gathers a list of objects from all ranks
-        gathered: List[Optional[Dict[str, Any]]] = [None for _ in range(world)]
-        dist.gather_object(local, object_gather_list=gathered, dst=dst)
-        # Type narrowing: all entries must be dicts here
-        return [g for g in gathered if g is not None]
-    else:
-        # Non-root sends and returns None to avoid extra work/printing
-        dist.gather_object(local, dst=dst)
-        return None
+    for name, shape in shape_defs:
+        m, n, k = shape
+        lines.append(f"- {name}: ({m}, {n}, {k})")
+
+    lines += [
+        "",
+        "## Phases",
+        "- fwd: forward pass",
+        "- wgrad: weight gradient",
+        "- dgrad: data gradient",
+        "",
+    ]
+
+    return "\n".join(lines)
 
 
 def run_gemm_benchmark(args):
-    if args.M <= 0 or args.N <= 0 or args.K <= 0:
-        raise ValueError("M, N, K must be positive integers.")
-
-    m, n, k = args.M, args.N, args.K
-    trans_a, trans_b = args.trans_a, args.trans_b
-
-    dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+    dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp34": torch.float32}
     dtype = dtype_map[args.dtype]
 
-    res = profile_gemm(m, n, k, dtype, trans_a, trans_b)
+    shape_defs = [
+        (
+            "attn_qkv",
+            [
+                args.seqlen,
+                (args.num_attention_heads + 2 * args.num_key_value_heads) * args.head_dim,
+                args.hidden_size,
+            ],
+        ),
+        ("attn_out", [args.seqlen, args.hidden_size, args.hidden_size]),
+        ("mlp_up", [args.seqlen, 2 * args.intermediate_size, args.hidden_size]),
+        ("mlp_down", [args.seqlen, args.hidden_size, args.intermediate_size]),
+        ("vocab", [args.seqlen, args.vocab_size, args.hidden_size]),
+    ]
 
-    # Build record with GEMM-specific metrics
-    record = {
-        "m": res["m"],
-        "n": res["n"],
-        "k": res["k"],
-        "trans_a": int(res["trans_a"]),
-        "trans_b": int(res["trans_b"]),
-        "dtype": res["dtype"],  # "bf16"/"fp16"/"fp32"
-        "avg_time_ms": float(f"{res['avg_time_ms']:.6f}"),
-        "tflop": float(f"{res['tflop']:.2f}"),
-        "tflops": float(f"{res['tflops']:.2f}"),
-        "bandwidth_gbps": float(f"{res['bandwidth_gbps']:.2f}"),
-    }
+    func_defs = [
+        ("fwd", profile_fwd),
+        ("wgrad", profile_wgrad),
+        ("dgrad", profile_dgrad),
+    ]
 
-    # Gather results
+    record = {}
+    for (phase, shape), (tag, func) in tqdm(
+        itertools.product(shape_defs, func_defs), total=len(shape_defs) * len(func_defs), desc="Dense GEMM"
+    ):
+        m = args.mbs * shape[0]
+        n = shape[1]
+        k = shape[2]
+
+        res = func(m, n, k, dtype, args.duration)
+        summary = (
+            f"{res['avg_time_ms']:.6f}s / "
+            f"{res['tflops']:.2f}TF/s / "
+            f"{res['bandwidth_gbps']:.2f}GB/s / "
+            f"AI={res['arith_intensity']:.2f}"
+        )
+        record[f"{phase}_{tag}"] = summary
+
     gathered = gather_records(record)
-
     if is_rank_0():
+        all_keys = set()
+        for r in gathered:
+            all_keys.update(r.keys())
+        header = ["host", "world", "rank"] + sorted(
+            [k for k in all_keys if k not in {"host", "rank", "world"}]
+        )
 
-        gemm_summary_header = [
-            "host",
-            "world",
-            "rank",
-            "m",
-            "n",
-            "k",
-            "trans_a",
-            "trans_b",
-            "dtype",
-            "avg_time_ms",
-            "tflop",
-            "tflops",
-            "bandwidth_gbps",
-        ]
+        rows = [[r.get(col, "") for col in header] for r in gathered]
 
-        # Convert list[dict] -> list[list] in header order
-        float6 = {"avg_time_ms"}
-        float2 = {"tflop", "tflops", "bandwidth_gbps"}
+        preamble = build_gemm_preamble(args, shape_defs)
 
-        rows_ll = []
-        for rec in gathered:
-            row = []
-            for col in gemm_summary_header:
-                v = rec.get(col, "")
-                if v is None:
-                    v = ""
-                elif col in float6:
-                    v = f"{float(v):.6f}"
-                elif col in float2:
-                    v = f"{float(v):.2f}"
-                row.append(v)
-            rows_ll.append(row)
+        append = getattr(args, "append", False)
 
         write_table_simple(
-            header=gemm_summary_header,
-            rows=rows_ll,  # <-- pass list-of-lists, not list-of-dicts
-            output_file=getattr(args, "output_file", None),
-            append=getattr(args, "append", False),
+            header=header,
+            rows=rows,
+            output_file=args.output_file or f"benchmark_gemm_dense_{args.model}.md",
+            append=append,
+            preamble=preamble if not append else None,
+        )
+
+        print(
+            f"[✔] GEMM benchmark finished. Results saved to {args.output_file or f'benchmark_gemm_dense_{args.model}.md'}"
         )
 
 
-def build_gemm_parser() -> argparse.ArgumentParser:
+def build_gemm_dense_parser() -> argparse.ArgumentParser:
     """
     Build a standalone parser for local execution.
     """
@@ -219,6 +165,6 @@ def build_gemm_parser() -> argparse.ArgumentParser:
 
 
 if __name__ == "__main__":
-    parser = build_gemm_parser()
+    parser = build_gemm_dense_parser()
     args = parser.parse_args()
     run_gemm_benchmark(args)

@@ -22,6 +22,10 @@ def run(args, extra_args):
         from primus.tools.benchmark.gemm_bench import run_gemm_benchmark
 
         run_gemm_benchmark(args)
+    elif suite == "gemm-dense":
+        from primus.tools.benchmark.dense_gemm_bench import run_gemm_benchmark
+
+        run_gemm_benchmark(args)
 
     finalize_distributed()
 
@@ -41,7 +45,7 @@ def register_subcommand(subparsers):
     gemm_bench.add_gemm_parser(gemm)
 
     # ---------- DENSE-GEMM ----------
-    dense_gemm = suite_parsers.add_parser("dense-gemm", help="DENSE-GEMM microbench.")
+    dense_gemm = suite_parsers.add_parser("gemm-dense", help="GEMM-DENSE microbench.")
     from primus.tools.benchmark import dense_gemm_bench
 
     dense_gemm_bench.add_gemm_parser(dense_gemm)

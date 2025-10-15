@@ -7,7 +7,7 @@
 
 import os
 import socket
-from typing import List
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -195,3 +195,36 @@ def gather_hostnames() -> List[str]:
     else:
         dist.gather_object(name, None, dst=0)
         return []
+
+
+def gather_records(record: Dict[str, Any], dst: int = 0) -> Optional[List[Dict[str, Any]]]:
+    """
+    Gather per-rank dict records to dst (root) rank only.
+    - Automatically injects 'host', 'rank', and 'world'.
+    - Returns:
+        * On root (rank==dst): List[Dict[str, Any]] of all records.
+        * On non-root: None  (change to [] if you prefer old behavior).
+    - Works even if torch.distributed is not initialized (single-process).
+    """
+    rank, world = get_rank_world()
+
+    # Inject host/rank/world into a shallow copy to avoid mutating caller's dict
+    local = dict(record)
+    local["host"] = get_hostname()
+    local["rank"] = rank
+    local["world"] = world
+
+    if world == 1 or not (dist.is_available() and dist.is_initialized()):
+        # Single process: just return a singleton list on "root"
+        return [local]
+
+    if rank == dst:
+        # Root gathers a list of objects from all ranks
+        gathered: List[Optional[Dict[str, Any]]] = [None for _ in range(world)]
+        dist.gather_object(local, object_gather_list=gathered, dst=dst)
+        # Type narrowing: all entries must be dicts here
+        return [g for g in gathered if g is not None]
+    else:
+        # Non-root sends and returns None to avoid extra work/printing
+        dist.gather_object(local, dst=dst)
+        return None

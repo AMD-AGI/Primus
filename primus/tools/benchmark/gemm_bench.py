@@ -6,18 +6,11 @@
 
 import argparse
 import math
-from typing import Any, Dict, List, Optional
 
 import torch
-import torch.distributed as dist
 
 from primus.tools.report import write_table_simple
-from primus.tools.utils import (
-    get_current_device,
-    get_hostname,
-    get_rank_world,
-    is_rank_0,
-)
+from primus.tools.utils import gather_records, get_current_device, is_rank_0
 
 CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
 
@@ -34,10 +27,10 @@ def add_gemm_parser(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--dtype", choices=["bf16", "fp16", "fp32"], default="bf16", help="Data type for GEMM computation."
     )
-    parser.add_argument("--duration", type=int, default=60, help="Benchmark duration in seconds.")
+    parser.add_argument("--duration", type=int, default=10, help="Benchmark duration in seconds.")
     parser.add_argument(
         "--output_file",
-        default="",
+        default="./gemm_report.md",
         help="Path to save results (.md/.csv/.tsv/.jsonl[.gz]). If not set or '-', print to stdout (Markdown).",
     )
 
@@ -48,47 +41,57 @@ def maybe_transpose(tensor, transpose):
     return tensor.t() if transpose else tensor
 
 
-def profile_gemm(m, n, k, dtype, trans_a, trans_b):
-    assert dtype in [torch.float16, torch.bfloat16], f"Unsupported dtype: {dtype}"
+@torch.inference_mode()
+def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
+    assert dtype in [torch.float16, torch.bfloat16, torch.float32], f"Unsupported dtype: {dtype}"
 
     device = get_current_device()
-
     dtype_size = torch.tensor([], dtype=dtype).element_size()
     mem_size_bytes = (m * k + k * n + m * n) * dtype_size
-    num_rotations = math.ceil(CACHE_ROTATING_BUFFER_BYTES / mem_size_bytes) + 1
-    num_run = 100
+    num_rotations = max(2, math.ceil(CACHE_ROTATING_BUFFER_BYTES / max(1, mem_size_bytes)) + 1)
+    # num_run = 100
 
     a_shape = (k, m) if trans_a else (m, k)
     b_shape = (n, k) if trans_b else (k, n)
-
     a_list = [torch.randn(a_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
     b_list = [torch.randn(b_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
-    c_list = [torch.randn((m, n), device=device, dtype=dtype) for _ in range(num_rotations)]
+    c_list = [torch.empty((m, n), device=device, dtype=dtype) for _ in range(num_rotations)]
 
     # Warm-up
     for i in range(num_rotations):
         a = maybe_transpose(a_list[i], trans_a)
         b = maybe_transpose(b_list[i], trans_b)
-        c_list[i] = torch.matmul(a, b)
+        torch.matmul(a, b, out=c_list[i])
     torch.cuda.synchronize()
 
-    # Run
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
-    start_event.record()
-    for _ in range(num_run):
-        for i in range(num_rotations):
+    # Timed run (duration-based)
+    target_ms = max(100.0, duration_s * 1000.0)
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+
+    total_calls = 0
+    start.record()
+
+    while True:
+        for _ in range(num_rotations):
             a = maybe_transpose(a_list[i], trans_a)
             b = maybe_transpose(b_list[i], trans_b)
-            c_list[i] = torch.matmul(a, b)
-    end_event.record()
-    torch.cuda.synchronize()
+            torch.matmul(a, b, out=c_list[i])
+        end.record()
+        torch.cuda.synchronize()
 
-    # result
-    avg_time_ms = start_event.elapsed_time(end_event) / (num_rotations * num_run)
-    tflop = 2 * m * n * k / 1e12
-    tflops = tflop / avg_time_ms * 1000  # Convert to TFlops
-    bandwidth = mem_size_bytes / 1e9 / avg_time_ms * 1000  # Convert to GB/s
+        total_calls += num_rotations
+
+        elapsed = start.elapsed_time(end)  # ms
+        if elapsed >= target_ms:
+            avg_time_ms = elapsed / total_calls
+            break
+
+    tflop = 2.0 * m * n * k / 1e12
+    tflops = tflop / (avg_time_ms / 1000.0)
+    bandwidth = mem_size_bytes / 1e9 / (avg_time_ms / 1000.0)
+    arith_intensity = (2.0 * m * n * k) / mem_size_bytes
+
     return {
         "m": m,
         "n": n,
@@ -100,53 +103,17 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b):
         "tflop": tflop,
         "tflops": tflops,
         "bandwidth_gbps": bandwidth,
+        "arith_intensity": arith_intensity,
     }
-
-
-def gather_records(record: Dict[str, Any], dst: int = 0) -> Optional[List[Dict[str, Any]]]:
-    """
-    Gather per-rank dict records to dst (root) rank only.
-    - Automatically injects 'host', 'rank', and 'world'.
-    - Returns:
-        * On root (rank==dst): List[Dict[str, Any]] of all records.
-        * On non-root: None  (change to [] if you prefer old behavior).
-    - Works even if torch.distributed is not initialized (single-process).
-    """
-    rank, world = get_rank_world()
-
-    # Inject host/rank/world into a shallow copy to avoid mutating caller's dict
-    local = dict(record)
-    local["host"] = get_hostname()
-    local["rank"] = rank
-    local["world"] = world
-
-    if world == 1 or not (dist.is_available() and dist.is_initialized()):
-        # Single process: just return a singleton list on "root"
-        return [local]
-
-    if rank == dst:
-        # Root gathers a list of objects from all ranks
-        gathered: List[Optional[Dict[str, Any]]] = [None for _ in range(world)]
-        dist.gather_object(local, object_gather_list=gathered, dst=dst)
-        # Type narrowing: all entries must be dicts here
-        return [g for g in gathered if g is not None]
-    else:
-        # Non-root sends and returns None to avoid extra work/printing
-        dist.gather_object(local, dst=dst)
-        return None
 
 
 def run_gemm_benchmark(args):
     if args.M <= 0 or args.N <= 0 or args.K <= 0:
         raise ValueError("M, N, K must be positive integers.")
 
-    m, n, k = args.M, args.N, args.K
-    trans_a, trans_b = args.trans_a, args.trans_b
-
     dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
     dtype = dtype_map[args.dtype]
-
-    res = profile_gemm(m, n, k, dtype, trans_a, trans_b)
+    res = profile_gemm(args.M, args.N, args.K, dtype, args.trans_a, args.trans_b, args.duration)
 
     # Build record with GEMM-specific metrics
     record = {
@@ -160,14 +127,14 @@ def run_gemm_benchmark(args):
         "tflop": float(f"{res['tflop']:.2f}"),
         "tflops": float(f"{res['tflops']:.2f}"),
         "bandwidth_gbps": float(f"{res['bandwidth_gbps']:.2f}"),
+        "arith_intensity": float(f"{res['arith_intensity']:.2f}"),
     }
 
     # Gather results
     gathered = gather_records(record)
 
     if is_rank_0():
-
-        gemm_summary_header = [
+        header = [
             "host",
             "world",
             "rank",
@@ -181,16 +148,17 @@ def run_gemm_benchmark(args):
             "tflop",
             "tflops",
             "bandwidth_gbps",
+            "arith_intensity",
         ]
 
         # Convert list[dict] -> list[list] in header order
         float6 = {"avg_time_ms"}
-        float2 = {"tflop", "tflops", "bandwidth_gbps"}
+        float2 = {"tflop", "tflops", "bandwidth_gbps", "arith_intensity"}
 
         rows_ll = []
         for rec in gathered:
             row = []
-            for col in gemm_summary_header:
+            for col in header:
                 v = rec.get(col, "")
                 if v is None:
                     v = ""
@@ -202,8 +170,8 @@ def run_gemm_benchmark(args):
             rows_ll.append(row)
 
         write_table_simple(
-            header=gemm_summary_header,
-            rows=rows_ll,  # <-- pass list-of-lists, not list-of-dicts
+            header=header,
+            rows=rows_ll,
             output_file=getattr(args, "output_file", None),
             append=getattr(args, "append", False),
         )

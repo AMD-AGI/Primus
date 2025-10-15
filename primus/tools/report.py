@@ -10,7 +10,7 @@ import csv
 import gzip
 import json
 import os
-from typing import Any, List
+from typing import Any, List, Optional
 
 
 def _infer_fmt(path: str) -> str:
@@ -40,16 +40,26 @@ def _md_body(rows: List[List[Any]]) -> str:
     return "".join("| " + " | ".join(str(x) for x in r) + " |\n" for r in rows)
 
 
-def write_table_simple(output_file: str, rows: List[List[Any]], header: List[str], append: bool = False):
+def write_table_simple(
+    output_file: str,
+    rows: List[List[Any]],
+    header: List[str],
+    append: bool = False,
+    preamble: Optional[str] = None,
+):
     """
     Minimal table writer for benchmark results.
     - If output_file == "" or "-" -> print Markdown table to stdout
     - Otherwise, infer format by extension: .md/.csv/.tsv/.jsonl (and optional .gz)
     - Append mode supported for csv/tsv/jsonl (rows only) and md (body only)
+    - `preamble`: if provided, will be inserted before the table (only when not appending)
     """
     # stdout mode
     if not output_file or output_file == "-":
-        content = _md_header(header) + _md_body(rows)
+        content = ""
+        if preamble:
+            content += preamble.rstrip() + "\n\n"
+        content += _md_header(header) + _md_body(rows)
         print(content, end="")
         return
 
@@ -74,6 +84,8 @@ def write_table_simple(output_file: str, rows: List[List[Any]], header: List[str
                 f.write("\n" + _md_body(rows))
         else:
             with open_fn(output_file, text_mode_w) as f:
+                if preamble:
+                    f.write(preamble.rstrip() + "\n\n")
                 f.write(_md_header(header) + _md_body(rows))
         print(f"[BENCH] Markdown saved: {output_file} ({'append' if append else 'overwrite'})")
         return
