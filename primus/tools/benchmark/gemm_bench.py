@@ -29,7 +29,7 @@ def add_gemm_parser(parser: argparse.ArgumentParser):
     )
     parser.add_argument("--duration", type=int, default=10, help="Benchmark duration in seconds.")
     parser.add_argument(
-        "--output_file",
+        "--output-file",
         default="./gemm_report.md",
         help="Path to save results (.md/.csv/.tsv/.jsonl[.gz]). If not set or '-', print to stdout (Markdown).",
     )
@@ -175,6 +175,8 @@ def run_gemm_benchmark(args):
             output_file=getattr(args, "output_file", None),
             append=getattr(args, "append", False),
         )
+
+        print(f"[✔] GEMM benchmark finished. Results saved to {args.output_file}")
 
 
 def build_gemm_parser() -> argparse.ArgumentParser:

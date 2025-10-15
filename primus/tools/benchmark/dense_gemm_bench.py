@@ -95,7 +95,7 @@ def add_gemm_parser(parser: argparse.ArgumentParser):
     parser.add_argument("--vocab-size", type=int, default=32000)
     parser.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
     parser.add_argument("--mbs", type=int, default=1, help="Microbatch size")
-    parser.add_argument("--output_file", default="./gemm-dense_report.md")
+    parser.add_argument("--output-file", default="./gemm-dense_report.md")
     parser.add_argument("--duration", type=int, default=3, help="Benchmark duration per shape (sec)")
     return parser
 
@@ -153,11 +153,17 @@ def build_gemm_preamble(args, shape_defs: List[Tuple[str, List[int]]]) -> str:
 
 def run_gemm_benchmark(args):
     if args.model:
-        if args.model not in MODEL_CONFIGS:
+        model_lower_map = {k.lower(): k for k in MODEL_CONFIGS.keys()}
+        model_key = args.model.lower()
+
+        if model_key not in model_lower_map:
             raise ValueError(
                 f"[ERROR] Unknown model '{args.model}'. Supported models: {', '.join(MODEL_CONFIGS.keys())}"
             )
-        cfg = MODEL_CONFIGS[args.model]
+
+        true_key = model_lower_map[model_key]
+        cfg = MODEL_CONFIGS[true_key]
+        args.model = true_key  # 规范化模型名
         for k, v in cfg.items():
             setattr(args, k, v)
     else:
@@ -227,9 +233,7 @@ def run_gemm_benchmark(args):
             preamble=preamble if not append else None,
         )
 
-        print(
-            f"[✔] GEMM benchmark finished. Results saved to {args.output_file or f'benchmark_gemm_dense_{args.model}.md'}"
-        )
+        print(f"[✔] DENSE GEMM benchmark finished. Results saved to {args.output_file}")
 
 
 def build_gemm_dense_parser() -> argparse.ArgumentParser:

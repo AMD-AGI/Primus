@@ -26,6 +26,10 @@ def run(args, extra_args):
         from primus.tools.benchmark.dense_gemm_bench import run_gemm_benchmark
 
         run_gemm_benchmark(args)
+    elif suite == "gemm-deepseek":
+        from primus.tools.benchmark.deepseek_dense_gemm_bench import run_gemm_benchmark
+
+        run_gemm_benchmark(args)
 
     finalize_distributed()
 
@@ -49,6 +53,12 @@ def register_subcommand(subparsers):
     from primus.tools.benchmark import dense_gemm_bench
 
     dense_gemm_bench.add_gemm_parser(dense_gemm)
+
+    # ---------- DEEPSEEK-GEMM ----------
+    deepseek_gemm = suite_parsers.add_parser("gemm-deepseek", help="DEEPSEEK-GEMM microbench.")
+    from primus.tools.benchmark import deepseek_dense_gemm_bench
+
+    deepseek_dense_gemm_bench.add_gemm_parser(deepseek_gemm)
 
     parser.set_defaults(func=run)
 
