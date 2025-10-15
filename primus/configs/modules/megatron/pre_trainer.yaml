@@ -29,4 +29,4 @@ override_opt_param_scheduler: true
 
 use_flash_attn: true
 distributed_timeout_minutes: 60
-use_distributed_optimizer: true
+use_distributed_optimizer: false

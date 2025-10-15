@@ -14,7 +14,7 @@ ffn_hidden_size: 10944 # not used in moe layer
 num_attention_heads: 64
 group_query_attention: true
 num_query_groups: 8
-kv_channels: 62
+kv_channels: 64
 
 # moe
 moe_layer_freq: 1
