@@ -394,7 +394,6 @@ def _get_sync_free_moe_options(stage: int) -> dict:
         1: {"moe_use_fused_router_with_aux_score": True, "moe_permute_fusion": True},
         2: {
             "moe_use_fused_router_with_aux_score": True,
-            "enable_primus_turbo": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
             "use_turbo_grouped_mlp": True,
