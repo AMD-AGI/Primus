@@ -72,6 +72,8 @@ while IFS='=' read -r name _; do
 done < <(env | grep "^PRIMUS_")
 ENV_ARGS+=("--env" "EXP")
 ENV_ARGS+=("--env" "HF_TOKEN")
+ENV_ARGS+=("--env" "https_proxy")
+ENV_ARGS+=("--env" "http_proxy")
 
 HOSTNAME=$(hostname)
 ARGS=("$@")
@@ -134,9 +136,10 @@ docker_podman_proxy run --rm \
     --device=/dev/kfd --device=/dev/dri \
     --cap-add=SYS_PTRACE --cap-add=CAP_SYS_ADMIN \
     --security-opt seccomp=unconfined --group-add video \
-    --privileged --device=/dev/infiniband \
+    --privileged \
     "${VOLUME_ARGS[@]}" \
     "$DOCKER_IMAGE" /bin/bash -c "\
+        env && \
         echo '[NODE-${NODE_RANK}(${HOSTNAME})]: begin, time=$(date +"%Y.%m.%d %H:%M:%S")' && \
         cd $PRIMUS_PATH && \
         bash examples/run_pretrain.sh \"\$@\" 2>&1 && \
