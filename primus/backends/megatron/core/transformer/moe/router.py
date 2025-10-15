@@ -12,6 +12,8 @@ from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training import get_args
 
+from primus.backends.megatron.core.extensions.logits_processor import fused_softcap
+
 
 class PrimusTopKRouter(TopKRouter):
     """Balanced route each token to the top-k experts."""
@@ -77,6 +79,11 @@ class PrimusTopKRouter(TopKRouter):
 
     def routing(self, logits: torch.Tensor):
         args = get_args()
+
+        if args.router_logit_softcapping is not None and args.router_logit_softcapping > 0.0:
+            # grok2 router logit softcapping
+            fused_softcap(logits, args.router_logit_softcapping)
+
         if args.enable_primus_turbo and args.moe_use_fused_router_with_aux_score:
             scores, routing_map = self.fused_router_and_auxiliary_loss(logits)
         else:
