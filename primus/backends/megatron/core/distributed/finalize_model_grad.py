@@ -12,8 +12,8 @@ from typing import List, Optional
 import torch
 from megatron.core import parallel_state
 from megatron.core.distributed.finalize_model_grads import (
-    _allreduce_embedding_grads,
     _allreduce_layernorm_grads,
+    _allreduce_word_embedding_grads,
 )
 from megatron.core.utils import get_model_config
 
@@ -45,7 +45,7 @@ def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torc
     # All-reduce embedding grads (for pipeline parallelism).
     if config.timers is not None:
         config.timers("embedding-grads-all-reduce", log_level=1).start(barrier=config.barrier_with_L1_time)
-    _allreduce_embedding_grads(model, config)
+    _allreduce_word_embedding_grads(model, config)
     if config.timers is not None:
         config.timers("embedding-grads-all-reduce").stop()
 

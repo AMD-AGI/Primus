@@ -313,13 +313,6 @@ def set_dump_pp_data_patch():
     schedules.forward_step = fwd_bwd_wrapper(schedules.forward_step, "fwd")
     schedules.backward_step = fwd_bwd_wrapper(schedules.backward_step, "bwd")
 
-    schedules.forward_backward_pipelining_without_interleaving = schedule_wrapper(
-        schedules.forward_backward_pipelining_without_interleaving
-    )
-    schedules.forward_backward_pipelining_with_interleaving = schedule_wrapper(
-        schedules.forward_backward_pipelining_with_interleaving
-    )
-
 
 def dump_pp_data(args, num_mbs, pp_data_dir):
     torch.cuda.synchronize()
