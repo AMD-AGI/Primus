@@ -7,7 +7,7 @@
 import argparse
 import itertools
 from datetime import datetime
-from typing import Tuple
+from typing import Any, Dict, Tuple
 
 import torch
 from git import List
@@ -17,9 +17,75 @@ from primus.tools.benchmark.gemm_bench import profile_gemm
 from primus.tools.report import write_table_simple
 from primus.tools.utils import gather_records, is_rank_0
 
+MODEL_CONFIGS: Dict[str, Dict[str, Any]] = {
+    "Llama2_7B": {
+        "seqlen": 4096,
+        "hidden_size": 4096,
+        "intermediate_size": 11008,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 32,
+        "head_dim": 128,
+        "vocab_size": 32000,
+    },
+    "Llama2_70B": {
+        "seqlen": 4096,
+        "hidden_size": 8192,
+        "intermediate_size": 28672,
+        "num_attention_heads": 64,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "vocab_size": 32000,
+    },
+    "Llama3.1_8B": {
+        "seqlen": 8192,
+        "hidden_size": 4096,
+        "intermediate_size": 14336,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "vocab_size": 128256,
+    },
+    "Llama3.1_70B": {
+        "seqlen": 8192,
+        "hidden_size": 8192,
+        "intermediate_size": 28672,
+        "num_attention_heads": 64,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "vocab_size": 128256,
+    },
+    "Llama3.1_405B": {
+        "seqlen": 8192,
+        "hidden_size": 16384,
+        "intermediate_size": 53248,
+        "num_attention_heads": 128,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "vocab_size": 128256,
+    },
+    "Mistral_8x7B": {
+        "seqlen": 4096,
+        "hidden_size": 4096,
+        "intermediate_size": 14336,
+        "num_attention_heads": 32,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "vocab_size": 32000,
+    },
+    "Mistral_8x22B": {
+        "seqlen": 4096,
+        "hidden_size": 6144,
+        "intermediate_size": 16384,
+        "num_attention_heads": 48,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "vocab_size": 32000,
+    },
+}
+
 
 def add_gemm_parser(parser: argparse.ArgumentParser):
-    parser.add_argument("--model", default="llama3-7B")
+    parser.add_argument("--model", default=None, help="Model name (e.g., Llama3.1_8B)")
     parser.add_argument("--seqlen", type=int, default=2048)
     parser.add_argument("--hidden-size", type=int, default=4096)
     parser.add_argument("--intermediate-size", type=int, default=11008)
@@ -50,7 +116,7 @@ def build_gemm_preamble(args, shape_defs: List[Tuple[str, List[int]]]) -> str:
     lines = [
         "# Dense GEMM Benchmark Report",
         "",
-        f"- Model: {args.model}",
+        f"- Model: {args.model or 'Custom'}",
         f"- Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"- Cluster: amd-aig-poolside",
         f"- Duration per shape: {args.duration} sec",
@@ -86,6 +152,17 @@ def build_gemm_preamble(args, shape_defs: List[Tuple[str, List[int]]]) -> str:
 
 
 def run_gemm_benchmark(args):
+    if args.model:
+        if args.model not in MODEL_CONFIGS:
+            raise ValueError(
+                f"[ERROR] Unknown model '{args.model}'. Supported models: {', '.join(MODEL_CONFIGS.keys())}"
+            )
+        cfg = MODEL_CONFIGS[args.model]
+        for k, v in cfg.items():
+            setattr(args, k, v)
+    else:
+        print("[INFO] No model specified. Using CLI-provided parameters.")
+
     dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp34": torch.float32}
     dtype = dtype_map[args.dtype]
 
