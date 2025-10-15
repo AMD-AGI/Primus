@@ -870,7 +870,8 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
             deepep_num_use_cu=args.turbo_deepep_num_cu,
             deepep_num_worst_tokens=num_worst_tokens,
-            deepep_use_cuda_num_tokens_per_expert=args.use_turbo_grouped_mlp,
+            deepep_use_cuda_num_tokens_per_expert=args.use_turbo_grouped_mlp
+            and not args.moe_use_legacy_grouped_gemm,
             deepep_async_finish=True,
             deepep_allocate_on_comm_stream=True,
         )

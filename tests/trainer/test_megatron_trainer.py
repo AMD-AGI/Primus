@@ -283,6 +283,8 @@ class TestMegatronTrainer(PrimusUT):
                 "fp32",
                 "--moe_shared_expert_overlap",
                 "0",
+                "--moe_use_legacy_grouped_gemm",
+                "0",
             ],
         )
 
