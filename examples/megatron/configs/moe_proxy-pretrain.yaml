@@ -25,10 +25,10 @@ modules:
       recompute_method: block # uniform, block
       recompute_num_layers: 8 # int
 
-      # profile: true
-      # use_pytorch_profiler: true
-      # profile_step_end: 7
-      # profile_step_start: 6
+      profile: true
+      use_pytorch_profiler: true
+      profile_step_end: 7
+      profile_step_start: 6
 
       # hyber parameters
       train_iters: 10
