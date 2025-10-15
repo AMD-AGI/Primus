@@ -19,7 +19,7 @@ export NVTE_CK_USES_BWD_V3=1
 export USE_ROCM_AITER_ROPE_BACKEND=0
 
 ######################### Training Config #########################
-export EXP="examples/megatron/configs/llama3.1_8B-pretrain.yaml"
+export EXP="examples/torchtitan/configs/llama3.1_70B-FP8-pretrain.yaml"
 export NNODES=1
 MBS=4
 TP=1
@@ -45,7 +45,7 @@ if [ "$FP8" = "True" ]; then
     export FP8_CONFIG="--fp8 hybrid"
 fi
 
-CONFIG="llama3.1_8B.FP8-$FP8.nodes$NNODES.GBS$GBS.MBS$MBS.PP$PP.EP$EP.CP$CP.VPP$VPP.rc-$RECOMPUTE_LAYERS"
+CONFIG="llama3.1_70B.FP8-$FP8.nodes$NNODES.GBS$GBS.MBS$MBS.PP$PP.EP$EP.CP$CP.VPP$VPP.rc-$RECOMPUTE_LAYERS"
 echo "config: $CONFIG"
 
 ######################### Training Experiments #########################
