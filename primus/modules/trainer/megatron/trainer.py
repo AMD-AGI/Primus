@@ -171,6 +171,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_fp8_context()
         self.patch_zbpp()
 
+        # replace TESpecProvider to PrimusTurboSpecProvider, model block will replace to Primus-Turbo impl when setup nodel
+        self.patch_te_spec_provider()
 
         self.app_metrics = {}
 
@@ -182,7 +184,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
               
     def patch_pt_replace_te(self, args):         
         from megatron.core.extensions import transformer_engine_spec_provider
-        from megatron.core.models.gpt import gpt_layer_specs, moe_module_specs, gpt_model
+        from megatron.core.models.gpt import (
+            gpt_layer_specs,
+            gpt_model,
+            moe_module_specs,
+        )
         from megatron.core.transformer import multi_token_prediction
         from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import PrimusTurboSpecProvider
         
@@ -194,7 +200,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         assert megatron.core.extensions.transformer_engine.HAVE_TE, "PrimusTurboSpecProvider patch failed, can't found transformer_engine"
         
         transformer_engine_spec_provider.TESpecProvider = PrimusTurboSpecProvider
-        
+
         # the following modules used TESpecProvider in Megatron-LM 847781764fe468c90caec16309deded245c1022c
         gpt_layer_specs.TESpecProvider = PrimusTurboSpecProvider
         moe_module_specs.TESpecProvider = PrimusTurboSpecProvider
