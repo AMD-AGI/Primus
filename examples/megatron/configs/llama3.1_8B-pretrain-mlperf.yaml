@@ -17,15 +17,15 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 1200000
-      micro_batch_size: 2 # can use 4 instead this was s
+      train_iters: 150
+      micro_batch_size: 2               # with NGPUS=8 and GBS=32 and MBS=2 we get GRAC_ACC=2
       global_batch_size: 32
 
       seq_length: 8192
       max_position_embeddings: 8192
 
-      lr: 8e-4       # max_lr
-      min_lr: 8e-5   # 0.1 * lr
+      lr: 8e-4                          # max_lr
+      min_lr: 8e-5                      # 0.1 * lr
       lr_warmup_iters: 128
       lr_decay_iters: null
       lr_decay_style: cosine
@@ -52,6 +52,19 @@ modules:
       seq_length: 8192
       data_cache_path: /npy_indices
       mmap_bin_files: true
+
+      # ===== PROFILING CONFIGURATION =====
+      profile: true
+      use_pytorch_profiler: true
+      profile_ranks: [0]           # Only profile rank 0 to save disk space
+      profile_step_start: 2        # Start after warmup (step 8)
+      profile_step_end: 10         # Profile 5 iterations (8-12)
+      
+      # Profiler options - for GPU kernel traces only
+      disable_profiler_activity_cpu: true     # GPU kernels only (smaller files)
+      torch_profiler_record_shapes: false     # Disable for smaller traces
+      torch_profiler_with_stack: false        # Disable for smaller traces
+      torch_profiler_use_gzip: true           # Compress output
 
       # ckpt
       finetune: false

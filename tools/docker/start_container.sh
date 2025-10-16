@@ -6,7 +6,7 @@
 ###############################################################################
 
 PRIMUS_PATH=$(realpath "$(dirname "$0")/../..")
-DOCKER_IMAGE=${DOCKER_IMAGE:-"rocm/megatron-lm-private:c798f55e-b2d8-4e1e-8241-72b49bc39ab0"}
+DOCKER_IMAGE=${DOCKER_IMAGE:-" rocm/primus:v25.9_gfx950"}
 DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 
 bash "${PRIMUS_PATH}"/tools/docker/docker_podman_proxy.sh run -d \

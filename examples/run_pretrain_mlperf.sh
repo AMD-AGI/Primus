@@ -204,7 +204,10 @@ export NVTE_USE_CAST_TRANSPOSE_TRITON=1
 export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=0
 
 # Note: Disable v3 due to accuracy issues. Will fix after TE version 2.1.
-export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
+export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
+export NVTE_CK_USES_BWD_V3=1       
+export NVTE_CK_USES_FWD_V3=1
+export NVTE_CK_IS_V3_ATOMIC_FP32=0  
 
 # nvte debug envs
 export NVTE_DEBUG=0 # 0, 1
@@ -326,11 +329,6 @@ echo $CMD
 eval "$CMD" 2>&1 | tee "$TRAIN_LOG"
 exit_code=${PIPESTATUS[0]}
 
-if [ "${PRIMUS_HIPBLASLT_TUNING_STAGE:-0}" -eq 1 ]; then
-    LOG_INFO "[PRIMUS_HIPBLASLT_TUNING_STAGE-1]: HipBlasLT gemm shape dump is finished, " \
-         "please set PRIMUS_HIPBLASLT_TUNING_STAGE to 2, " \
-         "and tune the gemm with a single node."
-fi
 
 LOG_INFO "torchrun exited with code $exit_code"
 
