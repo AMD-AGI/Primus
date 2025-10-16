@@ -89,7 +89,7 @@ checkpoint:
   create_seed_checkpoint: false
 
 activation_checkpoint:
-  mode: selective
+  mode: none
   selective_ac_option: "2"
   per_op_sac_force_recompute_mm_shapes_by_fqns:
     - moe.router.gate
