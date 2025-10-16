@@ -1,37 +1,35 @@
 work_group: ${TEAM:amd}
 user_name: ${USER:root}
-exp_name: ${EXP_NAME:qwen2.5_7B-pretrain}
+exp_name: ${EXP_NAME:grok2-pretrain}
 workspace: ./output
 
 modules:
   pre_trainer:
-    framework: megatron
     config: pre_trainer.yaml
-    # data_path: ./data
-
-    # model to run
-    model: qwen2.5_7B.yaml
+    framework: megatron
+    model: grok2.yaml
     overrides:
-      # log
-      wandb_project: "Primus_Qwen2.5_7B_Pretrain"
+      wandb_project: "Primus_Grok2_Pretrain"
       # disable_wandb: false
       # disable_tensorboard: false
       stderr_sink_level: DEBUG
 
+      # moe
+      moe_router_force_load_balancing: true
+      moe_router_dtype: null
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 50
-      micro_batch_size: 10
-      global_batch_size: 640
-
-      seq_length: ${SEQ_LENGTH:2048}
-      max_position_embeddings: ${MAX_POSITION_EMBEDDINGS:131072}
-
+      # hyber parameters
+      train_iters: 10
+      micro_batch_size: 2
+      global_batch_size: 128
+      seq_length: 8192
+      max_position_embeddings: 8192
       lr: 1.0e-5
       min_lr: 0.0
       lr_warmup_iters: 2
-      lr_decay_iters: 320000
+      lr_decay_iters: null
       lr_decay_style: cosine
       weight_decay: 0.1
       adam_beta1: 0.9
@@ -40,12 +38,18 @@ modules:
       init_method_std: 0.008
       norm_epsilon: 1.0e-6
 
-      # parallel
+      # parallel (for 8 nodes)
       tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 1
-      expert_model_parallel_size: 1
+      pipeline_model_parallel_size: 4
+      num_virtual_stages_per_pipeline_rank: 4
+      expert_model_parallel_size: 8
       overlap_grad_reduce: true
       overlap_param_gather: true
+
+      # recompute
+      recompute_granularity: full # full, selective
+      recompute_method: block # uniform, block
+      recompute_num_layers: 8 # int
 
       # data
       mock_data: true
@@ -53,9 +57,16 @@ modules:
       valid_data_path: null
       test_data_path: null
 
+      # fusion
+      moe_permute_fusion: false
+      gradient_accumulation_fusion: false
+      moe_use_legacy_grouped_gemm: true
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
       # ckpt
       finetune: false
-      auto_continue_train: ${CONTI_PARAMS:0}
+      auto_continue_train: false
       load: null
       no_load_optim: null
       no_load_rng: null
@@ -65,14 +76,3 @@ modules:
       no_save_rng: null
       disable_last_saving: true
       ckpt_format: torch
-
-      gradient_accumulation_fusion: false
-
-      # Turbo
-      enable_primus_turbo: true
-      use_turbo_attention: true
-      use_turbo_grouped_mlp: true
-
-      # Cross entropy flags
-      cross_entropy_fusion_impl: "te"
-      cross_entropy_loss_fusion: true

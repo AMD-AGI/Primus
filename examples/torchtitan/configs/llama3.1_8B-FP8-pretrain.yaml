@@ -20,15 +20,15 @@ modules:
         warmup_steps: 10
 
       metrics:
-        log_freq: 1
+        log_freq: 10
 
       training:
-        batch_size: 19
+        batch_size: 4
         compile: true
         steps: 50
 
       activation_checkpoint:
-        mode: "full"  # ["none", "selective", "full"]
+        mode: "none"  # ["none", "selective", "full"]
         selective_ac_option: "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
 
       float8:

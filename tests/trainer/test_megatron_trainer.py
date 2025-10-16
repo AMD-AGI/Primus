@@ -206,6 +206,30 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def test_grok2(self):
+        run_script(
+            self.__class__.__name__,
+            "grok2",
+            exp_path="examples/megatron/configs/grok2-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "2",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--expert_model_parallel_size",
+                "8",
+                "--pipeline_model_parallel_size",
+                "1",
+                "--num_virtual_stages_per_pipeline_rank",
+                "1",
+            ],
+        )
+
     def test_deepseek_v3(self):
         run_script(
             self.__class__.__name__,

@@ -38,9 +38,10 @@ modules:
       init_method_std: 0.008
       norm_epsilon: 1.0e-6
 
-      # parallel
+      # parallel (for 8 nodes)
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 4
+      num_virtual_stages_per_pipeline_rank: 4
       expert_model_parallel_size: 8
       overlap_grad_reduce: true
       overlap_param_gather: true
@@ -48,7 +49,7 @@ modules:
       # recompute
       recompute_granularity: full # full, selective
       recompute_method: block # uniform, block
-      recompute_num_layers: 0 # int
+      recompute_num_layers: 8 # int
 
       # data
       mock_data: true
@@ -60,6 +61,8 @@ modules:
       moe_permute_fusion: false
       gradient_accumulation_fusion: false
       moe_use_legacy_grouped_gemm: true
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
 
       # ckpt
       finetune: false
