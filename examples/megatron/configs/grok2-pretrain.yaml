@@ -1,15 +1,15 @@
 work_group: ${TEAM:amd}
 user_name: ${USER:root}
-exp_name: ${EXP_NAME:grok1-pretrain}
+exp_name: ${EXP_NAME:grok2-pretrain}
 workspace: ./output
 
 modules:
   pre_trainer:
     config: pre_trainer.yaml
     framework: megatron
-    model: grok1.yaml
+    model: grok2.yaml
     overrides:
-      wandb_project: "Primus_Grok1_Pretrain"
+      wandb_project: "Primus_Grok2_Pretrain"
       # disable_wandb: false
       # disable_tensorboard: false
       stderr_sink_level: DEBUG
