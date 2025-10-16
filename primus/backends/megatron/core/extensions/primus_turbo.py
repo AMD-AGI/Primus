@@ -9,6 +9,7 @@ from typing import Callable, List, Optional, Tuple
 
 import grouped_gemm
 import primus_turbo.pytorch as pt
+import primus_turbo.pytorch.ops.activation as turbo_moe_activation
 import torch
 import torch.nn.functional as F
 import transformer_engine as te
@@ -35,6 +36,9 @@ from primus_turbo.pytorch.core.float8 import (
     ScalingGranularity,
     ScalingStrategy,
     check_fp8_support,
+)
+from primus_turbo.pytorch.ops.moe.tokens_per_expert_to_mask import (
+    tokens_per_expert_to_mask as turbo_tokens_per_expert_to_mask,
 )
 from torch import Tensor
 from transformer_engine.pytorch.fp8 import (
@@ -752,23 +756,20 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
 
             if self.config.activation_func == F.silu:
-                turbo_fused_act_with_probs = pt.ops.activation.swiglu_with_probs
+                turbo_fused_act_with_probs = turbo_moe_activation.swiglu_with_probs
             elif self.config.activation_func == F.gelu:
-                turbo_fused_act_with_probs = pt.ops.activation.geglu_with_probs
+                turbo_fused_act_with_probs = turbo_moe_activation.geglu_with_probs
             else:
                 raise ValueError("Activation function must be silu or gelu when using GroupedMLP.")
 
             def _activation_func_with_probs(x, probs, tokens_per_experts):
                 assert x.ndim == 2
+                assert probs.ndim == 1
                 num_tokens = x.shape[0]
-                row_mask = pt.ops.tokens_per_expert_to_mask.tokens_per_expert_to_mask(
-                    tokens_per_experts, num_tokens
-                )
+                row_mask = turbo_tokens_per_expert_to_mask(tokens_per_experts, num_tokens)
                 return turbo_fused_act_with_probs(x, probs, row_mask)
 
             self.activation_func_with_probs = _activation_func_with_probs
-
-        raise Exception("here")
 
     def forward(
         self,
@@ -817,7 +818,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     intermediate_parallel = self.activation_checkpoint.checkpoint(
                         self.activation_func_with_probs,
                         fc1_output,
-                        permuted_probs.unsqueeze(-1),
+                        permuted_probs,
                         tokens_per_expert,
                     )
                 else:
@@ -831,7 +832,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             else:
                 if args.use_turbo_fused_act_with_probs:
                     intermediate_parallel = self.activation_func_with_probs(
-                        fc1_output, permuted_probs.unsqueeze(-1), tokens_per_expert
+                        fc1_output, permuted_probs, tokens_per_expert
                     )
                 else:
                     intermediate_parallel = self.activation_func_with_probs(
@@ -851,7 +852,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             if self.activation_recompute:
                 if args.use_turbo_fused_act_with_probs:
                     h = self.activation_checkpoint.checkpoint(
-                        self.activation_func_with_probs, h, permuted_probs.unsqueeze(-1), tokens_per_expert
+                        self.activation_func_with_probs, h, permuted_probs, tokens_per_expert
                     )
                 else:
                     h = self.activation_checkpoint.checkpoint(
@@ -861,7 +862,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
                 if args.use_turbo_fused_act_with_probs:
-                    h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1), tokens_per_expert)
+                    h = self.activation_func_with_probs(h, permuted_probs, tokens_per_expert)
                 else:
                     h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
                 fc2_output = torch.matmul(h, w2)

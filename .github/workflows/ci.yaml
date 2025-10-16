@@ -60,7 +60,7 @@ jobs:
           repository: AMD-AIG-AIMA/Primus-Turbo
           submodules: "recursive"
           path: Primus-Turbo
-          ref: 7375a6692786c9b1e08df274d289b637da45aaba # feat: add swiglu, geglu and tokens_per_expert_to_mask api (#122)
+          ref: a97e986f01893fec5789243400c7046d18591ba9 # chore: update aiter to fix pybind11 issue (#132)
       - run: echo "Begin Primus-Turbo Install."
       - name: Install Primus-Turbo
         run: |

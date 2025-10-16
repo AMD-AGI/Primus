@@ -429,14 +429,18 @@ def validate_args_on_rocm(args):
 
     # sync-free MoE
     if args.turbo_sync_free_moe_stage > 0:
-        assert args.enable_primus_turbo, "use `enable_primus_turbo=True` to enable sync-free MoE."
+        assert args.enable_primus_turbo, "Please set `enable_primus_turbo=True` to enable sync-free MoE."
+        assert (
+            args.turbo_sync_free_moe_stage > 1 and args.moe_use_legacy_grouped_gemm
+        ), "Sync-Free MoE require PrimusTurboGroupedMLP, please set `moe_use_legacy_grouped_gemm=True`"
 
         options = _get_sync_free_moe_options(args.turbo_sync_free_moe_stage)
         print_rank_last(
             f"========== Enable Sync-Free MoE Stage {args.turbo_sync_free_moe_stage} (Auto-Enabled Options) =========="
         )
         for flag, value in options.items():
-            print_rank_last(f"{flag}={value}")
+            dots = "." * (73 - len(flag) - len(str(value)))
+            print_rank_last(f"{flag}{dots}{value}")
             setattr(args, flag, value)
         print_rank_last(
             f"========== Enable Sync-Free MoE Stage {args.turbo_sync_free_moe_stage} (Auto-Enabled Options) =========="
@@ -446,9 +450,9 @@ def validate_args_on_rocm(args):
     if args.use_turbo_deepep:
         assert (
             not args.moe_shared_expert_overlap
-        ), "DeepEP not support moe_shared_expert_overlap, please set `--moe-shared-expert-overlap=false`."
+        ), "DeepEP not support moe_shared_expert_overlap, please set `moe_shared_expert_overlap=False`."
         assert (
             args.moe_router_dtype == "fp32"
-        ), "DeepEP only supports float32 probs, please set `--moe-router-dtype=fp32`"
+        ), "DeepEP only supports float32 probs, please set `moe_router_dtype=fp32`"
         if args.expert_model_parallel_size >= 16:
             assert args.turbo_deepep_num_cu <= 32, "Set `turbo_deepep_num_cu<=32` when using ep_size >= 16."
