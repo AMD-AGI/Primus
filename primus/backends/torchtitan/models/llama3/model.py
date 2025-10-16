@@ -5,8 +5,8 @@
 ###############################################################################
 
 import torch
-from torchtitan.models.llama3.model import Attention as TTAttention
-from torchtitan.models.llama3.model import apply_rotary_emb
+from torchtitan.models.llama3.model.model import Attention as TTAttention
+from torchtitan.models.llama3.model.model import apply_rotary_emb
 
 
 class Attention(TTAttention):

@@ -18,7 +18,7 @@ class TorchTitanPretrainTrainer(BaseModule):
         # important: make sure patch torchtitan logger first
         self.patch_torchtitan_logger()
 
-        from torchtitan.config_manager import JobConfig
+        from torchtitan.config.job_config import JobConfig
         from torchtitan.train import Trainer
 
         self.TrainerClass = Trainer
@@ -106,6 +106,10 @@ class TorchTitanPretrainTrainer(BaseModule):
         if self.titan_config.primus_turbo.use_turbo_async_tp:
             # ******* Async TP *******
             self.patch_torch_async_tp()
+
+        from primus.core.utils.logger import _logger as primus_logger
+
+        primus_logger.info("Enable primus turbo extension...")
 
     def patch_torch_async_tp(self):
         import torch
@@ -231,9 +235,8 @@ class TorchTitanPretrainTrainer(BaseModule):
     def build_job_config(self, cfg_dict: dict, JobConfigType) -> Any:
         import importlib
 
+        from torchtitan.config.job_config import Experimental
         from torchtitan.tools.logging import logger
-
-        from third_party.torchtitan.torchtitan.config_manager import Experimental
 
         # Step 1: Parse the experimental section to check for a custom JobConfig extension
         experimental_cfg = cfg_dict.get("experimental", {})
