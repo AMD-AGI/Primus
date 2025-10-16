@@ -1,5 +1,6 @@
 loguru
 wandb
+expecttest
 pre-commit
 nltk
 matplotlib
