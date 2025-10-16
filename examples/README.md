@@ -49,7 +49,7 @@ We recommend using the official [rocm/megatron-lm Docker image](https://hub.dock
 
 ```bash
 # Pull the latest Docker image
-docker pull docker.io/rocm/primusv25.9_gfx942
+docker pull docker.io/rocm/primus:v25.9_gfx942
 
 ```
 
