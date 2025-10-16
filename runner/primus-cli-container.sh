@@ -12,7 +12,7 @@ Usage: bash primus-run-container.sh [OPTIONS] -- [SCRIPT_ARGS...]
 Launch a Primus task (train / benchmark / preflight / etc.) in a Docker/Podman container.
 
 Options:
-    --image <DOCKER_IMAGE>      Docker image to use [default: \$DOCKER_IMAGE or rocm/megatron-lm:v25.8_py310]
+    --image <DOCKER_IMAGE>      Docker image to use [default: \$DOCKER_IMAGE or rocm/primus:v25.9_gfx942]
     --mount <HOST[:CONTAINER]>  Mount a host directory into the container.
                                  - If only HOST is given, mounts to same path inside container.
                                  - If HOST:CONTAINER is given, mounts host directory to container path.
@@ -98,7 +98,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Defaults (fallback)
-DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/megatron-lm:v25.8_py310"}
+DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.9_gfx942"}
 
 # ----------------- Volume Mounts -----------------
 # Mount the project root and dataset directory into the container
