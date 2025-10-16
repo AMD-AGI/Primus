@@ -1,6 +1,6 @@
-work_group: ${TEAM:amd}
-user_name: ${USER:root}
-exp_name: ${EXP_NAME:deepseek_v2_lite-pretrain}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v2_lite-pretrain}
 workspace: ./output
 
 modules:
@@ -47,7 +47,7 @@ modules:
 
       # data
       mock_data: true
-      train_data_path: ${TOKENIZED_DATA_PATH:null}
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
 
@@ -83,6 +83,17 @@ modules:
       enable_primus_turbo: true
       use_turbo_attention: true
       use_turbo_grouped_mlp: true
+
+      # deepep
+      use_turbo_deepep: false
+
+      # 64 or 80 for ep8, 32 for ep16-64 is best practice
+      turbo_deepep_num_cu: 32
+      turbo_deepep_use_comm_stream: false
+
+      # sync-free moe support stage 1-2, 0 means not use sync-free moe
+      # stage 2 is recommended for better performance
+      turbo_sync_free_moe_stage: 0
 
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"

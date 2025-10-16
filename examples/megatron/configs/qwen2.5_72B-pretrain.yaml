@@ -1,6 +1,6 @@
-work_group: ${TEAM:amd}
-user_name: ${USER:root}
-exp_name: ${EXP_NAME:qwen2.5_72B-pretrain}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen2.5_72B-pretrain}
 workspace: ./output
 
 modules:
@@ -24,8 +24,8 @@ modules:
       micro_batch_size: 4
       global_batch_size: 32
 
-      seq_length: ${SEQ_LENGTH:2048}
-      max_position_embeddings: ${MAX_POSITION_EMBEDDINGS:131072}
+      seq_length: ${PRIMUS_SEQ_LENGTH:2048}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:131072}
 
       lr: 1.0e-4
       min_lr: 1.0e-5

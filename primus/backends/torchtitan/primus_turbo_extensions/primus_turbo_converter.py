@@ -5,7 +5,7 @@
 ###############################################################################
 
 import torch
-from torchtitan.config_manager import JobConfig
+from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.models.attention import FlexAttention, ScaledDotProductAttention
 from torchtitan.protocols.model_converter import (

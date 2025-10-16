@@ -186,11 +186,13 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             gpt_model,
             moe_module_specs,
         )
+        from megatron.core.transformer.moe import moe_layer, token_dispatcher
 
         from primus.backends.megatron.core.extensions.primus_turbo import (
             PrimusTurboAttention,
             PrimusTurboColumnParallelLinear,
             PrimusTurboColumnParallelLinearTorch,
+            PrimusTurboDeepEPTokenDispatcher,
             PrimusTurboGroupedMLP,
             PrimusTurboLayerNormColumnParallelLinear,
             PrimusTurboRowParallelLinear,
@@ -211,6 +213,13 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             gpt_model.tensor_parallel.ColumnParallelLinear = PrimusTurboColumnParallelLinearTorch
         if args.use_turbo_grouped_mlp:
             moe_module_specs.GroupedMLP = PrimusTurboGroupedMLP
+
+        if args.use_turbo_deepep:
+            # use PrimusTurboDeepEPTokenDispatcher will auto-enable moe_enable_deepep=True, moe_token_dispatcher_type='flex' of megatron options.
+            args.moe_enable_deepep = True
+            args.moe_token_dispatcher_type = "flex"
+            token_dispatcher.MoEFlexTokenDispatcher = PrimusTurboDeepEPTokenDispatcher
+            moe_layer.MoEFlexTokenDispatcher = PrimusTurboDeepEPTokenDispatcher
 
     def patch_fp8_context(self):
         from megatron.core import fp8_utils
