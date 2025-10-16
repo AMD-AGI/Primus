@@ -1,6 +1,6 @@
-work_group: ${TEAM:amd}
-user_name: ${USER:root}
-exp_name: ${EXP_NAME:deepseek_v2_lite-pretrain}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v2_lite-pretrain}
 workspace: ./output
 
 modules:
@@ -47,7 +47,7 @@ modules:
 
       # data
       mock_data: true
-      train_data_path: ${TOKENIZED_DATA_PATH:null}
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
 
