@@ -1,4 +1,8 @@
-# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 import warnings
 from typing import Optional, Tuple
@@ -18,9 +22,14 @@ from megatron.core.fusions.fused_layer_norm import FusedLayerNorm
 from megatron.core.models.backends import BackendSpecProvider
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.transformer.mlp import MLPSubmodules
-from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP, TEGroupedMLP
+from megatron.core.transformer.moe.experts import (
+    GroupedMLP,
+    SequentialMLP,
+    TEGroupedMLP,
+)
 from megatron.core.utils import get_te_version, is_te_min_version
 from megatron.training.global_vars import get_args
+
 try:
     from primus.backends.megatron.core.extensions.primus_turbo import (PrimusTurboAttention,
                                                                        PrimusTurboColumnParallelLinear,
@@ -41,8 +50,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
     def __init__(self):
         if not HAVE_PRIMUS_TURBO:
             raise ImportError(
-                "PrimusTurbo extension requires the primus_Turbo package. "
-                "Please install it."
+                "PrimusTurbo extension requires the primus_Turbo package. " "Please install it."
             )
 
         self.cfg = get_args()
@@ -53,7 +61,9 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
 
     def column_parallel_linear(self) -> type:
         """Which column parallel linear module TE backend uses"""
-        return PrimusTurboColumnParallelLinear if self.cfg.use_turbo_parallel_linear else TEColumnParallelLinear
+        return (
+            PrimusTurboColumnParallelLinear if self.cfg.use_turbo_parallel_linear else TEColumnParallelLinear
+        )
 
     def row_parallel_linear(self) -> type:
         """Which row parallel linear module TE backend uses"""
@@ -65,7 +75,11 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
 
     def column_parallel_layer_norm_linear(self) -> Optional[type]:
         """Which module for sequential layernorm and linear"""
-        return PrimusTurboLayerNormColumnParallelLinear if self.cfg.use_turbo_parallel_linear else TELayerNormColumnParallelLinear
+        return (
+            PrimusTurboLayerNormColumnParallelLinear
+            if self.cfg.use_turbo_parallel_linear
+            else TELayerNormColumnParallelLinear
+        )
 
     def layer_norm(self, rms_norm: bool = False, for_qk: bool = False) -> type:
         """Which module to use for layer norm"""
@@ -90,14 +104,14 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             and not moe_use_legacy_grouped_gemm
         ):
             assert not self.cfg.use_turbo_grouped_mlp, "PrimusTurbo not support RowParallelGroupedLinear"
-            
+
             return TEGroupedMLP, MLPSubmodules(
                 linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
             )
         elif moe_use_grouped_gemm:
             warnings.warn(
-                'The legacy GroupedMLP will be deprecated in Megatron-Core v0.12.0. '
-                'Please update the TransformerEngine to version>=1.7.0 and use TEGroupedMLP.'
+                "The legacy GroupedMLP will be deprecated in Megatron-Core v0.12.0. "
+                "Please update the TransformerEngine to version>=1.7.0 and use TEGroupedMLP."
             )
             return PrimusTurboGroupedMLP if self.cfg.use_turbo_grouped_mlp else GroupedMLP, None
         else:
