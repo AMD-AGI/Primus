@@ -171,9 +171,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_fp8_context()
         self.patch_zbpp()
 
-        # replace TESpecProvider to PrimusTurboSpecProvider, model block will replace to Primus-Turbo impl when setup nodel
-        self.patch_te_spec_provider()
-
         self.app_metrics = {}
 
         # disable all logging handlers
