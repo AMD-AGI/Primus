@@ -135,7 +135,7 @@ if [ "$RUN_ENV" = "torchrun" ]; then
         2>&1 | tee $PREFLIGHT_LOG
 
 elif [ "$RUN_ENV" = "slurm" ]; then
-    export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/megatron-lm:v25.8_py310"}
+    export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.9_gfx942"}
 
     bash "${PRIMUS_PATH}"/tools/docker/docker_podman_proxy.sh run --rm \
         --env SLURM_MASTER_ADDR=$SLURM_MASTER_ADDR \

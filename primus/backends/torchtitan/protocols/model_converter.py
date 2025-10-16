@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from torchtitan.config_manager import JobConfig
+from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
     ModelConvertersContainer as TTModelConvertersContainer,

@@ -1,6 +1,6 @@
-work_group: ${TEAM:amd}
-user_name: ${USER:root}
-exp_name: ${EXP_NAME:llama3_8B-pretrain}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3_8B-pretrain}
 workspace: ./output
 
 modules:
@@ -71,3 +71,7 @@ modules:
       enable_primus_turbo: true
       use_turbo_attention: true
       use_turbo_grouped_mlp: true
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
