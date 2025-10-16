@@ -96,7 +96,7 @@ activation_checkpoint:
   early_stop: false
 
 compile:
-  enable: false
+  enable: true
   components:
     - model
     - loss
