@@ -1,5 +1,5 @@
-work_group: ${TEAM:amd}
-user_name: ${USER:root}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
 exp_name: &exp_name ${EXP:exp-deepseek-pretrain}
 workspace: ./output
 
