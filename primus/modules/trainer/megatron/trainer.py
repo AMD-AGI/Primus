@@ -2304,6 +2304,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 elapsed_time_per_iteration * 1000.0,
                 statistics.mean(self.recent_iteration_times),
             )
+            log_string += " Throughput (samples/s): {:.1f}/{:.1f} |".format(
+                batch_size / float(elapsed_time_per_iteration),
+                batch_size / float(statistics.mean(self.recent_iteration_times) / 1000.0),
+            )
             if args.log_throughput:
                 if (
                     iteration == self.log_avg_skip_iterations + 1

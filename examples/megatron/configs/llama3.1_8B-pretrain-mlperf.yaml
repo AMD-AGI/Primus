@@ -1,0 +1,85 @@
+work_group: ${TEAM:amd}
+user_name: ${USER:root}
+exp_name: ${EXP_NAME:llama3.1_8B-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: llama3.1_8B.yaml
+    overrides:
+      # log
+      wandb_project: ""
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      train_iters: 1200000
+      micro_batch_size: 2 # can use 4 instead this was s
+      global_batch_size: 32
+
+      seq_length: 8192
+      max_position_embeddings: 8192
+
+      lr: 8e-4       # max_lr
+      min_lr: 8e-5   # 0.1 * lr
+      lr_warmup_iters: 128
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # parallelism configs
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      overlap_grad_reduce: true
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+
+      # data
+      mock_data: false
+      train_data_path: "10 /data/c4-train.en_6_text_document"
+      valid_data_path: "/data/c4-validation-91205-samples.en_text_document"
+      test_data_path: "/data/c4-validation-91205-samples.en_text_document"
+      seq_length: 8192
+      data_cache_path: /npy_indices
+      mmap_bin_files: true
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch_dist
+
+      use_torch_fsdp2: false
+      use_distributed_optimizer: false # this is needed for fsdp2
+
+      # fp8
+      fp8: hybrid # e4m3, hybrid
+      fp8_amax_history_len: 4
+
+      log_interval: 1
+
+      # primus turbo
+      enable_primus_turbo: false
+      # feature control flags
+      use_turbo_attention: false
+      use_turbo_parallel_linear: false # can't use togerther with delayed recipe
+      use_turbo_grouped_mlp: true
+      moe_use_fused_router_with_aux_score: false
+      enable_turbo_attention_float8 : false

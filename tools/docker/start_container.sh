@@ -6,7 +6,7 @@
 ###############################################################################
 
 PRIMUS_PATH=$(realpath "$(dirname "$0")/../..")
-DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/megatron-lm:v25.8_py310"}
+DOCKER_IMAGE=${DOCKER_IMAGE:-"rocm/megatron-lm-private:c798f55e-b2d8-4e1e-8241-72b49bc39ab0"}
 DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 
 bash "${PRIMUS_PATH}"/tools/docker/docker_podman_proxy.sh run -d \
@@ -24,5 +24,6 @@ bash "${PRIMUS_PATH}"/tools/docker/docker_podman_proxy.sh run -d \
     --env DATA_PATH="${DATA_PATH}" \
     -v "${PRIMUS_PATH}:/workspace/Primus" \
     -v "${DATA_PATH}:${DATA_PATH}" \
+    -v /data/mlperf_llama31_8b/data:/data \
     -w "/workspace/Primus" \
     "$DOCKER_IMAGE" sleep infinity
