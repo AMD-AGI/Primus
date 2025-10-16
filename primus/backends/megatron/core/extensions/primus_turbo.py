@@ -10,6 +10,7 @@ from typing import Callable, List, Optional, Tuple
 import grouped_gemm
 import primus_turbo.pytorch as pt
 import torch
+import torch.nn.functional as F
 import transformer_engine as te
 from megatron.core import tensor_parallel
 from megatron.core.extensions.transformer_engine import TELinear, condition_init_method
@@ -747,6 +748,28 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             else:
                 raise NotImplementedError(f"Grouped gemm backend {grouped_gemm_backend} not implemented")
 
+        if args.use_turbo_fused_act_with_probs:
+            assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
+
+            if self.config.activation_func == F.silu:
+                turbo_fused_act_with_probs = pt.ops.activation.swiglu_with_probs
+            elif self.config.activation_func == F.gelu:
+                turbo_fused_act_with_probs = pt.ops.activation.geglu_with_probs
+            else:
+                raise ValueError("Activation function must be silu or gelu when using GroupedMLP.")
+
+            def _activation_func_with_probs(x, probs, tokens_per_experts):
+                assert x.ndim == 2
+                num_tokens = x.shape[0]
+                row_mask = pt.ops.tokens_per_expert_to_mask.tokens_per_expert_to_mask(
+                    tokens_per_experts, num_tokens
+                )
+                return turbo_fused_act_with_probs(x, probs, row_mask)
+
+            self.activation_func_with_probs = _activation_func_with_probs
+
+        raise Exception("here")
+
     def forward(
         self,
         permuted_local_hidden_states: torch.Tensor,
@@ -790,17 +813,30 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, **(gemm_kargs[0])
             )
             if self.activation_recompute:
-                intermediate_parallel = self.activation_checkpoint.checkpoint(
-                    self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
-                )
+                if args.use_turbo_fused_act_with_probs:
+                    intermediate_parallel = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs,
+                        fc1_output,
+                        permuted_probs.unsqueeze(-1),
+                        tokens_per_expert,
+                    )
+                else:
+                    intermediate_parallel = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
+                    )
                 fc2_output = self.grouped_gemm(
                     intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
                 )
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
-                intermediate_parallel = self.activation_func_with_probs(
-                    fc1_output, permuted_probs.unsqueeze(-1)
-                )
+                if args.use_turbo_fused_act_with_probs:
+                    intermediate_parallel = self.activation_func_with_probs(
+                        fc1_output, permuted_probs.unsqueeze(-1), tokens_per_expert
+                    )
+                else:
+                    intermediate_parallel = self.activation_func_with_probs(
+                        fc1_output, permuted_probs.unsqueeze(-1)
+                    )
                 fc2_output = self.grouped_gemm(
                     intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
                 )
@@ -813,13 +849,21 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             w2 = self.weight2.view(-1, self.config.hidden_size)
             h = torch.matmul(permuted_local_hidden_states, w1)
             if self.activation_recompute:
-                h = self.activation_checkpoint.checkpoint(
-                    self.activation_func_with_probs, h, permuted_probs.unsqueeze(-1)
-                )
+                if args.use_turbo_fused_act_with_probs:
+                    h = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, h, permuted_probs.unsqueeze(-1), tokens_per_expert
+                    )
+                else:
+                    h = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, h, permuted_probs.unsqueeze(-1)
+                    )
                 fc2_output = torch.matmul(h, w2)
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
-                h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
+                if args.use_turbo_fused_act_with_probs:
+                    h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1), tokens_per_expert)
+                else:
+                    h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
                 fc2_output = torch.matmul(h, w2)
 
         return fc2_output, None
@@ -870,7 +914,6 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             if args.turbo_sync_free_moe_stage > 2:
                 # fully sync-free moe
                 permute_max_token_num = num_worst_tokens * config.moe_router_topk
-                raise NotImplementedError("not support fully sync-free moe.")
 
         self.deepep_dispatcher = pt.modules.DeepEPTokenDispatcher(
             num_experts=config.num_moe_experts,

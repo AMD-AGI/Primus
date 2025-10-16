@@ -1233,6 +1233,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         log_rank_0(f"-run get_model")
         model = get_model(model_provider_func, model_type)
+        raise Exception(model)
         log_rank_0(model)
         # get_megatron_optimizer will use the ddp_config
         if isinstance(model[0], torch_FSDP):

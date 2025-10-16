@@ -60,7 +60,7 @@ jobs:
           repository: AMD-AIG-AIMA/Primus-Turbo
           submodules: "recursive"
           path: Primus-Turbo
-          ref: 12308d7dc670914c15d8e8199fb9ff08f356df06 # feat(token_dispatcher): add DeepEPTokenDispatcher for MoE. (#114)
+          ref: 7375a6692786c9b1e08df274d289b637da45aaba # feat: add swiglu, geglu and tokens_per_expert_to_mask api (#122)
       - run: echo "Begin Primus-Turbo Install."
       - name: Install Primus-Turbo
         run: |
