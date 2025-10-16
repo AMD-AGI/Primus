@@ -11,21 +11,23 @@ modules:
     # model to run
     model: llama3.1_8B.yaml
     overrides:
-      # log
+      # --- Logging Config ---
       wandb_project: ""
       stderr_sink_level: DEBUG
+      log_interval: 12288 
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 150
-      micro_batch_size: 2               # with NGPUS=8 and GBS=32 and MBS=2 we get GRAC_ACC=2
+      # --- Training Config ---
+      train_iters: 1200000
+      micro_batch_size: 2               # grad_acc = global_batch_size / (micro_batch_size * num_gpus) = 32 / (2 * 8) = 2
       global_batch_size: 32
-
+      
       seq_length: 8192
       max_position_embeddings: 8192
 
-      lr: 8e-4                          # max_lr
-      min_lr: 8e-5                      # 0.1 * lr
+      lr: 0.0008          # 8e-4
+      min_lr: 0.00008     # 10% of lr
       lr_warmup_iters: 128
       lr_decay_iters: null
       lr_decay_style: cosine
@@ -36,7 +38,7 @@ modules:
       init_method_std: 0.008
       norm_epsilon: 1.0e-6
 
-      # parallelism configs
+      # --- Model Parallel Config ---
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
@@ -44,7 +46,7 @@ modules:
       overlap_param_gather: false
       gradient_accumulation_fusion: false
 
-      # data
+      # --- Data Config ---
       mock_data: false
       train_data_path: "10 /data/c4-train.en_6_text_document"
       valid_data_path: "/data/c4-validation-91205-samples.en_text_document"
@@ -53,20 +55,18 @@ modules:
       data_cache_path: /npy_indices
       mmap_bin_files: true
 
-      # ===== PROFILING CONFIGURATION =====
-      profile: true
-      use_pytorch_profiler: true
+      # ---profiling config ---
+      profile: false
+      use_pytorch_profiler: false
       profile_ranks: [0]           # Only profile rank 0 to save disk space
       profile_step_start: 2        # Start after warmup (step 8)
       profile_step_end: 10         # Profile 5 iterations (8-12)
-      
-      # Profiler options - for GPU kernel traces only
       disable_profiler_activity_cpu: true     # GPU kernels only (smaller files)
       torch_profiler_record_shapes: false     # Disable for smaller traces
       torch_profiler_with_stack: false        # Disable for smaller traces
       torch_profiler_use_gzip: true           # Compress output
 
-      # ckpt
+      # --- Checkpointing Config ---
       finetune: false
       auto_continue_train: false
       load: null
@@ -79,20 +79,18 @@ modules:
       disable_last_saving: true
       ckpt_format: torch_dist
 
+      # --- FSDP Config ---
       use_torch_fsdp2: false
       use_distributed_optimizer: false # this is needed for fsdp2
 
-      # fp8
+      # --- Mixed Precision Config ---
       fp8: hybrid # e4m3, hybrid
       fp8_amax_history_len: 4
 
-      log_interval: 1
-
-      # primus turbo
+      # --- Primus Turbo Config ---
       enable_primus_turbo: false
-      # feature control flags
       use_turbo_attention: false
-      use_turbo_parallel_linear: false # can't use togerther with delayed recipe
+      use_turbo_parallel_linear: false              # can't use togerther with delayed recipe
       use_turbo_grouped_mlp: true
       moe_use_fused_router_with_aux_score: false
       enable_turbo_attention_float8 : false
