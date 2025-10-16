@@ -84,8 +84,10 @@ class TorchTitanPretrainTrainer(BaseModule):
             import torchtitan.models.llama3.model
 
             from primus.backends.torchtitan.models.llama3.model import Attention
+            from primus.backends.torchtitan.models.llama3.model import precompute_freqs_cis_for_te
 
             torchtitan.models.llama3.model.Attention = Attention
+            torchtitan.models.llama3.model.precompute_freqs_cis = precompute_freqs_cis_for_te
             logger.warning(f"TorchtitanPretrainTrainer: Patch Turbo Attention")
 
         if self.titan_config.primus_turbo.use_turbo_mx_linear:
