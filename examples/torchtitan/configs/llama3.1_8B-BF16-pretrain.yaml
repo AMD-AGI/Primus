@@ -24,8 +24,7 @@ modules:
         warmup_steps: 10
 
       training:
-        batch_size: 3
-        compile: true
+        local_batch_size: 3
         steps: 50
 
       activation_checkpoint:

@@ -23,24 +23,6 @@ from examples.scripts.utils import (
 )
 from primus.core.launcher.parser import PrimusParser
 
-# def hf_download(repo_id: str, tokenizer_path: str, local_dir: str, hf_token: Optional[str] = None) -> None:
-
-#     from huggingface_hub import hf_hub_download
-
-#     try:
-#         hf_hub_download(
-#             repo_id=repo_id,
-#             filename=f"{tokenizer_path}/tokenizer.model",
-#             local_dir=local_dir,
-#             local_dir_use_symlinks=False,
-#             token=hf_token,
-#         )
-#     except HTTPError as e:
-#         if e.response.status_code == 401:
-#             log_error_and_exit("You need to pass a valid `HF_TOKEN` to download private checkpoints.")
-#         else:
-#             raise e
-
 
 def hf_download(repo_id: str, local_dir: str, hf_token: Optional[str] = None) -> None:
     try:
@@ -49,7 +31,7 @@ def hf_download(repo_id: str, local_dir: str, hf_token: Optional[str] = None) ->
             local_dir=local_dir,
             local_dir_use_symlinks=False,
             token=hf_token,
-            ignore_patterns=["*.bin", "*.pt", "*.safetensors"],  # 只下载 tokenizer 不要 checkpoint
+            ignore_patterns=["*.bin", "*.pt", "*.safetensors"],
         )
     except HTTPError as e:
         if e.response.status_code == 401:
@@ -137,34 +119,11 @@ def main():
     if not hasattr(pre_trainer_cfg.model, "hf_assets_path") or not pre_trainer_cfg.model.hf_assets_path:
         log_error_and_exit("Missing required field: pre_trainer.model.tokenizer_path")
 
-    # hf_assets_path = pre_trainer_cfg.model.hf_assets_path
-
-    # full_path = data_path / "torchtitan" / hf_assets_path.lstrip("/")
-    # tokenizer_file = full_path / "original/tokenizer.model"
-
-    # if not tokenizer_file.is_file():
-    #     hf_token = os.environ.get("HF_TOKEN")
-    #     if not hf_token:
-    #         log_error_and_exit("HF_TOKEN not set. Please export HF_TOKEN.")
-
-    #     if get_node_rank() == 0:
-    #         log_info(f"Downloading tokenizer to {full_path} ...")
-    #         (full_path / "original").mkdir(parents=True, exist_ok=True)
-    #         hf_download(
-    #             repo_id=hf_assets_path, tokenizer_path="original", local_dir=str(full_path), hf_token=hf_token
-    #         )
-    #     else:
-    #         log_info(f"Rank {get_node_rank()} waiting for tokenizer file ...")
-    #         while not tokenizer_file.exists():
-    #             time.sleep(5)
-    # else:
-    #     log_info(f"Tokenizer file exists: {tokenizer_file}")
-
     hf_assets_path = pre_trainer_cfg.model.hf_assets_path
 
     full_path = data_path / "torchtitan" / hf_assets_path.lstrip("/")
 
-    tokenizer_test_file = full_path / "tokenizer.json"  # 用这个判断是否已下载
+    tokenizer_test_file = full_path / "tokenizer.json"
     if not tokenizer_test_file.is_file():
         hf_token = os.environ.get("HF_TOKEN")
         if not hf_token:
@@ -184,10 +143,6 @@ def main():
     write_patch_args(patch_args_file, "train_args", {"model.hf_assets_path": str(full_path)})
     write_patch_args(patch_args_file, "train_args", {"backend_path": str(torchtitan_path)})
     write_patch_args(patch_args_file, "torchrun_args", {"local-ranks-filter": "1"})
-
-    # write_patch_args(patch_args_file, "train_args", {"model.hf_assets_path": str(tokenizer_file)})
-    # write_patch_args(patch_args_file, "train_args", {"backend_path": str(torchtitan_path)})
-    # write_patch_args(patch_args_file, "torchrun_args", {"local-ranks-filter": "1"})
 
 
 if __name__ == "__main__":
