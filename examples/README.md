@@ -7,28 +7,16 @@ It supports both **single-node** and **multi-node** training, and includes optio
 
 ## 📚 Table of Contents
 
-- [🧠 Pretraining with Primus](#-pretraining-with-primus)
-  - [📚 Table of Contents](#-table-of-contents)
-  - [⚙️ Supported Backends](#️-supported-backends)
-  - [🖥️ Single Node Training](#️-single-node-training)
-    - [Setup Docker](#setup-docker)
-    - [Setup Primus](#setup-primus)
-    - [Run Pretraining](#run-pretraining)
-      - [🚀 Quick Start Mode](#-quick-start-mode)
-      - [🧑‍🔧 Interactive Mode](#-interactive-mode)
-  - [🌐 Multi-node Training](#-multi-node-training)
-  - [🔧 HipblasLT Auto Tuning](#-hipblaslt-auto-tuning)
-    - [Stage 1: Dump GEMM Shape](#stage-1-dump-gemm-shape)
-    - [Stage 2: Tune GEMM Kernel](#stage-2-tune-gemm-kernel)
-    - [Stage 3: Train with Tuned Kernel](#stage-3-train-with-tuned-kernel)
-  - [✅ Supported Models](#-supported-models)
-    - [🏃‍♂️ How to Run a Supported Model](#️-how-to-run-a-supported-model)
-  - [☸️ Kubernetes Training Management (`run_k8s_pretrain.sh`)](#️-kubernetes-training-management-run_k8s_pretrainsh)
-    - [Requirements](#requirements)
-    - [Usage](#usage)
-    - [⚙️ Commands](#️-commands)
-    - [⚙️ Create Command Options](#️-create-command-options)
-    - [Example](#example)
+- [⚙️ Supported Backends](#️-supported-backends)
+- [🖥️ Single Node Training](#️-single-node-training)
+  - [Setup Docker](#setup-docker)
+  - [Setup Primus](#setup-primus)
+  - [Run Pretraining](#run-pretraining)
+- [🌐 Multi-node Training](#-multi-node-training)
+- [🚀 HipBLASLt Auto Tuning (Optional)](#-hipblaslt-auto-tuning-optional)
+- [✅ Supported Models](#-supported-models)
+  - [🏃‍♂️ How to Run a Supported Model](#️-how-to-run-a-supported-model)
+- [☸️ Kubernetes Training Management](#️-kubernetes-training-management-run_k8s_pretrainsh)
 
 ---
 
