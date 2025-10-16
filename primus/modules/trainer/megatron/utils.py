@@ -386,6 +386,23 @@ def dump_pp_data(args, num_mbs, pp_data_dir):
             json.dump(config_dict, f, indent=2)
 
 
+def _get_sync_free_moe_options(stage: int) -> dict:
+    if stage > 3 or stage < 0:
+        raise ValueError("turbo_sync_free_moe_stage only support [0-3]")
+
+    sync_free_moe = {
+        1: {"moe_use_fused_router_with_aux_score": True, "moe_permute_fusion": True},
+        2: {
+            "moe_use_fused_router_with_aux_score": True,
+            "use_turbo_deepep": True,
+            "moe_permute_fusion": True,
+            "use_turbo_grouped_mlp": True,
+        },
+    }
+
+    return sync_free_moe[stage]
+
+
 def validate_args_on_rocm(args):
     # Deterministic mode
     if args.deterministic_mode:
@@ -402,3 +419,30 @@ def validate_args_on_rocm(args):
     if args.dump_pp_data and args.pipeline_model_parallel_size == 1:
         args.dump_pp_data = False
         print_rank_last(f"Disable args.dump_pp_data since args.pipeline_model_parallel_size=1")
+
+    # sync-free MoE
+    if args.turbo_sync_free_moe_stage > 0:
+        assert args.enable_primus_turbo, "use `enable_primus_turbo=True` to enable sync-free MoE."
+
+        if args.turbo_sync_free_moe_stage > 2:
+            raise NotImplementedError("not support fully sync-free moe.")
+
+        options = _get_sync_free_moe_options(args.turbo_sync_free_moe_stage)
+        print_rank_last(
+            f"========== Enable Sync-Free MoE Stage {args.turbo_sync_free_moe_stage} (Auto-Enabled Options) =========="
+        )
+        for flag, value in options.items():
+            print_rank_last(f"{flag}={value}")
+            setattr(args, flag, value)
+        print_rank_last(
+            f"========== Enable Sync-Free MoE Stage {args.turbo_sync_free_moe_stage} (Auto-Enabled Options) =========="
+        )
+
+    # turbo deepep
+    if args.use_turbo_deepep:
+        assert not args.moe_shared_expert_overlap, "MoE Shared Expert Overlap can't be used with deepep."
+        assert (
+            args.moe_router_dtype == "fp32"
+        ), "DeepEP only supports float32 probs, please set --moe-router-dtype=fp32"
+        if args.expert_model_parallel_size >= 16:
+            assert args.turbo_deepep_num_cu <= 32, "Set `turbo_deepep_num_cu<=32` when using ep_size >= 16."
