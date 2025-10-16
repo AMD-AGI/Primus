@@ -171,6 +171,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_fp8_context()
         self.patch_zbpp()
 
+        # replace TESpecProvider to PrimusTurboSpecProvider, model block will replace to Primus-Turbo impl when setup nodel
+        self.patch_te_spec_provider()
+
         self.app_metrics = {}
 
         # disable all logging handlers
@@ -198,7 +201,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         )
 
         warning_rank_0(
-            f"MegatronTrainer: patch TESpecProvider to PrimusTurboSpecProvider, `enable_primus_turbo=True` will use PrimusTurbo backend"
+            f"MegatronTrainer: patch TESpecProvider to PrimusTurboSpecProvider, `enable_primus_turbo=True` will use Primus-Turbo backend when `transformer_impl=transformer_engine`"
         )
 
         assert (
