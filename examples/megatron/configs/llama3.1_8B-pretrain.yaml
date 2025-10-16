@@ -66,7 +66,6 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
-      # Turbo
-      enable_primus_turbo: true
-      use_turbo_attention: true
-      use_turbo_grouped_mlp: true
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true

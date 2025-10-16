@@ -32,7 +32,8 @@ def test_allreduce(mbs, seq, hidden, dtype, rank, local_rank, world_size):
     shape = (mbs, seq, hidden)
     device = torch.device(f"cuda:{local_rank}")
     tensor = torch.ones(shape, dtype=dtype, device=device)
-
+    if local_rank == 0:
+        print("AllReduce with input size(Byte): ", tensor.nelement() * tensor.element_size())
     # Warm-up
     for _ in range(5):
         dist.all_reduce(tensor)
@@ -62,7 +63,13 @@ def test_allgather(mbs, seq, hidden, dtype, rank, local_rank, world_size):
 
     # Gather buffer
     output = [torch.randn_like(tensor) for _ in range(world_size)]
-
+    if local_rank == 0:
+        print(
+            "AllGather with input size(Byte): ",
+            tensor.nelement() * tensor.element_size(),
+            " Output size ",
+            world_size * tensor.nelement() * tensor.element_size(),
+        )
     for _ in range(5):
         dist.all_gather(output, tensor)
     dist.barrier()
@@ -89,7 +96,8 @@ def test_reducescatter(mbs, seq, hidden, dtype, rank, local_rank, world_size):
     device = torch.device(f"cuda:{local_rank}")
     tensor = torch.ones(full_shape, dtype=dtype, device=device)
     output = torch.empty(chunk_shape, dtype=dtype, device=device)
-
+    if local_rank == 0:
+        print("ReduceScatter with each output chunk size(Byte): ", output.nelement() * output.element_size())
     for _ in range(5):
         dist.reduce_scatter(output, list(tensor.chunk(world_size, dim=1)))
     dist.barrier()

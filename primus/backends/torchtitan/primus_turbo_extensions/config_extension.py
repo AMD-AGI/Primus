@@ -19,6 +19,9 @@ from torchtitan.config.job_config import JobConfig as TTJobConfig
 class PrimusTurboConfig:
     enable_primus_turbo: bool = False
     enable_attention_float8: bool = False
+    use_turbo_attention: bool = False
+    use_turbo_async_tp: bool = False
+    use_turbo_mx_linear: bool = False
     # float8_config: PrimusTurboFloat8Config = field(default_factory=PrimusTurboFloat8Config)
 
 

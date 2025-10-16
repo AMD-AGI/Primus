@@ -1,0 +1,26 @@
+bases:
+  - grok_base.yaml
+
+# https://huggingface.co/xai-org/grok-2
+# 270B total params, 62B active params
+
+tokenizer_type: MixtralTokenizer
+tokenizer_model: mistralai/Mixtral-8x22B-v0.1
+
+# model parameters
+max_position_embeddings: 131072
+num_layers: 64
+hidden_size: 8192
+moe_ffn_hidden_size: 16384
+
+num_attention_heads: 64
+init_method_std: 0.01
+
+final_logit_softcapping: 50.0
+router_logit_softcapping: 30.0
+# Not working yet
+# attn_logit_softcapping: 30.0
+
+rotary_base: 1000000
+rotary_scaling_factor: 16
+masked_softmax_fusion: false

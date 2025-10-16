@@ -3,13 +3,11 @@ enable_primus_turbo: false
 
 # feature control flags
 use_turbo_attention: false
-use_turbo_row_parallel_linear: false
-use_turbo_layer_norm_column_parallel_linear: false
-use_turbo_column_parallel_linear: false
-use_turbo_column_parallel_linear_torch: false
+use_turbo_parallel_linear: false
 use_turbo_grouped_mlp: false
 moe_use_fused_router_with_aux_score: false
 
+
+
 # inner features flags
 enable_turbo_attention_float8 : false
-enable_turbo_gemm_float8 : false

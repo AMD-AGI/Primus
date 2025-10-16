@@ -16,6 +16,12 @@ def add_pretrain_parser(parser: argparse.ArgumentParser):
         help="Path to experiment YAML config file (alias: --exp)",
     )
     parser.add_argument(
+        "--data_path",
+        type=str,
+        default="./data",
+        help="Path to data directory [default: ./data]",
+    )
+    parser.add_argument(
         "--backend_path",
         nargs="?",
         default=None,
@@ -256,13 +262,13 @@ class PrimusParser(object):
             yaml_utils.check_key_in_namespace(module, key)
 
         # ---- Load module config ----
-        module_config_file = os.path.join(self.primus_home, "configs/modules", framework, module.config)
+        model_format = self.get_model_format(framework)
+        module_config_file = os.path.join(self.primus_home, "configs/modules", model_format, module.config)
         module_config = yaml_utils.parse_yaml_to_namespace(module_config_file)
         module_config.name = f"exp.modules.{module_name}.config"
         module_config.framework = framework
 
         # ---- Load model config ----
-        model_format = self.get_model_format(framework)
         model_config_file = os.path.join(self.primus_home, "configs/models", model_format, module.model)
         model_config = yaml_utils.parse_yaml_to_namespace(model_config_file)
         model_config.name = f"exp.modules.{module_name}.model"

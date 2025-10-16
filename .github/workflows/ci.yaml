@@ -41,6 +41,7 @@ jobs:
       - uses: isort/isort-action@v1
         if: always()
         with:
+          isort-version: "5.13.2"
           configuration: "--profile black --check-only --diff"
       - uses: psf/black@stable
         if: always()
@@ -59,8 +60,7 @@ jobs:
           repository: AMD-AIG-AIMA/Primus-Turbo
           submodules: "recursive"
           path: Primus-Turbo
-          token: ${{ secrets.PRIMUS_TURBO_SECRET }}
-          ref: 125da20665dea3b703b8ee7105e4189c43cc486c # feat(async-tp): remove triton-dist dependency. (#41)
+          ref: 6d39647350baa180cccc61e701cf75281dc7e878 # feat: add TurboStream (#96)
       - run: echo "Begin Primus-Turbo Install."
       - name: Install Primus-Turbo
         run: |
@@ -78,7 +78,7 @@ jobs:
           echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
           start_time=$(date +%s)
           echo "✅ [build primus-turbo] started at: $(date)"
-          python setup.py develop
+          pip3 install --no-build-isolation -e . -v
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "✅ [build primus-turbo] ended at: $(date)"

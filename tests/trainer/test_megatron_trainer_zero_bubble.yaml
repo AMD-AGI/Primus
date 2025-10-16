@@ -1,0 +1,84 @@
+work_group: ${TEAM:amd}
+user_name: ${USER:root}
+exp_name: ${EXP_NAME:llama2_7B-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: llama2_7B.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_DeepSeek_Pretrain"
+      # disable_wandb: false
+      # disable_tensorboard: false
+      stderr_sink_level: DEBUG
+
+      eval_iters: 0
+
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      train_iters: 3
+      micro_batch_size: 1
+      global_batch_size: 32
+
+      seq_length: 4096
+      max_position_embeddings: 4096
+
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      num_layers: ${PRIMUS_NUM_LAYERS:16}
+      # parallel
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 8
+      num_virtual_stages_per_pipeline_rank: 2
+      expert_model_parallel_size: 1
+
+      # data
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # Turbo
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: true
+
+      # transformer_impl: local
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      no_persist_layer_norm: true
+      create_attention_mask_in_dataloader: false
+      gradient_accumulation_fusion: true
+
+      patch_zero_bubble: true
+      enable_zero_bubble: true
+      zero_bubble_v_schedule: true

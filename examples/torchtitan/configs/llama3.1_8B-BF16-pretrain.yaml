@@ -10,19 +10,27 @@ modules:
 
     # model to run
     model: llama3.1_8B.yaml
-
     overrides:
       sink_level: null
       file_sink_level: DEBUG
       stderr_sink_level: INFO
 
-      training:
-        seq_len: 8192
-        # global_batch_size: 128
-        local_batch_size: 4
+      metrics:
+        log_freq: 10
+        enable_wandb: false
 
-      compile:
-        enable: true
+      lr_scheduler:
+        # lr scheduler warm up
+        warmup_steps: 10
+
+      training:
+        batch_size: 3
+        compile: true
+        steps: 50
+
+      activation_checkpoint:
+        mode: "none"  # ["none", "selective", "full"]
+        selective_ac_option: "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
 
       primus_turbo:
         enable_primus_turbo: true

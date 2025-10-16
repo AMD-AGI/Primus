@@ -1,6 +1,6 @@
 job:
   dump_folder: "./outputs"
-  description: "Llama 3 8B training"
+  description: "Llama 3 70B training"
 
 model:
   name: "llama3"

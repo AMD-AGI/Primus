@@ -63,6 +63,7 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
     # 3) Fallback to source tree under third_party
     fallback_name_map = {
         "megatron": "Megatron-LM",
+        "light-megatron": "Megatron-LM",
         "torchtitan": "torchtitan",
     }
     mapped_name = fallback_name_map.get(framework, framework)
@@ -87,6 +88,16 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
     )
 
 
+def setup_env(data_path: str):
+    if "HF_HOME" not in os.environ:
+        hf_home = os.path.join(data_path, "huggingface")
+        os.environ["HF_HOME"] = hf_home
+        print(f"[Primus CLI] HF_HOME={hf_home}")
+    else:
+        hf_home = os.environ["HF_HOME"]
+        print(f"[Primus CLI] HF_HOME already set: {hf_home}")
+
+
 def launch_pretrain_trainer(primus_cfg: PrimusConfig):
     """
     Launch the training using the Primus trainer.
@@ -97,10 +108,6 @@ def launch_pretrain_trainer(primus_cfg: PrimusConfig):
     # Get pre_trainer module configuration
     pre_trainer_cfg = primus_cfg.get_module_config("pre_trainer")
     framework = pre_trainer_cfg.framework
-
-    # Setup backend path for dynamic import
-    framework = primus_cfg.get_module_config("pre_trainer").framework
-    setup_backend_path(framework=framework, backend_path=args.backend_path, verbose=True)
 
     # Lazy import backend trainer
     TrainerClass = load_backend_trainer(framework)
@@ -140,6 +147,8 @@ def launch_pretrain_from_cli(args, overrides):
     cfg_path = Path(args.config)
     if not cfg_path.exists():
         raise FileNotFoundError(f"[Primus:Train] Config file '{cfg_path}' not found.")
+
+    setup_env(data_path=args.data_path)
 
     primus_cfg = load_primus_config(args, overrides)
 
