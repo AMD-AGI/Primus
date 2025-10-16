@@ -198,7 +198,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         )
 
         warning_rank_0(
-            f"MegatronTrainer: patch TESpecProvider to PrimusTurboSpecProvider, `enable_primus_turbo=True` will use Primus-Turbo backend when `transformer_impl=transformer_engine`"
+            f"MegatronTrainer: patch TESpecProvider to PrimusTurboSpecProvider, `enable_primus_turbo=True` will use PrimusTurbo backend"
         )
 
         assert (
