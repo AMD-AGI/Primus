@@ -229,7 +229,7 @@ class TorchTitanPretrainTrainer(BaseModule):
         max_key_len = max(len(k) for k in flat.keys())
         for key in sorted(flat):
             val = flat[key]
-            formatted_line = f"arguments {key.ljust(max_key_len, '.')} {val} (type: {type(val).__name__})"
+            formatted_line = f"arguments {key.ljust(max_key_len, '.')} {val}"
             logger.info(formatted_line)
 
     def build_job_config(self, cfg_dict: dict, JobConfigType) -> Any:
