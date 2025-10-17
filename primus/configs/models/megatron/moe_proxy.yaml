@@ -8,9 +8,9 @@ multi_latent_attention: false
 apply_rope_fusion: true
 
 # model
-num_layers: 32 # full 64
+num_layers: 64 # full 64
 hidden_size: 4096
-ffn_hidden_size: 256 # not used in moe layer
+ffn_hidden_size: 10944 # not used in moe layer
 num_attention_heads: 64
 group_query_attention: true
 num_query_groups: 8
@@ -18,8 +18,8 @@ kv_channels: 128
 
 # moe
 moe_layer_freq: 1
-moe_router_topk: 4
-num_experts: 256
+moe_router_topk: 16
+num_experts: 1024
 # num_shared_experts: 1
 moe_ffn_hidden_size: 256
 moe_shared_expert_intermediate_size: 256 # num_shared_experts * moe_ffn_hidden_size
