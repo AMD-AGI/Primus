@@ -1,6 +1,6 @@
 #!/bin/bash
 export USING_AINIC=1
-export REBUILD_PRIMUS_TURBO=0
+export REBUILD_PRIMUS_TURBO=1
 export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
 export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
 # export AINIC_LIB="/apps/gpuperf/ainic-driver-20251007/lib/"

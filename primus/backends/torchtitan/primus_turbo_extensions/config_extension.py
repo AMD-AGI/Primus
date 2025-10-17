@@ -22,6 +22,7 @@ class PrimusTurboConfig:
     use_turbo_attention: bool = False
     use_turbo_async_tp: bool = False
     use_turbo_mx_linear: bool = False
+    use_turbo_fp8_gemm: bool = False
     # float8_config: PrimusTurboFloat8Config = field(default_factory=PrimusTurboFloat8Config)
 
 

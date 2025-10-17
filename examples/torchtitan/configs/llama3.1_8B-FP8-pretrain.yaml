@@ -39,4 +39,4 @@ modules:
       primus_turbo:
         enable_primus_turbo: true
         enable_attention_float8: false
-        use_turbo_fp8_gemm: true
+        use_turbo_fp8_gemm: false  # 禁用Primus-Turbo FP8（与PyTorch FP8冲突）

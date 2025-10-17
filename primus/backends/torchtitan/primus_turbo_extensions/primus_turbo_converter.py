@@ -28,6 +28,20 @@ def replace_turbo_attention_modules(model: torch.nn.Module, backend_type: str, u
             replace_turbo_attention_modules(module, backend_type, use_fp8)
 
 
+def set_turbo_config_on_modules(model: torch.nn.Module, config: object):
+    """
+    Set Primus Turbo configuration flags on Attention and FeedForward modules.
+    This allows the patched modules to access the config and conditionally use turbo features.
+    """
+    from torchtitan.models.llama3.model import Attention, FeedForward
+    
+    for module in model.modules():
+        if isinstance(module, (Attention, FeedForward)):
+            # Set config flags as module attributes
+            module.use_turbo_fp8_gemm = config.use_turbo_fp8_gemm
+            module.use_turbo_attention = config.use_turbo_attention
+
+
 class PrimusTubroConverter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = True
@@ -40,6 +54,10 @@ class PrimusTubroConverter(ModelConverter):
             return
 
         replace_turbo_attention_modules(model, self.attn_backend_type, self.enabled_attn_fp8)
+        
+        # Set config flags on Attention and FeedForward modules
+        set_turbo_config_on_modules(model, self.primus_turbo_config)
+        
         return model
 
     def post_optimizer_hook(self, model: torch.nn.Module | list[torch.nn.Module]):

@@ -82,14 +82,22 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         torchtitan.protocols.model_converter.ModelConvertersContainer = ModelConvertersContainer
 
-        if self.titan_config.primus_turbo.use_turbo_attention:
-            # ******* llama3 Attention Model *******
+        # Patch llama3 models based on Primus Turbo config
+        if self.titan_config.primus_turbo.use_turbo_attention or self.titan_config.primus_turbo.use_turbo_fp8_gemm:
             import torchtitan.models.llama3.model
-
             from primus.backends.torchtitan.models.llama3.model import Attention
+            from primus.backends.torchtitan.models.llama3.model import precompute_freqs_cis_for_te
 
             torchtitan.models.llama3.model.Attention = Attention
+            torchtitan.models.llama3.model.precompute_freqs_cis = precompute_freqs_cis_for_te
             logger.warning(f"TorchtitanPretrainTrainer: Patch Turbo Attention")
+        
+        if self.titan_config.primus_turbo.use_turbo_fp8_gemm:
+            # ******* llama3 FP8 GEMM Model *******
+            import torchtitan.models.llama3.model
+            from primus.backends.torchtitan.models.llama3.model import FeedForward
+            torchtitan.models.llama3.model.FeedForward = FeedForward
+            logger.warning(f"TorchtitanPretrainTrainer: Patch FeedForward")
 
         if self.titan_config.primus_turbo.use_turbo_mx_linear:
             # ******* MXLinear *******
