@@ -23,8 +23,7 @@ modules:
         log_freq: 10
 
       training:
-        batch_size: 4
-        compile: true
+        local_batch_size: 4
         steps: 50
 
       optimizer:
