@@ -1,6 +1,6 @@
-work_group: ${TEAM:amd}
-user_name: ${USER:root}
-exp_name: ${EXP_NAME:llama3.1_8B-pretrain}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3.1_8B-pretrain}
 workspace: ./output
 
 modules:
@@ -65,3 +65,7 @@ modules:
       no_save_rng: null
       disable_last_saving: true
       ckpt_format: torch
+
+      # Cross entropy flags
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true

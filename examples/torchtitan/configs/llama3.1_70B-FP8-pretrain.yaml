@@ -1,6 +1,6 @@
-work_group: ${TEAM:amd}
-user_name: ${USER:root}
-exp_name: ${EXP_NAME:llama3_70B-pretrain}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3_70B-pretrain}
 workspace: ./output
 
 modules:
@@ -20,11 +20,10 @@ modules:
         warmup_steps: 10
 
       metrics:
-        log_freq: 1
+        log_freq: 10
 
       training:
-        batch_size: 3
-        compile: true
+        local_batch_size: 3
         steps: 50
 
       optimizer:

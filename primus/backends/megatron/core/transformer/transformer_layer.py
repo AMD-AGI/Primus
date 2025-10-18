@@ -14,13 +14,11 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.global_vars import get_args
 
 
-def get_transformer_layer_offset(config: TransformerConfig, vp_stage: Optional[int] = None):
+def get_transformer_layer_offset(
+    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
-    pipeline_rank = parallel_state.get_pipeline_model_parallel_rank()
-    if not parallel_state.is_inside_encoder():
-        pp_decoder_start = parallel_state.get_pipeline_model_parallel_decoder_start()
-        if pp_decoder_start is not None:
-            pipeline_rank = pipeline_rank - pp_decoder_start
+    pipeline_rank = pp_rank if pp_rank is not None else parallel_state.get_pipeline_model_parallel_rank()
 
     if config.pipeline_model_parallel_size > 1:
 

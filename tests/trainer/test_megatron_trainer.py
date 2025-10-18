@@ -206,6 +206,30 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def test_grok2(self):
+        run_script(
+            self.__class__.__name__,
+            "grok2",
+            exp_path="examples/megatron/configs/grok2-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "2",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--expert_model_parallel_size",
+                "8",
+                "--pipeline_model_parallel_size",
+                "1",
+                "--num_virtual_stages_per_pipeline_rank",
+                "1",
+            ],
+        )
+
     def test_deepseek_v3(self):
         run_script(
             self.__class__.__name__,
@@ -248,13 +272,47 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
-    # def test_zero_bubble_pipeline_parallelism(self):
-    #     run_script(
-    #         self.__class__.__name__,
-    #         "zero_bubble_pipeline_parallelism",
-    #         exp_path="tests/trainer/test_megatron_trainer_zero_bubble.yaml",
-    #         env_override={},
-    #     )
+    def test_zero_bubble_pipeline_parallelism(self):
+        run_script(
+            self.__class__.__name__,
+            "zero_bubble_pipeline_parallelism",
+            exp_path="tests/trainer/test_megatron_trainer_zero_bubble.yaml",
+            env_override={},
+        )
+
+    def test_turbo_deepep(self):
+        run_script(
+            self.__class__.__name__,
+            "turbo_deepep",
+            exp_path="examples/megatron/configs/deepseek_v2_lite-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--moe_layer_freq",
+                "1",
+                "--expert_model_parallel_size",
+                "8",
+                "--use_turbo_deepep",
+                "1",
+                "--enable_primus_turbo",
+                "1",
+                "--moe_router_dtype",
+                "fp32",
+                "--moe_shared_expert_overlap",
+                "0",
+                "--moe_use_legacy_grouped_gemm",
+                "0",
+                "--turbo_sync_free_moe_stage",
+                "2",
+            ],
+        )
 
 
 class TestMegatronTrainerDeterministic(PrimusUT):

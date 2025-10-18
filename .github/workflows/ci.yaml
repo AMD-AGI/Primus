@@ -60,7 +60,7 @@ jobs:
           repository: AMD-AIG-AIMA/Primus-Turbo
           submodules: "recursive"
           path: Primus-Turbo
-          ref: 6d39647350baa180cccc61e701cf75281dc7e878 # feat: add TurboStream (#96)
+          ref: 12308d7dc670914c15d8e8199fb9ff08f356df06 # feat(token_dispatcher): add DeepEPTokenDispatcher for MoE. (#114)
       - run: echo "Begin Primus-Turbo Install."
       - name: Install Primus-Turbo
         run: |

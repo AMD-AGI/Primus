@@ -6,6 +6,7 @@
 ###############################################################################
 
 import dataclasses
+import functools
 import gc
 import importlib.util
 import os
@@ -131,6 +132,7 @@ from megatron.training.utils import (
 from megatron.training.yaml_arguments import validate_yaml
 
 from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_metrics
+from primus.backends.megatron.model_provider import primus_model_provider
 from primus.backends.megatron.training.global_vars import (
     get_mlflow_writer,
     set_primus_global_variables,
@@ -149,7 +151,7 @@ from primus.modules.module_utils import (
 )
 from primus.modules.trainer.base_trainer import BaseTrainer
 
-from .utils import set_wandb_writer_patch, validate_args_on_rocm
+from .utils import schedule_wrapper, set_wandb_writer_patch, validate_args_on_rocm
 
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
@@ -167,7 +169,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_te_tp_overlap()
         self.patch_mla_attention()
         self.patch_fp8_context()
-        # self.patch_zbpp()
+        self.patch_zbpp()
 
         self.app_metrics = {}
 
@@ -184,11 +186,13 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             gpt_model,
             moe_module_specs,
         )
+        from megatron.core.transformer.moe import moe_layer, token_dispatcher
 
         from primus.backends.megatron.core.extensions.primus_turbo import (
             PrimusTurboAttention,
             PrimusTurboColumnParallelLinear,
             PrimusTurboColumnParallelLinearTorch,
+            PrimusTurboDeepEPTokenDispatcher,
             PrimusTurboGroupedMLP,
             PrimusTurboLayerNormColumnParallelLinear,
             PrimusTurboRowParallelLinear,
@@ -209,6 +213,13 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             gpt_model.tensor_parallel.ColumnParallelLinear = PrimusTurboColumnParallelLinearTorch
         if args.use_turbo_grouped_mlp:
             moe_module_specs.GroupedMLP = PrimusTurboGroupedMLP
+
+        if args.use_turbo_deepep:
+            # use PrimusTurboDeepEPTokenDispatcher will auto-enable moe_enable_deepep=True, moe_token_dispatcher_type='flex' of megatron options.
+            args.moe_enable_deepep = True
+            args.moe_token_dispatcher_type = "flex"
+            token_dispatcher.MoEFlexTokenDispatcher = PrimusTurboDeepEPTokenDispatcher
+            moe_layer.MoEFlexTokenDispatcher = PrimusTurboDeepEPTokenDispatcher
 
     def patch_fp8_context(self):
         from megatron.core import fp8_utils
@@ -241,8 +252,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     )
 
         _check_tp_overlap_cfg()
-
-        import functools
 
         import transformer_engine as te
         import transformer_engine_torch as tex
@@ -875,6 +884,15 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.valid_data_path = None
             args.test_data_path = None
 
+        if args.final_logit_softcapping is not None and args.final_logit_softcapping > 0.0:
+            log_rank_0(f"-enable final_logit_softcapping: {args.final_logit_softcapping}")
+            self.model_provider = functools.partial(primus_model_provider, get_model_provider())
+        else:
+            self.model_provider = get_model_provider()
+
+        if args.router_logit_softcapping is not None and args.router_logit_softcapping > 0.0:
+            log_rank_0(f"-enable router_logit_softcapping: {args.router_logit_softcapping}")
+
     def vocab_size_with_padding(self, orig_vocab_size, args):
         """Pad vocab size so it is divisible by model parallel size and
         still having GPU friendly size."""
@@ -897,7 +915,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.app_metrics["app_build_optimizer_start_time"] = one_logger_utils.get_timestamp_in_ms()
         log_rank_0(f"-setup_model_and_optimizer...")
         self.model, self.optimizer, self.opt_param_scheduler = self.setup_model_and_optimizer(
-            get_model_provider(),
+            self.model_provider,
             ModelType.encoder_or_decoder,
             checkpointing_context=self.checkpointing_context,
         )
@@ -1900,6 +1918,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             from megatron.core.pipeline_parallel import get_forward_backward_func
 
             forward_backward_func = get_forward_backward_func()
+            if optimizer is None and args.dump_pp_data:
+                forward_backward_func = schedule_wrapper(forward_backward_func)
             kwargs = {}
             if optimizer is not None:
                 kwargs["optimizer"] = optimizer
