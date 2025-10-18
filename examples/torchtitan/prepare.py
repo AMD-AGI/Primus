@@ -6,6 +6,7 @@
 
 import argparse
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -145,6 +146,47 @@ def main():
     write_patch_args(patch_args_file, "torchrun_args", {"local-ranks-filter": "1"})
 
 
+def detect_rocm_version() -> Optional[str]:
+    """
+    Detect ROCm version from /opt/rocm/.info/version (most reliable source).
+
+    Example file content:
+        7.0.0
+    → returns '7.0'
+    """
+    info_file = "/opt/rocm/.info/version"
+    if os.path.exists(info_file):
+        try:
+            with open(info_file, "r") as f:
+                content = f.readline().strip()
+                # Match like '7.0.0' or '6.3.1'
+                match = re.match(r"^(\d+)\.(\d+)", content)
+                if match:
+                    major, minor = match.groups()
+                    return f"{major}.{minor}"
+        except Exception:
+            pass
+
+    return None
+
+
+def install_torch_for_rocm(nightly=True):
+    version = detect_rocm_version()
+    if not version:
+        print("[ERROR] ROCm not detected.")
+        sys.exit(1)
+
+    tag = f"rocm{version}"
+    base = "https://download.pytorch.org/whl/nightly" if nightly else "https://download.pytorch.org/whl"
+    url = f"{base}/{tag}"
+
+    print(f"[INFO] Installing PyTorch for {tag} from {url}")
+    subprocess.run(["pip", "install", "--pre", "torch", "--index-url", url, "--force-reinstall"], check=True)
+
+
 if __name__ == "__main__":
+    log_info("========== Prepare torch for Torchtitan ==========")
+    install_torch_for_rocm(nightly=True)
+
     log_info("========== Prepare Torchtitan dataset ==========")
     main()
