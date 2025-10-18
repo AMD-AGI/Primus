@@ -173,14 +173,13 @@ def detect_rocm_version() -> Optional[str]:
 def install_torch_for_rocm(nightly=True):
     version = detect_rocm_version()
     if not version:
-        print("[ERROR] ROCm not detected.")
-        sys.exit(1)
+        log_error_and_exit("ROCm not detected.")
 
     tag = f"rocm{version}"
     base = "https://download.pytorch.org/whl/nightly" if nightly else "https://download.pytorch.org/whl"
     url = f"{base}/{tag}"
 
-    print(f"[INFO] Installing PyTorch for {tag} from {url}")
+    log_info(f"Installing PyTorch for {tag} from {url}")
     subprocess.run(["pip", "install", "--pre", "torch", "--index-url", url, "--force-reinstall"], check=True)
 
 
