@@ -41,6 +41,8 @@ srun -N "${NNODES}" \
      --exclusive \
      --ntasks-per-node=1 \
      --cpus-per-task="${CPUS_PER_TASK:-256}" \
+     --reservation=mi355-gpu-11_mi355-gpu-12_mi355-gpu-13_mi355-gpu-14_mi355-gpu-17_mi355-gpu-18_mi355-gpu-19_mi355-gpu-20_Reservation \
+     --exclusive --mem=0 -N 1  --nodes=4 --time=00:30:00 \
      bash -c "
           readarray -t node_array < <(scontrol show hostnames \"\$SLURM_JOB_NODELIST\")
           if [ \"\$SLURM_NODEID\" = \"0\" ]; then
