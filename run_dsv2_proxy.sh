@@ -20,11 +20,11 @@ export NVTE_CK_USES_BWD_V3=1
 export EXP="examples/megatron/configs/moe_proxy-pretrain.yaml"
 mkdir -p data
 # the real number of nodes to run
-export NNODES=4
+export NNODES=2
 MBS=1
 TP=1
 ETP=1
-GBS=$(($NNODES * 512))
+GBS=$(($NNODES*$MBS) / ($TP*$PP*$CP))
 SEQ_LENGTH=4096
 PP=1
 EP=8
@@ -40,10 +40,11 @@ FP8=False
 TOPK=16
 NUM_EXPERTS=1024
 MOE_FFN_HIDDEN_SIZE=256
+DATASET="mock_data"
 
 export HF_TOKEN=${HF_TOKEN:="your_hf_token"}
 
-CONFIG="DSv2-Proxy-FP8-$FP8.GBS$GBS.PP$PP.EP$EP.TOPK$TOPK.NUM_EXPERTS$NUM_EXPERTS.MOE_FFN_HIDDEN_SIZE$MOE_FFN_HIDDEN_SIZE.nodes$NNODES"
+CONFIG="DSv2-Proxy-FP8-$FP8.GBS$GBS.PP$PP.EP$EP.TOPK$TOPK.NUM_EXPERTS$NUM_EXPERTS.MOE_FFN_HIDDEN_SIZE$MOE_FFN_HIDDEN_SIZE.nodes$NNODES.DATASET$DATASET"
 echo "config: $CONFIG"
 
 if [ $VPP -gt 1 ]; then
