@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:llama3_8B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:llama3.1_8B-pretrain}
 workspace: ./output
 
 modules:
