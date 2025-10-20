@@ -25,6 +25,7 @@ from megatron.core.parallel_state import (
 from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
 from megatron.core.pipeline_parallel.schedules import (
     backward_step,
+    check_first_val_step,
     deallocate_output_tensor,
     forward_step,
     get_tensor_shapes,
@@ -83,6 +84,8 @@ class TrainingIterationConfig:
     tensor_shape: Tuple
     recv_tensor_shapes: List
     send_tensor_shapes: List
+
+    first_val_step: Optional[bool] = None
 
 
 class SpQueue:
@@ -548,6 +551,9 @@ class TrainingIteration:
             conf.config,
             conf.collect_non_loss_data,
             checkpoint_activations_microbatch=None,
+            is_first_microbatch=check_first_val_step(
+                conf.first_val_step, conf.forward_only, scheduled_node.microbatch == 0
+            ),
             vp_stage=vp_stage,
             is_last_stage=is_last_stage,
             current_microbatch=scheduled_node.microbatch,
@@ -1142,6 +1148,7 @@ class SchedNodeRuntime:
             tensor_shape=tensor_shape,
             recv_tensor_shapes=recv_tensor_shapes,
             send_tensor_shapes=send_tensor_shapes,
+            first_val_step=first_val_step,
         )
         return iteration_config
 
