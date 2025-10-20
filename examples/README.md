@@ -90,7 +90,7 @@ You do not need to enter the Docker container. Just set the config and run.
 EXP=examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_local_pretrain.sh
 
 # examples for torchtitan llama3.1_8B
-EXP=examples/torchtitan/mi300/llama3.1_8B-pretrain.yaml bash ./examples/run_local_pretrain.sh
+EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_local_pretrain.sh
 ```
 
 ---
@@ -114,7 +114,7 @@ cd Primus && pip install -r requirements.txt
 EXP=examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_pretrain.sh
 
 # examples for torchtitan llama3.1_8B
-EXP=examples/torchtitan/mi300/llama3.1_8B-pretrain.yaml bash ./examples/run_pretrain.sh
+EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_pretrain.sh
 
 ```
 
@@ -133,7 +133,7 @@ export NNODES=8
 EXP=examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
 
 # examples for torchtitan llama3.1_8b
-EXP=examples/torchtitan/mi300/llama3.1_8B-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
+EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
 ```
 
 ## 🔧 HipblasLT Auto Tuning
@@ -199,9 +199,9 @@ The following models are supported out of the box via provided configuration fil
 | llama2_70B       | [meta-llama/Llama-2-70b-hf](https://huggingface.co/meta-llama/Llama-2-70b-hf)       | [llama2_70B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama2_70B-pretrain.yaml)             | |
 | llama3_8B        | [meta-llama/Meta-Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B)     | [llama3_8B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3_8B-pretrain.yaml)               | |
 | llama3_70B       | [meta-llama/Meta-Llama-3-70B](https://huggingface.co/meta-llama/Meta-Llama-3-70B)   | [llama3_70B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3_70B-pretrain.yaml)             | |
-| llama3.1_8B      | [meta-llama/Llama-3.1-8B](https://huggingface.co/meta-llama/Llama-3.1-8B)           | [llama3.1_8B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml)           | [llama3.1_8B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/torchtitan/mi300/llama3.1_8B-pretrain.yaml)|
-| llama3.1_70B     | [meta-llama/Llama-3.1-70B](https://huggingface.co/meta-llama/Llama-3.1-70B)         | [llama3.1_70B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3.1_70B-pretrain.yaml)         | [llama3.1_70B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/torchtitan/mi300/llama3.1_70B-pretrain.yaml)|
-| llama3.1_405B     | [meta-llama/Llama-3.1-405B](https://huggingface.co/meta-llama/Llama-3.1-405B)         | [llama3.1_405B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3.1_405B-pretrain.yaml)         | [llama3.1_405B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/torchtitan/mi300/llama3.1_405B-pretrain.yaml)|
+| llama3.1_8B      | [meta-llama/Llama-3.1-8B](https://huggingface.co/meta-llama/Llama-3.1-8B)           | [llama3.1_8B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml)           | [llama3.1_8B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml)|
+| llama3.1_70B     | [meta-llama/Llama-3.1-70B](https://huggingface.co/meta-llama/Llama-3.1-70B)         | [llama3.1_70B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3.1_70B-pretrain.yaml)         | [llama3.1_70B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/torchtitan/configs/MI300X/llama3.1_70B-pretrain.yaml)|
+| llama3.1_405B     | [meta-llama/Llama-3.1-405B](https://huggingface.co/meta-llama/Llama-3.1-405B)         | [llama3.1_405B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3.1_405B-pretrain.yaml)         | [llama3.1_405B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/torchtitan/configs/MI300X/llama3.1_405B-pretrain.yaml)|
 | deepseek_v2_lite | [deepseek-ai/DeepSeek-V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite) | [deepseek_v2_lite-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/deepseek_v2_lite-pretrain.yaml) | |
 | deepseek_v2      | [deepseek-ai/DeepSeek-V2](https://huggingface.co/deepseek-ai/DeepSeek-V2)           | [deepseek_v2-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/deepseek_v2-pretrain.yaml)           | |
 | deepseek_v3      | [deepseek-ai/DeepSeek-V3](https://huggingface.co/deepseek-ai/DeepSeek-V3)           | [deepseek_v3-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/deepseek_v3-pretrain.yaml)           | |
@@ -223,7 +223,7 @@ For example, to run the llama3.1_8B model quickly:
 ```bash
 EXP=examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_local_pretrain.sh
 
-EXP=examples/torchtitan/mi300/llama3.1_8B-pretrain.yaml bash ./examples/run_local_pretrain.sh
+EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_local_pretrain.sh
 ```
 
 
@@ -236,7 +236,7 @@ export NNODES=8
 EXP=examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
 
 # run torchtitan
-EXP=examples/torchtitan/mi300/llama3.1_8B-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
+EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
 ```
 
 ## ☸️ Kubernetes Training Management (`run_k8s_pretrain.sh`)
