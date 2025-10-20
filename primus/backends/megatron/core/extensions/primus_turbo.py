@@ -892,6 +892,10 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             deepep_async_finish=True,
             deepep_allocate_on_comm_stream=True,
         )
+        # This is just a place holder.
+        # The communication manager class is not used in Primus Turbo's DeepEP dispatcher.
+        # But it may get referenced in some Megatron code paths.
+        self._comm_manager = self.deepep_dispatcher
 
         self.moe_router_force_load_balancing = args.moe_router_force_load_balancing
 
