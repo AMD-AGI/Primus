@@ -57,7 +57,7 @@ modules:
       # fused wgrad gemm and accumulation
       gradient_accumulation_fusion: false
       # recommend set `false` in fp8
-      moe_use_legacy_grouped_gemm: false
+      moe_use_legacy_grouped_gemm: true
       # fused topk router with aux score
       moe_use_fused_router_with_aux_score: false
       # pad 192/128 for deepseek attention
