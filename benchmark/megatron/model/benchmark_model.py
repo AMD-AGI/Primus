@@ -9,7 +9,7 @@ import os
 import subprocess
 from pathlib import Path
 
-CONFIG_DIR = Path("examples/megatron/configs")
+CONFIG_DIR = Path("examples/megatron/configs/MI300X")
 
 
 def find_all_model_configs():
@@ -45,7 +45,7 @@ def main():
         type=str,
         help=(
             "Specify a model name (without -pretrain.yaml). "
-            "For example, for config 'examples/megatron/configs/llama2_7B-pretrain.yaml', use: --model llama2_7B"
+            "For example, for config 'examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml', use: --model llama2_7B"
         ),
     )
     parser.add_argument(
