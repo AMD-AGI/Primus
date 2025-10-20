@@ -185,7 +185,6 @@ replication_factor: null # int
 deterministic_mode: false
 check_weight_hash_across_dp_replicas_interval: null
 overlap_moe_expert_parallel_comm: false
-delay_wgrad_compute: false
 
 train_iters: null
 eval_iters: 32
