@@ -17,16 +17,18 @@ export CPUS_PER_TASK=128
 export HSA_NO_SCRATCH_RECLAIM=0 
 export NVTE_CK_USES_BWD_V3=1
 
-export EXP="examples/megatron/configs/moe_proxy-pretrain.yaml"
+# export EXP="examples/megatron/configs/moe_proxy-pretrain.yaml"
+export EXP="examples/megatron/configs/deepseek_v2-pretrain.yaml"
 mkdir -p data
 # the real number of nodes to run
-export NNODES=2
+export NNODES=4
 MBS=1
 TP=1
 ETP=1
-GBS=$(($NNODES*$MBS) / ($TP*$PP*$CP))
+# GBS=$(($NNODES*$MBS) / ($TP*$PP*$CP))
+GBS=$(($NNODES * 512))
 SEQ_LENGTH=4096
-PP=1
+PP=2
 EP=8
 CP=1
 VPP=1
@@ -41,6 +43,7 @@ TOPK=16
 NUM_EXPERTS=1024
 MOE_FFN_HIDDEN_SIZE=256
 DATASET="mock_data"
+ROPE_FUSION=false 
 
 export HF_TOKEN=${HF_TOKEN:="your_hf_token"}
 
@@ -85,6 +88,7 @@ bash ./examples/run_local_pretrain.sh --micro_batch_size $MBS \
                                       --moe_router_topk $TOPK \
                                       --num_experts $NUM_EXPERTS \
                                       --moe_ffn_hidden_size $MOE_FFN_HIDDEN_SIZE \
+                                      --apply_rope_fusion $ROPE_FUSION \
                                       --profile True \
                                       --disable_profiler_activity_cpu True \
                                       --use_pytorch_profiler True \
