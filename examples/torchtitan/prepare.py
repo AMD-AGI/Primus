@@ -184,8 +184,8 @@ def install_torch_for_rocm(nightly=True):
 
 
 if __name__ == "__main__":
-    log_info("========== Prepare torch for Torchtitan ==========")
-    install_torch_for_rocm(nightly=True)
+    # log_info("========== Prepare torch for Torchtitan ==========")
+    # install_torch_for_rocm(nightly=True)
 
     log_info("========== Prepare Torchtitan dataset ==========")
     main()
