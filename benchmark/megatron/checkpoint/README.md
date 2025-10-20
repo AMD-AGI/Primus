@@ -43,7 +43,7 @@ example:
 ```
 export DATA_PATH=/PATH/TO/DATA
 python3 benchmark/megatron/checkpoint/ckpt_launch.py \
-    --yaml-config-path examples/megatron/mi300/mixtral_8x7B_v0.1-pretrain.yaml \
+    --yaml-config-path examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-pretrain.yaml \
     --nnodes 1
 ```
 If you need to benchmark multiple different models, parallel strategies, and checkpoint modes,

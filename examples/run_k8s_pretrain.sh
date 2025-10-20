@@ -53,7 +53,7 @@ Examples:
 
     # Create a workload with custom resources and paths
     $0 --url http://api.example.com create --replica 2 --cpu 96 --gpu 4\
-        --exp examples/megatron/mi300/llama2_7B-pretrain.yaml --data_path /mnt/data/train\
+        --exp examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml --data_path /mnt/data/train\
         --image docker.io/custom/image:latest --hf_token myhf_token --workspace team-dev \
         --batch-size 64 --lr 1e-4 --seed 1234
 
