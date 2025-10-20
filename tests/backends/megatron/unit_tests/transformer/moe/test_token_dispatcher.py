@@ -10,7 +10,6 @@ import dataclasses
 from contextlib import contextmanager
 from types import SimpleNamespace
 
-import pytest
 import torch
 import torch.distributed as dist
 from megatron.core import parallel_state
@@ -162,7 +161,6 @@ class MoEModelTestContainer:
         torch.cuda.synchronize()
         Utils.destroy_model_parallel()
 
-    @pytest.mark.internal
     def dispatcher_dropless_test(self):
         moe_layer = self.moe_layer
         bs = 32
@@ -204,7 +202,6 @@ class MoEModelTestContainer:
             hidden_states.grad, ans
         ), "Restored hidden states do not match original hidden states"
 
-    @pytest.mark.internal
     def dispatcher_capacity_test(self):
         moe_layer = self.moe_layer
         num_tokens = 16
@@ -253,7 +250,6 @@ class MoEModelTestContainer:
             hidden_states.grad, restored_hidden_states_answer
         ), "Gradient of hidden states should be same as hidden states"
 
-    @pytest.mark.internal
     def dispatcher_drop_and_pad_test(self):
         """Test if the tokens are dropped and padded correctly.
 
