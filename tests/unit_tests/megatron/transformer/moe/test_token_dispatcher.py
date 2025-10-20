@@ -7,9 +7,11 @@
 
 
 import dataclasses
+import os
 from contextlib import contextmanager
 from types import SimpleNamespace
 
+import megatron.core.parallel_state as ps
 import torch
 import torch.distributed as dist
 from megatron.core import parallel_state
@@ -25,16 +27,14 @@ from torch.testing._internal.common_distributed import (
 )
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
-    parametrize,
     run_tests,
 )
-
-from tests.backends.megatron.unit_tests.test_utilities import Utils
 
 
 def create_args():
     """Setup dummy args."""
     args = SimpleNamespace()
+    args.grouped_gemm_backend = "turbo-gg"
     args.turbo_sync_free_moe_stage = 0
     args.sequence_parallel = False
     args.seq_length = 4096
@@ -105,13 +105,16 @@ class MoEModelTestContainer:
         self.test_dtype = test_dtype
         if moe_tp_size is None:
             moe_tp_size = tp_size
-        Utils.initialize_model_parallel(
+
+        ps.destroy_model_parallel()
+        ps.initialize_model_parallel(
             tensor_model_parallel_size=tp_size,
             pipeline_model_parallel_size=pp_size,
             expert_model_parallel_size=ep_size,
             context_parallel_size=cp_size,
             expert_tensor_parallel_size=moe_tp_size,
         )
+
         _set_random_seed(seed_=123, data_parallel_random_init=data_parallel_random_init)
         local_expert_indices_offset = parallel_state.get_expert_model_parallel_rank() * self.num_local_experts
         self.local_expert_indices = [local_expert_indices_offset + i for i in range(self.num_local_experts)]
@@ -159,7 +162,6 @@ class MoEModelTestContainer:
     def __del__(self):
         torch.distributed.barrier()
         torch.cuda.synchronize()
-        Utils.destroy_model_parallel()
 
     def dispatcher_dropless_test(self):
         moe_layer = self.moe_layer
@@ -313,7 +315,6 @@ class MoEModelTestContainer:
 class TestFlexDispatcher(MultiProcessTestCase):
     def tearDown(self):
         super().tearDown()
-        Utils.destroy_model_parallel()
 
     def setUp(self) -> None:
         super().setUp()
@@ -328,6 +329,9 @@ class TestFlexDispatcher(MultiProcessTestCase):
         return torch.device("cuda", self.rank)
 
     def _init_process(self):
+        os.environ["WORLD_SIZE"] = str(self.world_size)
+        os.environ["LOCAL_RANK"] = str(self.rank)
+
         torch.cuda.set_device(self.device)
         store = dist.FileStore(self.file_name, self.world_size)
         dist.init_process_group(
@@ -338,54 +342,52 @@ class TestFlexDispatcher(MultiProcessTestCase):
         )
 
     @skip_if_lt_x_gpu(8)
-    @parametrize("tp_size,ep_size", [(8, 1), (1, 8), (2, 4)])
-    @parametrize("permute_fusion", [True])
-    def test_forward_backward(self, tp_size, ep_size, permute_fusion):
+    def test_forward_backward(self):
         self._init_process()
 
         args = create_args()
         set_args(args)
         with custom_patch():
-            container = MoEModelTestContainer(
-                tp_size=tp_size,
-                ep_size=ep_size,
-                pp_size=1,
-                num_moe_experts=8,
-                moe_router_topk=2,
-                moe_router_load_balancing_type="aux_loss",
-                moe_token_dispatcher_type="flex",
-                moe_permute_fusion=permute_fusion,
-                hidden_size=32,
-                moe_enable_deepep=True,
-                test_dtype=torch.bfloat16,
-            )
-            container.dispatcher_dropless_test()
+            for tp_size, ep_size in [(8, 1), (1, 8), (2, 4)]:
+                container = MoEModelTestContainer(
+                    tp_size=tp_size,
+                    ep_size=ep_size,
+                    pp_size=1,
+                    num_moe_experts=8,
+                    moe_router_topk=2,
+                    moe_router_load_balancing_type="aux_loss",
+                    moe_token_dispatcher_type="flex",
+                    moe_permute_fusion=True,
+                    hidden_size=32,
+                    moe_enable_deepep=True,
+                    test_dtype=torch.bfloat16,
+                )
+                container.dispatcher_dropless_test()
 
     @skip_if_lt_x_gpu(8)
-    @parametrize("tp_size,ep_size", [(1, 8), (8, 1), (4, 2)])
-    @parametrize("permute_fusion", [True])
-    def test_capacity_forward_backward(self, tp_size, ep_size, permute_fusion):
+    def test_capacity_forward_backward(self):
         self._init_process()
         args = create_args()
         set_args(args)
         with custom_patch():
-            container = MoEModelTestContainer(
-                tp_size=tp_size,
-                ep_size=ep_size,
-                pp_size=1,
-                num_moe_experts=8,
-                moe_router_topk=2,
-                moe_router_load_balancing_type="aux_loss",
-                moe_token_dispatcher_type="flex",
-                moe_token_drop_policy="probs",
-                moe_expert_capacity_factor=0.5,
-                moe_pad_expert_input_to_capacity=False,
-                moe_permute_fusion=permute_fusion,
-                hidden_size=32,
-                moe_enable_deepep=True,
-                test_dtype=torch.bfloat16,
-            )
-            container.dispatcher_capacity_test()
+            for tp_size, ep_size in [(1, 8), (8, 1), (4, 2)]:
+                container = MoEModelTestContainer(
+                    tp_size=tp_size,
+                    ep_size=ep_size,
+                    pp_size=1,
+                    num_moe_experts=8,
+                    moe_router_topk=2,
+                    moe_router_load_balancing_type="aux_loss",
+                    moe_token_dispatcher_type="flex",
+                    moe_token_drop_policy="probs",
+                    moe_expert_capacity_factor=0.5,
+                    moe_pad_expert_input_to_capacity=False,
+                    moe_permute_fusion=True,
+                    hidden_size=32,
+                    moe_enable_deepep=True,
+                    test_dtype=torch.bfloat16,
+                )
+                container.dispatcher_capacity_test()
 
 
 if __name__ == "__main__":
