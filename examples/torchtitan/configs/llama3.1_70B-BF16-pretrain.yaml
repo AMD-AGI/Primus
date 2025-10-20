@@ -24,7 +24,6 @@ modules:
 
       training:
         local_batch_size: 4
-
         steps: 50
 
       optimizer:

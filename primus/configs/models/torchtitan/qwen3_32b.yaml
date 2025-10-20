@@ -1,0 +1,9 @@
+job:
+  dump_folder: "./outputs"
+  description: "Qwen 3 32B training"
+
+model:
+  name: "qwen3"
+  flavor: "32B"
+  hf_assets_path: "Qwen/Qwen3-32B"
+  # converters = ["float8"]

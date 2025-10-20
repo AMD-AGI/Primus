@@ -18,9 +18,8 @@ modules:
       training:
         local_batch_size: 2
 
-
       optimizer:
-        lr: 8e-5
+        lr: 8.0e-5
 
       parallelism:
         tensor_parallel_degree: 8
