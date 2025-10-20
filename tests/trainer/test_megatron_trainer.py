@@ -308,7 +308,7 @@ class TestMegatronTrainer(PrimusUT):
                 "--moe_shared_expert_overlap",
                 "0",
                 "--moe_use_legacy_grouped_gemm",
-                "0",
+                "1",
                 "--turbo_sync_free_moe_stage",
                 "2",
             ],
