@@ -3,9 +3,11 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+import functools
 from contextlib import contextmanager
 from typing import Callable, List, Optional, Tuple
 
+import grouped_gemm
 import primus_turbo.pytorch as pt
 import torch
 import transformer_engine as te
@@ -728,12 +730,22 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             pg_collection,
         )
         args = get_args()
+        grouped_gemm_backend = args.grouped_gemm_backend
+        self.grouped_gemm_backend = grouped_gemm_backend
+
         if args.patch_zero_bubble and args.enable_zero_bubble:
             from .zbpp_gemm import grouped_gemm_with_weight_gradient_store
 
-            self.grouped_gemm = grouped_gemm_with_weight_gradient_store
+            self.grouped_gemm = functools.partial(
+                grouped_gemm_with_weight_gradient_store, gg_backend=grouped_gemm_backend
+            )
         else:
-            self.grouped_gemm = pt.ops.grouped_gemm
+            if grouped_gemm_backend == "turbo-gg":
+                self.grouped_gemm = pt.ops.grouped_gemm
+            elif grouped_gemm_backend == "lagacy-gg":
+                self.grouped_gemm = grouped_gemm.ops.gmm
+            else:
+                raise NotImplementedError(f"Grouped gemm backend {grouped_gemm_backend} not implemented")
 
     def forward(
         self,
@@ -760,6 +772,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         if permuted_local_hidden_states.nelement() != 0:
             # Reshape the weights for the grouped GEMMs.
             if args.patch_zero_bubble and args.enable_zero_bubble:
+
                 w1 = self.weight1
                 w2 = self.weight2
 
@@ -769,7 +782,8 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
                 w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
 
-            tokens_per_expert = tokens_per_expert.cuda()
+            if self.grouped_gemm_backend == "turbo-gg":
+                tokens_per_expert = tokens_per_expert.cuda()
             assert w1.is_contiguous(), "w1 must be contiguous"
             assert w2.is_contiguous(), "w2 must be contiguous"
             fc1_output = self.grouped_gemm(
@@ -870,8 +884,11 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
             deepep_num_use_cu=args.turbo_deepep_num_cu,
             deepep_num_worst_tokens=num_worst_tokens,
-            deepep_use_cuda_num_tokens_per_expert=args.use_turbo_grouped_mlp
-            and args.moe_use_legacy_grouped_gemm,
+            deepep_use_cuda_num_tokens_per_expert=(
+                args.use_turbo_grouped_mlp
+                and args.moe_use_legacy_grouped_gemm
+                and args.grouped_gemm_backend == "turbo-gg"
+            ),
             deepep_async_finish=True,
             deepep_allocate_on_comm_stream=True,
         )
