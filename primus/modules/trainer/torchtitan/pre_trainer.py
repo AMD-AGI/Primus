@@ -18,6 +18,29 @@ class TorchTitanPretrainTrainer(BaseModule):
         # important: make sure patch torchtitan logger first
         self.patch_torchtitan_logger()
 
+        # ensure checkpoint patch applied before import torchtitan
+        # background: consolidate_safetensors_files_on_every_rank is a new DCP
+        # utility introduced in newer torch versions. our current build does not
+        # include it yet. this patch safely skips safetensors consolidation and
+        # issues a warning so Titan checkpoints can still work normally.
+        self.patch_torch_dcp_consolidate()
+
+        # ensure ScheduleDualPipeV is available
+        # background: ScheduleDualPipeV is a newer pipeline schedule recently
+        # introduced in torch.distributed; our current torch build does not
+        # include it yet. this patch injects a temporary alias to fall back to
+        # Schedule1F1B or ScheduleGPipe so Titan imports can succeed.
+        self.patch_torch_pipelining_schedules()
+
+        # ensure AuxOutput exists in flex_attention for model imports
+        # background: AuxOutput is a newly introduced optional return type in
+        # torch.nn.attention.flex_attention, used for debug or profiling data
+        # (e.g., attention probabilities or mask stats). our current torch build
+        # does not yet include it. this patch injects a lightweight stub class
+        # so model imports succeed. Titan does not rely on AuxOutput in its
+        # attention or training logic, so this patch does not affect behavior.
+        self.patch_torch_flex_attention_auxoutput()
+
         from torchtitan.config.job_config import JobConfig
         from torchtitan.train import Trainer
 
@@ -58,6 +81,139 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         titan_logging.logger = primus_logger
         titan_logging.init_logger = lambda: None
+
+    def patch_torch_dcp_consolidate(self):
+        """
+        Monkey patch for torch.distributed.checkpoint._consolidate_hf_safetensors
+        when current torch build does not export consolidate_safetensors_files_on_every_rank.
+        This avoids ImportError in TorchTitan when last_save_in_hf=True.
+        """
+        import sys
+        import types
+        import warnings
+
+        mod_name = "torch.distributed.checkpoint._consolidate_hf_safetensors"
+        func_name = "consolidate_safetensors_files_on_every_rank"
+
+        try:
+            mod = __import__(mod_name, fromlist=["*"])
+            if hasattr(mod, func_name):
+                primus_logger.info("[PrimusPatch][DCP] consolidate available, no patch needed.")
+                return  # OK, torch build supports it
+        except Exception:
+            pass
+
+        # Patch missing module/function
+        dummy_mod = types.ModuleType(mod_name)
+
+        def _warn_and_skip(*args, **kwargs):
+            warnings.warn(
+                "[PrimusPatch][DCP] Current PyTorch build does not support "
+                f"{mod_name}.{func_name}; safetensors export will be skipped.",
+                UserWarning,
+            )
+            return None
+
+        setattr(dummy_mod, func_name, _warn_and_skip)
+        sys.modules[mod_name] = dummy_mod
+
+        from primus.core.utils.logger import _logger as primus_logger
+
+        primus_logger.warning(
+            f"[PrimusPatch][DCP] Installed fallback for missing {mod_name}.{func_name}, "
+            "HuggingFace safetensors export will be disabled."
+        )
+
+    def patch_torch_pipelining_schedules(self):
+        """
+        Ensure torch.distributed.pipelining.schedules.ScheduleDualPipeV exists.
+
+        If this class is missing in the current PyTorch build (common in ROCm 7.0 / 2.9),
+        we create a fallback alias that inherits from Schedule1F1B or ScheduleGPipe.
+        This prevents ImportError in TorchTitan pipeline modules.
+        """
+
+        from primus.core.utils.logger import _logger as primus_logger
+
+        try:
+            import torch.distributed.pipelining.schedules as sched
+        except Exception as e:
+            primus_logger.warning(f"[PrimusPatch][Pipe] failed to import schedules: {e}")
+            return
+
+        # Check if DualPipeV is already provided
+        if hasattr(sched, "ScheduleDualPipeV"):
+            primus_logger.info("[PrimusPatch][Pipe] ScheduleDualPipeV available, no patch needed.")
+            return  # No patch needed
+
+        # Pick a safe fallback
+        fallback = getattr(sched, "Schedule1F1B", None) or getattr(sched, "ScheduleGPipe", None)
+
+        if fallback is None:
+            primus_logger.warning(
+                "[PrimusPatch][Pipe] No pipeline schedule available; pipeline parallel may be unsupported."
+            )
+            return
+
+        # Define the fallback class with identical signature
+        class ScheduleDualPipeV(fallback):  # type: ignore[misc]
+            def __init__(self, *args, **kwargs):
+                primus_logger.warning(
+                    f"[PrimusPatch][Pipe] ScheduleDualPipeV not found, using fallback {fallback.__name__}. "
+                    f"This is a temporary compatibility patch; functionality may differ from the official DualPipeV."
+                )
+                super().__init__(*args, **kwargs)
+
+        # Inject into torch namespace
+        setattr(sched, "ScheduleDualPipeV", ScheduleDualPipeV)
+        primus_logger.warning(
+            f"[PrimusPatch][Pipe] Installed fallback: ScheduleDualPipeV -> {fallback.__name__}"
+        )
+
+    def patch_torch_flex_attention_auxoutput(self):
+        """
+        Ensure torch.nn.attention.flex_attention has an AuxOutput symbol.
+        Some PyTorch builds (e.g., certain ROCm 2.9 dev builds) rename or drop it.
+        We provide a safe alias so Titan's imports won't fail.
+        """
+        from primus.core.utils.logger import _logger as primus_logger
+
+        try:
+            import torch.nn.attention.flex_attention as flex_mod
+        except Exception as e:
+            primus_logger.warning(f"[PrimusPatch][FlexAttn] flex_attention import failed: {e}")
+            return
+
+        # If AuxOutput already exists, nothing to do.
+        if hasattr(flex_mod, "AuxOutput"):
+            primus_logger.info("[PrimusPatch][FlexAttn] AuxOutput available, no patch needed.")
+            return
+
+        primus_logger.warning(
+            "[PrimusPatch][FlexAttn] AuxOutput not found. "
+            "This torch build predates the new debug/profiling return type. "
+            "Injecting a lightweight stub so Titan model imports can succeed."
+        )
+
+        from dataclasses import dataclass
+
+        import torch
+
+        @dataclass
+        class _AuxOutput:
+            attn_probs: torch.Tensor = torch.empty(0)
+            block_mask: torch.Tensor | None = None
+            stats: dict | None = None
+            extra: dict | None = None
+
+            def __init__(self, **kwargs):
+                for k, v in kwargs.items():
+                    setattr(self, k, v)
+
+        setattr(flex_mod, "AuxOutput", _AuxOutput)
+        primus_logger.info(
+            "[PrimusPatch][FlexAttn] Injected fallback AuxOutput stub (Titan does not rely on this)."
+        )
 
     def enable_primus_turbo_extension(self):
         """
