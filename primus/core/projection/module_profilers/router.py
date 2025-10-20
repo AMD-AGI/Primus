@@ -4,16 +4,18 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from primus.core.projection.meta_modules.base_meta_module import BaseMetaModule
+
+from primus.core.projection.base_module_profiler import BaseModuleProfiler
 
 
-class LanguageModelMM(BaseMetaModule):
+class RouterProfiler(BaseModuleProfiler):
     def __init__(self, name: str):
         self.name = name
 
     # -------- Parameter related --------
     @abstractmethod
     def estimated_num_params(self) -> int:
+        # embedding + layers + outputlayer
         return 0
 
     @abstractmethod

@@ -4,60 +4,46 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from abc import ABC, abstractmethod
+
+from primus.core.projection.base_module_profiler import BaseModuleProfiler
 
 
-class BaseMetaModule(ABC):
-    """Abstract base class for transformer-like modules.
-    Provides both estimated and measured statistics.
-    """
-
+class LinearProfiler(BaseModuleProfiler):
     def __init__(self, name: str):
         self.name = name
 
     # -------- Parameter related --------
     @abstractmethod
     def estimated_num_params(self) -> int:
-        """Return estimated parameter count (based on formula)."""
-        raise NotImplementedError
+        # embedding + layers + outputlayer
+        return 0
 
     @abstractmethod
     def measured_num_params(self) -> int:
-        """Return measured parameter count (from real tensors)."""
-        raise NotImplementedError
+        return 0
 
     # -------- Memory related --------
     @abstractmethod
     def estimated_memory(self, batch_size: int, seq_len: int) -> int:
-        """Return estimated memory usage in bytes (activations)."""
-        raise NotImplementedError
+        return 0
 
     @abstractmethod
     def measured_memory(self, batch_size: int, seq_len: int) -> int:
-        """Return measured memory usage in bytes (via profiler/runtime stats)."""
-        raise NotImplementedError
+        return 0
 
     # -------- Performance related --------
     @abstractmethod
     def estimated_forward_time(self, batch_size: int, seq_len: int) -> int:
-        """Return estimated forward latency for forward pass in milliseconds."""
-        raise NotImplementedError
+        return 0
 
     @abstractmethod
     def estimated_backward_time(self, batch_size: int, seq_len: int) -> int:
-        """Return estimated latency for backward pass in milliseconds."""
-        raise NotImplementedError
+        return 0
 
     @abstractmethod
     def measured_forward_time(self, batch_size: int, seq_len: int) -> float:
-        """Return measured forward latency in milliseconds."""
-        raise NotImplementedError
+        return 0
 
     @abstractmethod
     def measured_backward_time(self, batch_size: int, seq_len: int) -> float:
-        """Return measured backward latency in milliseconds."""
-        raise NotImplementedError
-
-    # -------- Debugging / summary --------
-    def __repr__(self):
-        return f"{self.__class__.__name__}(name={self.name})"
+        return 0
