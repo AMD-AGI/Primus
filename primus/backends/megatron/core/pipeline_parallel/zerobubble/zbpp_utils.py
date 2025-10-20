@@ -253,9 +253,6 @@ class WeightGradStore:
             return False
         if not args.gradient_accumulation_fusion:
             return False
-        if args.transformer_impl == "transformer_engine" and (not args.enable_primus_turbo):
-            # hard to capture weight gradient computation for transformer_engine
-            return False
         return True
 
     @classmethod

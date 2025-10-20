@@ -550,6 +550,7 @@ class TrainingIteration:
             checkpoint_activations_microbatch=None,
             vp_stage=vp_stage,
             is_last_stage=is_last_stage,
+            current_microbatch=scheduled_node.microbatch,
         )
         assert isinstance(output_tensor, list), "output tensor should be a list"
         bufs.total_num_tokens += num_tokens

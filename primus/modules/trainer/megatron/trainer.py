@@ -614,6 +614,23 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
                 ori_transformer_layer.get_transformer_layer_offset = get_transformer_layer_offset
 
+            # patch te_group_gemm & gemm
+            import transformer_engine.pytorch.module.grouped_linear as ori_grouped_linear
+
+            from primus.backends.megatron.core.extensions.te_group_gemm_patch_wgrad import (
+                _GroupedLinearWithWGradSplit,
+            )
+
+            ori_grouped_linear._GroupedLinear = _GroupedLinearWithWGradSplit
+
+            import transformer_engine.pytorch.module.linear as ori_linear
+
+            from primus.backends.megatron.core.extensions.te_gemm_patch_wgrad import (
+                _LinearWithWGradSplit,
+            )
+
+            ori_linear._Linear = _LinearWithWGradSplit
+
     def init(self, *init_args, **kwargs):
         allowed_keys = {
             "extra_args_provider",
