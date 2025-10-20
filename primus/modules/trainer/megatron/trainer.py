@@ -180,39 +180,41 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             logging.root.removeHandler(handler)
 
     def patch_pt_replace_te(self, args):
-
+        from megatron.core.extensions import transformer_engine_spec_provider
         from megatron.core.models.gpt import (
             gpt_layer_specs,
             gpt_model,
             moe_module_specs,
         )
+        from megatron.core.transformer import multi_token_prediction
         from megatron.core.transformer.moe import moe_layer, token_dispatcher
 
         from primus.backends.megatron.core.extensions.primus_turbo import (
-            PrimusTurboAttention,
-            PrimusTurboColumnParallelLinear,
             PrimusTurboColumnParallelLinearTorch,
             PrimusTurboDeepEPTokenDispatcher,
-            PrimusTurboGroupedMLP,
-            PrimusTurboLayerNormColumnParallelLinear,
-            PrimusTurboRowParallelLinear,
+        )
+        from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
+            PrimusTurboSpecProvider,
         )
 
-        if args.use_turbo_attention:
-            gpt_layer_specs.TEDotProductAttention = PrimusTurboAttention
+        warning_rank_0(
+            f"MegatronTrainer: patch TESpecProvider to PrimusTurboSpecProvider, `enable_primus_turbo=True` will use PrimusTurbo backend"
+        )
+
+        assert (
+            megatron.core.extensions.transformer_engine.HAVE_TE
+        ), "PrimusTurboSpecProvider patch failed, can't found transformer_engine"
+
+        transformer_engine_spec_provider.TESpecProvider = PrimusTurboSpecProvider
+
+        # the following modules used TESpecProvider in Megatron-LM 847781764fe468c90caec16309deded245c1022c
+        gpt_layer_specs.TESpecProvider = PrimusTurboSpecProvider
+        moe_module_specs.TESpecProvider = PrimusTurboSpecProvider
+        multi_token_prediction.TESpecProvider = PrimusTurboSpecProvider
+
         if args.use_turbo_parallel_linear:
-            # TE row parallel linear
-            gpt_layer_specs.TERowParallelLinear = PrimusTurboRowParallelLinear
-            moe_module_specs.TERowParallelLinear = PrimusTurboRowParallelLinear
-            # TE layer norn column parallel linear
-            gpt_layer_specs.TELayerNormColumnParallelLinear = PrimusTurboLayerNormColumnParallelLinear
-            # TE column parallel linear
-            gpt_layer_specs.TEColumnParallelLinear = PrimusTurboColumnParallelLinear
-            moe_module_specs.TEColumnParallelLinear = PrimusTurboColumnParallelLinear
-            # column parallel linear
+            # the output layer of GPTModel
             gpt_model.tensor_parallel.ColumnParallelLinear = PrimusTurboColumnParallelLinearTorch
-        if args.use_turbo_grouped_mlp:
-            moe_module_specs.GroupedMLP = PrimusTurboGroupedMLP
 
         if args.use_turbo_deepep:
             # use PrimusTurboDeepEPTokenDispatcher will auto-enable moe_enable_deepep=True, moe_token_dispatcher_type='flex' of megatron options.
