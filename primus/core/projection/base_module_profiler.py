@@ -12,8 +12,12 @@ class BaseModuleProfiler(ABC):
     Provides both estimated and measured statistics.
     """
 
-    def __init__(self, name: str):
-        self.name = name
+    # def __init__(self, name: str):
+    #     self.name = name
+
+    def __init__(self, config, sub_profilers=None):
+        self.config = config
+        self.sub_profilers = sub_profilers
 
     # -------- Parameter related --------
     @abstractmethod

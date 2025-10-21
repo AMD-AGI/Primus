@@ -1,10 +1,15 @@
 
 # runtime configuration
-runtime:
+runtime_config:
+  global_batch_size: 1 # int
   micro_batch_size: 1 # int
-  hidden_size: null # int
   sequence_length: null # int
 
+distributed_config:
+  tensor_model_parallel_size: 1 # int
+  pipeline_model_parallel_size: 1 # int
+
+model_config:
 # embedding configuration
 embedding:
   vocab_size: null # int
@@ -13,6 +18,8 @@ embedding:
 layer:
   num_layers: null # int
   moe_layer_freq: 1 # int or str
+
+  hidden_size: null # int
 
   input_layernorm:
     normalization: null # RMSNorm, LayerNorm

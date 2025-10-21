@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Optional, Type, Union
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
@@ -15,8 +15,7 @@ from primus.core.projection.training_config import TrainingConfig
 class ModuleProfilerSpec:
     profiler: Type[BaseModuleProfiler]
     config: Type[TrainingConfig]
-    sub_profiler_specs: Optional[
-        Dict[str, Optional[Union["ModuleProfilerSpec", Type[BaseModuleProfiler]]]]
-    ] = None
-    # sub_profiler_specs: type = None
+    sub_profiler_specs: Optional[Dict[str, Union[Type[BaseModuleProfiler], "ModuleProfilerSpec", None]]] = (
+        field(default_factory=lambda: {})
+    )
     # params: dict = field(default_factory=lambda: {})
