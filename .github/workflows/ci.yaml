@@ -88,15 +88,23 @@ jobs:
           docker login -u tasimage -p ${{secrets.PRIMUS_DOCKER_HUB_TOKEN}}
 
           echo "> Building Docker Image with tag: ${{ env.IMAGE_TAG }}"
+          start_time=$(date +%s)
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
                -t tasimage/primus:${{env.IMAGE_TAG}} \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} .
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build primus docker] Total elapsed time: ${elapsed} seconds"
 
           echo "> Docker tag image for Docker Hub"
           docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}
 
           echo "> Docker push to Docker Hub"
+          start_time=$(date +%s)
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [push primus docker] Total elapsed time: ${elapsed} seconds"
 
   run-unittest:
     env:
