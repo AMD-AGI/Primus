@@ -9,6 +9,9 @@ on:
       - "v*"
   pull_request:
 
+env:
+  PRIMUS_TURBO_COMMIT: a97e986f01893fec5789243400c7046d18591ba9 # chore: update aiter to fix pybind11 issue (#132)
+
 jobs:
   code-lint:
     runs-on: ubuntu-latest
@@ -47,6 +50,53 @@ jobs:
         if: always()
         with:
           options: "--check --diff --color --verbose --line-length=110"
+  docker-build:
+    needs: [code-lint]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - run: echo "🎉 Begin Build Primus Docker Image."
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Show Environment Info
+        run: |
+          echo "Hostname: $(hostname)"
+          echo "PWD: $(pwd)"
+          echo "HOME: $HOME"
+          echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
+          echo "Runner Temp Dir: $RUNNER_TEMP"
+          echo "Runner Tool Cache: $RUNNER_TOOL_CACHE"
+      - name: Build Primus Docker Image
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "IMAGE_TAG=pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG_NAME="${{ github.ref }}"
+            TAG="${TAG_NAME#refs/tags/}"
+            echo "IMAGE_TAG=$TAG" >> $GITHUB_ENV
+          else
+            echo "IMAGE_TAG=others" >> $GITHUB_ENV
+          fi
+
+          echo "> Login to Docker Hub"
+          docker login -u tasimage -p ${{secrets.PRIMUS_DOCKER_HUB_TOKEN}}
+
+          echo "> Building Docker Image with tag: ${{ env.IMAGE_TAG }}"
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
+               -t tasimage/primus:${{env.IMAGE_TAG}} \
+               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}
+
+          echo "> Docker tag image for Docker Hub"
+          docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+
+          echo "> Docker push to Docker Hub"
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+
   run-unittest:
     env:
       PRIMUS_WORKDIR: /apps/tas/0_public/primus_k8s_ci
@@ -60,7 +110,8 @@ jobs:
           repository: AMD-AIG-AIMA/Primus-Turbo
           submodules: "recursive"
           path: Primus-Turbo
-          ref: a97e986f01893fec5789243400c7046d18591ba9 # chore: update aiter to fix pybind11 issue (#132)
+          ref: ${PRIMUS_TURBO_COMMIT}
+          # ref: a97e986f01893fec5789243400c7046d18591ba9 # chore: update aiter to fix pybind11 issue (#132)
       - run: echo "Begin Primus-Turbo Install."
       - name: Install Primus-Turbo
         run: |
