@@ -119,14 +119,15 @@ jobs:
     runs-on: [tas-k8s]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
+      - name: Set commit hash to env
+        run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
         uses: actions/checkout@v4
         with:
           repository: AMD-AIG-AIMA/Primus-Turbo
           submodules: "recursive"
           path: Primus-Turbo
-          ref: ${PRIMUS_TURBO_COMMIT}
-          # ref: a97e986f01893fec5789243400c7046d18591ba9 # chore: update aiter to fix pybind11 issue (#132)
+          ref: ${{ env.PRIMUS_TURBO_COMMIT }}
       - run: echo "Begin Primus-Turbo Install."
       - name: Install Primus-Turbo
         run: |
