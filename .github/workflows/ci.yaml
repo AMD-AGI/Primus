@@ -107,10 +107,9 @@ jobs:
           elapsed=$((end_time - start_time))
           echo "⏱️ [push primus docker] Total elapsed time: ${elapsed} seconds"
 
-          echo "> Docker cleanup local images"
-          docker rmi tasimage/primus:${{env.IMAGE_TAG}}
-          docker rmi docker.io/tasimage/primus:${{env.IMAGE_TAG}}
-          echo "> build-docker success"
+          # echo "> Docker cleanup local images"
+          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}
+          # echo "> build-docker success"
 
   run-unittest:
     env:
