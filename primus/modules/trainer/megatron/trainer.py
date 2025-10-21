@@ -895,7 +895,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.iterations_to_skip = []
 
         # support moe_freq_type
-        # args.moe_layer_freq = moe_freq_type(args.moe_layer_freq)
+        if isinstance(args.moe_layer_freq, str):
+            try:
+                args.moe_layer_freq = eval(args.moe_layer_freq)
+            except Exception:
+                raise ValueError(f"Invalid moe_layer_freq format: {args.moe_layer_freq}")
 
         if args.mock_data:
             args.data_path = None
