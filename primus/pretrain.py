@@ -31,6 +31,9 @@ def load_backend_trainer(framework: str):
         )
 
         return TorchTitanPretrainTrainer
+    elif framework == "hybrid_models":
+        from primus.modules.trainer.hybrid_models.pre_trainer import HybridModelsPretrainTrainer
+        return HybridModelsPretrainTrainer
     else:
         raise ValueError(f"Unsupported framework: {framework}")
 
@@ -65,6 +68,7 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
         "megatron": "Megatron-LM",
         "light-megatron": "Megatron-LM",
         "torchtitan": "torchtitan",
+        "hybrid_models": "AMD-Hybrid-Models/Zebra-Llama",
     }
     mapped_name = fallback_name_map.get(framework, framework)
     default_path = Path(__file__).resolve().parent.parent / "third_party" / mapped_name

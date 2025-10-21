@@ -1,22 +1,26 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:llama3.2_1B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:zebra_8MLA8M2_8bt_SFT}
 workspace: ./output
+
+platform:
+  config: platform_azure.yaml
+  overrides:
+    master_sink_level: INFO
 
 modules:
   pre_trainer:
     framework: hybrid_models
     config: pre_trainer.yaml
-    model: zebra_llama/llama3.2_1B/zebra_4MLA12M2_8bt_SFT.yaml
+    model: llama3.2_1B/zebra_8MLA8M2_8bt_SFT.yaml
     backend_path: third_party/AMD-Hybrid-Models/Zebra-Llama
     
     # Accelerate launch parameters
     training_command:
       script: train_hybrid/train_distill.py
       accelerate_config: configs/fsdp.yaml
-      model_config: configs/llama3.2_1B/zebra_4MLA12M2_8bt_SFT.yaml
+      model_config: configs/llama3.2_1B/zebra_8MLA8M2_8bt_SFT.yaml
     
     # Environment variables
     env_vars:
       ACCELERATE_LOG_LEVEL: info
-    

@@ -75,6 +75,7 @@ while IFS='=' read -r name _; do
 done < <(env | grep "^NCCL_")
 ENV_ARGS+=("--env" "EXP")
 ENV_ARGS+=("--env" "HF_TOKEN")
+ENV_ARGS+=("--env" "BACKEND_PATH")
 
 HOSTNAME=$(hostname)
 ARGS=("$@")
