@@ -26,7 +26,7 @@ def add_pretrain_parser(parser: argparse.ArgumentParser):
         nargs="?",
         default=None,
         help=(
-            "Optional backend import path for Megatron or TorchTitan. "
+            "Optional backend import path for Megatron, TorchTitan, or Hybrid Models. "
             "If provided, it will be appended to PYTHONPATH dynamically."
         ),
     )
@@ -54,7 +54,7 @@ def _parse_args(extra_args_provider=None, ignore_unknown_args=False) -> tuple[ar
         nargs="?",
         default=None,
         help=(
-            "Optional backend import path for Megatron or TorchTitan. "
+            "Optional backend import path for Megatron, TorchTitan, or Hybrid Models. "
             "If provided, it will be appended to PYTHONPATH dynamically."
         ),
     )
@@ -239,7 +239,7 @@ class PrimusParser(object):
         yaml_utils.set_value_by_key(self.exp, "platform", platform_config, allow_override=True)
 
     def get_model_format(self, framework: str):
-        map = {"megatron": "megatron", "light-megatron": "megatron", "torchtitan": "torchtitan"}
+        map = {"megatron": "megatron", "light-megatron": "megatron", "torchtitan": "torchtitan", "hybrid_models": "hybrid_models"}
         assert framework in map, f"Invalid module framework: {framework}."
         return map[framework]
 

@@ -1,0 +1,13 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3.2_1B-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: hybrid_models
+    config: pre_trainer.yaml
+
+    # model to run
+    model: llama3.2_1B.yaml
+    
