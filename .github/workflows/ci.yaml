@@ -50,6 +50,7 @@ jobs:
         if: always()
         with:
           options: "--check --diff --color --verbose --line-length=110"
+
   docker-build:
     needs: [code-lint]
     runs-on: ubuntu-latest
