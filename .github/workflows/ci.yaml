@@ -110,8 +110,7 @@ jobs:
   run-unittest:
     env:
       PRIMUS_WORKDIR: /apps/tas/0_public/primus_k8s_ci
-    needs: [docker-build]
-    # needs: [code-lint]
+    needs: [code-lint]
     runs-on: [tas-k8s]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
