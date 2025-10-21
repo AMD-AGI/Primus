@@ -14,7 +14,7 @@ modules:
     training_command:
       script: train_hybrid/train_distill.py
       accelerate_config: configs/fsdp.yaml
-      model_config: configs/llama3.2_1B/zebra_4MLA12M2_8bt_SFT.yaml
+      model_config: configs/llama3.2_1B/zebra_8MLA8M2_8bt_SFT.yaml
     
     # Environment variables
     env_vars:

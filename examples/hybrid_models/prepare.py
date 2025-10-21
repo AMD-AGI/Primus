@@ -24,23 +24,6 @@ from examples.scripts.utils import (
 )
 from primus.core.launcher.parser import PrimusParser
 
-
-def hf_download(repo_id: str, local_dir: str, hf_token: Optional[str] = None) -> None:
-    try:
-        snapshot_download(
-            repo_id=repo_id,
-            local_dir=local_dir,
-            local_dir_use_symlinks=False,
-            token=hf_token,
-            ignore_patterns=["*.bin", "*.pt", "*.safetensors"],
-        )
-    except HTTPError as e:
-        if e.response.status_code == 401:
-            log_error_and_exit("You need to pass a valid `HF_TOKEN` to download private checkpoints.")
-        else:
-            raise e
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Prepare Primus environment")
     parser.add_argument("--primus_path", type=str, required=True, help="Root path to the Primus project")
@@ -105,46 +88,18 @@ def main():
     primus_cfg = PrimusParser().parse(args)
 
     hybrid_models_path = resolve_backend_path(
-        args.backend_path, "HYBRID_MODELS_PATH", "third_party/hybrid_models", primus_path, "Hybrid_Models"
+        args.backend_path, "HYBRID_MODELS_PATH", "third_party/AMD-Hybrid-Models/Zebra-Llama", primus_path, "Hybrid_Models"
     )
-    pip_install_editable(hybrid_models_path, "Hybrid_Models")
+
+    # Skip pip installation for hybrid models since it's not a Python package
+    log_info(f"Hybrid Models backend path: {hybrid_models_path}")
+    if not hybrid_models_path.exists():
+        log_error_and_exit(f"Hybrid Models path does not exist: {hybrid_models_path}")
 
     try:
         pre_trainer_cfg = primus_cfg.get_module_config("pre_trainer")
     except Exception:
         log_error_and_exit("Missing required module config: pre_trainer")
-
-    if not hasattr(pre_trainer_cfg, "model") or pre_trainer_cfg.model is None:
-        log_error_and_exit("Missing required field: pre_trainer.model")
-
-    if not hasattr(pre_trainer_cfg.model, "hf_assets_path") or not pre_trainer_cfg.model.hf_assets_path:
-        log_error_and_exit("Missing required field: pre_trainer.model.tokenizer_path")
-
-    hf_assets_path = pre_trainer_cfg.model.hf_assets_path
-
-    full_path = data_path / "hybrid_models" / hf_assets_path.lstrip("/")
-
-    tokenizer_test_file = full_path / "tokenizer.json"
-    if not tokenizer_test_file.is_file():
-        hf_token = os.environ.get("HF_TOKEN")
-        if not hf_token:
-            log_error_and_exit("HF_TOKEN not set. Please export HF_TOKEN.")
-
-        if get_node_rank() == 0:
-            log_info(f"Downloading HF assets for tokenizer to {full_path} ...")
-            full_path.mkdir(parents=True, exist_ok=True)
-            hf_download(repo_id=hf_assets_path, local_dir=str(full_path), hf_token=hf_token)
-        else:
-            log_info(f"Rank {get_node_rank()} waiting for tokenizer download ...")
-            while not tokenizer_test_file.exists():
-                time.sleep(5)
-    else:
-        log_info(f"Tokenizer assets already exist: {tokenizer_test_file}")
-
-    write_patch_args(patch_args_file, "train_args", {"model.hf_assets_path": str(full_path)})
-    write_patch_args(patch_args_file, "train_args", {"backend_path": str(hybrid_models_path)})
-    write_patch_args(patch_args_file, "torchrun_args", {"local-ranks-filter": "1"})
-
 
 def detect_rocm_version() -> Optional[str]:
     """
