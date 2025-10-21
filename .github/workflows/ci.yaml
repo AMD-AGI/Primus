@@ -70,7 +70,7 @@ jobs:
           echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
           echo "Runner Temp Dir: $RUNNER_TEMP"
           echo "Runner Tool Cache: $RUNNER_TOOL_CACHE"
-      - name: Build Primus Docker Image
+      - name: Parse Commit Info
         run: |
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             echo "IMAGE_TAG=pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
@@ -83,9 +83,10 @@ jobs:
           else
             echo "IMAGE_TAG=others" >> $GITHUB_ENV
           fi
-
+      - name: Build and Push Docker Image
+        run: |
           echo "> Login to Docker Hub"
-          docker login -u tasimage -p ${{secrets.PRIMUS_DOCKER_HUB_TOKEN}}
+          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
 
           echo "> Building Docker Image with tag: ${{ env.IMAGE_TAG }}"
           start_time=$(date +%s)
@@ -109,7 +110,8 @@ jobs:
   run-unittest:
     env:
       PRIMUS_WORKDIR: /apps/tas/0_public/primus_k8s_ci
-    needs: [code-lint]
+    needs: [docker-build]
+    # needs: [code-lint]
     runs-on: [tas-k8s]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
