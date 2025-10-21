@@ -306,7 +306,7 @@ class TestMegatronTrainer(PrimusUT):
                 "--moe_use_legacy_grouped_gemm",
                 "1",
                 "--turbo_sync_free_moe_stage",
-                "2",
+                "3",
             ],
         )
 
