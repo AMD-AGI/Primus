@@ -93,7 +93,6 @@ activation_checkpoint:
   selective_ac_option: "2"
   per_op_sac_force_recompute_mm_shapes_by_fqns:
     - moe.router.gate
-  early_stop: false
 
 compile:
   enable: true
