@@ -1,0 +1,10 @@
+job:
+  dump_folder: "./outputs"
+  description: "DeepSeek-V3 671B model training"
+  print_config: false
+
+model:
+  name: "deepseek_v3"
+  flavor: "671B"
+  hf_assets_path: "deepseek-ai/DeepSeek-V3.1-Base"
+  # converters: ["float8"]

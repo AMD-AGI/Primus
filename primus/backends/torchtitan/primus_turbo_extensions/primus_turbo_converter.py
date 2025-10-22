@@ -7,7 +7,10 @@
 import torch
 from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims
-from torchtitan.models.attention import FlexAttention, ScaledDotProductAttention
+from torchtitan.models.attention import (
+    FlexAttentionWrapper,
+    ScaledDotProductAttentionWrapper,
+)
 from torchtitan.protocols.model_converter import (
     ModelConverter,
     register_model_converter,
@@ -18,7 +21,7 @@ def replace_turbo_attention_modules(model: torch.nn.Module, backend_type: str, u
     from primus_turbo.pytorch.modules import TurboAttention  # TODO: import Check
 
     for name, module in model.named_children():
-        if isinstance(module, (FlexAttention, ScaledDotProductAttention)):
+        if isinstance(module, (FlexAttentionWrapper, ScaledDotProductAttentionWrapper)):
             setattr(
                 model,
                 name,

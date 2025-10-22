@@ -7,8 +7,6 @@ use_turbo_parallel_linear: false
 use_turbo_grouped_mlp: false
 moe_use_fused_router_with_aux_score: false
 
-
-
 # inner features flags
 enable_turbo_attention_float8 : false
 
@@ -20,3 +18,9 @@ turbo_deepep_use_comm_stream: false
 
 # sync-free moe
 turbo_sync_free_moe_stage: 0
+
+# group-gemm
+grouped_gemm_backend: "turbo-gg" # turbo-gg, lagacy-gg
+
+# use turbo fused activation_with_probs to optmize redundant computation
+use_turbo_fused_act_with_probs: false

@@ -3,11 +3,15 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+import functools
 from contextlib import contextmanager
 from typing import Callable, List, Optional, Tuple
 
+import grouped_gemm
 import primus_turbo.pytorch as pt
+import primus_turbo.pytorch.ops.activation as turbo_moe_activation
 import torch
+import torch.nn.functional as F
 import transformer_engine as te
 from megatron.core import tensor_parallel
 from megatron.core.extensions.transformer_engine import TELinear, condition_init_method
@@ -32,6 +36,9 @@ from primus_turbo.pytorch.core.float8 import (
     ScalingGranularity,
     ScalingStrategy,
     check_fp8_support,
+)
+from primus_turbo.pytorch.ops.moe.tokens_per_expert_to_mask import (
+    tokens_per_expert_to_mask as turbo_tokens_per_expert_to_mask,
 )
 from torch import Tensor
 from transformer_engine.pytorch.fp8 import (
@@ -728,12 +735,41 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             pg_collection,
         )
         args = get_args()
+        grouped_gemm_backend = args.grouped_gemm_backend
+        self.grouped_gemm_backend = grouped_gemm_backend
+
         if args.patch_zero_bubble and args.enable_zero_bubble:
             from .zbpp_gemm import grouped_gemm_with_weight_gradient_store
 
-            self.grouped_gemm = grouped_gemm_with_weight_gradient_store
+            self.grouped_gemm = functools.partial(
+                grouped_gemm_with_weight_gradient_store, gg_backend=grouped_gemm_backend
+            )
         else:
-            self.grouped_gemm = pt.ops.grouped_gemm
+            if grouped_gemm_backend == "turbo-gg":
+                self.grouped_gemm = pt.ops.grouped_gemm
+            elif grouped_gemm_backend == "lagacy-gg":
+                self.grouped_gemm = grouped_gemm.ops.gmm
+            else:
+                raise NotImplementedError(f"Grouped gemm backend {grouped_gemm_backend} not implemented")
+
+        if args.use_turbo_fused_act_with_probs:
+            assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
+
+            if self.config.activation_func == F.silu:
+                turbo_fused_act_with_probs = turbo_moe_activation.swiglu_with_probs
+            elif self.config.activation_func == F.gelu:
+                turbo_fused_act_with_probs = turbo_moe_activation.geglu_with_probs
+            else:
+                raise ValueError("Activation function must be silu or gelu when using GroupedMLP.")
+
+            def _activation_func_with_probs(x, probs, tokens_per_experts):
+                assert x.ndim == 2
+                assert probs.ndim == 1
+                num_tokens = x.shape[0]
+                row_mask = turbo_tokens_per_expert_to_mask(tokens_per_experts, num_tokens)
+                return turbo_fused_act_with_probs(x, probs, row_mask)
+
+            self.activation_func_with_probs = _activation_func_with_probs
 
     def forward(
         self,
@@ -760,6 +796,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         if permuted_local_hidden_states.nelement() != 0:
             # Reshape the weights for the grouped GEMMs.
             if args.patch_zero_bubble and args.enable_zero_bubble:
+
                 w1 = self.weight1
                 w2 = self.weight2
 
@@ -769,24 +806,38 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
                 w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
 
-            tokens_per_expert = tokens_per_expert.cuda()
+            if self.grouped_gemm_backend == "turbo-gg":
+                tokens_per_expert = tokens_per_expert.cuda()
             assert w1.is_contiguous(), "w1 must be contiguous"
             assert w2.is_contiguous(), "w2 must be contiguous"
             fc1_output = self.grouped_gemm(
                 permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, **(gemm_kargs[0])
             )
             if self.activation_recompute:
-                intermediate_parallel = self.activation_checkpoint.checkpoint(
-                    self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
-                )
+                if args.use_turbo_fused_act_with_probs:
+                    intermediate_parallel = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs,
+                        fc1_output,
+                        permuted_probs,
+                        tokens_per_expert,
+                    )
+                else:
+                    intermediate_parallel = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
+                    )
                 fc2_output = self.grouped_gemm(
                     intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
                 )
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
-                intermediate_parallel = self.activation_func_with_probs(
-                    fc1_output, permuted_probs.unsqueeze(-1)
-                )
+                if args.use_turbo_fused_act_with_probs:
+                    intermediate_parallel = self.activation_func_with_probs(
+                        fc1_output, permuted_probs, tokens_per_expert
+                    )
+                else:
+                    intermediate_parallel = self.activation_func_with_probs(
+                        fc1_output, permuted_probs.unsqueeze(-1)
+                    )
                 fc2_output = self.grouped_gemm(
                     intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
                 )
@@ -799,13 +850,21 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             w2 = self.weight2.view(-1, self.config.hidden_size)
             h = torch.matmul(permuted_local_hidden_states, w1)
             if self.activation_recompute:
-                h = self.activation_checkpoint.checkpoint(
-                    self.activation_func_with_probs, h, permuted_probs.unsqueeze(-1)
-                )
+                if args.use_turbo_fused_act_with_probs:
+                    h = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, h, permuted_probs, tokens_per_expert
+                    )
+                else:
+                    h = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, h, permuted_probs.unsqueeze(-1)
+                    )
                 fc2_output = torch.matmul(h, w2)
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
-                h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
+                if args.use_turbo_fused_act_with_probs:
+                    h = self.activation_func_with_probs(h, permuted_probs, tokens_per_expert)
+                else:
+                    h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
                 fc2_output = torch.matmul(h, w2)
 
         return fc2_output, None
@@ -856,7 +915,6 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             if args.turbo_sync_free_moe_stage > 2:
                 # fully sync-free moe
                 permute_max_token_num = num_worst_tokens * config.moe_router_topk
-                raise NotImplementedError("not support fully sync-free moe.")
 
         self.deepep_dispatcher = pt.modules.DeepEPTokenDispatcher(
             num_experts=config.num_moe_experts,
@@ -870,11 +928,18 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
             deepep_num_use_cu=args.turbo_deepep_num_cu,
             deepep_num_worst_tokens=num_worst_tokens,
-            deepep_use_cuda_num_tokens_per_expert=args.use_turbo_grouped_mlp
-            and not args.moe_use_legacy_grouped_gemm,
+            deepep_use_cuda_num_tokens_per_expert=(
+                args.use_turbo_grouped_mlp
+                and args.moe_use_legacy_grouped_gemm
+                and args.grouped_gemm_backend == "turbo-gg"
+            ),
             deepep_async_finish=True,
             deepep_allocate_on_comm_stream=True,
         )
+        # This is just a place holder.
+        # The communication manager class is not used in Primus Turbo's DeepEP dispatcher.
+        # But it may get referenced in some Megatron code paths.
+        self._comm_manager = self.deepep_dispatcher
 
         self.moe_router_force_load_balancing = args.moe_router_force_load_balancing
 

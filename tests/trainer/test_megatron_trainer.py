@@ -97,7 +97,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama2_7B",
-            exp_path="examples/megatron/configs/llama2_7B-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml",
             env_override={},
             extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
@@ -106,7 +106,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama3_8B",
-            exp_path="examples/megatron/configs/llama3_8B-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/llama3_8B-pretrain.yaml",
             env_override={},
             extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
@@ -115,7 +115,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama3_70B",
-            exp_path="examples/megatron/configs/llama3_70B-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/llama3_70B-pretrain.yaml",
             env_override={},
             extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
@@ -124,7 +124,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "qwen2.5_7B",
-            exp_path="examples/megatron/configs/qwen2.5_7B-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/qwen2.5_7B-pretrain.yaml",
             env_override={},
             extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
@@ -133,7 +133,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "qwen2.5_72B",
-            exp_path="examples/megatron/configs/qwen2.5_72B-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/qwen2.5_72B-pretrain.yaml",
             env_override={},
             extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
@@ -142,19 +142,15 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "deepseek_v2_lite",
-            exp_path="examples/megatron/configs/deepseek_v2_lite-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/deepseek_v2_lite-pretrain.yaml",
             env_override={},
             extra_args=[
-                "--num_layers",
-                "4",
                 "--train_iters",
                 "3",
                 "--micro_batch_size",
                 "1",
                 "--global_batch_size",
                 "8",
-                "--moe_layer_freq",
-                "[0]*1+[1]*3",
                 "--expert_model_parallel_size",
                 "8",
             ],
@@ -164,7 +160,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "mixtral_8x7B_v0.1",
-            exp_path="examples/megatron/configs/mixtral_8x7B_v0.1-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -186,7 +182,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "mixtral_8x22B_v0.1",
-            exp_path="examples/megatron/configs/mixtral_8x22B_v0.1-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/mixtral_8x22B_v0.1-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -210,7 +206,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "grok2",
-            exp_path="examples/megatron/configs/grok2-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/grok2-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -234,7 +230,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "deepseek_v3",
-            exp_path="examples/megatron/configs/deepseek_v3-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/deepseek_v3-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -284,7 +280,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "turbo_deepep",
-            exp_path="examples/megatron/configs/deepseek_v2_lite-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/deepseek_v2_lite-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -308,9 +304,9 @@ class TestMegatronTrainer(PrimusUT):
                 "--moe_shared_expert_overlap",
                 "0",
                 "--moe_use_legacy_grouped_gemm",
-                "0",
+                "1",
                 "--turbo_sync_free_moe_stage",
-                "2",
+                "3",
             ],
         )
 
