@@ -16,7 +16,8 @@ RUN pip3 install fbgemm-gpu && \
 
 # Clone and install the Primus-Turbo
 WORKDIR /opt
-RUN mkdir -p /opt && cd /opt && \
+RUN pip3 uninstall aiter primus_turbo -y && \
+    mkdir -p /opt && cd /opt && \
     git clone https://github.com/AMD-AGI/Primus-Turbo.git && \
     cd Primus-Turbo && \
     git checkout ${PRIMUS_TURBO_COMMIT} && \
