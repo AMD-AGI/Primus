@@ -2,7 +2,7 @@ import argparse
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List
+from typing import Any, Dict, List, Tuple
 
 from primus.core.launcher.config import PrimusConfig
 from primus.core.utils import constant_vars, yaml_utils
@@ -142,6 +142,30 @@ def _check_keys_exist(ns: SimpleNamespace, overrides: dict, prefix=""):
             _check_keys_exist(attr_val, v, prefix=full_key)
 
 
+def _split_known_unknown(ns: SimpleNamespace, overrides: dict) -> Tuple[dict, dict]:
+    """
+    Split overrides into two dictionaries:
+      - known: keys that exist in the namespace
+      - unknown: keys not defined in the namespace
+    """
+    known, unknown = {}, {}
+    for k, v in overrides.items():
+        if hasattr(ns, k):
+            attr_val = getattr(ns, k)
+            if isinstance(v, dict) and isinstance(attr_val, SimpleNamespace):
+                sub_known, sub_unknown = _split_known_unknown(attr_val, v)
+                if sub_known:
+                    known[k] = sub_known
+                if sub_unknown:
+                    unknown[k] = sub_unknown
+            else:
+                known[k] = v
+        else:
+            unknown[k] = v
+            # print(f"[PrimusConfig] Unknown key '{k}' delegated to backend.")
+    return known, unknown
+
+
 def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     args, unknown_args = _parse_args(extra_args_provider, ignore_unknown_args=True)
 
@@ -156,7 +180,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     return primus_config
 
 
-def load_primus_config(args: argparse.Namespace, overrides: List[str]) -> PrimusConfig:
+def load_primus_config(args: argparse.Namespace, overrides: List[str]) -> Tuple[Any, Dict[str, Any]]:
     """
     Build the Primus configuration with optional command-line overrides.
 
@@ -177,10 +201,19 @@ def load_primus_config(args: argparse.Namespace, overrides: List[str]) -> Primus
 
     # 3 Apply overrides to pre_trainer module config
     pre_trainer_cfg = primus_config.get_module_config("pre_trainer")
-    _check_keys_exist(pre_trainer_cfg, override_ns)
-    _deep_merge_namespace(pre_trainer_cfg, override_ns)
+    # _check_keys_exist(pre_trainer_cfg, override_ns)
+    # _deep_merge_namespace(pre_trainer_cfg, override_ns)
 
-    return primus_config
+    # return primus_config
+    known_overrides, unknown_overrides = _split_known_unknown(pre_trainer_cfg, override_ns)
+
+    if known_overrides:
+        _deep_merge_namespace(pre_trainer_cfg, known_overrides)
+
+    if unknown_overrides:
+        print(f"[PrimusConfig] Detected unknown override keys: {list(unknown_overrides.keys())}")
+
+    return primus_config, unknown_overrides
 
 
 class PrimusParser(object):
