@@ -478,7 +478,6 @@ class TorchTitanPretrainTrainer(BaseModule):
             - Otherwise, uses mixed_precision_param from Titan config.
             - Can be disabled via env: export PRIMUS_EMBED_AUTOCAST_DTYPE=off
         """
-        import os
 
         import torch
         import torch.nn as nn
@@ -487,11 +486,6 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         if not enable_patch:
             primus_logger.info("[PrimusPatch][AMP] Embedding AMP patch disabled via config.")
-            return
-
-        env_flag = os.getenv("PRIMUS_EMBED_AUTOCAST_DTYPE", "auto").lower()
-        if env_flag in ("off", "false", "none"):
-            primus_logger.info("[PrimusPatch][AMP] Embedding AMP patch disabled via env.")
             return
 
         def _hook(module, inp, out):
