@@ -5,8 +5,11 @@
 ###############################################################################
 
 import torch
+from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.models.llama3.model.model import Attention as TTAttention
 from torchtitan.models.llama3.model.model import apply_rotary_emb
+
+AttentionMasksType = dict[str, BlockMask] | BlockMask
 
 
 class Attention(TTAttention):
@@ -14,6 +17,7 @@ class Attention(TTAttention):
         self,
         x: torch.Tensor,
         freqs_cis: torch.Tensor,
+        attention_masks: AttentionMasksType | None,
     ):
         bs, seqlen, _ = x.shape
         xq, xk, xv = self.wq(x), self.wk(x), self.wv(x)
@@ -31,7 +35,7 @@ class Attention(TTAttention):
         # xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
         # xv = repeat_kv(xv, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
 
-        output = self.sdpa(xq, xk, xv)
+        output = self.inner_attention(xq, xk, xv)
 
         output = output.view(bs, seqlen, -1)
         return self.wo(output)

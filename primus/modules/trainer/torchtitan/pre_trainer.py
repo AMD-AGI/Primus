@@ -239,11 +239,11 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         if self.titan_config.primus_turbo.use_turbo_attention:
             # ******* llama3 Attention Model *******
-            import torchtitan.models.llama3.model
+            import torchtitan.models.llama3.model.model
 
-            from primus.backends.torchtitan.models.llama3.model import Attention
+            from primus.backends.torchtitan.models.llama3.model.model import Attention
 
-            torchtitan.models.llama3.model.Attention = Attention
+            torchtitan.models.llama3.model.model.Attention = Attention
             logger.warning(f"TorchtitanPretrainTrainer: Patch Turbo Attention")
 
         if self.titan_config.primus_turbo.use_turbo_mx_linear:
