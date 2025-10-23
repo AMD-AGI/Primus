@@ -18,6 +18,8 @@ class TorchTitanPretrainTrainer(BaseModule):
         # important: make sure patch torchtitan logger first
         self.patch_torchtitan_logger()
 
+        self.patch_torchtitan_embedding_amp()
+
         # ensure checkpoint patch applied before import torchtitan
         # background: consolidate_safetensors_files_on_every_rank is a new DCP
         # utility introduced in newer torch versions. our current build does not
@@ -465,3 +467,46 @@ class TorchTitanPretrainTrainer(BaseModule):
                 else:
                     init_values[f.name] = val
         return cls(**init_values)
+
+    def patch_torchtitan_embedding_amp(self):
+        """
+        Monkey patch for AMP precision mismatch in nn.Embedding.
+
+        Behavior:
+            Globally patches nn.Embedding.__init__ to register a forward hook that:
+            - When AMP/autocast is active, casts outputs to AMP dtype (bf16/fp16).
+            - Otherwise, uses mixed_precision_param from Titan config.
+            - Can be disabled via env: export PRIMUS_EMBED_AUTOCAST_DTYPE=off
+        """
+        import os
+
+        import torch
+        import torch.nn as nn
+
+        from primus.core.utils.logger import _logger as primus_logger
+
+        env_flag = os.getenv("PRIMUS_EMBED_AUTOCAST_DTYPE", "auto").lower()
+        if env_flag in ("off", "false", "none"):
+            primus_logger.info("[PrimusPatch][AMP] Embedding AMP patch disabled via env.")
+            return
+
+        def _hook(module, inp, out):
+            if not isinstance(out, torch.Tensor) or not out.is_floating_point():
+                return out
+
+            if torch.is_autocast_enabled():
+                runtime_dtype = torch.get_autocast_gpu_dtype()
+                if out.dtype != runtime_dtype:
+                    return out.to(runtime_dtype)
+            return out
+
+        orig_init = nn.Embedding.__init__
+
+        def new_init(self, *args, **kwargs):
+            orig_init(self, *args, **kwargs)
+            self.register_forward_hook(_hook)
+
+        nn.Embedding.__init__ = new_init
+        primus_logger.info(
+            "[PrimusPatch][AMP] nn.Embedding.__init__ patched for AMP/mixed precision alignment."
+        )
