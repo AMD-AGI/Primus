@@ -5,11 +5,12 @@
 ###############################################################################
 
 import torch
+from torch.nn.attention.flex_attention import BlockMask
 from torchtitan.models.llama3.model.model import Attention as TTAttention
 from torchtitan.models.llama3.model.model import apply_rotary_emb
-from torch.nn.attention.flex_attention import BlockMask
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask
+
 
 class Attention(TTAttention):
     def forward(
