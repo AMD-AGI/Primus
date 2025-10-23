@@ -25,10 +25,6 @@ class TorchTitanPretrainTrainer(BaseModule):
         pre_trainer_cfg = self.primus_cfg.get_module_config("pre_trainer")
         cfg_dict = nested_namespace_to_dict(pre_trainer_cfg)
 
-        from primus.core.utils.logger import _logger as primus_logger
-
-        primus_logger.info(f"cfg_dict: {cfg_dict}")
-
         self.patch_torchtitan_embedding_amp(cfg_dict["primus_turbo"]["enable_embedding_autocast"])
 
         # ensure checkpoint patch applied before import torchtitan
