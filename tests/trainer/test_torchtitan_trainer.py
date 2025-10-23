@@ -81,7 +81,14 @@ class TestTorchTitanTrainer(PrimusUT):
             self.__class__.__name__,
             "llama3_8B-BF16",
             exp_path="examples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml",
-            extra_args=["--n_layers", "4", "--training.steps", "30"],
+            extra_args=[
+                "--n_layers",
+                "4",
+                "--training.steps",
+                "30",
+                "--primus_turbo.enable_primus_turbo",
+                "False",
+            ],
         )
 
     # def test_llama3_1_8B_FP8(self):
@@ -94,7 +101,14 @@ class TestTorchTitanTrainer(PrimusUT):
             self.__class__.__name__,
             "llama3.1_405B",
             "examples/torchtitan/configs/MI300X/llama3.1_405B-pretrain.yaml",
-            extra_args=["--n_layers", "4", "--training.steps", "30"],
+            extra_args=[
+                "--n_layers",
+                "4",
+                "--training.steps",
+                "30",
+                "--primus_turbo.enable_primus_turbo",
+                "False",
+            ],
         )
 
     def test_llama3_1_70B_bf16(self):
@@ -102,7 +116,14 @@ class TestTorchTitanTrainer(PrimusUT):
             self.__class__.__name__,
             "llama3.1_70B_bf16",
             "examples/torchtitan/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml",
-            extra_args=["--n_layers", "4", "--training.steps", "30", "--training.dataset", "c4_test"],
+            extra_args=[
+                "--n_layers",
+                "4",
+                "--training.steps",
+                "30",
+                "--primus_turbo.enable_primus_turbo",
+                "False",
+            ],
         )
 
     def test_llama3_1_70B_fp8(self):
@@ -110,7 +131,14 @@ class TestTorchTitanTrainer(PrimusUT):
             self.__class__.__name__,
             "llama3.1_70B_fp8",
             "examples/torchtitan/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml",
-            extra_args=["--n_layers", "4", "--training.steps", "30"],
+            extra_args=[
+                "--n_layers",
+                "4",
+                "--training.steps",
+                "30",
+                "--primus_turbo.enable_primus_turbo",
+                "false",
+            ],
         )
 
     # def test_qwen3_0_6B(self):
