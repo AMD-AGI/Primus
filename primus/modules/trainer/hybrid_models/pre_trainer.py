@@ -7,6 +7,7 @@
 import os
 import subprocess
 import sys
+import yaml
 from typing import Any, Dict, Optional
 
 from primus.core.utils.yaml_utils import nested_namespace_to_dict
@@ -14,58 +15,19 @@ from primus.modules.base_module import BaseModule
 
 
 class HybridModelsPretrainTrainer(BaseModule):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.primus_cfg = kwargs.pop("primus_config", None)
-        if self.primus_cfg is None:
-            raise ValueError("primus_config is required")
-
-        pre_trainer_cfg = self.primus_cfg.get_module_config("pre_trainer")
-        self.module_config = pre_trainer_cfg
+    def init(self, *args, **kwargs):
+        # Get the backend path from the first element of sys.path        
+        self.backend_path = sys.path[0] if sys.path else None
         
-        # Setup environment
-        self.setup_environment()
-        
+        if self.backend_path is None:
+            raise FileNotFoundError("No backend path found in sys.path")
+                
         # Build training command
         self.training_cmd = self.build_training_command()
-        self.log_config()
 
-    def setup_environment(self):
-        """Setup environment variables and paths for hybrid models training."""
-        # First try to get backend_path from module_config
-        backend_path = getattr(self.module_config, 'backend_path', None)
-        
-        # If not found in module_config, try to get it from the primus_cfg
-        if not backend_path:
-            backend_path = getattr(self.primus_cfg, 'backend_path', None)
-        
-        # If still not found, try to get it from the root config
-        if not backend_path:
-            backend_path = getattr(self.primus_cfg, 'modules', {}).get('pre_trainer', {}).get('backend_path', None)
-        
-        if backend_path:
-            # Add backend path to Python path
-            if backend_path not in sys.path:
-                sys.path.insert(0, backend_path)
-            
-            # Store backend path for later use
-            self.backend_path = backend_path
-            
-            # Run install.sh in the backend_path directory
-            self.run_backend_install()
-        else:
-            self.backend_path = '.'
-            
-        # Set environment variables
-        env_vars = getattr(self.module_config, 'env_vars', {})
-        for key, value in env_vars.items():
-            os.environ[key] = value
-
-    def run_backend_install(self):
+    def setup(self, *args, **kwargs):
+        from primus.core.utils.logger import _logger as primus_logger        
         """Run the install.sh script in the backend_path directory."""
-        from primus.core.utils.logger import _logger as primus_logger
-        
         install_script_path = os.path.join(self.backend_path, 'install.sh')
         
         if os.path.exists(install_script_path):
@@ -105,17 +67,43 @@ class HybridModelsPretrainTrainer(BaseModule):
 
     def build_training_command(self):
         """Build the accelerate launch command using the configuration from the YAML file."""
-        # Get the training command parameters from the config
-        training_cmd = getattr(self.module_config, 'training_command', {})
+        from primus.core.utils.logger import _logger as primus_logger
+        # Get the experiment YAML file path from the primus config
+        # primus_logger.info(f'Primus config: {self.primus_config}')
+        exp_yaml_path = self.primus_config._exp.config_file
+        primus_logger.info(f'Experiment YAML file: {exp_yaml_path}')
         
-        # Get the script, accelerate config, and model config from the YAML
-        script = training_cmd.get('script', 'train_hybrid/train_distill.py')
-        accelerate_config = training_cmd.get('accelerate_config', 'configs/fsdp.yaml')
-        model_config = training_cmd.get('model_config', 'configs/llama3.2_1B/zebra_4MLA12M2_8bt_SFT.yaml')
+        with open(exp_yaml_path, 'r') as f:
+            yaml_content = f.read()        
+        yaml_data = yaml.safe_load(yaml_content)
         
-        # Get environment variables
-        env_vars = getattr(self.module_config, 'env_vars', {})
-        accelerate_log_level = env_vars.get('ACCELERATE_LOG_LEVEL', 'info')
+        # Extract training_command from the pre_trainer section
+        pre_trainer_section = yaml_data.get('modules', {}).get('pre_trainer', {})
+        training_cmd = pre_trainer_section.get('training_command', {})
+        if not training_cmd:
+            raise ValueError("training_command not found in pre_trainer section of YAML")
+        
+        # Extract variables from the YAML config
+        script = training_cmd.get('script', None)
+        accelerate_config = training_cmd.get('accelerate_config', None)
+        model_config = training_cmd.get('model_config', None)
+        accelerate_log_level = training_cmd.get('ACCELERATE_LOG_LEVEL', None)
+        
+        # Validate that required parameters are present
+        if script is None:
+            raise ValueError("script not found in training_command config")
+        if accelerate_config is None:
+            raise ValueError("accelerate_config not found in training_command config")
+        if model_config is None:
+            raise ValueError("model_config not found in training_command config")
+        if accelerate_log_level is None:
+            accelerate_log_level = 'info'  # Default fallback
+        
+        print(f'Training command config: {training_cmd}')
+        print(f'Script: {script}')
+        print(f'Accelerate config: {accelerate_config}')
+        print(f'Model config: {model_config}')
+        print(f'Log level: {accelerate_log_level}')
         
         # Construct the accelerate launch command
         cmd_parts = [
@@ -131,51 +119,7 @@ class HybridModelsPretrainTrainer(BaseModule):
         # Join the command parts
         cmd = ' '.join(cmd_parts)
         
-        # Store values for later use
-        self.script = script
-        self.accelerate_config = accelerate_config
-        self.model_config = model_config
-        self.accelerate_log_level = accelerate_log_level
-
-        from primus.core.utils.logger import _logger as primus_logger
-        
-        primus_logger.info(f"Script: {self.script}")
-        primus_logger.info(f"Accelerate Config: {self.accelerate_config}")
-        primus_logger.info(f"Model Config: {self.model_config}")
-        primus_logger.info(f"Accelerate Log Level: {self.accelerate_log_level}")
-        primus_logger.info(f"Command: {cmd}")
-        
         return cmd
-
-    def log_config(self):
-        """Log the training configuration."""
-        from primus.core.utils.logger import _logger as primus_logger
-        
-        primus_logger.info("========== Hybrid Models Training Config ==========")
-        primus_logger.info(f"Backend Path: {self.backend_path}")
-        primus_logger.info(f"Script: {getattr(self, 'script', 'N/A')}")
-        primus_logger.info(f"Accelerate Config: {getattr(self, 'accelerate_config', 'N/A')}")
-        primus_logger.info(f"Model Config: {getattr(self, 'model_config', 'N/A')}")
-        primus_logger.info(f"Accelerate Log Level: {getattr(self, 'accelerate_log_level', 'N/A')}")
-        primus_logger.info(f"Training Command: {self.training_cmd}")
-        
-        # Log environment variables
-        env_vars = getattr(self.module_config, 'env_vars', {})
-        for key, value in env_vars.items():
-            primus_logger.info(f"  env.{key}: {value}")
-
-    def setup(self):
-        """Setup phase - change to backend directory."""
-        if hasattr(self, 'backend_path'):
-            original_cwd = os.getcwd()
-            os.chdir(self.backend_path)
-            from primus.core.utils.logger import _logger as primus_logger
-            primus_logger.info(f"Changed working directory to: {self.backend_path}")
-            self.original_cwd = original_cwd
-
-    def init(self, *init_args, **kwargs):
-        """Initialize the trainer - no special initialization needed for hybrid models."""
-        pass
 
     def run(self, *args, **kwargs):
         """Run the hybrid models training."""
@@ -190,19 +134,8 @@ class HybridModelsPretrainTrainer(BaseModule):
         os.chdir(self.backend_path)
         primus_logger.info(f"Changed working directory to: {os.getcwd()}")
         
-        # Debug: Check if config files exist
-        accelerate_config_path = getattr(self, 'accelerate_config', 'configs/fsdp.yaml')
-        model_config_path = getattr(self, 'model_config', 'configs/llama3.2_1B/zebra_8MLA8M2_8bt_SFT.yaml')
-        
-        primus_logger.info(f"Checking for accelerate config: {accelerate_config_path}")
-        primus_logger.info(f"File exists: {os.path.exists(accelerate_config_path)}")
-        primus_logger.info(f"Checking for model config: {model_config_path}")
-        primus_logger.info(f"File exists: {os.path.exists(model_config_path)}")
-        
         # List files in current directory
         primus_logger.info(f"Files in current directory: {os.listdir('.')}")
-        if os.path.exists('configs'):
-            primus_logger.info(f"Files in configs directory: {os.listdir('configs')}")
         
         # Set environment variables
         env = os.environ.copy()
@@ -214,28 +147,6 @@ class HybridModelsPretrainTrainer(BaseModule):
         
         # Execute training using shell=True to run the accelerate command
         try:
-            # If files don't exist with relative paths, try absolute paths
-            if not os.path.exists(accelerate_config_path):
-                primus_logger.warning(f"Config file not found with relative path, trying absolute path")
-                # Update the command with absolute paths
-                abs_accelerate_config = os.path.abspath(accelerate_config_path)
-                abs_model_config = os.path.abspath(model_config_path)
-                
-                if os.path.exists(abs_accelerate_config):
-                    primus_logger.info(f"Found config with absolute path: {abs_accelerate_config}")
-                    # Rebuild command with absolute paths
-                    cmd_parts = [
-                        f'ACCELERATE_LOG_LEVEL={self.accelerate_log_level}',
-                        'accelerate',
-                        'launch',
-                        f'--config_file',
-                        abs_accelerate_config,
-                        self.script,
-                        abs_model_config
-                    ]
-                    self.training_cmd = ' '.join(cmd_parts)
-                    primus_logger.info(f"Updated command: {self.training_cmd}")
-            
             result = subprocess.run(
                 self.training_cmd, 
                 shell=True,

@@ -57,6 +57,7 @@ def main():
         "megatron": "megatron",
         "light-megatron": "megatron",
         "torchtitan": "torchtitan",
+        "hybrid_models": "hybrid_models",
         # Add more aliases here if needed
     }
     framework_dir = framework_map.get(framework, framework)

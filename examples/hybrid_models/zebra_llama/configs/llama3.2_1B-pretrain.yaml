@@ -7,16 +7,13 @@ modules:
   pre_trainer:
     framework: hybrid_models
     config: pre_trainer.yaml
-    model: zebra_llama/llama3.2_1B/zebra_4MLA12M2_8bt_SFT.yaml
-    backend_path: third_party/AMD-Hybrid-Models/Zebra-Llama
+    model: zebra_llama/llama3.2_1B/zebra_8MLA8M2_8bt_SFT.yaml
+    backend_path: Zebra-Llama
     
     # Accelerate launch parameters
     training_command:
       script: train_hybrid/train_distill.py
       accelerate_config: configs/fsdp.yaml
       model_config: configs/llama3.2_1B/zebra_8MLA8M2_8bt_SFT.yaml
-    
-    # Environment variables
-    env_vars:
       ACCELERATE_LOG_LEVEL: info
     

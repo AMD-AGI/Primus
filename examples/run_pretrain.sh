@@ -412,6 +412,8 @@ DISTRIBUTED_ARGS=(
 
 
 CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
+# CMD="python3 $TORCHRUN_EXTRA_ARGS primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
+
 
 LOG_INFO "Launching distributed training with command: $CMD"
 

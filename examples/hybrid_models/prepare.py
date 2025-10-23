@@ -96,11 +96,6 @@ def main():
     if not hybrid_models_path.exists():
         log_error_and_exit(f"Hybrid Models path does not exist: {hybrid_models_path}")
 
-    try:
-        pre_trainer_cfg = primus_cfg.get_module_config("pre_trainer")
-    except Exception:
-        log_error_and_exit("Missing required module config: pre_trainer")
-
 def detect_rocm_version() -> Optional[str]:
     """
     Detect ROCm version from /opt/rocm/.info/version (most reliable source).
