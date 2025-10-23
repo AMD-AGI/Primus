@@ -41,28 +41,6 @@ RUN git clone --recursive ${FA_REPO} \
     && cd .. \
     && rm -rf flash-attention
 
-# Latest TransformerEngine
-ARG TE_REPO=https://github.com/ROCm/TransformerEngine.git
-ARG TE_BRANCH=1834247827f47f5eab76ea790841168ac778592e
-
-ENV NVTE_USE_HIPBLASLT=1
-ENV NVTE_FRAMEWORK=pytorch
-ENV NVTE_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
-ENV NVTE_USE_CAST_TRANSPOSE_TRITON=0
-ENV NVTE_CK_IS_V3_ATOMIC_FP32=0
-ENV NVTE_CK_USES_BWD_V3=1
-ENV NVTE_CK_USES_FWD_V3=1
-ENV CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=2
-ENV NVTE_CK_HOW_V3_BF16_CVT=2
-ENV NVTE_USE_ROCM=1
-
-RUN git clone --recursive ${TE_REPO} \
-    && cd TransformerEngine \
-    && git checkout ${TE_BRANCH} \
-    && git submodule update --init --recursive \
-    && MAX_JOBS=${MAX_JOBS} pip install . \
-    && cd ..
-
 # Groupped GEMM
 ARG GROUPED_GEMM_REPO=https://github.com/caaatch22/grouped_gemm.git
 ARG GROUPED_GEMM_BRANCH=rocm
@@ -82,6 +60,31 @@ RUN pip uninstall -y apex \
     && cd apex \
     && pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--build-option=--cpp_ext" --config-settings "--build-option=--cuda_ext" ./ \
     && cd .. && rm -r apex
+
+# Latest TransformerEngine
+ARG TE_REPO=https://github.com/ROCm/TransformerEngine.git
+ARG TE_BRANCH=1834247827f47f5eab76ea790841168ac778592e
+
+ENV NVTE_USE_HIPBLASLT=1
+ENV NVTE_FRAMEWORK=pytorch
+ENV NVTE_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
+ENV NVTE_USE_CAST_TRANSPOSE_TRITON=0
+ENV NVTE_CK_IS_V3_ATOMIC_FP32=0
+ENV NVTE_CK_USES_BWD_V3=1
+ENV NVTE_CK_USES_FWD_V3=1
+ENV CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=2
+ENV NVTE_CK_HOW_V3_BF16_CVT=2
+ENV NVTE_USE_ROCM=1
+
+RUN pip uninstall -y aiter
+RUN git clone --recursive ${TE_REPO} \
+    && cd TransformerEngine \
+    && git checkout ${TE_BRANCH} \
+    && git submodule update --init --recursive \
+    && MAX_JOBS=${MAX_JOBS} pip install . \
+    && cd ..
+    # && cd 3rdparty/aiter && git checkout a0b424d3848f461b2d94d9e3d1d329bd18f4d3b9 && cd ../../ \
+
 
 # Set the default working directory
 WORKDIR /opt
