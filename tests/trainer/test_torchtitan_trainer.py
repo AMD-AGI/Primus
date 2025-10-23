@@ -86,8 +86,8 @@ class TestTorchTitanTrainer(PrimusUT):
                 "4",
                 "--training.steps",
                 "30",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
+                # "--primus_turbo.enable_primus_turbo",
+                # "False",
             ],
         )
 
@@ -121,8 +121,8 @@ class TestTorchTitanTrainer(PrimusUT):
                 "4",
                 "--training.steps",
                 "30",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
+                # "--primus_turbo.enable_primus_turbo",
+                # "False",
             ],
         )
 
