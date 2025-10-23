@@ -18,7 +18,18 @@ class TorchTitanPretrainTrainer(BaseModule):
         # important: make sure patch torchtitan logger first
         self.patch_torchtitan_logger()
 
-        self.patch_torchtitan_embedding_amp()
+        self.primus_cfg = kwargs.pop("primus_config", None)
+        if self.primus_cfg is None:
+            raise ValueError("primus_config is required")
+
+        pre_trainer_cfg = self.primus_cfg.get_module_config("pre_trainer")
+        cfg_dict = nested_namespace_to_dict(pre_trainer_cfg)
+
+        from primus.core.utils.logger import _logger as primus_logger
+
+        primus_logger.info(f"cfg_dict: {cfg_dict}")
+
+        self.patch_torchtitan_embedding_amp(cfg_dict["primus_turbo"]["enable_embedding_autocast"])
 
         # ensure checkpoint patch applied before import torchtitan
         # background: consolidate_safetensors_files_on_every_rank is a new DCP
@@ -48,13 +59,6 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         self.TrainerClass = Trainer
         self.JobConfigClass = JobConfig
-
-        self.primus_cfg = kwargs.pop("primus_config", None)
-        if self.primus_cfg is None:
-            raise ValueError("primus_config is required")
-
-        pre_trainer_cfg = self.primus_cfg.get_module_config("pre_trainer")
-        cfg_dict = nested_namespace_to_dict(pre_trainer_cfg)
 
         self.titan_config = self.build_job_config(cfg_dict, self.JobConfigClass)
         self.log_config(self.titan_config)
@@ -468,7 +472,7 @@ class TorchTitanPretrainTrainer(BaseModule):
                     init_values[f.name] = val
         return cls(**init_values)
 
-    def patch_torchtitan_embedding_amp(self):
+    def patch_torchtitan_embedding_amp(self, enable_patch: bool):
         """
         Monkey patch for AMP precision mismatch in nn.Embedding.
 
@@ -484,6 +488,10 @@ class TorchTitanPretrainTrainer(BaseModule):
         import torch.nn as nn
 
         from primus.core.utils.logger import _logger as primus_logger
+
+        if not enable_patch:
+            primus_logger.info("[PrimusPatch][AMP] Embedding AMP patch disabled via config.")
+            return
 
         env_flag = os.getenv("PRIMUS_EMBED_AUTOCAST_DTYPE", "auto").lower()
         if env_flag in ("off", "false", "none"):
