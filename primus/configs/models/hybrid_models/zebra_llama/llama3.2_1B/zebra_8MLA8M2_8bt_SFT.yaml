@@ -1,8 +1,8 @@
 # Model arguments
 model_name_or_path: meta-llama/Llama-3.2-1B-Instruct 
 teacher_model_name_or_path: meta-llama/Llama-3.1-8B-Instruct 
-mamba_ILD_path: checkpoints/Zebra-1B-ILD-M2
-mla_ILD_path: checkpoints/Zebra-1B-ILD-MLA 
+mamba_ILD_path: amd/Zebra-Llama-1B-8MLA-8Mamba-SFT
+mla_ILD_path: amd/Zebra-Llama-1B-8MLA-8Mamba-SFT
 with_distill: false
 mla_layers: [0,2,4,6,8,10,12,14]
 init_with_svd: false
