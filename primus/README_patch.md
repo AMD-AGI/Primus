@@ -82,6 +82,6 @@ These arguments affect the internal architecture or layer implementations. They 
 
 | New Argument | Default Value | Version | Description | Patched Files | Notes |
 | ------------ | ------------- | ------- | ----------- | ------------- | ----- |
-| `ABC`        | `true`        | v0.1.0  | ABC         | `abc.py`      | ABC   |
+| `primus_turbo.enable_embedding_autocast`        | `true`        | v0.4.0  | Automatically casts nn.Embedding output to AMP dtype (e.g. bf16) during training. Helps align dtype with the rest of the model under AMP.|        |     |
 
 ---
