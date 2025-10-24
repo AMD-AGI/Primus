@@ -98,7 +98,7 @@ def setup_env(data_path: str):
         print(f"[Primus CLI] HF_HOME already set: {hf_home}")
 
 
-def launch_pretrain_trainer(primus_cfg: PrimusConfig):
+def launch_pretrain_trainer(primus_cfg: PrimusConfig, extra_args=None):
     """
     Launch the training using the Primus trainer.
 
@@ -126,6 +126,7 @@ def launch_pretrain_trainer(primus_cfg: PrimusConfig):
         module_world_size=world_size,
         module_master_addr=master_addr,
         module_master_port=master_port,
+        extra_args=extra_args,
     )
 
     # Launch training
@@ -150,7 +151,7 @@ def launch_pretrain_from_cli(args, overrides):
 
     setup_env(data_path=args.data_path)
 
-    primus_cfg = load_primus_config(args, overrides)
+    primus_cfg, unknown_overrides = load_primus_config(args, overrides)
 
     # Export merged config if requested
     if args.export_config:
@@ -160,7 +161,7 @@ def launch_pretrain_from_cli(args, overrides):
     framework = primus_cfg.get_module_config("pre_trainer").framework
     setup_backend_path(framework=framework, backend_path=args.backend_path, verbose=True)
 
-    launch_pretrain_trainer(primus_cfg=primus_cfg)
+    launch_pretrain_trainer(primus_cfg=primus_cfg, extra_args=unknown_overrides)
 
 
 if __name__ == "__main__":
