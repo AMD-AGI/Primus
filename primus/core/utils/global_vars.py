@@ -47,11 +47,9 @@ def get_target_platform():
 
 def set_global_variables(cfg: PrimusConfig):
     """Set global vars"""
-    print("Setting global PrimusConfig...")
     assert cfg is not None
 
     global _GLOBAL_PRIMUS_CFG
-    print(f"assert Setting global PrimusConfig... {_GLOBAL_PRIMUS_CFG}")
     if _GLOBAL_PRIMUS_CFG:
         return
     _GLOBAL_PRIMUS_CFG = cfg
@@ -61,7 +59,6 @@ def set_global_variables(cfg: PrimusConfig):
 
 
 def _set_cli_args(cfg: PrimusConfig):
-    print("Setting global CLI args...")
     global _GLOBAL_CLI_ARGS
     if _GLOBAL_CLI_ARGS:
         return
@@ -73,7 +70,6 @@ def _set_target_platform(cfg: PrimusConfig):
     if _GLOBAL_TARGET_PLATFORM:
         return
 
-    print("Setting global target platform...")
     platform_config = cfg.platform_config
     if platform_config.name and platform_config.name != "local":
         from primus.platforms import RemotePlatform
