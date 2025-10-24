@@ -118,6 +118,15 @@ class DataLoaderStore:
 class MegatronPretrainTrainer(MegatronTrainer):
     def __init__(self, *args, **kwargs):
         kwargs["module_name"] = "pre_trainer"
+
+        # Explicitly reject unknown extra_args
+        extra_args = kwargs.pop("extra_overrides", None)
+        if extra_args:
+            raise ValueError(
+                f"[MegatronPretrainTrainer] Unexpected extra_overrides detected: {extra_args}. "
+                f"Megatron backend does not support unregistered config keys."
+            )
+
         super().__init__(*args, **kwargs)
 
     def get_batch(self, data_iterator):

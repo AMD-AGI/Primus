@@ -13,6 +13,7 @@ from primus.modules.base_module import BaseModule
 
 class TorchTitanPretrainTrainer(BaseModule):
     def __init__(self, *args, **kwargs):
+        extra_args = kwargs.pop("extra_args", None)
         super().__init__(*args, **kwargs)
 
         # important: make sure patch torchtitan logger first
@@ -26,6 +27,7 @@ class TorchTitanPretrainTrainer(BaseModule):
         cfg_dict = nested_namespace_to_dict(pre_trainer_cfg)
 
         self.patch_torchtitan_embedding_amp(cfg_dict["primus_turbo"]["enable_embedding_autocast"])
+        self.patch_titan_train_spec(pre_trainer_cfg.model.name, pre_trainer_cfg.model.flavor, extra_args)
 
         # ensure checkpoint patch applied before import torchtitan
         # background: consolidate_safetensors_files_on_every_rank is a new DCP
@@ -507,4 +509,90 @@ class TorchTitanPretrainTrainer(BaseModule):
         nn.Embedding.__init__ = new_init
         primus_logger.info(
             "[PrimusPatch][AMP] nn.Embedding.__init__ patched for AMP/mixed precision alignment."
+        )
+
+    def patch_titan_train_spec(self, model_name: str, flavor: str, model_overrides: Dict[str, Any]):
+        """
+        Monkey patch torchtitan.train_spec.get_train_spec to override model args dynamically.
+        All override keys MUST start with "model." (e.g., {"model.n_layers": 8}).
+        """
+        from primus.core.utils.logger import _logger as primus_logger
+
+        if not model_overrides:
+            primus_logger.info("[PrimusPatch][ModelOverride] No model_overrides provided, skip patch.")
+            return
+
+        primus_logger.info(f"[PrimusPatch][ModelOverride] Applying model_overrides: {model_overrides}")
+
+        # --- flatten nested form {"model": {"n_layers": 4}} → {"model.n_layers": 4}
+        flat_overrides = {}
+        for k, v in model_overrides.items():
+            if k == "model" and isinstance(v, dict):
+                for subk, subv in v.items():
+                    flat_overrides[f"model.{subk}"] = subv
+            else:
+                flat_overrides[k] = v
+        model_overrides = flat_overrides
+
+        # Enforce `model.` prefix strictly
+        bad_keys = [k for k in model_overrides.keys() if not k.startswith("model.")]
+        if bad_keys:
+            raise ValueError(
+                # f"[PrimusPatch][ModelOverride] Unsupported override keys (must start with 'model.'): {bad_keys}"
+                f"[PrimusPatch][ModelOverride] Invalid override keys detected: {bad_keys}. "
+                "These parameters belong to the model configuration and must be specified "
+                "with the 'model.' prefix (e.g., 'model.n_layers', 'model.dim')."
+            )
+
+        primus_logger.info(
+            f"[PrimusPatch][ModelOverride] model_overrides provided for '{model_name}' (flavor={flavor}): {model_overrides}"
+        )
+
+        import torchtitan.protocols.train_spec as train_spec_module
+
+        orig_get_train_spec = train_spec_module.get_train_spec
+
+        def patched_get_train_spec(name: str):
+            spec = orig_get_train_spec(name)
+            if name != model_name:
+                return spec  # only patch targeted model
+
+            assert hasattr(
+                spec, "model_args"
+            ), f"[PrimusPatch][ModelOverride] train_spec for '{name}' missing model_args"
+            model_args_root = spec.model_args
+            assert isinstance(
+                model_args_root, dict
+            ), f"[PrimusPatch][ModelOverride] train_spec.model_args must be dict, got {type(model_args_root)}"
+
+            if flavor not in model_args_root:
+                raise KeyError(
+                    f"[PrimusPatch][ModelOverride] flavor '{flavor}' not found in model_args for '{name}'. "
+                    f"Available flavors: {list(model_args_root.keys())}"
+                )
+
+            target_args = model_args_root[flavor]
+            assert is_dataclass(
+                target_args
+            ), f"[PrimusPatch][ModelOverride] Expected dataclass model_args, got {type(target_args)}"
+
+            before = asdict(target_args)
+            for k, v in model_overrides.items():
+                field_name = k[len("model.") :]
+                if not hasattr(target_args, field_name):
+                    raise AttributeError(
+                        f"[PrimusPatch][ModelOverride] '{type(target_args).__name__}' has no field '{field_name}'"
+                    )
+                setattr(target_args, field_name, v)
+
+            primus_logger.info(
+                f"[PrimusPatch][ModelOverride] Patched dataclass model_args['{flavor}'] "
+                f"for '{name}' with {model_overrides} (before={before})"
+            )
+            return spec
+
+        # Apply the patch globally
+        train_spec_module.get_train_spec = patched_get_train_spec
+        primus_logger.info(
+            f"[PrimusPatch][ModelOverride] get_train_spec for '{model_name}' successfully monkey patched (flavor={flavor})."
         )
