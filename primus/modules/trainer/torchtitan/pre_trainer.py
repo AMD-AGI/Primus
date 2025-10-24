@@ -219,68 +219,6 @@ class TorchTitanPretrainTrainer(BaseModule):
             "[PrimusPatch][FlexAttn] Injected fallback AuxOutput stub (Titan does not rely on this)."
         )
 
-    def patch_titan_train_spec(self, model_name: str, flavor: str, model_overrides: Dict[str, Any]):
-        """
-        Monkey patch torchtitan.train_spec.get_train_spec to override n_layers.
-        """
-        from primus.core.utils.logger import _logger as primus_logger
-
-        if not model_overrides:
-            primus_logger.info("[PrimusPatch][ModelOverride] No model_overrides provided, skip patch.")
-            return
-
-        primus_logger.info(
-            f"[PrimusPatch][ModelOverride] model_overrides provided for '{model_name}' (flavor={flavor}): {model_overrides}"
-        )
-
-        import torchtitan.protocols.train_spec as train_spec_module
-
-        orig_get_train_spec = train_spec_module.get_train_spec
-
-        def patched_get_train_spec(name: str):
-            spec = orig_get_train_spec(name)
-            if name != model_name:
-                return spec  # only patch targeted model
-
-            assert hasattr(
-                spec, "model_args"
-            ), f"[PrimusPatch][ModelOverride] train_spec for '{name}' missing model_args"
-            model_args_root = spec.model_args
-            assert isinstance(
-                model_args_root, dict
-            ), f"[PrimusPatch][ModelOverride] train_spec.model_args must be dict, got {type(model_args_root)}"
-
-            if flavor not in model_args_root:
-                primus_logger.warning(
-                    f"[PrimusPatch][ModelOverride] flavor '{flavor}' not found in model_args for '{name}'. "
-                    f"Available flavors: {list(model_args_root.keys())}"
-                )
-                return spec
-
-            target_args = model_args_root[flavor]
-            assert is_dataclass(
-                target_args
-            ), f"[PrimusPatch][ModelOverride] Expected dataclass model_args, got {type(target_args)}"
-
-            before = asdict(target_args)
-            for k, v in model_overrides.items():
-                assert hasattr(
-                    target_args, k
-                ), f"[PrimusPatch][ModelOverride] '{type(target_args).__name__}' has no field '{k}'"
-                setattr(target_args, k, v)
-
-            primus_logger.info(
-                f"[PrimusPatch][ModelOverride] Patched dataclass model_args['{flavor}'] "
-                f"for '{name}' with {model_overrides} (before={before})"
-            )
-            return spec
-
-        # Apply the patch globally
-        train_spec_module.get_train_spec = patched_get_train_spec
-        primus_logger.info(
-            f"[PrimusPatch][ModelOverride] get_train_spec for '{model_name}' successfully monkey patched (flavor={flavor})."
-        )
-
     def enable_primus_turbo_extension(self):
         """
         Enable Primus-Turbo features and extensions.
