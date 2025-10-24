@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import types
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional
 
@@ -14,6 +15,7 @@ from primus.modules.base_module import BaseModule
 class TorchTitanPretrainTrainer(BaseModule):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.enable_mock_hf_download()
 
         # important: make sure patch torchtitan logger first
         self.patch_torchtitan_logger()
@@ -508,3 +510,22 @@ class TorchTitanPretrainTrainer(BaseModule):
         primus_logger.info(
             "[PrimusPatch][AMP] nn.Embedding.__init__ patched for AMP/mixed precision alignment."
         )
+
+    def enable_mock_hf_download(self):
+        import torch
+
+        from primus.core.utils.logger import _logger as primus_logger
+
+        primus_logger.info("[PrimusMock] Mocking torch.load")
+
+        def _mock_torch_load(*args, **kwargs):
+            # return an empty state_dict
+            primus_logger.info("[PrimusMock] torch.load called, skipped actual loading.")
+            return {}
+
+        def _mock_load_state_dict(self, state_dict, *args, **kwargs):
+            primus_logger.info("[PrimusMock] load_state_dict called, skipped actual loading.")
+            return types.SimpleNamespace(missing_keys=[], unexpected_keys=[])
+
+        torch.load = _mock_torch_load
+        torch.nn.Module.load_state_dict = _mock_load_state_dict
