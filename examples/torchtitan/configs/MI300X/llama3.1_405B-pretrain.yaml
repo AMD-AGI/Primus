@@ -18,6 +18,9 @@ modules:
       training:
         local_batch_size: 2
 
+      metrics:
+        log_freq: 1
+
       optimizer:
         lr: 8.0e-5
 
