@@ -21,7 +21,7 @@ def get_all_unit_tests():
     unit_tests = {}
 
     EXCLUDE_UNIT_TESTS = [
-        "tests/unit_tests/megatron/cco/test_tp_overlap.py",
+        "unit_tests/megatron/cco/test_tp_overlap.py",
     ]
 
     for root, dirs, files in os.walk(cur_dir):
