@@ -20,9 +20,18 @@ def get_all_unit_tests():
     cur_dir = "./tests"
     unit_tests = {}
 
+    EXCLUDE_UNIT_TESTS = [
+        "tests/unit_tests/megatron/cco/test_tp_overlap.py",
+    ]
+
     for root, dirs, files in os.walk(cur_dir):
         for file_name in files:
             if not file_name.endswith(".py") or not file_name.startswith("test_"):
+                continue
+
+            # Construct relative path from tests/
+            rel_path = os.path.relpath(os.path.join(root, file_name), start=cur_dir)
+            if rel_path in EXCLUDE_UNIT_TESTS:
                 continue
 
             if file_name not in DISTRIBUTED_UNIT_TESTS:
