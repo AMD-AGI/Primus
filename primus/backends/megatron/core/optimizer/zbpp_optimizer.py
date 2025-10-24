@@ -25,10 +25,10 @@ class ZeroBubblePPChainedOptimizer(ChainedOptimizer):
     def __init__(self, chained_optimizers: List[MegatronOptimizer]):
         super().__init__(chained_optimizers)
 
-        self.partial_reduced_total_norm = torch.FloatTensor([0])
+        self.partial_reduced_total_norm = torch.zeros([0], dtype=torch.float, device="cuda")
         self.local_total_norm = None
-        self.dummy_overflow_buf = torch.cuda.IntTensor([0])
-        self.zero_float_tensor = torch.cuda.FloatTensor([0])
+        self.dummy_overflow_buf = torch.zeros([0], dtype=torch.int, device="cuda")
+        self.zero_float_tensor = torch.zeros([0], dtype=torch.float, device="cuda")
         self.parameters_backup = None
         self.do_prev_step = False
         self.do_this_step = False
