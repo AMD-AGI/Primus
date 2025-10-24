@@ -25,46 +25,6 @@ class HybridModelsPretrainTrainer(BaseModule):
         # Build training command
         self.training_cmd = self.build_training_command()
 
-    def setup(self, *args, **kwargs):
-        from primus.core.utils.logger import _logger as primus_logger        
-        """Run the install.sh script in the backend_path directory."""
-        install_script_path = os.path.join(self.backend_path, 'install.sh')
-        
-        if os.path.exists(install_script_path):
-            primus_logger.info(f"Running install.sh in backend directory: {self.backend_path}")
-            primus_logger.info("Command: bash install.sh FLASH_ATTN=1 MAMBA=1")
-            
-            try:
-                # Change to backend directory and run install script
-                original_cwd = os.getcwd()
-                os.chdir(self.backend_path)
-                
-                result = subprocess.run(
-                    ['bash', 'install.sh', 'FLASH_ATTN=1', 'MAMBA=1'],
-                    check=True,
-                    capture_output=True,
-                    text=True
-                )
-                
-                primus_logger.info(f"Install script completed successfully")
-                if result.stdout:
-                    primus_logger.info(f"Install output: {result.stdout}")
-                    
-            except subprocess.CalledProcessError as e:
-                primus_logger.error(f"Install script failed with return code: {e.returncode}")
-                if e.stderr:
-                    primus_logger.error(f"Install error: {e.stderr}")
-                raise e
-            except Exception as e:
-                primus_logger.error(f"Failed to run install script: {e}")
-                raise e
-            finally:
-                # Restore original working directory
-                os.chdir(original_cwd)
-        else:
-            primus_logger.warning(f"Install script not found at: {install_script_path}")
-            primus_logger.warning("Skipping backend installation")
-
     def build_training_command(self):
         """Build the accelerate launch command using the configuration from the YAML file."""
         from primus.core.utils.logger import _logger as primus_logger
@@ -147,15 +107,26 @@ class HybridModelsPretrainTrainer(BaseModule):
         
         # Execute training using shell=True to run the accelerate command
         try:
-            result = subprocess.run(
-                self.training_cmd, 
-                shell=True,
-                env=env, 
-                check=True, 
-                capture_output=False
-            )
-            primus_logger.info(f"Training completed successfully with return code: {result.returncode}")
-            return result.returncode
+            current_directory = os.getcwd()
+            primus_logger.info(f"Current directory: {current_directory}")
+            setup_cmd = ["bash", "install.sh", "FLASH_ATTN=1", "MAMBA=1"]
+            setup_result = subprocess.Popen(setup_cmd, stdout=sys.stdout, stderr=sys.stderr)
+            setup_result.wait()
+            primus_logger.info(f"Install script completed successfully with return code: {setup_result.returncode}")
+
+            primus_logger.info(f"Current directory: {current_directory}")
+            training_result = subprocess.Popen(self.training_cmd, stdout=sys.stdout, stderr=sys.stderr)
+            training_result.wait()
+            # training_result = subprocess.run(
+            #     self.training_cmd, 
+            #     shell=True,
+            #     env=env, 
+            #     check=True, 
+            #     capture_output=True,
+            #     text=True
+            # )
+            primus_logger.info(f"Training completed successfully with return code: {training_result.returncode}")
+            return training_result.returncode
         except subprocess.CalledProcessError as e:
             primus_logger.error(f"Training failed with return code: {e.returncode}")
             raise e

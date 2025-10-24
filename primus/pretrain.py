@@ -135,8 +135,6 @@ def launch_pretrain_trainer(primus_cfg: PrimusConfig):
 
     # Launch training
     trainer.init()
-    if framework == "hybrid_models":
-        trainer.setup()
     trainer.run()
 
 
