@@ -82,19 +82,20 @@ class TestTorchTitanTrainer(PrimusUT):
             "llama3_8B-BF16",
             exp_path="examples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml",
             extra_args=[
-                "--n_layers",
+                "--model.n_layers",
                 "4",
                 "--training.steps",
-                "30",
-                # "--primus_turbo.enable_primus_turbo",
-                # "False",
+                "3",
             ],
         )
 
-    # def test_llama3_1_8B_FP8(self):
-    #     run_script(self.__class__.__name__, "llama3_8B-FP8",
-    #                exp_path="examples/torchtitan/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml",
-    #                extra_args=["--n_layers", "4", "--training.steps", "30"])
+    def test_llama3_1_8B_FP8(self):
+        run_script(
+            self.__class__.__name__,
+            "llama3_8B-FP8",
+            exp_path="examples/torchtitan/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml",
+            extra_args=["--model.n_layers", "4", "--training.steps", "3"],
+        )
 
     def test_llama3_1_405B(self):
         run_script(
@@ -102,10 +103,10 @@ class TestTorchTitanTrainer(PrimusUT):
             "llama3.1_405B",
             "examples/torchtitan/configs/MI300X/llama3.1_405B-pretrain.yaml",
             extra_args=[
-                "--n_layers",
+                "--model.n_layers",
                 "4",
                 "--training.steps",
-                "30",
+                "3",
                 "--primus_turbo.enable_primus_turbo",
                 "False",
             ],
@@ -117,12 +118,10 @@ class TestTorchTitanTrainer(PrimusUT):
             "llama3.1_70B_bf16",
             "examples/torchtitan/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml",
             extra_args=[
-                "--n_layers",
+                "--model.n_layers",
                 "4",
                 "--training.steps",
-                "30",
-                # "--primus_turbo.enable_primus_turbo",
-                # "False",
+                "3",
             ],
         )
 
@@ -132,19 +131,22 @@ class TestTorchTitanTrainer(PrimusUT):
             "llama3.1_70B_fp8",
             "examples/torchtitan/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml",
             extra_args=[
-                "--n_layers",
+                "--model.n_layers",
                 "4",
                 "--training.steps",
-                "30",
+                "3",
                 "--primus_turbo.enable_primus_turbo",
                 "false",
             ],
         )
 
-    # def test_qwen3_0_6B(self):
-    #     run_script(self.__class__.__name__, "qwen3_0.6B",
-    #                "examples/torchtitan/configs/MI300X/qwen3_0.6B-pretrain.yaml",
-    #                extra_args=["--n_layers", "4", "--training.steps", "30"])
+    def test_qwen3_0_6B(self):
+        run_script(
+            self.__class__.__name__,
+            "qwen3_0.6B",
+            "examples/torchtitan/configs/MI300X/qwen3_0.6B-pretrain.yaml",
+            extra_args=["--n_layers", "4", "--training.steps", "30"],
+        )
 
     # def test_qwen3_1_7B(self):
     #     run_script(self.__class__.__name__, "qwen3_1.7B",
