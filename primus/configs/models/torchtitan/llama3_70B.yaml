@@ -1,0 +1,9 @@
+job:
+  dump_folder: "./outputs"
+  description: "Llama 3 70B training"
+
+model:
+  name: "llama3"
+  flavor: "70B"
+  tokenizer_path: "meta-llama/Meta-Llama-3-70B"
+  # converters = ["float8"]
