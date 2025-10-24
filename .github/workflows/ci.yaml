@@ -10,7 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: a97e986f01893fec5789243400c7046d18591ba9 # chore: update aiter to fix pybind11 issue (#132)
+  PRIMUS_TURBO_COMMIT: 445cf05050179dc88dba3853954575f9c9ca2f49 # fix: fixed import activation module (#137)
 
 jobs:
   code-lint:

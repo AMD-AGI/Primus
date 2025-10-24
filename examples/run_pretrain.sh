@@ -79,6 +79,7 @@ PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
 export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 
+LOG_INFO_RANK0 "Pip installing required packages ..."
 pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
 
 # -------------------- EXP Check --------------------

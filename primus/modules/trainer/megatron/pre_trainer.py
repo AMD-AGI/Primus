@@ -120,10 +120,10 @@ class MegatronPretrainTrainer(MegatronTrainer):
         kwargs["module_name"] = "pre_trainer"
 
         # Explicitly reject unknown extra_args
-        extra_args = kwargs.pop("extra_overrides", None)
+        extra_args = kwargs.pop("extra_args", None)
         if extra_args:
             raise ValueError(
-                f"[MegatronPretrainTrainer] Unexpected extra_overrides detected: {extra_args}. "
+                f"[MegatronPretrainTrainer] Unexpected extra_args detected: {extra_args}. "
                 f"Megatron backend does not support unregistered config keys."
             )
 

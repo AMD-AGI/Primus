@@ -7,6 +7,13 @@ ARG PRIMUS_TURBO_COMMIT
 # Install basic dependencies
 RUN apt-get update
 
+RUN pip3 install fbgemm-gpu && \
+    pip3 install torch==2.10.0.dev20251019+rocm7.0 \
+                 torchao==0.15.0.dev20251015+rocm7.0 \
+                 torchvision==0.25.0.dev20251020+rocm7.0 \
+                 --index-url https://download.pytorch.org/whl/nightly/rocm7.0 \
+                 --force-reinstall
+
 # Clone and install the Primus-Turbo
 WORKDIR /opt
 RUN mkdir -p /opt && cd /opt && \
