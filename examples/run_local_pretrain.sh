@@ -73,6 +73,9 @@ done < <(env | grep "^PRIMUS_")
 while IFS='=' read -r name _; do
     ENV_ARGS+=("--env" "$name")
 done < <(env | grep "^NCCL_")
+while IFS='=' read -r name _; do
+    ENV_ARGS+=("--env" "$name")
+done < <(env | grep "^PRIMUS_TURBO_")
 ENV_ARGS+=("--env" "EXP")
 ENV_ARGS+=("--env" "HF_TOKEN")
 
