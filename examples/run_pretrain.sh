@@ -249,6 +249,7 @@ LOG_INFO_RANK0 "NCCL_PXN_DISABLE: $NCCL_PXN_DISABLE"
 LOG_INFO_RANK0 "NCCL_P2P_NET_CHUNKSIZE: $NCCL_P2P_NET_CHUNKSIZE"
 LOG_INFO_RANK0 "NVTE_CK_USES_BWD_V3: $NVTE_CK_USES_BWD_V3"
 LOG_INFO_RANK0 "USE_ROCM_AITER_ROPE_BACKEND: $USE_ROCM_AITER_ROPE_BACKEND"
+LOG_INFO_RANK0 "PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: $PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32"
 LOG_INFO_RANK0 "NVTE_USE_CAST_TRANSPOSE_TRITON: $NVTE_USE_CAST_TRANSPOSE_TRITON"
 LOG_INFO_RANK0 "NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE: $NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE"
 if [[ "$PATCH_TE_FLASH_ATTN" == "1" ]]; then
@@ -287,11 +288,10 @@ if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
     cd "/workspace/turbo"
     git clone https://github.com/AMD-AGI/Primus-Turbo.git --recursive
     cd Primus-Turbo
-    git checkout dev/xiaobo_tmp_1014_attn
+    # git checkout dev/xiaobo_tmp_1014_attn
     pip3 install -r requirements.txt
-    pip3 install --no-build-isolation .
     # Set GPU_ARCHS to compile Turbo for multiple AMD GPU architectures.
-    GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
+    GPU_ARCHS="native" pip3 install --no-build-isolation .
     cd "${PRIMUS_PATH}"
     LOG_INFO "Rebuilding Primus Turbo from source done."
 else

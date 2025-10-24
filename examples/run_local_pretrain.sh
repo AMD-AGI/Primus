@@ -160,6 +160,7 @@ docker_podman_proxy run --rm \
     --env BACKEND_PATH \
     --env HF_TOKEN \
     --env USE_ROCM_AITER_ROPE_BACKEND \
+    --env PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32 \
     --env PRIMUS_TEAM \
     --env PRIMUS_USER \
     --env PRIMUS_EXP_NAME \
