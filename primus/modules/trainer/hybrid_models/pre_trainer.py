@@ -21,11 +21,15 @@ class HybridModelsPretrainTrainer(BaseModule):
         
         if self.backend_path is None:
             raise FileNotFoundError("No backend path found in sys.path")
-                
+
+        self.setup_cmd = self.setup()        
         # Build training command
         self.training_cmd = self.build_training_command()
+    
+    def setup(self) -> str:
+        return " ".join(["bash", "install.sh", "FLASH_ATTN=1", "MAMBA=1"]).strip()
 
-    def build_training_command(self):
+    def build_training_command(self) -> str:
         """Build the accelerate launch command using the configuration from the YAML file."""
         from primus.core.utils.logger import _logger as primus_logger
         # Get the experiment YAML file path from the primus config
@@ -109,22 +113,48 @@ class HybridModelsPretrainTrainer(BaseModule):
         try:
             current_directory = os.getcwd()
             primus_logger.info(f"Current directory: {current_directory}")
-            setup_cmd = ["bash", "install.sh", "FLASH_ATTN=1", "MAMBA=1"]
-            setup_result = subprocess.Popen(setup_cmd, stdout=sys.stdout, stderr=sys.stderr)
+            
+            setup_result = subprocess.Popen(
+                self.setup_cmd, 
+                shell=True, 
+                env=env, 
+                stdout=sys.stdout, 
+                stderr=sys.stderr,
+                text=True
+            )
             setup_result.wait()
             primus_logger.info(f"Install script completed successfully with return code: {setup_result.returncode}")
+            dependency_result = subprocess.Popen(
+                "python -m pip install huggingface-hub==0.24.5",
+                shell=True, 
+                env=env, 
+                stdout=sys.stdout, 
+                stderr=sys.stderr,
+                text=True
+            )
+            dependency_result.wait()
+            primus_logger.info(f"Dependency check completed successfully with return code: {dependency_result.returncode}")
+            result = subprocess.Popen(
+                "python -m pip show huggingface-hub",
+                shell=True, 
+                env=env, 
+                stdout=sys.stdout, 
+                stderr=sys.stderr,
+                text=True
+            )
+            result.wait()
+            primus_logger.info(f"Dependency check completed successfully with return code: {result.returncode}")
 
             primus_logger.info(f"Current directory: {current_directory}")
-            training_result = subprocess.Popen(self.training_cmd, stdout=sys.stdout, stderr=sys.stderr)
+            training_result = subprocess.Popen(
+                self.training_cmd, 
+                shell=True, 
+                env=env, 
+                stdout=sys.stdout, 
+                stderr=sys.stderr,
+                text=True
+            )
             training_result.wait()
-            # training_result = subprocess.run(
-            #     self.training_cmd, 
-            #     shell=True,
-            #     env=env, 
-            #     check=True, 
-            #     capture_output=True,
-            #     text=True
-            # )
             primus_logger.info(f"Training completed successfully with return code: {training_result.returncode}")
             return training_result.returncode
         except subprocess.CalledProcessError as e:
