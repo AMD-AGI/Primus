@@ -93,6 +93,8 @@ if [ "$USING_AINIC" == "1" ]; then
         -v "$DATA_PATH":"$DATA_PATH"
         -v "$RCCL_HOME_DIR":"$RCCL_HOME_DIR"
         -v "$ANP_HOME_DIR":"$ANP_HOME_DIR"
+        -v "$MPI_HOME_DIR":"$MPI_HOME_DIR" \
+        -v "$AINIC_LIB":"$AINIC_LIB"
         -v /etc/libibverbs.d/:/etc/libibverbs.d
         -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/
         -v $PRIMUS_BUILD_DIR/:$PRIMUS_BUILD_DIR/
@@ -109,9 +111,11 @@ export CLEAN_DOCKER_CONTAINER=${CLEAN_DOCKER_CONTAINER:-0}
 
 # ------------------ Optional Container Cleanup ------------------
 docker_podman_proxy() {
-    if command -v podman &>/dev/null; then
-        podman "$@"
-    elif command -v docker &>/dev/null; then
+    # if command -v podman &>/dev/null; then
+    #     podman "$@"
+    # elif command -v docker &>/dev/null; then
+    #     docker "$@"
+    if command -v docker &>/dev/null; then
         docker "$@"
     else
         echo "Neither Docker nor Podman found!" >&2
@@ -150,6 +154,7 @@ docker_podman_proxy run --rm \
     --env USING_AINIC \
     --env RCCL_HOME_DIR="$RCCL_HOME_DIR" \
     --env ANP_HOME_DIR="$ANP_HOME_DIR" \
+    --env MPI_HOME_DIR="$MPI_HOME_DIR" \
     --env AINIC_LIB="$AINIC_LIB" \
     --env PRIMUS_BUILD_DIR="$PRIMUS_BUILD_DIR" \
     --env REBUILD_BNXT \

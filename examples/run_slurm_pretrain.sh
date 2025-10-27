@@ -37,10 +37,13 @@ export LOG_DIR=${LOG_DIR:-"./output"}
 LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
 
+NODE_LIST="smci355-ccs-aus-n09-[21,25,29,33]"
+
 srun -N "${NNODES}" \
      --exclusive \
      --ntasks-per-node=1 \
      --cpus-per-task="${CPUS_PER_TASK:-256}" \
+     --nodelist="${NODE_LIST}" \
      bash -c "
           readarray -t node_array < <(scontrol show hostnames \"\$SLURM_JOB_NODELIST\")
           if [ \"\$SLURM_NODEID\" = \"0\" ]; then
@@ -70,6 +73,7 @@ srun -N "${NNODES}" \
           export BACKEND_PATH=\${BACKEND_PATH}
           export PATH_TO_BNXT_TAR_PACKAGE=\${PATH_TO_BNXT_TAR_PACKAGE}
           export RCCL_HOME_DIR=\${RCCL_HOME_DIR}
+          export MPI_HOME_DIR=\${MPI_HOME_DIR}
           export ANP_HOME_DIR=\${ANP_HOME_DIR}
           export USING_AINIC=\${USING_AINIC}
           export USE_ROCM_AITER_ROPE_BACKEND=\${USE_ROCM_AITER_ROPE_BACKEND}
