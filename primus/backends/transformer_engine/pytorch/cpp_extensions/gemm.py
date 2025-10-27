@@ -16,11 +16,20 @@ from transformer_engine.pytorch.utils import assert_dim_for_fp8_exec
 
 import primus.backends.transformer_engine.transformer_engine_torch as ptex
 
-if is_te_min_version("2.0"):
-    from transformer_engine.pytorch.cpp_extensions.gemm import (
-        reset_swizzled_inputs,
-        swizzle_inputs,
+if is_te_min_version("2.4"):
+    from ...debug.pytorch.debug_quantization import DebugQuantizer
+    from ..tensor._internal.float8_blockwise_tensor_base import (
+        Float8BlockwiseQTensorBase,
     )
+
+if is_te_min_version("2.0"):
+
+    # TE version >= 2.0 and <= 2.3
+    if not is_te_min_version("2.3", check_equality=False):
+        from transformer_engine.pytorch.cpp_extensions.gemm import (
+            reset_swizzled_inputs,
+            swizzle_inputs,
+        )
     from transformer_engine.pytorch.tensor.quantized_tensor import Quantizer
 
     def general_gemm(
@@ -86,6 +95,18 @@ if is_te_min_version("2.0"):
             if not out.is_contiguous():
                 raise ValueError("Output tensor is not contiguous.")
 
+        if is_te_min_version("2.3", check_equality=False):
+            debug_quantizer = None
+            if isinstance(quantization_params, DebugQuantizer):
+                debug_quantizer = quantization_params
+                quantization_params = quantization_params.parent_quantizer
+                A = A.get_tensor(not transa)
+                B = B.get_tensor(transb)
+            if isinstance(A, Float8BlockwiseQTensorBase) or isinstance(B, Float8BlockwiseQTensorBase):
+                # There is not use_split_accumulator == False
+                # implementation for Float8BlockwiseQTensorBase GEMM
+                use_split_accumulator = True
+
         # Use bfloat16 as default bias_dtype
         bias_dtype = torch.bfloat16 if bias is None else bias.dtype
 
@@ -114,9 +135,18 @@ if is_te_min_version("2.0"):
             "bulk_overlap": bulk_overlap,
         }
 
-        original_scale_inverses = swizzle_inputs(A, B, layout)
+        # TE version >= 2.0 and <= 2.3
+        if not is_te_min_version("2.3", check_equality=False):
+            original_scale_inverses = swizzle_inputs(A, B, layout)
+
         out, bias_grad, gelu_input, extra_output = ptex.generic_gemm(*args, **kwargs)
-        reset_swizzled_inputs(A, B, original_scale_inverses)
+
+        # TE version >= 2.0 and <= 2.3
+        if not is_te_min_version("2.3", check_equality=False):
+            reset_swizzled_inputs(A, B, original_scale_inverses)
+        elif debug_quantizer is not None:
+            # TE version >= 2.4
+            out = debug_quantizer.process_gemm_output(out)
 
         return out, bias_grad, gelu_input, extra_output
 
