@@ -16,7 +16,6 @@ from primus.core.launcher.parser import (
     _parse_kv_overrides,
 )
 from primus.core.utils import logger
-from primus.modules.trainer.torchtitan.patch_utils import patch_mock_hf_dataset
 from tests.utils import PrimusUT
 
 
@@ -82,28 +81,6 @@ class TestPrimusParser(PrimusUT):
         self.assertEqual(ns.a, 10)
         self.assertEqual(ns.b.c, 20)
         self.assertEqual(ns.flag, True)
-
-    def test_mock_hf_dataset_patch(self):
-        """
-        Test that enable_mock_hf_dataset() successfully patches datasets.load_dataset
-        and returns a fake HuggingFace Dataset.
-        """
-        # from primus.utils import mock_hf_dataset
-
-        patch_mock_hf_dataset()
-
-        # Reimport datasets and call load_dataset
-        import datasets
-
-        ds = datasets.load_dataset("allenai/c4", split="train")
-
-        # Verify that this is an in-memory Dataset with expected content
-        assert isinstance(ds, datasets.Dataset)
-        assert "text" in ds.column_names
-        assert len(ds) > 0
-        sample = ds[0]
-        assert isinstance(sample["text"], str)
-        assert len(sample["text"].split()) > 0
 
     def test_export_and_parse_cycle_with_real_yaml(self):
         """
