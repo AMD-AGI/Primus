@@ -415,6 +415,14 @@ DISTRIBUTED_ARGS=(
     --master_port "${MASTER_PORT}"
 )
 
+if [[ -n "${HYBRID_MODELS_PATH}" ]]; then
+    LOG_INFO "Current directory: $(pwd)"
+    CMD="bash $(pwd)/primus/backends/hybrid_models/run_zebra_llama.sh"
+    LOG_INFO "Launching hybrid models training with command: $CMD"
+    eval "$CMD" 2>&1 | tee "$TRAIN_LOG"
+    exit_code=${PIPESTATUS[0]}
+    exit "$exit_code"
+fi
 
 CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
 

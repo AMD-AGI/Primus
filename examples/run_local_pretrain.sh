@@ -78,6 +78,7 @@ while IFS='=' read -r name _; do
 done < <(env | grep "^PRIMUS_TURBO_")
 ENV_ARGS+=("--env" "EXP")
 ENV_ARGS+=("--env" "HF_TOKEN")
+ENV_ARGS+=("--env" "HYBRID_MODELS_PATH")
 
 HOSTNAME=$(hostname)
 ARGS=("$@")
@@ -131,6 +132,7 @@ docker_podman_proxy run --rm \
     --env PATH_TO_BNXT_TAR_PACKAGE \
     --env MEGATRON_PATH \
     --env TORCHTITAN_PATH \
+    --env HYBRID_MODELS_PATH \
     --env BACKEND_PATH \
     "${ENV_ARGS[@]}" \
     --ipc=host --network=host \
