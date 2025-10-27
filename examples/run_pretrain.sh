@@ -82,17 +82,27 @@ export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 LOG_INFO_RANK0 "Pip installing required packages ..."
 pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
 
+if [[ -n "${HYBRID_MODELS_PATH}" ]]; then
+    LOG_INFO "Current directory: $(pwd)"
+    CMD="bash $(pwd)/primus/backends/hybrid_models/run_zebra-llama.sh"
+    LOG_INFO "Launching hybrid models training with command: $CMD"
+    eval "$CMD" 2>&1 | tee "$TRAIN_LOG"
+    exit_code=${PIPESTATUS[0]}
+    exit "$exit_code"
+fi
+
 # -------------------- EXP Check --------------------
 if [ -z "${EXP:-}" ]; then
+
     LOG_ERROR "EXP must be specified (e.g., examples/megatron/exp_pretrain.yaml)." \
-              "Primus will use the configuration in EXP to train the model."
-    exit 1
+                "Primus will use the configuration in EXP to train the model."
 fi
 
 # Ensure EXP file exists, otherwise exit with error
-if [ ! -f "${EXP}" ]; then
+if [ ! -f "${EXP}" ]; then  
+
     LOG_ERROR "The specified EXP file does not exist: ${EXP}" \
-              "Primus will use the configuration in EXP to train the model."
+            "Primus will use the configuration in EXP to train the model."
     exit 1
 fi
 
@@ -415,14 +425,7 @@ DISTRIBUTED_ARGS=(
     --master_port "${MASTER_PORT}"
 )
 
-if [[ -n "${HYBRID_MODELS_PATH}" ]]; then
-    LOG_INFO "Current directory: $(pwd)"
-    CMD="bash $(pwd)/primus/backends/hybrid_models/run_zebra_llama.sh"
-    LOG_INFO "Launching hybrid models training with command: $CMD"
-    eval "$CMD" 2>&1 | tee "$TRAIN_LOG"
-    exit_code=${PIPESTATUS[0]}
-    exit "$exit_code"
-fi
+
 
 CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
 

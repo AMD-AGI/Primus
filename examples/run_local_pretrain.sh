@@ -135,11 +135,11 @@ docker_podman_proxy run --rm \
     --env HYBRID_MODELS_PATH \
     --env BACKEND_PATH \
     "${ENV_ARGS[@]}" \
-    --ipc=host --network=host \
-    --device=/dev/kfd --device=/dev/dri \
-    --cap-add=SYS_PTRACE --cap-add=CAP_SYS_ADMIN \
-    --security-opt seccomp=unconfined --group-add video \
-    --privileged --device=/dev/infiniband \
+    --device /dev/dri --device /dev/kfd \
+    --device=/dev/infiniband --network host --ipc host \
+    --group-add video --cap-add SYS_PTRACE \
+    --security-opt seccomp=unconfined --privileged \
+    -v $HOME:$HOME --shm-size 64G --name mla_training \
     "${VOLUME_ARGS[@]}" \
     "$DOCKER_IMAGE" /bin/bash -c "\
         echo '[NODE-${NODE_RANK}(${HOSTNAME})]: begin, time=$(date +"%Y.%m.%d %H:%M:%S")' && \
