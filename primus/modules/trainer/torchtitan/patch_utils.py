@@ -59,7 +59,7 @@ def patch_mock_hf_dataset() -> None:
             if "validation" in path.lower():
                 return _create_mock_text_dataset(num_samples=32)
             else:
-                return _create_mock_token_dataset(seq_len=2048, vocab_size=32000, num_samples=256)
+                return _create_mock_token_dataset(seq_len=8192, vocab_size=32000, num_samples=256)
 
         datasets.load_dataset = mock_load_dataset
         logger.warning("[PrimusPath][Dataset] Patched datasets.load_dataset successfully.")
