@@ -16,9 +16,9 @@ from transformer_engine.pytorch.utils import assert_dim_for_fp8_exec
 
 import primus.backends.transformer_engine.transformer_engine_torch as ptex
 
-if is_te_min_version("2.4"):
-    from ...debug.pytorch.debug_quantization import DebugQuantizer
-    from ..tensor._internal.float8_blockwise_tensor_base import (
+if is_te_min_version("2.3", check_equality=False):
+    from transformer_engine.debug.pytorch.debug_quantization import DebugQuantizer
+    from transformer_engine.pytorch.tensor._internal.float8_blockwise_tensor_base import (
         Float8BlockwiseQTensorBase,
     )
 
@@ -95,6 +95,7 @@ if is_te_min_version("2.0"):
             if not out.is_contiguous():
                 raise ValueError("Output tensor is not contiguous.")
 
+        # TE version > 2.3
         if is_te_min_version("2.3", check_equality=False):
             debug_quantizer = None
             if isinstance(quantization_params, DebugQuantizer):
