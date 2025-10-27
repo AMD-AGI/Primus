@@ -26,6 +26,14 @@ class TorchTitanPretrainTrainer(BaseModule):
         pre_trainer_cfg = self.primus_cfg.get_module_config("pre_trainer")
         cfg_dict = nested_namespace_to_dict(pre_trainer_cfg)
 
+        patch_mock = getattr(pre_trainer_cfg.training, "mock_data", False)
+        if patch_mock:
+            from primus.modules.trainer.torchtitan.patch_utils import (
+                patch_mock_hf_dataset,
+            )
+
+            patch_mock_hf_dataset()
+
         self.patch_torchtitan_embedding_amp(cfg_dict["primus_turbo"]["enable_embedding_autocast"])
         self.patch_titan_train_spec(pre_trainer_cfg.model.name, pre_trainer_cfg.model.flavor, extra_args)
 
@@ -460,7 +468,11 @@ class TorchTitanPretrainTrainer(BaseModule):
         if not is_dataclass(cls):
             return data
 
+        # collect valid field names
+        field_names = {f.name for f in fields(cls)}
         init_values = {}
+
+        # only use known fields for constructor
         for f in fields(cls):
             if f.name in data:
                 val = data[f.name]
@@ -468,7 +480,16 @@ class TorchTitanPretrainTrainer(BaseModule):
                     init_values[f.name] = self._dict_to_dataclass(f.type, val)
                 else:
                     init_values[f.name] = val
-        return cls(**init_values)
+
+        # instantiate dataclass
+        obj = cls(**init_values)
+
+        # attach unknown fields dynamically
+        for k, v in data.items():
+            if k not in field_names:
+                setattr(obj, k, v)
+
+        return obj
 
     def patch_torchtitan_embedding_amp(self, enable_patch: bool):
         """
