@@ -33,6 +33,7 @@ profiling:
   save_traces_folder: profile_traces
 
 training:
+  mock_data: true
   dataset: c4
   dataset_path: null
   deterministic: false
