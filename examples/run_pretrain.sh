@@ -86,7 +86,7 @@ if [[ -n "${HYBRID_MODELS_PATH}" ]]; then
     LOG_INFO "Current directory: $(pwd)"
     CMD="bash $(pwd)/primus/backends/hybrid_models/run_zebra-llama.sh"
     LOG_INFO "Launching hybrid models training with command: $CMD"
-    eval "$CMD" 2>&1 | tee "$TRAIN_LOG"
+    eval "$CMD"
     exit_code=${PIPESTATUS[0]}
     exit "$exit_code"
 fi
