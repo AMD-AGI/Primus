@@ -10,7 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 3acc0fe3271b7e41f0646382311f36bdffca0554 # feat(permute): permute op support to compute tokens_per_expert (#140)
+  PRIMUS_TURBO_COMMIT: 0385cdd615cb4eff28a1cbbf3583fccf95d11fe9 # chore: refactor grouped gemm blockwise python code (#142)
 
 jobs:
   code-lint:

@@ -34,7 +34,6 @@ from torch.testing._internal.common_utils import (
 def create_args():
     """Setup dummy args."""
     args = SimpleNamespace()
-    args.grouped_gemm_backend = "turbo-gg"
     args.turbo_sync_free_moe_stage = 0
     args.sequence_parallel = False
     args.seq_length = 4096
