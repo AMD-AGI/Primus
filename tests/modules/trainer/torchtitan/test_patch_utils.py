@@ -5,7 +5,10 @@
 ###############################################################################
 
 
-from primus.modules.trainer.torchtitan.patch_utils import patch_mock_hf_dataset
+from primus.modules.trainer.torchtitan.patch_utils import (
+    apply_patch_checkpoint_wrapper,
+    patch_mock_hf_dataset,
+)
 from tests.utils import PrimusUT
 
 
@@ -40,3 +43,39 @@ class TestTorchtitanPatch(PrimusUT):
         sample = ds[0]
         assert isinstance(sample["text"], str)
         assert len(sample["text"].split()) > 0
+
+    def test_patch_checkpoint_wrapper(self):
+        """
+        Verify Primus patch for torch.distributed.algorithms._checkpoint.checkpoint_wrapper
+        correctly ignores unsupported kwargs (e.g., early_stop)
+        without breaking checkpoint functionality.
+        """
+        import torch
+
+        apply_patch_checkpoint_wrapper()
+
+        from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+            checkpoint_wrapper,
+        )
+
+        class DummyModule(torch.nn.Module):
+            def forward(self, x):
+                return x + 1
+
+        m = DummyModule()
+
+        # Should NOT raise: TypeError: unexpected keyword argument 'early_stop'
+        try:
+            wrapped = checkpoint_wrapper(m, preserve_rng_state=False, early_stop=True)
+        except TypeError as e:
+            raise AssertionError(f"checkpoint_wrapper should ignore unsupported kwargs but raised: {e}")
+
+        assert isinstance(wrapped, torch.nn.Module)
+
+        # Verify normal forward/backward still works
+        x = torch.tensor([2.0], requires_grad=True)
+        y = wrapped(x)
+        loss = y.sum()
+        loss.backward()
+        assert x.grad is not None
+        assert torch.allclose(x.grad, torch.tensor([1.0]))

@@ -16,9 +16,6 @@ class TorchTitanPretrainTrainer(BaseModule):
         extra_args = kwargs.pop("extra_args", None)
         super().__init__(*args, **kwargs)
 
-        # important: make sure patch torchtitan logger first
-        self.patch_torchtitan_logger()
-
         self.primus_cfg = kwargs.pop("primus_config", None)
         if self.primus_cfg is None:
             raise ValueError("primus_config is required")
@@ -59,6 +56,15 @@ class TorchTitanPretrainTrainer(BaseModule):
         # so model imports succeed. Titan does not rely on AuxOutput in its
         # attention or training logic, so this patch does not affect behavior.
         self.patch_torch_flex_attention_auxoutput()
+
+        from primus.modules.trainer.torchtitan.patch_utils import (
+            apply_patch_checkpoint_wrapper,
+        )
+
+        apply_patch_checkpoint_wrapper()
+
+        # important: make sure patch torchtitan logger first
+        self.patch_torchtitan_logger()
 
         from torchtitan.config.job_config import JobConfig
         from torchtitan.train import Trainer
@@ -508,7 +514,7 @@ class TorchTitanPretrainTrainer(BaseModule):
         from primus.core.utils.logger import _logger as primus_logger
 
         if not enable_patch:
-            primus_logger.info("[PrimusPatch][AMP] Embedding AMP patch disabled via config.")
+            primus_logger.warning("[PrimusPatch][AMP] Embedding AMP patch disabled via config.")
             return
 
         def _hook(module, inp, out):
@@ -528,7 +534,7 @@ class TorchTitanPretrainTrainer(BaseModule):
             self.register_forward_hook(_hook)
 
         nn.Embedding.__init__ = new_init
-        primus_logger.info(
+        primus_logger.warning(
             "[PrimusPatch][AMP] nn.Embedding.__init__ patched for AMP/mixed precision alignment."
         )
 
@@ -540,10 +546,10 @@ class TorchTitanPretrainTrainer(BaseModule):
         from primus.core.utils.logger import _logger as primus_logger
 
         if not model_overrides:
-            primus_logger.info("[PrimusPatch][ModelOverride] No model_overrides provided, skip patch.")
+            primus_logger.warning("[PrimusPatch][ModelOverride] No model_overrides provided, skip patch.")
             return
 
-        primus_logger.info(f"[PrimusPatch][ModelOverride] Applying model_overrides: {model_overrides}")
+        primus_logger.warning(f"[PrimusPatch][ModelOverride] Applying model_overrides: {model_overrides}")
 
         # --- flatten nested form {"model": {"n_layers": 4}} → {"model.n_layers": 4}
         flat_overrides = {}
@@ -565,7 +571,7 @@ class TorchTitanPretrainTrainer(BaseModule):
                 "with the 'model.' prefix (e.g., 'model.n_layers', 'model.dim')."
             )
 
-        primus_logger.info(
+        primus_logger.warning(
             f"[PrimusPatch][ModelOverride] model_overrides provided for '{model_name}' (flavor={flavor}): {model_overrides}"
         )
 
@@ -606,7 +612,7 @@ class TorchTitanPretrainTrainer(BaseModule):
                     )
                 setattr(target_args, field_name, v)
 
-            primus_logger.info(
+            primus_logger.warning(
                 f"[PrimusPatch][ModelOverride] Patched dataclass model_args['{flavor}'] "
                 f"for '{name}' with {model_overrides} (before={before})"
             )
@@ -614,6 +620,6 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         # Apply the patch globally
         train_spec_module.get_train_spec = patched_get_train_spec
-        primus_logger.info(
+        primus_logger.warning(
             f"[PrimusPatch][ModelOverride] get_train_spec for '{model_name}' successfully monkey patched (flavor={flavor})."
         )
