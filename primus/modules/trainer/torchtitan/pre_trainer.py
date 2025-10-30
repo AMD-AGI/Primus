@@ -31,9 +31,6 @@ class TorchTitanPretrainTrainer(BaseModule):
 
             patch_mock_hf_dataset()
 
-        self.patch_torchtitan_embedding_amp(cfg_dict["primus_turbo"]["enable_embedding_autocast"])
-        self.patch_titan_train_spec(pre_trainer_cfg.model.name, pre_trainer_cfg.model.flavor, extra_args)
-
         # ensure checkpoint patch applied before import torchtitan
         # background: consolidate_safetensors_files_on_every_rank is a new DCP
         # utility introduced in newer torch versions. our current build does not
@@ -57,11 +54,15 @@ class TorchTitanPretrainTrainer(BaseModule):
         # attention or training logic, so this patch does not affect behavior.
         self.patch_torch_flex_attention_auxoutput()
 
+        self.patch_torchtitan_embedding_amp(cfg_dict["primus_turbo"]["enable_embedding_autocast"])
+
         from primus.modules.trainer.torchtitan.patch_utils import (
             apply_patch_checkpoint_wrapper,
         )
 
         apply_patch_checkpoint_wrapper()
+
+        self.patch_titan_train_spec(pre_trainer_cfg.model.name, pre_trainer_cfg.model.flavor, extra_args)
 
         # important: make sure patch torchtitan logger first
         self.patch_torchtitan_logger()
