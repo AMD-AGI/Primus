@@ -6,63 +6,13 @@
 
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
+from primus.core.projection.profiler_spec import ModuleProfilerSpec
+from primus.core.projection.training_config import TrainingConfig
 
-from .bias_dropout_add import get_bias_dropout_add_profiler_spec
-from .mlp import get_mlp_profiler_spec
-from .self_attention import get_self_attention_profiler_spec
-
-
-def get_transformer_layer_profiler_spec(config: TrainingConfig) -> ModuleProfilerSpec:
-    return ModuleProfilerSpec(
-        profiler=TransformerLayerProfiler,
-        config=config,
-        sub_profiler_specs={
-            "input_layernorm": get_layernorm_profiler_spec(config),
-            "self_attention": get_self_attention_profiler_spec(config),
-            "self_attn_bda": get_bias_dropout_add_profiler_spec(config),
-            "pre_mlp_layernorm": get_layernorm_profiler_spec(config),
-            "mlp": get_mlp_profiler_spec(config),
-            "mlp_bda": get_bias_dropout_add_profiler_spec(config),
-        },
-    )
-
-
-class TransformerLayerProfiler(BaseModuleProfiler):
-    # -------- Parameter related --------
-    @abstractmethod
-    def estimated_num_params(self) -> int:
-        return 0
-
-    @abstractmethod
-    def measured_num_params(self) -> int:
-        return 0
-
-    # -------- Memory related --------
-    @abstractmethod
-    def estimated_memory(self, batch_size: int, seq_len: int) -> int:
-        return 0
-
-    @abstractmethod
-    def measured_memory(self, batch_size: int, seq_len: int) -> int:
-        return 0
-
-    # -------- Performance related --------
-    @abstractmethod
-    def estimated_forward_time(self, batch_size: int, seq_len: int) -> int:
-        return 0
-
-    @abstractmethod
-    def estimated_backward_time(self, batch_size: int, seq_len: int) -> int:
-        return 0
-
-    @abstractmethod
-    def measured_forward_time(self, batch_size: int, seq_len: int) -> float:
-        return 0
-
-    @abstractmethod
-    def measured_backward_time(self, batch_size: int, seq_len: int) -> float:
-        return 0
-
+from .attention import AttentionProfiler
+from .dense_mlp import DenseMLPProfiler
+from .layer_norm import LayerNormProfiler
+from .moe_mlp import MoEMLPProfiler
 
 # Transformer Layer Data Flow
 #
@@ -107,3 +57,43 @@ class TransformerLayerProfiler(BaseModuleProfiler):
 #             +----------------+
 #             |     Output      |
 #             +----------------+
+
+
+class DenseTransformerLayerProfiler(BaseModuleProfiler):
+    def estimated_params_memory(self) -> int:
+        return 0
+
+    def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
+        return 0
+
+
+class MoETransformerLayerProfiler(BaseModuleProfiler):
+    def estimated_params_memory(self) -> int:
+        return 0
+
+    def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
+        return 0
+
+
+def get_dense_transformer_layer_profiler_spec(config: TrainingConfig) -> "ModuleProfilerSpec":
+    return ModuleProfilerSpec(
+        profiler=DenseTransformerLayerProfiler,
+        config=config,
+        sub_profiler_specs={
+            "layer_norm": LayerNormProfiler,
+            "self_attention": AttentionProfiler,
+            "mlp": DenseMLPProfiler,
+        },
+    )
+
+
+def get_moe_transformer_layer_profiler_spec(config: TrainingConfig) -> "ModuleProfilerSpec":
+    return ModuleProfilerSpec(
+        profiler=MoETransformerLayerProfiler,
+        config=config,
+        sub_profiler_specs={
+            "layer_norm": LayerNormProfiler,
+            "self_attention": AttentionProfiler,
+            "mlp": DenseMLPProfiler,
+        },
+    )
