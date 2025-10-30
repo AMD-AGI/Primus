@@ -13,7 +13,7 @@ def run(args, overrides):
         from primus.core.projection.memory_projection import launch_projection_from_cli
         launch_projection_from_cli(args, overrides)
     else:
-        raise NotImplementedError(f"Unsupported train suite: {args.suite}")
+        raise NotImplementedError(f"Unsupported projection suite: {args.suite}")
 
 
 def register_subcommand(subparsers):

@@ -4,17 +4,16 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from dataclasses import dataclass, field
-from typing import Dict, Optional, Type, Union
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
+from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import TrainingConfig
 
 
-@dataclass
-class ModuleProfilerSpec:
-    profiler: Type[BaseModuleProfiler]
-    config: Type[TrainingConfig]
-    sub_profiler_specs: Optional[Dict[str, Union[Type[BaseModuleProfiler], "ModuleProfilerSpec", None]]] = (
-        field(default_factory=lambda: {})
-    )
+class AttentionProfiler(BaseModuleProfiler):
+    def estimated_params_memory(self) -> int:
+        # embedding + layers + outputlayer
+        return 0
+
+    def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
+        return 0

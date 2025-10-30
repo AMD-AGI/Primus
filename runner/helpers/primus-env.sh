@@ -154,6 +154,6 @@ log_exported_vars "Performance tuning" \
 
 # -------------------- setup_pythonpath -------------------
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
-site_packages=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+site_packages=$(python3 -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
 export PYTHONPATH="${PRIMUS_PATH}:${site_packages}:${PYTHONPATH:-}"
 log_exported_vars "pythonpath" PYTHONPATH

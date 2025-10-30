@@ -6,44 +6,14 @@
 
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
+from primus.core.projection.profiler_spec import ModuleProfilerSpec
+from primus.core.projection.training_config import TrainingConfig
 
 
 class LossProfiler(BaseModuleProfiler):
-    def __init__(self, name: str):
-        self.name = name
-
-    # -------- Parameter related --------
-    @abstractmethod
-    def estimated_num_params(self) -> int:
+    def estimated_params_memory(self) -> int:
         # embedding + layers + outputlayer
         return 0
 
-    @abstractmethod
-    def measured_num_params(self) -> int:
-        return 0
-
-    # -------- Memory related --------
-    @abstractmethod
-    def estimated_memory(self, batch_size: int, seq_len: int) -> int:
-        return 0
-
-    @abstractmethod
-    def measured_memory(self, batch_size: int, seq_len: int) -> int:
-        return 0
-
-    # -------- Performance related --------
-    @abstractmethod
-    def estimated_forward_time(self, batch_size: int, seq_len: int) -> int:
-        return 0
-
-    @abstractmethod
-    def estimated_backward_time(self, batch_size: int, seq_len: int) -> int:
-        return 0
-
-    @abstractmethod
-    def measured_forward_time(self, batch_size: int, seq_len: int) -> float:
-        return 0
-
-    @abstractmethod
-    def measured_backward_time(self, batch_size: int, seq_len: int) -> float:
+    def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
         return 0
