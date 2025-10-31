@@ -258,8 +258,10 @@ class TorchTitanPretrainTrainer(BaseModule):
             # ******* llama3 Attention Model *******
             import torchtitan
 
+            from primus.backends.torchtitan.models.deepseek_v3.model.model import (
+                Attention,
+            )
             from primus.backends.torchtitan.models.llama3.model.model import Attention
-            from primus.backends.torchtitan.models.deepseek_v3.model.model import Attention
 
             torchtitan.models.llama3.model.model.Attention = Attention
             torchtitan.models.deepseek_v3.model.model.Attention = Attention
