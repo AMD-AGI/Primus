@@ -86,8 +86,6 @@ class TestTorchTitanTrainer(PrimusUT):
                 "4",
                 "--training.steps",
                 "3",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
             ],
         )
 
@@ -101,8 +99,6 @@ class TestTorchTitanTrainer(PrimusUT):
                 "4",
                 "--training.steps",
                 "3",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
             ],
         )
 
@@ -116,38 +112,32 @@ class TestTorchTitanTrainer(PrimusUT):
                 "4",
                 "--training.steps",
                 "3",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
             ],
         )
 
-    def test_llama3_1_70B_bf16(self):
+    def test_llama3_1_70B_BF16(self):
         run_script(
             self.__class__.__name__,
-            "llama3.1_70B_bf16",
+            "llama3.1_70B_BF16",
             "examples/torchtitan/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
                 "--training.steps",
                 "3",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
             ],
         )
 
-    def test_llama3_1_70B_fp8(self):
+    def test_llama3_1_70B_FP8(self):
         run_script(
             self.__class__.__name__,
-            "llama3.1_70B_fp8",
+            "llama3.1_70B_FP8",
             "examples/torchtitan/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
                 "--training.steps",
                 "3",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
             ],
         )
 
@@ -161,8 +151,8 @@ class TestTorchTitanTrainer(PrimusUT):
     #             "4",
     #             "--training.steps",
     #             "3",
-    #             "--primus_turbo.enable_primus_turbo",
-    #             "False",
+    #             # "--primus_turbo.enable_primus_turbo",
+    #             # "False",
     #         ],
     #     )
 
@@ -176,8 +166,8 @@ class TestTorchTitanTrainer(PrimusUT):
     #             "4",
     #             "--training.steps",
     #             "3",
-    #             "--primus_turbo.enable_primus_turbo",
-    #             "False",
+    #             # "--primus_turbo.enable_primus_turbo",
+    #             # "False",
     #         ],
     #     )
 
@@ -191,8 +181,8 @@ class TestTorchTitanTrainer(PrimusUT):
     #             "4",
     #             "--training.steps",
     #             "3",
-    #             "--primus_turbo.enable_primus_turbo",
-    #             "False",
+    #             # "--primus_turbo.enable_primus_turbo",
+    #             # "False",
     #         ],
     #     )
 
@@ -208,8 +198,8 @@ class TestTorchTitanTrainer(PrimusUT):
     #             "1",
     #             "--training.steps",
     #             "3",
-    #             "--primus_turbo.enable_primus_turbo",
-    #             "False",
+    #             # "--primus_turbo.enable_primus_turbo",
+    #             # "False",
     #             "--model.moe_args.use_grouped_mm",
     #             "False",
     #         ],
@@ -227,8 +217,8 @@ class TestTorchTitanTrainer(PrimusUT):
     #             "1",
     #             "--training.steps",
     #             "3",
-    #             "--primus_turbo.enable_primus_turbo",
-    #             "False",
+    #             # "--primus_turbo.enable_primus_turbo",
+    #             # "False",
     #             "--model.moe_args.use_grouped_mm",
     #             "False",
     #         ],
