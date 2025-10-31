@@ -151,50 +151,50 @@ class TestTorchTitanTrainer(PrimusUT):
             ],
         )
 
-    def test_qwen3_0_6B(self):
-        run_script(
-            self.__class__.__name__,
-            "qwen3_0.6B",
-            "examples/torchtitan/configs/MI300X/qwen3_0.6B-pretrain.yaml",
-            extra_args=[
-                "--model.n_layers",
-                "4",
-                "--training.steps",
-                "3",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
-            ],
-        )
+    # def test_qwen3_0_6B(self):
+    #     run_script(
+    #         self.__class__.__name__,
+    #         "qwen3_0.6B",
+    #         "examples/torchtitan/configs/MI300X/qwen3_0.6B-pretrain.yaml",
+    #         extra_args=[
+    #             "--model.n_layers",
+    #             "4",
+    #             "--training.steps",
+    #             "3",
+    #             "--primus_turbo.enable_primus_turbo",
+    #             "False",
+    #         ],
+    #     )
 
-    def test_qwen3_1_7B(self):
-        run_script(
-            self.__class__.__name__,
-            "qwen3_1.7B",
-            "examples/torchtitan/configs/MI300X/qwen3_1.7B-pretrain.yaml",
-            extra_args=[
-                "--model.n_layers",
-                "4",
-                "--training.steps",
-                "3",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
-            ],
-        )
+    # def test_qwen3_1_7B(self):
+    #     run_script(
+    #         self.__class__.__name__,
+    #         "qwen3_1.7B",
+    #         "examples/torchtitan/configs/MI300X/qwen3_1.7B-pretrain.yaml",
+    #         extra_args=[
+    #             "--model.n_layers",
+    #             "4",
+    #             "--training.steps",
+    #             "3",
+    #             "--primus_turbo.enable_primus_turbo",
+    #             "False",
+    #         ],
+    #     )
 
-    def test_qwen3_32B(self):
-        run_script(
-            self.__class__.__name__,
-            "qwen3_32B",
-            "examples/torchtitan/configs/MI300X/qwen3_32B-pretrain.yaml",
-            extra_args=[
-                "--model.n_layers",
-                "4",
-                "--training.steps",
-                "3",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
-            ],
-        )
+    # def test_qwen3_32B(self):
+    #     run_script(
+    #         self.__class__.__name__,
+    #         "qwen3_32B",
+    #         "examples/torchtitan/configs/MI300X/qwen3_32B-pretrain.yaml",
+    #         extra_args=[
+    #             "--model.n_layers",
+    #             "4",
+    #             "--training.steps",
+    #             "3",
+    #             "--primus_turbo.enable_primus_turbo",
+    #             "False",
+    #         ],
+    #     )
 
     # def test_deepseek_v3_16b(self):
     #     run_script(

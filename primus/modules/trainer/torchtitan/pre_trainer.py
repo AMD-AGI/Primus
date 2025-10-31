@@ -23,6 +23,8 @@ class TorchTitanPretrainTrainer(BaseModule):
         pre_trainer_cfg = self.primus_cfg.get_module_config("pre_trainer")
         cfg_dict = nested_namespace_to_dict(pre_trainer_cfg)
 
+        self.patch_torchtitan_embedding_amp(cfg_dict["primus_turbo"]["enable_embedding_autocast"])
+
         patch_mock = getattr(pre_trainer_cfg.training, "mock_data", False)
         if patch_mock:
             from primus.modules.trainer.torchtitan.patch_utils import (
@@ -53,8 +55,6 @@ class TorchTitanPretrainTrainer(BaseModule):
         # so model imports succeed. Titan does not rely on AuxOutput in its
         # attention or training logic, so this patch does not affect behavior.
         self.patch_torch_flex_attention_auxoutput()
-
-        self.patch_torchtitan_embedding_amp(cfg_dict["primus_turbo"]["enable_embedding_autocast"])
 
         from primus.modules.trainer.torchtitan.patch_utils import (
             apply_patch_checkpoint_wrapper,
@@ -528,6 +528,9 @@ class TorchTitanPretrainTrainer(BaseModule):
 
             if torch.is_autocast_enabled():
                 runtime_dtype = torch.get_autocast_gpu_dtype()
+                primus_logger.warning(
+                    f"[PrimusPatch][AMP] Autocast active, casting Embedding output to runtime dtype {runtime_dtype}."
+                )
                 if out.dtype != runtime_dtype:
                     return out.to(runtime_dtype)
             return out
