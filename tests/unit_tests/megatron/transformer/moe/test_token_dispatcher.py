@@ -7,18 +7,28 @@
 
 
 import dataclasses
+import os
 from contextlib import contextmanager
 from types import SimpleNamespace
 
 import megatron.core.parallel_state as ps
 import torch
+import torch.distributed as dist
 from megatron.core import parallel_state
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.moe_utils import get_capacity
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.training.global_vars import set_args
 from megatron.training.initialize import _set_random_seed
-from torch.testing._internal.common_utils import run_tests
+from torch.testing._internal.common_distributed import (
+    MultiProcessTestCase,
+    skip_if_lt_x_gpu,
+)
+from torch.testing._internal.common_utils import (
+    instantiate_parametrized_tests,
+    run_tests,
+)
 
 
 def create_args():
@@ -301,83 +311,83 @@ class MoEModelTestContainer:
         ), "Gradient of hidden states should be same as hidden states"
 
 
-# @instantiate_parametrized_tests
-# class TestFlexDispatcher(MultiProcessTestCase):
-#     def tearDown(self):
-#         super().tearDown()
+@instantiate_parametrized_tests
+class TestFlexDispatcher(MultiProcessTestCase):
+    def tearDown(self):
+        super().tearDown()
 
-#     def setUp(self) -> None:
-#         super().setUp()
-#         self._spawn_processes()
+    def setUp(self) -> None:
+        super().setUp()
+        self._spawn_processes()
 
-#     @property
-#     def world_size(self) -> int:
-#         return torch.cuda.device_count()
+    @property
+    def world_size(self) -> int:
+        return torch.cuda.device_count()
 
-#     @property
-#     def device(self) -> torch.device:
-#         return torch.device("cuda", self.rank)
+    @property
+    def device(self) -> torch.device:
+        return torch.device("cuda", self.rank)
 
-#     def _init_process(self):
-#         os.environ["WORLD_SIZE"] = str(self.world_size)
-#         os.environ["LOCAL_RANK"] = str(self.rank)
+    def _init_process(self):
+        os.environ["WORLD_SIZE"] = str(self.world_size)
+        os.environ["LOCAL_RANK"] = str(self.rank)
 
-#         torch.cuda.set_device(self.device)
-#         store = dist.FileStore(self.file_name, self.world_size)
-#         dist.init_process_group(
-#             backend="nccl",
-#             world_size=self.world_size,
-#             rank=self.rank,
-#             store=store,
-#         )
+        torch.cuda.set_device(self.device)
+        store = dist.FileStore(self.file_name, self.world_size)
+        dist.init_process_group(
+            backend="nccl",
+            world_size=self.world_size,
+            rank=self.rank,
+            store=store,
+        )
 
-#     @skip_if_lt_x_gpu(8)
-#     def test_forward_backward(self):
-#         self._init_process()
+    @skip_if_lt_x_gpu(8)
+    def test_forward_backward(self):
+        self._init_process()
 
-#         args = create_args()
-#         set_args(args)
-#         with custom_patch():
-#             for tp_size, ep_size in [(8, 1), (1, 8), (2, 4)]:
-#                 container = MoEModelTestContainer(
-#                     tp_size=tp_size,
-#                     ep_size=ep_size,
-#                     pp_size=1,
-#                     num_moe_experts=8,
-#                     moe_router_topk=2,
-#                     moe_router_load_balancing_type="aux_loss",
-#                     moe_token_dispatcher_type="flex",
-#                     moe_permute_fusion=True,
-#                     hidden_size=32,
-#                     moe_enable_deepep=True,
-#                     test_dtype=torch.bfloat16,
-#                 )
-#                 container.dispatcher_dropless_test()
+        args = create_args()
+        set_args(args)
+        with custom_patch():
+            for tp_size, ep_size in [(8, 1), (1, 8), (2, 4)]:
+                container = MoEModelTestContainer(
+                    tp_size=tp_size,
+                    ep_size=ep_size,
+                    pp_size=1,
+                    num_moe_experts=8,
+                    moe_router_topk=2,
+                    moe_router_load_balancing_type="aux_loss",
+                    moe_token_dispatcher_type="flex",
+                    moe_permute_fusion=True,
+                    hidden_size=32,
+                    moe_enable_deepep=True,
+                    test_dtype=torch.bfloat16,
+                )
+                container.dispatcher_dropless_test()
 
-#     @skip_if_lt_x_gpu(8)
-#     def test_capacity_forward_backward(self):
-#         self._init_process()
-#         args = create_args()
-#         set_args(args)
-#         with custom_patch():
-#             for tp_size, ep_size in [(1, 8), (8, 1), (4, 2)]:
-#                 container = MoEModelTestContainer(
-#                     tp_size=tp_size,
-#                     ep_size=ep_size,
-#                     pp_size=1,
-#                     num_moe_experts=8,
-#                     moe_router_topk=2,
-#                     moe_router_load_balancing_type="aux_loss",
-#                     moe_token_dispatcher_type="flex",
-#                     moe_token_drop_policy="probs",
-#                     moe_expert_capacity_factor=0.5,
-#                     moe_pad_expert_input_to_capacity=False,
-#                     moe_permute_fusion=True,
-#                     hidden_size=32,
-#                     moe_enable_deepep=True,
-#                     test_dtype=torch.bfloat16,
-#                 )
-#                 container.dispatcher_capacity_test()
+    @skip_if_lt_x_gpu(8)
+    def test_capacity_forward_backward(self):
+        self._init_process()
+        args = create_args()
+        set_args(args)
+        with custom_patch():
+            for tp_size, ep_size in [(1, 8), (8, 1), (4, 2)]:
+                container = MoEModelTestContainer(
+                    tp_size=tp_size,
+                    ep_size=ep_size,
+                    pp_size=1,
+                    num_moe_experts=8,
+                    moe_router_topk=2,
+                    moe_router_load_balancing_type="aux_loss",
+                    moe_token_dispatcher_type="flex",
+                    moe_token_drop_policy="probs",
+                    moe_expert_capacity_factor=0.5,
+                    moe_pad_expert_input_to_capacity=False,
+                    moe_permute_fusion=True,
+                    hidden_size=32,
+                    moe_enable_deepep=True,
+                    test_dtype=torch.bfloat16,
+                )
+                container.dispatcher_capacity_test()
 
 
 if __name__ == "__main__":
