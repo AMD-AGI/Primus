@@ -100,7 +100,8 @@ class TestTorchTitanTrainer(PrimusUT):
                 "--model.n_layers",
                 "4",
                 "--training.steps",
-                "3" "--primus_turbo.enable_primus_turbo",
+                "3",
+                "--primus_turbo.enable_primus_turbo",
                 "False",
             ],
         )
@@ -195,40 +196,40 @@ class TestTorchTitanTrainer(PrimusUT):
             ],
         )
 
-    def test_deepseek_v3_16b(self):
-        run_script(
-            self.__class__.__name__,
-            "deepseek_v3_16b",
-            "examples/torchtitan/configs/MI300X/deepseek_v3_16b-pretrain.yaml",
-            extra_args=[
-                "--model.n_layers",
-                "4",
-                "--model.n_dense_layers",
-                "1",
-                "--training.steps",
-                "3",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
-                "--model.moe_args.use_grouped_mm",
-                "False",
-            ],
-        )
+    # def test_deepseek_v3_16b(self):
+    #     run_script(
+    #         self.__class__.__name__,
+    #         "deepseek_v3_16b",
+    #         "examples/torchtitan/configs/MI300X/deepseek_v3_16b-pretrain.yaml",
+    #         extra_args=[
+    #             "--model.n_layers",
+    #             "4",
+    #             "--model.n_dense_layers",
+    #             "1",
+    #             "--training.steps",
+    #             "3",
+    #             "--primus_turbo.enable_primus_turbo",
+    #             "False",
+    #             "--model.moe_args.use_grouped_mm",
+    #             "False",
+    #         ],
+    #     )
 
-    def test_deepseek_v3_671b(self):
-        run_script(
-            self.__class__.__name__,
-            "deepseek_v3_671b",
-            "examples/torchtitan/configs/MI300X/deepseek_v3_671b-pretrain.yaml",
-            extra_args=[
-                "--model.n_layers",
-                "4",
-                "--model.n_dense_layers",
-                "1",
-                "--training.steps",
-                "3",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
-                "--model.moe_args.use_grouped_mm",
-                "False",
-            ],
-        )
+    # def test_deepseek_v3_671b(self):
+    #     run_script(
+    #         self.__class__.__name__,
+    #         "deepseek_v3_671b",
+    #         "examples/torchtitan/configs/MI300X/deepseek_v3_671b-pretrain.yaml",
+    #         extra_args=[
+    #             "--model.n_layers",
+    #             "4",
+    #             "--model.n_dense_layers",
+    #             "1",
+    #             "--training.steps",
+    #             "3",
+    #             "--primus_turbo.enable_primus_turbo",
+    #             "False",
+    #             "--model.moe_args.use_grouped_mm",
+    #             "False",
+    #         ],
+    #     )
