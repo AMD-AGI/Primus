@@ -230,7 +230,7 @@ class TorchTitanPretrainTrainer(BaseModule):
                     setattr(self, k, v)
 
         setattr(flex_mod, "AuxOutput", _AuxOutput)
-        primus_logger.info(
+        primus_logger.warning(
             "[PrimusPatch][FlexAttn] Injected fallback AuxOutput stub (Titan does not rely on this)."
         )
 
@@ -542,7 +542,10 @@ class TorchTitanPretrainTrainer(BaseModule):
     def patch_titan_train_spec(self, model_name: str, flavor: str, model_overrides: Dict[str, Any]):
         """
         Monkey patch torchtitan.train_spec.get_train_spec to override model args dynamically.
-        All override keys MUST start with "model." (e.g., {"model.n_layers": 8}).
+        Supports nested overrides like:
+            {"model.moe_args.num_experts": 16, "model.moe_args.router.score_func": "softmax"}
+
+        All override keys MUST start with "model.".
         """
         from primus.core.utils.logger import _logger as primus_logger
 
@@ -552,38 +555,71 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         primus_logger.warning(f"[PrimusPatch][ModelOverride] Applying model_overrides: {model_overrides}")
 
-        # --- flatten nested form {"model": {"n_layers": 4}} → {"model.n_layers": 4}
+        # --- Step 1. Flatten any nested dict under 'model'
         flat_overrides = {}
         for k, v in model_overrides.items():
             if k == "model" and isinstance(v, dict):
-                for subk, subv in v.items():
-                    flat_overrides[f"model.{subk}"] = subv
+
+                def _flatten(prefix, d):
+                    for subk, subv in d.items():
+                        if isinstance(subv, dict):
+                            _flatten(f"{prefix}.{subk}", subv)
+                        else:
+                            flat_overrides[f"{prefix}.{subk}"] = subv
+
+                _flatten("model", v)
             else:
                 flat_overrides[k] = v
         model_overrides = flat_overrides
 
         # Enforce `model.` prefix strictly
-        bad_keys = [k for k in model_overrides.keys() if not k.startswith("model.")]
+        bad_keys = [k for k in model_overrides if not k.startswith("model.")]
         if bad_keys:
             raise ValueError(
-                # f"[PrimusPatch][ModelOverride] Unsupported override keys (must start with 'model.'): {bad_keys}"
                 f"[PrimusPatch][ModelOverride] Invalid override keys detected: {bad_keys}. "
                 "These parameters belong to the model configuration and must be specified "
-                "with the 'model.' prefix (e.g., 'model.n_layers', 'model.dim')."
+                "with the 'model.' prefix (e.g., 'model.n_layers' or 'model.moe_args.num_experts')."
             )
 
-        primus_logger.warning(
-            f"[PrimusPatch][ModelOverride] model_overrides provided for '{model_name}' (flavor={flavor}): {model_overrides}"
-        )
+        primus_logger.warning(f"[PrimusPatch][ModelOverride] Applying overrides: {model_overrides}")
 
         import torchtitan.protocols.train_spec as train_spec_module
 
         orig_get_train_spec = train_spec_module.get_train_spec
 
+        def _deep_setattr(obj, attr_path: str, value: Any):
+            """
+            Support setting nested attributes like "moe_args.num_experts" on dataclass or dict.
+            """
+            parts = attr_path.split(".")
+            current = obj
+            for p in parts[:-1]:
+                if is_dataclass(current):
+                    current = getattr(current, p)
+                elif isinstance(current, dict):
+                    current = current[p]
+                else:
+                    raise TypeError(
+                        f"[PrimusPatch] Unsupported type in path traversal: {type(current)} at {p}"
+                    )
+            last_key = parts[-1]
+            if is_dataclass(current):
+                if not hasattr(current, last_key):
+                    raise AttributeError(
+                        f"[PrimusPatch] '{type(current).__name__}' has no field '{last_key}'"
+                    )
+                setattr(current, last_key, value)
+            elif isinstance(current, dict):
+                if last_key not in current:
+                    raise KeyError(f"[PrimusPatch] dict has no key '{last_key}'")
+                current[last_key] = value
+            else:
+                raise TypeError(f"[PrimusPatch] Unsupported type for final assignment: {type(current)}")
+
         def patched_get_train_spec(name: str):
             spec = orig_get_train_spec(name)
             if name != model_name:
-                return spec  # only patch targeted model
+                return spec
 
             assert hasattr(
                 spec, "model_args"
@@ -605,17 +641,14 @@ class TorchTitanPretrainTrainer(BaseModule):
             ), f"[PrimusPatch][ModelOverride] Expected dataclass model_args, got {type(target_args)}"
 
             before = asdict(target_args)
-            for k, v in model_overrides.items():
-                field_name = k[len("model.") :]
-                if not hasattr(target_args, field_name):
-                    raise AttributeError(
-                        f"[PrimusPatch][ModelOverride] '{type(target_args).__name__}' has no field '{field_name}'"
-                    )
-                setattr(target_args, field_name, v)
+
+            for full_key, new_value in model_overrides.items():
+                field_path = full_key[len("model.") :]
+                _deep_setattr(target_args, field_path, new_value)
 
             primus_logger.warning(
-                f"[PrimusPatch][ModelOverride] Patched dataclass model_args['{flavor}'] "
-                f"for '{name}' with {model_overrides} (before={before})"
+                f"[PrimusPatch][ModelOverride] Successfully patched model_args['{flavor}'] for '{name}' with "
+                f"{model_overrides}. Diff(before→after): {before} → {asdict(target_args)}"
             )
             return spec
 
