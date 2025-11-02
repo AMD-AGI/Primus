@@ -35,6 +35,7 @@ if [[ "$1" == "--help" || "$1" == "-h" ]]; then
     exit 0
 fi
 
+
 # Path to experiment configuration YAML
 EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
 
@@ -116,49 +117,36 @@ if [[ "${CLEAN_DOCKER_CONTAINER:-0}" == "1" ]]; then
 fi
 
 # ------------------ Launch Training Container ------------------
-if [[ -n "${HYBRID_MODELS_PATH}" ]]; then
-    echo "Running Zebra-Llama in ${PWD}"
-    docker_podman_proxy run --rm \
-        --env HYBRID_MODELS_PATH \
-        --env BACKEND_PATH \
-        --device /dev/dri --device /dev/kfd \
-        --device=/dev/infiniband --network host --ipc host \
-        --group-add video --cap-add SYS_PTRACE \
-        --security-opt seccomp=unconfined --privileged \
-        -v $HOME:$HOME --shm-size 64G --name mla_training \
-        $DOCKER_IMAGE /bin/bash -c "\
-        bash $PRIMUS_PATH/primus/backends/hybrid_models/run_zebra-llama.sh
+
+docker_podman_proxy run --rm \
+    --env MASTER_ADDR \
+    --env MASTER_PORT \
+    --env NNODES \
+    --env NODE_RANK \
+    --env GPUS_PER_NODE \
+    --env DATA_PATH \
+    --env TRAIN_LOG \
+    --env HSA_NO_SCRATCH_RECLAIM \
+    --env NVTE_CK_USES_BWD_V3 \
+    --env GPU_MAX_HW_QUEUES \
+    --env GLOO_SOCKET_IFNAME \
+    --env REBUILD_BNXT \
+    --env PATH_TO_BNXT_TAR_PACKAGE \
+    --env MEGATRON_PATH \
+    --env TORCHTITAN_PATH \
+    --env HYBRID_MODELS_PATH \
+    --env BACKEND_PATH \
+    "${ENV_ARGS[@]}" \
+    --device /dev/dri --device /dev/kfd \
+    --device=/dev/infiniband --network host --ipc host \
+    --group-add video --cap-add SYS_PTRACE \
+    --security-opt seccomp=unconfined --privileged \
+    "${VOLUME_ARGS[@]}" \
+    "$DOCKER_IMAGE" /bin/bash -c "\
+        echo '[NODE-${NODE_RANK}(${HOSTNAME})]: begin, time=$(date +"%Y.%m.%d %H:%M:%S")' && \
+        cd $PRIMUS_PATH && \
+        bash examples/run_pretrain.sh \"\$@\" 2>&1 && \
+        echo '[NODE-${NODE_RANK}(${HOSTNAME})]: end, time=$(date +"%Y.%m.%d %H:%M:%S")'
     " bash "${ARGS[@]}"
-else
-    docker_podman_proxy run --rm \
-        --env MASTER_ADDR \
-        --env MASTER_PORT \
-        --env NNODES \
-        --env NODE_RANK \
-        --env GPUS_PER_NODE \
-        --env DATA_PATH \
-        --env TRAIN_LOG \
-        --env HSA_NO_SCRATCH_RECLAIM \
-        --env NVTE_CK_USES_BWD_V3 \
-        --env GPU_MAX_HW_QUEUES \
-        --env GLOO_SOCKET_IFNAME \
-        --env REBUILD_BNXT \
-        --env PATH_TO_BNXT_TAR_PACKAGE \
-        --env MEGATRON_PATH \
-        --env TORCHTITAN_PATH \
-        --env HYBRID_MODELS_PATH \
-        --env BACKEND_PATH \
-        "${ENV_ARGS[@]}" \
-        --device /dev/dri --device /dev/kfd \
-        --device=/dev/infiniband --network host --ipc host \
-        --group-add video --cap-add SYS_PTRACE \
-        --security-opt seccomp=unconfined --privileged \
-        "${VOLUME_ARGS[@]}" \
-        "$DOCKER_IMAGE" /bin/bash -c "\
-            echo '[NODE-${NODE_RANK}(${HOSTNAME})]: begin, time=$(date +"%Y.%m.%d %H:%M:%S")' && \
-            cd $PRIMUS_PATH && \
-            bash examples/run_pretrain.sh \"\$@\" 2>&1 && \
-            echo '[NODE-${NODE_RANK}(${HOSTNAME})]: end, time=$(date +"%Y.%m.%d %H:%M:%S")'
-        " bash "${ARGS[@]}"
-fi
+
 
