@@ -23,20 +23,22 @@ modules:
         log_freq: 1
 
       training:
-        batch_size: 19
+        batch_size: 8
         compile: true
-        steps: 50
+        steps: 20
 
       activation_checkpoint:
-        mode: "full"  # ["none", "selective", "full"]
-        selective_ac_option: "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
+        mode: "none"  # ["none", "selective", "full"]
+        #selective_ac_option: "op"  # "int" = ac every positive int layer or 'op', ac based on ops policy
 
       float8:
         enable_fsdp_float8_all_gather: true
         precompute_float8_dynamic_scale_for_fsdp: true
+        force_recompute_fp8_weight_in_bwd: true
         filter_fqns: ["output"]
 
       primus_turbo:
-        enable_primus_turbo: true
-        enable_attention_float8: false
-        use_turbo_fp8_gemm: false  # 禁用Primus-Turbo FP8（与PyTorch FP8冲突）
+        enable_primus_turbo : true
+        use_turbo_attention: true
+        enable_attention_float8 : false
+        use_turbo_fp8_gemm: false  

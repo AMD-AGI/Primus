@@ -17,6 +17,7 @@ export CPUS_PER_TASK=128
 # export HSA_NO_SCRATCH_RECLAIM=0 
 export NVTE_CK_USES_BWD_V3=1
 export USE_ROCM_AITER_ROPE_BACKEND=0
+export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=0
 
 
 ######################### Training Config #########################

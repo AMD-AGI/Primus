@@ -68,6 +68,7 @@ srun -N "${NNODES}" \
           export MEGATRON_PATH=\${MEGATRON_PATH}
           export TORCHTITAN_PATH=\${TORCHTITAN_PATH}
           export BACKEND_PATH=\${BACKEND_PATH}
+          export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=\${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32}
           export PATH_TO_BNXT_TAR_PACKAGE=\${PATH_TO_BNXT_TAR_PACKAGE}
           export RCCL_HOME_DIR=\${RCCL_HOME_DIR}
           export ANP_HOME_DIR=\${ANP_HOME_DIR}

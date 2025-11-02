@@ -1,6 +1,7 @@
 #!/bin/bash
 export USING_AINIC=1
-export REBUILD_PRIMUS_TURBO=1
+export REBUILD_PRIMUS_TURBO=0
+
 export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
 export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
 # export AINIC_LIB="/apps/gpuperf/ainic-driver-20251007/lib/"
@@ -9,11 +10,12 @@ export NCCL_SOCKET_IFNAME="enp193s0f1np1"
 export GLOO_SOCKET_IFNAME="enp193s0f1np1"
 export CLEAN_DOCKER_CONTAINER=1
 export USE_ROCM_AITER_ROPE_BACKEND=0
+export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=0
 
 export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
 
 export CPUS_PER_TASK=128
-export HSA_NO_SCRATCH_RECLAIM=0 
+# export HSA_NO_SCRATCH_RECLAIM=0 
 export NVTE_CK_USES_BWD_V3=1
 
 export EXP="examples/torchtitan/configs/llama3.1_405B-FP8-pretrain.yaml"

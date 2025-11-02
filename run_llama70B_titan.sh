@@ -9,13 +9,14 @@ export NCCL_SOCKET_IFNAME="enp193s0f1np1"
 export GLOO_SOCKET_IFNAME="enp193s0f1np1"
 export CLEAN_DOCKER_CONTAINER=1
 export USE_ROCM_AITER_ROPE_BACKEND=0
-export REBUILD_PRIMUS_TURBO=1
+export REBUILD_PRIMUS_TURBO=0
 
 export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
 
 export CPUS_PER_TASK=128
 export HSA_NO_SCRATCH_RECLAIM=0 
 export NVTE_CK_USES_BWD_V3=1
+export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=0
 
 export EXP="examples/torchtitan/configs/llama3.1_70B-FP8-pretrain.yaml"
 mkdir -p data

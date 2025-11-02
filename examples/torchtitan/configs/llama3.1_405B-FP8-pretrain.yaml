@@ -18,10 +18,12 @@ modules:
       training:
         batch_size: 2
         compile: true
-        steps: 30
+        steps: 10
       
-      # profiling:
-      #   profile_freq: 6
+      
+      profiling:
+        enable_profiling: true
+        profile_freq: 6
 
       metrics:
         log_freq: 1
@@ -45,5 +47,5 @@ modules:
       float8:
         enable_fsdp_float8_all_gather: true
         precompute_float8_dynamic_scale_for_fsdp: true
-        force_recompute_fp8_weight_in_bwd: false
+        force_recompute_fp8_weight_in_bwd: true
         filter_fqns: ["output"]

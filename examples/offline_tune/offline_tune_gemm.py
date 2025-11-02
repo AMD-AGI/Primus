@@ -231,8 +231,10 @@ class OfflineTuneGemm:
                 self.src_script_list.append(src_script)
                 # tune script
                 tune_script_dict = copy.deepcopy(src_script_dict)
-                del tune_script_dict["--algo_method"]
-                del tune_script_dict["--solution_index"]
+                if "--algo_method" in tune_script_dict:
+                    del tune_script_dict["--algo_method"]
+                if "--solution_index" in tune_script_dict:
+                    del tune_script_dict["--solution_index"]
                 tune_script_dict["--requested_solution"] = self.REQUESTED_SOLUTION
                 tune_script_dict["--skip_slow_solution_ratio"] = self.SKIP_LOW_SOLUTION
                 tune_script = self.HIPBLASLT_BENCH + " ".join(f"{k} {v}" for k, v in tune_script_dict.items())

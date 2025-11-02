@@ -6,7 +6,7 @@ export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:202
 export CLEAN_DOCKER_CONTAINER=1
 
 export USING_AINIC=1
-export REBUILD_PRIMUS_TURBO=1
+export REBUILD_PRIMUS_TURBO=0
 export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
 # export AINIC_LIB="/apps/gpuperf/ainic-driver-20251007/lib/"
 export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
@@ -17,21 +17,22 @@ export CPUS_PER_TASK=128
 # export HSA_NO_SCRATCH_RECLAIM=0 
 export NVTE_CK_USES_BWD_V3=1
 export USE_ROCM_AITER_ROPE_BACKEND=0
+export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=0
 
 ######################### Training Config #########################
-export EXP="examples/torchtitan/configs/llama3.1_70B-FP8-pretrain.yaml"
+export EXP="examples/megatron/configs/llama3.1_70B-pretrain.yaml"
 export NNODES=1
-MBS=4
+MBS=1
 TP=1
 ETP=1
-GBS=$(($NNODES * 512))
+GBS=$(($NNODES * 128))
 SEQ_LENGTH=8192
 PP=1
 EP=1
 CP=1
 VPP=1
 OPTIMIZER=adam
-RECOMPUTE_LAYERS=0
+RECOMPUTE_LAYERS=80
 RECOMPUTE_ID_START=0
 BALANCE=True
 LEGACY_GG=False
@@ -72,7 +73,7 @@ bash ./examples/run_local_pretrain.sh --micro_batch_size $MBS \
                                       --context_parallel_size $CP \
                                       --moe_router_force_load_balancing $BALANCE \
                                       --manual_gc False \
-                                      --pp_warmup True \
+                                      --pp_warmup False \
                                       --manual_gc_interval 1 \
                                       --optimizer $OPTIMIZER \
                                       --cp_comm_type a2a \

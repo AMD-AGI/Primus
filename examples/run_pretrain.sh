@@ -260,6 +260,13 @@ if [[ "$PATCH_TE_FLASH_ATTN" == "1" ]]; then
 fi
 LOG_INFO_RANK0 ""
 
+
+# export HIPBLASLT_LOG_LEVEL=4         # Debug level
+# export HIPBLASLT_LOG_MASK=32         # 1+2+4+64 (solution+timing+problem+heuristic)
+# export HIPBLASLT_LOG_FILE=tuning_verification_70B.log
+export HIPBLASLT_TUNING_OVERRIDE_FILE=tune_gemm_results.txt
+# export HIPBLASLT_LOG_MASK=32
+# export HIPBLASLT_LOG_FILE=dump_gemm_shapes_8B.txt
 # ----------------- Rebuild nbxt -----------------
 export REBUILD_BNXT=${REBUILD_BNXT:-0}
 export PATH_TO_BNXT_TAR_PACKAGE=${PATH_TO_BNXT_TAR_PACKAGE}
@@ -297,6 +304,8 @@ if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
 else
     LOG_INFO "Skip Primus Turbo rebuild. REBUILD_PRIMUS_TURBO=$REBUILD_PRIMUS_TURBO"
 fi
+
+pip3 install --extra-index-url https://test.pypi.org/simple ./dist/primus_turbo-0.1.0+071fbe5-cp310-cp310-linux_x86_64.whl
 
 # -------------------- HipBLASLt Tuning --------------------
 handle_hipblaslt_tuning() {
