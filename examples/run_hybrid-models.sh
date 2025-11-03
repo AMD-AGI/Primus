@@ -27,6 +27,7 @@ docker run --rm \
         echo 'Running Zebra-Llama in ${PWD} with HF_TOKEN: ${HF_TOKEN}' && \
         git clone https://github.com/AMD-AGI/AMD-Hybrid-Models.git && \
         ls && cd AMD-Hybrid-Models/Zebra-Llama && \
+        cp /home/claire.lee2@amd.com/Primus/primus/configs/hybrid_models/zebra_llama/llama3.2_1B/zebra_8MLA8M2_8bt_SFT.yaml configs/llama3.2_1B/zebra_8MLA8M2_8bt_SFT.yaml && \
         bash install.sh FLASH_ATTN=1 MAMBA=1 && \
         ACCELERATE_LOG_LEVEL=info accelerate launch --config_file configs/fsdp.yaml train_hybrid/train_distill.py configs/llama3.2_1B/zebra_8MLA8M2_8bt_SFT.yaml 
     " bash "${ARGS[@]}"
