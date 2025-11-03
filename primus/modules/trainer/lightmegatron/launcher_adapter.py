@@ -179,11 +179,7 @@ class MegatronLauncherAdapter:
 
         cli_args = []
 
-        action_map = {
-            action.dest: action
-            for action in self._parser._actions
-            if action.option_strings
-        }
+        action_map = {action.dest: action for action in self._parser._actions if action.option_strings}
 
         for key, val in flat_args.items():
             if val is None:
@@ -207,10 +203,7 @@ class MegatronLauncherAdapter:
             # 2. Enum choices
             if action.choices and all(isinstance(c, enum.Enum) for c in action.choices):
                 s = str(val).lower()
-                matched = [
-                    e for e in action.choices
-                    if e.name.lower() == s or str(e.value).lower() == s
-                ]
+                matched = [e for e in action.choices if e.name.lower() == s or str(e.value).lower() == s]
                 if not matched:
                     raise ValueError(
                         f"[PatchParseArgs] Invalid enum value '{val}' for {key}, "
@@ -263,4 +256,3 @@ class MegatronLauncherAdapter:
             log_rank_0(f"[PatchParseArgs] Ignored unknown args: {unknown_args}")
         log_rank_0(f"[PatchParseArgs] Final Megatron args: {known_args}")
         return known_args
-
