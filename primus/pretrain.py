@@ -16,26 +16,33 @@ from primus.core.launcher.parser import add_pretrain_parser, load_primus_config
 # Lazy backend loader
 def load_backend_trainer(framework: str):
     if framework == "megatron":
-        import torch
         import megatron.training.training as training
+        import torch
 
         _original_build_model = training.get_model
+
         def _patched_get_model(*args, **kwargs):
             """
             Monkey-patched version of build_model that removes the second
             DDP construction inside torch.cuda.stream() block.
             """
             import inspect
+
             from megatron.training import training as tr
-            src_lines = inspect.getsource(tr.get_model)
+
+            inspect.getsource(tr.get_model)
             print("[PrimusPatch] Overriding build_model to disable second DDP construction...")
 
             _orig_stream_ctx = torch.cuda.stream
 
             def _noop_stream(*args, **kwargs):
                 class DummyCtx:
-                    def __enter__(self): return None
-                    def __exit__(self, *a): return False
+                    def __enter__(self):
+                        return None
+
+                    def __exit__(self, *a):
+                        return False
+
                 return DummyCtx()
 
             torch.cuda.stream = _noop_stream
@@ -45,9 +52,9 @@ def load_backend_trainer(framework: str):
             finally:
                 torch.cuda.stream = _orig_stream_ctx
 
-        training.get_model= _patched_get_model
+        training.get_model = _patched_get_model
         print("[PrimusPatch] Applied Megatron build_model monkey-patch to disable second DDP.")
-       
+
         from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
 
         return MegatronPretrainTrainer
