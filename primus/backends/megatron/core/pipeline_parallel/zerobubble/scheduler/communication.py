@@ -12,6 +12,8 @@ import functools
 import math
 from typing import List, Tuple
 
+from megatron.training.global_vars import get_args
+
 from primus.modules.module_utils import log_rank_all
 
 from .graph import BW, B, CommDirection, F, FuncType, GraphConfig, ScheduledNode
@@ -225,20 +227,67 @@ def add_post_validation_nodes_before_deadline(
     return local_order, comm_pairs
 
 
+def reorder_communication_nodes(local_order: List[List[ScheduledNode]]):
+    """reorder communication nodes to combine them with batch"""
+    recordered_w_list = []
+
+    def ismatch(recv_node, node):
+        return (recv_node.type == FuncType.RECV_FORWARD and node.type == FuncType.F) or (
+            recv_node.type == FuncType.RECV_BACKWARD and node.type == FuncType.B
+        )
+
+    for stage in local_order:
+        stage_list = []
+        w_list = []
+        recv_list = []
+        for node in stage:
+            if node.type == FuncType.W:
+                w_list.append(node)
+            elif node.type in (F, B, BW):
+                for i in range(len(recv_list)):
+                    if (
+                        recv_list[i].microbatch == node.microbatch
+                        and recv_list[i].chunk == node.chunk
+                        and ismatch(recv_list[i], node)
+                    ):
+                        recv_i = recv_list[i]
+                        stage_list.append(recv_i)
+                stage_list.extend(w_list)
+                w_list = []
+                stage_list.append(node)
+
+            elif node.type in (FuncType.RECV_FORWARD, FuncType.RECV_BACKWARD):
+                recv_list.append(node)
+            else:  # communication nodes
+                stage_list.append(node)
+
+        stage_list.extend(w_list)
+        recordered_w_list.append(stage_list)
+
+    return recordered_w_list
+
+
 def add_communication_nodes_without_sorting(
     config: GraphConfig,
     local_order: List[List[ScheduledNode]],
     post_validation: bool,
 ) -> List[List[ScheduledNode]]:
+
     local_order, comm_pairs = insert_send_nodes(config, local_order)
+
     if post_validation:
         local_order, post_validation_comm_pairs = add_post_validation_nodes_before_deadline(
             config, local_order
         )
         comm_pairs.extend(post_validation_comm_pairs)
     local_order = insert_recv_nodes(config, local_order, comm_pairs)
+
     if post_validation:
         local_order = tag_rollback_communication(config, local_order)
+
+    if get_args().num_virtual_stages_per_pipeline_rank is None:
+        local_order = reorder_communication_nodes(local_order)
+
     return local_order
 
 

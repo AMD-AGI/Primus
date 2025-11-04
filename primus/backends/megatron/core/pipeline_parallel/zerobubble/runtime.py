@@ -1327,8 +1327,8 @@ def fused_pipeline_ops(
         ops.append(recv_next_op)
     if len(ops) > 0:
         reqs = torch.distributed.batch_isend_irecv(ops)
+
         # batch_isend_irecv only returns 1 handle
-        assert len(reqs) == 1
         r = reqs[0]
         # Keep the returned value consistent with p2p_pipeline_ops
         sp_reqs = [r] * len(tensor_send_prev)
@@ -1339,6 +1339,12 @@ def fused_pipeline_ops(
         reqs = []
         sp_reqs, rp_reqs, sn_reqs, rn_reqs = [], [], [], []
     return reqs, (sp_reqs, rp_reqs, sn_reqs, rn_reqs)
+
+
+class HackReq:
+    """Class to hack async p2p request because the async p2p performance bad"""
+
+    def wait(): ...
 
 
 def multi_pipeline_ops(
@@ -1353,13 +1359,32 @@ def multi_pipeline_ops(
         p2p_func = fused_pipeline_ops
     else:
         p2p_func = p2p_pipeline_ops
-    return p2p_func(
+
+    reqs = p2p_func(
         tensor_send_prev=tensor_send_prev,
         tensor_recv_prev=tensor_recv_prev,
         tensor_send_next=tensor_send_next,
         tensor_recv_next=tensor_recv_next,
         group=group,
     )
+
+    if batch:
+        hack_req = HackReq()
+        hack_reqs = []
+
+        real_reqs, all_tensor_reqs = reqs
+        for req in real_reqs:
+            req.wait()
+            hack_reqs.append(hack_req)
+
+        torch.cuda.synchronize()
+        for tensor_reqs in all_tensor_reqs:
+            for req in tensor_reqs:
+                req = hack_req
+
+        reqs = (hack_reqs, all_tensor_reqs)
+
+    return reqs
 
 
 def bootstrap_and_profile_p2p_communication(config, send_tensor_shapes, recv_tensor_shapes, p2p_communicator):
@@ -1435,8 +1460,10 @@ def bootstrap_and_profile_p2p_communication(config, send_tensor_shapes, recv_ten
             if not parallel_state.is_pipeline_first_stage(ignore_virtual=True):
                 p2p_communicator.send_backward(recv_data, False)
         t.stop()
-        per_communication = torch.cuda.FloatTensor(
-            [t.elapsed() / (parallel_state.get_pipeline_model_parallel_world_size() - 1) / 2 / 10]
+        per_communication = torch.tensor(
+            [t.elapsed() / (parallel_state.get_pipeline_model_parallel_world_size() - 1) / 2 / 10],
+            dtype=torch.float,
+            device="cuda",
         )
         torch.distributed.all_reduce(per_communication, torch.distributed.ReduceOp.MAX)
         ScheduleTimers.comm_time = per_communication.item()

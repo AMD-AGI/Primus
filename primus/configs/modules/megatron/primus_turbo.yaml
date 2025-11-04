@@ -24,3 +24,6 @@ grouped_gemm_backend: "turbo-gg" # turbo-gg, lagacy-gg
 
 # use turbo fused activation_with_probs to optmize redundant computation
 use_turbo_fused_act_with_probs: false
+
+# layer norm
+use_turbo_rms_norm: false

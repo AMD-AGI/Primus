@@ -16,15 +16,14 @@ class TorchTitanPretrainTrainer(BaseModule):
         extra_args = kwargs.pop("extra_args", None)
         super().__init__(*args, **kwargs)
 
-        # important: make sure patch torchtitan logger first
-        self.patch_torchtitan_logger()
-
         self.primus_cfg = kwargs.pop("primus_config", None)
         if self.primus_cfg is None:
             raise ValueError("primus_config is required")
 
         pre_trainer_cfg = self.primus_cfg.get_module_config("pre_trainer")
         cfg_dict = nested_namespace_to_dict(pre_trainer_cfg)
+
+        self.patch_torchtitan_embedding_amp(cfg_dict["primus_turbo"]["enable_embedding_autocast"])
 
         patch_mock = getattr(pre_trainer_cfg.training, "mock_data", False)
         if patch_mock:
@@ -33,9 +32,6 @@ class TorchTitanPretrainTrainer(BaseModule):
             )
 
             patch_mock_hf_dataset()
-
-        self.patch_torchtitan_embedding_amp(cfg_dict["primus_turbo"]["enable_embedding_autocast"])
-        self.patch_titan_train_spec(pre_trainer_cfg.model.name, pre_trainer_cfg.model.flavor, extra_args)
 
         # ensure checkpoint patch applied before import torchtitan
         # background: consolidate_safetensors_files_on_every_rank is a new DCP
@@ -59,6 +55,17 @@ class TorchTitanPretrainTrainer(BaseModule):
         # so model imports succeed. Titan does not rely on AuxOutput in its
         # attention or training logic, so this patch does not affect behavior.
         self.patch_torch_flex_attention_auxoutput()
+
+        from primus.modules.trainer.torchtitan.patch_utils import (
+            apply_patch_checkpoint_wrapper,
+        )
+
+        apply_patch_checkpoint_wrapper()
+
+        self.patch_titan_train_spec(pre_trainer_cfg.model.name, pre_trainer_cfg.model.flavor, extra_args)
+
+        # important: make sure patch torchtitan logger first
+        self.patch_torchtitan_logger()
 
         from torchtitan.config.job_config import JobConfig
         from torchtitan.train import Trainer
@@ -223,7 +230,7 @@ class TorchTitanPretrainTrainer(BaseModule):
                     setattr(self, k, v)
 
         setattr(flex_mod, "AuxOutput", _AuxOutput)
-        primus_logger.info(
+        primus_logger.warning(
             "[PrimusPatch][FlexAttn] Injected fallback AuxOutput stub (Titan does not rely on this)."
         )
 
@@ -249,11 +256,15 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         if self.titan_config.primus_turbo.use_turbo_attention:
             # ******* llama3 Attention Model *******
-            import torchtitan.models.llama3.model.model
+            import torchtitan
 
+            from primus.backends.torchtitan.models.deepseek_v3.model.model import (
+                Attention,
+            )
             from primus.backends.torchtitan.models.llama3.model.model import Attention
 
             torchtitan.models.llama3.model.model.Attention = Attention
+            torchtitan.models.deepseek_v3.model.model.Attention = Attention
             logger.warning(f"TorchtitanPretrainTrainer: Patch Turbo Attention")
 
         if self.titan_config.primus_turbo.use_turbo_mx_linear:
@@ -508,7 +519,7 @@ class TorchTitanPretrainTrainer(BaseModule):
         from primus.core.utils.logger import _logger as primus_logger
 
         if not enable_patch:
-            primus_logger.info("[PrimusPatch][AMP] Embedding AMP patch disabled via config.")
+            primus_logger.warning("[PrimusPatch][AMP] Embedding AMP patch disabled via config.")
             return
 
         def _hook(module, inp, out):
@@ -517,6 +528,9 @@ class TorchTitanPretrainTrainer(BaseModule):
 
             if torch.is_autocast_enabled():
                 runtime_dtype = torch.get_autocast_gpu_dtype()
+                primus_logger.warning(
+                    f"[PrimusPatch][AMP] Autocast active, casting Embedding output to runtime dtype {runtime_dtype}."
+                )
                 if out.dtype != runtime_dtype:
                     return out.to(runtime_dtype)
             return out
@@ -528,55 +542,91 @@ class TorchTitanPretrainTrainer(BaseModule):
             self.register_forward_hook(_hook)
 
         nn.Embedding.__init__ = new_init
-        primus_logger.info(
+        primus_logger.warning(
             "[PrimusPatch][AMP] nn.Embedding.__init__ patched for AMP/mixed precision alignment."
         )
 
     def patch_titan_train_spec(self, model_name: str, flavor: str, model_overrides: Dict[str, Any]):
         """
         Monkey patch torchtitan.train_spec.get_train_spec to override model args dynamically.
-        All override keys MUST start with "model." (e.g., {"model.n_layers": 8}).
+        Supports nested overrides like:
+            {"model.moe_args.num_experts": 16, "model.moe_args.router.score_func": "softmax"}
+
+        All override keys MUST start with "model.".
         """
         from primus.core.utils.logger import _logger as primus_logger
 
         if not model_overrides:
-            primus_logger.info("[PrimusPatch][ModelOverride] No model_overrides provided, skip patch.")
+            primus_logger.warning("[PrimusPatch][ModelOverride] No model_overrides provided, skip patch.")
             return
 
-        primus_logger.info(f"[PrimusPatch][ModelOverride] Applying model_overrides: {model_overrides}")
+        primus_logger.warning(f"[PrimusPatch][ModelOverride] Applying model_overrides: {model_overrides}")
 
-        # --- flatten nested form {"model": {"n_layers": 4}} → {"model.n_layers": 4}
+        # --- Step 1. Flatten any nested dict under 'model'
         flat_overrides = {}
         for k, v in model_overrides.items():
             if k == "model" and isinstance(v, dict):
-                for subk, subv in v.items():
-                    flat_overrides[f"model.{subk}"] = subv
+
+                def _flatten(prefix, d):
+                    for subk, subv in d.items():
+                        if isinstance(subv, dict):
+                            _flatten(f"{prefix}.{subk}", subv)
+                        else:
+                            flat_overrides[f"{prefix}.{subk}"] = subv
+
+                _flatten("model", v)
             else:
                 flat_overrides[k] = v
         model_overrides = flat_overrides
 
         # Enforce `model.` prefix strictly
-        bad_keys = [k for k in model_overrides.keys() if not k.startswith("model.")]
+        bad_keys = [k for k in model_overrides if not k.startswith("model.")]
         if bad_keys:
             raise ValueError(
-                # f"[PrimusPatch][ModelOverride] Unsupported override keys (must start with 'model.'): {bad_keys}"
                 f"[PrimusPatch][ModelOverride] Invalid override keys detected: {bad_keys}. "
                 "These parameters belong to the model configuration and must be specified "
-                "with the 'model.' prefix (e.g., 'model.n_layers', 'model.dim')."
+                "with the 'model.' prefix (e.g., 'model.n_layers' or 'model.moe_args.num_experts')."
             )
 
-        primus_logger.info(
-            f"[PrimusPatch][ModelOverride] model_overrides provided for '{model_name}' (flavor={flavor}): {model_overrides}"
-        )
+        primus_logger.warning(f"[PrimusPatch][ModelOverride] Applying overrides: {model_overrides}")
 
         import torchtitan.protocols.train_spec as train_spec_module
 
         orig_get_train_spec = train_spec_module.get_train_spec
 
+        def _deep_setattr(obj, attr_path: str, value: Any):
+            """
+            Support setting nested attributes like "moe_args.num_experts" on dataclass or dict.
+            """
+            parts = attr_path.split(".")
+            current = obj
+            for p in parts[:-1]:
+                if is_dataclass(current):
+                    current = getattr(current, p)
+                elif isinstance(current, dict):
+                    current = current[p]
+                else:
+                    raise TypeError(
+                        f"[PrimusPatch] Unsupported type in path traversal: {type(current)} at {p}"
+                    )
+            last_key = parts[-1]
+            if is_dataclass(current):
+                if not hasattr(current, last_key):
+                    raise AttributeError(
+                        f"[PrimusPatch] '{type(current).__name__}' has no field '{last_key}'"
+                    )
+                setattr(current, last_key, value)
+            elif isinstance(current, dict):
+                if last_key not in current:
+                    raise KeyError(f"[PrimusPatch] dict has no key '{last_key}'")
+                current[last_key] = value
+            else:
+                raise TypeError(f"[PrimusPatch] Unsupported type for final assignment: {type(current)}")
+
         def patched_get_train_spec(name: str):
             spec = orig_get_train_spec(name)
             if name != model_name:
-                return spec  # only patch targeted model
+                return spec
 
             assert hasattr(
                 spec, "model_args"
@@ -598,22 +648,19 @@ class TorchTitanPretrainTrainer(BaseModule):
             ), f"[PrimusPatch][ModelOverride] Expected dataclass model_args, got {type(target_args)}"
 
             before = asdict(target_args)
-            for k, v in model_overrides.items():
-                field_name = k[len("model.") :]
-                if not hasattr(target_args, field_name):
-                    raise AttributeError(
-                        f"[PrimusPatch][ModelOverride] '{type(target_args).__name__}' has no field '{field_name}'"
-                    )
-                setattr(target_args, field_name, v)
 
-            primus_logger.info(
-                f"[PrimusPatch][ModelOverride] Patched dataclass model_args['{flavor}'] "
-                f"for '{name}' with {model_overrides} (before={before})"
+            for full_key, new_value in model_overrides.items():
+                field_path = full_key[len("model.") :]
+                _deep_setattr(target_args, field_path, new_value)
+
+            primus_logger.warning(
+                f"[PrimusPatch][ModelOverride] Successfully patched model_args['{flavor}'] for '{name}' with "
+                f"{model_overrides}. Diff(before→after): {before} → {asdict(target_args)}"
             )
             return spec
 
         # Apply the patch globally
         train_spec_module.get_train_spec = patched_get_train_spec
-        primus_logger.info(
+        primus_logger.warning(
             f"[PrimusPatch][ModelOverride] get_train_spec for '{model_name}' successfully monkey patched (flavor={flavor})."
         )

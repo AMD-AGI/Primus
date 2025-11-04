@@ -10,7 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 445cf05050179dc88dba3853954575f9c9ca2f49 # fix: fixed import activation module (#137)
+  PRIMUS_TURBO_COMMIT: 3acc0fe3271b7e41f0646382311f36bdffca0554 # feat(permute): permute op support to compute tokens_per_expert (#140)
 
 jobs:
   code-lint:

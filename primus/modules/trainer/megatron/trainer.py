@@ -192,6 +192,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         from primus.backends.megatron.core.extensions.primus_turbo import (
             PrimusTurboColumnParallelLinearTorch,
             PrimusTurboDeepEPTokenDispatcher,
+            PrimusTurboRMSNorm,
         )
         from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
             PrimusTurboSpecProvider,
@@ -222,6 +223,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.moe_token_dispatcher_type = "flex"
             token_dispatcher.MoEFlexTokenDispatcher = PrimusTurboDeepEPTokenDispatcher
             moe_layer.MoEFlexTokenDispatcher = PrimusTurboDeepEPTokenDispatcher
+
+        if args.use_turbo_rms_norm:
+            import transformer_engine as te
+
+            te.pytorch.RMSNorm = PrimusTurboRMSNorm
 
     def patch_fp8_context(self):
         from megatron.core import fp8_utils
