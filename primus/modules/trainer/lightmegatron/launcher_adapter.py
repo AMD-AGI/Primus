@@ -179,11 +179,7 @@ class MegatronLauncherAdapter:
 
         cli_args = []
 
-        action_map = {
-            action.dest: action
-            for action in self._parser._actions
-            if action.option_strings  # skip positional args
-        }
+        action_map = {action.dest: action for action in self._parser._actions if action.option_strings}
 
         for key, val in flat_args.items():
             if val is None:
@@ -196,48 +192,67 @@ class MegatronLauncherAdapter:
 
             opt = action.option_strings[0]
 
-            # Handle booleans flags: store_true / store_false
+            # 1. bool flags
             if isinstance(val, bool):
-                if isinstance(action, _StoreTrueAction) and val is True:
+                if isinstance(action, _StoreTrueAction) and val:
                     cli_args.append(opt)
-                elif isinstance(action, _StoreFalseAction) and val is False:
+                elif isinstance(action, _StoreFalseAction) and not val:
                     cli_args.append(opt)
+                continue
 
-            # List-type flags (nargs +/*), ignore empty lists
-            elif action.nargs in ("+", "*") and isinstance(val, list):
-                if val:
+            # 2. Enum choices
+            if action.choices and all(isinstance(c, enum.Enum) for c in action.choices):
+                s = str(val).lower()
+                matched = [e for e in action.choices if e.name.lower() == s or str(e.value).lower() == s]
+                if not matched:
+                    raise ValueError(
+                        f"[PatchParseArgs] Invalid enum value '{val}' for {key}, "
+                        f"expected one of {[e.name for e in action.choices]}"
+                    )
+                cli_args += [opt, matched[0].name]
+                continue
+
+            # 3. Special handling for --moe-layer-freq
+            if key == "moe_layer_freq":
+                # Convert list to string expression for Megatron parser
+                if isinstance(val, list):
+                    cli_args += [opt, str(val)]
+                # Convert pure int to string
+                elif isinstance(val, int):
+                    cli_args += [opt, str(val)]
+                # Already a string (like "([0]*1+[1]*26)" or "[0,1,1]")
+                else:
+                    cli_args += [opt, val]
+                continue
+
+            # 4. nargs list
+            if action.nargs in ("+", "*"):
+                # if isinstance(val, list):
+                #     if val and isinstance(val[0], list):
+                #         val = val[0]
+                #     cli_args += [opt] + [str(v) for v in val]
+                # else:
+                #     cli_args += [opt, str(val)]
+                # continue
+                # ✅ skip if empty list for nargs='+'
+                if isinstance(val, list) and len(val) == 0:
+                    continue
+                if isinstance(val, list):
+                    if val and isinstance(val[0], list):
+                        val = val[0]
                     cli_args += [opt] + [str(v) for v in val]
+                else:
+                    cli_args += [opt, str(val)]
+                continue
 
-            elif action.choices and all(isinstance(c, enum.Enum) for c in action.choices):
-                try:
-                    input_str = str(val).lower()
-                    matched = [
-                        e
-                        for e in action.choices
-                        if e.name.lower() == input_str or str(e.value).lower() == input_str
-                    ]
-                    if not matched:
-                        raise ValueError(
-                            f"[PatchParseArgs] Invalid enum value '{val}' for {key}, "
-                            f"expected one of {[e.name for e in action.choices]}"
-                        )
-                    cli_args += [opt, matched[0].name]
-                except Exception as e:
-                    raise RuntimeError(f"[PatchParseArgs] Failed to match enum for {key}={val}") from e
+            # 5. default single-value args
+            cli_args += [opt, str(val)]
 
-            # Typed single value
-            elif action.type:
-                try:
-                    cli_args += [opt, str(action.type(val))]
-                except Exception as e:
-                    raise RuntimeError(f"[PatchParseArgs] Failed to cast {key}={val} to {action.type}") from e
-
-            # Fallback: treat as string
-            else:
-                cli_args += [opt, str(val)]
+        # make sure all args are strings
+        cli_args = [str(x) for x in cli_args]
 
         known_args, unknown_args = self._parser.parse_known_args(cli_args)
         if unknown_args:
             log_rank_0(f"[PatchParseArgs] Ignored unknown args: {unknown_args}")
-
+        log_rank_0(f"[PatchParseArgs] Final Megatron args: {known_args}")
         return known_args
