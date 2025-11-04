@@ -27,8 +27,6 @@ if [[ -n "${TIME:-}" ]]; then
     SLURM_ARGS+=(--time="$TIME")
 fi
 
-                # --primus_path "$PRIMUS_PATH" \
-
 bash "${PRIMUS_PATH}"/runner/primus-cli slurm srun "${SLURM_ARGS[@]}" \
                 -- container --mount "$DATA_PATH" \
                 -- --env MASTER_ADDR="$MASTER_ADDR" \
