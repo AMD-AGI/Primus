@@ -5,7 +5,20 @@
 ###############################################################################
 
 import argparse
+import importlib
 import sys
+
+
+def load_and_register_subcommands(subparsers):
+    """
+    Dynamically load and register subcommands from CLI modules.
+    """
+    cli_modules = ["train_cli", "benchmark_cli"]  # Add more CLI modules here as needed
+
+    for module_name in cli_modules:
+        module = importlib.import_module(f"primus.cli.{module_name}")
+        if hasattr(module, "register_subcommand"):
+            module.register_subcommand(subparsers)
 
 
 def main():
@@ -23,11 +36,8 @@ def main():
     parser = argparse.ArgumentParser(prog="primus", description="Primus Unified CLI for Training & Utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    from primus.cli import benchmark_cli, train_cli
-
-    # Register train subcommand (only implemented one for now)
-    train_cli.register_subcommand(subparsers)
-    benchmark_cli.register_subcommand(subparsers)
+    # Dynamically load and register subcommands
+    load_and_register_subcommands(subparsers)
 
     args, unknown_args = parser.parse_known_args()
 

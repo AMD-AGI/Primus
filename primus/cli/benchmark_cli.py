@@ -34,6 +34,26 @@ def run(args, extra_args):
     finalize_distributed()
 
 
+def load_and_register_benchmark_suites(suite_parsers):
+    """
+    Dynamically load and register benchmark suites.
+    """
+    import importlib
+
+    benchmark_modules = [
+        "gemm_bench",
+        "dense_gemm_bench",
+        "deepseek_dense_gemm_bench",
+    ]
+
+    for module_name in benchmark_modules:
+        module = importlib.import_module(f"primus.tools.benchmark.{module_name}")
+        if hasattr(module, "add_gemm_parser"):
+            module.add_gemm_parser(
+                suite_parsers.add_parser(module_name, help=f"{module_name.replace('_', '-')} microbench.")
+            )
+
+
 def register_subcommand(subparsers):
     """
     primus-cli benchmark <suite> [suite-specific-args]
@@ -42,23 +62,8 @@ def register_subcommand(subparsers):
     parser = subparsers.add_parser("benchmark", help="Run performance benchmarks (GEMM / Attention / RCCL).")
     suite_parsers = parser.add_subparsers(dest="suite", required=True)
 
-    # ---------- GEMM ----------
-    gemm = suite_parsers.add_parser("gemm", help="GEMM microbench.")
-    from primus.tools.benchmark import gemm_bench
-
-    gemm_bench.add_gemm_parser(gemm)
-
-    # ---------- DENSE-GEMM ----------
-    dense_gemm = suite_parsers.add_parser("gemm-dense", help="GEMM-DENSE microbench.")
-    from primus.tools.benchmark import dense_gemm_bench
-
-    dense_gemm_bench.add_gemm_parser(dense_gemm)
-
-    # ---------- DEEPSEEK-GEMM ----------
-    deepseek_gemm = suite_parsers.add_parser("gemm-deepseek", help="DEEPSEEK-GEMM microbench.")
-    from primus.tools.benchmark import deepseek_dense_gemm_bench
-
-    deepseek_dense_gemm_bench.add_gemm_parser(deepseek_gemm)
+    # Dynamically load and register benchmark suites
+    load_and_register_benchmark_suites(suite_parsers)
 
     parser.set_defaults(func=run)
 
