@@ -1075,3 +1075,19 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         """
         hidden_states = self.deepep_dispatcher._post_combine(hidden_states)
         return hidden_states.view(self.hidden_shape)
+
+
+class PrimusTurboRMSNorm(te.pytorch.RMSNorm):
+    def __init__(self, *args, **kwargs):
+        assert "device" in kwargs
+        assert "dtype" in kwargs or "params_dtype" in kwargs, "device and dtype must be provided"
+        super().__init__(*args, **kwargs)
+        self.rms_norm_func = pt.modules.RMSNorm(
+            normalized_shape=kwargs["hidden_size"],
+            eps=self.eps,
+            device=kwargs["device"],
+            dtype=kwargs["dtype"] if "dtype" in kwargs else kwargs["params_dtype"],
+        )
+
+    def forward(self, x):
+        return self.rms_norm_func(x)

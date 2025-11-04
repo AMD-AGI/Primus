@@ -21,3 +21,6 @@ turbo_sync_free_moe_stage: 0
 
 # use turbo fused activation_with_probs to optmize redundant computation
 use_turbo_fused_act_with_probs: false
+
+# layer norm
+use_turbo_rms_norm: false
