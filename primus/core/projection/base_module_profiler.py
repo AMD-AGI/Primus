@@ -16,11 +16,11 @@ class BaseModuleProfiler(ABC):
         self.sub_profilers = sub_profilers
 
     # -------- Parameter related --------
-    def estimated_params_memory(self) -> int:
+    def estimated_num_params(self) -> int:
         """Return estimated parameter count (based on formula)."""
         raise NotImplementedError
 
-    def measured_params_memory(self) -> int:
+    def measured_num_params(self) -> int:
         """Return measured parameter count (from real tensors)."""
         raise NotImplementedError
 

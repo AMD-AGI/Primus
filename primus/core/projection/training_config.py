@@ -44,10 +44,13 @@ class ModelConfig:
     v_head_dim: int = 0
     q_lora_rank: int = 0
     kv_lora_rank: int = 0
-    # MoE
+    # FFN & MoE
+    swiglu: bool = False
     num_experts: int = 0
     moe_ffn_hidden_size: int = 0
     moe_pattern: list = None
+    moe_router_topk: int = 0
+    moe_shared_expert_intermediate_size: int = 0
     # Misc
     share_embeddings_and_output_weights : bool = False
 

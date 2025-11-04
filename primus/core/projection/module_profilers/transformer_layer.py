@@ -13,6 +13,7 @@ from .attention import AttentionProfiler
 from .dense_mlp import DenseMLPProfiler
 from .layer_norm import LayerNormProfiler
 from .moe_mlp import MoEMLPProfiler
+from .router import RouterProfiler
 
 # Transformer Layer Data Flow
 #
@@ -60,19 +61,29 @@ from .moe_mlp import MoEMLPProfiler
 
 
 class DenseTransformerLayerProfiler(BaseModuleProfiler):
-    def estimated_params_memory(self) -> int:
-        return 0
+    def estimated_num_params(self) -> int:
+        return (self.sub_profilers["layer_norm"].estimated_num_params() * 2 +
+                self.sub_profilers["self_attention"].estimated_num_params() +
+                self.sub_profilers["mlp"].estimated_num_params())
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
-        return 0
+        return (self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 2 +
+                self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len) +
+                self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len))
 
 
 class MoETransformerLayerProfiler(BaseModuleProfiler):
-    def estimated_params_memory(self) -> int:
-        return 0
+    def estimated_num_params(self) -> int:
+        return (self.sub_profilers["layer_norm"].estimated_num_params() * 2 +
+                self.sub_profilers["self_attention"].estimated_num_params() +
+                self.sub_profilers["mlp"].estimated_num_params() +
+                self.sub_profilers["router"].estimated_num_params())
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
-        return 0
+        return (self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 2 +
+                self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len) +
+                self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len) +
+                self.sub_profilers["router"].estimated_activation_memory(batch_size, seq_len))
 
 
 def get_dense_transformer_layer_profiler_spec(config: TrainingConfig) -> "ModuleProfilerSpec":
@@ -94,6 +105,7 @@ def get_moe_transformer_layer_profiler_spec(config: TrainingConfig) -> "ModulePr
         sub_profiler_specs={
             "layer_norm": LayerNormProfiler,
             "self_attention": AttentionProfiler,
-            "mlp": DenseMLPProfiler,
+            "router": RouterProfiler,
+            "mlp": MoEMLPProfiler,
         },
     )

@@ -24,3 +24,16 @@ def launch_projection_from_cli(args, overrides):
 
     model_profiler_spec = get_language_model_profiler_spec(training_config)
     model_profiler = build_profiler(model_profiler_spec)
+
+    seq_len = training_config.runtime_config.sequence_length
+    batch_size = training_config.runtime_config.micro_batch_size
+    num_params = model_profiler.estimated_num_params()
+    activation_memory = model_profiler.estimated_activation_memory(batch_size, seq_len)
+
+    print("\n[Primus:Projection] Model Profiling Results:")
+    print(f"  Estimated Number of Parameters: {num_params / 1e9} Billion")
+    print(f"  Estimated Parameter Memory: {num_params * 2 / 1024 / 1024 / 1024:.2f} GB")
+    print(f"  Estimated Activation Memory (per batch size {batch_size}, seq len {seq_len}): "
+          f"{activation_memory / 1024 / 1024 / 1024:.2f} GB")
+    print(f"  Estimated Total Memory: "
+          f"{(num_params * 2 + activation_memory) / 1024 / 1024 / 1024:.2f} GB")

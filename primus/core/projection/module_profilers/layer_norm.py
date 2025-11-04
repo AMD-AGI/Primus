@@ -9,9 +9,11 @@ from primus.core.projection.base_module_profiler import BaseModuleProfiler
 
 
 class LayerNormProfiler(BaseModuleProfiler):
-    def estimated_params_memory(self) -> int:
-        # embedding + layers + outputlayer
-        return 0
+    def estimated_num_params(self) -> int:
+        return self.config.model_config.hidden_size * 2  # gamma and beta
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
-        return 0
+        return (batch_size * seq_len //
+                self.config.model_parallel_config.tensor_model_parallel_size //
+                self.config.model_parallel_config.context_model_parallel_size *
+                self.config.model_config.hidden_size * 2)  # bf16

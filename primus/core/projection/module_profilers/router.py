@@ -8,12 +8,12 @@
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 
 
-class OutputLayerProfiler(BaseModuleProfiler):
+class RouterProfiler(BaseModuleProfiler):
     def estimated_num_params(self) -> int:
-        return self.config.model_config.padded_vocab_size * self.model_config.model.hidden_size
+        return self.config.model_config.hidden_size * self.config.model_config.num_experts
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
-        return  (batch_size * seq_len //
-                 self.config.model_parallel_config.tensor_model_parallel_size //
-                 self.config.model_parallel_config.context_model_parallel_size * 
-                 self.config.model_config.padded_vocab_size * 2)  # bf16
+        return (batch_size * seq_len //
+                self.config.model_parallel_config.tensor_model_parallel_size //
+                self.config.model_parallel_config.context_model_parallel_size *
+                self.config.model_config.hidden_size * 2)  # bf16

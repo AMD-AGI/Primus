@@ -120,20 +120,20 @@ class LanguageModelProfiler(BaseModuleProfiler):
         return assigned_layers
 
 
-    def estimated_params_memory(self) -> int:    
+    def estimated_num_params(self) -> int:    
         total_params = 0
         for layer in self.layers:
             is_moe = self.config.model_config.moe_pattern[layer]
             if is_moe:
-                total_params += self.sub_profilers["moe_transformer_layer"].estimated_params_memory()
+                total_params += self.sub_profilers["moe_transformer_layer"].estimated_num_params()
             else:
-                total_params += self.sub_profilers["dense_transformer_layer"].estimated_params_memory()
+                total_params += self.sub_profilers["dense_transformer_layer"].estimated_num_params()
         if 0 in self.layers:
-            total_params += self.sub_profilers["embedding"].estimated_params_memory()
+            total_params += self.sub_profilers["embedding"].estimated_num_params()
         if self.config.model_config.num_layers - 1 in self.layers:
-            total_params += self.sub_profilers["final_layernorm"].estimated_params_memory()
-            total_params += self.sub_profilers["output_layer"].estimated_params_memory()
-            total_params += self.sub_profilers["calc_loss"].estimated_params_memory()
+            total_params += self.sub_profilers["final_layernorm"].estimated_num_params()
+            total_params += self.sub_profilers["output_layer"].estimated_num_params()
+            total_params += self.sub_profilers["calc_loss"].estimated_num_params()
         return total_params
 
 

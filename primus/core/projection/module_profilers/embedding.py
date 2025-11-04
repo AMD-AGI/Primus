@@ -11,9 +11,11 @@ from primus.core.projection.training_config import TrainingConfig
 
 
 class EmbeddingProfiler(BaseModuleProfiler):
-    def estimated_params_memory(self) -> int:
-        # embedding + layers + outputlayer
-        return 0
+    def estimated_num_params(self) -> int:
+        return self.config.model_config.padded_vocab_size * self.config.model_config.hidden_size
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
-        return 0
+        return  (batch_size * seq_len //
+                 self.config.model_parallel_config.tensor_model_parallel_size //
+                 self.config.model_parallel_config.context_model_parallel_size * 
+                 self.config.model_config.hidden_size * 2)  # bf16
