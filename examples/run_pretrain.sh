@@ -205,11 +205,17 @@ LOG_INFO_RANK0 ""
 # Limit GPU hardware queues to 2 for performance stability
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 
+# Increase HSA kernarg pool size to 12MB for models with lot of kernels
+# export HSA_KERNARG_POOL_SIZE=${HSA_KERNARG_POOL_SIZE:-12582912}
+
+# Enable NUMA binding for better memory locality (may increase stability for large models)
+export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-0}
+
 # Limit max CUDA device connections to reduce PCIe traffic
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
 
 # Prioritize NCCL communication for PyTorch for higher throughput
-export TORCH_NCCL_HIGH_PRIORITY=1
+export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 
 # In multi-node training, PXN can be enabled to improve inter-node all-to-all
 # communication efficiency, but it will increase GPU memory usage.
@@ -218,8 +224,8 @@ export NCCL_PXN_DISABLE=${NCCL_PXN_DISABLE:-1}
 export NCCL_P2P_NET_CHUNKSIZE=${NCCL_P2P_NET_CHUNKSIZE:-524288}
 
 # optimize nvte fp8 cast transpose
-export NVTE_USE_CAST_TRANSPOSE_TRITON=1
-export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=0
+export NVTE_USE_CAST_TRANSPOSE_TRITON=${NVTE_USE_CAST_TRANSPOSE_TRITON:-1}
+export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE:-0}
 
 # Note: Disable v3 due to accuracy issues. Will fix after TE version 2.1.
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
@@ -235,6 +241,8 @@ export PATCH_TE_FLASH_ATTN=${PATCH_TE_FLASH_ATTN:-0}
 
 LOG_INFO_RANK0 "==========Performance tuning=========="
 LOG_INFO_RANK0 "GPU_MAX_HW_QUEUES: $GPU_MAX_HW_QUEUES"
+LOG_INFO_RANK0 "HSA_KERNARG_POOL_SIZE: $HSA_KERNARG_POOL_SIZE"
+LOG_INFO_RANK0 "ENABLE_NUMA_BINDING: $ENABLE_NUMA_BINDING"
 LOG_INFO_RANK0 "CUDA_DEVICE_MAX_CONNECTIONS: $CUDA_DEVICE_MAX_CONNECTIONS"
 LOG_INFO_RANK0 "TORCH_NCCL_HIGH_PRIORITY: $TORCH_NCCL_HIGH_PRIORITY"
 LOG_INFO_RANK0 "CUDA_DEVICE_MAX_CONNECTIONS: $CUDA_DEVICE_MAX_CONNECTIONS"
@@ -406,6 +414,7 @@ else
     LOG_INFO_RANK0 "No patch args file found at $PRIMUS_PATCH_ARGS_FILE, skipping patch args."
 fi
 
+
 # -------------------- Launch Training --------------------
 DISTRIBUTED_ARGS=(
     --nproc_per_node "${GPUS_PER_NODE}"
@@ -415,8 +424,12 @@ DISTRIBUTED_ARGS=(
     --master_port "${MASTER_PORT}"
 )
 
+if [[ "$ENABLE_NUMA_BINDING" == "1" ]]; then
+    apt-get install numactl -y > /dev/null 2>&1
+    NUMA_LAUNCHER="--no-python ./runner/helpers/numa_bind.sh python3"
+fi
 
-CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
+CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS ${NUMA_LAUNCHER} primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
 
 LOG_INFO "Launching distributed training with command: $CMD"
 
