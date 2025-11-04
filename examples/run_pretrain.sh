@@ -38,21 +38,6 @@ if [ -z "${DATA_PATH:-}" ]; then
     fi
 fi
 
-# Slurm Launch
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
-export DATA_PATH
-
-SLURM_ARGS=(--nodes="$NNODES")
-if [[ -n "${RESERVATION:-}" ]]; then
-    SLURM_ARGS+=(--reservation="$RESERVATION")
-fi
-
-if [[ -n "${PARTITION:-}" ]]; then
-    SLURM_ARGS+=(--partition="$PARTITION")
-fi
-
-if [[ -n "${TIME:-}" ]]; then
-    SLURM_ARGS+=(--time="$TIME")
-fi
-
-bash "${PRIMUS_PATH}"/bin/primus-cli direct -- train pretrain --config "$EXP" --data_path "$DATA_PATH" "$@"
+bash "${PRIMUS_PATH}"/runner/primus-cli direct --env NVTE_CK_USES_BWD_V3=0 \
+    -- train pretrain --config "$EXP" --data_path "$DATA_PATH" "$@"
