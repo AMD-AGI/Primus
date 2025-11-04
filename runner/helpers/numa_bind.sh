@@ -21,7 +21,6 @@ LOG_INFO_RANK0() {
 }
 
 # Capture the output from amd-smi and process it without quotes
-# BUS_ID=($(amd-smi list --csv | awk -F, 'NR>1 && $2!="" {print $2}'))
 mapfile -t BUS_ID < <(amd-smi list --csv | awk -F, 'NR>1 && $2!="" {print $2}')
 LOG_INFO_RANK0 "BUS_IDs: ${BUS_ID[*]}"
 
