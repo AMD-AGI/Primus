@@ -12,7 +12,8 @@ from megatron.core.dist_checkpointing.strategies.filesystem_async import (
 )
 
 from primus.modules.module_utils import log_rank_0, warning_rank_0
-            
+
+
 class PrimusFileSystemWriterAsync(FileSystemWriterAsync):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -41,7 +42,7 @@ class PrimusFileSystemWriterAsync(FileSystemWriterAsync):
         return super(PrimusFileSystemWriterAsync, PrimusFileSystemWriterAsync).preload_tensors(
             *args, **kwargs
         )
-    
+
     # unlike torch.version.hip
     # hipRuntimeGetVersion() can return the HIP runtime version instead of build-time
     @staticmethod
@@ -56,7 +57,7 @@ class PrimusFileSystemWriterAsync(FileSystemWriterAsync):
             if error_code != 0:
                 return (-1, -1)
             # (major_version, minor_version)
-            return (version.value//10000000, (version.value//100000)%100)
+            return (version.value // 10000000, (version.value // 100000) % 100)
         except Exception as e:
             print(e)
             return (-1, -1)
