@@ -7,8 +7,12 @@
 
 set -euo pipefail
 
+# cd $SLURM_SUBMIT_DIR
+
+
 # Resolve script directory robustly (handles symlinks)
 SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+echo "[primus-cli-slurm-entry] Script directory: $SCRIPT_DIR"
 
 
 if [[ -z "${SLURM_NODELIST:-}" ]]; then
