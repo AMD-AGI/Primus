@@ -120,17 +120,23 @@ log_exported_vars "AMD-specific GPU optimizations" \
 
 # ----------------- Performance tuning -----------------
 # Limit GPU hardware queues to 2 for performance stability
-export GPU_MAX_HW_QUEUES=2
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+
+# Increase HSA kernarg pool size to 12MB for models with lot of kernels
+# export HSA_KERNARG_POOL_SIZE=${HSA_KERNARG_POOL_SIZE:-12582912}
+
+# Enable NUMA binding for better memory locality (may increase stability for large models)
+export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-0}
 
 # Limit max CUDA device connections to reduce PCIe traffic
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
 
 # Prioritize NCCL communication for PyTorch for higher throughput
-export TORCH_NCCL_HIGH_PRIORITY=1
+export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 
 # optimize nvte fp8 cast transpose
-export NVTE_USE_CAST_TRANSPOSE_TRITON=1
-export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=0
+export NVTE_USE_CAST_TRANSPOSE_TRITON=${NVTE_USE_CAST_TRANSPOSE_TRITON:-1}
+export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE:-0}
 
 # Note: Disable v3 due to accuracy issues. Will fix after TE version 2.1.
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
@@ -142,8 +148,8 @@ export NVTE_FUSED_ATTN_LOG_CONFIG=0 # 0, 1
 export PATCH_TE_FLASH_ATTN=${PATCH_TE_FLASH_ATTN:-0}
 
 log_exported_vars "Performance tuning" \
-    GPU_MAX_HW_QUEUES CUDA_DEVICE_MAX_CONNECTIONS TORCH_NCCL_HIGH_PRIORITY \
-    NVTE_USE_CAST_TRANSPOSE_TRITON NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE \
+    GPU_MAX_HW_QUEUES HSA_KERNARG_POOL_SIZE ENABLE_NUMA_BINDING CUDA_DEVICE_MAX_CONNECTIONS \
+    TORCH_NCCL_HIGH_PRIORITY NVTE_USE_CAST_TRANSPOSE_TRITON NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE \
     NVTE_CK_USES_BWD_V3 NVTE_DEBUG NVTE_DEBUG_LEVEL NVTE_FUSED_ATTN_LOG_CONFIG PATCH_TE_FLASH_ATTN
 
 # -------------------- setup_pythonpath -------------------

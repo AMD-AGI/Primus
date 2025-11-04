@@ -145,6 +145,13 @@ done
 
 pip install -qq -r requirements.txt
 
+if [[ "$ENABLE_NUMA_BINDING" == "1" ]]; then
+    apt-get install numactl -y > /dev/null 2>&1
+    NUMA_LAUNCHER="--no-python ./runner/helpers/numa_bind.sh python3"
+else
+    NUMA_LAUNCHER="--"
+fi
+
 # Build launch arguments.
 if [[ "$run_mode" == "single" ]]; then
     CMD="python3 $script_path $*"
@@ -181,7 +188,7 @@ else
     fi
 
     # Step 4: Build the final command.
-    CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS} -- $script_path $* "
+    CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS} ${NUMA_LAUNCHER} $script_path $* "
     LOG_INFO "Launching distributed training with command: $CMD 2>&1 | tee $log_file"
 fi
 
