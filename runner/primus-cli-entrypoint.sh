@@ -180,6 +180,7 @@ else
     LOG_INFO_RANK0 "[Primus Entrypoint] No hook target detected (missing \$1 \$2)."
 fi
 
+
 # Step 3: Run patch scripts if specified
 if [[ ${#patch_scripts[@]} -gt 0 ]]; then
     LOG_INFO_RANK0 "[Primus Entrypoint] Detected patch scripts: ${patch_scripts[*]}"
