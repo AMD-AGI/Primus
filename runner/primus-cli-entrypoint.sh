@@ -211,6 +211,9 @@ else
 fi
 
 pip install -qq -r requirements.txt
+if [[ "$enable_numa" == "1" ]]; then
+    apt-get install numactl -y > /dev/null 2>&1
+fi
 
 # Build launch arguments.
 if [[ "$run_mode" == "single" ]]; then
