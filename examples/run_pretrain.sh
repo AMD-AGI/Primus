@@ -137,7 +137,9 @@ export HIP_VISIBLE_DEVICES
 
 # ----------------- NCCL and Network Settings -----------------
 # VERSION, WARN, INFO, DEBUG, TRACE
-export NCCL_DEBUG=
+export NCCL_DEBUG=INFO
+export NCCL_SUBSYS=ALL 
+export NCCL_DEBUG_FILE=mixtral_8x7B_8N.%h.%p.log
 
 # Disable NCCL internal checks to reduce overhead
 export NCCL_CHECKS_DISABLE=1

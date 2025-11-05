@@ -4,15 +4,15 @@ export HF_TOKEN=${HF_TOKEN:-"your_hf_token"}
 export USE_ROCM_AITER_ROPE_BACKEND=0
 export CLEAN_DOCKER_CONTAINER=1
 
-export USING_AINIC=1
-export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
+export USING_AINIC=0
+export NCCL_IB_HCA="mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_8,mlx5_9"
 # export AINIC_LIB="/apps/gpuperf/ainic-driver-20251007/lib/"
 export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
 export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
-export NCCL_SOCKET_IFNAME="enp193s0f1np1"
-export GLOO_SOCKET_IFNAME="enp193s0f1np1"
-
-export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
+export NCCL_SOCKET_IFNAME="bond0"
+export GLOO_SOCKET_IFNAME="bond0"
+# export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
+export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/megatron-lm:v25.5_py310"}
 
 export CPUS_PER_TASK=128
 export HSA_NO_SCRATCH_RECLAIM=0 
@@ -23,7 +23,7 @@ mkdir -p data
 # the real number of nodes to run
 export NNODES=8
 GPUS_PER_NODE=8
-MBS=4
+MBS=2
 GA=8
 TP=1
 ETP=1
