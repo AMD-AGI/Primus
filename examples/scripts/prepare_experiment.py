@@ -40,6 +40,12 @@ def main():
         default=None,
         help="Optional path to backend (e.g., Megatron), will be added to PYTHONPATH",
     )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default=None,
+        help="Optional backend (e.g., Megatron, TorchTitan and MaxText), check consistency between config and backend",
+    )
     args, unknown = parser.parse_known_args()
 
     primus_path = Path.cwd()
@@ -51,12 +57,15 @@ def main():
 
     # Get framework name from pre_trainer module
     framework = config.get_module_config("pre_trainer").framework
+    if args.backend is not None and (args.backend.strip().lower() != framework):
+        log_error_and_exit(f"The backend {args.backend} set in env is different with {framework} set in the config")
 
     # Normalize alias: map "light-megatron" to actual folder name
     framework_map = {
         "megatron": "megatron",
         "light-megatron": "megatron",
         "torchtitan": "torchtitan",
+        "maxtext": "maxtext",
         # Add more aliases here if needed
     }
     framework_dir = framework_map.get(framework, framework)

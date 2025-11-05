@@ -25,7 +25,9 @@ Environment Variables:
     PRIMUS_*       Any environment variable prefixed with PRIMUS_ will be passed into the container.
 
 Example:
-    EXP=examples/megatron/exp_pretrain.yaml DATA_PATH=/mnt/data bash run_local_pretrain.sh
+    For Megatron: EXP=examples/megatron/exp_pretrain.yaml DATA_PATH=/mnt/data bash run_local_pretrain.sh
+    For TorchTitan: EXP=eexamples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml DATA_PATH=/mnt/data bash run_local_pretrain.sh
+    For MaxText: BACKEND=MaxText EXP=examples/maxtext/exp_pretrain.yaml bash run_local_pretrain.sh
 
 EOF
 }
@@ -39,10 +41,14 @@ fi
 EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
 
 # Default docker image
+if [ "${BACKEND:-}" = "MaxText" ]; then
+    DOCKER_IMAGE="docker.io/rocm/jax-training:maxtext-v25.9"
+fi
 DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.9_gfx942"}
 
 # Project root
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
+echo "PRIMUS_PATH: $PRIMUS_PATH"
 
 # Dataset directory
 # DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
@@ -77,6 +83,7 @@ while IFS='=' read -r name _; do
     ENV_ARGS+=("--env" "$name")
 done < <(env | grep "^PRIMUS_TURBO_")
 ENV_ARGS+=("--env" "EXP")
+ENV_ARGS+=("--env" "BACKEND")
 ENV_ARGS+=("--env" "HF_TOKEN")
 
 HOSTNAME=$(hostname)
@@ -87,6 +94,7 @@ if [[ -f "$PATH_TO_BNXT_TAR_PACKAGE" ]]; then
     VOLUME_ARGS+=(-v "$PATH_TO_BNXT_TAR_PACKAGE":"$PATH_TO_BNXT_TAR_PACKAGE")
 fi
 
+echo "-----------VOLUME_ARGS: ${VOLUME_ARGS[@]}-----------"
 export CLEAN_DOCKER_CONTAINER=${CLEAN_DOCKER_CONTAINER:-0}
 
 # ------------------ Optional Container Cleanup ------------------
@@ -131,6 +139,7 @@ docker_podman_proxy run --rm \
     --env PATH_TO_BNXT_TAR_PACKAGE \
     --env MEGATRON_PATH \
     --env TORCHTITAN_PATH \
+    --env MAXTEXT_PATH \
     --env BACKEND_PATH \
     "${ENV_ARGS[@]}" \
     --ipc=host --network=host \

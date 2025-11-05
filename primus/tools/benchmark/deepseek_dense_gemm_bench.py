@@ -7,15 +7,20 @@
 import argparse
 import itertools
 from datetime import datetime
-from typing import Tuple
-
-import torch
-from git import List
+from typing import List, Tuple
 from tqdm import tqdm
 
-from primus.tools.benchmark.gemm_bench import profile_gemm
+try:
+    import torch
+    from primus.tools.benchmark.gemm_bench import profile_gemm
+    from primus.tools.utils import gather_records, is_rank_0
+    TORCH_AVAILABLE = True
+except ImportError:
+    print("[WARNNING] dense gemm benchmark depends on torch, which does not exist in current environment!")
+    TORCH_AVAILABLE = False
+
 from primus.tools.report import write_table_simple
-from primus.tools.utils import gather_records, is_rank_0
+
 
 MODEL_CONFIGS = {
     "Deepseek_V2_Lite": {
@@ -91,19 +96,6 @@ def add_gemm_parser(parser: argparse.ArgumentParser):
     parser.add_argument("--output-file", default="./gemm-deepseek_report.md")
     parser.add_argument("--append", action="store_true", help="Append to existing report")
     return parser
-    return parser
-
-
-def profile_fwd(m, n, k, dtype, duration):
-    return profile_gemm(m, n, k, dtype, False, True, duration)
-
-
-def profile_wgrad(m, n, k, dtype, duration):
-    return profile_gemm(n, k, m, dtype, True, False, duration)
-
-
-def profile_dgrad(m, n, k, dtype, duration):
-    return profile_gemm(m, k, n, dtype, False, False, duration)
 
 
 def build_preamble(args, shapes: List[Tuple[str, List[int]]]) -> str:
@@ -135,112 +127,125 @@ def build_preamble(args, shapes: List[Tuple[str, List[int]]]) -> str:
     return "\n".join(lines)
 
 
-def run_gemm_benchmark(args):
-    if args.model:
-        model_lower_map = {k.lower(): k for k in MODEL_CONFIGS.keys()}
-        model_key = args.model.lower()
+if TORCH_AVAILABLE:
+    def profile_fwd(m, n, k, dtype, duration):
+        return profile_gemm(m, n, k, dtype, False, True, duration)
 
-        if model_key not in model_lower_map:
-            raise ValueError(
-                f"[ERROR] Unknown model '{args.model}'. Supported models: {', '.join(MODEL_CONFIGS.keys())}"
+
+    def profile_wgrad(m, n, k, dtype, duration):
+        return profile_gemm(n, k, m, dtype, True, False, duration)
+
+
+    def profile_dgrad(m, n, k, dtype, duration):
+        return profile_gemm(m, k, n, dtype, False, False, duration)
+
+
+    def run_gemm_benchmark(args):
+        if args.model:
+            model_lower_map = {k.lower(): k for k in MODEL_CONFIGS.keys()}
+            model_key = args.model.lower()
+
+            if model_key not in model_lower_map:
+                raise ValueError(
+                    f"[ERROR] Unknown model '{args.model}'. Supported models: {', '.join(MODEL_CONFIGS.keys())}"
+                )
+
+            true_key = model_lower_map[model_key]
+            cfg = MODEL_CONFIGS[true_key]
+            args.model = true_key  # 规范化模型名
+            for k, v in cfg.items():
+                setattr(args, k, v)
+        else:
+            print("[INFO] No model specified. Using CLI-provided parameters.")
+
+        dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+        dtype = dtype_map[args.dtype]
+
+        q_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim
+        shape_defs = []
+
+        # q-proj
+        if args.q_lora_rank is None:
+            shape_defs.append(("attn_q", [args.seqlen, args.num_attention_heads * q_head_dim, args.hidden_size]))
+        else:
+            shape_defs.append(("attn_q_down", [args.seqlen, args.q_lora_rank, args.hidden_size]))
+            shape_defs.append(
+                ("attn_q_up", [args.seqlen, args.num_attention_heads * q_head_dim, args.q_lora_rank])
             )
 
-        true_key = model_lower_map[model_key]
-        cfg = MODEL_CONFIGS[true_key]
-        args.model = true_key  # 规范化模型名
-        for k, v in cfg.items():
-            setattr(args, k, v)
-    else:
-        print("[INFO] No model specified. Using CLI-provided parameters.")
+        # kv projections
+        shape_defs += [
+            ("attn_kv_down", [args.seqlen, args.kv_lora_rank + args.qk_rope_head_dim, args.hidden_size]),
+            (
+                "attn_kv_up",
+                [
+                    args.seqlen,
+                    args.num_attention_heads * (args.qk_nope_head_dim + args.v_head_dim),
+                    args.kv_lora_rank,
+                ],
+            ),
+            ("attn_out", [args.seqlen, args.hidden_size, args.num_attention_heads * args.v_head_dim]),
+            ("router", [args.seqlen, args.n_routed_experts, args.hidden_size]),
+        ]
 
-    dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp34": torch.float32}
-    dtype = dtype_map[args.dtype]
+        # shared experts
+        if args.n_shared_experts > 0:
+            shape_defs.append(("shared_gateup", [args.seqlen, args.intermediate_size * 2, args.hidden_size]))
+            shape_defs.append(("shared_down", [args.seqlen, args.hidden_size, args.intermediate_size]))
 
-    q_head_dim = args.qk_nope_head_dim + args.qk_rope_head_dim
-    shape_defs = []
+        # routed experts (balance)
+        balance_seq = int(args.seqlen * args.num_experts_per_tok // args.n_routed_experts)
+        shape_defs.append(("moe_gateup", [balance_seq, args.moe_intermediate_size * 2, args.hidden_size]))
+        shape_defs.append(("moe_down", [balance_seq, args.hidden_size, args.moe_intermediate_size]))
 
-    # q-proj
-    if args.q_lora_rank is None:
-        shape_defs.append(("attn_q", [args.seqlen, args.num_attention_heads * q_head_dim, args.hidden_size]))
-    else:
-        shape_defs.append(("attn_q_down", [args.seqlen, args.q_lora_rank, args.hidden_size]))
-        shape_defs.append(
-            ("attn_q_up", [args.seqlen, args.num_attention_heads * q_head_dim, args.q_lora_rank])
-        )
+        # vocab
+        shape_defs.append(("vocab", [args.seqlen, args.vocab_size, args.hidden_size]))
 
-    # kv projections
-    shape_defs += [
-        ("attn_kv_down", [args.seqlen, args.kv_lora_rank + args.qk_rope_head_dim, args.hidden_size]),
-        (
-            "attn_kv_up",
-            [
-                args.seqlen,
-                args.num_attention_heads * (args.qk_nope_head_dim + args.v_head_dim),
-                args.kv_lora_rank,
-            ],
-        ),
-        ("attn_out", [args.seqlen, args.hidden_size, args.num_attention_heads * args.v_head_dim]),
-        ("router", [args.seqlen, args.n_routed_experts, args.hidden_size]),
-    ]
+        func_defs = [
+            ("fwd", profile_fwd),
+            ("wgrad", profile_wgrad),
+            ("dgrad", profile_dgrad),
+        ]
 
-    # shared experts
-    if args.n_shared_experts > 0:
-        shape_defs.append(("shared_gateup", [args.seqlen, args.intermediate_size * 2, args.hidden_size]))
-        shape_defs.append(("shared_down", [args.seqlen, args.hidden_size, args.intermediate_size]))
+        record = {}
+        for (phase, shape), (tag, func) in tqdm(
+            itertools.product(shape_defs, func_defs),
+            total=len(shape_defs) * len(func_defs),
+            desc=f"[DeepSeek GEMM] {args.model or 'Custom'}",
+        ):
+            m, n, k = [args.mbs * shape[0], shape[1], shape[2]]
 
-    # routed experts (balance)
-    balance_seq = int(args.seqlen * args.num_experts_per_tok // args.n_routed_experts)
-    shape_defs.append(("moe_gateup", [balance_seq, args.moe_intermediate_size * 2, args.hidden_size]))
-    shape_defs.append(("moe_down", [balance_seq, args.hidden_size, args.moe_intermediate_size]))
+            res = func(m, n, k, dtype, args.duration)
+            summary = (
+                f"{res['tflops']:.2f}TF/s / "
+                f"{res['bandwidth_gbps']:.2f}GB/s / "
+                f"{res['avg_time_ms']:.6f}s / "
+                f"AI={res['arith_intensity']:.2f}"
+            )
+            record[f"{phase}_{tag}"] = summary
 
-    # vocab
-    shape_defs.append(("vocab", [args.seqlen, args.vocab_size, args.hidden_size]))
+        gathered = gather_records(record)
+        if is_rank_0():
+            all_keys = set().union(*(r.keys() for r in gathered))
+            header = ["host", "world", "rank"] + sorted(
+                [k for k in all_keys if k not in {"host", "rank", "world"}]
+            )
 
-    func_defs = [
-        ("fwd", profile_fwd),
-        ("wgrad", profile_wgrad),
-        ("dgrad", profile_dgrad),
-    ]
+            rows = [[r.get(col, "") for col in header] for r in gathered]
 
-    record = {}
-    for (phase, shape), (tag, func) in tqdm(
-        itertools.product(shape_defs, func_defs),
-        total=len(shape_defs) * len(func_defs),
-        desc=f"[DeepSeek GEMM] {args.model or 'Custom'}",
-    ):
-        m, n, k = [args.mbs * shape[0], shape[1], shape[2]]
+            preamble = build_preamble(args, shape_defs)
 
-        res = func(m, n, k, dtype, args.duration)
-        summary = (
-            f"{res['tflops']:.2f}TF/s / "
-            f"{res['bandwidth_gbps']:.2f}GB/s / "
-            f"{res['avg_time_ms']:.6f}s / "
-            f"AI={res['arith_intensity']:.2f}"
-        )
-        record[f"{phase}_{tag}"] = summary
+            append = getattr(args, "append", False)
 
-    gathered = gather_records(record)
-    if is_rank_0():
-        all_keys = set().union(*(r.keys() for r in gathered))
-        header = ["host", "world", "rank"] + sorted(
-            [k for k in all_keys if k not in {"host", "rank", "world"}]
-        )
+            write_table_simple(
+                header=header,
+                rows=rows,
+                output_file=args.output_file or f"benchmark_gemm_dense_{args.model}.md",
+                append=append,
+                preamble=preamble if not append else None,
+            )
 
-        rows = [[r.get(col, "") for col in header] for r in gathered]
-
-        preamble = build_preamble(args, shape_defs)
-
-        append = getattr(args, "append", False)
-
-        write_table_simple(
-            header=header,
-            rows=rows,
-            output_file=args.output_file or f"benchmark_gemm_dense_{args.model}.md",
-            append=append,
-            preamble=preamble if not append else None,
-        )
-
-        print(f"[✔] DeepSeek GEMM benchmark finished. Results saved to {args.output_file}")
+            print(f"[✔] DeepSeek GEMM benchmark finished. Results saved to {args.output_file}")
 
 
 def build_gemm_dense_parser() -> argparse.ArgumentParser:

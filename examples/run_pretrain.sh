@@ -66,13 +66,18 @@ export NNODES=${NNODES:-1}
 export NODE_RANK=${NODE_RANK:-0}
 export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
-
 LOG_INFO_RANK0 "==========Training cluster info=========="
 LOG_INFO_RANK0 "MASTER_ADDR: $MASTER_ADDR"
 LOG_INFO_RANK0 "MASTER_PORT: $MASTER_PORT"
 LOG_INFO_RANK0 "NNODES: $NNODES"
 LOG_INFO_RANK0 "NODE_RANK: $NODE_RANK"
 LOG_INFO_RANK0 "GPUS_PER_NODE: $GPUS_PER_NODE"
+if [ "${BACKEND:-}" = "MaxText" ]; then
+    export JAX_COORDINATOR_IP=$MASTER_ADDR
+    export JAX_COORDINATOR_PORT=$MASTER_PORT
+    LOG_INFO_RANK0 "JAX_COORDINATOR_IP: $JAX_COORDINATOR_IP"
+    LOG_INFO_RANK0 "JAX_COORDINATOR_PORT: $JAX_COORDINATOR_PORT"
+fi
 LOG_INFO_RANK0 ""
 
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
@@ -80,7 +85,11 @@ export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 
 LOG_INFO_RANK0 "Pip installing required packages ..."
-pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
+if [ "${BACKEND:-}" != "MaxText" ]; then
+    pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
+else
+    pip install -r "$PRIMUS_PATH/requirements-jax.txt"  --quiet
+fi
 
 # -------------------- EXP Check --------------------
 if [ -z "${EXP:-}" ]; then
@@ -114,10 +123,11 @@ fi
 # export AITER_JIT_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}_aiter_cache"
 
 
-TRAIN_LOG=${TRAIN_LOG:-"output/log_torchrun_pretrain_$(basename "$EXP" .yaml).txt"}
+TRAIN_LOG=${TRAIN_LOG:-"output/log_mp_pretrain_$(basename "$EXP" .yaml).txt"}
 
 LOG_INFO_RANK0 "==========Training info=========="
 LOG_INFO_RANK0 "EXP: $EXP"
+LOG_INFO_RANK0 "EXP: $BACKEND"
 LOG_INFO_RANK0 "TRAIN_LOG: $TRAIN_LOG"
 LOG_INFO_RANK0 "PRIMUS_PATH: $PRIMUS_PATH"
 LOG_INFO_RANK0 "DATA_PATH: $DATA_PATH"
@@ -155,6 +165,7 @@ if [ -z "${IP_INTERFACE}" ]; then
 fi
 export IP_INTERFACE
 
+export NCCL_SOCKET_IFNAME=lo
 # Set network interfaces for NCCL and Gloo, fallback to detected IP_INTERFACE
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-$IP_INTERFACE}
 export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-$IP_INTERFACE}
@@ -186,8 +197,10 @@ export RCCL_MSCCLPP_FORCE_ENABLE=0
 export RCCL_MSCCLPP_THRESHOLD=$((1*1024*1024*1024)) # default 1 MB
 # https://github.com/microsoft/mscclpp/blob/main/include/mscclpp/env.hpp#L82-L87
 export MSCCLPP_DISABLE_CHANNEL_CACHE=FALSE
-# pytorch need set this env to enable register comm
-export TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=0
+if [ "${BACKEND:-}" != "MaxText" ]; then
+    # pytorch need set this env to enable register comm
+    export TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=0
+fi
 
 LOG_INFO_RANK0 "==========AMD-specific GPU optimizations=========="
 LOG_INFO_RANK0 "HSA_ENABLE_SDMA: $HSA_ENABLE_SDMA"
@@ -201,15 +214,47 @@ LOG_INFO_RANK0 "TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK: $TORCH_NCCL_USE_T
 LOG_INFO_RANK0 ""
 
 # ----------------- Performance tuning -----------------
+if [ "${BACKEND:-}" == "MaxText" ]; then
+    export NVTE_ALLOW_NONDETERMINISTIC_ALGO=1
+    export XLA_PYTHON_CLIENT_MEM_FRACTION=.97
+    export NVTE_USE_HIPBLASLT=1
+    export XLA_FLAGS="--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_graph_level=0 --xla_gpu_enable_latency_hiding_scheduler=True --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=False --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=FALSE"
+ 
+    export HIP_FORCE_DEV_KERNARG=1
+    export HSA_FORCE_FINE_GRAIN_PCIE=1
+    export NVTE_FUSED_ATTN=1
+    export NVTE_CK_USES_BWD_V3=1
+    export NVTE_CK_USES_FWD_V3=1
+    export NVTE_CK_IS_V3_ATOMIC_FP32=0
+    export NVTE_CK_HOW_V3_BF16_CVT=2
+    export NVTE_FUSED_ATTN_CK=1
+    export NVTE_FUSED_ATTN_AOTRITON=0
+
+    LOG_INFO_RANK0 "==========Performance tuning for MaxText=========="
+    LOG_INFO_RANK0 "NVTE_ALLOW_NONDETERMINISTIC_ALGO: $NVTE_ALLOW_NONDETERMINISTIC_ALGO"
+    LOG_INFO_RANK0 "XLA_PYTHON_CLIENT_MEM_FRACTION: $XLA_PYTHON_CLIENT_MEM_FRACTION"
+    LOG_INFO_RANK0 "NVTE_USE_HIPBLASLT: $NVTE_USE_HIPBLASLT"
+    LOG_INFO_RANK0 "XLA_FLAGS: $XLA_FLAGS"
+    LOG_INFO_RANK0 "HIP_FORCE_DEV_KERNARG: $HIP_FORCE_DEV_KERNARG"
+    LOG_INFO_RANK0 "HSA_FORCE_FINE_GRAIN_PCIE: $HSA_FORCE_FINE_GRAIN_PCIE"
+    LOG_INFO_RANK0 "NVTE_FUSED_ATTN: $NVTE_FUSED_ATTN"
+    LOG_INFO_RANK0 "NVTE_CK_USES_BWD_V3: $NVTE_CK_USES_BWD_V3"
+    LOG_INFO_RANK0 "NVTE_CK_USES_FWD_V3: $NVTE_CK_USES_FWD_V3"
+    LOG_INFO_RANK0 "NVTE_CK_IS_V3_ATOMIC_FP32: $NVTE_CK_IS_V3_ATOMIC_FP32"
+    LOG_INFO_RANK0 "NVTE_CK_HOW_V3_BF16_CVT: $NVTE_CK_HOW_V3_BF16_CVT"
+    LOG_INFO_RANK0 "NVTE_FUSED_ATTN_CK: $NVTE_FUSED_ATTN_CK"
+    LOG_INFO_RANK0 "NVTE_FUSED_ATTN_AOTRITON: $NVTE_FUSED_ATTN_AOTRITON"
+fi
 
 # Limit GPU hardware queues to 2 for performance stability
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 
 # Limit max CUDA device connections to reduce PCIe traffic
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
-
-# Prioritize NCCL communication for PyTorch for higher throughput
-export TORCH_NCCL_HIGH_PRIORITY=1
+if [ "${BACKEND:-}" != "MaxText" ]; then
+    # Prioritize NCCL communication for PyTorch for higher throughput
+    export TORCH_NCCL_HIGH_PRIORITY=1
+fi
 
 # In multi-node training, PXN can be enabled to improve inter-node all-to-all
 # communication efficiency, but it will increase GPU memory usage.
@@ -273,7 +318,19 @@ else
   LOG_INFO "Skip bnxt rebuild. REBUILD_BNXT=$REBUILD_BNXT, PATH_TO_BNXT_TAR_PACKAGE=$PATH_TO_BNXT_TAR_PACKAGE"
 fi
 
+# -------------------- Install required packages for Jax --------------------
+install_pkgs_for_maxtext() {
+    LOG_INFO_RANK0 "========== Install required packages for Jax/MaxText =========="
+    apt install iproute2 -y
+    apt install -y linux-headers-"$(uname -r)" libelf-dev
+    apt install -y gcc make libtool autoconf librdmacm-dev rdmacm-utils infiniband-diags ibverbs-utils perftest ethtool libibverbs-dev \
+        rdma-core strace libibmad5 libibnetdisc5 ibverbs-providers libibumad-dev libibumad3 libibverbs1 libnl-3-dev libnl-route-3-dev
+    LOG_INFO_RANK0 "========== Install required packages for Jax/MaxText Done =========="
+}
 
+if [ "${BACKEND:-}" == "MaxText" ]; then
+    install_pkgs_for_maxtext
+fi
 
 # -------------------- HipBLASLt Tuning --------------------
 handle_hipblaslt_tuning() {
@@ -350,6 +407,9 @@ run_prepare_experiment() {
     if [[ -n "${BACKEND_PATH}" ]]; then
         BACKEND_ARG=(--backend_path "$BACKEND_PATH")
     fi
+    if [[ -n "${BACKEND}" ]]; then
+        BACKEND_ARG+=("--backend" "$BACKEND")
+    fi
 
     # Run the prepare_experiment.py script with required and optional arguments
     if ! python3 "$SCRIPT" \
@@ -407,16 +467,18 @@ else
 fi
 
 # -------------------- Launch Training --------------------
-DISTRIBUTED_ARGS=(
-    --nproc_per_node "${GPUS_PER_NODE}"
-    --nnodes "${NNODES}"
-    --node_rank "${NODE_RANK}"
-    --master_addr "${MASTER_ADDR}"
-    --master_port "${MASTER_PORT}"
-)
-
-
-CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
+if [ "${BACKEND:-}" == "MaxText" ]; then
+    CMD="python primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
+else
+    DISTRIBUTED_ARGS=(
+        --nproc_per_node "${GPUS_PER_NODE}"
+        --nnodes "${NNODES}"
+        --node_rank "${NODE_RANK}"
+        --master_addr "${MASTER_ADDR}"
+        --master_port "${MASTER_PORT}"
+    )
+    CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
+fi
 
 LOG_INFO "Launching distributed training with command: $CMD"
 

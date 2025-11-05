@@ -31,6 +31,12 @@ def load_backend_trainer(framework: str):
         )
 
         return TorchTitanPretrainTrainer
+    elif framework == "maxtext":
+        from primus.modules.trainer.maxtext.pre_trainer import (
+            MaxTextPretrainTrainer,
+        )
+
+        return MaxTextPretrainTrainer
     else:
         raise ValueError(f"Unsupported framework: {framework}")
 
@@ -65,6 +71,7 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
         "megatron": "Megatron-LM",
         "light-megatron": "Megatron-LM",
         "torchtitan": "torchtitan",
+        "maxtext": "maxtext"
     }
     mapped_name = fallback_name_map.get(framework, framework)
     default_path = Path(__file__).resolve().parent.parent / "third_party" / mapped_name
@@ -158,6 +165,7 @@ def launch_pretrain_from_cli(args, overrides):
         primus_cfg.export(export_path=args.export_config)
 
     # Setup backend path for dynamic import
+    primus_cfg.export_module_config("pre_trainer")
     framework = primus_cfg.get_module_config("pre_trainer").framework
     setup_backend_path(framework=framework, backend_path=args.backend_path, verbose=True)
 
