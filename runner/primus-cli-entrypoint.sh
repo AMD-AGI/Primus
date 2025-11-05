@@ -79,11 +79,22 @@ run_mode="torchrun"
 script_path="primus/cli/main.py"
 primus_env_kv=()
 primus_args=()
+patch_scripts=()
 log_file=""
+enable_numa="auto"  # auto / 1 / 0
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --single)
             run_mode="single"
+            shift
+            ;;
+        --numa)
+            enable_numa="1"
+            shift
+            ;;
+        --no-numa)
+            enable_numa="0"
             shift
             ;;
         --script)
@@ -99,6 +110,14 @@ while [[ $# -gt 0 ]]; do
                 echo "[primus-entry][ERROR] --env requires KEY=VALUE"
                 exit 2
             fi
+            ;;
+        --patch)
+            patch_scripts+=("$2")
+            shift 2
+            ;;
+        --patch=*)
+            patch_scripts+=("${1#*=}")
+            shift
             ;;
         --log_file)
             log_file="$2"
@@ -132,30 +151,79 @@ fi
 mkdir -p "$(dirname "$log_file")"
 
 
-# Source the environment setup script (centralizes all exports and helper functions).
+# Step 1: Source Primus environment setup
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
-source "${SCRIPT_DIR}/primus-env.sh"
+source "${SCRIPT_DIR}/helpers/primus-env.sh"
 
 for kv in "${primus_env_kv[@]}"; do
     export "${kv%%=*}"="${kv#*=}"
     LOG_INFO_RANK0 "[Primus Entrypoint] Exported env: ${kv%%=*}=${kv#*=}"
 done
 
+# Step 2: Auto-run hooks based on $1 $2 (e.g., train pretrain → hooks/train/pretrain/*)
+if [[ $# -ge 2 ]]; then
+    hook_group="$1"
+    hook_name="$2"
+    hook_dir="${SCRIPT_DIR}/helpers/hooks/${hook_group}/${hook_name}"
+    if [[ -d "$hook_dir" ]]; then
+        LOG_INFO_RANK0 "[Primus Entrypoint] Detected hooks directory: $hook_dir"
+        mapfile -t hook_files < <(find "$hook_dir" -maxdepth 1 -type f \( -name "*.sh" -o -name "*.py" \) | sort)
+        for hook_file in "${hook_files[@]}"; do
+            LOG_INFO_RANK0 "[Primus Entrypoint] Executing hook: $hook_file ${primus_args[*]}"
+            if [[ "$hook_file" == *.sh ]]; then
+                if ! bash "$hook_file" "${primus_args[@]}"; then
+                    LOG_ERROR "[Primus Entrypoint] Hook failed: $hook_file"
+                    exit 1
+                fi
+            elif [[ "$hook_file" == *.py ]]; then
+                if ! python3 "$hook_file" "${primus_args[@]}"; then
+                    LOG_ERROR "[Primus Entrypoint] Hook failed: $hook_file"
+                    exit 1
+                fi
+            fi
+        done
+    else
+        LOG_INFO_RANK0 "[Primus Entrypoint] No hook directory for [$hook_group/$hook_name]"
+    fi
+else
+    LOG_INFO_RANK0 "[Primus Entrypoint] No hook target detected (missing \$1 \$2)."
+fi
+
+
+# Step 3: Run patch scripts if specified
+if [[ ${#patch_scripts[@]} -gt 0 ]]; then
+    LOG_INFO_RANK0 "[Primus Entrypoint] Detected patch scripts: ${patch_scripts[*]}"
+    for patch in "${patch_scripts[@]}"; do
+        if [[ ! -f "$patch" ]]; then
+            LOG_WARN "[Primus Entrypoint] Patch script not found: $patch (skipping)"
+            continue
+        fi
+
+        LOG_INFO_RANK0 "[Primus Entrypoint] Running patch: bash $patch"
+        if ! bash "$patch"; then
+            LOG_ERROR "[Primus Entrypoint] Patch script failed: $patch"
+            exit 1
+        fi
+    done
+else
+    LOG_INFO_RANK0 "[Primus Entrypoint] No patch scripts specified."
+fi
 
 pip install -qq -r requirements.txt
-
-if [[ "$ENABLE_NUMA_BINDING" == "1" ]]; then
+if [[ "$enable_numa" == "1" ]]; then
     apt-get install numactl -y > /dev/null 2>&1
-    NUMA_LAUNCHER="--no-python ./runner/helpers/numa_bind.sh python3"
-else
-    NUMA_LAUNCHER="--"
 fi
 
 # Build launch arguments.
 if [[ "$run_mode" == "single" ]]; then
-    CMD="python3 $script_path $*"
-    LOG_INFO "Launching single-process script: $CMD"
+    if [[ "$enable_numa" == "1" ]]; then
+        CMD="bash ${SCRIPT_DIR}/helpers/numa_bind.sh python3 $script_path $*"
+        LOG_INFO "Launching single-process script with NUMA binding:"
+    else
+        CMD="python3 $script_path $*"
+        LOG_INFO "Launching single-process script:"
+    fi
 else
     DISTRIBUTED_ARGS=(
         --nproc_per_node "${GPUS_PER_NODE:-8}"
@@ -187,8 +255,18 @@ else
         FILTER_ARG=()
     fi
 
+    NUMA_LAUNCHER_ARGS=()
+    if [[ "$enable_numa" == "1" ]]; then
+        NUMA_LAUNCHER_ARGS=(--no-python "${SCRIPT_DIR}/helpers/numa_bind.sh" python3)
+        LOG_INFO_RANK0 "[Primus Entrypoint] NUMA binding: ENABLED (forced by CLI)"
+    elif [[ "$enable_numa" == "0" ]]; then
+        LOG_INFO_RANK0 "[Primus Entrypoint] NUMA binding: DISABLED (forced by CLI)"
+    else
+        LOG_INFO_RANK0 "[Primus Entrypoint] NUMA binding: AUTO (default OFF)"
+    fi
+
     # Step 4: Build the final command.
-    CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS} ${NUMA_LAUNCHER} $script_path $* "
+    CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS} ${NUMA_LAUNCHER_ARGS[*]}  $script_path $* "
     LOG_INFO "Launching distributed training with command: $CMD 2>&1 | tee $log_file"
 fi
 

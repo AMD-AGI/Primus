@@ -38,8 +38,10 @@ fi
 
 HOSTNAME=$(hostname)
 
-# Default Values
-PRIMUS_PATH="/workspace/Primus"
+# Derive PRIMUS_PATH as the parent directory of this script by default. This
+# makes the container script usable when invoked from the repo's runner/ folder.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PRIMUS_PATH="$(realpath -m "$SCRIPT_DIR/..")"
 
 # Parse CLI options
 DOCKER_IMAGE=""
@@ -102,7 +104,7 @@ DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.9_gfx942"}
 
 # ----------------- Volume Mounts -----------------
 # Mount the project root and dataset directory into the container
-VOLUME_ARGS=()
+VOLUME_ARGS=(-v "$PRIMUS_PATH:$PRIMUS_PATH")
 for mnt in "${MOUNTS[@]}"; do
     # Parse --mount argument (HOST[:CONTAINER])
     if [[ "$mnt" == *:* ]]; then
