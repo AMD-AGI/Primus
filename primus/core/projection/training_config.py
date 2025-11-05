@@ -115,6 +115,9 @@ def megatron_derive_default_args(args):
     args.sequence_length = args.seq_length
     args.context_model_parallel_size = args.context_parallel_size
 
+    # TODO: set this number right
+    args.padded_vocab_size = 100352
+
     return args
 
 

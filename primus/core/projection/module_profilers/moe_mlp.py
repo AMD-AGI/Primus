@@ -42,9 +42,16 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # First Gemm
         total += num_tokens * self.config.model_config.hidden_size * 2  # bf16
         # Activation layer
-        total += num_tokens * self.config.model_config.ffn_hidden_size * 2  # bf16
+        # TODO: swiglu scalue
+        swiglu_scale = 1
+        if self.config.model_config.swiglu:
+            swiglu_scale = 2
+        total += (num_tokens * self.config.model_config.moe_ffn_hidden_size *
+                  swiglu_scale) * 2  # bf16
         # Second Gemm
-        total += num_tokens * self.config.model_config.ffn_hidden_size * 2  # bf16
+        total += num_tokens * self.config.model_config.moe_ffn_hidden_size * 2  # bf16
+
+        denom = self.config.model_config.hidden_size * batch_size * seq_len * 2
         return total
 
 

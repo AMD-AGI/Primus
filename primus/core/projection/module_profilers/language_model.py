@@ -122,6 +122,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
     def estimated_num_params(self) -> int:    
         total_params = 0
+        print("per layer params: %s" % self.sub_profilers["moe_transformer_layer"].estimated_num_params())
         for layer in self.layers:
             is_moe = self.config.model_config.moe_pattern[layer]
             if is_moe:
@@ -138,6 +139,8 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
+        print("per layer act: %s" % self.sub_profilers["moe_transformer_layer"].estimated_activation_memory(batch_size, seq_len))
+
         total_act = 0
         for layer in self.layers:
             is_moe = self.config.model_config.moe_pattern[layer]
