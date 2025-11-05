@@ -39,5 +39,5 @@ if [ -z "${DATA_PATH:-}" ]; then
 fi
 
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
-bash "${PRIMUS_PATH}"/runner/primus-cli direct --env NVTE_CK_USES_BWD_V3=0 \
+bash "${PRIMUS_PATH}"/runner/primus-cli direct \
     -- train pretrain --config "$EXP" --data_path "$DATA_PATH" "$@"
