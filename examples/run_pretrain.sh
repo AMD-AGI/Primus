@@ -165,7 +165,6 @@ if [ -z "${IP_INTERFACE}" ]; then
 fi
 export IP_INTERFACE
 
-export NCCL_SOCKET_IFNAME=lo
 # Set network interfaces for NCCL and Gloo, fallback to detected IP_INTERFACE
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-$IP_INTERFACE}
 export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-$IP_INTERFACE}

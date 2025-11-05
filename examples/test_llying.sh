@@ -1,2 +1,4 @@
 #!/bin/bash
-BACKEND=MaxText EXP=examples/maxtext/config/MI300X/llama3_8B-pretrain.yaml bash examples/run_local_pretrain.sh
+export EXP=examples/maxtext/config/MI300X/llama2_7B-pretrain.yaml
+export BACKEND=MaxText
+NNODES=2 bash examples/run_slurm_pretrain.sh

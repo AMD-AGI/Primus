@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:llama3_8B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:llama2_7B-pretrain}
 workspace: ./output
 
 modules:
@@ -9,9 +9,9 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: llama3_8B.yaml
+    model: llama2_7B.yaml
     overrides:
-      run_name: "llama3_8b_training"
+      run_name: "llama2_7b_training"
       base_output_directory: "./output"
       steps: 50
       log_period: 10
@@ -32,7 +32,8 @@ modules:
       # intra-node parallelism strategy
       ici_fsdp_parallelism: 8
       ici_data_parallelism: 1
+      ici_tensor_sequence_parallelism: -1
 
       remat_policy: "minimal_flash"
-      max_target_length: 8192
-      per_device_batch_size: 4
+      max_target_length: 4096
+      per_device_batch_size: 12

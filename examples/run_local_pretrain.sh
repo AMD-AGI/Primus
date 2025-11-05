@@ -53,6 +53,8 @@ echo "PRIMUS_PATH: $PRIMUS_PATH"
 # Dataset directory
 # DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 DATA_PATH=${DATA_PATH:-"$(pwd)/data"}
+echo "DATA_PATH: $DATA_PATH"
+mkdir -p $DATA_PATH
 
 # ------------------ Cluster Env Defaults ------------------
 MASTER_ADDR=${MASTER_ADDR:-localhost}
@@ -94,7 +96,6 @@ if [[ -f "$PATH_TO_BNXT_TAR_PACKAGE" ]]; then
     VOLUME_ARGS+=(-v "$PATH_TO_BNXT_TAR_PACKAGE":"$PATH_TO_BNXT_TAR_PACKAGE")
 fi
 
-echo "-----------VOLUME_ARGS: ${VOLUME_ARGS[@]}-----------"
 export CLEAN_DOCKER_CONTAINER=${CLEAN_DOCKER_CONTAINER:-0}
 
 # ------------------ Optional Container Cleanup ------------------

@@ -14,6 +14,9 @@ dataset_type: "synthetic"
 attention: "cudnn_flash_te"
 use_iota_embed: True
 megablox: False
+capacity_factor: 1.25
+sparse_matmul: False
+sharding_tolerance: 0.05
 shardy: False
 
 remat_policy: 'full'

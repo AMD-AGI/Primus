@@ -32,7 +32,8 @@ modules:
       # intra-node parallelism strategy
       ici_fsdp_parallelism: 8
       ici_data_parallelism: 1
+      ici_tensor_sequence_parallelism: -1
 
       remat_policy: "minimal_flash"
       max_target_length: 8192
-      per_device_batch_size: 4
+      per_device_batch_size: 9
