@@ -118,53 +118,32 @@ if [[ "${1:-}" == "sbatch" || "${1:-}" == "srun" ]]; then
 fi
 
 # 2. Collect SLURM_FLAGS before '--'
-# Use associative array for generic Slurm parameter handling
-# This ensures CLI > Config priority without hardcoding specific parameters
-declare -A SLURM_OPTS
+# Fully generic passthrough mechanism: all CLI args override config
+# No hardcoded Slurm parameters - everything is passed through
+declare -A CLI_OPTS_SET
+CLI_ARGS=()
 
-# Load Slurm options from config first (if available)
-if [[ -n "${SLURM_PARTITION:-}" ]]; then
-    SLURM_OPTS[partition]="$SLURM_PARTITION"
-fi
-if [[ -n "${SLURM_NODES:-}" ]]; then
-    SLURM_OPTS[nodes]="$SLURM_NODES"
-fi
-
-# Parse CLI arguments and override config values
+# Collect all CLI arguments and track which options are set
 while [[ $# -gt 0 && "$1" != "--" ]]; do
-    case "$1" in
-        -p|--partition)
-            SLURM_OPTS[partition]="$2"
-            shift 2
-            ;;
-        -N|--nodes)
-            SLURM_OPTS[nodes]="$2"
-            shift 2
-            ;;
-        *)
-            # For other Slurm flags, pass them through as-is
-            # This supports flags like --time, --mem, --gres, etc.
-            if [[ -z "${SLURM_OTHER_FLAGS:-}" ]]; then
-                SLURM_OTHER_FLAGS=()
-            fi
-            SLURM_OTHER_FLAGS+=("$1")
-            shift
-            ;;
-    esac
+    CLI_ARGS+=("$1")
+    # Track option flags (e.g., -p, -N, --partition, --nodes, etc.)
+    if [[ "$1" =~ ^- ]]; then
+        CLI_OPTS_SET["$1"]=1
+    fi
+    shift
 done
 
-# Build final SLURM_FLAGS array from associative array
-SLURM_FLAGS=()
-if [[ -n "${SLURM_OPTS[partition]:-}" ]]; then
-    SLURM_FLAGS+=(-p "${SLURM_OPTS[partition]}")
+# Build config args that are NOT overridden by CLI
+CONFIG_ARGS=()
+if [[ -n "${SLURM_PARTITION:-}" ]] && [[ -z "${CLI_OPTS_SET[-p]:-}" ]] && [[ -z "${CLI_OPTS_SET[--partition]:-}" ]]; then
+    CONFIG_ARGS+=(-p "$SLURM_PARTITION")
 fi
-if [[ -n "${SLURM_OPTS[nodes]:-}" ]]; then
-    SLURM_FLAGS+=(-N "${SLURM_OPTS[nodes]}")
+if [[ -n "${SLURM_NODES:-}" ]] && [[ -z "${CLI_OPTS_SET[-N]:-}" ]] && [[ -z "${CLI_OPTS_SET[--nodes]:-}" ]]; then
+    CONFIG_ARGS+=(-N "$SLURM_NODES")
 fi
-# Append other flags
-if [[ -n "${SLURM_OTHER_FLAGS:-}" ]]; then
-    SLURM_FLAGS+=("${SLURM_OTHER_FLAGS[@]}")
-fi
+
+# Final SLURM_FLAGS: config args first, then CLI args (CLI has priority)
+SLURM_FLAGS=("${CONFIG_ARGS[@]}" "${CLI_ARGS[@]}")
 
 # Skip '--'
 if [[ "$#" -gt 0 && "$1" == "--" ]]; then
