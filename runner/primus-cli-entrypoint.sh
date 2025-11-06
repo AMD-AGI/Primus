@@ -154,7 +154,7 @@ mkdir -p "$(dirname "$log_file")"
 # Step 1: Source Primus environment setup
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
-source "${SCRIPT_DIR}/helpers/primus-env.sh"
+source "${SCRIPT_DIR}/helpers/envs/primus-env.sh"
 
 for kv in "${primus_env_kv[@]}"; do
     export "${kv%%=*}"="${kv#*=}"
