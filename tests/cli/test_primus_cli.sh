@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # Source common library
+export PRIMUS_LOG_COLOR=0  # Disable colors in tests
 # shellcheck disable=SC1091
 source "$PROJECT_ROOT/runner/lib/common.sh"
 
