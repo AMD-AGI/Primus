@@ -17,12 +17,24 @@ slurm:
 
 # Container-specific settings
 container:
+  # Docker/Podman image
   image: "rocm/primus:v25.9_gfx942"
-  cpus: 32
-  memory: "256G"
-  shm_size: "16G"
-  gpus: 8
-  # user: "1000:1000"
+  
+  # Resource limits
+  cpus: 32                    # CPU cores limit
+  memory: "256G"              # Memory limit
+  gpus: 8                     # GPU count limit
+  shm_size: "16G"             # Shared memory size
+  
+  # Container runtime settings
+  name: "primus-training"     # Container name
+  user: "1000:1000"           # Run as specific user (UID:GID)
+  
+  # Mount points
+  mounts:
+    - "/data:/data"
+    - "/output:/output"
+    - "/workspace/Primus"     # Mount local Primus repo
 
 # Direct mode settings
 direct:
@@ -34,8 +46,9 @@ direct:
 # Path settings (shared)
 paths:
   log_path: "logs"
-  # data_path: "/data"
-  # output_path: "/output"
+  data_path: "/data"
+  output_path: "/output"
+  primus_path: "/workspace/Primus"  # Local Primus repo path
 
 # Architecture Notes:
 # - Each mode (slurm/container/direct) loads only its own section

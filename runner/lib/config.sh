@@ -178,8 +178,11 @@ load_yaml_config() {
 
     LOG_DEBUG "Loading YAML config: $config_file"
 
-    # Simple YAML parser (handles basic key: value format)
+    # Simple YAML parser (handles basic key: value format and arrays)
     local current_section=""
+    local current_array_key=""
+    local array_index=0
+    
     while IFS= read -r line || [[ -n "$line" ]]; do
         # Skip comments and empty lines
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
@@ -188,6 +191,34 @@ load_yaml_config() {
         # Detect section (e.g., "container:")
         if [[ "$line" =~ ^([a-z_]+):[[:space:]]*$ ]]; then
             current_section="${BASH_REMATCH[1]}"
+            current_array_key=""
+            array_index=0
+            continue
+        fi
+
+        # Parse key with empty value (indicates array) (e.g., "  mounts:")
+        if [[ "$line" =~ ^[[:space:]]+([a-z_]+):[[:space:]]*$ ]]; then
+            current_array_key="${BASH_REMATCH[1]}"
+            array_index=0
+            continue
+        fi
+
+        # Parse array item (e.g., "    - /data:/data")
+        if [[ "$line" =~ ^[[:space:]]+\-[[:space:]]+(.+)$ ]]; then
+            local value="${BASH_REMATCH[1]}"
+            
+            # Remove quotes
+            value="${value%\"}"
+            value="${value#\"}"
+            value="${value%\'}"
+            value="${value#\'}"
+            
+            if [[ -n "$current_section" ]] && [[ -n "$current_array_key" ]]; then
+                local config_key="${current_section}.${current_array_key}.${array_index}"
+                PRIMUS_CONFIG[$config_key]="$value"
+                LOG_DEBUG "  $config_key = $value"
+                ((array_index++))
+            fi
             continue
         fi
 
@@ -201,6 +232,10 @@ load_yaml_config() {
             value="${value#\"}"
             value="${value%\'}"
             value="${value#\'}"
+
+            # Reset array key when we get a normal key-value pair
+            current_array_key=""
+            array_index=0
 
             if [[ -n "$current_section" ]]; then
                 local config_key="${current_section}.${key}"
@@ -309,6 +344,18 @@ load_mode_config() {
             [[ -n "${PRIMUS_CONFIG[container.shm_size]:-}" ]] && export CONTAINER_SHM_SIZE="${PRIMUS_CONFIG[container.shm_size]}"
             [[ -n "${PRIMUS_CONFIG[container.gpus]:-}" ]] && export CONTAINER_GPUS="${PRIMUS_CONFIG[container.gpus]}"
             [[ -n "${PRIMUS_CONFIG[container.user]:-}" ]] && export CONTAINER_USER="${PRIMUS_CONFIG[container.user]}"
+            [[ -n "${PRIMUS_CONFIG[container.name]:-}" ]] && export CONTAINER_NAME="${PRIMUS_CONFIG[container.name]}"
+            
+            # Handle mounts array (stored as container.mounts.0, container.mounts.1, ...)
+            local mount_idx=0
+            while [[ -n "${PRIMUS_CONFIG[container.mounts.$mount_idx]:-}" ]]; do
+                if [[ -z "${CONTAINER_MOUNTS:-}" ]]; then
+                    export CONTAINER_MOUNTS="${PRIMUS_CONFIG[container.mounts.$mount_idx]}"
+                else
+                    export CONTAINER_MOUNTS="$CONTAINER_MOUNTS|${PRIMUS_CONFIG[container.mounts.$mount_idx]}"
+                fi
+                ((mount_idx++))
+            done
             ;;
         direct)
             # Export direct-mode-specific settings

@@ -108,6 +108,13 @@ CONTAINER_GPUS="${CONTAINER_GPUS:-}"
 CONTAINER_USER="${CONTAINER_USER:-}"
 CONTAINER_NAME="${CONTAINER_NAME:-}"
 
+# Load mounts from config (if set via CONTAINER_MOUNTS env var)
+# Format: mount1|mount2|mount3
+if [[ -n "${CONTAINER_MOUNTS:-}" ]]; then
+    IFS='|' read -ra CONFIG_MOUNTS <<< "$CONTAINER_MOUNTS"
+    MOUNTS+=("${CONFIG_MOUNTS[@]}")
+fi
+
 VERBOSE=1
 
 LOG_ERROR="[primus-cli-container][${HOSTNAME}][ERROR]"

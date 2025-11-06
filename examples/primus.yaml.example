@@ -17,16 +17,24 @@ direct:
 
 # Container settings
 container:
+  # Docker/Podman image
   image: "rocm/primus:v25.9_gfx942"
-  cpus: 16
-  memory: "128G"
-  # shm_size: "16G"
-  # user: "1000:1000"
-
-  # Common mount points (optional)
-  # mounts:
-  #   - "/data:/data"
-  #   - "/output:/output"
+  
+  # Resource limits
+  cpus: 16                    # CPU cores limit (e.g., 8, 16.5)
+  memory: "128G"              # Memory limit (e.g., 64G, 128G)
+  gpus: 8                     # GPU count limit (default: all available)
+  shm_size: "16G"             # Shared memory size (default: host IPC)
+  
+  # Container runtime settings
+  name: "primus-training"     # Container name
+  user: "1000:1000"           # Run as specific user (UID:GID)
+  
+  # Mount points (can be specified as HOST or HOST:CONTAINER)
+  mounts:
+    - "/data:/data"           # Mount /data from host to /data in container
+    - "/output:/output"       # Mount output directory
+    # - "/workspace/Primus"   # Mount with same path (when only HOST given)
 
 # Slurm-specific settings
 slurm:
@@ -38,9 +46,9 @@ slurm:
 # Path settings
 paths:
   log_path: "logs"
-  # data_path: "/data"
-  # output_path: "/output"
-  # primus_path: "/workspace/Primus"
+  data_path: "/data"
+  output_path: "/output"
+  primus_path: "/workspace/Primus"  # Local Primus repo (will be mounted and installed in container)
 
 # Project-specific settings
 # project:
