@@ -163,12 +163,13 @@ def benchmark_strided_allgather(
             avg_s = total_s / iters
             # Each iteration moves group_size * size_bytes worth of data to each rank
             total_bytes = size_bytes * group_size
-            gib_s = bytes_to_gib_per_s(total_bytes, avg_s)
+            algobw = bytes_to_gib_per_s(total_bytes, avg_s)
+            busbw = algobw * (group_size - 1) / group_size
 
             if rank == print_rank:
                 print(
                     f"[RANK-{rank}][StridedAllGather][Parallel][Group-{group_id}][Ranks-{group_ranks}] size={format_size_mb(size_bytes)} "
-                    f"avg={avg_s*1e3:.2f} ms agg_bw={gib_s:.2f} GiB/s"
+                    f"avg={avg_s*1e3:.2f} ms algobw={algobw:.2f} GiB/s busbw={busbw:.2f} GiB/s"
                 )
         else:
             for g_id in range(num_groups):
@@ -183,11 +184,12 @@ def benchmark_strided_allgather(
                     total_s = t1 - t0
                     avg_s = total_s / iters
                     total_bytes = size_bytes * group_size
-                    gib_s = bytes_to_gib_per_s(total_bytes, avg_s)
+                    algobw = bytes_to_gib_per_s(total_bytes, avg_s)
+                    busbw = algobw * (group_size - 1) / group_size
                     if rank == print_rank:
                         print(
                             f"[RANK-{rank}][StridedAllGather][Single][Group-{g_id}][Ranks-{group_ranks}] size={format_size_mb(size_bytes)} "
-                            f"avg={avg_s*1e3:.2f} ms agg_bw={gib_s:.2f} GiB/s"
+                            f"avg={avg_s*1e3:.2f} ms algobw={algobw:.2f} GiB/s busbw={busbw:.2f} GiB/s"
                         )
                 barrier()
                 torch.cuda.synchronize()
