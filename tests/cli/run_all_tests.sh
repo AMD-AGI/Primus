@@ -32,6 +32,7 @@ TEST_SCRIPTS=(
     "$SCRIPT_DIR/test_helpers.sh"
     "$SCRIPT_DIR/test_config.sh"
     "$SCRIPT_DIR/test_primus_cli_container.sh"
+    "$SCRIPT_DIR/test_primus_cli_slurm.sh"
 )
 
 # Run each test suite
