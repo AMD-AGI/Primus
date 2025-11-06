@@ -15,13 +15,18 @@ cat <<'EOF'
 Primus Slurm Launcher
 
 Usage:
-    primus-cli slurm [--config FILE] [srun|sbatch] [SLURM_FLAGS...] -- <entry> [ENTRY_ARGS...] -- [PRIMUS_ARGS...]
+    primus-cli slurm [--config FILE] [--debug] [--dry-run] [srun|sbatch] [SLURM_FLAGS...] -- <entry> [ENTRY_ARGS...] -- [PRIMUS_ARGS...]
 
 Description:
     Launch distributed Primus jobs via Slurm.
     - Everything before the first '--' is passed to Slurm (srun/sbatch and flags).
     - <entry> specifies Primus execution mode: container | direct | preflight (see below).
     - The second '--' (if any) separates Primus entry args from Primus CLI arguments.
+
+Options:
+    --config FILE    Load configuration from specified file
+    --debug          Enable debug mode (verbose logging)
+    --dry-run        Show what would be executed without actually running
 
 Examples:
     # Launch 4 nodes using srun and container mode
@@ -32,6 +37,12 @@ Examples:
 
     # Run preflight environment check across 4 nodes
     primus-cli slurm srun -N 4 -- preflight
+
+    # Dry-run to see what would be executed
+    primus-cli slurm --dry-run srun -N 4 -- container -- train
+
+    # Use configuration file with dry-run
+    primus-cli slurm --config slurm.yaml --dry-run sbatch -- container -- benchmark
 
 Notes:
     - [srun|sbatch] is optional; defaults to srun if not specified.
@@ -51,10 +62,10 @@ if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
     exit 0
 fi
 
-# 0. Parse --config, --debug first if present
-# Note: --dry-run is handled by primus-cli and won't be passed here
+# 0. Parse --config, --debug, --dry-run first if present
 CONFIG_FILE=""
 DEBUG_MODE=0
+DRY_RUN_MODE=0
 CONFIG_ARGS=()
 PRE_PARSE_ARGS=()
 while [[ $# -gt 0 ]]; do
@@ -69,6 +80,10 @@ while [[ $# -gt 0 ]]; do
             CONFIG_ARGS+=(--debug)
             shift
             ;;
+        --dry-run)
+            DRY_RUN_MODE=1
+            shift
+            ;;
         *)
             PRE_PARSE_ARGS+=("$1")
             shift
@@ -77,6 +92,11 @@ while [[ $# -gt 0 ]]; do
 done
 # Restore arguments
 set -- "${PRE_PARSE_ARGS[@]}"
+
+# Load common library first (required by config.sh)
+if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
+    source "$SCRIPT_DIR/lib/common.sh" 2>/dev/null || true
+fi
 
 # Load config library and slurm-specific config
 if [[ -f "$SCRIPT_DIR/lib/config.sh" ]]; then
@@ -135,5 +155,12 @@ if [[ "$DEBUG_MODE" == "1" ]]; then
 fi
 ENTRY_ARGS+=("$@")
 
-echo "[primus-cli-slurm] Executing: $LAUNCH_CMD ${SLURM_FLAGS[*]} $ENTRY ${ENTRY_ARGS[*]}"
+echo "[primus-cli-slurm] Executing: $LAUNCH_CMD ${SLURM_FLAGS[*]:-} $ENTRY ${ENTRY_ARGS[*]:-}"
+
+# Handle dry-run mode
+if [[ "$DRY_RUN_MODE" == "1" ]]; then
+    echo "[DRY-RUN] Would execute: $LAUNCH_CMD ${SLURM_FLAGS[*]:-} $ENTRY ${ENTRY_ARGS[*]:-}"
+    exit 0
+fi
+
 exec "$LAUNCH_CMD" "${SLURM_FLAGS[@]}" "$ENTRY" "${ENTRY_ARGS[@]}"
