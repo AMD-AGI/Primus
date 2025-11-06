@@ -1,7 +1,11 @@
 #!/bin/bash
 ###############################################################################
-# Run all Primus CLI tests
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
 ###############################################################################
+
+# Run all Primus CLI tests
 
 set -euo pipefail
 
@@ -42,7 +46,7 @@ for test_script in "${TEST_SCRIPTS[@]}"; do
         continue
     fi
 
-    ((TOTAL_SUITES++))
+    ((TOTAL_SUITES++)) || true
 
     test_name=$(basename "$test_script")
     LOG_INFO "========================================="
@@ -52,10 +56,10 @@ for test_script in "${TEST_SCRIPTS[@]}"; do
 
     if bash "$test_script"; then
         LOG_SUCCESS "✓ $test_name PASSED"
-        ((PASSED_SUITES++))
+        ((PASSED_SUITES++)) || true
     else
         LOG_ERROR "✗ $test_name FAILED"
-        ((FAILED_SUITES++))
+        ((FAILED_SUITES++)) || true
     fi
     echo ""
     echo ""

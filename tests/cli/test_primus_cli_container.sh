@@ -1,8 +1,12 @@
 #!/bin/bash
 ###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 # Unit tests for primus-cli-container.sh
 # Uses dry-run mode and mock docker to verify functionality
-###############################################################################
 
 # Get project root
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -29,13 +33,13 @@ assert_equals() {
 
     if [[ "$expected" == "$actual" ]]; then
         echo -e "${GREEN}✓${NC} $test_name"
-        ((TESTS_PASSED++))
+        ((TESTS_PASSED++)) || true
         return 0
     else
         echo -e "${RED}✗${NC} $test_name"
         echo "  Expected: $expected"
         echo "  Actual:   $actual"
-        ((TESTS_FAILED++))
+        ((TESTS_FAILED++)) || true
         return 1
     fi
 }
@@ -49,14 +53,14 @@ assert_contains() {
 
     if echo "$haystack" | grep -qF "$needle"; then
         echo -e "${GREEN}✓${NC} $test_name"
-        ((TESTS_PASSED++))
+        ((TESTS_PASSED++)) || true
         return 0
     else
         echo -e "${RED}✗${NC} $test_name"
         echo "  Expected to contain: $needle"
         echo "  Actual output:"
         echo "$haystack" | head -10
-        ((TESTS_FAILED++))
+        ((TESTS_FAILED++)) || true
         return 1
     fi
 }
@@ -70,13 +74,13 @@ assert_not_contains() {
 
     if ! echo "$haystack" | grep -qF "$needle"; then
         echo -e "${GREEN}✓${NC} $test_name"
-        ((TESTS_PASSED++))
+        ((TESTS_PASSED++)) || true
         return 0
     else
         echo -e "${RED}✗${NC} $test_name"
         echo "  Should NOT contain: $needle"
         echo "  But found in output"
-        ((TESTS_FAILED++))
+        ((TESTS_FAILED++)) || true
         return 1
     fi
 }
