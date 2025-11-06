@@ -361,6 +361,148 @@ test_arguments_after_entry() {
 }
 
 # ============================================================================
+# Test 13: Long option format override
+# ============================================================================
+test_long_option_override() {
+    print_section "Test 13: Long Option Format Override"
+
+    # Create test config
+    local test_config="/tmp/test-slurm-long-opt-$$.yaml"
+    cat > "$test_config" << 'EOF'
+slurm:
+  partition: "config_partition"
+  nodes: 4
+EOF
+
+    # Use long option format to override
+    local output
+    output=$(bash "$RUNNER_DIR/primus-cli-slurm.sh" \
+        --config "$test_config" \
+        --dry-run \
+        srun --nodes 16 --partition cli_partition \
+        -- container -- train 2>&1)
+
+    assert_contains "$output" "--partition cli_partition" "Long option should override config"
+    assert_contains "$output" "--nodes 16" "Long option should override config"
+    assert_not_contains "$output" "config_partition" "Config value should not appear"
+
+    rm -f "$test_config"
+}
+
+# ============================================================================
+# Test 14: Pure passthrough - arbitrary Slurm parameters
+# ============================================================================
+test_pure_passthrough() {
+    print_section "Test 14: Pure Passthrough - Arbitrary Parameters"
+
+    # Test with various Slurm parameters that are NOT hardcoded
+    local output
+    output=$(bash "$RUNNER_DIR/primus-cli-slurm.sh" \
+        --dry-run \
+        srun \
+        --exclusive \
+        --ntasks-per-node=8 \
+        --cpus-per-task=16 \
+        --job-name=my_training \
+        --account=research_team \
+        -C gpu \
+        -- container -- train 2>&1)
+
+    assert_contains "$output" "--exclusive" "Should passthrough --exclusive"
+    assert_contains "$output" "--ntasks-per-node=8" "Should passthrough --ntasks-per-node"
+    assert_contains "$output" "--cpus-per-task=16" "Should passthrough --cpus-per-task"
+    assert_contains "$output" "--job-name=my_training" "Should passthrough --job-name"
+    assert_contains "$output" "--account=research_team" "Should passthrough --account"
+    assert_contains "$output" "-C gpu" "Should passthrough -C constraint"
+}
+
+# ============================================================================
+# Test 15: Parameter order (config first, CLI second)
+# ============================================================================
+test_parameter_order() {
+    print_section "Test 15: Parameter Order (Config First, CLI Second)"
+
+    # Create test config
+    local test_config="/tmp/test-slurm-order-$$.yaml"
+    cat > "$test_config" << 'EOF'
+slurm:
+  partition: "config_part"
+  nodes: 4
+EOF
+
+    local output
+    output=$(bash "$RUNNER_DIR/primus-cli-slurm.sh" \
+        --config "$test_config" \
+        --dry-run \
+        srun --time=01:00:00 --mem=64G \
+        -- container -- train 2>&1)
+
+    # Verify both config params and CLI params are present
+    # Config params should appear before CLI params in the command
+    assert_contains "$output" "-p config_part" "Config partition should be present"
+    assert_contains "$output" "-N 4" "Config nodes should be present"
+    assert_contains "$output" "--time=01:00:00" "CLI time should be present"
+    assert_contains "$output" "--mem=64G" "CLI mem should be present"
+}
+
+# ============================================================================
+# Test 16: Mixed short and long options with override
+# ============================================================================
+test_mixed_short_long_override() {
+    print_section "Test 16: Mixed Short and Long Options Override"
+
+    # Create test config with both partition and nodes
+    local test_config="/tmp/test-slurm-mixed-$$.yaml"
+    cat > "$test_config" << 'EOF'
+slurm:
+  partition: "default_partition"
+  nodes: 8
+EOF
+
+    # Override partition with short option, nodes with long option
+    local output
+    output=$(bash "$RUNNER_DIR/primus-cli-slurm.sh" \
+        --config "$test_config" \
+        --dry-run \
+        srun -p gpu_queue --nodes 32 \
+        -- container -- train 2>&1)
+
+    assert_contains "$output" "-p gpu_queue" "Short option should override partition"
+    assert_contains "$output" "--nodes 32" "Long option should override nodes"
+    assert_not_contains "$output" "default_partition" "Default partition should not appear"
+    # Note: Both -N 8 and its equivalents should be overridden
+
+    rm -f "$test_config"
+}
+
+# ============================================================================
+# Test 17: Sbatch-specific parameters
+# ============================================================================
+test_sbatch_specific_params() {
+    print_section "Test 17: Sbatch-Specific Parameters"
+
+    local output
+    output=$(bash "$RUNNER_DIR/primus-cli-slurm.sh" \
+        --dry-run \
+        sbatch \
+        --job-name=training_job \
+        --output=logs/job-%j.out \
+        --error=logs/job-%j.err \
+        --mail-type=END,FAIL \
+        --mail-user=user@example.com \
+        -N 4 \
+        -- container -- train 2>&1)
+
+    assert_contains "$output" "sbatch" "Should use sbatch"
+    assert_contains "$output" "--job-name=training_job" "Should include job name"
+    assert_contains "$output" "--output=logs/job-%j.out" "Should include output path"
+    assert_contains "$output" "--error=logs/job-%j.err" "Should include error path"
+    assert_contains "$output" "--mail-type=END,FAIL" "Should include mail type"
+    assert_contains "$output" "--mail-user=user@example.com" "Should include mail user"
+    assert_contains "$output" "-N 4" "Should include nodes"
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 main() {
@@ -380,6 +522,11 @@ main() {
     test_help_message
     test_multiple_slurm_flags
     test_arguments_after_entry
+    test_long_option_override
+    test_pure_passthrough
+    test_parameter_order
+    test_mixed_short_long_override
+    test_sbatch_specific_params
 
     # Print summary
     echo ""
