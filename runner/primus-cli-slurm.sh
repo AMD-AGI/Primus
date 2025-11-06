@@ -111,27 +111,13 @@ declare -A slurm_args
 if [[ -n "$CONFIG_FILE" ]] && [[ -f "$CONFIG_FILE" ]]; then
     # Load yaml config file
     load_yaml_config "$CONFIG_FILE" 2>/dev/null || true
-
-    # Extract all slurm.* config keys and remove "slurm." prefix
-    for key in "${!PRIMUS_CONFIG[@]}"; do
-        if [[ "$key" =~ ^slurm\. ]]; then
-            # Remove "slurm." prefix to get parameter name
-            param_name="${key#slurm.}"
-            slurm_args["$param_name"]="${PRIMUS_CONFIG[$key]}"
-        fi
-    done
 else
     # No config file provided, use defaults from load_config
     load_config 2>/dev/null || true
-
-    # Extract slurm.* from default config
-    for key in "${!PRIMUS_CONFIG[@]}"; do
-        if [[ "$key" =~ ^slurm\. ]]; then
-            param_name="${key#slurm.}"
-            slurm_args["$param_name"]="${PRIMUS_CONFIG[$key]}"
-        fi
-    done
 fi
+
+# Extract all slurm.* config parameters using the generic function
+extract_config_section "slurm" slurm_args 2>/dev/null || true
 
 # Step 2: Detect srun/sbatch mode
 LAUNCH_CMD="srun"   # Default launcher

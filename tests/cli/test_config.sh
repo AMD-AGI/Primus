@@ -332,6 +332,70 @@ EOF
 }
 
 # ============================================================================
+# Test 9: Extract config section
+# ============================================================================
+test_extract_config_section() {
+    print_section "Test 9: Extract Config Section"
+
+    # Create test config with multiple sections
+    local test_yaml="/tmp/test-extract-$$.yaml"
+    cat > "$test_yaml" << 'EOF'
+slurm:
+  partition: "gpu"
+  nodes: 4
+  time: "01:00:00"
+  mem: "64G"
+
+container:
+  image: "rocm/primus:latest"
+  cpus: "16"
+
+direct:
+  master_port: 29500
+  gpus_per_node: 8
+EOF
+
+    load_yaml_config "$test_yaml" 2>/dev/null
+
+    # Test extracting slurm section
+    declare -A slurm_params
+    if extract_config_section "slurm" slurm_params 2>/dev/null; then
+        assert_pass "extract_config_section works for slurm"
+    else
+        assert_fail "extract_config_section works for slurm"
+    fi
+
+    # Verify extracted values
+    assert_equals "gpu" "${slurm_params[partition]:-}" "Slurm partition extracted"
+    assert_equals "4" "${slurm_params[nodes]:-}" "Slurm nodes extracted"
+    assert_equals "01:00:00" "${slurm_params[time]:-}" "Slurm time extracted"
+    assert_equals "64G" "${slurm_params[mem]:-}" "Slurm mem extracted"
+
+    # Test extracting container section
+    declare -A container_params
+    extract_config_section "container" container_params 2>/dev/null
+    assert_equals "rocm/primus:latest" "${container_params[image]:-}" "Container image extracted"
+    assert_equals "16" "${container_params[cpus]:-}" "Container cpus extracted"
+
+    # Test extracting direct section
+    declare -A direct_params
+    extract_config_section "direct" direct_params 2>/dev/null
+    assert_equals "29500" "${direct_params[master_port]:-}" "Direct master_port extracted"
+    assert_equals "8" "${direct_params[gpus_per_node]:-}" "Direct gpus_per_node extracted"
+
+    # Test extracting non-existent section
+    declare -A empty_params
+    extract_config_section "nonexistent" empty_params 2>/dev/null
+    if [[ ${#empty_params[@]} -eq 0 ]]; then
+        assert_pass "Empty result for non-existent section"
+    else
+        assert_fail "Empty result for non-existent section"
+    fi
+
+    rm -f "$test_yaml"
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 main() {
@@ -347,6 +411,7 @@ main() {
     test_yaml_array_handling
     test_config_priority
     test_nested_config_keys
+    test_extract_config_section
 
     # Print summary
     echo ""

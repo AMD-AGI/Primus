@@ -87,6 +87,7 @@ load_cache() {
     local cache_file="$1"
 
     if [[ -f "$cache_file" ]]; then
+        # shellcheck disable=SC1090  # Dynamic source path
         source "$cache_file" 2>/dev/null && return 0
     fi
     return 1
@@ -124,7 +125,8 @@ load_shell_config() {
     fi
 
     # Check cache first
-    local cache_file="$PRIMUS_CONFIG_CACHE_DIR/$(basename "$config_file").cache"
+    local cache_file
+    cache_file="$PRIMUS_CONFIG_CACHE_DIR/$(basename "$config_file").cache"
     if is_cache_valid "$config_file" "$cache_file"; then
         LOG_DEBUG "Loading cached config: $config_file"
         load_cache "$cache_file" && return 0
@@ -183,7 +185,7 @@ load_yaml_config() {
     local current_subsection=""
     local current_array_key=""
     local array_index=0
-    
+
     while IFS= read -r line || [[ -n "$line" ]]; do
         # Skip comments and empty lines
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
@@ -209,13 +211,13 @@ load_yaml_config() {
         # Parse array item (e.g., "    - /data:/data")
         if [[ "$line" =~ ^[[:space:]]+\-[[:space:]]+(.+)$ ]]; then
             local value="${BASH_REMATCH[1]}"
-            
+
             # Remove quotes
             value="${value%\"}"
             value="${value#\"}"
             value="${value%\'}"
             value="${value#\'}"
-            
+
             if [[ -n "$current_section" ]]; then
                 if [[ -n "$current_subsection" ]]; then
                     local config_key="${current_section}.${current_subsection}.${array_index}"
@@ -369,10 +371,9 @@ load_mode_config() {
         container)
             # Export container image
             [[ -n "${PRIMUS_CONFIG[container.image]:-}" ]] && export DOCKER_IMAGE="${PRIMUS_CONFIG[container.image]}"
-            
+
             # Export generic container options as CONTAINER_OPTIONS
             # Format: key1=value1|key2=value2|...
-            local option_keys=()
             for config_key in "${!PRIMUS_CONFIG[@]}"; do
                 if [[ "$config_key" =~ ^container\.options\.(.+)$ ]]; then
                     local opt_key="${BASH_REMATCH[1]}"
@@ -384,7 +385,7 @@ load_mode_config() {
                     fi
                 fi
             done
-            
+
             # Handle mounts array (stored as container.mounts.0, container.mounts.1, ...)
             local mount_idx=0
             while [[ -n "${PRIMUS_CONFIG[container.mounts.$mount_idx]:-}" ]]; do
@@ -409,10 +410,40 @@ load_mode_config() {
 }
 
 # ---------------------------------------------------------------------------
+# Extract Config Section
+# Extract all config keys matching a prefix and remove the prefix
+# Usage: extract_config_section "slurm" result_array
+# ---------------------------------------------------------------------------
+extract_config_section() {
+    local prefix="$1"
+    # shellcheck disable=SC2034  # result_array is used via nameref
+    local -n result_array="$2"  # nameref to associative array
+
+    LOG_DEBUG "Extracting config section: $prefix.*"
+
+    local count=0
+    # Extract all config keys matching prefix and remove the prefix
+    for key in "${!PRIMUS_CONFIG[@]}"; do
+        if [[ "$key" =~ ^${prefix}\. ]]; then
+            # Remove prefix to get parameter name (e.g., "slurm.partition" -> "partition")
+            local param_name="${key#"${prefix}".}"
+            # shellcheck disable=SC2034  # result_array is a nameref, accessed indirectly
+            result_array["$param_name"]="${PRIMUS_CONFIG[$key]}"
+            LOG_DEBUG "  $param_name = ${PRIMUS_CONFIG[$key]}"
+            ((count++))
+        fi
+    done
+
+    LOG_DEBUG "Extracted $count parameters from $prefix section"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # Export all functions
 # ---------------------------------------------------------------------------
 export -f load_shell_config load_yaml_config load_config
 export -f get_config set_config apply_global_config load_mode_config
+export -f extract_config_section
 
 # Backward compatibility: apply_config calls apply_global_config
 apply_config() {
