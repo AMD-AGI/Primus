@@ -178,8 +178,9 @@ load_yaml_config() {
 
     LOG_DEBUG "Loading YAML config: $config_file"
 
-    # Simple YAML parser (handles basic key: value format and arrays)
+    # Simple YAML parser (handles basic key: value format, arrays, and nested sections)
     local current_section=""
+    local current_subsection=""
     local current_array_key=""
     local array_index=0
     
@@ -188,17 +189,19 @@ load_yaml_config() {
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${line// /}" ]] && continue
 
-        # Detect section (e.g., "container:")
+        # Detect top-level section (e.g., "container:")
         if [[ "$line" =~ ^([a-z_]+):[[:space:]]*$ ]]; then
             current_section="${BASH_REMATCH[1]}"
+            current_subsection=""
             current_array_key=""
             array_index=0
             continue
         fi
 
-        # Parse key with empty value (indicates array) (e.g., "  mounts:")
-        if [[ "$line" =~ ^[[:space:]]+([a-z_]+):[[:space:]]*$ ]]; then
-            current_array_key="${BASH_REMATCH[1]}"
+        # Detect subsection with 2 spaces (e.g., "  options:")
+        if [[ "$line" =~ ^[[:space:]]{2}([a-z_-]+):[[:space:]]*$ ]]; then
+            current_subsection="${BASH_REMATCH[1]}"
+            current_array_key=""
             array_index=0
             continue
         fi
@@ -213,17 +216,24 @@ load_yaml_config() {
             value="${value%\'}"
             value="${value#\'}"
             
-            if [[ -n "$current_section" ]] && [[ -n "$current_array_key" ]]; then
-                local config_key="${current_section}.${current_array_key}.${array_index}"
-                PRIMUS_CONFIG[$config_key]="$value"
-                LOG_DEBUG "  $config_key = $value"
-                ((array_index++))
+            if [[ -n "$current_section" ]]; then
+                if [[ -n "$current_subsection" ]]; then
+                    local config_key="${current_section}.${current_subsection}.${array_index}"
+                    PRIMUS_CONFIG[$config_key]="$value"
+                    LOG_DEBUG "  $config_key = $value"
+                    ((array_index++))
+                elif [[ -n "$current_array_key" ]]; then
+                    local config_key="${current_section}.${current_array_key}.${array_index}"
+                    PRIMUS_CONFIG[$config_key]="$value"
+                    LOG_DEBUG "  $config_key = $value"
+                    ((array_index++))
+                fi
             fi
             continue
         fi
 
-        # Parse key-value in section (e.g., "  image: value")
-        if [[ "$line" =~ ^[[:space:]]+([a-z_]+):[[:space:]]*(.+)$ ]]; then
+        # Parse nested key-value with 4 spaces (e.g., "    cpus: 16")
+        if [[ "$line" =~ ^[[:space:]]{4}([a-z_-]+):[[:space:]]*(.+)$ ]]; then
             local key="${BASH_REMATCH[1]}"
             local value="${BASH_REMATCH[2]}"
 
@@ -233,7 +243,27 @@ load_yaml_config() {
             value="${value%\'}"
             value="${value#\'}"
 
-            # Reset array key when we get a normal key-value pair
+            if [[ -n "$current_section" ]] && [[ -n "$current_subsection" ]]; then
+                local config_key="${current_section}.${current_subsection}.${key}"
+                PRIMUS_CONFIG[$config_key]="$value"
+                LOG_DEBUG "  $config_key = $value"
+            fi
+            continue
+        fi
+
+        # Parse key-value with 2 spaces (e.g., "  image: value")
+        if [[ "$line" =~ ^[[:space:]]{2}([a-z_-]+):[[:space:]]*(.+)$ ]]; then
+            local key="${BASH_REMATCH[1]}"
+            local value="${BASH_REMATCH[2]}"
+
+            # Remove quotes
+            value="${value%\"}"
+            value="${value#\"}"
+            value="${value%\'}"
+            value="${value#\'}"
+
+            # Reset subsection when we get a normal key-value pair
+            current_subsection=""
             current_array_key=""
             array_index=0
 
@@ -337,14 +367,23 @@ load_mode_config() {
             [[ -n "${PRIMUS_CONFIG[slurm.gpus_per_node]:-}" ]] && export GPUS_PER_NODE="${PRIMUS_CONFIG[slurm.gpus_per_node]}"
             ;;
         container)
-            # Export container-specific settings
+            # Export container image
             [[ -n "${PRIMUS_CONFIG[container.image]:-}" ]] && export DOCKER_IMAGE="${PRIMUS_CONFIG[container.image]}"
-            [[ -n "${PRIMUS_CONFIG[container.cpus]:-}" ]] && export CONTAINER_CPUS="${PRIMUS_CONFIG[container.cpus]}"
-            [[ -n "${PRIMUS_CONFIG[container.memory]:-}" ]] && export CONTAINER_MEMORY="${PRIMUS_CONFIG[container.memory]}"
-            [[ -n "${PRIMUS_CONFIG[container.shm_size]:-}" ]] && export CONTAINER_SHM_SIZE="${PRIMUS_CONFIG[container.shm_size]}"
-            [[ -n "${PRIMUS_CONFIG[container.gpus]:-}" ]] && export CONTAINER_GPUS="${PRIMUS_CONFIG[container.gpus]}"
-            [[ -n "${PRIMUS_CONFIG[container.user]:-}" ]] && export CONTAINER_USER="${PRIMUS_CONFIG[container.user]}"
-            [[ -n "${PRIMUS_CONFIG[container.name]:-}" ]] && export CONTAINER_NAME="${PRIMUS_CONFIG[container.name]}"
+            
+            # Export generic container options as CONTAINER_OPTIONS
+            # Format: key1=value1|key2=value2|...
+            local option_keys=()
+            for config_key in "${!PRIMUS_CONFIG[@]}"; do
+                if [[ "$config_key" =~ ^container\.options\.(.+)$ ]]; then
+                    local opt_key="${BASH_REMATCH[1]}"
+                    local opt_value="${PRIMUS_CONFIG[$config_key]}"
+                    if [[ -z "${CONTAINER_OPTIONS:-}" ]]; then
+                        export CONTAINER_OPTIONS="${opt_key}=${opt_value}"
+                    else
+                        export CONTAINER_OPTIONS="$CONTAINER_OPTIONS|${opt_key}=${opt_value}"
+                    fi
+                fi
+            done
             
             # Handle mounts array (stored as container.mounts.0, container.mounts.1, ...)
             local mount_idx=0

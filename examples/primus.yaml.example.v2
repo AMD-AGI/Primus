@@ -20,15 +20,15 @@ container:
   # Docker/Podman image
   image: "rocm/primus:v25.9_gfx942"
   
-  # Resource limits
-  cpus: 32                    # CPU cores limit
-  memory: "256G"              # Memory limit
-  gpus: 8                     # GPU count limit
-  shm_size: "16G"             # Shared memory size
-  
-  # Container runtime settings
-  name: "primus-training"     # Container name
-  user: "1000:1000"           # Run as specific user (UID:GID)
+  # Docker/Podman runtime options (generic key-value pairs)
+  # These will be passed as --key value to docker/podman run
+  options:
+    cpus: "32"
+    memory: "256G"
+    shm-size: "16G"
+    name: "primus-training"
+    user: "1000:1000"
+    # Any docker run option can be added here
   
   # Mount points
   mounts:

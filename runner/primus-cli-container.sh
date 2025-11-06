@@ -11,8 +11,8 @@ Usage: bash primus-run-container.sh [OPTIONS] -- [SCRIPT_ARGS...]
 
 Launch a Primus task (train / benchmark / preflight / etc.) in a Docker/Podman container.
 
-Options:
-    --image <DOCKER_IMAGE>      Docker image to use [default: \$DOCKER_IMAGE or rocm/primus:v25.9_gfx942]
+Built-in Options:
+    --image <DOCKER_IMAGE>      Docker image to use [default: rocm/primus:v25.9_gfx942]
     --mount <HOST[:CONTAINER]>  Mount a host directory into the container.
                                  - If only HOST is given, mounts to same path inside container.
                                  - If HOST:CONTAINER is given, mounts host directory to container path.
@@ -20,30 +20,38 @@ Options:
     --primus-path <HOST_PATH>   Use this Primus repo instead of the image default. The path will be mounted
                                 into the container and installed in editable mode.
     --clean                     Remove all containers before launch
-
-Resource Limits:
-    --cpus <N>                  Limit CPU cores (e.g., 8, 16.5)
-    --memory <SIZE>             Limit memory (e.g., 64G, 128G, 512M)
-    --shm-size <SIZE>           Set shared memory size (e.g., 16G) [default: host IPC]
-    --gpus <N>                  Limit GPU count (e.g., 4, 8) [default: all]
-
-Other Options:
-    --user <UID:GID>            Run as specific user (e.g., 1000:1000)
-    --name <CONTAINER_NAME>     Set container name
     --help                      Show this message and exit
 
-Examples:
-    primus-cli container --mount /mnt/data -- train --config /mnt/data/exp.yaml --data-path /mnt/data
-    primus-cli container --mount /mnt/profile_out -- benchmark gemm --output /mnt/profile_out/result.txt
+Generic Docker/Podman Options:
+    Any --<option> <value> pairs are passed directly to docker/podman run.
+    This provides full flexibility for all docker runtime options.
+    
+    Examples:
+        --cpus <N>              Limit CPU cores (e.g., 8, 16.5)
+        --memory <SIZE>         Limit memory (e.g., 64G, 128G)
+        --shm-size <SIZE>       Set shared memory size (e.g., 16G)
+        --gpus <N>              GPU limit (for nvidia-docker)
+        --user <UID:GID>        Run as specific user (e.g., 1000:1000)
+        --name <NAME>           Container name
+        --network <NET>         Network mode (e.g., host, bridge)
+        --env KEY=VALUE         Environment variable
+        ... any other docker run options
 
-    # Mounts and installs your local Primus repo into the container.
-    primus-cli container --primus-path ~/workspace/Primus -- train pretrain --config /data/exp.yaml
+Examples:
+    # Basic training with mounted data
+    primus-cli container --mount /mnt/data -- train --config /mnt/data/exp.yaml
+
+    # Use local Primus repo
+    primus-cli container --primus-path ~/workspace/Primus -- train pretrain
 
     # Run with resource limits
-    primus-cli container --cpus 16 --memory 128G --gpus 8 -- train pretrain --config exp.yaml
+    primus-cli container --cpus 16 --memory 128G --gpus 8 -- train pretrain
 
     # Run as specific user
     primus-cli container --user 1000:1000 -- benchmark gemm
+
+    # Use configuration file
+    primus-cli --config .primus.yaml container -- train
 EOF
 }
 
@@ -100,13 +108,21 @@ CLEAN_DOCKER_CONTAINER=0
 MOUNTS=()
 POSITIONAL_ARGS=()
 
-# Resource limits (loaded from container section of config)
-CONTAINER_CPUS="${CONTAINER_CPUS:-}"
-CONTAINER_MEMORY="${CONTAINER_MEMORY:-}"
-CONTAINER_SHM_SIZE="${CONTAINER_SHM_SIZE:-}"
-CONTAINER_GPUS="${CONTAINER_GPUS:-}"
-CONTAINER_USER="${CONTAINER_USER:-}"
-CONTAINER_NAME="${CONTAINER_NAME:-}"
+# Container options (generic key-value pairs)
+# Format: key1=value1|key2=value2|...
+declare -A CONTAINER_OPTS
+
+# Load options from config (CONTAINER_OPTIONS env var)
+if [[ -n "${CONTAINER_OPTIONS:-}" ]]; then
+    IFS='|' read -ra OPTS <<< "$CONTAINER_OPTIONS"
+    for opt in "${OPTS[@]}"; do
+        if [[ "$opt" == *=* ]]; then
+            local key="${opt%%=*}"
+            local value="${opt#*=}"
+            CONTAINER_OPTS[$key]="$value"
+        fi
+    done
+fi
 
 # Load mounts from config (if set via CONTAINER_MOUNTS env var)
 # Format: mount1|mount2|mount3
@@ -141,30 +157,6 @@ while [[ $# -gt 0 ]]; do
             CLEAN_DOCKER_CONTAINER=1
             shift
             ;;
-        --cpus)
-            CONTAINER_CPUS="$2"
-            shift 2
-            ;;
-        --memory)
-            CONTAINER_MEMORY="$2"
-            shift 2
-            ;;
-        --shm-size)
-            CONTAINER_SHM_SIZE="$2"
-            shift 2
-            ;;
-        --gpus)
-            CONTAINER_GPUS="$2"
-            shift 2
-            ;;
-        --user)
-            CONTAINER_USER="$2"
-            shift 2
-            ;;
-        --name)
-            CONTAINER_NAME="$2"
-            shift 2
-            ;;
         --no-verbose)
             VERBOSE=0
             shift
@@ -181,6 +173,18 @@ while [[ $# -gt 0 ]]; do
             shift
             POSITIONAL_ARGS+=("$@")
             break
+            ;;
+        --*)
+            # Generic docker option (--key value)
+            opt_key="${1#--}"
+            opt_value="${2:-}"
+            if [[ -n "$opt_value" ]] && [[ "$opt_value" != --* ]]; then
+                CONTAINER_OPTS[$opt_key]="$opt_value"
+                shift 2
+            else
+                echo "$LOG_ERROR Unknown option: $1" >&2
+                exit 1
+            fi
             ;;
         *)
             POSITIONAL_ARGS+=("$1")
@@ -240,44 +244,13 @@ fi
 
 ARGS=("${POSITIONAL_ARGS[@]}")
 
-# ------------------ Build Resource Limit Arguments ------------------
-RESOURCE_ARGS=()
-
-# CPU limit
-if [[ -n "$CONTAINER_CPUS" ]]; then
-    RESOURCE_ARGS+=(--cpus "$CONTAINER_CPUS")
-fi
-
-# Memory limit
-if [[ -n "$CONTAINER_MEMORY" ]]; then
-    RESOURCE_ARGS+=(--memory "$CONTAINER_MEMORY")
-fi
-
-# Shared memory size
-if [[ -n "$CONTAINER_SHM_SIZE" ]]; then
-    RESOURCE_ARGS+=(--shm-size "$CONTAINER_SHM_SIZE")
-fi
-
-# GPU limit (for Docker with nvidia-docker or similar)
-if [[ -n "$CONTAINER_GPUS" ]]; then
-    # Note: This works with nvidia-docker or similar GPU runtime
-    # For AMD GPUs, device visibility is controlled by HIP_VISIBLE_DEVICES
-    if [[ "$DOCKER_CLI" == "docker" ]]; then
-        RESOURCE_ARGS+=(--gpus "device=0-$((CONTAINER_GPUS-1))")
-    fi
-    # Export HIP_VISIBLE_DEVICES for AMD GPUs
-    export HIP_VISIBLE_DEVICES=$(seq -s, 0 $((CONTAINER_GPUS-1)))
-fi
-
-# User specification
-if [[ -n "$CONTAINER_USER" ]]; then
-    RESOURCE_ARGS+=(--user "$CONTAINER_USER")
-fi
-
-# Container name
-if [[ -n "$CONTAINER_NAME" ]]; then
-    RESOURCE_ARGS+=(--name "$CONTAINER_NAME")
-fi
+# ------------------ Build Container Option Arguments ------------------
+# Convert CONTAINER_OPTS associative array to docker arguments
+OPTION_ARGS=()
+for opt_key in "${!CONTAINER_OPTS[@]}"; do
+    opt_value="${CONTAINER_OPTS[$opt_key]}"
+    OPTION_ARGS+=(--"$opt_key" "$opt_value")
+done
 
 # ------------------ Print Info ------------------
 if [[ "$VERBOSE" == "1" ]]; then
@@ -288,14 +261,11 @@ if [[ "$VERBOSE" == "1" ]]; then
     for ((i = 0; i < ${#VOLUME_ARGS[@]}; i+=2)); do
         echo "$LOG_INFO      ${VOLUME_ARGS[i]} ${VOLUME_ARGS[i+1]}"
     done
-    if [[ ${#RESOURCE_ARGS[@]} -gt 0 ]]; then
-        echo "$LOG_INFO  RESOURCE_LIMITS:"
-        [[ -n "$CONTAINER_CPUS" ]] && echo "$LOG_INFO      CPUs: $CONTAINER_CPUS"
-        [[ -n "$CONTAINER_MEMORY" ]] && echo "$LOG_INFO      Memory: $CONTAINER_MEMORY"
-        [[ -n "$CONTAINER_SHM_SIZE" ]] && echo "$LOG_INFO      SHM Size: $CONTAINER_SHM_SIZE"
-        [[ -n "$CONTAINER_GPUS" ]] && echo "$LOG_INFO      GPUs: $CONTAINER_GPUS"
-        [[ -n "$CONTAINER_USER" ]] && echo "$LOG_INFO      User: $CONTAINER_USER"
-        [[ -n "$CONTAINER_NAME" ]] && echo "$LOG_INFO      Name: $CONTAINER_NAME"
+    if [[ ${#OPTION_ARGS[@]} -gt 0 ]]; then
+        echo "$LOG_INFO  CONTAINER_OPTIONS:"
+        for ((i = 0; i < ${#OPTION_ARGS[@]}; i+=2)); do
+            echo "$LOG_INFO      ${OPTION_ARGS[i]} ${OPTION_ARGS[i+1]}"
+        done
     fi
     echo "$LOG_INFO  LAUNCH ARGS:"
     echo "$LOG_INFO    ${ARGS[*]}"
@@ -314,7 +284,7 @@ fi
     --privileged \
     --device=/dev/infiniband \
     "${VOLUME_ARGS[@]}" \
-    "${RESOURCE_ARGS[@]}" \
+    "${OPTION_ARGS[@]}" \
     "$DOCKER_IMAGE" /bin/bash -c "\
         echo '[primus-cli-container][${HOSTNAME}][INFO]: container started at $(date +"%Y.%m.%d %H:%M:%S")' && \
         [[ -d $PRIMUS_PATH ]] || { echo '$LOG_ERROR Primus not found at $PRIMUS_PATH'; exit 42; } && \
