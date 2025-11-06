@@ -14,29 +14,40 @@ SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 # Note: --dry-run is handled by primus-cli and won't be passed here
 CONFIG_FILE=""
 DEBUG_MODE=0
-for ((i=1; i<=$#; i++)); do
-    case "${!i}" in
+PRE_PARSE_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --config)
-            ((i++))
-            CONFIG_FILE="${!i}"
+            CONFIG_FILE="$2"
+            shift 2
             ;;
         --debug)
-            DEBUG_MODE=1
+            export DEBUG_MODE=1
+            shift
+            ;;
+        *)
+            PRE_PARSE_ARGS+=("$1")
+            shift
             ;;
     esac
 done
+# Restore arguments
+set -- "${PRE_PARSE_ARGS[@]}"
 
 # Load common library and validation
 if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
+    # shellcheck disable=SC1091
     source "$SCRIPT_DIR/lib/common.sh"
 fi
 
 if [[ -f "$SCRIPT_DIR/lib/validation.sh" ]]; then
+    # shellcheck disable=SC1091
     source "$SCRIPT_DIR/lib/validation.sh"
 fi
 
 # Load config library and mode-specific config
 if [[ -f "$SCRIPT_DIR/lib/config.sh" ]]; then
+    # shellcheck disable=SC1091
     source "$SCRIPT_DIR/lib/config.sh" 2>/dev/null || true
     # If config file is provided via --config, load slurm-specific config
     if [[ -n "$CONFIG_FILE" ]] && [[ -f "$CONFIG_FILE" ]]; then
@@ -101,22 +112,12 @@ fi
 
 # ------------- Dispatch based on mode ---------------
 
-PATCH_ARGS=(
-    --env MASTER_ADDR="$MASTER_ADDR"
-    --env MASTER_PORT="$MASTER_PORT"
-    --env NNODES="$NNODES"
-    --env NODE_RANK="$NODE_RANK"
-    --env GPUS_PER_NODE="$GPUS_PER_NODE"
-    --log_file "logs/log_${SLURM_JOB_ID:-nojob}_$(date +%Y%m%d_%H%M%S).txt"
-)
-
-# Pass --config, --debug to next script if present
-if [[ -n "$CONFIG_FILE" ]]; then
-    PATCH_ARGS+=(--config "$CONFIG_FILE")
-fi
-if [[ "$DEBUG_MODE" == "1" ]]; then
-    PATCH_ARGS+=(--debug)
-fi
+# Export environment variables for next script
+export MASTER_ADDR
+export MASTER_PORT
+export NNODES
+export NODE_RANK
+export GPUS_PER_NODE
 
 # Default: 'container' mode, unless user overrides
 MODE="container"
@@ -124,19 +125,33 @@ if [[ $# -gt 0 && "$1" =~ ^(container|direct|native|host)$ ]]; then
     MODE="$1"
     shift
 fi
-# MODE="${1:-container}"
-# shift || true
+
+# Build arguments based on mode
+SCRIPT_ARGS=()
+
+# Pass --config, --debug to next script if present
+if [[ -n "$CONFIG_FILE" ]]; then
+    SCRIPT_ARGS+=(--config "$CONFIG_FILE")
+fi
+if [[ "$DEBUG_MODE" == "1" ]]; then
+    SCRIPT_ARGS+=(--debug)
+fi
+
 case "$MODE" in
     container)
         script_path="$SCRIPT_DIR/primus-cli-container.sh"
-        if [[ "$NODE_RANK" == "0" ]]; then
-            PATCH_ARGS=(--verbose "${PATCH_ARGS[@]}")
-        else
-            PATCH_ARGS=(--no-verbose "${PATCH_ARGS[@]}")
-        fi
+        # For container mode, pass environment variables as docker --env options
+        SCRIPT_ARGS+=(
+            --env "MASTER_ADDR=$MASTER_ADDR"
+            --env "MASTER_PORT=$MASTER_PORT"
+            --env "NNODES=$NNODES"
+            --env "NODE_RANK=$NODE_RANK"
+            --env "GPUS_PER_NODE=$GPUS_PER_NODE"
+        )
         ;;
     direct)
         script_path="$SCRIPT_DIR/primus-cli-entrypoint.sh"
+        # For direct mode, environment variables are already exported above
         ;;
     *)
         if type LOG_ERROR &>/dev/null; then
@@ -158,8 +173,8 @@ if [[ ! -f "$script_path" ]]; then
 fi
 
 if type LOG_INFO &>/dev/null; then
-    LOG_INFO "Executing: bash $script_path ${PATCH_ARGS[*]} $*"
+    LOG_INFO "Executing: bash $script_path ${SCRIPT_ARGS[*]} $*"
 else
-    echo "[primus-slurm-entry] Executing: bash $script_path ${PATCH_ARGS[*]} $*"
+    echo "[primus-slurm-entry] Executing: bash $script_path ${SCRIPT_ARGS[*]} $*"
 fi
-exec bash "$script_path" "${PATCH_ARGS[@]}" "$@"
+exec bash "$script_path" "${SCRIPT_ARGS[@]}" "$@"

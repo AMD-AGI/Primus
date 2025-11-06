@@ -76,7 +76,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --debug)
-            DEBUG_MODE=1
+            export DEBUG_MODE=1
             CONFIG_ARGS+=(--debug)
             shift
             ;;
@@ -95,11 +95,13 @@ set -- "${PRE_PARSE_ARGS[@]}"
 
 # Load common library first (required by config.sh)
 if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
+    # shellcheck disable=SC1091
     source "$SCRIPT_DIR/lib/common.sh" 2>/dev/null || true
 fi
 
 # Load config library and slurm-specific config
 if [[ -f "$SCRIPT_DIR/lib/config.sh" ]]; then
+    # shellcheck disable=SC1091
     source "$SCRIPT_DIR/lib/config.sh" 2>/dev/null || true
     # If config file is provided via --config, load slurm-specific config
     if [[ -n "$CONFIG_FILE" ]] && [[ -f "$CONFIG_FILE" ]]; then
@@ -116,19 +118,32 @@ if [[ "${1:-}" == "sbatch" || "${1:-}" == "srun" ]]; then
 fi
 
 # 2. Collect SLURM_FLAGS before '--'
-# Apply config values if available (can be overridden by command line)
+# First collect CLI arguments, then add config values only if not set by CLI
+# This ensures CLI > Config priority
+declare -A SLURM_OPTS_SET
 SLURM_FLAGS=()
-if [[ -n "${SLURM_PARTITION:-}" ]]; then
-    SLURM_FLAGS+=(-p "$SLURM_PARTITION")
-fi
-if [[ -n "${SLURM_NODES:-}" ]]; then
-    SLURM_FLAGS+=(-N "$SLURM_NODES")
-fi
 
 while [[ $# -gt 0 && "$1" != "--" ]]; do
     SLURM_FLAGS+=("$1")
+    # Track which options are set via CLI
+    case "$1" in
+        -p|--partition)
+            SLURM_OPTS_SET[partition]=1
+            ;;
+        -N|--nodes)
+            SLURM_OPTS_SET[nodes]=1
+            ;;
+    esac
     shift
 done
+
+# Apply config values only if not set via CLI (CLI has priority)
+if [[ -n "${SLURM_PARTITION:-}" ]] && [[ -z "${SLURM_OPTS_SET[partition]:-}" ]]; then
+    SLURM_FLAGS=(-p "$SLURM_PARTITION" "${SLURM_FLAGS[@]}")
+fi
+if [[ -n "${SLURM_NODES:-}" ]] && [[ -z "${SLURM_OPTS_SET[nodes]:-}" ]]; then
+    SLURM_FLAGS=(-N "$SLURM_NODES" "${SLURM_FLAGS[@]}")
+fi
 
 # Skip '--'
 if [[ "$#" -gt 0 && "$1" == "--" ]]; then
