@@ -1,0 +1,26 @@
+# Primus CLI Global Configuration File
+# Copy to ~/.primusrc to use
+# Format: Shell variable format (KEY=VALUE)
+
+# Global settings
+PRIMUS_GLOBAL_LOG_LEVEL="INFO"
+PRIMUS_GLOBAL_DRY_RUN="0"
+PRIMUS_GLOBAL_DEBUG="0"
+
+# Distributed training settings
+PRIMUS_DISTRIBUTED_GPUS_PER_NODE="8"
+PRIMUS_DISTRIBUTED_MASTER_PORT="1234"
+PRIMUS_DISTRIBUTED_NNODES="1"
+
+# Container settings
+PRIMUS_CONTAINER_IMAGE="rocm/primus:v25.9_gfx942"
+# PRIMUS_CONTAINER_CPUS="16"
+# PRIMUS_CONTAINER_MEMORY="128G"
+
+# Path settings
+PRIMUS_PATHS_LOG_PATH="logs"
+# PRIMUS_PATHS_DATA_PATH="/data"
+# PRIMUS_PATHS_OUTPUT_PATH="/output"
+
+# Personal preferences
+# PRIMUS_PATHS_PRIMUS_PATH="/home/user/workspace/Primus"

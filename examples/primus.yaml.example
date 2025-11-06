@@ -1,0 +1,48 @@
+# Primus CLI Project Configuration File
+# Copy to .primus.yaml in your project root
+# Format: YAML
+# Priority: CLI arguments > Config file > Default values
+
+# Global settings (apply to all modes)
+global:
+  debug: false       # Enable debug mode (equivalent to --debug)
+  dry_run: false     # Enable dry-run mode (equivalent to --dry-run)
+
+# Direct mode settings (for direct execution without Slurm)
+direct:
+  gpus_per_node: 8
+  master_port: 1234
+  nnodes: 1
+  # master_addr: localhost
+
+# Container settings
+container:
+  image: "rocm/primus:v25.9_gfx942"
+  cpus: 16
+  memory: "128G"
+  # shm_size: "16G"
+  # user: "1000:1000"
+
+  # Common mount points (optional)
+  # mounts:
+  #   - "/data:/data"
+  #   - "/output:/output"
+
+# Slurm-specific settings
+slurm:
+  partition: "AIG_Model"
+  nodes: 4
+  gpus_per_node: 8
+  # time_limit: "24:00:00"
+
+# Path settings
+paths:
+  log_path: "logs"
+  # data_path: "/data"
+  # output_path: "/output"
+  # primus_path: "/workspace/Primus"
+
+# Project-specific settings
+# project:
+#   name: "my-training-project"
+#   description: "GPT model training"

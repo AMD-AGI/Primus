@@ -7,16 +7,38 @@
 
 set -euo pipefail
 
+# Resolve script directory and load libraries
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+
+# Load common library if available (optional for main entry)
+if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
+    source "$SCRIPT_DIR/lib/common.sh"
+fi
+
+# Load configuration library
+if [[ -f "$SCRIPT_DIR/lib/config.sh" ]]; then
+    source "$SCRIPT_DIR/lib/config.sh"
+    # Load configuration files (global and project)
+    load_config
+fi
+
 print_usage() {
 cat << EOF
 Primus Unified Launcher CLI
 
 Usage:
-    primus-cli <mode> [mode-args] -- [primus-commands and args]
+    primus-cli [global-options] <mode> [mode-args] -- [primus-commands and args]
 
 Description:
     The unified entry point for all Primus workflows: distributed launch, containerization, and direct host training.
     Use '--' to separate mode-specific arguments from Primus Python CLI commands (train, benchmark, etc).
+
+Global Options:
+    --debug              Enable debug mode (verbose logging, set -x)
+    --dry-run            Show commands without executing them
+    --config FILE        Load configuration from specific file
+    --version            Show version and exit
+    -h, --help           Show this help message and exit
 
 Supported modes:
     slurm      Launch distributed workflows via Slurm cluster (srun/sbatch)
@@ -41,9 +63,11 @@ Examples:
     # Run pretrain directly on the host or inside an existing container:
     primus-cli direct -- train pretrain --config exp.yaml
 
-    # [Advanced] Specify --container or --host for explicit entry (slurm mode only):
-    primus-cli slurm srun --container -N 2 -- benchmark gemm ...
-    primus-cli slurm sbatch --host -N 1 -- train pretrain ...
+    # Use debug mode for troubleshooting:
+    primus-cli --debug direct -- train pretrain --config exp.yaml
+
+    # Dry-run to see commands without execution:
+    primus-cli --dry-run slurm srun -N 4 -- benchmark gemm
 
 Notes:
     - [--] is required: it separates Primus launcher options (mode/mode-args) from Python CLI arguments.
@@ -56,33 +80,173 @@ To see all supported Primus Python CLI commands and options:
 EOF
 }
 
+# Print version
+print_version() {
+    local version_file="$SCRIPT_DIR/../VERSION"
+    if [[ -f "$version_file" ]]; then
+        cat "$version_file"
+    else
+        echo "unknown"
+    fi
+}
+
 # Show help if called with -h, --help, or no arguments
-if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
+if [[ $# -eq 0 ]]; then
     print_usage
     exit 0
 fi
 
-# Resolve script directory robustly (handles symlinks)
-SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+# Parse global options (single pass)
+CONFIG_FILE=""
+DEBUG_MODE=0
+DRY_RUN_MODE=0
+MODE_ARGS=()
 
-# Try PATH first, fallback to local ./bin directory
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        --version)
+            echo "Primus CLI version $(print_version)"
+            exit 0
+            ;;
+        --config)
+            if [[ -z "${2:-}" ]]; then
+                echo "[primus-cli][ERROR] --config requires a file path" >&2
+                exit 2
+            fi
+            if [[ ! -f "$2" ]]; then
+                echo "[primus-cli][ERROR] Config file not found: $2" >&2
+                exit 2
+            fi
+            CONFIG_FILE="$(realpath "$2")"
+            shift 2
+            ;;
+        --debug)
+            DEBUG_MODE=1
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN_MODE=1
+            export PRIMUS_DRY_RUN=1
+            shift
+            ;;
+        -*)
+            echo "[primus-cli][ERROR] Unknown global option: $1" >&2
+            echo "Try 'primus-cli --help' for more information." >&2
+            exit 2
+            ;;
+        *)
+            # Not a global option, this is the mode or remaining args
+            MODE_ARGS+=("$@")
+            break
+            ;;
+    esac
+done
+
+# Restore mode and its arguments
+set -- "${MODE_ARGS[@]}"
+
+# Load configuration after parsing all options
+if [[ -n "$CONFIG_FILE" ]]; then
+    # Load specified config file
+    if type load_yaml_config &>/dev/null; then
+        load_yaml_config "$CONFIG_FILE" || echo "[primus-cli][WARN] Failed to load config: $CONFIG_FILE" >&2
+    fi
+else
+    # Load default config files
+    if type load_config &>/dev/null; then
+        load_config
+    fi
+fi
+
+# Apply config values only if:
+# 1. Not set via CLI (DEBUG_MODE/DRY_RUN_MODE still == 0)
+# 2. AND config file is specified (CONFIG_FILE is set)
+if [[ -n "$CONFIG_FILE" ]] && type get_config &>/dev/null; then
+    # Apply global.debug only if not set via CLI
+    if [[ "$DEBUG_MODE" == "0" ]]; then
+        config_debug=$(get_config "global.debug")
+        if [[ "$config_debug" == "true" || "$config_debug" == "1" ]]; then
+            DEBUG_MODE=1
+        fi
+    fi
+
+    # Apply global.dry_run only if not set via CLI
+    if [[ "$DRY_RUN_MODE" == "0" ]]; then
+        config_dry_run=$(get_config "global.dry_run")
+        if [[ "$config_dry_run" == "true" || "$config_dry_run" == "1" ]]; then
+            DRY_RUN_MODE=1
+            export PRIMUS_DRY_RUN=1
+        fi
+    fi
+fi
+
+# Enable debug mode if set
+if [[ "$DEBUG_MODE" == "1" ]]; then
+    set -x
+fi
+
+# Run subscript from runner directory
 run_subscript() {
     local script="$1"
     shift
-    if command -v "$script" >/dev/null 2>&1; then
-        echo "[primus-cli] Executing from PATH: $script $*"
-        exec "$script" "$@"
-    elif [[ -x "$SCRIPT_DIR/$script" ]]; then
-        echo "[primus-cli] Executing from local repo: $SCRIPT_DIR/$script $*"
-        exec bash "$SCRIPT_DIR/$script" "$@"
-    else
-        echo "[primus-cli][ERROR] Subscript not found: $script" >&2
+
+    local script_path="$SCRIPT_DIR/$script"
+
+    if [[ ! -f "$script_path" ]]; then
+        if type LOG_ERROR &>/dev/null; then
+            LOG_ERROR "Script not found: $script"
+        else
+            echo "[primus-cli][ERROR] Script not found: $script" >&2
+        fi
         exit 2
+    fi
+
+    # Build script arguments
+    local script_args=()
+
+    # Pass --config if specified
+    if [[ -n "$CONFIG_FILE" ]]; then
+        script_args+=(--config "$CONFIG_FILE")
+    fi
+
+    # Pass --debug if enabled
+    if [[ "$DEBUG_MODE" == "1" ]]; then
+        script_args+=(--debug)
+    fi
+
+    # Add remaining arguments
+    script_args+=("$@")
+
+    if type LOG_INFO &>/dev/null; then
+        LOG_INFO "Executing: $script ${script_args[*]}"
+    fi
+
+    # In dry-run mode, just show the command and exit (don't execute sub-script)
+    if [[ "$DRY_RUN_MODE" == "1" ]]; then
+        echo "[DRY-RUN] Would execute: bash $script_path ${script_args[*]}"
+        exit 0
+    fi
+
+    # Pass debug flag via bash -x if enabled
+    if [[ "$DEBUG_MODE" == "1" ]]; then
+        exec bash -x "$script_path" "${script_args[@]}"
+    else
+        exec bash "$script_path" "${script_args[@]}"
     fi
 }
 
-# # Check argument count, print usage if not enough arguments
-[[ $# -ge 1 ]] || { echo "Usage: primus-cli <mode> [mode-args] -- [primus-commands and args]"; exit 2; }
+# Check if mode is provided
+if [[ $# -lt 1 ]]; then
+    echo "[primus-cli][ERROR] Mode argument is required" >&2
+    echo "" >&2
+    print_usage >&2
+    exit 2
+fi
+
 mode="$1"; shift
 
 case "$mode" in
@@ -96,7 +260,11 @@ case "$mode" in
         run_subscript "primus-cli-entrypoint.sh" "$@"
         ;;
     *)
-        echo "[primus-cli][ERROR] Unknown mode: $mode" >&2
+        if type LOG_ERROR &>/dev/null; then
+            LOG_ERROR "Unknown mode: $mode"
+        else
+            echo "[primus-cli][ERROR] Unknown mode: $mode" >&2
+        fi
         print_usage
         exit 2
         ;;

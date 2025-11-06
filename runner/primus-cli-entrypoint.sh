@@ -82,9 +82,19 @@ primus_args=()
 patch_scripts=()
 log_file=""
 enable_numa="auto"  # auto / 1 / 0
+CONFIG_FILE=""
+DEBUG_MODE=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --config)
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
+        --debug)
+            DEBUG_MODE=1
+            shift
+            ;;
         --single)
             run_mode="single"
             shift
@@ -153,9 +163,27 @@ mkdir -p "$(dirname "$log_file")"
 
 # Step 1: Source Primus environment setup
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load config library and mode-specific config
+if [[ -f "$SCRIPT_DIR/lib/config.sh" ]]; then
+    source "$SCRIPT_DIR/lib/config.sh" 2>/dev/null || true
+    # If config file is provided via --config, load direct-mode-specific config
+    if [[ -n "$CONFIG_FILE" ]] && [[ -f "$CONFIG_FILE" ]]; then
+        load_yaml_config "$CONFIG_FILE" 2>/dev/null || true
+        load_mode_config "direct" 2>/dev/null || true
+    fi
+fi
+
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/helpers/envs/primus-env.sh"
 
+# Source helper modules
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/helpers/execute_hooks.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/helpers/execute_patches.sh"
+
+# Export environment variables passed via --env
 for kv in "${primus_env_kv[@]}"; do
     export "${kv%%=*}"="${kv#*=}"
     LOG_INFO_RANK0 "[Primus Entrypoint] Exported env: ${kv%%=*}=${kv#*=}"
@@ -163,28 +191,9 @@ done
 
 # Step 2: Auto-run hooks based on $1 $2 (e.g., train pretrain → hooks/train/pretrain/*)
 if [[ $# -ge 2 ]]; then
-    hook_group="$1"
-    hook_name="$2"
-    hook_dir="${SCRIPT_DIR}/helpers/hooks/${hook_group}/${hook_name}"
-    if [[ -d "$hook_dir" ]]; then
-        LOG_INFO_RANK0 "[Primus Entrypoint] Detected hooks directory: $hook_dir"
-        mapfile -t hook_files < <(find "$hook_dir" -maxdepth 1 -type f \( -name "*.sh" -o -name "*.py" \) | sort)
-        for hook_file in "${hook_files[@]}"; do
-            LOG_INFO_RANK0 "[Primus Entrypoint] Executing hook: $hook_file ${primus_args[*]}"
-            if [[ "$hook_file" == *.sh ]]; then
-                if ! bash "$hook_file" "${primus_args[@]}"; then
-                    LOG_ERROR "[Primus Entrypoint] Hook failed: $hook_file"
-                    exit 1
-                fi
-            elif [[ "$hook_file" == *.py ]]; then
-                if ! python3 "$hook_file" "${primus_args[@]}"; then
-                    LOG_ERROR "[Primus Entrypoint] Hook failed: $hook_file"
-                    exit 1
-                fi
-            fi
-        done
-    else
-        LOG_INFO_RANK0 "[Primus Entrypoint] No hook directory for [$hook_group/$hook_name]"
+    if ! execute_hooks "$1" "$2" "${primus_args[@]}"; then
+        LOG_ERROR "[Primus Entrypoint] Hooks execution failed"
+        exit 1
     fi
 else
     LOG_INFO_RANK0 "[Primus Entrypoint] No hook target detected (missing \$1 \$2)."
@@ -193,21 +202,10 @@ fi
 
 # Step 3: Run patch scripts if specified
 if [[ ${#patch_scripts[@]} -gt 0 ]]; then
-    LOG_INFO_RANK0 "[Primus Entrypoint] Detected patch scripts: ${patch_scripts[*]}"
-    for patch in "${patch_scripts[@]}"; do
-        if [[ ! -f "$patch" ]]; then
-            LOG_WARN "[Primus Entrypoint] Patch script not found: $patch (skipping)"
-            continue
-        fi
-
-        LOG_INFO_RANK0 "[Primus Entrypoint] Running patch: bash $patch"
-        if ! bash "$patch"; then
-            LOG_ERROR "[Primus Entrypoint] Patch script failed: $patch"
-            exit 1
-        fi
-    done
-else
-    LOG_INFO_RANK0 "[Primus Entrypoint] No patch scripts specified."
+    if ! execute_patches "${patch_scripts[@]}"; then
+        LOG_ERROR "[Primus Entrypoint] Patch execution failed"
+        exit 1
+    fi
 fi
 
 pip install -qq -r requirements.txt
@@ -225,6 +223,8 @@ if [[ "$run_mode" == "single" ]]; then
         LOG_INFO "Launching single-process script:"
     fi
 else
+    # NOTE: These variables use environment variables from config file (via primus-cli --config)
+    # Priority: Environment (from config/export) > Script defaults
     DISTRIBUTED_ARGS=(
         --nproc_per_node "${GPUS_PER_NODE:-8}"
         --nnodes "${NNODES:-1}"

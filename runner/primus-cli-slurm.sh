@@ -7,12 +7,15 @@
 
 set -euo pipefail
 
+# Resolve script directory
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+
 print_usage() {
 cat <<'EOF'
 Primus Slurm Launcher
 
 Usage:
-    primus-cli slurm [srun|sbatch] [SLURM_FLAGS...] -- <entry> [ENTRY_ARGS...] -- [PRIMUS_ARGS...]
+    primus-cli slurm [--config FILE] [srun|sbatch] [SLURM_FLAGS...] -- <entry> [ENTRY_ARGS...] -- [PRIMUS_ARGS...]
 
 Description:
     Launch distributed Primus jobs via Slurm.
@@ -48,6 +51,43 @@ if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
     exit 0
 fi
 
+# 0. Parse --config, --debug first if present
+# Note: --dry-run is handled by primus-cli and won't be passed here
+CONFIG_FILE=""
+DEBUG_MODE=0
+CONFIG_ARGS=()
+PRE_PARSE_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --config)
+            CONFIG_FILE="$2"
+            CONFIG_ARGS+=(--config "$CONFIG_FILE")
+            shift 2
+            ;;
+        --debug)
+            DEBUG_MODE=1
+            CONFIG_ARGS+=(--debug)
+            shift
+            ;;
+        *)
+            PRE_PARSE_ARGS+=("$1")
+            shift
+            ;;
+    esac
+done
+# Restore arguments
+set -- "${PRE_PARSE_ARGS[@]}"
+
+# Load config library and slurm-specific config
+if [[ -f "$SCRIPT_DIR/lib/config.sh" ]]; then
+    source "$SCRIPT_DIR/lib/config.sh" 2>/dev/null || true
+    # If config file is provided via --config, load slurm-specific config
+    if [[ -n "$CONFIG_FILE" ]] && [[ -f "$CONFIG_FILE" ]]; then
+        load_yaml_config "$CONFIG_FILE" 2>/dev/null || true
+        load_mode_config "slurm" 2>/dev/null || true
+    fi
+fi
+
 # 1. Detect srun/sbatch mode
 LAUNCH_CMD="srun"   # Default launcher
 if [[ "${1:-}" == "sbatch" || "${1:-}" == "srun" ]]; then
@@ -56,7 +96,15 @@ if [[ "${1:-}" == "sbatch" || "${1:-}" == "srun" ]]; then
 fi
 
 # 2. Collect SLURM_FLAGS before '--'
+# Apply config values if available (can be overridden by command line)
 SLURM_FLAGS=()
+if [[ -n "${SLURM_PARTITION:-}" ]]; then
+    SLURM_FLAGS+=(-p "$SLURM_PARTITION")
+fi
+if [[ -n "${SLURM_NODES:-}" ]]; then
+    SLURM_FLAGS+=(-N "$SLURM_NODES")
+fi
+
 while [[ $# -gt 0 && "$1" != "--" ]]; do
     SLURM_FLAGS+=("$1")
     shift
@@ -75,7 +123,17 @@ if [[ $# -eq 0 ]]; then
 fi
 
 # 4. Logging and launch
-SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 ENTRY="$SCRIPT_DIR/primus-cli-slurm-entry.sh"
-echo "[primus-cli-slurm] Executing: $LAUNCH_CMD ${SLURM_FLAGS[*]} $ENTRY $*"
-exec "$LAUNCH_CMD" "${SLURM_FLAGS[@]}" "$ENTRY" "$@"
+
+# Prepend global options to entry args
+ENTRY_ARGS=()
+if [[ -n "$CONFIG_FILE" ]]; then
+    ENTRY_ARGS+=(--config "$CONFIG_FILE")
+fi
+if [[ "$DEBUG_MODE" == "1" ]]; then
+    ENTRY_ARGS+=(--debug)
+fi
+ENTRY_ARGS+=("$@")
+
+echo "[primus-cli-slurm] Executing: $LAUNCH_CMD ${SLURM_FLAGS[*]} $ENTRY ${ENTRY_ARGS[*]}"
+exec "$LAUNCH_CMD" "${SLURM_FLAGS[@]}" "$ENTRY" "${ENTRY_ARGS[@]}"
