@@ -8,6 +8,49 @@ from primus.core.projection.training_config import convert_primus_config_to_proj
 from primus.core.projection.module_profilers.language_model import build_profiler, get_language_model_profiler_spec
 
 
+def print_profiler_hierarchy(profiler, batch_size, seq_len, name="root", depth=0, visited=None):
+    """
+    Recursively print the profiler hierarchy with num_params and activation_memory for each component.
+    
+    Args:
+        profiler: The profiler instance to print
+        batch_size: Batch size for activation memory calculation
+        seq_len: Sequence length for activation memory calculation
+        name: Name of the current profiler component
+        depth: Current depth in the hierarchy (for indentation)
+        visited: Set of visited profiler IDs to avoid infinite recursion
+    """
+    if visited is None:
+        visited = set()
+    
+    # Avoid infinite recursion if profilers reference each other
+    profiler_id = id(profiler)
+    if profiler_id in visited:
+        return
+    visited.add(profiler_id)
+    
+    indent = "  " * depth
+    
+    # Calculate metrics for this profiler
+    try:
+        num_params = profiler.estimated_num_params()
+        activation_mem = profiler.estimated_activation_memory(batch_size, seq_len)
+        
+        print(f"{indent}[{name}]")
+        print(f"{indent}  Params: {num_params / 1e9:.6f} Billion ({num_params:,})")
+        print(f"{indent}  Param Memory: {num_params * 2 / 1024 / 1024 / 1024:.4f} GB")
+        print(f"{indent}  Activation Memory: {activation_mem / 1024 / 1024 / 1024:.4f} GB")
+        
+        # Recursively process sub_profilers if they exist
+        if hasattr(profiler, 'sub_profilers') and profiler.sub_profilers:
+            for sub_name, sub_profiler in profiler.sub_profilers.items():
+                if sub_profiler is not None:
+                    print()  # Add spacing between components
+                    print_profiler_hierarchy(sub_profiler, batch_size, seq_len, sub_name, depth + 1, visited)
+    except Exception as e:
+        print(f"{indent}[{name}] - Error calculating metrics: {e}")
+
+
 def launch_projection_from_cli(args, overrides):
     """
     Entry point for the 'projection' subcommand.
@@ -27,13 +70,28 @@ def launch_projection_from_cli(args, overrides):
 
     seq_len = training_config.runtime_config.sequence_length
     batch_size = training_config.runtime_config.micro_batch_size
+    
+    # Print recursive profiler hierarchy with detailed breakdown
+    print("\n" + "=" * 100)
+    print("[Primus:Projection] Component-wise Profiling Results:")
+    print("=" * 100)
+    print()
+    
+    # Print the complete hierarchy recursively
+    print_profiler_hierarchy(model_profiler, batch_size, seq_len, name="LanguageModelProfiler", depth=0)
+    
+    # Get overall totals from the model profiler
     num_params = model_profiler.estimated_num_params()
     activation_memory = model_profiler.estimated_activation_memory(batch_size, seq_len)
 
-    print("\n[Primus:Projection] Model Profiling Results:")
-    print(f"  Estimated Number of Parameters: {num_params / 1e9} Billion")
-    print(f"  Estimated Parameter Memory: {num_params * 2 / 1024 / 1024 / 1024:.2f} GB")
-    print(f"  Estimated Activation Memory (per batch size {batch_size}, seq len {seq_len}): "
-          f"{activation_memory / 1024 / 1024 / 1024:.2f} GB")
-    print(f"  Estimated Total Memory: "
-          f"{(num_params * 2 + activation_memory) / 1024 / 1024 / 1024:.2f} GB")
+    rank = int(os.getenv('RANK', '0'))
+    print()
+    print("=" * 100)
+    print(f"[Primus:Projection] Memory Projection Results on Rank {rank}:")
+    print(f"  Params: {num_params / 1e9:.6f} Billion ({num_params:,})")
+    print(f"  Param Memory: {num_params * 2 / 1024 / 1024 / 1024:.4f} GB")
+    print(f"  Activation Memory (per batch size {batch_size}, seq len {seq_len}): "
+          f"{activation_memory / 1024 / 1024 / 1024:.4f} GB")
+    print(f"  Projected Total Memory: "
+          f"{(num_params * 2 + activation_memory) / 1024 / 1024 / 1024:.4f} GB")
+    print("=" * 100)
