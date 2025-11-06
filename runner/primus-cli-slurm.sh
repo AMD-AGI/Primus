@@ -118,31 +118,52 @@ if [[ "${1:-}" == "sbatch" || "${1:-}" == "srun" ]]; then
 fi
 
 # 2. Collect SLURM_FLAGS before '--'
-# First collect CLI arguments, then add config values only if not set by CLI
-# This ensures CLI > Config priority
-declare -A SLURM_OPTS_SET
-SLURM_FLAGS=()
+# Use associative array for generic Slurm parameter handling
+# This ensures CLI > Config priority without hardcoding specific parameters
+declare -A SLURM_OPTS
 
+# Load Slurm options from config first (if available)
+if [[ -n "${SLURM_PARTITION:-}" ]]; then
+    SLURM_OPTS[partition]="$SLURM_PARTITION"
+fi
+if [[ -n "${SLURM_NODES:-}" ]]; then
+    SLURM_OPTS[nodes]="$SLURM_NODES"
+fi
+
+# Parse CLI arguments and override config values
 while [[ $# -gt 0 && "$1" != "--" ]]; do
-    SLURM_FLAGS+=("$1")
-    # Track which options are set via CLI
     case "$1" in
         -p|--partition)
-            SLURM_OPTS_SET[partition]=1
+            SLURM_OPTS[partition]="$2"
+            shift 2
             ;;
         -N|--nodes)
-            SLURM_OPTS_SET[nodes]=1
+            SLURM_OPTS[nodes]="$2"
+            shift 2
+            ;;
+        *)
+            # For other Slurm flags, pass them through as-is
+            # This supports flags like --time, --mem, --gres, etc.
+            if [[ -z "${SLURM_OTHER_FLAGS:-}" ]]; then
+                SLURM_OTHER_FLAGS=()
+            fi
+            SLURM_OTHER_FLAGS+=("$1")
+            shift
             ;;
     esac
-    shift
 done
 
-# Apply config values only if not set via CLI (CLI has priority)
-if [[ -n "${SLURM_PARTITION:-}" ]] && [[ -z "${SLURM_OPTS_SET[partition]:-}" ]]; then
-    SLURM_FLAGS=(-p "$SLURM_PARTITION" "${SLURM_FLAGS[@]}")
+# Build final SLURM_FLAGS array from associative array
+SLURM_FLAGS=()
+if [[ -n "${SLURM_OPTS[partition]:-}" ]]; then
+    SLURM_FLAGS+=(-p "${SLURM_OPTS[partition]}")
 fi
-if [[ -n "${SLURM_NODES:-}" ]] && [[ -z "${SLURM_OPTS_SET[nodes]:-}" ]]; then
-    SLURM_FLAGS=(-N "$SLURM_NODES" "${SLURM_FLAGS[@]}")
+if [[ -n "${SLURM_OPTS[nodes]:-}" ]]; then
+    SLURM_FLAGS+=(-N "${SLURM_OPTS[nodes]}")
+fi
+# Append other flags
+if [[ -n "${SLURM_OTHER_FLAGS:-}" ]]; then
+    SLURM_FLAGS+=("${SLURM_OTHER_FLAGS[@]}")
 fi
 
 # Skip '--'
