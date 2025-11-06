@@ -298,6 +298,6 @@ if __name__ == "__main__":
     Run the strided allgather benchmark.
     """
     parser = argparse.ArgumentParser(description="Strided Allgather Benchmark")
+    add_arguments(parser)
     args = parser.parse_args()
-    add_arguments(args)
     run_strided_allgather_benchmark(args)
