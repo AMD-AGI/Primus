@@ -77,7 +77,6 @@ class LanguageModelProfiler(BaseModuleProfiler):
             ep_size=self.config.model_parallel_config.expert_model_parallel_size,
             num_virtual_pipeline_stages=self.config.model_parallel_config.virtual_pipeline_model_parallel_size)
 
-
     def get_layers_for_rank(
         self,
         global_rank: int,
@@ -119,26 +118,53 @@ class LanguageModelProfiler(BaseModuleProfiler):
             
         return assigned_layers
 
+    def get_dp_size(self) -> int:
+        num_nodes = int(os.getenv('NNODES', '1'))
+        if num_nodes == 1:
+            # Calculate the minimum number of needed nodes
+            num_nodes = (self.config.model_parallel_config.tensor_model_parallel_size *
+                self.config.model_parallel_config.context_model_parallel_size *
+                self.config.model_parallel_config.pipeline_model_parallel_size *
+                self.config.model_parallel_config.expert_model_parallel_size //
+                int(os.getenv('GPUS_PER_NODE', '8')))
+        world_size = num_nodes * int(os.getenv('GPUS_PER_NODE', '8'))
+        dp_size = (world_size //
+                self.config.model_parallel_config.expert_model_parallel_size //
+                self.config.model_parallel_config.pipeline_model_parallel_size)
+        return dp_size
 
-    def estimated_num_params(self) -> int:    
+    def get_num_bytes_per_param(self) -> float:
+        dp_size = self.get_dp_size()
+        multiplier = 4  # param weights + gradients, bf16
+        # 2 for main params, 4 + 4 for fp32 optimizer 1st & 2nd order moments
+        optimizer_state_multiplier = 10 / dp_size  # DP sharding
+        return multiplier + optimizer_state_multiplier
+
+    def estimated_num_params(self, rank: int | None = None) -> int:
         total_params = 0
-        for layer in self.layers:
+        if rank is None:
+            layers = range(self.config.model_config.num_layers)
+        else:
+            layers = self.layers
+        for layer in layers:
             is_moe = self.config.model_config.moe_pattern[layer]
             if is_moe:
-                total_params += self.sub_profilers["moe_transformer_layer"].estimated_num_params()
+                total_params += self.sub_profilers["moe_transformer_layer"].estimated_num_params(rank)
             else:
-                total_params += self.sub_profilers["dense_transformer_layer"].estimated_num_params()
+                total_params += self.sub_profilers["dense_transformer_layer"].estimated_num_params(rank)
         if 0 in self.layers:
-            total_params += self.sub_profilers["embedding"].estimated_num_params()
+            total_params += self.sub_profilers["embedding"].estimated_num_params(rank)
         if self.config.model_config.num_layers - 1 in self.layers:
-            total_params += self.sub_profilers["final_layernorm"].estimated_num_params()
-            total_params += self.sub_profilers["output_layer"].estimated_num_params()
-            total_params += self.sub_profilers["calc_loss"].estimated_num_params()
+            total_params += self.sub_profilers["final_layernorm"].estimated_num_params(rank)
+            total_params += self.sub_profilers["output_layer"].estimated_num_params(rank)
+            total_params += self.sub_profilers["calc_loss"].estimated_num_params(rank)
         return total_params
 
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
         total_act = 0
+        pp_size = self.config.model_parallel_config.pipeline_model_parallel_size
+        vpp_size = self.config.model_parallel_config.virtual_pipeline_model_parallel_size
         for layer in self.layers:
             is_moe = self.config.model_config.moe_pattern[layer]
             if is_moe:
@@ -151,4 +177,13 @@ class LanguageModelProfiler(BaseModuleProfiler):
             total_act += self.sub_profilers["final_layernorm"].estimated_activation_memory(batch_size, seq_len)
             total_act += self.sub_profilers["output_layer"].estimated_activation_memory(batch_size, seq_len)
             total_act += self.sub_profilers["calc_loss"].estimated_activation_memory(batch_size, seq_len)
+        # 1F1B
+        total_act *= pp_size
+        interleaved_schedule_memory_penalty = 1 + (
+            (pp_size - 1)
+            / (pp_size * vpp_size)
+        )
+        ga = self.config.runtime_config.global_batch_size // self.get_dp_size()
+        gs_saving = 1 if ga > pp_size else ga / pp_size
+        total_act *= gs_saving * interleaved_schedule_memory_penalty
         return total_act

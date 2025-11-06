@@ -23,7 +23,7 @@ modules:
       # hyber parameters
       train_iters: 50
       micro_batch_size: 1
-      global_batch_size: 32
+      global_batch_size: 768
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
       lr: 1.0e-5
@@ -40,8 +40,10 @@ modules:
 
       # parallel
       tensor_model_parallel_size: ${PRIMUS_TP:1}
-      pipeline_model_parallel_size: ${PRIMUS_PP:24}
+      pipeline_model_parallel_size: ${PRIMUS_PP:12}
       expert_model_parallel_size: ${PRIMUS_EP:16}
+      context_parallel_size: ${PRIMUS_CP:2}
+      num_virtual_stages_per_pipeline_rank: 8
       overlap_grad_reduce: true
       overlap_param_gather: true
 

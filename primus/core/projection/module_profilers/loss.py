@@ -11,7 +11,7 @@ from primus.core.projection.training_config import TrainingConfig
 
 
 class LossProfiler(BaseModuleProfiler):
-    def estimated_num_params(self) -> int:
+    def estimated_num_params(self, rank: int | None = None) -> int:
         return 0
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:

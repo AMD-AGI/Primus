@@ -16,8 +16,11 @@ class BaseModuleProfiler(ABC):
         self.sub_profilers = sub_profilers
 
     # -------- Parameter related --------
-    def estimated_num_params(self) -> int:
-        """Return estimated parameter count (based on formula)."""
+    def estimated_num_params(self, rank: int | None = None) -> int:
+        """Return estimated parameter count (based on formula).
+        If rank is provided, return the parameter count for the given rank,
+        otherwise return the total parameter count for the entire model.
+        """
         raise NotImplementedError
 
     def measured_num_params(self) -> int:

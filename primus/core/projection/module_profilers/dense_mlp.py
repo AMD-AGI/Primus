@@ -11,7 +11,7 @@ from primus.core.projection.training_config import TrainingConfig
 
 
 class DenseMLPProfiler(BaseModuleProfiler):
-    def estimated_num_params(self) -> int:
+    def estimated_num_params(self, rank: int | None = None) -> int:
         # For SwiGLU: 3 projections (gate, up, down)
         # For standard FFN: 2 projections (up, down)
         num_ffn_projections = 3 if self.config.model_config.swiglu else 2

@@ -11,7 +11,7 @@ from primus.core.projection.training_config import TrainingConfig
 
 
 class AttentionProfiler(BaseModuleProfiler):
-    def estimated_num_params(self) -> int:
+    def estimated_num_params(self, rank: int | None = None) -> int:
         args = self.config.model_config
         # Group-query & multi-latent attention support.
         # If GQA not enabled, fall back to per-head queries.

@@ -11,7 +11,7 @@ from primus.core.projection.training_config import TrainingConfig
 
 
 class MoEMLPProfiler(BaseModuleProfiler):
-    def estimated_num_params(self) -> int:
+    def estimated_num_params(self, rank: int | None = None) -> int:
         if self.config.model_config.moe_ffn_hidden_size is not None:
             moe_ffn = self.config.model_config.moe_ffn_hidden_size
         else:
@@ -21,9 +21,10 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # For standard FFN: 2 projections per expert (up, down)
         num_ffn_projections = 3 if self.config.model_config.swiglu else 2
         per_expert_params = num_ffn_projections * self.config.model_config.hidden_size * moe_ffn
+        ep = 1 if rank is None else self.config.model_parallel_config.expert_model_parallel_size
+
         all_experts_params = (self.config.model_config.num_experts *
-                              per_expert_params //
-                              self.config.model_parallel_config.expert_model_parallel_size)
+                              per_expert_params // ep)
 
         # Shared experts (if any)
         shared_sz = 0
