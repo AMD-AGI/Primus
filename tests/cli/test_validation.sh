@@ -1,179 +1,313 @@
 #!/bin/bash
 ###############################################################################
-# Test script for validation library
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
 ###############################################################################
 
-set -euo pipefail
+# Unit tests for Primus CLI validation library
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# Get project root
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# Source libraries
-export PRIMUS_LOG_COLOR=0  # Disable colors in tests
+# Test counters
+TESTS_RUN=0
+TESTS_PASSED=0
+TESTS_FAILED=0
+
+# Colors for output
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Source libraries (needed for testing)
+export PRIMUS_LOG_COLOR=0  # Disable colors
 # shellcheck disable=SC1091
 source "$PROJECT_ROOT/runner/lib/common.sh"
 # shellcheck disable=SC1091
 source "$PROJECT_ROOT/runner/lib/validation.sh"
 
-export NODE_RANK=0
-
-echo "========================================="
-echo "  Primus CLI Validation Library Tests"
-echo "========================================="
-echo ""
-
-# Test counters
-TESTS_PASSED=0
-TESTS_FAILED=0
-
-test_pass() {
-    LOG_SUCCESS "✓ $1: PASSED"
-    ((TESTS_PASSED++)) || true
+# Test helper functions
+assert_pass() {
+    local test_name="$1"
+    ((TESTS_RUN++))
+    echo -e "${GREEN}✓${NC} $test_name"
+    ((TESTS_PASSED++))
 }
 
-test_fail() {
-    LOG_ERROR "✗ $1: FAILED"
-    ((TESTS_FAILED++)) || true
+assert_fail() {
+    local test_name="$1"
+    local reason="${2:-}"
+    ((TESTS_RUN++))
+    echo -e "${RED}✗${NC} $test_name"
+    if [[ -n "$reason" ]]; then
+        echo "  Reason: $reason"
+    fi
+    ((TESTS_FAILED++))
 }
 
+assert_contains() {
+    local haystack="$1"
+    local needle="$2"
+    local test_name="$3"
+
+    ((TESTS_RUN++))
+
+    if echo "$haystack" | grep -qF -- "$needle"; then
+        echo -e "${GREEN}✓${NC} $test_name"
+        ((TESTS_PASSED++))
+        return 0
+    else
+        echo -e "${RED}✗${NC} $test_name"
+        echo "  Expected to contain: $needle"
+        ((TESTS_FAILED++))
+        return 1
+    fi
+}
+
+# Print test section header
+print_section() {
+    echo ""
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}$1${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+}
+
+# ============================================================================
 # Test 1: Distributed parameters validation
-LOG_INFO "Test 1: Validating distributed parameters..."
-export NNODES=2
-export NODE_RANK=0
-export GPUS_PER_NODE=8
-export MASTER_ADDR="localhost"
-export MASTER_PORT=1234
+# ============================================================================
+test_distributed_params() {
+    print_section "Test 1: Distributed Parameters Validation"
 
-if validate_distributed_params 2>/dev/null; then
-    test_pass "Distributed parameters validation"
-else
-    test_fail "Distributed parameters validation"
-fi
-echo ""
+    export NNODES=2
+    export NODE_RANK=0
+    export GPUS_PER_NODE=8
+    export MASTER_ADDR="localhost"
+    export MASTER_PORT=1234
 
-# Test 2: Invalid GPUS_PER_NODE
-LOG_INFO "Test 2: Testing invalid GPUS_PER_NODE (should fail gracefully)..."
-export GPUS_PER_NODE=10
-if validate_gpus_per_node 2>&1 | grep -q "must be between"; then
-    test_pass "Invalid GPUS_PER_NODE correctly rejected"
-else
-    test_fail "Invalid GPUS_PER_NODE not caught"
-fi
-export GPUS_PER_NODE=8
-echo ""
+    if validate_distributed_params 2>/dev/null; then
+        assert_pass "Valid distributed parameters accepted"
+    else
+        assert_fail "Valid distributed parameters accepted"
+    fi
+}
 
+# ============================================================================
+# Test 2: GPUS_PER_NODE validation
+# ============================================================================
+test_gpus_per_node_validation() {
+    print_section "Test 2: GPUS_PER_NODE Validation"
+
+    export GPUS_PER_NODE=8
+    if validate_gpus_per_node 2>/dev/null; then
+        assert_pass "Valid GPUS_PER_NODE=8 accepted"
+    else
+        assert_fail "Valid GPUS_PER_NODE=8 accepted"
+    fi
+
+    export GPUS_PER_NODE=10
+    local output
+    output=$(validate_gpus_per_node 2>&1)
+    assert_contains "$output" "must be between" "Invalid GPUS_PER_NODE rejected"
+
+    export GPUS_PER_NODE=8  # Reset
+}
+
+# ============================================================================
 # Test 3: Integer validation
-LOG_INFO "Test 3: Testing integer validation..."
-if validate_integer "123" "test_value" 2>/dev/null; then
-    test_pass "Integer validation"
-else
-    test_fail "Integer validation"
-fi
+# ============================================================================
+test_integer_validation() {
+    print_section "Test 3: Integer Validation"
 
-if ! validate_integer "abc" "test_value" 2>/dev/null; then
-    test_pass "Non-integer correctly rejected"
-else
-    test_fail "Non-integer not caught"
-fi
-echo ""
+    if validate_integer "123" "test_value" 2>/dev/null; then
+        assert_pass "Valid integer accepted"
+    else
+        assert_fail "Valid integer accepted"
+    fi
 
+    if ! validate_integer "abc" "test_value" 2>/dev/null; then
+        assert_pass "Non-integer correctly rejected"
+    else
+        assert_fail "Non-integer correctly rejected"
+    fi
+
+    if ! validate_integer "12.5" "test_value" 2>/dev/null; then
+        assert_pass "Float correctly rejected"
+    else
+        assert_fail "Float correctly rejected"
+    fi
+}
+
+# ============================================================================
 # Test 4: Integer range validation
-LOG_INFO "Test 4: Testing integer range validation..."
-if validate_integer_range "5" 1 10 "test_value" 2>/dev/null; then
-    test_pass "Integer range validation (valid)"
-else
-    test_fail "Integer range validation (valid)"
-fi
+# ============================================================================
+test_integer_range_validation() {
+    print_section "Test 4: Integer Range Validation"
 
-if ! validate_integer_range "15" 1 10 "test_value" 2>/dev/null; then
-    test_pass "Out of range correctly rejected"
-else
-    test_fail "Out of range not caught"
-fi
-echo ""
+    if validate_integer_range "5" 1 10 "test_value" 2>/dev/null; then
+        assert_pass "Value in range accepted"
+    else
+        assert_fail "Value in range accepted"
+    fi
 
+    if ! validate_integer_range "15" 1 10 "test_value" 2>/dev/null; then
+        assert_pass "Value above range rejected"
+    else
+        assert_fail "Value above range rejected"
+    fi
+
+    if ! validate_integer_range "0" 1 10 "test_value" 2>/dev/null; then
+        assert_pass "Value below range rejected"
+    else
+        assert_fail "Value below range rejected"
+    fi
+}
+
+# ============================================================================
 # Test 5: Container runtime detection
-LOG_INFO "Test 5: Testing container runtime detection..."
-if validate_container_runtime 2>/dev/null; then
-    test_pass "Container runtime detected: ${CONTAINER_RUNTIME}"
-else
-    LOG_WARN "⚠ No container runtime found (docker/podman) - this is expected on some systems"
-    test_pass "Container runtime check (no runtime found)"
-fi
-echo ""
+# ============================================================================
+test_container_runtime() {
+    print_section "Test 5: Container Runtime Detection"
 
+    if validate_container_runtime 2>/dev/null; then
+        assert_pass "Container runtime detected: ${CONTAINER_RUNTIME:-none}"
+    else
+        echo -e "${YELLOW}  ℹ No container runtime found (docker/podman) - this is OK${NC}"
+        assert_pass "Container runtime check completed (no runtime found)"
+    fi
+}
+
+# ============================================================================
 # Test 6: NNODES validation
-LOG_INFO "Test 6: Testing NNODES validation..."
-export NNODES=4
-if validate_nnodes 2>/dev/null; then
-    test_pass "NNODES validation (valid)"
-else
-    test_fail "NNODES validation (valid)"
-fi
+# ============================================================================
+test_nnodes_validation() {
+    print_section "Test 6: NNODES Validation"
 
-export NNODES=0
-if ! validate_nnodes 2>/dev/null; then
-    test_pass "NNODES=0 correctly rejected"
-else
-    test_fail "NNODES=0 not caught"
-fi
-export NNODES=2
-echo ""
+    export NNODES=4
+    if validate_nnodes 2>/dev/null; then
+        assert_pass "Valid NNODES=4 accepted"
+    else
+        assert_fail "Valid NNODES=4 accepted"
+    fi
 
+    export NNODES=0
+    if ! validate_nnodes 2>/dev/null; then
+        assert_pass "NNODES=0 correctly rejected"
+    else
+        assert_fail "NNODES=0 correctly rejected"
+    fi
+
+    export NNODES=-1
+    if ! validate_nnodes 2>/dev/null; then
+        assert_pass "Negative NNODES rejected"
+    else
+        assert_fail "Negative NNODES rejected"
+    fi
+
+    export NNODES=2  # Reset
+}
+
+# ============================================================================
 # Test 7: NODE_RANK validation
-LOG_INFO "Test 7: Testing NODE_RANK validation..."
-export NNODES=4
-export NODE_RANK=2
-if validate_node_rank 2>/dev/null; then
-    test_pass "NODE_RANK validation (valid)"
-else
-    test_fail "NODE_RANK validation (valid)"
-fi
+# ============================================================================
+test_node_rank_validation() {
+    print_section "Test 7: NODE_RANK Validation"
 
-export NODE_RANK=5
-if ! validate_node_rank 2>/dev/null; then
-    test_pass "NODE_RANK >= NNODES correctly rejected"
-else
-    test_fail "NODE_RANK >= NNODES not caught"
-fi
-export NODE_RANK=0
-echo ""
+    export NNODES=4
+    export NODE_RANK=2
+    if validate_node_rank 2>/dev/null; then
+        assert_pass "Valid NODE_RANK=2 (NNODES=4) accepted"
+    else
+        assert_fail "Valid NODE_RANK=2 (NNODES=4) accepted"
+    fi
 
+    export NODE_RANK=5
+    if ! validate_node_rank 2>/dev/null; then
+        assert_pass "NODE_RANK >= NNODES correctly rejected"
+    else
+        assert_fail "NODE_RANK >= NNODES correctly rejected"
+    fi
+
+    export NODE_RANK=-1
+    if ! validate_node_rank 2>/dev/null; then
+        assert_pass "Negative NODE_RANK rejected"
+    else
+        assert_fail "Negative NODE_RANK rejected"
+    fi
+
+    export NODE_RANK=0  # Reset
+}
+
+# ============================================================================
 # Test 8: MASTER_PORT validation
-LOG_INFO "Test 8: Testing MASTER_PORT validation..."
-export MASTER_PORT=8888
-if validate_master_port 2>/dev/null; then
-    test_pass "MASTER_PORT validation (valid)"
-else
-    test_fail "MASTER_PORT validation (valid)"
-fi
+# ============================================================================
+test_master_port_validation() {
+    print_section "Test 8: MASTER_PORT Validation"
 
-export MASTER_PORT=100
-if ! validate_master_port 2>/dev/null; then
-    test_pass "MASTER_PORT < 1024 correctly rejected"
-else
-    test_fail "MASTER_PORT < 1024 not caught"
-fi
-export MASTER_PORT=1234
-echo ""
+    export MASTER_PORT=8888
+    if validate_master_port 2>/dev/null; then
+        assert_pass "Valid MASTER_PORT=8888 accepted"
+    else
+        assert_fail "Valid MASTER_PORT=8888 accepted"
+    fi
 
-# Summary
-echo "========================================="
-echo "  Test Summary"
-echo "========================================="
-LOG_SUCCESS "Passed: $TESTS_PASSED"
-if [[ "$TESTS_FAILED" -gt 0 ]]; then
-    LOG_ERROR "Failed: $TESTS_FAILED"
-else
-    LOG_INFO "Failed: $TESTS_FAILED"
-fi
-echo "Total: $((TESTS_PASSED + TESTS_FAILED))"
-echo "========================================="
+    export MASTER_PORT=100
+    if ! validate_master_port 2>/dev/null; then
+        assert_pass "MASTER_PORT < 1024 correctly rejected"
+    else
+        assert_fail "MASTER_PORT < 1024 correctly rejected"
+    fi
 
-if [[ "$TESTS_FAILED" -eq 0 ]]; then
-    LOG_SUCCESS "All validation tests passed! ✓"
-    exit 0
-else
-    LOG_ERROR "Some validation tests failed! ✗"
-    exit 1
-fi
+    export MASTER_PORT=70000
+    if ! validate_master_port 2>/dev/null; then
+        assert_pass "MASTER_PORT > 65535 correctly rejected"
+    else
+        assert_fail "MASTER_PORT > 65535 correctly rejected"
+    fi
+
+    export MASTER_PORT=1234  # Reset
+}
+
+# ============================================================================
+# Run all tests
+# ============================================================================
+main() {
+    echo "╔══════════════════════════════════════════════════════════════╗"
+    echo "║  Unit Tests for Primus CLI Validation Library               ║"
+    echo "╚══════════════════════════════════════════════════════════════╝"
+
+    test_distributed_params
+    test_gpus_per_node_validation
+    test_integer_validation
+    test_integer_range_validation
+    test_container_runtime
+    test_nnodes_validation
+    test_node_rank_validation
+    test_master_port_validation
+
+    # Print summary
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "Test Summary:"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Total:  $TESTS_RUN"
+    echo -e "  Passed: ${GREEN}$TESTS_PASSED${NC}"
+    if [[ $TESTS_FAILED -gt 0 ]]; then
+        echo -e "  Failed: ${RED}$TESTS_FAILED${NC}"
+    else
+        echo "  Failed: 0"
+    fi
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    if [[ $TESTS_FAILED -eq 0 ]]; then
+        echo -e "${GREEN}✓ All tests passed!${NC}"
+        return 0
+    else
+        echo -e "${RED}✗ Some tests failed${NC}"
+        return 1
+    fi
+}
+
+# Run tests
+main
