@@ -99,65 +99,144 @@ if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
     source "$SCRIPT_DIR/lib/common.sh" 2>/dev/null || true
 fi
 
-# Load config library and slurm-specific config
+# Load config library
 if [[ -f "$SCRIPT_DIR/lib/config.sh" ]]; then
     # shellcheck disable=SC1091
     source "$SCRIPT_DIR/lib/config.sh" 2>/dev/null || true
-    # If config file is provided via --config, load slurm-specific config
-    if [[ -n "$CONFIG_FILE" ]] && [[ -f "$CONFIG_FILE" ]]; then
-        load_yaml_config "$CONFIG_FILE" 2>/dev/null || true
-        load_mode_config "slurm" 2>/dev/null || true
-    fi
 fi
 
-# 1. Detect srun/sbatch mode
+# Step 1: Load config and extract slurm.* parameters
+declare -A slurm_args
+
+if [[ -n "$CONFIG_FILE" ]] && [[ -f "$CONFIG_FILE" ]]; then
+    # Load yaml config file
+    load_yaml_config "$CONFIG_FILE" 2>/dev/null || true
+
+    # Extract all slurm.* config keys and remove "slurm." prefix
+    for key in "${!PRIMUS_CONFIG[@]}"; do
+        if [[ "$key" =~ ^slurm\. ]]; then
+            # Remove "slurm." prefix to get parameter name
+            param_name="${key#slurm.}"
+            slurm_args["$param_name"]="${PRIMUS_CONFIG[$key]}"
+        fi
+    done
+else
+    # No config file provided, use defaults from load_config
+    load_config 2>/dev/null || true
+
+    # Extract slurm.* from default config
+    for key in "${!PRIMUS_CONFIG[@]}"; do
+        if [[ "$key" =~ ^slurm\. ]]; then
+            param_name="${key#slurm.}"
+            slurm_args["$param_name"]="${PRIMUS_CONFIG[$key]}"
+        fi
+    done
+fi
+
+# Step 2: Detect srun/sbatch mode
 LAUNCH_CMD="srun"   # Default launcher
 if [[ "${1:-}" == "sbatch" || "${1:-}" == "srun" ]]; then
     LAUNCH_CMD="$1"
     shift
 fi
 
-# 2. Collect SLURM_FLAGS before '--'
-# Strategy: CLI > Config > None
-# Generic approach: use parameter mapping table for extensibility
-
-declare -A CLI_OPTS_SEEN
-CLI_ARGS=()
-
-# Collect all CLI arguments and track option flags
-while [[ $# -gt 0 && "$1" != "--" ]]; do
-    CLI_ARGS+=("$1")
-    # Track options (anything starting with -)
-    if [[ "$1" =~ ^- ]]; then
-        CLI_OPTS_SEEN["$1"]=1
-    fi
-    shift
-done
-
-# Build final SLURM_FLAGS from config (if not overridden by CLI)
-SLURM_FLAGS=()
-
-# Parameter mapping: env_var|short_opt|long_opt
-# Easy to extend - just add new lines here
-declare -a PARAM_MAP=(
-    "SLURM_PARTITION|-p|--partition"
-    "SLURM_NODES|-N|--nodes"
+# Step 3: Collect CLI arguments and track which parameters are overridden
+# Map long options to their short option equivalents for override detection
+declare -A LONG_TO_SHORT=(
+    ["partition"]="p"
+    ["nodes"]="N"
+    ["ntasks"]="n"
+    ["cpus-per-task"]="c"
+    ["time"]="t"
+    ["output"]="o"
+    ["error"]="e"
+    ["job-name"]="J"
 )
 
-# Process each parameter from the mapping table
-for param_spec in "${PARAM_MAP[@]}"; do
-    IFS='|' read -r env_var short_opt long_opt <<< "$param_spec"
+declare -A CLI_OVERRIDES  # Track which config params are overridden by CLI
+CLI_ARGS=()  # Store original CLI arguments
 
-    # Check if CLI provided this option
-    if [[ -z "${CLI_OPTS_SEEN[$short_opt]:-}" ]] && [[ -z "${CLI_OPTS_SEEN[$long_opt]:-}" ]]; then
-        # CLI didn't provide it, check if config has it
-        if [[ -n "${!env_var:-}" ]]; then
-            SLURM_FLAGS+=("$short_opt" "${!env_var}")
+while [[ $# -gt 0 && "$1" != "--" ]]; do
+    arg="$1"
+    shift
+
+    # Store original CLI arg
+    CLI_ARGS+=("$arg")
+
+    # Track what parameter is being overridden
+    if [[ "$arg" =~ ^-- ]]; then
+        # Long option: --partition or --partition=value
+        param_name="${arg#--}"
+        param_name="${param_name%%=*}"  # Remove value if using = format
+        CLI_OVERRIDES["$param_name"]=1
+        # Also mark the short form as overridden
+        if [[ -n "${LONG_TO_SHORT[$param_name]:-}" ]]; then
+            CLI_OVERRIDES["${LONG_TO_SHORT[$param_name]}"]=1
+        fi
+
+        # If option has a separate value, store it too
+        if [[ "$arg" != *=* && $# -gt 0 && ! "$1" =~ ^- ]]; then
+            CLI_ARGS+=("$1")
+            shift
+        fi
+    elif [[ "$arg" =~ ^- ]]; then
+        # Short option: -p or -p value
+        param_name="${arg#-}"
+        CLI_OVERRIDES["$param_name"]=1
+        # Also mark the long form as overridden by checking reverse mapping
+        for long in "${!LONG_TO_SHORT[@]}"; do
+            if [[ "${LONG_TO_SHORT[$long]}" == "$param_name" ]]; then
+                CLI_OVERRIDES["$long"]=1
+                break
+            fi
+        done
+
+        # If option has a separate value, store it too
+        if [[ $# -gt 0 && ! "$1" =~ ^- ]]; then
+            CLI_ARGS+=("$1")
+            shift
         fi
     fi
 done
 
-# Append all CLI args (ensuring CLI has final say)
+# Step 4: Build SLURM_FLAGS from config (only non-overridden params) + CLI args
+SLURM_FLAGS=()
+
+# Add config parameters that were not overridden by CLI
+for param_name in "${!slurm_args[@]}"; do
+    # Skip if this parameter was provided via CLI
+    if [[ -n "${CLI_OVERRIDES[$param_name]:-}" ]]; then
+        continue
+    fi
+
+    param_value="${slurm_args[$param_name]}"
+
+    # Use short form if available, otherwise long form
+    if [[ ${#param_name} -eq 1 ]]; then
+        # Already a short option
+        if [[ -n "$param_value" ]]; then
+            SLURM_FLAGS+=("-$param_name" "$param_value")
+        else
+            SLURM_FLAGS+=("-$param_name")
+        fi
+    elif [[ -n "${LONG_TO_SHORT[$param_name]:-}" ]]; then
+        # Has a known short form, use it
+        if [[ -n "$param_value" ]]; then
+            SLURM_FLAGS+=("-${LONG_TO_SHORT[$param_name]}" "$param_value")
+        else
+            SLURM_FLAGS+=("-${LONG_TO_SHORT[$param_name]}")
+        fi
+    else
+        # Use long form
+        if [[ -n "$param_value" ]]; then
+            SLURM_FLAGS+=("--$param_name" "$param_value")
+        else
+            SLURM_FLAGS+=("--$param_name")
+        fi
+    fi
+done
+
+# Append all CLI arguments (preserving their original format)
 SLURM_FLAGS+=("${CLI_ARGS[@]}")
 
 # Skip '--'
