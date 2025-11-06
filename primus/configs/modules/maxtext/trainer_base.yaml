@@ -51,6 +51,7 @@ async_checkpointing: True
 checkpoint_period: 10_000
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: False
+max_to_keep: 5
 
 force_unroll: False # during generate_param_only_checkpoint should we unroll the loop?
 
@@ -161,6 +162,7 @@ mtp_loss_scaling_factor: 0.1
 mtp_eval_target_module: 0
 
 # mixture of experts (moe)
+expert_balance: False
 num_experts: 1
 num_experts_per_tok: 1
 megablox: True
@@ -453,6 +455,7 @@ train_image_column: 'image'
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_image_column: 'image'
 packing: True
+max_segments: 32
 num_epoch: 1  # only grain and tfds pipeline supports num_epoch > 1
 
 # direct preference optimization (DPO)
