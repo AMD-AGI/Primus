@@ -66,7 +66,8 @@ def add_arguments(parser: argparse.ArgumentParser):
         choices=["nccl", "gloo", "mpi"],
         help="Distributed backend",
     )
-    return parser.parse_args()
+
+    return parser
 
 
 def get_dtype(dtype_name: str) -> torch.dtype:
@@ -166,12 +167,13 @@ def benchmark_strided_allgather(
 
             if rank == print_rank:
                 print(
-                    f"[StridedAllGather][Parallel][Group-{group_id}][Ranks-{group_ranks}] size={format_size_mb(size_bytes)} "
+                    f"[RANK-{rank}][StridedAllGather][Parallel][Group-{group_id}][Ranks-{group_ranks}] size={format_size_mb(size_bytes)} "
                     f"avg={avg_s*1e3:.2f} ms agg_bw={gib_s:.2f} GiB/s"
                 )
         else:
             for g_id in range(num_groups):
                 if g_id == group_id:
+                    t0 = time.perf_counter()
                     for _ in range(iters):
                         dist.all_gather_into_tensor(out_tensor, inp, group=group)
                     if device.type == "cuda":
@@ -184,7 +186,7 @@ def benchmark_strided_allgather(
                     gib_s = bytes_to_gib_per_s(total_bytes, avg_s)
                     if rank == print_rank:
                         print(
-                            f"[StridedAllGather][Single][Group-{g_id}][Ranks-{group_ranks}] size={format_size_mb(size_bytes)} "
+                            f"[RANK-{rank}][StridedAllGather][Single][Group-{g_id}][Ranks-{group_ranks}] size={format_size_mb(size_bytes)} "
                             f"avg={avg_s*1e3:.2f} ms agg_bw={gib_s:.2f} GiB/s"
                         )
                 barrier()
@@ -198,13 +200,22 @@ def init_distributed(backend: str) -> Tuple[int, int, int, int]:
         (rank, world_size, local_rank, local_world_size)
     """
 
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", "8"))
 
     torch.cuda.set_device(local_rank)
 
     if not dist.is_initialized():
-        dist.init_process_group(backend=backend, init_method="env://", timeout=timedelta(minutes=5))
+        dist.init_process_group(
+            backend=backend,
+            rank=rank,
+            world_size=world_size,
+            device_id=torch.device(f"cuda:{local_rank}"),
+            init_method="env://",
+            timeout=timedelta(minutes=5),
+        )
 
     rank = dist.get_rank()
     world_size = dist.get_world_size()
@@ -243,19 +254,21 @@ def run_strided_allgather_benchmark(args):
     pg_by_gpu = None
     group_leader = None
     group_id = None
+    group_ranks = None
     for g_id in range(num_groups):
-        group_ranks = [
+        ranks = [
             local_rank_in_group * args.stride + g_id for local_rank_in_group in range(num_ranks_per_group)
         ]
-        leader = min(group_ranks)
+        leader = min(ranks)
         # All ranks call new_group for every GPU id
-        pg = dist.new_group(ranks=group_ranks)
-        if rank in group_ranks:
+        pg = dist.new_group(ranks=ranks)
+        if rank in ranks:
             pg_by_gpu = pg
             group_leader = leader
             group_id = g_id
+            group_ranks = ranks
             if rank == group_leader:
-                print(f"[benchmark][strided-allgather][SETUP-PG] group_id={g_id}, ranks={group_ranks}")
+                print(f"[benchmark][strided-allgather][SETUP-PG] group_id={g_id}, ranks={ranks}")
     assert pg_by_gpu is not None, f"RANK[{rank}]: Failed to create process group"
 
     benchmark_strided_allgather(
