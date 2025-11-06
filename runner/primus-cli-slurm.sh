@@ -118,32 +118,47 @@ if [[ "${1:-}" == "sbatch" || "${1:-}" == "srun" ]]; then
 fi
 
 # 2. Collect SLURM_FLAGS before '--'
-# Fully generic passthrough mechanism: all CLI args override config
-# No hardcoded Slurm parameters - everything is passed through
-declare -A CLI_OPTS_SET
+# Strategy: CLI > Config > None
+# Generic approach: use parameter mapping table for extensibility
+
+declare -A CLI_OPTS_SEEN
 CLI_ARGS=()
 
-# Collect all CLI arguments and track which options are set
+# Collect all CLI arguments and track option flags
 while [[ $# -gt 0 && "$1" != "--" ]]; do
     CLI_ARGS+=("$1")
-    # Track option flags (e.g., -p, -N, --partition, --nodes, etc.)
+    # Track options (anything starting with -)
     if [[ "$1" =~ ^- ]]; then
-        CLI_OPTS_SET["$1"]=1
+        CLI_OPTS_SEEN["$1"]=1
     fi
     shift
 done
 
-# Build config args that are NOT overridden by CLI
-CONFIG_ARGS=()
-if [[ -n "${SLURM_PARTITION:-}" ]] && [[ -z "${CLI_OPTS_SET[-p]:-}" ]] && [[ -z "${CLI_OPTS_SET[--partition]:-}" ]]; then
-    CONFIG_ARGS+=(-p "$SLURM_PARTITION")
-fi
-if [[ -n "${SLURM_NODES:-}" ]] && [[ -z "${CLI_OPTS_SET[-N]:-}" ]] && [[ -z "${CLI_OPTS_SET[--nodes]:-}" ]]; then
-    CONFIG_ARGS+=(-N "$SLURM_NODES")
-fi
+# Build final SLURM_FLAGS from config (if not overridden by CLI)
+SLURM_FLAGS=()
 
-# Final SLURM_FLAGS: config args first, then CLI args (CLI has priority)
-SLURM_FLAGS=("${CONFIG_ARGS[@]}" "${CLI_ARGS[@]}")
+# Parameter mapping: env_var|short_opt|long_opt
+# Easy to extend - just add new lines here
+declare -a PARAM_MAP=(
+    "SLURM_PARTITION|-p|--partition"
+    "SLURM_NODES|-N|--nodes"
+)
+
+# Process each parameter from the mapping table
+for param_spec in "${PARAM_MAP[@]}"; do
+    IFS='|' read -r env_var short_opt long_opt <<< "$param_spec"
+
+    # Check if CLI provided this option
+    if [[ -z "${CLI_OPTS_SEEN[$short_opt]:-}" ]] && [[ -z "${CLI_OPTS_SEEN[$long_opt]:-}" ]]; then
+        # CLI didn't provide it, check if config has it
+        if [[ -n "${!env_var:-}" ]]; then
+            SLURM_FLAGS+=("$short_opt" "${!env_var}")
+        fi
+    fi
+done
+
+# Append all CLI args (ensuring CLI has final say)
+SLURM_FLAGS+=("${CLI_ARGS[@]}")
 
 # Skip '--'
 if [[ "$#" -gt 0 && "$1" == "--" ]]; then
