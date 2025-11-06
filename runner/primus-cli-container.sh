@@ -20,12 +20,13 @@ Built-in Options:
     --primus-path <HOST_PATH>   Use this Primus repo instead of the image default. The path will be mounted
                                 into the container and installed in editable mode.
     --clean                     Remove all containers before launch
+    --dry-run                   Show what would be executed without running
     --help                      Show this message and exit
 
 Generic Docker/Podman Options:
     Any --<option> <value> pairs are passed directly to docker/podman run.
     This provides full flexibility for all docker runtime options.
-    
+
     Examples:
         --cpus <N>              Limit CPU cores (e.g., 8, 16.5)
         --memory <SIZE>         Limit memory (e.g., 64G, 128G)
@@ -67,9 +68,10 @@ HOSTNAME=$(hostname)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRIMUS_PATH="$(realpath -m "$SCRIPT_DIR/..")"
 
-# Parse CLI options first to get --config, --debug if present
+# Parse CLI options first to get --config, --debug, --dry-run if present
 CONFIG_FILE=""
 DEBUG_MODE=0
+DRY_RUN_MODE=0
 PRE_PARSE_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -78,7 +80,11 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --debug)
-            DEBUG_MODE=1
+            export DEBUG_MODE=1
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN_MODE=1
             shift
             ;;
         *)
@@ -90,8 +96,15 @@ done
 # Restore arguments
 set -- "${PRE_PARSE_ARGS[@]}"
 
+# Load common library first (required by config.sh)
+if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "$SCRIPT_DIR/lib/common.sh" 2>/dev/null || true
+fi
+
 # Load config library and mode-specific config
 if [[ -f "$SCRIPT_DIR/lib/config.sh" ]]; then
+    # shellcheck disable=SC1091
     source "$SCRIPT_DIR/lib/config.sh" 2>/dev/null || true
     # If config file is provided via --config, load container-specific config
     if [[ -n "$CONFIG_FILE" ]] && [[ -f "$CONFIG_FILE" ]]; then
@@ -117,8 +130,8 @@ if [[ -n "${CONTAINER_OPTIONS:-}" ]]; then
     IFS='|' read -ra OPTS <<< "$CONTAINER_OPTIONS"
     for opt in "${OPTS[@]}"; do
         if [[ "$opt" == *=* ]]; then
-            local key="${opt%%=*}"
-            local value="${opt#*=}"
+            key="${opt%%=*}"
+            value="${opt#*=}"
             CONTAINER_OPTS[$key]="$value"
         fi
     done
@@ -227,8 +240,13 @@ if command -v podman >/dev/null 2>&1; then
 elif command -v docker >/dev/null 2>&1; then
     DOCKER_CLI="docker"
 else
-    echo "$LOG_ERROR Neither Docker nor Podman found!" >&2
-    exit 1
+    # In dry-run mode, we don't need actual docker/podman
+    if [[ "$DRY_RUN_MODE" == "1" ]]; then
+        DOCKER_CLI="docker"  # Use docker for dry-run output
+    else
+        echo "$LOG_ERROR Neither Docker nor Podman found!" >&2
+        exit 1
+    fi
 fi
 
 if [[ "$CLEAN_DOCKER_CONTAINER" == "1" ]]; then
@@ -272,6 +290,31 @@ if [[ "$VERBOSE" == "1" ]]; then
 fi
 
 # ------------------ Launch Training Container ------------------
+# Handle dry-run mode
+if [[ "$DRY_RUN_MODE" == "1" ]]; then
+    echo "$LOG_INFO [DRY-RUN] Would execute:"
+    echo "$LOG_INFO   ${DOCKER_CLI} run --rm \\"
+    echo "$LOG_INFO     --ipc=host \\"
+    echo "$LOG_INFO     --network=host \\"
+    echo "$LOG_INFO     --device=/dev/kfd \\"
+    echo "$LOG_INFO     --device=/dev/dri \\"
+    echo "$LOG_INFO     --cap-add=SYS_PTRACE \\"
+    echo "$LOG_INFO     --cap-add=CAP_SYS_ADMIN \\"
+    echo "$LOG_INFO     --security-opt seccomp=unconfined \\"
+    echo "$LOG_INFO     --group-add video \\"
+    echo "$LOG_INFO     --privileged \\"
+    echo "$LOG_INFO     --device=/dev/infiniband \\"
+    for ((i = 0; i < ${#VOLUME_ARGS[@]}; i+=2)); do
+        echo "$LOG_INFO     ${VOLUME_ARGS[i]} ${VOLUME_ARGS[i+1]} \\"
+    done
+    for ((i = 0; i < ${#OPTION_ARGS[@]}; i+=2)); do
+        echo "$LOG_INFO     ${OPTION_ARGS[i]} ${OPTION_ARGS[i+1]} \\"
+    done
+    echo "$LOG_INFO     $DOCKER_IMAGE /bin/bash -c \"...\""
+    echo "$LOG_INFO   With args: ${ARGS[*]}"
+    exit 0
+fi
+
 "${DOCKER_CLI}" run --rm \
     --ipc=host \
     --network=host \
