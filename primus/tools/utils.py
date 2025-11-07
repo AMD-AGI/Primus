@@ -7,6 +7,7 @@
 
 import os
 import socket
+from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -17,11 +18,19 @@ def init_distributed():
     """Init only when launched with >1 processes via torchrun."""
     if dist.is_initialized():
         return
+    rank = int(os.environ.get("RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     if world_size > 1:
-        dist.init_process_group(backend="nccl", init_method="env://")
-        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         torch.cuda.set_device(local_rank)
+        dist.init_process_group(
+            backend="nccl",
+            rank=rank,
+            world_size=world_size,
+            device_id=torch.device(f"cuda:{local_rank}"),
+            init_method="env://",
+            timeout=timedelta(minutes=5),
+        )
 
 
 def finalize_distributed():

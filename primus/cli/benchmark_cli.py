@@ -30,6 +30,14 @@ def run(args, extra_args):
         from primus.tools.benchmark.deepseek_dense_gemm_bench import run_gemm_benchmark
 
         run_gemm_benchmark(args)
+    elif suite == "strided-allgather":
+        from primus.tools.benchmark.strided_allgather_bench import (
+            run_strided_allgather_benchmark,
+        )
+
+        run_strided_allgather_benchmark(args)
+    else:
+        raise ValueError(f"Unknown benchmark suite: {suite}")
 
     finalize_distributed()
 
@@ -59,6 +67,14 @@ def register_subcommand(subparsers):
     from primus.tools.benchmark import deepseek_dense_gemm_bench
 
     deepseek_dense_gemm_bench.add_gemm_parser(deepseek_gemm)
+
+    # ---------- INTER-NODE-ALLGATHER-BY-LOCAL-RANK ----------
+    strided_allgather_parser = suite_parsers.add_parser(
+        "strided-allgather", help="Strided Allgather microbench."
+    )
+    from primus.tools.benchmark import strided_allgather_bench
+
+    strided_allgather_bench.add_arguments(strided_allgather_parser)
 
     parser.set_defaults(func=run)
 
