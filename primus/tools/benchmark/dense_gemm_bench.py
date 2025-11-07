@@ -8,19 +8,21 @@ import argparse
 import itertools
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
+
 from tqdm import tqdm
 
 try:
     import torch
+
     from primus.tools.benchmark.gemm_bench import profile_gemm
     from primus.tools.utils import gather_records, is_rank_0
+
     TORCH_AVAILABLE = True
 except ImportError:
     print("[WARNNING] dense gemm benchmark depends on torch, which does not exist in current environment!")
     TORCH_AVAILABLE = False
 
 from primus.tools.report import write_table_simple
-
 
 MODEL_CONFIGS: Dict[str, Dict[str, Any]] = {
     "Llama2_7B": {
@@ -145,17 +147,15 @@ def build_gemm_preamble(args, shape_defs: List[Tuple[str, List[int]]]) -> str:
 
 
 if TORCH_AVAILABLE:
+
     def profile_fwd(m, n, k, dtype, duration):
         return profile_gemm(m, n, k, dtype, False, True, duration)
-
 
     def profile_wgrad(m, n, k, dtype, duration):
         return profile_gemm(n, k, m, dtype, True, False, duration)
 
-
     def profile_dgrad(m, n, k, dtype, duration):
         return profile_gemm(m, k, n, dtype, False, False, duration)
-    
 
     def run_gemm_benchmark(args):
         if args.model:
@@ -201,7 +201,9 @@ if TORCH_AVAILABLE:
 
         record = {}
         for (phase, shape), (tag, func) in tqdm(
-            itertools.product(shape_defs, func_defs), total=len(shape_defs) * len(func_defs), desc="Dense GEMM"
+            itertools.product(shape_defs, func_defs),
+            total=len(shape_defs) * len(func_defs),
+            desc="Dense GEMM",
         ):
             m = args.mbs * shape[0]
             n = shape[1]

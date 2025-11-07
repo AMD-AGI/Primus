@@ -14,7 +14,6 @@ try:
     import torch
     import torch.distributed as dist
 
-
     def init_distributed():
         """Init only when launched with >1 processes via torchrun."""
         if dist.is_initialized():
@@ -25,7 +24,6 @@ try:
             local_rank = int(os.environ.get("LOCAL_RANK", "0"))
             torch.cuda.set_device(local_rank)
 
-
     def finalize_distributed():
         """Destroy process group if initialized."""
         if dist.is_initialized():
@@ -34,7 +32,6 @@ try:
             except Exception:
                 pass  # ignore barrier errors on exit
             dist.destroy_process_group()
-
 
     def gather_all_results(obj):
         """
@@ -67,12 +64,10 @@ try:
         # Otherwise, assume ranks returned single objects (e.g., dict summaries)
         return gathered
 
-
     def is_rank_0() -> bool:
         if not dist.is_initialized():
             raise RuntimeError("Distributed not initialized, cannot determine rank.")
         return dist.get_rank() == 0
-
 
     def get_local_rank() -> int:
         """Return local rank for this node (torchrun/Slurm/fallback)."""
@@ -82,18 +77,15 @@ try:
             return int(os.environ["LOCAL_RANK"])
         return 0
 
-
     def get_current_device() -> torch.device:
         """Set and return the current CUDA device for this rank."""
         lr = get_local_rank()
         torch.cuda.set_device(lr)
         return torch.device(f"cuda:{lr}")
 
-
     # @torch.no_grad()
     # def allreduce_once(tensor):
     #     dist.all_reduce(tensor)
-
 
     def get_rank_world() -> Tuple[int, int]:
         """Best-effort rank/world detection (dist first, then env)."""
@@ -103,7 +95,6 @@ try:
         rank = int(os.environ.get("RANK", "0"))
         world = int(os.environ.get("WORLD_SIZE", "1"))
         return rank, world
-
 
     def gather_times(times_local: List[float]) -> List[List[float]]:
         """
@@ -121,7 +112,6 @@ try:
             dist.gather_object(times_local, dst=0)
             return []
 
-
     def gather_hostnames() -> List[str]:
         """
         Gather per-rank hostnames to rank0.
@@ -138,7 +128,6 @@ try:
         else:
             dist.gather_object(name, None, dst=0)
             return []
-
 
     def gather_records(record: Dict[str, Any], dst: int = 0) -> Optional[List[Dict[str, Any]]]:
         """
@@ -172,7 +161,6 @@ try:
             dist.gather_object(local, dst=dst)
             return None
 
-
     def pick_dtype(name: str):
         name = name.lower()
         if name in ("bf16", "bfloat16"):
@@ -182,6 +170,7 @@ try:
         if name in ("fp32", "float", "float32"):
             return torch.float32
         raise ValueError(f"Unsupported dtype: {name}")
+
 except ImportError:
     print("[WARNNING] dist tools depend on torch, which does not exist in current environment!")
 
@@ -232,6 +221,3 @@ def parse_sizes_list(s: str) -> set[int]:
     if not s:
         return set()
     return {parse_bytes(tok.strip()) for tok in s.split(",") if tok.strip()}
-
-
-

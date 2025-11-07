@@ -32,9 +32,7 @@ def load_backend_trainer(framework: str):
 
         return TorchTitanPretrainTrainer
     elif framework == "maxtext":
-        from primus.modules.trainer.maxtext.pre_trainer import (
-            MaxTextPretrainTrainer,
-        )
+        from primus.modules.trainer.maxtext.pre_trainer import MaxTextPretrainTrainer
 
         return MaxTextPretrainTrainer
     else:
@@ -71,7 +69,7 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
         "megatron": "Megatron-LM",
         "light-megatron": "Megatron-LM",
         "torchtitan": "torchtitan",
-        "maxtext": "maxtext"
+        "maxtext": "maxtext",
     }
     mapped_name = fallback_name_map.get(framework, framework)
     default_path = Path(__file__).resolve().parent.parent / "third_party" / mapped_name

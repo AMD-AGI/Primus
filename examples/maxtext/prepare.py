@@ -102,7 +102,7 @@ def main():
             primus_path=primus_path,
             data_path=data_path,
             patch_args=patch_args_file,
-            env=None
+            env=None,
         )
 
     write_patch_args(patch_args_file, "train_args", {"backend_path": str(maxtext_path)})

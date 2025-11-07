@@ -53,7 +53,9 @@ class PrimusConfig(object):
         return list(self._exp.modules.__dict__.keys())
 
     def module_config_path(self, module_name: str) -> str:
-        return self._module_config_path.get(module_name, os.path.join(self._exp_root_path, f"{module_name}.yaml"))
+        return self._module_config_path.get(
+            module_name, os.path.join(self._exp_root_path, f"{module_name}.yaml")
+        )
 
     def get_module_config(self, module_name: str) -> SimpleNamespace:
         if not yaml_utils.has_key_in_namespace(self._exp.modules, module_name):

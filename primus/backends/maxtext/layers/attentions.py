@@ -1,7 +1,6 @@
 from typing import Tuple
 
 from flax import nnx
-
 from MaxText.layers.attentions import Attention
 from MaxText.layers.linears import DenseGeneral
 
@@ -24,7 +23,9 @@ class PrimusAttention(Attention):
             return self.kernel_init(*args) / depth_scaling
 
         kernel_axes = (
-            (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed", "q_heads", "kv")
+            (None, None, None)
+            if self.config.ici_context_autoregressive_parallelism > 1
+            else ("embed", "q_heads", "kv")
         )
         return DenseGeneral(
             in_features_shape=self.convert_dense_general_inputs_shape(inputs_q_shape),

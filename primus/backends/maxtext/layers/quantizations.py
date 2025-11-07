@@ -1,7 +1,6 @@
-
 from dataclasses import dataclass
-import jax.numpy as jnp
 
+import jax.numpy as jnp
 from MaxText.common_types import DType
 from MaxText.layers.quantizations import Fp8Einsum, NANOOFp8Quantization
 

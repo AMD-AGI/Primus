@@ -218,7 +218,7 @@ if [ "${BACKEND:-}" == "MaxText" ]; then
     export XLA_PYTHON_CLIENT_MEM_FRACTION=.97
     export NVTE_USE_HIPBLASLT=1
     export XLA_FLAGS="--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_graph_level=0 --xla_gpu_enable_latency_hiding_scheduler=True --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=False --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=FALSE"
- 
+
     export HIP_FORCE_DEV_KERNARG=1
     export HSA_FORCE_FINE_GRAIN_PCIE=1
     export NVTE_FUSED_ATTN=1

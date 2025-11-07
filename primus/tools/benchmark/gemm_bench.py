@@ -15,10 +15,8 @@ try:
 
     CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
 
-
     def maybe_transpose(tensor, transpose):
         return tensor.t() if transpose else tensor
-
 
     @torch.inference_mode()
     def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
@@ -84,7 +82,6 @@ try:
             "bandwidth_gbps": bandwidth,
             "arith_intensity": arith_intensity,
         }
-
 
     def run_gemm_benchmark(args):
         if args.M <= 0 or args.N <= 0 or args.K <= 0:
@@ -156,6 +153,7 @@ try:
             )
 
             print(f"[✔] GEMM benchmark finished. Results saved to {args.output_file}")
+
 except ImportError:
     print("[WARNNING] gemm benchmark depends on torch, which does not exist in current environment!")
 

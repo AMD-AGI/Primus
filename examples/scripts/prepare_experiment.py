@@ -58,7 +58,9 @@ def main():
     # Get framework name from pre_trainer module
     framework = config.get_module_config("pre_trainer").framework
     if args.backend is not None and (args.backend.strip().lower() != framework):
-        log_error_and_exit(f"The backend {args.backend} set in env is different with {framework} set in the config")
+        log_error_and_exit(
+            f"The backend {args.backend} set in env is different with {framework} set in the config"
+        )
 
     # Normalize alias: map "light-megatron" to actual folder name
     framework_map = {

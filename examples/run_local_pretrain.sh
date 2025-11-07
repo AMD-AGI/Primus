@@ -54,7 +54,7 @@ echo "PRIMUS_PATH: $PRIMUS_PATH"
 # DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 DATA_PATH=${DATA_PATH:-"$(pwd)/data"}
 echo "DATA_PATH: $DATA_PATH"
-mkdir -p $DATA_PATH
+mkdir -p "$DATA_PATH"
 
 # ------------------ Cluster Env Defaults ------------------
 MASTER_ADDR=${MASTER_ADDR:-localhost}

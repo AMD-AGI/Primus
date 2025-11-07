@@ -8,19 +8,21 @@ import argparse
 import itertools
 from datetime import datetime
 from typing import List, Tuple
+
 from tqdm import tqdm
 
 try:
     import torch
+
     from primus.tools.benchmark.gemm_bench import profile_gemm
     from primus.tools.utils import gather_records, is_rank_0
+
     TORCH_AVAILABLE = True
 except ImportError:
     print("[WARNNING] dense gemm benchmark depends on torch, which does not exist in current environment!")
     TORCH_AVAILABLE = False
 
 from primus.tools.report import write_table_simple
-
 
 MODEL_CONFIGS = {
     "Deepseek_V2_Lite": {
@@ -128,17 +130,15 @@ def build_preamble(args, shapes: List[Tuple[str, List[int]]]) -> str:
 
 
 if TORCH_AVAILABLE:
+
     def profile_fwd(m, n, k, dtype, duration):
         return profile_gemm(m, n, k, dtype, False, True, duration)
-
 
     def profile_wgrad(m, n, k, dtype, duration):
         return profile_gemm(n, k, m, dtype, True, False, duration)
 
-
     def profile_dgrad(m, n, k, dtype, duration):
         return profile_gemm(m, k, n, dtype, False, False, duration)
-
 
     def run_gemm_benchmark(args):
         if args.model:
@@ -166,7 +166,9 @@ if TORCH_AVAILABLE:
 
         # q-proj
         if args.q_lora_rank is None:
-            shape_defs.append(("attn_q", [args.seqlen, args.num_attention_heads * q_head_dim, args.hidden_size]))
+            shape_defs.append(
+                ("attn_q", [args.seqlen, args.num_attention_heads * q_head_dim, args.hidden_size])
+            )
         else:
             shape_defs.append(("attn_q_down", [args.seqlen, args.q_lora_rank, args.hidden_size]))
             shape_defs.append(

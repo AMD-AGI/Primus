@@ -1,12 +1,7 @@
-
 import jax.numpy as jnp
-
-from MaxText.common_types import (
-    Array,
-    AttentionType,
-    MODEL_MODE_TRAIN,
-)
+from MaxText.common_types import MODEL_MODE_TRAIN, Array, AttentionType
 from MaxText.layers.attention_op import AttentionOp
+
 
 class PrimusAttentionOp(AttentionOp):
     def __init__(self, *args, **kwargs):
@@ -26,14 +21,18 @@ class PrimusAttentionOp(AttentionOp):
         """
         # These imports are only meant to work in a GPU build.
         # pylint: disable=import-outside-toplevel
-        from transformer_engine.jax.flax.transformer import DotProductAttention  # pytype: disable=import-error
+        from transformer_engine.jax.flax.transformer import (
+            DotProductAttention,  # pytype: disable=import-error
+        )
 
         _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
         using_context_parallelism = self.mesh.shape["context"] > 1
 
         if self.attention_type == AttentionType.LOCAL_SLIDING and using_context_parallelism:
-            raise AssertionError("Sliding window attention is not supported when context parallelism is enabled")
+            raise AssertionError(
+                "Sliding window attention is not supported when context parallelism is enabled"
+            )
 
         sliding_window_size = None
         mask_type = "padding_causal"
@@ -46,10 +45,14 @@ class PrimusAttentionOp(AttentionOp):
         if self.config.packing and self.config.dataset_type != "synthetic":
             if decoder_segment_ids is None:
                 decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-            attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=decoder_segment_ids, segment_pos=None)
+            attn_mask = SequenceDescriptor.from_segment_ids_and_pos(
+                segment_ids=decoder_segment_ids, segment_pos=None
+            )
             qkv_layout = "THD_THD_THD"  # 'T3HD', 'THD_T2HD' or 'THD_THD_THD'
             max_segments_per_seq = 32
-        elif using_context_parallelism or self.config.dataset_type == "synthetic":  # context parallelism currently only supports causal masking and no packing
+        elif (
+            using_context_parallelism or self.config.dataset_type == "synthetic"
+        ):  # context parallelism currently only supports causal masking and no packing
             attn_mask = None
             mask_type = "causal"
         else:
