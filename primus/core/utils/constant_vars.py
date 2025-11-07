@@ -18,3 +18,4 @@ LOCAL_MASTER_PORT = 1024
 PRIMUS_MASTER = "master"
 PRE_TRAINER = "pre_trainer"
 SFT_TRAINER = "sft_trainer"
+MAMBA_TRAINER = "mamba_trainer"
