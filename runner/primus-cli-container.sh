@@ -4,6 +4,23 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+#
+# Primus Container Mode Launcher
+#
+# This script launches Primus workflows in a Docker/Podman container.
+#
+# Execution Flow:
+#   1. Parse global options (--config, --debug, --dry-run)
+#   2. Load configuration from YAML files
+#   3. Extract and apply container.* configuration parameters
+#   4. Parse CLI arguments (--image, --mount, generic docker options)
+#   5. Build volume mounts and container options
+#   6. Detect docker/podman CLI
+#   7. Launch container with primus-cli-direct.sh inside
+#
+###############################################################################
+
+set -euo pipefail
 
 print_usage() {
 cat <<EOF
@@ -61,14 +78,33 @@ if [[ "$1" == "--help" || "$1" == "-h" ]]; then
     exit 0
 fi
 
+###############################################################################
+# STEP 0: Initialization
+###############################################################################
+
+# Resolve runner directory
+RUNNER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PRIMUS_PATH="$(realpath -m "$RUNNER_DIR/..")"
+
+# Load common library (required)
+# shellcheck disable=SC1091
+source "$RUNNER_DIR/lib/common.sh" || {
+    echo "[ERROR] Failed to load common library: $RUNNER_DIR/lib/common.sh" >&2
+    exit 1
+}
+
+# Load config library (required)
+# shellcheck disable=SC1091
+source "$RUNNER_DIR/lib/config.sh" || {
+    LOG_ERROR "[container] Failed to load config library: $RUNNER_DIR/lib/config.sh"
+    exit 1
+}
+
 HOSTNAME=$(hostname)
 
-# Derive PRIMUS_PATH as the parent directory of this script by default. This
-# makes the container script usable when invoked from the repo's runner/ folder.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PRIMUS_PATH="$(realpath -m "$SCRIPT_DIR/..")"
-
-# Parse CLI options first to get --config, --debug, --dry-run if present
+###############################################################################
+# STEP 1: Pre-parse global options (--config, --debug, --dry-run)
+###############################################################################
 CONFIG_FILE=""
 DEBUG_MODE=0
 DRY_RUN_MODE=0
@@ -96,58 +132,79 @@ done
 # Restore arguments
 set -- "${PRE_PARSE_ARGS[@]}"
 
-# Load common library first (required by config.sh)
-if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
-    # shellcheck disable=SC1091
-    source "$SCRIPT_DIR/lib/common.sh" 2>/dev/null || true
+###############################################################################
+# STEP 2: Load configuration files
+###############################################################################
+
+load_config_auto "$CONFIG_FILE" "container" || {
+    LOG_ERROR "[container] Configuration loading failed"
+    exit 1
+}
+
+# Extract container.* config parameters
+declare -A container_config
+extract_config_section "container" container_config || {
+    LOG_ERROR "[container] Failed to extract container config section"
+    exit 1
+}
+
+###############################################################################
+# STEP 3: Apply configuration values
+# Priority: CLI args > Config file > Script defaults
+###############################################################################
+# 1. Image
+if [[ -z "${DOCKER_IMAGE:-}" && -n "${container_config[image]:-}" ]]; then
+    DOCKER_IMAGE="${container_config[image]}"
+    LOG_INFO "[container] Using image from config: $DOCKER_IMAGE"
 fi
 
-# Load config library and mode-specific config
-if [[ -f "$SCRIPT_DIR/lib/config.sh" ]]; then
-    # shellcheck disable=SC1091
-    source "$SCRIPT_DIR/lib/config.sh" 2>/dev/null || true
-    # If config file is provided via --config, load container-specific config
-    if [[ -n "$CONFIG_FILE" ]] && [[ -f "$CONFIG_FILE" ]]; then
-        load_yaml_config "$CONFIG_FILE" 2>/dev/null || true
-        load_mode_config "container" 2>/dev/null || true
-    fi
-fi
-
-# Parse CLI options
-# NOTE: These variables use environment variables from mode-specific config
-# Priority: CLI args > Mode config > Script defaults
-DOCKER_IMAGE="${DOCKER_IMAGE:-}"
-CLEAN_DOCKER_CONTAINER=0
+# 2. Mounts
 MOUNTS=()
+for key in "${!container_config[@]}"; do
+    if [[ "$key" =~ ^mounts\.[0-9]+$ ]]; then
+        MOUNTS+=("${container_config[$key]}")
+        LOG_DEBUG "[container] Added mount from config: ${container_config[$key]}"
+    fi
+done
+
+# 3. Env vars
+CONTAINER_OPTS=()  # Container options (generic --key value pairs, stored as array to support repeatable options)
+for key in "${!container_config[@]}"; do
+    if [[ "$key" =~ ^env\.[A-Za-z0-9_]+$ ]]; then
+        env_name="${key#env.}"
+        env_value="${container_config[$key]}"
+        CONTAINER_OPTS+=(--env "${env_name}=${env_value}")
+        LOG_DEBUG "[container] Added env var from config: ${env_name}=${env_value}"
+    fi
+done
+
+# 4. Generic options (options.*)
+for key in "${!container_config[@]}"; do
+    if [[ "$key" =~ ^options\. ]]; then
+        opt_name="${key#options.}"
+        opt_value="${container_config[$key]}"
+        CONTAINER_OPTS+=( "--${opt_name}" "${opt_value}" )
+        LOG_DEBUG "[container] Added option from config: --${opt_name} ${opt_value}"
+    fi
+done
+
+
+# 5. Debug / dry-run
+[[ "$DEBUG_MODE" == "0" && ("${container_config[debug]:-false}" == "true" || "${container_config[debug]:-false}" == "1") ]] && DEBUG_MODE=1
+[[ "$DRY_RUN_MODE" == "0" && ("${container_config[dry_run]:-false}" == "true" || "${container_config[dry_run]:-false}" == "1") ]] && DRY_RUN_MODE=1
+
+# Enable debug mode if set
+if [[ "$DEBUG_MODE" == "1" ]]; then
+    set -x
+fi
+
+###############################################################################
+# STEP 4: Parse CLI arguments
+# Priority: CLI args override configuration values
+###############################################################################
+
+CLEAN_DOCKER_CONTAINER=0
 POSITIONAL_ARGS=()
-
-# Container options (generic key-value pairs)
-# Format: key1=value1|key2=value2|...
-declare -A CONTAINER_OPTS
-
-# Load options from config (CONTAINER_OPTIONS env var)
-if [[ -n "${CONTAINER_OPTIONS:-}" ]]; then
-    IFS='|' read -ra OPTS <<< "$CONTAINER_OPTIONS"
-    for opt in "${OPTS[@]}"; do
-        if [[ "$opt" == *=* ]]; then
-            key="${opt%%=*}"
-            value="${opt#*=}"
-            CONTAINER_OPTS[$key]="$value"
-        fi
-    done
-fi
-
-# Load mounts from config (if set via CONTAINER_MOUNTS env var)
-# Format: mount1|mount2|mount3
-if [[ -n "${CONTAINER_MOUNTS:-}" ]]; then
-    IFS='|' read -ra CONFIG_MOUNTS <<< "$CONTAINER_MOUNTS"
-    MOUNTS+=("${CONFIG_MOUNTS[@]}")
-fi
-
-VERBOSE=1
-
-LOG_ERROR="[primus-cli-container][${HOSTNAME}][ERROR]"
-LOG_INFO="[primus-cli-container][${HOSTNAME}][INFO]"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -159,23 +216,8 @@ while [[ $# -gt 0 ]]; do
             MOUNTS+=("$2")
             shift 2
             ;;
-        --primus-path)
-            raw_path="$2"
-            full_path="$(realpath -m "$raw_path")"
-            PRIMUS_PATH="$full_path"
-            MOUNTS+=("$full_path")
-            shift 2
-            ;;
         --clean)
             CLEAN_DOCKER_CONTAINER=1
-            shift
-            ;;
-        --no-verbose)
-            VERBOSE=0
-            shift
-            ;;
-        --verbose)
-            VERBOSE=1
             shift
             ;;
         --help|-h)
@@ -189,13 +231,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         --*)
             # Generic docker option (--key value)
-            opt_key="${1#--}"
             opt_value="${2:-}"
             if [[ -n "$opt_value" ]] && [[ "$opt_value" != --* ]]; then
-                CONTAINER_OPTS[$opt_key]="$opt_value"
+                CONTAINER_OPTS+=("$1" "$opt_value")
                 shift 2
             else
-                echo "$LOG_ERROR Unknown option: $1" >&2
+                LOG_ERROR "[container] Unknown option: $1"
                 exit 1
             fi
             ;;
@@ -206,11 +247,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+###############################################################################
+# STEP 5: Build volume mounts
+###############################################################################
+
 # Defaults (fallback)
 DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.9_gfx942"}
 
-# ----------------- Volume Mounts -----------------
-# Mount the project root and dataset directory into the container
+# Mount the project root and additional directories into the container
 VOLUME_ARGS=(-v "$PRIMUS_PATH:$PRIMUS_PATH")
 for mnt in "${MOUNTS[@]}"; do
     # Parse --mount argument (HOST[:CONTAINER])
@@ -219,14 +263,14 @@ for mnt in "${MOUNTS[@]}"; do
         container_path="${mnt#*:}"
         # Check that the host path exists and is a directory
         if [[ ! -d "$host_path" ]]; then
-            echo "$LOG_ERROR  invalid directory for --mount $mnt" >&2
+            LOG_ERROR "[container] Invalid directory for --mount $mnt"
             exit 1
         fi
         VOLUME_ARGS+=(-v "$(realpath "$host_path")":"$container_path")
     else
         # Mount to same path inside container
         if [[ ! -d "$mnt" ]]; then
-            echo "$LOG_ERROR  invalid directory for --mount $mnt" >&2
+            LOG_ERROR "[container] Invalid directory for --mount $mnt"
             exit 1
         fi
         abs_path="$(realpath "$mnt")"
@@ -234,7 +278,10 @@ for mnt in "${MOUNTS[@]}"; do
     fi
 done
 
-# ------------------ Optional Container Cleanup ------------------
+###############################################################################
+# STEP 6: Detect container runtime (docker/podman)
+###############################################################################
+
 if command -v podman >/dev/null 2>&1; then
     DOCKER_CLI="podman"
 elif command -v docker >/dev/null 2>&1; then
@@ -244,74 +291,80 @@ else
     if [[ "$DRY_RUN_MODE" == "1" ]]; then
         DOCKER_CLI="docker"  # Use docker for dry-run output
     else
-        echo "$LOG_ERROR Neither Docker nor Podman found!" >&2
+        LOG_ERROR "[container] Neither Docker nor Podman found!"
         exit 1
     fi
 fi
 
+###############################################################################
+# STEP 7: Optional container cleanup
+###############################################################################
+
 if [[ "$CLEAN_DOCKER_CONTAINER" == "1" ]]; then
-    echo "$LOG_INFO Cleaning up existing containers..."
+    LOG_INFO "[container] Cleaning up existing containers..."
     CONTAINERS="$($DOCKER_CLI ps -aq)"
     if [[ -n "$CONTAINERS" ]]; then
         printf '%s\n' "$CONTAINERS" | xargs -r -n1 "$DOCKER_CLI" rm -f
-        echo "$LOG_INFO Removed containers: $CONTAINERS"
+        LOG_INFO "[container] Removed containers: $CONTAINERS"
     else
-        echo "$LOG_INFO No containers to remove."
+        LOG_INFO "[container] No containers to remove."
     fi
 fi
+
+###############################################################################
+# STEP 8: Prepare launch arguments
+###############################################################################
 
 ARGS=("${POSITIONAL_ARGS[@]}")
+OPTION_ARGS=("${CONTAINER_OPTS[@]}")
 
-# ------------------ Build Container Option Arguments ------------------
-# Convert CONTAINER_OPTS associative array to docker arguments
-OPTION_ARGS=()
-for opt_key in "${!CONTAINER_OPTS[@]}"; do
-    opt_value="${CONTAINER_OPTS[$opt_key]}"
-    OPTION_ARGS+=(--"$opt_key" "$opt_value")
+###############################################################################
+# STEP 9: Display launch information
+###############################################################################
+LOG_INFO "[container] ========== Launch Info($DOCKER_CLI) =========="
+LOG_INFO "[container]   IMAGE: $DOCKER_IMAGE"
+LOG_INFO "[container]   HOSTNAME: $HOSTNAME"
+LOG_INFO "[container]   VOLUME_ARGS:"
+for ((i = 0; i < ${#VOLUME_ARGS[@]}; i+=2)); do
+    LOG_INFO "[container]       ${VOLUME_ARGS[i]} ${VOLUME_ARGS[i+1]}"
 done
-
-# ------------------ Print Info ------------------
-if [[ "$VERBOSE" == "1" ]]; then
-    echo "$LOG_INFO ========== Launch Info($DOCKER_CLI) =========="
-    echo "$LOG_INFO  IMAGE: $DOCKER_IMAGE"
-    echo "$LOG_INFO  HOSTNAME: $HOSTNAME"
-    echo "$LOG_INFO  VOLUME_ARGS:"
-    for ((i = 0; i < ${#VOLUME_ARGS[@]}; i+=2)); do
-        echo "$LOG_INFO      ${VOLUME_ARGS[i]} ${VOLUME_ARGS[i+1]}"
+if [[ ${#OPTION_ARGS[@]} -gt 0 ]]; then
+    LOG_INFO "[container]   CONTAINER_OPTIONS:"
+    i=0
+    while [[ $i -lt ${#OPTION_ARGS[@]} ]]; do
+        LOG_INFO "[container]       ${OPTION_ARGS[i]} ${OPTION_ARGS[i+1]}"
+        ((i+=2))
     done
-    if [[ ${#OPTION_ARGS[@]} -gt 0 ]]; then
-        echo "$LOG_INFO  CONTAINER_OPTIONS:"
-        for ((i = 0; i < ${#OPTION_ARGS[@]}; i+=2)); do
-            echo "$LOG_INFO      ${OPTION_ARGS[i]} ${OPTION_ARGS[i+1]}"
-        done
-    fi
-    echo "$LOG_INFO  LAUNCH ARGS:"
-    echo "$LOG_INFO    ${ARGS[*]}"
 fi
+LOG_INFO "[container]   LAUNCH ARGS:"
+LOG_INFO "[container]     ${ARGS[*]}"
 
-# ------------------ Launch Training Container ------------------
-# Handle dry-run mode
+###############################################################################
+# STEP 10: Launch container (or show dry-run)
+###############################################################################
 if [[ "$DRY_RUN_MODE" == "1" ]]; then
-    echo "$LOG_INFO [DRY-RUN] Would execute:"
-    echo "$LOG_INFO   ${DOCKER_CLI} run --rm \\"
-    echo "$LOG_INFO     --ipc=host \\"
-    echo "$LOG_INFO     --network=host \\"
-    echo "$LOG_INFO     --device=/dev/kfd \\"
-    echo "$LOG_INFO     --device=/dev/dri \\"
-    echo "$LOG_INFO     --cap-add=SYS_PTRACE \\"
-    echo "$LOG_INFO     --cap-add=CAP_SYS_ADMIN \\"
-    echo "$LOG_INFO     --security-opt seccomp=unconfined \\"
-    echo "$LOG_INFO     --group-add video \\"
-    echo "$LOG_INFO     --privileged \\"
-    echo "$LOG_INFO     --device=/dev/infiniband \\"
+    LOG_INFO "[container] [DRY-RUN] Would execute:"
+    LOG_INFO "[container]   ${DOCKER_CLI} run --rm \\"
+    LOG_INFO "[container]     --ipc=host \\"
+    LOG_INFO "[container]     --network=host \\"
+    LOG_INFO "[container]     --device=/dev/kfd \\"
+    LOG_INFO "[container]     --device=/dev/dri \\"
+    LOG_INFO "[container]     --cap-add=SYS_PTRACE \\"
+    LOG_INFO "[container]     --cap-add=CAP_SYS_ADMIN \\"
+    LOG_INFO "[container]     --security-opt seccomp=unconfined \\"
+    LOG_INFO "[container]     --group-add video \\"
+    LOG_INFO "[container]     --privileged \\"
+    LOG_INFO "[container]     --device=/dev/infiniband \\"
     for ((i = 0; i < ${#VOLUME_ARGS[@]}; i+=2)); do
-        echo "$LOG_INFO     ${VOLUME_ARGS[i]} ${VOLUME_ARGS[i+1]} \\"
+        LOG_INFO "[container]     ${VOLUME_ARGS[i]} ${VOLUME_ARGS[i+1]} \\"
     done
-    for ((i = 0; i < ${#OPTION_ARGS[@]}; i+=2)); do
-        echo "$LOG_INFO     ${OPTION_ARGS[i]} ${OPTION_ARGS[i+1]} \\"
+    i=0
+    while [[ $i -lt ${#OPTION_ARGS[@]} ]]; do
+        LOG_INFO "[container]     ${OPTION_ARGS[i]} ${OPTION_ARGS[i+1]} \\"
+        ((i+=2))
     done
-    echo "$LOG_INFO     $DOCKER_IMAGE /bin/bash -c \"...\""
-    echo "$LOG_INFO   With args: ${ARGS[*]}"
+    LOG_INFO "[container]     $DOCKER_IMAGE /bin/bash -c \"...\""
+    LOG_INFO "[container]   With args: ${ARGS[*]}"
     exit 0
 fi
 
@@ -329,8 +382,8 @@ fi
     "${VOLUME_ARGS[@]}" \
     "${OPTION_ARGS[@]}" \
     "$DOCKER_IMAGE" /bin/bash -c "\
-        echo '[primus-cli-container][${HOSTNAME}][INFO]: container started at $(date +"%Y.%m.%d %H:%M:%S")' && \
-        [[ -d $PRIMUS_PATH ]] || { echo '$LOG_ERROR Primus not found at $PRIMUS_PATH'; exit 42; } && \
-        cd $PRIMUS_PATH && bash runner/primus-cli-entrypoint.sh \"\$@\" 2>&1 && \
-        echo '[primus-cli-container][${HOSTNAME}][INFO]: container finished at $(date +"%Y.%m.%d %H:%M:%S")'
+        echo '[container][INFO]: container started at $(date +"%Y.%m.%d %H:%M:%S")' && \
+        [[ -d $PRIMUS_PATH ]] || { echo '[container][ERROR]: Primus not found at $PRIMUS_PATH' >&2; exit 42; } && \
+        cd $PRIMUS_PATH && bash runner/primus-cli-direct.sh \"\$@\" 2>&1 && \
+        echo '[container][INFO]: container finished at $(date +"%Y.%m.%d %H:%M:%S")'
     " bash "${ARGS[@]}"

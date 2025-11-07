@@ -81,6 +81,24 @@ assert_not_contains() {
     fi
 }
 
+assert_pass() {
+    local test_name="$1"
+    ((TESTS_RUN++))
+    echo -e "${GREEN}✓${NC} $test_name"
+    ((TESTS_PASSED++)) || true
+}
+
+assert_fail() {
+    local test_name="$1"
+    local reason="${2:-}"
+    ((TESTS_RUN++))
+    echo -e "${RED}✗${NC} $test_name"
+    if [[ -n "$reason" ]]; then
+        echo "  Reason: $reason"
+    fi
+    ((TESTS_FAILED++)) || true
+}
+
 # Print test section header
 print_section() {
     echo ""
@@ -503,6 +521,98 @@ test_sbatch_specific_params() {
 }
 
 # ============================================================================
+# Test 18: Config-based dry_run
+# ============================================================================
+test_config_dry_run() {
+    print_section "Test 18: Config-Based Dry Run"
+
+    # Create test config with dry_run enabled
+    local test_config="/tmp/test-slurm-config-dryrun-$$.yaml"
+    cat > "$test_config" << 'EOF'
+slurm:
+  dry_run: true
+  partition: "test_partition"
+  nodes: 2
+EOF
+
+    local output
+    output=$(bash "$RUNNER_DIR/primus-cli-slurm.sh" \
+        --config "$test_config" \
+        srun -- container -- train 2>&1)
+
+    assert_contains "$output" "DRY-RUN" "Should enable dry-run from config"
+    assert_contains "$output" "srun" "Should show srun command"
+    assert_contains "$output" "-p test_partition" "Should use config partition"
+
+    rm -f "$test_config"
+}
+
+# ============================================================================
+# Test 19: Config-based debug
+# ============================================================================
+test_config_debug() {
+    print_section "Test 19: Config-Based Debug"
+
+    # Create test config with debug enabled
+    local test_config="/tmp/test-slurm-config-debug-$$.yaml"
+    cat > "$test_config" << 'EOF'
+slurm:
+  debug: true
+  dry_run: true
+  partition: "test_partition"
+EOF
+
+    local output
+    output=$(bash "$RUNNER_DIR/primus-cli-slurm.sh" \
+        --config "$test_config" \
+        srun -N 2 -- container -- train 2>&1)
+
+    # Debug mode enables bash trace (set -x), which shows + prefix or DEBUG
+    if echo "$output" | grep -qE "(\+|set -x)"; then
+        assert_pass "Config debug mode enables verbose output"
+    else
+        assert_fail "Config debug mode enables verbose output" "No debug output found"
+    fi
+
+    rm -f "$test_config"
+}
+
+# ============================================================================
+# Test 20: CLI overrides config debug/dry_run
+# ============================================================================
+test_cli_overrides_config_debug_dryrun() {
+    print_section "Test 20: CLI Overrides Config Debug/Dry-Run"
+
+    # Create test config with debug=false and dry_run=false
+    local test_config="/tmp/test-slurm-override-debug-$$.yaml"
+    cat > "$test_config" << 'EOF'
+slurm:
+  debug: false
+  dry_run: false
+  partition: "test_partition"
+EOF
+
+    # CLI should override config (enable both via CLI)
+    local output
+    output=$(bash "$RUNNER_DIR/primus-cli-slurm.sh" \
+        --config "$test_config" \
+        --debug \
+        --dry-run \
+        srun -N 2 -- container -- train 2>&1)
+
+    assert_contains "$output" "DRY-RUN" "CLI --dry-run should override config"
+
+    # Debug mode should be enabled
+    if echo "$output" | grep -qE "(\+|set -x)"; then
+        assert_pass "CLI --debug should override config"
+    else
+        assert_fail "CLI --debug should override config" "No debug output found"
+    fi
+
+    rm -f "$test_config"
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 main() {
@@ -527,6 +637,9 @@ main() {
     test_parameter_order
     test_mixed_short_long_override
     test_sbatch_specific_params
+    test_config_dry_run
+    test_config_debug
+    test_cli_overrides_config_debug_dryrun
 
     # Print summary
     echo ""

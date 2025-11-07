@@ -75,6 +75,24 @@ if [[ "$1" == "--help" || "$1" == "-h" ]]; then
     exit 0
 fi
 
+# Resolve runner directory
+# Use RUNNER_DIR instead of SCRIPT_DIR to avoid conflicts with sourced scripts
+RUNNER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Load common library (required)
+# shellcheck disable=SC1091
+source "$RUNNER_DIR/lib/common.sh" || {
+    echo "[ERROR] Failed to load common library: $RUNNER_DIR/lib/common.sh" >&2
+    exit 1
+}
+
+# Load config library (required)
+# shellcheck disable=SC1091
+source "$RUNNER_DIR/lib/config.sh" || {
+    LOG_ERROR "[entrypoint] Failed to load config library: $RUNNER_DIR/lib/config.sh"
+    exit 1
+}
+
 run_mode="torchrun"
 script_path="primus/cli/main.py"
 primus_env_kv=()
@@ -85,6 +103,13 @@ enable_numa="auto"  # auto / 1 / 0
 CONFIG_FILE=""
 DEBUG_MODE=0
 
+# Track which parameters were explicitly set via CLI
+CLI_RUN_MODE_SET=0
+CLI_SCRIPT_PATH_SET=0
+CLI_NUMA_SET=0
+CLI_LOG_FILE_SET=0
+CLI_DEBUG_SET=0
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --config)
@@ -93,22 +118,27 @@ while [[ $# -gt 0 ]]; do
             ;;
         --debug)
             DEBUG_MODE=1
+            CLI_DEBUG_SET=1
             shift
             ;;
         --single)
             run_mode="single"
+            CLI_RUN_MODE_SET=1
             shift
             ;;
         --numa)
             enable_numa="1"
+            CLI_NUMA_SET=1
             shift
             ;;
         --no-numa)
             enable_numa="0"
+            CLI_NUMA_SET=1
             shift
             ;;
         --script)
             script_path="$2"
+            CLI_SCRIPT_PATH_SET=1
             shift 2
             ;;
         --env)
@@ -117,7 +147,7 @@ while [[ $# -gt 0 ]]; do
                 primus_env_kv+=("${2}")
                 shift 2
             else
-                echo "[primus-entry][ERROR] --env requires KEY=VALUE"
+                LOG_ERROR "[entrypoint] --env requires KEY=VALUE"
                 exit 2
             fi
             ;;
@@ -131,10 +161,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         --log_file)
             log_file="$2"
+            CLI_LOG_FILE_SET=1
             shift 2
             ;;
         --log_file=*)
             log_file="${1#*=}"
+            CLI_LOG_FILE_SET=1
             shift
             ;;
         --)
@@ -161,49 +193,84 @@ fi
 mkdir -p "$(dirname "$log_file")"
 
 
-# Step 1: Source Primus environment setup
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Step 1: Load configuration and apply mode-specific settings
+# Load configuration (specified or defaults)
+load_config_auto "$CONFIG_FILE" "entrypoint" || {
+    LOG_ERROR "[entrypoint] Configuration loading failed"
+    exit 1
+}
 
-# Load config library and mode-specific config
-if [[ -f "$SCRIPT_DIR/lib/config.sh" ]]; then
-    source "$SCRIPT_DIR/lib/config.sh" 2>/dev/null || true
-    # If config file is provided via --config, load direct-mode-specific config
-    if [[ -n "$CONFIG_FILE" ]] && [[ -f "$CONFIG_FILE" ]]; then
-        load_yaml_config "$CONFIG_FILE" 2>/dev/null || true
-        load_mode_config "direct" 2>/dev/null || true
-    fi
+# Extract all direct.* config parameters
+declare -A direct_config
+extract_config_section "direct" direct_config || true
+
+# Apply direct config values if not set via CLI
+[[ "$CLI_DEBUG_SET" == "0" && ("${direct_config[debug]:-false}" == "true" || "${direct_config[debug]:-false}" == "1") ]] && DEBUG_MODE=1
+
+# Enable debug mode if set
+if [[ "$DEBUG_MODE" == "1" ]]; then
+    set -x
 fi
 
+# Apply config values for non-overridden parameters (CLI args take precedence)
+# Priority: CLI args > Config file > Default values
+[[ "$CLI_RUN_MODE_SET" == "0" && "${direct_config[run_mode]}" == "single" ]] && run_mode="single"
+[[ "$CLI_SCRIPT_PATH_SET" == "0" && -n "${direct_config[script_path]}" ]] && script_path="${direct_config[script_path]}"
+[[ "$CLI_NUMA_SET" == "0" && -n "${direct_config[numa]}" ]] && enable_numa="${direct_config[numa]}"
+[[ "$CLI_LOG_FILE_SET" == "0" && -n "${direct_config[log_file]}" ]] && log_file="${direct_config[log_file]}"
+
+# Handle patch scripts array (patches.0, patches.1, ...) if not set via CLI
+if [[ ${#patch_scripts[@]} -eq 0 ]]; then
+    patch_idx=0
+    while [[ -n "${direct_config[patches.$patch_idx]:-}" ]]; do
+        patch_scripts+=("${direct_config[patches.$patch_idx]}")
+        ((patch_idx++))
+    done
+fi
+
+# Handle env array (env.0, env.1, ...) - always append from config (config + CLI)
+env_idx=0
+while [[ -n "${direct_config[env.$env_idx]:-}" ]]; do
+    env_value="${direct_config[env.$env_idx]}"
+    if [[ "$env_value" == *=* ]]; then
+        export "${env_value%%=*}"="${env_value#*=}"
+        primus_env_kv+=("$env_value")
+    fi
+    ((env_idx++))
+done
+
+
+# Source primus-env.sh (it will set its own SCRIPT_DIR, which is fine)
 # shellcheck disable=SC1091
-source "${SCRIPT_DIR}/helpers/envs/primus-env.sh"
+source "${RUNNER_DIR}/helpers/envs/primus-env.sh"
 
 # Source helper modules
 # shellcheck disable=SC1091
-source "${SCRIPT_DIR}/helpers/execute_hooks.sh"
+source "${RUNNER_DIR}/helpers/execute_hooks.sh"
 # shellcheck disable=SC1091
-source "${SCRIPT_DIR}/helpers/execute_patches.sh"
+source "${RUNNER_DIR}/helpers/execute_patches.sh"
 
 # Export environment variables passed via --env
 for kv in "${primus_env_kv[@]}"; do
     export "${kv%%=*}"="${kv#*=}"
-    LOG_INFO_RANK0 "[Primus Entrypoint] Exported env: ${kv%%=*}=${kv#*=}"
+    LOG_INFO_RANK0 "[entrypoint] Exported env: ${kv%%=*}=${kv#*=}"
 done
 
 # Step 2: Auto-run hooks based on $1 $2 (e.g., train pretrain → hooks/train/pretrain/*)
 if [[ $# -ge 2 ]]; then
     if ! execute_hooks "$1" "$2" "${primus_args[@]}"; then
-        LOG_ERROR "[Primus Entrypoint] Hooks execution failed"
+        LOG_ERROR "[entrypoint] Hooks execution failed"
         exit 1
     fi
 else
-    LOG_INFO_RANK0 "[Primus Entrypoint] No hook target detected (missing \$1 \$2)."
+    LOG_INFO_RANK0 "[entrypoint] No hook target detected (missing \$1 \$2)."
 fi
 
 
 # Step 3: Run patch scripts if specified
 if [[ ${#patch_scripts[@]} -gt 0 ]]; then
     if ! execute_patches "${patch_scripts[@]}"; then
-        LOG_ERROR "[Primus Entrypoint] Patch execution failed"
+        LOG_ERROR "[entrypoint] Patch execution failed"
         exit 1
     fi
 fi
@@ -216,11 +283,11 @@ fi
 # Build launch arguments.
 if [[ "$run_mode" == "single" ]]; then
     if [[ "$enable_numa" == "1" ]]; then
-        CMD="bash ${SCRIPT_DIR}/helpers/numa_bind.sh python3 $script_path $*"
-        LOG_INFO "Launching single-process script with NUMA binding:"
+        CMD="bash ${RUNNER_DIR}/helpers/numa_bind.sh python3 $script_path $*"
+        LOG_INFO "[entrypoint] Launching single-process script with NUMA binding:"
     else
         CMD="python3 $script_path $*"
-        LOG_INFO "Launching single-process script:"
+        LOG_INFO "[entrypoint] Launching single-process script:"
     fi
 else
     # NOTE: These variables use environment variables from config file (via primus-cli --config)
@@ -257,17 +324,17 @@ else
 
     NUMA_LAUNCHER_ARGS=()
     if [[ "$enable_numa" == "1" ]]; then
-        NUMA_LAUNCHER_ARGS=(--no-python "${SCRIPT_DIR}/helpers/numa_bind.sh" python3)
-        LOG_INFO_RANK0 "[Primus Entrypoint] NUMA binding: ENABLED (forced by CLI)"
+        NUMA_LAUNCHER_ARGS=(--no-python "${RUNNER_DIR}/helpers/numa_bind.sh" python3)
+        LOG_INFO_RANK0 "[entrypoint] NUMA binding: ENABLED (forced by CLI)"
     elif [[ "$enable_numa" == "0" ]]; then
-        LOG_INFO_RANK0 "[Primus Entrypoint] NUMA binding: DISABLED (forced by CLI)"
+        LOG_INFO_RANK0 "[entrypoint] NUMA binding: DISABLED (forced by CLI)"
     else
-        LOG_INFO_RANK0 "[Primus Entrypoint] NUMA binding: AUTO (default OFF)"
+        LOG_INFO_RANK0 "[entrypoint] NUMA binding: AUTO (default OFF)"
     fi
 
     # Step 4: Build the final command.
     CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS} ${NUMA_LAUNCHER_ARGS[*]}  $script_path $* "
-    LOG_INFO "Launching distributed training with command: $CMD 2>&1 | tee $log_file"
+    LOG_INFO "[entrypoint] Launching distributed training with command: $CMD 2>&1 | tee $log_file"
 fi
 
 eval "$CMD" 2>&1 | tee "$log_file"
@@ -275,11 +342,11 @@ exit_code=${PIPESTATUS[0]}
 
 # Print log based on exit code
 if [[ $exit_code -ge 128 ]]; then
-    LOG_ERROR "torchrun crashed due to signal $((exit_code - 128))"
+    LOG_ERROR "[entrypoint] torchrun crashed due to signal $((exit_code - 128))"
 elif [[ $exit_code -ne 0 ]]; then
-    LOG_ERROR "torchrun exited with code $exit_code"
+    LOG_ERROR "[entrypoint] torchrun exited with code $exit_code"
 else
-    LOG_INFO "torchrun finished successfully (code 0)"
+    LOG_INFO "[entrypoint] torchrun finished successfully (code 0)"
 fi
 
 exit "$exit_code"

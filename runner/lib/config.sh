@@ -17,6 +17,18 @@ if [[ -z "${__PRIMUS_COMMON_SOURCED:-}" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Configuration Variables
+# ---------------------------------------------------------------------------
+# Always ensure associative array exists
+if ! declare -p PRIMUS_CONFIG &>/dev/null; then
+    declare -A PRIMUS_CONFIG
+fi
+
+PRIMUS_ROOT_DIR="${PRIMUS_ROOT_DIR:-$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../../" && pwd)}"
+PRIMUS_RUNNER_DIR="${PRIMUS_RUNNER_DIR:-${PRIMUS_ROOT_DIR}/runner}"
+
+
+# ---------------------------------------------------------------------------
 # Guard: avoid duplicate sourcing
 # ---------------------------------------------------------------------------
 if [[ -n "${__PRIMUS_CONFIG_SOURCED:-}" ]]; then
@@ -24,41 +36,8 @@ if [[ -n "${__PRIMUS_CONFIG_SOURCED:-}" ]]; then
 fi
 export __PRIMUS_CONFIG_SOURCED=1
 
-# ---------------------------------------------------------------------------
-# Configuration Variables
-# ---------------------------------------------------------------------------
-declare -A PRIMUS_CONFIG
-
-# Cache directory for parsed configurations
-PRIMUS_CONFIG_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/primus-cli"
+# Cache configuration
 PRIMUS_CONFIG_CACHE_TTL=3600  # Cache validity in seconds (1 hour)
-
-# Default configuration values
-# Global defaults
-PRIMUS_CONFIG[global.dry_run]="${PRIMUS_DRY_RUN:-0}"
-PRIMUS_CONFIG[global.debug]="${DEBUG_MODE:-0}"
-
-# Slurm defaults
-PRIMUS_CONFIG[slurm.partition]="${SLURM_PARTITION:-}"
-PRIMUS_CONFIG[slurm.nodes]="${SLURM_NODES:-}"
-PRIMUS_CONFIG[slurm.gpus_per_node]="${GPUS_PER_NODE:-8}"
-
-# Container defaults
-PRIMUS_CONFIG[container.image]="${DOCKER_IMAGE:-rocm/primus:v25.9_gfx942}"
-PRIMUS_CONFIG[container.cpus]="${CONTAINER_CPUS:-}"
-PRIMUS_CONFIG[container.memory]="${CONTAINER_MEMORY:-}"
-PRIMUS_CONFIG[container.shm_size]="${CONTAINER_SHM_SIZE:-}"
-PRIMUS_CONFIG[container.gpus]="${CONTAINER_GPUS:-}"
-PRIMUS_CONFIG[container.user]="${CONTAINER_USER:-}"
-
-# Direct mode defaults
-PRIMUS_CONFIG[direct.gpus_per_node]="${GPUS_PER_NODE:-8}"
-PRIMUS_CONFIG[direct.master_port]="${MASTER_PORT:-1234}"
-PRIMUS_CONFIG[direct.nnodes]="${NNODES:-1}"
-PRIMUS_CONFIG[direct.master_addr]="${MASTER_ADDR:-localhost}"
-
-# Path defaults
-PRIMUS_CONFIG[paths.log_path]="${LOG_PATH:-logs}"
 
 # ---------------------------------------------------------------------------
 # Check if cached config is valid
@@ -115,70 +94,17 @@ save_cache() {
 }
 
 # ---------------------------------------------------------------------------
-# Load Shell-format Config File (.primusrc)
-# ---------------------------------------------------------------------------
-load_shell_config() {
-    local config_file="$1"
-
-    if [[ ! -f "$config_file" ]]; then
-        return 1
-    fi
-
-    # Check cache first
-    local cache_file
-    cache_file="$PRIMUS_CONFIG_CACHE_DIR/$(basename "$config_file").cache"
-    if is_cache_valid "$config_file" "$cache_file"; then
-        LOG_DEBUG "Loading cached config: $config_file"
-        load_cache "$cache_file" && return 0
-    fi
-
-    LOG_DEBUG "Loading shell config: $config_file"
-
-    # Source the config file in a subshell to avoid pollution
-    while IFS='=' read -r key value || [[ -n "$key" ]]; do
-        # Skip comments and empty lines
-        [[ "$key" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "${key// /}" ]] && continue
-
-        # Remove leading/trailing whitespace
-        key=$(echo "$key" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        value=$(echo "$value" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
-        # Remove quotes
-        value="${value%\"}"
-        value="${value#\"}"
-        value="${value%\'}"
-        value="${value#\'}"
-
-        # Convert PRIMUS_CONTAINER_IMAGE to container.image
-        if [[ "$key" == PRIMUS_* ]]; then
-            # Extract the config path
-            config_key="${key#PRIMUS_}"
-            config_key="${config_key,,}"  # lowercase
-            config_key="${config_key//_/.}"  # replace _ with .
-
-            PRIMUS_CONFIG[$config_key]="$value"
-            LOG_DEBUG "  $config_key = $value"
-        fi
-    done < "$config_file"
-
-    # Save to cache
-    save_cache "$cache_file"
-
-    return 0
-}
-
-# ---------------------------------------------------------------------------
 # Load YAML Config File (.primus.yaml)
 # ---------------------------------------------------------------------------
 load_yaml_config() {
     local config_file="$1"
 
+    LOG_DEBUG_RANK0 "Loading YAML config: $config_file"
+
     if [[ ! -f "$config_file" ]]; then
+        LOG_ERROR_RANK0 "YAML config file not found: $config_file"
         return 1
     fi
-
-    LOG_DEBUG "Loading YAML config: $config_file"
 
     # Simple YAML parser (handles basic key: value format, arrays, and nested sections)
     local current_section=""
@@ -222,12 +148,12 @@ load_yaml_config() {
                 if [[ -n "$current_subsection" ]]; then
                     local config_key="${current_section}.${current_subsection}.${array_index}"
                     PRIMUS_CONFIG[$config_key]="$value"
-                    LOG_DEBUG "  $config_key = $value"
+                    LOG_DEBUG_RANK0 "  $config_key = $value"
                     ((array_index++))
                 elif [[ -n "$current_array_key" ]]; then
                     local config_key="${current_section}.${current_array_key}.${array_index}"
                     PRIMUS_CONFIG[$config_key]="$value"
-                    LOG_DEBUG "  $config_key = $value"
+                    LOG_DEBUG_RANK0 "  $config_key = $value"
                     ((array_index++))
                 fi
             fi
@@ -248,7 +174,7 @@ load_yaml_config() {
             if [[ -n "$current_section" ]] && [[ -n "$current_subsection" ]]; then
                 local config_key="${current_section}.${current_subsection}.${key}"
                 PRIMUS_CONFIG[$config_key]="$value"
-                LOG_DEBUG "  $config_key = $value"
+                LOG_DEBUG_RANK0 "  $config_key = $value"
             fi
             continue
         fi
@@ -272,42 +198,71 @@ load_yaml_config() {
             if [[ -n "$current_section" ]]; then
                 local config_key="${current_section}.${key}"
                 PRIMUS_CONFIG[$config_key]="$value"
-                LOG_DEBUG "  $config_key = $value"
+                LOG_DEBUG_RANK0 "  $config_key = $value"
             fi
         fi
     done < "$config_file"
+
+    LOG_DEBUG_RANK0 "Loaded YAML config: $config_file"
 
     return 0
 }
 
 # ---------------------------------------------------------------------------
 # Load All Config Files (with priority)
+# Priority: CLI args > System defaults (runner/.primus.yaml) > User config (~/.primus.yaml)
+# Note: Later loads override earlier ones
 # ---------------------------------------------------------------------------
 load_config() {
-    LOG_DEBUG "Loading configuration files..."
+    LOG_INFO_RANK0 "  Loading configuration files..."
 
-    # 1. Load global config (~/.primusrc)
-    local global_config="$HOME/.primusrc"
+    # 1. Load user global config (~/.primus.yaml) first - lowest priority
+    local global_config="$HOME/.primus.yaml"
     if [[ -f "$global_config" ]]; then
-        LOG_INFO_RANK0 "Loading global config: $global_config"
-        load_shell_config "$global_config" || LOG_WARN "Failed to load global config"
+        LOG_INFO_RANK0 "  Loading user config: $global_config"
+        load_yaml_config "$global_config" || LOG_ERROR "Failed to load user config"
     fi
 
-    # 2. Load project config (.primus.yaml in current directory)
-    local project_config=".primus.yaml"
-    if [[ -f "$project_config" ]]; then
-        LOG_INFO_RANK0 "Loading project config: $project_config"
-        load_yaml_config "$project_config" || LOG_WARN "Failed to load project config"
+    # 2. Load system default config (runner/.primus.yaml) last - highest priority (overrides user config)
+    local system_config="${PRIMUS_RUNNER_DIR}/.primus.yaml"
+    if [[ -f "$system_config" ]]; then
+        LOG_INFO_RANK0 "  Loading system default config: $system_config"
+        load_yaml_config "$system_config" ||  {
+            LOG_ERROR "Failed to load system default config"
+            exit 1
+        }
     fi
 
-    # 3. Alternative: .primusrc in current directory
-    local local_config=".primusrc"
-    if [[ -f "$local_config" ]]; then
-        LOG_INFO_RANK0 "Loading local config: $local_config"
-        load_shell_config "$local_config" || LOG_WARN "Failed to load local config"
+    LOG_INFO_RANK0 "  Configuration loading complete"
+}
+
+# ---------------------------------------------------------------------------
+# Load Config Automatically (with CLI override support)
+# Usage: load_config_auto [config_file] [log_prefix]
+#
+# If config_file is provided and non-empty:
+#   - Load the specified config file (must succeed)
+# Otherwise:
+#   - Load default configuration files via load_config()
+# ---------------------------------------------------------------------------
+load_config_auto() {
+    local config_file="${1:-}"
+    local log_prefix="${2:-main}"
+
+    if [[ -n "$config_file" ]]; then
+        # Load specified config file (must succeed)
+        LOG_INFO "[$log_prefix] Loading config: $config_file"
+        load_yaml_config "$config_file" || {
+            LOG_ERROR "[$log_prefix] Failed to load config: $config_file"
+            return 1
+        }
+    else
+        # Load default configuration files (global and project)
+        LOG_INFO "[$log_prefix] Loading default configuration files"
+        load_config
     fi
 
-    LOG_DEBUG "Configuration loading complete"
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -336,80 +291,6 @@ set_config() {
 }
 
 # ---------------------------------------------------------------------------
-# Apply Global Config to Environment Variables
-# ---------------------------------------------------------------------------
-apply_global_config() {
-    LOG_DEBUG "Applying global configuration..."
-
-    # Only export global settings that affect all modes
-    if [[ -n "${PRIMUS_CONFIG[global.debug]:-}" ]]; then
-        export PRIMUS_DEBUG="${PRIMUS_CONFIG[global.debug]}"
-    fi
-
-    if [[ -n "${PRIMUS_CONFIG[global.dry_run]:-}" ]]; then
-        export PRIMUS_DRY_RUN="${PRIMUS_CONFIG[global.dry_run]}"
-    fi
-
-    LOG_DEBUG "Global configuration applied"
-}
-
-# ---------------------------------------------------------------------------
-# Load Mode-Specific Config (called by each mode script)
-# ---------------------------------------------------------------------------
-load_mode_config() {
-    local mode="$1"  # slurm, container, direct
-
-    LOG_DEBUG "Loading config for mode: $mode"
-
-    case "$mode" in
-        slurm)
-            # Export slurm-specific settings
-            [[ -n "${PRIMUS_CONFIG[slurm.partition]:-}" ]] && export SLURM_PARTITION="${PRIMUS_CONFIG[slurm.partition]}"
-            [[ -n "${PRIMUS_CONFIG[slurm.nodes]:-}" ]] && export SLURM_NODES="${PRIMUS_CONFIG[slurm.nodes]}"
-            [[ -n "${PRIMUS_CONFIG[slurm.gpus_per_node]:-}" ]] && export GPUS_PER_NODE="${PRIMUS_CONFIG[slurm.gpus_per_node]}"
-            ;;
-        container)
-            # Export container image
-            [[ -n "${PRIMUS_CONFIG[container.image]:-}" ]] && export DOCKER_IMAGE="${PRIMUS_CONFIG[container.image]}"
-
-            # Export generic container options as CONTAINER_OPTIONS
-            # Format: key1=value1|key2=value2|...
-            for config_key in "${!PRIMUS_CONFIG[@]}"; do
-                if [[ "$config_key" =~ ^container\.options\.(.+)$ ]]; then
-                    local opt_key="${BASH_REMATCH[1]}"
-                    local opt_value="${PRIMUS_CONFIG[$config_key]}"
-                    if [[ -z "${CONTAINER_OPTIONS:-}" ]]; then
-                        export CONTAINER_OPTIONS="${opt_key}=${opt_value}"
-                    else
-                        export CONTAINER_OPTIONS="$CONTAINER_OPTIONS|${opt_key}=${opt_value}"
-                    fi
-                fi
-            done
-
-            # Handle mounts array (stored as container.mounts.0, container.mounts.1, ...)
-            local mount_idx=0
-            while [[ -n "${PRIMUS_CONFIG[container.mounts.$mount_idx]:-}" ]]; do
-                if [[ -z "${CONTAINER_MOUNTS:-}" ]]; then
-                    export CONTAINER_MOUNTS="${PRIMUS_CONFIG[container.mounts.$mount_idx]}"
-                else
-                    export CONTAINER_MOUNTS="$CONTAINER_MOUNTS|${PRIMUS_CONFIG[container.mounts.$mount_idx]}"
-                fi
-                ((mount_idx++))
-            done
-            ;;
-        direct)
-            # Export direct-mode-specific settings
-            [[ -n "${PRIMUS_CONFIG[direct.gpus_per_node]:-}" ]] && export GPUS_PER_NODE="${PRIMUS_CONFIG[direct.gpus_per_node]}"
-            [[ -n "${PRIMUS_CONFIG[direct.master_port]:-}" ]] && export MASTER_PORT="${PRIMUS_CONFIG[direct.master_port]}"
-            [[ -n "${PRIMUS_CONFIG[direct.nnodes]:-}" ]] && export NNODES="${PRIMUS_CONFIG[direct.nnodes]}"
-            [[ -n "${PRIMUS_CONFIG[direct.master_addr]:-}" ]] && export MASTER_ADDR="${PRIMUS_CONFIG[direct.master_addr]}"
-            ;;
-    esac
-
-    LOG_DEBUG "Mode config loaded for: $mode"
-}
-
-# ---------------------------------------------------------------------------
 # Extract Config Section
 # Extract all config keys matching a prefix and remove the prefix
 # Usage: extract_config_section "slurm" result_array
@@ -419,9 +300,6 @@ extract_config_section() {
     # shellcheck disable=SC2034  # result_array is used via nameref
     local -n result_array="$2"  # nameref to associative array
 
-    LOG_DEBUG "Extracting config section: $prefix.*"
-
-    local count=0
     # Extract all config keys matching prefix and remove the prefix
     for key in "${!PRIMUS_CONFIG[@]}"; do
         if [[ "$key" =~ ^${prefix}\. ]]; then
@@ -429,26 +307,17 @@ extract_config_section() {
             local param_name="${key#"${prefix}".}"
             # shellcheck disable=SC2034  # result_array is a nameref, accessed indirectly
             result_array["$param_name"]="${PRIMUS_CONFIG[$key]}"
-            LOG_DEBUG "  $param_name = ${PRIMUS_CONFIG[$key]}"
-            ((count++))
         fi
     done
 
-    LOG_DEBUG "Extracted $count parameters from $prefix section"
     return 0
 }
 
 # ---------------------------------------------------------------------------
 # Export all functions
 # ---------------------------------------------------------------------------
-export -f load_shell_config load_yaml_config load_config
-export -f get_config set_config apply_global_config load_mode_config
+export -f load_yaml_config load_config load_config_auto
+export -f get_config set_config
 export -f extract_config_section
 
-# Backward compatibility: apply_config calls apply_global_config
-apply_config() {
-    apply_global_config
-}
-export -f apply_config
-
-LOG_DEBUG_RANK0 "Primus config library loaded successfully"
+LOG_INFO_RANK0 "Primus config library loaded successfully"

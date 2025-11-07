@@ -106,6 +106,12 @@ test_config_functions_exist() {
         assert_fail "load_config function exists"
     fi
 
+    if type load_config_auto &>/dev/null; then
+        assert_pass "load_config_auto function exists"
+    else
+        assert_fail "load_config_auto function exists"
+    fi
+
     if type get_config &>/dev/null; then
         assert_pass "get_config function exists"
     else
@@ -117,24 +123,19 @@ test_config_functions_exist() {
     else
         assert_fail "set_config function exists"
     fi
+
+    if type extract_config_section &>/dev/null; then
+        assert_pass "extract_config_section function exists"
+    else
+        assert_fail "extract_config_section function exists"
+    fi
 }
 
 # ============================================================================
-# Test 2: Default configuration values
-# ============================================================================
-test_default_config_values() {
-    print_section "Test 2: Default Configuration Values"
-
-    local default_gpus
-    default_gpus=$(get_config "distributed.gpus_per_node" 2>/dev/null)
-    assert_equals "8" "$default_gpus" "Default gpus_per_node is 8"
-}
-
-# ============================================================================
-# Test 3: Set and get config
+# Test 2: Set and get config
 # ============================================================================
 test_set_get_config() {
-    print_section "Test 3: Set and Get Config"
+    print_section "Test 2: Set and Get Config"
 
     set_config "test.key" "test_value" 2>/dev/null
     local value
@@ -151,19 +152,21 @@ test_set_get_config() {
 }
 
 # ============================================================================
-# Test 4: YAML config loading
+# Test 3: YAML config loading
 # ============================================================================
 test_yaml_config_loading() {
-    print_section "Test 4: YAML Config Loading"
+    print_section "Test 3: YAML Config Loading"
 
     local test_yaml="/tmp/test-primus-$$-yaml"
     cat > "$test_yaml" << 'EOF'
-global:
+main:
   debug: true
+  mode: slurm
 
-distributed:
+slurm:
+  partition: gpu
+  nodes: 2
   gpus_per_node: 4
-  master_port: 5678
 
 container:
   image: "rocm/primus:test"
@@ -180,8 +183,8 @@ EOF
 
     # Check if values were loaded
     local loaded_gpus
-    loaded_gpus=$(get_config "distributed.gpus_per_node" 2>/dev/null)
-    assert_equals "4" "$loaded_gpus" "YAML gpus_per_node value loaded"
+    loaded_gpus=$(get_config "slurm.gpus_per_node" 2>/dev/null)
+    assert_equals "4" "$loaded_gpus" "YAML slurm.gpus_per_node value loaded"
 
     local loaded_cpus
     loaded_cpus=$(get_config "container.options.cpus" 2>/dev/null)
@@ -191,46 +194,18 @@ EOF
     loaded_image=$(get_config "container.image" 2>/dev/null)
     assert_equals "rocm/primus:test" "$loaded_image" "YAML container.image loaded"
 
+    local loaded_debug
+    loaded_debug=$(get_config "main.debug" 2>/dev/null)
+    assert_equals "true" "$loaded_debug" "YAML main.debug loaded"
+
     rm -f "$test_yaml"
 }
 
 # ============================================================================
-# Test 5: Shell config loading
-# ============================================================================
-test_shell_config_loading() {
-    print_section "Test 5: Shell Config Loading"
-
-    local test_shell="/tmp/test-primusrc-$$"
-    cat > "$test_shell" << 'EOF'
-# Test shell config
-PRIMUS_DISTRIBUTED_GPUS_PER_NODE="16"
-PRIMUS_CONTAINER_MEMORY="512G"
-PRIMUS_CONTAINER_IMAGE="rocm/custom:latest"
-EOF
-
-    if load_shell_config "$test_shell" 2>/dev/null; then
-        assert_pass "Shell config loads without error"
-    else
-        assert_fail "Shell config loads without error"
-    fi
-
-    # Check if values were loaded
-    local loaded_memory
-    loaded_memory=$(get_config "container.memory" 2>/dev/null)
-    assert_equals "512G" "$loaded_memory" "Shell config memory loaded"
-
-    local loaded_gpus
-    loaded_gpus=$(get_config "distributed.gpus_per_node" 2>/dev/null)
-    assert_equals "16" "$loaded_gpus" "Shell config gpus_per_node loaded"
-
-    rm -f "$test_shell"
-}
-
-# ============================================================================
-# Test 6: YAML array handling
+# Test 4: YAML array handling
 # ============================================================================
 test_yaml_array_handling() {
-    print_section "Test 6: YAML Array Handling"
+    print_section "Test 4: YAML Array Handling"
 
     local test_yaml="/tmp/test-array-$$.yaml"
     cat > "$test_yaml" << 'EOF'
@@ -239,6 +214,14 @@ container:
     - "/data:/data"
     - "/models:/models"
     - "/output:/output"
+
+direct:
+  patches:
+    - "/opt/patch1.sh"
+    - "/opt/patch2.sh"
+  env:
+    - "KEY1=value1"
+    - "KEY2=value2"
 EOF
 
     if load_yaml_config "$test_yaml" 2>/dev/null; then
@@ -250,59 +233,107 @@ EOF
     # Check if array values were loaded
     local mount1
     mount1=$(get_config "container.mounts.0" 2>/dev/null)
-    assert_equals "/data:/data" "$mount1" "First array element loaded"
+    assert_equals "/data:/data" "$mount1" "First mount array element loaded"
 
     local mount2
     mount2=$(get_config "container.mounts.1" 2>/dev/null)
-    assert_equals "/models:/models" "$mount2" "Second array element loaded"
+    assert_equals "/models:/models" "$mount2" "Second mount array element loaded"
+
+    local patch1
+    patch1=$(get_config "direct.patches.0" 2>/dev/null)
+    assert_equals "/opt/patch1.sh" "$patch1" "First patches array element loaded"
+
+    local env1
+    env1=$(get_config "direct.env.0" 2>/dev/null)
+    assert_equals "KEY1=value1" "$env1" "First env array element loaded"
 
     rm -f "$test_yaml"
 }
 
 # ============================================================================
-# Test 7: Config file priority (CLI > Project > Global)
+# Test 5: load_config_auto function
 # ============================================================================
-test_config_priority() {
-    print_section "Test 7: Config File Priority"
+test_load_config_auto() {
+    print_section "Test 5: load_config_auto Function"
 
-    # Create global config
-    local global_config="/tmp/test-global-$$.yaml"
-    cat > "$global_config" << 'EOF'
-distributed:
-  gpus_per_node: 2
-container:
-  image: "rocm/global:v1"
+    # Test 1: Load specified config file
+    local test_yaml="/tmp/test-auto-$$.yaml"
+    cat > "$test_yaml" << 'EOF'
+slurm:
+  partition: test-gpu
+  nodes: 3
 EOF
 
-    # Create project config
-    local project_config="/tmp/test-project-$$.yaml"
-    cat > "$project_config" << 'EOF'
-distributed:
-  gpus_per_node: 4
-EOF
+    if load_config_auto "$test_yaml" "test" 2>/dev/null; then
+        assert_pass "load_config_auto loads specified config file"
+    else
+        assert_fail "load_config_auto loads specified config file"
+    fi
 
-    # Load in priority order (global first, then project)
-    load_yaml_config "$global_config" 2>/dev/null
-    load_yaml_config "$project_config" 2>/dev/null
+    local loaded_partition
+    loaded_partition=$(get_config "slurm.partition" 2>/dev/null)
+    assert_equals "test-gpu" "$loaded_partition" "Specified config value loaded"
 
-    # Project config should override global for gpus_per_node
-    local gpus
-    gpus=$(get_config "distributed.gpus_per_node" 2>/dev/null)
-    assert_equals "4" "$gpus" "Project config overrides global config"
+    # Test 2: Fail on invalid config file
+    if load_config_auto "/nonexistent/config.yaml" "test" 2>/dev/null; then
+        assert_fail "load_config_auto should fail on nonexistent file"
+    else
+        assert_pass "load_config_auto fails on nonexistent file"
+    fi
 
-    # Global config value should remain for image
-    local image
-    image=$(get_config "container.image" 2>/dev/null)
-    assert_equals "rocm/global:v1" "$image" "Global config value preserved"
-
-    rm -f "$global_config" "$project_config"
+    rm -f "$test_yaml"
 }
 
 # ============================================================================
-# Test 8: Nested configuration keys
+# Test 6: Config file priority (System overrides User)
+# ============================================================================
+test_config_priority() {
+    print_section "Test 6: Config File Priority (System > User)"
+
+    # Create user config (loaded first, lower priority)
+    local user_config="/tmp/test-user-$$.yaml"
+    cat > "$user_config" << 'EOF'
+slurm:
+  partition: user-gpu
+  nodes: 2
+container:
+  image: "rocm/user:v1"
+EOF
+
+    # Create system config (loaded second, higher priority)
+    local system_config="/tmp/test-system-$$.yaml"
+    cat > "$system_config" << 'EOF'
+slurm:
+  partition: system-gpu
+EOF
+
+    # Load in order: user first (lowest priority), then system (highest priority)
+    load_yaml_config "$user_config" 2>/dev/null
+    load_yaml_config "$system_config" 2>/dev/null
+
+    # System config should override user for partition
+    local partition
+    partition=$(get_config "slurm.partition" 2>/dev/null)
+    assert_equals "system-gpu" "$partition" "System config overrides user config"
+
+    # User config value should remain for nodes (not overridden)
+    local nodes
+    nodes=$(get_config "slurm.nodes" 2>/dev/null)
+    assert_equals "2" "$nodes" "User config value preserved when not overridden"
+
+    # User config value for image should remain
+    local image
+    image=$(get_config "container.image" 2>/dev/null)
+    assert_equals "rocm/user:v1" "$image" "User config value preserved for different section"
+
+    rm -f "$user_config" "$system_config"
+}
+
+# ============================================================================
+# Test 7: Nested configuration keys
 # ============================================================================
 test_nested_config_keys() {
-    print_section "Test 8: Nested Configuration Keys"
+    print_section "Test 7: Nested Configuration Keys"
 
     local test_yaml="/tmp/test-nested-$$.yaml"
     cat > "$test_yaml" << 'EOF'
@@ -312,6 +343,10 @@ container:
     memory: "192G"
     user: "1000:1000"
     network: "host"
+slurm:
+  resources:
+    gpus: 8
+    mem: "128G"
 EOF
 
     load_yaml_config "$test_yaml" 2>/dev/null
@@ -328,14 +363,18 @@ EOF
     user=$(get_config "container.options.user" 2>/dev/null)
     assert_equals "1000:1000" "$user" "Nested key container.options.user"
 
+    local gpus
+    gpus=$(get_config "slurm.resources.gpus" 2>/dev/null)
+    assert_equals "8" "$gpus" "Nested key slurm.resources.gpus"
+
     rm -f "$test_yaml"
 }
 
 # ============================================================================
-# Test 9: Extract config section
+# Test 8: Extract config section
 # ============================================================================
 test_extract_config_section() {
-    print_section "Test 9: Extract Config Section"
+    print_section "Test 8: Extract Config Section"
 
     # Create test config with multiple sections
     local test_yaml="/tmp/test-extract-$$.yaml"
@@ -345,6 +384,8 @@ slurm:
   nodes: 4
   time: "01:00:00"
   mem: "64G"
+  debug: true
+  dry_run: false
 
 container:
   image: "rocm/primus:latest"
@@ -370,6 +411,8 @@ EOF
     assert_equals "4" "${slurm_params[nodes]:-}" "Slurm nodes extracted"
     assert_equals "01:00:00" "${slurm_params[time]:-}" "Slurm time extracted"
     assert_equals "64G" "${slurm_params[mem]:-}" "Slurm mem extracted"
+    assert_equals "true" "${slurm_params[debug]:-}" "Slurm debug extracted"
+    assert_equals "false" "${slurm_params[dry_run]:-}" "Slurm dry_run extracted"
 
     # Test extracting container section
     declare -A container_params
@@ -396,6 +439,55 @@ EOF
 }
 
 # ============================================================================
+# Test 9: YAML special characters and edge cases
+# ============================================================================
+test_yaml_edge_cases() {
+    print_section "Test 9: YAML Special Characters and Edge Cases"
+
+    local test_yaml="/tmp/test-edge-$$.yaml"
+    cat > "$test_yaml" << 'EOF'
+container:
+  image: "rocm/primus:v1.0-beta"
+  workdir: "/opt/workspace"
+  path: "/data/models/llama-2-7b"
+  hostname: "gpu-node-01"
+
+slurm:
+  account: "project-123"
+  comment: "Test run #42"
+  constraint: "mi300x&nvme"
+EOF
+
+    load_yaml_config "$test_yaml" 2>/dev/null
+
+    local image
+    image=$(get_config "container.image" 2>/dev/null)
+    assert_equals "rocm/primus:v1.0-beta" "$image" "Image with version and dash"
+
+    local workdir
+    workdir=$(get_config "container.workdir" 2>/dev/null)
+    assert_equals "/opt/workspace" "$workdir" "Path with slashes"
+
+    local path
+    path=$(get_config "container.path" 2>/dev/null)
+    assert_equals "/data/models/llama-2-7b" "$path" "Path with dashes and numbers"
+
+    local hostname
+    hostname=$(get_config "container.hostname" 2>/dev/null)
+    assert_equals "gpu-node-01" "$hostname" "Hostname with dashes"
+
+    local account
+    account=$(get_config "slurm.account" 2>/dev/null)
+    assert_equals "project-123" "$account" "Account with dash and number"
+
+    local constraint
+    constraint=$(get_config "slurm.constraint" 2>/dev/null)
+    assert_equals "mi300x&nvme" "$constraint" "Constraint with ampersand"
+
+    rm -f "$test_yaml"
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 main() {
@@ -404,14 +496,14 @@ main() {
     echo "╚══════════════════════════════════════════════════════════════╝"
 
     test_config_functions_exist
-    test_default_config_values
     test_set_get_config
     test_yaml_config_loading
-    test_shell_config_loading
     test_yaml_array_handling
+    test_load_config_auto
     test_config_priority
     test_nested_config_keys
     test_extract_config_section
+    test_yaml_edge_cases
 
     # Print summary
     echo ""

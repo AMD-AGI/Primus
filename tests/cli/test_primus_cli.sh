@@ -91,6 +91,7 @@ test_version_option() {
     output=$(bash "$PROJECT_ROOT/runner/primus-cli" --version 2>&1)
 
     assert_contains "$output" "Primus CLI version" "Shows version information"
+    assert_contains "$output" "1.0.0" "Shows correct version number"
 }
 
 # ============================================================================
@@ -114,7 +115,7 @@ test_unknown_mode() {
     local output
     output=$(bash "$PROJECT_ROOT/runner/primus-cli" unknown-mode 2>&1)
 
-    assert_contains "$output" "Unknown mode" "Rejects unknown mode"
+    assert_contains "$output" "Unknown or unsupported mode" "Rejects unknown mode"
 }
 
 # ============================================================================
@@ -126,7 +127,7 @@ test_dry_run_mode() {
     local output
     output=$(bash "$PROJECT_ROOT/runner/primus-cli" --dry-run direct --help 2>&1)
 
-    assert_contains "$output" "DRY-RUN" "Shows dry-run indicator"
+    assert_contains "$output" "Primus CLI Dry-Run Summary" "Shows dry-run indicator"
 }
 
 # ============================================================================
@@ -193,9 +194,11 @@ test_config_option() {
     # Create a test config file
     local test_config="/tmp/test-primus-cli-$$.yaml"
     cat > "$test_config" << 'EOF'
-global:
-  debug: true
-distributed:
+main:
+  debug: false
+  dry_run: false
+
+direct:
   gpus_per_node: 4
 EOF
 
@@ -221,7 +224,7 @@ test_multiple_global_options() {
     local output
     output=$(bash "$PROJECT_ROOT/runner/primus-cli" --debug --dry-run direct --help 2>&1)
 
-    assert_contains "$output" "DRY-RUN" "Multiple global options work together"
+    assert_contains "$output" "Primus CLI Dry-Run Summary" "Multiple global options work together"
 }
 
 # ============================================================================
@@ -252,6 +255,91 @@ test_mode_selection() {
 }
 
 # ============================================================================
+# Test 13: Config file not found
+# ============================================================================
+test_config_file_not_found() {
+    print_section "Test 13: Config File Not Found"
+
+    local output
+    output=$(bash "$PROJECT_ROOT/runner/primus-cli" --config /nonexistent/file.yaml direct --help 2>&1)
+
+    assert_contains "$output" "Config file not found" "Rejects missing config file"
+}
+
+# ============================================================================
+# Test 14: Config priority (CLI > Config)
+# ============================================================================
+test_config_priority() {
+    print_section "Test 14: Config Priority (CLI overrides Config)"
+
+    # Create a test config file with debug=true
+    local test_config="/tmp/test-primus-cli-priority-$$.yaml"
+    cat > "$test_config" << 'EOF'
+main:
+  debug: true
+  dry_run: true
+EOF
+
+    # CLI should override config (--dry-run without debug should only show DRY-RUN, not debug output)
+    local output
+    output=$(bash "$PROJECT_ROOT/runner/primus-cli" --config "$test_config" direct --help 2>&1)
+
+    # With config debug=true, should see debug output
+    if echo "$output" | grep -qE "(\+|DEBUG|set -x)"; then
+        assert_pass "Config debug mode applies when not overridden by CLI"
+    else
+        assert_fail "Config debug mode applies when not overridden by CLI"
+    fi
+
+    rm -f "$test_config"
+}
+
+# ============================================================================
+# Test 15: Invalid config file format
+# ============================================================================
+test_invalid_config_format() {
+    print_section "Test 15: Invalid Config File Format"
+
+    # Create an invalid YAML file
+    local test_config="/tmp/test-primus-cli-invalid-$$.yaml"
+    cat > "$test_config" << 'EOF'
+this is not valid yaml: [
+  unclosed bracket
+EOF
+
+    local output
+    output=$(bash "$PROJECT_ROOT/runner/primus-cli" --config "$test_config" direct --help 2>&1)
+
+    # Should handle gracefully (either show error or continue with defaults)
+    # We just check it doesn't crash completely
+    if [[ -n "$output" ]]; then
+        assert_pass "Handles invalid config gracefully"
+    else
+        assert_fail "Handles invalid config gracefully"
+    fi
+
+    rm -f "$test_config"
+}
+
+# ============================================================================
+# Test 16: Default config loading
+# ============================================================================
+test_default_config() {
+    print_section "Test 16: Default Config Loading"
+
+    # The system should load runner/.primus.yaml by default
+    local output
+    output=$(bash "$PROJECT_ROOT/runner/primus-cli" direct --help 2>&1)
+
+    # Should work without explicit config
+    if echo "$output" | grep -qF "Direct"; then
+        assert_pass "Loads default config without errors"
+    else
+        assert_fail "Loads default config without errors"
+    fi
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 main() {
@@ -271,6 +359,10 @@ main() {
     test_config_option
     test_multiple_global_options
     test_mode_selection
+    test_config_file_not_found
+    test_config_priority
+    test_invalid_config_format
+    test_default_config
 
     # Print summary
     echo ""

@@ -7,9 +7,6 @@
 
 set -euo pipefail
 
-# Resolve script directory
-SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
-
 print_usage() {
 cat <<'EOF'
 Primus Slurm Launcher
@@ -62,7 +59,24 @@ if [[ $# -eq 0 || "$1" == "-h" || "$1" == "--help" ]]; then
     exit 0
 fi
 
-# 0. Parse --config, --debug, --dry-run first if present
+# Resolve runner directory
+RUNNER_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+
+# Load common library (required)
+# shellcheck disable=SC1091
+source "$RUNNER_DIR/lib/common.sh" || {
+    echo "[ERROR] Failed to load common library: $RUNNER_DIR/lib/common.sh" >&2
+    exit 1
+}
+
+# Load config library (required)
+# shellcheck disable=SC1091
+source "$RUNNER_DIR/lib/config.sh" || {
+    LOG_ERROR "[slurm] Failed to load config library: $RUNNER_DIR/lib/config.sh"
+    exit 1
+}
+
+# 0. Parse --config, --debug, --dry-run first if present (before first --)
 CONFIG_FILE=""
 DEBUG_MODE=0
 DRY_RUN_MODE=0
@@ -70,6 +84,11 @@ CONFIG_ARGS=()
 PRE_PARSE_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --)
+            # Stop parsing, preserve -- and all remaining args
+            PRE_PARSE_ARGS+=("$@")
+            break
+            ;;
         --config)
             CONFIG_FILE="$2"
             CONFIG_ARGS+=(--config "$CONFIG_FILE")
@@ -93,31 +112,29 @@ done
 # Restore arguments
 set -- "${PRE_PARSE_ARGS[@]}"
 
-# Load common library first (required by config.sh)
-if [[ -f "$SCRIPT_DIR/lib/common.sh" ]]; then
-    # shellcheck disable=SC1091
-    source "$SCRIPT_DIR/lib/common.sh" 2>/dev/null || true
-fi
-
-# Load config library
-if [[ -f "$SCRIPT_DIR/lib/config.sh" ]]; then
-    # shellcheck disable=SC1091
-    source "$SCRIPT_DIR/lib/config.sh" 2>/dev/null || true
-fi
-
 # Step 1: Load config and extract slurm.* parameters
-declare -A slurm_args
+declare -A slurm_config
 
-if [[ -n "$CONFIG_FILE" ]] && [[ -f "$CONFIG_FILE" ]]; then
-    # Load yaml config file
-    load_yaml_config "$CONFIG_FILE" 2>/dev/null || true
-else
-    # No config file provided, use defaults from load_config
-    load_config 2>/dev/null || true
-fi
+# Load configuration (specified or defaults)
+load_config_auto "$CONFIG_FILE" "slurm" || {
+    LOG_ERROR "[slurm] Configuration loading failed"
+    exit 1
+}
 
 # Extract all slurm.* config parameters using the generic function
-extract_config_section "slurm" slurm_args 2>/dev/null || true
+extract_config_section "slurm" slurm_config || {
+    LOG_ERROR "[slurm] Failed to extract slurm config section"
+    exit 1
+}
+
+# Apply slurm config values if not set via CLI
+[[ "$DEBUG_MODE" == "0" && ("${slurm_config[debug]:-false}" == "true" || "${slurm_config[debug]:-false}" == "1") ]] && DEBUG_MODE=1
+[[ "$DRY_RUN_MODE" == "0" && ("${slurm_config[dry_run]:-false}" == "true" || "${slurm_config[dry_run]:-false}" == "1") ]] && DRY_RUN_MODE=1
+
+# Enable debug mode if set
+if [[ "$DEBUG_MODE" == "1" ]]; then
+    set -x
+fi
 
 # Step 2: Detect srun/sbatch mode
 LAUNCH_CMD="srun"   # Default launcher
@@ -189,13 +206,18 @@ done
 SLURM_FLAGS=()
 
 # Add config parameters that were not overridden by CLI
-for param_name in "${!slurm_args[@]}"; do
+for param_name in "${!slurm_config[@]}"; do
+    # Skip internal primus-cli parameters (not slurm flags)
+    if [[ "$param_name" == "debug" || "$param_name" == "dry_run" || "$param_name" == "gpus_per_node" ]]; then
+        continue
+    fi
+
     # Skip if this parameter was provided via CLI
     if [[ -n "${CLI_OVERRIDES[$param_name]:-}" ]]; then
         continue
     fi
 
-    param_value="${slurm_args[$param_name]}"
+    param_value="${slurm_config[$param_name]}"
 
     # Use short form if available, otherwise long form
     if [[ ${#param_name} -eq 1 ]]; then
@@ -232,13 +254,13 @@ fi
 
 # 3. Check for primus-run args
 if [[ $# -eq 0 ]]; then
-    echo "[primus-cli-slurm][ERROR] Missing Primus entry (container|direct|preflight)" >&2
+    LOG_ERROR "[slurm] Missing Primus entry (container|direct|preflight)"
     print_usage >&2
     exit 2
 fi
 
 # 4. Logging and launch
-ENTRY="$SCRIPT_DIR/primus-cli-slurm-entry.sh"
+ENTRY="$RUNNER_DIR/primus-cli-slurm-entry.sh"
 
 # Prepend global options to entry args
 ENTRY_ARGS=()
@@ -248,14 +270,18 @@ fi
 if [[ "$DEBUG_MODE" == "1" ]]; then
     ENTRY_ARGS+=(--debug)
 fi
+if [[ "$DRY_RUN_MODE" == "1" ]]; then
+    ENTRY_ARGS+=(--dry-run)
+fi
 ENTRY_ARGS+=("$@")
 
-echo "[primus-cli-slurm] Executing: $LAUNCH_CMD ${SLURM_FLAGS[*]:-} $ENTRY ${ENTRY_ARGS[*]:-}"
+# Build full command
+CMD=("$LAUNCH_CMD" "${SLURM_FLAGS[@]}" "$ENTRY" -- "${ENTRY_ARGS[@]}")
 
-# Handle dry-run mode
+# Log and execute (or dry-run)
 if [[ "$DRY_RUN_MODE" == "1" ]]; then
-    echo "[DRY-RUN] Would execute: $LAUNCH_CMD ${SLURM_FLAGS[*]:-} $ENTRY ${ENTRY_ARGS[*]:-}"
-    exit 0
+    LOG_INFO "[slurm] [DRY-RUN] Would execute: ${CMD[*]}"
+else
+    LOG_INFO "[slurm] Executing: ${CMD[*]}"
+    exec "${CMD[@]}"
 fi
-
-exec "$LAUNCH_CMD" "${SLURM_FLAGS[@]}" "$ENTRY" "${ENTRY_ARGS[@]}"
