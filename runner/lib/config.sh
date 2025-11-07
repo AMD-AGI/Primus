@@ -312,12 +312,29 @@ extract_config_section() {
 
     return 0
 }
+export -f extract_config_section
+
+# ---------------------------------------------------------------------------
+# Pretty-print Config Section (for debugging)
+# Usage: print_config_section "section_name" associative_array
+# ---------------------------------------------------------------------------
+print_config_section() {
+    local section="$1"
+    # shellcheck disable=SC2034
+    local -n section_array="$2"  # name reference to associative array
+
+    print_section "[$section] Config Section"  # uses print_section from common.sh
+
+    for key in "${!section_array[@]}"; do
+        printf "  %s = %s\n" "$key" "${section_array[$key]}"
+    done
+}
+export -f print_config_section
 
 # ---------------------------------------------------------------------------
 # Export all functions
 # ---------------------------------------------------------------------------
 export -f load_yaml_config load_config load_config_auto
 export -f get_config set_config
-export -f extract_config_section
 
 LOG_INFO_RANK0 "Primus config library loaded successfully"

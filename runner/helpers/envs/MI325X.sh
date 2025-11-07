@@ -6,62 +6,28 @@
 ###############################################################################
 #
 # AMD MI325X GPU-specific optimizations
+# Note: Common settings are in base_env.sh. This file only contains MI325X-specific overrides.
 #
 
 LOG_INFO_RANK0 "Loading MI325X-specific optimizations..."
 
-# # ----------------- AMD MI325X GPU optimizations -----------------
-# # Enable system DMA engine (SDMA) on AMD GPUs for better IO throughput
-# export HSA_ENABLE_SDMA=1
+# ----------------- MI325X-specific GPU settings -----------------
+# MI325X has 256GB HBM3e (enhanced), disable XNACK for performance
+export HSA_XNACK=${HSA_XNACK:-0}
 
-# # Prevent scratch memory from being reclaimed to stabilize large memory usage patterns
-# # NOTE: Must disable scratch reclaim to avoid MoE training crash on AMD GPUs
-# export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-0}
+# Optimize memory allocation for larger models compared to MI300X
+export GPU_MAX_HEAP_SIZE=${GPU_MAX_HEAP_SIZE:-100}
 
-# # Disable MSCCL (RCCL multi-connection feature) for better stability
-# export RCCL_MSCCL_ENABLE=0
-# export RCCL_MSCCLPP_ENABLE=0
-# export RCCL_MSCCLPP_FORCE_ENABLE=0
-# export RCCL_MSCCLPP_THRESHOLD=$((1*1024*1024*1024)) # default 1 GB
+# MI325X-specific memory optimizations
+export HSA_KERNARG_POOL_SIZE=${HSA_KERNARG_POOL_SIZE:-12582912}
 
-# # MSCCLPP settings
-# export MSCCLPP_DISABLE_CHANNEL_CACHE=FALSE
+# ----------------- MI325X RCCL optimizations -----------------
+# MI325X may benefit from different RCCL settings
+# Override base_env.sh settings if needed for MI325X
 
-# # PyTorch tensor register allocator hook
-# export TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=0
+# Uncomment to enable MSCCLPP for MI325X if tested and verified
+# export RCCL_MSCCLPP_ENABLE=1
+# export RCCL_MSCCLPP_FORCE_ENABLE=1
 
-# # ----------------- Performance tuning for MI325X -----------------
-# # Limit GPU hardware queues to 2 for performance stability
-# export GPU_MAX_HW_QUEUES=2
-
-# # Limit max CUDA device connections to reduce PCIe traffic
-# export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
-
-# # Prioritize NCCL communication for PyTorch for higher throughput
-# export TORCH_NCCL_HIGH_PRIORITY=1
-
-# # ----------------- Transformer Engine optimizations for MI325X -----------------
-# # Optimize nvte fp8 cast transpose
-# export NVTE_USE_CAST_TRANSPOSE_TRITON=1
-# export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=0
-
-# # Note: Disable v3 due to accuracy issues on MI325X
-# export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
-
-# # NVTE debug envs
-# export NVTE_DEBUG=0 # 0, 1
-# export NVTE_DEBUG_LEVEL=0 # 0, 1, 2
-# export NVTE_FUSED_ATTN_LOG_CONFIG=0 # 0, 1
-# export PATCH_TE_FLASH_ATTN=${PATCH_TE_FLASH_ATTN:-0}
-
-# # MI325X has 192GB HBM3, optimize for large models
-# export HSA_XNACK=0  # Disable XNACK for performance
-# export GPU_MAX_HEAP_SIZE=100  # Percentage of GPU memory
-
-# log_exported_vars "MI325X-specific optimizations" \
-#     HSA_ENABLE_SDMA HSA_NO_SCRATCH_RECLAIM HSA_XNACK GPU_MAX_HEAP_SIZE \
-#     RCCL_MSCCL_ENABLE RCCL_MSCCLPP_ENABLE RCCL_MSCCLPP_FORCE_ENABLE RCCL_MSCCLPP_THRESHOLD \
-#     MSCCLPP_DISABLE_CHANNEL_CACHE TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK \
-#     GPU_MAX_HW_QUEUES CUDA_DEVICE_MAX_CONNECTIONS TORCH_NCCL_HIGH_PRIORITY \
-#     NVTE_USE_CAST_TRANSPOSE_TRITON NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE \
-#     NVTE_CK_USES_BWD_V3 NVTE_DEBUG NVTE_DEBUG_LEVEL NVTE_FUSED_ATTN_LOG_CONFIG PATCH_TE_FLASH_ATTN
+log_exported_vars "MI325X-specific optimizations" \
+    HSA_XNACK GPU_MAX_HEAP_SIZE HSA_KERNARG_POOL_SIZE

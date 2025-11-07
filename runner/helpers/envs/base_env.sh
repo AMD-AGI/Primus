@@ -13,38 +13,45 @@ if [[ -n "${__PRIMUS_ENV_SOURCED:-}" ]]; then
 fi
 export __PRIMUS_ENV_SOURCED=1
 
-# Hostname is useful for logs in any script that sources this file
-HOSTNAME="$(hostname)"
-export HOSTNAME
+# Load common library for consistent logging
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/../../lib/common.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "$SCRIPT_DIR/../../lib/common.sh"
+else
+    # Fallback logging functions if common.sh not available
+    HOSTNAME="$(hostname)"
+    export HOSTNAME
 
-LOG_INFO() {
-    if [ "$*" = "" ]; then
-        echo ""
-    else
-        echo "[NODE-$NODE_RANK($HOSTNAME)] $*"
-    fi
-}
-
-LOG_INFO_RANK0() {
-    if [ "$NODE_RANK" -eq 0 ]; then
+    LOG_INFO() {
         if [ "$*" = "" ]; then
             echo ""
         else
-            echo "[NODE-$NODE_RANK($HOSTNAME)] $*"
+            echo "[NODE-${NODE_RANK:-0}($HOSTNAME)] $*"
         fi
-    fi
-}
+    }
 
-LOG_ERROR() {
-    echo "[NODE-$NODE_RANK($HOSTNAME)] [ERROR] $*";
-}
+    LOG_INFO_RANK0() {
+        if [ "${NODE_RANK:-0}" -eq 0 ]; then
+            if [ "$*" = "" ]; then
+                echo ""
+            else
+                echo "[NODE-${NODE_RANK:-0}($HOSTNAME)] $*"
+            fi
+        fi
+    }
 
-log_exported_vars() {
-    LOG_INFO_RANK0 "========== $1 =========="
-    for var in "${@:2}"; do
-        LOG_INFO_RANK0 "    $var=${!var-}"
-    done
-}
+    LOG_ERROR() {
+        echo "[NODE-${NODE_RANK:-0}($HOSTNAME)] [ERROR] $*" >&2
+    }
+
+    log_exported_vars() {
+        LOG_INFO_RANK0 "========== $1 =========="
+        for var in "${@:2}"; do
+            LOG_INFO_RANK0 "    $var=${!var-}"
+        done
+    }
+fi
 
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 export MASTER_PORT=${MASTER_PORT:-1234}
@@ -72,17 +79,17 @@ export NCCL_IB_GID_INDEX=3
 # Disable cross NIC communication for NCCL
 export NCCL_CROSS_NIC=0
 
-SCRIPT_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
-
 # Dynamically get InfiniBand Host Channel Adapter index for NCCL if not set
 if [ -z "${NCCL_IB_HCA}" ]; then
-    NCCL_IB_HCA=$(bash "$SCRIPT_DIR/helpers/get_nccl_ib_hca.sh")
+    HELPER_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    NCCL_IB_HCA=$(bash "$HELPER_SCRIPT_DIR/get_nccl_ib_hca.sh" 2>/dev/null || echo "")
 fi
 export NCCL_IB_HCA
 
 # Dynamically get network interface IP address for socket communication if not set
 if [ -z "${IP_INTERFACE}" ]; then
-    IP_INTERFACE=$(bash "$SCRIPT_DIR/helpers/get_ip_interface.sh")
+    HELPER_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    IP_INTERFACE=$(bash "$HELPER_SCRIPT_DIR/get_ip_interface.sh" 2>/dev/null || hostname -I | awk '{print $1}')
 fi
 export IP_INTERFACE
 # Set network interfaces for NCCL and Gloo, fallback to detected IP_INTERFACE

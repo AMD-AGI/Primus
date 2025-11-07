@@ -2,14 +2,16 @@
 # This file demonstrates the new mode-specific configuration structure
 # Each section is loaded by its respective mode script
 
-# Global settings (apply to all modes)
+# Main settings (apply to all modes)
 # Priority: CLI arguments > Config file > Default values
-global:
+main:
   debug: false       # Enable debug mode (equivalent to --debug)
   dry_run: false     # Enable dry-run mode (equivalent to --dry-run)
 
 # Slurm-specific settings
 slurm:
+  debug: false
+  dry_run: false
   partition: "AIG_Model"
   nodes: 4
   gpus_per_node: 8
@@ -17,9 +19,12 @@ slurm:
 
 # Container-specific settings
 container:
+  debug: false
+  dry_run: false
+
   # Docker/Podman image
   image: "rocm/primus:v25.9_gfx942"
-  
+
   # Docker/Podman runtime options (generic key-value pairs)
   # These will be passed as --key value to docker/podman run
   options:
@@ -29,7 +34,7 @@ container:
     name: "primus-training"
     user: "1000:1000"
     # Any docker run option can be added here
-  
+
   # Mount points
   mounts:
     - "/data:/data"
@@ -38,10 +43,29 @@ container:
 
 # Direct mode settings
 direct:
+  debug: false
+
+  # Distributed training parameters
   gpus_per_node: 8
   master_port: 1234
   nnodes: 1
   master_addr: "localhost"
+
+  # Direct mode specific options (can be overridden by CLI)
+  run_mode: "torchrun"           # "torchrun" or "single"
+  script_path: "primus/cli/main.py"  # Python script to execute
+  numa: "auto"                   # "auto", "1" (enabled), or "0" (disabled)
+  log_file: "logs/training.log"  # Log file path
+
+  # Patch scripts (optional, array of shell scripts to execute before training)
+  patches:
+    - "patches/patch1.sh"
+    - "patches/patch2.sh"
+
+  # Environment variables (optional, array of KEY=VALUE pairs)
+  env:
+    - "CUSTOM_VAR1=value1"
+    - "CUSTOM_VAR2=value2"
 
 # Path settings (shared)
 paths:
@@ -52,6 +76,6 @@ paths:
 
 # Architecture Notes:
 # - Each mode (slurm/container/direct) loads only its own section
-# - Global settings apply to all modes
+# - Main settings apply to all modes
 # - Configuration file path is passed via PRIMUS_CONFIG_FILE environment variable
 # - Each mode script calls load_mode_config() to load its specific settings
