@@ -29,7 +29,7 @@ fi
 #   $@: Additional arguments to pass to hooks
 execute_hooks() {
     if [[ $# -lt 2 ]]; then
-        LOG_INFO_RANK0 "[Execute Hooks] No hook target specified (need group and name)"
+        LOG_INFO_RANK0 "[Hooks] No hook target specified (need group and name)"
         return 0
     fi
 
@@ -45,41 +45,46 @@ execute_hooks() {
     local hook_dir="${script_dir}/hooks/${hook_group}/${hook_name}"
 
     if [[ ! -d "$hook_dir" ]]; then
-        LOG_INFO_RANK0 "[Execute Hooks] No hook directory for [$hook_group/$hook_name]"
+        LOG_INFO_RANK0 "[Hooks] No hook directory for [$hook_group/$hook_name]"
         return 0
     fi
 
-    LOG_INFO_RANK0 "[Execute Hooks] Detected hooks directory: $hook_dir"
+    LOG_INFO_RANK0 "[Hooks] Detected hooks directory: $hook_dir"
 
     # Find all hook files (*.sh and *.py)
     local hook_files=()
     mapfile -t hook_files < <(find "$hook_dir" -maxdepth 1 -type f \( -name "*.sh" -o -name "*.py" \) | sort)
 
     if [[ ${#hook_files[@]} -eq 0 ]]; then
-        LOG_INFO_RANK0 "[Execute Hooks] No hook files found in $hook_dir"
+        LOG_INFO_RANK0 "[Hooks] No hook files found in $hook_dir"
         return 0
     fi
 
     # Execute each hook file
     for hook_file in "${hook_files[@]}"; do
-        LOG_INFO_RANK0 "[Execute Hooks] Executing hook: $hook_file ${hook_args[*]}"
+        LOG_INFO_RANK0 "[Hooks] Executing hook: $hook_file ${hook_args[*]}"
+
+        start_time=$(date +%s)
 
         if [[ "$hook_file" == *.sh ]]; then
             if ! bash "$hook_file" "${hook_args[@]}"; then
-                LOG_ERROR "[Execute Hooks] Hook failed: $hook_file (exit code: $?)"
+                LOG_ERROR "[Hooks] Hook failed: $hook_file (exit code: $?)"
                 return 1
             fi
         elif [[ "$hook_file" == *.py ]]; then
             if ! python3 "$hook_file" "${hook_args[@]}"; then
-                LOG_ERROR "[Execute Hooks] Hook failed: $hook_file (exit code: $?)"
+                LOG_ERROR "[Hooks] Hook failed: $hook_file (exit code: $?)"
                 return 1
             fi
         else
-            LOG_WARN "[Execute Hooks] Skipping unknown hook type: $hook_file"
+            LOG_WARN "[Hooks] Skipping unknown hook type: $hook_file"
         fi
+
+        duration=$(( $(date +%s) - start_time ))
+        LOG_INFO_RANK0 "[Hooks] Hook $hook_file finished in ${duration}s"
     done
 
-    LOG_INFO_RANK0 "[Execute Hooks] All hooks executed successfully"
+    LOG_INFO_RANK0 "[Hooks] All hooks executed successfully"
     return 0
 }
 
