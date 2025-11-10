@@ -23,17 +23,9 @@ container:
   dry_run: false
   image: "rocm/primus:v25.9_gfx942"
 
-  # Mount points (host:container or host path)
-  # Uncomment and customize as needed
-  mounts: []
-  # mounts:
-  #   - "/data:/data"
-  #   - "/output:/output"
-  #   - "/workspace/Primus"
-  #   - "/model_weights:/model_weights:ro"
-
-  # Docker/Podman runtime options (passed as --key value)
+  # Docker/Podman runtime options
   options:
+    # Single-value options (passed as --key value)
     ipc: "host"
     network: "host"
     cpus: "32"
@@ -43,16 +35,25 @@ container:
     security-opt: "seccomp=unconfined"
     group-add: "video"
 
-  # Options that can have multiple values (use array format with index)
-  # These will be passed as multiple --device or --cap-add flags
-  devices:
-    - "/dev/kfd"
-    - "/dev/dri"
-    - "/dev/infiniband"
+    # Mount points (host:container or host path)
+    # Each mount will be passed as --volume
+    mounts: []
+    # mounts:
+    #   - "/data:/data"
+    #   - "/output:/output"
+    #   - "/workspace/Primus"
+    #   - "/model_weights:/model_weights:ro"
 
-  capabilities:
-    - "SYS_PTRACE"
-    - "CAP_SYS_ADMIN"
+    # Device access (each passed as --device)
+    devices:
+      - "/dev/kfd"
+      - "/dev/dri"
+      - "/dev/infiniband"
+
+    # Capabilities (each passed as --cap-add)
+    capabilities:
+      - "SYS_PTRACE"
+      - "CAP_SYS_ADMIN"
 
 # Direct mode settings
 direct:
