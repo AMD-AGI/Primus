@@ -142,6 +142,66 @@ LOG_SUCCESS_RANK0() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Simple Print Functions (without timestamps and prefixes)
+# ---------------------------------------------------------------------------
+
+# Simple print functions - no timestamp, no node info, no level prefix
+# Useful for formatted output like tables, config sections, etc.
+
+PRINT_DEBUG() {
+    if [[ "$PRIMUS_LOG_LEVEL" == "DEBUG" ]]; then
+        echo "$*"
+    fi
+}
+
+PRINT_INFO() {
+    case "$PRIMUS_LOG_LEVEL" in
+        DEBUG|INFO)
+            echo "$*"
+            ;;
+    esac
+}
+
+PRINT_WARN() {
+    case "$PRIMUS_LOG_LEVEL" in
+        DEBUG|INFO|WARN)
+            echo "$*" >&2
+            ;;
+    esac
+}
+
+PRINT_ERROR() {
+    echo "$*" >&2
+}
+
+PRINT_SUCCESS() {
+    case "$PRIMUS_LOG_LEVEL" in
+        DEBUG|INFO)
+            echo "$*"
+            ;;
+    esac
+}
+
+# Simple print only on rank 0
+PRINT_INFO_RANK0() {
+    if [[ "${NODE_RANK:-0}" == "0" ]]; then
+        PRINT_INFO "$@"
+    fi
+}
+
+PRINT_DEBUG_RANK0() {
+    if [[ "${NODE_RANK:-0}" == "0" ]]; then
+        PRINT_DEBUG "$@"
+    fi
+}
+
+PRINT_SUCCESS_RANK0() {
+    if [[ "${NODE_RANK:-0}" == "0" ]]; then
+        PRINT_SUCCESS "$@"
+    fi
+}
+
 # Log exported environment variables in a formatted way
 log_exported_vars() {
     local title="$1"
@@ -155,10 +215,10 @@ log_exported_vars() {
 # Print a section header (for formatted output)
 print_section() {
     local title="$1"
-    LOG_INFO_RANK0 ""
-    LOG_INFO_RANK0 "=========================================="
-    LOG_INFO_RANK0 "  $title"
-    LOG_INFO_RANK0 "=========================================="
+    PRINT_INFO_RANK0 ""
+    PRINT_INFO_RANK0 "=========================================="
+    PRINT_INFO_RANK0 "  $title"
+    PRINT_INFO_RANK0 "=========================================="
 }
 
 # ---------------------------------------------------------------------------
@@ -476,6 +536,8 @@ trap run_cleanup_hooks EXIT INT TERM
 export -f _get_timestamp _get_node_id _log
 export -f LOG_DEBUG LOG_INFO LOG_WARN LOG_ERROR LOG_SUCCESS
 export -f LOG_INFO_RANK0 LOG_DEBUG_RANK0 LOG_SUCCESS_RANK0
+export -f PRINT_DEBUG PRINT_INFO PRINT_WARN PRINT_ERROR PRINT_SUCCESS
+export -f PRINT_INFO_RANK0 PRINT_DEBUG_RANK0 PRINT_SUCCESS_RANK0
 export -f log_exported_vars print_section
 export -f die require_command require_file require_dir run_cmd run_cmd_capture
 export -f get_absolute_path get_script_dir ensure_dir cleanup_temp
