@@ -1,8 +1,6 @@
-import argparse
 import os
-import sys
 from pathlib import Path
- 
+
 from primus.core.launcher.parser import PrimusParser
 from primus.core.projection.training_config import convert_primus_config_to_projection_config
 from primus.core.projection.module_profilers.language_model import build_profiler, get_language_model_profiler_spec
@@ -11,7 +9,7 @@ from primus.core.projection.module_profilers.language_model import build_profile
 def print_profiler_hierarchy(profiler, batch_size, seq_len, rank=None, name="root", depth=0, visited=None):
     """
     Recursively print the profiler hierarchy with num_params and activation_memory for each component.
-    
+
     Args:
         profiler: The profiler instance to print
         batch_size: Batch size for activation memory calculation
@@ -23,15 +21,15 @@ def print_profiler_hierarchy(profiler, batch_size, seq_len, rank=None, name="roo
     """
     if visited is None:
         visited = set()
-    
+
     # Avoid infinite recursion if profilers reference each other
     profiler_id = id(profiler)
     if profiler_id in visited:
         return
     visited.add(profiler_id)
-    
+
     indent = "  " * depth
-    
+
     # Calculate metrics for this profiler
     try:
         if depth == 0:
@@ -44,7 +42,7 @@ def print_profiler_hierarchy(profiler, batch_size, seq_len, rank=None, name="roo
             print(f"{indent}[{name}]")
             print(f"{indent}  Params: {num_params / 1e9:.6f} Billion ({num_params:,})")
             print(f"{indent}  Activation Memory: {activation_mem / 1024 / 1024 / 1024:.4f} GB")
-        
+
         # Recursively process sub_profilers if they exist
         if hasattr(profiler, 'sub_profilers') and profiler.sub_profilers:
             for sub_name, sub_profiler in profiler.sub_profilers.items():
@@ -75,16 +73,16 @@ def launch_projection_from_cli(args, overrides):
     seq_len = training_config.runtime_config.sequence_length
     batch_size = training_config.runtime_config.micro_batch_size
     rank = int(os.getenv('RANK', '0'))
-    
+
     # Print recursive profiler hierarchy with detailed breakdown
     print("\n" + "=" * 100)
     print(f"[Primus:Projection] Component-wise Profiling Results (Rank {rank}):")
     print("=" * 100)
     print()
-    
+
     # Print the complete hierarchy recursively
     print_profiler_hierarchy(model_profiler, batch_size, seq_len, rank=rank, name="LanguageModelProfiler", depth=0)
-    
+
     # Get overall totals from the model profiler for this rank
     num_params = model_profiler.estimated_num_params(rank=rank)
     activation_memory = model_profiler.estimated_activation_memory(batch_size, seq_len)

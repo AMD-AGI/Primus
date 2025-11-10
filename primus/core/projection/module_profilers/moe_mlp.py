@@ -16,7 +16,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
             moe_ffn = self.config.model_config.moe_ffn_hidden_size
         else:
             moe_ffn = self.config.model_config.ffn_hidden_size
-        
+
         # For SwiGLU: 3 projections per expert (gate, up, down)
         # For standard FFN: 2 projections per expert (up, down)
         num_ffn_projections = 3 if self.config.model_config.swiglu else 2
@@ -31,7 +31,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
         if self.config.model_config.moe_shared_expert_intermediate_size is not None:
             shared_sz = self.config.model_config.moe_shared_expert_intermediate_size
         shared_params = num_ffn_projections * self.config.model_config.hidden_size * shared_sz
-        
+
         return all_experts_params + shared_params
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:

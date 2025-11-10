@@ -61,4 +61,3 @@ def add_arguments(parser: argparse.ArgumentParser):
     )
 
     return parser
-

@@ -24,4 +24,3 @@ def add_gemm_parser(parser: argparse.ArgumentParser):
     parser.add_argument("--output-file", default="./gemm-dense_report.md")
     parser.add_argument("--duration", type=int, default=3, help="Benchmark duration per shape (sec)")
     return parser
-

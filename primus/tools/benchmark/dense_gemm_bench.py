@@ -104,7 +104,7 @@ def build_gemm_preamble(args, shape_defs: List[Tuple[str, List[int]]]) -> str:
         "",
         f"- Model: {args.model or 'Custom'}",
         f"- Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"- Cluster: amd-aig-poolside",
+        "- Cluster: amd-aig-poolside",
         f"- Duration per shape: {args.duration} sec",
         "",
         "## Configuration",

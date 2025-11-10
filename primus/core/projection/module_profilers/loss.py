@@ -6,8 +6,6 @@
 
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
-from primus.core.projection.profiler_spec import ModuleProfilerSpec
-from primus.core.projection.training_config import TrainingConfig
 
 
 class LossProfiler(BaseModuleProfiler):

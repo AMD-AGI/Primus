@@ -15,5 +15,5 @@ class OutputLayerProfiler(BaseModuleProfiler):
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
         return  (batch_size * seq_len //
                  self.config.model_parallel_config.tensor_model_parallel_size //
-                 self.config.model_parallel_config.context_model_parallel_size * 
+                 self.config.model_parallel_config.context_model_parallel_size *
                  self.config.model_config.padded_vocab_size * 2)  # bf16

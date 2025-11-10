@@ -90,7 +90,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
         total_stages = pp_size
         if num_virtual_pipeline_stages is not None:
             total_stages = total_stages * num_virtual_pipeline_stages
-            
+
         if n_layers % total_stages != 0:
             raise ValueError(
                 f"Total number of layers ({n_layers}) must be divisible by "
@@ -100,22 +100,22 @@ class LanguageModelProfiler(BaseModuleProfiler):
         model_parallel_size = pp_size * tp_size * cp_size * ep_size
         model_parallel_rank = global_rank % model_parallel_size
         pp_rank = model_parallel_rank // (tp_size * cp_size * ep_size)
-        
+
         # Calculate how many layers are in each virtual stage (chunk)
         layers_per_virtual_stage = n_layers // total_stages
-        
+
         # A physical pp_rank hosts multiple virtual stages in an interleaved fashion.
         # pp_rank 0 gets virtual stages: 0, pp_size, 2*pp_size, ...
         # pp_rank 1 gets virtual stages: 1, pp_size+1, 2*pp_size+1, ...
         my_virtual_stages = range(pp_rank, total_stages, pp_size)
-        
+
         assigned_layers = []
         for vs_index in my_virtual_stages:
             start_layer = vs_index * layers_per_virtual_stage
             end_layer = (vs_index + 1) * layers_per_virtual_stage - 1
             for layer in range(start_layer, end_layer + 1):
                 assigned_layers.append(layer)
-            
+
         return assigned_layers
 
     def get_dp_size(self) -> int:
@@ -159,7 +159,6 @@ class LanguageModelProfiler(BaseModuleProfiler):
             total_params += self.sub_profilers["output_layer"].estimated_num_params(rank)
             total_params += self.sub_profilers["calc_loss"].estimated_num_params(rank)
         return total_params
-
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
         total_act = 0

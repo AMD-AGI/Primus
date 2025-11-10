@@ -27,4 +27,3 @@ def add_gemm_parser(parser: argparse.ArgumentParser):
     )
 
     return parser
-

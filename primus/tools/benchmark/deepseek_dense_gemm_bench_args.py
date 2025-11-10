@@ -32,4 +32,3 @@ def add_gemm_parser(parser: argparse.ArgumentParser):
     parser.add_argument("--output-file", default="./gemm-deepseek_report.md")
     parser.add_argument("--append", action="store_true", help="Append to existing report")
     return parser
-

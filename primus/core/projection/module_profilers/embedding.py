@@ -6,8 +6,6 @@
 
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
-from primus.core.projection.profiler_spec import ModuleProfilerSpec
-from primus.core.projection.training_config import TrainingConfig
 
 
 class EmbeddingProfiler(BaseModuleProfiler):
@@ -17,5 +15,5 @@ class EmbeddingProfiler(BaseModuleProfiler):
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
         return  (batch_size * seq_len //
                  self.config.model_parallel_config.tensor_model_parallel_size //
-                 self.config.model_parallel_config.context_model_parallel_size * 
+                 self.config.model_parallel_config.context_model_parallel_size *
                  self.config.model_config.hidden_size * 2)  # bf16
