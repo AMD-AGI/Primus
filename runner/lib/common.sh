@@ -167,6 +167,8 @@ require_command() {
     local cmd="$1"
     local hint="${2:-}"
 
+    LOG_DEBUG "Checking for required command: $cmd"
+
     if ! command -v "$cmd" &> /dev/null; then
         local msg="Required command not found: $cmd"
         if [[ -n "$hint" ]]; then
@@ -174,6 +176,8 @@ require_command() {
         fi
         die "$msg"
     fi
+
+    LOG_DEBUG "Required command found: $cmd"
 }
 
 # Check if file exists
@@ -229,7 +233,10 @@ run_cmd_capture() {
 # Get absolute path (handles symlinks)
 get_absolute_path() {
     local path="$1"
-    realpath -m "$path" 2>/dev/null || readlink -f "$path" 2>/dev/null || echo "$path"
+    local result
+    result=$(realpath -m "$path" 2>/dev/null || readlink -f "$path" 2>/dev/null || echo "$path")
+    LOG_DEBUG "get_absolute_path: $path -> $result"
+    echo "$result"
 }
 
 # Get script directory (handles symlinks)
@@ -289,7 +296,9 @@ load_env_file() {
     fi
 
     LOG_INFO "Loading environment file: $env_file"
+    LOG_DEBUG "Parsing environment file: $env_file"
 
+    local count=0
     # Read file line by line, skip comments and empty lines
     while IFS= read -r line || [[ -n "$line" ]]; do
         # Skip comments and empty lines
@@ -306,9 +315,12 @@ load_env_file() {
             value="${value%\'}"
             value="${value#\'}"
             export "$key"="$value"
+            ((count++))
             LOG_DEBUG "Loaded: $key=$value"
         fi
     done < "$env_file"
+
+    LOG_DEBUG "Loaded $count environment variables from: $env_file"
 }
 
 # ---------------------------------------------------------------------------
@@ -404,6 +416,7 @@ get_primus_version() {
 
 # Print system information
 print_system_info() {
+    LOG_DEBUG "Gathering system information..."
     LOG_INFO_RANK0 "========== System Information =========="
     LOG_INFO_RANK0 "    Hostname: $(hostname)"
     LOG_INFO_RANK0 "    Kernel: $(uname -r)"
@@ -415,6 +428,9 @@ print_system_info() {
         local gpu_count
         gpu_count=$(rocm-smi --showid | grep -c "GPU" || echo "0")
         LOG_INFO_RANK0 "    GPUs: $gpu_count"
+        LOG_DEBUG "ROCm SMI available, GPU count: $gpu_count"
+    else
+        LOG_DEBUG "ROCm SMI not available"
     fi
 }
 
@@ -428,11 +444,13 @@ PRIMUS_CLEANUP_HOOKS=()
 # Register cleanup hook
 register_cleanup_hook() {
     PRIMUS_CLEANUP_HOOKS+=("$1")
+    LOG_DEBUG "Registered cleanup hook: $1"
 }
 
 # Execute all cleanup hooks
 run_cleanup_hooks() {
     local exit_code=$?
+    LOG_DEBUG "Running ${#PRIMUS_CLEANUP_HOOKS[@]} cleanup hooks (exit code: $exit_code)"
     for hook in "${PRIMUS_CLEANUP_HOOKS[@]}"; do
         LOG_DEBUG "Running cleanup hook: $hook"
         eval "$hook" || LOG_WARN "Cleanup hook failed: $hook"

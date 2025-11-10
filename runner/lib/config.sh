@@ -46,16 +46,28 @@ is_cache_valid() {
     local config_file="$1"
     local cache_file="$2"
 
+    LOG_DEBUG "Checking cache validity: $cache_file"
+
     # Cache doesn't exist
-    [[ ! -f "$cache_file" ]] && return 1
+    if [[ ! -f "$cache_file" ]]; then
+        LOG_DEBUG "Cache file does not exist"
+        return 1
+    fi
 
     # Source file is newer than cache
-    [[ "$config_file" -nt "$cache_file" ]] && return 1
+    if [[ "$config_file" -nt "$cache_file" ]]; then
+        LOG_DEBUG "Source file is newer than cache"
+        return 1
+    fi
 
     # Cache is older than TTL
     local cache_age=$(($(date +%s) - $(stat -c %Y "$cache_file" 2>/dev/null || echo 0)))
-    [[ $cache_age -gt $PRIMUS_CONFIG_CACHE_TTL ]] && return 1
+    if [[ $cache_age -gt $PRIMUS_CONFIG_CACHE_TTL ]]; then
+        LOG_DEBUG "Cache expired (age: ${cache_age}s, TTL: ${PRIMUS_CONFIG_CACHE_TTL}s)"
+        return 1
+    fi
 
+    LOG_DEBUG "Cache is valid (age: ${cache_age}s)"
     return 0
 }
 
@@ -65,9 +77,16 @@ is_cache_valid() {
 load_cache() {
     local cache_file="$1"
 
+    LOG_DEBUG "Attempting to load cache from: $cache_file"
+
     if [[ -f "$cache_file" ]]; then
         # shellcheck disable=SC1090  # Dynamic source path
-        source "$cache_file" 2>/dev/null && return 0
+        if source "$cache_file" 2>/dev/null; then
+            LOG_DEBUG "Successfully loaded cache from: $cache_file"
+            return 0
+        else
+            LOG_DEBUG "Failed to load cache from: $cache_file"
+        fi
     fi
     return 1
 }
@@ -106,13 +125,17 @@ load_yaml_config() {
         return 1
     fi
 
+    LOG_DEBUG_RANK0 "Parsing YAML file: $config_file"
+
     # Simple YAML parser (handles basic key: value format, arrays, and nested sections)
     local current_section=""
     local current_subsection=""
     local current_array_key=""
     local array_index=0
+    local line_count=0
 
     while IFS= read -r line || [[ -n "$line" ]]; do
+        ((line_count++))
         # Skip comments and empty lines
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${line// /}" ]] && continue
@@ -123,6 +146,7 @@ load_yaml_config() {
             current_subsection=""
             current_array_key=""
             array_index=0
+            LOG_DEBUG_RANK0 "Found section: $current_section (line $line_count)"
             continue
         fi
 
@@ -131,6 +155,7 @@ load_yaml_config() {
             current_subsection="${BASH_REMATCH[1]}"
             current_array_key=""
             array_index=0
+            LOG_DEBUG_RANK0 "Found subsection: $current_section.$current_subsection (line $line_count)"
             continue
         fi
 
@@ -203,7 +228,8 @@ load_yaml_config() {
         fi
     done < "$config_file"
 
-    LOG_DEBUG_RANK0 "Loaded YAML config: $config_file"
+    LOG_DEBUG_RANK0 "Loaded YAML config: $config_file (processed $line_count lines)"
+    LOG_DEBUG_RANK0 "Total config keys loaded: ${#PRIMUS_CONFIG[@]}"
 
     return 0
 }
@@ -215,12 +241,15 @@ load_yaml_config() {
 # ---------------------------------------------------------------------------
 load_config() {
     LOG_INFO_RANK0 "  Loading configuration files..."
+    LOG_DEBUG_RANK0 "Config loading order: 1) user global config, 2) system default config"
 
     # 1. Load user global config (~/.primus.yaml) first - lowest priority
     local global_config="$HOME/.primus.yaml"
     if [[ -f "$global_config" ]]; then
         LOG_INFO_RANK0 "  Loading user config: $global_config"
         load_yaml_config "$global_config" || LOG_ERROR "Failed to load user config"
+    else
+        LOG_DEBUG_RANK0 "User global config not found: $global_config"
     fi
 
     # 2. Load system default config (runner/.primus.yaml) last - highest priority (overrides user config)
@@ -231,9 +260,12 @@ load_config() {
             LOG_ERROR "Failed to load system default config"
             exit 1
         }
+    else
+        LOG_DEBUG_RANK0 "System default config not found: $system_config"
     fi
 
     LOG_INFO_RANK0 "  Configuration loading complete"
+    LOG_DEBUG_RANK0 "Total config entries: ${#PRIMUS_CONFIG[@]}"
 }
 
 # ---------------------------------------------------------------------------
@@ -273,8 +305,10 @@ get_config() {
     local default="${2:-}"
 
     if [[ -n "${PRIMUS_CONFIG[$key]:-}" ]]; then
+        LOG_DEBUG "get_config: $key = ${PRIMUS_CONFIG[$key]}"
         echo "${PRIMUS_CONFIG[$key]}"
     else
+        LOG_DEBUG "get_config: $key not found, using default = $default"
         echo "$default"
     fi
 }
@@ -300,6 +334,9 @@ extract_config_section() {
     # shellcheck disable=SC2034  # result_array is used via nameref
     local -n result_array="$2"  # nameref to associative array
 
+    LOG_DEBUG "Extracting config section: $prefix"
+
+    local count=0
     # Extract all config keys matching prefix and remove the prefix
     for key in "${!PRIMUS_CONFIG[@]}"; do
         if [[ "$key" =~ ^${prefix}\. ]]; then
@@ -307,8 +344,12 @@ extract_config_section() {
             local param_name="${key#"${prefix}".}"
             # shellcheck disable=SC2034  # result_array is a nameref, accessed indirectly
             result_array["$param_name"]="${PRIMUS_CONFIG[$key]}"
+            ((count++))
+            LOG_DEBUG "  Extracted: $param_name = ${PRIMUS_CONFIG[$key]}"
         fi
     done
+
+    LOG_DEBUG "Extracted $count config entries for section: $prefix"
 
     return 0
 }
