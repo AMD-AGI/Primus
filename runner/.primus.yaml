@@ -34,12 +34,25 @@ container:
 
   # Docker/Podman runtime options (passed as --key value)
   options:
+    ipc: "host"
+    network: "host"
     cpus: "32"
     memory: "256G"
-    shm-size: "16G"
     name: "primus-training"
-  #   network: "host"
-  #   user: "1000:1000"
+    privileged: "true"
+    security-opt: "seccomp=unconfined"
+    group-add: "video"
+
+  # Options that can have multiple values (use array format with index)
+  # These will be passed as multiple --device or --cap-add flags
+  devices:
+    - "/dev/kfd"
+    - "/dev/dri"
+    - "/dev/infiniband"
+
+  capabilities:
+    - "SYS_PTRACE"
+    - "CAP_SYS_ADMIN"
 
 # Direct mode settings
 direct:
