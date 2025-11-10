@@ -152,6 +152,15 @@ log_exported_vars() {
     done
 }
 
+# Print a section header (for formatted output)
+print_section() {
+    local title="$1"
+    LOG_INFO_RANK0 ""
+    LOG_INFO_RANK0 "=========================================="
+    LOG_INFO_RANK0 "  $title"
+    LOG_INFO_RANK0 "=========================================="
+}
+
 # ---------------------------------------------------------------------------
 # Error Handling
 # ---------------------------------------------------------------------------
@@ -467,7 +476,7 @@ trap run_cleanup_hooks EXIT INT TERM
 export -f _get_timestamp _get_node_id _log
 export -f LOG_DEBUG LOG_INFO LOG_WARN LOG_ERROR LOG_SUCCESS
 export -f LOG_INFO_RANK0 LOG_DEBUG_RANK0 LOG_SUCCESS_RANK0
-export -f log_exported_vars
+export -f log_exported_vars print_section
 export -f die require_command require_file require_dir run_cmd run_cmd_capture
 export -f get_absolute_path get_script_dir ensure_dir cleanup_temp
 export -f export_and_log set_default load_env_file
