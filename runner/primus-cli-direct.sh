@@ -209,7 +209,9 @@ extract_config_section "direct" direct_config || true
 
 # Enable debug mode if set
 if [[ "$DEBUG_MODE" == "1" ]]; then
-    set -x
+    export PRIMUS_LOG_LEVEL="DEBUG"
+    LOG_INFO "[entrypoint] Debug mode enabled (PRIMUS_LOG_LEVEL=DEBUG)"
+    print_config_section "direct" direct_config
 fi
 
 # Apply config values for non-overridden parameters (CLI args take precedence)

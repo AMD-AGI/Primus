@@ -133,6 +133,7 @@ extract_config_section "slurm" slurm_config || {
 
 # Enable debug mode if set
 if [[ "$DEBUG_MODE" == "1" ]]; then
+    print_config_section "slurm" slurm_config
     set -x
 fi
 

@@ -195,7 +195,8 @@ done
 
 # Enable debug mode if set
 if [[ "$DEBUG_MODE" == "1" ]]; then
-    set -x
+    export PRIMUS_LOG_LEVEL="DEBUG"
+    LOG_INFO "[container] Debug mode enabled (PRIMUS_LOG_LEVEL=DEBUG)"
 fi
 
 ###############################################################################
