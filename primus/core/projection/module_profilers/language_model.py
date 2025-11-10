@@ -14,7 +14,10 @@ from .embedding import EmbeddingProfiler
 from .layer_norm import LayerNormProfiler
 from .loss import LossProfiler
 from .output_layer import OutputLayerProfiler
-from .transformer_layer import get_dense_transformer_layer_profiler_spec, get_moe_transformer_layer_profiler_spec
+from .transformer_layer import (
+    get_dense_transformer_layer_profiler_spec,
+    get_moe_transformer_layer_profiler_spec,
+)
 
 
 def build_profiler(spec: ModuleProfilerSpec, depth=0) -> BaseModuleProfiler:
@@ -67,7 +70,7 @@ def get_language_model_profiler_spec(config: TrainingConfig) -> ModuleProfilerSp
 class LanguageModelProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
         super().__init__(config, sub_profilers)
-        rank = int(os.getenv('RANK', '0'))
+        rank = int(os.getenv("RANK", "0"))
         self.layers = self.get_layers_for_rank(
             global_rank=rank,
             n_layers=self.config.model_config.num_layers,
@@ -75,7 +78,8 @@ class LanguageModelProfiler(BaseModuleProfiler):
             tp_size=self.config.model_parallel_config.tensor_model_parallel_size,
             cp_size=self.config.model_parallel_config.context_model_parallel_size,
             ep_size=self.config.model_parallel_config.expert_model_parallel_size,
-            num_virtual_pipeline_stages=self.config.model_parallel_config.virtual_pipeline_model_parallel_size)
+            num_virtual_pipeline_stages=self.config.model_parallel_config.virtual_pipeline_model_parallel_size,
+        )
 
     def get_layers_for_rank(
         self,
@@ -85,7 +89,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
         tp_size: int,
         cp_size: int,
         ep_size: int,
-        num_virtual_pipeline_stages: int | None = None
+        num_virtual_pipeline_stages: int | None = None,
     ) -> list[int]:
         total_stages = pp_size
         if num_virtual_pipeline_stages is not None:
@@ -119,18 +123,22 @@ class LanguageModelProfiler(BaseModuleProfiler):
         return assigned_layers
 
     def get_dp_size(self) -> int:
-        num_nodes = int(os.getenv('NNODES', '1'))
+        num_nodes = int(os.getenv("NNODES", "1"))
         if num_nodes == 1:
             # Calculate the minimum number of needed nodes
-            num_nodes = (self.config.model_parallel_config.tensor_model_parallel_size *
-                self.config.model_parallel_config.context_model_parallel_size *
-                self.config.model_parallel_config.pipeline_model_parallel_size *
-                self.config.model_parallel_config.expert_model_parallel_size //
-                int(os.getenv('GPUS_PER_NODE', '8')))
-        world_size = num_nodes * int(os.getenv('GPUS_PER_NODE', '8'))
-        dp_size = (world_size //
-                self.config.model_parallel_config.expert_model_parallel_size //
-                self.config.model_parallel_config.pipeline_model_parallel_size)
+            num_nodes = (
+                self.config.model_parallel_config.tensor_model_parallel_size
+                * self.config.model_parallel_config.context_model_parallel_size
+                * self.config.model_parallel_config.pipeline_model_parallel_size
+                * self.config.model_parallel_config.expert_model_parallel_size
+                // int(os.getenv("GPUS_PER_NODE", "8"))
+            )
+        world_size = num_nodes * int(os.getenv("GPUS_PER_NODE", "8"))
+        dp_size = (
+            world_size
+            // self.config.model_parallel_config.expert_model_parallel_size
+            // self.config.model_parallel_config.pipeline_model_parallel_size
+        )
         return dp_size
 
     def get_num_bytes_per_param(self) -> float:
@@ -167,21 +175,24 @@ class LanguageModelProfiler(BaseModuleProfiler):
         for layer in self.layers:
             is_moe = self.config.model_config.moe_pattern[layer]
             if is_moe:
-                total_act += self.sub_profilers["moe_transformer_layer"].estimated_activation_memory(batch_size, seq_len)
+                total_act += self.sub_profilers["moe_transformer_layer"].estimated_activation_memory(
+                    batch_size, seq_len
+                )
             else:
-                total_act += self.sub_profilers["dense_transformer_layer"].estimated_activation_memory(batch_size, seq_len)
+                total_act += self.sub_profilers["dense_transformer_layer"].estimated_activation_memory(
+                    batch_size, seq_len
+                )
         if 0 in self.layers:
             total_act += self.sub_profilers["embedding"].estimated_activation_memory(batch_size, seq_len)
         if self.config.model_config.num_layers - 1 in self.layers:
-            total_act += self.sub_profilers["final_layernorm"].estimated_activation_memory(batch_size, seq_len)
+            total_act += self.sub_profilers["final_layernorm"].estimated_activation_memory(
+                batch_size, seq_len
+            )
             total_act += self.sub_profilers["output_layer"].estimated_activation_memory(batch_size, seq_len)
             total_act += self.sub_profilers["calc_loss"].estimated_activation_memory(batch_size, seq_len)
         # 1F1B
         total_act *= pp_size
-        interleaved_schedule_memory_penalty = 1 + (
-            (pp_size - 1)
-            / (pp_size * vpp_size)
-        )
+        interleaved_schedule_memory_penalty = 1 + ((pp_size - 1) / (pp_size * vpp_size))
         ga = self.config.runtime_config.global_batch_size // self.get_dp_size()
         gs_saving = 1 if ga > pp_size else ga / pp_size
         total_act *= gs_saving * interleaved_schedule_memory_penalty

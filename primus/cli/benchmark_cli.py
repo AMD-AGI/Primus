@@ -58,13 +58,17 @@ def register_subcommand(subparsers):
 
     # ---------- DENSE-GEMM ----------
     dense_gemm = suite_parsers.add_parser("gemm-dense", help="GEMM-DENSE microbench.")
-    from primus.tools.benchmark.dense_gemm_bench_args import add_gemm_parser as add_dense_gemm_parser
+    from primus.tools.benchmark.dense_gemm_bench_args import (
+        add_gemm_parser as add_dense_gemm_parser,
+    )
 
     add_dense_gemm_parser(dense_gemm)
 
     # ---------- DEEPSEEK-GEMM ----------
     deepseek_gemm = suite_parsers.add_parser("gemm-deepseek", help="DEEPSEEK-GEMM microbench.")
-    from primus.tools.benchmark.deepseek_dense_gemm_bench_args import add_gemm_parser as add_deepseek_gemm_parser
+    from primus.tools.benchmark.deepseek_dense_gemm_bench_args import (
+        add_gemm_parser as add_deepseek_gemm_parser,
+    )
 
     add_deepseek_gemm_parser(deepseek_gemm)
 

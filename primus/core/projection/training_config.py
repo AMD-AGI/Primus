@@ -52,7 +52,7 @@ class ModelConfig:
     moe_router_topk: int = 0
     moe_shared_expert_intermediate_size: int = 0
     # Misc
-    share_embeddings_and_output_weights : bool = False
+    share_embeddings_and_output_weights: bool = False
 
 
 @dataclass
@@ -74,7 +74,7 @@ def update_config_from_args(config, args):
 
 
 def megatron_derive_default_args(args):
-    world_size = int(os.getenv('NNODES', '1')) * int(os.getenv('GPUS_PER_NODE', '8'))
+    world_size = int(os.getenv("NNODES", "1")) * int(os.getenv("GPUS_PER_NODE", "8"))
     if args.kv_channels is None:
         args.kv_channels = args.hidden_size // args.num_attention_heads
 
@@ -82,11 +82,14 @@ def megatron_derive_default_args(args):
         # If GQA not set, treat as per-head queries
         args.num_query_groups = args.num_attention_heads
 
-    if not hasattr(args, 'data_parallel_size') or args.data_parallel_size is None:
+    if not hasattr(args, "data_parallel_size") or args.data_parallel_size is None:
         args.data_parallel_size = world_size // (
             args.tensor_model_parallel_size * args.pipeline_model_parallel_size * args.context_parallel_size
         )
-    if args.num_layers_per_virtual_pipeline_stage is None and args.num_virtual_stages_per_pipeline_rank is None:
+    if (
+        args.num_layers_per_virtual_pipeline_stage is None
+        and args.num_virtual_stages_per_pipeline_rank is None
+    ):
         args.virtual_pipeline_model_parallel_size = 1
     elif args.num_layers_per_virtual_pipeline_stage is not None:
         args.virtual_pipeline_model_parallel_size = args.num_layers // (
@@ -107,9 +110,9 @@ def megatron_derive_default_args(args):
                 args.moe_pattern = eval(args.moe_layer_freq)
             except Exception:
                 raise ValueError(f"Invalid moe_layer_freq format: {args.moe_layer_freq}")
-            assert len(args.moe_pattern) == args.num_layers, (
-                f"Invalid moe_layer_freq length: {len(moe_pattern)} (expected {args.num_layers})"
-            )
+            assert (
+                len(args.moe_pattern) == args.num_layers
+            ), f"Invalid moe_layer_freq length: {len(moe_pattern)} (expected {args.num_layers})"
 
     # naming conversion
     args.sequence_length = args.seq_length
@@ -122,9 +125,9 @@ def megatron_derive_default_args(args):
 
 
 def convert_primus_config_to_projection_config(primus_config) -> TrainingConfig:
-    args = primus_config.get_module_config('pre_trainer')
-    framework = getattr(args, 'framework', '')
-    if framework == 'megatron':
+    args = primus_config.get_module_config("pre_trainer")
+    framework = getattr(args, "framework", "")
+    if framework == "megatron":
         args = megatron_derive_default_args(args)
     else:
         raise NotImplementedError(f"Unsupported framework: {framework}")

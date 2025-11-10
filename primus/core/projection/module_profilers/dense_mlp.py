@@ -15,13 +15,19 @@ class DenseMLPProfiler(BaseModuleProfiler):
         # For SwiGLU: 3 projections (gate, up, down)
         # For standard FFN: 2 projections (up, down)
         num_ffn_projections = 3 if self.config.model_config.swiglu else 2
-        return (self.config.model_config.hidden_size *
-                self.config.model_config.ffn_hidden_size * num_ffn_projections)
+        return (
+            self.config.model_config.hidden_size
+            * self.config.model_config.ffn_hidden_size
+            * num_ffn_projections
+        )
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
-        num_tokens = (batch_size * seq_len //
-                self.config.model_parallel_config.tensor_model_parallel_size //
-                self.config.model_parallel_config.context_model_parallel_size)
+        num_tokens = (
+            batch_size
+            * seq_len
+            // self.config.model_parallel_config.tensor_model_parallel_size
+            // self.config.model_parallel_config.context_model_parallel_size
+        )
         total = 0
         # First Gemm
         total += num_tokens * self.config.model_config.hidden_size * 2  # bf16

@@ -13,7 +13,11 @@ class LayerNormProfiler(BaseModuleProfiler):
         return self.config.model_config.hidden_size * 2  # gamma and beta
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
-        return (batch_size * seq_len //
-                self.config.model_parallel_config.tensor_model_parallel_size //
-                self.config.model_parallel_config.context_model_parallel_size *
-                self.config.model_config.hidden_size * 2)  # bf16
+        return (
+            batch_size
+            * seq_len
+            // self.config.model_parallel_config.tensor_model_parallel_size
+            // self.config.model_parallel_config.context_model_parallel_size
+            * self.config.model_config.hidden_size
+            * 2
+        )  # bf16

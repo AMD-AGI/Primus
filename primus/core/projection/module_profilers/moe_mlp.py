@@ -23,8 +23,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
         per_expert_params = num_ffn_projections * self.config.model_config.hidden_size * moe_ffn
         ep = 1 if rank is None else self.config.model_parallel_config.expert_model_parallel_size
 
-        all_experts_params = (self.config.model_config.num_experts *
-                              per_expert_params // ep)
+        all_experts_params = self.config.model_config.num_experts * per_expert_params // ep
 
         # Shared experts (if any)
         shared_sz = 0
@@ -35,10 +34,13 @@ class MoEMLPProfiler(BaseModuleProfiler):
         return all_experts_params + shared_params
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
-        num_tokens = (batch_size * seq_len //
-                self.config.model_parallel_config.tensor_model_parallel_size //
-                self.config.model_parallel_config.context_model_parallel_size *
-                self.config.model_config.moe_router_topk)
+        num_tokens = (
+            batch_size
+            * seq_len
+            // self.config.model_parallel_config.tensor_model_parallel_size
+            // self.config.model_parallel_config.context_model_parallel_size
+            * self.config.model_config.moe_router_topk
+        )
         total = 0
         # First Gemm
         total += num_tokens * self.config.model_config.hidden_size * 2  # bf16
@@ -47,8 +49,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
         swiglu_scale = 1
         if self.config.model_config.swiglu:
             swiglu_scale = 2
-        total += (num_tokens * self.config.model_config.moe_ffn_hidden_size *
-                  swiglu_scale) * 2  # bf16
+        total += (num_tokens * self.config.model_config.moe_ffn_hidden_size * swiglu_scale) * 2  # bf16
         # Second Gemm
         total += num_tokens * self.config.model_config.moe_ffn_hidden_size * 2  # bf16
 

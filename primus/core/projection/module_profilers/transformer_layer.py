@@ -62,28 +62,36 @@ from .router import RouterProfiler
 
 class DenseTransformerLayerProfiler(BaseModuleProfiler):
     def estimated_num_params(self, rank: int | None = None) -> int:
-        return (self.sub_profilers["layer_norm"].estimated_num_params(rank) * 2 +
-                self.sub_profilers["self_attention"].estimated_num_params(rank) +
-                self.sub_profilers["mlp"].estimated_num_params(rank))
+        return (
+            self.sub_profilers["layer_norm"].estimated_num_params(rank) * 2
+            + self.sub_profilers["self_attention"].estimated_num_params(rank)
+            + self.sub_profilers["mlp"].estimated_num_params(rank)
+        )
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
-        return (self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 2 +
-                self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len) +
-                self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len))
+        return (
+            self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 2
+            + self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len)
+            + self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len)
+        )
 
 
 class MoETransformerLayerProfiler(BaseModuleProfiler):
     def estimated_num_params(self, rank: int | None = None) -> int:
-        return (self.sub_profilers["layer_norm"].estimated_num_params(rank) * 2 +
-                self.sub_profilers["self_attention"].estimated_num_params(rank) +
-                self.sub_profilers["mlp"].estimated_num_params(rank) +
-                self.sub_profilers["router"].estimated_num_params(rank))
+        return (
+            self.sub_profilers["layer_norm"].estimated_num_params(rank) * 2
+            + self.sub_profilers["self_attention"].estimated_num_params(rank)
+            + self.sub_profilers["mlp"].estimated_num_params(rank)
+            + self.sub_profilers["router"].estimated_num_params(rank)
+        )
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
-        return (self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 2 +
-                self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len) +
-                self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len) +
-                self.sub_profilers["router"].estimated_activation_memory(batch_size, seq_len))
+        return (
+            self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 2
+            + self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len)
+            + self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len)
+            + self.sub_profilers["router"].estimated_activation_memory(batch_size, seq_len)
+        )
 
 
 def get_dense_transformer_layer_profiler_spec(config: TrainingConfig) -> "ModuleProfilerSpec":

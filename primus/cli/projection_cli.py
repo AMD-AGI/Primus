@@ -11,6 +11,7 @@ def run(args, overrides):
     """
     if args.suite == "memory":
         from primus.core.projection.memory_projection import launch_projection_from_cli
+
         launch_projection_from_cli(args, overrides)
     else:
         raise NotImplementedError(f"Unsupported projection suite: {args.suite}")

@@ -11,6 +11,7 @@ class BaseModuleProfiler(ABC):
     """Abstract base class for transformer-like module profiler.
     Provides both estimated and measured statistics.
     """
+
     def __init__(self, config, sub_profilers=None):
         self.config = config
         self.sub_profilers = sub_profilers

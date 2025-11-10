@@ -2,8 +2,13 @@ import os
 from pathlib import Path
 
 from primus.core.launcher.parser import PrimusParser
-from primus.core.projection.training_config import convert_primus_config_to_projection_config
-from primus.core.projection.module_profilers.language_model import build_profiler, get_language_model_profiler_spec
+from primus.core.projection.module_profilers.language_model import (
+    build_profiler,
+    get_language_model_profiler_spec,
+)
+from primus.core.projection.training_config import (
+    convert_primus_config_to_projection_config,
+)
 
 
 def print_profiler_hierarchy(profiler, batch_size, seq_len, rank=None, name="root", depth=0, visited=None):
@@ -44,11 +49,13 @@ def print_profiler_hierarchy(profiler, batch_size, seq_len, rank=None, name="roo
             print(f"{indent}  Activation Memory: {activation_mem / 1024 / 1024 / 1024:.4f} GB")
 
         # Recursively process sub_profilers if they exist
-        if hasattr(profiler, 'sub_profilers') and profiler.sub_profilers:
+        if hasattr(profiler, "sub_profilers") and profiler.sub_profilers:
             for sub_name, sub_profiler in profiler.sub_profilers.items():
                 if sub_profiler is not None:
                     print()  # Add spacing between components
-                    print_profiler_hierarchy(sub_profiler, batch_size, seq_len, rank, sub_name, depth + 1, visited)
+                    print_profiler_hierarchy(
+                        sub_profiler, batch_size, seq_len, rank, sub_name, depth + 1, visited
+                    )
     except Exception as e:
         print(f"{indent}[{name}] - Error calculating metrics: {e}")
 
@@ -72,7 +79,7 @@ def launch_projection_from_cli(args, overrides):
 
     seq_len = training_config.runtime_config.sequence_length
     batch_size = training_config.runtime_config.micro_batch_size
-    rank = int(os.getenv('RANK', '0'))
+    rank = int(os.getenv("RANK", "0"))
 
     # Print recursive profiler hierarchy with detailed breakdown
     print("\n" + "=" * 100)
@@ -81,7 +88,9 @@ def launch_projection_from_cli(args, overrides):
     print()
 
     # Print the complete hierarchy recursively
-    print_profiler_hierarchy(model_profiler, batch_size, seq_len, rank=rank, name="LanguageModelProfiler", depth=0)
+    print_profiler_hierarchy(
+        model_profiler, batch_size, seq_len, rank=rank, name="LanguageModelProfiler", depth=0
+    )
 
     # Get overall totals from the model profiler for this rank
     num_params = model_profiler.estimated_num_params(rank=rank)
@@ -92,8 +101,12 @@ def launch_projection_from_cli(args, overrides):
     print(f"[Primus:Projection] Memory Projection Summary on Rank {rank}:")
     print(f"  Params: {num_params / 1e9:.6f} Billion ({num_params:,})")
     print(f"  Param+Optimizer Memory: {num_params * num_bytes_per_param / 1024 / 1024 / 1024:.4f} GB")
-    print(f"  Activation Memory (per batch size {batch_size}, seq len {seq_len}): "
-          f"{activation_memory / 1024 / 1024 / 1024:.4f} GB")
-    print(f"  Projected Total Memory: "
-          f"{(num_params * num_bytes_per_param + activation_memory) / 1024 / 1024 / 1024:.4f} GB")
+    print(
+        f"  Activation Memory (per batch size {batch_size}, seq len {seq_len}): "
+        f"{activation_memory / 1024 / 1024 / 1024:.4f} GB"
+    )
+    print(
+        f"  Projected Total Memory: "
+        f"{(num_params * num_bytes_per_param + activation_memory) / 1024 / 1024 / 1024:.4f} GB"
+    )
     print("=" * 100)
