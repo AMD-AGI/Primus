@@ -127,14 +127,15 @@ extract_config_section "slurm" slurm_config || {
     exit 1
 }
 
+
 # Apply slurm config values if not set via CLI
 [[ "$DEBUG_MODE" == "0" && ("${slurm_config[debug]:-false}" == "true" || "${slurm_config[debug]:-false}" == "1") ]] && DEBUG_MODE=1
 [[ "$DRY_RUN_MODE" == "0" && ("${slurm_config[dry_run]:-false}" == "true" || "${slurm_config[dry_run]:-false}" == "1") ]] && DRY_RUN_MODE=1
 
 # Enable debug mode if set
 if [[ "$DEBUG_MODE" == "1" ]]; then
-    print_config_section "slurm" slurm_config
-    set -x
+    export PRIMUS_LOG_LEVEL="DEBUG"
+    LOG_INFO "[slurm] Debug mode enabled (PRIMUS_LOG_LEVEL=DEBUG)"
 fi
 
 # Step 2: Detect srun/sbatch mode
@@ -156,6 +157,7 @@ declare -A LONG_TO_SHORT=(
     ["error"]="e"
     ["job-name"]="J"
 )
+
 
 declare -A CLI_OVERRIDES  # Track which config params are overridden by CLI
 CLI_ARGS=()  # Store original CLI arguments
@@ -247,6 +249,12 @@ done
 
 # Append all CLI arguments (preserving their original format)
 SLURM_FLAGS+=("${CLI_ARGS[@]}")
+
+# Print final config in debug mode (after CLI merge)
+if [[ "$DEBUG_MODE" == "1" ]]; then
+    print_config_section "slurm" slurm_config
+    LOG_DEBUG "[slurm] Final SLURM_FLAGS: ${SLURM_FLAGS[*]}"
+fi
 
 # Skip '--'
 if [[ "$#" -gt 0 && "$1" == "--" ]]; then
