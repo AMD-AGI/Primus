@@ -252,14 +252,14 @@ done
 SLURM_FLAGS+=("${CLI_ARGS[@]}")
 
 # Print final config in debug or dry-run mode (after CLI merge)
-if [[ "$DEBUG_MODE" == "1" ]]; then
-    LOG_DEBUG "[slurm] Final SLURM_FLAGS: ${SLURM_FLAGS[*]}"
-fi
-
-if [[ "$DRY_RUN_MODE" == "1" ]]; then
+if [[ "$DEBUG_MODE" == "1" ]] || [[ "$DRY_RUN_MODE" == "1" ]]; then
     PRINT_INFO_RANK0 ""
     PRINT_INFO_RANK0 "=========================================="
-    PRINT_INFO_RANK0 "  [DRY RUN] Slurm Configuration"
+    if [[ "$DRY_RUN_MODE" == "1" ]]; then
+        PRINT_INFO_RANK0 "  [DRY RUN] Slurm Configuration"
+    else
+        PRINT_INFO_RANK0 "  [DEBUG] Slurm Configuration"
+    fi
     PRINT_INFO_RANK0 "=========================================="
     PRINT_INFO_RANK0 "Launch Command: $LAUNCH_CMD"
     PRINT_INFO_RANK0 ""
@@ -269,19 +269,11 @@ if [[ "$DRY_RUN_MODE" == "1" ]]; then
     if [[ ${#SLURM_FLAGS[@]} -eq 0 ]]; then
         PRINT_INFO_RANK0 "  (none)"
     else
-        _slurm_i=0
-        while [[ $_slurm_i -lt ${#SLURM_FLAGS[@]} ]]; do
-            _slurm_flag="${SLURM_FLAGS[$_slurm_i]}"
-            ((_slurm_i++))
-            # Check if next element is a value (doesn't start with -)
-            if [[ $_slurm_i -lt ${#SLURM_FLAGS[@]} && ! "${SLURM_FLAGS[$_slurm_i]}" =~ ^- ]]; then
-                PRINT_INFO_RANK0 "  $_slurm_flag ${SLURM_FLAGS[$_slurm_i]}"
-                ((_slurm_i++))
-            else
-                PRINT_INFO_RANK0 "  $_slurm_flag"
-            fi
+        for flag in "${SLURM_FLAGS[@]}"; do
+            PRINT_INFO_RANK0 "  $flag"
         done
     fi
+    PRINT_INFO_RANK0 "=========================================="
     PRINT_INFO_RANK0 ""
 fi
 
