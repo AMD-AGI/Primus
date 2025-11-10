@@ -251,32 +251,6 @@ done
 # Append all CLI arguments (preserving their original format)
 SLURM_FLAGS+=("${CLI_ARGS[@]}")
 
-# Print final config in debug or dry-run mode (after CLI merge)
-if [[ "$DEBUG_MODE" == "1" ]] || [[ "$DRY_RUN_MODE" == "1" ]]; then
-    PRINT_INFO_RANK0 ""
-    PRINT_INFO_RANK0 "=========================================="
-    if [[ "$DRY_RUN_MODE" == "1" ]]; then
-        PRINT_INFO_RANK0 "  [DRY RUN] Slurm Configuration"
-    else
-        PRINT_INFO_RANK0 "  [DEBUG] Slurm Configuration"
-    fi
-    PRINT_INFO_RANK0 "=========================================="
-    PRINT_INFO_RANK0 "Launch Command: $LAUNCH_CMD"
-    PRINT_INFO_RANK0 ""
-    PRINT_INFO_RANK0 "SLURM Flags:"
-
-    # Print each flag on a separate line
-    if [[ ${#SLURM_FLAGS[@]} -eq 0 ]]; then
-        PRINT_INFO_RANK0 "  (none)"
-    else
-        for flag in "${SLURM_FLAGS[@]}"; do
-            PRINT_INFO_RANK0 "  $flag"
-        done
-    fi
-    PRINT_INFO_RANK0 "=========================================="
-    PRINT_INFO_RANK0 ""
-fi
-
 # Skip '--'
 if [[ "$#" -gt 0 && "$1" == "--" ]]; then
     shift
@@ -308,14 +282,38 @@ ENTRY_ARGS+=("$@")
 # Build full command
 CMD=("$LAUNCH_CMD" "${SLURM_FLAGS[@]}" "$ENTRY" -- "${ENTRY_ARGS[@]}")
 
-# Log and execute (or dry-run)
-if [[ "$DRY_RUN_MODE" == "1" ]]; then
+# Print configuration in debug or dry-run mode
+if [[ "$DEBUG_MODE" == "1" ]] || [[ "$DRY_RUN_MODE" == "1" ]]; then
+    PRINT_INFO_RANK0 ""
+    PRINT_INFO_RANK0 "=========================================="
+    if [[ "$DRY_RUN_MODE" == "1" ]]; then
+        PRINT_INFO_RANK0 "  [DRY RUN] Slurm Configuration"
+    else
+        PRINT_INFO_RANK0 "  [DEBUG] Slurm Configuration"
+    fi
+    PRINT_INFO_RANK0 "=========================================="
+    PRINT_INFO_RANK0 "Launch Command: $LAUNCH_CMD"
+    PRINT_INFO_RANK0 ""
+    PRINT_INFO_RANK0 "SLURM Flags:"
+    if [[ ${#SLURM_FLAGS[@]} -eq 0 ]]; then
+        PRINT_INFO_RANK0 "  (none)"
+    else
+        for flag in "${SLURM_FLAGS[@]}"; do
+            PRINT_INFO_RANK0 "  $flag"
+        done
+    fi
+    PRINT_INFO_RANK0 ""
     PRINT_INFO_RANK0 "Entry Script: $ENTRY"
     PRINT_INFO_RANK0 "Entry Args: ${ENTRY_ARGS[*]}"
     PRINT_INFO_RANK0 ""
     PRINT_INFO_RANK0 "Full Command:"
     PRINT_INFO_RANK0 "  ${CMD[*]}"
+    PRINT_INFO_RANK0 "=========================================="
     PRINT_INFO_RANK0 ""
+fi
+
+# Log and execute (or dry-run)
+if [[ "$DRY_RUN_MODE" == "1" ]]; then
     LOG_INFO "[slurm] [DRY-RUN] Command ready (not executed)"
 else
     LOG_INFO "[slurm] Executing: ${CMD[*]}"
