@@ -76,6 +76,7 @@ source "$RUNNER_DIR/lib/config.sh" || {
     exit 1
 }
 
+
 # 0. Parse --config, --debug, --dry-run first if present (before first --)
 CONFIG_FILE=""
 DEBUG_MODE=0
@@ -261,7 +262,21 @@ if [[ "$DRY_RUN_MODE" == "1" ]]; then
     PRINT_INFO_RANK0 "  [DRY RUN] Slurm Configuration"
     PRINT_INFO_RANK0 "=========================================="
     PRINT_INFO_RANK0 "Launch Command: $LAUNCH_CMD"
-    PRINT_INFO_RANK0 "SLURM Flags: ${SLURM_FLAGS[*]}"
+    PRINT_INFO_RANK0 ""
+    PRINT_INFO_RANK0 "SLURM Flags:"
+    # Print each flag on a separate line
+    i=0
+    while [[ $i -lt ${#SLURM_FLAGS[@]} ]]; do
+        flag="${SLURM_FLAGS[$i]}"
+        ((i++))
+        # Check if next element is a value (doesn't start with -)
+        if [[ $i -lt ${#SLURM_FLAGS[@]} && ! "${SLURM_FLAGS[$i]}" =~ ^- ]]; then
+            PRINT_INFO_RANK0 "  $flag ${SLURM_FLAGS[$i]}"
+            ((i++))
+        else
+            PRINT_INFO_RANK0 "  $flag"
+        fi
+    done
     PRINT_INFO_RANK0 ""
 fi
 
