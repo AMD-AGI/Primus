@@ -367,7 +367,7 @@ print_config_section() {
     print_section "[$section] Config Section"  # uses print_section from common.sh
 
     for key in "${!section_array[@]}"; do
-        printf "  %s = %s\n" "$key" "${section_array[$key]}"
+        PRINT_INFO_RANK0 "  $key = ${section_array[$key]}"
     done
 }
 export -f print_config_section
