@@ -295,11 +295,25 @@ if [[ "$DEBUG_MODE" == "1" ]] || [[ "$DRY_RUN_MODE" == "1" ]]; then
     PRINT_INFO_RANK0 "Launch Command: $LAUNCH_CMD"
     PRINT_INFO_RANK0 ""
     PRINT_INFO_RANK0 "SLURM Flags:"
+
     if [[ ${#SLURM_FLAGS[@]} -eq 0 ]]; then
         PRINT_INFO_RANK0 "  (none)"
     else
-        for flag in "${SLURM_FLAGS[@]}"; do
-            PRINT_INFO_RANK0 "  $flag"
+        i=0
+        while [[ $i -lt ${#SLURM_FLAGS[@]} ]]; do
+            flag="${SLURM_FLAGS[$i]}"
+            i=$((i + 1))
+            if [[ $i -lt ${#SLURM_FLAGS[@]} ]]; then
+                next="${SLURM_FLAGS[$i]}"
+                if [[ "$next" == -* ]]; then
+                    PRINT_INFO_RANK0 "  $flag"
+                else
+                    PRINT_INFO_RANK0 "  $flag $next"
+                    ((i++))
+                fi
+            else
+                PRINT_INFO_RANK0 "  $flag"
+            fi
         done
     fi
     PRINT_INFO_RANK0 ""
