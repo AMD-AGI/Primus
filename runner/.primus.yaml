@@ -35,16 +35,11 @@ container:
     security-opt: "seccomp=unconfined"
     group-add: "video"
 
-    # Mount points (host:container or host path)
-    # Each mount will be passed as --volume
-    mounts: []
-    # mounts:
-    #   - "/data:/data"
-    #   - "/output:/output"
-    #   - "/workspace/Primus"
-    #   - "/model_weights:/model_weights:ro"
-
     # Device access (each passed as --device)
+    # NOTE: Do not modify these device paths - they are required for ROCm/GPU access
+    #   /dev/kfd  - Kernel Fusion Driver (ROCm core)
+    #   /dev/dri  - Direct Rendering Infrastructure (GPU access)
+    #   /dev/infiniband - InfiniBand network device (multi-node communication)
     devices:
       - "/dev/kfd"
       - "/dev/dri"
@@ -54,6 +49,16 @@ container:
     capabilities:
       - "SYS_PTRACE"
       - "CAP_SYS_ADMIN"
+
+    # Mount points (host:container or host path)
+    # Each mount will be passed as --volume
+    mounts: []
+    # mounts:
+    #   - "/data:/data"
+    #   - "/output:/output"
+    #   - "/workspace/Primus"
+    #   - "/model_weights:/model_weights:ro"
+
 
 # Direct mode settings
 direct:
