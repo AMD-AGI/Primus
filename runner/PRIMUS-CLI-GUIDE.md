@@ -4,8 +4,225 @@
 
 ---
 
+## 🔄 完整调用逻辑
+
+### 执行流程图
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         用户命令                                  │
+│  primus-cli [全局选项] <模式> [模式参数] -- [Primus命令]          │
+└─────────────────────────┬───────────────────────────────────────┘
+                          │
+                          ↓
+┌─────────────────────────────────────────────────────────────────┐
+│                    1. primus-cli (主入口)                         │
+│  • 解析全局选项 (--config, --debug, --dry-run)                   │
+│  • 加载配置文件 (.primus.yaml)                                   │
+│  • 提取 main.* 配置                                              │
+│  • 设置调试模式和日志级别                                         │
+└─────────────────────────┬───────────────────────────────────────┘
+                          │
+         ┌────────────────┼────────────────┐
+         │                │                │
+         ↓                ↓                ↓
+┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+│   Direct    │  │  Container  │  │   Slurm     │
+│   模式      │  │   模式      │  │   模式      │
+└──────┬──────┘  └──────┬──────┘  └──────┬──────┘
+       │                │                │
+       │                │                │
+       ↓                ↓                ↓
+┌──────────────────────────────────────────────┐
+│  2. 模式特定脚本 (primus-cli-*.sh)            │
+│  • 加载 container/slurm/direct 配置           │
+│  • 解析模式特定参数                           │
+│  • 准备执行环境                               │
+│    - Direct: 加载 GPU 环境                    │
+│    - Container: 启动容器                      │
+│    - Slurm: 构建 srun/sbatch 命令             │
+└──────────────────┬───────────────────────────┘
+                   │
+                   ↓
+┌──────────────────────────────────────────────┐
+│  3. primus-cli-direct.sh (最终执行层)         │
+│  • 加载环境 (primus-env.sh)                  │
+│    - base_env.sh (基础环境)                  │
+│    - detect_gpu.sh (GPU 检测)                │
+│    - GPU-specific env (MI300X.sh 等)         │
+│  • 执行 Hooks (execute_hooks.sh)             │
+│  • 应用 Patches (execute_patches.sh)         │
+│  • 设置分布式环境变量                         │
+│    - MASTER_ADDR, NODE_RANK                  │
+│    - NCCL/RCCL 配置                          │
+└──────────────────┬───────────────────────────┘
+                   │
+                   ↓
+┌──────────────────────────────────────────────┐
+│  4. Primus Python CLI (primus/cli/main.py)   │
+│  • 解析 Primus 命令 (train/benchmark/等)     │
+│  • 加载子命令插件                             │
+│  • 执行具体任务                               │
+│    - train: 启动训练 (Megatron/TorchTitan)   │
+│    - benchmark: 性能测试 (GEMM/AllReduce)    │
+│    - preflight: 环境检查                     │
+└──────────────────────────────────────────────┘
+```
+
+### 调用示例解析
+
+以一个完整的 Slurm 训练命令为例：
+
+```bash
+primus-cli --config prod.yaml --debug \
+  slurm srun -N 4 -p gpu \
+  -- train pretrain --config deepseek_v2.yaml
+```
+
+**执行步骤**：
+
+```
+第 1 步: primus-cli 主入口
+  ├─ 解析全局选项: --config prod.yaml, --debug
+  ├─ 加载配置: prod.yaml + .primus.yaml
+  ├─ 提取 main.debug=true
+  ├─ 设置 PRIMUS_LOG_LEVEL=DEBUG
+  └─ 识别模式: slurm
+
+第 2 步: primus-cli-slurm.sh
+  ├─ 加载 slurm.* 配置 (nodes, time, partition 等)
+  ├─ 解析 Slurm 参数: srun -N 4 -p gpu
+  ├─ 合并配置和 CLI 参数 (CLI 优先)
+  │   配置: nodes=2, time=4:00:00
+  │   CLI: -N 4
+  │   结果: nodes=4, time=4:00:00, partition=gpu
+  ├─ 构建 SLURM_FLAGS: [-N 4 -p gpu -t 4:00:00]
+  └─ 生成命令: srun -N 4 -p gpu -t 4:00:00 \
+                primus-cli-slurm-entry.sh -- \
+                --config prod.yaml --debug \
+                direct -- train pretrain --config deepseek_v2.yaml
+
+第 3 步: primus-cli-slurm-entry.sh (在每个 Slurm 节点上执行)
+  ├─ 设置节点环境变量
+  │   NODE_RANK, MASTER_ADDR, WORLD_SIZE
+  └─ 调用: primus-cli-direct.sh --config prod.yaml --debug \
+            -- train pretrain --config deepseek_v2.yaml
+
+第 4 步: primus-cli-direct.sh
+  ├─ 加载环境脚本
+  │   ├─ base_env.sh (通用环境)
+  │   ├─ detect_gpu.sh (检测到 MI300X)
+  │   └─ MI300X.sh (GPU 专属配置)
+  ├─ 执行 Hooks
+  │   └─ execute_hooks "train" "pretrain"
+  │       ├─ hooks/train/pretrain/01_prepare.sh
+  │       └─ hooks/train/pretrain/02_preprocess_data.sh
+  ├─ 应用 Patches
+  │   └─ execute_patches (如果配置了)
+  ├─ 设置分布式环境
+  │   MASTER_ADDR=node-0, NODE_RANK=0..3
+  │   NCCL_SOCKET_IFNAME, NCCL_IB_HCA
+  └─ 启动: torchrun --nproc_per_node=8 \
+            --nnodes=4 --node_rank=$NODE_RANK \
+            primus/cli/main.py train pretrain \
+            --config deepseek_v2.yaml
+
+第 5 步: primus/cli/main.py (Python CLI)
+  ├─ 解析命令: train pretrain
+  ├─ 加载子命令插件: primus/cli/subcommands/train.py
+  ├─ 执行训练
+  │   ├─ 加载配置: deepseek_v2.yaml
+  │   ├─ 初始化 Megatron
+  │   ├─ 设置模型、数据、优化器
+  │   └─ 开始分布式训练
+  └─ 输出日志和指标
+```
+
+### 配置优先级流程
+
+```
+┌─────────────────────────────────────────┐
+│        配置来源 (从低到高优先级)         │
+└─────────────────────────────────────────┘
+        ↓
+┌─────────────────────────────────────────┐
+│  1. 用户全局配置 (~/.primus.yaml)       │
+│     优先级: ★☆☆☆                        │
+└──────────────┬──────────────────────────┘
+               ↓
+┌─────────────────────────────────────────┐
+│  2. 系统默认配置 (runner/.primus.yaml)  │
+│     优先级: ★★☆☆                        │
+└──────────────┬──────────────────────────┘
+               ↓
+┌─────────────────────────────────────────┐
+│  3. 指定配置文件 (--config FILE)        │
+│     优先级: ★★★☆                        │
+└──────────────┬──────────────────────────┘
+               ↓
+┌─────────────────────────────────────────┐
+│  4. 命令行参数                           │
+│     优先级: ★★★★ (最高)                 │
+└─────────────────────────────────────────┘
+```
+
+**示例**：
+```bash
+# ~/.primus.yaml:     nodes=1
+# .primus.yaml:       nodes=2, time=2:00:00
+# --config prod.yaml: nodes=4, time=4:00:00, partition=gpu
+# CLI: -N 8
+
+最终结果:
+  nodes=8           (来自 CLI)
+  time=4:00:00      (来自 prod.yaml)
+  partition=gpu     (来自 prod.yaml)
+```
+
+### 环境变量传递流程
+
+```
+primus-cli (主入口)
+  ↓ 设置
+  ├─ PRIMUS_LOG_LEVEL=DEBUG
+  ├─ CONFIG_FILE=/path/to/prod.yaml
+  └─ DEBUG_MODE=1
+      ↓ 传递到
+primus-cli-slurm.sh
+  ↓ 通过 srun 传递到每个节点
+primus-cli-slurm-entry.sh (节点上)
+  ↓ 设置分布式环境
+  ├─ NODE_RANK=0..N
+  ├─ MASTER_ADDR=node-0
+  ├─ WORLD_SIZE=32 (4 nodes × 8 GPUs)
+  └─ LOCAL_RANK=0..7
+      ↓ 传递到
+primus-cli-direct.sh
+  ↓ 加载 GPU 环境 (primus-env.sh)
+  ├─ ROCR_VISIBLE_DEVICES
+  ├─ NCCL_SOCKET_IFNAME
+  ├─ RCCL_MSCCL_ENABLE
+  └─ GPU_DEVICE_ORDINAL
+      ↓ 最终用于
+Python Training Process
+  使用所有环境变量启动分布式训练
+```
+
+### 三种模式的调用差异
+
+| 组件 | Direct 模式 | Container 模式 | Slurm 模式 |
+|------|------------|----------------|-----------|
+| **入口** | primus-cli-direct.sh | primus-cli-container.sh | primus-cli-slurm.sh |
+| **环境准备** | 加载本地 GPU 环境 | 启动容器 + 挂载 + 设备 | 分配节点 + 网络配置 |
+| **执行位置** | 当前主机 | 容器内 | Slurm 节点 |
+| **最终调用** | 直接执行 | 容器内执行 direct.sh | 每节点执行 slurm-entry.sh → direct.sh |
+| **分布式** | 单节点多卡 | 单节点多卡 | 多节点多卡 |
+
+---
+
 ## 📋 目录
 
+- [完整调用逻辑](#完整调用逻辑)
 - [快速开始](#快速开始)
 - [全局选项](#全局选项)
 - [执行模式](#执行模式)
