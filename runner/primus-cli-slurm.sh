@@ -250,10 +250,19 @@ done
 # Append all CLI arguments (preserving their original format)
 SLURM_FLAGS+=("${CLI_ARGS[@]}")
 
-# Print final config in debug mode (after CLI merge)
+# Print final config in debug or dry-run mode (after CLI merge)
 if [[ "$DEBUG_MODE" == "1" ]]; then
-    print_config_section "slurm" slurm_config
     LOG_DEBUG "[slurm] Final SLURM_FLAGS: ${SLURM_FLAGS[*]}"
+fi
+
+if [[ "$DRY_RUN_MODE" == "1" ]]; then
+    PRINT_INFO_RANK0 ""
+    PRINT_INFO_RANK0 "=========================================="
+    PRINT_INFO_RANK0 "  [DRY RUN] Slurm Configuration"
+    PRINT_INFO_RANK0 "=========================================="
+    PRINT_INFO_RANK0 "Launch Command: $LAUNCH_CMD"
+    PRINT_INFO_RANK0 "SLURM Flags: ${SLURM_FLAGS[*]}"
+    PRINT_INFO_RANK0 ""
 fi
 
 # Skip '--'
@@ -289,7 +298,13 @@ CMD=("$LAUNCH_CMD" "${SLURM_FLAGS[@]}" "$ENTRY" -- "${ENTRY_ARGS[@]}")
 
 # Log and execute (or dry-run)
 if [[ "$DRY_RUN_MODE" == "1" ]]; then
-    LOG_INFO "[slurm] [DRY-RUN] Would execute: ${CMD[*]}"
+    PRINT_INFO_RANK0 "Entry Script: $ENTRY"
+    PRINT_INFO_RANK0 "Entry Args: ${ENTRY_ARGS[*]}"
+    PRINT_INFO_RANK0 ""
+    PRINT_INFO_RANK0 "Full Command:"
+    PRINT_INFO_RANK0 "  ${CMD[*]}"
+    PRINT_INFO_RANK0 ""
+    LOG_INFO "[slurm] [DRY-RUN] Command ready (not executed)"
 else
     LOG_INFO "[slurm] Executing: ${CMD[*]}"
     exec "${CMD[@]}"
