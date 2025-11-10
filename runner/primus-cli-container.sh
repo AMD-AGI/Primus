@@ -158,17 +158,9 @@ if [[ -z "${DOCKER_IMAGE:-}" && -n "${container_config[image]:-}" ]]; then
     LOG_INFO "[container] Using image from config: $DOCKER_IMAGE"
 fi
 
-# 2. Mounts
-MOUNTS=()
-for key in "${!container_config[@]}"; do
-    if [[ "$key" =~ ^mounts\.[0-9]+$ ]]; then
-        MOUNTS+=("${container_config[$key]}")
-        LOG_DEBUG "[container] Added mount from config: ${container_config[$key]}"
-    fi
-done
-
-# 3. Env vars
+# 2. Env vars (will be added to CONTAINER_OPTS)
 CONTAINER_OPTS=()  # Container options (generic --key value pairs, stored as array to support repeatable options)
+MOUNTS=()  # Mounts from CLI arguments (will be processed later)
 for key in "${!container_config[@]}"; do
     if [[ "$key" =~ ^env\.[A-Za-z0-9_]+$ ]]; then
         env_name="${key#env.}"
@@ -183,8 +175,19 @@ for key in "${!container_config[@]}"; do
     if [[ "$key" =~ ^options\. ]]; then
         opt_name="${key#options.}"
         opt_value="${container_config[$key]}"
-        CONTAINER_OPTS+=( "--${opt_name}" "${opt_value}" )
-        LOG_DEBUG "[container] Added option from config: --${opt_name} ${opt_value}"
+        if [[ "$opt_name" =~ ^devices\.[0-9]+$ ]]; then
+            CONTAINER_OPTS+=( --device "${opt_value}" )
+            LOG_DEBUG "[container] Added device from config: ${opt_value}"
+        elif [[ "$opt_name" =~ ^capabilities\.[0-9]+$ ]]; then
+            CONTAINER_OPTS+=( --cap-add "${opt_value}" )
+            LOG_DEBUG "[container] Added capability from config: ${opt_value}"
+        elif [[ "$opt_name" =~ ^mounts\.[0-9]+$ ]]; then
+            CONTAINER_OPTS+=( --volume "${opt_value}" )
+            LOG_DEBUG "[container] Added mount from config: ${opt_value}"
+        else
+            CONTAINER_OPTS+=( "--${opt_name}" "${opt_value}" )
+            LOG_DEBUG "[container] Added option from config: --${opt_name} ${opt_value}"
+        fi
     fi
 done
 
@@ -237,7 +240,7 @@ while [[ $# -gt 0 ]]; do
                 CONTAINER_OPTS+=("$1" "$opt_value")
                 shift 2
             else
-                LOG_ERROR "[container] Unknown option: $1"
+                LOG_ERROR_RANK0 "[container] Unknown option: $1"
                 exit 1
             fi
             ;;
@@ -264,14 +267,14 @@ for mnt in "${MOUNTS[@]}"; do
         container_path="${mnt#*:}"
         # Check that the host path exists and is a directory
         if [[ ! -d "$host_path" ]]; then
-            LOG_ERROR "[container] Invalid directory for --mount $mnt"
+            LOG_ERROR_RANK0 "[container] Invalid directory for --mount $mnt"
             exit 1
         fi
         VOLUME_ARGS+=(-v "$(realpath "$host_path")":"$container_path")
     else
         # Mount to same path inside container
         if [[ ! -d "$mnt" ]]; then
-            LOG_ERROR "[container] Invalid directory for --mount $mnt"
+            LOG_ERROR_RANK0 "[container] Invalid directory for --mount $mnt"
             exit 1
         fi
         abs_path="$(realpath "$mnt")"
@@ -292,7 +295,7 @@ else
     if [[ "$DRY_RUN_MODE" == "1" ]]; then
         DOCKER_CLI="docker"  # Use docker for dry-run output
     else
-        LOG_ERROR "[container] Neither Docker nor Podman found!"
+        LOG_ERROR_RANK0 "[container] Neither Docker nor Podman found!"
         exit 1
     fi
 fi
@@ -302,13 +305,13 @@ fi
 ###############################################################################
 
 if [[ "$CLEAN_DOCKER_CONTAINER" == "1" ]]; then
-    LOG_INFO "[container] Cleaning up existing containers..."
+    LOG_INFO_RANK0 "[container] Cleaning up existing containers..."
     CONTAINERS="$($DOCKER_CLI ps -aq)"
     if [[ -n "$CONTAINERS" ]]; then
         printf '%s\n' "$CONTAINERS" | xargs -r -n1 "$DOCKER_CLI" rm -f
-        LOG_INFO "[container] Removed containers: $CONTAINERS"
+        LOG_INFO_RANK0 "[container] Removed containers: $CONTAINERS"
     else
-        LOG_INFO "[container] No containers to remove."
+        LOG_INFO_RANK0 "[container] No containers to remove."
     fi
 fi
 
@@ -322,64 +325,44 @@ OPTION_ARGS=("${CONTAINER_OPTS[@]}")
 ###############################################################################
 # STEP 9: Display launch information
 ###############################################################################
-LOG_INFO "[container] ========== Launch Info($DOCKER_CLI) =========="
-LOG_INFO "[container]   IMAGE: $DOCKER_IMAGE"
+LOG_INFO_RANK0 "[container] ========== Launch Info($DOCKER_CLI) =========="
+LOG_INFO_RANK0 "[container]   IMAGE: $DOCKER_IMAGE"
 LOG_INFO "[container]   HOSTNAME: $HOSTNAME"
-LOG_INFO "[container]   VOLUME_ARGS:"
+LOG_INFO_RANK0 "[container]   VOLUME_ARGS:"
 for ((i = 0; i < ${#VOLUME_ARGS[@]}; i+=2)); do
-    LOG_INFO "[container]       ${VOLUME_ARGS[i]} ${VOLUME_ARGS[i+1]}"
+    LOG_INFO_RANK0 "[container]       ${VOLUME_ARGS[i]} ${VOLUME_ARGS[i+1]}"
 done
 if [[ ${#OPTION_ARGS[@]} -gt 0 ]]; then
-    LOG_INFO "[container]   CONTAINER_OPTIONS:"
+    LOG_INFO_RANK0 "[container]   CONTAINER_OPTIONS:"
     i=0
     while [[ $i -lt ${#OPTION_ARGS[@]} ]]; do
-        LOG_INFO "[container]       ${OPTION_ARGS[i]} ${OPTION_ARGS[i+1]}"
+        LOG_INFO_RANK0 "[container]       ${OPTION_ARGS[i]} ${OPTION_ARGS[i+1]}"
         ((i+=2))
     done
 fi
-LOG_INFO "[container]   LAUNCH ARGS:"
-LOG_INFO "[container]     ${ARGS[*]}"
+LOG_INFO_RANK0 "[container]   LAUNCH ARGS:"
+LOG_INFO_RANK0 "[container]     ${ARGS[*]}"
 
 ###############################################################################
 # STEP 10: Launch container (or show dry-run)
 ###############################################################################
 if [[ "$DRY_RUN_MODE" == "1" ]]; then
-    LOG_INFO "[container] [DRY-RUN] Would execute:"
-    LOG_INFO "[container]   ${DOCKER_CLI} run --rm \\"
-    LOG_INFO "[container]     --ipc=host \\"
-    LOG_INFO "[container]     --network=host \\"
-    LOG_INFO "[container]     --device=/dev/kfd \\"
-    LOG_INFO "[container]     --device=/dev/dri \\"
-    LOG_INFO "[container]     --cap-add=SYS_PTRACE \\"
-    LOG_INFO "[container]     --cap-add=CAP_SYS_ADMIN \\"
-    LOG_INFO "[container]     --security-opt seccomp=unconfined \\"
-    LOG_INFO "[container]     --group-add video \\"
-    LOG_INFO "[container]     --privileged \\"
-    LOG_INFO "[container]     --device=/dev/infiniband \\"
+    LOG_INFO_RANK0 "[container] [DRY-RUN] Would execute:"
+    LOG_INFO_RANK0 "[container]   ${DOCKER_CLI} run --rm \\"
     for ((i = 0; i < ${#VOLUME_ARGS[@]}; i+=2)); do
-        LOG_INFO "[container]     ${VOLUME_ARGS[i]} ${VOLUME_ARGS[i+1]} \\"
+        LOG_INFO_RANK0 "[container]     ${VOLUME_ARGS[i]} ${VOLUME_ARGS[i+1]} \\"
     done
     i=0
     while [[ $i -lt ${#OPTION_ARGS[@]} ]]; do
-        LOG_INFO "[container]     ${OPTION_ARGS[i]} ${OPTION_ARGS[i+1]} \\"
+        LOG_INFO_RANK0 "[container]     ${OPTION_ARGS[i]} ${OPTION_ARGS[i+1]} \\"
         ((i+=2))
     done
-    LOG_INFO "[container]     $DOCKER_IMAGE /bin/bash -c \"...\""
-    LOG_INFO "[container]   With args: ${ARGS[*]}"
+    LOG_INFO_RANK0 "[container]     $DOCKER_IMAGE /bin/bash -c \"...\""
+    LOG_INFO_RANK0 "[container]   With args: ${ARGS[*]}"
     exit 0
 fi
 
 "${DOCKER_CLI}" run --rm \
-    --ipc=host \
-    --network=host \
-    --device=/dev/kfd \
-    --device=/dev/dri \
-    --cap-add=SYS_PTRACE \
-    --cap-add=CAP_SYS_ADMIN \
-    --security-opt seccomp=unconfined \
-    --group-add video \
-    --privileged \
-    --device=/dev/infiniband \
     "${VOLUME_ARGS[@]}" \
     "${OPTION_ARGS[@]}" \
     "$DOCKER_IMAGE" /bin/bash -c "\
