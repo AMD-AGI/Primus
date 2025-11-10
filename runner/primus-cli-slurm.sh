@@ -264,19 +264,24 @@ if [[ "$DRY_RUN_MODE" == "1" ]]; then
     PRINT_INFO_RANK0 "Launch Command: $LAUNCH_CMD"
     PRINT_INFO_RANK0 ""
     PRINT_INFO_RANK0 "SLURM Flags:"
+
     # Print each flag on a separate line
-    i=0
-    while [[ $i -lt ${#SLURM_FLAGS[@]} ]]; do
-        flag="${SLURM_FLAGS[$i]}"
-        ((i++))
-        # Check if next element is a value (doesn't start with -)
-        if [[ $i -lt ${#SLURM_FLAGS[@]} && ! "${SLURM_FLAGS[$i]}" =~ ^- ]]; then
-            PRINT_INFO_RANK0 "  $flag ${SLURM_FLAGS[$i]}"
-            ((i++))
-        else
-            PRINT_INFO_RANK0 "  $flag"
-        fi
-    done
+    if [[ ${#SLURM_FLAGS[@]} -eq 0 ]]; then
+        PRINT_INFO_RANK0 "  (none)"
+    else
+        _slurm_i=0
+        while [[ $_slurm_i -lt ${#SLURM_FLAGS[@]} ]]; do
+            _slurm_flag="${SLURM_FLAGS[$_slurm_i]}"
+            ((_slurm_i++))
+            # Check if next element is a value (doesn't start with -)
+            if [[ $_slurm_i -lt ${#SLURM_FLAGS[@]} && ! "${SLURM_FLAGS[$_slurm_i]}" =~ ^- ]]; then
+                PRINT_INFO_RANK0 "  $_slurm_flag ${SLURM_FLAGS[$_slurm_i]}"
+                ((_slurm_i++))
+            else
+                PRINT_INFO_RANK0 "  $_slurm_flag"
+            fi
+        done
+    fi
     PRINT_INFO_RANK0 ""
 fi
 
