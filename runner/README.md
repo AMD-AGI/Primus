@@ -1,260 +1,432 @@
-# 🚀 Primus CLI：AMD 统一训练入口的核心控制层
+# 🚀 从混乱到秩序：打造 AMD GPU 大模型训练的统一入口
 
-> *“让 AMD GPU 的训练体验，从复杂脚本到统一入口。”*
-
----
-
-## 一、背景与动机
-
-在大型模型训练场景中，训练系统往往包含多个层次：
-- 环境准备（GPU 检测、网络拓扑、RCCL/NCCL 环境配置）
-- 框架调度（Megatron、TorchTitan、JAX 等）
-- 任务启动（单节点、多节点、容器化、Slurm 作业）
-- 性能验证与 Benchmark
-- 训练前后的 Hook、Patch、Dataset 预处理
-
-这些环节传统上由大量 Bash 脚本零散控制，逻辑重复且难以维护。
-而 **Primus CLI** 的目标，是通过一个统一的入口层，将这些流程模块化、自动化、可配置化。
+> **作者**: AMD AI Team
+> **发布日期**: 2025-11-10
+> **标签**: `#ROCm` `#LLM训练` `#Primus` `#开发者工具` `#AMD-GPU`
 
 ---
 
-## 二、CLI 设计理念
+## 📖 故事的开始：训练流程的痛点
 
-Primus CLI 采用 **“三层结构 + 插件化体系”**：
+想象一下这样的场景：
 
-```
-Primus CLI
-├── Command Layer        # 统一命令入口（train, benchmark, preflight）
-├── Runtime Layer        # 环境与任务执行封装（direct, container, slurm）
-└── Hook/Patch System    # 任务前后可插拔逻辑
-```
+你刚接手一个大模型训练项目，项目目录里散落着几十个 Bash 脚本：`setup_env_mi300x.sh`、`run_megatron_8node.sh`、`check_network.sh`、`preprocess_data_v2_final_really.sh`... 每个脚本都有自己的逻辑，相互之间耦合严重。
 
-| 维度 | 设计目标 |
-|------|-----------|
-| **一致性** | 不论 Megatron、TorchTitan 还是其他 backend，统一 CLI 入口 |
-| **可扩展性** | Subcommand 插件自动发现，可动态注册新功能 |
-| **可调试性** | 日志体系统一，支持 rank-aware 输出 |
-| **可复现性** | 所有运行依赖由 Primus 环境层控制，可容器化、可 Slurm 化 |
+当你想在新的 GPU 集群上复现一次训练时，你需要：
+1. 手动检测 GPU 型号，找到对应的环境配置脚本
+2. 根据节点数量修改分布式参数
+3. 确保数据预处理脚本在训练前执行
+4. 手动设置十几个环境变量
+5. 祈祷一切顺利运行...
+
+**这就是我们在构建 Primus 平台时遇到的真实问题。**
+
+在 AMD GPU 大模型训练生态中，我们面临着多个层次的复杂性：
+- 🔧 **环境准备**：不同 GPU 型号（MI300X、MI250X）需要不同的 ROCm 配置
+- 🔗 **网络拓扑**：RCCL/NCCL 环境、InfiniBand 配置千差万别
+- 🎯 **框架调度**：Megatron、TorchTitan、JAX 等框架各有特点
+- 🖥️ **执行环境**：本地开发、容器化、Slurm 集群三种场景
+- 📊 **性能验证**：GEMM benchmark、通信性能测试
+- 🛠️ **前后处理**：数据预处理、环境检查、热修复补丁
+
+传统的做法是用大量 Bash 脚本来处理这些环节，但这带来了：
+- ❌ 逻辑重复，难以维护
+- ❌ 缺乏统一的错误处理
+- ❌ 实验难以复现
+- ❌ 新人上手门槛高
+
+**Primus CLI 的诞生，就是为了解决这些痛点。**
 
 ---
 
-## 三、核心结构
+## 💡 设计哲学：一条命令，搞定一切
 
-### 🧩 1. Subcommand 插件系统
-
-CLI 主入口 `primus/cli/main.py` 自动扫描 `primus/cli/subcommands/` 下的模块：
+我们的核心理念很简单：**一条命令，从环境配置到训练启动，全自动完成。**
 
 ```bash
-primus-cli train pretrain --config configs/deepseek_v2.yaml
-primus-cli benchmark gemm --dtype bf16
-primus-cli preflight check --gpu
+# 就这么简单！
+primus-cli train pretrain --config deepseek_v2.yaml
 ```
 
-子命令通过注册表 (`primus/cli/registry.py`) 动态加载，实现可插拔扩展：
+### 🏗️ 三层架构设计
+
+Primus CLI 采用清晰的**三层结构 + 插件化体系**：
+
+```
+┌─────────────────────────────────────────────┐
+│         Command Layer (命令层)              │
+│  train | benchmark | preflight | analyze   │
+│       统一的命令入口和参数解析                │
+└──────────────────┬──────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────┐
+│         Runtime Layer (运行时层)            │
+│    direct | container | slurm               │
+│  自动检测环境、配置 GPU、管理分布式           │
+└──────────────────┬──────────────────────────┘
+                   │
+┌──────────────────▼──────────────────────────┐
+│      Hook/Patch System (扩展层)            │
+│  数据预处理 | 环境检查 | 热修复补丁           │
+│         可插拔的任务前后处理逻辑              │
+└─────────────────────────────────────────────┘
+```
+
+### 🎯 四大设计目标
+
+| 目标 | 实现方式 | 用户收益 |
+|------|---------|---------|
+| **🔄 一致性** | 统一 CLI 入口，支持 Megatron/TorchTitan/JAX | 无需为不同框架学习不同命令 |
+| **🔌 可扩展性** | 插件自动发现，动态注册新功能 | 添加新功能无需修改核心代码 |
+| **🐛 可调试性** | Rank-aware 日志，详细的执行追踪 | 快速定位多节点训练问题 |
+| **📦 可复现性** | 自动导出运行环境和配置 | 一键复现任何历史实验 |
+
+---
+
+## 🔍 深入了解：架构剖析
+
+### 🧩 第一层：插件化命令系统
+
+还记得我们说要"零侵入扩展"吗？这是怎么做到的？
+
+```bash
+# 训练命令
+primus-cli train pretrain --config deepseek_v2.yaml
+
+# 性能测试
+primus-cli benchmark gemm --dtype bf16 -M 8192
+
+# 环境检查
+primus-cli preflight check --gpu --network
+```
+
+每个子命令都是一个独立的 Python 模块，通过装饰器自动注册：
 
 ```python
 from primus.cli.registry import register_subcommand
 
 @register_subcommand("train")
 def run_train(args, unknown_args):
+    # 你的训练逻辑
     ...
 ```
 
-这样添加一个新命令（如 `primus-cli analyze topology`）只需新增一个文件，而无需修改主入口逻辑。
-
----
-
-### ⚙️ 2. Runtime 模式抽象
-
-Primus CLI 支持三种执行模式：
-
-| 模式 | 描述 | 典型入口 |
-|------|------|-----------|
-| **direct** | 直接在宿主环境中执行 | `primus-cli-direct.sh` |
-| **container** | 在容器内执行（Docker/Podman） | `primus-cli-container.sh` |
-| **slurm** | 在 Slurm 集群调度系统中执行 | `primus-cli-slurm.sh` |
-
-三者共享统一的命令分发逻辑，区别仅在于：
-- 运行环境的准备（容器、节点分配、网络配置）
-- 环境变量传递（如 `MASTER_ADDR`, `NODE_RANK`, `HIP_VISIBLE_DEVICES`）
-- 执行层入口（`primus-cli-entrypoint.sh`）
-
----
-
-### 🔁 3. Hook 系统（execute_hooks.sh）
-
-在训练流程中，CLI 会根据任务类型自动执行 Hook：
-
-```
-runner/helpers/hooks/train/pretrain/megatron/prepare.sh
-runner/helpers/hooks/train/pretrain/megatron/preprocess_data.sh
-```
-
-执行逻辑：
+**想添加新功能？** 只需要在 `primus/cli/subcommands/` 目录下创建一个新文件，无需修改任何核心代码。比如你想添加一个拓扑分析命令：
 
 ```bash
-execute_hooks "train" "pretrain" "$@"
+# 新增文件: primus/cli/subcommands/analyze.py
+# 就能直接使用
+primus-cli analyze topology --visualize
 ```
 
-它支持：
-- 自动发现同目录下的脚本并按字典序执行；
-- 统一日志与错误处理；
-- 灵活注册 dataset preparation、env setup、sanity check 等任务。
+这种设计让 Primus CLI 能够快速响应新需求，保持核心稳定的同时不断扩展功能。
 
 ---
 
-## 四、🌐 环境自动检测与分层加载机制
+### ⚙️ 第二层：智能运行时抽象
 
-Primus CLI 的环境加载由 `primus-env.sh` 实现，是整个 CLI 的 **基础支撑层**。
+不同的场景需要不同的运行环境，但用户不应该关心这些细节。Primus CLI 提供了三种无缝切换的运行模式：
 
-该脚本自动完成三件事：
+| 🎭 模式 | 📝 使用场景 | 🎯 典型命令 |
+|---------|------------|------------|
+| **🖥️ Direct** | 本地开发、快速验证 | `primus-cli direct -- train pretrain` |
+| **🐳 Container** | 环境隔离、依赖管理 | `primus-cli container --image rocm/megatron:v25.8 -- train pretrain` |
+| **🖧 Slurm** | 多节点生产训练 | `primus-cli slurm srun -N 8 -- train pretrain` |
 
-### 1️⃣ 加载基础环境
+**关键亮点**：这三种模式共享相同的命令语法，只是在运行环境准备上有所不同：
 
 ```bash
+# 本地测试
+primus-cli direct -- benchmark gemm -M 4096
+
+# 容器中测试（确保环境一致）
+primus-cli container -- benchmark gemm -M 4096
+
+# 生产环境（8节点集群）
+primus-cli slurm srun -N 8 -- benchmark gemm -M 4096
+```
+
+**从开发到生产，只需要改变运行模式，命令和参数保持不变！**
+
+---
+
+### 🔁 第三层：Hook 与 Patch 系统
+
+训练不只是运行一个 Python 脚本那么简单。你可能需要：
+- 🗂️ 在训练前预处理数据集
+- 🔍 检查 GPU 和网络环境
+- 🩹 应用临时的 hotfix
+- 📊 收集和上报指标
+
+Primus CLI 的 Hook 系统让这一切自动化：
+
+```bash
+# 目录结构
+runner/helpers/hooks/
+└── train/
+    └── pretrain/
+        ├── 01_check_environment.sh
+        ├── 02_prepare_dataset.sh
+        └── 03_setup_monitoring.sh
+```
+
+当你运行 `primus-cli train pretrain` 时，这些 Hook 会按顺序自动执行。无需手动调用，无需修改训练代码。
+
+**Patch 系统**则用于更灵活的场景：
+
+```bash
+primus-cli direct --patch fixes/workaround_rccl.sh \
+  -- train pretrain --config config.yaml
+```
+
+这在你需要快速应用临时修复、或针对特定环境做调整时特别有用。
+
+---
+
+## 🌐 魔法背后：智能环境检测
+
+这可能是 Primus CLI 最 "黑科技" 的部分了。
+
+### 问题：不同 GPU 需要不同配置
+
+AMD 的 GPU 家族很丰富：MI300X、MI250X、MI210... 每种 GPU 都有其最佳的 ROCm 配置、环境变量设置。传统做法是让用户手动选择配置，但这既容易出错又不够自动化。
+
+### 解决方案：三步自动配置
+
+**第 1 步：加载通用环境**
+
+```bash
+# base_env.sh 提供统一的日志、工具函数
 source "${SCRIPT_DIR}/base_env.sh"
 ```
 
-定义通用变量（`NODE_RANK`, `HOSTNAME`, `LOG_INFO_RANK0` 等）并配置常规 ROCm 环境。
-
-### 2️⃣ 自动检测 GPU 型号
+**第 2 步：自动检测 GPU**
 
 ```bash
+# 智能检测当前节点的 GPU 型号
 GPU_MODEL=$(bash "${SCRIPT_DIR}/detect_gpu.sh")
-LOG_INFO_RANK0 "Detected GPU model: ${GPU_MODEL}"
+# 输出: MI300X
 ```
 
-支持自动识别 MI300X、MI355X 等 GPU 类型。
-
-### 3️⃣ 按 GPU 型号加载特定配置
+**第 3 步：加载 GPU 专属配置**
 
 ```bash
-case "$GPU_MODEL" in
-    *MI300*) GPU_CONFIG_FILE="${SCRIPT_DIR}/MI300X.sh" ;;
-    *MI355*) GPU_CONFIG_FILE="${SCRIPT_DIR}/MI355X.sh" ;;
-esac
-source "$GPU_CONFIG_FILE"
+# 根据检测结果，自动加载最优配置
+GPU_CONFIG_FILE="${SCRIPT_DIR}/${GPU_MODEL}.sh"
+source "$GPU_CONFIG_FILE"  # 加载 MI300X.sh
 ```
 
-> **👉 这一机制让 CLI 能自动匹配不同 GPU 架构的最佳配置，保证所有模块都在最优 ROCm 环境中运行。**
+现在，`MI300X.sh` 里可以包含这个 GPU 型号的所有最佳实践：
+- ROCm 环境变量（`HSA_*`, `HIP_*`）
+- RCCL 通信优化参数
+- 内存管理策略
+- 性能调优选项
+
+**用户完全不需要关心这些细节，一切都是自动的。**
+
+### 实战示例
+
+```bash
+# 在 MI300X 集群上
+primus-cli train pretrain --config config.yaml
+# 自动加载: MI300X.sh → 优化的 RCCL 配置
+
+# 换到 MI250X 集群，同样的命令
+primus-cli train pretrain --config config.yaml
+# 自动加载: MI250X.sh → 适配的不同配置
+```
+
+**跨 GPU 迁移，零配置修改！**
 
 ---
 
-## 五、🧪 实验可复现性机制（Reproducibility）
+## 🧪 科学实验的基石：可复现性
 
-Primus CLI 通过对运行时环境与配置文件的全量导出，实现“一键复现”。
+在机器学习研究中，可复现性至关重要。但现实是残酷的：
 
-### 1️⃣ 自动导出运行环境与配置
+> *"这个实验我三个月前跑的，现在想复现一下... 咦，配置文件哪去了？环境变量是怎么设的来着？"*
 
-每次训练或 Benchmark 启动时，CLI 会将关键运行信息导出到 `output` 目录：
+这样的对话你是不是很熟悉？Primus CLI 用**自动化快照机制**彻底解决这个问题。
+
+### 自动记录一切
+
+每次训练启动时，Primus CLI 会自动保存完整的运行上下文：
 
 ```
-output/
+output/exp_2025_11_10_134522/
 ├── env/
-│   ├── primus_env_dump.txt
-│   ├── gpu_model.txt
-│   └── system_info.json
+│   ├── primus_env_dump.txt      # 所有环境变量
+│   ├── gpu_model.txt            # GPU 型号信息
+│   ├── rocm_version.txt         # ROCm 版本
+│   └── system_info.json         # 系统配置
 ├── config/
-│   └── primus_config.yaml
-└── logs/
-    └── launch.log
+│   ├── primus_config.yaml       # Primus 配置
+│   ├── model_config.yaml        # 模型配置
+│   └── data_config.yaml         # 数据配置
+├── logs/
+│   └── launch.log               # 启动日志
+└── metadata.json                # 运行元数据
 ```
 
-### 2️⃣ 一键复现机制
+### 一键复现
+
+三个月后，当你想复现这个实验：
 
 ```bash
-primus-cli train pretrain --replay output/exp_2025_11_07/
+# 就这么简单！
+primus-cli train pretrain --replay output/exp_2025_11_10_134522/
 ```
 
-CLI 会自动加载环境与 config，保证运行一致性。
+Primus CLI 会自动：
+1. 恢复所有环境变量
+2. 加载原始配置文件
+3. 验证 GPU 和系统环境
+4. 启动训练（如果环境兼容）
 
-### 3️⃣ 使用场景
+### 实战价值
 
-| 场景 | 说明 |
-|------|------|
-| 🔁 性能复现 | 比较不同版本模型在相同配置下的性能 |
-| 🧩 问题定位 | 在其他集群快速重现 hang 或通信问题 |
-| 🧱 回归测试 | 结合 CI 验证版本更新对训练影响 |
-| 📦 模型归档 | 保存完整运行上下文，支持审计和迁移 |
+| 场景 | 传统做法 | 使用 Primus CLI |
+|------|---------|----------------|
+| **🔁 性能对比** | 手动记录配置，容易遗漏 | 自动快照，精确复现 |
+| **🐛 Bug 调试** | 难以在新环境复现问题 | `--replay` 一键复现 |
+| **📊 A/B 测试** | 手动确保两次运行一致 | 自动保证配置一致性 |
+| **🏆 论文实验** | 手写实验设置文档 | 一键导出完整环境 |
+| **🔄 版本回归** | 依赖人工记录 | 自动化 CI 集成 |
 
 ---
 
-## 六、Patch 系统（execute_patches.sh）
+## 📊 实战案例：从开发到生产
 
-Patch 系统用于执行任务级动态修补脚本：
+让我们通过一个真实场景，看看 Primus CLI 如何简化整个工作流。
+
+### 场景：训练 DeepSeek-V2 模型
+
+**第 1 步：本地开发与验证** 🖥️
 
 ```bash
-execute_patches runner/helpers/patches/train/pretrain/fix_env.sh                 runner/helpers/patches/train/pretrain/prepare_dataset.sh
+# 在开发机上快速验证配置
+primus-cli direct --debug -- train pretrain \
+  --config configs/deepseek_v2_debug.yaml
 ```
 
-每个 patch 独立执行，失败即中断。可用于 framework 兼容修补、性能优化等。
+几分钟内就能发现配置问题、数据格式错误等。
 
----
-
-## 七、日志与调试体系
-
-统一日志接口（由 `base_env.sh` / `common.sh` 提供）：
+**第 2 步：容器环境测试** 🐳
 
 ```bash
-LOG_INFO_RANK0 "[Train] Starting pretrain job"
-LOG_ERROR "[Patch] Missing dataset config"
+# 确保在标准化环境中也能正常运行
+primus-cli container \
+  --image rocm/megatron-lm:v25.8_py310 \
+  --mount /data:/data \
+  -- train pretrain --config configs/deepseek_v2_debug.yaml
 ```
 
-输出样式示例：
+容器确保了环境一致性，避免"在我机器上能跑"的问题。
 
-```
-[NODE-0(pdfc-aig-23)] [INFO] Preparing Megatron dataset
-[NODE-1(pdfc-aig-24)] [ERROR] Tokenizer missing
-```
-
----
-
-## 八、典型执行流程
+**第 3 步：小规模集群验证** 🖧
 
 ```bash
-primus-cli train pretrain --config examples/megatron/configs/MI355X/deepseek_v2_lite.yaml
+# 2 节点测试，验证分布式通信
+primus-cli slurm srun -N 2 -p gpu-test \
+  -- container --image rocm/megatron-lm:v25.8_py310 \
+  -- train pretrain --config configs/deepseek_v2_small.yaml
 ```
 
-完整流程：
+**第 4 步：生产环境大规模训练** 🚀
 
+```bash
+# 64 节点、512 GPU 的生产训练
+primus-cli slurm sbatch \
+  -N 64 -p gpu-prod -t 72:00:00 \
+  --job-name=deepseek-v2-prod \
+  -o logs/train_%j.log \
+  -- container --image rocm/megatron-lm:v25.8_py310 \
+  -- train pretrain --config configs/deepseek_v2_prod.yaml
 ```
-1. primus-cli-direct.sh               → 加载基础与 GPU 专属 env
-2. execute_hooks train/pretrain       → 数据预处理与检查
-3. execute_patches                    → 动态 patch 应用
-4. export env + config to output      → 保存实验上下文
-5. launch_megatron_trainer            → 启动分布式训练
+
+### 关键洞察
+
+注意到了吗？**从开发到生产，核心命令结构保持不变**：
+```
+primus-cli <runtime> -- <subcommand> <args>
 ```
 
----
-
-## 九、CLI 架构优势
-
-| 模块 | 优势 |
-|------|------|
-| Subcommand 插件 | 零侵入扩展 |
-| Hook 系统 | 解耦预处理流程 |
-| Patch 系统 | 支持 hotfix 与兼容调整 |
-| 自动 Env 检测 | 自动适配 GPU 配置 |
-| Reproducibility 导出 | 支持复现与审计 |
-| 容器 / Slurm 支持 | 统一执行路径 |
-| 多后端适配 | TorchTitan / Megatron / JAX 等统一接口 |
+只是运行时环境（`direct` → `container` → `slurm`）在变化，其他一切都是统一的。
 
 ---
 
-## 十、未来展望
+## 🎯 核心优势总结
 
-- ✅ Hook/Patch 支持 Python API
-- ✅ `primus plugin list` 插件管理
-- ✅ Preflight 智能拓扑检查
-- ✅ 异构后端（ROCm + CPU/FPGA）集成
-- ✅ 可视化 Dashboard 展示训练状态、性能对比
+经过前面的详细介绍，让我们总结一下 Primus CLI 带来的核心价值：
+
+| 🎁 特性 | 💪 能力 | 🚀 价值 |
+|--------|--------|--------|
+| **统一入口** | 一条命令，适配所有场景 | 降低学习成本，提高开发效率 |
+| **插件化** | 零侵入扩展新功能 | 快速响应新需求，保持系统稳定 |
+| **智能环境** | 自动检测 GPU 并优化配置 | 跨平台迁移零成本 |
+| **Hook 系统** | 自动化任务前后处理 | 解耦复杂流程，提高代码复用 |
+| **可复现性** | 一键快照和恢复 | 科学实验的坚实基础 |
+| **三层运行时** | Direct/Container/Slurm 无缝切换 | 从开发到生产的平滑路径 |
+| **统一日志** | Rank-aware 的结构化日志 | 快速定位多节点问题 |
+
+---
+
+## 🛣️ 未来路线图
+
+Primus CLI 仍在持续演进，我们的未来计划包括：
+
+### 近期目标 (Q1-Q2 2025)
+- ✅ **Python Hook API**：不只是 Bash 脚本，Python 开发者也能轻松编写 Hook
+- ✅ **插件市场**：`primus plugin install` 安装社区贡献的功能
+- ✅ **智能 Preflight**：启动前自动检查网络拓扑、GPU 互联、存储性能
+
+### 中期目标 (Q3-Q4 2025)
+- ✅ **异构支持**：不只是 GPU，还支持 CPU、FPGA 等异构加速器
+- ✅ **可视化 Dashboard**：Web 界面实时监控训练状态和性能
+- ✅ **自动调优**：基于历史数据自动优化超参数和系统配置
+
+### 长期愿景
+- 🌟 成为 **ROCm 生态的标准训练入口**
+- 🌟 支持 **多云、多集群的统一调度**
+- 🌟 与 **MLOps 平台深度集成**
 
 ---
 
-## 十一、总结
+## 🎓 总结：一条命令的力量
 
-Primus CLI 是 AMD 大模型训练平台的统一入口。它封装了调度、配置、日志、兼容性和复现性，为大规模训练提供了一条 **一致、可控、可扩展、可复现** 的路径。
+回到文章开头的问题：如何让大模型训练从复杂走向简单？
 
-> 🧠 一条命令，从环境到训练，全自动、可复现、可扩展 —— 这就是 Primus CLI。
+Primus CLI 的答案是：**通过精心设计的抽象层，把复杂性隐藏在统一的接口之下。**
+
+```bash
+# 从这个简单的命令...
+primus-cli train pretrain --config deepseek_v2.yaml
+
+# ...到背后的：
+# ✅ 自动 GPU 检测和配置
+# ✅ 智能环境变量设置
+# ✅ 数据预处理 Hook
+# ✅ 分布式通信优化
+# ✅ 日志收集和分析
+# ✅ 实验快照和复现
+# ✅ 错误处理和恢复
+```
+
+**这就是 Primus CLI：让复杂的事情变简单，让简单的事情变自动。**
 
 ---
+
+## 📚 了解更多
+
+- 📖 **用户指南**：[PRIMUS-CLI-GUIDE.md](./PRIMUS-CLI-GUIDE.md)
+- 🔧 **快速开始**：`primus-cli --help`
+- 💬 **问题反馈**：GitHub Issues
+- 🌐 **ROCm 生态**：[rocm.github.io](https://rocm.github.io)
+
+---
+
+> *"The best interface is no interface."*
+>
+> 但在无法消除接口的地方，最好的接口是**统一、简洁、自动化**的。这就是 Primus CLI。
+
+**Happy Training with AMD ROCm! 🎉**
