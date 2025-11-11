@@ -1,211 +1,213 @@
-# Primus CLI 使用指南
+# Primus CLI User Guide
 
-> 统一的 AMD 大模型训练和 Benchmark 入口
+> Unified Entry Point for AMD Large Model Training and Benchmarking
 
----
-
-## 📋 目录
-
-- [快速开始](#快速开始) - 5 分钟上手指南
-- [执行模式](#执行模式) - Direct / Container / Slurm
-- [配置文件](#配置文件) - YAML 配置详解
-- [使用示例](#使用示例) - 实战案例集合
-- [全局选项](#全局选项) - 通用命令参数
-- [完整调用逻辑](#完整调用逻辑) - 内部执行流程（高级）
-- [最佳实践](#最佳实践) - 推荐工作流
-- [故障排除](#故障排除) - 常见问题解决
+**English** | [中文版](./PRIMUS-CLI-GUIDE_CN.md)
 
 ---
 
-## 快速开始
+## 📋 Table of Contents
 
-### 基本语法
+- [Quick Start](#quick-start) - 5-minute onboarding guide
+- [Execution Modes](#execution-modes) - Direct / Container / Slurm
+- [Configuration Files](#configuration-files) - YAML configuration explained
+- [Usage Examples](#usage-examples) - Real-world case collection
+- [Global Options](#global-options) - Common command parameters
+- [Complete Call Logic](#complete-call-logic) - Internal execution flow (Advanced)
+- [Best Practices](#best-practices) - Recommended workflows
+- [Troubleshooting](#troubleshooting) - Common issue resolution
+
+---
+
+## Quick Start
+
+### Basic Syntax
 
 ```bash
-primus-cli [全局选项] <模式> [模式参数] -- [Primus 命令和参数]
+primus-cli [global-options] <mode> [mode-args] -- [Primus commands and args]
 ```
 
-### 核心概念
+### Core Concepts
 
-- **全局选项**：适用于所有模式的选项（如 `--debug`, `--config`）
-- **模式**：执行环境（`slurm` / `container` / `direct`）
-- **分隔符 `--`**：必须使用，用于分隔模式参数和 Primus 命令
-- **Primus 命令**：Python CLI 命令（`train`, `benchmark`, `preflight` 等）
+- **Global Options**: Options applicable to all modes (e.g., `--debug`, `--config`)
+- **Mode**: Execution environment (`slurm` / `container` / `direct`)
+- **Separator `--`**: Required, used to separate mode parameters from Primus commands
+- **Primus Commands**: Python CLI commands (`train`, `benchmark`, `preflight`, etc.)
 
-### 第一个命令
+### Your First Command
 
 ```bash
-# 在当前主机直接运行 GEMM benchmark
+# Run GEMM benchmark directly on current host
 primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
 ```
 
 ---
 
-## 执行模式
+## Execution Modes
 
-Primus CLI 支持三种执行模式，每种适用于不同的场景。
+Primus CLI supports three execution modes, each suitable for different scenarios.
 
-### 1. 🖥️ Direct 模式
+### 1. 🖥️ Direct Mode
 
-**适用场景**：在当前主机或已有容器内直接执行
+**Use Case**: Execute directly on current host or within an existing container
 
-**特点**：
-- 最简单的执行方式
-- 适合单节点训练或调试
-- 在当前环境直接运行，无额外开销
+**Features**:
+- Simplest execution method
+- Suitable for single-node training or debugging
+- Runs directly in current environment with no extra overhead
 
-**语法**：
+**Syntax**:
 ```bash
-primus-cli direct [选项] -- <Primus命令>
+primus-cli direct [options] -- <Primus-command>
 ```
 
-**示例**：
+**Examples**:
 ```bash
-# 基本训练
+# Basic training
 primus-cli direct -- train pretrain --config config.yaml
 
 # GEMM benchmark
 primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
 
-# 环境检查
+# Environment check
 primus-cli direct -- preflight check --gpu
 ```
 
-**适用于**：
-- ✅ 本地开发和调试
-- ✅ 单节点训练
-- ✅ 快速实验
-- ✅ 在已有容器内运行
+**Suitable for**:
+- ✅ Local development and debugging
+- ✅ Single-node training
+- ✅ Quick experiments
+- ✅ Running within existing containers
 
 ---
 
-### 2. 🐳 Container 模式
+### 2. 🐳 Container Mode
 
-**适用场景**：在 Docker/Podman 容器中执行
+**Use Case**: Execute in Docker/Podman containers
 
-**特点**：
-- 提供隔离的运行环境
-- 自动挂载必要的设备和目录
-- 支持自定义镜像和资源限制
-- 适合需要特定环境的任务
+**Features**:
+- Provides isolated runtime environment
+- Auto-mounts necessary devices and directories
+- Supports custom images and resource limits
+- Suitable for tasks requiring specific environments
 
-**语法**：
+**Syntax**:
 ```bash
-primus-cli container [容器选项] -- <Primus命令>
+primus-cli container [container-options] -- <Primus-command>
 ```
 
-**常用选项**：
-| 选项 | 描述 | 示例 |
-|------|------|------|
-| `--image IMAGE` | 指定容器镜像 | `--image rocm/primus:v25.9` |
-| `--mount PATH[:PATH]` | 挂载目录 | `--mount /data:/data` |
-| `--cpus N` | 限制 CPU 核心数 | `--cpus 16` |
-| `--memory SIZE` | 限制内存大小 | `--memory 128G` |
-| `--clean` | 启动前清理所有容器 | `--clean` |
+**Common Options**:
+| Option | Description | Example |
+|--------|-------------|---------|
+| `--image IMAGE` | Specify container image | `--image rocm/primus:v25.9` |
+| `--mount PATH[:PATH]` | Mount directory | `--mount /data:/data` |
+| `--cpus N` | Limit CPU cores | `--cpus 16` |
+| `--memory SIZE` | Limit memory size | `--memory 128G` |
+| `--clean` | Clean all containers before starting | `--clean` |
 
-**示例**：
+**Examples**:
 ```bash
-# 使用默认镜像运行训练
+# Run training with default image
 primus-cli container -- train pretrain --config config.yaml
 
-# 指定镜像和挂载数据目录
+# Specify image and mount data directory
 primus-cli container --image rocm/primus:latest \
   --mount /mnt/data:/data \
   -- train pretrain --config /data/config.yaml
 
-# 设置资源限制
+# Set resource limits
 primus-cli container --cpus 32 --memory 256G \
   -- benchmark gemm -M 8192 -N 8192 -K 8192
 
-# 挂载本地 Primus 代码用于开发
+# Mount local Primus code for development
 primus-cli container --mount ~/workspace/Primus:/workspace/Primus \
   -- train pretrain
 ```
 
-**适用于**：
-- ✅ 需要特定依赖环境
-- ✅ 环境隔离和复现性
-- ✅ 开发和测试不同版本
-- ✅ CI/CD 流水线
+**Suitable for**:
+- ✅ Requiring specific dependency environments
+- ✅ Environment isolation and reproducibility
+- ✅ Developing and testing different versions
+- ✅ CI/CD pipelines
 
 ---
 
-### 3. 🖧 Slurm 模式
+### 3. 🖧 Slurm Mode
 
-**适用场景**：在 Slurm 集群上执行分布式任务
+**Use Case**: Execute distributed tasks on Slurm clusters
 
-**特点**：
-- 支持多节点分布式训练
-- 自动处理节点分配和任务调度
-- 支持 `srun`（交互式）和 `sbatch`（批处理）
-- 完整的 Slurm 参数支持
+**Features**:
+- Supports multi-node distributed training
+- Auto-handles node allocation and task scheduling
+- Supports `srun` (interactive) and `sbatch` (batch)
+- Full Slurm parameter support
 
-**语法**：
+**Syntax**:
 ```bash
-primus-cli slurm [srun|sbatch] [Slurm参数] -- <Primus命令>
+primus-cli slurm [srun|sbatch] [Slurm-params] -- <Primus-command>
 ```
 
-**常用 Slurm 参数**：
-| 参数 | 简写 | 描述 | 示例 |
-|------|------|------|------|
-| `--nodes` | `-N` | 节点数 | `-N 4` |
-| `--partition` | `-p` | 分区 | `-p gpu` |
-| `--time` | `-t` | 时间限制 | `-t 4:00:00` |
-| `--output` | `-o` | 输出日志文件 | `-o job.log` |
-| `--job-name` | `-J` | 作业名称 | `-J train_job` |
+**Common Slurm Parameters**:
+| Parameter | Short | Description | Example |
+|-----------|-------|-------------|---------|
+| `--nodes` | `-N` | Number of nodes | `-N 4` |
+| `--partition` | `-p` | Partition | `-p gpu` |
+| `--time` | `-t` | Time limit | `-t 4:00:00` |
+| `--output` | `-o` | Output log file | `-o job.log` |
+| `--job-name` | `-J` | Job name | `-J train_job` |
 
-**示例**：
+**Examples**:
 ```bash
-# 使用 srun 在 4 个节点上运行训练（交互式）
+# Run training on 4 nodes using srun (interactive)
 primus-cli slurm srun -N 4 -p gpu -- train pretrain --config config.yaml
 
-# 使用 sbatch 提交批处理作业
+# Submit batch job using sbatch
 primus-cli slurm sbatch -N 8 -p AIG_Model -t 8:00:00 -o train.log \
   -- train pretrain --config deepseek_v2.yaml
 
-# 运行分布式 GEMM benchmark
+# Run distributed GEMM benchmark
 primus-cli slurm srun -N 2 -- benchmark gemm -M 16384 -N 16384 -K 16384
 
-# 多节点环境检查
+# Multi-node environment check
 primus-cli slurm srun -N 4 -- preflight check --network
 ```
 
-**适用于**：
-- ✅ 多节点分布式训练
-- ✅ 大规模模型训练
-- ✅ 需要作业调度和资源管理
-- ✅ 生产环境训练任务
+**Suitable for**:
+- ✅ Multi-node distributed training
+- ✅ Large-scale model training
+- ✅ Requiring job scheduling and resource management
+- ✅ Production environment training tasks
 
 ---
 
-## 配置文件
+## Configuration Files
 
-Primus CLI 支持 YAML 格式的配置文件，可以预设各种选项。
+Primus CLI supports YAML format configuration files to preset various options.
 
-### 配置文件位置
+### Configuration File Locations
 
-配置文件按以下优先级加载：
+Configuration files are loaded in the following priority order:
 
-1. **命令行指定**：`--config /path/to/config.yaml`（最高优先级）
-2. **系统默认**：`runner/.primus.yaml`
-3. **用户配置**：`~/.primus.yaml`（最低优先级）
+1. **Command-line specified**: `--config /path/to/config.yaml` (Highest priority)
+2. **System default**: `runner/.primus.yaml`
+3. **User config**: `~/.primus.yaml` (Lowest priority)
 
-### 配置文件结构
+### Configuration File Structure
 
 ```yaml
-# 全局设置
+# Global settings
 main:
   debug: false
   dry_run: false
 
-# Slurm 配置
+# Slurm configuration
 slurm:
   nodes: 2
   time: "4:00:00"
   partition: "gpu"
   gpus_per_node: 8
 
-# Container 配置
+# Container configuration
 container:
   image: "rocm/primus:v25.9_gfx942"
   options:
@@ -214,137 +216,137 @@ container:
     ipc: "host"
     network: "host"
 
-    # GPU 设备（不要修改）
+    # GPU devices (do not modify)
     devices:
       - "/dev/kfd"
       - "/dev/dri"
       - "/dev/infiniband"
 
-    # 权限
+    # Permissions
     capabilities:
       - "SYS_PTRACE"
       - "CAP_SYS_ADMIN"
 
-    # 挂载点
+    # Mount points
     mounts:
       - "/data:/data"
       - "/model_weights:/weights:ro"
 
-# Direct 模式配置
+# Direct mode configuration
 direct:
   gpus_per_node: 8
   master_port: 1234
   numa: "auto"
 ```
 
-### 使用配置文件
+### Using Configuration Files
 
 ```bash
-# 使用项目配置文件
+# Use project config file
 primus-cli --config .primus.yaml slurm srun -N 4 -- train pretrain
 
-# 使用用户自定义配置
+# Use custom user config
 primus-cli --config ~/my-config.yaml container -- benchmark gemm
 
-# 配置文件 + 命令行参数（命令行参数优先级更高）
+# Config file + command-line args (command-line has higher priority)
 primus-cli --config prod.yaml slurm srun -N 8 -- train pretrain
 ```
 
-### 配置优先级
+### Configuration Priority
 
-**优先级顺序**（从高到低）：
+**Priority Order** (high to low):
 ```
-命令行参数 > 指定配置文件 > 系统默认配置 > 用户配置
+Command-line args > Specified config file > System default config > User config
 ```
 
-**示例**：
+**Example**:
 ```bash
-# 配置文件中设置 nodes=2，命令行指定 -N 4
-# 最终使用 4 个节点（命令行优先）
+# Config file sets nodes=2, command-line specifies -N 4
+# Final result uses 4 nodes (command-line takes priority)
 primus-cli --config .primus.yaml slurm srun -N 4 -- train pretrain
 ```
 
 ---
 
-## 使用示例
+## Usage Examples
 
-### 训练任务
+### Training Tasks
 
-#### 单节点训练（Direct）
+#### Single-Node Training (Direct)
 ```bash
-# 基本训练
+# Basic training
 primus-cli direct -- train pretrain --config config.yaml
 
-# 使用调试模式
+# With debug mode
 primus-cli --debug direct -- train pretrain --config config.yaml
 ```
 
-#### 单节点训练（Container）
+#### Single-Node Training (Container)
 ```bash
-# 使用容器运行
+# Run in container
 primus-cli container --mount /data:/data \
   -- train pretrain --config /data/config.yaml
 
-# 自定义资源限制
+# Custom resource limits
 primus-cli container --cpus 64 --memory 512G \
   -- train pretrain --config config.yaml
 ```
 
-#### 多节点训练（Slurm）
+#### Multi-Node Training (Slurm)
 ```bash
-# 4 节点分布式训练
+# 4-node distributed training
 primus-cli slurm srun -N 4 -p gpu -- train pretrain --config config.yaml
 
-# 提交批处理作业
+# Submit batch job
 primus-cli slurm sbatch -N 8 -p AIG_Model -t 12:00:00 \
   -o train_%j.log -e train_%j.err \
   -- train pretrain --config deepseek_v2.yaml
 ```
 
-### Benchmark 任务
+### Benchmark Tasks
 
 #### GEMM Benchmark
 ```bash
-# 单节点 GEMM
+# Single-node GEMM
 primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
 
-# 容器中运行
+# Run in container
 primus-cli container -- benchmark gemm -M 8192 -N 8192 -K 8192
 
-# 多节点 GEMM
+# Multi-node GEMM
 primus-cli slurm srun -N 2 -- benchmark gemm -M 16384 -N 16384 -K 16384
 ```
 
-#### 其他 Benchmark
+#### Other Benchmarks
 ```bash
 # All-reduce benchmark
 primus-cli slurm srun -N 4 -- benchmark allreduce --size 1GB
 
-# 端到端训练性能
+# End-to-end training performance
 primus-cli slurm srun -N 8 -- benchmark e2e --model llama2-7b
 ```
 
-### 环境检查（Preflight）
+### Environment Check (Preflight)
 
 ```bash
-# GPU 检查
+# GPU check
 primus-cli direct -- preflight check --gpu
 
-# 网络检查
+# Network check
 primus-cli slurm srun -N 4 -- preflight check --network
 
-# 完整环境检查
+# Complete environment check
 primus-cli slurm srun -N 4 -- preflight check --all
 ```
 
-### 组合使用
+### Combined Usage
 
 ```bash
-# 使用配置文件 + 调试模式 + 干跑
+# Config file + debug mode + dry-run
 primus-cli --config prod.yaml --debug --dry-run \
   slurm srun -N 4 -- train pretrain
 
-# 容器 + 自定义镜像 + 多挂载点
+# Container + custom image + multiple mount points
 primus-cli container \
   --image rocm/primus:dev \
   --mount /data:/data \
@@ -352,7 +354,7 @@ primus-cli container \
   --mount /output:/output \
   -- train pretrain --config /data/config.yaml
 
-# Slurm + 配置文件 + 资源限制
+# Slurm + config file + resource limits
 primus-cli --config cluster.yaml slurm sbatch \
   -N 16 -p bigmem --exclusive \
   -- train pretrain --config llama3-70b.yaml
@@ -360,77 +362,77 @@ primus-cli --config cluster.yaml slurm sbatch \
 
 ---
 
-## 全局选项
+## Global Options
 
-全局选项适用于所有执行模式（Direct、Container、Slurm），在模式名称之前指定。
+Global options apply to all execution modes (Direct, Container, Slurm) and are specified before the mode name.
 
-### 可用选项
+### Available Options
 
-| 选项 | 描述 | 默认值 |
-|------|------|--------|
-| `--config FILE` | 指定配置文件路径 | `runner/.primus.yaml` |
-| `--debug` | 启用调试模式（详细日志） | 关闭 |
-| `--dry-run` | 显示将要执行的命令但不实际运行 | 关闭 |
-| `--version` | 显示版本信息并退出 | - |
-| `-h, --help` | 显示帮助信息并退出 | - |
+| Option | Description | Default |
+|--------|-------------|---------|
+| `--config FILE` | Specify config file path | `runner/.primus.yaml` |
+| `--debug` | Enable debug mode (verbose logging) | Off |
+| `--dry-run` | Show command that would be executed without running | Off |
+| `--version` | Show version info and exit | - |
+| `-h, --help` | Show help info and exit | - |
 
-### 详细说明
+### Detailed Description
 
 #### `--config FILE`
-指定自定义配置文件，覆盖默认配置。
+Specify a custom configuration file, overriding the default config.
 
 ```bash
-# 使用生产环境配置
+# Use production environment config
 primus-cli --config configs/prod.yaml slurm srun -N 4 -- train pretrain
 
-# 使用相对路径
+# Use relative path
 primus-cli --config ./my-config.yaml direct -- benchmark gemm
 
-# 使用绝对路径
+# Use absolute path
 primus-cli --config /shared/configs/cluster.yaml container -- train pretrain
 ```
 
-**配置优先级**：`--config` 指定的文件 > 系统默认 `runner/.primus.yaml` > 用户配置 `~/.primus.yaml`
+**Config Priority**: `--config` specified file > System default `runner/.primus.yaml` > User config `~/.primus.yaml`
 
 #### `--debug`
-启用调试模式，输出详细的执行日志，包括：
-- 配置加载过程
-- 环境变量设置
-- 命令构建步骤
-- 内部函数调用
+Enable debug mode, output detailed execution logs including:
+- Configuration loading process
+- Environment variable setup
+- Command building steps
+- Internal function calls
 
 ```bash
-# 调试 Slurm 作业
+# Debug Slurm job
 primus-cli --debug slurm srun -N 2 -- train pretrain --config config.yaml
 
-# 调试容器启动
+# Debug container startup
 primus-cli --debug container --image rocm/primus:dev -- benchmark gemm
 
-# 调试配置加载
+# Debug config loading
 primus-cli --debug --config test.yaml direct -- preflight check
 ```
 
-**环境变量**：`--debug` 会设置 `PRIMUS_LOG_LEVEL=DEBUG`
+**Environment Variable**: `--debug` sets `PRIMUS_LOG_LEVEL=DEBUG`
 
 #### `--dry-run`
-干跑模式，显示完整的执行命令但不实际运行，适用于：
-- 验证配置正确性
-- 查看最终命令
-- 调试参数传递
-- CI/CD 流水线测试
+Dry-run mode, shows the complete execution command without actually running it. Useful for:
+- Verifying config correctness
+- Viewing final command
+- Debugging parameter passing
+- CI/CD pipeline testing
 
 ```bash
-# 查看 Slurm 作业会如何提交
+# View how Slurm job would be submitted
 primus-cli --dry-run slurm sbatch -N 8 -p gpu -- train pretrain
 
-# 查看容器启动命令
+# View container startup command
 primus-cli --dry-run container --mount /data:/data -- benchmark gemm
 
-# 查看分布式训练命令
+# View distributed training command
 primus-cli --dry-run direct -- train pretrain --config config.yaml
 ```
 
-**输出格式**：
+**Output Format**:
 ```
 ==========================================
   [DRY RUN] Slurm Configuration
@@ -445,87 +447,87 @@ Entry Script: primus-cli-slurm-entry.sh
 ```
 
 #### `--version`
-显示 Primus CLI 版本信息并退出。
+Show Primus CLI version info and exit.
 
 ```bash
 primus-cli --version
-# 输出: Primus CLI v1.0.0
+# Output: Primus CLI v1.0.0
 ```
 
 #### `-h, --help`
-显示帮助信息，可以在不同层级使用：
+Show help info, can be used at different levels:
 
 ```bash
-# 主入口帮助
+# Main entry help
 primus-cli --help
 
-# 模式特定帮助
+# Mode-specific help
 primus-cli direct --help
 primus-cli container --help
 primus-cli slurm --help
 
-# Primus Python CLI 帮助
+# Primus Python CLI help
 primus-cli direct -- --help
 primus-cli direct -- train --help
 primus-cli direct -- benchmark --help
 ```
 
-### 组合使用示例
+### Combined Usage Examples
 
-#### 调试 + 配置文件
+#### Debug + Config File
 ```bash
 primus-cli --config dev.yaml --debug direct -- train pretrain
 ```
 
-#### 干跑 + 自定义配置
+#### Dry-run + Custom Config
 ```bash
 primus-cli --config prod.yaml --dry-run slurm srun -N 4 -- train pretrain
 ```
 
-#### 多层级调试
+#### Multi-level Debugging
 ```bash
-# 查看完整的命令构建和执行过程
+# View complete command building and execution process
 primus-cli --debug --dry-run slurm sbatch -N 8 -- container --debug -- train pretrain
 ```
 
-### 全局选项的生效范围
+### Global Options Scope
 
 ```
-primus-cli [全局选项] <模式> [模式参数] -- [Primus 命令]
+primus-cli [global-options] <mode> [mode-args] -- [Primus commands]
            ↑
-           └─ 影响整个执行流程
-              • 主入口 (primus-cli)
-              • 模式脚本 (primus-cli-*.sh)
-              • 最终执行 (primus-cli-direct.sh)
+           └─ Affects entire execution flow
+              • Main entry (primus-cli)
+              • Mode scripts (primus-cli-*.sh)
+              • Final execution (primus-cli-direct.sh)
 ```
 
-**注意事项**：
-- 全局选项必须在模式名称之前指定
-- `--debug` 会传递到所有子脚本
-- `--dry-run` 会在模式脚本层面拦截执行
-- `--config` 的配置会在所有阶段生效
+**Notes**:
+- Global options must be specified before the mode name
+- `--debug` is passed to all subscripts
+- `--dry-run` intercepts execution at the mode script level
+- `--config` configuration takes effect in all stages
 
 ---
 
-## 完整调用逻辑
+## Complete Call Logic
 
-> 📌 **提示**: 本节面向高级用户，详细解释 Primus CLI 的内部执行流程。如果你是新手，可以直接跳到[最佳实践](#最佳实践)。
+> 📌 **Tip**: This section is for advanced users, explaining Primus CLI's internal execution flow in detail. If you're a beginner, you can skip to [Best Practices](#best-practices).
 
-### 执行流程图
+### Execution Flow Diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         用户命令                                  │
-│  primus-cli [全局选项] <模式> [模式参数] -- [Primus命令]          │
+│                         User Command                             │
+│  primus-cli [global-options] <mode> [mode-args] -- [Primus-cmd] │
 └─────────────────────────┬───────────────────────────────────────┘
                           │
                           ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│                    1. primus-cli (主入口)                         │
-│  • 解析全局选项 (--config, --debug, --dry-run)                   │
-│  • 加载配置文件 (.primus.yaml)                                   │
-│  • 提取 main.* 配置                                              │
-│  • 设置调试模式和日志级别                                         │
+│                    1. primus-cli (Main Entry)                    │
+│  • Parse global options (--config, --debug, --dry-run)          │
+│  • Load config files (.primus.yaml)                             │
+│  • Extract main.* configuration                                 │
+│  • Set debug mode and log level                                 │
 └─────────────────────────┬───────────────────────────────────────┘
                           │
          ┌────────────────┼────────────────┐
@@ -538,44 +540,44 @@ primus-cli [全局选项] <模式> [模式参数] -- [Primus 命令]
        │                │                │
        ↓                ↓                ↓
 ┌──────────────────────────────────────────────┐
-│  2. 模式特定脚本 (primus-cli-*.sh)            │
-│  • 加载 container/slurm/direct 配置           │
-│  • 解析模式特定参数                           │
-│  • 准备执行环境                               │
-│    - Slurm: 构建 srun/sbatch 命令             │
-│    - Container: 启动容器                      │
-│    - Direct: 加载 GPU 环境                    │
+│  2. Mode-Specific Scripts (primus-cli-*.sh)  │
+│  • Load container/slurm/direct config        │
+│  • Parse mode-specific parameters            │
+│  • Prepare execution environment             │
+│    - Slurm: Build srun/sbatch command        │
+│    - Container: Start container              │
+│    - Direct: Load GPU environment            │
 └──────────────────┬───────────────────────────┘
                    │
                    ↓
 ┌──────────────────────────────────────────────┐
-│  3. primus-cli-direct.sh (最终执行层)         │
-│  • 加载环境 (primus-env.sh)                  │
-│    - base_env.sh (基础环境)                  │
-│    - detect_gpu.sh (GPU 检测)                │
-│    - GPU-specific env (MI300X.sh 等)         │
-│  • 执行 Hooks (execute_hooks.sh)             │
-│  • 应用 Patches (execute_patches.sh)         │
-│  • 设置分布式环境变量                         │
+│  3. primus-cli-direct.sh (Final Exec Layer)  │
+│  • Load environment (primus-env.sh)          │
+│    - base_env.sh (base environment)          │
+│    - detect_gpu.sh (GPU detection)           │
+│    - GPU-specific env (MI300X.sh, etc.)      │
+│  • Execute Hooks (execute_hooks.sh)          │
+│  • Apply Patches (execute_patches.sh)        │
+│  • Set distributed environment variables     │
 │    - MASTER_ADDR, NODE_RANK                  │
-│    - NCCL/RCCL 配置                          │
+│    - NCCL/RCCL configuration                 │
 └──────────────────┬───────────────────────────┘
                    │
                    ↓
 ┌──────────────────────────────────────────────┐
 │  4. Primus Python CLI (primus/cli/main.py)   │
-│  • 解析 Primus 命令 (train/benchmark/等)     │
-│  • 加载子命令插件                             │
-│  • 执行具体任务                               │
-│    - train: 启动训练 (Megatron/TorchTitan)   │
-│    - benchmark: 性能测试 (GEMM/RCCL)         │
-│    - preflight: 环境检查                     │
+│  • Parse Primus commands (train/benchmark)   │
+│  • Load subcommand plugins                   │
+│  • Execute specific tasks                    │
+│    - train: Start training (Megatron/etc.)   │
+│    - benchmark: Performance testing          │
+│    - preflight: Environment check            │
 └──────────────────────────────────────────────┘
 ```
 
-### 调用示例解析
+### Example Call Breakdown
 
-以一个完整的 Slurm 多节点容器化训练命令为例：
+A complete Slurm multi-node containerized training command:
 
 ```bash
 primus-cli --config prod.yaml --debug \
@@ -583,50 +585,50 @@ primus-cli --config prod.yaml --debug \
   -- train pretrain --config deepseek_v2.yaml
 ```
 
-**执行步骤详解**：
+**Execution Steps Explained**:
 
 ```
-第 1 步: primus-cli 主入口
-  ├─ 解析全局选项: --config prod.yaml, --debug
-  ├─ 加载配置: prod.yaml + .primus.yaml
-  ├─ 提取 main.debug=true
-  ├─ 设置 PRIMUS_LOG_LEVEL=DEBUG
-  └─ 识别模式: slurm
+Step 1: primus-cli main entry
+  ├─ Parse global options: --config prod.yaml, --debug
+  ├─ Load config: prod.yaml + .primus.yaml
+  ├─ Extract main.debug=true
+  ├─ Set PRIMUS_LOG_LEVEL=DEBUG
+  └─ Identify mode: slurm
 
-第 2 步: primus-cli-slurm.sh
-  ├─ 加载 slurm.* 配置 (nodes, time, partition 等)
-  ├─ 解析 Slurm 参数: srun -N 4
-  ├─ 合并配置和 CLI 参数 (CLI 优先)
-  │   配置: nodes=2, time=4:00:00, partition=gpu
+Step 2: primus-cli-slurm.sh
+  ├─ Load slurm.* config (nodes, time, partition, etc.)
+  ├─ Parse Slurm params: srun -N 4
+  ├─ Merge config and CLI params (CLI takes priority)
+  │   Config: nodes=2, time=4:00:00, partition=gpu
   │   CLI: -N 4
-  │   结果: nodes=4, time=4:00:00, partition=gpu
-  ├─ 构建 SLURM_FLAGS: [-N 4 -p gpu -t 4:00:00]
-  └─ 生成命令: srun -N 4 -p gpu -t 4:00:00 \
+  │   Result: nodes=4, time=4:00:00, partition=gpu
+  ├─ Build SLURM_FLAGS: [-N 4 -p gpu -t 4:00:00]
+  └─ Generate command: srun -N 4 -p gpu -t 4:00:00 \
                 primus-cli-slurm-entry.sh -- \
                 --config prod.yaml --debug \
                 container --image rocm/megatron-lm:v25.8_py310 \
                 -- train pretrain --config deepseek_v2.yaml
 
-第 3 步: primus-cli-slurm-entry.sh (在每个 Slurm 节点上执行)
-  ├─ 设置节点环境变量
+Step 3: primus-cli-slurm-entry.sh (runs on each Slurm node)
+  ├─ Set node environment variables
   │   NODE_RANK, MASTER_ADDR, WORLD_SIZE
-  └─ 调用: primus-cli-container.sh --config prod.yaml --debug \
+  └─ Call: primus-cli-container.sh --config prod.yaml --debug \
             --image rocm/megatron-lm:v25.8_py310 \
             -- train pretrain --config deepseek_v2.yaml
 
-第 4 步: primus-cli-container.sh (在每个节点上)
-  ├─ 加载 container.* 配置 (image, devices, mounts 等)
-  ├─ 解析容器参数: --image rocm/megatron-lm:v25.8_py310
-  ├─ 合并配置和 CLI 参数
-  │   配置: image=rocm/primus:v25.9
+Step 4: primus-cli-container.sh (on each node)
+  ├─ Load container.* config (image, devices, mounts, etc.)
+  ├─ Parse container params: --image rocm/megatron-lm:v25.8_py310
+  ├─ Merge config and CLI params
+  │   Config: image=rocm/primus:v25.9
   │   CLI: --image rocm/megatron-lm:v25.8_py310
-  │   结果: image=rocm/megatron-lm:v25.8_py310
-  ├─ 构建容器选项
+  │   Result: image=rocm/megatron-lm:v25.8_py310
+  ├─ Build container options
   │   --device /dev/kfd, /dev/dri, /dev/infiniband
   │   --cap-add SYS_PTRACE, CAP_SYS_ADMIN
-  │   --volume (挂载数据和代码)
-  │   --cpus, --memory (资源限制)
-  └─ 启动容器: docker/podman run --rm \
+  │   --volume (mount data and code)
+  │   --cpus, --memory (resource limits)
+  └─ Start container: docker/podman run --rm \
                 --device /dev/kfd --device /dev/dri \
                 --volume $PWD:/workspace/Primus \
                 --env NODE_RANK=$NODE_RANK \
@@ -637,84 +639,84 @@ primus-cli --config prod.yaml --debug \
                   --config prod.yaml --debug \
                   -- train pretrain --config deepseek_v2.yaml"
 
-第 5 步: primus-cli-direct.sh (在容器内执行)
-  ├─ 加载环境脚本
-  │   ├─ base_env.sh (通用环境)
-  │   ├─ detect_gpu.sh (检测到 MI300X)
-  │   └─ MI300X.sh (GPU 专属配置)
-  ├─ 执行 Hooks
+Step 5: primus-cli-direct.sh (runs inside container)
+  ├─ Load environment scripts
+  │   ├─ base_env.sh (common environment)
+  │   ├─ detect_gpu.sh (detected MI300X)
+  │   └─ MI300X.sh (GPU-specific config)
+  ├─ Execute Hooks
   │   └─ execute_hooks "train" "pretrain"
   │       ├─ hooks/train/pretrain/01_prepare.sh
   │       └─ hooks/train/pretrain/02_preprocess_data.sh
-  ├─ 应用 Patches
-  │   └─ execute_patches (如果配置了)
-  ├─ 设置分布式环境
+  ├─ Apply Patches
+  │   └─ execute_patches (if configured)
+  ├─ Set distributed environment
   │   MASTER_ADDR=node-0, NODE_RANK=0..3
   │   NCCL_SOCKET_IFNAME, NCCL_IB_HCA
-  └─ 启动: torchrun --nproc_per_node=8 \
+  └─ Launch: torchrun --nproc_per_node=8 \
             --nnodes=4 --node_rank=$NODE_RANK \
             --master_addr=$MASTER_ADDR \
             primus/cli/main.py train pretrain \
             --config deepseek_v2.yaml
 
-第 6 步: primus/cli/main.py (Python CLI，在容器内)
-  ├─ 解析命令: train pretrain
-  ├─ 加载子命令插件: primus/cli/subcommands/train.py
-  ├─ 执行训练
-  │   ├─ 加载配置: deepseek_v2.yaml
-  │   ├─ 初始化 Megatron
-  │   ├─ 设置模型、数据、优化器
-  │   └─ 开始分布式训练
-  └─ 输出日志和指标
+Step 6: primus/cli/main.py (Python CLI, inside container)
+  ├─ Parse command: train pretrain
+  ├─ Load subcommand plugin: primus/cli/subcommands/train.py
+  ├─ Execute training
+  │   ├─ Load config: deepseek_v2.yaml
+  │   ├─ Initialize Megatron
+  │   ├─ Set up model, data, optimizer
+  │   └─ Start distributed training
+  └─ Output logs and metrics
 ```
 
-**多层嵌套说明**：
-- **Slurm 层**：负责多节点资源分配和任务调度
-- **Container 层**：在每个节点上提供隔离的运行环境
-- **Direct 层**：在容器内执行实际的训练任务
+**Multi-Layer Nesting Explanation**:
+- **Slurm Layer**: Handles multi-node resource allocation and task scheduling
+- **Container Layer**: Provides isolated runtime environment on each node
+- **Direct Layer**: Executes actual training task inside container
 
-这种三层架构实现了：
-- ✅ 多节点分布式训练（Slurm）
-- ✅ 环境一致性和隔离（Container）
-- ✅ GPU 自动配置和优化（Direct）
+This three-layer architecture achieves:
+- ✅ Multi-node distributed training (Slurm)
+- ✅ Environment consistency and isolation (Container)
+- ✅ GPU auto-configuration and optimization (Direct)
 
-### 配置优先级流程
+### Configuration Priority Flow
 
-配置系统采用分层合并策略，优先级从低到高：
+Configuration system uses layered merging strategy, priority from low to high:
 
 ```
 ┌─────────────────────────────────────────┐
-│        配置来源 (从低到高优先级)         │
+│    Configuration Sources (low to high)  │
 └─────────────────────────────────────────┘
         ↓
 ┌─────────────────────────────────────────┐
-│  1. 用户全局配置 (~/.primus.yaml)       │
-│     优先级: ★☆☆☆                        │
-│     用途: 个人默认配置                   │
+│  1. User Global Config (~/.primus.yaml) │
+│     Priority: ★☆☆☆                      │
+│     Usage: Personal default config      │
 └──────────────┬──────────────────────────┘
                ↓
 ┌─────────────────────────────────────────┐
-│  2. 系统默认配置 (runner/.primus.yaml)  │
-│     优先级: ★★☆☆                        │
-│     用途: 项目默认配置                   │
+│  2. System Default (runner/.primus.yaml)│
+│     Priority: ★★☆☆                      │
+│     Usage: Project default config       │
 └──────────────┬──────────────────────────┘
                ↓
 ┌─────────────────────────────────────────┐
-│  3. 指定配置文件 (--config FILE)        │
-│     优先级: ★★★☆                        │
-│     用途: 环境特定配置                   │
+│  3. Specified Config File (--config)    │
+│     Priority: ★★★☆                      │
+│     Usage: Environment-specific config  │
 └──────────────┬──────────────────────────┘
                ↓
 ┌─────────────────────────────────────────┐
-│  4. 命令行参数                           │
-│     优先级: ★★★★ (最高)                 │
-│     用途: 临时覆盖                       │
+│  4. Command-line Arguments              │
+│     Priority: ★★★★ (Highest)            │
+│     Usage: Temporary override           │
 └─────────────────────────────────────────┘
 ```
 
-> 📖 参考系统默认配置文件：[`.primus.yaml`](.primus.yaml)
+> 📖 Reference system default config file: [`.primus.yaml`](.primus.yaml)
 
-**配置合并示例**：
+**Config Merge Example**:
 
 ```bash
 # ~/.primus.yaml:     nodes=1
@@ -722,230 +724,230 @@ primus-cli --config prod.yaml --debug \
 # --config prod.yaml: nodes=4, time=4:00:00, partition=gpu
 # CLI: -N 8
 
-最终结果:
-  nodes=8           (来自 CLI - 最高优先级)
-  time=4:00:00      (来自 prod.yaml)
-  partition=gpu     (来自 prod.yaml)
+Final result:
+  nodes=8           (from CLI - highest priority)
+  time=4:00:00      (from prod.yaml)
+  partition=gpu     (from prod.yaml)
 ```
 
-### 三种模式的调用差异
+### Three Modes Call Differences
 
-| 组件 | Direct 模式 | Container 模式 | Slurm 模式 |
-|------|------------|----------------|-----------|
-| **入口脚本** | primus-cli-direct.sh | primus-cli-container.sh | primus-cli-slurm.sh |
-| **环境准备** | 加载本地 GPU 环境 | 启动容器 + 挂载 + 设备 | 分配节点 + 网络配置 |
-| **执行位置** | 当前主机 | 容器内 | Slurm 分配的节点 |
-| **最终调用** | 直接执行 torchrun | 容器内执行 direct.sh | 每节点执行 slurm-entry.sh → direct.sh |
-| **分布式支持** | 单节点多卡 | 单节点多卡 | 多节点多卡 |
-| **适用场景** | 开发调试 | 环境隔离 | 生产训练 |
+| Component | Direct Mode | Container Mode | Slurm Mode |
+|-----------|-------------|----------------|------------|
+| **Entry Script** | primus-cli-direct.sh | primus-cli-container.sh | primus-cli-slurm.sh |
+| **Environment Prep** | Load local GPU env | Start container + mount + devices | Allocate nodes + network config |
+| **Execution Location** | Current host | Inside container | Slurm-allocated nodes |
+| **Final Call** | Direct torchrun execution | Execute direct.sh in container | Each node executes slurm-entry.sh → direct.sh |
+| **Distributed Support** | Single-node multi-GPU | Single-node multi-GPU | Multi-node multi-GPU |
+| **Use Case** | Dev debugging | Environment isolation | Production training |
 
-### GPU 环境自动配置
+### GPU Environment Auto-Configuration
 
-Primus CLI 会自动检测 GPU 型号并加载优化配置：
+Primus CLI automatically detects GPU model and loads optimized configuration:
 
 ```
-detect_gpu.sh (检测 GPU 型号)
+detect_gpu.sh (detect GPU model)
       ↓
   MI300X / MI250X / MI210 / ...
       ↓
-source ${GPU_MODEL}.sh (加载 GPU 专属配置)
+source ${GPU_MODEL}.sh (load GPU-specific config)
       ↓
-  • HSA_* 环境变量
-  • NCCL/RCCL 优化参数
-  • GPU 特定的运行时配置
+  • HSA_* environment variables
+  • NCCL/RCCL optimization parameters
+  • GPU-specific runtime config
 ```
 
-**支持的 GPU 配置文件**：
+**Supported GPU Config Files**:
 - `MI300X.sh` - AMD Instinct MI300X
 - `MI250X.sh` - AMD Instinct MI250X
 - `MI210.sh` - AMD Instinct MI210
-- 更多...
+- More...
 
-如果没有找到对应的 GPU 配置，系统会使用 `base_env.sh` 作为后备。
+If no corresponding GPU config is found, the system falls back to `base_env.sh`.
 
 ---
 
-## 最佳实践
+## Best Practices
 
-### 1. 使用配置文件管理环境
+### 1. Use Config Files to Manage Environments
 
-为不同环境创建不同的配置文件：
+Create different config files for different environments:
 
 ```bash
 configs/
-├── dev.yaml          # 开发环境
-├── test.yaml         # 测试环境
-└── prod.yaml         # 生产环境
+├── dev.yaml          # Development environment
+├── test.yaml         # Testing environment
+└── prod.yaml         # Production environment
 ```
 
-### 2. 善用调试模式
+### 2. Make Good Use of Debug Mode
 
 ```bash
-# 先用 dry-run 查看会执行什么
+# First use dry-run to see what will be executed
 primus-cli --dry-run slurm srun -N 4 -- train pretrain
 
-# 确认无误后用 debug 模式详细追踪
+# After confirming, use debug mode for detailed tracking
 primus-cli --debug slurm srun -N 4 -- train pretrain
 ```
 
-### 3. 容器开发工作流
+### 3. Container Development Workflow
 
 ```bash
-# 本地开发：挂载本地代码
+# Local dev: mount local code
 primus-cli container \
   --mount ~/workspace/Primus:/workspace/Primus \
   -- train pretrain --config config.yaml
 
-# 测试：使用 staging 镜像
+# Testing: use staging image
 primus-cli container --image rocm/primus:staging \
   -- benchmark gemm
 
-# 生产：使用 release 镜像
+# Production: use release image
 primus-cli container --image rocm/primus:v1.0.0 \
   -- train pretrain
 ```
 
-### 4. Slurm 作业管理
+### 4. Slurm Job Management
 
 ```bash
-# 交互式开发和调试
+# Interactive dev and debugging
 primus-cli slurm srun -N 1 -- train pretrain --debug
 
-# 生产训练：批处理模式
+# Production training: batch mode
 primus-cli slurm sbatch -N 8 -t 24:00:00 \
   -o logs/train_%j.log \
   -- train pretrain --config production.yaml
 ```
 
-### 5. 日志管理
+### 5. Log Management
 
 ```bash
-# Slurm 自动管理日志
+# Slurm auto-manages logs
 primus-cli slurm sbatch -N 4 \
   -o logs/stdout_%j.log \
   -e logs/stderr_%j.log \
   -- train pretrain
 
-# Container 日志重定向
+# Container log redirect
 primus-cli container -- train pretrain 2>&1 | tee train.log
 ```
 
 ---
 
-## 故障排除
+## Troubleshooting
 
-### 常见问题
+### Common Issues
 
 #### 1. "Unknown or unsupported mode"
 
-**原因**：模式名称错误或脚本文件缺失
+**Cause**: Incorrect mode name or missing script file
 
-**解决**：
+**Solution**:
 ```bash
-# 检查可用模式
+# Check available modes
 ls runner/primus-cli-*.sh
 
-# 确保使用正确的模式名
-primus-cli slurm ...    # ✓ 正确
-primus-cli Slurm ...    # ✗ 错误（大小写）
+# Ensure correct mode name is used
+primus-cli slurm ...    # ✓ Correct
+primus-cli Slurm ...    # ✗ Wrong (case-sensitive)
 ```
 
 #### 2. "Config file not found"
 
-**原因**：配置文件路径错误
+**Cause**: Incorrect config file path
 
-**解决**：
+**Solution**:
 ```bash
-# 使用绝对路径
+# Use absolute path
 primus-cli --config /full/path/to/config.yaml ...
 
-# 或相对于当前目录
+# Or relative to current directory
 primus-cli --config ./configs/dev.yaml ...
 ```
 
-#### 3. Container 启动失败
+#### 3. Container Startup Failure
 
-**原因**：Docker/Podman 未安装或权限不足
+**Cause**: Docker/Podman not installed or insufficient permissions
 
-**解决**：
+**Solution**:
 ```bash
-# 检查容器运行时
+# Check container runtime
 which docker || which podman
 
-# 检查权限
+# Check permissions
 docker ps
 podman ps
 
-# 使用 dry-run 查看命令
+# Use dry-run to view command
 primus-cli --dry-run container -- train pretrain
 ```
 
-#### 4. Slurm 作业提交失败
+#### 4. Slurm Job Submission Failure
 
-**原因**：Slurm 参数错误或资源不足
+**Cause**: Incorrect Slurm parameters or insufficient resources
 
-**解决**：
+**Solution**:
 ```bash
-# 检查可用分区
+# Check available partitions
 sinfo
 
-# 检查队列状态
+# Check queue status
 squeue
 
-# 使用 dry-run 检查命令
+# Use dry-run to check command
 primus-cli --dry-run slurm srun -N 4 -- train pretrain
 ```
 
 #### 5. "Failed to load library"
 
-**原因**：依赖库文件缺失
+**Cause**: Missing library files
 
-**解决**：
+**Solution**:
 ```bash
-# 检查库文件
+# Check library files
 ls runner/lib/
 
-# 确保必要文件存在
+# Ensure necessary files exist
 # - lib/common.sh
 # - lib/config.sh
 ```
 
-### 调试技巧
+### Debugging Tips
 
-#### 启用详细日志
+#### Enable Verbose Logging
 ```bash
-# 方法 1：使用 --debug
+# Method 1: Use --debug
 primus-cli --debug direct -- train pretrain
 
-# 方法 2：设置环境变量
+# Method 2: Set environment variable
 export PRIMUS_LOG_LEVEL=DEBUG
 primus-cli direct -- train pretrain
 ```
 
-#### 使用 Dry-run
+#### Use Dry-run
 ```bash
-# 查看完整命令但不执行
+# View complete command without executing
 primus-cli --dry-run slurm srun -N 4 -- train pretrain
 ```
 
-#### 检查配置加载
+#### Check Config Loading
 ```bash
-# 使用 debug 模式查看加载的配置
+# Use debug mode to view loaded config
 primus-cli --debug --config .primus.yaml direct -- train pretrain
 ```
 
-### 获取帮助
+### Getting Help
 
 ```bash
-# 主入口帮助
+# Main entry help
 primus-cli --help
 
-# 模式特定帮助
+# Mode-specific help
 primus-cli slurm --help
 primus-cli container --help
 primus-cli direct --help
 
-# Primus Python CLI 帮助
+# Primus Python CLI help
 primus-cli direct -- --help
 primus-cli direct -- train --help
 primus-cli direct -- benchmark --help
@@ -953,28 +955,28 @@ primus-cli direct -- benchmark --help
 
 ---
 
-## 参考资源
+## Reference Resources
 
-### 相关文档
-- [README.md](./README.md) - Primus CLI 架构文档
-- [QUICK_REFERENCE.md](./QUICK_REFERENCE.md) - 快速参考指南
-- [.primus.yaml](./.primus.yaml) - 默认配置示例
+### Related Documentation
+- [README.md](./README.md) - Primus CLI architecture documentation
+- [QUICK_REFERENCE.md](./QUICK_REFERENCE.md) - Quick reference guide
+- [.primus.yaml](./.primus.yaml) - Default configuration example
 
-### 退出码约定
+### Exit Code Convention
 
-| 退出码 | 含义 | 示例 |
-|--------|------|------|
-| 0 | 成功 | 正常执行完成 |
-| 1 | 库或依赖失败 | 缺失配置库文件 |
-| 2 | 无效参数或配置 | 配置文件不存在 |
-| 3 | 运行时执行失败 | 训练过程失败 |
+| Exit Code | Meaning | Example |
+|-----------|---------|---------|
+| 0 | Success | Normal execution completed |
+| 1 | Library or dependency failure | Missing config library file |
+| 2 | Invalid argument or config | Config file doesn't exist |
+| 3 | Runtime execution failure | Training process failed |
 
 ---
 
-## 版本信息
+## Version Information
 
-- **当前版本**：1.0.0
-- **最后更新**：2025-11-10
+- **Current Version**: 1.0.0
+- **Last Updated**: 2025-11-10
 
 ---
 
