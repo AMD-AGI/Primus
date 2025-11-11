@@ -45,7 +45,7 @@
 
 ```bash
 # 就这么简单！
-primus-cli train pretrain --config deepseek_v2.yaml
+primus-cli direct -- train pretrain --config deepseek_v2.yaml
 ```
 
 ### 🏗️ 三层架构设计
