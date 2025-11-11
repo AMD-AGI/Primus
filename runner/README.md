@@ -68,9 +68,9 @@ Primus CLI adopts a clear **three-layer structure + plugin system**:
 └──────────────────┬──────────────────────────┘
                    │
 ┌──────────────────▼──────────────────────────┐
-│         Command Layer                       │
+│      Task Execution Layer                   │
 │  train | benchmark | preflight | analyze   │
-│       Unified command entry and arg parsing │
+│    Plugin-based business logic and tasks    │
 └─────────────────────────────────────────────┘
 ```
 
@@ -147,33 +147,33 @@ This is especially useful when you need to quickly apply temporary fixes or make
 
 ---
 
-### 🧩 Layer 3: Plugin-Based Command System
+### 🧩 Layer 3: Task Execution Layer
 
-Remember we said "zero-intrusion extension"? How is this achieved?
+This layer is responsible for executing specific business logic—training, testing, environment checks, and other actual tasks. Remember we said "zero-intrusion extension"? How is this achieved?
 
 ```bash
-# Training command
+# Training task
 primus-cli direct -- train pretrain --config deepseek_v2.yaml
 
-# Performance testing
+# Performance testing task
 primus-cli direct -- benchmark gemm --dtype bf16 -M 8192
 
-# Environment check
+# Environment check task
 primus-cli direct -- preflight check --gpu --network
 ```
 
-Each subcommand is an independent Python module, auto-registered via decorators:
+Each task is an independent Python plugin module, auto-registered via decorators:
 
 ```python
 from primus.cli.registry import register_subcommand
 
 @register_subcommand("train")
 def run_train(args, unknown_args):
-    # Your training logic
+    # Your training business logic
     ...
 ```
 
-**Want to add a new feature?** Just create a new file in `primus/cli/subcommands/` without modifying any core code. For example, if you want to add a topology analysis command:
+**Want to add a new task?** Just create a new plugin file in `primus/cli/subcommands/` without modifying any core code. For example, if you want to add a topology analysis task:
 
 ```bash
 # Add file: primus/cli/subcommands/analyze.py
@@ -181,7 +181,7 @@ def run_train(args, unknown_args):
 primus-cli direct -- analyze topology --visualize
 ```
 
-This design allows Primus CLI to quickly respond to new requirements while keeping the core stable as functionality expands.
+This plugin-based design allows Primus CLI to quickly respond to new requirements while keeping the core stable as functionality expands.
 
 ---
 

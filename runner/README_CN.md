@@ -68,9 +68,9 @@ Primus CLI 采用清晰的**三层结构 + 插件化体系**：
 └──────────────────┬──────────────────────────┘
                    │
 ┌──────────────────▼──────────────────────────┐
-│         Command Layer (命令层)              │
+│    Task Execution Layer (任务执行层)        │
 │  train | benchmark | preflight | analyze   │
-│       统一的命令入口和参数解析                │
+│       插件化的业务逻辑和任务执行              │
 └─────────────────────────────────────────────┘
 ```
 
@@ -147,33 +147,33 @@ primus-cli direct --patch fixes/workaround_rccl.sh \
 
 ---
 
-### 🧩 第三层：插件化命令系统
+### 🧩 第三层：任务执行层
 
-还记得我们说要"零侵入扩展"吗？这是怎么做到的？
+这一层负责执行具体的业务逻辑——训练、测试、环境检查等实际任务。还记得我们说要"零侵入扩展"吗？这是怎么做到的？
 
 ```bash
-# 训练命令
+# 训练任务
 primus-cli direct -- train pretrain --config deepseek_v2.yaml
 
-# 性能测试
+# 性能测试任务
 primus-cli direct -- benchmark gemm --dtype bf16 -M 8192
 
-# 环境检查
+# 环境检查任务
 primus-cli direct -- preflight check --gpu --network
 ```
 
-每个子命令都是一个独立的 Python 模块，通过装饰器自动注册：
+每个任务都是一个独立的 Python 插件模块，通过装饰器自动注册：
 
 ```python
 from primus.cli.registry import register_subcommand
 
 @register_subcommand("train")
 def run_train(args, unknown_args):
-    # 你的训练逻辑
+    # 你的训练业务逻辑
     ...
 ```
 
-**想添加新功能？** 只需要在 `primus/cli/subcommands/` 目录下创建一个新文件，无需修改任何核心代码。比如你想添加一个拓扑分析命令：
+**想添加新任务？** 只需要在 `primus/cli/subcommands/` 目录下创建一个新插件文件，无需修改任何核心代码。比如你想添加一个拓扑分析任务：
 
 ```bash
 # 新增文件: primus/cli/subcommands/analyze.py
@@ -181,7 +181,7 @@ def run_train(args, unknown_args):
 primus-cli direct -- analyze topology --visualize
 ```
 
-这种设计让 Primus CLI 能够快速响应新需求，保持核心稳定的同时不断扩展功能。
+这种插件化设计让 Primus CLI 能够快速响应新需求，保持核心稳定的同时不断扩展功能。
 
 ---
 
