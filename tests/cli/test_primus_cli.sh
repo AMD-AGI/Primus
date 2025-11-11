@@ -140,11 +140,11 @@ test_debug_mode() {
     export NODE_RANK=0
     output=$(bash "$PROJECT_ROOT/runner/primus-cli" --debug direct --help 2>&1)
 
-    # Debug mode enables bash trace (set -x), which shows + prefix
-    if echo "$output" | grep -qE "(\+|DEBUG)"; then
+    # Debug mode sets PRIMUS_LOG_LEVEL=DEBUG and shows debug messages
+    if echo "$output" | grep -qE "(DEBUG|Debug mode enabled)"; then
         assert_pass "Debug mode enables verbose output"
     else
-        assert_fail "Debug mode enables verbose output"
+        assert_fail "Debug mode enables verbose output" "Expected DEBUG output but got: $output"
     fi
 }
 
@@ -280,15 +280,16 @@ main:
   dry_run: true
 EOF
 
-    # CLI should override config (--dry-run without debug should only show DRY-RUN, not debug output)
+    # Config should apply when not overridden by CLI
     local output
+    export NODE_RANK=0
     output=$(bash "$PROJECT_ROOT/runner/primus-cli" --config "$test_config" direct --help 2>&1)
 
-    # With config debug=true, should see debug output
-    if echo "$output" | grep -qE "(\+|DEBUG|set -x)"; then
+    # With config debug=true, should see DEBUG output or "Debug mode enabled"
+    if echo "$output" | grep -qE "(DEBUG|Debug mode enabled)"; then
         assert_pass "Config debug mode applies when not overridden by CLI"
     else
-        assert_fail "Config debug mode applies when not overridden by CLI"
+        assert_fail "Config debug mode applies when not overridden by CLI" "Expected DEBUG output"
     fi
 
     rm -f "$test_config"
@@ -340,6 +341,35 @@ test_default_config() {
 }
 
 # ============================================================================
+# Test 17: Missing mode before separator
+# ============================================================================
+test_missing_mode_before_separator() {
+    print_section "Test 17: Missing Mode Before Separator"
+
+    # Test that '--' without mode is caught
+    local output
+    output=$(bash "$PROJECT_ROOT/runner/primus-cli" -- train pretrain 2>&1)
+
+    assert_contains "$output" "Missing <mode> argument before '--'" "Detects missing mode before separator"
+}
+
+# ============================================================================
+# Test 18: Nested command structure
+# ============================================================================
+test_nested_command_structure() {
+    print_section "Test 18: Nested Command Structure"
+
+    # Test nested command with multiple '--' separators in dry-run
+    local output
+    output=$(bash "$PROJECT_ROOT/runner/primus-cli" --dry-run slurm -N 1 -- container --debug -- train pretrain 2>&1)
+
+    assert_contains "$output" "Primus CLI Dry-Run Summary" "Handles nested command structure"
+    assert_contains "$output" "slurm" "Shows slurm mode"
+    assert_contains "$output" "container --debug" "Shows nested container mode"
+    assert_contains "$output" "train pretrain" "Shows final Primus command"
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 main() {
@@ -363,6 +393,8 @@ main() {
     test_config_priority
     test_invalid_config_format
     test_default_config
+    test_missing_mode_before_separator
+    test_nested_command_structure
 
     # Print summary
     echo ""
