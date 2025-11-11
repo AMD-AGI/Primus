@@ -10,18 +10,24 @@ cat << EOF
 Primus Direct Launcher
 
 Usage:
-    primus-cli direct [--env KEY=VALUE ...] [--single] [--script <file.py>] [-- primus-args]
+    primus-cli direct [--env KEY=VALUE ...] [--single] [--script <file.py>] [--patch <file>] [-- primus-args]
 
 Description:
     Launch Primus training, benchmarking, or preflight directly on the host (or inside a container).
     Distributed settings can be controlled by either exporting environment variables in advance,
     or by specifying them inline using --env KEY=VALUE.
 
+    This script automatically detects your GPU model (e.g., MI300X, MI250X) and loads GPU-specific
+    environment variable optimizations from runner/helpers/envs/<GPU_MODEL>.sh for best performance.
+
 Options:
     --single             Run with python3 instead of torchrun (single process only)
     --script <file.py>   Python script to execute (default: primus/cli/main.py)
     --env KEY=VALUE      Set environment variable before execution
+    --patch <file>       Apply a patch script before execution (can specify multiple times)
     --log_file PATH      Save log to a specific file (default: logs/log_TIMESTAMP.txt)
+    --numa               Force enable NUMA binding for processes
+    --no-numa            Force disable NUMA binding for processes
 
 Distributed Environment Variables:
     NNODES        Number of nodes participating in distributed run        [default: 1]
@@ -60,12 +66,23 @@ Examples:
     # Run a custom script with torchrun
       primus-cli direct --script examples/run_distributed.py -- --config conf.yaml
 
+    # Apply patch scripts before execution
+      primus-cli direct --patch patches/fix_env.sh --patch patches/setup.py -- train pretrain --config exp.yaml
+
+    # Force enable NUMA binding for better performance
+      primus-cli direct --numa -- benchmark gemm -M 8192 -N 8192 -K 8192
+
 Notes:
     - If --single is specified, Primus skips torchrun and uses python3 directly.
     - If --script is not specified, defaults to primus/cli/main.py.
     - Always separate Primus arguments from launcher options using '--'.
     - Environment variables can be mixed: 'export' takes precedence unless overridden by '--env'.
     - Multi-node jobs require MASTER_ADDR set to the master node's hostname/IP.
+    - Patch scripts are executed in order before running the main script (useful for env setup, hot fixes, etc.).
+    - NUMA binding is auto-disabled by default; use --numa to enable for better memory locality.
+    - GPU-specific optimizations: The script automatically sources primus-env.sh, which detects your
+      GPU model and loads optimized environment variables from runner/helpers/envs/<GPU_MODEL>.sh
+      (e.g., MI300X.sh, MI250X.sh). If no GPU-specific config is found, it uses base_env.sh only.
 
 EOF
 }
@@ -89,7 +106,7 @@ source "$RUNNER_DIR/lib/common.sh" || {
 # Load config library (required)
 # shellcheck disable=SC1091
 source "$RUNNER_DIR/lib/config.sh" || {
-    LOG_ERROR "[entrypoint] Failed to load config library: $RUNNER_DIR/lib/config.sh"
+    LOG_ERROR "[direct] Failed to load config library: $RUNNER_DIR/lib/config.sh"
     exit 1
 }
 
@@ -147,7 +164,7 @@ while [[ $# -gt 0 ]]; do
                 primus_env_kv+=("${2}")
                 shift 2
             else
-                LOG_ERROR "[entrypoint] --env requires KEY=VALUE"
+                LOG_ERROR "[direct] --env requires KEY=VALUE"
                 exit 2
             fi
             ;;
@@ -196,7 +213,7 @@ mkdir -p "$(dirname "$log_file")"
 # Step 1: Load configuration and apply mode-specific settings
 # Load configuration (specified or defaults)
 load_config_auto "$CONFIG_FILE" "entrypoint" || {
-    LOG_ERROR "[entrypoint] Configuration loading failed"
+    LOG_ERROR "[direct] Configuration loading failed"
     exit 1
 }
 
@@ -210,7 +227,7 @@ extract_config_section "direct" direct_config || true
 # Enable debug mode if set
 if [[ "$DEBUG_MODE" == "1" ]]; then
     export PRIMUS_LOG_LEVEL="DEBUG"
-    LOG_INFO "[entrypoint] Debug mode enabled (PRIMUS_LOG_LEVEL=DEBUG)"
+    LOG_INFO "[direct] Debug mode enabled (PRIMUS_LOG_LEVEL=DEBUG)"
     print_config_section "direct" direct_config
 fi
 
@@ -255,24 +272,24 @@ source "${RUNNER_DIR}/helpers/execute_patches.sh"
 # Export environment variables passed via --env
 for kv in "${primus_env_kv[@]}"; do
     export "${kv%%=*}"="${kv#*=}"
-    LOG_INFO_RANK0 "[entrypoint] Exported env: ${kv%%=*}=${kv#*=}"
+    LOG_INFO_RANK0 "[direct] Exported env: ${kv%%=*}=${kv#*=}"
 done
 
 # Step 2: Auto-run hooks based on $1 $2 (e.g., train pretrain → hooks/train/pretrain/*)
 if [[ $# -ge 2 ]]; then
     if ! execute_hooks "$1" "$2" "${primus_args[@]}"; then
-        LOG_ERROR "[entrypoint] Hooks execution failed"
+        LOG_ERROR "[direct] Hooks execution failed"
         exit 1
     fi
 else
-    LOG_INFO_RANK0 "[entrypoint] No hook target detected (missing \$1 \$2)."
+    LOG_INFO_RANK0 "[direct] No hook target detected (missing \$1 \$2)."
 fi
 
 
 # Step 3: Run patch scripts if specified
 if [[ ${#patch_scripts[@]} -gt 0 ]]; then
     if ! execute_patches "${patch_scripts[@]}"; then
-        LOG_ERROR "[entrypoint] Patch execution failed"
+        LOG_ERROR "[direct] Patch execution failed"
         exit 1
     fi
 fi
@@ -286,10 +303,10 @@ fi
 if [[ "$run_mode" == "single" ]]; then
     if [[ "$enable_numa" == "1" ]]; then
         CMD="bash ${RUNNER_DIR}/helpers/numa_bind.sh python3 $script_path $*"
-        LOG_INFO "[entrypoint] Launching single-process script with NUMA binding:"
+        LOG_INFO "[direct] Launching single-process script with NUMA binding:"
     else
         CMD="python3 $script_path $*"
-        LOG_INFO "[entrypoint] Launching single-process script:"
+        LOG_INFO "[direct] Launching single-process script:"
     fi
 else
     # NOTE: These variables use environment variables from config file (via primus-cli --config)
@@ -327,16 +344,27 @@ else
     NUMA_LAUNCHER_ARGS=()
     if [[ "$enable_numa" == "1" ]]; then
         NUMA_LAUNCHER_ARGS=(--no-python "${RUNNER_DIR}/helpers/numa_bind.sh" python3)
-        LOG_INFO_RANK0 "[entrypoint] NUMA binding: ENABLED (forced by CLI)"
+        LOG_INFO_RANK0 "[direct] NUMA binding: ENABLED (forced by CLI)"
     elif [[ "$enable_numa" == "0" ]]; then
-        LOG_INFO_RANK0 "[entrypoint] NUMA binding: DISABLED (forced by CLI)"
+        LOG_INFO_RANK0 "[direct] NUMA binding: DISABLED (forced by CLI)"
     else
-        LOG_INFO_RANK0 "[entrypoint] NUMA binding: AUTO (default OFF)"
+        LOG_INFO_RANK0 "[direct] NUMA binding: AUTO (default OFF)"
+    fi
+
+    if [[ "$DEBUG_MODE" == "1" ]]; then
+        print_section "Primus Entrypoint Summary"
+        LOG_INFO_RANK0 "  Run Mode     : $run_mode"
+        LOG_INFO_RANK0 "  Script Path  : $script_path"
+        LOG_INFO_RANK0 "  Config File  : ${CONFIG_FILE:-<none>}"
+        LOG_INFO_RANK0 "  Log File     : $log_file"
+        LOG_INFO_RANK0 "  NUMA Binding : $enable_numa"
+        LOG_INFO_RANK0 "  Patches      : ${patch_scripts[*]:-<none>}"
+        LOG_INFO_RANK0 "  Env Vars     : ${primus_env_kv[*]:-<none>}"
     fi
 
     # Step 4: Build the final command.
     CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS} ${NUMA_LAUNCHER_ARGS[*]}  $script_path $* "
-    LOG_INFO "[entrypoint] Launching distributed training with command: $CMD 2>&1 | tee $log_file"
+    LOG_INFO "[direct] Launching distributed training with command: $CMD 2>&1 | tee $log_file"
 fi
 
 eval "$CMD" 2>&1 | tee "$log_file"
@@ -344,11 +372,11 @@ exit_code=${PIPESTATUS[0]}
 
 # Print log based on exit code
 if [[ $exit_code -ge 128 ]]; then
-    LOG_ERROR "[entrypoint] torchrun crashed due to signal $((exit_code - 128))"
+    LOG_ERROR "[direct] torchrun crashed due to signal $((exit_code - 128))"
 elif [[ $exit_code -ne 0 ]]; then
-    LOG_ERROR "[entrypoint] torchrun exited with code $exit_code"
+    LOG_ERROR "[direct] torchrun exited with code $exit_code"
 else
-    LOG_INFO "[entrypoint] torchrun finished successfully (code 0)"
+    LOG_INFO "[direct] torchrun finished successfully (code 0)"
 fi
 
 exit "$exit_code"
