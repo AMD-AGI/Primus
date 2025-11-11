@@ -272,12 +272,12 @@ test_config_file_not_found() {
 test_config_priority() {
     print_section "Test 14: Config Priority (CLI overrides Config)"
 
-    # Create a test config file with debug=true
+    # Create a test config file with debug=true (without dry_run to see actual debug output)
     local test_config="/tmp/test-primus-cli-priority-$$.yaml"
     cat > "$test_config" << 'EOF'
 main:
   debug: true
-  dry_run: true
+  dry_run: false
 EOF
 
     # Config should apply when not overridden by CLI
@@ -285,11 +285,11 @@ EOF
     export NODE_RANK=0
     output=$(bash "$PROJECT_ROOT/runner/primus-cli" --config "$test_config" direct --help 2>&1)
 
-    # With config debug=true, should see DEBUG output or "Debug mode enabled"
-    if echo "$output" | grep -qE "(DEBUG|Debug mode enabled)"; then
+    # With config debug=true, should see --debug flag in the "Executing" line
+    if echo "$output" | grep -qF -- "--debug"; then
         assert_pass "Config debug mode applies when not overridden by CLI"
     else
-        assert_fail "Config debug mode applies when not overridden by CLI" "Expected DEBUG output"
+        assert_fail "Config debug mode applies when not overridden by CLI" "Expected --debug flag in execution command"
     fi
 
     rm -f "$test_config"
