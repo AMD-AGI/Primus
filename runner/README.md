@@ -85,45 +85,7 @@ Primus CLI 采用清晰的**三层结构 + 插件化体系**：
 
 ## 🔍 深入了解：架构剖析
 
-### 🧩 第一层：插件化命令系统
-
-还记得我们说要"零侵入扩展"吗？这是怎么做到的？
-
-```bash
-# 训练命令
-primus-cli train pretrain --config deepseek_v2.yaml
-
-# 性能测试
-primus-cli benchmark gemm --dtype bf16 -M 8192
-
-# 环境检查
-primus-cli preflight check --gpu --network
-```
-
-每个子命令都是一个独立的 Python 模块，通过装饰器自动注册：
-
-```python
-from primus.cli.registry import register_subcommand
-
-@register_subcommand("train")
-def run_train(args, unknown_args):
-    # 你的训练逻辑
-    ...
-```
-
-**想添加新功能？** 只需要在 `primus/cli/subcommands/` 目录下创建一个新文件，无需修改任何核心代码。比如你想添加一个拓扑分析命令：
-
-```bash
-# 新增文件: primus/cli/subcommands/analyze.py
-# 就能直接使用
-primus-cli analyze topology --visualize
-```
-
-这种设计让 Primus CLI 能够快速响应新需求，保持核心稳定的同时不断扩展功能。
-
----
-
-### ⚙️ 第二层：智能运行时抽象
+### ⚙️ 第一层：智能运行时抽象
 
 不同的场景需要不同的运行环境，但用户不应该关心这些细节。Primus CLI 提供了三种无缝切换的运行模式：
 
@@ -150,7 +112,7 @@ primus-cli slurm srun -N 8 -- benchmark gemm -M 4096
 
 ---
 
-### 🔁 第三层：Hook 与 Patch 系统
+### 🔁 第二层：Hook 与 Patch 系统
 
 训练不只是运行一个 Python 脚本那么简单。你可能需要：
 - 🗂️ 在训练前预处理数据集
@@ -180,6 +142,44 @@ primus-cli direct --patch fixes/workaround_rccl.sh \
 ```
 
 这在你需要快速应用临时修复、或针对特定环境做调整时特别有用。
+
+---
+
+### 🧩 第三层：插件化命令系统
+
+还记得我们说要"零侵入扩展"吗？这是怎么做到的？
+
+```bash
+# 训练命令
+primus-cli direct -- train pretrain --config deepseek_v2.yaml
+
+# 性能测试
+primus-cli direct -- benchmark gemm --dtype bf16 -M 8192
+
+# 环境检查
+primus-cli direct -- preflight check --gpu --network
+```
+
+每个子命令都是一个独立的 Python 模块，通过装饰器自动注册：
+
+```python
+from primus.cli.registry import register_subcommand
+
+@register_subcommand("train")
+def run_train(args, unknown_args):
+    # 你的训练逻辑
+    ...
+```
+
+**想添加新功能？** 只需要在 `primus/cli/subcommands/` 目录下创建一个新文件，无需修改任何核心代码。比如你想添加一个拓扑分析命令：
+
+```bash
+# 新增文件: primus/cli/subcommands/analyze.py
+# 就能直接使用
+primus-cli direct -- analyze topology --visualize
+```
+
+这种设计让 Primus CLI 能够快速响应新需求，保持核心稳定的同时不断扩展功能。
 
 ---
 
