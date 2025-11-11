@@ -202,26 +202,27 @@ EOF
 }
 
 # ============================================================================
-# Test 4: YAML array handling
+# Test 4: YAML array handling (newline-separated values)
 # ============================================================================
 test_yaml_array_handling() {
-    print_section "Test 4: YAML Array Handling"
+    print_section "Test 4: YAML Array Handling (Newline-Separated)"
 
     local test_yaml="/tmp/test-array-$$.yaml"
     cat > "$test_yaml" << 'EOF'
 container:
-  mounts:
-    - "/data:/data"
-    - "/models:/models"
-    - "/output:/output"
+  options:
+    mounts:
+      - "/data:/data"
+      - "/models:/models"
+      - "/output:/output"
+    devices:
+      - "/dev/kfd"
+      - "/dev/dri"
 
 direct:
   patches:
     - "/opt/patch1.sh"
     - "/opt/patch2.sh"
-  env:
-    - "KEY1=value1"
-    - "KEY2=value2"
 EOF
 
     if load_yaml_config "$test_yaml" 2>/dev/null; then
@@ -230,22 +231,48 @@ EOF
         assert_fail "YAML with arrays loads successfully"
     fi
 
-    # Check if array values were loaded
-    local mount1
-    mount1=$(get_config "container.mounts.0" 2>/dev/null)
-    assert_equals "/data:/data" "$mount1" "First mount array element loaded"
+    # Arrays are now stored as newline-separated strings
+    local mounts
+    mounts=$(get_config "container.options.mounts" 2>/dev/null)
 
-    local mount2
-    mount2=$(get_config "container.mounts.1" 2>/dev/null)
-    assert_equals "/models:/models" "$mount2" "Second mount array element loaded"
+    # Check if mounts contains the expected values
+    if echo "$mounts" | grep -qF "/data:/data"; then
+        assert_pass "Mounts array contains /data:/data"
+    else
+        assert_fail "Mounts array contains /data:/data"
+    fi
 
-    local patch1
-    patch1=$(get_config "direct.patches.0" 2>/dev/null)
-    assert_equals "/opt/patch1.sh" "$patch1" "First patches array element loaded"
+    if echo "$mounts" | grep -qF "/models:/models"; then
+        assert_pass "Mounts array contains /models:/models"
+    else
+        assert_fail "Mounts array contains /models:/models"
+    fi
 
-    local env1
-    env1=$(get_config "direct.env.0" 2>/dev/null)
-    assert_equals "KEY1=value1" "$env1" "First env array element loaded"
+    # Check devices array
+    local devices
+    devices=$(get_config "container.options.devices" 2>/dev/null)
+
+    if echo "$devices" | grep -qF "/dev/kfd"; then
+        assert_pass "Devices array contains /dev/kfd"
+    else
+        assert_fail "Devices array contains /dev/kfd"
+    fi
+
+    # Check patches array
+    local patches
+    patches=$(get_config "direct.patches" 2>/dev/null)
+
+    if echo "$patches" | grep -qF "/opt/patch1.sh"; then
+        assert_pass "Patches array contains /opt/patch1.sh"
+    else
+        assert_fail "Patches array contains /opt/patch1.sh"
+    fi
+
+    if echo "$patches" | grep -qF "/opt/patch2.sh"; then
+        assert_pass "Patches array contains /opt/patch2.sh"
+    else
+        assert_fail "Patches array contains /opt/patch2.sh"
+    fi
 
     rm -f "$test_yaml"
 }
@@ -439,10 +466,53 @@ EOF
 }
 
 # ============================================================================
-# Test 9: YAML special characters and edge cases
+# Test 9: YAML empty arrays
+# ============================================================================
+test_yaml_empty_arrays() {
+    print_section "Test 9: YAML Empty Arrays"
+
+    local test_yaml="/tmp/test-empty-array-$$.yaml"
+    cat > "$test_yaml" << 'EOF'
+container:
+  options:
+    mounts: []
+    devices:
+      - "/dev/kfd"
+    capabilities: []
+EOF
+
+    if load_yaml_config "$test_yaml" 2>/dev/null; then
+        assert_pass "YAML with empty arrays loads successfully"
+    else
+        assert_fail "YAML with empty arrays loads successfully"
+    fi
+
+    # Check empty array is represented as "[]"
+    local empty_mounts
+    empty_mounts=$(get_config "container.options.mounts" 2>/dev/null)
+    assert_equals "[]" "$empty_mounts" "Empty mounts array stored as []"
+
+    local empty_caps
+    empty_caps=$(get_config "container.options.capabilities" 2>/dev/null)
+    assert_equals "[]" "$empty_caps" "Empty capabilities array stored as []"
+
+    # Check non-empty array works normally
+    local devices
+    devices=$(get_config "container.options.devices" 2>/dev/null)
+    if echo "$devices" | grep -qF "/dev/kfd"; then
+        assert_pass "Non-empty devices array contains expected value"
+    else
+        assert_fail "Non-empty devices array contains expected value"
+    fi
+
+    rm -f "$test_yaml"
+}
+
+# ============================================================================
+# Test 10: YAML special characters and edge cases
 # ============================================================================
 test_yaml_edge_cases() {
-    print_section "Test 9: YAML Special Characters and Edge Cases"
+    print_section "Test 10: YAML Special Characters and Edge Cases"
 
     local test_yaml="/tmp/test-edge-$$.yaml"
     cat > "$test_yaml" << 'EOF'
@@ -503,6 +573,7 @@ main() {
     test_config_priority
     test_nested_config_keys
     test_extract_config_section
+    test_yaml_empty_arrays
     test_yaml_edge_cases
 
     # Print summary

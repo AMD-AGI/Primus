@@ -159,7 +159,7 @@ load_yaml_config() {
             continue
         fi
 
-        # Parse array item (e.g., "    - /data:/data")
+        # Parse array item (e.g., "    - /data:/data" or "      - /dev/kfd")
         if [[ "$line" =~ ^[[:space:]]+\-[[:space:]]+(.+)$ ]]; then
             local value="${BASH_REMATCH[1]}"
 
@@ -170,23 +170,43 @@ load_yaml_config() {
             value="${value#\'}"
 
             if [[ -n "$current_section" ]]; then
-                if [[ -n "$current_subsection" ]]; then
-                    local config_key="${current_section}.${current_subsection}.${array_index}"
-                    PRIMUS_CONFIG[$config_key]="$value"
-                    LOG_DEBUG_RANK0 "  $config_key = $value"
+                if [[ -n "$current_subsection" ]] && [[ -n "$current_array_key" ]]; then
+                    # Nested array under subsection (e.g., container.options.devices)
+                    local config_key="${current_section}.${current_subsection}.${current_array_key}"
+                    if [[ -z "${PRIMUS_CONFIG[$config_key]:-}" ]]; then
+                        PRIMUS_CONFIG[$config_key]="$value"
+                    else
+                        PRIMUS_CONFIG[$config_key]+=$'\n'"$value"
+                    fi
+                    LOG_DEBUG_RANK0 "  $config_key += $value"
+                    ((array_index++))
+                elif [[ -n "$current_subsection" ]]; then
+                    # Array directly under subsection
+                    local config_key="${current_section}.${current_subsection}"
+                    if [[ -z "${PRIMUS_CONFIG[$config_key]:-}" ]]; then
+                        PRIMUS_CONFIG[$config_key]="$value"
+                    else
+                        PRIMUS_CONFIG[$config_key]+=$'\n'"$value"
+                    fi
+                    LOG_DEBUG_RANK0 "  $config_key += $value"
                     ((array_index++))
                 elif [[ -n "$current_array_key" ]]; then
-                    local config_key="${current_section}.${current_array_key}.${array_index}"
-                    PRIMUS_CONFIG[$config_key]="$value"
-                    LOG_DEBUG_RANK0 "  $config_key = $value"
+                    # Array directly under section
+                    local config_key="${current_section}.${current_array_key}"
+                    if [[ -z "${PRIMUS_CONFIG[$config_key]:-}" ]]; then
+                        PRIMUS_CONFIG[$config_key]="$value"
+                    else
+                        PRIMUS_CONFIG[$config_key]+=$'\n'"$value"
+                    fi
+                    LOG_DEBUG_RANK0 "  $config_key += $value"
                     ((array_index++))
                 fi
             fi
             continue
         fi
 
-        # Parse nested key-value with 4 spaces (e.g., "    cpus: 16")
-        if [[ "$line" =~ ^[[:space:]]{4}([a-z_-]+):[[:space:]]*(.+)$ ]]; then
+        # Parse nested key-value with 4 spaces (e.g., "    cpus: 16" or "    devices:")
+        if [[ "$line" =~ ^[[:space:]]{4}([a-z_-]+):[[:space:]]*(.*)$ ]]; then
             local key="${BASH_REMATCH[1]}"
             local value="${BASH_REMATCH[2]}"
 
@@ -197,9 +217,23 @@ load_yaml_config() {
             value="${value#\'}"
 
             if [[ -n "$current_section" ]] && [[ -n "$current_subsection" ]]; then
-                local config_key="${current_section}.${current_subsection}.${key}"
-                PRIMUS_CONFIG[$config_key]="$value"
-                LOG_DEBUG_RANK0 "  $config_key = $value"
+                # If value is empty, this is an array key (e.g., "devices:")
+                if [[ -z "$value" || "$value" == "[]" ]]; then
+                    current_array_key="$key"
+                    array_index=0
+                    LOG_DEBUG_RANK0 "Found array key: $current_section.$current_subsection.$current_array_key (line $line_count)"
+                    if [[ "$value" == "[]" ]]; then
+                        local config_key="${current_section}.${current_subsection}.${key}"
+                        PRIMUS_CONFIG[$config_key]="$value"
+                        LOG_DEBUG_RANK0 "  $config_key = $value"
+                    fi
+                else
+                    # Regular key-value pair
+                    current_array_key=""
+                    local config_key="${current_section}.${current_subsection}.${key}"
+                    PRIMUS_CONFIG[$config_key]="$value"
+                    LOG_DEBUG_RANK0 "  $config_key = $value"
+                fi
             fi
             continue
         fi
@@ -378,4 +412,4 @@ export -f print_config_section
 export -f load_yaml_config load_config load_config_auto
 export -f get_config set_config
 
-LOG_INFO_RANK0 "Primus config library loaded successfully"
+LOG_DEBUG_RANK0 "Primus config library loaded successfully"
