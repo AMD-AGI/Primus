@@ -15,6 +15,12 @@ modules:
       wandb_project: "Primus_DeepSeek_Pretrain"
       stderr_sink_level: DEBUG
 
+      profile: true
+      use_pytorch_profiler: true
+      profile_step_end: 7
+      profile_step_start: 6
+      profile_ranks: [0, 31]
+
       # debug
       moe_router_force_load_balancing: true
       log_avg_skip_iterations: 2
@@ -85,6 +91,22 @@ modules:
       enable_primus_turbo: true
       use_turbo_attention: true
       use_turbo_grouped_mlp: true
+
+      # # deepep
+      use_turbo_deepep: true
+
+      # 64 or 80 for ep8, 32 for ep16-64 is best practice
+      turbo_deepep_num_cu: 32
+      turbo_deepep_use_comm_stream: false
+
+      # sync-free moe support stage 1-2, 0 means not use sync-free moe
+      # stage 2 is recommended for better performance
+      turbo_sync_free_moe_stage: 2
+
+      overlap_moe_expert_parallel_comm: true
+      delay_wgrad_compute: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
 
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"

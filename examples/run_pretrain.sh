@@ -80,8 +80,17 @@ export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 
 LOG_INFO_RANK0 "Pip installing required packages ..."
+
+sudo apt update && sudo apt install rdma-core libibverbs-dev ibverbs-utils -y
+sudo apt-get install libopenmpi-dev openmpi-bin -y
 pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
 
+pip uninstall primus_turbo -y
+pip install -qq hip-python --extra-index-url https://test.pypi.org/simple
+# pip install "${PRIMUS_PATH}"/third_party/primus_turbo-0.1.1+0385cdd-cp310-cp310-linux_x86_64.whl
+pip install "${PRIMUS_PATH}"/third_party/primus_turbo-0.1.1+851e4af-cp310-cp310-linux_x86_64.whl
+
+# exporty AITER_JIT_DIR="${PRIMUS_PATH}"/aiter_aiter_cache
 # -------------------- EXP Check --------------------
 if [ -z "${EXP:-}" ]; then
     LOG_ERROR "EXP must be specified (e.g., examples/megatron/exp_pretrain.yaml)." \
@@ -206,10 +215,10 @@ LOG_INFO_RANK0 ""
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 
 # Increase HSA kernarg pool size to 12MB for models with lot of kernels
-# export HSA_KERNARG_POOL_SIZE=${HSA_KERNARG_POOL_SIZE:-12582912}
+export HSA_KERNARG_POOL_SIZE=${HSA_KERNARG_POOL_SIZE:-12582912}
 
 # Enable NUMA binding for better memory locality (may increase stability for large models)
-export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-0}
+export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-1}
 
 # Limit max CUDA device connections to reduce PCIe traffic
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
@@ -430,6 +439,7 @@ if [[ "$ENABLE_NUMA_BINDING" == "1" ]]; then
 fi
 
 CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS ${NUMA_LAUNCHER} primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
+# CMD="torchrun --nproc_per_node 1 --nnodes "${NNODES}" --node_rank "${NODE_RANK}" --master_addr "${MASTER_ADDR}" --master_port "${MASTER_PORT}"  ../Primus-Turbo/benchmark/ops/deep_ep/bench_internode.py"
 
 LOG_INFO "Launching distributed training with command: $CMD"
 

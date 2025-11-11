@@ -103,7 +103,7 @@ class GroupedLinearWithWeightGradientStore(torch.autograd.Function):
     ):
         if wgrad_gemm_backend_func is None:
             wgrad_gemm_backend_func = group_gemm_backend_func
-        ctx.weight_main_grad = weight.main_grad
+        # ctx.weight_main_grad = weight.main_grad
         ctx.weight_shape_ori = weight.shape
         ctx.group_gemm_backend_func = group_gemm_backend_func
         ctx.wgrad_gemm_backend_func = wgrad_gemm_backend_func
@@ -129,7 +129,7 @@ class GroupedLinearWithWeightGradientStore(torch.autograd.Function):
     def backward(ctx, grad_output):
         input, weight, group_lens, group_offs = ctx.saved_tensors
         group_gemm_backend_func = ctx.group_gemm_backend_func
-        weight.main_grad = ctx.weight_main_grad
+        # weight.main_grad = ctx.weight_main_grad
         grad_a = group_gemm_backend_func(
             grad_output,
             weight,
@@ -154,8 +154,8 @@ class GroupedLinearWithWeightGradientStore(torch.autograd.Function):
                 trans_b=False,
             )
             _wgrad = _wgrad.view(_weight_shape_ori)
-            with torch.no_grad():
-                _weight.main_grad.add_(_wgrad)
+            # with torch.no_grad():
+            #     _weight.main_grad.add_(_wgrad)
 
         WeightGradStore.put(
             weight,
