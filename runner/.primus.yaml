@@ -46,6 +46,9 @@ container:
       - "/dev/infiniband"
 
     # Capabilities (each passed as --cap-add)
+    # NOTE: Do not modify these capabilities - they are required for proper container operation
+    #   SYS_PTRACE     - Required for debugging and profiling tools
+    #   CAP_SYS_ADMIN  - Required for system administration operations
     capabilities:
       - "SYS_PTRACE"
       - "CAP_SYS_ADMIN"

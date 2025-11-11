@@ -171,20 +171,62 @@ for key in "${!container_config[@]}"; do
 done
 
 # 4. Generic options (options.*)
+# Handle array options (devices, capabilities, mounts) - stored as newline-separated strings
+if [[ -n "${container_config[options.devices]:-}" && "${container_config[options.devices]}" != "[]" ]]; then
+    while IFS= read -r device; do
+        [[ -n "$device" ]] || continue
+        CONTAINER_OPTS+=( --device "$device" )
+        LOG_DEBUG "[container] Added device from config: $device"
+    done <<< "${container_config[options.devices]}"
+fi
+
+if [[ -n "${container_config[options.capabilities]:-}" && "${container_config[options.capabilities]}" != "[]" ]]; then
+    while IFS= read -r cap; do
+        [[ -n "$cap" ]] || continue
+        CONTAINER_OPTS+=( --cap-add "$cap" )
+        LOG_DEBUG "[container] Added capability from config: $cap"
+    done <<< "${container_config[options.capabilities]}"
+fi
+
+if [[ -n "${container_config[options.mounts]:-}" && "${container_config[options.mounts]}" != "[]" ]]; then
+    while IFS= read -r mount; do
+        [[ -n "$mount" ]] || continue
+        CONTAINER_OPTS+=( --volume "$mount" )
+        LOG_DEBUG "[container] Added mount from config: $mount"
+    done <<< "${container_config[options.mounts]}"
+fi
+
+# Handle single-value options
+# List of boolean flags that don't take values
+BOOLEAN_FLAGS=("privileged" "rm" "init" "tty" "interactive" "detach")
+
 for key in "${!container_config[@]}"; do
     if [[ "$key" =~ ^options\. ]]; then
         opt_name="${key#options.}"
+        # Skip array options (already handled above)
+        [[ "$opt_name" == "devices" || "$opt_name" == "capabilities" || "$opt_name" == "mounts" ]] && continue
+
         opt_value="${container_config[$key]}"
-        if [[ "$opt_name" =~ ^devices\.[0-9]+$ ]]; then
-            CONTAINER_OPTS+=( --device "${opt_value}" )
-            LOG_DEBUG "[container] Added device from config: ${opt_value}"
-        elif [[ "$opt_name" =~ ^capabilities\.[0-9]+$ ]]; then
-            CONTAINER_OPTS+=( --cap-add "${opt_value}" )
-            LOG_DEBUG "[container] Added capability from config: ${opt_value}"
-        elif [[ "$opt_name" =~ ^mounts\.[0-9]+$ ]]; then
-            CONTAINER_OPTS+=( --volume "${opt_value}" )
-            LOG_DEBUG "[container] Added mount from config: ${opt_value}"
+        # Skip empty array markers
+        [[ "$opt_value" == "[]" ]] && continue
+
+        # Handle boolean flags
+        is_boolean=0
+        for flag in "${BOOLEAN_FLAGS[@]}"; do
+            if [[ "$opt_name" == "$flag" ]]; then
+                is_boolean=1
+                break
+            fi
+        done
+
+        if [[ $is_boolean -eq 1 ]]; then
+            # Only add the flag if value is true/1
+            if [[ "$opt_value" == "true" || "$opt_value" == "1" ]]; then
+                CONTAINER_OPTS+=( "--${opt_name}" )
+                LOG_DEBUG "[container] Added boolean flag from config: --${opt_name}"
+            fi
         else
+            # Regular key-value option
             CONTAINER_OPTS+=( "--${opt_name}" "${opt_value}" )
             LOG_DEBUG "[container] Added option from config: --${opt_name} ${opt_value}"
         fi
@@ -336,38 +378,93 @@ if [[ ${#OPTION_ARGS[@]} -gt 0 ]]; then
     LOG_INFO_RANK0 "[container]   CONTAINER_OPTIONS:"
     i=0
     while [[ $i -lt ${#OPTION_ARGS[@]} ]]; do
-        LOG_INFO_RANK0 "[container]       ${OPTION_ARGS[i]} ${OPTION_ARGS[i+1]}"
-        ((i+=2))
+        flag="${OPTION_ARGS[i]}"
+        i=$((i + 1))
+        # Check if next argument exists and is not a flag
+        if [[ $i -lt ${#OPTION_ARGS[@]} ]] && [[ "${OPTION_ARGS[i]}" != --* ]]; then
+            # This is a key-value pair
+            LOG_INFO_RANK0 "[container]       $flag ${OPTION_ARGS[i]}"
+            i=$((i + 1))
+        else
+            # This is a boolean flag
+            LOG_INFO_RANK0 "[container]       $flag"
+        fi
     done
 fi
 LOG_INFO_RANK0 "[container]   LAUNCH ARGS:"
 LOG_INFO_RANK0 "[container]     ${ARGS[*]}"
 
 ###############################################################################
-# STEP 10: Launch container (or show dry-run)
+# STEP 10: Build and execute container command
 ###############################################################################
-if [[ "$DRY_RUN_MODE" == "1" ]]; then
-    LOG_INFO_RANK0 "[container] [DRY-RUN] Would execute:"
-    LOG_INFO_RANK0 "[container]   ${DOCKER_CLI} run --rm \\"
+
+# Build the container entrypoint script
+CONTAINER_SCRIPT="\
+    echo '[container][INFO]: container started at \$(date +\"%Y.%m.%d %H:%M:%S\")' && \
+    [[ -d $PRIMUS_PATH ]] || { echo '[container][ERROR]: Primus not found at $PRIMUS_PATH' >&2; exit 42; } && \
+    cd $PRIMUS_PATH && bash runner/primus-cli-direct.sh \"\$@\" 2>&1 && \
+    echo '[container][INFO]: container finished at \$(date +\"%Y.%m.%d %H:%M:%S\")'"
+
+# Build complete command array
+CMD=(
+    "${DOCKER_CLI}"
+    run
+    --rm
+    "${VOLUME_ARGS[@]}"
+    "${OPTION_ARGS[@]}"
+    "$DOCKER_IMAGE"
+    /bin/bash
+    -c
+    "$CONTAINER_SCRIPT"
+    bash
+    "${ARGS[@]}"
+)
+
+# Print command in dry-run or debug mode
+if [[ "$DRY_RUN_MODE" == "1" ]] || [[ "$DEBUG_MODE" == "1" ]]; then
+    PRINT_INFO_RANK0 ""
+    PRINT_INFO_RANK0 "=========================================="
+    if [[ "$DRY_RUN_MODE" == "1" ]]; then
+        PRINT_INFO_RANK0 "  [DRY RUN] Container Command"
+    else
+        PRINT_INFO_RANK0 "  [DEBUG] Container Command"
+    fi
+    PRINT_INFO_RANK0 "=========================================="
+    PRINT_INFO_RANK0 "${DOCKER_CLI} run --rm \\"
+
+    # Print volume args
     for ((i = 0; i < ${#VOLUME_ARGS[@]}; i+=2)); do
-        LOG_INFO_RANK0 "[container]     ${VOLUME_ARGS[i]} ${VOLUME_ARGS[i+1]} \\"
+        PRINT_INFO_RANK0 "    ${VOLUME_ARGS[i]} ${VOLUME_ARGS[i+1]} \\"
     done
+
+    # Print option args
     i=0
     while [[ $i -lt ${#OPTION_ARGS[@]} ]]; do
-        LOG_INFO_RANK0 "[container]     ${OPTION_ARGS[i]} ${OPTION_ARGS[i+1]} \\"
-        ((i+=2))
+        flag="${OPTION_ARGS[i]}"
+        i=$((i + 1))
+        # Check if next argument exists and is not a flag
+        if [[ $i -lt ${#OPTION_ARGS[@]} ]] && [[ "${OPTION_ARGS[i]}" != --* ]]; then
+            # This is a key-value pair
+            PRINT_INFO_RANK0 "    $flag ${OPTION_ARGS[i]} \\"
+            i=$((i + 1))
+        else
+            # This is a boolean flag
+            PRINT_INFO_RANK0 "    $flag \\"
+        fi
     done
-    LOG_INFO_RANK0 "[container]     $DOCKER_IMAGE /bin/bash -c \"...\""
-    LOG_INFO_RANK0 "[container]   With args: ${ARGS[*]}"
+
+    PRINT_INFO_RANK0 "    $DOCKER_IMAGE /bin/bash -c \\"
+    PRINT_INFO_RANK0 "        \"<entrypoint script>\" \\"
+    PRINT_INFO_RANK0 "    bash \\"
+    PRINT_INFO_RANK0 "        ${ARGS[*]}"
+    PRINT_INFO_RANK0 "=========================================="
+    PRINT_INFO_RANK0 ""
+fi
+
+# Exit if dry-run mode
+if [[ "$DRY_RUN_MODE" == "1" ]]; then
     exit 0
 fi
 
-"${DOCKER_CLI}" run --rm \
-    "${VOLUME_ARGS[@]}" \
-    "${OPTION_ARGS[@]}" \
-    "$DOCKER_IMAGE" /bin/bash -c "\
-        echo '[container][INFO]: container started at $(date +"%Y.%m.%d %H:%M:%S")' && \
-        [[ -d $PRIMUS_PATH ]] || { echo '[container][ERROR]: Primus not found at $PRIMUS_PATH' >&2; exit 42; } && \
-        cd $PRIMUS_PATH && bash runner/primus-cli-direct.sh \"\$@\" 2>&1 && \
-        echo '[container][INFO]: container finished at $(date +"%Y.%m.%d %H:%M:%S")'
-    " bash "${ARGS[@]}"
+# Execute the command
+"${CMD[@]}"
