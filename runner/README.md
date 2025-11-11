@@ -1,6 +1,6 @@
 # 🚀 从混乱到秩序：打造 AMD GPU 大模型训练的统一入口
 
-> **作者**: AMD AI Team
+> **作者**: Peng Xiaoming
 > **发布日期**: 2025-11-10
 > **标签**: `#ROCm` `#LLM训练` `#Primus` `#开发者工具` `#AMD-GPU`
 
