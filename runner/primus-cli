@@ -112,16 +112,16 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         --version)
-            echo "Primus CLI version $PRIMUS_CLI_VERSION"
+            echo "[main] Primus CLI version $PRIMUS_CLI_VERSION"
             exit 0
             ;;
         --config)
             if [[ -z "${2:-}" ]]; then
-                LOG_ERROR "[main] --config requires a file path"
+                echo "[main] --config requires a file path" >&2
                 exit 2
             fi
             if [[ ! -f "$2" ]]; then
-                LOG_ERROR "[main] Config file not found: $2"
+                LOG_ERROR "[main] Config file not found: $2" >&2
                 exit 2
             fi
             CONFIG_FILE="$(realpath "$2")"
@@ -135,9 +135,15 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN_MODE=1
             shift
             ;;
+        --)
+            LOG_ERROR "[main] Missing <mode> argument before '--'" >&2
+            LOG_ERROR "Usage: primus-cli [global-options] <mode> [mode-args] -- [primus-commands and args]" >&2
+            LOG_ERROR "Example: primus-cli slurm --debug -N 1 -- container --debug benchmark gemm" >&2
+            exit 2
+            ;;
         -*)
-            LOG_ERROR "[main] Unknown global option: $1"
-            echo "Try 'primus-cli --help' for more information." >&2
+            LOG_ERROR "[main] Unknown global option: $1" >&2
+            LOG_ERROR "Try 'primus-cli --help' for more information." >&2
             exit 2
             ;;
         *)
@@ -150,6 +156,12 @@ done
 
 # Restore mode and its arguments
 set -- "${MODE_ARGS[@]}"
+
+# Enable debug mode if set
+if [[ "$DEBUG_MODE" == "1" ]]; then
+    export PRIMUS_LOG_LEVEL="DEBUG"
+    LOG_INFO "[main] Debug mode enabled (PRIMUS_LOG_LEVEL=DEBUG)"
+fi
 
 # Load configuration after parsing all options
 load_config_auto "$CONFIG_FILE" "main" || {
@@ -170,12 +182,6 @@ extract_config_section "main" main_config || {
 [[ "$DEBUG_MODE" == "0" && ("${main_config[debug]:-false}" == "true" || "${main_config[debug]:-false}" == "1") ]] && DEBUG_MODE=1
 [[ "$DRY_RUN_MODE" == "0" && ("${main_config[dry_run]:-false}" == "true" || "${main_config[dry_run]:-false}" == "1") ]] && DRY_RUN_MODE=1
 
-# Enable debug mode if set
-if [[ "$DEBUG_MODE" == "1" ]]; then
-    export PRIMUS_LOG_LEVEL="DEBUG"
-    LOG_INFO "[main] Debug mode enabled (PRIMUS_LOG_LEVEL=DEBUG)"
-fi
-
 # Run subscript from runner directory
 run_subscript() {
     local script="$1"
@@ -188,54 +194,103 @@ run_subscript() {
         exit 1
     fi
 
-    # Split args around '--'
+    # Split args around the first '--' only
     local global_opts=()
     local mode_opts=()
     local primus_args=()
-    local before_double_dash=true
+    local found_separator=false
+
     for arg in "$@"; do
-        if [[ "$arg" == "--" ]]; then
-            before_double_dash=false
+        if [[ "$arg" == "--" ]] && [[ "$found_separator" == false ]]; then
+            # First '--' separator, switch to primus args
+            found_separator=true
             continue
         fi
-        if $before_double_dash; then
+
+        if [[ "$found_separator" == false ]]; then
             mode_opts+=("$arg")
         else
+            # Everything after first '--', including subsequent '--'
             primus_args+=("$arg")
         fi
     done
 
-    # Inject global flags
+    # Inject global flags (only if not already present in mode_opts)
     [[ -n "$CONFIG_FILE" ]] && global_opts+=(--config "$CONFIG_FILE")
-    [[ "$DEBUG_MODE" == "1" ]] && global_opts+=(--debug)
+    # Only add --debug to global_opts if DEBUG_MODE is set and not already in mode_opts
+    if [[ "$DEBUG_MODE" == "1" ]]; then
+        local has_debug=false
+        for opt in "${mode_opts[@]}"; do
+            [[ "$opt" == "--debug" ]] && has_debug=true && break
+        done
+        [[ "$has_debug" == false ]] && global_opts+=(--debug)
+    fi
 
     local cmd="bash $script_path ${global_opts[*]} ${mode_opts[*]} -- ${primus_args[*]}"
 
     # Enhanced dry-run summary
     if [[ "$DRY_RUN_MODE" == "1" ]]; then
-        echo "========== [Primus CLI Dry-Run Summary] =========="
-        printf "  %-15s : %s\n" "Script" "$script"
-        printf "  %-15s : %s\n" "Config File" "${CONFIG_FILE:-<none>}"
-        printf "  %-15s : %s\n" "Debug Mode" "$DEBUG_MODE"
-        echo "--------------------------------------------------"
-        echo "  [Global Options]: ${global_opts[*]:-(none)}"
-        echo "  [Mode Arguments] : ${mode_opts[*]:-(none)}"
-        echo "  [Primus Args]    : ${primus_args[*]:-(none)}"
-        echo "--------------------------------------------------"
-        echo "  Would Execute:"
-        echo "  $cmd"
-        echo "=================================================="
+        # Extract mode name from script (e.g., "primus-cli-slurm.sh" -> "slurm")
+        local mode_name="${script#primus-cli-}"
+        mode_name="${mode_name%.sh}"
+
+        # Find the last '--' in primus_args to separate mode chain from final Primus Python CLI args
+        local final_mode_args=()
+        local final_primus_args=()
+        local last_separator_idx=-1
+
+        # Find the index of the last '--' in primus_args
+        for i in "${!primus_args[@]}"; do
+            if [[ "${primus_args[$i]}" == "--" ]]; then
+                last_separator_idx=$i
+            fi
+        done
+
+        if [[ $last_separator_idx -ge 0 ]]; then
+            # Split at the last '--'
+            for i in "${!primus_args[@]}"; do
+                if [[ $i -lt $last_separator_idx ]]; then
+                    final_mode_args+=("${primus_args[$i]}")
+                elif [[ $i -gt $last_separator_idx ]]; then
+                    final_primus_args+=("${primus_args[$i]}")
+                fi
+            done
+
+            # Build display string for mode arguments with mode name prefix
+            local display_mode_str="$mode_name ${mode_opts[*]}"
+            if [[ ${#final_mode_args[@]} -gt 0 ]]; then
+                display_mode_str="$mode_name ${mode_opts[*]} -- ${final_mode_args[*]}"
+            fi
+        else
+            # No additional '--' found, use primus_args as is
+            local display_mode_str="$mode_name ${mode_opts[*]}"
+            final_primus_args=("${primus_args[@]}")
+        fi
+
+        # Build comprehensive global options display
+        local global_display=("${global_opts[@]}")
+        [[ -n "$CONFIG_FILE" ]] && global_display+=("--config" "$CONFIG_FILE")
+        [[ "$DEBUG_MODE" == "1" ]] && global_display+=("--debug")
+        [[ "$DRY_RUN_MODE" == "1" ]] && global_display+=("--dry-run")
+
+        PRINT_INFO_RANK0 ""
+        PRINT_INFO_RANK0 "========== [Primus CLI Dry-Run Summary] =========="
+        PRINT_INFO_RANK0 "  Script             : $script"
+        PRINT_INFO_RANK0 "--------------------------------------------------"
+        PRINT_INFO_RANK0 "  [Global   Options] : ${global_display[*]:-(none)}"
+        PRINT_INFO_RANK0 "  [Mode   Arguments] : ${display_mode_str:-(none)}"
+        PRINT_INFO_RANK0 "  [Primus Arguments] : ${final_primus_args[*]:-(none)}"
+        PRINT_INFO_RANK0 "--------------------------------------------------"
+        PRINT_INFO_RANK0 "  Would Execute:"
+        PRINT_INFO_RANK0 "    $cmd"
+        PRINT_INFO_RANK0 "=================================================="
+        PRINT_INFO_RANK0 ""
         exit 0
     fi
 
     LOG_INFO "[main] Executing: $cmd"
 
-    # Pass debug flag via bash -x if enabled
-    if [[ "$DEBUG_MODE" == "1" ]]; then
-        exec bash -x "$script_path" "${global_opts[@]}" "${mode_opts[@]}" -- "${primus_args[@]}"
-    else
-        exec bash "$script_path" "${global_opts[@]}" "${mode_opts[@]}" -- "${primus_args[@]}"
-    fi
+   exec bash "$script_path" "${global_opts[@]}" "${mode_opts[@]}" -- "${primus_args[@]}"
 }
 
 # Check if mode is provided
