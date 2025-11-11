@@ -331,5 +331,5 @@ if [[ "$DRY_RUN_MODE" == "1" ]]; then
     LOG_INFO "[slurm] [DRY-RUN] Command ready (not executed)"
 else
     LOG_INFO "[slurm] Executing: ${CMD[*]}"
-    exec "${CMD[@]}"
 fi
+exec "${CMD[@]}"

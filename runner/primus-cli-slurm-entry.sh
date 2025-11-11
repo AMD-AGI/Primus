@@ -87,9 +87,9 @@ extract_config_section "slurm" slurm_config || {
 [[ "$DRY_RUN_MODE" == "0" && ("${slurm_config[dry_run]:-false}" == "true" || "${slurm_config[dry_run]:-false}" == "1") ]] && DRY_RUN_MODE=1
 
 # Enable debug mode if set
-if [[ "$DEBUG_MODE" == "1" ]]; then
-    set -x
-fi
+# if [[ "$DEBUG_MODE" == "1" ]]; then
+#     set -x
+# fi
 
 # Validate Slurm environment
 if [[ -z "${SLURM_NODELIST:-}" ]]; then
@@ -123,12 +123,12 @@ export MASTER_PORT
 validate_distributed_params || LOG_WARN "[slurm-entry] Failed to validate distributed parameters"
 
 # Log configuration
-LOG_INFO "[slurm-entry] MASTER_ADDR=$MASTER_ADDR"
-LOG_INFO "[slurm-entry] MASTER_PORT=$MASTER_PORT"
-LOG_INFO "[slurm-entry] NNODES=$NNODES"
-LOG_INFO "[slurm-entry] NODE_RANK=$NODE_RANK"
-LOG_INFO "[slurm-entry] GPUS_PER_NODE=$GPUS_PER_NODE"
-LOG_INFO "[slurm-entry] NODE_LIST: ${NODE_ARRAY[*]}"
+LOG_INFO_RANK0 "[slurm-entry] MASTER_ADDR=$MASTER_ADDR"
+LOG_INFO_RANK0 "[slurm-entry] MASTER_PORT=$MASTER_PORT"
+LOG_INFO_RANK0 "[slurm-entry] NNODES=$NNODES"
+LOG_INFO_RANK0 "[slurm-entry] NODE_RANK=$NODE_RANK"
+LOG_INFO_RANK0 "[slurm-entry] GPUS_PER_NODE=$GPUS_PER_NODE"
+LOG_INFO_RANK0 "[slurm-entry] NODE_LIST: ${NODE_ARRAY[*]}"
 
 # ------------- Dispatch based on mode ---------------
 
@@ -187,6 +187,7 @@ if [[ ! -f "$script_path" ]]; then
     LOG_ERROR "[slurm-entry] Script not found: $script_path"
     exit 2
 fi
+
 
 # Execute or dry-run
 if [[ "$DRY_RUN_MODE" == "1" ]]; then
