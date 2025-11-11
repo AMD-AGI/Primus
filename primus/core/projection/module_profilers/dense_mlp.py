@@ -30,16 +30,16 @@ class DenseMLPProfiler(BaseModuleProfiler):
         )
         # Calculate memory at different stages and take maximum
         input_memory = num_tokens * self.config.model_config.hidden_size * 2  # bf16
-        
+
         # Memory after first projection(s)
         if self.config.model_config.swiglu:
             # Need to store both gate and up projections for backward
             intermediate_memory = 2 * num_tokens * self.config.model_config.ffn_hidden_size * 2  # bf16
         else:
             intermediate_memory = num_tokens * self.config.model_config.ffn_hidden_size * 2  # bf16
-        
+
         output_memory = num_tokens * self.config.model_config.hidden_size * 2  # bf16
-        
+
         # Peak memory is input + intermediate (both needed for backward)
         return input_memory + intermediate_memory + output_memory
 
