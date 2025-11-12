@@ -28,6 +28,8 @@ Example:
 
     EXP=examples/megatron/exp_pretrain.yaml bash examples/run_pretrain.sh
 
+BACKEND=${BACKEND:-megatron}  # set this env var before running if needed
+
 EOF
 }
 
@@ -79,7 +81,6 @@ PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
 export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 
-LOG_INFO_RANK0 "Pip installing required packages ..."
 pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
 
 # -------------------- EXP Check --------------------
@@ -205,17 +206,11 @@ LOG_INFO_RANK0 ""
 # Limit GPU hardware queues to 2 for performance stability
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 
-# Increase HSA kernarg pool size to 12MB for models with lot of kernels
-# export HSA_KERNARG_POOL_SIZE=${HSA_KERNARG_POOL_SIZE:-12582912}
-
-# Enable NUMA binding for better memory locality (may increase stability for large models)
-export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-0}
-
 # Limit max CUDA device connections to reduce PCIe traffic
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
 
 # Prioritize NCCL communication for PyTorch for higher throughput
-export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
+export TORCH_NCCL_HIGH_PRIORITY=1
 
 # In multi-node training, PXN can be enabled to improve inter-node all-to-all
 # communication efficiency, but it will increase GPU memory usage.
@@ -224,14 +219,11 @@ export NCCL_PXN_DISABLE=${NCCL_PXN_DISABLE:-1}
 export NCCL_P2P_NET_CHUNKSIZE=${NCCL_P2P_NET_CHUNKSIZE:-524288}
 
 # optimize nvte fp8 cast transpose
-export NVTE_USE_CAST_TRANSPOSE_TRITON=${NVTE_USE_CAST_TRANSPOSE_TRITON:-1}
-export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE:-0}
+export NVTE_USE_CAST_TRANSPOSE_TRITON=1
+export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=0
 
 # Note: Disable v3 due to accuracy issues. Will fix after TE version 2.1.
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
-
-# Note: Disable fp32 atomic due if you find any accuracy issue.
-export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:0}
 
 # nvte debug envs
 export NVTE_DEBUG=0 # 0, 1
@@ -241,8 +233,6 @@ export PATCH_TE_FLASH_ATTN=${PATCH_TE_FLASH_ATTN:-0}
 
 LOG_INFO_RANK0 "==========Performance tuning=========="
 LOG_INFO_RANK0 "GPU_MAX_HW_QUEUES: $GPU_MAX_HW_QUEUES"
-LOG_INFO_RANK0 "HSA_KERNARG_POOL_SIZE: $HSA_KERNARG_POOL_SIZE"
-LOG_INFO_RANK0 "ENABLE_NUMA_BINDING: $ENABLE_NUMA_BINDING"
 LOG_INFO_RANK0 "CUDA_DEVICE_MAX_CONNECTIONS: $CUDA_DEVICE_MAX_CONNECTIONS"
 LOG_INFO_RANK0 "TORCH_NCCL_HIGH_PRIORITY: $TORCH_NCCL_HIGH_PRIORITY"
 LOG_INFO_RANK0 "CUDA_DEVICE_MAX_CONNECTIONS: $CUDA_DEVICE_MAX_CONNECTIONS"
@@ -252,7 +242,6 @@ LOG_INFO_RANK0 "NCCL_P2P_NET_CHUNKSIZE: $NCCL_P2P_NET_CHUNKSIZE"
 LOG_INFO_RANK0 "NVTE_CK_USES_BWD_V3: $NVTE_CK_USES_BWD_V3"
 LOG_INFO_RANK0 "NVTE_USE_CAST_TRANSPOSE_TRITON: $NVTE_USE_CAST_TRANSPOSE_TRITON"
 LOG_INFO_RANK0 "NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE: $NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE"
-LOG_INFO_RANK0 "PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: $PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32"
 if [[ "$PATCH_TE_FLASH_ATTN" == "1" ]]; then
     LOG_INFO_RANK0 'Patching _flash_attn_max_version in attention.py...'
     sed -i 's/_flash_attn_max_version = PkgVersion(\".*\")/_flash_attn_max_version = PkgVersion(\"3.0.0.post1\")/' \
@@ -414,7 +403,6 @@ else
     LOG_INFO_RANK0 "No patch args file found at $PRIMUS_PATCH_ARGS_FILE, skipping patch args."
 fi
 
-
 # -------------------- Launch Training --------------------
 DISTRIBUTED_ARGS=(
     --nproc_per_node "${GPUS_PER_NODE}"
@@ -424,12 +412,8 @@ DISTRIBUTED_ARGS=(
     --master_port "${MASTER_PORT}"
 )
 
-if [[ "$ENABLE_NUMA_BINDING" == "1" ]]; then
-    apt-get install numactl -y > /dev/null 2>&1
-    NUMA_LAUNCHER="--no-python ./runner/helpers/numa_bind.sh python3"
-fi
 
-CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS ${NUMA_LAUNCHER} primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
+CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
 
 LOG_INFO "Launching distributed training with command: $CMD"
 
@@ -453,4 +437,52 @@ if [[ $exit_code -ne 0 ]]; then
     fi
 fi
 
-exit "$exit_code"
+
+if [[ "$BACKEND" == "megatron" ]]; then
+    # ====== MEGATRON BACKEND ======
+    num_warmup=$(grep 'lr_warmup_iters' ${TRAIN_LOG} | sed -E 's/.*\.+ ([0-9,]+).*/\1/' | tr -d ',' 2>/dev/null)
+    echo "Num warmup: $num_warmup"
+
+    tps_values=$(grep 'INFO .*:  iteration' ${TRAIN_LOG} | sed -E 's/.*tokens per GPU \(tokens\/s\/GPU\): ([0-9.]+).*/\1/' 2>/dev/null)
+    tflops_values=$(grep 'INFO .*:  iteration' ${TRAIN_LOG} | sed -E 's/.*throughput per GPU \(TFLOP\/s\/GPU\): ([0-9.]+).*/\1/' 2>/dev/null)
+    mem_pct_values=$(grep 'usage_ratio' "${TRAIN_LOG}" \
+      | sed -En 's/.*usage_ratio:[[:space:]]*[^/]*\/[^/]*\/[^/]*\/([0-9]+(\.[0-9]+)?)%.*/\1/p' 2>/dev/null)
+    elapsed_time_values=$(grep 'INFO .*:  iteration' ${TRAIN_LOG} | sed -E 's/.*elapsed time per iteration \(ms\): ([0-9.]+).*/\1/' 2>/dev/null)
+
+    avg_tps=$(echo "$tps_values" | tail -n +$((num_warmup + 1)) | awk 'NF > 0 { if ($0 == 0) zero_found=1; else {sum += 1/$0; count++}} END {if (zero_found || count == 0 || sum == 0) print "N/A"; else printf "%.2f", count/sum}')
+    avg_tflops=$(echo "$tflops_values" | tail -n +$((num_warmup + 1)) | awk 'NF > 0 { if ($0 == 0) zero_found=1; else {sum += 1/$0; count++}} END {if (zero_found || count == 0 || sum == 0) print "N/A"; else printf "%.2f", count/sum}')
+    avg_mem_pct=$(echo "$mem_pct_values" | tail -n +$((num_warmup + 1)) | awk '{sum+=$1;count++} END {if(count==0)print"N/A";else printf"%.4f",sum/count}')
+    avg_elapsed_time=$(echo "$elapsed_time_values" | tail -n +$((num_warmup + 1)) | awk '{sum+=$1;count++} END {if(count==0)print"N/A";else printf"%.4f",sum/count}')
+
+    echo "Harmonic mean of TPS (excluding first $num_warmup steps): $avg_tps" | tee -a ${TRAIN_LOG}
+    echo "Harmonic mean of TFLOPS (excluding first $num_warmup steps): $avg_tflops" | tee -a ${TRAIN_LOG}
+    echo "Arithmetic mean of memory percentage (excluding first $num_warmup steps): $avg_mem_pct" | tee -a ${TRAIN_LOG}
+    echo "Arithmetic mean of elapsed time (ms) (excluding first $num_warmup steps): $avg_elapsed_time" | tee -a ${TRAIN_LOG}
+
+
+elif [[ "$BACKEND" == "torchtitan" ]]; then
+    echo "Using Torchtitan log parser"
+
+    num_warmup=$(grep 'lr_scheduler.warmup_steps' ${TRAIN_LOG} | sed -E 's/.*\.+ ([0-9,]+).*/\1/' | tr -d ',' 2>/dev/null)
+    echo "Num warmup (first steps skipped): $num_warmup"
+
+    tps_values=$(grep 'INFO' "${TRAIN_LOG}" | sed -En 's/.*tps:[[:space:]]*([0-9.,]+).*/\1/p' | tr -d ',' 2>/dev/null)
+    tflops_values=$(grep 'INFO' "${TRAIN_LOG}" | sed -En 's/.*tflops:[[:space:]]*([0-9.,]+).*/\1/p' 2>/dev/null)
+    mfu_values=$(grep 'INFO' "${TRAIN_LOG}" | sed -En 's/.*mfu:[[:space:]]*([0-9.,]+)%.*/\1/p' 2>/dev/null)
+    mem_values=$(grep 'INFO' "${TRAIN_LOG}" | sed -En 's/.*memory:[[:space:]]*[0-9.,]+GiB\(([0-9.]+)%\).*/\1/p' 2>/dev/null)
+
+    #echo "Extracted TPS values:" $tps_values
+    #echo "Extracted TFLOPS values:" $tflops_values
+    #echo "Extracted MFU values:" $mfu_values
+    #echo "Extracted Memory % values:" $mem_values
+
+    avg_tps=$(echo "$tps_values" | tail -n +$((num_warmup + 1)) | awk 'NF>0{if($0==0)z=1;else{sum+=1/$0;c++}}END{if(z||c==0||sum==0)print"N/A";else printf"%.2f",c/sum}')
+    avg_tflops=$(echo "$tflops_values" | tail -n +$((num_warmup + 1)) | awk 'NF>0{if($0==0)z=1;else{sum+=1/$0;c++}}END{if(z||c==0||sum==0)print"N/A";else printf"%.2f",c/sum}')
+    avg_mfu=$(echo "$mfu_values" | tail -n +$((num_warmup + 1)) | awk '{sum+=$1;c++}END{if(c==0)print"N/A";else printf"%.4f",sum/c}')
+    avg_mem=$(echo "$mem_values" | tail -n +$((num_warmup + 1)) | awk '{sum+=$1;c++}END{if(c==0)print"N/A";else printf"%.4f",sum/c}')
+
+    echo "Harmonic mean of TPS (excluding first $num_warmup steps): $avg_tps" | tee -a "${TRAIN_LOG}"
+    echo "Harmonic mean of TFLOPS (excluding first $num_warmup steps): $avg_tflops" | tee -a "${TRAIN_LOG}"
+    echo "Arithmetic mean of MFU (excluding first $num_warmup steps): $avg_mfu" | tee -a "${TRAIN_LOG}"
+    echo "Arithmetic mean of memory percentage (excluding first $num_warmup steps): $avg_mem" | tee -a "${TRAIN_LOG}"
+fi
