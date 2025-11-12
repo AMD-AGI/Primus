@@ -19,7 +19,7 @@ try:
 
     TORCH_AVAILABLE = True
 except ImportError:
-    print("[WARNNING] dense gemm benchmark depends on torch, which does not exist in current environment!")
+    print("[WARNING] dense gemm benchmark depends on torch, which does not exist in current environment!")
     TORCH_AVAILABLE = False
 
 from primus.tools.report import write_table_simple

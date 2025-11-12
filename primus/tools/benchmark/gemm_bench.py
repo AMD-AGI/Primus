@@ -155,7 +155,7 @@ try:
             print(f"[✔] GEMM benchmark finished. Results saved to {args.output_file}")
 
 except ImportError:
-    print("[WARNNING] gemm benchmark depends on torch, which does not exist in current environment!")
+    print("[WARNING] gemm benchmark depends on torch, which does not exist in current environment!")
 
 
 def add_gemm_parser(parser: argparse.ArgumentParser):

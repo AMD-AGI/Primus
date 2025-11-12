@@ -172,7 +172,7 @@ try:
         raise ValueError(f"Unsupported dtype: {name}")
 
 except ImportError:
-    print("[WARNNING] dist tools depend on torch, which does not exist in current environment!")
+    print("[WARNING] dist tools depend on torch, which does not exist in current environment!")
 
 
 def parse_bytes(s: str) -> int:

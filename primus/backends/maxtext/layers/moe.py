@@ -1,5 +1,6 @@
 from typing import Optional, Tuple
 
+import jax
 import jax.numpy as jnp
 from MaxText.layers import quantizations
 from MaxText.layers.moe import COMBINE, DISPATCH, RoutedMoE

@@ -87,6 +87,7 @@ done < <(env | grep "^PRIMUS_TURBO_")
 ENV_ARGS+=("--env" "EXP")
 ENV_ARGS+=("--env" "BACKEND")
 ENV_ARGS+=("--env" "HF_TOKEN")
+echo "ENV_ARGS: ${ENV_ARGS[@]}"
 
 HOSTNAME=$(hostname)
 ARGS=("$@")
