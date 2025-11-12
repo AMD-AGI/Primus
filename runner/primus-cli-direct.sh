@@ -21,6 +21,9 @@ Description:
     environment variable optimizations from runner/helpers/envs/<GPU_MODEL>.sh for best performance.
 
 Options:
+    --config <file>      Specify configuration file (default: .primus.yaml or system default)
+    --debug              Enable debug mode with verbose logging
+    --dry-run            Show configuration and command without executing
     --single             Run with python3 instead of torchrun (single process only)
     --script <file.py>   Python script to execute (default: primus/cli/main.py)
     --env KEY=VALUE      Set environment variable before execution
@@ -119,6 +122,7 @@ log_file=""
 enable_numa="auto"  # auto / 1 / 0
 CONFIG_FILE=""
 DEBUG_MODE=0
+DRY_RUN_MODE=0
 
 # Track which parameters were explicitly set via CLI
 CLI_RUN_MODE_SET=0
@@ -136,6 +140,10 @@ while [[ $# -gt 0 ]]; do
         --debug)
             DEBUG_MODE=1
             CLI_DEBUG_SET=1
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN_MODE=1
             shift
             ;;
         --single)
@@ -275,28 +283,31 @@ for kv in "${primus_env_kv[@]}"; do
     LOG_INFO_RANK0 "[direct] Exported env: ${kv%%=*}=${kv#*=}"
 done
 
-# Step 2: Auto-run hooks based on $1 $2 (e.g., train pretrain → hooks/train/pretrain/*)
-if [[ $# -ge 2 ]]; then
+# Step 2: Auto-run hooks based on $1 $2 (e.g., train pretrain → hooks/train/pretrain/*) (skip in dry-run mode)
+if [[ $# -ge 2 && "$DRY_RUN_MODE" == "0" ]]; then
     if ! execute_hooks "$1" "$2" "${primus_args[@]}"; then
         LOG_ERROR "[direct] Hooks execution failed"
         exit 1
     fi
-else
+elif [[ "$DRY_RUN_MODE" == "0" ]]; then
     LOG_INFO_RANK0 "[direct] No hook target detected (missing \$1 \$2)."
 fi
 
 
-# Step 3: Run patch scripts if specified
-if [[ ${#patch_scripts[@]} -gt 0 ]]; then
+# Step 3: Run patch scripts if specified (skip in dry-run mode)
+if [[ ${#patch_scripts[@]} -gt 0 && "$DRY_RUN_MODE" == "0" ]]; then
     if ! execute_patches "${patch_scripts[@]}"; then
         LOG_ERROR "[direct] Patch execution failed"
         exit 1
     fi
 fi
 
-pip install -qq -r requirements.txt
-if [[ "$enable_numa" == "1" ]]; then
-    apt-get install numactl -y > /dev/null 2>&1
+# Install dependencies (skip in dry-run mode)
+if [[ "$DRY_RUN_MODE" == "0" ]]; then
+    pip install -qq -r requirements.txt
+    if [[ "$enable_numa" == "1" ]]; then
+        apt-get install numactl -y > /dev/null 2>&1
+    fi
 fi
 
 # Build launch arguments.
@@ -365,6 +376,39 @@ else
     # Step 4: Build the final command.
     CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS} ${NUMA_LAUNCHER_ARGS[*]}  $script_path $* "
     LOG_INFO "[direct] Launching distributed training with command: $CMD 2>&1 | tee $log_file"
+fi
+
+# Dry-run mode: display configuration and exit
+if [[ "$DRY_RUN_MODE" == "1" ]]; then
+    print_section "[DRY RUN] Direct Launch Configuration"
+    PRINT_INFO_RANK0 "  Run Mode        : $run_mode"
+    PRINT_INFO_RANK0 "  Script Path     : $script_path"
+    PRINT_INFO_RANK0 "  Config File     : ${CONFIG_FILE:-<none>}"
+    PRINT_INFO_RANK0 "  Log File        : $log_file"
+    PRINT_INFO_RANK0 "  NUMA Binding    : $enable_numa"
+    PRINT_INFO_RANK0 "  Patch Scripts   : ${patch_scripts[*]:-<none>}"
+    PRINT_INFO_RANK0 "  Primus Args     : $*"
+    PRINT_INFO_RANK0 ""
+    if [[ ${#primus_env_kv[@]} -gt 0 ]]; then
+        PRINT_INFO_RANK0 "  Environment Variables:"
+        for kv in "${primus_env_kv[@]}"; do
+            PRINT_INFO_RANK0 "    $kv"
+        done
+        PRINT_INFO_RANK0 ""
+    fi
+    if [[ "$run_mode" == "torchrun" ]]; then
+        PRINT_INFO_RANK0 "  Distributed Settings:"
+        PRINT_INFO_RANK0 "    NNODES          : ${NNODES:-1}"
+        PRINT_INFO_RANK0 "    NODE_RANK       : ${NODE_RANK:-0}"
+        PRINT_INFO_RANK0 "    GPUS_PER_NODE   : ${GPUS_PER_NODE:-8}"
+        PRINT_INFO_RANK0 "    MASTER_ADDR     : ${MASTER_ADDR:-localhost}"
+        PRINT_INFO_RANK0 "    MASTER_PORT     : ${MASTER_PORT:-1234}"
+        PRINT_INFO_RANK0 ""
+    fi
+    PRINT_INFO_RANK0 "  Full Command:"
+    PRINT_INFO_RANK0 "    $CMD 2>&1 | tee $log_file"
+    print_section "End of Dry Run"
+    exit 0
 fi
 
 eval "$CMD" 2>&1 | tee "$log_file"
