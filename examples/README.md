@@ -111,10 +111,10 @@ docker exec -it dev_primus bash
 cd Primus && pip install -r requirements.txt
 
 # Example for megatron llama3.1_8B
-EXP=examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_pretrain.sh
+BACKEND=megatron EXP=examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_pretrain.sh
 
 # examples for torchtitan llama3.1_8B
-EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_pretrain.sh
+BACKEND=torchtitan EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_pretrain.sh
 
 ```
 
