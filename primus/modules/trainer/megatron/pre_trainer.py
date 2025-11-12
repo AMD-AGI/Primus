@@ -11,9 +11,13 @@ import torch
 from megatron.core import mpu
 from megatron.core.models.gpt import GPTModel
 from megatron.core.rerun_state_machine import get_rerun_state_machine
-from megatron.core.utils import StragglerDetector
+from megatron.core.utils import StragglerDetector, get_attr_wrapped_model
 from megatron.training import get_args, get_timers
-from megatron.training.utils import get_batch_on_this_cp_rank, get_batch_on_this_tp_rank
+from megatron.training.utils import (
+    get_batch_on_this_cp_rank,
+    get_batch_on_this_tp_rank,
+    is_first_or_last_pipeline_stage,
+)
 
 stimer = StragglerDetector()
 
@@ -22,9 +26,9 @@ from .trainer import MegatronTrainer
 mb_batch = None
 
 
-def get_batch_func(data_iterator):
+def get_batch_func(data_iterator, vp_stage=None):
     # TODO: this is pretty hacky, find a better way
-    if (not mpu.is_pipeline_first_stage()) and (not mpu.is_pipeline_last_stage()):
+    if not is_first_or_last_pipeline_stage(vp_stage):
         return None, None, None, None, None
 
     # get batches based on the TP rank you are on
@@ -129,9 +133,9 @@ class MegatronPretrainTrainer(MegatronTrainer):
 
         super().__init__(*args, **kwargs)
 
-    def get_batch(self, data_iterator):
+    def get_batch(self, data_iterator, vp_stage=None):
         """Generate a batch."""
-        return get_batch_func(data_iterator)
+        return get_batch_func(data_iterator, vp_stage)
 
     def loss_func(self, loss_mask: torch.Tensor, output_tensor: torch.Tensor):
         """Loss function.
@@ -215,7 +219,10 @@ class MegatronPretrainTrainer(MegatronTrainer):
             timers("batch-generator", log_level=2).start()
             global stimer
             with stimer(bdata=True):
-                tokens, labels, loss_mask, attention_mask, position_ids = self.get_batch(data_iterator)
+                vp_stage = get_attr_wrapped_model(model, "vp_stage")
+                tokens, labels, loss_mask, attention_mask, position_ids = self.get_batch(
+                    data_iterator, vp_stage
+                )
             timers("batch-generator").stop()
         else:
             from collections.abc import Iterable
