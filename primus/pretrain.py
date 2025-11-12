@@ -128,16 +128,26 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
 
 
 def setup_env(data_path: str):
+    """
+    Ensure HF_HOME points to an existing directory under the provided data root.
+    """
+    data_root = Path(data_path).expanduser()
+    if not data_root.exists():
+        raise FileNotFoundError(f"[Primus CLI] data_path '{data_root}' not found.")
+
+    data_root = data_root.resolve()
+    hf_home_path = data_root / "huggingface"
+    hf_home_path.mkdir(parents=True, exist_ok=True)
+
     if "HF_HOME" not in os.environ:
-        hf_home = os.path.join(data_path, "huggingface")
-        os.environ["HF_HOME"] = hf_home
-        print(f"[Primus CLI] HF_HOME={hf_home}")
+        os.environ["HF_HOME"] = str(hf_home_path)
+        print(f"[Primus CLI] HF_HOME={hf_home_path}")
     else:
         hf_home = os.environ["HF_HOME"]
         print(f"[Primus CLI] HF_HOME already set: {hf_home}")
 
 
-def launch_pretrain_trainer(primus_cfg: PrimusConfig, extra_args=None):
+def launch_pretrain_trainer(primus_cfg: PrimusConfig, extra_args=None, pre_trainer_cfg=None):
     """
     Launch the training using the Primus trainer.
 
@@ -145,7 +155,8 @@ def launch_pretrain_trainer(primus_cfg: PrimusConfig, extra_args=None):
         primus_cfg (PrimusConfig): Parsed Primus configuration object.
     """
     # Get pre_trainer module configuration
-    pre_trainer_cfg = primus_cfg.get_module_config("pre_trainer")
+    if pre_trainer_cfg is None:
+        pre_trainer_cfg = primus_cfg.get_module_config("pre_trainer")
     framework = pre_trainer_cfg.framework
 
     # Lazy import backend trainer
@@ -184,23 +195,31 @@ def launch_pretrain_from_cli(args, overrides):
         4. Setup backend path
         5. Launch the training
     """
-    cfg_path = Path(args.config)
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"[Primus:Train] Config file '{cfg_path}' not found.")
+    cfg_path_input = Path(args.config).expanduser()
+    try:
+        cfg_path = cfg_path_input.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"[Primus:Train] Config file '{cfg_path_input}' not found.") from exc
+    args.config = str(cfg_path)
 
     setup_env(data_path=args.data_path)
 
     primus_cfg, unknown_overrides = load_primus_config(args, overrides)
+    if unknown_overrides:
+        print(f"[Primus CLI] Unrecognized overrides forwarded to trainer: {unknown_overrides}")
 
     # Export merged config if requested
     if args.export_config:
         primus_cfg.export(export_path=args.export_config)
 
     # Setup backend path for dynamic import
-    framework = primus_cfg.get_module_config("pre_trainer").framework
+    pre_trainer_cfg = primus_cfg.get_module_config("pre_trainer")
+    framework = pre_trainer_cfg.framework
     setup_backend_path(framework=framework, backend_path=args.backend_path, verbose=True)
 
-    launch_pretrain_trainer(primus_cfg=primus_cfg, extra_args=unknown_overrides)
+    launch_pretrain_trainer(
+        primus_cfg=primus_cfg, extra_args=unknown_overrides, pre_trainer_cfg=pre_trainer_cfg
+    )
 
 
 if __name__ == "__main__":

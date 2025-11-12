@@ -1,0 +1,14 @@
+# Optional dependencies for Primus CLI enhancements
+#
+# Install with:
+#   pip install -r primus/cli/requirements-cli-optional.txt
+#
+# Or install individually:
+#   pip install argcomplete  # For shell completion
+#   pip install rich         # For beautiful terminal output (future)
+
+# Shell auto-completion support
+argcomplete>=2.0.0
+
+# Beautiful terminal output (for future enhancement)
+# rich>=13.0.0
