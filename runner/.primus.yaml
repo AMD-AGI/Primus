@@ -21,11 +21,14 @@ slurm:
 container:
   debug: false
   dry_run: false
-  image: "rocm/primus:v25.9_gfx942"
 
   # Docker/Podman runtime options
+  # All keys directly map to CLI arguments (--key value)
   options:
-    # Single-value options (passed as --key value)
+    # Container image
+    image: "rocm/primus:v25.9_gfx942"
+
+    # Single-value options
     ipc: "host"
     network: "host"
     cpus: "32"
@@ -35,32 +38,40 @@ container:
     security-opt: "seccomp=unconfined"
     group-add: "video"
 
+    # Cumulative options (can be specified multiple times via CLI)
     # Device access (each passed as --device)
     # NOTE: Do not modify these device paths - they are required for ROCm/GPU access
     #   /dev/kfd  - Kernel Fusion Driver (ROCm core)
     #   /dev/dri  - Direct Rendering Infrastructure (GPU access)
     #   /dev/infiniband - InfiniBand network device (multi-node communication)
-    devices:
+    device:
       - "/dev/kfd"
       - "/dev/dri"
       - "/dev/infiniband"
 
-    # Capabilities (each passed as --cap-add)
+    # Linux capabilities (each passed as --cap-add)
     # NOTE: Do not modify these capabilities - they are required for proper container operation
     #   SYS_PTRACE     - Required for debugging and profiling tools
     #   CAP_SYS_ADMIN  - Required for system administration operations
-    capabilities:
+    cap-add:
       - "SYS_PTRACE"
       - "CAP_SYS_ADMIN"
 
-    # Mount points (host:container or host path)
-    # Each mount will be passed as --volume
-    mounts: []
-    # mounts:
+    # Volume mounts (each passed as --volume)
+    volume: []
+    # volume:
     #   - "/data:/data"
     #   - "/output:/output"
     #   - "/workspace/Primus"
     #   - "/model_weights:/model_weights:ro"
+
+    # Environment variables (each passed as --env KEY=VALUE)
+    env: []
+    # env:
+    #   - "NCCL_DEBUG=INFO"
+    #   - "TORCH_DISTRIBUTED_DEBUG=DETAIL"
+    #   - "CUDA_VISIBLE_DEVICES=0,1,2,3"
+    #   - "WANDB_API_KEY=your-api-key"
 
 
 # Direct mode settings

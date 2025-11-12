@@ -304,7 +304,6 @@ get_absolute_path() {
     local path="$1"
     local result
     result=$(realpath -m "$path" 2>/dev/null || readlink -f "$path" 2>/dev/null || echo "$path")
-    LOG_DEBUG "get_absolute_path: $path -> $result"
     echo "$result"
 }
 
