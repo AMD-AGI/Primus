@@ -220,7 +220,7 @@ container:
       - "/dev/dri"
 
 direct:
-  patches:
+  patch:
     - "/opt/patch1.sh"
     - "/opt/patch2.sh"
 EOF
@@ -258,9 +258,9 @@ EOF
         assert_fail "Devices array contains /dev/kfd"
     fi
 
-    # Check patches array
+    # Check patch array
     local patches
-    patches=$(get_config "direct.patches" 2>/dev/null)
+    patches=$(get_config "direct.patch" 2>/dev/null)
 
     if echo "$patches" | grep -qF "/opt/patch1.sh"; then
         assert_pass "Patches array contains /opt/patch1.sh"

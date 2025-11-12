@@ -20,6 +20,12 @@ LOG_INFO_RANK0() {
     fi
 }
 
+# Install numactl if not available
+if ! command -v numactl &> /dev/null; then
+    LOG_INFO_RANK0 "numactl not found, installing..."
+    apt-get install numactl -y > /dev/null 2>&1
+fi
+
 # Capture the output from amd-smi and process it without quotes
 mapfile -t BUS_ID < <(amd-smi list --csv | awk -F, 'NR>1 && $2!="" {print $2}')
 LOG_INFO_RANK0 "BUS_IDs: ${BUS_ID[*]}"

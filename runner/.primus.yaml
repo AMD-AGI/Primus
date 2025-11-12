@@ -86,10 +86,10 @@ direct:
 
   # Direct mode specific options
   run_mode: "torchrun"
-  script_path: "primus/cli/main.py"
+  script: "primus/cli/main.py"
   numa: "auto"
   log_file: ""
 
   # Default patch scripts and env vars
-  patches: []
+  patch: []
   env: []

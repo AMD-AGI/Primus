@@ -113,23 +113,13 @@ source "$RUNNER_DIR/lib/config.sh" || {
     exit 1
 }
 
-run_mode="torchrun"
-script_path="primus/cli/main.py"
-primus_env_kv=()
-primus_args=()
-patch_scripts=()
-log_file=""
-enable_numa="auto"  # auto / 1 / 0
+###############################################################################
+# STEP 1: Pre-parse global options (--config, --debug, --dry-run, --help)
+###############################################################################
 CONFIG_FILE=""
 DEBUG_MODE=0
 DRY_RUN_MODE=0
-
-# Track which parameters were explicitly set via CLI
-CLI_RUN_MODE_SET=0
-CLI_SCRIPT_PATH_SET=0
-CLI_NUMA_SET=0
-CLI_LOG_FILE_SET=0
-CLI_DEBUG_SET=0
+PRE_PARSE_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -139,65 +129,124 @@ while [[ $# -gt 0 ]]; do
             ;;
         --debug)
             DEBUG_MODE=1
-            CLI_DEBUG_SET=1
             shift
             ;;
         --dry-run)
             DRY_RUN_MODE=1
             shift
             ;;
-        --single)
-            run_mode="single"
-            CLI_RUN_MODE_SET=1
+        --help|-h)
+            print_usage
+            exit 0
+            ;;
+        *)
+            PRE_PARSE_ARGS+=("$1")
             shift
             ;;
-        --numa)
-            enable_numa="1"
-            CLI_NUMA_SET=1
-            shift
-            ;;
-        --no-numa)
-            enable_numa="0"
-            CLI_NUMA_SET=1
-            shift
-            ;;
-        --script)
-            script_path="$2"
-            CLI_SCRIPT_PATH_SET=1
-            shift 2
-            ;;
-        --env)
-            if [[ "$2" == *=* ]]; then
-                export "${2%%=*}"="${2#*=}"
-                primus_env_kv+=("${2}")
-                shift 2
-            else
-                LOG_ERROR "[direct] --env requires KEY=VALUE"
-                exit 2
-            fi
-            ;;
-        --patch)
-            patch_scripts+=("$2")
-            shift 2
-            ;;
-        --patch=*)
-            patch_scripts+=("${1#*=}")
-            shift
-            ;;
-        --log_file)
-            log_file="$2"
-            CLI_LOG_FILE_SET=1
-            shift 2
-            ;;
-        --log_file=*)
-            log_file="${1#*=}"
-            CLI_LOG_FILE_SET=1
-            shift
-            ;;
+    esac
+done
+# Restore arguments for second pass
+set -- "${PRE_PARSE_ARGS[@]}"
+
+# Enable debug mode early if set via CLI
+if [[ "$DEBUG_MODE" == "1" ]]; then
+    export PRIMUS_LOG_LEVEL="DEBUG"
+    LOG_INFO_RANK0 "[direct] Debug mode enabled via CLI (PRIMUS_LOG_LEVEL=DEBUG)"
+fi
+
+###############################################################################
+# STEP 2: Load configuration files
+###############################################################################
+load_config_auto "$CONFIG_FILE" "direct" || {
+    LOG_ERROR "[direct] Configuration loading failed"
+    exit 1
+}
+
+###############################################################################
+# STEP 3: Extract direct.* config and apply defaults
+###############################################################################
+declare -A direct_config
+extract_config_section "direct" direct_config || true
+
+# Check debug/dry-run from config (CLI takes precedence, already set in STEP 1)
+if [[ "$DEBUG_MODE" == "0" ]]; then
+    debug_value="${direct_config[debug]:-false}"
+    if [[ "$debug_value" == "true" || "$debug_value" == "1" ]]; then
+        DEBUG_MODE=1
+        export PRIMUS_LOG_LEVEL="DEBUG"
+        LOG_INFO_RANK0 "[direct] Debug mode enabled via config (PRIMUS_LOG_LEVEL=DEBUG)"
+    fi
+fi
+
+if [[ "$DRY_RUN_MODE" == "0" ]]; then
+    dry_run_value="${direct_config[dry_run]:-false}"
+    if [[ "$dry_run_value" == "true" || "$dry_run_value" == "1" ]]; then
+        DRY_RUN_MODE=1
+        LOG_INFO_RANK0 "[direct] Dry-run mode enabled via config"
+    fi
+fi
+
+# Set default values for parameters not in config
+direct_config[run_mode]="${direct_config[run_mode]:-torchrun}"
+direct_config[script]="${direct_config[script]:-primus/cli/main.py}"
+direct_config[numa]="${direct_config[numa]:-auto}"
+direct_config[log_file]="${direct_config[log_file]:-}"
+
+# Clean up empty array markers ("[]")
+for key in "${!direct_config[@]}"; do
+    if [[ "${direct_config[$key]}" == "[]" ]]; then
+        unset "direct_config[$key]"
+    fi
+done
+
+LOG_DEBUG_RANK0 "[direct] Configuration loaded, ready for CLI argument override"
+
+###############################################################################
+# STEP 4: Parse CLI arguments (all stored as newline-separated strings)
+# Priority: CLI args > Config file > Defaults
+###############################################################################
+primus_args=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
         --)
             shift
             primus_args+=("$@")
             break
+            ;;
+        --single)
+            # Special case: --single maps to run_mode=single
+            direct_config[run_mode]="single"
+            LOG_DEBUG_RANK0 "[direct] CLI: run_mode=single"
+            shift
+            ;;
+        --no-numa)
+            # Special case: --no-numa maps to numa=false
+            direct_config[numa]="false"
+            LOG_DEBUG_RANK0 "[direct] CLI: numa=false"
+            shift
+            ;;
+        --*)
+            # Generic option handler
+            opt_name="${1#--}"
+            opt_value="${2:-}"
+
+            # Check if next argument is a value or another flag
+            if [[ -z "$opt_value" ]] || [[ "$opt_value" == --* ]]; then
+                # Boolean flag (no value or next is a flag)
+                direct_config[$opt_name]="true"
+                LOG_INFO_RANK0 "[direct] CLI: $opt_name=true"
+                shift
+            else
+                # Key-value option: append with newline
+                if [[ -z "${direct_config[$opt_name]:-}" ]]; then
+                    direct_config[$opt_name]="$opt_value"
+                else
+                    direct_config[$opt_name]+=$'\n'"$opt_value"
+                fi
+                LOG_INFO_RANK0 "[direct] CLI: $opt_name += $opt_value"
+                shift 2
+            fi
             ;;
         *)
             primus_args+=("$1")
@@ -207,116 +256,99 @@ while [[ $# -gt 0 ]]; do
 done
 set -- "${primus_args[@]}"
 
-if [[ "$*" == *"--help"* ]] || [[ "$*" == *"-h"* ]]; then
-    exec python3 -m primus.cli.main "$@"
-fi
+###############################################################################
+# STEP 4.5: Process non-cumulative parameters (use last value only)
+###############################################################################
 
-# Step 0: Setup log directory and generate log file path
-if [[ -z "$log_file" ]]; then
-    log_file="logs/log_$(date +%Y%m%d_%H%M%S).txt"
-fi
-mkdir -p "$(dirname "$log_file")"
-
-
-# Step 1: Load configuration and apply mode-specific settings
-# Load configuration (specified or defaults)
-load_config_auto "$CONFIG_FILE" "entrypoint" || {
-    LOG_ERROR "[direct] Configuration loading failed"
-    exit 1
-}
-
-# Extract all direct.* config parameters
-declare -A direct_config
-extract_config_section "direct" direct_config || true
-
-# Apply direct config values if not set via CLI
-[[ "$CLI_DEBUG_SET" == "0" && ("${direct_config[debug]:-false}" == "true" || "${direct_config[debug]:-false}" == "1") ]] && DEBUG_MODE=1
-
-# Enable debug mode if set
-if [[ "$DEBUG_MODE" == "1" ]]; then
-    export PRIMUS_LOG_LEVEL="DEBUG"
-    LOG_INFO "[direct] Debug mode enabled (PRIMUS_LOG_LEVEL=DEBUG)"
-    print_config_section "direct" direct_config
-fi
-
-# Apply config values for non-overridden parameters (CLI args take precedence)
-# Priority: CLI args > Config file > Default values
-[[ "$CLI_RUN_MODE_SET" == "0" && "${direct_config[run_mode]}" == "single" ]] && run_mode="single"
-[[ "$CLI_SCRIPT_PATH_SET" == "0" && -n "${direct_config[script_path]}" ]] && script_path="${direct_config[script_path]}"
-[[ "$CLI_NUMA_SET" == "0" && -n "${direct_config[numa]}" ]] && enable_numa="${direct_config[numa]}"
-[[ "$CLI_LOG_FILE_SET" == "0" && -n "${direct_config[log_file]}" ]] && log_file="${direct_config[log_file]}"
-
-# Handle patch scripts array (patches.0, patches.1, ...) if not set via CLI
-if [[ ${#patch_scripts[@]} -eq 0 ]]; then
-    patch_idx=0
-    while [[ -n "${direct_config[patches.$patch_idx]:-}" ]]; do
-        patch_scripts+=("${direct_config[patches.$patch_idx]}")
-        ((patch_idx++))
-    done
-fi
-
-# Handle env array (env.0, env.1, ...) - always append from config (config + CLI)
-env_idx=0
-while [[ -n "${direct_config[env.$env_idx]:-}" ]]; do
-    env_value="${direct_config[env.$env_idx]}"
-    if [[ "$env_value" == *=* ]]; then
-        export "${env_value%%=*}"="${env_value#*=}"
-        primus_env_kv+=("$env_value")
+# For non-cumulative parameters with multiple values (config + CLI), use only the last value
+for param in "script" "log_file"; do
+    if [[ -n "${direct_config[$param]:-}" && "${direct_config[$param]}" == *$'\n'* ]]; then
+        # Has newlines, take last value (CLI overrides config)
+        last_value=$(echo "${direct_config[$param]}" | tail -1)
+        direct_config[$param]="$last_value"
+        LOG_DEBUG_RANK0 "[direct] Using last value for $param: $last_value"
     fi
-    ((env_idx++))
 done
 
+###############################################################################
+# STEP 4.6: Setup log file path
+###############################################################################
+if [[ -z "${direct_config[log_file]}" ]]; then
+    direct_config[log_file]="logs/log_$(date +%Y%m%d_%H%M%S).txt"
+fi
+mkdir -p "$(dirname "${direct_config[log_file]}")"
+
+
+###############################################################################
+# STEP 5: Install dependencies
+###############################################################################
+# Skip pip install if PRIMUS_SKIP_PIP_INSTALL is set (useful for testing)
+if [[ "${PRIMUS_SKIP_PIP_INSTALL:-0}" != "1" ]]; then
+    pip install -qq -r requirements.txt
+fi
+
+###############################################################################
+# STEP 6: Source GPU environment and helper modules
+###############################################################################
 
 # Source primus-env.sh (it will set its own SCRIPT_DIR, which is fine)
 # shellcheck disable=SC1091
 source "${RUNNER_DIR}/helpers/envs/primus-env.sh"
 
-# Source helper modules
-# shellcheck disable=SC1091
-source "${RUNNER_DIR}/helpers/execute_hooks.sh"
-# shellcheck disable=SC1091
-source "${RUNNER_DIR}/helpers/execute_patches.sh"
+###############################################################################
+# STEP 7: Build and export environment variables
+###############################################################################
 
-# Export environment variables passed via --env
-for kv in "${primus_env_kv[@]}"; do
-    export "${kv%%=*}"="${kv#*=}"
-    LOG_INFO_RANK0 "[direct] Exported env: ${kv%%=*}=${kv#*=}"
-done
-
-# Step 2: Auto-run hooks based on $1 $2 (e.g., train pretrain → hooks/train/pretrain/*) (skip in dry-run mode)
-if [[ $# -ge 2 && "$DRY_RUN_MODE" == "0" ]]; then
-    if ! execute_hooks "$1" "$2" "${primus_args[@]}"; then
-        LOG_ERROR "[direct] Hooks execution failed"
-        exit 1
-    fi
-elif [[ "$DRY_RUN_MODE" == "0" ]]; then
-    LOG_INFO_RANK0 "[direct] No hook target detected (missing \$1 \$2)."
+# Build primus_env_kv array and export environment variables
+primus_env_kv=()
+if [[ -n "${direct_config[env]:-}" ]]; then
+    while IFS= read -r env_entry; do
+        [[ -n "$env_entry" ]] || continue
+        # Validate env format (KEY=VALUE)
+        if ! [[ "$env_entry" == *=* ]]; then
+            LOG_ERROR "[direct] Invalid env format: $env_entry"
+            LOG_ERROR "  Expected format: KEY=VALUE (e.g., NCCL_DEBUG=INFO)"
+            exit 1
+        fi
+        primus_env_kv+=("$env_entry")
+        export "${env_entry%%=*}"="${env_entry#*=}"
+        LOG_DEBUG_RANK0 "[direct] Exported env: ${env_entry%%=*}=${env_entry#*=}"
+    done <<< "${direct_config[env]}"
 fi
 
+###############################################################################
+# STEP 8: Execute hooks
+###############################################################################
+if ! bash "${RUNNER_DIR}/helpers/execute_hooks.sh" "$1" "$2" "$@"; then
+    LOG_ERROR "[direct] Hooks execution failed"
+    exit 1
+fi
 
-# Step 3: Run patch scripts if specified (skip in dry-run mode)
-if [[ ${#patch_scripts[@]} -gt 0 && "$DRY_RUN_MODE" == "0" ]]; then
-    if ! execute_patches "${patch_scripts[@]}"; then
+###############################################################################
+# STEP 9: Execute patch scripts
+###############################################################################
+# Build and execute patch scripts array from config + CLI
+if [[ -n "${direct_config[patch]:-}" ]]; then
+    patch_scripts=()
+    while IFS= read -r patch_entry; do
+        patch_scripts+=("$patch_entry")
+    done <<< "${direct_config[patch]}"
+
+    if ! bash "${RUNNER_DIR}/helpers/execute_patches.sh" "${patch_scripts[@]}"; then
         LOG_ERROR "[direct] Patch execution failed"
         exit 1
     fi
 fi
 
-# Install dependencies (skip in dry-run mode)
-if [[ "$DRY_RUN_MODE" == "0" ]]; then
-    pip install -qq -r requirements.txt
-    if [[ "$enable_numa" == "1" ]]; then
-        apt-get install numactl -y > /dev/null 2>&1
-    fi
-fi
-
-# Build launch arguments.
-if [[ "$run_mode" == "single" ]]; then
-    if [[ "$enable_numa" == "1" ]]; then
-        CMD="bash ${RUNNER_DIR}/helpers/numa_bind.sh python3 $script_path $*"
+###############################################################################
+# STEP 10: Build launch command
+###############################################################################
+if [[ "${direct_config[run_mode]}" == "single" ]]; then
+    if [[ "${direct_config[numa]}" == "true" ]]; then
+        CMD="bash ${RUNNER_DIR}/helpers/numa_bind.sh python3 ${direct_config[script]} $*"
         LOG_INFO "[direct] Launching single-process script with NUMA binding:"
     else
-        CMD="python3 $script_path $*"
+        CMD="python3 ${direct_config[script]} $*"
         LOG_INFO "[direct] Launching single-process script:"
     fi
 else
@@ -353,42 +385,41 @@ else
     fi
 
     NUMA_LAUNCHER_ARGS=()
-    if [[ "$enable_numa" == "1" ]]; then
+    if [[ "${direct_config[numa]}" == "true" ]]; then
         NUMA_LAUNCHER_ARGS=(--no-python "${RUNNER_DIR}/helpers/numa_bind.sh" python3)
         LOG_INFO_RANK0 "[direct] NUMA binding: ENABLED (forced by CLI)"
-    elif [[ "$enable_numa" == "0" ]]; then
+    elif [[ "${direct_config[numa]}" == "false" ]]; then
         LOG_INFO_RANK0 "[direct] NUMA binding: DISABLED (forced by CLI)"
     else
         LOG_INFO_RANK0 "[direct] NUMA binding: AUTO (default OFF)"
     fi
 
-    if [[ "$DEBUG_MODE" == "1" ]]; then
-        print_section "Primus Entrypoint Summary"
-        LOG_INFO_RANK0 "  Run Mode     : $run_mode"
-        LOG_INFO_RANK0 "  Script Path  : $script_path"
-        LOG_INFO_RANK0 "  Config File  : ${CONFIG_FILE:-<none>}"
-        LOG_INFO_RANK0 "  Log File     : $log_file"
-        LOG_INFO_RANK0 "  NUMA Binding : $enable_numa"
-        LOG_INFO_RANK0 "  Patches      : ${patch_scripts[*]:-<none>}"
-        LOG_INFO_RANK0 "  Env Vars     : ${primus_env_kv[*]:-<none>}"
-    fi
-
-    # Step 4: Build the final command.
-    CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS} ${NUMA_LAUNCHER_ARGS[*]}  $script_path $* "
-    LOG_INFO "[direct] Launching distributed training with command: $CMD 2>&1 | tee $log_file"
+    CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS} ${NUMA_LAUNCHER_ARGS[*]}  ${direct_config[script]} $* "
 fi
 
-# Dry-run mode: display configuration and exit
-if [[ "$DRY_RUN_MODE" == "1" ]]; then
-    print_section "[DRY RUN] Direct Launch Configuration"
-    PRINT_INFO_RANK0 "  Run Mode        : $run_mode"
-    PRINT_INFO_RANK0 "  Script Path     : $script_path"
+###############################################################################
+# STEP 11: Display configuration
+###############################################################################
+if [[ "$DEBUG_MODE" == "1" || "$DRY_RUN_MODE" == "1" ]]; then
+    if [[ "$DRY_RUN_MODE" == "1" ]]; then
+        print_section "[DRY RUN] Direct Launch Configuration"
+    else
+        print_section "Primus Direct Launch Configuration"
+    fi
+
+    PRINT_INFO_RANK0 "  Run Mode        : ${direct_config[run_mode]}"
+    PRINT_INFO_RANK0 "  Script Path     : ${direct_config[script]}"
     PRINT_INFO_RANK0 "  Config File     : ${CONFIG_FILE:-<none>}"
-    PRINT_INFO_RANK0 "  Log File        : $log_file"
-    PRINT_INFO_RANK0 "  NUMA Binding    : $enable_numa"
-    PRINT_INFO_RANK0 "  Patch Scripts   : ${patch_scripts[*]:-<none>}"
+    PRINT_INFO_RANK0 "  Log File        : ${direct_config[log_file]}"
+    PRINT_INFO_RANK0 "  NUMA Binding    : ${direct_config[numa]}"
+    if [[ -n "${direct_config[patch]:-}" ]]; then
+        PRINT_INFO_RANK0 "  Patch Scripts   : $(echo "${direct_config[patch]}" | tr '\n' ' ')"
+    else
+        PRINT_INFO_RANK0 "  Patch Scripts   : <none>"
+    fi
     PRINT_INFO_RANK0 "  Primus Args     : $*"
     PRINT_INFO_RANK0 ""
+
     if [[ ${#primus_env_kv[@]} -gt 0 ]]; then
         PRINT_INFO_RANK0 "  Environment Variables:"
         for kv in "${primus_env_kv[@]}"; do
@@ -396,7 +427,8 @@ if [[ "$DRY_RUN_MODE" == "1" ]]; then
         done
         PRINT_INFO_RANK0 ""
     fi
-    if [[ "$run_mode" == "torchrun" ]]; then
+
+    if [[ "${direct_config[run_mode]}" == "torchrun" ]]; then
         PRINT_INFO_RANK0 "  Distributed Settings:"
         PRINT_INFO_RANK0 "    NNODES          : ${NNODES:-1}"
         PRINT_INFO_RANK0 "    NODE_RANK       : ${NODE_RANK:-0}"
@@ -405,16 +437,24 @@ if [[ "$DRY_RUN_MODE" == "1" ]]; then
         PRINT_INFO_RANK0 "    MASTER_PORT     : ${MASTER_PORT:-1234}"
         PRINT_INFO_RANK0 ""
     fi
+
     PRINT_INFO_RANK0 "  Full Command:"
-    PRINT_INFO_RANK0 "    $CMD 2>&1 | tee $log_file"
-    print_section "End of Dry Run"
-    exit 0
+    PRINT_INFO_RANK0 "    $CMD 2>&1 | tee ${direct_config[log_file]}"
+
+    if [[ "$DRY_RUN_MODE" == "1" ]]; then
+        print_section "End of Dry Run"
+        exit 0
+    fi
+    print_section ""
 fi
 
-eval "$CMD" 2>&1 | tee "$log_file"
+###############################################################################
+# STEP 12: Execute command
+###############################################################################
+eval "$CMD" 2>&1 | tee "${direct_config[log_file]}"
 exit_code=${PIPESTATUS[0]}
 
-# Print log based on exit code
+# Print result based on exit code
 if [[ $exit_code -ge 128 ]]; then
     LOG_ERROR "[direct] torchrun crashed due to signal $((exit_code - 128))"
 elif [[ $exit_code -ne 0 ]]; then
