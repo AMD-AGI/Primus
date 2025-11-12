@@ -8,6 +8,24 @@
 # Execute patch scripts
 # Usage: execute_patches <patch_script1> [patch_script2] ...
 #
+# Exit codes from patch scripts:
+#   0   - Success, continue to next patch
+#   2   - Skip this patch (not an error)
+#   other - Failure, stop execution
+#
+# Example patch script with conditional skip:
+#   #!/bin/bash
+#   # Check if patch is needed
+#   if [[ -f /tmp/already_patched ]]; then
+#       echo "Patch already applied, skipping"
+#       exit 2  # Skip this patch
+#   fi
+#
+#   # Apply patch
+#   echo "Applying patch..."
+#   # ... patch logic ...
+#   exit 0  # Success
+#
 
 # Requires common.sh to be sourced
 if [[ -z "${__PRIMUS_COMMON_SOURCED:-}" ]]; then
@@ -51,8 +69,15 @@ execute_patches() {
 
         LOG_INFO_RANK0 "[Execute Patches] Running patch: bash $patch"
 
-        if ! bash "$patch"; then
-            LOG_ERROR "[Execute Patches] Patch script failed: $patch (exit code: $?)"
+        bash "$patch"
+        local exit_code=$?
+
+        if [[ $exit_code -eq 0 ]]; then
+            LOG_INFO_RANK0 "[Execute Patches] Patch completed successfully: $patch"
+        elif [[ $exit_code -eq 2 ]]; then
+            LOG_INFO_RANK0 "[Execute Patches] Patch skipped (exit code 2): $patch"
+        else
+            LOG_ERROR "[Execute Patches] Patch script failed: $patch (exit code: $exit_code)"
             return 1
         fi
     done
