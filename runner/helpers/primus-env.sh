@@ -93,58 +93,62 @@ log_exported_vars "NCCL and Network Settings" \
     HIP_VISIBLE_DEVICES NCCL_DEBUG NCCL_CHECKS_DISABLE NCCL_IB_GID_INDEX \
     NCCL_IB_HCA IP_INTERFACE NCCL_SOCKET_IFNAME GLOO_SOCKET_IFNAME
 
-# ----------------- AMD-specific GPU optimizations -----------------
-# Enable system DMA engine (SDMA) on AMD GPUs for better IO throughput
-export HSA_ENABLE_SDMA=1
+# ----------------- GPU Model Detection and Configuration Loading -----------------
+# Detect GPU model and load model-specific optimizations
+GPU_MODEL=${GPU_MODEL:-}
 
-# Prevent scratch memory from being reclaimed to stabilize large memory usage patterns (e.g., KV cache, MoE experts)
-# NOTE: Must disable scratch reclaim to avoid MoE training crash on AMD GPUs
-# Setting this to 0 prevents core dumps when using Mixture-of-Experts (MoE) models
-export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-0}
+if [[ -z "$GPU_MODEL" ]]; then
+    # Try to detect GPU model using rocm-smi
+    if command -v rocm-smi &> /dev/null; then
+        GPU_MODEL=$(bash "$SCRIPT_DIR/helpers/detect_gpu_model.sh" 2>/dev/null || echo "")
+    fi
+fi
 
-# Disable MSCCL (RCCL multi-connection feature) for better stability
-export RCCL_MSCCL_ENABLE=0
-export RCCL_MSCCLPP_ENABLE=0
-export RCCL_MSCCLPP_FORCE_ENABLE=0
-export RCCL_MSCCLPP_THRESHOLD=$((1*1024*1024*1024)) # default 1 MB
-# https://github.com/microsoft/mscclpp/blob/main/include/mscclpp/env.hpp#L82-L87
-export MSCCLPP_DISABLE_CHANNEL_CACHE=FALSE
-# pytorch need set this env to enable register comm
-export TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=0
+# Load GPU model-specific configuration
+ENV_CONFIG_DIR="$SCRIPT_DIR/helpers/envs"
+GPU_CONFIG_FILE=""
 
-log_exported_vars "AMD-specific GPU optimizations" \
-    HSA_ENABLE_SDMA HSA_NO_SCRATCH_RECLAIM \
-    RCCL_MSCCL_ENABLE RCCL_MSCCLPP_ENABLE RCCL_MSCCLPP_FORCE_ENABLE RCCL_MSCCLPP_THRESHOLD \
-    MSCCLPP_DISABLE_CHANNEL_CACHE TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK
+if [[ -n "$GPU_MODEL" ]]; then
+    LOG_INFO_RANK0 "Detected GPU model: $GPU_MODEL"
 
+    # Check for exact match first
+    if [[ -f "$ENV_CONFIG_DIR/${GPU_MODEL}.sh" ]]; then
+        GPU_CONFIG_FILE="$ENV_CONFIG_DIR/${GPU_MODEL}.sh"
+    # Check for MI300 variants (MI300X, MI300A)
+    elif [[ "$GPU_MODEL" =~ ^MI300 ]] && [[ -f "$ENV_CONFIG_DIR/MI300X.sh" ]]; then
+        GPU_CONFIG_FILE="$ENV_CONFIG_DIR/MI300X.sh"
+    # Check for MI250 variants
+    elif [[ "$GPU_MODEL" =~ ^MI250 ]] && [[ -f "$ENV_CONFIG_DIR/MI250X.sh" ]]; then
+        GPU_CONFIG_FILE="$ENV_CONFIG_DIR/MI250X.sh"
+    # Fallback to default
+    else
+        LOG_WARN "No specific configuration found for GPU model: $GPU_MODEL"
+        GPU_CONFIG_FILE="$ENV_CONFIG_DIR/default.sh"
+    fi
+else
+    LOG_WARN "Unable to detect GPU model, using default configuration"
+    GPU_CONFIG_FILE="$ENV_CONFIG_DIR/default.sh"
+fi
 
-# ----------------- Performance tuning -----------------
-# Limit GPU hardware queues to 2 for performance stability
-export GPU_MAX_HW_QUEUES=2
+# Source the GPU-specific configuration
+if [[ -f "$GPU_CONFIG_FILE" ]]; then
+    LOG_INFO_RANK0 "Loading GPU configuration: $GPU_CONFIG_FILE"
+    # shellcheck disable=SC1090
+    source "$GPU_CONFIG_FILE"
+else
+    LOG_ERROR "GPU configuration file not found: $GPU_CONFIG_FILE"
+    LOG_ERROR "Please create $ENV_CONFIG_DIR/default.sh or specify GPU_MODEL manually"
+    exit 1
+fi
 
-# Limit max CUDA device connections to reduce PCIe traffic
-export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
+# ----------------- Common Performance Tuning -----------------
+# These settings apply to all GPU models
 
 # Prioritize NCCL communication for PyTorch for higher throughput
-export TORCH_NCCL_HIGH_PRIORITY=1
+export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 
-# optimize nvte fp8 cast transpose
-export NVTE_USE_CAST_TRANSPOSE_TRITON=1
-export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=0
-
-# Note: Disable v3 due to accuracy issues. Will fix after TE version 2.1.
-export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
-
-# nvte debug envs
-export NVTE_DEBUG=0 # 0, 1
-export NVTE_DEBUG_LEVEL=0 # 0, 1, 2
-export NVTE_FUSED_ATTN_LOG_CONFIG=0 # 0, 1
-export PATCH_TE_FLASH_ATTN=${PATCH_TE_FLASH_ATTN:-0}
-
-log_exported_vars "Performance tuning" \
-    GPU_MAX_HW_QUEUES CUDA_DEVICE_MAX_CONNECTIONS TORCH_NCCL_HIGH_PRIORITY \
-    NVTE_USE_CAST_TRANSPOSE_TRITON NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE \
-    NVTE_CK_USES_BWD_V3 NVTE_DEBUG NVTE_DEBUG_LEVEL NVTE_FUSED_ATTN_LOG_CONFIG PATCH_TE_FLASH_ATTN
+log_exported_vars "Common Performance Tuning" \
+    TORCH_NCCL_HIGH_PRIORITY
 
 # -------------------- setup_pythonpath -------------------
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
