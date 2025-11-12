@@ -12,9 +12,6 @@
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUNNER_DIR="$PROJECT_ROOT/runner"
 
-# Skip pip install during tests
-export PRIMUS_SKIP_PIP_INSTALL=1
-
 # Test counters
 TESTS_RUN=0
 TESTS_PASSED=0
@@ -272,7 +269,7 @@ direct:
 EOF
 
     local output
-    output=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --env INVALID_ENV -- test 2>&1 || true)
+    output=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run --config "$test_config" --env INVALID_ENV -- test 2>&1 || true)
 
     assert_contains "$output" "Invalid env format" "Invalid env format detected"
     assert_contains "$output" "Expected format: KEY=VALUE" "Error message shows correct format"

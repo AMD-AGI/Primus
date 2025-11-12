@@ -282,8 +282,8 @@ mkdir -p "$(dirname "${direct_config[log_file]}")"
 ###############################################################################
 # STEP 5: Install dependencies
 ###############################################################################
-# Skip pip install if PRIMUS_SKIP_PIP_INSTALL is set (useful for testing)
-if [[ "${PRIMUS_SKIP_PIP_INSTALL:-0}" != "1" ]]; then
+# Skip pip install in dry-run mode
+if [[ "$DRY_RUN_MODE" != "1" ]]; then
     pip install -qq -r requirements.txt
 fi
 
