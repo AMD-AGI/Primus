@@ -20,11 +20,10 @@ qk_pos_emb_head_dim: 64
 v_head_dim: 128
 kv_channels: 128
 # mtp
-# mtp_num_layers: 1
-# mtp_loss_scaling_factor: 0.1
+mtp_num_layers: 1
+mtp_loss_scaling_factor: 0.1
 # moe
-# moe_layer_freq: "([0]*3+[1]*58)"
-moe_layer_freq: 1
+moe_layer_freq: "([0]*3+[1]*58)"
 num_experts: 256
 moe_router_topk: 8
 # num_shared_experts: 1
