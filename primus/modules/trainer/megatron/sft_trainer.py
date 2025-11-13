@@ -4,7 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from .trainer import MegatronTrainer
+
 
 
 import collections
