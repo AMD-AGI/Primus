@@ -9,10 +9,8 @@
 # Primus Environment Setup - Layered Configuration Loading
 # =============================================================================
 # Load order:
-#   1. base_env.sh           - Base configuration (logging, cluster info, pythonpath)
-#   2. common_network.sh     - Network and NCCL settings
-#   3. perf_tuning.sh        - Performance tuning and optimizations
-#   4. <GPU_MODEL>.sh        - GPU-specific overrides (e.g., MI300X.sh, MI325X.sh)
+#   1. base_env.sh    - All base configurations (cluster, network, performance, pythonpath)
+#   2. <GPU_MODEL>.sh - GPU-specific overrides (e.g., MI300X.sh, MI325X.sh)
 #
 # Environment Variables:
 #   PRIMUS_DEBUG=1           - Enable debug mode (set -x, verbose output)
@@ -27,7 +25,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# 1. Load base environment (logging, cluster info, pythonpath)
+# 1. Load base environment (includes all configurations)
 # shellcheck source=runner/helpers/envs/base_env.sh
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/base_env.sh"
@@ -35,18 +33,41 @@ source "${SCRIPT_DIR}/base_env.sh"
 LOG_INFO_RANK0 ""
 LOG_INFO_RANK0 "=== Loading Primus Environment Configuration ==="
 
-# 2. Load common network configuration
-# shellcheck source=runner/helpers/envs/common_network.sh
-# shellcheck disable=SC1091
-source "${SCRIPT_DIR}/common_network.sh"
+# 2. Detect GPU model and load device-specific configuration
 
-# 3. Load performance tuning configuration
-# shellcheck source=runner/helpers/envs/perf_tuning.sh
-# shellcheck disable=SC1091
-source "${SCRIPT_DIR}/perf_tuning.sh"
+# GPU detection function
+detect_gpu_model() {
+    local gpu_model
+    gpu_model="unknown"
 
-# 4. Detect GPU model and load device-specific configuration
-GPU_MODEL=$(bash "${SCRIPT_DIR}/detect_gpu.sh")
+    # Check if rocm-smi is available
+    if ! command -v rocm-smi &> /dev/null; then
+        echo "Error: rocm-smi not found. Is ROCm installed?" >&2
+        echo "unknown"
+        return 1
+    fi
+
+    # Get product name from rocm-smi
+    local product_name
+    product_name=$(rocm-smi --showproductname 2>/dev/null | grep -i "Card series" | head -n1 | awk '{print $NF}')
+
+    # If that doesn't work, try alternative method
+    if [[ -z "$product_name" ]]; then
+        product_name=$(rocm-smi --showproductname 2>/dev/null | grep -oP 'MI\d+[A-Z]*' | head -n1)
+    fi
+
+    # Extract model identifier (MI300, MI355, etc.)
+    if [[ "$product_name" =~ MI([0-9]+)([A-Z]*) ]]; then
+        gpu_model="MI${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+    fi
+
+    echo "$gpu_model"
+}
+
+GPU_MODEL=$(detect_gpu_model)
+if [[ "$GPU_MODEL" == "unknown" ]]; then
+    LOG_WARN "Unable to detect GPU model. Using default configuration."
+fi
 LOG_INFO_RANK0 "Detected GPU model: ${GPU_MODEL}"
 
 GPU_CONFIG_FILE="${SCRIPT_DIR}/${GPU_MODEL}.sh"
