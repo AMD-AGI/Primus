@@ -15,20 +15,20 @@ LOG_INFO_RANK0 "Loading MI355X-specific optimizations..."
 # ----------------- MI355X-specific GPU settings -----------------
 # MI355X has 128GB unified memory (HBM + DDR)
 # Enable XNACK for unified memory support (different from discrete GPUs)
-export HSA_XNACK=${HSA_XNACK:-1}
+# export HSA_XNACK=${HSA_XNACK:-1}
 
 # APU-specific: Enable interrupt-driven mode for better power efficiency
-export HSA_ENABLE_INTERRUPT=${HSA_ENABLE_INTERRUPT:-1}
+# export HSA_ENABLE_INTERRUPT=${HSA_ENABLE_INTERRUPT:-1}
 
 # Optimize memory allocation for unified memory architecture
-export GPU_MAX_HEAP_SIZE=${GPU_MAX_HEAP_SIZE:-100}
+# export GPU_MAX_HEAP_SIZE=${GPU_MAX_HEAP_SIZE:-100}
 
 # MI355X memory pool settings
-export HSA_KERNARG_POOL_SIZE=${HSA_KERNARG_POOL_SIZE:-8388608}  # 8MB (smaller than discrete GPUs)
+# export HSA_KERNARG_POOL_SIZE=${HSA_KERNARG_POOL_SIZE:-8388608}  # 8MB (smaller than discrete GPUs)
 
 # ----------------- MI355X RCCL optimizations -----------------
 # APU may have different interconnect characteristics
-# Keep base_env.sh settings unless testing shows otherwise
+# Keep common_network.sh settings unless testing shows otherwise
 
-log_exported_vars "MI355X-specific optimizations" \
-    HSA_XNACK HSA_ENABLE_INTERRUPT GPU_MAX_HEAP_SIZE HSA_KERNARG_POOL_SIZE
+# log_exported_vars "MI355X-specific optimizations" \
+#     HSA_XNACK HSA_ENABLE_INTERRUPT GPU_MAX_HEAP_SIZE HSA_KERNARG_POOL_SIZE
