@@ -43,9 +43,6 @@ from transformer_engine.pytorch.fp8 import (
     dist_group_type,
 )
 
-from primus.backends.megatron.core.pipeline_parallel.zerobubble.zbpp_utils import (
-    WeightGradStore,
-)
 
 class PrimusTurboFloat8QuantConfig(Float8QuantConfig):
 
@@ -734,7 +731,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         )
         args = get_args()
 
-        if (args.patch_zero_bubble and args.enable_zero_bubble) or args.delay_wgrad_compute:
+        if (args.patch_zero_bubble and args.enable_zero_bubble) or (args.patch_moe_overlap and args.overlap_moe_expert_parallel_comm):
             from .zbpp_gemm import grouped_gemm_with_weight_gradient_store
 
             self.grouped_gemm = functools.partial(
@@ -876,11 +873,6 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 fc2_output = torch.matmul(h, w2)
 
         return fc2_output, None
-
-    def backward_dw(self):
-        WeightGradStore.flush()
-        WeightGradStore.pop()
-
 
 
 class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):

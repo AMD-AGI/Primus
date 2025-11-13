@@ -43,7 +43,6 @@ DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.9_gfx942"}
 
 # Project root
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
-TURBO_PATH=$(realpath "${PRIMUS_PATH}/../Primus-Turbo")
 
 # Dataset directory
 # DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
@@ -83,7 +82,7 @@ ENV_ARGS+=("--env" "HF_TOKEN")
 HOSTNAME=$(hostname)
 ARGS=("$@")
 
-VOLUME_ARGS=(-v "$PRIMUS_PATH":"$PRIMUS_PATH" -v "$DATA_PATH":"$DATA_PATH" -v "$TURBO_PATH":"$TURBO_PATH")
+VOLUME_ARGS=(-v "$PRIMUS_PATH":"$PRIMUS_PATH" -v "$DATA_PATH":"$DATA_PATH")
 if [[ -f "$PATH_TO_BNXT_TAR_PACKAGE" ]]; then
     VOLUME_ARGS+=(-v "$PATH_TO_BNXT_TAR_PACKAGE":"$PATH_TO_BNXT_TAR_PACKAGE")
 fi

@@ -225,7 +225,7 @@ def get_gpu_flops_and_offload_bandwidth():
 
 class WeightGradStore:
 
-    should_split_bw = True
+    should_split_bw = False
     cache = []
     weight_grad_queue = None  # lazy init
 
