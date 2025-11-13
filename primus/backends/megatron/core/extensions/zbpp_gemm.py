@@ -103,7 +103,7 @@ class GroupedLinearWithWeightGradientStore(torch.autograd.Function):
     ):
         if wgrad_gemm_backend_func is None:
             wgrad_gemm_backend_func = group_gemm_backend_func
-        ctx.use_main_grad = hasattr(weight, 'main_grad') and weight.main_grad is not None
+        ctx.use_main_grad = hasattr(weight, "main_grad") and weight.main_grad is not None
         if ctx.use_main_grad:
             ctx.weight_main_grad = weight.main_grad
         ctx.weight_shape_ori = weight.shape

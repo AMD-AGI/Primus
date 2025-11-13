@@ -5,15 +5,14 @@
 ###############################################################################
 
 import torch
-
-from megatron.core.pipeline_parallel.utils import (
-    get_comm_stream,
-)
-
 from megatron.core.models.common.model_chunk_schedule_plan import (
     TransformerLayerSchedulePlan,
+)
+from megatron.core.models.common.model_chunk_schedule_plan import (
     TransformerModelChunkSchedulePlan as TransformerModelChunkSchedulePlanBase,
 )
+from megatron.core.pipeline_parallel.utils import get_comm_stream
+
 from primus.backends.megatron.core.pipeline_parallel.zerobubble.zbpp_utils import (
     WeightGradStore,
 )
