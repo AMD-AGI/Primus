@@ -82,6 +82,7 @@ primus_args=()
 patch_scripts=()
 log_file=""
 enable_numa="auto"  # auto / 1 / 0
+use_gpu="1"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -95,6 +96,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-numa)
             enable_numa="0"
+            shift
+            ;;
+        --no-gpu)
+            use_gpu="0"
             shift
             ;;
         --script)
@@ -210,7 +215,10 @@ else
     LOG_INFO_RANK0 "[Primus Entrypoint] No patch scripts specified."
 fi
 
-pip install -qq -r requirements.txt
+if [[ "$use_gpu" == "1" ]]; then
+    pip install -qq -r requirements.txt
+fi
+
 if [[ "$enable_numa" == "1" ]]; then
     apt-get install numactl -y > /dev/null 2>&1
 fi
