@@ -142,6 +142,12 @@ LOG_SUCCESS_RANK0() {
     fi
 }
 
+LOG_ERROR_RANK0() {
+    if [[ "${NODE_RANK:-0}" == "0" ]]; then
+        LOG_ERROR "$@"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Simple Print Functions (without timestamps and prefixes)
 # ---------------------------------------------------------------------------
