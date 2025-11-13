@@ -81,16 +81,8 @@ export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 
 LOG_INFO_RANK0 "Pip installing required packages ..."
 
-sudo apt update && sudo apt install rdma-core libibverbs-dev ibverbs-utils -y
-sudo apt-get install libopenmpi-dev openmpi-bin -y
 pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
 
-pip uninstall primus_turbo -y
-pip install -qq hip-python --extra-index-url https://test.pypi.org/simple
-# pip install "${PRIMUS_PATH}"/third_party/primus_turbo-0.1.1+0385cdd-cp310-cp310-linux_x86_64.whl
-pip install "${PRIMUS_PATH}"/third_party/primus_turbo-0.1.1+851e4af-cp310-cp310-linux_x86_64.whl
-
-# exporty AITER_JIT_DIR="${PRIMUS_PATH}"/aiter_aiter_cache
 # -------------------- EXP Check --------------------
 if [ -z "${EXP:-}" ]; then
     LOG_ERROR "EXP must be specified (e.g., examples/megatron/exp_pretrain.yaml)." \
