@@ -34,6 +34,8 @@ TEST_SCRIPTS=(
     "$SCRIPT_DIR/lib/test_validation.sh"
     "$SCRIPT_DIR/lib/test_config.sh"
     "$SCRIPT_DIR/helpers/test_execute_hooks.sh"
+    "$SCRIPT_DIR/helpers/test_execute_patches.sh"
+    "$SCRIPT_DIR/helpers/test_primus_env.sh"
 )
 
 # Run each test suite
