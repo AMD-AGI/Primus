@@ -142,6 +142,12 @@ LOG_SUCCESS_RANK0() {
     fi
 }
 
+LOG_ERROR_RANK0() {
+    if [[ "${NODE_RANK:-0}" == "0" ]]; then
+        LOG_ERROR "$@"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Simple Print Functions (without timestamps and prefixes)
 # ---------------------------------------------------------------------------
@@ -534,7 +540,7 @@ trap run_cleanup_hooks EXIT INT TERM
 # ---------------------------------------------------------------------------
 export -f _get_timestamp _get_node_id _log
 export -f LOG_DEBUG LOG_INFO LOG_WARN LOG_ERROR LOG_SUCCESS
-export -f LOG_INFO_RANK0 LOG_DEBUG_RANK0 LOG_SUCCESS_RANK0
+export -f LOG_INFO_RANK0 LOG_DEBUG_RANK0 LOG_SUCCESS_RANK0 LOG_ERROR_RANK0
 export -f PRINT_DEBUG PRINT_INFO PRINT_WARN PRINT_ERROR PRINT_SUCCESS
 export -f PRINT_INFO_RANK0 PRINT_DEBUG_RANK0 PRINT_SUCCESS_RANK0
 export -f log_exported_vars print_section
