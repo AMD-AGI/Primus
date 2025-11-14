@@ -9,8 +9,8 @@ Welcome to the Primus documentation! This guide will help you get started with t
 Start here if you're new to Primus:
 
 - **[Quick Start Guide](./quickstart.md)** - Get up and running in 5 minutes
-- **[CLI User Guide](./cli/PRIMUS-CLI-GUIDE.md)** ([中文版](./cli/PRIMUS-CLI-GUIDE_CN.md)) - Complete command-line reference
-- **[CLI Architecture](./cli/CLI-ARCHITECTURE.md)** ([中文版](./cli/CLI-ARCHITECTURE_CN.md)) - Design philosophy and deep dive
+- **[CLI User Guide](./cli/PRIMUS-CLI-GUIDE.md)** - Complete command-line reference
+- **[CLI Architecture](./cli/CLI-ARCHITECTURE.md)** - Design philosophy and deep dive
 
 ### 📖 User Guides
 
