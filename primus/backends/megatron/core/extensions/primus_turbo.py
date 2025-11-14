@@ -731,7 +731,9 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         )
         args = get_args()
 
-        if args.patch_zero_bubble and args.enable_zero_bubble:
+        if (args.patch_zero_bubble and args.enable_zero_bubble) or (
+            args.patch_moe_overlap and args.overlap_moe_expert_parallel_comm
+        ):
             from .zbpp_gemm import grouped_gemm_with_weight_gradient_store
 
             self.grouped_gemm = functools.partial(

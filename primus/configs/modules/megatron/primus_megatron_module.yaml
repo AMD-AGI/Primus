@@ -30,6 +30,9 @@ no_fp8_weight_transpose_cache: false
 # parallelism
 decoder_pipeline_manual_split_list: null # int list
 
+# MoE comm & comp Overlap
+patch_moe_overlap: false
+
 # perf
 pp_warmup: false # set to true to decrease iter-1 time when using pp
 

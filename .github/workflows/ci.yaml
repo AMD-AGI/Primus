@@ -180,6 +180,10 @@ jobs:
           else
             echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others" >> $GITHUB_ENV
           fi
+      - name: Run Shell Tests
+        run: |
+          echo "Running Primus CLI shell tests..."
+          bash ./tests/runner/run_all_tests.sh
       - name: Run Unit Tests
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
