@@ -152,7 +152,7 @@ validate_master_port() {
 
 # Validate all distributed training parameters
 validate_distributed_params() {
-    LOG_INFO_RANK0 "Validating distributed training parameters..."
+    LOG_DEBUG_RANK0 "Validating distributed training parameters..."
 
     validate_nnodes
     validate_node_rank
@@ -160,7 +160,7 @@ validate_distributed_params() {
     validate_master_addr
     validate_master_port
 
-    LOG_SUCCESS_RANK0 "All distributed parameters validated successfully"
+    LOG_DEBUG_RANK0 "All distributed parameters validated successfully"
 }
 
 # ---------------------------------------------------------------------------
@@ -285,6 +285,146 @@ validate_mount_path() {
     LOG_DEBUG "Validated mount: $mount"
 }
 
+# Validate volume format (supports newline-separated list)
+# Format: /host:/container[:options] or /path or named_volume:/container[:options]
+validate_volume_format() {
+    local volumes="$1"
+    local error_prefix="${2:-[validation]}"
+
+    # Skip if empty or empty array marker
+    [[ -z "$volumes" || "$volumes" == "[]" ]] && return 0
+
+    local validation_failed=0
+    while IFS= read -r volume_entry; do
+        [[ -n "$volume_entry" ]] || continue
+
+        # Volume format: /host:/container[:options] or /path or named_volume:/container[:options]
+        if [[ "$volume_entry" == *:* ]]; then
+            IFS=':' read -r src dst opts <<< "$volume_entry"
+
+            # Check that source is not empty
+            if [[ -z "$src" ]]; then
+                LOG_ERROR "$error_prefix Invalid volume format: $volume_entry"
+                LOG_ERROR "$error_prefix Source path cannot be empty"
+                validation_failed=1
+                continue
+            fi
+
+            # Count colons to distinguish /host: from /host:/dst
+            local colon_count
+            colon_count=$(echo "$volume_entry" | grep -o ":" | wc -l)
+            if [[ $colon_count -ge 1 && -z "$dst" ]]; then
+                LOG_ERROR "$error_prefix Invalid volume format: $volume_entry"
+                LOG_ERROR "$error_prefix Destination path cannot be empty when colon is present"
+                validation_failed=1
+                continue
+            fi
+        else
+            # Single path format (e.g., /workspace)
+            opts=""
+        fi
+
+        # If options specified, validate they are valid
+        if [[ -n "$opts" ]]; then
+            IFS=',' read -ra opt_array <<< "$opts"
+            for opt in "${opt_array[@]}"; do
+                if ! [[ "$opt" =~ ^(ro|rw|z|Z|shared|slave|private|delegated|cached|consistent)$ ]]; then
+                    LOG_ERROR "$error_prefix Invalid volume option: $opt in $volume_entry"
+                    LOG_ERROR "$error_prefix Valid options: ro, rw, z, Z, shared, slave, private, delegated, cached, consistent"
+                    validation_failed=1
+                fi
+            done
+        fi
+
+        LOG_DEBUG "Volume validated: $volume_entry"
+    done <<< "$volumes"
+
+    if [[ $validation_failed -eq 1 ]]; then
+        die "$error_prefix Volume format validation failed"
+    fi
+
+    LOG_DEBUG "All volumes validated"
+}
+
+# Validate device paths exist on host (supports newline-separated list)
+validate_device_paths() {
+    local devices="$1"
+    local error_prefix="${2:-[validation]}"
+    local missing_error_msg="${3:-}"
+    local validation_error_msg="${4:-}"
+
+    # First check if devices are configured
+    if [[ -z "$devices" || "$devices" == "[]" ]]; then
+        if [[ -n "$missing_error_msg" ]]; then
+            die "$missing_error_msg"
+        else
+            die "$error_prefix No GPU devices configured. Add via CLI (--device /dev/kfd --device /dev/dri) or config file"
+        fi
+    fi
+
+    # Validate each device path exists
+    local validation_failed=0
+    while IFS= read -r device; do
+        [[ -n "$device" ]] || continue
+        if [[ ! -e "$device" ]]; then
+            LOG_ERROR "$error_prefix Device does not exist on host: $device"
+            validation_failed=1
+        else
+            LOG_DEBUG "Device validated: $device"
+        fi
+    done <<< "$devices"
+
+    if [[ $validation_failed -eq 1 ]]; then
+        if [[ -n "$validation_error_msg" ]]; then
+            die "$validation_error_msg"
+        else
+            die "$error_prefix Device validation failed. Ensure ROCm drivers are installed. Check: ls -la /dev/kfd /dev/dri"
+        fi
+    fi
+
+    LOG_DEBUG "All device paths validated"
+}
+
+# Validate memory format (e.g., 256G, 1024M)
+validate_memory_format() {
+    local memory="$1"
+    local param_name="${2:-memory}"
+    local error_msg="${3:-}"
+
+    # Skip if empty or multiline
+    [[ -z "$memory" || "$memory" == *$'\n'* ]] && return 0
+
+    if ! [[ "$memory" =~ ^[0-9]+[bkmgBKMG]?$ ]]; then
+        if [[ -n "$error_msg" ]]; then
+            die "$error_msg"
+        else
+            die "Invalid $param_name format: $memory. Expected: <number>[b|k|m|g] (e.g., 256G, 1024M)"
+        fi
+    fi
+
+    LOG_DEBUG "Validated $param_name: $memory"
+}
+
+# Validate CPUs format (e.g., 32, 16.5)
+validate_cpus_format() {
+    local cpus="$1"
+    local param_name="${2:-cpus}"
+    local error_msg="${3:-}"
+
+    # Skip if empty or multiline
+    [[ -z "$cpus" || "$cpus" == *$'\n'* ]] && return 0
+
+    if ! [[ "$cpus" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        if [[ -n "$error_msg" ]]; then
+            die "$error_msg"
+        else
+            die "Invalid $param_name format: $cpus. Expected: <number> or <number>.<decimal> (e.g., 32, 16.5)"
+        fi
+    fi
+
+    LOG_DEBUG "Validated $param_name: $cpus"
+}
+
 # ---------------------------------------------------------------------------
 # Slurm Validation
 # ---------------------------------------------------------------------------
@@ -363,6 +503,73 @@ validate_env_var_choices() {
 }
 
 # ---------------------------------------------------------------------------
+# Configuration Validation
+# ---------------------------------------------------------------------------
+
+# Validate required config parameter is set
+validate_config_param() {
+    local param_value="$1"
+    local param_name="$2"
+    local error_msg="${3:-Missing required parameter: $param_name}"
+
+    if [[ -z "$param_value" ]]; then
+        die "$error_msg"
+    fi
+
+    LOG_DEBUG "Validated config param: $param_name"
+}
+
+# Validate environment variable format (KEY=VALUE, supports newline-separated list)
+validate_env_format() {
+    local env_vars="$1"
+    local error_prefix="${2:-[validation]}"
+
+    # Skip if empty or empty array marker
+    [[ -z "$env_vars" || "$env_vars" == "[]" ]] && return 0
+
+    local validation_failed=0
+    while IFS= read -r env_entry; do
+        [[ -n "$env_entry" ]] || continue
+        if ! [[ "$env_entry" == *=* ]]; then
+            LOG_ERROR "$error_prefix Invalid env format: $env_entry"
+            LOG_ERROR "$error_prefix Expected format: KEY=VALUE (e.g., NCCL_DEBUG=INFO)"
+            validation_failed=1
+        fi
+    done <<< "$env_vars"
+
+    if [[ $validation_failed -eq 1 ]]; then
+        die "$error_prefix Environment variable validation failed"
+    fi
+
+    LOG_DEBUG "All environment variables validated"
+}
+
+# Validate array config parameter is not empty
+validate_config_array() {
+    local param_value="$1"
+    local param_name="$2"
+    local error_msg="${3:-Missing required array parameter: $param_name}"
+
+    if [[ -z "$param_value" || "$param_value" == "[]" ]]; then
+        die "$error_msg"
+    fi
+
+    LOG_DEBUG "Validated config array: $param_name"
+}
+
+# Validate positional arguments are provided
+validate_positional_args() {
+    local -n args_array="$1"
+    local error_msg="${2:-Missing required arguments}"
+
+    if [[ ${#args_array[@]} -eq 0 ]]; then
+        die "$error_msg"
+    fi
+
+    LOG_DEBUG "Validated positional args: ${#args_array[@]} arguments"
+}
+
+# ---------------------------------------------------------------------------
 # Script Validation
 # ---------------------------------------------------------------------------
 
@@ -395,9 +602,11 @@ export -f validate_integer validate_integer_range validate_positive_integer
 export -f validate_gpus_per_node validate_nnodes validate_node_rank
 export -f validate_master_addr validate_master_port validate_distributed_params
 export -f validate_file_readable validate_dir_readable validate_dir_writable validate_absolute_path
-export -f validate_container_runtime validate_docker_image validate_mount_path
+export -f validate_container_runtime validate_docker_image validate_mount_path validate_volume_format validate_device_paths
+export -f validate_memory_format validate_cpus_format
 export -f validate_slurm_env validate_slurm_nodes
 export -f validate_env_var validate_env_var_choices
+export -f validate_config_param validate_config_array validate_positional_args validate_env_format
 export -f validate_python_script validate_bash_script
 
 LOG_DEBUG_RANK0 "Primus validation library loaded successfully"

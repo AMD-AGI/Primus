@@ -36,6 +36,10 @@ TEST_SCRIPTS=(
     "$SCRIPT_DIR/helpers/test_execute_hooks.sh"
     "$SCRIPT_DIR/helpers/test_execute_patches.sh"
     "$SCRIPT_DIR/helpers/test_primus_env.sh"
+    "$SCRIPT_DIR/test_primus_cli.sh"
+    "$SCRIPT_DIR/test_primus_cli_slurm.sh"
+    "$SCRIPT_DIR/test_primus_cli_container.sh"
+    "$SCRIPT_DIR/test_primus_cli_direct.sh"
 )
 
 # Run each test suite
