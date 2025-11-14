@@ -4,8 +4,6 @@
 > **Published**: 2025-11-10
 > **Tags**: `#ROCm` `#LLM-Training` `#Primus` `#DevTools` `#AMD-GPU`
 
-**English** | [中文版](./README_CN.md)
-
 ---
 
 ## 📖 The Beginning: Pain Points in Training Workflows

@@ -1,8 +1,6 @@
 # Primus CLI User Guide
 
-> Unified Entry Point for AMD Large Model Training and Benchmarking
-
-**English** | [中文版](./PRIMUS-CLI-GUIDE_CN.md)
+> Unified Command-Line Interface for AMD GPU Large Model Workflows
 
 ---
 

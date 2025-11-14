@@ -49,9 +49,9 @@ Get help and find answers:
 
 ## 🔗 External Resources
 
-- [Primus GitHub Repository](https://github.com/AMD-AIG-AIMA/Primus)
+- [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) - High-performance operators & modules
+- [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE) - Stability & platform layer
 - [AMD ROCm Documentation](https://rocm.docs.amd.com/)
-- [Megatron-LM Documentation](https://github.com/NVIDIA/Megatron-LM)
 - [TorchTitan Documentation](https://github.com/pytorch/torchtitan)
 
 ---
