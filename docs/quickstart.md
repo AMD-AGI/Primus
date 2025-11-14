@@ -80,7 +80,6 @@ primus-cli [options] <mode> [mode-args] -- [command]
 **Common options:**
 - `--debug` - Verbose logging
 - `--dry-run` - Preview without executing
-- `--config FILE` - Use custom config
 
 ---
 

@@ -119,7 +119,8 @@ source "$RUNNER_DIR/lib/config.sh" || {
 CONFIG_FILE=""
 DEBUG_MODE=0
 DRY_RUN_MODE=0
-PRE_PARSE_ARGS=()
+PRE_PARSE_ARGS=("--")
+PRIMUS_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -150,6 +151,10 @@ while [[ $# -gt 0 ]]; do
                 exit 2
             fi
             ;;
+        --)
+            PRIMUS_ARGS+=("$@")
+            break
+            ;;
         *)
             PRE_PARSE_ARGS+=("$1")
             shift
@@ -157,7 +162,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 # Restore arguments for second pass
-set -- "${PRE_PARSE_ARGS[@]}"
+set "${PRE_PARSE_ARGS[@]}" "${PRIMUS_ARGS[@]}"
 
 # Enable debug mode early if set via CLI
 if [[ "$DEBUG_MODE" == "1" ]]; then
@@ -265,7 +270,7 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-set -- "${primus_args[@]}"
+set "${primus_args[@]}"
 
 ###############################################################################
 # STEP 4.5: Process non-cumulative parameters (use last value only)

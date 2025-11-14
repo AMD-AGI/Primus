@@ -120,13 +120,12 @@ DEBUG_MODE=false
 DRY_RUN_MODE=false
 CLEAN_DOCKER_CONTAINER=false
 PRE_PARSE_ARGS=()
+POST_PARSE_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --)
-            # Preserve '--' separator and append all remaining arguments
-            PRE_PARSE_ARGS+=("$1")  # Include '--' itself
             shift
-            PRE_PARSE_ARGS+=("$@")  # Append all arguments after '--'
+            POST_PARSE_ARGS+=("$@")  # Append all arguments after '--'
             break
             ;;
         --config)
@@ -158,7 +157,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 # Restore arguments
-set -- "${PRE_PARSE_ARGS[@]}"
+set -- "${PRE_PARSE_ARGS[@]}" -- "${POST_PARSE_ARGS[@]}"
 
 ###############################################################################
 # STEP 2: Load configuration files
@@ -223,12 +222,11 @@ fi
 ###############################################################################
 
 POSITIONAL_ARGS=()
-
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --)
             shift
-            POSITIONAL_ARGS+=("$@")
+            POSITIONAL_ARGS+=("${@}")
             break
             ;;
         --*)
@@ -255,7 +253,7 @@ while [[ $# -gt 0 ]]; do
             fi
             ;;
         *)
-            POSITIONAL_ARGS+=("$1")
+            POSITIONAL_ARGS+=("${1}")
             shift
             ;;
     esac
@@ -264,7 +262,7 @@ done
 ###############################################################################
 # STEP 4.5: Validate required parameters
 ###############################################################################
-
+set -- "${POSITIONAL_ARGS[@]}"
 LOG_DEBUG_RANK0 "[container] Validating configuration..."
 
 # Validate required parameters
