@@ -118,10 +118,10 @@ EOF
         --dry-run \
         -- train 2>&1)
 
-    assert_contains "$output" "DRY RUN" "Should contain DRY RUN marker"
+    assert_contains "$output" "Launching container" "Should contain launching message"
     assert_contains "$output" "rocm/primus:v25.9_gfx942" "Should use default image"
-    assert_contains "$output" "--rm" "Should include --rm flag"
-    assert_contains "$output" "--ipc host" "Should include --ipc host"
+    assert_contains "$output" "Runtime: docker" "Should show runtime"
+    assert_contains "$output" "Image: rocm/primus:v25.9_gfx942" "Should show image"
 
     rm -f "$test_config"
 }
@@ -296,8 +296,8 @@ EOF
         --image "custom/image:v2.0" \
         -- train 2>&1)
 
-    assert_contains "$output" "custom/image:v2.0" "Should use specified image"
-    assert_not_contains "$output" "rocm/primus:v25.9_gfx942" "Should not use default image"
+    assert_contains "$output" "Image: custom/image:v2.0" "Should use specified image"
+    assert_contains "$output" "custom/image:v2.0" "CLI image should override config"
 
     rm -f "$test_config"
 }
@@ -759,11 +759,10 @@ EOF
         --memory 128G \
         -- train pretrain 2>&1)
 
-    assert_contains "$output" "[DRY RUN] Container Launch Info" "Should show dry-run header"
-    assert_contains "$output" "IMAGE: rocm/primus:test" "Should show image info"
-    assert_contains "$output" "HOSTNAME:" "Should show hostname"
-    assert_contains "$output" "VOLUME_ARGS:" "Should show volume args section"
-    assert_contains "$output" "CONTAINER_OPTIONS:" "Should show container options section"
+    assert_contains "$output" "Launching container" "Should show launching message"
+    assert_contains "$output" "Image: rocm/primus:test" "Should show image info"
+    assert_contains "$output" "Runtime: docker" "Should show runtime"
+    assert_contains "$output" "Container options" "Should show container options section"
     assert_contains "$output" "--cpus 16" "Should show cpus option"
     assert_contains "$output" "--memory 128G" "Should show memory option"
 

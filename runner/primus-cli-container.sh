@@ -200,7 +200,20 @@ if [[ "$DRY_RUN_MODE" == "false" ]]; then
 fi
 
 # Validate container runtime (docker/podman)
-validate_container_runtime
+# In dry-run mode, allow mock runtime if docker/podman not available
+if [[ "$DRY_RUN_MODE" == "true" ]]; then
+    if command -v podman >/dev/null 2>&1; then
+        export CONTAINER_RUNTIME="podman"
+    elif command -v docker >/dev/null 2>&1; then
+        export CONTAINER_RUNTIME="docker"
+    else
+        # Mock runtime for dry-run testing
+        export CONTAINER_RUNTIME="docker"
+        LOG_INFO_RANK0 "[container] Using mock container runtime for dry-run (no docker/podman found)"
+    fi
+else
+    validate_container_runtime
+fi
 
 ###############################################################################
 # STEP 4: Parse container-specific CLI arguments
@@ -303,7 +316,8 @@ LOG_DEBUG_RANK0 "[container] Parameter validation passed"
 LOG_DEBUG_RANK0 "[container] Converting configuration to container options..."
 
 # 1. Image (required, validated above)
-DOCKER_IMAGE="${container_config[options.image]}"
+# For single-value options like image, take the last value (CLI overrides config)
+DOCKER_IMAGE=$(echo "${container_config[options.image]}" | tail -n1)
 LOG_DEBUG_RANK0 "[container] Final image: $DOCKER_IMAGE"
 
 # 2. Build CONTAINER_OPTS from configuration
