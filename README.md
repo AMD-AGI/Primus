@@ -61,7 +61,7 @@ Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-ru
       -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml
     ```
 
-For more detailed usage instructions, see the [CLI User Guide](./docs/cli/PRIMUS-CLI-GUIDE.md) or [examples/README.md].
+For more detailed usage instructions, see the [CLI User Guide](./docs/cli/PRIMUS-CLI-GUIDE.md).
 
 ---
 
