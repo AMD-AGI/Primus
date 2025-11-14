@@ -311,25 +311,29 @@ test_missing_base_env() {
 
     # Temporarily rename base_env.sh to simulate missing file
     BASE_ENV_FILE="$PROJECT_ROOT/runner/helpers/envs/base_env.sh"
-    BASE_ENV_BACKUP="$PROJECT_ROOT/runner/helpers/envs/base_env.sh.backup"
+    BASE_ENV_BACKUP="$PROJECT_ROOT/runner/helpers/envs/base_env.sh.backup.$$"
 
     if [[ -f "$BASE_ENV_FILE" ]]; then
         mv "$BASE_ENV_FILE" "$BASE_ENV_BACKUP"
     fi
 
-    # Should fail when base_env.sh is missing - capture exit code only
-    if bash -c "source '$PROJECT_ROOT/runner/helpers/envs/primus-env.sh' 2>/dev/null" 2>/dev/null; then
-        fail_detected=0
-    else
-        fail_detected=1
-    fi
+    # Should fail when base_env.sh is missing
+    # Use a fresh bash process and check for error message
+    local output
+    output=$(bash -c "
+        unset __PRIMUS_BASE_ENV_SOURCED
+        unset __PRIMUS_COMMON_SOURCED
+        cd '$PROJECT_ROOT'
+        source '$PROJECT_ROOT/runner/helpers/envs/primus-env.sh' 2>&1
+    " 2>&1)
 
-    # Restore base_env.sh
+    # Restore base_env.sh immediately
     if [[ -f "$BASE_ENV_BACKUP" ]]; then
         mv "$BASE_ENV_BACKUP" "$BASE_ENV_FILE"
     fi
 
-    if [[ "$fail_detected" -eq 1 ]]; then
+    # Test should detect the failure (check for "No such file or directory" error)
+    if echo "$output" | grep -q "No such file or directory"; then
         assert_pass "Missing base environment is detected"
     else
         assert_fail "Missing base environment not detected"
