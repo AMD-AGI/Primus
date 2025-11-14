@@ -490,21 +490,21 @@ get_primus_version() {
 
 # Print system information
 print_system_info() {
-    LOG_DEBUG "Gathering system information..."
-    LOG_INFO_RANK0 "========== System Information =========="
-    LOG_INFO_RANK0 "    Hostname: $(hostname)"
-    LOG_INFO_RANK0 "    Kernel: $(uname -r)"
-    LOG_INFO_RANK0 "    CPUs: $(get_cpu_count)"
-    LOG_INFO_RANK0 "    Memory: $(get_memory_gb) GB"
-    LOG_INFO_RANK0 "    Container: $(is_container && echo 'Yes' || echo 'No')"
-    LOG_INFO_RANK0 "    Slurm Job: $(is_slurm_job && echo 'Yes' || echo 'No')"
+    PRINT_DEBUG "Gathering system information..."
+    PRINT_INFO_RANK0 "========== System Information =========="
+    PRINT_INFO_RANK0 "    Hostname: $(hostname)"
+    PRINT_INFO_RANK0 "    Kernel: $(uname -r)"
+    PRINT_INFO_RANK0 "    CPUs: $(get_cpu_count)"
+    PRINT_INFO_RANK0 "    Memory: $(get_memory_gb) GB"
+    PRINT_INFO_RANK0 "    Container: $(is_container && echo 'Yes' || echo 'No')"
+    PRINT_INFO_RANK0 "    Slurm Job: $(is_slurm_job && echo 'Yes' || echo 'No')"
     if command -v rocm-smi &>/dev/null; then
         local gpu_count
         gpu_count=$(rocm-smi --showid | grep -c "GPU" || echo "0")
-        LOG_INFO_RANK0 "    GPUs: $gpu_count"
-        LOG_DEBUG "ROCm SMI available, GPU count: $gpu_count"
+        PRINT_INFO_RANK0 "    GPUs: $gpu_count"
+        PRINT_DEBUG "ROCm SMI available, GPU count: $gpu_count"
     else
-        LOG_DEBUG "ROCm SMI not available"
+        PRINT_DEBUG "ROCm SMI not available"
     fi
 }
 

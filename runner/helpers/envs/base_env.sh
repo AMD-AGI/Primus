@@ -68,7 +68,7 @@ else
     }
 
     log_exported_vars() {
-        LOG_INFO_RANK0 "========== $1 =========="
+        LOG_INFO_RANK0 "========== $1 ========== ||||||||||||||||||"
         for var in "${@:2}"; do
             LOG_INFO_RANK0 "    $var=${!var-}"
         done

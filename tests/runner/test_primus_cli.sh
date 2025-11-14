@@ -115,7 +115,7 @@ test_unknown_mode() {
     local output
     output=$(bash "$PROJECT_ROOT/runner/primus-cli" unknown-mode 2>&1)
 
-    assert_contains "$output" "Unknown or unsupported mode" "Rejects unknown mode"
+    assert_contains "$output" "Unknown mode:" "Rejects unknown mode"
 }
 
 # ============================================================================
@@ -127,7 +127,7 @@ test_dry_run_mode() {
     local output
     output=$(bash "$PROJECT_ROOT/runner/primus-cli" --dry-run direct --help 2>&1)
 
-    assert_contains "$output" "[DRY RUN] Primus CLI" "Shows dry-run indicator"
+    assert_contains "$output" "Dry-run mode: command not executed" "Shows dry-run indicator"
 }
 
 # ============================================================================
@@ -224,7 +224,8 @@ test_multiple_global_options() {
     local output
     output=$(bash "$PROJECT_ROOT/runner/primus-cli" --debug --dry-run direct --help 2>&1)
 
-    assert_contains "$output" "[DRY RUN] Primus CLI" "Multiple global options work together"
+    assert_contains "$output" "Dry-run mode: command not executed" "Multiple global options work together"
+    assert_contains "$output" "Debug mode enabled" "Debug mode enabled"
 }
 
 # ============================================================================
@@ -263,7 +264,7 @@ test_config_file_not_found() {
     local output
     output=$(bash "$PROJECT_ROOT/runner/primus-cli" --config /nonexistent/file.yaml direct --help 2>&1)
 
-    assert_contains "$output" "Config file not found" "Rejects missing config file"
+    assert_contains "$output" "config file not found" "Rejects missing config file"
 }
 
 # ============================================================================
@@ -346,11 +347,11 @@ test_default_config() {
 test_missing_mode_before_separator() {
     print_section "Test 17: Missing Mode Before Separator"
 
-    # Test that '--' without mode is caught
+    # Test that '--' without mode is caught (treated as unknown mode)
     local output
     output=$(bash "$PROJECT_ROOT/runner/primus-cli" -- train pretrain 2>&1)
 
-    assert_contains "$output" "Missing <mode> argument before '--'" "Detects missing mode before separator"
+    assert_contains "$output" "Unknown mode: --" "Detects missing mode (treats -- as unknown mode)"
 }
 
 # ============================================================================
@@ -363,9 +364,10 @@ test_nested_command_structure() {
     local output
     output=$(bash "$PROJECT_ROOT/runner/primus-cli" --dry-run slurm -N 1 -- container --debug -- train pretrain 2>&1)
 
-    assert_contains "$output" "[DRY RUN] Primus CLI" "Handles nested command structure"
+    assert_contains "$output" "Dry-run mode: command not executed" "Handles nested command structure (dry-run)"
+    assert_contains "$output" "Would execute:" "Shows command to be executed"
     assert_contains "$output" "slurm" "Shows slurm mode"
-    assert_contains "$output" "container --debug" "Shows nested container mode"
+    assert_contains "$output" "container" "Shows nested container mode"
     assert_contains "$output" "train pretrain" "Shows final Primus command"
 }
 

@@ -33,8 +33,8 @@ source "$RUNNER_DIR/lib/config.sh" || {
 
 # Parse --config, --debug, --dry-run first if present
 CONFIG_FILE=""
-DEBUG_MODE=0
-DRY_RUN_MODE=0
+DEBUG_MODE=false
+DRY_RUN_MODE=false
 PRE_PARSE_ARGS=()
 # Pre-parse only until mode separator or mode keyword
 while [[ $# -gt 0 ]]; do
@@ -52,12 +52,12 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --debug)
-            export DEBUG_MODE=1
+            DEBUG_MODE=true
             shift
             ;;
         --dry-run)
             # Only treat as entry dry-run if before mode keyword
-            DRY_RUN_MODE=1
+            DRY_RUN_MODE=true
             shift
             ;;
         *)
@@ -83,13 +83,26 @@ extract_config_section "slurm" slurm_config || {
 }
 
 # Apply slurm config values if not set via CLI
-[[ "$DEBUG_MODE" == "0" && ("${slurm_config[debug]:-false}" == "true" || "${slurm_config[debug]:-false}" == "1") ]] && DEBUG_MODE=1
-[[ "$DRY_RUN_MODE" == "0" && ("${slurm_config[dry_run]:-false}" == "true" || "${slurm_config[dry_run]:-false}" == "1") ]] && DRY_RUN_MODE=1
-
+if [[ "$DEBUG_MODE" == "false" ]]; then
+    debug_value="${slurm_config[debug]:-false}"
+    if [[ "$debug_value" == "true" ]]; then
+        DEBUG_MODE=true
+        LOG_INFO "[slurm] Debug mode enabled via config (PRIMUS_LOG_LEVEL=DEBUG)"
+    fi
+fi
 # Enable debug mode if set
-# if [[ "$DEBUG_MODE" == "1" ]]; then
-#     set -x
-# fi
+if [[ "$DEBUG_MODE" == "true" ]]; then
+    export PRIMUS_LOG_LEVEL="DEBUG"
+    LOG_INFO "[slurm] Debug mode enabled (PRIMUS_LOG_LEVEL=DEBUG)"
+fi
+
+if [[ "$DRY_RUN_MODE" == "false" ]]; then
+    dry_run_value="${slurm_config[dry_run]:-false}"
+    if [[ "$dry_run_value" == "true" || "$dry_run_value" == "1" ]]; then
+        DRY_RUN_MODE=true
+        LOG_INFO "[slurm] Dry-run mode enabled via config"
+    fi
+fi
 
 # Validate Slurm environment
 if [[ -z "${SLURM_NODELIST:-}" ]]; then
@@ -119,80 +132,55 @@ export GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 export MASTER_ADDR
 export MASTER_PORT
 
+# Log configuration
+LOG_DEBUG_RANK0 "[slurm-entry] MASTER_ADDR=$MASTER_ADDR"
+LOG_DEBUG_RANK0 "[slurm-entry] MASTER_PORT=$MASTER_PORT"
+LOG_DEBUG_RANK0 "[slurm-entry] NNODES=$NNODES"
+LOG_DEBUG_RANK0 "[slurm-entry] NODE_RANK=$NODE_RANK"
+LOG_DEBUG_RANK0 "[slurm-entry] GPUS_PER_NODE=$GPUS_PER_NODE"
+LOG_DEBUG_RANK0 "[slurm-entry] NODE_LIST: ${NODE_ARRAY[*]}"
+
 # Validate distributed parameters
 validate_distributed_params || LOG_WARN "[slurm-entry] Failed to validate distributed parameters"
 
-# Log configuration
-LOG_INFO_RANK0 "[slurm-entry] MASTER_ADDR=$MASTER_ADDR"
-LOG_INFO_RANK0 "[slurm-entry] MASTER_PORT=$MASTER_PORT"
-LOG_INFO_RANK0 "[slurm-entry] NNODES=$NNODES"
-LOG_INFO_RANK0 "[slurm-entry] NODE_RANK=$NODE_RANK"
-LOG_INFO_RANK0 "[slurm-entry] GPUS_PER_NODE=$GPUS_PER_NODE"
-LOG_INFO_RANK0 "[slurm-entry] NODE_LIST: ${NODE_ARRAY[*]}"
-
 # ------------- Dispatch based on mode ---------------
 
-# Export environment variables for next script
-export MASTER_ADDR
-export MASTER_PORT
-export NNODES
-export NODE_RANK
-export GPUS_PER_NODE
-
-# Default: 'container' mode, unless user overrides
+# Parse mode (default: container)
+[[ "${1:-}" == "--" ]] && shift
 MODE="container"
-# If the first arg is just a separator, skip it
-if [[ "$1" == "--" ]]; then
-    shift
-fi
-if [[ $# -gt 0 && "$1" =~ ^(container|direct|native|host)$ ]]; then
+if [[ "${1:-}" =~ ^(container|direct)$ ]]; then
     MODE="$1"
     shift
 fi
 
 # Build arguments based on mode
 SCRIPT_ARGS=()
-
-# Pass --config, --debug, --dry-run to next script if present
 if [[ -n "$CONFIG_FILE" ]]; then
     SCRIPT_ARGS+=(--config "$CONFIG_FILE")
 fi
-if [[ "$DEBUG_MODE" == "1" ]]; then
+if [[ "$DEBUG_MODE" == "true" ]]; then
     SCRIPT_ARGS+=(--debug)
 fi
+SCRIPT_ARGS+=(
+    --env "MASTER_ADDR=$MASTER_ADDR"
+    --env "MASTER_PORT=$MASTER_PORT"
+    --env "NNODES=$NNODES"
+    --env "NODE_RANK=$NODE_RANK"
+    --env "GPUS_PER_NODE=$GPUS_PER_NODE"
+)
 
-case "$MODE" in
-    container)
-        script_path="$RUNNER_DIR/primus-cli-container.sh"
-        # For container mode, pass environment variables as docker --env options
-        SCRIPT_ARGS+=(
-            --env "MASTER_ADDR=$MASTER_ADDR"
-            --env "MASTER_PORT=$MASTER_PORT"
-            --env "NNODES=$NNODES"
-            --env "NODE_RANK=$NODE_RANK"
-            --env "GPUS_PER_NODE=$GPUS_PER_NODE"
-        )
-        ;;
-    direct)
-        script_path="$RUNNER_DIR/primus-cli-direct.sh"
-        # For direct mode, environment variables are already exported above
-        ;;
-    *)
-        LOG_ERROR "[slurm-entry] Unknown mode: $MODE. Use 'container' or 'direct'."
-        exit 2
-        ;;
-esac
+# Build script path based on mode
+script_path="$RUNNER_DIR/primus-cli-${MODE}.sh"
+require_file "$script_path" "[slurm-entry] Script not found: $script_path"
 
-if [[ ! -f "$script_path" ]]; then
-    LOG_ERROR "[slurm-entry] Script not found: $script_path"
-    exit 2
+# Build full command
+CMD=(bash "$script_path" "${SCRIPT_ARGS[@]}" "$@")
+LOG_INFO "[slurm-entry] Would execute: ${CMD[*]}"
+
+if [[ "$DRY_RUN_MODE" == "true" ]]; then
+    LOG_INFO "[slurm-entry] Dry-run mode: command not executed"
+    exit 0
 fi
 
-
-# Execute or dry-run
-if [[ "$DRY_RUN_MODE" == "1" ]]; then
-    LOG_INFO "[slurm-entry] [DRY-RUN] Would execute: bash $script_path ${SCRIPT_ARGS[*]} $*"
-else
-    LOG_INFO "[slurm-entry] Executing: bash $script_path ${SCRIPT_ARGS[*]} $*"
-    exec bash "$script_path" "${SCRIPT_ARGS[@]}" "$@"
-fi
+LOG_INFO "[slurm-entry] Executing command..."
+exec "${CMD[@]}"

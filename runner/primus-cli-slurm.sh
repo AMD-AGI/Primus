@@ -79,9 +79,9 @@ source "$RUNNER_DIR/lib/config.sh" || {
 
 # 0. Parse --config, --debug, --dry-run first if present (before first --)
 CONFIG_FILE=""
-DEBUG_MODE=0
-DRY_RUN_MODE=0
-CONFIG_ARGS=()
+DEBUG_MODE=false
+DRY_RUN_MODE=false
+ENTRY_ARGS=()
 PRE_PARSE_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -92,16 +92,17 @@ while [[ $# -gt 0 ]]; do
             ;;
         --config)
             CONFIG_FILE="$2"
-            CONFIG_ARGS+=(--config "$CONFIG_FILE")
+            ENTRY_ARGS+=(--config "$CONFIG_FILE")
             shift 2
             ;;
         --debug)
-            export DEBUG_MODE=1
-            CONFIG_ARGS+=(--debug)
+            export DEBUG_MODE=true
+            ENTRY_ARGS+=(--debug)
             shift
             ;;
         --dry-run)
-            DRY_RUN_MODE=1
+            DRY_RUN_MODE=true
+            ENTRY_ARGS+=(--dry-run)
             shift
             ;;
         *)
@@ -130,14 +131,28 @@ extract_config_section "slurm" slurm_config || {
 
 
 # Apply slurm config values if not set via CLI
-[[ "$DEBUG_MODE" == "0" && ("${slurm_config[debug]:-false}" == "true" || "${slurm_config[debug]:-false}" == "1") ]] && DEBUG_MODE=1
-[[ "$DRY_RUN_MODE" == "0" && ("${slurm_config[dry_run]:-false}" == "true" || "${slurm_config[dry_run]:-false}" == "1") ]] && DRY_RUN_MODE=1
+if [[ "$DEBUG_MODE" == "false" ]]; then
+    debug_value="${slurm_config[debug]:-false}"
+    if [[ "$debug_value" == "true" ]]; then
+        DEBUG_MODE=true
+        LOG_INFO "[slurm] Debug mode enabled via config (PRIMUS_LOG_LEVEL=DEBUG)"
+    fi
+fi
+
+if [[ "$DRY_RUN_MODE" == "false" ]]; then
+    dry_run_value="${slurm_config[dry_run]:-false}"
+    if [[ "$dry_run_value" == "true" || "$dry_run_value" == "1" ]]; then
+        DRY_RUN_MODE=true
+        LOG_INFO "[slurm] Dry-run mode enabled via config"
+    fi
+fi
 
 # Enable debug mode if set
-if [[ "$DEBUG_MODE" == "1" ]]; then
+if [[ "$DEBUG_MODE" == "true" ]]; then
     export PRIMUS_LOG_LEVEL="DEBUG"
     LOG_INFO "[slurm] Debug mode enabled (PRIMUS_LOG_LEVEL=DEBUG)"
 fi
+
 
 # Step 2: Detect srun/sbatch mode
 LAUNCH_CMD="srun"   # Default launcher
@@ -172,17 +187,16 @@ while [[ $# -gt 0 && "$1" != "--" ]]; do
 
     # Track what parameter is being overridden
     if [[ "$arg" =~ ^-- ]]; then
-        # Long option: --partition or --partition=value
+        # Long option: --partition value
         param_name="${arg#--}"
-        param_name="${param_name%%=*}"  # Remove value if using = format
         CLI_OVERRIDES["$param_name"]=1
         # Also mark the short form as overridden
         if [[ -n "${LONG_TO_SHORT[$param_name]:-}" ]]; then
             CLI_OVERRIDES["${LONG_TO_SHORT[$param_name]}"]=1
         fi
 
-        # If option has a separate value, store it too
-        if [[ "$arg" != *=* && $# -gt 0 && ! "$1" =~ ^- ]]; then
+        # Store the value (next argument)
+        if [[ $# -gt 0 && ! "$1" =~ ^- ]]; then
             CLI_ARGS+=("$1")
             shift
         fi
@@ -258,82 +272,24 @@ fi
 
 # 3. Check for primus-run args
 if [[ $# -eq 0 ]]; then
-    LOG_ERROR "[slurm] Missing Primus entry (container|direct|preflight)"
+    LOG_ERROR "[slurm] Missing Primus entry (container|direct)"
     print_usage >&2
     exit 2
 fi
 
 # 4. Logging and launch
 ENTRY="$RUNNER_DIR/primus-cli-slurm-entry.sh"
-
-# Prepend global options to entry args
-ENTRY_ARGS=()
-if [[ -n "$CONFIG_FILE" ]]; then
-    ENTRY_ARGS+=(--config "$CONFIG_FILE")
-fi
-if [[ "$DEBUG_MODE" == "1" ]]; then
-    ENTRY_ARGS+=(--debug)
-fi
-if [[ "$DRY_RUN_MODE" == "1" ]]; then
-    ENTRY_ARGS+=(--dry-run)
-fi
-ENTRY_ARGS+=("$@")
+require_file "$ENTRY" "[slurm] Entry script not found: $ENTRY"
 
 # Build full command
-CMD=("$LAUNCH_CMD" "${SLURM_FLAGS[@]}" "$ENTRY" -- "${ENTRY_ARGS[@]}")
+CMD=("$LAUNCH_CMD" "${SLURM_FLAGS[@]}" "$ENTRY" "${ENTRY_ARGS[@]}" -- "$@")
 
-# Always display configuration (regardless of debug or dry-run mode)
-PRINT_INFO_RANK0 ""
-PRINT_INFO_RANK0 "=========================================="
-if [[ "$DRY_RUN_MODE" == "1" ]]; then
-    PRINT_INFO_RANK0 "  [DRY RUN] Slurm Configuration"
-else
-    PRINT_INFO_RANK0 "  Slurm Configuration"
-fi
-PRINT_INFO_RANK0 "=========================================="
-PRINT_INFO_RANK0 "Launch Command: $LAUNCH_CMD"
-PRINT_INFO_RANK0 ""
-PRINT_INFO_RANK0 "SLURM Flags:"
-
-if [[ ${#SLURM_FLAGS[@]} -eq 0 ]]; then
-    PRINT_INFO_RANK0 "  (none)"
-else
-    i=0
-    while [[ $i -lt ${#SLURM_FLAGS[@]} ]]; do
-        flag="${SLURM_FLAGS[$i]}"
-        i=$((i + 1))
-        if [[ $i -lt ${#SLURM_FLAGS[@]} ]]; then
-            next="${SLURM_FLAGS[$i]}"
-            if [[ "$next" == -* ]]; then
-                PRINT_INFO_RANK0 "  $flag"
-            else
-                PRINT_INFO_RANK0 "  $flag $next"
-                ((i++))
-            fi
-        else
-            PRINT_INFO_RANK0 "  $flag"
-        fi
-    done
-fi
-PRINT_INFO_RANK0 ""
-PRINT_INFO_RANK0 "Entry Script: $ENTRY"
-PRINT_INFO_RANK0 "Entry Args: ${ENTRY_ARGS[*]}"
-PRINT_INFO_RANK0 ""
-PRINT_INFO_RANK0 "Full Command:"
-if [[ "$DRY_RUN_MODE" == "1" ]]; then
-    PRINT_INFO_RANK0 "  Would Execute: ${CMD[*]}"
-else
-    PRINT_INFO_RANK0 "  Executing: ${CMD[*]}"
-fi
-PRINT_INFO_RANK0 "=========================================="
-PRINT_INFO_RANK0 ""
-
-# In dry-run mode, exit after displaying the command
-if [[ "$DRY_RUN_MODE" == "1" ]]; then
+# Display command
+if [[ "$DRY_RUN_MODE" == "true" ]]; then
+    LOG_INFO "[slurm] [DRY RUN] Would execute: ${CMD[*]}"
     LOG_INFO "[slurm] Dry-run mode: command not executed"
     exit 0
 fi
 
-# Execute the command
-LOG_INFO "[slurm] Executing command..."
+LOG_INFO "[slurm] Executing: ${CMD[*]}"
 exec "${CMD[@]}"

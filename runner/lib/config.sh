@@ -274,13 +274,13 @@ load_yaml_config() {
 # Note: Later loads override earlier ones
 # ---------------------------------------------------------------------------
 load_config() {
-    LOG_INFO_RANK0 "  Loading configuration files..."
+    LOG_DEBUG_RANK0 "  Loading configuration files..."
     LOG_DEBUG_RANK0 "Config loading order: 1) user global config, 2) system default config"
 
     # 1. Load user global config (~/.primus.yaml) first - lowest priority
     local global_config="$HOME/.primus.yaml"
     if [[ -f "$global_config" ]]; then
-        LOG_INFO_RANK0 "  Loading user config: $global_config"
+        LOG_DEBUG_RANK0 "  Loading user config: $global_config"
         load_yaml_config "$global_config" || LOG_ERROR "Failed to load user config"
     else
         LOG_DEBUG_RANK0 "User global config not found: $global_config"
@@ -289,7 +289,7 @@ load_config() {
     # 2. Load system default config (runner/.primus.yaml) last - highest priority (overrides user config)
     local system_config="${PRIMUS_RUNNER_DIR}/.primus.yaml"
     if [[ -f "$system_config" ]]; then
-        LOG_INFO_RANK0 "  Loading system default config: $system_config"
+        LOG_DEBUG_RANK0 "  Loading system default config: $system_config"
         load_yaml_config "$system_config" ||  {
             LOG_ERROR "Failed to load system default config"
             exit 1
@@ -298,7 +298,7 @@ load_config() {
         LOG_DEBUG_RANK0 "System default config not found: $system_config"
     fi
 
-    LOG_INFO_RANK0 "  Configuration loading complete"
+    LOG_DEBUG_RANK0 "  Configuration loading complete"
     LOG_DEBUG_RANK0 "Total config entries: ${#PRIMUS_CONFIG[@]}"
 }
 
@@ -317,14 +317,14 @@ load_config_auto() {
 
     if [[ -n "$config_file" ]]; then
         # Load specified config file (must succeed)
-        LOG_INFO "[$log_prefix] Loading config: $config_file"
+        LOG_DEBUG_RANK0 "[$log_prefix] Loading config: $config_file"
         load_yaml_config "$config_file" || {
             LOG_ERROR "[$log_prefix] Failed to load config: $config_file"
             return 1
         }
     else
         # Load default configuration files (global and project)
-        LOG_INFO "[$log_prefix] Loading default configuration files"
+        LOG_DEBUG_RANK0 "[$log_prefix] Loading default configuration files"
         load_config
     fi
 

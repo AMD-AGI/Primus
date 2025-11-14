@@ -270,6 +270,235 @@ test_master_port_validation() {
 }
 
 # ============================================================================
+# Test 9: Volume format validation
+# ============================================================================
+test_volume_format_validation() {
+    print_section "Test 9: Volume Format Validation"
+
+    # Valid formats
+    if validate_volume_format "/host:/container" "[test]" 2>/dev/null; then
+        assert_pass "Valid volume format /host:/container accepted"
+    else
+        assert_fail "Valid volume format /host:/container accepted"
+    fi
+
+    if validate_volume_format "/host:/container:ro" "[test]" 2>/dev/null; then
+        assert_pass "Valid volume format with options accepted"
+    else
+        assert_fail "Valid volume format with options accepted"
+    fi
+
+    if validate_volume_format "/workspace" "[test]" 2>/dev/null; then
+        assert_pass "Single path format accepted"
+    else
+        assert_fail "Single path format accepted"
+    fi
+
+    # Invalid formats
+    if ! (validate_volume_format ":/container" "[test]" 2>/dev/null); then
+        assert_pass "Empty source path rejected"
+    else
+        assert_fail "Empty source path rejected"
+    fi
+
+    if ! (validate_volume_format "/host:" "[test]" 2>/dev/null); then
+        assert_pass "Empty destination path rejected"
+    else
+        assert_fail "Empty destination path rejected"
+    fi
+
+    if ! (validate_volume_format "/host:/container:invalid" "[test]" 2>/dev/null); then
+        assert_pass "Invalid volume option rejected"
+    else
+        assert_fail "Invalid volume option rejected"
+    fi
+}
+
+# ============================================================================
+# Test 10: Memory format validation
+# ============================================================================
+test_memory_format_validation() {
+    print_section "Test 10: Memory Format Validation"
+
+    # Valid formats
+    if validate_memory_format "256G" "memory" 2>/dev/null; then
+        assert_pass "Valid memory format 256G accepted"
+    else
+        assert_fail "Valid memory format 256G accepted"
+    fi
+
+    if validate_memory_format "1024M" "memory" 2>/dev/null; then
+        assert_pass "Valid memory format 1024M accepted"
+    else
+        assert_fail "Valid memory format 1024M accepted"
+    fi
+
+    if validate_memory_format "512" "memory" 2>/dev/null; then
+        assert_pass "Memory format without unit accepted"
+    else
+        assert_fail "Memory format without unit accepted"
+    fi
+
+    # Invalid formats
+    if ! (validate_memory_format "256GB" "memory" 2>/dev/null); then
+        assert_pass "Invalid memory format 256GB rejected"
+    else
+        assert_fail "Invalid memory format 256GB rejected"
+    fi
+
+    if ! (validate_memory_format "abc" "memory" 2>/dev/null); then
+        assert_pass "Non-numeric memory format rejected"
+    else
+        assert_fail "Non-numeric memory format rejected"
+    fi
+}
+
+# ============================================================================
+# Test 11: CPUs format validation
+# ============================================================================
+test_cpus_format_validation() {
+    print_section "Test 11: CPUs Format Validation"
+
+    # Valid formats
+    if validate_cpus_format "32" "cpus" 2>/dev/null; then
+        assert_pass "Valid cpus format 32 accepted"
+    else
+        assert_fail "Valid cpus format 32 accepted"
+    fi
+
+    if validate_cpus_format "16.5" "cpus" 2>/dev/null; then
+        assert_pass "Valid cpus format 16.5 accepted"
+    else
+        assert_fail "Valid cpus format 16.5 accepted"
+    fi
+
+    # Invalid formats
+    if ! (validate_cpus_format "abc" "cpus" 2>/dev/null); then
+        assert_pass "Non-numeric cpus format rejected"
+    else
+        assert_fail "Non-numeric cpus format rejected"
+    fi
+
+    if ! (validate_cpus_format "16.5.2" "cpus" 2>/dev/null); then
+        assert_pass "Invalid decimal cpus format rejected"
+    else
+        assert_fail "Invalid decimal cpus format rejected"
+    fi
+}
+
+# ============================================================================
+# Test 12: Environment variable format validation
+# ============================================================================
+test_env_format_validation() {
+    print_section "Test 12: Environment Variable Format Validation"
+
+    # Valid formats
+    if validate_env_format "KEY=VALUE" "[test]" 2>/dev/null; then
+        assert_pass "Valid env format KEY=VALUE accepted"
+    else
+        assert_fail "Valid env format KEY=VALUE accepted"
+    fi
+
+    local multi_env="KEY1=VALUE1
+KEY2=VALUE2"
+    if validate_env_format "$multi_env" "[test]" 2>/dev/null; then
+        assert_pass "Multiple env variables accepted"
+    else
+        assert_fail "Multiple env variables accepted"
+    fi
+
+    # Invalid formats
+    if ! (validate_env_format "INVALID" "[test]" 2>/dev/null); then
+        assert_pass "Env without = rejected"
+    else
+        assert_fail "Env without = rejected"
+    fi
+
+    local mixed_env="KEY1=VALUE1
+INVALID"
+    if ! (validate_env_format "$mixed_env" "[test]" 2>/dev/null); then
+        assert_pass "Mixed valid/invalid env rejected"
+    else
+        assert_fail "Mixed valid/invalid env rejected"
+    fi
+}
+
+# ============================================================================
+# Test 13: Config parameter validation
+# ============================================================================
+test_config_param_validation() {
+    print_section "Test 13: Config Parameter Validation"
+
+    # Valid parameter
+    if validate_config_param "value" "param_name" 2>/dev/null; then
+        assert_pass "Non-empty parameter accepted"
+    else
+        assert_fail "Non-empty parameter accepted"
+    fi
+
+    # Empty parameter
+    if ! (validate_config_param "" "param_name" 2>/dev/null); then
+        assert_pass "Empty parameter rejected"
+    else
+        assert_fail "Empty parameter rejected"
+    fi
+}
+
+# ============================================================================
+# Test 14: Config array validation
+# ============================================================================
+test_config_array_validation() {
+    print_section "Test 14: Config Array Validation"
+
+    # Valid array
+    if validate_config_array "item1
+item2" "array_name" 2>/dev/null; then
+        assert_pass "Non-empty array accepted"
+    else
+        assert_fail "Non-empty array accepted"
+    fi
+
+    # Empty array marker
+    if ! (validate_config_array "[]" "array_name" 2>/dev/null); then
+        assert_pass "Empty array marker [] rejected"
+    else
+        assert_fail "Empty array marker [] rejected"
+    fi
+
+    # Empty string
+    if ! (validate_config_array "" "array_name" 2>/dev/null); then
+        assert_pass "Empty array rejected"
+    else
+        assert_fail "Empty array rejected"
+    fi
+}
+
+# ============================================================================
+# Test 15: Positional arguments validation
+# ============================================================================
+test_positional_args_validation() {
+    print_section "Test 15: Positional Arguments Validation"
+
+    # Valid arguments
+    # shellcheck disable=SC2034
+    local valid_args=("arg1" "arg2" "arg3")
+    if validate_positional_args valid_args 2>/dev/null; then
+        assert_pass "Non-empty arguments array accepted"
+    else
+        assert_fail "Non-empty arguments array accepted"
+    fi
+
+    # Empty arguments
+    # shellcheck disable=SC2034
+    local empty_args=()
+    if ! (validate_positional_args empty_args 2>/dev/null); then
+        assert_pass "Empty arguments array rejected"
+    else
+        assert_fail "Empty arguments array rejected"
+    fi
+}
+
+# ============================================================================
 # Run all tests
 # ============================================================================
 main() {
@@ -285,6 +514,13 @@ main() {
     test_nnodes_validation
     test_node_rank_validation
     test_master_port_validation
+    test_volume_format_validation
+    test_memory_format_validation
+    test_cpus_format_validation
+    test_env_format_validation
+    test_config_param_validation
+    test_config_array_validation
+    test_positional_args_validation
 
     # Print summary
     echo ""
