@@ -148,7 +148,29 @@ export NCCL_DEBUG=
 export NCCL_CHECKS_DISABLE=1
 
 # Set InfiniBand GID index for NCCL communication
-export NCCL_IB_GID_INDEX=3
+if [ "$USING_AINIC" == "1" ]; then
+    # Setup Pollara specific args
+    LOG_INFO_RANK0 "Using AINIC"
+    LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
+    LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
+    # unset NCCL_IB_GID_INDEX
+    export NCCL_IB_GID_INDEX=1 # TODO: unset or set to 1?
+    export NCCL_IB_ROCE_VERSION_NUM=2 # TODO: set or not?
+    export NCCL_MAX_P2P_CHANNELS=56
+    export NCCL_IB_TC=104
+    export NCCL_IB_FIFO_TC=192
+    export NET_OPTIONAL_RECV_COMPLETION=1
+    export NCCL_IB_USE_INLINE=1
+    export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
+    export NCCL_GDR_FLUSH_DISABLE=1
+    export NCCL_DMABUF_ENABLE=0
+    export NCCL_IGNORE_CPU_AFFINITY=1
+    export NCCL_IB_QPS_PER_CONNECTION=1
+    export LD_LIBRARY_PATH=${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${ANP_HOME_DIR}/build/lib:$LD_LIBRARY_PATH
+    export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
+else
+    export NCCL_IB_GID_INDEX=3
+fi
 
 # Disable cross NIC communication for NCCL
 export NCCL_CROSS_NIC=0
