@@ -1,0 +1,140 @@
+work_group: ${PRIMUS_GROUP:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_1T-pretrain.profile}
+workspace: ${PRIMUS_WORKSPACE:deepseek/1T}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: ${PRIMUS_MODEL:deepseek_1T}.yaml
+    overrides:
+      # log
+      # disable_wandb: false
+      # wandb_project: "deepseek_1T_768GPUS_MI300_Pretrain"
+      stderr_sink_level: DEBUG
+
+      # debug
+      moe_router_force_load_balancing: true
+      # moe_router_force_load_balancing: false
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+
+      # hyber parameters
+      train_iters: 20
+      micro_batch_size: 1
+      global_batch_size: 32
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 0
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+
+      num_layers: 8
+      # recompute
+      # recompute_granularity: full # full, selective
+      # recompute_method: block # uniform, block
+      # recompute_num_layers: 0 # int
+      # recompute_layer_ids_start: null
+      # recompute_layer_ids: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+      # recompute_layer_ids: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23]
+
+      # recompute_granularity: full # full, selective
+      # recompute_method: null # uniform, block
+      # recompute_num_layers: 0 # int
+      # recompute_layer_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:2}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      context_parallel_size: ${PRIMUS_CP:1}
+      num_virtual_stages_per_pipeline_rank: null
+
+      # fp8: hybrid
+      moe_use_legacy_grouped_gemm: true
+
+      moe_shared_expert_overlap: false
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+
+      # use_turbo_sync_free_moe: true
+
+      # data
+      mock_data: true
+      train_data_path: ${TOKENIZED_DATA_PATH:null}
+      valid_data_path: null
+      test_data_path: null
+
+      profile: true
+      use_pytorch_profiler: true
+      profile_step_end: 7
+      profile_step_start: 6
+      profile_ranks: [0, 31]
+
+      # fusion
+      # 20250321: need latest megatron docker image
+      # moe_permute_fusion: false
+      # fused wgrad gemm and accumulation
+      gradient_accumulation_fusion: true
+      # recommend set `false` in fp8
+      # fused topk router with aux score
+      # moe_use_fused_router_with_aux_score: false
+      # pad 192/128 for deepseek attention
+      fused_padded_mla_attention: false
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      cp_comm_type: a2a
+
+      use_precision_aware_optimizer: true
+      main_params_dtype: fp16
+      main_grads_dtype: bf16
+      accumulate_allreduce_grads_in_fp32: false
+
+      #################################
+      # Turbo
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: true
+
+      # deepep
+      use_turbo_deepep: true
+
+      # 64 or 80 for ep8, 32 for ep16-64 is best practice
+      turbo_deepep_num_cu: 32
+      turbo_deepep_use_comm_stream: false
+
+      # sync-free moe support stage 1-2, 0 means not use sync-free moe
+      # stage 2 is recommended for better performance
+      turbo_sync_free_moe_stage: 2
+
+      overlap_moe_expert_parallel_comm: true
+      patch_moe_overlap: true
+      delay_wgrad_compute: false
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
