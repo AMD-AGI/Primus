@@ -65,6 +65,17 @@ For more detailed usage instructions, see the [CLI User Guide](./docs/cli/PRIMUS
 
 ---
 
+## 📚 Documentation
+
+Comprehensive documentation is available in the [`docs/`](./docs/) directory:
+
+- **[Quick Start Guide](./docs/quickstart.md)** - Get started in 5 minutes
+- **[Primus CLI User Guide](./docs/cli/PRIMUS-CLI-GUIDE.md)** - Complete CLI reference and usage
+- **[CLI Architecture](./docs/cli/CLI-ARCHITECTURE.md)** - Technical design and architecture
+- **[Full Documentation Index](./docs/README.md)** - Browse all available documentation
+
+---
+
 
 ## 📝 TODOs
 
