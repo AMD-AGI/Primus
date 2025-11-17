@@ -14,23 +14,24 @@ export CLEAN_DOCKER_CONTAINER=1
 export HF_TOKEN=${HF_TOKEN:-"your_hf_token"}
 export WANDB_API_KEY=${WANDB_API_KEY:-"your_wandb_api_key"}
 # TODO
-export GPU_MAX_HW_QUEUES=8
+export GPU_MAX_HW_QUEUES=2
+# export GPU_MAX_HW_QUEUES=8
 
 # Set on Primus-Safe Platform
-# export MASTER_ADDR=${MASTER_ADDR:-localhost}
-# export MASTER_PORT=${MASTER_PORT:-1234}
-# export NNODES=${PET_NNODES:-1}
-# export NODE_RANK=${PET_NODE_RANK:-0}
-# export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
+export MASTER_ADDR=${MASTER_ADDR:-localhost}
+export MASTER_PORT=${MASTER_PORT:-1234}
+export NNODES=${PET_NNODES:-1}
+export NODE_RANK=${PET_NODE_RANK:-0}
+export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
 # Set on AAC14 cluster
-export NNODES=4
-export USING_AINIC=1
-export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
-export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
-export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
-export NCCL_SOCKET_IFNAME="enp193s0f1np1"
-export GLOO_SOCKET_IFNAME="enp193s0f1np1"
+# export NNODES=4
+# export USING_AINIC=1
+# export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
+# export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
+# export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
+# export NCCL_SOCKET_IFNAME="enp193s0f1np1"
+# export GLOO_SOCKET_IFNAME="enp193s0f1np1"
 
 export HSA_NO_SCRATCH_RECLAIM=1
 export NVTE_CK_USES_BWD_V3=1
@@ -42,8 +43,8 @@ GBS=256
 SEQ_LENGTH=4096
 TP=1
 ETP=1
-PP=4
-VPP=2
+PP=2
+VPP=4
 EP=8
 CP=1
 CP_COMM_TYPE="a2a" # p2p, a2a, allgather or a2a+p2p
@@ -104,14 +105,14 @@ for feature in "${MoE_Features[@]}"; do
 		ensure_primus_turbo
         # mi355
 		# sync_free moe stage 1 will open router and permutation fusion
-		FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "1")
+		# FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "1")
 
         # mi300/mi325
 		# sync_free moe stage 2 will open deepep automatically
-		# FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "2")
-        # FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
-		# FEATURE_ARGS+=("--moe_use_legacy_grouped_gemm" "True")
-		# FEATURE_ARGS+=("--moe_router_dtype" "fp32")
+		FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "2")
+        FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
+		FEATURE_ARGS+=("--moe_use_legacy_grouped_gemm" "True")
+		FEATURE_ARGS+=("--moe_router_dtype" "fp32")
 		;;
 	5)
 		FEATURE_ARGS+=("--overlap_moe_expert_parallel_comm" "True")
@@ -252,7 +253,8 @@ export SKIP_TRAIN=0
     # --num_layers 16 \
     # --moe_layer_freq 1 \
 	# --pp_warmup True \
-bash ./examples/run_slurm_pretrain.sh \
+# bash ./examples/run_slurm_pretrain.sh \
+bash ./examples/run_pretrain.sh \
 --num_layers 16 \
 --moe_layer_freq 1 \
     --micro_batch_size "$MBS" \
