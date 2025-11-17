@@ -44,7 +44,7 @@ def _load_subcommands(subparsers: argparse._SubParsersAction) -> None:
             module, "register_subcommand", None
         )
         if register is None:
-            raise AttributeError(f"Module '{module_path}' must expose register_subcommand()")
+            continue
         parser = register(subparsers)
         if parser is None:
             continue
