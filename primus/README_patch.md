@@ -1,3 +1,12 @@
+# Primus Patch Notes have moved
+
+This content now lives in the centralized documentation tree:
+
+- `docs/backends/overview.md`
+- `docs/backends/megatron/patch-notes.md`
+- `docs/backends/torchtitan/patch-notes.md`
+
+Please update any remaining links to point to the new locations.
 
 # Primus Patch Notes & Extended Argument Documentation
 
