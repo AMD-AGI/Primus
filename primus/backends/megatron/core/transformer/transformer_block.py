@@ -1,3 +1,10 @@
+###############################################################################
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 from contextlib import nullcontext
 
 from megatron.core import tensor_parallel
