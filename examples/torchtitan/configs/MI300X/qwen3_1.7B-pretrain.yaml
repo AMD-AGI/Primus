@@ -12,6 +12,9 @@ modules:
     model: qwen3_1.7b.yaml
     overrides:
 
+      metrics:
+        log_freq: 1
+
       optimizer:
         name: "AdamW"
         lr: 8.0e-4

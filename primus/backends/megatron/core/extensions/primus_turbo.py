@@ -7,9 +7,7 @@ import functools
 from contextlib import contextmanager
 from typing import Callable, List, Optional, Tuple
 
-import grouped_gemm
 import primus_turbo.pytorch as pt
-import primus_turbo.pytorch.ops.activation as turbo_moe_activation
 import torch
 import torch.nn.functional as F
 import transformer_engine as te
@@ -36,9 +34,6 @@ from primus_turbo.pytorch.core.float8 import (
     ScalingGranularity,
     ScalingStrategy,
     check_fp8_support,
-)
-from primus_turbo.pytorch.ops.moe.tokens_per_expert_to_mask import (
-    tokens_per_expert_to_mask as turbo_tokens_per_expert_to_mask,
 )
 from torch import Tensor
 from transformer_engine.pytorch.fp8 import (
@@ -735,30 +730,25 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             pg_collection,
         )
         args = get_args()
-        grouped_gemm_backend = args.grouped_gemm_backend
-        self.grouped_gemm_backend = grouped_gemm_backend
 
-        if args.patch_zero_bubble and args.enable_zero_bubble:
+        if (args.patch_zero_bubble and args.enable_zero_bubble) or (
+            args.patch_moe_overlap and args.overlap_moe_expert_parallel_comm
+        ):
             from .zbpp_gemm import grouped_gemm_with_weight_gradient_store
 
             self.grouped_gemm = functools.partial(
-                grouped_gemm_with_weight_gradient_store, gg_backend=grouped_gemm_backend
+                grouped_gemm_with_weight_gradient_store, gg_backend="turbo-gg"
             )
         else:
-            if grouped_gemm_backend == "turbo-gg":
-                self.grouped_gemm = pt.ops.grouped_gemm
-            elif grouped_gemm_backend == "lagacy-gg":
-                self.grouped_gemm = grouped_gemm.ops.gmm
-            else:
-                raise NotImplementedError(f"Grouped gemm backend {grouped_gemm_backend} not implemented")
+            self.grouped_gemm = pt.ops.grouped_gemm
 
         if args.use_turbo_fused_act_with_probs:
             assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
 
             if self.config.activation_func == F.silu:
-                turbo_fused_act_with_probs = turbo_moe_activation.swiglu_with_probs
+                turbo_fused_act_with_probs = pt.ops.swiglu_with_probs
             elif self.config.activation_func == F.gelu:
-                turbo_fused_act_with_probs = turbo_moe_activation.geglu_with_probs
+                turbo_fused_act_with_probs = pt.ops.geglu_with_probs
             else:
                 raise ValueError("Activation function must be silu or gelu when using GroupedMLP.")
 
@@ -766,7 +756,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 assert x.ndim == 2
                 assert probs.ndim == 1
                 num_tokens = x.shape[0]
-                row_mask = turbo_tokens_per_expert_to_mask(tokens_per_experts, num_tokens)
+                row_mask = pt.ops.tokens_per_expert_to_mask(tokens_per_experts, num_tokens)
                 return turbo_fused_act_with_probs(x, probs, row_mask)
 
             self.activation_func_with_probs = _activation_func_with_probs
@@ -806,13 +796,18 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
                 w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
 
-            if self.grouped_gemm_backend == "turbo-gg":
-                tokens_per_expert = tokens_per_expert.cuda()
+            tokens_per_expert = tokens_per_expert.to(w1.device)
             assert w1.is_contiguous(), "w1 must be contiguous"
             assert w2.is_contiguous(), "w2 must be contiguous"
-            fc1_output = self.grouped_gemm(
-                permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, **(gemm_kargs[0])
-            )
+            if PrimusTurboFP8GlobalStateManager.is_turbo_fp8_enabled():
+                quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
+                fc1_output = pt.ops.grouped_gemm_fp8(
+                    permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, config=quant_config
+                )
+            else:
+                fc1_output = self.grouped_gemm(
+                    permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, **(gemm_kargs[0])
+                )
             if self.activation_recompute:
                 if args.use_turbo_fused_act_with_probs:
                     intermediate_parallel = self.activation_checkpoint.checkpoint(
@@ -825,9 +820,15 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     intermediate_parallel = self.activation_checkpoint.checkpoint(
                         self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
                     )
-                fc2_output = self.grouped_gemm(
-                    intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
-                )
+                if PrimusTurboFP8GlobalStateManager.is_turbo_fp8_enabled():
+                    quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
+                    fc2_output = pt.ops.grouped_gemm_fp8(
+                        intermediate_parallel, w2, tokens_per_expert, trans_b=False, config=quant_config
+                    )
+                else:
+                    fc2_output = self.grouped_gemm(
+                        intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
+                    )
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
                 if args.use_turbo_fused_act_with_probs:
@@ -838,9 +839,15 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     intermediate_parallel = self.activation_func_with_probs(
                         fc1_output, permuted_probs.unsqueeze(-1)
                     )
-                fc2_output = self.grouped_gemm(
-                    intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
-                )
+                if PrimusTurboFP8GlobalStateManager.is_turbo_fp8_enabled():
+                    quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
+                    fc2_output = pt.ops.grouped_gemm_fp8(
+                        intermediate_parallel, w2, tokens_per_expert, trans_b=False, config=quant_config
+                    )
+                else:
+                    fc2_output = self.grouped_gemm(
+                        intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
+                    )
         else:
             # No token is allocated for local experts.
             assert torch.count_nonzero(tokens_per_expert) == 0
@@ -929,9 +936,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             deepep_num_use_cu=args.turbo_deepep_num_cu,
             deepep_num_worst_tokens=num_worst_tokens,
             deepep_use_cuda_num_tokens_per_expert=(
-                args.use_turbo_grouped_mlp
-                and args.moe_use_legacy_grouped_gemm
-                and args.grouped_gemm_backend == "turbo-gg"
+                args.use_turbo_grouped_mlp and args.moe_use_legacy_grouped_gemm
             ),
             deepep_async_finish=True,
             deepep_allocate_on_comm_stream=True,
@@ -1072,3 +1077,19 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         """
         hidden_states = self.deepep_dispatcher._post_combine(hidden_states)
         return hidden_states.view(self.hidden_shape)
+
+
+class PrimusTurboRMSNorm(te.pytorch.RMSNorm):
+    def __init__(self, *args, **kwargs):
+        assert "device" in kwargs
+        assert "dtype" in kwargs or "params_dtype" in kwargs, "device and dtype must be provided"
+        super().__init__(*args, **kwargs)
+        self.rms_norm_func = pt.modules.RMSNorm(
+            normalized_shape=kwargs["hidden_size"],
+            eps=self.eps,
+            device=kwargs["device"],
+            dtype=kwargs["dtype"] if "dtype" in kwargs else kwargs["params_dtype"],
+        )
+
+    def forward(self, x):
+        return self.rms_norm_func(x)

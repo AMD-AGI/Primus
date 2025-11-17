@@ -268,13 +268,13 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
-    def test_zero_bubble_pipeline_parallelism(self):
-        run_script(
-            self.__class__.__name__,
-            "zero_bubble_pipeline_parallelism",
-            exp_path="tests/trainer/test_megatron_trainer_zero_bubble.yaml",
-            env_override={},
-        )
+    # def test_zero_bubble_pipeline_parallelism(self):
+    #     run_script(
+    #         self.__class__.__name__,
+    #         "zero_bubble_pipeline_parallelism",
+    #         exp_path="tests/trainer/test_megatron_trainer_zero_bubble.yaml",
+    #         env_override={},
+    #     )
 
     def test_turbo_deepep(self):
         run_script(

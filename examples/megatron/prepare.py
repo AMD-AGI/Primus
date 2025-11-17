@@ -191,7 +191,7 @@ def main():
 
     log_info(f"BACKEND_PATH {args.backend_path}")
     # primus_config = PrimusParser().parse(args)
-    primus_config = load_primus_config(args, unknown)
+    primus_config, _ = load_primus_config(args, unknown)
 
     primus_path = Path(args.primus_path).resolve()
     log_info(f"PRIMUS_PATH is set to: {primus_path}")

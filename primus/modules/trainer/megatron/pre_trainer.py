@@ -118,6 +118,15 @@ class DataLoaderStore:
 class MegatronPretrainTrainer(MegatronTrainer):
     def __init__(self, *args, **kwargs):
         kwargs["module_name"] = "pre_trainer"
+
+        # Explicitly reject unknown extra_args
+        extra_args = kwargs.pop("extra_args", None)
+        if extra_args:
+            raise ValueError(
+                f"[MegatronPretrainTrainer] Unexpected extra_args detected: {extra_args}. "
+                f"Megatron backend does not support unregistered config keys."
+            )
+
         super().__init__(*args, **kwargs)
 
     def get_batch(self, data_iterator):
@@ -224,9 +233,26 @@ class MegatronPretrainTrainer(MegatronTrainer):
                 assert (
                     args.overlap_moe_expert_parallel_comm
                 ), "overlap_moe_expert_parallel_comm must be enabled to return the schedule plan"
-                schedule_plan = model.build_schedule_plan(
-                    tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
-                )
+                if args.patch_moe_overlap:
+                    assert (
+                        not args.delay_wgrad_compute
+                    ), "Primus MoE overlap handles wgrad separately from the original Megatron implementation"
+                    from primus.backends.megatron.core.pipeline_parallel.zerobubble.zbpp_utils import (
+                        WeightGradStore,
+                    )
+
+                    WeightGradStore.enable_split_bw()
+                    from primus.backends.megatron.core.models.common.model_chunk_schedule_plan import (
+                        TransformerModelChunkSchedulePlan,
+                    )
+
+                    schedule_plan = TransformerModelChunkSchedulePlan(
+                        model, tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+                    )
+                else:
+                    schedule_plan = model.build_schedule_plan(
+                        tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+                    )
                 return schedule_plan, partial(self.loss_func, loss_mask)
             else:
                 output_tensor = model(

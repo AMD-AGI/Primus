@@ -10,7 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 445cf05050179dc88dba3853954575f9c9ca2f49 # fix: fixed import activation module (#137)
+  PRIMUS_TURBO_COMMIT: 7ecd1edc31a3f1607e92b536b4250f9d98bfe423 # feat: unify fp8 gemm (#148)
 
 jobs:
   code-lint:
@@ -85,8 +85,8 @@ jobs:
           fi
       - name: Build and Push Docker Image
         run: |
-          echo "> Login to Docker Hub"
-          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          echo "> Login to ROCm Docker Hub"
+          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}"
           start_time=$(date +%s)
@@ -99,6 +99,9 @@ jobs:
 
           echo "> Docker tag image for Docker Hub"
           docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+
+          echo "> Login to Primus Docker Hub"
+          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
 
           echo "> Docker push to Docker Hub"
           start_time=$(date +%s)
@@ -177,6 +180,10 @@ jobs:
           else
             echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others" >> $GITHUB_ENV
           fi
+      - name: Run Shell Tests
+        run: |
+          echo "Running Primus CLI shell tests..."
+          bash ./tests/runner/run_all_tests.sh
       - name: Run Unit Tests
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}

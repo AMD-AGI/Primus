@@ -430,10 +430,11 @@ def validate_args_on_rocm(args):
     # sync-free MoE
     if args.turbo_sync_free_moe_stage > 0:
         assert args.enable_primus_turbo, "Please set `enable_primus_turbo=True` to enable sync-free MoE."
-        assert (
-            args.turbo_sync_free_moe_stage > 1 and args.moe_use_legacy_grouped_gemm
-        ), "Sync-Free MoE require PrimusTurboGroupedMLP, please set `moe_use_legacy_grouped_gemm=True`"
 
+        if args.turbo_sync_free_moe_stage > 1 and not args.moe_use_legacy_grouped_gemm:
+            raise ValueError(
+                "Sync-Free MoE stage 2 or 3 require PrimusTurboGroupedMLP, please set `moe_use_legacy_grouped_gemm=True`"
+            )
         options = _get_sync_free_moe_options(args.turbo_sync_free_moe_stage)
         print_rank_last(
             f"========== Enable Sync-Free MoE Stage {args.turbo_sync_free_moe_stage} (Auto-Enabled Options) =========="

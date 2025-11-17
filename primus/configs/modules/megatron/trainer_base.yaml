@@ -124,6 +124,8 @@ non_persistent_ckpt_type: null # 'global', 'local', 'in_memory', null
 non_persistent_global_ckpt_dir: null # str
 non_persistent_local_ckpt_dir: null # str
 non_persistent_local_ckpt_algo: "fully_parallel" # 'fully_parallel', 'atomic'
+dist_ckpt_save_pre_mcore_014: null
+dist_ckpt_optim_fully_reshardable: null
 
 pretrained_checkpoint: null
 ckpt_step: null

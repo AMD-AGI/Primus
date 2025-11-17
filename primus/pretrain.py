@@ -16,6 +16,45 @@ from primus.core.launcher.parser import add_pretrain_parser, load_primus_config
 # Lazy backend loader
 def load_backend_trainer(framework: str):
     if framework == "megatron":
+        import megatron.training.training as training
+        import torch
+
+        _original_build_model = training.get_model
+
+        def _patched_get_model(*args, **kwargs):
+            """
+            Monkey-patched version of build_model that removes the second
+            DDP construction inside torch.cuda.stream() block.
+            """
+            import inspect
+
+            from megatron.training import training as tr
+
+            inspect.getsource(tr.get_model)
+            print("[PrimusPatch] Overriding build_model to disable second DDP construction...")
+
+            _orig_stream_ctx = torch.cuda.stream
+
+            def _noop_stream(*args, **kwargs):
+                class DummyCtx:
+                    def __enter__(self):
+                        return None
+
+                    def __exit__(self, *a):
+                        return False
+
+                return DummyCtx()
+
+            torch.cuda.stream = _noop_stream
+
+            try:
+                return _original_build_model(*args, **kwargs)
+            finally:
+                torch.cuda.stream = _orig_stream_ctx
+
+        training.get_model = _patched_get_model
+        print("[PrimusPatch] Applied Megatron build_model monkey-patch to disable second DDP.")
+
         from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
 
         return MegatronPretrainTrainer
@@ -98,7 +137,7 @@ def setup_env(data_path: str):
         print(f"[Primus CLI] HF_HOME already set: {hf_home}")
 
 
-def launch_pretrain_trainer(primus_cfg: PrimusConfig):
+def launch_pretrain_trainer(primus_cfg: PrimusConfig, extra_args=None):
     """
     Launch the training using the Primus trainer.
 
@@ -126,6 +165,7 @@ def launch_pretrain_trainer(primus_cfg: PrimusConfig):
         module_world_size=world_size,
         module_master_addr=master_addr,
         module_master_port=master_port,
+        extra_args=extra_args,
     )
 
     # Launch training
@@ -150,7 +190,7 @@ def launch_pretrain_from_cli(args, overrides):
 
     setup_env(data_path=args.data_path)
 
-    primus_cfg = load_primus_config(args, overrides)
+    primus_cfg, unknown_overrides = load_primus_config(args, overrides)
 
     # Export merged config if requested
     if args.export_config:
@@ -160,7 +200,7 @@ def launch_pretrain_from_cli(args, overrides):
     framework = primus_cfg.get_module_config("pre_trainer").framework
     setup_backend_path(framework=framework, backend_path=args.backend_path, verbose=True)
 
-    launch_pretrain_trainer(primus_cfg=primus_cfg)
+    launch_pretrain_trainer(primus_cfg=primus_cfg, extra_args=unknown_overrides)
 
 
 if __name__ == "__main__":
