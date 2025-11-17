@@ -36,7 +36,7 @@ Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-ru
 
 ### Prerequisites
 
-- AMD ROCm drivers (version ≥ 6.4 recommended)
+- AMD ROCm drivers (version ≥ 7.0 recommended)
 - Docker (version ≥ 24.0) with ROCm support
 - ROCm-compatible AMD GPUs (e.g., Instinct MI300 series)
 - Proper permissions for Docker and GPU device access
