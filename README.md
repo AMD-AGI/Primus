@@ -1,6 +1,6 @@
 # Primus
 
-**Primus** is a flexible and high-performance training framework designed for large-scale foundation model training and inference on AMD GPUs. It supports **pretraining**, **posttraining**, and **reinforcement learning** workflows with multiple backends including [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), [TorchTitan](https://github.com/pytorch/torchtitan), and [JAX MaxText](https://github.com/google/maxtext), alongside ROCm-optimized components.
+**Primus/Primus-LM** is a flexible and high-performance training framework designed for large-scale foundation model training and inference on AMD GPUs. It supports **pretraining**, **posttraining**, and **reinforcement learning** workflows with multiple backends including [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), [TorchTitan](https://github.com/pytorch/torchtitan), and [JAX MaxText](https://github.com/google/maxtext), alongside ROCm-optimized components.
 
 > **Part of the Primus Ecosystem**: Primus-LM is the training framework layer of the [Primus ecosystem](#-primus-ecosystem), working together with [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) (high-performance operators) and [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE) (stability & platform).
 
@@ -36,7 +36,7 @@ Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-ru
 
 ### Prerequisites
 
-- AMD ROCm drivers (version ≥ 6.4 recommended)
+- AMD ROCm drivers (version ≥ 7.0 recommended)
 - Docker (version ≥ 24.0) with ROCm support
 - ROCm-compatible AMD GPUs (e.g., Instinct MI300 series)
 - Proper permissions for Docker and GPU device access
@@ -76,6 +76,7 @@ Comprehensive documentation is available in the [`docs/`](./docs/) directory:
 - **[Quick Start Guide](./docs/quickstart.md)** - Get started in 5 minutes
 - **[Primus CLI User Guide](./docs/cli/PRIMUS-CLI-GUIDE.md)** - Complete CLI reference and usage
 - **[CLI Architecture](./docs/cli/CLI-ARCHITECTURE.md)** - Technical design and architecture
+- **[Backend Patch Notes](./docs/backends/overview.md)** - Primus-specific backend arguments
 - **[Full Documentation Index](./docs/README.md)** - Browse all available documentation
 
 ---
@@ -96,13 +97,13 @@ Primus-LM is part of a comprehensive ecosystem designed to provide end-to-end so
 ┌────────────────────────▼────────────────────────────┐
 │                   Primus-LM                         │
 │              (Training Framework)                   │
-│    Megatron | TorchTitan | Unified CLI | Workflows │
+│    Megatron | TorchTitan | Unified CLI | Workflows  │
 └────────────────────────┬────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────┐
 │                  Primus-Turbo                       │
 │           (High-Performance Operators)              │
-│  FlashAttention | GEMM | Collectives | GroupedGemm │
+│  FlashAttention | GEMM | Collectives | GroupedGemm  │
 │        AITER | CK | hipBLASLt | Triton              │
 └─────────────────────────────────────────────────────┘
 ```

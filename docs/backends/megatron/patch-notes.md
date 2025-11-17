@@ -1,40 +1,14 @@
+## Megatron-LM Patch Notes & Extended Arguments
 
-# Primus Patch Notes & Extended Argument Documentation
+Primus keeps a curated patch layer on top of upstream Megatron-LM so CLI presets and configs can expose additional controls.
+Use this page with:
+- [`docs/backends/overview.md`](../overview.md) for shared module parameters
+- [`docs/cli/PRIMUS-CLI-GUIDE.md`](../../cli/PRIMUS-CLI-GUIDE.md) for CLI/config usage patterns
 
-This document records the modifications made to integrate and extend **Megatron** and **TorchTitan** within the Primus framework via patching. It includes new arguments introduced for configuration and highlights the affected code paths.
+> ℹ️ The **Version** column maps to Primus internal patch tags (v0.x.y) so you know when a flag landed.
 
----
+### 1. Module-Level Parameters
 
-## Sections
-
-- [Primus Patch Notes \& Extended Argument Documentation](#primus-patch-notes--extended-argument-documentation)
-  - [Sections](#sections)
-  - [1. Base Module Parameters](#1-base-module-parameters)
-  - [2. Megatron Patch Summary](#2-megatron-patch-summary)
-    - [2.1 Module-Level Parameters](#21-module-level-parameters)
-    - [2.2 Model-Definition Parameters](#22-model-definition-parameters)
-  - [3. TorchTitan Patch Summary](#3-torchtitan-patch-summary)
-
----
-
-## 1. Base Module Parameters
-The following arguments are defined in the base module configuration file:
-[primus/configs/modules/module_base.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/primus/configs/modules/module_base.yaml)
-This base config is inherited by all other modules in the framework, so every module supports these parameters. These options control whether a module participates in training and how its logging behaves.
-
-| Argument Name       | Default Value | Description                                                                                |
-| ------------------- | ------------- | ------------------------------------------------------------------------------------------ |
-| `trainable`         | `false`       | Whether the module is trainable.                                                           |
-| `sink_level`        | `null`        | Global sink level for logging. Overrides `file_sink_level` and `stderr_sink_level` if set. |
-| `file_sink_level`   | `DEBUG`       | Logging level for file sink (e.g., log file output).                                       |
-| `stderr_sink_level` | `INFO`        | Logging level for standard error (console) output.                                         |
-
----
-
-
-## 2. Megatron Patch Summary
-
-### 2.1 Module-Level Parameters
 
 These arguments are introduced in the Megatron module logic (e.g., training loop, logging, resume logic). They are defined via patching and can be configured to control training behavior and logging utilities.
 
@@ -57,7 +31,7 @@ These arguments are introduced in the Megatron module logic (e.g., training loop
 
 ---
 
-### 2.2 Model-Definition Parameters
+### 2 Model-Definition Parameters
 
 These arguments affect the internal architecture or layer implementations. They are patched into the model construction logic and used for tuning or debugging specific variants.
 
@@ -74,14 +48,3 @@ These arguments affect the internal architecture or layer implementations. They 
 | `turbo_deepep_num_cu`   | `32`       | v0.4.0  | Set the number of CUs to use for Primus-Turbo DeepEP. |   | 64 or 80 for ep8, 32 for ep16-64 is best practice.  |
 | `turbo_deepep_use_comm_stream`   | `false`       | v0.4.0  | Primus-Turbo DeepEP will use an internal stream to dispatch/combine when enabled, default used `current_stream` |   |  **Please both set`enable_primus_turbo=True` and `use_turbo_deepep=True` first**
 | `turbo_sync_free_moe_stage`   | `0`       | v0.4.0  | Primus Sync-Free MoE has 4 stages. See [RFC: Primus-Megatron SyncFree MoE](https://github.com/AMD-AGI/Primus/issues/203) for more details. |   |   stage 2 is recommended for better performance. **Please set`enable_primus_turbo=True` first**   |
-
-
----
-
-## 3. TorchTitan Patch Summary
-
-| New Argument | Default Value | Version | Description | Patched Files | Notes |
-| ------------ | ------------- | ------- | ----------- | ------------- | ----- |
-| `primus_turbo.enable_embedding_autocast`        | `true`        | v0.4.0  | Automatically casts nn.Embedding output to AMP dtype (e.g. bf16) during training. Helps align dtype with the rest of the model under AMP.|        |     |
-
----

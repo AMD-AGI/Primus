@@ -4,7 +4,7 @@ Get up and running with Primus in 5 minutes!
 
 ## 📋 Prerequisites
 
-- AMD ROCm drivers (≥ 6.0)
+- AMD ROCm drivers (≥ 7.0)
 - Docker (≥ 24.0) with ROCm support
 - AMD Instinct GPUs (MI300X, MI325X, etc.)
 
