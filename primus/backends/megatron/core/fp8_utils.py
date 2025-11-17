@@ -34,6 +34,7 @@ except (ImportError, ModuleNotFoundError):
 
 
 SCALING_BLOCK_SIZE = 128
+MX_SCALING_BLOCK_SIZE = 32
 
 WARN_ONCE = True
 
@@ -135,7 +136,11 @@ if HAVE_TE and HAVE_TURBO:
                     fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(fp8_format=fp8_format)
                 else:
                     fp8_recipe_none_reason = "Transformer Engine version < 2.1.0.dev0"
-                fp8_quant_config_none_reason = "Primus-Turbo not support MXFP8."
+                fp8_quant_config = PrimusTurboFloat8QuantConfig(
+                    granularity=ScalingGranularity.MX_BLOCKWISE,
+                    format=te_fp8_format_mapping(fp8_format),
+                    block_size=MX_SCALING_BLOCK_SIZE,
+                )
 
             global WARN_ONCE
             if WARN_ONCE:
@@ -243,16 +248,22 @@ elif HAVE_TURBO:
 
             # Select fp8
             fp8_quant_config = None
-            if config.fp8_quant_config == Fp8Recipe.tensorwise:
+            if config.fp8_recipe == Fp8Recipe.tensorwise:
                 fp8_quant_config = PrimusTurboFloat8QuantConfig(
                     fp8_format=fp8_format, granularity=ScalingGranularity.TENSORWISE
                 )
-            elif config.fp8_quant_config == Fp8Recipe.blockwise:
+            elif config.fp8_recipe == Fp8Recipe.blockwise:
                 fp8_quant_config = PrimusTurboFloat8QuantConfig(
                     fp8_format=fp8_format, granularity=ScalingGranularity.BLOCKWISE, block_size=128
                 )
+            elif config.fp8_recipe == Fp8Recipe.mxfp8:
+                fp8_quant_config = PrimusTurboFloat8QuantConfig(
+                    granularity=ScalingGranularity.MX_BLOCKWISE,
+                    format=te_fp8_format_mapping(fp8_format),
+                    block_size=MX_SCALING_BLOCK_SIZE,
+                )
             else:
-                raise ValueError("Primus-Turbo only supports tensorwise and blockwise scaling.")
+                raise ValueError(f"Not support fp8 recipe on Primus-Turbo: {config.fp8_recipe}.")
 
             if not is_init:
                 from primus.backends.megatron.core.extensions.primus_turbo import (
