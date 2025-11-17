@@ -10,8 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 7ecd1edc31a3f1607e92b536b4250f9d98bfe423 # feat: unify fp8 gemm (#148)
-
+  PRIMUS_TURBO_COMMIT: 70b76508408474f254ac048cef2005179c6cb55b # fix(deepep): fix internode_combine hang when set num_worst_token > 0 (#149)
 jobs:
   code-lint:
     runs-on: ubuntu-latest
