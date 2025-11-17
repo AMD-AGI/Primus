@@ -5,7 +5,55 @@
 ###############################################################################
 
 import argparse
+import importlib
+import pkgutil
 import sys
+from typing import Callable, Iterable
+
+SUBCOMMAND_PACKAGE = "primus.cli.subcommands"
+
+
+def _iter_subcommand_modules() -> Iterable[str]:
+    """
+    Discover every module inside `primus.cli.subcommands` (excluding those that
+    start with `_`) and yield its full import path.
+    """
+
+    package = importlib.import_module(SUBCOMMAND_PACKAGE)
+    prefix = package.__name__ + "."
+    for _, module_name, is_pkg in pkgutil.walk_packages(package.__path__, prefix):
+        leaf = module_name.split(".")[-1]
+        if leaf.startswith("_"):
+            continue
+        if is_pkg:
+            # Subpackages can contain nested commands; include their modules.
+            # walk_packages already recurses, so we just skip the placeholder.
+            continue
+        yield module_name
+
+
+def _load_subcommands(subparsers: argparse._SubParsersAction) -> None:
+    """
+    Dynamically import each discovered module and invoke its
+    `register_subcommand(subparsers)` hook.
+    """
+
+    for module_path in _iter_subcommand_modules():
+        module = importlib.import_module(module_path)
+        register: Callable[[argparse._SubParsersAction], argparse.ArgumentParser] = getattr(
+            module, "register_subcommand", None
+        )
+        if register is None:
+            raise AttributeError(f"Module '{module_path}' must expose register_subcommand()")
+        parser = register(subparsers)
+        if parser is None:
+            raise RuntimeError(
+                f"register_subcommand() in '{module_path}' must return the parser it configured"
+            )
+        if not hasattr(parser, "get_default") or parser.get_default("func") is None:
+            raise RuntimeError(
+                f"Subcommand registered by '{module_path}' must call parser.set_defaults(func=...)"
+            )
 
 
 def main():
@@ -23,12 +71,7 @@ def main():
     parser = argparse.ArgumentParser(prog="primus", description="Primus Unified CLI for Training & Utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    from primus.cli import benchmark_cli, projection_cli, train_cli
-
-    # Register train subcommand (only implemented one for now)
-    train_cli.register_subcommand(subparsers)
-    benchmark_cli.register_subcommand(subparsers)
-    projection_cli.register_subcommand(subparsers)
+    _load_subcommands(subparsers)
 
     args, unknown_args = parser.parse_known_args()
 
