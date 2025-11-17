@@ -11,6 +11,7 @@ Zero bubbles is a state-of-art technique aiming to reduce the bubble time and me
 
 - Some other flags need to be specified
 
+```
 overlap_grad_reduce: false
 overlap_param_gather: false
 no_persist_layer_norm: true
@@ -20,7 +21,7 @@ gradient_accumulation_fusion: true
 
 - Most of the zero-bubble flags are writted in `zero_bubble.yaml`, others reuse megatron flags. Here are some examples for config your prefer PP stratages
 
-| pp stratages / flag | num_virtual_stages_per_pipeline_rank | patch_zero_bubble | zero_bubble_v_schedule | zero_bubble_v_schedule_mem_setup |
+| pp strategy / flag | num_virtual_stages_per_pipeline_rank | patch_zero_bubble | zero_bubble_v_schedule | zero_bubble_v_schedule_mem_setup |
 |---|---|---|---|---|
 | turbo-1f1b | 1 |  false | - | - |
 | turbo-1f1b-interleaved | >=2 |  false | - | - |

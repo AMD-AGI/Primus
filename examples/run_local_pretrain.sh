@@ -141,6 +141,13 @@ if [[ "${CLEAN_DOCKER_CONTAINER:-0}" == "1" ]]; then
     fi
 fi
 
+if [[ "${SKIP_TRAIN:-0}" == "1" ]]; then
+    echo "Node-${NODE_RANK}: Skipping training container launch."
+    exit 0
+else
+    echo "Node-${NODE_RANK}: Launching training container."
+fi
+
 # ------------------ Launch Training Container ------------------
 docker_podman_proxy run --rm \
     --env MASTER_ADDR \

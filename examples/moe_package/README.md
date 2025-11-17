@@ -23,13 +23,13 @@ The mainstream MoE models today are DeepSeek-style architectures, spanning from 
 
 For performance analysis and bottleneck identification during MoE model training, we recommend the following workflow:
 
-- **Step 1: Torch Profiler Trace Generation**  
+- **Step 1: Torch Profiler Trace Generation**
   Use the integrated Torch Profiler (`--use_pytorch_profiler`) during training to generate comprehensive traces capturing operator timings, GPU utilization, and kernel launches. Specify the profiling window using `profile_step_start`/`profile_step_end` to focus on particular training steps.
 
-- **Step 2: Detailed Bottleneck Analysis with TraceLen**  
+- **Step 2: Detailed Bottleneck Analysis with TraceLen**
   Analyze the profile traces with TraceLen, a specialized tool for fine-grained identification of performance bottlenecks such as communication stalls, unbalanced compute, or inefficient operator fusion. TraceLen can reveal both compile-time and runtime inefficiencies at different model scales.
 
-- **Step 3: Pipeline Parallelism Visualization**  
+- **Step 3: Pipeline Parallelism Visualization**
   Primus provides a built-in PP (pipeline-parallel) visualization tool that helps diagnose and visualize pipeline-stage utilization across ranks. This tool is valuable for discovering pipeline bubbles or imbalances that limit throughput.
 
 ## 4. Memory Breakdown (Placeholder)
@@ -91,6 +91,7 @@ This section maps to the `MoE_Features` in `run_deepseek_v3_pretrain_mi325x.sh`.
   - `--use_turbo_deepep True`
   - `--turbo_deepep_num_cu 32`
   - `--turbo_deepep_use_comm_stream False`
+  - `--moe_router_dtype fp32`
 - Speedup: *TBD*
 - Details placeholder: *TODO: list recommended CU counts for EP 8/16/64*
 
@@ -109,21 +110,38 @@ This section maps to the `MoE_Features` in `run_deepseek_v3_pretrain_mi325x.sh`.
 ### Feature 5 – Zero-Bubble Pipeline
 
 - Description: Applies Zero-Bubble techniques to reduce pipeline bubbles, often with virtual pipeline stages.
+  - `primus/backends/megatron/core/pipeline_parallel/zerobubble/README.md`
+  - `primus/configs/modules/megatron/zero_bubble.yaml`
 - Optimization principle: *TBD*
-- Args:
-  - `--enable_primus_turbo True`
-  - `--use_turbo_row_parallel_linear True`
-  - `--use_turbo_layer_norm_column_parallel_linear True`
-  - `--use_turbo_column_parallel_linear True`
-  - `--num_virtual_stages_per_pipeline_rank 1`
-  - `--patch_zero_bubble True`
-- Speedup: *TBD*
+- Required Args:
+```
+overlap_grad_reduce: false
+overlap_param_gather: false
+no_persist_layer_norm: true
+create_attention_mask_in_dataloader: false
+gradient_accumulation_fusion: true
+```
+- PP Strategy Args:
+
+| pp strategy / flag | num_virtual_stages_per_pipeline_rank | patch_zero_bubble | zero_bubble_v_schedule | zero_bubble_v_schedule_mem_setup |
+|---|---|---|---|---|
+| turbo-1f1b | 1 |  false | - | - |
+| turbo-1f1b-interleaved | >=2 |  false | - | - |
+| zero bubble 1p | 1 | true | false | - |
+| zbv | 2 | true | true | zb |
+| v-half | 2 | true | true | half |
+| v-min | 2 | true | true | min |
+
+- Speedup/Memory: *TBD*
 - Details placeholder: *TODO: relate to VPP configuration*
 
 ### Feature 6 – Arbitrary Pipeline Partition
 
 - Description: Forces an explicit 8-way pipeline layout to balance uneven layers.
-- Optimization principle: *TBD*
+- Optimization principle:
+  - Pipeline parallelism is quite useful in large language model training, but also faces many challenges such as uneven memory and compute distribution, bubble overhead, and debugging complexity. To better fulfill pipeline parallelism’s potential in production-grade training, we’ve been investigating the implementation details and making corresponding improvements. Below are two aspects of progress based on Megatron-LM[1] integrated into Primus[2].
+  - Developed a visualization tool for pipeline schedule, enabling intuitive visual analysis of the schedule to help easily find the performance bottleneck and optimization possibilities.
+  - Enabled arbitrary pipeline split feature, offering more fine-grained control of memory and compute among different ranks to both save the overall memory and improve throughput.
 - Args:
   - `--pipeline_model_parallel_size 8`
   - `# --pipeline_model_parallel_layout 'Et*3|(tt|)*29,m|L'` (to be tuned)
@@ -139,6 +157,11 @@ This section maps to the `MoE_Features` in `run_deepseek_v3_pretrain_mi325x.sh`.
   - `# export HSA_KERNARG_POOL_SIZE=12582912` (enable as needed)
 - Speedup: *TBD*
 - Details placeholder: *TODO: log MI325 vs. MI355 comparisons*
+
+
+### TODO
+AINIC, cp,
+
 
 ## 8. Code and Reproduction
 
@@ -159,4 +182,3 @@ This section maps to the `MoE_Features` in `run_deepseek_v3_pretrain_mi325x.sh`.
 - DeepSeek V2 Lite / V2 / V3 Hugging Face pages for public configs and parameter counts.
 - AMD ROCm™ docs and Instinct™ MI300 performance tuning guides.
 - Primus repository Megatron configs and READMEs (continuously updated best practices).
-
