@@ -254,6 +254,12 @@ test_patch_not_found() {
 test_patch_not_readable() {
     print_section "Test 7: Patch Not Readable"
 
+    # Skip this test if running as root (root can read any file)
+    if [[ $EUID -eq 0 ]]; then
+        echo -e "${COLOR_YELLOW}⚠${COLOR_RESET} Skipping test (running as root)"
+        return 0
+    fi
+
     # Create test patch without read permission
     local test_patch="/tmp/test_patch_noread_$$.sh"
     cat > "$test_patch" << 'EOF'
