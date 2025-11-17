@@ -6,8 +6,8 @@
 ###############################################################################
 
 ######################### Training Docker and Variables #########################
-export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
-# export DOCKER_IMAGE="docker.io/tasimage/primus:pr-280"
+# export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
+export DOCKER_IMAGE="docker.io/tasimage/primus:pr-280"
 export CLEAN_DOCKER_CONTAINER=1
 
 ######################### Training Environment Variables #########################
@@ -40,8 +40,8 @@ GBS=256
 SEQ_LENGTH=4096
 TP=1
 ETP=1
-PP=1
-VPP=1
+PP=4
+VPP=2
 EP=8
 CP=1
 CP_COMM_TYPE="a2a" # p2p, a2a, allgather or a2a+p2p
@@ -55,18 +55,19 @@ PROFILE=False
 DISABLE_CPU_TRACE=True
 PROFILE_STEP_START=5
 PROFILE_STEP_END=6
-TRAIN_ITERS=10
+TRAIN_ITERS=5
 
 # MoE_Features legend:
 # 0 - Baseline (no extra optimization toggles)
-# 1 - Turbo attention + grouped GEMM speedups
-# 2 - Sync-free MoE (stage 2)
+# 1 - Turbo attention acceleration
+# 2 - Turbo grouped GEMM / MLP fusion
 # 3 - DeepEP acceleration
-# 4 - 1F1B MoE overlap
-# 5 - Zero-bubble pipeline optimizations
-# 6 - Arbitrary pipeline partition (8-way custom layout)
-# 7 - CPU NUMA binding helper
-# MoE_Features=(0 1 2 3 4 5 6 7)
+# 4 - Sync-free MoE (stage 2)
+# 5 - 1F1B MoE overlap
+# 6 - Zero-bubble pipeline optimizations
+# 7 - Arbitrary pipeline partition (8-way custom layout)
+# 8 - CPU NUMA binding helper
+# MoE_Features=(0 1 2 3 4 5 6 7 8)
 MoE_Features=(0)
 
 FEATURE_ARGS=()
@@ -84,40 +85,92 @@ for feature in "${MoE_Features[@]}"; do
 	1)
 		ensure_primus_turbo
 		FEATURE_ARGS+=("--use_turbo_attention" "True")
-		FEATURE_ARGS+=("--use_turbo_grouped_mlp" "True")
 		;;
 	2)
 		ensure_primus_turbo
-		FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "2")
+		FEATURE_ARGS+=("--use_turbo_grouped_mlp" "True")
 		;;
 	3)
 		ensure_primus_turbo
 		FEATURE_ARGS+=("--use_turbo_deepep" "True")
 		FEATURE_ARGS+=("--turbo_deepep_num_cu" "32")
 		FEATURE_ARGS+=("--turbo_deepep_use_comm_stream" "False")
+		FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
+		FEATURE_ARGS+=("--moe_router_dtype" "fp32")
 		;;
 	4)
+		ensure_primus_turbo
+        # mi355
+		# sync_free moe stage 1 will open router and permutation fusion
+		FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "1")
+
+        # mi300/mi325
+		# sync_free moe stage 2 will open deepep automatically
+		# FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "2")
+        # FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
+		# FEATURE_ARGS+=("--moe_use_legacy_grouped_gemm" "True")
+		# FEATURE_ARGS+=("--moe_router_dtype" "fp32")
+		;;
+	5)
 		FEATURE_ARGS+=("--overlap_moe_expert_parallel_comm" "True")
 		FEATURE_ARGS+=("--patch_moe_overlap" "True")
 		FEATURE_ARGS+=("--delay_wgrad_compute" "False")
 		FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
 		;;
-	5)
-		ensure_primus_turbo
-		FEATURE_ARGS+=("--use_turbo_row_parallel_linear" "True")
-		FEATURE_ARGS+=("--use_turbo_layer_norm_column_parallel_linear" "True")
-		FEATURE_ARGS+=("--use_turbo_column_parallel_linear" "True")
-		FEATURE_ARGS+=("--num_virtual_stages_per_pipeline_rank" "1")
-		FEATURE_ARGS+=("--patch_zero_bubble" "True")
-		;;
 	6)
+		ensure_primus_turbo
+        # required flags for zero bubble
+		FEATURE_ARGS+=("--overlap_grad_reduce" "False")
+		FEATURE_ARGS+=("--overlap_param_gather" "False")
+		FEATURE_ARGS+=("--no_persist_layer_norm" "True")
+		FEATURE_ARGS+=("--create_attention_mask_in_dataloader" "False")
+		FEATURE_ARGS+=("--gradient_accumulation_fusion" "True")
+
+        # default strategy is zero bubble
+        PP_STRATEGY="zbv" # 1f1b, vpp, zb1p, zbv, v-half, v-min
+
+		case "$PP_STRATEGY" in
+		1f1b)
+			VPP=1
+			;;
+		vpp)
+			;;
+		zb1p)
+			FEATURE_ARGS+=("--patch_zero_bubble" "True")
+			VPP=1
+			;;
+		zbv)
+			FEATURE_ARGS+=("--patch_zero_bubble" "True")
+			FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
+			FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "zb")
+			VPP=2
+			;;
+		v-half)
+			FEATURE_ARGS+=("--patch_zero_bubble" "True")
+			FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
+			FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "half")
+			VPP=2
+			;;
+		v-min)
+			FEATURE_ARGS+=("--patch_zero_bubble" "True")
+			FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
+			FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "min")
+			VPP=2
+			;;
+		*)
+			echo "Unsupported PP_STRATEGY: ${PP_STRATEGY}. Supported values: 1f1b, vpp, zb1p, zbv, v-half, v-min." >&2
+			exit 1
+			;;
+		esac
+		;;
+	7)
 		# TODO: need tuning for the pipeline layout pattern
 		# FEATURE_ARGS+=" --pipeline_model_parallel_layout 'Et*3|(tt|)*29,m|L'"
 		;;
-	7)
+	8)
 		# Enable NUMA binding for better memory locality (increase stability for large models)
 		export ENABLE_NUMA_BINDING=1
-		# export HSA_KERNARG_POOL_SIZE=12582912
+		export HSA_KERNARG_POOL_SIZE=12582912
 		;;
 	*) ;;
 	esac
@@ -130,6 +183,8 @@ MTP_ARGS=()
 if [ "$ENABLE_MTP" = "True" ]; then
 	MTP_ARGS+=("--mtp_num_layers" "1")
 	MTP_ARGS+=("--mtp_loss_scaling_factor" "0.1")
+else
+	MTP_ARGS+=("--mtp_num_layers" "None")
 fi
 
 VPP_ARGS=()
@@ -164,6 +219,7 @@ PRIMUS_TEAM="date-$(date +%Y%m%d)"
 export PRIMUS_TEAM
 PRIMUS_USER=user-tas
 export PRIMUS_USER
+# export PRIMUS_EXP_NAME="debug"
 export PRIMUS_EXP_NAME="DeepSeekV3_MI325X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}(${PROFILE_STEP_START}-${PROFILE_STEP_END})_NoCPUTrace${DISABLE_CPU_TRACE}_Features${FEATURE_TAG}"
 
 LOG_DIR=./output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
@@ -171,7 +227,7 @@ export DUMP_PP_DIR=$LOG_DIR/pp_dump
 export LOG_FILE=$LOG_DIR/training.log
 export EXPORT_CONFIG=$LOG_DIR/config.yaml
 mkdir -p "$LOG_DIR"
-touch "$LOG_FILE"
+rm -rf "$LOG_FILE"
 
 ######################### Training Job #########################
 export EXP="examples/megatron/configs/MI300X/deepseek_v3-pretrain.yaml"
@@ -184,14 +240,16 @@ echo "LOG_FILE=${LOG_FILE}" | tee -a "$LOG_FILE"
 echo "FEATURE_ARGS=${FEATURE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "MoE_Features=${FEATURE_LIST}" | tee -a "$LOG_FILE"
 echo "MTP_ARGS=${MTP_ARGS[*]}" | tee -a "$LOG_FILE"
-echo "VPP_ARGS=${VPP_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "FP8_ARGS=${FP8_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "RECOMPUTE_ARGS=${RECOMPUTE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "PROFILE_ARGS=${PROFILE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "--------------------------------" | tee -a "$LOG_FILE"
 
-# --num_layers 4 \
-# --moe_layer_freq 1 \
+export SKIP_TRAIN=0
+
+    # --num_layers 16 \
+    # --moe_layer_freq 1 \
+	# --pp_warmup True \
 bash ./examples/run_slurm_pretrain.sh \
     --micro_batch_size "$MBS" \
 	--global_batch_size "$GBS" \
@@ -204,12 +262,12 @@ bash ./examples/run_slurm_pretrain.sh \
 	--cp_comm_type "$CP_COMM_TYPE" \
 	--mock_data True \
 	--moe_router_force_load_balancing "$LOAD_BALANCE" \
-	--pp_warmup True \
 	--manual_gc True \
 	--manual_gc_interval 1 \
 	--optimizer "$OPTIMIZER" \
 	--moe_use_legacy_grouped_gemm "$LEGACY_GG" \
-	"${VPP_ARGS[@]}" \
+    "${MTP_ARGS[@]}" \
+    "${VPP_ARGS[@]}" \
 	"${FEATURE_ARGS[@]}" \
 	"${RECOMPUTE_ARGS[@]}" \
 	"${FP8_ARGS[@]}" \

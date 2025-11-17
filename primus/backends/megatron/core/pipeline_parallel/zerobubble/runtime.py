@@ -1503,9 +1503,9 @@ def update_schedule(
     f, b, w, f_mem, b_mem, w_mem, mem_limit = zip(*ag_arguments)
 
     if is_second_last_pipeline_stage():
-        log_rank_all(
-            f"rank {torch.distributed.get_rank()} Performing ILP with: f={f},\n b={b},\n w={w},\n c={c},\n f_mem={f_mem},\n b_mem={b_mem},\n w_mem={w_mem},\n mem_limit={mem_limit}"
-        )
+        # log_rank_all(
+        #     f"rank {torch.distributed.get_rank()} Performing ILP with: f={f},\n b={b},\n w={w},\n c={c},\n f_mem={f_mem},\n b_mem={b_mem},\n w_mem={w_mem},\n mem_limit={mem_limit}"
+        # )
         global schedule_cache
         schedule_cache = scheduler(
             pipeline_model_parallel_size,
