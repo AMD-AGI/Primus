@@ -170,6 +170,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_mla_attention()
         self.patch_fp8_context()
         self.patch_zbpp()
+        self.patch_custom_recompute_layer_ids()
 
         self.app_metrics = {}
 
@@ -178,6 +179,45 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
+
+    def patch_custom_recompute_layer_ids(self):
+        if self.module_config.recompute_layer_ids is None:
+            return
+        warning_rank_0(f"MegatronTrainer: monkey patch TransformerConfig post_init...")
+        import megatron.core.transformer.transformer_config as config_mod
+
+        config_mod.TransformerConfig.recompute_layer_ids = self.module_config.recompute_layer_ids
+
+        orig_post_init = config_mod.TransformerConfig.__post_init__
+
+        def new_post_init(self):
+            tmp = self.recompute_granularity
+            self.recompute_granularity = None
+            orig_post_init(self)
+            self.recompute_granularity = tmp
+
+        config_mod.TransformerConfig.__post_init__ = new_post_init
+
+        warning_rank_0(f"MegatronTrainer: monkey patch TransformerBlock checkpoint_forward...")
+        import megatron.core.models.bert.bert_model as orig_bert_model
+        import megatron.core.models.gpt.gpt_model as orig_gpt_model
+        import megatron.core.models.retro.decoder_attention as orig_decoder_attention
+        import megatron.core.models.T5.t5_model as orig_t5_model
+        import megatron.core.models.vision.clip_vit_model as orig_clip_vit_model
+        import megatron.core.models.vision.radio as orig_radio
+        import megatron.core.transformer.transformer_block as orig_transformer_block
+
+        from primus.backends.megatron.core.transformer.transformer_block import (
+            PrimusTransformerBlock,
+        )
+
+        orig_transformer_block.TransformerBlock = PrimusTransformerBlock
+        orig_bert_model.TransformerBlock = PrimusTransformerBlock
+        orig_gpt_model.TransformerBlock = PrimusTransformerBlock
+        orig_decoder_attention.TransformerBlock = PrimusTransformerBlock
+        orig_t5_model.TransformerBlock = PrimusTransformerBlock
+        orig_clip_vit_model.TransformerBlock = PrimusTransformerBlock
+        orig_radio.TransformerBlock = PrimusTransformerBlock
 
     def patch_pt_replace_te(self, args):
         from megatron.core.extensions import transformer_engine_spec_provider
@@ -679,6 +719,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             log_rank_0(f"-monkey patch to enable manual pipeline split...")
             if validate_manual_split(args):
                 set_manual_pipeline_split_patch(args)
+
+        if args.recompute_layer_ids is not None:
+            from .utils import validate_specified_recompute_layers
+
+            validate_specified_recompute_layers(args)
 
         if args.log_progress:
             append_to_progress_log("Starting job")

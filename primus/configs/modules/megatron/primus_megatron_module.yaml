@@ -38,3 +38,6 @@ pp_warmup: false # set to true to decrease iter-1 time when using pp
 
 # tool
 dump_pp_data: false
+
+# recompute
+recompute_layer_ids: null #int list，id srange from 0 to (num_layers_per_pp_stage - 1)
