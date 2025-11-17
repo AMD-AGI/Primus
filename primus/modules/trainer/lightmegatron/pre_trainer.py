@@ -12,6 +12,12 @@ from primus.modules.module_utils import log_rank_0
 class LightMegatronPretrainTrainer(BaseModule):
 
     def __init__(self, *args, **kwargs):
+        extra_args = kwargs.pop("extra_args", None)
+        if extra_args:
+            raise ValueError(
+                f"[LightMegatronPretrainTrainer] Unexpected extra_args detected: {extra_args}. "
+                f"LightMegatron backend does not support unregistered config keys."
+            )
         kwargs["module_name"] = "pre_trainer"
         super().__init__(*args, **kwargs)
 

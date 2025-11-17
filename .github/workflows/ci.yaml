@@ -10,8 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 3acc0fe3271b7e41f0646382311f36bdffca0554 # feat(permute): permute op support to compute tokens_per_expert (#140)
-
+  PRIMUS_TURBO_COMMIT: 70b76508408474f254ac048cef2005179c6cb55b # fix(deepep): fix internode_combine hang when set num_worst_token > 0 (#149)
 jobs:
   code-lint:
     runs-on: ubuntu-latest
@@ -180,6 +179,10 @@ jobs:
           else
             echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others" >> $GITHUB_ENV
           fi
+      - name: Run Shell Tests
+        run: |
+          echo "Running Primus CLI shell tests..."
+          bash ./tests/runner/run_all_tests.sh
       - name: Run Unit Tests
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}

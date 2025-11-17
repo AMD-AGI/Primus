@@ -61,8 +61,8 @@ modules:
       moe_permute_fusion: false
       gradient_accumulation_fusion: false
       moe_use_legacy_grouped_gemm: true
-      cross_entropy_fusion_impl: "te"
-      cross_entropy_loss_fusion: true
+      # cross_entropy_fusion_impl: "te"
+      # cross_entropy_loss_fusion: true
 
       # ckpt
       finetune: false

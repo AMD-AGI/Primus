@@ -1,40 +1,14 @@
+## Megatron-LM Patch Notes & Extended Arguments
 
-# Primus Patch Notes & Extended Argument Documentation
+Primus keeps a curated patch layer on top of upstream Megatron-LM so CLI presets and configs can expose additional controls.
+Use this page with:
+- [`docs/backends/overview.md`](../overview.md) for shared module parameters
+- [`docs/cli/PRIMUS-CLI-GUIDE.md`](../../cli/PRIMUS-CLI-GUIDE.md) for CLI/config usage patterns
 
-This document records the modifications made to integrate and extend **Megatron** and **TorchTitan** within the Primus framework via patching. It includes new arguments introduced for configuration and highlights the affected code paths.
+> ℹ️ The **Version** column maps to Primus internal patch tags (v0.x.y) so you know when a flag landed.
 
----
+### 1. Module-Level Parameters
 
-## Sections
-
-- [Primus Patch Notes \& Extended Argument Documentation](#primus-patch-notes--extended-argument-documentation)
-  - [Sections](#sections)
-  - [1. Base Module Parameters](#1-base-module-parameters)
-  - [2. Megatron Patch Summary](#2-megatron-patch-summary)
-    - [2.1 Module-Level Parameters](#21-module-level-parameters)
-    - [2.2 Model-Definition Parameters](#22-model-definition-parameters)
-  - [3. TorchTitan Patch Summary](#3-torchtitan-patch-summary)
-
----
-
-## 1. Base Module Parameters
-The following arguments are defined in the base module configuration file:
-[primus/configs/modules/module_base.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/primus/configs/modules/module_base.yaml)
-This base config is inherited by all other modules in the framework, so every module supports these parameters. These options control whether a module participates in training and how its logging behaves.
-
-| Argument Name       | Default Value | Description                                                                                |
-| ------------------- | ------------- | ------------------------------------------------------------------------------------------ |
-| `trainable`         | `false`       | Whether the module is trainable.                                                           |
-| `sink_level`        | `null`        | Global sink level for logging. Overrides `file_sink_level` and `stderr_sink_level` if set. |
-| `file_sink_level`   | `DEBUG`       | Logging level for file sink (e.g., log file output).                                       |
-| `stderr_sink_level` | `INFO`        | Logging level for standard error (console) output.                                         |
-
----
-
-
-## 2. Megatron Patch Summary
-
-### 2.1 Module-Level Parameters
 
 These arguments are introduced in the Megatron module logic (e.g., training loop, logging, resume logic). They are defined via patching and can be configured to control training behavior and logging utilities.
 
@@ -53,11 +27,12 @@ These arguments are introduced in the Megatron module logic (e.g., training loop
 | `use_rocm_mem_info`                        | `false`       | v0.2.0  | Logging ROCm memory information in Megatron-LM Trainer                             | NA                                                                                                                                                                                                                                                                                                           | If `use_rocm_mem_info = True`, ROCm memory information will be collected with `rocm-smi` at every iteration.           |
 | `use_rocm_mem_info_iters`                        | `[1,2]`       | v0.2.0  | Logging ROCm memory information in Megatron-LM Trainer for some iterations                            | NA                                                                                                                                                                                                                                                                                                           | If `use_rocm_mem_info = False`, ROCm memory information will be collected at the iterations specified in `use_rocm_mem_info_iters`.           |
 | `patch_zero_bubble`                        | `false`       | v0.2.0  | Using Zero-Bubble pipeline parallism  | `megatron.core.optimizer.ChainedOptimizer`, `megatron.core.pipeline_parallel.get_forward_backward_func`, `megatron.core.tensor_parallel.layers.LinearWithGradAccumulationAndAsyncCommunication`, `megatron.core.parallel_stat.default_embedding_ranks`, `megatron.core.parallel_stat.is_pipeline_last_stage`, `megatron.core.parallel_stat.is_rank_in_embedding_group`, `megatron.core.distributed.finalize_model_grads`, `megatron.core.transformer.transformer_layer.get_transformer_layer_offset` | If `patch_zero_bubble = True`, Zero bubble pipeline parallism will be enable to use. See more detail at [ZeroBubble User Guide](./backends/megatron/core/pipeline_parallel/zerobubble/README.md)           |
-| `disable_mlflow`                        | `true`       | v0.3.0  | Track model development using MLflow                             | NA                                                                                                                                                                                                                                                                                                           |  Envs: <br> `export DATABRICKS_TOKEN=your_token`<br>`export DATABRICKS_HOST=your_host`<br>`export MLFLOW_TRACKING_URI=databricks`<br>`export MLFLOW_REGISTRY_URI=databricks-uc`<br>Arguments: <br>`mlflow_run_name: null`,<br>`mlflow_experiment_name: null`     |
+| `disable_mlflow`                        | `true`       | v0.3.0  | Track model development using MLflow                             | NA                                                                                                                                                                                                                                                                                                         |  Envs: <br> `export DATABRICKS_TOKEN=your_token`<br>`export DATABRICKS_HOST=your_host`<br>`export MLFLOW_TRACKING_URI=databricks`<br>`export MLFLOW_REGISTRY_URI=databricks-uc`<br>Arguments: <br>`mlflow_run_name: null`,<br>`mlflow_experiment_name: null`     |
+| `recompute_layer_ids`                    | `null`       | v0.4.0  | Specify the exact IDs of layers to recompute, enabling more flexible memory reduction                            | NA                                                                                                                                                                                                                                                                                                           | Using `recompute_layer_ids=[layer_id_0, layer_id_1,...]` together with `recompute_granularity=full`, where layer_id ranges from 0 to num_layers - 1.           |
 
 ---
 
-### 2.2 Model-Definition Parameters
+### 2 Model-Definition Parameters
 
 These arguments affect the internal architecture or layer implementations. They are patched into the model construction logic and used for tuning or debugging specific variants.
 
@@ -74,14 +49,3 @@ These arguments affect the internal architecture or layer implementations. They 
 | `turbo_deepep_num_cu`   | `32`       | v0.4.0  | Set the number of CUs to use for Primus-Turbo DeepEP. |   | 64 or 80 for ep8, 32 for ep16-64 is best practice.  |
 | `turbo_deepep_use_comm_stream`   | `false`       | v0.4.0  | Primus-Turbo DeepEP will use an internal stream to dispatch/combine when enabled, default used `current_stream` |   |  **Please both set`enable_primus_turbo=True` and `use_turbo_deepep=True` first**
 | `turbo_sync_free_moe_stage`   | `0`       | v0.4.0  | Primus Sync-Free MoE has 4 stages. See [RFC: Primus-Megatron SyncFree MoE](https://github.com/AMD-AGI/Primus/issues/203) for more details. |   |   stage 2 is recommended for better performance. **Please set`enable_primus_turbo=True` first**   |
-
-
----
-
-## 3. TorchTitan Patch Summary
-
-| New Argument | Default Value | Version | Description | Patched Files | Notes |
-| ------------ | ------------- | ------- | ----------- | ------------- | ----- |
-| `primus_turbo.enable_embedding_autocast`        | `true`        | v0.4.0  | Automatically casts nn.Embedding output to AMP dtype (e.g. bf16) during training. Helps align dtype with the rest of the model under AMP.|        |     |
-
----

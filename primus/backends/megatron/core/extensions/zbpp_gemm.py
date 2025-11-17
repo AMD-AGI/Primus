@@ -70,15 +70,19 @@ class LinearWithWeightGradientStore(torch.autograd.Function):
         else:
             wgrad_gemm_accum_func = fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16
 
-        WeightGradStore.put(
-            weight,
-            functools.partial(pre_process, grad_output, input),
-            functools.partial(
-                process_wgrad,
+        if WeightGradStore.split_bw():
+            WeightGradStore.put(
                 weight,
-                wgrad_gemm_accum_func=wgrad_gemm_accum_func,
-            ),
-        )
+                functools.partial(pre_process, grad_output, input),
+                functools.partial(
+                    process_wgrad,
+                    weight,
+                    wgrad_gemm_accum_func=wgrad_gemm_accum_func,
+                ),
+            )
+        else:
+            grad_output, input, _ = pre_process(grad_output, input)
+            process_wgrad(weight, grad_output, input, None, wgrad_gemm_accum_func)
         # grad_weight = gemm_impl(grad_output.t(), input)
 
         return grad_input, None, grad_bias, None, None
@@ -103,7 +107,9 @@ class GroupedLinearWithWeightGradientStore(torch.autograd.Function):
     ):
         if wgrad_gemm_backend_func is None:
             wgrad_gemm_backend_func = group_gemm_backend_func
-        ctx.weight_main_grad = weight.main_grad
+        ctx.use_main_grad = hasattr(weight, "main_grad") and weight.main_grad is not None
+        if ctx.use_main_grad:
+            ctx.weight_main_grad = weight.main_grad
         ctx.weight_shape_ori = weight.shape
         ctx.group_gemm_backend_func = group_gemm_backend_func
         ctx.wgrad_gemm_backend_func = wgrad_gemm_backend_func
@@ -129,7 +135,8 @@ class GroupedLinearWithWeightGradientStore(torch.autograd.Function):
     def backward(ctx, grad_output):
         input, weight, group_lens, group_offs = ctx.saved_tensors
         group_gemm_backend_func = ctx.group_gemm_backend_func
-        weight.main_grad = ctx.weight_main_grad
+        if ctx.use_main_grad:
+            weight.main_grad = ctx.weight_main_grad
         grad_a = group_gemm_backend_func(
             grad_output,
             weight,
@@ -154,18 +161,23 @@ class GroupedLinearWithWeightGradientStore(torch.autograd.Function):
                 trans_b=False,
             )
             _wgrad = _wgrad.view(_weight_shape_ori)
-            with torch.no_grad():
-                _weight.main_grad.add_(_wgrad)
+            if ctx.use_main_grad:
+                with torch.no_grad():
+                    _weight.main_grad.add_(_wgrad)
 
-        WeightGradStore.put(
-            weight,
-            functools.partial(pre_process, grad_output, input, ctx.trans_b),
-            functools.partial(
-                process_wgrad,
+        if WeightGradStore.split_bw():
+            WeightGradStore.put(
                 weight,
-                ctx.weight_shape_ori,
-            ),
-        )
+                functools.partial(pre_process, grad_output, input, ctx.trans_b),
+                functools.partial(
+                    process_wgrad,
+                    weight,
+                    ctx.weight_shape_ori,
+                ),
+            )
+        else:
+            pre_process(grad_output, input, ctx.trans_b)
+            process_wgrad(weight, ctx.weight_shape_ori, grad_output, input)
 
         return grad_a, None, None, None, None, None, None, None
 

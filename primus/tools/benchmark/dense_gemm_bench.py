@@ -24,6 +24,8 @@ except ImportError:
 
 from primus.tools.report import write_table_simple
 
+from .dense_gemm_bench_args import add_gemm_parser
+
 MODEL_CONFIGS: Dict[str, Dict[str, Any]] = {
     "Llama2_7B": {
         "seqlen": 4096,
@@ -91,29 +93,13 @@ MODEL_CONFIGS: Dict[str, Dict[str, Any]] = {
 }
 
 
-def add_gemm_parser(parser: argparse.ArgumentParser):
-    parser.add_argument("--model", default=None, help="Model name (e.g., Llama3.1_8B)")
-    parser.add_argument("--seqlen", type=int, default=2048)
-    parser.add_argument("--hidden-size", type=int, default=4096)
-    parser.add_argument("--intermediate-size", type=int, default=11008)
-    parser.add_argument("--num-attention-heads", type=int, default=32)
-    parser.add_argument("--num-key-value-heads", type=int, default=32)
-    parser.add_argument("--head-dim", type=int, default=128)
-    parser.add_argument("--vocab-size", type=int, default=32000)
-    parser.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
-    parser.add_argument("--mbs", type=int, default=1, help="Microbatch size")
-    parser.add_argument("--output-file", default="./gemm-dense_report.md")
-    parser.add_argument("--duration", type=int, default=3, help="Benchmark duration per shape (sec)")
-    return parser
-
-
 def build_gemm_preamble(args, shape_defs: List[Tuple[str, List[int]]]) -> str:
     lines = [
         "# Dense GEMM Benchmark Report",
         "",
         f"- Model: {args.model or 'Custom'}",
         f"- Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-        f"- Cluster: amd-aig-poolside",
+        "- Cluster: amd-aig-poolside",
         f"- Duration per shape: {args.duration} sec",
         "",
         "## Configuration",

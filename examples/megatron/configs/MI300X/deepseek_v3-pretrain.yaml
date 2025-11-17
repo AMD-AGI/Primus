@@ -86,6 +86,12 @@ modules:
       use_turbo_attention: true
       use_turbo_grouped_mlp: true
 
+      # MoE overlap
+      # overlap_moe_expert_parallel_comm: true
+      # patch_moe_overlap: true
+      # delay_wgrad_compute: false
+      # moe_shared_expert_overlap: false
+
       # Cross entropy flags
-      cross_entropy_fusion_impl: "te"
-      cross_entropy_loss_fusion: true
+      # cross_entropy_fusion_impl: "te"
+      # cross_entropy_loss_fusion: true
