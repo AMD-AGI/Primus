@@ -45,7 +45,15 @@ def _load_subcommands(subparsers: argparse._SubParsersAction) -> None:
         )
         if register is None:
             raise AttributeError(f"Module '{module_path}' must expose register_subcommand()")
-        register(subparsers)
+        parser = register(subparsers)
+        if parser is None:
+            raise RuntimeError(
+                f"register_subcommand() in '{module_path}' must return the parser it configured"
+            )
+        if not hasattr(parser, "get_default") or parser.get_default("func") is None:
+            raise RuntimeError(
+                f"Subcommand registered by '{module_path}' must call parser.set_defaults(func=...)"
+            )
 
 
 def main():
