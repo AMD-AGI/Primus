@@ -7,12 +7,14 @@
 
 ######################### Training Docker and Variables #########################
 # export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
-export DOCKER_IMAGE="docker.io/tasimage/primus:pr-280"
+export DOCKER_IMAGE="docker.io/tasimage/primus:pr-289"
 export CLEAN_DOCKER_CONTAINER=1
 
 ######################### Training Environment Variables #########################
 export HF_TOKEN=${HF_TOKEN:-"your_hf_token"}
 export WANDB_API_KEY=${WANDB_API_KEY:-"your_wandb_api_key"}
+# TODO
+export GPU_MAX_HW_QUEUES=8
 
 # Set on Primus-Safe Platform
 # export MASTER_ADDR=${MASTER_ADDR:-localhost}
@@ -113,7 +115,7 @@ for feature in "${MoE_Features[@]}"; do
 		;;
 	5)
 		FEATURE_ARGS+=("--overlap_moe_expert_parallel_comm" "True")
-		FEATURE_ARGS+=("--patch_moe_overlap" "True")
+		FEATURE_ARGS+=("--patch_moe_overlap" "False") # TODO: error
 		FEATURE_ARGS+=("--delay_wgrad_compute" "False")
 		FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
 		;;
@@ -251,6 +253,8 @@ export SKIP_TRAIN=0
     # --moe_layer_freq 1 \
 	# --pp_warmup True \
 bash ./examples/run_slurm_pretrain.sh \
+--num_layers 16 \
+--moe_layer_freq 1 \
     --micro_batch_size "$MBS" \
 	--global_batch_size "$GBS" \
 	--seq_length "$SEQ_LENGTH" \
