@@ -1,3 +1,10 @@
+###############################################################################
+# Copyright 2023–2025 Google LLC. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 import datasets
 import grain.python as grain
 import jax
@@ -38,7 +45,6 @@ def preprocessing_pipeline(
     max_segments=1,  # max segments per sequence
 ):
     """pipeline for preprocessing HF dataset"""
-
     assert (
         global_batch_size % global_mesh.size == 0
     ), "Batch size should be divisible by number of global devices."

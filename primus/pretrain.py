@@ -117,11 +117,16 @@ def launch_pretrain_trainer(primus_cfg: PrimusConfig, extra_args=None):
     # Lazy import backend trainer
     TrainerClass = load_backend_trainer(framework)
 
-    # envs set by torchrun
-    rank = int(os.getenv("RANK", "0"))
-    world_size = int(os.getenv("WORLD_SIZE", "1"))
     master_addr = os.getenv("MASTER_ADDR", "127.0.0.1")
     master_port = int(os.getenv("MASTER_PORT", "29500"))
+
+    if framework == "maxtext":
+        rank = int(os.getenv("NODE_RANK", "0"))
+        world_size = int(os.getenv("NNODES", "1"))
+    else:
+        # envs set by torchrun
+        rank = int(os.getenv("RANK", "0"))
+        world_size = int(os.getenv("WORLD_SIZE", "1"))
 
     # Initialize trainer
     trainer = TrainerClass(
@@ -163,7 +168,6 @@ def launch_pretrain_from_cli(args, overrides):
         primus_cfg.export(export_path=args.export_config)
 
     # Setup backend path for dynamic import
-    primus_cfg.export_module_config("pre_trainer")
     framework = primus_cfg.get_module_config("pre_trainer").framework
     setup_backend_path(framework=framework, backend_path=args.backend_path, verbose=True)
 

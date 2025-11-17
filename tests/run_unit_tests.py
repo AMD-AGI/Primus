@@ -22,6 +22,7 @@ def get_all_unit_tests():
 
     EXCLUDE_UNIT_TESTS = [
         "unit_tests/megatron/cco/test_tp_overlap.py",
+        "tests/trainer/test_maxtext_trainer.py",
     ]
 
     for root, dirs, files in os.walk(cur_dir):

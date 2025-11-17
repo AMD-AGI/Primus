@@ -69,7 +69,7 @@ class BaseModule(ABC):
         os.environ["LOCAL_RANK"] = str(self.module_local_rank)
 
         # setup logger for worker
-        # self.setup_worker_logger(module_rank, module_world_size)
+        self.setup_worker_logger(module_rank, module_world_size)
 
     @abstractmethod
     def init(self, *args, **kwargs):

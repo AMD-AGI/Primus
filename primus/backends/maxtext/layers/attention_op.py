@@ -1,3 +1,10 @@
+###############################################################################
+# Copyright 2023–2025 Google LLC. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 import jax.numpy as jnp
 from MaxText.common_types import MODEL_MODE_TRAIN, Array, AttentionType
 from MaxText.layers.attention_op import AttentionOp

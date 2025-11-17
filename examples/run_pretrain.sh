@@ -327,7 +327,7 @@ install_pkgs_for_maxtext() {
     LOG_INFO_RANK0 "========== Install required packages for Jax/MaxText Done =========="
 }
 
-if [ "${BACKEND:-}" == "MaxText" ]; then
+if [[ "$NNODES" -gt 1 ]] && [[ "${BACKEND:-}" == "MaxText" ]]; then
     install_pkgs_for_maxtext
 fi
 
@@ -490,14 +490,14 @@ if [ "${PRIMUS_HIPBLASLT_TUNING_STAGE:-0}" -eq 1 ]; then
          "and tune the gemm with a single node."
 fi
 
-LOG_INFO "torchrun exited with code $exit_code"
+LOG_INFO "primus launcher exited with code $exit_code"
 
 if [[ $exit_code -ne 0 ]]; then
     if [[ $exit_code -ge 128 ]]; then
         signal=$((exit_code - 128))
-        LOG_ERROR "torchrun crashed due to signal $signal"
+        LOG_ERROR "primus launcher crashed due to signal $signal"
     else
-        LOG_ERROR "torchrun exited with code $exit_code"
+        LOG_ERROR "primus launcher exited with code $exit_code"
     fi
 fi
 

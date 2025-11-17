@@ -9,9 +9,10 @@ import subprocess
 import sys
 import time
 
+from absl.testing import absltest
+
 from primus.core.utils import logger
 from tests.utils import PrimusUT
-from absl.testing import absltest
 
 
 def run_script(
@@ -94,13 +95,9 @@ class TestMaxTextTrainer(PrimusUT):
             self.__class__.__name__,
             "llama3_8B-FP8",
             exp_path="examples/maxtext/configs/MI300X/llama3.1_8B-pretrain.yaml",
-            extra_args=[
-                "--steps",
-                "3",
-                "--quantization",
-                "fp8"
-            ],
+            extra_args=["--steps", "3", "--quantization", "nanoo_fp8"],
         )
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     absltest.main()
