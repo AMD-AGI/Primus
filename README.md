@@ -128,7 +128,6 @@ This separation of concerns allows each component to evolve independently while 
 
 ## 📝 TODOs
 
-- [ ] Support for Primus-RL (training/inference modules for RLHF, OnlineDPO, GRPO, etc.)
 - [ ] Add support for more model architectures and backends
 - [ ] Expand documentation with more examples and tutorials
 
