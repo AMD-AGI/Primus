@@ -160,7 +160,7 @@ gradient_accumulation_fusion: true
 
 
 ### TODO
-AINIC, cp,
+AINIC, cp, hw_queue
 
 
 ## 8. Code and Reproduction
