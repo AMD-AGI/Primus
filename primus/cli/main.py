@@ -6,12 +6,9 @@
 
 import argparse
 import importlib
-import logging
 import pkgutil
 import sys
 from typing import Callable, Iterable
-
-LOGGER = logging.getLogger(__name__)
 
 SUBCOMMAND_PACKAGE = "primus.cli.subcommands"
 
@@ -47,12 +44,12 @@ def _load_subcommands(subparsers: argparse._SubParsersAction) -> None:
             module, "register_subcommand", None
         )
         if register is None:
-            LOGGER.warning("Skipping CLI module '%s' (no register_subcommand hook)", module_path)
-            continue
+            raise AttributeError(f"Module '{module_path}' must expose register_subcommand()")
         parser = register(subparsers)
         if parser is None:
-            LOGGER.warning("Skipping CLI module '%s' (register_subcommand returned None)", module_path)
-            continue
+            raise RuntimeError(
+                f"register_subcommand() in '{module_path}' must return the parser it configured"
+            )
         if not hasattr(parser, "get_default") or parser.get_default("func") is None:
             raise RuntimeError(
                 f"Subcommand registered by '{module_path}' must call parser.set_defaults(func=...)"
