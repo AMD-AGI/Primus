@@ -134,6 +134,19 @@ This separation of concerns allows each component to evolve independently while 
 
 ---
 
+## 🙏 Upstream Optimizations
+
+Primus builds on top of several ROCm-native operator libraries and compiler projects—we couldn’t reach current performance levels without them:
+
+- [ROCm AITer](https://github.com/ROCm/aiter) – AI Tensor Engine kernels (elementwise, attention, KV-cache, fused MoE, etc.)
+- [Composable Kernel](https://github.com/ROCm/composable_kernel) – performance-portable tensor operator generator for GEMM and convolutions
+- [hipBLASLt](https://github.com/ROCm/hipBLASLt) – low-level BLAS Lt API with autotuning support for ROCm GPUs
+- [ROCm Triton](https://github.com/ROCm/triton) – Python-first kernel compiler used for custom attention and MoE paths
+
+If you rely on Primus, please consider starring or contributing to these projects as well—they are foundational to our stack.
+
+---
+
 ## 🤝 Contributing
 
 We welcome contributions! Please see our [Contributing Guide](./CONTRIBUTING.md) for details.
