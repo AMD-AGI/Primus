@@ -249,6 +249,9 @@ class MegatronPretrainTrainer(MegatronTrainer):
                     )
 
                     WeightGradStore.enable_split_bw()
+                    assert (
+                        WeightGradStore.split_bw()
+                    ), "WeightGradStore.split_bw is not supported, please make sure overlap_grad_reduce is disabled and gradient_accumulation_fusion is enabled"
                     from primus.backends.megatron.core.models.common.model_chunk_schedule_plan import (
                         TransformerModelChunkSchedulePlan,
                     )

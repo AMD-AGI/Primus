@@ -124,8 +124,10 @@ class TransformerModelChunkSchedulePlan(TransformerModelChunkSchedulePlanBase):
 
         # Delay the dw in backward pass for overlapping with the p2p comm
         if b_num_layers > 0:
-            WeightGradStore.flush()
-            WeightGradStore.pop()
+            if WeightGradStore.split_bw():
+                WeightGradStore.flush()
+                if WeightGradStore.queue_size() > 0:
+                    WeightGradStore.pop()
 
         # post process forward
         if f_schedule_plan is not None and f_schedule_plan.post_process is not None:
