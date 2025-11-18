@@ -40,8 +40,10 @@ export NVTE_CK_USES_BWD_V3=1
 # export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=0
 
 ######################### Training Config #########################
-MBS=12
-GBS=768
+# MBS=12
+# GBS=768
+MBS=14
+GBS=896
 SEQ_LENGTH=4096
 TP=1
 ETP=1
@@ -50,6 +52,7 @@ VPP=1
 EP=8
 CP=1
 CP_COMM_TYPE="a2a" # p2p, a2a, allgather or a2a+p2p
+# TODO: set to true to enable MLA
 ENABLE_MLA=False
 ENABLE_MTP=False
 LOAD_BALANCE=True
@@ -78,10 +81,10 @@ TRAIN_ITERS=10
 # 11 - Manual GC helper
 # MoE_Features=(0 1 2 3 4 5 6 7 8 9 10 11)
 # MoE_Features=(0 11)
-MoE_Features=(3 11)
+# MoE_Features=(3 11)
 # MoE_Features=(3 4 11)
 # MoE_Features=(3 4 5 11)
-# MoE_Features=(3 4 5 10 11)
+MoE_Features=(3 4 5 10 11)
 
 FEATURE_ARGS=()
 PRIMUS_TURBO_ENABLED="False"
@@ -288,8 +291,8 @@ export SKIP_TRAIN=0
 
 	# --pp_warmup True \
     # --multi_latent_attention True \
-# bash ./examples/run_pretrain.sh \
-bash ./examples/run_slurm_pretrain.sh \
+# bash ./examples/run_slurm_pretrain.sh \
+bash ./examples/run_pretrain.sh \
     --micro_batch_size "$MBS" \
 	--global_batch_size "$GBS" \
 	--seq_length "$SEQ_LENGTH" \
