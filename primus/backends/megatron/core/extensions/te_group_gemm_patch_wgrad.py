@@ -324,15 +324,19 @@ class _GroupedLinearWithWGradSplit(torch.autograd.Function):
                         handle_custom_ddp_from_mcore(w, wgrad) for w, wgrad in zip(weights, wgrad_list)
                     ]
 
-                WeightGradStore.put(
-                    wgrad_list,
-                    functools.partial(pre_process, grad_output, inputmats),
-                    functools.partial(
-                        process_wgrad,
+                if WeightGradStore.split_bw():
+                    WeightGradStore.put(
                         wgrad_list,
-                        kargs_dict,
-                    ),
-                )
+                        functools.partial(pre_process, grad_output, inputmats),
+                        functools.partial(
+                            process_wgrad,
+                            wgrad_list,
+                            kargs_dict,
+                        ),
+                    )
+                else:
+                    grad_output, inputmats, _ = pre_process(grad_output, inputmats)
+                    process_wgrad(wgrad_list, kargs_dict, grad_output, inputmats)
 
                 wgrad_list_return = [None] * ctx.num_gemms
             else:

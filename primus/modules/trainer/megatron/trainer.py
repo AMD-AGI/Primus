@@ -9,6 +9,7 @@ import dataclasses
 import functools
 import gc
 import importlib.util
+import inspect
 import os
 import statistics
 import sys
@@ -123,6 +124,7 @@ from megatron.training.training import (
 from megatron.training.utils import (
     append_to_progress_log,
     calc_params_l2_norm,
+    is_first_or_last_pipeline_stage,
     logical_and_across_model_parallel_group,
     reduce_max_stat_across_model_parallel_group,
     report_memory,
@@ -170,6 +172,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_mla_attention()
         self.patch_fp8_context()
         self.patch_zbpp()
+        self.patch_custom_recompute_layer_ids()
 
         self.app_metrics = {}
 
@@ -178,6 +181,45 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
+
+    def patch_custom_recompute_layer_ids(self):
+        if self.module_config.recompute_layer_ids is None:
+            return
+        warning_rank_0(f"MegatronTrainer: monkey patch TransformerConfig post_init...")
+        import megatron.core.transformer.transformer_config as config_mod
+
+        config_mod.TransformerConfig.recompute_layer_ids = self.module_config.recompute_layer_ids
+
+        orig_post_init = config_mod.TransformerConfig.__post_init__
+
+        def new_post_init(self):
+            tmp = self.recompute_granularity
+            self.recompute_granularity = None
+            orig_post_init(self)
+            self.recompute_granularity = tmp
+
+        config_mod.TransformerConfig.__post_init__ = new_post_init
+
+        warning_rank_0(f"MegatronTrainer: monkey patch TransformerBlock checkpoint_forward...")
+        import megatron.core.models.bert.bert_model as orig_bert_model
+        import megatron.core.models.gpt.gpt_model as orig_gpt_model
+        import megatron.core.models.retro.decoder_attention as orig_decoder_attention
+        import megatron.core.models.T5.t5_model as orig_t5_model
+        import megatron.core.models.vision.clip_vit_model as orig_clip_vit_model
+        import megatron.core.models.vision.radio as orig_radio
+        import megatron.core.transformer.transformer_block as orig_transformer_block
+
+        from primus.backends.megatron.core.transformer.transformer_block import (
+            PrimusTransformerBlock,
+        )
+
+        orig_transformer_block.TransformerBlock = PrimusTransformerBlock
+        orig_bert_model.TransformerBlock = PrimusTransformerBlock
+        orig_gpt_model.TransformerBlock = PrimusTransformerBlock
+        orig_decoder_attention.TransformerBlock = PrimusTransformerBlock
+        orig_t5_model.TransformerBlock = PrimusTransformerBlock
+        orig_clip_vit_model.TransformerBlock = PrimusTransformerBlock
+        orig_radio.TransformerBlock = PrimusTransformerBlock
 
     def patch_pt_replace_te(self, args):
         from megatron.core.extensions import transformer_engine_spec_provider
@@ -312,7 +354,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
     def patch_get_extra_te_kwargs(self):
         warning_rank_0(f"MegatronTrainer: monkey patch get_extra_te_kwargs...")
-        import inspect
 
         import transformer_engine as te
         from megatron.core.extensions import transformer_engine as te_ext
@@ -680,6 +721,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             if validate_manual_split(args):
                 set_manual_pipeline_split_patch(args)
 
+        if args.recompute_layer_ids is not None:
+            from .utils import validate_specified_recompute_layers
+
+            validate_specified_recompute_layers(args)
+
         if args.log_progress:
             append_to_progress_log("Starting job")
 
@@ -958,8 +1004,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.app_metrics["app_build_dataiters_start_time"] = one_logger_utils.get_timestamp_in_ms()
         timers("train/valid/test-data-iterators-setup", log_level=0).start(barrier=True)
 
-        def train_valid_test_datasets_provider_func(train_val_test_num_samples):
-            return self.train_valid_test_datasets_provider(train_val_test_num_samples)
+        def train_valid_test_datasets_provider_func(train_val_test_num_samples, vp_stage=None):
+            return self.train_valid_test_datasets_provider(train_val_test_num_samples, vp_stage=vp_stage)
 
         train_valid_test_datasets_provider_func.is_distributed = True
 
@@ -967,8 +1013,19 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             self.train_data_iterator = []
             self.valid_data_iterator = []
             self.test_data_iterator = []
-            for i in range(len(self.model)):
-                iterators = build_train_valid_test_data_iterators(train_valid_test_datasets_provider_func)
+            for vp_stage in range(len(self.model)):
+                dataset_provider_parameters = inspect.signature(
+                    train_valid_test_datasets_provider_func
+                ).parameters
+                assert (
+                    "vp_stage" in dataset_provider_parameters
+                ), "vp_stage must be a kwarg in train_valid_test_dataset_provider when using virtual pipeline parallelism"
+                vp_stage_train_valid_test_dataset_provider = functools.partial(
+                    train_valid_test_datasets_provider_func, vp_stage=vp_stage
+                )
+                if getattr(train_valid_test_datasets_provider_func, "is_distributed", False):
+                    vp_stage_train_valid_test_dataset_provider.is_distributed = True
+                iterators = build_train_valid_test_data_iterators(vp_stage_train_valid_test_dataset_provider)
                 self.train_data_iterator.append(iterators[0])
                 self.valid_data_iterator.append(iterators[1])
                 self.test_data_iterator.append(iterators[2])
@@ -1027,7 +1084,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             create_attention_mask=args.create_attention_mask_in_dataloader,
         )
 
-    def train_valid_test_datasets_provider(self, train_val_test_num_samples):
+    def train_valid_test_datasets_provider(self, train_val_test_num_samples, vp_stage=None):
         """Build the train test and validation datasets.
 
         Args:
@@ -1042,15 +1099,18 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         else:
             dataset_type = GPTDataset
 
-        def is_dataset_built_on_rank():
+        def is_dataset_built_on_rank(vp_stage=None):
             return (
-                parallel_state.is_pipeline_first_stage(ignore_virtual=True)
-                or parallel_state.is_pipeline_last_stage(ignore_virtual=True)
-            ) and parallel_state.get_tensor_model_parallel_rank() == 0
+                is_first_or_last_pipeline_stage(vp_stage)
+                and parallel_state.get_tensor_model_parallel_rank() == 0
+            )
 
         log_rank_0("> building train, validation, and test datasets for GPT ...")
         train_ds, valid_ds, test_ds = BlendedMegatronDatasetBuilder(
-            dataset_type, train_val_test_num_samples, is_dataset_built_on_rank, config
+            dataset_type,
+            train_val_test_num_samples,
+            functools.partial(is_dataset_built_on_rank, vp_stage=vp_stage),
+            config,
         ).build()
 
         log_rank_0("> finished creating GPT datasets ...")

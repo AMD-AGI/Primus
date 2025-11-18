@@ -78,6 +78,37 @@ def set_wandb_writer_patch(args):  # monkey patch
         megatron.training.global_vars._GLOBAL_WANDB_WRITER = wandb
 
 
+def validate_specified_recompute_layers(args):
+    if args.recompute_layer_ids is None:
+        return
+
+    assert isinstance(
+        args.recompute_layer_ids, list
+    ), f"recompute_layer_ids={args.recompute_layer_ids} should be a list"
+    recompute_layer_ids = list(set(args.recompute_layer_ids))
+    assert len(recompute_layer_ids) > 0, "recompute layer ids is null"
+    for layer_id in recompute_layer_ids:
+        assert (
+            layer_id >= 0 and layer_id < args.num_layers
+        ), f"recompute layer id must be between 0 and {args.num_layers - 1}"
+
+    if args.recompute_granularity != "full":
+        raise ValueError(
+            f'When using recompute_layer_ids, recompute_granuarlity: {args.recompute_granularity} must be "full"'
+        )
+
+    if args.recompute_method is not None:
+        raise ValueError(
+            f"When using recompute_layer_ids, recompute_method: {args.recompute_method} must be None."
+        )
+
+    if args.distribute_saved_activations and args.sequence_parallel:
+        raise ValueError(
+            f"distribute_saved_activations: {args.distribute_saved_activations} must be "
+            f"false when sequence parallel is enabled: {args.sequence_parallel}"
+        )
+
+
 def validate_manual_split(args):
     """
     The use of decoder_pipeline_manual_split_list is to relax the divisibility
