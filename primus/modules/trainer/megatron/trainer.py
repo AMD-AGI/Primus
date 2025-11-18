@@ -715,6 +715,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # Enable manually split layers in (interleaved) 1f1b pipeline
         # parallelism by monkey patching
         if args.decoder_pipeline_manual_split_list is not None:
+            log_rank_0(
+                f"-decoder_pipeline_manual_split_list has been deprecated, please use pipeline_model_parallel_layout instead"
+            )
             from .utils import set_manual_pipeline_split_patch, validate_manual_split
 
             log_rank_0(f"-monkey patch to enable manual pipeline split...")
