@@ -70,6 +70,10 @@ def load_backend_trainer(framework: str):
         )
 
         return TorchTitanPretrainTrainer
+    elif framework == "maxtext":
+        from primus.modules.trainer.maxtext.pre_trainer import MaxTextPretrainTrainer
+
+        return MaxTextPretrainTrainer
     else:
         raise ValueError(f"Unsupported framework: {framework}")
 
@@ -104,6 +108,7 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
         "megatron": "Megatron-LM",
         "light-megatron": "Megatron-LM",
         "torchtitan": "torchtitan",
+        "maxtext": "maxtext",
     }
     mapped_name = fallback_name_map.get(framework, framework)
     default_path = Path(__file__).resolve().parent.parent / "third_party" / mapped_name
@@ -151,11 +156,16 @@ def launch_pretrain_trainer(primus_cfg: PrimusConfig, extra_args=None):
     # Lazy import backend trainer
     TrainerClass = load_backend_trainer(framework)
 
-    # envs set by torchrun
-    rank = int(os.getenv("RANK", "0"))
-    world_size = int(os.getenv("WORLD_SIZE", "1"))
     master_addr = os.getenv("MASTER_ADDR", "127.0.0.1")
     master_port = int(os.getenv("MASTER_PORT", "29500"))
+
+    if framework == "maxtext":
+        rank = int(os.getenv("NODE_RANK", "0"))
+        world_size = int(os.getenv("NNODES", "1"))
+    else:
+        # envs set by torchrun
+        rank = int(os.getenv("RANK", "0"))
+        world_size = int(os.getenv("WORLD_SIZE", "1"))
 
     # Initialize trainer
     trainer = TrainerClass(
