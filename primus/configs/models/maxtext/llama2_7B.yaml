@@ -1,0 +1,2 @@
+model_name: "llama2-7b"
+tokenizer_path: "meta-llama/Llama-2-7b"

@@ -22,6 +22,10 @@ def get_all_unit_tests():
     cur_dir = "./tests"
     unit_tests = {}
 
+    EXCLUDE_UNIT_TESTS = [
+        "trainer/test_maxtext_trainer.py",
+    ]
+
     for root, dirs, files in os.walk(cur_dir):
         for file_name in files:
             if not file_name.endswith(".py") or not file_name.startswith("test_"):
