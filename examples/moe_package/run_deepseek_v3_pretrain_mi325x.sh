@@ -45,7 +45,7 @@ TP=1
 ETP=1
 PP=2
 VPP=4
-EP=8
+EP=16
 CP=1
 CP_COMM_TYPE="a2a" # p2p, a2a, allgather or a2a+p2p
 ENABLE_MTP=False
@@ -168,7 +168,14 @@ for feature in "${MoE_Features[@]}"; do
 		;;
 	7)
 		# TODO: need tuning for the pipeline layout pattern
-		# FEATURE_ARGS+=" --pipeline_model_parallel_layout 'Et*3|(tt|)*29,m|L'"
+		# FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et*3|(tt|)*29,m|L")
+		# 32 stages for PP8VPP4
+		# FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et|(tt|)*30L")
+		# pp2 vpp4
+		# 1 + 6 + 1 stages
+		# 1 + 2*6 = 13 layers
+		FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et|(tt|)*6L")
+		VPP=1
 		;;
 	8)
 		# Enable NUMA binding for better memory locality (increase stability for large models)
@@ -255,7 +262,7 @@ export SKIP_TRAIN=0
 	# --pp_warmup True \
 # bash ./examples/run_slurm_pretrain.sh \
 bash ./examples/run_pretrain.sh \
---num_layers 16 \
+--num_layers 13 \
 --moe_layer_freq 1 \
     --micro_batch_size "$MBS" \
 	--global_batch_size "$GBS" \
