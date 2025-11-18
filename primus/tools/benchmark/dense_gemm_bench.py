@@ -213,7 +213,31 @@ if TORCH_AVAILABLE:
                 [k for k in all_keys if k not in {"host", "rank", "world"}]
             )
 
-            rows = [[r.get(col, "") for col in header] for r in gathered]
+        true_key = model_lower_map[model_key]
+        cfg = MODEL_CONFIGS[true_key]
+        args.model = true_key  # Normalize model name
+        for k, v in cfg.items():
+            setattr(args, k, v)
+    else:
+        print("[INFO] No model specified. Using CLI-provided parameters.")
+
+    dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp34": torch.float32}
+    dtype = dtype_map[args.dtype]
+
+    shape_defs = [
+        (
+            "attn_qkv",
+            [
+                args.seqlen,
+                (args.num_attention_heads + 2 * args.num_key_value_heads) * args.head_dim,
+                args.hidden_size,
+            ],
+        ),
+        ("attn_out", [args.seqlen, args.hidden_size, args.hidden_size]),
+        ("mlp_up", [args.seqlen, 2 * args.intermediate_size, args.hidden_size]),
+        ("mlp_down", [args.seqlen, args.hidden_size, args.intermediate_size]),
+        ("vocab", [args.seqlen, args.vocab_size, args.hidden_size]),
+    ]
 
             preamble = build_gemm_preamble(args, shape_defs)
 
