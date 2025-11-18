@@ -160,7 +160,7 @@ gradient_accumulation_fusion: true
 
 
 ### TODO
-AINIC, cp, hw_queue
+AINIC, cp, hw_queue, manual gc (stability), fused crossentropy
 
 
 ## 8. Code and Reproduction
