@@ -149,7 +149,7 @@ def run_gemm_benchmark(args):
 
         true_key = model_lower_map[model_key]
         cfg = MODEL_CONFIGS[true_key]
-        args.model = true_key  # 规范化模型名
+        args.model = true_key  # Normalize model name
         for k, v in cfg.items():
             setattr(args, k, v)
     else:
