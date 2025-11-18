@@ -278,6 +278,8 @@ bash ./examples/run_pretrain.sh \
 	--manual_gc_interval 1 \
 	--optimizer "$OPTIMIZER" \
 	--moe_use_legacy_grouped_gemm "$LEGACY_GG" \
+    --cross_entropy_fusion_impl "te" \
+    --cross_entropy_loss_fusion True \
     "${MTP_ARGS[@]}" \
     "${VPP_ARGS[@]}" \
 	"${FEATURE_ARGS[@]}" \
