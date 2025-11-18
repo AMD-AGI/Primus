@@ -48,6 +48,7 @@ VPP=4
 EP=8
 CP=1
 CP_COMM_TYPE="a2a" # p2p, a2a, allgather or a2a+p2p
+ENABLE_MLA=False
 ENABLE_MTP=False
 LOAD_BALANCE=True
 OPTIMIZER=adam
@@ -64,14 +65,17 @@ TRAIN_ITERS=5
 # 0 - Baseline (no extra optimization toggles)
 # 1 - Turbo attention acceleration
 # 2 - Turbo grouped GEMM / MLP fusion
-# 3 - DeepEP acceleration
-# 4 - Sync-free MoE (stage 2)
-# 5 - 1F1B MoE overlap
-# 6 - Zero-bubble pipeline optimizations
-# 7 - Arbitrary pipeline partition (8-way custom layout)
-# 8 - CPU NUMA binding helper
-# MoE_Features=(0 1 2 3 4 5 6 7 8)
-MoE_Features=(0 7)
+# 3 - Loss fusion helper
+# 4 - DeepEP acceleration
+# 5 - Sync-free MoE (stage 2)
+# 6 - 1F1B MoE overlap
+# 7 - Zero-bubble pipeline optimizations
+# 8 - Arbitrary pipeline partition (8-way custom layout)
+# 9 - Recompute selected layers helper
+# 10 - CPU NUMA binding helper
+# 11 - Manual GC helper
+# MoE_Features=(0 1 2 3 4 5 6 7 8 9 10 11)
+MoE_Features=(0 3 8 11)
 
 FEATURE_ARGS=()
 PRIMUS_TURBO_ENABLED="False"
@@ -94,6 +98,10 @@ for feature in "${MoE_Features[@]}"; do
 		FEATURE_ARGS+=("--use_turbo_grouped_mlp" "True")
 		;;
 	3)
+		FEATURE_ARGS+=("--cross_entropy_fusion_impl" "te")
+		FEATURE_ARGS+=("--cross_entropy_loss_fusion" "True")
+		;;
+	4)
 		ensure_primus_turbo
 		FEATURE_ARGS+=("--use_turbo_deepep" "True")
 		FEATURE_ARGS+=("--turbo_deepep_num_cu" "32")
@@ -101,7 +109,7 @@ for feature in "${MoE_Features[@]}"; do
 		FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
 		FEATURE_ARGS+=("--moe_router_dtype" "fp32")
 		;;
-	4)
+	5)
 		ensure_primus_turbo
         # mi355
 		# sync_free moe stage 1 will open router and permutation fusion
@@ -114,13 +122,13 @@ for feature in "${MoE_Features[@]}"; do
 		FEATURE_ARGS+=("--moe_use_legacy_grouped_gemm" "True")
 		FEATURE_ARGS+=("--moe_router_dtype" "fp32")
 		;;
-	5)
+	6)
 		FEATURE_ARGS+=("--overlap_moe_expert_parallel_comm" "True")
 		FEATURE_ARGS+=("--patch_moe_overlap" "False") # TODO: error
 		FEATURE_ARGS+=("--delay_wgrad_compute" "False")
 		FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
 		;;
-	6)
+	7)
 		ensure_primus_turbo
         # required flags for zero bubble
 		FEATURE_ARGS+=("--overlap_grad_reduce" "False")
@@ -166,7 +174,7 @@ for feature in "${MoE_Features[@]}"; do
 			;;
 		esac
 		;;
-	7)
+	8)
 		# TODO: need tuning for the pipeline layout pattern
 		# FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et*3|(tt|)*29,m|L")
 		# 32 stages for PP8VPP4
@@ -178,10 +186,17 @@ for feature in "${MoE_Features[@]}"; do
 		# FEATURE_ARGS+=("--pipeline_model_parallel_layout" 'Et|tt|tt|tt|tt|tt|tt|L')
 		VPP=1
 		;;
-	8)
+	9)
+		FEATURE_ARGS+=("--recompute_layer_ids" "0,1,2,3")
+		;;
+	10)
 		# Enable NUMA binding for better memory locality (increase stability for large models)
 		export ENABLE_NUMA_BINDING=1
 		export HSA_KERNARG_POOL_SIZE=12582912
+		;;
+	11)
+		FEATURE_ARGS+=("--manual_gc" "True")
+		FEATURE_ARGS+=("--manual_gc_interval" "1")
 		;;
 	*) ;;
 	esac
@@ -189,6 +204,13 @@ done
 
 FEATURE_LIST="${MoE_Features[*]}"
 FEATURE_TAG=$(printf "%s" "${FEATURE_LIST}" | tr ' ' '-')
+
+MLA_ARGS=()
+if [ "$ENABLE_MLA" = "True" ]; then
+	MLA_ARGS+=("--multi_latent_attention" "True")
+else
+	MLA_ARGS+=("--multi_latent_attention" "False")
+fi
 
 MTP_ARGS=()
 if [ "$ENABLE_MTP" = "True" ]; then
@@ -231,7 +253,7 @@ export PRIMUS_TEAM
 PRIMUS_USER=user-tas
 export PRIMUS_USER
 # export PRIMUS_EXP_NAME="debug"
-export PRIMUS_EXP_NAME="DeepSeekV3_MI325X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}(${PROFILE_STEP_START}-${PROFILE_STEP_END})_NoCPUTrace${DISABLE_CPU_TRACE}_Features${FEATURE_TAG}"
+export PRIMUS_EXP_NAME="DeepSeekV3_MI355X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_MLA${ENABLE_MLA}_MTP${ENABLE_MTP}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}-${PROFILE_STEP_START}-${PROFILE_STEP_END}_NoCPUTrace${DISABLE_CPU_TRACE}_Features${FEATURE_TAG}"
 
 LOG_DIR=./output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
 export DUMP_PP_DIR=$LOG_DIR/pp_dump
@@ -250,6 +272,7 @@ echo "LOG_DIR=${LOG_DIR}" | tee -a "$LOG_FILE"
 echo "LOG_FILE=${LOG_FILE}" | tee -a "$LOG_FILE"
 echo "FEATURE_ARGS=${FEATURE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "MoE_Features=${FEATURE_LIST}" | tee -a "$LOG_FILE"
+echo "MLA_ARGS=${MLA_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "MTP_ARGS=${MTP_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "FP8_ARGS=${FP8_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "RECOMPUTE_ARGS=${RECOMPUTE_ARGS[*]}" | tee -a "$LOG_FILE"
@@ -275,12 +298,9 @@ bash ./examples/run_slurm_pretrain.sh \
 	--cp_comm_type "$CP_COMM_TYPE" \
 	--mock_data True \
 	--moe_router_force_load_balancing "$LOAD_BALANCE" \
-	--manual_gc True \
-	--manual_gc_interval 1 \
 	--optimizer "$OPTIMIZER" \
 	--moe_use_legacy_grouped_gemm "$LEGACY_GG" \
-    --cross_entropy_fusion_impl "te" \
-    --cross_entropy_loss_fusion True \
+    "${MLA_ARGS[@]}" \
     "${MTP_ARGS[@]}" \
     "${VPP_ARGS[@]}" \
 	"${FEATURE_ARGS[@]}" \
