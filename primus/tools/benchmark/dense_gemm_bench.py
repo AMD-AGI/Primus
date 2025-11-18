@@ -13,14 +13,13 @@ from tqdm import tqdm
 
 try:
     import torch
-
+except ModuleNotFoundError:
+    TORCH_AVAILABLE = False
+    print("[WARNING] dense gemm benchmark depends on torch, which does not exist in the current environment!")
+else:
+    TORCH_AVAILABLE = True
     from primus.tools.benchmark.gemm_bench import profile_gemm
     from primus.tools.utils import gather_records, is_rank_0
-
-    TORCH_AVAILABLE = True
-except ImportError:
-    print("[WARNING] dense gemm benchmark depends on torch, which does not exist in current environment!")
-    TORCH_AVAILABLE = False
 
 from primus.tools.report import write_table_simple
 
@@ -132,96 +131,53 @@ def build_gemm_preamble(args, shape_defs: List[Tuple[str, List[int]]]) -> str:
     return "\n".join(lines)
 
 
-if TORCH_AVAILABLE:
+def _require_torch():
+    if (
+        not TORCH_AVAILABLE
+        or torch is None
+        or profile_gemm is None
+        or gather_records is None
+        or is_rank_0 is None
+    ):
+        raise RuntimeError("Dense GEMM benchmark requires torch. Please install torch and retry.")
 
-    def profile_fwd(m, n, k, dtype, duration):
-        return profile_gemm(m, n, k, dtype, False, True, duration)
 
-    def profile_wgrad(m, n, k, dtype, duration):
-        return profile_gemm(n, k, m, dtype, True, False, duration)
+def profile_fwd(m, n, k, dtype, duration):
+    _require_torch()
+    return profile_gemm(m, n, k, dtype, False, True, duration)
 
-    def profile_dgrad(m, n, k, dtype, duration):
-        return profile_gemm(m, k, n, dtype, False, False, duration)
 
-    def run_gemm_benchmark(args):
-        if args.model:
-            model_lower_map = {k.lower(): k for k in MODEL_CONFIGS.keys()}
-            model_key = args.model.lower()
+def profile_wgrad(m, n, k, dtype, duration):
+    _require_torch()
+    return profile_gemm(n, k, m, dtype, True, False, duration)
 
-            if model_key not in model_lower_map:
-                raise ValueError(
-                    f"[ERROR] Unknown model '{args.model}'. Supported models: {', '.join(MODEL_CONFIGS.keys())}"
-                )
 
-            true_key = model_lower_map[model_key]
-            cfg = MODEL_CONFIGS[true_key]
-            args.model = true_key  # 规范化模型名
-            for k, v in cfg.items():
-                setattr(args, k, v)
-        else:
-            print("[INFO] No model specified. Using CLI-provided parameters.")
+def profile_dgrad(m, n, k, dtype, duration):
+    _require_torch()
+    return profile_gemm(m, k, n, dtype, False, False, duration)
 
-        dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
-        dtype = dtype_map[args.dtype]
 
-        shape_defs = [
-            (
-                "attn_qkv",
-                [
-                    args.seqlen,
-                    (args.num_attention_heads + 2 * args.num_key_value_heads) * args.head_dim,
-                    args.hidden_size,
-                ],
-            ),
-            ("attn_out", [args.seqlen, args.hidden_size, args.hidden_size]),
-            ("mlp_up", [args.seqlen, 2 * args.intermediate_size, args.hidden_size]),
-            ("mlp_down", [args.seqlen, args.hidden_size, args.intermediate_size]),
-            ("vocab", [args.seqlen, args.vocab_size, args.hidden_size]),
-        ]
+def run_gemm_benchmark(args):
+    _require_torch()
 
-        func_defs = [
-            ("fwd", profile_fwd),
-            ("wgrad", profile_wgrad),
-            ("dgrad", profile_dgrad),
-        ]
+    if args.model:
+        model_lower_map = {k.lower(): k for k in MODEL_CONFIGS.keys()}
+        model_key = args.model.lower()
 
-        record = {}
-        for (phase, shape), (tag, func) in tqdm(
-            itertools.product(shape_defs, func_defs),
-            total=len(shape_defs) * len(func_defs),
-            desc="Dense GEMM",
-        ):
-            m = args.mbs * shape[0]
-            n = shape[1]
-            k = shape[2]
-
-            res = func(m, n, k, dtype, args.duration)
-            summary = (
-                f"{res['avg_time_ms']:.6f}s / "
-                f"{res['tflops']:.2f}TF/s / "
-                f"{res['bandwidth_gbps']:.2f}GB/s / "
-                f"AI={res['arith_intensity']:.2f}"
-            )
-            record[f"{phase}_{tag}"] = summary
-
-        gathered = gather_records(record)
-        if is_rank_0():
-            all_keys = set()
-            for r in gathered:
-                all_keys.update(r.keys())
-            header = ["host", "world", "rank"] + sorted(
-                [k for k in all_keys if k not in {"host", "rank", "world"}]
+        if model_key not in model_lower_map:
+            raise ValueError(
+                f"[ERROR] Unknown model '{args.model}'. Supported models: {', '.join(MODEL_CONFIGS.keys())}"
             )
 
         true_key = model_lower_map[model_key]
         cfg = MODEL_CONFIGS[true_key]
-        args.model = true_key  # Normalize model name
+        args.model = true_key  # 规范化模型名
         for k, v in cfg.items():
             setattr(args, k, v)
     else:
         print("[INFO] No model specified. Using CLI-provided parameters.")
 
-    dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp34": torch.float32}
+    dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
     dtype = dtype_map[args.dtype]
 
     shape_defs = [
@@ -239,19 +195,54 @@ if TORCH_AVAILABLE:
         ("vocab", [args.seqlen, args.vocab_size, args.hidden_size]),
     ]
 
-            preamble = build_gemm_preamble(args, shape_defs)
+    func_defs = [
+        ("fwd", profile_fwd),
+        ("wgrad", profile_wgrad),
+        ("dgrad", profile_dgrad),
+    ]
 
-            append = getattr(args, "append", False)
+    record: Dict[str, str] = {}
+    for (phase, shape), (tag, func) in tqdm(
+        itertools.product(shape_defs, func_defs),
+        total=len(shape_defs) * len(func_defs),
+        desc="Dense GEMM",
+    ):
+        m = args.mbs * shape[0]
+        n = shape[1]
+        k = shape[2]
 
-            write_table_simple(
-                header=header,
-                rows=rows,
-                output_file=args.output_file or f"benchmark_gemm_dense_{args.model}.md",
-                append=append,
-                preamble=preamble if not append else None,
-            )
+        res = func(m, n, k, dtype, args.duration)
+        summary = (
+            f"{res['avg_time_ms']:.6f}s / "
+            f"{res['tflops']:.2f}TF/s / "
+            f"{res['bandwidth_gbps']:.2f}GB/s / "
+            f"AI={res['arith_intensity']:.2f}"
+        )
+        record[f"{phase}_{tag}"] = summary
 
-            print(f"[✔] DENSE GEMM benchmark finished. Results saved to {args.output_file}")
+    gathered = gather_records(record)
+    if not is_rank_0():
+        return
+
+    assert gathered is not None
+    all_keys = set()
+    for r in gathered:
+        all_keys.update(r.keys())
+    header = ["host", "world", "rank"] + sorted([k for k in all_keys if k not in {"host", "rank", "world"}])
+
+    rows = [[r.get(col, "") for col in header] for r in gathered]
+    preamble = build_gemm_preamble(args, shape_defs)
+    append = getattr(args, "append", False)
+
+    write_table_simple(
+        header=header,
+        rows=rows,
+        output_file=args.output_file or f"benchmark_gemm_dense_{args.model}.md",
+        append=append,
+        preamble=preamble if not append else None,
+    )
+
+    print(f"[✔] DENSE GEMM benchmark finished. Results saved to {args.output_file}")
 
 
 def build_gemm_dense_parser() -> argparse.ArgumentParser:
@@ -266,4 +257,6 @@ def build_gemm_dense_parser() -> argparse.ArgumentParser:
 if __name__ == "__main__":
     parser = build_gemm_dense_parser()
     args = parser.parse_args()
+    if not TORCH_AVAILABLE:
+        parser.error("Dense GEMM benchmark requires torch. Please install torch and retry.")
     run_gemm_benchmark(args)
