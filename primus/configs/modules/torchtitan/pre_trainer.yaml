@@ -1,5 +1,6 @@
 includes:
   - ../module_base.yaml
+  - quantize.yaml
 
 lr_scheduler:
   decay_ratio: null
@@ -102,20 +103,20 @@ compile:
     - model
     - loss
 
-float8:
-  enable_fsdp_float8_all_gather: false
-  precompute_float8_dynamic_scale_for_fsdp: false
-  recipe_name: null
-  filter_fqns: []
-  emulate: false
-  moe_fqns_prototype: []
+# float8:
+#   enable_fsdp_float8_all_gather: false
+#   precompute_float8_dynamic_scale_for_fsdp: false
+#   recipe_name: null
+#   filter_fqns: []
+#   emulate: false
+#   moe_fqns_prototype: []
 
-mx:
-  mxfp8_dim1_cast_kernel_choice: triton
-  recipe_name: mxfp8_cublas
-  filter_fqns:
-    - output
-  moe_fqns_prototype: []
+# mx:
+#   mxfp8_dim1_cast_kernel_choice: triton
+#   recipe_name: mxfp8_cublas
+#   filter_fqns:
+#     - output
+#   moe_fqns_prototype: []
 
 comm:
   init_timeout_seconds: 300
