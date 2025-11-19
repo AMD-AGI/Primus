@@ -218,33 +218,48 @@ class PrimusParser(object):
         assert framework in map, f"Invalid module framework: {framework}."
         return map[framework]
 
-    def parse_trainer_module(self, module_name: str):
-        module = yaml_utils.get_value_by_key(self.exp.modules, module_name)
-        module.name = f"exp.modules.{module_name}"
+    def parse_trainer_module(self, module_name: str, module_def: SimpleNamespace):
+        """
+        Parse a trainer module that has config/model files to load and merge.
 
+        Args:
+            module_name: Name of the module (e.g., "pretrain_stage")
+            module_def: Raw module definition from YAML
+        """
         # Ensure framework exists
-        yaml_utils.check_key_in_namespace(module, "framework")
-        framework = module.framework
+        if not hasattr(module_def, "framework"):
+            raise ValueError(f"Module '{module_name}' is missing required 'framework' field")
 
-        # If both config and model are missing, skip
-        has_config = yaml_utils.has_key_in_namespace(module, "config")
-        has_model = yaml_utils.has_key_in_namespace(module, "model")
+        framework = module_def.framework
+
+        # If both config and model are missing, skip complex parsing
+        has_config = hasattr(module_def, "config")
+        has_model = hasattr(module_def, "model")
+
         if not has_config and not has_model:
+            # No config/model files to load, just use the raw definition
+            module_def.name = module_name
+            yaml_utils.set_value_by_key(self.exp.modules, module_name, module_def, allow_override=True)
             return
 
-        # Validate required keys
-        for key in ("config", "model"):
-            yaml_utils.check_key_in_namespace(module, key)
+        # Both config and model are required if one is present
+        if not (has_config and has_model):
+            raise ValueError(
+                f"Module '{module_name}' must have both 'config' and 'model' fields, "
+                f"or neither (for inline configuration)"
+            )
 
         # ---- Load module config ----
         model_format = self.get_model_format(framework)
-        module_config_file = os.path.join(self.primus_home, "configs/modules", model_format, module.config)
+        module_config_file = os.path.join(
+            self.primus_home, "configs/modules", model_format, module_def.config
+        )
         module_config = yaml_utils.parse_yaml_to_namespace(module_config_file)
         module_config.name = f"exp.modules.{module_name}.config"
         module_config.framework = framework
 
         # ---- Load model config ----
-        model_config_file = os.path.join(self.primus_home, "configs/models", model_format, module.model)
+        model_config_file = os.path.join(self.primus_home, "configs/models", model_format, module_def.model)
         model_config = yaml_utils.parse_yaml_to_namespace(model_config_file)
         model_config.name = f"exp.modules.{module_name}.model"
 
@@ -252,20 +267,57 @@ class PrimusParser(object):
         yaml_utils.merge_namespace(module_config, model_config, allow_override=False, excepts=["name"])
 
         # ---- Apply overrides if present ----
-        if yaml_utils.has_key_in_namespace(module, "overrides"):
-            yaml_utils.override_namespace(module_config, module.overrides)
+        if hasattr(module_def, "overrides"):
+            yaml_utils.override_namespace(module_config, module_def.overrides)
+
+        # ---- Fill in framework defaults ----
+        if model_format == "megatron":
+            from primus.modules.trainer.megatron.config_loader import (
+                apply_megatron_defaults,
+            )
+
+            apply_megatron_defaults(module_config)
 
         # ---- Flatten and save back ----
         module_config.name = module_name
         yaml_utils.set_value_by_key(self.exp.modules, module_name, module_config, allow_override=True)
 
+    def parse_tool_module(self, module_name: str, module_def: SimpleNamespace):
+        """
+        Parse a tool/benchmark module (no config/model files, just raw params).
+
+        Args:
+            module_name: Name of the module (e.g., "gemm_bench")
+            module_def: Raw module definition from YAML
+        """
+        # Tool modules are used as-is, no complex merging
+        module_def.name = module_name
+        yaml_utils.set_value_by_key(self.exp.modules, module_name, module_def, allow_override=True)
+
     def parse_modules(self):
         yaml_utils.check_key_in_namespace(self.exp, "modules")
-        for module_name in vars(self.exp.modules):
-            if "trainer" in module_name:
-                self.parse_trainer_module(module_name)
+
+        # Iterate over normalized modules (SimpleNamespace keyed by name)
+        for module_name, module_def in vars(self.exp.modules).items():
+            if not isinstance(module_def, SimpleNamespace):
+                raise TypeError(f"Module '{module_name}' must be a SimpleNamespace, got {type(module_def)}")
+
+            # Dispatch based on 'module' type field
+            module_type = getattr(module_def, "module", None)
+
+            if not module_type:
+                # Fallback: check if it has 'framework' (trainer) or not (tool)
+                if hasattr(module_def, "framework"):
+                    self.parse_trainer_module(module_name, module_def)
+                else:
+                    self.parse_tool_module(module_name, module_def)
+            elif module_type in ("pre_trainer", "sft_trainer"):
+                self.parse_trainer_module(module_name, module_def)
+            elif module_type.startswith("benchmark_"):
+                self.parse_tool_module(module_name, module_def)
             else:
-                raise ValueError(f"Unsupported module: {module_name}")
+                # Unknown module type, treat as tool
+                self.parse_tool_module(module_name, module_def)
 
     def export(self, export_path):
         """
