@@ -11,7 +11,7 @@ from datetime import datetime
 import torch
 
 from primus.tools.report import write_table_simple
-from primus.tools.utils import gather_records, get_current_device, is_rank_0
+from primus.tools.utils import gather_records, is_rank_0
 
 CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
 
@@ -19,9 +19,7 @@ CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
 def maybe_transpose(tensor, transpose):
     return tensor.t() if transpose else tensor
 
-
-    from primus.tools.report import write_table_simple
-    from primus.tools.utils import gather_records, get_current_device, is_rank_0
+    from primus.tools.utils import get_current_device
 
     CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
 
@@ -55,7 +53,7 @@ def maybe_transpose(tensor, transpose):
 
         elapsed = start.elapsed_time(end)  # ms
         if elapsed >= target_ms:
-            avg_time_ms = elapsed / total_calls
+            elapsed / total_calls
             break
 
     tflop = 2.0 * m * n * k / 1e12
