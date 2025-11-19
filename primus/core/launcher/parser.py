@@ -123,47 +123,15 @@ def _parse_kv_overrides(args: list[str]) -> dict:
 
 
 def _deep_merge_namespace(ns, override_dict):
+    """
+    Merge override_dict into namespace ns without validation.
+    Creates new attributes if they don't exist.
+    """
     for k, v in override_dict.items():
         if hasattr(ns, k) and isinstance(getattr(ns, k), SimpleNamespace) and isinstance(v, dict):
             _deep_merge_namespace(getattr(ns, k), v)
         else:
             setattr(ns, k, v)
-
-
-def _check_keys_exist(ns: SimpleNamespace, overrides: dict, prefix=""):
-    for k, v in overrides.items():
-        full_key = f"{prefix}.{k}" if prefix else k
-        assert hasattr(ns, k), f"Override key '{full_key}' does not exist in pre_trainer config."
-        attr_val = getattr(ns, k)
-        if isinstance(v, dict):
-            assert isinstance(
-                attr_val, SimpleNamespace
-            ), f"Override key '{full_key}' expects a namespace/dict but got {type(attr_val)}"
-            _check_keys_exist(attr_val, v, prefix=full_key)
-
-
-def _split_known_unknown(ns: SimpleNamespace, overrides: dict) -> Tuple[dict, dict]:
-    """
-    Split overrides into two dictionaries:
-      - known: keys that exist in the namespace
-      - unknown: keys not defined in the namespace
-    """
-    known, unknown = {}, {}
-    for k, v in overrides.items():
-        if hasattr(ns, k):
-            attr_val = getattr(ns, k)
-            if isinstance(v, dict) and isinstance(attr_val, SimpleNamespace):
-                sub_known, sub_unknown = _split_known_unknown(attr_val, v)
-                if sub_known:
-                    known[k] = sub_known
-                if sub_unknown:
-                    unknown[k] = sub_unknown
-            else:
-                known[k] = v
-        else:
-            unknown[k] = v
-            # print(f"[PrimusConfig] Unknown key '{k}' delegated to backend.")
-    return known, unknown
 
 
 def parse_args(extra_args_provider=None, ignore_unknown_args=False):
@@ -172,9 +140,9 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     config_parser = PrimusParser()
     primus_config = config_parser.parse(args)
 
+    # Merge CLI overrides directly without validation
     overrides = _parse_kv_overrides(unknown_args)
     pre_trainer_cfg = primus_config.get_module_config("pre_trainer")
-    _check_keys_exist(pre_trainer_cfg, overrides)
     _deep_merge_namespace(pre_trainer_cfg, overrides)
 
     return primus_config
@@ -197,23 +165,22 @@ def load_primus_config(args: argparse.Namespace, overrides: List[str]) -> Tuple[
     primus_config = config_parser.parse(args)
 
     # 2 Parse overrides from flat list to dict/namespace
-    override_ns = _parse_kv_overrides(overrides)
+    override_dict = _parse_kv_overrides(overrides)
 
-    # 3 Apply overrides to pre_trainer module config
-    pre_trainer_cfg = primus_config.get_module_config("pre_trainer")
-    # _check_keys_exist(pre_trainer_cfg, override_ns)
-    # _deep_merge_namespace(pre_trainer_cfg, override_ns)
+    # 3 Merge all overrides directly into the first trainer module found
+    # The trainer will validate parameters itself
+    try:
+        # Find first trainer module (pre_trainer, sft_trainer, etc.)
+        for module_name in primus_config.module_keys:
+            module_cfg = primus_config.get_module_config(module_name)
+            if hasattr(module_cfg, "framework"):  # It's a trainer module
+                _deep_merge_namespace(module_cfg, override_dict)
+                break
+    except (ValueError, AttributeError):
+        # No trainer module found, that's okay (might be benchmark-only config)
+        pass
 
-    # return primus_config
-    known_overrides, unknown_overrides = _split_known_unknown(pre_trainer_cfg, override_ns)
-
-    if known_overrides:
-        _deep_merge_namespace(pre_trainer_cfg, known_overrides)
-
-    if unknown_overrides:
-        print(f"[PrimusConfig] Detected unknown override keys: {list(unknown_overrides.keys())}")
-
-    return primus_config, unknown_overrides
+    return primus_config, override_dict
 
 
 class PrimusParser(object):
