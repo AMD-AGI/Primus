@@ -63,9 +63,6 @@ modules:
       # pad 192/128 for deepseek attention
       fused_padded_mla_attention: false
 
-      # Performance toggles
-      #multi_latent_attention: false
-      #apply_rope_fusion: true
 
       # ckpt
       finetune: false
@@ -82,7 +79,7 @@ modules:
       eval_iters: 0
 
       # Turbo
-      enable_primus_turbo: true
+      enable_primus_turbo: false
       use_turbo_attention: false
       use_turbo_grouped_mlp: false
 

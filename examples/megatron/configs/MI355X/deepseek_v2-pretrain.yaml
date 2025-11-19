@@ -68,6 +68,8 @@ modules:
       # pad 192/128 for deepseek attention
       fused_padded_mla_attention: false
 
+      multi_latent_attention: true
+
       # ckpt
       finetune: false
       auto_continue_train: false
