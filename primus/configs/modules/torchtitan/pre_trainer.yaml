@@ -156,3 +156,4 @@ primus_turbo:
   use_turbo_async_tp: true
   use_turbo_mx_linear: true
   enable_embedding_autocast: true
+  enable_dma_allgather: false

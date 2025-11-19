@@ -23,6 +23,7 @@ class PrimusTurboConfig:
     use_turbo_async_tp: bool = False
     use_turbo_mx_linear: bool = False
     enable_embedding_autocast: bool = True
+    enable_dma_allgather: bool = False
     # float8_config: PrimusTurboFloat8Config = field(default_factory=PrimusTurboFloat8Config)
 
 
