@@ -82,9 +82,9 @@ modules:
       eval_iters: 0
 
       # Turbo
-      enable_primus_turbo: false
-      use_turbo_attention: false
-      use_turbo_grouped_mlp: false
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: true
 
       # MoE overlap
       # overlap_moe_expert_parallel_comm: true

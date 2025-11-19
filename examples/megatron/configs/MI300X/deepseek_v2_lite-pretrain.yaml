@@ -63,7 +63,7 @@ modules:
       # pad 192/128 for deepseek attention
       fused_padded_mla_attention: false
 
-      multi_latent_attention: true
+      multi_latent_attention: false
 
       # ckpt
       finetune: false
@@ -80,9 +80,9 @@ modules:
       eval_iters: 0
 
       # Turbo
-      enable_primus_turbo: false
-      use_turbo_attention: false
-      use_turbo_grouped_mlp: false
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: true
 
       # fp8: e4m3
       # fp8_recipe: blockwise  # tensorwise, blockwise
