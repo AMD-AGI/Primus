@@ -82,7 +82,7 @@ This section mirrors the `MoE_Features` defined in `examples/moe_package/run_dee
   - `--cross_entropy_fusion_impl te`
   - `--cross_entropy_loss_fusion True`
 
-### Feature 4 – DeepEP Acceleration
+### Feature 4 – DeepEP Acceleration @huang zhen
 
 - Description: Activates DeepEP kernels for router/a2a efficiency.
 - Args:
@@ -94,7 +94,7 @@ This section mirrors the `MoE_Features` defined in `examples/moe_package/run_dee
   - `--moe_router_dtype fp32`
 - TODO: document CU recommendations for other EP sizes.
 
-### Feature 5 – Sync-Free MoE (Stage 1)
+### Feature 5 – Sync-Free MoE (Stage 1) @ruibin
 
 - Description: Uses sync-free router/permutation fusion for MI355-friendly layouts.
 - Args:
@@ -102,7 +102,7 @@ This section mirrors the `MoE_Features` defined in `examples/moe_package/run_dee
   - `--turbo_sync_free_moe_stage 1`
 - Notes: Stage-1 keeps overlap disabled to preserve determinism on MI355; MI300/MI325 configs can bump to stage 2 if desired.
 
-### Feature 6 – 1F1B MoE Overlap
+### Feature 6 – 1F1B MoE Overlap @yuankai @lihuan
 
 - Description: Overlaps expert communication with backward compute using 1F1B scheduling.
 - Args:
@@ -112,7 +112,7 @@ This section mirrors the `MoE_Features` defined in `examples/moe_package/run_dee
   - `--moe_shared_expert_overlap False`
 - TODO: revisit once the patch flag can be safely re-enabled.
 
-### Feature 7 – Zero-Bubble Pipeline
+### Feature 7 – Zero-Bubble Pipeline @yao cheng
 
 - Description: Applies the zero-bubble virtual-pipeline schedule. References:
   - `primus/backends/megatron/core/pipeline_parallel/zerobubble/README.md`
@@ -143,7 +143,7 @@ gradient_accumulation_fusion: true
   - `--pipeline_model_parallel_layout Et|(tt|)*6L` (commented patterns in the script show other options)
 - Notes: Still experimental; expect to tune per model depth.
 
-### Feature 9 – Recompute Selected Layers
+### Feature 9 – Recompute Selected Layers @liying
 
 - Description: Recomputes the first four transformer layers to save activation memory without enabling full recompute.
 - Args:
