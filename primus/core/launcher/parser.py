@@ -2,7 +2,7 @@ import argparse
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import List
+from typing import Any, Dict, List, Tuple
 
 from primus.core.launcher.config import PrimusConfig
 from primus.core.utils import constant_vars, yaml_utils
@@ -14,6 +14,12 @@ def add_pretrain_parser(parser: argparse.ArgumentParser):
         type=str,
         required=True,
         help="Path to experiment YAML config file (alias: --exp)",
+    )
+    parser.add_argument(
+        "--data_path",
+        type=str,
+        default="./data",
+        help="Path to data directory [default: ./data]",
     )
     parser.add_argument(
         "--backend_path",
@@ -136,6 +142,30 @@ def _check_keys_exist(ns: SimpleNamespace, overrides: dict, prefix=""):
             _check_keys_exist(attr_val, v, prefix=full_key)
 
 
+def _split_known_unknown(ns: SimpleNamespace, overrides: dict) -> Tuple[dict, dict]:
+    """
+    Split overrides into two dictionaries:
+      - known: keys that exist in the namespace
+      - unknown: keys not defined in the namespace
+    """
+    known, unknown = {}, {}
+    for k, v in overrides.items():
+        if hasattr(ns, k):
+            attr_val = getattr(ns, k)
+            if isinstance(v, dict) and isinstance(attr_val, SimpleNamespace):
+                sub_known, sub_unknown = _split_known_unknown(attr_val, v)
+                if sub_known:
+                    known[k] = sub_known
+                if sub_unknown:
+                    unknown[k] = sub_unknown
+            else:
+                known[k] = v
+        else:
+            unknown[k] = v
+            # print(f"[PrimusConfig] Unknown key '{k}' delegated to backend.")
+    return known, unknown
+
+
 def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     args, unknown_args = _parse_args(extra_args_provider, ignore_unknown_args=True)
 
@@ -150,7 +180,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     return primus_config
 
 
-def load_primus_config(args: argparse.Namespace, overrides: List[str]) -> PrimusConfig:
+def load_primus_config(args: argparse.Namespace, overrides: List[str]) -> Tuple[Any, Dict[str, Any]]:
     """
     Build the Primus configuration with optional command-line overrides.
 
@@ -171,10 +201,19 @@ def load_primus_config(args: argparse.Namespace, overrides: List[str]) -> Primus
 
     # 3 Apply overrides to pre_trainer module config
     pre_trainer_cfg = primus_config.get_module_config("pre_trainer")
-    _check_keys_exist(pre_trainer_cfg, override_ns)
-    _deep_merge_namespace(pre_trainer_cfg, override_ns)
+    # _check_keys_exist(pre_trainer_cfg, override_ns)
+    # _deep_merge_namespace(pre_trainer_cfg, override_ns)
 
-    return primus_config
+    # return primus_config
+    known_overrides, unknown_overrides = _split_known_unknown(pre_trainer_cfg, override_ns)
+
+    if known_overrides:
+        _deep_merge_namespace(pre_trainer_cfg, known_overrides)
+
+    if unknown_overrides:
+        print(f"[PrimusConfig] Detected unknown override keys: {list(unknown_overrides.keys())}")
+
+    return primus_config, unknown_overrides
 
 
 class PrimusParser(object):
@@ -233,7 +272,12 @@ class PrimusParser(object):
         yaml_utils.set_value_by_key(self.exp, "platform", platform_config, allow_override=True)
 
     def get_model_format(self, framework: str):
-        map = {"megatron": "megatron", "light-megatron": "megatron", "torchtitan": "torchtitan"}
+        map = {
+            "megatron": "megatron",
+            "light-megatron": "megatron",
+            "torchtitan": "torchtitan",
+            "maxtext": "maxtext",
+        }
         assert framework in map, f"Invalid module framework: {framework}."
         return map[framework]
 
@@ -256,13 +300,13 @@ class PrimusParser(object):
             yaml_utils.check_key_in_namespace(module, key)
 
         # ---- Load module config ----
-        module_config_file = os.path.join(self.primus_home, "configs/modules", framework, module.config)
+        model_format = self.get_model_format(framework)
+        module_config_file = os.path.join(self.primus_home, "configs/modules", model_format, module.config)
         module_config = yaml_utils.parse_yaml_to_namespace(module_config_file)
         module_config.name = f"exp.modules.{module_name}.config"
         module_config.framework = framework
 
         # ---- Load model config ----
-        model_format = self.get_model_format(framework)
         model_config_file = os.path.join(self.primus_home, "configs/models", model_format, module.model)
         model_config = yaml_utils.parse_yaml_to_namespace(model_config_file)
         model_config.name = f"exp.modules.{module_name}.model"

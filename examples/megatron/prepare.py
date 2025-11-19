@@ -22,7 +22,8 @@ from examples.scripts.utils import (
     write_patch_args,
 )
 from primus.core.launcher.config import PrimusConfig
-from primus.core.launcher.parser import PrimusParser
+from primus.core.launcher.parser import load_primus_config
+from primus.pretrain import setup_backend_path
 
 
 # ---------- Helpers ----------
@@ -39,7 +40,12 @@ def check_dir_nonempty(path: Path, name: str):
 
 
 def prepare_dataset(
-    primus_path: Path, data_path: Path, tokenizer_type: str, tokenizer_model: str, tokenized_data_path: Path
+    primus_path: Path,
+    data_path: Path,
+    tokenizer_type: str,
+    tokenizer_model: str,
+    tokenized_data_path: Path,
+    env=None,
 ):
     dataset = "bookcorpus"
     dataset_path = data_path / dataset
@@ -87,12 +93,13 @@ def prepare_dataset(
             "2",
         ],
         check=True,
+        env=env,
     )
     log_info(f"Preprocessing completed in {int(time.time() - start)} s")
 
 
 def prepare_dataset_if_needed(
-    primus_config: PrimusConfig, primus_path: Path, data_path: Path, patch_args: Path
+    primus_config: PrimusConfig, primus_path: Path, data_path: Path, patch_args: Path, env=None
 ):
     pre_trainer_cfg = primus_config.get_module_config("pre_trainer")
     if pre_trainer_cfg.train_data_path is not None:
@@ -122,6 +129,7 @@ def prepare_dataset_if_needed(
                 tokenizer_type=tokenizer_type,
                 tokenizer_model=tokenizer_model,
                 tokenized_data_path=tokenized_data_path,
+                env=env,
             )
             done_flag.touch()
             log_info("Dataset preparation completed.")
@@ -179,10 +187,11 @@ def main():
         default=None,
         help="Optional path to backend (e.g., Megatron), will be added to PYTHONPATH",
     )
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
 
     log_info(f"BACKEND_PATH {args.backend_path}")
-    primus_config = PrimusParser().parse(args)
+    # primus_config = PrimusParser().parse(args)
+    primus_config, _ = load_primus_config(args, unknown)
 
     primus_path = Path(args.primus_path).resolve()
     log_info(f"PRIMUS_PATH is set to: {primus_path}")
@@ -198,6 +207,10 @@ def main():
     patch_args_file = Path(args.patch_args).resolve()
     log_info(f"PATCH-ARGS is set to: {patch_args_file}")
 
+    used_backend_path = setup_backend_path(framework="megatron", backend_path=args.backend_path, verbose=True)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = f"{used_backend_path}:{env.get('PYTHONPATH', '')}"
+
     mock_data = primus_config.get_module_config("pre_trainer").mock_data
     if mock_data:
         log_info(f"'mock_data: true', Skipping dataset preparation.")
@@ -207,6 +220,7 @@ def main():
             primus_path=primus_path,
             data_path=data_path,
             patch_args=patch_args_file,
+            env=env,
         )
 
     build_megatron_helper(primus_path=primus_path, backend_path=args.backend_path, patch_args=patch_args_file)

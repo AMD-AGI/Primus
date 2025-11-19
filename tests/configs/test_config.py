@@ -37,7 +37,7 @@ class TestPrimusParser(PrimusUT):
     def test_exp_configs(self):
         exps = [
             "examples/megatron/exp_pretrain.yaml",
-            "examples/torchtitan/configs/llama3.1_8B-BF16-pretrain.yaml",
+            "examples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml",
         ]
 
         for exp in exps:

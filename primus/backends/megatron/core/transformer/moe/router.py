@@ -4,17 +4,15 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from functools import partial
 from typing import Tuple
 
 import torch
-from megatron.core.transformer.moe.moe_utils import (
-    get_capacity,
-    sequence_load_balancing_loss_func,
-)
+from megatron.core.transformer.moe.moe_utils import apply_router_token_dropping
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training import get_args
+
+from primus.backends.megatron.core.extensions.logits_processor import fused_softcap
 
 
 class PrimusTopKRouter(TopKRouter):
@@ -31,11 +29,11 @@ class PrimusTopKRouter(TopKRouter):
 
         seq_length, bsz = logits.shape[:2]
         logits = logits.view(-1, self.config.num_moe_experts)
-        num_tokens, num_experts = logits.shape
-        topk = self.config.moe_router_topk
-        drop_policy = self.config.moe_token_drop_policy
 
-        scores, probs, routing_map = pt.ops.fused_group_topk_routing_with_aux_score(
+        # Apply Z-Loss
+        logits = self.apply_z_loss(logits)
+
+        scores_for_aux_loss, probs, routing_map = pt.ops.fused_group_topk_routing_with_aux_score(
             logits,
             self.config.moe_router_topk,
             self.config.moe_router_num_groups,
@@ -46,49 +44,46 @@ class PrimusTopKRouter(TopKRouter):
 
         routing_map = routing_map.bool()
 
-        # drop by capacity
-        capacity_factor = self.config.moe_expert_capacity_factor
-        if capacity_factor is not None:
-            # TopK with capacity
-            expert_capacity = get_capacity(
-                num_tokens=num_tokens * topk, num_experts=num_experts, capacity_factor=capacity_factor
+        # Apply token dropping to probs and routing_map.
+        if self.config.moe_expert_capacity_factor is not None:
+            probs, routing_map = apply_router_token_dropping(
+                probs,
+                routing_map,
+                router_topk=self.topk,
+                capacity_factor=self.config.moe_expert_capacity_factor,
+                drop_policy=self.config.moe_token_drop_policy,
+                pad_to_capacity=self.config.moe_pad_expert_input_to_capacity,
             )
 
-            # Maskout exceeded tokens
-            if drop_policy == "probs":
-                _, capacity_indices = torch.topk(probs, k=expert_capacity, dim=0, sorted=False)
-                capacity_mask = torch.zeros_like(logits).scatter(0, capacity_indices, 1).bool()
-            elif drop_policy == "position":
-                _, capacity_indices = torch.topk(routing_map.int(), k=expert_capacity, dim=0, sorted=False)
-                capacity_mask = torch.zeros_like(logits).scatter(0, capacity_indices, 1).bool()
+        if self.training and torch.is_grad_enabled() and self.is_aux_loss_enabled():
+            # todo: fuse the following logic into the turbo fused_group_topk_routing_with_aux_score OP
+            # (the routing_map here differs from the one in the OP output is regarding less of group limit)
+            if self.config.moe_router_num_groups is None or self.config.moe_router_num_groups <= 1:
+                routing_map_for_aux_loss = routing_map
             else:
-                raise ValueError(f"Invalid drop_policy: {drop_policy}")
-
-            pad_to_capacity = self.config.moe_pad_expert_input_to_capacity
-            if pad_to_capacity:
-                routing_map = capacity_mask
-                probs = probs * routing_map
-            else:
-                # Get exceed mask and maskout exceeded probs and indices
-                routing_map = torch.logical_and(routing_map, capacity_mask)
-                probs = probs * routing_map
-
-        # cal auxiliary loss
-        aux_loss_func = partial(
-            sequence_load_balancing_loss_func,
-            probs=scores,
-            routing_map=routing_map,
-            batch_size=bsz,
-            seq_length=seq_length,
-            topk=self.topk,
-        )
-
-        probs = self.apply_load_balancing_loss(activation=probs, load_balancing_loss_func=aux_loss_func)
-
+                _, top_indices_for_aux_loss = torch.topk(scores_for_aux_loss, k=self.topk, dim=1)
+                routing_map_for_aux_loss = (
+                    torch.zeros_like(logits).int().scatter(1, top_indices_for_aux_loss, 1).bool()
+                )
+            probs = self._apply_aux_loss(probs, scores_for_aux_loss, routing_map_for_aux_loss)
+            probs = self._apply_seq_aux_loss(
+                probs, scores_for_aux_loss, routing_map_for_aux_loss, seq_length, bsz
+            )
+            probs = self._apply_global_aux_loss(probs, scores_for_aux_loss, routing_map_for_aux_loss)
+        # Update expert bias and tokens_per_expert
+        # Prevent extra local tokens accumulation on evaluation or activation recomputation
+        if self.enable_expert_bias and torch.is_grad_enabled():
+            with torch.no_grad():
+                self.local_tokens_per_expert += routing_map.sum(dim=0)
         return probs, routing_map
 
     def routing(self, logits: torch.Tensor):
         args = get_args()
+
+        if args.router_logit_softcapping is not None and args.router_logit_softcapping > 0.0:
+            # grok2 router logit softcapping
+            fused_softcap(logits, args.router_logit_softcapping)
+
         if args.enable_primus_turbo and args.moe_use_fused_router_with_aux_score:
             scores, routing_map = self.fused_router_and_auxiliary_loss(logits)
         else:

@@ -1,0 +1,220 @@
+#!/bin/bash
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+set -euo pipefail
+
+###############################################################################
+# Exit Code Convention
+#   0 = Success
+#   1 = Library or dependency failure (e.g. missing file/lib)
+#   2 = Invalid arguments or configuration
+#   3 = Runtime execution failure
+###############################################################################
+
+print_usage() {
+cat << EOF
+Primus Unified Launcher CLI
+
+Usage:
+    primus-cli [global-options] <mode> [mode-args] -- [primus-commands and args]
+
+Description:
+    The unified entry point for all Primus workflows: distributed launch, containerization, and direct host training.
+    Use '--' to separate mode-specific arguments from Primus Python CLI commands (train, benchmark, etc).
+
+Global Options:
+    --debug              Enable debug mode (verbose logging, set -x)
+    --dry-run            Show commands without executing them
+    --config FILE        Load configuration from specific file
+    --version            Show version and exit
+    -h, --help           Show this help message and exit
+
+Supported modes:
+    slurm      Launch distributed workflows via Slurm cluster (srun/sbatch)
+    container  Launch workflows in a managed Docker/Podman container
+    direct     Launch workflows directly on the current host or container
+
+    Mode-specific help:
+        primus-cli slurm --help         Show usage for slurm mode
+        primus-cli container --help     Show usage for container mode (single node or debugging)
+        primus-cli direct --help        Show usage for direct mode (host/container)
+
+Examples:
+    # Distributed GEMM benchmark using srun on 4 nodes:
+    primus-cli slurm srun -N 4 -- benchmark gemm -M 4096 -N 4096 -K 4096
+
+    # Distributed pretrain using sbatch on partition "AIG_Model":
+    primus-cli slurm sbatch -N 8 -p AIG_Model -- train pretrain --config exp.yaml
+
+    # Run GEMM benchmark in a managed container (single node):
+    primus-cli container -- benchmark gemm -M 4096 -N 4096 -K 4096
+
+    # Run pretrain directly on the host or inside an existing container:
+    primus-cli direct -- train pretrain --config exp.yaml
+
+    # Use debug mode for troubleshooting:
+    primus-cli --debug direct -- train pretrain --config exp.yaml
+
+    # Dry-run to see commands without execution:
+    primus-cli --dry-run slurm srun -N 4 -- benchmark gemm
+
+Notes:
+    - [--] is required: it separates Primus launcher options (mode/mode-args) from Python CLI arguments.
+    - All arguments after [--] are passed to the Primus Python CLI (see 'primus-cli direct -- --help').
+    - For detailed documentation on each mode, use the '--help' flag after the mode name.
+    - Primus CLI supports both training and benchmarking with Megatron, TorchTitan, and ROCm-optimized backends.
+
+To see all supported Primus Python CLI commands and options:
+    primus-cli direct -- --help
+EOF
+}
+
+# Show help if called with -h, --help, or no arguments
+if [[ $# -eq 0 ]]; then
+    print_usage
+    exit 0
+fi
+
+# Version
+PRIMUS_CLI_VERSION="1.0.0"
+
+# Resolve runner directory
+RUNNER_DIR="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+
+# Load common library (required)
+# shellcheck disable=SC1091
+source "$RUNNER_DIR/lib/common.sh" || {
+    echo "[ERROR] Failed to load common library: $RUNNER_DIR/lib/common.sh" >&2
+    exit 1
+}
+
+# Load configuration library (required)
+# shellcheck disable=SC1091
+source "$RUNNER_DIR/lib/config.sh" || {
+    LOG_ERROR "[main] Failed to load config library: $RUNNER_DIR/lib/config.sh"
+    exit 1
+}
+
+# Parse global options (single pass)
+CONFIG_FILE=""
+DEBUG_MODE=false
+DRY_RUN_MODE=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        --version)
+            LOG_INFO "Primus CLI version $PRIMUS_CLI_VERSION"
+            exit 0
+            ;;
+        --config)
+            if [[ -z "${2:-}" ]]; then
+                LOG_ERROR "[main] --config requires a file path"
+                exit 2
+            fi
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
+        --debug)
+            DEBUG_MODE=true
+            shift
+            ;;
+        --dry-run)
+            DRY_RUN_MODE=true
+            shift
+            ;;
+        slurm|container|direct)
+            # Found valid mode, stop parsing global options
+            MODE="$1"
+            shift
+            break
+            ;;
+        *)
+            LOG_ERROR "[main] Unknown mode: $1"
+            LOG_ERROR "Supported modes: slurm, container, direct"
+            LOG_ERROR "Usage: primus-cli [global-options] <mode> [mode-args] -- [primus-commands and args]"
+            LOG_ERROR "Try 'primus-cli --help' for more information."
+            exit 2
+            ;;
+    esac
+done
+
+# Enable debug mode if set
+if [[ "$DEBUG_MODE" == "true" ]]; then
+    export PRIMUS_LOG_LEVEL="DEBUG"
+    LOG_INFO "[main] Debug mode enabled (PRIMUS_LOG_LEVEL=DEBUG)"
+fi
+
+# Load configuration after parsing all options
+load_config_auto "$CONFIG_FILE" "main" || {
+    LOG_ERROR "[main] Configuration loading failed"
+    exit 1
+}
+
+# Step 1: Load config and extract main.* parameters
+declare -A main_config
+# Extract all main.* config parameters using the generic function
+extract_config_section "main" main_config || {
+    LOG_ERROR "[main] Failed to extract main config section"
+    exit 1
+}
+
+# Apply config values if not set via CLI
+# Priority: CLI args > Config file > Default values
+# Apply config overrides if not set via CLI
+if [[ "$DEBUG_MODE" == "false" ]]; then
+    debug_value="${main_config[debug]:-false}"
+    if [[ "$debug_value" == "true" ]]; then
+        DEBUG_MODE=true
+        LOG_INFO "[main] Debug mode enabled via config (PRIMUS_LOG_LEVEL=DEBUG)"
+    fi
+fi
+
+if [[ "$DRY_RUN_MODE" == "false" ]]; then
+    dry_run_value="${main_config[dry_run]:-false}"
+    if [[ "$dry_run_value" == "true" || "$dry_run_value" == "1" ]]; then
+        DRY_RUN_MODE=true
+        LOG_INFO "[main] Dry-run mode enabled via config"
+    fi
+fi
+
+# Check if mode was provided and captured
+if [[ -z "${MODE:-}" ]]; then
+    LOG_ERROR "[main] Mode argument is required"
+    echo "" >&2
+    print_usage >&2
+    exit 2
+fi
+
+# Build script path
+script_path="$RUNNER_DIR/primus-cli-${MODE}.sh"
+if [[ ! -f "$script_path" ]]; then
+    LOG_ERROR "[main] Unknown or unsupported mode: $MODE"
+    print_usage >&2
+    exit 2
+fi
+
+# Build the full command array
+CMD=(bash "$script_path")
+[[ "$DEBUG_MODE" == "true" ]] && CMD+=(--debug)
+[[ -n "$CONFIG_FILE" ]] && CMD+=(--config "$CONFIG_FILE")
+CMD+=("$@")
+
+# Display the command
+LOG_INFO "[main] Would execute: ${CMD[*]}"
+
+# Execute or dry-run
+if [[ "$DRY_RUN_MODE" == "true" ]]; then
+    LOG_INFO "[main] Dry-run mode: command not executed"
+    exit 0
+fi
+
+LOG_INFO "[main] Executing: ${CMD[*]}"
+exec "${CMD[@]}"

@@ -1,12 +1,15 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
 import dataclasses
+import functools
 import gc
 import importlib.util
+import inspect
 import os
 import statistics
 import sys
@@ -18,9 +21,6 @@ import torch.distributed as dist
 from megatron.core import mpu, parallel_state, tensor_parallel
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import finalize_model_grads
-from megatron.core.distributed.custom_fsdp import (
-    FullyShardedDataParallel as custom_FSDP,
-)
 from megatron.core.distributed.distributed_data_parallel_config import (
     DistributedDataParallelConfig,
 )
@@ -35,6 +35,7 @@ from megatron.training.checkpointing import (
 )
 
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
+from primus.core.utils.import_utils import get_custom_fsdp, get_model_provider
 
 try:
     pass
@@ -66,7 +67,6 @@ from megatron.core.rerun_state_machine import (
     get_rerun_state_machine,
     initialize_rerun_state_machine,
 )
-from megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from megatron.core.utils import check_param_hashes_across_dp_replicas, get_model_config
 from megatron.training import (
     ft_integration,
@@ -76,7 +76,7 @@ from megatron.training import (
     global_vars,
     one_logger_utils,
 )
-from megatron.training.arguments import moe_freq_type, validate_args
+from megatron.training.arguments import validate_args
 from megatron.training.async_utils import (
     init_persistent_async_worker,
     maybe_finalize_async_save,
@@ -124,6 +124,7 @@ from megatron.training.training import (
 from megatron.training.utils import (
     append_to_progress_log,
     calc_params_l2_norm,
+    is_first_or_last_pipeline_stage,
     logical_and_across_model_parallel_group,
     reduce_max_stat_across_model_parallel_group,
     report_memory,
@@ -131,8 +132,13 @@ from megatron.training.utils import (
     update_use_dist_ckpt,
 )
 from megatron.training.yaml_arguments import validate_yaml
-from pretrain_gpt import model_provider
 
+from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_metrics
+from primus.backends.megatron.model_provider import primus_model_provider
+from primus.backends.megatron.training.global_vars import (
+    get_mlflow_writer,
+    set_primus_global_variables,
+)
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
 from primus.core.utils.flops_estimator import num_floating_point_operations
@@ -147,7 +153,7 @@ from primus.modules.module_utils import (
 )
 from primus.modules.trainer.base_trainer import BaseTrainer
 
-from .utils import set_wandb_writer_patch, validate_args_on_rocm
+from .utils import schedule_wrapper, set_wandb_writer_patch, validate_args_on_rocm
 
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
@@ -166,6 +172,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_mla_attention()
         self.patch_fp8_context()
         self.patch_zbpp()
+        self.patch_custom_recompute_layer_ids()
 
         self.app_metrics = {}
 
@@ -175,38 +182,94 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
 
-    def patch_pt_replace_te(self, args):
+    def patch_custom_recompute_layer_ids(self):
+        if self.module_config.recompute_layer_ids is None:
+            return
+        warning_rank_0(f"MegatronTrainer: monkey patch TransformerConfig post_init...")
+        import megatron.core.transformer.transformer_config as config_mod
 
+        config_mod.TransformerConfig.recompute_layer_ids = self.module_config.recompute_layer_ids
+
+        orig_post_init = config_mod.TransformerConfig.__post_init__
+
+        def new_post_init(self):
+            tmp = self.recompute_granularity
+            self.recompute_granularity = None
+            orig_post_init(self)
+            self.recompute_granularity = tmp
+
+        config_mod.TransformerConfig.__post_init__ = new_post_init
+
+        warning_rank_0(f"MegatronTrainer: monkey patch TransformerBlock checkpoint_forward...")
+        import megatron.core.models.bert.bert_model as orig_bert_model
+        import megatron.core.models.gpt.gpt_model as orig_gpt_model
+        import megatron.core.models.retro.decoder_attention as orig_decoder_attention
+        import megatron.core.models.T5.t5_model as orig_t5_model
+        import megatron.core.models.vision.clip_vit_model as orig_clip_vit_model
+        import megatron.core.models.vision.radio as orig_radio
+        import megatron.core.transformer.transformer_block as orig_transformer_block
+
+        from primus.backends.megatron.core.transformer.transformer_block import (
+            PrimusTransformerBlock,
+        )
+
+        orig_transformer_block.TransformerBlock = PrimusTransformerBlock
+        orig_bert_model.TransformerBlock = PrimusTransformerBlock
+        orig_gpt_model.TransformerBlock = PrimusTransformerBlock
+        orig_decoder_attention.TransformerBlock = PrimusTransformerBlock
+        orig_t5_model.TransformerBlock = PrimusTransformerBlock
+        orig_clip_vit_model.TransformerBlock = PrimusTransformerBlock
+        orig_radio.TransformerBlock = PrimusTransformerBlock
+
+    def patch_pt_replace_te(self, args):
+        from megatron.core.extensions import transformer_engine_spec_provider
         from megatron.core.models.gpt import (
             gpt_layer_specs,
             gpt_model,
             moe_module_specs,
         )
+        from megatron.core.transformer import multi_token_prediction
+        from megatron.core.transformer.moe import moe_layer, token_dispatcher
 
         from primus.backends.megatron.core.extensions.primus_turbo import (
-            PrimusTurboAttention,
-            PrimusTurboColumnParallelLinear,
             PrimusTurboColumnParallelLinearTorch,
-            PrimusTurboGroupedMLP,
-            PrimusTurboLayerNormColumnParallelLinear,
-            PrimusTurboRowParallelLinear,
+            PrimusTurboDeepEPTokenDispatcher,
+            PrimusTurboRMSNorm,
+        )
+        from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
+            PrimusTurboSpecProvider,
         )
 
-        if args.use_turbo_attention:
-            gpt_layer_specs.TEDotProductAttention = PrimusTurboAttention
+        warning_rank_0(
+            f"MegatronTrainer: patch TESpecProvider to PrimusTurboSpecProvider, `enable_primus_turbo=True` will use PrimusTurbo backend"
+        )
+
+        assert (
+            megatron.core.extensions.transformer_engine.HAVE_TE
+        ), "PrimusTurboSpecProvider patch failed, can't found transformer_engine"
+
+        transformer_engine_spec_provider.TESpecProvider = PrimusTurboSpecProvider
+
+        # the following modules used TESpecProvider in Megatron-LM 847781764fe468c90caec16309deded245c1022c
+        gpt_layer_specs.TESpecProvider = PrimusTurboSpecProvider
+        moe_module_specs.TESpecProvider = PrimusTurboSpecProvider
+        multi_token_prediction.TESpecProvider = PrimusTurboSpecProvider
+
         if args.use_turbo_parallel_linear:
-            # TE row parallel linear
-            gpt_layer_specs.TERowParallelLinear = PrimusTurboRowParallelLinear
-            moe_module_specs.TERowParallelLinear = PrimusTurboRowParallelLinear
-            # TE layer norn column parallel linear
-            gpt_layer_specs.TELayerNormColumnParallelLinear = PrimusTurboLayerNormColumnParallelLinear
-            # TE column parallel linear
-            gpt_layer_specs.TEColumnParallelLinear = PrimusTurboColumnParallelLinear
-            moe_module_specs.TEColumnParallelLinear = PrimusTurboColumnParallelLinear
-            # column parallel linear
+            # the output layer of GPTModel
             gpt_model.tensor_parallel.ColumnParallelLinear = PrimusTurboColumnParallelLinearTorch
-        if args.use_turbo_grouped_mlp:
-            moe_module_specs.GroupedMLP = PrimusTurboGroupedMLP
+
+        if args.use_turbo_deepep:
+            # use PrimusTurboDeepEPTokenDispatcher will auto-enable moe_enable_deepep=True, moe_token_dispatcher_type='flex' of megatron options.
+            args.moe_enable_deepep = True
+            args.moe_token_dispatcher_type = "flex"
+            token_dispatcher.MoEFlexTokenDispatcher = PrimusTurboDeepEPTokenDispatcher
+            moe_layer.MoEFlexTokenDispatcher = PrimusTurboDeepEPTokenDispatcher
+
+        if args.use_turbo_rms_norm:
+            import transformer_engine as te
+
+            te.pytorch.RMSNorm = PrimusTurboRMSNorm
 
     def patch_fp8_context(self):
         from megatron.core import fp8_utils
@@ -239,8 +302,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     )
 
         _check_tp_overlap_cfg()
-
-        import functools
 
         import transformer_engine as te
         import transformer_engine_torch as tex
@@ -293,7 +354,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
     def patch_get_extra_te_kwargs(self):
         warning_rank_0(f"MegatronTrainer: monkey patch get_extra_te_kwargs...")
-        import inspect
 
         import transformer_engine as te
         from megatron.core.extensions import transformer_engine as te_ext
@@ -601,6 +661,23 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
                 ori_transformer_layer.get_transformer_layer_offset = get_transformer_layer_offset
 
+            # patch te_group_gemm & gemm
+            import transformer_engine.pytorch.module.grouped_linear as ori_grouped_linear
+
+            from primus.backends.megatron.core.extensions.te_group_gemm_patch_wgrad import (
+                _GroupedLinearWithWGradSplit,
+            )
+
+            ori_grouped_linear._GroupedLinear = _GroupedLinearWithWGradSplit
+
+            import transformer_engine.pytorch.module.linear as ori_linear
+
+            from primus.backends.megatron.core.extensions.te_gemm_patch_wgrad import (
+                _LinearWithWGradSplit,
+            )
+
+            ori_linear._Linear = _LinearWithWGradSplit
+
     def init(self, *init_args, **kwargs):
         allowed_keys = {
             "extra_args_provider",
@@ -643,6 +720,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             log_rank_0(f"-monkey patch to enable manual pipeline split...")
             if validate_manual_split(args):
                 set_manual_pipeline_split_patch(args)
+
+        if args.recompute_layer_ids is not None:
+            from .utils import validate_specified_recompute_layers
+
+            validate_specified_recompute_layers(args)
 
         if args.log_progress:
             append_to_progress_log("Starting job")
@@ -794,10 +876,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 warning_rank_0(f"args.wandb_save_dir is deprecated, the wandb path is: {wandb_path}/wandb")
             if not hasattr(args, "wandb_project") or args.wandb_project is None:
                 args.wandb_project = f"{exp_meta_info['work_group']}_{exp_meta_info['user_name']}"
-                debug_rank_0(f" -create new wandb project name: {args.wandb_project}")
+                debug_rank_0(f"  -create new wandb project name: {args.wandb_project}")
             if not hasattr(args, "wandb_exp_name") or args.wandb_exp_name is None:
                 args.wandb_exp_name = exp_meta_info["exp_name"]
-                debug_rank_0(f" - create new exp name: {args.wandb_exp_name}")
+                debug_rank_0(f"  -create new exp name: {args.wandb_exp_name}")
             args.wandb_save_dir = wandb_path
         elif args.wandb_project is not None:
             args.wandb_project = None
@@ -812,6 +894,24 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         log_kv_rank_0(f"  -wandb_exp_name", f"{args.wandb_exp_name}")
         log_kv_rank_0(f"  -wandb_save_dir", f"{args.wandb_save_dir}")
         log_kv_rank_0(f"  -wandb_entity", f"{args.wandb_entity}")
+
+        # mlflow
+        log_kv_rank_0(f"-disable_mlflow", f"{args.disable_mlflow}")
+        if not args.disable_mlflow:
+            if not hasattr(args, "mlflow_run_name") or args.mlflow_run_name is None:
+                args.mlflow_run_name = f"{exp_meta_info['work_group']}_{exp_meta_info['user_name']}"
+                debug_rank_0(f"  -create new mlflow run name: {args.mlflow_run_name}")
+        elif args.mlflow_run_name is not None:
+            args.mlflow_run_name = None
+            args.mlflow_experiment_name = None
+            debug_rank_0(f"args.mlflow_run_name is disabled, as args.disable_mlflow=True.")
+        if not args.disable_mlflow and "DATABRICKS_HOST" not in os.environ:
+            warning_rank_0(
+                "The environment variable DATABRICKS_HOST is not set. "
+                "Please set it before proceeding or enable 'disable_mlflow' in yaml config"
+            )
+        log_kv_rank_0(f"  -mlflow_run_name", f"{args.mlflow_run_name}")
+        log_kv_rank_0(f"  -mlflow_experiment_name", f"{args.mlflow_experiment_name}")
 
         # sink_level: logging_level
         level_map = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40}
@@ -847,13 +947,26 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.iterations_to_skip = []
 
         # support moe_freq_type
-        args.moe_layer_freq = moe_freq_type(args.moe_layer_freq)
+        if isinstance(args.moe_layer_freq, str):
+            try:
+                args.moe_layer_freq = eval(args.moe_layer_freq)
+            except Exception:
+                raise ValueError(f"Invalid moe_layer_freq format: {args.moe_layer_freq}")
 
         if args.mock_data:
             args.data_path = None
             args.train_data_path = None
             args.valid_data_path = None
             args.test_data_path = None
+
+        if args.final_logit_softcapping is not None and args.final_logit_softcapping > 0.0:
+            log_rank_0(f"-enable final_logit_softcapping: {args.final_logit_softcapping}")
+            self.model_provider = functools.partial(primus_model_provider, get_model_provider())
+        else:
+            self.model_provider = get_model_provider()
+
+        if args.router_logit_softcapping is not None and args.router_logit_softcapping > 0.0:
+            log_rank_0(f"-enable router_logit_softcapping: {args.router_logit_softcapping}")
 
     def vocab_size_with_padding(self, orig_vocab_size, args):
         """Pad vocab size so it is divisible by model parallel size and
@@ -877,7 +990,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.app_metrics["app_build_optimizer_start_time"] = one_logger_utils.get_timestamp_in_ms()
         log_rank_0(f"-setup_model_and_optimizer...")
         self.model, self.optimizer, self.opt_param_scheduler = self.setup_model_and_optimizer(
-            model_provider,
+            self.model_provider,
             ModelType.encoder_or_decoder,
             checkpointing_context=self.checkpointing_context,
         )
@@ -891,8 +1004,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.app_metrics["app_build_dataiters_start_time"] = one_logger_utils.get_timestamp_in_ms()
         timers("train/valid/test-data-iterators-setup", log_level=0).start(barrier=True)
 
-        def train_valid_test_datasets_provider_func(train_val_test_num_samples):
-            return self.train_valid_test_datasets_provider(train_val_test_num_samples)
+        def train_valid_test_datasets_provider_func(train_val_test_num_samples, vp_stage=None):
+            return self.train_valid_test_datasets_provider(train_val_test_num_samples, vp_stage=vp_stage)
 
         train_valid_test_datasets_provider_func.is_distributed = True
 
@@ -900,8 +1013,19 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             self.train_data_iterator = []
             self.valid_data_iterator = []
             self.test_data_iterator = []
-            for i in range(len(self.model)):
-                iterators = build_train_valid_test_data_iterators(train_valid_test_datasets_provider_func)
+            for vp_stage in range(len(self.model)):
+                dataset_provider_parameters = inspect.signature(
+                    train_valid_test_datasets_provider_func
+                ).parameters
+                assert (
+                    "vp_stage" in dataset_provider_parameters
+                ), "vp_stage must be a kwarg in train_valid_test_dataset_provider when using virtual pipeline parallelism"
+                vp_stage_train_valid_test_dataset_provider = functools.partial(
+                    train_valid_test_datasets_provider_func, vp_stage=vp_stage
+                )
+                if getattr(train_valid_test_datasets_provider_func, "is_distributed", False):
+                    vp_stage_train_valid_test_dataset_provider.is_distributed = True
+                iterators = build_train_valid_test_data_iterators(vp_stage_train_valid_test_dataset_provider)
                 self.train_data_iterator.append(iterators[0])
                 self.valid_data_iterator.append(iterators[1])
                 self.test_data_iterator.append(iterators[2])
@@ -960,7 +1084,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             create_attention_mask=args.create_attention_mask_in_dataloader,
         )
 
-    def train_valid_test_datasets_provider(self, train_val_test_num_samples):
+    def train_valid_test_datasets_provider(self, train_val_test_num_samples, vp_stage=None):
         """Build the train test and validation datasets.
 
         Args:
@@ -975,15 +1099,18 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         else:
             dataset_type = GPTDataset
 
-        def is_dataset_built_on_rank():
+        def is_dataset_built_on_rank(vp_stage=None):
             return (
-                parallel_state.is_pipeline_first_stage(ignore_virtual=True)
-                or parallel_state.is_pipeline_last_stage(ignore_virtual=True)
-            ) and parallel_state.get_tensor_model_parallel_rank() == 0
+                is_first_or_last_pipeline_stage(vp_stage)
+                and parallel_state.get_tensor_model_parallel_rank() == 0
+            )
 
         log_rank_0("> building train, validation, and test datasets for GPT ...")
         train_ds, valid_ds, test_ds = BlendedMegatronDatasetBuilder(
-            dataset_type, train_val_test_num_samples, is_dataset_built_on_rank, config
+            dataset_type,
+            train_val_test_num_samples,
+            functools.partial(is_dataset_built_on_rank, vp_stage=vp_stage),
+            config,
         ).build()
 
         log_rank_0("> finished creating GPT datasets ...")
@@ -1059,6 +1186,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # tensorboard-writer, and timers.
         log_rank_0(f"-set_global_variables...")
         set_global_variables(args, build_tokenizer=False)
+        log_rank_0(f"-set_primus_global_variables...")
+        set_primus_global_variables(args)
         args = get_args()
 
         # set tokenizer
@@ -1406,6 +1535,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         maybe_finalize_async_save(blocking=True, terminate=True)
         ft_integration.on_checkpointing_end(is_async_finalization=True)
 
+        mlflow_writer = get_mlflow_writer()
+        if mlflow_writer:
+            mlflow_writer.end_run()
+
         one_logger and one_logger.log_metrics({"app_finish_time": one_logger_utils.get_timestamp_in_ms()})
 
         ft_integration.shutdown()
@@ -1479,7 +1612,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # Setup some training config params.
         config.grad_scale_func = optimizer.scale_loss
         config.timers = timers
-        if isinstance(model[0], (custom_FSDP, DDP)) and args.overlap_grad_reduce:
+
+        if isinstance(model[0], (get_custom_fsdp(), DDP)) and args.overlap_grad_reduce:
             assert config.no_sync_func is None, (
                 "When overlap_grad_reduce is True, config.no_sync_func must be None; "
                 "a custom no_sync_func is not supported when overlapping grad-reduce"
@@ -1559,6 +1693,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             activities = [torch.profiler.ProfilerActivity.CUDA]
             if not args.disable_profiler_activity_cpu:
                 activities.append(torch.profiler.ProfilerActivity.CPU)
+            worker_name = (
+                f"primus-megatron-exp[{self.exp_meta_info['exp_name']}]-rank[{torch.distributed.get_rank()}]"
+            )
             prof = torch.profiler.profile(
                 activities=activities,
                 schedule=torch.profiler.schedule(
@@ -1567,9 +1704,13 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     active=args.profile_step_end - args.profile_step_start,
                     repeat=1,
                 ),
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(args.tensorboard_dir),
-                record_shapes=True,
-                with_stack=False,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    args.tensorboard_dir,
+                    worker_name=worker_name,
+                    use_gzip=args.torch_profiler_use_gzip,
+                ),
+                record_shapes=args.torch_profiler_record_shapes,
+                with_stack=args.torch_profiler_with_stack,
             )
             prof.start()
 
@@ -1838,6 +1979,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             wandb_writer = get_wandb_writer()
             if wandb_writer:
                 wandb_writer.finish()
+            mlflow_writer = get_mlflow_writer()
+            if mlflow_writer:
+                mlflow_writer.end_run()
             ft_integration.shutdown()
             sys.exit(exit_code)
 
@@ -1863,6 +2007,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             from megatron.core.pipeline_parallel import get_forward_backward_func
 
             forward_backward_func = get_forward_backward_func()
+            if optimizer is None and args.dump_pp_data:
+                forward_backward_func = schedule_wrapper(forward_backward_func)
             kwargs = {}
             if optimizer is not None:
                 kwargs["optimizer"] = optimizer
@@ -2013,6 +2159,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         timers = get_timers()
         writer = get_tensorboard_writer()
         wandb_writer = get_wandb_writer()
+        mlflow_writer = get_mlflow_writer()
         get_one_logger()
 
         # Advanced, skipped, and Nan iterations.
@@ -2086,6 +2233,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if iteration % args.tensorboard_log_interval == 0:
             if wandb_writer:
                 wandb_writer.log({"samples vs steps": args.consumed_train_samples}, iteration)
+            if mlflow_writer:
+                mlflow_writer.log_metric("samples vs steps", args.consumed_train_samples, step=iteration)
             if writer:
                 writer.add_scalar("learning-rate", learning_rate, iteration)
                 if args.decoupled_lr is not None:
@@ -2097,9 +2246,13 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 )
             if wandb_writer:
                 wandb_writer.log({"learning-rate": learning_rate}, iteration)
+            if mlflow_writer:
+                mlflow_writer.log_metric("learning-rate", learning_rate, step=iteration)
             if writer:
                 writer.add_scalar("batch-size", batch_size, iteration)
                 writer.add_scalar("batch-size vs samples", batch_size, args.consumed_train_samples)
+            if mlflow_writer:
+                mlflow_writer.log_metric("batch-size", batch_size, iteration)
             if wandb_writer:
                 wandb_writer.log({"batch-size": batch_size}, iteration)
             for key in loss_dict:
@@ -2108,12 +2261,16 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     writer.add_scalar(key + " vs samples", loss_dict[key], args.consumed_train_samples)
                 if wandb_writer:
                     wandb_writer.log({key: loss_dict[key]}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric(key, loss_dict[key], step=iteration)
             if args.log_loss_scale_to_tensorboard:
                 if writer:
                     writer.add_scalar("loss-scale", loss_scale, iteration)
                     writer.add_scalar("loss-scale vs samples", loss_scale, args.consumed_train_samples)
                 if wandb_writer:
                     wandb_writer.log({"loss-scale": loss_scale}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric("loss-scale", loss_scale, step=iteration)
             if args.log_world_size_to_tensorboard:
                 if writer:
                     writer.add_scalar("world-size", args.world_size, iteration)
@@ -2124,12 +2281,16 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     )
                 if wandb_writer:
                     wandb_writer.log({"world-size": args.world_size}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric("world-size", args.world_size, step=iteration)
             if grad_norm is not None:
                 if writer:
                     writer.add_scalar("grad-norm", grad_norm, iteration)
                     writer.add_scalar("grad-norm vs samples", grad_norm, args.consumed_train_samples)
                 if wandb_writer:
                     wandb_writer.log({"grad-norm": grad_norm}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric("grad-norm", grad_norm, step=iteration)
             if num_zeros_in_grad is not None:
                 if writer:
                     writer.add_scalar("num-zeros", num_zeros_in_grad, iteration)
@@ -2140,6 +2301,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     )
                 if wandb_writer:
                     wandb_writer.log({"num-zeros": num_zeros_in_grad}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric("num-zeros", num_zeros_in_grad, iteration)
             if params_norm is not None:
                 if writer:
                     writer.add_scalar("params-norm", params_norm, iteration)
@@ -2150,6 +2313,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     )
                 if wandb_writer:
                     wandb_writer.log({"params-norm": params_norm}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric("params-norm", params_norm, iteration)
             if args.log_memory_to_tensorboard:
                 mem_stats = torch.cuda.memory_stats()
                 if writer:
@@ -2197,6 +2362,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 iteration=iteration,
                 writer=writer,
                 wandb_writer=wandb_writer,
+                mlflow_writer=mlflow_writer,
                 total_loss_dict=total_loss_dict,
                 per_layer_logging=args.moe_per_layer_logging,
                 moe_layer_freq=args.moe_layer_freq,
@@ -2229,6 +2395,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     writer.add_scalar("iteration-time", elapsed_time_per_iteration, iteration)
                 if wandb_writer:
                     wandb_writer.log({"iteration-time": elapsed_time_per_iteration}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric("iteration-time", elapsed_time_per_iteration, iteration)
             # log_string = f" [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
             log_string = f""
             if hasattr(self, "episode_count") and self.episode_count is not None:
@@ -2345,6 +2513,31 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                             iteration,
                         )
                         wandb_writer.log({f"{mem_collector}_mem_usage(%)": mem_usage * 100.0}, iteration)
+                    if mlflow_writer:
+                        mlflow_writer.log_metric("throughput(tflops/sec/gpu)", throughput, iteration)
+                        mlflow_writer.log_metric(
+                            "token_throughput(tokens/sec/gpu)",
+                            token_throughput,
+                            iteration,
+                        )
+                        mlflow_writer.log_metric(
+                            f"{mem_collector}_used_mem(GB)",
+                            used_mem / 1024 / 1024 / 1024,
+                            iteration,
+                        )
+                        mlflow_writer.log_metric(
+                            f"{mem_collector}_free_mem(GB)",
+                            free_mem / 1024 / 1024 / 1024,
+                            iteration,
+                        )
+                        mlflow_writer.log_metric(
+                            f"{mem_collector}_total_mem(GB)",
+                            total_mem / 1024 / 1024 / 1024,
+                            iteration,
+                        )
+                        mlflow_writer.log_metric(
+                            f"{mem_collector}_mem_usage(%)", mem_usage * 100.0, iteration
+                        )
             assert learning_rate is not None
             # Decoupled_learning_rate should be not None only on first and last pipeline stage.
             log_string += " learning rate: {:.6E} |".format(learning_rate)

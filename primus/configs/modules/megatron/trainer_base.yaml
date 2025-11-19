@@ -58,6 +58,11 @@ fp8_param_gather: false
 te_rng_tracker: false
 inference_rng_tracker: false
 
+# fp4
+fp4: null
+fp4_recipe: nvfp4
+fp4_param: false
+
 first_last_layers_bf16: false
 num_layers_at_start_in_bf16: 1
 num_layers_at_end_in_bf16: 1
@@ -102,9 +107,11 @@ pin_cpu_params: true
 # checkpointing arguments
 save: null
 save_interval: 20000
+save_retain_interval: null
 no_save_optim: null
 no_save_rng: null
 load: null
+load_main_params_from_ckpt: false
 no_load_optim: null
 no_load_rng: null
 finetune: false
@@ -117,6 +124,8 @@ non_persistent_ckpt_type: null # 'global', 'local', 'in_memory', null
 non_persistent_global_ckpt_dir: null # str
 non_persistent_local_ckpt_dir: null # str
 non_persistent_local_ckpt_algo: "fully_parallel" # 'fully_parallel', 'atomic'
+dist_ckpt_save_pre_mcore_014: null
+dist_ckpt_optim_fully_reshardable: null
 
 pretrained_checkpoint: null
 ckpt_step: null
@@ -159,7 +168,10 @@ account_for_loss_in_pipeline_split: false
 empty_unused_memory_level: 0
 standalone_embedding_stage: false
 use_distributed_optimizer: false
+use_sharp: false
+sharp_enabled_group: null  # options: [dp, dp_replica]
 use_custom_fsdp: false
+use_megatron_fsdp: false
 init_model_with_meta_device: false
 data_parallel_sharding_strategy: no_shard # 'no_shard', 'optim', 'optim_grads', 'optim_grads_params'
 gradient_reduce_div_fusion: true
@@ -174,9 +186,12 @@ replication_jump: null # int
 replication_factor: null # int
 deterministic_mode: false
 check_weight_hash_across_dp_replicas_interval: null
+overlap_moe_expert_parallel_comm: false
 
 train_iters: null
 eval_iters: 32
+full_validation: false
+multiple_validation_sets: false
 eval_interval: 2000
 skip_train: false
 train_sync_interval: null # int
@@ -275,10 +290,21 @@ error_injection_rate: 0 # int
 error_injection_type: transient_error # str: 'correct_result', 'transient_error', 'persistent_error'
 rerun_mode: disabled # str: 'disabled', 'validate_results', 'report_stats'
 
-# experimental
+# Experimental features
+enable_experimental: false
+
+# Hybrid model configuration
 hybrid_attention_ratio: 0.0 # float range [0,0, 1.0]
 hybrid_mlp_ratio: 0.0 # float range [0,0, 1.0]
 hybrid_override_pattern: null # str
+
+# Mamba layer configuration
+mamba_state_dim: 128
+mamba_head_dim: 64
+mamba_num_groups: 8
+mamba_num_heads: null
+disable_mamba_mem_eff_path: false
+
 # Args of precision-aware optimizer
 use_precision_aware_optimizer: false
 main_grads_dtype: fp32 # str: fp32, bf16
@@ -372,7 +398,31 @@ calc_ft_timeouts: false
 run_workload_inspector_server: false
 is_hybrid_model: false
 
-
 heterogeneous_layers_config_path: null
 heterogeneous_layers_config_encoded_json: null
 inprocess_restart: false
+
+# rl_args
+perform_rl_step: false
+rl_prompts_per_eval: 32
+grpo_prompts_per_step: 32
+grpo_group_size: 2
+grpo_iterations: 2
+grpo_clamp_eps_lower: 0.01
+grpo_clamp_eps_upper: 0.01
+grpo_kl_beta: 0.001
+grpo_entropy_term_weight: 0.0
+grpo_filter_groups_with_same_reward: false
+grpo_default_temperature: 1.0
+grpo_default_top_p: 0
+langrl_inference_server_type: inplace_megatron
+langrl_inference_server_conversation_template: null
+langrl_env_config: null
+rl_offload_optimizer_during_inference: false
+rl_offload_kv_cache_during_training: false
+rl_remove_kv_cache_during_training: false
+rl_reset_cuda_graphs: false
+rl_partial_rollouts: false
+rl_inference_logprobs_is_correction: false
+rl_importance_sampling_truncation_coef: null
+rl_calculate_intra_group_similarity: false

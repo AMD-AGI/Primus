@@ -1,0 +1,38 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama2_7B-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+
+    # model to run
+    model: llama2_7B.yaml
+    overrides:
+      run_name: "llama2_7b_training"
+      base_output_directory: "./output"
+      steps: 50
+      log_period: 10
+      profiler: ""
+
+      # data
+      dataset_type: "synthetic"
+      hf_access_token: ${HF_TOKEN:""}
+
+      # checkpoint
+      enable_checkpointing: False
+      async_checkpointing: False
+
+      # inter-node parallelism strategy
+      dcn_data_parallelism: -1
+      dcn_fsdp_parallelism: 1
+
+      # intra-node parallelism strategy
+      ici_fsdp_parallelism: 8
+      ici_data_parallelism: 1
+
+      remat_policy: "minimal_flash"
+      max_target_length: 4096
+      per_device_batch_size: 12

@@ -78,6 +78,37 @@ def set_wandb_writer_patch(args):  # monkey patch
         megatron.training.global_vars._GLOBAL_WANDB_WRITER = wandb
 
 
+def validate_specified_recompute_layers(args):
+    if args.recompute_layer_ids is None:
+        return
+
+    assert isinstance(
+        args.recompute_layer_ids, list
+    ), f"recompute_layer_ids={args.recompute_layer_ids} should be a list"
+    recompute_layer_ids = list(set(args.recompute_layer_ids))
+    assert len(recompute_layer_ids) > 0, "recompute layer ids is null"
+    for layer_id in recompute_layer_ids:
+        assert (
+            layer_id >= 0 and layer_id < args.num_layers
+        ), f"recompute layer id must be between 0 and {args.num_layers - 1}"
+
+    if args.recompute_granularity != "full":
+        raise ValueError(
+            f'When using recompute_layer_ids, recompute_granuarlity: {args.recompute_granularity} must be "full"'
+        )
+
+    if args.recompute_method is not None:
+        raise ValueError(
+            f"When using recompute_layer_ids, recompute_method: {args.recompute_method} must be None."
+        )
+
+    if args.distribute_saved_activations and args.sequence_parallel:
+        raise ValueError(
+            f"distribute_saved_activations: {args.distribute_saved_activations} must be "
+            f"false when sequence parallel is enabled: {args.sequence_parallel}"
+        )
+
+
 def validate_manual_split(args):
     """
     The use of decoder_pipeline_manual_split_list is to relax the divisibility
@@ -313,13 +344,6 @@ def set_dump_pp_data_patch():
     schedules.forward_step = fwd_bwd_wrapper(schedules.forward_step, "fwd")
     schedules.backward_step = fwd_bwd_wrapper(schedules.backward_step, "bwd")
 
-    schedules.forward_backward_pipelining_without_interleaving = schedule_wrapper(
-        schedules.forward_backward_pipelining_without_interleaving
-    )
-    schedules.forward_backward_pipelining_with_interleaving = schedule_wrapper(
-        schedules.forward_backward_pipelining_with_interleaving
-    )
-
 
 def dump_pp_data(args, num_mbs, pp_data_dir):
     torch.cuda.synchronize()
@@ -393,6 +417,30 @@ def dump_pp_data(args, num_mbs, pp_data_dir):
             json.dump(config_dict, f, indent=2)
 
 
+def _get_sync_free_moe_options(stage: int) -> dict:
+    if stage > 3 or stage < 0:
+        raise ValueError("turbo_sync_free_moe_stage only support [0-3]")
+
+    sync_free_moe = {
+        1: {"moe_use_fused_router_with_aux_score": True, "moe_permute_fusion": True},
+        2: {
+            "moe_use_fused_router_with_aux_score": True,
+            "use_turbo_deepep": True,
+            "moe_permute_fusion": True,
+            "use_turbo_grouped_mlp": True,
+        },
+        3: {
+            "moe_use_fused_router_with_aux_score": True,
+            "use_turbo_deepep": True,
+            "moe_permute_fusion": True,
+            "use_turbo_grouped_mlp": True,
+            "use_turbo_fused_act_with_probs": True,
+        },
+    }
+
+    return sync_free_moe[stage]
+
+
 def validate_args_on_rocm(args):
     # Deterministic mode
     if args.deterministic_mode:
@@ -409,3 +457,34 @@ def validate_args_on_rocm(args):
     if args.dump_pp_data and args.pipeline_model_parallel_size == 1:
         args.dump_pp_data = False
         print_rank_last(f"Disable args.dump_pp_data since args.pipeline_model_parallel_size=1")
+
+    # sync-free MoE
+    if args.turbo_sync_free_moe_stage > 0:
+        assert args.enable_primus_turbo, "Please set `enable_primus_turbo=True` to enable sync-free MoE."
+
+        if args.turbo_sync_free_moe_stage > 1 and not args.moe_use_legacy_grouped_gemm:
+            raise ValueError(
+                "Sync-Free MoE stage 2 or 3 require PrimusTurboGroupedMLP, please set `moe_use_legacy_grouped_gemm=True`"
+            )
+        options = _get_sync_free_moe_options(args.turbo_sync_free_moe_stage)
+        print_rank_last(
+            f"========== Enable Sync-Free MoE Stage {args.turbo_sync_free_moe_stage} (Auto-Enabled Options) =========="
+        )
+        for flag, value in options.items():
+            dots = "." * (73 - len(flag) - len(str(value)))
+            print_rank_last(f"{flag}{dots}{value}")
+            setattr(args, flag, value)
+        print_rank_last(
+            f"========== Enable Sync-Free MoE Stage {args.turbo_sync_free_moe_stage} (Auto-Enabled Options) =========="
+        )
+
+    # turbo deepep
+    if args.use_turbo_deepep:
+        assert (
+            not args.moe_shared_expert_overlap
+        ), "DeepEP not support moe_shared_expert_overlap, please set `moe_shared_expert_overlap=False`."
+        assert (
+            args.moe_router_dtype == "fp32"
+        ), "DeepEP only supports float32 probs, please set `moe_router_dtype=fp32`"
+        if args.expert_model_parallel_size >= 16:
+            assert args.turbo_deepep_num_cu <= 32, "Set `turbo_deepep_num_cu<=32` when using ep_size >= 16."

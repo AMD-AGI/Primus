@@ -7,8 +7,8 @@
 import torch
 import torch.nn as nn
 from primus_turbo.pytorch.core.float8 import Float8QuantConfig, ScalingGranularity
-from primus_turbo.pytorch.modules import MXLinear
-from torchtitan.config_manager import JobConfig
+from primus_turbo.pytorch.modules import Float8Linear
+from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
     ModelConverter,
@@ -21,8 +21,8 @@ SCALING_BLOCK_SIZE = 128
 
 def replace_turbo_mxlinear_modules(model: nn.Module, config: Float8QuantConfig):
     for name, module in model.named_children():
-        if isinstance(module, torch.nn.Linear) and not isinstance(module, MXLinear):
-            mx_linear = MXLinear.from_float(module, config)
+        if isinstance(module, torch.nn.Linear) and not isinstance(module, Float8Linear):
+            mx_linear = Float8Linear.from_float(module, config)
             setattr(model, name, mx_linear)
         else:
             replace_turbo_mxlinear_modules(module, config)

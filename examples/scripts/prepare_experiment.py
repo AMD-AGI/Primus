@@ -25,7 +25,9 @@ def log(msg, level="INFO"):
 def main():
     parser = argparse.ArgumentParser(description="Primus Backend Preparation Entry")
     parser.add_argument("--config", required=True, help="Path to experiment YAML config file")
-    parser.add_argument("--data_path", required=True, help="Root directory for datasets and tokenizer")
+    parser.add_argument(
+        "--data_path", type=str, default="./data/", help="Root directory for datasets and tokenizer"
+    )
     parser.add_argument(
         "--patch_args",
         type=str,
@@ -38,7 +40,13 @@ def main():
         default=None,
         help="Optional path to backend (e.g., Megatron), will be added to PYTHONPATH",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default=None,
+        help="Optional backend (e.g., Megatron, TorchTitan and MaxText), check consistency between config and backend",
+    )
+    args, unknown = parser.parse_known_args()
 
     primus_path = Path.cwd()
     patch_args_path = Path(args.patch_args).resolve()
@@ -49,12 +57,17 @@ def main():
 
     # Get framework name from pre_trainer module
     framework = config.get_module_config("pre_trainer").framework
+    if args.backend is not None and (args.backend.strip().lower() != framework):
+        log_error_and_exit(
+            f"The backend {args.backend} set in env is different with {framework} set in the config"
+        )
 
     # Normalize alias: map "light-megatron" to actual folder name
     framework_map = {
         "megatron": "megatron",
         "light-megatron": "megatron",
         "torchtitan": "torchtitan",
+        "maxtext": "maxtext",
         # Add more aliases here if needed
     }
     framework_dir = framework_map.get(framework, framework)
@@ -81,6 +94,8 @@ def main():
 
     if args.backend_path:
         cmd += ["--backend_path", args.backend_path]
+
+    cmd += unknown
     try:
         subprocess.run(
             cmd,

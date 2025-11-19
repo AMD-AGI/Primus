@@ -124,7 +124,9 @@ if is_te_min_version("2.0"):
         def is_fp8_ubuf(self) -> bool:
             return self.buf_dtype.itemsize == 1
 
-        def copy_into_buffer(self, input: torch.Tensor, quantizer: Quantizer, local_chunk: bool = False):
+        def copy_into_buffer(
+            self, input: torch.Tensor, quantizer: Quantizer = None, local_chunk: bool = False
+        ):
             """copy input to local buffer
 
             Args:

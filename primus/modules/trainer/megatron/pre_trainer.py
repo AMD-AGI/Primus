@@ -11,24 +11,24 @@ import torch
 from megatron.core import mpu
 from megatron.core.models.gpt import GPTModel
 from megatron.core.rerun_state_machine import get_rerun_state_machine
-from megatron.core.utils import StragglerDetector
+from megatron.core.utils import StragglerDetector, get_attr_wrapped_model
 from megatron.training import get_args, get_timers
-from megatron.training.utils import get_batch_on_this_cp_rank, get_batch_on_this_tp_rank
+from megatron.training.utils import (
+    get_batch_on_this_cp_rank,
+    get_batch_on_this_tp_rank,
+    is_first_or_last_pipeline_stage,
+)
 
 stimer = StragglerDetector()
-
-from primus.backends.megatron.core.pipeline_parallel.zerobubble.zbpp_vars import (
-    get_seq_split_idx,
-)
 
 from .trainer import MegatronTrainer
 
 mb_batch = None
 
 
-def get_batch_func(data_iterator):
+def get_batch_func(data_iterator, vp_stage=None):
     # TODO: this is pretty hacky, find a better way
-    if (not mpu.is_pipeline_first_stage()) and (not mpu.is_pipeline_last_stage()):
+    if not is_first_or_last_pipeline_stage(vp_stage):
         return None, None, None, None, None
 
     # get batches based on the TP rank you are on
@@ -38,6 +38,10 @@ def get_batch_func(data_iterator):
     args = get_args()
 
     if args.patch_zero_bubble:
+        from primus.backends.megatron.core.pipeline_parallel.zerobubble.zbpp_vars import (
+            get_seq_split_idx,
+        )
+
         global mb_batch
         # "or 0" to support original 1f1b and interleaved-1f1b in schedules.py
         seq_split_idx = get_seq_split_idx() or 0
@@ -118,11 +122,20 @@ class DataLoaderStore:
 class MegatronPretrainTrainer(MegatronTrainer):
     def __init__(self, *args, **kwargs):
         kwargs["module_name"] = "pre_trainer"
+
+        # Explicitly reject unknown extra_args
+        extra_args = kwargs.pop("extra_args", None)
+        if extra_args:
+            raise ValueError(
+                f"[MegatronPretrainTrainer] Unexpected extra_args detected: {extra_args}. "
+                f"Megatron backend does not support unregistered config keys."
+            )
+
         super().__init__(*args, **kwargs)
 
-    def get_batch(self, data_iterator):
+    def get_batch(self, data_iterator, vp_stage=None):
         """Generate a batch."""
-        return get_batch_func(data_iterator)
+        return get_batch_func(data_iterator, vp_stage)
 
     def loss_func(self, loss_mask: torch.Tensor, output_tensor: torch.Tensor):
         """Loss function.
@@ -191,7 +204,7 @@ class MegatronPretrainTrainer(MegatronTrainer):
             {"lm loss": (reporting_loss[0], reporting_loss[1])},
         )
 
-    def forward_step(self, data_iterator, model: GPTModel):
+    def forward_step(self, data_iterator, model: GPTModel, return_schedule_plan=False):
         """Forward training step.
 
         Args:
@@ -206,7 +219,10 @@ class MegatronPretrainTrainer(MegatronTrainer):
             timers("batch-generator", log_level=2).start()
             global stimer
             with stimer(bdata=True):
-                tokens, labels, loss_mask, attention_mask, position_ids = self.get_batch(data_iterator)
+                vp_stage = get_attr_wrapped_model(model, "vp_stage")
+                tokens, labels, loss_mask, attention_mask, position_ids = self.get_batch(
+                    data_iterator, vp_stage
+                )
             timers("batch-generator").stop()
         else:
             from collections.abc import Iterable
@@ -220,6 +236,34 @@ class MegatronPretrainTrainer(MegatronTrainer):
                 tokens, labels, loss_mask, attention_mask, position_ids = DataLoaderStore.pop()
 
         with stimer:
-            output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
+            if return_schedule_plan:
+                assert (
+                    args.overlap_moe_expert_parallel_comm
+                ), "overlap_moe_expert_parallel_comm must be enabled to return the schedule plan"
+                if args.patch_moe_overlap:
+                    assert (
+                        not args.delay_wgrad_compute
+                    ), "Primus MoE overlap handles wgrad separately from the original Megatron implementation"
+                    from primus.backends.megatron.core.pipeline_parallel.zerobubble.zbpp_utils import (
+                        WeightGradStore,
+                    )
+
+                    WeightGradStore.enable_split_bw()
+                    from primus.backends.megatron.core.models.common.model_chunk_schedule_plan import (
+                        TransformerModelChunkSchedulePlan,
+                    )
+
+                    schedule_plan = TransformerModelChunkSchedulePlan(
+                        model, tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+                    )
+                else:
+                    schedule_plan = model.build_schedule_plan(
+                        tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+                    )
+                return schedule_plan, partial(self.loss_func, loss_mask)
+            else:
+                output_tensor = model(
+                    tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+                )
 
         return output_tensor, partial(self.loss_func, loss_mask)

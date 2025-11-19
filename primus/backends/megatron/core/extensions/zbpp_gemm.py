@@ -8,8 +8,9 @@
 ###############################################################################
 
 import functools
-from typing import Tuple
+from typing import Callable, Tuple
 
+import grouped_gemm
 import torch
 from primus_turbo.pytorch.kernels.gemm.gemm_csrc_impl import gemm_impl
 from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_csrc_impl import (
@@ -69,15 +70,19 @@ class LinearWithWeightGradientStore(torch.autograd.Function):
         else:
             wgrad_gemm_accum_func = fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16
 
-        WeightGradStore.put(
-            weight,
-            functools.partial(pre_process, grad_output, input),
-            functools.partial(
-                process_wgrad,
+        if WeightGradStore.split_bw():
+            WeightGradStore.put(
                 weight,
-                wgrad_gemm_accum_func=wgrad_gemm_accum_func,
-            ),
-        )
+                functools.partial(pre_process, grad_output, input),
+                functools.partial(
+                    process_wgrad,
+                    weight,
+                    wgrad_gemm_accum_func=wgrad_gemm_accum_func,
+                ),
+            )
+        else:
+            grad_output, input, _ = pre_process(grad_output, input)
+            process_wgrad(weight, grad_output, input, None, wgrad_gemm_accum_func)
         # grad_weight = gemm_impl(grad_output.t(), input)
 
         return grad_input, None, grad_bias, None, None
@@ -96,46 +101,48 @@ class GroupedLinearWithWeightGradientStore(torch.autograd.Function):
         group_lens: torch.Tensor,
         group_offs: torch.Tensor,
         trans_b: bool,
-        num_cu: int | None,
         weight_reshape_size: Tuple | None,
+        group_gemm_backend_func: Callable,
+        wgrad_gemm_backend_func: Callable | None = None,
     ):
-
-        ctx.weight_main_grad = weight.main_grad
+        if wgrad_gemm_backend_func is None:
+            wgrad_gemm_backend_func = group_gemm_backend_func
+        ctx.use_main_grad = hasattr(weight, "main_grad") and weight.main_grad is not None
+        if ctx.use_main_grad:
+            ctx.weight_main_grad = weight.main_grad
         ctx.weight_shape_ori = weight.shape
+        ctx.group_gemm_backend_func = group_gemm_backend_func
+        ctx.wgrad_gemm_backend_func = wgrad_gemm_backend_func
 
         if weight_reshape_size is not None:
             weight = weight.view(*weight_reshape_size)
 
         ctx.save_for_backward(input, weight, group_lens, group_offs)
 
-        output = grouped_gemm_csrc_impl(
+        output = group_gemm_backend_func(
             input,
             weight,
             group_lens,
-            group_offs,
             trans_a=False,
             trans_b=trans_b,
-            num_cu=num_cu,
         )
 
         ctx.trans_a = False
         ctx.trans_b = trans_b
-        ctx.num_cu = num_cu
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
         input, weight, group_lens, group_offs = ctx.saved_tensors
-
-        weight.main_grad = ctx.weight_main_grad
-        grad_a = grouped_gemm_csrc_impl(
+        group_gemm_backend_func = ctx.group_gemm_backend_func
+        if ctx.use_main_grad:
+            weight.main_grad = ctx.weight_main_grad
+        grad_a = group_gemm_backend_func(
             grad_output,
             weight,
             group_lens,
-            group_offs,
             trans_a=False,
             trans_b=not ctx.trans_b,
-            num_cu=ctx.num_cu,
         )
 
         def pre_process(_grad_output_, _input_, trans_b, async_op=True):
@@ -146,30 +153,33 @@ class GroupedLinearWithWeightGradientStore(torch.autograd.Function):
                 return _input_, _grad_output_, None
 
         def process_wgrad(_weight, _weight_shape_ori, _grad_output, _total_input, handle=None):
-            _wgrad = grouped_gemm_variable_k_csrc_impl(
+            _wgrad = ctx.wgrad_gemm_backend_func(
                 _grad_output,
                 _total_input,
                 group_lens,
-                group_offs,
                 trans_a=True,
                 trans_b=False,
-                num_cu=ctx.num_cu,
             )
             _wgrad = _wgrad.view(_weight_shape_ori)
-            with torch.no_grad():
-                _weight.main_grad.add_(_wgrad)
+            if ctx.use_main_grad:
+                with torch.no_grad():
+                    _weight.main_grad.add_(_wgrad)
 
-        WeightGradStore.put(
-            weight,
-            functools.partial(pre_process, grad_output, input, ctx.trans_b),
-            functools.partial(
-                process_wgrad,
+        if WeightGradStore.split_bw():
+            WeightGradStore.put(
                 weight,
-                ctx.weight_shape_ori,
-            ),
-        )
+                functools.partial(pre_process, grad_output, input, ctx.trans_b),
+                functools.partial(
+                    process_wgrad,
+                    weight,
+                    ctx.weight_shape_ori,
+                ),
+            )
+        else:
+            pre_process(grad_output, input, ctx.trans_b)
+            process_wgrad(weight, ctx.weight_shape_ori, grad_output, input)
 
-        return grad_a, None, None, None, None, None, None
+        return grad_a, None, None, None, None, None, None, None
 
 
 def grouped_gemm_with_weight_gradient_store(
@@ -180,9 +190,30 @@ def grouped_gemm_with_weight_gradient_store(
     trans_b: bool = False,
     num_cu: int | None = None,
     weight_reshape_size: Tuple | None = None,
+    gg_backend: str = "turbo-gg",
 ):
-    if group_offs is None:
-        group_offs = grouped_gemm_compute_offs(group_lens)
+    if gg_backend == "turbo-gg":
+        if group_offs is None:
+            group_offs = grouped_gemm_compute_offs(group_lens)
+        group_gemm_backend_func = functools.partial(
+            grouped_gemm_csrc_impl, group_offs=group_offs, num_cu=num_cu
+        )
+        wgrad_gemm_backend_func = functools.partial(
+            grouped_gemm_variable_k_csrc_impl, group_offs=group_offs, num_cu=num_cu
+        )
+    elif gg_backend == "lagacy-gg":
+        group_gemm_backend_func = grouped_gemm.backend.gmm
+        wgrad_gemm_backend_func = grouped_gemm.backend.gmm
+    else:
+        raise NotImplementedError(f"Grouped gemm backend {gg_backend} not implemented")
+
     return GroupedLinearWithWeightGradientStore.apply(
-        input, weight, group_lens, group_offs, trans_b, num_cu, weight_reshape_size
+        input,
+        weight,
+        group_lens,
+        group_offs,
+        trans_b,
+        weight_reshape_size,
+        group_gemm_backend_func,
+        wgrad_gemm_backend_func,
     )

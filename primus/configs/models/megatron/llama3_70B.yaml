@@ -2,7 +2,7 @@ bases:
   - llama3_base.yaml
 
 tokenizer_type: Llama3Tokenizer
-tokenizer_model: meta-llama/Llama-3.1-70B
+tokenizer_model: meta-llama/Meta-Llama-3-70B
 
 ffn_hidden_size: 28672
 hidden_size: 8192

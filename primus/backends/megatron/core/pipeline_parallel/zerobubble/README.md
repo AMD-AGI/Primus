@@ -7,13 +7,10 @@ Zero bubbles is a state-of-art technique aiming to reduce the bubble time and me
 
 ## 2. How to use
 
-- We use primus-turbo gemm to patch the original TE implementation, thus need to turn on the following flags
-```
-enable_primus_turbo: true
-use_turbo_parallel_linear: true
-```
+- Zero bubble patch the gemm OP and the grouped gemm OP for splitting the backward of the inputs and weights, support TE & Primus-turbo backend.
+
 - Some other flags need to be specified
-```
+
 overlap_grad_reduce: false
 overlap_param_gather: false
 no_persist_layer_norm: true

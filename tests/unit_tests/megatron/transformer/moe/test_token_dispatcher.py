@@ -1,0 +1,393 @@
+###############################################################################
+# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+
+import dataclasses
+import os
+from contextlib import contextmanager
+from types import SimpleNamespace
+
+import megatron.core.parallel_state as ps
+import torch
+import torch.distributed as dist
+from megatron.core import parallel_state
+from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
+from megatron.core.transformer.moe.moe_layer import MoELayer
+from megatron.core.transformer.moe.moe_utils import get_capacity
+from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.training.global_vars import set_args
+from megatron.training.initialize import _set_random_seed
+from torch.testing._internal.common_distributed import (
+    MultiProcessTestCase,
+    skip_if_lt_x_gpu,
+)
+from torch.testing._internal.common_utils import (
+    instantiate_parametrized_tests,
+    run_tests,
+)
+
+
+def create_args():
+    """Setup dummy args."""
+    args = SimpleNamespace()
+    args.turbo_sync_free_moe_stage = 0
+    args.sequence_parallel = False
+    args.seq_length = 4096
+    args.context_parallel_size = 1
+    args.micro_batch_size = 1
+    args.moe_router_force_load_balancing = False
+    args.moe_use_legacy_grouped_gemm = True
+    args.use_turbo_grouped_mlp = True
+    args.turbo_deepep_num_cu = 32
+    args.turbo_deepep_use_comm_stream = False
+    return args
+
+
+def token_permutation(token_dispatcher, hidden_states, probs, indices):
+    hidden_states, probs = token_dispatcher.dispatch_preprocess(hidden_states, indices, probs)
+    hidden_states, probs = token_dispatcher.token_dispatch(hidden_states, probs)
+    hidden_states, tokens_per_expert, permuted_probs = token_dispatcher.dispatch_postprocess(
+        hidden_states, probs
+    )
+    return hidden_states, tokens_per_expert, permuted_probs
+
+
+def token_unpermutation(token_dispatcher, hidden_states):
+    hidden_states = token_dispatcher.combine_preprocess(hidden_states)
+    hidden_states = token_dispatcher.token_combine(hidden_states)
+    hidden_states = token_dispatcher.combine_postprocess(hidden_states)
+    return hidden_states, None
+
+
+@contextmanager
+def custom_patch():
+    from megatron.core.transformer.moe import moe_layer, token_dispatcher
+
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        PrimusTurboDeepEPTokenDispatcher,
+    )
+
+    prev_token_dispatcher = token_dispatcher.MoEFlexTokenDispatcher
+    try:
+        token_dispatcher.MoEFlexTokenDispatcher = PrimusTurboDeepEPTokenDispatcher
+        moe_layer.MoEFlexTokenDispatcher = PrimusTurboDeepEPTokenDispatcher
+        yield
+    finally:
+        token_dispatcher.MoEFlexTokenDispatcher = prev_token_dispatcher
+        moe_layer.MoEFlexTokenDispatcher = prev_token_dispatcher
+
+
+class MoEModelTestContainer:
+    def __init__(
+        self,
+        tp_size,
+        ep_size,
+        pp_size,
+        cp_size=1,
+        moe_tp_size=None,
+        data_parallel_random_init=False,
+        num_moe_experts=8,
+        moe_router_topk=2,
+        moe_router_load_balancing_type="aux_loss",
+        moe_token_dispatcher_type="alltoall",
+        moe_expert_capacity_factor=None,
+        moe_pad_expert_input_to_capacity=False,
+        moe_aux_loss_coeff=0.1,
+        test_dtype=torch.float32,
+        **kwargs,
+    ):
+        self.num_local_experts = num_moe_experts // ep_size
+        self.test_dtype = test_dtype
+        if moe_tp_size is None:
+            moe_tp_size = tp_size
+
+        ps.destroy_model_parallel()
+        ps.initialize_model_parallel(
+            tensor_model_parallel_size=tp_size,
+            pipeline_model_parallel_size=pp_size,
+            expert_model_parallel_size=ep_size,
+            context_parallel_size=cp_size,
+            expert_tensor_parallel_size=moe_tp_size,
+        )
+
+        _set_random_seed(seed_=123, data_parallel_random_init=data_parallel_random_init)
+        local_expert_indices_offset = parallel_state.get_expert_model_parallel_rank() * self.num_local_experts
+        self.local_expert_indices = [local_expert_indices_offset + i for i in range(self.num_local_experts)]
+        self.config = TransformerConfig(
+            tensor_model_parallel_size=tp_size,
+            expert_model_parallel_size=ep_size,
+            pipeline_model_parallel_size=pp_size,
+            context_parallel_size=cp_size,
+            expert_tensor_parallel_size=moe_tp_size,
+            moe_router_topk=moe_router_topk,
+            num_moe_experts=num_moe_experts,
+            moe_router_load_balancing_type=moe_router_load_balancing_type,
+            moe_token_dispatcher_type=moe_token_dispatcher_type,
+            moe_expert_capacity_factor=moe_expert_capacity_factor,
+            moe_pad_expert_input_to_capacity=moe_pad_expert_input_to_capacity,
+            moe_aux_loss_coeff=moe_aux_loss_coeff,
+            num_layers=1,
+            moe_router_dtype="fp32",
+            moe_grouped_gemm=kwargs.get("moe_grouped_gemm", False),
+            hidden_size=kwargs.get("hidden_size", 16),
+            num_attention_heads=kwargs.get("num_attention_heads", 8),
+            use_cpu_initialization=kwargs.get("use_cpu_initialization", True),
+            sequence_parallel=tp_size > 1,
+            add_bias_linear=kwargs.get("add_bias_linear", False),
+            moe_permute_fusion=kwargs.get("moe_permute_fusion", False),
+            moe_enable_deepep=kwargs.get("moe_enable_deepep", False),
+        )
+
+        # init moe layer
+        self.moe_layer = self.new_moe_layer()
+
+    def new_moe_layer(self, **kargs):
+        transformer_layer_spec = get_gpt_layer_local_spec(
+            num_experts=self.config.num_moe_experts, moe_grouped_gemm=self.config.moe_grouped_gemm
+        )
+        new_config = dataclasses.replace(self.config, **kargs)
+        moe_layer = (
+            MoELayer(new_config, transformer_layer_spec.submodules.mlp.submodules)
+            .cuda()
+            .to(dtype=self.test_dtype)
+        )
+        moe_layer.set_layer_number(0)
+        return moe_layer
+
+    def __del__(self):
+        torch.distributed.barrier()
+        torch.cuda.synchronize()
+
+    def dispatcher_dropless_test(self):
+        moe_layer = self.moe_layer
+        bs = 32
+        seql = 8
+        # TODO: Find why setting manual seed can cause the test to fail
+        # Manual seed to differentiate input data for each rank
+        # rank = torch.distributed.get_rank()
+        # torch.manual_seed(1000 + rank)
+        hidden_states = torch.randn((bs, seql, moe_layer.config.hidden_size), dtype=self.test_dtype)
+        hidden_states = hidden_states.cuda()
+        # Permute and then unpermute data are supposed to restore original data
+        ans = hidden_states
+        hidden_states.requires_grad = True
+        probs, indices = moe_layer.router(hidden_states)
+        probs = torch.ones_like(probs) / moe_layer.router.topk
+
+        (permuted_local_hidden_states, tokens_per_expert, permuted_probs) = token_permutation(
+            moe_layer.token_dispatcher, hidden_states, probs, indices
+        )
+
+        permuted_local_hidden_states = permuted_local_hidden_states * permuted_probs.unsqueeze(-1)
+        permuted_local_hidden_states = permuted_local_hidden_states.to(dtype=self.test_dtype)
+
+        restored_hidden_states, restored_bias = token_unpermutation(
+            moe_layer.token_dispatcher, permuted_local_hidden_states
+        )
+
+        # reduce across TP rank equals to multiply data by a scale of ETP
+        scale = moe_layer.config.expert_tensor_parallel_size
+        restored_hidden_states = restored_hidden_states / scale
+
+        torch.testing.assert_close(
+            restored_hidden_states, ans
+        ), "Restored hidden states do not match original hidden states"
+
+        # check if the grad of the hidden states is same as the hidden states
+        torch.autograd.backward(restored_hidden_states, hidden_states)
+        torch.testing.assert_close(
+            hidden_states.grad, ans
+        ), "Restored hidden states do not match original hidden states"
+
+    def dispatcher_capacity_test(self):
+        moe_layer = self.moe_layer
+        num_tokens = 16
+        hidden_states = torch.randn((num_tokens, moe_layer.config.hidden_size), dtype=self.test_dtype)
+        hidden_states = hidden_states.cuda()
+        hidden_states.requires_grad = True
+        probs, indices = moe_layer.router(hidden_states)
+
+        # Create the answer.
+        prob_mask = probs != 0
+        probs = torch.ones_like(probs) * prob_mask / moe_layer.router.topk
+        local_probss = probs
+        restored_hidden_states_answer = hidden_states * local_probss.sum(dim=1).unsqueeze(1)
+        restored_hidden_states_answer = restored_hidden_states_answer.to(dtype=self.test_dtype)
+
+        (permuted_local_hidden_states, tokens_per_expert, permuted_probs) = token_permutation(
+            moe_layer.token_dispatcher, hidden_states, probs, indices
+        )
+
+        # Check tokens per expert not exceed the capacity.
+        capacity = get_capacity(
+            num_tokens * self.config.moe_router_topk,
+            self.config.num_moe_experts,
+            self.config.moe_expert_capacity_factor,
+        )
+        assert torch.all(
+            tokens_per_expert
+            <= capacity * self.config.expert_model_parallel_size * self.config.tensor_model_parallel_size
+        ), "Tokens per expert exceed the capacity"
+
+        permuted_local_hidden_states = permuted_local_hidden_states * permuted_probs.unsqueeze(-1)
+
+        permuted_local_hidden_states /= moe_layer.config.tensor_model_parallel_size
+        permuted_local_hidden_states = permuted_local_hidden_states.to(dtype=self.test_dtype)
+
+        restored_hidden_states, restored_bias = token_unpermutation(
+            moe_layer.token_dispatcher, permuted_local_hidden_states
+        )
+        torch.testing.assert_close(
+            restored_hidden_states, restored_hidden_states_answer
+        ), "Restored hidden states does not match"
+
+        # check if the grad of the hidden states is same as the hidden states
+        torch.autograd.backward(restored_hidden_states, hidden_states)
+        torch.testing.assert_close(
+            hidden_states.grad, restored_hidden_states_answer
+        ), "Gradient of hidden states should be same as hidden states"
+
+    def dispatcher_drop_and_pad_test(self):
+        """Test if the tokens are dropped and padded correctly.
+
+        Since the probs of padded tokens are 0, the combined results for
+        dispatching with or without padding should be the same.
+        """
+        moe_layer = self.new_moe_layer(moe_pad_expert_input_to_capacity=False)
+
+        num_tokens = 16
+        hidden_states = torch.randn((num_tokens, moe_layer.config.hidden_size), dtype=self.test_dtype).cuda()
+        hidden_states.requires_grad = True
+
+        probs_1, indices_1 = moe_layer.router(hidden_states)
+        (permuted_input_1, tokens_per_expert, permuted_probs_1) = token_permutation(
+            moe_layer.token_dispatcher, hidden_states, probs_1, indices_1
+        )
+        permuted_input_1 = permuted_input_1 * permuted_probs_1.unsqueeze(-1)
+        permuted_input_1 = permuted_input_1.to(dtype=self.test_dtype)
+        forward_answer, restored_bias = token_unpermutation(moe_layer.token_dispatcher, permuted_input_1)
+        torch.autograd.backward(forward_answer, forward_answer)
+        backward_answer = hidden_states.grad.clone()
+        hidden_states.grad = None
+        torch.cuda.synchronize()
+        # End
+
+        moe_layer_2 = self.new_moe_layer(moe_pad_expert_input_to_capacity=True)
+        moe_layer_2.load_state_dict(moe_layer.state_dict())
+
+        probs_2, indices_2 = moe_layer_2.router(hidden_states)
+        (permuted_input_2, tokens_per_expert, permuted_probs_2) = token_permutation(
+            moe_layer_2.token_dispatcher, hidden_states, probs_2, indices_2
+        )
+        permuted_input_2 = permuted_input_2 * permuted_probs_2.unsqueeze(-1)
+        permuted_input_2 = permuted_input_2.to(dtype=self.test_dtype)
+        restored_hidden_states, restored_bias = token_unpermutation(
+            moe_layer_2.token_dispatcher, permuted_input_2
+        )
+
+        # # Check tokens per expert equals to the capacity.
+        capacity = get_capacity(
+            num_tokens * self.config.moe_router_topk,
+            self.config.num_moe_experts,
+            self.config.moe_expert_capacity_factor,
+        )
+        assert torch.all(
+            tokens_per_expert
+            == capacity * self.config.expert_model_parallel_size * self.config.tensor_model_parallel_size
+        ), "Tokens per expert should be the same as the capacity"
+        torch.testing.assert_close(
+            restored_hidden_states, forward_answer
+        ), "Restored hidden states does not match"
+
+        # check if the grad of the hidden states is same as the hidden states
+        torch.autograd.backward(restored_hidden_states, restored_hidden_states)
+        torch.testing.assert_close(
+            hidden_states.grad, backward_answer
+        ), "Gradient of hidden states should be same as hidden states"
+
+
+@instantiate_parametrized_tests
+class TestFlexDispatcher(MultiProcessTestCase):
+    def tearDown(self):
+        super().tearDown()
+
+    def setUp(self) -> None:
+        super().setUp()
+        self._spawn_processes()
+
+    @property
+    def world_size(self) -> int:
+        return torch.cuda.device_count()
+
+    @property
+    def device(self) -> torch.device:
+        return torch.device("cuda", self.rank)
+
+    def _init_process(self):
+        os.environ["WORLD_SIZE"] = str(self.world_size)
+        os.environ["LOCAL_RANK"] = str(self.rank)
+
+        torch.cuda.set_device(self.device)
+        store = dist.FileStore(self.file_name, self.world_size)
+        dist.init_process_group(
+            backend="nccl",
+            world_size=self.world_size,
+            rank=self.rank,
+            store=store,
+        )
+
+    @skip_if_lt_x_gpu(8)
+    def test_forward_backward(self):
+        self._init_process()
+
+        args = create_args()
+        set_args(args)
+        with custom_patch():
+            for tp_size, ep_size in [(8, 1), (1, 8), (2, 4)]:
+                container = MoEModelTestContainer(
+                    tp_size=tp_size,
+                    ep_size=ep_size,
+                    pp_size=1,
+                    num_moe_experts=8,
+                    moe_router_topk=2,
+                    moe_router_load_balancing_type="aux_loss",
+                    moe_token_dispatcher_type="flex",
+                    moe_permute_fusion=True,
+                    hidden_size=32,
+                    moe_enable_deepep=True,
+                    test_dtype=torch.bfloat16,
+                )
+                container.dispatcher_dropless_test()
+
+    @skip_if_lt_x_gpu(8)
+    def test_capacity_forward_backward(self):
+        self._init_process()
+        args = create_args()
+        set_args(args)
+        with custom_patch():
+            for tp_size, ep_size in [(1, 8), (8, 1), (4, 2)]:
+                container = MoEModelTestContainer(
+                    tp_size=tp_size,
+                    ep_size=ep_size,
+                    pp_size=1,
+                    num_moe_experts=8,
+                    moe_router_topk=2,
+                    moe_router_load_balancing_type="aux_loss",
+                    moe_token_dispatcher_type="flex",
+                    moe_token_drop_policy="probs",
+                    moe_expert_capacity_factor=0.5,
+                    moe_pad_expert_input_to_capacity=False,
+                    moe_permute_fusion=True,
+                    hidden_size=32,
+                    moe_enable_deepep=True,
+                    test_dtype=torch.bfloat16,
+                )
+                container.dispatcher_capacity_test()
+
+
+if __name__ == "__main__":
+    run_tests()

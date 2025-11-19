@@ -2,8 +2,10 @@
 # logging
 disable_tensorboard: true
 disable_wandb: true
+disable_mlflow: true
+mlflow_run_name: null
+mlflow_experiment_name: null
 disable_compile_dependencies: true
-disable_profiler_activity_cpu: false
 # NOTE:
 # - If `use_rocm_mem_info = True`, ROCm memory information will be collected
 #   with `rocm-smi` at every iteration.
@@ -11,6 +13,12 @@ disable_profiler_activity_cpu: false
 #   at the iterations specified in `use_rocm_mem_info_iters`.
 use_rocm_mem_info: false
 use_rocm_mem_info_iters: [1,2]
+
+# profiling
+disable_profiler_activity_cpu: false
+torch_profiler_record_shapes: true
+torch_profiler_with_stack: true
+torch_profiler_use_gzip: true
 
 # continue/finetune
 auto_continue_train: false
@@ -22,8 +30,14 @@ no_fp8_weight_transpose_cache: false
 # parallelism
 decoder_pipeline_manual_split_list: null # int list
 
+# MoE comm & comp Overlap
+patch_moe_overlap: false
+
 # perf
 pp_warmup: false # set to true to decrease iter-1 time when using pp
 
 # tool
 dump_pp_data: false
+
+# recompute
+recompute_layer_ids: null #int list，id srange from 0 to (num_layers_per_pp_stage - 1)

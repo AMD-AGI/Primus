@@ -16,7 +16,7 @@ Usage: bash run_local_pretrain.sh
 This script launches a Primus pretraining task inside a Docker/Podman container.
 
 Environment Variables:
-    DOCKER_IMAGE   Docker image to use [Default: docker.io/rocm/megatron-lm:v25.8_py310]
+    DOCKER_IMAGE   Docker image to use [Default: docker.io/rocm/primus:v25.9_gfx942]
     MASTER_ADDR    Master node IP or hostname [Default: localhost]
     MASTER_PORT    Master node port [Default: 1234]
     NNODES         Total number of nodes [Default: 1]
@@ -25,7 +25,9 @@ Environment Variables:
     PRIMUS_*       Any environment variable prefixed with PRIMUS_ will be passed into the container.
 
 Example:
-    EXP=examples/megatron/exp_pretrain.yaml DATA_PATH=/mnt/data bash run_local_pretrain.sh
+    For Megatron: EXP=examples/megatron/exp_pretrain.yaml DATA_PATH=/mnt/data bash run_local_pretrain.sh
+    For TorchTitan: EXP=eexamples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml DATA_PATH=/mnt/data bash run_local_pretrain.sh
+    For MaxText: BACKEND=MaxText EXP=examples/maxtext/exp_pretrain.yaml bash run_local_pretrain.sh
 
 EOF
 }
@@ -39,14 +41,20 @@ fi
 EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
 
 # Default docker image
-DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/megatron-lm:v25.8_py310"}
+if [ "${BACKEND:-}" = "MaxText" ]; then
+    DOCKER_IMAGE="docker.io/rocm/jax-training:maxtext-v25.9"
+fi
+DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.9_gfx942"}
 
 # Project root
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
+echo "PRIMUS_PATH: $PRIMUS_PATH"
 
 # Dataset directory
 # DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 DATA_PATH=${DATA_PATH:-"$(pwd)/data"}
+echo "DATA_PATH: $DATA_PATH"
+mkdir -p "$DATA_PATH"
 
 # ------------------ Cluster Env Defaults ------------------
 MASTER_ADDR=${MASTER_ADDR:-localhost}
@@ -64,14 +72,22 @@ if [ "$NODE_RANK" = "0" ]; then
     echo ""
 fi
 
-# Pass all PRIMUS_ environment variables into the container
+# Pass all PRIMUS_ and NCCL_ environment variables into the container
 ENV_ARGS=()
 
 while IFS='=' read -r name _; do
     ENV_ARGS+=("--env" "$name")
 done < <(env | grep "^PRIMUS_")
+while IFS='=' read -r name _; do
+    ENV_ARGS+=("--env" "$name")
+done < <(env | grep "^NCCL_")
+while IFS='=' read -r name _; do
+    ENV_ARGS+=("--env" "$name")
+done < <(env | grep "^PRIMUS_TURBO_")
 ENV_ARGS+=("--env" "EXP")
+ENV_ARGS+=("--env" "BACKEND")
 ENV_ARGS+=("--env" "HF_TOKEN")
+echo "ENV_ARGS: ${ENV_ARGS[*]}"
 
 HOSTNAME=$(hostname)
 ARGS=("$@")
@@ -119,16 +135,14 @@ docker_podman_proxy run --rm \
     --env TRAIN_LOG \
     --env HSA_NO_SCRATCH_RECLAIM \
     --env NVTE_CK_USES_BWD_V3 \
-    --env NCCL_IB_HCA \
     --env GPU_MAX_HW_QUEUES \
     --env GLOO_SOCKET_IFNAME \
-    --env NCCL_SOCKET_IFNAME \
     --env REBUILD_BNXT \
     --env PATH_TO_BNXT_TAR_PACKAGE \
     --env MEGATRON_PATH \
     --env TORCHTITAN_PATH \
+    --env MAXTEXT_PATH \
     --env BACKEND_PATH \
-    --env HF_TOKEN \
     "${ENV_ARGS[@]}" \
     --ipc=host --network=host \
     --device=/dev/kfd --device=/dev/dri \

@@ -15,7 +15,7 @@ GPU="8"
 EXP_PATH=""
 DATA_PATH=""
 BACKEND="megatron"
-IMAGE="docker.io/rocm/megatron-lm:v25.8_py310"
+IMAGE="docker.io/rocm/primus:v25.9_gfx942"
 HF_TOKEN="${HF_TOKEN:-}"
 WORKSPACE="primus-safe-pretrain"
 NODELIST=""
@@ -38,7 +38,7 @@ Options for create:
     --backend <name>            Training backend, e.g. megatron | torchtitan(default: megatron)
     --exp <exp_path>            Path to EXP config (optional)
     --data_path <data_path>     Data path (optional)
-    --image <docker_image>      Docker image to use (default: docker.io/rocm/megatron-lm:v25.8_py310)
+    --image <docker_image>      Docker image to use (default: docker.io/rocm/primus:v25.9_gfx942)
     --hf_token <token>          HuggingFace token (default: from env HF_TOKEN)
     --workspace <workspace>     Workspace name (default: safe-cluster-dev)
     --nodelist <node1,node2>    Comma-separated list of node names to run on (optional)
@@ -53,7 +53,7 @@ Examples:
 
     # Create a workload with custom resources and paths
     $0 --url http://api.example.com create --replica 2 --cpu 96 --gpu 4\
-        --exp examples/megatron/configs/llama2_7B-pretrain.yaml --data_path /mnt/data/train\
+        --exp examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml --data_path /mnt/data/train\
         --image docker.io/custom/image:latest --hf_token myhf_token --workspace team-dev \
         --batch-size 64 --lr 1e-4 --seed 1234
 
@@ -179,6 +179,7 @@ if [[ "$CMD" == "create" && -z "$EXP_PATH" ]]; then
 fi
 
 USER_NAME=$(whoami)
+USER_ID=$(echo -n "$USER_NAME" | md5sum | awk '{print $1}')
 CUR_DIR=$(pwd)
 
 
@@ -240,23 +241,23 @@ read -r -d '' INLINE_JSON <<EOF || true
 EOF
 
 curl_post() {
-    curl -s -H "Content-Type: application/json" -H "userId: $USER_NAME" -X POST -d "$INLINE_JSON" "$API_URL/api/v1/workloads"
+    curl -s -H "Content-Type: application/json" -H "userId: $USER_ID" -X POST -d "$INLINE_JSON" "$API_URL/api/v1/workloads"
 }
 
 curl_get() {
-    curl -s -H "userId: $USER_NAME" "$API_URL/api/v1/workloads/$1"
+    curl -s -H "userId: $USER_ID" "$API_URL/api/v1/workloads/$1"
 }
 
 curl_delete() {
-    curl -s -H "userId: $USER_NAME" -X DELETE "$API_URL/api/v1/workloads/$1"
+    curl -s -H "userId: $USER_ID" -X DELETE "$API_URL/api/v1/workloads/$1"
 }
 
 curl_list() {
-    curl -s -H "userId: $USER_NAME" "$API_URL/api/v1/workloads"
+    curl -s -H "userId: $USER_ID" "$API_URL/api/v1/workloads"
 }
 
 curl_nodes() {
-    curl -s -H "userId: $USER_NAME" "$API_URL/api/v1/nodes"
+    curl -s -H "userId: $USER_ID" "$API_URL/api/v1/nodes"
 }
 
 case "$CMD" in

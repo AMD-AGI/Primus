@@ -15,23 +15,22 @@ from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 
 import torch
 from megatron.core import parallel_state
+from megatron.core.enums import ModelType
 from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.parallel_state import (
     get_pipeline_model_parallel_group,
     get_pipeline_model_parallel_next_rank,
     get_pipeline_model_parallel_prev_rank,
 )
-from megatron.core.pipeline_parallel.p2p_communication import _communicate
+from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
 from megatron.core.pipeline_parallel.schedules import (
     backward_step,
+    check_first_val_step,
     deallocate_output_tensor,
     forward_step,
     get_tensor_shapes,
-    recv_backward,
-    recv_forward,
-    send_backward,
-    send_forward,
 )
+from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.timers import Timer
 from megatron.core.utils import get_model_config, get_model_type, get_model_xattn
 from megatron.training import get_args, print_rank_0
@@ -85,6 +84,8 @@ class TrainingIterationConfig:
     tensor_shape: Tuple
     recv_tensor_shapes: List
     send_tensor_shapes: List
+
+    first_val_step: Optional[bool] = None
 
 
 class SpQueue:
@@ -491,10 +492,14 @@ class TrainingIteration:
     def schedule_f_impl(self, scheduled_node: ScheduledNode):
         conf = self.iteration_config
         vp_stage = None
+        is_last_stage = False
         multi_chunks = get_virtual_pipeline_number() > 1
         if multi_chunks:
             vp_stage = scheduled_node.chunk
             assert vp_stage == parallel_state.get_virtual_pipeline_model_parallel_rank()
+            is_last_stage = parallel_state.is_pipeline_last_stage(ignore_virtual=False, vp_stage=vp_stage)
+        else:
+            is_last_stage = parallel_state.is_pipeline_last_stage(ignore_virtual=True)
         bufs = self.buffers
 
         if parallel_state.is_pipeline_first_stage(ignore_virtual=(not multi_chunks), vp_stage=vp_stage):
@@ -546,6 +551,12 @@ class TrainingIteration:
             conf.config,
             conf.collect_non_loss_data,
             checkpoint_activations_microbatch=None,
+            is_first_microbatch=check_first_val_step(
+                conf.first_val_step, conf.forward_only, scheduled_node.microbatch == 0
+            ),
+            vp_stage=vp_stage,
+            is_last_stage=is_last_stage,
+            current_microbatch=scheduled_node.microbatch,
         )
         assert isinstance(output_tensor, list), "output tensor should be a list"
         bufs.total_num_tokens += num_tokens
@@ -981,6 +992,10 @@ class SchedNodeRuntime:
         decoder_seq_length: int = None,
         forward_only: bool = False,
         collect_non_loss_data: bool = False,
+        first_val_step: Optional[bool] = None,
+        adjust_tensor_shapes_fn: Optional[Callable] = None,  # unused
+        p2p_communicator: Optional[P2PCommunicator] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
     ):
         if not isinstance(model, list):
             model = [model]
@@ -991,6 +1006,58 @@ class SchedNodeRuntime:
             data_iterator = [data_iterator]
         assert len(data_iterator) > 0, "empty data_iterator list found"
         config = get_model_config(model[0])
+
+        if p2p_communicator is None and pg_collection is None:
+            p2p_communicator = P2PCommunicator(
+                pp_group=parallel_state.get_pipeline_model_parallel_group(), config=config
+            )
+            tp_group = parallel_state.get_tensor_model_parallel_group()
+            cp_group = parallel_state.get_context_parallel_group()
+            embd_group = parallel_state.get_embedding_group(check_initialized=False)
+            pp_group = parallel_state.get_pipeline_model_parallel_group()
+            pos_emb_group = parallel_state.get_position_embedding_group(check_initialized=False)
+
+            pg_collection = ProcessGroupCollection()
+            pg_collection.tp = tp_group
+            pg_collection.cp = cp_group
+            pg_collection.embd = embd_group
+            pg_collection.pos_embd = pos_emb_group
+            pg_collection.pp = pp_group
+            pg_collection.dp_cp = parallel_state.get_data_parallel_group(
+                with_context_parallel=True, partial_data_parallel=False
+            )
+
+        elif p2p_communicator is not None and pg_collection is not None:
+            model_type = get_model_type(model[0])
+            assert model_type != ModelType.encoder_and_decoder, (
+                "encoder PP stages not yet supported when passing custom process groups. "
+                "support coming soon!"
+            )
+            assert hasattr(p2p_communicator, "config"), "p2p_communicator must have a config"
+            assert hasattr(pg_collection, "tp"), "pg_collection must have a tp_group"
+            assert hasattr(pg_collection, "cp"), "pg_collection must have a cp_group"
+            assert hasattr(pg_collection, "embd"), (
+                "pg_collection must have a embd. In previous version, it is used default "
+                "`parallel_state.default_embedding_ranks` to create the process group. If you are "
+                "using the default process group, please use `parallel_state.get_embedding_group()` "
+                "to get the process group. If you don't need explicitly set it to None."
+            )
+            assert hasattr(pg_collection, "pos_embd"), (
+                "pg_collection must have a pos_embd. In previous version, it is used default "
+                "`parallel_state.default_position_embedding_ranks` to create the process group."
+                " If you are using the default process group, please use "
+                "`parallel_state.get_position_embedding_group()` "
+                "If you don't need pos_embd_group, you need to explicitly set it to None."
+            )
+            assert hasattr(pg_collection, "pp"), "pg_collection must have a pp_group"
+            assert hasattr(pg_collection, "dp_cp"), "pg_collection must have a dp_cp_group"
+            tp_group = pg_collection.tp
+            cp_group = pg_collection.cp
+        else:
+            raise ValueError(
+                "Invalid combination of p2p_communicator, pg_collection"
+                " provide none or provide all the process groups"
+            )
 
         multi_chunks = get_virtual_pipeline_number() > 1
         if config.overlap_p2p_comm and config.batch_p2p_comm:
@@ -1027,7 +1094,7 @@ class SchedNodeRuntime:
         assert config.num_microbatches_with_partial_activation_checkpoints is None
 
         model_type = get_model_type(model[0])
-        encoder_decoder_xattn = get_model_xattn(model[0])
+        get_model_xattn(model[0])
 
         tensor_shape = [seq_length, micro_batch_size, config.hidden_size]
         if config.sequence_parallel:
@@ -1037,25 +1104,22 @@ class SchedNodeRuntime:
         if multi_chunks and decoder_seq_length is not None and decoder_seq_length != tensor_shape[0]:
             raise RuntimeError("Interleaving is not supported with a different decoder sequence length.")
 
-        rank = parallel_state.get_pipeline_model_parallel_rank()
+        parallel_state.get_pipeline_model_parallel_rank()
         recv_tensor_shapes = get_tensor_shapes(
-            rank=rank - 1,
-            model_type=model_type,
             seq_length=seq_length,
             micro_batch_size=micro_batch_size,
             decoder_seq_length=decoder_seq_length,
             config=config,
-            encoder_decoder_xattn=encoder_decoder_xattn,
+            tp_group=tp_group,
+            cp_group=cp_group,
         )
-        assert recv_tensor_shapes[0] == tensor_shape
         send_tensor_shapes = get_tensor_shapes(
-            rank=rank,
-            model_type=model_type,
             seq_length=seq_length,
             micro_batch_size=micro_batch_size,
             decoder_seq_length=decoder_seq_length,
             config=config,
-            encoder_decoder_xattn=encoder_decoder_xattn,
+            tp_group=tp_group,
+            cp_group=cp_group,
         )
         assert send_tensor_shapes[0] == tensor_shape
 
@@ -1067,7 +1131,7 @@ class SchedNodeRuntime:
             >= get_args().zero_bubble_pipeline_timers_start_iter
         )
 
-        bootstrap_and_profile_p2p_communication(config, [tensor_shape], [tensor_shape])
+        bootstrap_and_profile_p2p_communication(config, [tensor_shape], [tensor_shape], p2p_communicator)
 
         iteration_config = TrainingIterationConfig(
             run_timer=run_timer,
@@ -1084,6 +1148,7 @@ class SchedNodeRuntime:
             tensor_shape=tensor_shape,
             recv_tensor_shapes=recv_tensor_shapes,
             send_tensor_shapes=send_tensor_shapes,
+            first_val_step=first_val_step,
         )
         return iteration_config
 
@@ -1262,8 +1327,8 @@ def fused_pipeline_ops(
         ops.append(recv_next_op)
     if len(ops) > 0:
         reqs = torch.distributed.batch_isend_irecv(ops)
+
         # batch_isend_irecv only returns 1 handle
-        assert len(reqs) == 1
         r = reqs[0]
         # Keep the returned value consistent with p2p_pipeline_ops
         sp_reqs = [r] * len(tensor_send_prev)
@@ -1274,6 +1339,12 @@ def fused_pipeline_ops(
         reqs = []
         sp_reqs, rp_reqs, sn_reqs, rn_reqs = [], [], [], []
     return reqs, (sp_reqs, rp_reqs, sn_reqs, rn_reqs)
+
+
+class HackReq:
+    """Class to hack async p2p request because the async p2p performance bad"""
+
+    def wait(): ...
 
 
 def multi_pipeline_ops(
@@ -1288,7 +1359,8 @@ def multi_pipeline_ops(
         p2p_func = fused_pipeline_ops
     else:
         p2p_func = p2p_pipeline_ops
-    return p2p_func(
+
+    reqs = p2p_func(
         tensor_send_prev=tensor_send_prev,
         tensor_recv_prev=tensor_recv_prev,
         tensor_send_next=tensor_send_next,
@@ -1296,8 +1368,26 @@ def multi_pipeline_ops(
         group=group,
     )
 
+    if batch:
+        hack_req = HackReq()
+        hack_reqs = []
 
-def bootstrap_and_profile_p2p_communication(config, send_tensor_shapes, recv_tensor_shapes):
+        real_reqs, all_tensor_reqs = reqs
+        for req in real_reqs:
+            req.wait()
+            hack_reqs.append(hack_req)
+
+        torch.cuda.synchronize()
+        for tensor_reqs in all_tensor_reqs:
+            for req in tensor_reqs:
+                req = hack_req
+
+        reqs = (hack_reqs, all_tensor_reqs)
+
+    return reqs
+
+
+def bootstrap_and_profile_p2p_communication(config, send_tensor_shapes, recv_tensor_shapes, p2p_communicator):
     # When we fuse some send-recv communication ops in a device and can't fuse on other devices
     # because there are computation between communication, it will result in deadlock.
     # Doing send-recv without fusing using the same communicator beforehand can avoid this problem.
@@ -1316,46 +1406,42 @@ def bootstrap_and_profile_p2p_communication(config, send_tensor_shapes, recv_ten
             # Make everyone think they are the first chunk, so we still need additional check to prevent rank -1 to send_forward/recv_backward
             parallel_state.set_virtual_pipeline_model_parallel_rank(0)
         if not parallel_state.is_pipeline_first_stage(ignore_virtual=True):
-            recv_forward(shape, config, False)
+            p2p_communicator.recv_forward(shape, False)
         if not parallel_state.is_pipeline_last_stage(ignore_virtual=True):
-            send_forward(nccl_init_tensor, shape, config, False)
-            recv_backward(shape, config, False)
+            p2p_communicator.send_forward(nccl_init_tensor, False)
+            p2p_communicator.recv_backward(shape, False)
         if not parallel_state.is_pipeline_first_stage(ignore_virtual=True):
-            send_backward(nccl_init_tensor, shape, config, False)
+            p2p_communicator.send_backward(nccl_init_tensor, False)
         # for interleaved pipeline parallelism
         if parallel_state.is_pipeline_first_stage(ignore_virtual=True):
-            _communicate(
+            p2p_communicator._communicate(
                 tensor_send_next=None,
                 tensor_send_prev=None,
                 recv_prev=True,
                 recv_next=False,
                 tensor_shape=shape[0],
-                config=config,
             )
-            _communicate(
+            p2p_communicator._communicate(
                 tensor_send_next=None,
                 tensor_send_prev=nccl_init_tensor[0],
                 recv_prev=False,
                 recv_next=False,
                 tensor_shape=None,
-                config=config,
             )
         if parallel_state.is_pipeline_last_stage(ignore_virtual=True):
-            _communicate(
+            p2p_communicator._communicate(
                 tensor_send_next=nccl_init_tensor[0],
                 tensor_send_prev=None,
                 recv_prev=False,
                 recv_next=False,
                 tensor_shape=None,
-                config=config,
             )
-            _communicate(
+            p2p_communicator._communicate(
                 tensor_send_next=None,
                 tensor_send_prev=None,
                 recv_prev=False,
                 recv_next=True,
                 tensor_shape=shape[0],
-                config=config,
             )
 
         # Benchmarking the communication cost
@@ -1367,15 +1453,17 @@ def bootstrap_and_profile_p2p_communication(config, send_tensor_shapes, recv_ten
         print_rank_0(f"Start benchmarking communication with size {recv_tensor_shapes}, {send_tensor_shapes}")
         for _ in range(10):
             if not parallel_state.is_pipeline_first_stage(ignore_virtual=True):
-                recv_forward(recv_tensor_shapes, config, False)
+                p2p_communicator.recv_forward(recv_tensor_shapes, False)
             if not parallel_state.is_pipeline_last_stage(ignore_virtual=True):
-                send_forward(send_data, send_tensor_shapes, config, False)
-                recv_backward(send_tensor_shapes, config, False)
+                p2p_communicator.send_forward(send_data, False)
+                p2p_communicator.recv_backward(send_tensor_shapes, False)
             if not parallel_state.is_pipeline_first_stage(ignore_virtual=True):
-                send_backward(recv_data, recv_tensor_shapes, config, False)
+                p2p_communicator.send_backward(recv_data, False)
         t.stop()
-        per_communication = torch.cuda.FloatTensor(
-            [t.elapsed() / (parallel_state.get_pipeline_model_parallel_world_size() - 1) / 2 / 10]
+        per_communication = torch.tensor(
+            [t.elapsed() / (parallel_state.get_pipeline_model_parallel_world_size() - 1) / 2 / 10],
+            dtype=torch.float,
+            device="cuda",
         )
         torch.distributed.all_reduce(per_communication, torch.distributed.ReduceOp.MAX)
         ScheduleTimers.comm_time = per_communication.item()
@@ -1716,8 +1804,6 @@ def get_zero_bubble_forward_backward_func():
             forward_backward_func = wrapped_auto_schedule_forward_backward_func(
                 global_zb_runtime, scheduler=scheduler
             )
-            # forward_backward_func = wrapped_auto_schedule_forward_backward_func(forward_backward_pipelining_with_interleaving_auto_schedule,
-            #                                                                     scheduler=scheduler)
         else:
             raise ValueError("got virtual pipeline parallel but v_schedule is disabled")
     else:
@@ -1766,10 +1852,5 @@ def get_zero_bubble_forward_backward_func():
         forward_backward_func = wrapped_auto_schedule_forward_backward_func(
             global_zb_runtime, scheduler=scheduler
         )
-
-    if get_args().dump_pp_data:
-        from primus.modules.trainer.megatron.utils import schedule_wrapper
-
-        forward_backward_func = schedule_wrapper(forward_backward_func)
 
     return forward_backward_func

@@ -9,6 +9,8 @@ on:
       - "v*"
   pull_request:
 
+env:
+  PRIMUS_TURBO_COMMIT: 70b76508408474f254ac048cef2005179c6cb55b # fix(deepep): fix internode_combine hang when set num_worst_token > 0 (#149)
 jobs:
   code-lint:
     runs-on: ubuntu-latest
@@ -47,6 +49,70 @@ jobs:
         if: always()
         with:
           options: "--check --diff --color --verbose --line-length=110"
+
+  build-docker:
+    needs: [code-lint]
+    runs-on: build-docker
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - run: echo "🎉 Begin Build Primus Docker Image."
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Show Environment Info
+        run: |
+          echo "Hostname: $(hostname)"
+          echo "PWD: $(pwd)"
+          echo "HOME: $HOME"
+          echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
+          echo "Runner Temp Dir: $RUNNER_TEMP"
+          echo "Runner Tool Cache: $RUNNER_TOOL_CACHE"
+      - name: Parse Commit Info
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "IMAGE_TAG=pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "IMAGE_TAG=latest" >> $GITHUB_ENV
+          elif [[ "${{ github.event_name }}" == "release" ]]; then
+            TAG_NAME="${{ github.ref }}"
+            TAG="${TAG_NAME#refs/tags/}"
+            echo "IMAGE_TAG=$TAG" >> $GITHUB_ENV
+          else
+            echo "IMAGE_TAG=others" >> $GITHUB_ENV
+          fi
+      - name: Build and Push Docker Image
+        run: |
+          echo "> Login to ROCm Docker Hub"
+          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+
+          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}"
+          start_time=$(date +%s)
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
+               -t tasimage/primus:${{env.IMAGE_TAG}} \
+               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} .
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build primus docker] Total elapsed time: ${elapsed} seconds"
+
+          echo "> Docker tag image for Docker Hub"
+          docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+
+          echo "> Login to Primus Docker Hub"
+          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+
+          echo "> Docker push to Docker Hub"
+          start_time=$(date +%s)
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [push primus docker] Total elapsed time: ${elapsed} seconds"
+
+          # echo "> Docker cleanup local images"
+          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}
+          # echo "> build-docker success"
+
   run-unittest:
     env:
       PRIMUS_WORKDIR: /apps/tas/0_public/primus_k8s_ci
@@ -54,13 +120,15 @@ jobs:
     runs-on: [tas-k8s]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
+      - name: Set commit hash to env
+        run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
       - name: Checkout Repo Primus-Turbo
         uses: actions/checkout@v4
         with:
           repository: AMD-AIG-AIMA/Primus-Turbo
           submodules: "recursive"
           path: Primus-Turbo
-          ref: 6d39647350baa180cccc61e701cf75281dc7e878 # feat: add TurboStream (#96)
+          ref: ${{ env.PRIMUS_TURBO_COMMIT }}
       - run: echo "Begin Primus-Turbo Install."
       - name: Install Primus-Turbo
         run: |
@@ -111,6 +179,10 @@ jobs:
           else
             echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others" >> $GITHUB_ENV
           fi
+      - name: Run Shell Tests
+        run: |
+          echo "Running Primus CLI shell tests..."
+          bash ./tests/runner/run_all_tests.sh
       - name: Run Unit Tests
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}

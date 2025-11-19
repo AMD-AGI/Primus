@@ -66,20 +66,30 @@ export NNODES=${NNODES:-1}
 export NODE_RANK=${NODE_RANK:-0}
 export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
-
 LOG_INFO_RANK0 "==========Training cluster info=========="
 LOG_INFO_RANK0 "MASTER_ADDR: $MASTER_ADDR"
 LOG_INFO_RANK0 "MASTER_PORT: $MASTER_PORT"
 LOG_INFO_RANK0 "NNODES: $NNODES"
 LOG_INFO_RANK0 "NODE_RANK: $NODE_RANK"
 LOG_INFO_RANK0 "GPUS_PER_NODE: $GPUS_PER_NODE"
+if [ "${BACKEND:-}" = "MaxText" ]; then
+    export JAX_COORDINATOR_IP=$MASTER_ADDR
+    export JAX_COORDINATOR_PORT=$MASTER_PORT
+    LOG_INFO_RANK0 "JAX_COORDINATOR_IP: $JAX_COORDINATOR_IP"
+    LOG_INFO_RANK0 "JAX_COORDINATOR_PORT: $JAX_COORDINATOR_PORT"
+fi
 LOG_INFO_RANK0 ""
 
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
 export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 
-pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
+LOG_INFO_RANK0 "Pip installing required packages ..."
+if [ "${BACKEND:-}" != "MaxText" ]; then
+    pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
+else
+    pip install -r "$PRIMUS_PATH/requirements-jax.txt"  --quiet
+fi
 
 # -------------------- EXP Check --------------------
 if [ -z "${EXP:-}" ]; then
@@ -113,10 +123,11 @@ fi
 # export AITER_JIT_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}_aiter_cache"
 
 
-TRAIN_LOG=${TRAIN_LOG:-"output/log_torchrun_pretrain_$(basename "$EXP" .yaml).txt"}
+TRAIN_LOG=${TRAIN_LOG:-"output/log_mp_pretrain_$(basename "$EXP" .yaml).txt"}
 
 LOG_INFO_RANK0 "==========Training info=========="
 LOG_INFO_RANK0 "EXP: $EXP"
+LOG_INFO_RANK0 "EXP: $BACKEND"
 LOG_INFO_RANK0 "TRAIN_LOG: $TRAIN_LOG"
 LOG_INFO_RANK0 "PRIMUS_PATH: $PRIMUS_PATH"
 LOG_INFO_RANK0 "DATA_PATH: $DATA_PATH"
@@ -185,8 +196,10 @@ export RCCL_MSCCLPP_FORCE_ENABLE=0
 export RCCL_MSCCLPP_THRESHOLD=$((1*1024*1024*1024)) # default 1 MB
 # https://github.com/microsoft/mscclpp/blob/main/include/mscclpp/env.hpp#L82-L87
 export MSCCLPP_DISABLE_CHANNEL_CACHE=FALSE
-# pytorch need set this env to enable register comm
-export TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=0
+if [ "${BACKEND:-}" != "MaxText" ]; then
+    # pytorch need set this env to enable register comm
+    export TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=0
+fi
 
 LOG_INFO_RANK0 "==========AMD-specific GPU optimizations=========="
 LOG_INFO_RANK0 "HSA_ENABLE_SDMA: $HSA_ENABLE_SDMA"
@@ -200,15 +213,53 @@ LOG_INFO_RANK0 "TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK: $TORCH_NCCL_USE_T
 LOG_INFO_RANK0 ""
 
 # ----------------- Performance tuning -----------------
+if [ "${BACKEND:-}" == "MaxText" ]; then
+    export NVTE_ALLOW_NONDETERMINISTIC_ALGO=1
+    export XLA_PYTHON_CLIENT_MEM_FRACTION=.97
+    export NVTE_USE_HIPBLASLT=1
+    export XLA_FLAGS="--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_graph_level=0 --xla_gpu_enable_latency_hiding_scheduler=True --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=False --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=FALSE"
+
+    export HIP_FORCE_DEV_KERNARG=1
+    export HSA_FORCE_FINE_GRAIN_PCIE=1
+    export NVTE_FUSED_ATTN=1
+    export NVTE_CK_USES_BWD_V3=1
+    export NVTE_CK_USES_FWD_V3=1
+    export NVTE_CK_IS_V3_ATOMIC_FP32=0
+    export NVTE_CK_HOW_V3_BF16_CVT=2
+    export NVTE_FUSED_ATTN_CK=1
+    export NVTE_FUSED_ATTN_AOTRITON=0
+
+    LOG_INFO_RANK0 "==========Performance tuning for MaxText=========="
+    LOG_INFO_RANK0 "NVTE_ALLOW_NONDETERMINISTIC_ALGO: $NVTE_ALLOW_NONDETERMINISTIC_ALGO"
+    LOG_INFO_RANK0 "XLA_PYTHON_CLIENT_MEM_FRACTION: $XLA_PYTHON_CLIENT_MEM_FRACTION"
+    LOG_INFO_RANK0 "NVTE_USE_HIPBLASLT: $NVTE_USE_HIPBLASLT"
+    LOG_INFO_RANK0 "XLA_FLAGS: $XLA_FLAGS"
+    LOG_INFO_RANK0 "HIP_FORCE_DEV_KERNARG: $HIP_FORCE_DEV_KERNARG"
+    LOG_INFO_RANK0 "HSA_FORCE_FINE_GRAIN_PCIE: $HSA_FORCE_FINE_GRAIN_PCIE"
+    LOG_INFO_RANK0 "NVTE_FUSED_ATTN: $NVTE_FUSED_ATTN"
+    LOG_INFO_RANK0 "NVTE_CK_USES_BWD_V3: $NVTE_CK_USES_BWD_V3"
+    LOG_INFO_RANK0 "NVTE_CK_USES_FWD_V3: $NVTE_CK_USES_FWD_V3"
+    LOG_INFO_RANK0 "NVTE_CK_IS_V3_ATOMIC_FP32: $NVTE_CK_IS_V3_ATOMIC_FP32"
+    LOG_INFO_RANK0 "NVTE_CK_HOW_V3_BF16_CVT: $NVTE_CK_HOW_V3_BF16_CVT"
+    LOG_INFO_RANK0 "NVTE_FUSED_ATTN_CK: $NVTE_FUSED_ATTN_CK"
+    LOG_INFO_RANK0 "NVTE_FUSED_ATTN_AOTRITON: $NVTE_FUSED_ATTN_AOTRITON"
+fi
 
 # Limit GPU hardware queues to 2 for performance stability
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 
+# Increase HSA kernarg pool size to 12MB for models with lot of kernels
+# export HSA_KERNARG_POOL_SIZE=${HSA_KERNARG_POOL_SIZE:-12582912}
+
+# Enable NUMA binding for better memory locality (may increase stability for large models)
+export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-0}
+
 # Limit max CUDA device connections to reduce PCIe traffic
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
-
-# Prioritize NCCL communication for PyTorch for higher throughput
-export TORCH_NCCL_HIGH_PRIORITY=1
+if [ "${BACKEND:-}" != "MaxText" ]; then
+    # Prioritize NCCL communication for PyTorch for higher throughput
+    export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
+fi
 
 # In multi-node training, PXN can be enabled to improve inter-node all-to-all
 # communication efficiency, but it will increase GPU memory usage.
@@ -217,11 +268,14 @@ export NCCL_PXN_DISABLE=${NCCL_PXN_DISABLE:-1}
 export NCCL_P2P_NET_CHUNKSIZE=${NCCL_P2P_NET_CHUNKSIZE:-524288}
 
 # optimize nvte fp8 cast transpose
-export NVTE_USE_CAST_TRANSPOSE_TRITON=1
-export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=0
+export NVTE_USE_CAST_TRANSPOSE_TRITON=${NVTE_USE_CAST_TRANSPOSE_TRITON:-1}
+export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE:-0}
 
 # Note: Disable v3 due to accuracy issues. Will fix after TE version 2.1.
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
+
+# Note: Disable fp32 atomic due if you find any accuracy issue.
+export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:0}
 
 # nvte debug envs
 export NVTE_DEBUG=0 # 0, 1
@@ -231,6 +285,8 @@ export PATCH_TE_FLASH_ATTN=${PATCH_TE_FLASH_ATTN:-0}
 
 LOG_INFO_RANK0 "==========Performance tuning=========="
 LOG_INFO_RANK0 "GPU_MAX_HW_QUEUES: $GPU_MAX_HW_QUEUES"
+LOG_INFO_RANK0 "HSA_KERNARG_POOL_SIZE: $HSA_KERNARG_POOL_SIZE"
+LOG_INFO_RANK0 "ENABLE_NUMA_BINDING: $ENABLE_NUMA_BINDING"
 LOG_INFO_RANK0 "CUDA_DEVICE_MAX_CONNECTIONS: $CUDA_DEVICE_MAX_CONNECTIONS"
 LOG_INFO_RANK0 "TORCH_NCCL_HIGH_PRIORITY: $TORCH_NCCL_HIGH_PRIORITY"
 LOG_INFO_RANK0 "CUDA_DEVICE_MAX_CONNECTIONS: $CUDA_DEVICE_MAX_CONNECTIONS"
@@ -240,6 +296,7 @@ LOG_INFO_RANK0 "NCCL_P2P_NET_CHUNKSIZE: $NCCL_P2P_NET_CHUNKSIZE"
 LOG_INFO_RANK0 "NVTE_CK_USES_BWD_V3: $NVTE_CK_USES_BWD_V3"
 LOG_INFO_RANK0 "NVTE_USE_CAST_TRANSPOSE_TRITON: $NVTE_USE_CAST_TRANSPOSE_TRITON"
 LOG_INFO_RANK0 "NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE: $NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE"
+LOG_INFO_RANK0 "PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: $PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32"
 if [[ "$PATCH_TE_FLASH_ATTN" == "1" ]]; then
     LOG_INFO_RANK0 'Patching _flash_attn_max_version in attention.py...'
     sed -i 's/_flash_attn_max_version = PkgVersion(\".*\")/_flash_attn_max_version = PkgVersion(\"3.0.0.post1\")/' \
@@ -268,7 +325,19 @@ else
   LOG_INFO "Skip bnxt rebuild. REBUILD_BNXT=$REBUILD_BNXT, PATH_TO_BNXT_TAR_PACKAGE=$PATH_TO_BNXT_TAR_PACKAGE"
 fi
 
+# -------------------- Install required packages for Jax --------------------
+install_pkgs_for_maxtext() {
+    LOG_INFO_RANK0 "========== Install required packages for Jax/MaxText =========="
+    apt install iproute2 -y
+    apt install -y linux-headers-"$(uname -r)" libelf-dev
+    apt install -y gcc make libtool autoconf librdmacm-dev rdmacm-utils infiniband-diags ibverbs-utils perftest ethtool libibverbs-dev \
+        rdma-core strace libibmad5 libibnetdisc5 ibverbs-providers libibumad-dev libibumad3 libibverbs1 libnl-3-dev libnl-route-3-dev
+    LOG_INFO_RANK0 "========== Install required packages for Jax/MaxText Done =========="
+}
 
+if [[ "$NNODES" -gt 1 ]] && [[ "${BACKEND:-}" == "MaxText" ]]; then
+    install_pkgs_for_maxtext
+fi
 
 # -------------------- HipBLASLt Tuning --------------------
 handle_hipblaslt_tuning() {
@@ -345,6 +414,9 @@ run_prepare_experiment() {
     if [[ -n "${BACKEND_PATH}" ]]; then
         BACKEND_ARG=(--backend_path "$BACKEND_PATH")
     fi
+    if [[ -n "${BACKEND}" ]]; then
+        BACKEND_ARG+=("--backend" "$BACKEND")
+    fi
 
     # Run the prepare_experiment.py script with required and optional arguments
     if ! python3 "$SCRIPT" \
@@ -401,18 +473,25 @@ else
     LOG_INFO_RANK0 "No patch args file found at $PRIMUS_PATCH_ARGS_FILE, skipping patch args."
 fi
 
+
 # -------------------- Launch Training --------------------
-DISTRIBUTED_ARGS=(
-    --nproc_per_node "${GPUS_PER_NODE}"
-    --nnodes "${NNODES}"
-    --node_rank "${NODE_RANK}"
-    --master_addr "${MASTER_ADDR}"
-    --master_port "${MASTER_PORT}"
-)
+if [ "${BACKEND:-}" == "MaxText" ]; then
+    CMD="python primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
+else
+    DISTRIBUTED_ARGS=(
+        --nproc_per_node "${GPUS_PER_NODE}"
+        --nnodes "${NNODES}"
+        --node_rank "${NODE_RANK}"
+        --master_addr "${MASTER_ADDR}"
+        --master_port "${MASTER_PORT}"
+    )
+    if [[ "$ENABLE_NUMA_BINDING" == "1" ]]; then
+        apt-get install numactl -y > /dev/null 2>&1
+        NUMA_LAUNCHER="--no-python ./runner/helpers/numa_bind.sh python3"
+    fi
 
-
-CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
-
+    CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS ${NUMA_LAUNCHER} primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
+fi
 LOG_INFO "Launching distributed training with command: $CMD"
 
 eval "$CMD" 2>&1 | tee "$TRAIN_LOG"
@@ -424,14 +503,14 @@ if [ "${PRIMUS_HIPBLASLT_TUNING_STAGE:-0}" -eq 1 ]; then
          "and tune the gemm with a single node."
 fi
 
-LOG_INFO "torchrun exited with code $exit_code"
+LOG_INFO "primus launcher exited with code $exit_code"
 
 if [[ $exit_code -ne 0 ]]; then
     if [[ $exit_code -ge 128 ]]; then
         signal=$((exit_code - 128))
-        LOG_ERROR "torchrun crashed due to signal $signal"
+        LOG_ERROR "primus launcher crashed due to signal $signal"
     else
-        LOG_ERROR "torchrun exited with code $exit_code"
+        LOG_ERROR "primus launcher exited with code $exit_code"
     fi
 fi
 

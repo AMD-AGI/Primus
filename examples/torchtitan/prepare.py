@@ -6,12 +6,11 @@
 
 import argparse
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
 from typing import Optional
-
-from requests.exceptions import HTTPError
 
 from examples.scripts.utils import (
     get_env_case_insensitive,
@@ -21,25 +20,6 @@ from examples.scripts.utils import (
     write_patch_args,
 )
 from primus.core.launcher.parser import PrimusParser
-
-
-def hf_download(repo_id: str, tokenizer_path: str, local_dir: str, hf_token: Optional[str] = None) -> None:
-
-    from huggingface_hub import hf_hub_download
-
-    try:
-        hf_hub_download(
-            repo_id=repo_id,
-            filename=f"{tokenizer_path}/tokenizer.model",
-            local_dir=local_dir,
-            local_dir_use_symlinks=False,
-            token=hf_token,
-        )
-    except HTTPError as e:
-        if e.response.status_code == 401:
-            log_error_and_exit("You need to pass a valid `HF_TOKEN` to download private checkpoints.")
-        else:
-            raise e
 
 
 def parse_args():
@@ -86,6 +66,75 @@ def resolve_backend_path(
     return path
 
 
+def run_titan_hf_download(
+    torchtitan_path: Path, repo_id: str, local_dir: Path, hf_token: Optional[str] = None
+):
+    """Use Titan's own download_hf_assets.py to fetch tokenizer/model assets."""
+    script_path = torchtitan_path / "scripts" / "download_hf_assets.py"
+    if not script_path.is_file():
+        log_error_and_exit(f"TorchTitan script not found: {script_path}")
+
+    cmd = [
+        "python",
+        str(script_path),
+        "--repo_id",
+        repo_id,
+        "--assets",
+        "tokenizer",
+        "--local_dir",
+        str(local_dir),
+    ]
+    env = os.environ.copy()
+    if hf_token:
+        env["HF_TOKEN"] = hf_token
+
+    log_info(f"[rank0] Running Titan HF downloader:\n  {' '.join(cmd)}")
+    ret = subprocess.run(cmd, env=env, cwd=torchtitan_path)
+    if ret.returncode != 0:
+        log_error_and_exit(f"TorchTitan HF download failed with code {ret.returncode}")
+
+
+def resolve_hf_assets_path(data_path: Path, hf_assets_value: str) -> tuple[str, Path, bool]:
+    """
+    Resolve HuggingFace asset source — supports both repo IDs and local paths.
+
+    Args:
+        data_path (Path):
+            Base data directory (e.g., /data/primus_data).
+        hf_assets_value (str):
+            Can be either:
+              - A HuggingFace repo ID (e.g., "meta-llama/Llama-3.1-70B")
+              - A local directory path (e.g., "/data/primus_data/torchtitan/Llama-3.1-70B")
+
+    Returns:
+        (repo_or_path, local_dir, need_download)
+            repo_or_path: str — repo_id if remote; same path if local
+            local_dir: Path — where assets are or will be located
+            need_download: bool — True if download is required
+
+    Behavior:
+        1. If hf_assets_value is an existing directory path:
+               → Treat it as an already downloaded local path.
+        2. If it is not an existing directory (likely a repo_id):
+               → Derive the local target dir as
+                   data_path / "torchtitan" / <last_component_of_repo_id>
+               → Mark need_download=True.
+    """
+    path_candidate = Path(hf_assets_value).expanduser()
+
+    # Case 1: already-downloaded local directory
+    if path_candidate.exists() and path_candidate.is_dir():
+        log_info(f"Detected local HF assets path: {path_candidate}")
+        return hf_assets_value, path_candidate.resolve(), False
+
+    # Case 2: repo_id (e.g., meta-llama/Llama-3.1-70B) → need to download
+    repo_id = hf_assets_value
+    repo_name = Path(repo_id).name  # last segment, e.g., Llama-3.1-70B
+    local_dir = data_path / "torchtitan" / repo_name
+    log_info(f"Resolved HF repo_id={repo_id}, local_dir={local_dir}")
+    return repo_id, local_dir, True
+
+
 def main():
     args = parse_args()
 
@@ -118,36 +167,82 @@ def main():
     if not hasattr(pre_trainer_cfg, "model") or pre_trainer_cfg.model is None:
         log_error_and_exit("Missing required field: pre_trainer.model")
 
-    if not hasattr(pre_trainer_cfg.model, "tokenizer_path") or not pre_trainer_cfg.model.tokenizer_path:
+    if not hasattr(pre_trainer_cfg.model, "hf_assets_path") or not pre_trainer_cfg.model.hf_assets_path:
         log_error_and_exit("Missing required field: pre_trainer.model.tokenizer_path")
 
-    tokenizer_path = pre_trainer_cfg.model.tokenizer_path
+    hf_assets_value = pre_trainer_cfg.model.hf_assets_path
+    repo_id, local_dir, need_download = resolve_hf_assets_path(data_path, hf_assets_value)
+    tokenizer_file = local_dir / "tokenizer.json"
 
-    full_path = data_path / "torchtitan" / tokenizer_path.lstrip("/")
-    tokenizer_file = full_path / "original/tokenizer.model"
-
-    if not tokenizer_file.is_file():
+    if need_download:
+        # Remote repo_id case — download via Titan script
         hf_token = os.environ.get("HF_TOKEN")
         if not hf_token:
-            log_error_and_exit("HF_TOKEN not set. Please export HF_TOKEN.")
+            log_error_and_exit("HF_TOKEN not set. Please export HF_TOKEN before running prepare.")
 
         if get_node_rank() == 0:
-            log_info(f"Downloading tokenizer to {full_path} ...")
-            (full_path / "original").mkdir(parents=True, exist_ok=True)
-            hf_download(
-                repo_id=tokenizer_path, tokenizer_path="original", local_dir=str(full_path), hf_token=hf_token
-            )
+            if not tokenizer_file.exists():
+                log_info(f"Downloading HF assets from repo={repo_id} into {local_dir} ...")
+                parent_dir = local_dir.parent
+                parent_dir.mkdir(parents=True, exist_ok=True)
+                run_titan_hf_download(torchtitan_path, repo_id, parent_dir, hf_token)
+            else:
+                log_info(f"Tokenizer assets already exist: {tokenizer_file}")
         else:
-            log_info(f"Rank {get_node_rank()} waiting for tokenizer file ...")
+            # Other ranks wait until the file is available
+            log_info(f"[rank{get_node_rank()}] waiting for tokenizer download ...")
             while not tokenizer_file.exists():
                 time.sleep(5)
     else:
-        log_info(f"Tokenizer file exists: {tokenizer_file}")
-    write_patch_args(patch_args_file, "train_args", {"model.tokenizer_path": str(tokenizer_file)})
+        # Local path case — skip download
+        log_info(f"HF assets already available locally at {local_dir}")
+
+    # Pass resolved path to training phase
+    write_patch_args(patch_args_file, "train_args", {"model.hf_assets_path": str(local_dir)})
     write_patch_args(patch_args_file, "train_args", {"backend_path": str(torchtitan_path)})
     write_patch_args(patch_args_file, "torchrun_args", {"local-ranks-filter": "1"})
 
 
+def detect_rocm_version() -> Optional[str]:
+    """
+    Detect ROCm version from /opt/rocm/.info/version (most reliable source).
+
+    Example file content:
+        7.0.0
+    → returns '7.0'
+    """
+    info_file = "/opt/rocm/.info/version"
+    if os.path.exists(info_file):
+        try:
+            with open(info_file, "r") as f:
+                content = f.readline().strip()
+                # Match like '7.0.0' or '6.3.1'
+                match = re.match(r"^(\d+)\.(\d+)", content)
+                if match:
+                    major, minor = match.groups()
+                    return f"{major}.{minor}"
+        except Exception:
+            pass
+
+    return None
+
+
+def install_torch_for_rocm(nightly=True):
+    version = detect_rocm_version()
+    if not version:
+        log_error_and_exit("ROCm not detected.")
+
+    tag = f"rocm{version}"
+    base = "https://download.pytorch.org/whl/nightly" if nightly else "https://download.pytorch.org/whl"
+    url = f"{base}/{tag}"
+
+    log_info(f"Installing PyTorch for {tag} from {url}")
+    subprocess.run(["pip", "install", "--pre", "torch", "--index-url", url, "--force-reinstall"], check=True)
+
+
 if __name__ == "__main__":
+    # log_info("========== Prepare torch for Torchtitan ==========")
+    # install_torch_for_rocm(nightly=True)
+
     log_info("========== Prepare Torchtitan dataset ==========")
     main()
