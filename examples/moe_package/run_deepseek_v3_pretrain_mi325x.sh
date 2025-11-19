@@ -80,126 +80,126 @@ MoE_Features=(0 3 11)
 FEATURE_ARGS=()
 PRIMUS_TURBO_ENABLED="False"
 ensure_primus_turbo() {
-	if [ "$PRIMUS_TURBO_ENABLED" = "False" ]; then
-		FEATURE_ARGS+=("--enable_primus_turbo" "True")
-		PRIMUS_TURBO_ENABLED="True"
-	fi
+    if [ "$PRIMUS_TURBO_ENABLED" = "False" ]; then
+        FEATURE_ARGS+=("--enable_primus_turbo" "True")
+        PRIMUS_TURBO_ENABLED="True"
+    fi
 }
 
 for feature in "${MoE_Features[@]}"; do
-	case "$feature" in
-	0) ;;
-	1)
-		ensure_primus_turbo
-		FEATURE_ARGS+=("--use_turbo_attention" "True")
-		;;
-	2)
-		ensure_primus_turbo
-		FEATURE_ARGS+=("--use_turbo_grouped_mlp" "True")
-		;;
-	3)
-		FEATURE_ARGS+=("--cross_entropy_fusion_impl" "te")
-		FEATURE_ARGS+=("--cross_entropy_loss_fusion" "True")
-		;;
-	4)
-		ensure_primus_turbo
-		FEATURE_ARGS+=("--use_turbo_deepep" "True")
-		FEATURE_ARGS+=("--turbo_deepep_num_cu" "32")
-		FEATURE_ARGS+=("--turbo_deepep_use_comm_stream" "False")
-		FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
-		FEATURE_ARGS+=("--moe_router_dtype" "fp32")
-		;;
-	5)
-		ensure_primus_turbo
+    case "$feature" in
+    0) ;;
+    1)
+        ensure_primus_turbo
+        FEATURE_ARGS+=("--use_turbo_attention" "True")
+        ;;
+    2)
+        ensure_primus_turbo
+        FEATURE_ARGS+=("--use_turbo_grouped_mlp" "True")
+        ;;
+    3)
+        FEATURE_ARGS+=("--cross_entropy_fusion_impl" "te")
+        FEATURE_ARGS+=("--cross_entropy_loss_fusion" "True")
+        ;;
+    4)
+        ensure_primus_turbo
+        FEATURE_ARGS+=("--use_turbo_deepep" "True")
+        FEATURE_ARGS+=("--turbo_deepep_num_cu" "32")
+        FEATURE_ARGS+=("--turbo_deepep_use_comm_stream" "False")
+        FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
+        FEATURE_ARGS+=("--moe_router_dtype" "fp32")
+        ;;
+    5)
+        ensure_primus_turbo
         # mi355
-		# sync_free moe stage 1 will open router and permutation fusion
-		# FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "1")
+        # sync_free moe stage 1 will open router and permutation fusion
+        # FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "1")
 
         # mi300/mi325
-		# sync_free moe stage 2 will open deepep automatically
-		FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "2")
+        # sync_free moe stage 2 will open deepep automatically
+        FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "2")
         FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
-		FEATURE_ARGS+=("--moe_use_legacy_grouped_gemm" "True")
-		FEATURE_ARGS+=("--moe_router_dtype" "fp32")
-		;;
-	6)
-		FEATURE_ARGS+=("--overlap_moe_expert_parallel_comm" "True")
-		FEATURE_ARGS+=("--patch_moe_overlap" "False") # TODO: error
-		FEATURE_ARGS+=("--delay_wgrad_compute" "False")
-		FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
-		;;
-	7)
-		ensure_primus_turbo
+        FEATURE_ARGS+=("--moe_use_legacy_grouped_gemm" "True")
+        FEATURE_ARGS+=("--moe_router_dtype" "fp32")
+        ;;
+    6)
+        FEATURE_ARGS+=("--overlap_moe_expert_parallel_comm" "True")
+        FEATURE_ARGS+=("--patch_moe_overlap" "False") # TODO: error
+        FEATURE_ARGS+=("--delay_wgrad_compute" "False")
+        FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
+        ;;
+    7)
+        ensure_primus_turbo
         # required flags for zero bubble
-		FEATURE_ARGS+=("--overlap_grad_reduce" "False")
-		FEATURE_ARGS+=("--overlap_param_gather" "False")
-		FEATURE_ARGS+=("--no_persist_layer_norm" "True")
-		FEATURE_ARGS+=("--create_attention_mask_in_dataloader" "False")
-		FEATURE_ARGS+=("--gradient_accumulation_fusion" "True")
+        FEATURE_ARGS+=("--overlap_grad_reduce" "False")
+        FEATURE_ARGS+=("--overlap_param_gather" "False")
+        FEATURE_ARGS+=("--no_persist_layer_norm" "True")
+        FEATURE_ARGS+=("--create_attention_mask_in_dataloader" "False")
+        FEATURE_ARGS+=("--gradient_accumulation_fusion" "True")
 
         # default strategy is zero bubble
         PP_STRATEGY="zbv" # 1f1b, vpp, zb1p, zbv, v-half, v-min
 
-		case "$PP_STRATEGY" in
-		1f1b)
-			VPP=1
-			;;
-		vpp)
-			;;
-		zb1p)
-			FEATURE_ARGS+=("--patch_zero_bubble" "True")
-			VPP=1
-			;;
-		zbv)
-			FEATURE_ARGS+=("--patch_zero_bubble" "True")
-			FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
-			FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "zb")
-			VPP=2
-			;;
-		v-half)
-			FEATURE_ARGS+=("--patch_zero_bubble" "True")
-			FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
-			FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "half")
-			VPP=2
-			;;
-		v-min)
-			FEATURE_ARGS+=("--patch_zero_bubble" "True")
-			FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
-			FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "min")
-			VPP=2
-			;;
-		*)
-			echo "Unsupported PP_STRATEGY: ${PP_STRATEGY}. Supported values: 1f1b, vpp, zb1p, zbv, v-half, v-min." >&2
-			exit 1
-			;;
-		esac
-		;;
-	8)
-		# TODO: need tuning for the pipeline layout pattern
-		# FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et*3|(tt|)*29,m|L")
-		# 32 stages for PP8VPP4
-		# FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et|(tt|)*30L")
-		# pp2 vpp4
-		# 1 + 6 + 1 stages
-		# 1 + 2*6 = 13 layers
-		# FEATURE_ARGS+=("--pipeline_model_parallel_layout" 'Et|(tt|)*6L')
-		# FEATURE_ARGS+=("--pipeline_model_parallel_layout" 'Et|tt|tt|tt|tt|tt|tt|L')
-		VPP=1
-		;;
-	9)
-		FEATURE_ARGS+=("--recompute_layer_ids" "0,1,2,3")
-		;;
-	10)
-		# Enable NUMA binding for better memory locality (increase stability for large models)
-		export ENABLE_NUMA_BINDING=1
-		export HSA_KERNARG_POOL_SIZE=12582912
-		;;
-	11)
+        case "$PP_STRATEGY" in
+        1f1b)
+            VPP=1
+            ;;
+        vpp)
+            ;;
+        zb1p)
+            FEATURE_ARGS+=("--patch_zero_bubble" "True")
+            VPP=1
+            ;;
+        zbv)
+            FEATURE_ARGS+=("--patch_zero_bubble" "True")
+            FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
+            FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "zb")
+            VPP=2
+            ;;
+        v-half)
+            FEATURE_ARGS+=("--patch_zero_bubble" "True")
+            FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
+            FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "half")
+            VPP=2
+            ;;
+        v-min)
+            FEATURE_ARGS+=("--patch_zero_bubble" "True")
+            FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
+            FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "min")
+            VPP=2
+            ;;
+        *)
+            echo "Unsupported PP_STRATEGY: ${PP_STRATEGY}. Supported values: 1f1b, vpp, zb1p, zbv, v-half, v-min." >&2
+            exit 1
+            ;;
+        esac
+        ;;
+    8)
+        # TODO: need tuning for the pipeline layout pattern
+        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et*3|(tt|)*29,m|L")
+        # 32 stages for PP8VPP4
+        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et|(tt|)*30L")
+        # pp2 vpp4
+        # 1 + 6 + 1 stages
+        # 1 + 2*6 = 13 layers
+        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" 'Et|(tt|)*6L')
+        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" 'Et|tt|tt|tt|tt|tt|tt|L')
+        VPP=1
+        ;;
+    9)
+        FEATURE_ARGS+=("--recompute_layer_ids" "0,1,2,3")
+        ;;
+    10)
+        # Enable NUMA binding for better memory locality (increase stability for large models)
+        export ENABLE_NUMA_BINDING=1
+        export HSA_KERNARG_POOL_SIZE=12582912
+        ;;
+    11)
         FEATURE_ARGS+=("--manual_gc" "True")
         FEATURE_ARGS+=("--manual_gc_interval" "1")
-		;;
-	*) ;;
-	esac
+        ;;
+    *) ;;
+    esac
 done
 
 FEATURE_LIST="${MoE_Features[*]}"
@@ -207,44 +207,44 @@ FEATURE_TAG=$(printf "%s" "${FEATURE_LIST}" | tr ' ' '-')
 
 MLA_ARGS=()
 if [ "$ENABLE_MLA" = "True" ]; then
-	MLA_ARGS+=("--multi_latent_attention" "True")
+    MLA_ARGS+=("--multi_latent_attention" "True")
 else
-	MLA_ARGS+=("--multi_latent_attention" "False")
+    MLA_ARGS+=("--multi_latent_attention" "False")
 fi
 
 MTP_ARGS=()
 if [ "$ENABLE_MTP" = "True" ]; then
-	MTP_ARGS+=("--mtp_num_layers" "1")
-	MTP_ARGS+=("--mtp_loss_scaling_factor" "0.1")
+    MTP_ARGS+=("--mtp_num_layers" "1")
+    MTP_ARGS+=("--mtp_loss_scaling_factor" "0.1")
 else
-	MTP_ARGS+=("--mtp_num_layers" "None")
+    MTP_ARGS+=("--mtp_num_layers" "None")
 fi
 
 VPP_ARGS=()
 if [ $VPP -gt 1 ]; then
-	VPP_ARGS+=("--num_virtual_stages_per_pipeline_rank" "$VPP")
+    VPP_ARGS+=("--num_virtual_stages_per_pipeline_rank" "$VPP")
 fi
 
 FP8_ARGS=()
 if [ "$FP8" = "True" ]; then
-	FP8_ARGS+=("--fp8" "hybrid")
+    FP8_ARGS+=("--fp8" "hybrid")
 fi
 
 RECOMPUTE_ARGS=()
 if [ "$RECOMPUTE_LAYERS" -gt 0 ]; then
-	RECOMPUTE_ARGS+=("--recompute_granularity" "full")
-	RECOMPUTE_ARGS+=("--recompute_method" "block")
-	RECOMPUTE_ARGS+=("--recompute_num_layers" "${RECOMPUTE_LAYERS}")
+    RECOMPUTE_ARGS+=("--recompute_granularity" "full")
+    RECOMPUTE_ARGS+=("--recompute_method" "block")
+    RECOMPUTE_ARGS+=("--recompute_num_layers" "${RECOMPUTE_LAYERS}")
 fi
 
 PROFILE_ARGS=()
 if [ "$PROFILE" = "True" ]; then
-	# --profile-ranks 0 1 2 3 4 5 6 7
-	PROFILE_ARGS+=("--profile" "True")
-	PROFILE_ARGS+=("--disable_profiler_activity_cpu" "${DISABLE_CPU_TRACE}")
-	PROFILE_ARGS+=("--use_pytorch_profiler" "True")
-	PROFILE_ARGS+=("--profile_step_start" "${PROFILE_STEP_START}")
-	PROFILE_ARGS+=("--profile_step_end" "${PROFILE_STEP_END}")
+    # --profile-ranks 0 1 2 3 4 5 6 7
+    PROFILE_ARGS+=("--profile" "True")
+    PROFILE_ARGS+=("--disable_profiler_activity_cpu" "${DISABLE_CPU_TRACE}")
+    PROFILE_ARGS+=("--use_pytorch_profiler" "True")
+    PROFILE_ARGS+=("--profile_step_start" "${PROFILE_STEP_START}")
+    PROFILE_ARGS+=("--profile_step_end" "${PROFILE_STEP_END}")
 fi
 
 ######################### Training Experiments #########################
@@ -283,29 +283,29 @@ export SKIP_TRAIN=0
 
     # --num_layers 16 \
     # --moe_layer_freq 1 \
-	# --pp_warmup True \
+    # --pp_warmup True \
 # bash ./examples/run_slurm_pretrain.sh \
 bash ./examples/run_pretrain.sh \
 --num_layers 13 \
 --moe_layer_freq 1 \
     --micro_batch_size "$MBS" \
-	--global_batch_size "$GBS" \
-	--seq_length "$SEQ_LENGTH" \
-	--tensor_model_parallel_size "$TP" \
-	--expert_tensor_parallel_size "$ETP" \
-	--pipeline_model_parallel_size "$PP" \
-	--expert_model_parallel_size "$EP" \
-	--context_parallel_size "$CP" \
-	--cp_comm_type "$CP_COMM_TYPE" \
-	--mock_data True \
-	--moe_router_force_load_balancing "$LOAD_BALANCE" \
-	--optimizer "$OPTIMIZER" \
-	--moe_use_legacy_grouped_gemm "$LEGACY_GG" \
+    --global_batch_size "$GBS" \
+    --seq_length "$SEQ_LENGTH" \
+    --tensor_model_parallel_size "$TP" \
+    --expert_tensor_parallel_size "$ETP" \
+    --pipeline_model_parallel_size "$PP" \
+    --expert_model_parallel_size "$EP" \
+    --context_parallel_size "$CP" \
+    --cp_comm_type "$CP_COMM_TYPE" \
+    --mock_data True \
+    --moe_router_force_load_balancing "$LOAD_BALANCE" \
+    --optimizer "$OPTIMIZER" \
+    --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
     "${MLA_ARGS[@]}" \
     "${MTP_ARGS[@]}" \
     "${VPP_ARGS[@]}" \
-	"${FEATURE_ARGS[@]}" \
-	"${RECOMPUTE_ARGS[@]}" \
-	"${FP8_ARGS[@]}" \
-	"${PROFILE_ARGS[@]}" \
-	--train_iters "$TRAIN_ITERS" 2>&1 | tee -a "$LOG_FILE"
+    "${FEATURE_ARGS[@]}" \
+    "${RECOMPUTE_ARGS[@]}" \
+    "${FP8_ARGS[@]}" \
+    "${PROFILE_ARGS[@]}" \
+    --train_iters "$TRAIN_ITERS" 2>&1 | tee -a "$LOG_FILE"

@@ -7,6 +7,7 @@
 
 ######################### Training Docker and Variables #########################
 # export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
+# export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ci_4096e28_20251114"
 export DOCKER_IMAGE="docker.io/tasimage/primus:pr-289"
 export CLEAN_DOCKER_CONTAINER=1
 
@@ -36,18 +37,22 @@ export GLOO_SOCKET_IFNAME="enp193s0f1np1"
 export HSA_NO_SCRATCH_RECLAIM=1
 export NVTE_CK_USES_BWD_V3=1
 # export USE_ROCM_AITER_ROPE_BACKEND=0
+# export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=0
 
 ######################### Training Config #########################
+# MBS=12
+# GBS=768
 MBS=1
 GBS=256
 SEQ_LENGTH=4096
 TP=1
 ETP=1
-PP=2
-VPP=4
+PP=4
+VPP=1
 EP=8
 CP=1
 CP_COMM_TYPE="a2a" # p2p, a2a, allgather or a2a+p2p
+# TODO: set to true to enable MLA
 ENABLE_MLA=False
 ENABLE_MTP=False
 LOAD_BALANCE=True
@@ -56,7 +61,7 @@ RECOMPUTE_LAYERS=0
 LEGACY_GG=True
 FP8=False # True for fp8, False for bf16
 PROFILE=False
-DISABLE_CPU_TRACE=True
+DISABLE_CPU_TRACE=False
 PROFILE_STEP_START=5
 PROFILE_STEP_END=6
 TRAIN_ITERS=5
@@ -67,7 +72,7 @@ TRAIN_ITERS=5
 # 2 - Turbo grouped GEMM / MLP fusion
 # 3 - Loss fusion helper
 # 4 - DeepEP acceleration
-# 5 - Sync-free MoE (stage 2)
+# 5 - Sync-free MoE (stage 1/2)
 # 6 - 1F1B MoE overlap
 # 7 - Zero-bubble pipeline optimizations
 # 8 - Arbitrary pipeline partition (8-way custom layout)
@@ -76,7 +81,10 @@ TRAIN_ITERS=5
 # 11 - Manual GC helper
 # MoE_Features=(0 1 2 3 4 5 6 7 8 9 10 11)
 MoE_Features=(0 11)
-# MoE_Features=(0 3 8 11)
+# MoE_Features=(3 11)
+# MoE_Features=(3 4 11)
+# MoE_Features=(3 4 5 11)
+# MoE_Features=(3 4 5 10 11)
 
 FEATURE_ARGS=()
 PRIMUS_TURBO_ENABLED="False"
@@ -105,7 +113,7 @@ for feature in "${MoE_Features[@]}"; do
     4)
         ensure_primus_turbo
         FEATURE_ARGS+=("--use_turbo_deepep" "True")
-        FEATURE_ARGS+=("--turbo_deepep_num_cu" "32")
+        FEATURE_ARGS+=("--turbo_deepep_num_cu" "64")
         FEATURE_ARGS+=("--turbo_deepep_use_comm_stream" "False")
         FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
         FEATURE_ARGS+=("--moe_router_dtype" "fp32")
@@ -114,14 +122,14 @@ for feature in "${MoE_Features[@]}"; do
         ensure_primus_turbo
         # mi355
         # sync_free moe stage 1 will open router and permutation fusion
-        # FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "1")
+        FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "1")
 
         # mi300/mi325
         # sync_free moe stage 2 will open deepep automatically
-        FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "2")
-        FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
-        FEATURE_ARGS+=("--moe_use_legacy_grouped_gemm" "True")
-        FEATURE_ARGS+=("--moe_router_dtype" "fp32")
+        # FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "2")
+        # FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
+        # FEATURE_ARGS+=("--moe_use_legacy_grouped_gemm" "True")
+        # FEATURE_ARGS+=("--moe_router_dtype" "fp32")
         ;;
     6)
         FEATURE_ARGS+=("--overlap_moe_expert_parallel_comm" "True")
@@ -181,10 +189,9 @@ for feature in "${MoE_Features[@]}"; do
         # 32 stages for PP8VPP4
         # FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et|(tt|)*30L")
         # pp2 vpp4
-        # 1 + 6 + 1 = 8 stages
+        # 1 + 6 + 1 stages
         # 1 + 2*6 = 13 layers
-        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" 'Et|(tt|)*6L')
-        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" 'Et|tt|tt|tt|tt|tt|tt|L')
+        FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et|(tt|)*6L")
         VPP=1
         ;;
     9)
@@ -254,7 +261,7 @@ export PRIMUS_TEAM
 PRIMUS_USER=user-tas
 export PRIMUS_USER
 # export PRIMUS_EXP_NAME="debug"
-export PRIMUS_EXP_NAME="DeepSeekV3_MI355X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_MLA${ENABLE_MLA}_MTP${ENABLE_MTP}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}-${PROFILE_STEP_START}-${PROFILE_STEP_END}_NoCPUTrace${DISABLE_CPU_TRACE}_Features${FEATURE_TAG}"
+export PRIMUS_EXP_NAME="DeepSeekV2_MI355X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_MLA${ENABLE_MLA}_MTP${ENABLE_MTP}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}-${PROFILE_STEP_START}-${PROFILE_STEP_END}_NoCPUTrace${DISABLE_CPU_TRACE}_Features${FEATURE_TAG}"
 
 LOG_DIR=./output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
 export DUMP_PP_DIR=$LOG_DIR/pp_dump
@@ -264,7 +271,7 @@ mkdir -p "$LOG_DIR"
 rm -rf "$LOG_FILE"
 
 ######################### Training Job #########################
-export EXP="examples/megatron/configs/MI355X/deepseek_v3-pretrain.yaml"
+export EXP="examples/moe_package/configs/MI355X/deepseek_v2-pretrain-baseline.yaml"
 
 echo "--------------------------------" | tee -a "$LOG_FILE"
 echo "Begin Training... $(date +%Y%m%d_%H%M%S)" | tee -a "$LOG_FILE"
@@ -282,12 +289,9 @@ echo "--------------------------------" | tee -a "$LOG_FILE"
 
 export SKIP_TRAIN=0
 
-    # --num_layers 16 \
-    # --moe_layer_freq 1 \
     # --pp_warmup True \
+    # --multi_latent_attention True \
 bash ./examples/run_slurm_pretrain.sh \
---num_layers 16 \
---moe_layer_freq 1 \
     --micro_batch_size "$MBS" \
     --global_batch_size "$GBS" \
     --seq_length "$SEQ_LENGTH" \
