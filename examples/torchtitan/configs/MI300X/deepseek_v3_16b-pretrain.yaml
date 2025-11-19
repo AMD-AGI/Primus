@@ -20,7 +20,7 @@ modules:
         save_memory_snapshot_folder: "memory_snapshot"
 
       metrics:
-        log_freq: 10
+        log_freq: 1
         disable_color_printing: false
         enable_tensorboard: false
         save_tb_folder: "tb"
@@ -41,8 +41,8 @@ modules:
         local_batch_size: 4
         seq_len: 4096
         max_norm: 1.0            # grad norm clipping
-        steps: 1000
-        dataset: "c4"            # supported datasets: c4_test (2K), c4 (177M)
+        steps: 10
+        dataset: "c4_test"            # supported datasets: c4_test (2K), c4 (177M)
 
       parallelism:
         data_parallel_replicate_degree: 1
@@ -64,13 +64,20 @@ modules:
         async_mode: "disabled"   # ["disabled", "async", "async_with_pinned_mem"]
 
       activation_checkpoint:
-        mode: "none"        # ["none", "selective", "full"]
+        mode: "selective"        # ["none", "selective", "full"]
         selective_ac_option: "op" # 'int' = ac every positive int layer or 'op', ac based on ops policy
 
       compile:
-        enable: true
-        components: ["loss"]     # ["model", "loss"]
+        enable: false
+        components: ["model", "loss"]     # ["model", "loss"]
 
+      primus_turbo:
+        enable_primus_turbo: false
+        use_turbo_mx_linear: false
+        enable_attention_float8: false
+        use_turbo_grouped_mm: true
+        use_moe_fp8: true
+        
       # quantize:
       #   linear:
       #     float8:
