@@ -194,7 +194,7 @@ DeepSeek V2 Lite is a more memory- and compute-efficient variant, designed for h
 
 AMD MI300/325/355 series GPUs offer very large memory pools. The easiest and most effective way to leverage this is to increase the micro batch size (mbs). For MoE models, the `EP` (expert parallel size) parameter enables scaling individual expert models across devices. For models exceeding 180B, you can further utilize pipeline parallelism (`PP`) to split the model, maximizing memory savings.
 
-The following bar chart illustrates how increasing the mini-batch size (MBS) during DeepSeekV2Lite training on an AMD MI355 GPU improves both throughput (tokens per second) and GPU memory utilization. By scaling up the MBS, you can achieve better hardware efficiency and model performance, within the limits of available memory resources.
+The following bar chart illustrates how increasing the micro-batch size (MBS) during DeepSeekV2Lite training on an AMD MI355 GPU improves both throughput (tokens per second) and GPU memory utilization. By scaling up the MBS, you can achieve better hardware efficiency and model performance, within the limits of available memory resources.
 
 ![DeepSeekV2Lite MI355 Batch Size Scaling – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_mbs_scaling_mi355.png)
 
@@ -243,14 +243,6 @@ Cumulative throughput (tokens/s per GPU) and GPU memory usage after successively
 Per-feature throughput (tokens/s) and speedup relative to baseline. This illustrates the acceleration contributed by each optimization as it is introduced.
 ![DeepSeekV2Lite MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_tks_speedup_mi355.png)
 
-#### 5. Future Optimization Opportunities
-
-- Explore deeper fusion between permute operations and DeepEP kernels.
-- Investigate more effective scheduling to further overlap communication and computation.
-- Develop adaptive expert assignment for improved MoE load balancing.
-- Continue tuning pipeline partition and recompute strategies for larger model fits.
-- Enable automatic tuning of hw queues and memory pools.
-
 ---
 
 ### 7.2 DeepSeek V2 Optimization
@@ -295,9 +287,11 @@ Time breakdown—profile compute, communication, and idle periods to guide optim
 
 #### 5. Future Optimization Directions
 
-- Tighter integration between MoE routing and turbo communication paths.
-- Pipeline parallel overlap with advanced scheduling.
-- Hardware-aware kernel fusion for even larger batch sizes.
+- Explore deeper fusion between permute operations and DeepEP kernels.
+- Investigate more effective scheduling to further overlap communication and computation.
+- Develop adaptive expert assignment for improved MoE load balancing.
+- Continue tuning pipeline partition and recompute strategies for larger model fits.
+- Enable automatic tuning of hw queues and memory pools.
 
 ---
 
@@ -342,9 +336,11 @@ As above; perform time breakdown. For V3, communication overheads can dominate a
 
 #### 5. Future Work
 
-- Improved dynamic workload balancing across experts and pipelines.
-- Enhanced profiling/monitoring tools for large-scale runs.
-- Deeper kernel fusion layers.
+- Explore deeper fusion between permute operations and DeepEP kernels.
+- Investigate more effective scheduling to further overlap communication and computation.
+- Develop adaptive expert assignment for improved MoE load balancing.
+- Continue tuning pipeline partition and recompute strategies for larger model fits.
+- Enable automatic tuning of hw queues and memory pools.
 
 ---
 
