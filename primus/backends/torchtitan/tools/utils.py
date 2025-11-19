@@ -18,3 +18,9 @@ def get_backend_stream(size=1, priority=0, prefix=""):
         _backend_streams[key] = [torch.cuda.Stream(priority=priority) for _ in range(size)]
 
     return _backend_streams[key][:size]
+
+
+def is_hip():
+    if torch.version.hip is not None:
+        return True
+    return False
