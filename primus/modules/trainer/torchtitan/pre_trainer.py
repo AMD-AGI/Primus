@@ -67,6 +67,11 @@ class TorchTitanPretrainTrainer(BaseModule):
         self.JobConfigClass = JobConfig
 
         self.titan_config = self.build_job_config(cfg_dict, self.JobConfigClass)
+        
+        # patch torchtitan moe
+        # background: we use turbo grouped mm for moe, so we need to patch the torchtitan moe
+        self.patch_torchtitan_moe()
+        
         self.log_config(self.titan_config)
         self.trainer = None
 
@@ -93,6 +98,32 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         titan_logging.logger = primus_logger
         titan_logging.init_logger = lambda: None
+    
+    def patch_torchtitan_moe(self):
+        if not self.titan_config.primus_turbo.use_turbo_grouped_mm:
+            return
+        from primus.core.utils.logger import _logger as primus_logger
+        primus_logger.info("Monkey patch torchtitan moe...")
+        try:
+            import functools
+            import torchtitan.models.moe.moe
+            from primus.backends.torchtitan.models.moe.moe import _run_experts_grouped_mm
+            
+            # Get MoE FP8 configuration and create a partial function
+            use_moe_fp8 = self.titan_config.primus_turbo.use_moe_fp8
+            primus_logger.info(f"Set MoE FP8 mode: {use_moe_fp8}")
+            
+            # Patch the grouped_mm function with use_fp8 parameter pre-set
+            torchtitan.models.moe.moe._run_experts_grouped_mm = functools.partial(
+                _run_experts_grouped_mm, use_fp8=use_moe_fp8
+            )
+            primus_logger.info("Successfully patched torchtitan moe with turbo grouped_mm")
+        except ImportError as e:
+            raise ImportError(
+                f"Failed to import primus_turbo for MoE grouped_mm patch. "
+                f"Please ensure primus_turbo is installed or set use_turbo_grouped_mm=False. "
+                f"Original error: {e}"
+            ) from e
 
     def patch_torch_dcp_consolidate(self):
         """
