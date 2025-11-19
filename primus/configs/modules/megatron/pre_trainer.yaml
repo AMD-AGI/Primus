@@ -1,15 +1,28 @@
-bases:
-  - trainer_base.yaml
+includes:
+  - ../module_base.yaml
+  - primus_megatron_module.yaml
+  - primus_turbo.yaml
+  - zero_bubble.yaml
 
+# Primus-specific defaults (override Megatron defaults)
+trainable: true
+
+# Training configuration
 train_iters: 1000
 global_batch_size: 16
+micro_batch_size: 2
+seq_length: 1024
+
+# Evaluation
 eval_iters: 0
 eval_interval: 1000
-seq_length: 1024
+
+# Data
 num_workers: 8
 split: null
 dataloader_type: cyclic
 
+# Checkpointing & Logging
 finetune: true
 save_interval: 1000
 log_interval: 1
@@ -19,6 +32,7 @@ log_timers_to_tensorboard: true
 log_batch_size_to_tensorboard: true
 log_learning_rate_to_tensorboard: true
 
+# Optimizer
 lr: 2.0e-05
 min_lr: 0.0
 lr_decay_iters: null
@@ -27,6 +41,8 @@ weight_decay: 0.0
 adam_beta2: 0.999
 override_opt_param_scheduler: true
 
+# Performance
 use_flash_attn: true
-distributed_timeout_minutes: 60
+bf16: true
 use_distributed_optimizer: true
+distributed_timeout_minutes: 60
