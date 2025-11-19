@@ -7,4 +7,5 @@ model:
   flavor: "70B"
   hf_assets_path: "meta-llama/Llama-3.1-8B"
   converters:
-    - "float8"
+    - quantize.linear.float8
+    - quantize.grouped_mm.float8
