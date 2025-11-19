@@ -60,7 +60,7 @@ This section mirrors the `MoE_Features` defined in `examples/moe_package/run_dee
 - Args: _none injected_.
 - Notes: Useful for sanity checks when other toggles regress stability or throughput.
 
-### Feature 1 – Turbo Attention
+### Feature 1 – Turbo Attention @xiaobo
 
 - Description: Enables Primus Turbo attention kernels.
 - Args:
@@ -68,7 +68,7 @@ This section mirrors the `MoE_Features` defined in `examples/moe_package/run_dee
   - `--use_turbo_attention True`
 - Notes: Safe to combine with every other feature.
 
-### Feature 2 – Turbo Grouped MLP
+### Feature 2 – Turbo Grouped MLP @kyle
 
 - Description: Swaps in the Turbo grouped MLP implementation to fuse expert GEMMs.
 - Args:
