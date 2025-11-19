@@ -25,6 +25,7 @@ modules:
 
       training:
         local_batch_size: 3
+        seq_len: 8192
         steps: 50
 
       activation_checkpoint:

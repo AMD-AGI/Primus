@@ -24,6 +24,7 @@ modules:
 
       training:
         local_batch_size: 3
+        seq_len: 8192
         steps: 50
 
       optimizer:
@@ -32,10 +33,12 @@ modules:
       activation_checkpoint:
         mode: full
 
-      float8:
-        enable_fsdp_float8_all_gather: true
-        precompute_float8_dynamic_scale_for_fsdp: true
-        filter_fqns: ["output"]
+      quantize:
+        linear:
+          float8:
+            enable_fsdp_float8_all_gather: true
+            precompute_float8_dynamic_scale_for_fsdp: true
+            filter_fqns: ["output"]
 
       primus_turbo:
         enable_primus_turbo : true
