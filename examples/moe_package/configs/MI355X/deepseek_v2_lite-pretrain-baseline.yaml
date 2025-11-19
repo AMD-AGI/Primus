@@ -1,7 +1,7 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:deepseek_v2_lite-pretrain}
-workspace: ${PRIMUS_WORKSPACE:./output}
+workspace: ./output
 
 modules:
   pre_trainer:
@@ -22,8 +22,8 @@ modules:
 
       # hyber parameters
       train_iters: 50
-      micro_batch_size: 14
-      global_batch_size: 896
+      micro_batch_size: 12
+      global_batch_size: 768
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
       lr: 1.0e-5
@@ -60,9 +60,7 @@ modules:
       moe_use_legacy_grouped_gemm: false
       # fused topk router with aux score
       moe_use_fused_router_with_aux_score: false
-      # pad 192/128 for deepseek attention
-      fused_padded_mla_attention: false
-
+      # MLA
       multi_latent_attention: false
 
       # ckpt
@@ -78,20 +76,3 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
       eval_iters: 0
-
-      # Turbo
-      enable_primus_turbo: true
-
-      # deepep
-      use_turbo_deepep: false
-      # 64 or 80 for ep8, 32 for ep16-64 is best practice
-      turbo_deepep_num_cu: 64
-      turbo_deepep_use_comm_stream: false
-
-      # sync-free moe support stage 1-2, 0 means not use sync-free moe
-      # stage 2 is recommended for better performance
-      turbo_sync_free_moe_stage: 1
-
-      # Cross entropy flags
-      cross_entropy_fusion_impl: "te"
-      cross_entropy_loss_fusion: true
