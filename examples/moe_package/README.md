@@ -52,68 +52,72 @@ For performance analysis and bottleneck identification during MoE model training
 
 ## 7. Performance Optimizations
 
-This section maps to the `MoE_Features` in `run_deepseek_v3_pretrain_mi325x.sh`. Each feature includes its purpose, the CLI knobs involved, and a placeholder for future speedup data.
+This section mirrors the `MoE_Features` defined in `examples/moe_package/run_deepseek_v2_lite_pretrain_mi355x.sh` (the same toggles are reused by the other MoE scripts). Each feature lists its intent along with the knobs that the script injects.
 
 ### Feature 0 – Baseline
 
-- Description: Plain Megatron implementation without Turbo or overlap toggles.
-- Optimization principle: *TBD*
-- Args: None.
-- Speedup: *TBD*
+- Description: Plain Megatron execution without extra Turbo kernels or overlap helpers.
+- Args: _none injected_.
+- Notes: Useful for sanity checks when other toggles regress stability or throughput.
 
-### Feature 1 – Turbo Attention + Grouped GEMM
+### Feature 1 – Turbo Attention
 
-- Description: Enables Primus Turbo kernels for EMA-style attention and Grouped MLP efficiency.
-- Optimization principle: *TBD*
+- Description: Enables Primus Turbo attention kernels.
 - Args:
-  - `--enable_primus_turbo True`
+  - `--enable_primus_turbo True` (first time this helper runs)
   - `--use_turbo_attention True`
-  - `--use_turbo_grouped_mlp True`
-- Speedup: *TBD*
-- Details placeholder: *TODO: add kernel-level notes*
+- Notes: Safe to combine with every other feature.
 
-### Feature 2 – Sync-Free MoE (Stage 2)
+### Feature 2 – Turbo Grouped MLP
 
-- Description: Removes synchronization for Router, DeepEP, and GroupMLP stages to shrink a2a stalls.
-- Optimization principle: *TBD*
+- Description: Swaps in the Turbo grouped MLP implementation to fuse expert GEMMs.
 - Args:
   - `--enable_primus_turbo True`
-  - `--turbo_sync_free_moe_stage 2`
-- Speedup: *TBD*
-- Details placeholder: *TODO: document differences among stages 0–3*
+  - `--use_turbo_grouped_mlp True`
 
-### Feature 3 – DeepEP Acceleration
+### Feature 3 – Loss Fusion Helper
 
-- Description: Activates DeepEP kernels with configurable CU usage and comm streams.
-- Optimization principle: *TBD*
+- Description: Turns on fused cross-entropy kernels to shrink softmax + CE overheads.
+- Args:
+  - `--cross_entropy_fusion_impl te`
+  - `--cross_entropy_loss_fusion True`
+
+### Feature 4 – DeepEP Acceleration
+
+- Description: Activates DeepEP kernels for router/a2a efficiency.
 - Args:
   - `--enable_primus_turbo True`
   - `--use_turbo_deepep True`
   - `--turbo_deepep_num_cu 32`
   - `--turbo_deepep_use_comm_stream False`
+  - `--moe_shared_expert_overlap False`
   - `--moe_router_dtype fp32`
-- Speedup: *TBD*
-- Details placeholder: *TODO: list recommended CU counts for EP 8/16/64*
+- TODO: document CU recommendations for other EP sizes.
 
-### Feature 4 – 1F1B MoE Overlap
+### Feature 5 – Sync-Free MoE (Stage 1)
 
-- Description: Uses 1F1B scheduling to overlap expert communication with backward compute.
-- Optimization principle: *TBD*
+- Description: Uses sync-free router/permutation fusion for MI355-friendly layouts.
+- Args:
+  - `--enable_primus_turbo True`
+  - `--turbo_sync_free_moe_stage 1`
+- Notes: Stage-1 keeps overlap disabled to preserve determinism on MI355; MI300/MI325 configs can bump to stage 2 if desired.
+
+### Feature 6 – 1F1B MoE Overlap
+
+- Description: Overlaps expert communication with backward compute using 1F1B scheduling.
 - Args:
   - `--overlap_moe_expert_parallel_comm True`
-  - `--patch_moe_overlap True`
+  - `--patch_moe_overlap False` (temporary workaround for known issue)
   - `--delay_wgrad_compute False`
   - `--moe_shared_expert_overlap False`
-- Speedup: *TBD*
-- Details placeholder: *TODO: explain dependency on pipeline partitioning*
+- TODO: revisit once the patch flag can be safely re-enabled.
 
-### Feature 5 – Zero-Bubble Pipeline
+### Feature 7 – Zero-Bubble Pipeline
 
-- Description: Applies Zero-Bubble techniques to reduce pipeline bubbles, often with virtual pipeline stages.
+- Description: Applies the zero-bubble virtual-pipeline schedule. References:
   - `primus/backends/megatron/core/pipeline_parallel/zerobubble/README.md`
   - `primus/configs/modules/megatron/zero_bubble.yaml`
-- Optimization principle: *TBD*
-- Required Args:
+- Required flags:
 ```
 overlap_grad_reduce: false
 overlap_param_gather: false
@@ -121,46 +125,280 @@ no_persist_layer_norm: true
 create_attention_mask_in_dataloader: false
 gradient_accumulation_fusion: true
 ```
-- PP Strategy Args:
+- PP strategy presets:
 
-| pp strategy / flag | num_virtual_stages_per_pipeline_rank | patch_zero_bubble | zero_bubble_v_schedule | zero_bubble_v_schedule_mem_setup |
-|---|---|---|---|---|
-| turbo-1f1b | 1 |  false | - | - |
-| turbo-1f1b-interleaved | >=2 |  false | - | - |
-| zero bubble 1p | 1 | true | false | - |
-| zbv | 2 | true | true | zb |
-| v-half | 2 | true | true | half |
-| v-min | 2 | true | true | min |
+| strategy | `--num_virtual_stages_per_pipeline_rank` | `--patch_zero_bubble` | `--zero_bubble_v_schedule` | `--zero_bubble_v_schedule_mem_setup` |
+| --- | --- | --- | --- | --- |
+| `1f1b` | 1 | false | - | - |
+| `vpp` | custom | false | - | - |
+| `zb1p` | 1 | true | false | - |
+| `zbv` | 2 | true | true | zb |
+| `v-half` | 2 | true | true | half |
+| `v-min` | 2 | true | true | min |
 
-- Speedup/Memory: *TBD*
-- Details placeholder: *TODO: relate to VPP configuration*
+### Feature 8 – Arbitrary Pipeline Partition
 
-### Feature 6 – Arbitrary Pipeline Partition
-
-- Description: Forces an explicit 8-way pipeline layout to balance uneven layers.
-- Optimization principle:
-  - Pipeline parallelism is quite useful in large language model training, but also faces many challenges such as uneven memory and compute distribution, bubble overhead, and debugging complexity. To better fulfill pipeline parallelism’s potential in production-grade training, we’ve been investigating the implementation details and making corresponding improvements. Below are two aspects of progress based on Megatron-LM[1] integrated into Primus[2].
-  - Developed a visualization tool for pipeline schedule, enabling intuitive visual analysis of the schedule to help easily find the performance bottleneck and optimization possibilities.
-  - Enabled arbitrary pipeline split feature, offering more fine-grained control of memory and compute among different ranks to both save the overall memory and improve throughput.
+- Description: Forces a manually curated pipeline layout (e.g., `Et|(tt|)*6L`) to balance memory/compute.
 - Args:
-  - `--pipeline_model_parallel_size 8`
-  - `# --pipeline_model_parallel_layout 'Et*3|(tt|)*29,m|L'` (to be tuned)
-- Speedup: *TBD*
-- Details placeholder: *TODO: supply layout design guidance*
+  - `--pipeline_model_parallel_layout Et|(tt|)*6L` (commented patterns in the script show other options)
+- Notes: Still experimental; expect to tune per model depth.
 
-### Feature 7 – CPU NUMA Binding Helper
+### Feature 9 – Recompute Selected Layers
+
+- Description: Recomputes the first four transformer layers to save activation memory without enabling full recompute.
+- Args:
+  - `--recompute_layer_ids 0,1,2,3`
+- Notes: Keep `RECOMPUTE_LAYERS` at `0` so this helper remains the only recompute knob.
+
+### Feature 10 – CPU NUMA Binding Helper
 
 - Description: Binds processes to NUMA domains on multi-socket systems, reducing HSA kernarg traffic.
 - Optimization principle: *TBD*
 - Args / Env:
   - `export ENABLE_NUMA_BINDING=1`
-  - `# export HSA_KERNARG_POOL_SIZE=12582912` (enable as needed)
-- Speedup: *TBD*
-- Details placeholder: *TODO: log MI325 vs. MI355 comparisons*
+  - `export HSA_KERNARG_POOL_SIZE=12582912`
+
+### Feature 11 – Manual GC Helper
+
+- Description: Forces periodic host GC to mitigate long-running Python fragmentation on multi-day runs.
+- Args:
+  - `--manual_gc True`
+  - `--manual_gc_interval 1`
+- Notes: Only needed when `train_iters` is large or the allocator starts spiking host memory.
 
 
 ### TODO
 AINIC, cp, hw_queue, manual gc (stability), fused crossentropy
+
+
+## 7. Model-Specific Optimization Guide
+
+This section provides an overview and practical guidance for optimizing different DeepSeek model variants on Primus/AMD MI-series hardware. Each sub-section covers a specific model family—DeepSeek V2 Lite, DeepSeek V2, DeepSeek V3, and ultra-large (1T+ parameters) models—with advice on configuration, baseline performance, bottleneck analysis, advanced tuning, and future directions.
+
+---
+
+### 7.1 DeepSeek V2 Lite Optimization
+
+#### 1. Model Overview and Configuration Files
+
+DeepSeek V2 Lite is a more memory- and compute-efficient variant, designed for high-throughput pretraining. Typical sizes range from 80B to 180B parameters. In Primus, you can find its configs and pretrain scripts under:
+
+| Variant | Total Params | Active Params | Transformer Layers |
+| --- | --- | --- | --- |
+| DeepSeek V2 Lite | 16B | 2.4B | 27 |
+
+- Model Config: `primus/configs/models/megatron/deepseek_v2_lite.yaml`
+- Pretrain Script: `examples/moe_package/run_deepseek_v2_lite_pretrain_mi355x.sh`
+
+#### 2. Baseline Performance Testing
+
+AMD MI300/325/355 series GPUs offer very large memory pools. The easiest and most effective way to leverage this is to increase the micro batch size (mbs). For MoE models, the `EP` (expert parallel size) parameter enables scaling individual expert models across devices. For models exceeding 180B, you can further utilize pipeline parallelism (`PP`) to split the model, maximizing memory savings.
+
+The following bar chart illustrates how increasing the mini-batch size (MBS) during DeepSeekV2Lite training on an AMD MI355 GPU improves both throughput (tokens per second) and GPU memory utilization. By scaling up the MBS, you can achieve better hardware efficiency and model performance, within the limits of available memory resources.
+
+![DeepSeekV2Lite MI355 Batch Size Scaling – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_mbs_scaling_mi355.png)
+
+#### 3. Bottleneck Analysis
+
+Perform a time breakdown analysis to identify performance bottlenecks (e.g., compute bound vs. communication bound). Use profiling tools to collect metrics such as compute time, comm time, and idle time.
+
+| Test Name | Compute Time | Comm Time | Idle Time | Misc Time |
+|-----------|--------------|-----------|-----------|-----------|
+|           |              |           |           |           |
+|           |              |           |           |           |
+
+*Table left blank for future data entry.*
+
+#### 4. Performance Optimization
+
+Evaluate the effect of each optimization feature on throughput and memory usage. Below, a placeholder for feature-wise performance comparison:
+
+[TODO]: optimization method introduction
+
+(Insert plot - "Feature Impact on Tokens/s and Memory")
+*Leave plot space blank; to be added later.*
+
+| Optimization Feature            | Tokens/s/GPU | Memory (GB) |
+|---------------------------------|--------------|-------------|
+| Baseline                        |              |             |
+| Turbo Attention                 |              |             |
+| Grouped GEMM/MLP Fusion         |              |             |
+| DeepEP                          |              |             |
+| Loss Fusion                     |              |             |
+| NUMA Binding                    |              |             |
+| Manual GC                       |              |             |
+| (additional features as needed) |              |             |
+
+*Please fill this table in during your own experiments.*
+
+Through stepwise optimization, we observe a clear and significant boost in end-to-end training performance. The figures below summarize the measured throughput improvements and memory utilization as each optimization feature is incrementally enabled.
+
+**Figure 1**:
+Cumulative throughput (tokens/s per GPU) and GPU memory usage after successively enabling key optimization features. Each bar represents the combined effect of all optimizations up to that point.
+![DeepSeekV2Lite MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_tks_memory_mi355.png)
+
+**Figure 2**:
+Per-feature throughput (tokens/s) and speedup relative to baseline. This illustrates the acceleration contributed by each optimization as it is introduced.
+![DeepSeekV2Lite MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_tks_speedup_mi355.png)
+
+#### 5. Future Optimization Opportunities
+
+- Explore deeper fusion between permute operations and DeepEP kernels.
+- Investigate more effective scheduling to further overlap communication and computation.
+- Develop adaptive expert assignment for improved MoE load balancing.
+- Continue tuning pipeline partition and recompute strategies for larger model fits.
+- Enable automatic tuning of hw queues and memory pools.
+
+---
+
+### 7.2 DeepSeek V2 Optimization
+
+#### 1. Model Overview and Configuration Files
+
+DeepSeek V2 models scale up in size and complexity, and are optimized for maximum parallel throughput on MI-series hardware.
+
+| Variant | Total Params | Active Params | Transformer Layers |
+| --- | --- | --- | --- |
+| DeepSeek V2 | 236B | 21B | 60 |
+
+- Model Config: `primus/configs/models/megatron/deepseek_v2.yaml`
+- Pretrain Script: `examples/moe_package/run_deepseek_v2_pretrain_mi355x.sh`
+
+#### 2. Baseline Performance Testing
+
+Memory scaling via higher mbs and expert/model partitioning (`EP`, `PP`) is even more critical for these larger models. Start with the largest mbs that fits within memory, and iteratively tune parallelism parameters.
+
+*(Insert chart — to be added: MB Size vs. Performance for DeepSeek V2)*
+
+#### 3. Bottleneck Analysis
+
+Time breakdown—profile compute, communication, and idle periods to guide optimization.
+
+| Test Name | Compute Time | Comm Time | Idle Time | Misc Time |
+|-----------|--------------|-----------|-----------|-----------|
+|           |              |           |           |           |
+
+#### 4. Performance Optimization
+
+(Insert plot: "DeepSeek V2 Optimization Features vs. Tokens/s")
+
+| Optimization Feature            | Tokens/s/GPU | Memory (GB) |
+|---------------------------------|--------------|-------------|
+| Baseline                        |              |             |
+| Turbo Attention                 |              |             |
+| Grouped GEMM/MLP Fusion         |              |             |
+| DeepEP                          |              |             |
+| NUMA Binding                    |              |             |
+| (others as relevant)            |              |             |
+
+#### 5. Future Optimization Directions
+
+- Tighter integration between MoE routing and turbo communication paths.
+- Pipeline parallel overlap with advanced scheduling.
+- Hardware-aware kernel fusion for even larger batch sizes.
+
+---
+
+### 7.3 DeepSeek V3 Optimization
+
+#### 1. Model Overview and Configuration Files
+
+DeepSeek V3 introduces further architectural improvements, leveraging increased parameter and expert counts. Typically used for experiments over 250B parameters.
+
+| Variant | Total Params | Active Params | Transformer Layers |
+| --- | --- | --- | --- |
+| DeepSeek V3 | 671B | 37B | 61 |
+
+- Model Config: `primus/configs/models/megatron/deepseek_v3.yaml`
+- Pretrain Script: `examples/moe_package/run_deepseek_v3_pretrain_mi325x.sh`
+
+#### 2. Baseline Performance Testing
+
+Utilize larger mbs, aggressive expert and pipeline partitioning. The MI325X platform especially allows for maximizing GPU memory utilization.
+
+*(Insert chart — MB Size vs. Memory/Throughput for DeepSeek V3)*
+
+#### 3. Bottleneck Analysis
+
+As above; perform time breakdown. For V3, communication overheads can dominate and may require additional tuning.
+
+| Test Name | Compute Time | Comm Time | Idle Time | Misc Time |
+|-----------|--------------|-----------|-----------|-----------|
+|           |              |           |           |           |
+
+#### 4. Performance Optimization
+
+(Insert plot: Feature Impact on V3 performance metrics)
+
+| Optimization Feature            | Tokens/s/GPU | Memory (GB) |
+|---------------------------------|--------------|-------------|
+| Baseline                        |              |             |
+| Turbo Attention                 |              |             |
+| Loss Fusion                     |              |             |
+| Manual GC                       |              |             |
+| (others as relevant)            |              |             |
+
+#### 5. Future Work
+
+- Improved dynamic workload balancing across experts and pipelines.
+- Enhanced profiling/monitoring tools for large-scale runs.
+- Deeper kernel fusion layers.
+
+---
+
+### 7.4 Optimizing 1 Trillion+ Parameter Models
+
+#### 1. Model Overview and Configuration Files
+
+Models exceeding 1 trillion parameters push the boundaries of distributed training. Configuration typically requires combining all advanced parallelism and memory optimization techniques.
+
+| Variant | Total Params | Active Params | Transformer Layers |
+| --- | --- | --- | --- |
+| DeepSeek Proxy 1T | 1T | 44B | 96 |
+| DeepSeek Proxy 2T | 2T | 80B | 96 |
+
+- Model Configs:
+  - `primus/configs/models/megatron/deepseek_proxy_1T.yaml`
+  - `primus/configs/models/megatron/deepseek_proxy_2T.yaml`
+- Pretrain Script (example): `examples/moe_package/run_ultra_1T_pretrain.sh`
+
+#### 2. Baseline Performance Testing
+
+Maximizing mbs is crucial, but will also require leveraging `EP`, `PP`, and possibly tensor parallel (`TP`) at high scales. Expect to build a custom configuration based on your hardware cluster.
+
+*(Insert chart/figure: MB Size vs. HW Utilization in 1T+ Models)*
+
+#### 3. Bottleneck and Memory Analysis
+
+Both time and memory breakdowns become essential at this scale. Memory view is critically important for debugging OOM or suboptimal fits.
+
+| Test Name | Compute Time | Comm Time | Idle Time | Misc Time |
+|-----------|--------------|-----------|-----------|-----------|
+|           |              |           |           |           |
+
+*Below: (Insert memory breakdown analysis plot for 1T+ models)*
+
+#### 4. Performance Optimization
+
+(Insert combined plot: Optimization Steps vs. Throughput for 1T+ runs)
+
+| Optimization Feature            | Tokens/s/GPU | Memory (GB) |
+|---------------------------------|--------------|-------------|
+| Baseline                        |              |             |
+| Turbo Attention                 |              |             |
+| Recompute/Selective Recompute   |              |             |
+| NUMA Binding                    |              |             |
+| GC and Memory Fragmentation Fix |              |             |
+
+#### 5. Future Optimization Priorities
+
+- Permute + DeepEP fusion kernels for both forward and backward passes.
+- Research into even more efficient communication/computation pipelines.
+- Scaling adaptive MoE gating for resource-aware load balancing.
+- Software support for hardware-level memory compression.
+
+---
+
 
 
 ## 8. Code and Reproduction
