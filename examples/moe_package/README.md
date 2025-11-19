@@ -168,7 +168,7 @@ gradient_accumulation_fusion: true
 
 
 ### TODO
-AINIC, cp, hw_queue, manual gc (stability), fused crossentropy
+AINIC, cp, hw_queue, manual gc (stability), fused crossentropy, aware-optimizer, 1f1b overlap+recompute?
 
 
 ## 7. Model-Specific Optimization Guide
@@ -211,25 +211,27 @@ Perform a time breakdown analysis to identify performance bottlenecks (e.g., com
 
 #### 4. Performance Optimization
 
-Evaluate the effect of each optimization feature on throughput and memory usage. Below, a placeholder for feature-wise performance comparison:
+This section summarizes our key optimization strategies used to enhance DeepSeek_V2_Lite MoE model training on AMD MI-series hardware. Each method addresses a specific bottleneck, providing both stability and performance improvements:
 
-[TODO]: optimization method introduction
+1. **Manual Garbage Collection (GC) for Performance Stability**
+   We observed that, during MoE training, iteration time can fluctuate significantly due to memory allocation behavior. By introducing manual garbage collection, we can stabilize the training process and reduce these time variations. As a result, all subsequent benchmarking results in this guide are based on runs with manual GC enabled by default.
 
-(Insert plot - "Feature Impact on Tokens/s and Memory")
-*Leave plot space blank; to be added later.*
+2. **Loss Fusion to Optimize Memory Footprint**
+   The memory consumed by the loss computation becomes substantial, primarily due to the extremely large vocabulary size. Employing loss fusion techniques reduces memory usage for this phase by approximately 7.4%, while also improving overall end-to-end training throughput.
 
-| Optimization Feature            | Tokens/s/GPU | Memory (GB) |
-|---------------------------------|--------------|-------------|
-| Baseline                        |              |             |
-| Turbo Attention                 |              |             |
-| Grouped GEMM/MLP Fusion         |              |             |
-| DeepEP                          |              |             |
-| Loss Fusion                     |              |             |
-| NUMA Binding                    |              |             |
-| Manual GC                       |              |             |
-| (additional features as needed) |              |             |
+3. **DeepEP Optimization for AllToAll Communication**
+   AllToAll-based inter-device communication is a critical bottleneck, especially as token traffic and expert parallelism scale up. By incorporating DeepEP (Deep Expert Parallel) optimizations, we reduce redundant token data transfer, increase token movement efficiency, and significantly improve training performance.
 
-*Please fill this table in during your own experiments.*
+4. **Sync-Free Mode to Resolve CPU D2H Synchronization Overheads**
+   Profiling shows that CPU device-to-host (d2h) synchronizations in the MoE layers can induce large kernel launch latencies, preventing effective overlapping of communication and computation. Enabling sync-free mode eliminates these synchronizations, resulting in a well-overlapped, higher-performance kernel launch sequence.
+
+5. **NUMA Binding for Improved CPU Affinity and Memory Access**
+   On multi-socket (NUMA) systems, poor CPU thread placement can degrade throughput. Applying NUMA binding strategies ensures better CPU affinity, reduces memory latency, and boosts pipeline scheduling efficiency, further supporting high-throughput training.
+
+6. **Micro-Batch Size (MBS) Scaling via Memory Savings from Prior Optimizations**
+   The combined effect of the optimizations above has reduced the MBS=12 training run's peak memory usage from 99.79% to 84.28%. This memory headroom allows us to increase the micro-batch size to 14, unlocking additional throughput improvements and maximizing hardware utilization.
+
+Each of these optimizations contributes incrementally to more stable, efficient, and scalable MoE training. We recommend applying them sequentially for best results.
 
 Through stepwise optimization, we observe a clear and significant boost in end-to-end training performance. The figures below summarize the measured throughput improvements and memory utilization as each optimization feature is incrementally enabled.
 
