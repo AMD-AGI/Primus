@@ -10,7 +10,38 @@ import sys
 from pathlib import Path
 
 from primus.core.launcher.config import PrimusConfig
-from primus.core.launcher.parser import add_pretrain_parser, load_primus_config
+from primus.core.launcher.parser import load_primus_config
+
+
+def add_pretrain_parser(parser: argparse.ArgumentParser):
+    """Add pretrain-specific CLI arguments."""
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to experiment YAML config file (alias: --exp)",
+    )
+    parser.add_argument(
+        "--data_path",
+        type=str,
+        default="./data",
+        help="Path to data directory [default: ./data]",
+    )
+    parser.add_argument(
+        "--backend_path",
+        nargs="?",
+        default=None,
+        help=(
+            "Optional backend import path for Megatron or TorchTitan. "
+            "If provided, it will be appended to PYTHONPATH dynamically."
+        ),
+    )
+    parser.add_argument(
+        "--export_config",
+        type=str,
+        help="Optional path to export the final merged config to a file.",
+    )
+    return parser
 
 
 # Lazy backend loader

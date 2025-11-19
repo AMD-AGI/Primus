@@ -46,7 +46,7 @@ def register_subcommand(subparsers):
 
     # ---------- pretrain ----------
     pretrain = suite_parsers.add_parser("pretrain", help="Pre-training workflow.")
-    from primus.core.launcher.parser import add_pretrain_parser
+    from primus.pretrain import add_pretrain_parser
 
     add_pretrain_parser(pretrain)
 
