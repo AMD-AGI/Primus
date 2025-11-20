@@ -1,0 +1,20 @@
+work_group: amd
+user_name: xiaoming
+exp_name: exp_pretrain
+workspace: ./output
+
+modules:
+  - name: gemm_bench
+    module: benchmark_gemm
+    dtype: bf16
+    shapes: "llama2_7B"
+    a.b: 1
+
+  - name: pretrain_stage
+    module: pre_trainer
+    framework: megatron
+    model: llama2_7B
+    arguments:
+      global_batch_size: 16
+      micro_batch_size: 1
+      lr: 1e-5

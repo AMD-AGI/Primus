@@ -335,10 +335,10 @@ fi
 ###############################################################################
 # STEP 8: Execute hooks
 ###############################################################################
-if ! bash "${RUNNER_DIR}/helpers/execute_hooks.sh" "$1" "$2" "$@"; then
-    LOG_ERROR "[direct] Hooks execution failed"
-    exit 1
-fi
+# if ! bash "${RUNNER_DIR}/helpers/execute_hooks.sh" "$1" "$2" "$@"; then
+#     LOG_ERROR "[direct] Hooks execution failed"
+#     exit 1
+# fi
 
 ###############################################################################
 # STEP 9: Execute patch scripts

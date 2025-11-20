@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from examples.scripts.utils import log_error_and_exit, log_info
-from primus.core.launcher.parser import PrimusParser
+from primus.core.launcher.config import PrimusConfig
 
 
 def log(msg, level="INFO"):
@@ -53,7 +53,7 @@ def main():
     patch_args_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Parse the config from CLI args
-    config = PrimusParser().parse(args)
+    config = PrimusConfig.from_file(args.config, args)
 
     # Get framework name from pre_trainer module
     framework = config.get_module_config("pre_trainer").framework
