@@ -197,3 +197,53 @@ class LanguageModelProfiler(BaseModuleProfiler):
         gs_saving = 1 if ga > pp_size else ga / pp_size
         total_act *= gs_saving * interleaved_schedule_memory_penalty
         return total_act
+
+    def run_layer_benchmark(self, model, batch_size: int, seq_len: int) -> dict:
+        # Handle both single model and list of model chunks (virtual pipeline parallelism)
+        models = model if isinstance(model, list) else [model]
+        print(f"[Primus:Performance Projection] Models: {models}")
+
+        # Extract transformer layers from all model chunks
+        all_layers = []
+        for model in models:
+            model_chunk = model.module.module
+            if hasattr(model_chunk, "decoder") and hasattr(model_chunk.decoder, "layers"):
+                all_layers.extend(model_chunk.decoder.layers)
+            elif hasattr(model_chunk, "layers"):
+                all_layers.extend(model_chunk.layers)
+            else:
+                raise ValueError(f"Cannot find transformer layers in model chunk: {type(model_chunk)}")
+
+        print(f"\n[Primus:Performance Projection] Found {len(all_layers)} transformer layers")
+        print(f"[Primus:Performance Projection] This rank is responsible for layers: {self.layers}")
+
+        # Benchmark each layer assigned to this rank
+        results = {}
+        for layer_idx in self.layers:
+            if layer_idx >= len(all_layers):
+                print(f"[WARNING] Layer index {layer_idx} exceeds available layers ({len(all_layers)})")
+                continue
+
+            layer_module = all_layers[layer_idx]
+            is_moe = self.config.model_config.moe_pattern[layer_idx]
+
+            print(
+                f"\n[Primus:Performance Projection] Benchmarking Layer {layer_idx} ({'MoE' if is_moe else 'Dense'})..."
+            )
+
+            # Get the appropriate profiler
+            if is_moe:
+                layer_profiler = self.sub_profilers["moe_transformer_layer"]
+            else:
+                layer_profiler = self.sub_profilers["dense_transformer_layer"]
+
+            # Set the layer module
+            layer_profiler.set_layer_module(layer_module)
+
+            forward_time = layer_profiler.measured_forward_time(batch_size, seq_len)
+            backward_time = layer_profiler.measured_backward_time(batch_size, seq_len)
+
+            print(f"  Forward time:  {forward_time:.2f} ms")
+            print(f"  Backward time: {backward_time:.2f} ms")
+
+        return results
