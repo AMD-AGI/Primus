@@ -7,7 +7,7 @@
 import torch
 import torch.nn as nn
 from primus_turbo.pytorch.core.float8 import Float8QuantConfig, ScalingGranularity
-from primus_turbo.pytorch.modules import Float8Linear
+from primus_turbo.pytorch.modules.linear_fp8 import Float8Linear
 from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (
@@ -31,7 +31,7 @@ def replace_turbo_mxlinear_modules(model: nn.Module, config: Float8QuantConfig):
 class PrimusTubroMXConverter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = True
-        self.config = Float8QuantConfig(ScalingGranularity.BLOCKWISE, block_size=SCALING_BLOCK_SIZE)
+        self.config = Float8QuantConfig(granularity=ScalingGranularity.BLOCKWISE, block_size=SCALING_BLOCK_SIZE)
 
     def convert(self, model: nn.Module):
         if not self.enabled:

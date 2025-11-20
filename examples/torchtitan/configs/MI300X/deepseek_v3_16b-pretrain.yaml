@@ -72,8 +72,9 @@ modules:
         components: ["model", "loss"]     # ["model", "loss"]
 
       primus_turbo:
-        enable_primus_turbo: false
+        enable_primus_turbo: true
         use_turbo_mx_linear: false
+        use_turbo_float8_linear: true
         enable_attention_float8: false
         use_turbo_grouped_mm: true
         use_moe_fp8: true
