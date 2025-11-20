@@ -22,6 +22,7 @@ class PrimusTurboConfig:
     use_turbo_attention: bool = False
     use_turbo_async_tp: bool = False
     use_turbo_mx_linear: bool = False
+    use_turbo_float8_linear: bool = False
     use_turbo_grouped_mm: bool = False
     use_moe_fp8: bool = True
     enable_embedding_autocast: bool = True

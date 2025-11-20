@@ -285,6 +285,13 @@ class TorchTitanPretrainTrainer(BaseModule):
             from primus.backends.torchtitan.models.llama3.model.model import Attention
 
             torchtitan.models.llama3.model.model.Attention = Attention
+
+            # ******* deepseek_v3 Attention Model *******
+            import torchtitan.models.deepseek_v3.model.model
+
+            from primus.backends.torchtitan.models.deepseek_v3.model.model import Attention
+
+            torchtitan.models.deepseek_v3.model.model.Attention = Attention
             logger.warning(f"TorchtitanPretrainTrainer: Patch Turbo Attention")
 
         if self.titan_config.primus_turbo.use_turbo_mx_linear:
@@ -299,8 +306,23 @@ class TorchTitanPretrainTrainer(BaseModule):
             )
 
             _registry_model_converter_cls["mx"] = PrimusTubroMXConverter
-            torchtitan.components.quantization.mx.MXConverter = PrimusTubroMXConverter
+            torchtitan.components.quantization.mx.MXLinearConverter = PrimusTubroMXConverter
             logger.warning(f"TorchtitanPretrainTrainer: Patch Turbo MXLinear")
+
+        if self.titan_config.primus_turbo.use_turbo_float8_linear:
+            # ******* FP8Linear *******
+            import torchtitan.components.quantization.float8
+            from torchtitan.protocols.model_converter import (
+                _registry_model_converter_cls,
+            )
+
+            from primus.backends.torchtitan.components.quantization.float8 import (
+                PrimusTubroFP8Converter,
+            )
+
+            _registry_model_converter_cls["turbo_fp8_linear"] = PrimusTubroFP8Converter
+            torchtitan.components.quantization.float8.Float8LinearConverter = PrimusTubroFP8Converter
+            logger.warning(f"TorchtitanPretrainTrainer: Patch Turbo FP8Linear")
 
         if self.titan_config.primus_turbo.use_turbo_async_tp:
             # ******* Async TP *******
