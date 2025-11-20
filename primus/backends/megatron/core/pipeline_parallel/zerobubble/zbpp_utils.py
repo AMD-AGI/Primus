@@ -292,14 +292,25 @@ class WeightGradStore:
         return WeightGradStore.weight_grad_queue[chunk][seq_split_idx].qsize()
 
     @classmethod
-    def flush(cls, chunk=0, seq_split_idx=0):
+    def flush(cls, chunk=0, seq_split_idx=0, num=None):
+        """Flush the weight gradient to the weight gradient store.
+
+        Args:
+            chunk (int): The chunk index.
+            seq_split_idx (int): The sequence split index.
+            num (int): The number of weight gradients to flush. If None, flush all.
+        """
         cls.lazy_init()
         # Or W later will consume empty computation and leak the non-empty computation.
         if not cls.split_bw():
             assert len(cls.cache) == 0
             return
-        cls.weight_grad_queue[chunk][seq_split_idx].put(cls.cache)
-        cls.cache = []
+        if num is not None and num < len(cls.cache):
+            cls.weight_grad_queue[chunk][seq_split_idx].put(cls.cache[:num])
+            cls.cache = cls.cache[num:]
+        else:
+            cls.weight_grad_queue[chunk][seq_split_idx].put(cls.cache)
+            cls.cache = []
 
     @classmethod
     def pop(cls, chunk=0, seq_split_idx=0, clear=False):
