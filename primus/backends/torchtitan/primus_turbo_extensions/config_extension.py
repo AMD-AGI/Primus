@@ -7,12 +7,24 @@
 from dataclasses import dataclass, field
 
 from torchtitan.config.job_config import JobConfig as TTJobConfig
+from torchtitan.config.job_config import Profiling as TTProfilingConfig
 
 # TODO: float8 quant config
 # Tensorwise / Rowwise / Blockwise  etc.
 # @dataclass
 # class PrimusTurboFloat8Config:
 #     pass
+
+
+@dataclass
+class ProfilingConfig(TTProfilingConfig):
+    """
+    Extended Profiling configuration with Primus extensions.
+    
+    Additional attributes:
+        profile_ranks (list[int]): List of ranks to profile. Defaults to [0].
+    """
+    profile_ranks: list[int] = field(default_factory=lambda: [0])
 
 
 @dataclass
@@ -30,4 +42,5 @@ class PrimusTurboConfig:
 
 @dataclass
 class JobConfig(TTJobConfig):
+    profiling: ProfilingConfig = field(default_factory=ProfilingConfig)
     primus_turbo: PrimusTurboConfig = field(default_factory=PrimusTurboConfig)

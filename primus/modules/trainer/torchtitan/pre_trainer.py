@@ -35,6 +35,7 @@ class TorchTitanPretrainTrainer(BaseModule):
             patch_mock_hf_dataset()
 
         self.patch_torchtitan_embedding_amp(cfg_dict["primus_turbo"]["enable_embedding_autocast"])
+        self.patch_torchtitan_profiling()
         self.patch_titan_train_spec(pre_trainer_cfg.model.name, pre_trainer_cfg.model.flavor, extra_args)
 
         # ensure checkpoint patch applied before import torchtitan
@@ -98,6 +99,24 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         titan_logging.logger = primus_logger
         titan_logging.init_logger = lambda: None
+    
+    def patch_torchtitan_profiling(self):
+        """
+        Patch torchtitan profiling to support profile_ranks parameter and json.gz format.
+        This adds the ability to specify which ranks should be profiled and saves traces in compressed format.
+        """
+        from primus.core.utils.logger import _logger as primus_logger
+        primus_logger.info("Monkey patch torchtitan profiling for profile_ranks support and json.gz format...")
+        
+        try:
+            import torchtitan.tools.profiling as profiling_module
+            from primus.backends.torchtitan.tools.profiling import patch_maybe_enable_profiling
+            
+            # Apply the patch
+            patch_maybe_enable_profiling(profiling_module, primus_logger)
+            
+        except Exception as e:
+            primus_logger.warning(f"Failed to patch torchtitan profiling: {e}")
     
     def patch_torchtitan_moe(self):
         if not self.titan_config.primus_turbo.use_turbo_grouped_mm:
@@ -263,11 +282,25 @@ class TorchTitanPretrainTrainer(BaseModule):
         Enable Primus-Turbo features and extensions.
         """
         from torchtitan.tools.logging import logger
+        from primus.core.utils.logger import _logger as primus_logger
 
         try:
             import primus_turbo  # noqa: F401
         except ImportError:
             raise ImportError("Module 'primus_turbo' is not installed. Please install it")
+        
+        # Log which features are enabled
+        turbo_config = self.titan_config.primus_turbo
+        enabled_features = []
+        if turbo_config.use_turbo_attention:
+            enabled_features.append("TurboAttention")
+        if turbo_config.use_turbo_mx_linear:
+            enabled_features.append("MXLinear")
+        if turbo_config.use_turbo_async_tp:
+            enabled_features.append("AsyncTP")
+        if turbo_config.use_turbo_grouped_mm:
+            enabled_features.append("GroupedMM")
+        primus_logger.info(f"Enabling Primus Turbo extensions: {', '.join(enabled_features)}")
 
         # ******* Model Converters Container *******
         import torchtitan.protocols.model_converter
@@ -285,6 +318,12 @@ class TorchTitanPretrainTrainer(BaseModule):
             from primus.backends.torchtitan.models.llama3.model.model import Attention
 
             torchtitan.models.llama3.model.model.Attention = Attention
+            logger.warning(f"TorchtitanPretrainTrainer: Patch Turbo Attention")
+
+            # ******* deepseekv3 Attention Model *******
+            import torchtitan.models.deepseek_v3.model.model
+            from primus.backends.torchtitan.models.deepseekv3.model.model import Attention
+            torchtitan.models.deepseek_v3.model.model.Attention = Attention
             logger.warning(f"TorchtitanPretrainTrainer: Patch Turbo Attention")
 
         if self.titan_config.primus_turbo.use_turbo_mx_linear:

@@ -13,9 +13,10 @@ modules:
     model: deepseek_v3_16b.yaml
     overrides:
       profiling:
-        enable_profiling: false
-        save_traces_folder: "profile_trace"
-        profile_freq: 10
+        enable_profiling: true
+        save_traces_folder: "profile_dsv2_lite_trace"
+        profile_freq: 6
+        profile_ranks: [0]
         enable_memory_snapshot: false
         save_memory_snapshot_folder: "memory_snapshot"
 
@@ -72,7 +73,8 @@ modules:
         components: ["model", "loss"]     # ["model", "loss"]
 
       primus_turbo:
-        enable_primus_turbo: false
+        enable_primus_turbo: true
+        use_turbo_attention: true
         use_turbo_mx_linear: false
         enable_attention_float8: false
         use_turbo_grouped_mm: true

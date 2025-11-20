@@ -30,6 +30,7 @@ profiling:
   enable_memory_snapshot: false
   enable_profiling: false
   profile_freq: 10
+  profile_ranks: [0]
   save_memory_snapshot_folder: memory_snapshot
   save_traces_folder: profile_traces
 
