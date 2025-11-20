@@ -17,6 +17,7 @@ export WANDB_API_KEY=${WANDB_API_KEY:-"your_wandb_api_key"}
 # TODO
 export GPU_MAX_HW_QUEUES=2
 # export GPU_MAX_HW_QUEUES=8
+export CPUS_PER_TASK=96
 
 # Set on Primus-Safe Platform
 # export MASTER_ADDR=${MASTER_ADDR:-localhost}
@@ -26,13 +27,16 @@ export GPU_MAX_HW_QUEUES=2
 # export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
 # Set on AAC14 cluster
-export NNODES=1
+export NNODES=4
 export USING_AINIC=1
-export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
-export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
-export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
+# export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
+# export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
+# export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
+export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7" # modify based on the GPU NiC settings
 export NCCL_SOCKET_IFNAME="enp193s0f1np1"
 export GLOO_SOCKET_IFNAME="enp193s0f1np1"
+export NCCL_IB_RETRY_CNT=20
+export NCCL_IB_TIMEOUT=300
 
 export HSA_NO_SCRATCH_RECLAIM=1
 export NVTE_CK_USES_BWD_V3=1
@@ -41,7 +45,7 @@ export NVTE_CK_USES_BWD_V3=1
 
 ######################### Training Config #########################
 MBS=8
-GBS=768
+GBS=$((768 * NNODES))
 SEQ_LENGTH=4096
 TP=1
 ETP=1
@@ -62,7 +66,7 @@ PROFILE=False
 DISABLE_CPU_TRACE=False
 PROFILE_STEP_START=5
 PROFILE_STEP_END=6
-TRAIN_ITERS=5
+TRAIN_ITERS=10
 
 # MoE_Features legend:
 # 0 - Baseline (no extra optimization toggles)
@@ -79,10 +83,7 @@ TRAIN_ITERS=5
 # 11 - Manual GC helper
 # MoE_Features=(0 1 2 3 4 5 6 7 8 9 10 11)
 # MoE_Features=(0 11)
-# MoE_Features=(3 11)
-# MoE_Features=(3 4 11)
-# MoE_Features=(3 4 5 11)
-MoE_Features=(3 4 5 10 11)
+MoE_Features=(3 4 10 11)
 
 FEATURE_ARGS=()
 PRIMUS_TURBO_ENABLED="False"
@@ -259,7 +260,7 @@ export PRIMUS_TEAM
 PRIMUS_USER=user-tas
 export PRIMUS_USER
 # export PRIMUS_EXP_NAME="debug"
-export PRIMUS_EXP_NAME="MoEProxy_MI355X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_MLA${ENABLE_MLA}_MTP${ENABLE_MTP}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}-${PROFILE_STEP_START}-${PROFILE_STEP_END}_NoCPUTrace${DISABLE_CPU_TRACE}_Features${FEATURE_TAG}"
+export PRIMUS_EXP_NAME="MoEProxy_l56_hs2048_MI355X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_MLA${ENABLE_MLA}_MTP${ENABLE_MTP}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}-${PROFILE_STEP_START}-${PROFILE_STEP_END}_NoCPUTrace${DISABLE_CPU_TRACE}_Features${FEATURE_TAG}"
 
 LOG_DIR=./output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
 export DUMP_PP_DIR=$LOG_DIR/pp_dump

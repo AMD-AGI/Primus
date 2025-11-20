@@ -155,7 +155,7 @@ if [ "$USING_AINIC" == "1" ]; then
     LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
     # unset NCCL_IB_GID_INDEX
     export NCCL_IB_GID_INDEX=1 # TODO: unset or set to 1?
-    export NCCL_IB_ROCE_VERSION_NUM=2 # TODO: set or not?
+    # export NCCL_IB_ROCE_VERSION_NUM=2 # TODO: set or not?
     export NCCL_MAX_P2P_CHANNELS=56
     export NCCL_IB_TC=104
     export NCCL_IB_FIFO_TC=192
@@ -166,8 +166,8 @@ if [ "$USING_AINIC" == "1" ]; then
     export NCCL_DMABUF_ENABLE=0
     export NCCL_IGNORE_CPU_AFFINITY=1
     export NCCL_IB_QPS_PER_CONNECTION=1
-    export LD_LIBRARY_PATH=${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${ANP_HOME_DIR}/build/lib:$LD_LIBRARY_PATH
-    export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
+    # export LD_LIBRARY_PATH=${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${ANP_HOME_DIR}/build/lib:$LD_LIBRARY_PATH
+    # export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
 else
     export NCCL_IB_GID_INDEX=3
 fi

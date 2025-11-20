@@ -5,9 +5,14 @@ tokenizer_type: DeepSeekV2Tokenizer
 tokenizer_model: deepseek-ai/DeepSeek-V2-Lite
 
 # model
-num_layers: 40
+# num_layers: 40
+# hidden_size: 4096
+# num_layers: 64
+num_layers: 56
 hidden_size: 2048
 num_attention_heads: 32
+group_query_attention: true
+num_query_groups: 8
 kv_channels: 128
 
 multi_latent_attention: false
