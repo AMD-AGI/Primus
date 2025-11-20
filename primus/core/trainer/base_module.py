@@ -15,6 +15,7 @@ from primus.core.utils.global_vars import (
     get_target_platform,
     set_global_variables,
 )
+from primus.modules.trainer.pretrain_config import PretrainConfig
 
 from .module_utils import debug_rank_all, set_logging_rank
 
@@ -22,15 +23,17 @@ from .module_utils import debug_rank_all, set_logging_rank
 class BaseModule(ABC):
     def __init__(
         self,
-        module_name: str,
-        primus_config: PrimusConfig,
-        module_rank: int,
-        module_world_size: int,
+        module_name: str = None,
+        primus_config: PrimusConfig = None,
+        module_rank: int = 0,
+        module_world_size: int = 1,
         module_master_addr: str = None,
         module_master_port: int = None,
+        module_context: PretrainConfig = None,
     ):
         # module will be initialized by multiple worker processes
         self.module_name = module_name
+        self.module_context = module_context
 
         assert primus_config is not None
         self.primus_config = primus_config
@@ -40,6 +43,16 @@ class BaseModule(ABC):
         set_global_variables(primus_config)
         self.platform = get_target_platform()
         self.cli_args = get_cli_args()
+
+        # Auto-detect distributed info if not provided
+        if module_rank is None:
+            module_rank = int(os.getenv("RANK", "0"))
+        if module_world_size is None:
+            module_world_size = int(os.getenv("WORLD_SIZE", "1"))
+        if module_master_addr is None:
+            module_master_addr = os.getenv("MASTER_ADDR", "127.0.0.1")
+        if module_master_port is None:
+            module_master_port = int(os.getenv("MASTER_PORT", "29500"))
 
         # distributed module worker infos
         checker.check_true(
@@ -85,9 +98,10 @@ class BaseModule(ABC):
 
     def setup_worker_logger(self, rank, world_size):
         # setup logger of dist module
-        if self.module_config.sink_level is not None:
-            self.module_config.file_sink_level = self.module_config.sink_level
-            self.module_config.stderr_sink_level = self.module_config.sink_level
+        sink_level = getattr(self.module_config, "sink_level", None)
+        if sink_level is not None:
+            self.module_config.file_sink_level = sink_level
+            self.module_config.stderr_sink_level = sink_level
         logger_cfg = logger.LoggerConfig(
             exp_root_path=self.primus_config.exp_root_path,
             work_group=self.primus_config.exp_meta_info["work_group"],

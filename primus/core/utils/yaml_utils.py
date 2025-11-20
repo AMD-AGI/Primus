@@ -71,44 +71,83 @@ def parse_yaml(yaml_file: str):
         if config is None:
             return {}
 
-        if "bases" in config:
-            for base_file in config["bases"]:
-                full_base_file = os.path.join(os.path.dirname(yaml_file), base_file)
-                base_config = parse_yaml(full_base_file)
-                # key must in base config
-                for key in config:
-                    if key != "bases":
-                        assert key in base_config, (
-                            f"The argument '{key}' in the a config file '{yaml_file}' "
-                            f"cannot be found in the base config file '{base_file}'."
-                        )
-                for key, value in base_config.items():
-                    if key != "bases" and key not in config:
-                        config[key] = value
-            # remove bases config
-            del config["bases"]
-
+        # Handle 'includes' (flexible merge, allows override and append)
         if "includes" in config:
+            merged_config = {}
+
+            # First, recursively merge all included files in order
+            # (later files override earlier ones)
             for include_file in config["includes"]:
                 full_include_file = os.path.join(os.path.dirname(yaml_file), include_file)
+                # Recursive call to parse_yaml handles nested includes
                 include_config = parse_yaml(full_include_file)
-                # overrides if exist
-                for key, value in include_config.items():
-                    if key == "includes":
-                        continue
-                    if key not in config:
-                        config[key] = value
-            # remove includes config
-            del config["includes"]
+
+                # Deep merge: later values override earlier ones
+                _deep_merge_dict(merged_config, include_config)
+
+            # Then, overlay current config (allows override and append new keys)
+            for key, value in config.items():
+                if key != "includes":
+                    merged_config[key] = value
+
+            config = merged_config
 
         return config
 
 
+def _deep_merge_dict(target: dict, source: dict) -> dict:
+    """
+    Deep merge source dict into target dict.
+
+    Args:
+        target: Target dictionary to merge into
+        source: Source dictionary to merge from
+
+    Returns:
+        Merged target dictionary
+    """
+    for key, value in source.items():
+        if key in target and isinstance(target[key], dict) and isinstance(value, dict):
+            # Recursively merge nested dicts
+            _deep_merge_dict(target[key], value)
+        else:
+            # Override or add new key
+            target[key] = value
+    return target
+
+
 def dict_to_nested_namespace(d: dict):
-    """Recursively convert dictionary to a nested SimpleNamespace."""
-    return SimpleNamespace(
-        **{k: dict_to_nested_namespace(v) if isinstance(v, dict) else v for k, v in d.items()}
-    )
+    """
+    Recursively convert dictionary to a nested SimpleNamespace.
+
+    Special handling for 'modules' key:
+    - If 'modules' is a list, each item becomes a SimpleNamespace with its 'name' as the key
+    - Other keys are converted recursively
+    """
+    if not isinstance(d, dict):
+        return d
+
+    result = {}
+    for k, v in d.items():
+        if k == "modules" and isinstance(v, list):
+            # Convert list of modules to a namespace with name-based keys
+            modules_ns = SimpleNamespace()
+            for module_dict in v:
+                if not isinstance(module_dict, dict):
+                    continue
+                module_name = module_dict.get("name")
+                if not module_name:
+                    raise ValueError(f"Module in 'modules' list must have a 'name' field: {module_dict}")
+                # Convert module dict to SimpleNamespace (non-recursive for module content)
+                module_ns = SimpleNamespace(**module_dict)
+                setattr(modules_ns, module_name, module_ns)
+            result[k] = modules_ns
+        elif isinstance(v, dict):
+            result[k] = dict_to_nested_namespace(v)
+        else:
+            result[k] = v
+
+    return SimpleNamespace(**result)
 
 
 def nested_namespace_to_dict(obj):

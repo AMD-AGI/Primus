@@ -1,5 +1,5 @@
-bases:
-  - language_model.yaml
+includes:
+  - ../../modules/megatron/pretrain_module.yaml
 
 group_query_attention: false
 num_query_groups: null
