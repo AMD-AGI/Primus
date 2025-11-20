@@ -48,7 +48,7 @@ SEQ_LENGTH=4096
 TP=1
 ETP=1
 PP=4
-VPP=1
+VPP=5
 EP=8
 CP=1
 CP_COMM_TYPE="a2a" # p2p, a2a, allgather or a2a+p2p
@@ -64,7 +64,7 @@ PROFILE=False
 DISABLE_CPU_TRACE=False
 PROFILE_STEP_START=5
 PROFILE_STEP_END=6
-TRAIN_ITERS=5
+TRAIN_ITERS=10
 
 # MoE_Features legend:
 # 0 - Baseline (no extra optimization toggles)
@@ -80,8 +80,8 @@ TRAIN_ITERS=5
 # 10 - CPU NUMA binding helper
 # 11 - Manual GC helper
 # MoE_Features=(0 1 2 3 4 5 6 7 8 9 10 11)
-MoE_Features=(0 11)
-# MoE_Features=(3 11)
+# MoE_Features=(0 11)
+MoE_Features=(3 11)
 # MoE_Features=(3 4 11)
 # MoE_Features=(3 4 5 11)
 # MoE_Features=(3 4 5 10 11)
@@ -291,6 +291,8 @@ export SKIP_TRAIN=0
 
     # --pp_warmup True \
     # --multi_latent_attention True \
+# --num_layers 8 \
+# --moe_layer_freq 1 \
 bash ./examples/run_slurm_pretrain.sh \
     --micro_batch_size "$MBS" \
     --global_batch_size "$GBS" \
@@ -302,6 +304,7 @@ bash ./examples/run_slurm_pretrain.sh \
     --context_parallel_size "$CP" \
     --cp_comm_type "$CP_COMM_TYPE" \
     --mock_data True \
+    --pp_warmup True \
     --moe_router_force_load_balancing "$LOAD_BALANCE" \
     --optimizer "$OPTIMIZER" \
     --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
