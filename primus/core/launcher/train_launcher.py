@@ -71,15 +71,15 @@ def launch_train(args, overrides, module: str):
         6. trainer.init()/run()
     """
 
-    # 0 Validate config file ----------
+    # 0 Validate config file
     cfg_path = Path(args.config)
     if not cfg_path.exists():
         raise FileNotFoundError(f"[Primus:Train] Config file not found: {cfg_path}")
 
-    # 1 Environment setup ----------
+    # 1 Environment setup
     setup_env(args.data_path)
 
-    # 2 Load PrimusConfig ----------
+    # 2 Load PrimusConfig
     primus_cfg = PrimusConfig.from_file(cfg_path, args)
 
     # Extract module-level train config
@@ -106,7 +106,7 @@ def launch_train(args, overrides, module: str):
             f"Please specify framework (e.g., 'megatron', 'torchtitan') in your config."
         )
 
-    # 3 Load backend adapter (automatically sets up path) ----------
+    # 3 Load backend adapter (automatically sets up path)
     try:
         adapter = BackendRegistry.get_adapter(framework, backend_path=args.backend_path)
     except (ValueError, FileNotFoundError, RuntimeError) as e:
@@ -116,14 +116,14 @@ def launch_train(args, overrides, module: str):
             f"Check your config file's 'framework' field and backend installation."
         ) from e
 
-    # 4 Backend-specific setup ----------
+    # 4 Backend-specific setup
     # Includes: patch pipeline, version fix, env overrides, etc.
     try:
         adapter.prepare_backend(train_cfg)
     except Exception as e:
         raise RuntimeError(f"[Primus:Train] Backend preparation failed for '{framework}': {e}") from e
 
-    # 5 Create trainer (adapter ensures correct conversion/loader) ----------
+    # 5 Create trainer (adapter ensures correct conversion/loader)
     try:
         trainer = adapter.create_trainer(
             primus_config=primus_cfg,
@@ -132,7 +132,7 @@ def launch_train(args, overrides, module: str):
     except Exception as e:
         raise RuntimeError(f"[Primus:Train] Failed to create trainer for '{framework}': {e}") from e
 
-    # 6 Execute training lifecycle ----------
+    # 6 Execute training lifecycle
     try:
         trainer.init()
         trainer.run()
