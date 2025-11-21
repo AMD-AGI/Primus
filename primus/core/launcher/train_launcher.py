@@ -10,6 +10,7 @@ from pathlib import Path
 from primus.core.backend.backend_registry import BackendRegistry
 from primus.core.config.merge_utils import deep_merge
 from primus.core.config.primus_config import PrimusConfig
+from primus.core.runtime import init_distributed_env, init_global_logger
 from primus.core.utils.arg_utils import parse_cli_overrides
 from primus.core.utils.env_setup import setup_training_env
 
@@ -50,12 +51,14 @@ def launch_train(args, overrides, module: str):
 
     Steps:
         1. Setup environment (cache paths, etc.)
-        2. Load Primus config
-        3. Resolve backend path
-        4. Select backend adapter
-        5. BackendAdapter.prepare_backend()   ← backend specific
-        6. Create Trainer via adapter
-        7. trainer.init()/run()
+        2. Initialize distributed environment (once)
+        3. Load Primus config
+        4. Initialize global logger (once)
+        5. Resolve backend path
+        6. Select backend adapter
+        7. BackendAdapter.prepare_backend()   ← backend specific
+        8. Create Trainer via adapter
+        9. trainer.init()/run()
     """
 
     # 0 Validate config file
@@ -66,10 +69,16 @@ def launch_train(args, overrides, module: str):
     # 1 Environment setup (HuggingFace cache, etc.)
     setup_training_env(args.data_path, setup_hf=True)
 
-    # 2 Load PrimusConfig
+    # 2 Initialize distributed environment (one-time global initialization)
+    init_distributed_env()
+
+    # 3 Load PrimusConfig
     primus_cfg = PrimusConfig.from_file(cfg_path, args)
 
-    # Extract module-level train config
+    # 4 Initialize global logger (one-time global initialization)
+    init_global_logger(primus_cfg)
+
+    # 5 Extract module-level train config
     try:
         train_cfg = primus_cfg.get_module_config(module)
     except ValueError as exc:
@@ -80,12 +89,12 @@ def launch_train(args, overrides, module: str):
             f"Please ensure your YAML defines a module with 'module: {module}'."
         ) from exc
 
-    # Apply CLI overrides to module params (deep merge to preserve nested structures)
+    # 6 Apply CLI overrides to module params (deep merge to preserve nested structures)
     if overrides:
         override_dict = parse_cli_overrides(overrides)
         train_cfg.params = deep_merge(train_cfg.params, override_dict)
 
-    # Validate framework is specified
+    # 7 Validate framework is specified
     framework = train_cfg.framework
     if not framework:
         raise ValueError(
@@ -93,7 +102,7 @@ def launch_train(args, overrides, module: str):
             f"Please specify framework (e.g., 'megatron', 'torchtitan') in your config."
         )
 
-    # 3 Load backend adapter (automatically sets up path)
+    # 8 Load backend adapter (automatically sets up path)
     try:
         adapter = BackendRegistry.get_adapter(framework, backend_path=args.backend_path)
     except (ValueError, FileNotFoundError, RuntimeError) as e:
@@ -103,7 +112,7 @@ def launch_train(args, overrides, module: str):
             f"Check your config file's 'framework' field and backend installation."
         ) from e
 
-    # 4 Create trainer (adapter handles backend setup, config conversion, and trainer loading)
+    # 9 Create trainer (adapter handles backend setup, config conversion, and trainer loading)
     try:
         trainer = adapter.create_trainer(
             primus_config=primus_cfg,
@@ -112,7 +121,7 @@ def launch_train(args, overrides, module: str):
     except Exception as e:
         raise RuntimeError(f"[Primus:Train] Failed to create trainer for '{framework}': {e}") from e
 
-    # 5 Execute training lifecycle
+    # 10 Execute training lifecycle
     try:
         trainer.init()
         trainer.run()
