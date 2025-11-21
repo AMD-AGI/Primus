@@ -26,6 +26,7 @@ class PrimusTurboConfig:
     use_turbo_grouped_mm: bool = False
     use_moe_fp8: bool = True
     enable_embedding_autocast: bool = True
+    use_classic_attention: bool = False
     # float8_config: PrimusTurboFloat8Config = field(default_factory=PrimusTurboFloat8Config)
 
 

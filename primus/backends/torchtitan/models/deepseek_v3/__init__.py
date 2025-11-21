@@ -1,0 +1,101 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+from torchtitan.models.deepseek_v3 import deepseekv3_args
+from torchtitan.models.moe import MoEArgs
+
+from .model.args import DeepSeekV3ClassicModelArgs
+
+classic_deepseekv3_args = {
+    **deepseekv3_args,
+    "16B": DeepSeekV3ClassicModelArgs(
+        vocab_size=102400,
+        dim=2048,
+        inter_dim=10944,
+        moe_inter_dim=1408,
+        n_layers=27,
+        n_dense_layers=1,
+        n_heads=16,
+        moe_args=MoEArgs(
+            num_experts=64,
+            num_shared_experts=2,
+            top_k=6,
+            score_func="softmax",
+            route_norm=True,
+            score_before_experts=False,
+        ),
+        q_lora_rank=0,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        mscale=0.70,
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
+        n_kv_heads=16,
+        head_dim=2048 // 128,
+    ),
+    "236B": DeepSeekV3ClassicModelArgs(
+        vocab_size=102400,
+        dim=5120,
+        inter_dim=12288,
+        moe_inter_dim=1536,
+        n_layers=60,
+        n_dense_layers=1,
+        n_heads=128,
+        moe_args=MoEArgs(
+            num_experts=160,
+            num_shared_experts=2,
+            top_k=6,
+            score_func="softmax",
+            route_norm=True,
+            route_scale=16.0,
+            score_before_experts=False,
+        ),
+        n_expert_groups=8,
+        n_limited_groups=3,
+        q_lora_rank=1536,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
+        q_head=40,
+        n_kv_heads=8,
+        head_dim=128,
+    ),
+    "671B": DeepSeekV3ClassicModelArgs(
+        vocab_size=129280,
+        dim=7168,
+        inter_dim=18432,
+        moe_inter_dim=2048,
+        n_layers=24,
+        n_dense_layers=0,
+        n_heads=128,
+        moe_args=MoEArgs(
+            num_experts=256,
+            num_shared_experts=1,
+            top_k=8,
+            score_func="sigmoid",
+            route_norm=True,
+            route_scale=2.5,
+            score_before_experts=False,
+        ),
+        n_expert_groups=8,
+        n_limited_groups=4,
+        q_lora_rank=1536,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        use_flex_attn=True,
+        attn_mask_type="block_causal",
+        q_head=40,
+        n_kv_heads=128,
+        head_dim=16,
+    ),
+}
