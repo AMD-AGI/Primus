@@ -10,139 +10,127 @@ Performance Optimization Patches
 General performance improvements for Megatron training.
 """
 
-from primus.core.patches import (
-    AttributePatch,
-    FunctionPatch,
-    PatchPriority,
-    PatchRegistry,
+import os
+
+from primus.core.patches import PatchContext, register_patch
+
+# ============================================================================
+# GPU Optimization Patches
+# ============================================================================
+
+
+@register_patch(
+    "megatron.perf.enable_tf32",
+    backend="megatron",
+    phase="before_train",
+    description="Enable TF32 for Ampere+ GPUs",
 )
-
-
-# Example: Enable CUDA graph for forward pass
-def patched_forward_with_cuda_graph(original_func, *args, **kwargs):
+def _enable_tf32(ctx: PatchContext):
     """
-    Wrap forward pass with CUDA graph for better performance.
+    Enable TF32 for better performance on Ampere+ GPUs.
 
-    Benefit: ~10-15% speedup for small models
+    Benefit: ~2x speedup for matmul operations on A100/H100
     """
-    import torch
+    try:
+        import torch
 
-    # Only use CUDA graph after warmup
-    if not hasattr(patched_forward_with_cuda_graph, "warmup_done"):
-        patched_forward_with_cuda_graph.warmup_done = False
-        patched_forward_with_cuda_graph.step_count = 0
-
-    patched_forward_with_cuda_graph.step_count += 1
-
-    # Warmup for 10 steps
-    if patched_forward_with_cuda_graph.step_count < 10:
-        return original_func(*args, **kwargs)
-
-    # Enable CUDA graph after warmup
-    if not patched_forward_with_cuda_graph.warmup_done:
-        patched_forward_with_cuda_graph.warmup_done = True
-        print("[Primus:Patch] CUDA graph warmup complete, enabling...")
-
-    # Use CUDA graph
-    if torch.cuda.is_available():
-        with torch.cuda.graph(torch.cuda.CUDAGraph()):
-            return original_func(*args, **kwargs)
-    else:
-        return original_func(*args, **kwargs)
+        if torch.cuda.is_available():
+            device_capability = torch.cuda.get_device_capability()
+            if device_capability[0] >= 8:  # Ampere or newer
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                print("[Patch] Enabled TF32 for Ampere+ GPU")
+    except Exception:
+        pass
 
 
-PatchRegistry.register(
-    FunctionPatch(
-        name="cuda_graph_forward_optimization",
-        description="Enable CUDA graph for forward pass optimization",
-        target_module="megatron.core.models.gpt.gpt_model",
-        target_function="forward",
-        patch_function=patched_forward_with_cuda_graph,
-        wrap=True,
-        framework="megatron",
-        priority=PatchPriority.LOW,
-    )
+@register_patch(
+    "megatron.perf.optimize_nccl",
+    backend="megatron",
+    phase="before_import_backend",
+    description="Set optimal NCCL environment variables",
 )
-
-
-# Example: Optimize gradient accumulation
-def patched_grad_accumulation(original_func, *args, **kwargs):
+def _optimize_nccl(ctx: PatchContext):
     """
-    Optimize gradient accumulation to reduce memory.
+    Set optimal NCCL environment variables for better communication performance.
 
-    Issue: Default grad accumulation keeps all intermediate activations
-    Fix: Use gradient checkpointing for accumulation steps
+    Benefit: Improved collective communication performance
     """
-    import torch
+    nccl_vars = {
+        "NCCL_IB_DISABLE": "0",
+        "NCCL_IB_GID_INDEX": "3",
+        "NCCL_SOCKET_IFNAME": "eth0",
+        "NCCL_DEBUG": "WARN",
+    }
 
-    # Enable gradient checkpointing for accumulation
-    if "gradient_accumulation_steps" in kwargs:
-        steps = kwargs["gradient_accumulation_steps"]
-        if steps > 1:
-            torch.cuda.empty_cache()  # Clear cache between accumulation steps
+    for key, value in nccl_vars.items():
+        if key not in os.environ:
+            os.environ[key] = value
 
-    return original_func(*args, **kwargs)
+    print("[Patch] Optimized NCCL environment variables")
 
 
-PatchRegistry.register(
-    FunctionPatch(
-        name="optimized_grad_accumulation",
-        description="Optimize gradient accumulation for memory efficiency",
-        target_module="megatron.training.training",
-        target_function="train_step",
-        patch_function=patched_grad_accumulation,
-        wrap=True,
-        framework="megatron",
-        priority=PatchPriority.NORMAL,
-    )
+# ============================================================================
+# Memory Optimization Patches
+# ============================================================================
+
+
+@register_patch(
+    "megatron.perf.gradient_accumulation_memory",
+    backend="megatron",
+    phase="before_train",
+    description="Optimize gradient accumulation for memory efficiency",
 )
+def _optimize_gradient_accumulation(ctx: PatchContext):
+    """
+    Optimize gradient accumulation to reduce memory usage.
+
+    Benefit: Reduced memory footprint during gradient accumulation
+    """
+    args = ctx.extra.get("args")
+    if args is None:
+        return
+
+    grad_accum_steps = getattr(args, "gradient_accumulation_steps", 1)
+    if grad_accum_steps > 1:
+        # Enable memory-efficient gradient accumulation
+        if hasattr(args, "no_sync_on_grad_accum_boundary"):
+            if not getattr(args, "no_sync_on_grad_accum_boundary", False):
+                print(
+                    f"[Patch] Enabling memory-efficient gradient accumulation " f"({grad_accum_steps} steps)"
+                )
+                setattr(args, "no_sync_on_grad_accum_boundary", True)
 
 
-# Example: Set optimal NCCL environment variables
-PatchRegistry.register(
-    AttributePatch(
-        name="nccl_optimization_env",
-        description="Set optimal NCCL environment variables",
-        target_module="os",
-        target_attribute="environ",
-        new_value={
-            "NCCL_IB_DISABLE": "0",
-            "NCCL_IB_GID_INDEX": "3",
-            "NCCL_IB_HCA": "mlx5_0,mlx5_1,mlx5_2,mlx5_3",
-            "NCCL_SOCKET_IFNAME": "eth0",
-            "NCCL_DEBUG": "WARN",
-        },
-        framework="megatron",
-        priority=PatchPriority.LOW,
-    )
+# ============================================================================
+# Compilation Optimization Patches
+# ============================================================================
+
+
+@register_patch(
+    "megatron.perf.torch_compile",
+    backend="megatron",
+    phase="before_train",
+    description="Enable torch.compile for supported models",
+    condition=lambda ctx: ctx.backend_version and ctx.backend_version >= "0.9.0",
 )
+def _enable_torch_compile(ctx: PatchContext):
+    """
+    Enable torch.compile for supported Megatron versions.
 
+    Benefit: Up to 30% speedup with PyTorch 2.0+
+    Note: Only enabled for Megatron 0.9.0+ which has compile support
+    """
+    args = ctx.extra.get("args")
+    if args is None:
+        return
 
-# Example: Enable TF32 for better performance on Ampere+
-def enable_tf32():
-    """Enable TF32 for matmul and convolutions on Ampere+ GPUs."""
-    import torch
+    try:
+        import torch
 
-    if torch.cuda.is_available():
-        # Check if GPU supports TF32
-        device_capability = torch.cuda.get_device_capability()
-        if device_capability[0] >= 8:  # Ampere or newer
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-            print("[Primus:Patch] TF32 enabled for Ampere+ GPU")
-            return True
-    return False
-
-
-PatchRegistry.register(
-    FunctionPatch(
-        name="enable_tf32_ampere",
-        description="Enable TF32 for better performance on Ampere+ GPUs",
-        target_module="megatron.training.initialize",
-        target_function="initialize_megatron",
-        patch_function=lambda orig, *args, **kwargs: (enable_tf32(), orig(*args, **kwargs))[1],
-        wrap=True,
-        framework="megatron",
-        priority=PatchPriority.LOW,
-    )
-)
+        if hasattr(torch, "compile") and hasattr(args, "use_torch_compile"):
+            if not getattr(args, "use_torch_compile", False):
+                print("[Patch] Enabling torch.compile for performance")
+                setattr(args, "use_torch_compile", True)
+    except Exception:
+        pass

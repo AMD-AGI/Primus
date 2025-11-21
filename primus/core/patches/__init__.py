@@ -5,23 +5,19 @@
 ###############################################################################
 
 from primus.core.patches.patch_system import (
-    AttributePatch,
     FunctionPatch,
-    ImportPatch,
-    Patch,
     PatchContext,
-    PatchPriority,
     PatchRegistry,
-    PatchStatus,
+    register_patch,
+    run_patches,
+    version_matches,
 )
 
 __all__ = [
-    "Patch",
-    "FunctionPatch",
-    "AttributePatch",
-    "ImportPatch",
     "PatchContext",
-    "PatchPriority",
-    "PatchStatus",
+    "FunctionPatch",
     "PatchRegistry",
+    "register_patch",
+    "run_patches",
+    "version_matches",
 ]

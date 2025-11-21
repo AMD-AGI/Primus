@@ -12,6 +12,7 @@ This trainer bridges Primus configuration system with Megatron-LM's training loo
 
 from types import SimpleNamespace
 
+from primus.backends.megatron.patches import apply_megatron_patches
 from primus.core.config.primus_config import ModuleConfig, PrimusConfig
 
 
@@ -94,6 +95,15 @@ class MegatronPretrainTrainer:
         """
         print(f"[Primus:MegatronTrainer] Starting Megatron training...")
 
+        # Apply before_train patches
+        model_name = self.module_config.model if hasattr(self.module_config, "model") else None
+        apply_megatron_patches(
+            backend_version=self._detect_version(),
+            model_name=model_name,
+            phase="before_train",
+            extra={"args": self.backend_args},
+        )
+
         # Import Megatron's pretrain function
         from megatron.training import pretrain  # type: ignore
 
@@ -113,3 +123,14 @@ class MegatronPretrainTrainer:
         )
 
         print(f"[Primus:MegatronTrainer] Training completed.")
+
+    def _detect_version(self) -> str:
+        """Detect Megatron version."""
+        try:
+            import megatron
+
+            if hasattr(megatron, "__version__"):
+                return megatron.__version__
+        except Exception:
+            pass
+        return "unknown"

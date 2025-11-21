@@ -7,479 +7,368 @@
 """
 Primus Patch System
 
-A flexible, version-aware patching system for backend frameworks.
+A lightweight, phase-aware patching system for backend frameworks.
 
 Design Goals:
     1. Handle version compatibility issues across Megatron/TorchTitan/etc
     2. Apply hotfixes without modifying upstream framework code
     3. Support model-specific patches (DeepSeek, Llama, Mixtral, etc)
-    4. Provide conditional patching based on version/model/config
-    5. Keep user training workflow unchanged
+    4. Phase-based execution (before_import, after_build_args, before_train, etc)
+    5. Environment variable control (PRIMUS_PATCHES)
 
 Architecture:
-    - PatchRegistry: Central registry for all patches
-    - Patch: Base class for all patch implementations
-    - PatchContext: Runtime context for conditional patching
-    - Version matching: Semantic version-based patch selection
+    - PatchContext: Runtime context (backend, phase, version, extra data)
+    - FunctionPatch: Function-based patch implementation
+    - PatchRegistry: Central registry with decorator-based registration
+    - run_patches(): Execute applicable patches for given context
+
+Usage:
+    # 1. Define a patch
+    @register_patch(
+        "megatron.deepseek_v3.fix_moe",
+        backend="megatron",
+        phase="before_train",
+        description="Fix MoE load balancing for DeepSeek V3",
+        condition=lambda ctx: ctx.model_name == "deepseek_v3",
+    )
+    def fix_deepseek_moe(ctx: PatchContext):
+        args = ctx.extra.get("args")
+        if args and hasattr(args, "moe_aux_loss_coeff"):
+            args.moe_aux_loss_coeff = 0.001
+
+    # 2. Execute patches
+    run_patches(
+        backend="megatron",
+        phase="before_train",
+        backend_version="0.8.0",
+        model_name="deepseek_v3",
+        extra={"args": megatron_args},
+    )
 """
 
-import importlib
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from enum import Enum
-from functools import wraps
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+import logging
+import os
+import re
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Optional
+
+log = logging.getLogger(__name__)
 
 
-class PatchPriority(Enum):
-    """Patch execution priority levels."""
-
-    CRITICAL = 0  # Must run first (e.g., import fixes, path setup)
-    HIGH = 10  # Important patches (e.g., version compatibility)
-    NORMAL = 50  # Standard patches (e.g., bug fixes)
-    LOW = 100  # Optional enhancements
-
-
-class PatchStatus(Enum):
-    """Patch application status."""
-
-    PENDING = "pending"
-    APPLIED = "applied"
-    SKIPPED = "skipped"
-    FAILED = "failed"
+# ============================================================================
+# Patch Context
+# ============================================================================
 
 
 @dataclass
 class PatchContext:
     """
-    Runtime context for conditional patch application.
+    Patch execution context.
 
-    Contains information needed to decide whether a patch should be applied.
+    Attributes:
+        backend: Backend name (e.g., "megatron", "torchtitan")
+        phase: Execution phase (e.g., "before_import", "before_train")
+        backend_version: Backend version (e.g., "0.8.0", "commit:abc123")
+        primus_version: Primus version (optional)
+        model_name: Model name (e.g., "llama3_70B", "deepseek_v3")
+        extra: Additional context data (e.g., {"args": megatron_args})
+
+    Phases:
+        - "before_import_backend": Before importing backend modules
+        - "after_import_backend": After importing backend modules
+        - "before_build_args": Before building backend arguments
+        - "after_build_args": After building backend arguments
+        - "before_train": Before starting training
+        - "after_train": After training completes
     """
 
-    framework: str  # e.g., "megatron", "torchtitan"
-    framework_version: Optional[str] = None  # e.g., "0.8.0"
-    model_name: Optional[str] = None  # e.g., "llama3_70B", "deepseek_v3"
-    model_type: Optional[str] = None  # e.g., "gpt", "mamba"
-    config: Optional[Dict[str, Any]] = None  # Runtime config
-    python_version: Optional[str] = None  # e.g., "3.10"
-    cuda_version: Optional[str] = None  # e.g., "12.1"
-
-    def __post_init__(self):
-        """Auto-detect versions if not provided."""
-        if self.python_version is None:
-            import sys
-
-            self.python_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    backend: str
+    phase: str
+    backend_version: Optional[str] = None
+    primus_version: Optional[str] = None
+    model_name: Optional[str] = None
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 
-class Patch(ABC):
+# ============================================================================
+# Patch Implementation
+# ============================================================================
+
+
+@dataclass
+class FunctionPatch:
     """
-    Base class for all patches.
+    Function-based patch implementation.
 
-    Each patch should:
-        1. Define applicability conditions (version, model, etc)
-        2. Implement the patching logic
-        3. Provide rollback capability if needed
+    A patch is defined by:
+        - id: Unique identifier
+        - handler: Function that implements the patch logic
+        - backend: Target backend (None = all backends)
+        - phase: Target phase (None = all phases)
+        - condition: Optional condition function for fine-grained control
     """
 
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        priority: PatchPriority = PatchPriority.NORMAL,
-        framework: Optional[str] = None,
-        version_range: Optional[str] = None,
-        models: Optional[List[str]] = None,
-    ):
-        """
-        Initialize patch.
+    id: str
+    description: str
+    handler: Callable[[PatchContext], None]
+    backend: Optional[str] = None
+    phase: Optional[str] = None
+    condition: Optional[Callable[[PatchContext], bool]] = None
 
-        Args:
-            name: Unique patch identifier
-            description: Human-readable description
-            priority: Execution priority
-            framework: Target framework (None = all frameworks)
-            version_range: Version constraint (e.g., ">=0.7.0,<0.9.0")
-            models: List of applicable model names (None = all models)
+    def applies_to(self, ctx: PatchContext) -> bool:
         """
-        self.name = name
-        self.description = description
-        self.priority = priority
-        self.framework = framework
-        self.version_range = version_range
-        self.models = models or []
-        self.status = PatchStatus.PENDING
-        self.error: Optional[Exception] = None
+        Check if this patch applies to the given context.
 
-    def should_apply(self, context: PatchContext) -> bool:
+        Filters:
+            1. Backend match
+            2. Phase match
+            3. Custom condition (if provided)
         """
-        Determine if this patch should be applied in the given context.
-
-        Args:
-            context: Runtime context
-
-        Returns:
-            True if patch should be applied
-        """
-        # Check framework match
-        if self.framework and context.framework != self.framework:
+        # Backend filter
+        if self.backend is not None and self.backend != ctx.backend:
             return False
 
-        # Check version range
-        if self.version_range and context.framework_version:
-            if not self._version_matches(context.framework_version, self.version_range):
-                return False
+        # Phase filter
+        if self.phase is not None and self.phase != ctx.phase:
+            return False
 
-        # Check model match
-        if self.models and context.model_name:
-            if context.model_name not in self.models:
-                return False
+        # Custom condition
+        if self.condition is not None and not self.condition(ctx):
+            return False
 
-        # Custom condition check
-        return self.check_condition(context)
-
-    def check_condition(self, context: PatchContext) -> bool:
-        """
-        Custom condition check (override in subclass if needed).
-
-        Args:
-            context: Runtime context
-
-        Returns:
-            True if custom conditions are met
-        """
         return True
 
-    @abstractmethod
-    def apply(self, context: PatchContext) -> bool:
-        """
-        Apply the patch.
-
-        Args:
-            context: Runtime context
-
-        Returns:
-            True if patch applied successfully
-        """
-
-    def rollback(self, context: PatchContext) -> bool:
-        """
-        Rollback the patch (optional, override if needed).
-
-        Args:
-            context: Runtime context
-
-        Returns:
-            True if rollback successful
-        """
-        return True
-
-    @staticmethod
-    def _version_matches(version: str, constraint: str) -> bool:
-        """
-        Check if version matches constraint.
-
-        Supports: ==, !=, >, >=, <, <=, comma-separated constraints
-
-        Examples:
-            ">=0.7.0,<0.9.0" matches "0.8.0"
-            "==0.8.0" matches "0.8.0"
-            "!=0.7.0" matches "0.8.0"
-        """
-        from packaging import version as pkg_version
-        from packaging.specifiers import SpecifierSet
-
-        try:
-            spec = SpecifierSet(constraint)
-            return pkg_version.parse(version) in spec
-        except Exception:
-            # Fallback to simple string comparison
-            return version == constraint
-
-    def __repr__(self):
-        return f"<Patch {self.name} [{self.status.value}]>"
+    def apply(self, ctx: PatchContext) -> None:
+        """Execute the patch handler."""
+        log.debug(f"[Patch] Applying {self.id}: {self.description}")
+        self.handler(ctx)
 
 
-class FunctionPatch(Patch):
-    """
-    Patch that replaces or wraps a function/method.
-
-    Common use cases:
-        - Fix bugs in upstream functions
-        - Add logging/monitoring
-        - Change behavior for specific models
-    """
-
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        target_module: str,
-        target_function: str,
-        patch_function: Callable,
-        wrap: bool = False,
-        **kwargs,
-    ):
-        """
-        Initialize function patch.
-
-        Args:
-            target_module: Module path (e.g., "megatron.training.arguments")
-            target_function: Function name to patch
-            patch_function: Replacement or wrapper function
-            wrap: If True, wrap original function; if False, replace it
-        """
-        super().__init__(name, description, **kwargs)
-        self.target_module = target_module
-        self.target_function = target_function
-        self.patch_function = patch_function
-        self.wrap = wrap
-        self.original_function: Optional[Callable] = None
-
-    def apply(self, context: PatchContext) -> bool:
-        """Apply function patch."""
-        try:
-            # Import target module
-            module = importlib.import_module(self.target_module)
-
-            # Get original function
-            if not hasattr(module, self.target_function):
-                print(
-                    f"[Primus:Patch] Warning: {self.target_module}.{self.target_function} not found, skipping"
-                )
-                self.status = PatchStatus.SKIPPED
-                return False
-
-            self.original_function = getattr(module, self.target_function)
-
-            # Apply patch
-            if self.wrap:
-                # Wrap original function
-                @wraps(self.original_function)
-                def wrapper(*args, **kwargs):
-                    return self.patch_function(self.original_function, *args, **kwargs)
-
-                setattr(module, self.target_function, wrapper)
-            else:
-                # Replace function
-                setattr(module, self.target_function, self.patch_function)
-
-            self.status = PatchStatus.APPLIED
-            print(f"[Primus:Patch] ✓ Applied: {self.name}")
-            return True
-
-        except Exception as e:
-            self.status = PatchStatus.FAILED
-            self.error = e
-            print(f"[Primus:Patch] ✗ Failed: {self.name} - {e}")
-            return False
-
-    def rollback(self, context: PatchContext) -> bool:
-        """Rollback function patch."""
-        if self.original_function is None:
-            return False
-
-        try:
-            module = importlib.import_module(self.target_module)
-            setattr(module, self.target_function, self.original_function)
-            self.status = PatchStatus.PENDING
-            return True
-        except Exception:
-            return False
-
-
-class AttributePatch(Patch):
-    """
-    Patch that modifies module/class attributes.
-
-    Common use cases:
-        - Override default values
-        - Inject custom configurations
-        - Fix constant definitions
-    """
-
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        target_module: str,
-        target_attribute: str,
-        new_value: Any,
-        **kwargs,
-    ):
-        super().__init__(name, description, **kwargs)
-        self.target_module = target_module
-        self.target_attribute = target_attribute
-        self.new_value = new_value
-        self.original_value: Optional[Any] = None
-
-    def apply(self, context: PatchContext) -> bool:
-        """Apply attribute patch."""
-        try:
-            module = importlib.import_module(self.target_module)
-
-            # Save original value
-            if hasattr(module, self.target_attribute):
-                self.original_value = getattr(module, self.target_attribute)
-
-            # Set new value
-            setattr(module, self.target_attribute, self.new_value)
-
-            self.status = PatchStatus.APPLIED
-            print(f"[Primus:Patch] ✓ Applied: {self.name}")
-            return True
-
-        except Exception as e:
-            self.status = PatchStatus.FAILED
-            self.error = e
-            print(f"[Primus:Patch] ✗ Failed: {self.name} - {e}")
-            return False
-
-
-class ImportPatch(Patch):
-    """
-    Patch that fixes import issues.
-
-    Common use cases:
-        - Add missing imports
-        - Fix circular import issues
-        - Inject compatibility shims
-    """
-
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        target_module: str,
-        imports: Dict[str, str],
-        **kwargs,
-    ):
-        """
-        Args:
-            target_module: Module to patch
-            imports: Dict of {name: source_module} to inject
-        """
-        super().__init__(name, description, **kwargs)
-        self.target_module = target_module
-        self.imports = imports
-
-    def apply(self, context: PatchContext) -> bool:
-        """Apply import patch."""
-        try:
-            module = importlib.import_module(self.target_module)
-
-            for name, source_module in self.imports.items():
-                source = importlib.import_module(source_module)
-                setattr(module, name, getattr(source, name))
-
-            self.status = PatchStatus.APPLIED
-            print(f"[Primus:Patch] ✓ Applied: {self.name}")
-            return True
-
-        except Exception as e:
-            self.status = PatchStatus.FAILED
-            self.error = e
-            print(f"[Primus:Patch] ✗ Failed: {self.name} - {e}")
-            return False
+# ============================================================================
+# Patch Registry
+# ============================================================================
 
 
 class PatchRegistry:
     """
-    Central registry for all patches.
+    Global patch registry.
 
-    Manages patch registration, selection, and application.
+    Usage:
+        1. Register patches via @register_patch decorator
+        2. Execute patches via run_patches()
     """
 
-    _patches: List[Patch] = []
-    _applied_patches: Set[str] = set()
+    _patches: Dict[str, FunctionPatch] = {}
 
     @classmethod
-    def register(cls, patch: Patch):
+    def register(cls, patch: FunctionPatch) -> FunctionPatch:
         """Register a patch."""
-        cls._patches.append(patch)
-        print(f"[Primus:PatchRegistry] Registered patch: {patch.name}")
+        if patch.id in cls._patches:
+            log.warning(f"Patch '{patch.id}' already registered, overriding")
+        cls._patches[patch.id] = patch
+        log.debug(f"[PatchRegistry] Registered patch: {patch.id}")
+        return patch
 
     @classmethod
-    def register_function_patch(
-        cls,
-        name: str,
-        description: str,
-        target_module: str,
-        target_function: str,
-        patch_function: Callable,
-        **kwargs,
-    ):
-        """Convenience method to register a function patch."""
-        patch = FunctionPatch(
-            name=name,
-            description=description,
-            target_module=target_module,
-            target_function=target_function,
-            patch_function=patch_function,
-            **kwargs,
-        )
-        cls.register(patch)
+    def get(cls, patch_id: str) -> FunctionPatch:
+        """Get a patch by ID."""
+        return cls._patches[patch_id]
 
     @classmethod
-    def apply_patches(cls, context: PatchContext) -> Tuple[int, int]:
-        """
-        Apply all applicable patches for the given context.
-
-        Args:
-            context: Runtime context
-
-        Returns:
-            Tuple of (applied_count, failed_count)
-        """
-        print(f"\n[Primus:PatchSystem] Applying patches for {context.framework}...")
-        print(f"[Primus:PatchSystem] Version: {context.framework_version}")
-        print(f"[Primus:PatchSystem] Model: {context.model_name or 'N/A'}")
-
-        # Sort patches by priority
-        sorted_patches = sorted(cls._patches, key=lambda p: p.priority.value)
-
-        applied_count = 0
-        failed_count = 0
-
-        for patch in sorted_patches:
-            # Check if already applied
-            if patch.name in cls._applied_patches:
-                continue
-
-            # Check if should apply
-            if not patch.should_apply(context):
-                patch.status = PatchStatus.SKIPPED
-                continue
-
-            # Apply patch
-            if patch.apply(context):
-                cls._applied_patches.add(patch.name)
-                applied_count += 1
-            else:
-                failed_count += 1
-
-        print(f"\n[Primus:PatchSystem] Summary:")
-        print(f"  ✓ Applied: {applied_count}")
-        print(f"  ⊘ Skipped: {len(sorted_patches) - applied_count - failed_count}")
-        print(f"  ✗ Failed: {failed_count}")
-
-        return applied_count, failed_count
+    def list_ids(cls) -> List[str]:
+        """List all registered patch IDs."""
+        return sorted(cls._patches.keys())
 
     @classmethod
-    def get_applicable_patches(cls, context: PatchContext) -> List[Patch]:
-        """Get list of patches applicable to the context."""
-        return [p for p in cls._patches if p.should_apply(context)]
+    def iter_patches(cls) -> List[FunctionPatch]:
+        """Iterate over all registered patches."""
+        return list(cls._patches.values())
 
     @classmethod
     def clear(cls):
-        """Clear all registered patches (useful for testing)."""
+        """Clear all patches (useful for testing)."""
         cls._patches.clear()
-        cls._applied_patches.clear()
 
-    @classmethod
-    def list_patches(cls, framework: Optional[str] = None) -> List[Patch]:
-        """List all registered patches, optionally filtered by framework."""
-        if framework:
-            return [p for p in cls._patches if p.framework == framework or p.framework is None]
-        return cls._patches.copy()
+
+# ============================================================================
+# Decorator: register_patch
+# ============================================================================
+
+
+def register_patch(
+    patch_id: str,
+    *,
+    description: str = "",
+    backend: Optional[str] = None,
+    phase: Optional[str] = None,
+    condition: Optional[Callable[[PatchContext], bool]] = None,
+) -> Callable[[Callable[[PatchContext], None]], Callable[[PatchContext], None]]:
+    """
+    Decorator to register a function as a patch.
+
+    Args:
+        patch_id: Unique patch identifier (e.g., "megatron.deepseek_v3.fix_moe")
+        description: Human-readable description
+        backend: Target backend (e.g., "megatron", "torchtitan")
+        phase: Target phase (e.g., "before_train", "after_build_args")
+        condition: Optional condition function for fine-grained control
+
+    Example:
+        @register_patch(
+            "megatron.deepseek_v3.fix_moe",
+            backend="megatron",
+            phase="before_train",
+            description="Fix MoE load balancing for DeepSeek V3",
+            condition=lambda ctx: ctx.model_name == "deepseek_v3",
+        )
+        def fix_deepseek_moe(ctx: PatchContext):
+            args = ctx.extra.get("args")
+            if args and hasattr(args, "moe_aux_loss_coeff"):
+                args.moe_aux_loss_coeff = 0.001
+    """
+
+    def decorator(func: Callable[[PatchContext], None]) -> Callable[[PatchContext], None]:
+        patch = FunctionPatch(
+            id=patch_id,
+            description=description or func.__doc__ or "",
+            handler=func,
+            backend=backend,
+            phase=phase,
+            condition=condition,
+        )
+        PatchRegistry.register(patch)
+        return func
+
+    return decorator
+
+
+# ============================================================================
+# Run Patches
+# ============================================================================
+
+
+def _parse_enabled_patches_from_env() -> Optional[List[str]]:
+    """
+    Parse enabled patches from environment variable.
+
+    Environment variable: PRIMUS_PATCHES
+        - "all" or empty: Enable all patches (default)
+        - "none": Disable all patches
+        - "id1,id2,id3": Enable only specified patches
+
+    Returns:
+        - None: Use default (all patches)
+        - []: No patches
+        - ["id1", "id2"]: Only these patches
+    """
+    raw = os.getenv("PRIMUS_PATCHES", "").strip()
+    if not raw or raw.lower() == "all":
+        return None
+    if raw.lower() == "none":
+        return []
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def run_patches(
+    *,
+    backend: str,
+    phase: str,
+    backend_version: Optional[str] = None,
+    primus_version: Optional[str] = None,
+    model_name: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    enabled_ids: Optional[List[str]] = None,
+) -> int:
+    """
+    Execute applicable patches for the given context.
+
+    Args:
+        backend: Backend name (e.g., "megatron", "torchtitan")
+        phase: Execution phase (e.g., "before_train")
+        backend_version: Backend version (e.g., "0.8.0")
+        primus_version: Primus version
+        model_name: Model name (e.g., "llama3_70B")
+        extra: Additional context data (e.g., {"args": megatron_args})
+        enabled_ids: Limit to specific patch IDs (None = use env var)
+
+    Returns:
+        Number of patches applied
+
+    Environment Control:
+        Set PRIMUS_PATCHES to control which patches are enabled:
+        - PRIMUS_PATCHES="all" (default): Enable all patches
+        - PRIMUS_PATCHES="none": Disable all patches
+        - PRIMUS_PATCHES="patch1,patch2": Enable only specified patches
+    """
+    # Create context
+    ctx = PatchContext(
+        backend=backend,
+        phase=phase,
+        backend_version=backend_version,
+        primus_version=primus_version,
+        model_name=model_name,
+        extra=extra or {},
+    )
+
+    # Parse enabled patches from env if not specified
+    if enabled_ids is None:
+        enabled_ids = _parse_enabled_patches_from_env()
+
+    log.debug(
+        f"[PatchSystem] Running patches: backend={backend}, phase={phase}, "
+        f"version={backend_version}, model={model_name}, enabled={enabled_ids}"
+    )
+
+    applied_count = 0
+
+    for patch in PatchRegistry.iter_patches():
+        # Filter by enabled_ids
+        if enabled_ids is not None and patch.id not in enabled_ids:
+            continue
+
+        # Check if patch applies
+        if not patch.applies_to(ctx):
+            continue
+
+        # Apply patch
+        try:
+            patch.apply(ctx)
+            applied_count += 1
+        except Exception as e:
+            log.exception(f"[PatchSystem] Patch {patch.id} failed: {e}")
+            # Continue with other patches (non-fatal)
+            continue
+
+    if applied_count > 0:
+        log.info(f"[PatchSystem] Applied {applied_count} patches for {backend}/{phase}")
+
+    return applied_count
+
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+
+def version_matches(version: str, pattern: str) -> bool:
+    """
+    Check if version matches a pattern.
+
+    Patterns:
+        - Exact match: "0.8.0"
+        - Prefix match: "0.8.*"
+        - Contains: "*2024-09*"
+
+    Args:
+        version: Version string to check
+        pattern: Pattern to match against
+
+    Returns:
+        True if version matches pattern
+    """
+    if "*" not in pattern:
+        return version == pattern
+
+    # Simple wildcard matching
+    regex_pattern = pattern.replace(".", r"\.").replace("*", ".*")
+    return re.match(f"^{regex_pattern}$", version) is not None

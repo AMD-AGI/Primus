@@ -10,106 +10,78 @@ Megatron Version Compatibility Patches
 Handles breaking changes between Megatron versions.
 """
 
-from primus.core.patches import FunctionPatch, PatchPriority, PatchRegistry
+import os
+
+from primus.core.patches import PatchContext, register_patch, version_matches
+
+# ============================================================================
+# Megatron 0.7.x Patches
+# ============================================================================
 
 
-# Example: Fix for Megatron 0.7.0 argument parsing issue
-def patched_parse_args_v07(original_func, *args, **kwargs):
+@register_patch(
+    "megatron.v07.parse_args_fix",
+    backend="megatron",
+    phase="before_build_args",
+    description="Fix argument parsing issue in Megatron 0.7.x",
+    condition=lambda ctx: ctx.backend_version and version_matches(ctx.backend_version, "0.7.*"),
+)
+def _fix_megatron_v07_parse_args(ctx: PatchContext):
     """
-    Wrapper for Megatron 0.7.0 parse_args to fix missing argument issue.
+    Fix for Megatron 0.7.x argument parsing issue.
 
-    Issue: Megatron 0.7.0 doesn't handle --no-async-tensor-model-parallel-allreduce correctly
-    Fix: Add default value before calling original function
+    Issue: --no-async-tensor-model-parallel-allreduce not handled correctly
+    Fix: Remove from sys.argv and set via environment variable
     """
     import sys
 
-    # Check if problematic arg is present
     if "--no-async-tensor-model-parallel-allreduce" in sys.argv:
         sys.argv.remove("--no-async-tensor-model-parallel-allreduce")
-        # Set via environment variable instead
-        import os
-
         os.environ["MEGATRON_ASYNC_TP_ALLREDUCE"] = "0"
+        print("[Patch] Fixed --no-async-tensor-model-parallel-allreduce for Megatron 0.7.x")
 
-    return original_func(*args, **kwargs)
+
+# ============================================================================
+# Megatron 0.8.x+ Patches
+# ============================================================================
 
 
-# Register the patch
-PatchRegistry.register(
-    FunctionPatch(
-        name="megatron_v07_parse_args_fix",
-        description="Fix argument parsing issue in Megatron 0.7.0",
-        target_module="megatron.training.arguments",
-        target_function="parse_args",
-        patch_function=patched_parse_args_v07,
-        wrap=True,
-        framework="megatron",
-        version_range=">=0.7.0,<0.8.0",
-        priority=PatchPriority.HIGH,
-    )
+@register_patch(
+    "megatron.v08.init_order_fix",
+    backend="megatron",
+    phase="before_train",
+    description="Fix initialization order in Megatron 0.8.0+",
+    condition=lambda ctx: ctx.backend_version
+    and (version_matches(ctx.backend_version, "0.8.*") or version_matches(ctx.backend_version, "0.9.*")),
 )
-
-
-# Example: Fix for Megatron 0.8.0+ initialization order
-def patched_initialize_megatron_v08(original_func, *args, **kwargs):
+def _fix_megatron_v08_init_order(ctx: PatchContext):
     """
-    Wrapper for Megatron 0.8.0+ initialize_megatron to fix initialization order.
+    Fix for Megatron 0.8.0+ initialization order.
 
-    Issue: In 0.8.0+, distributed backend must be initialized before model parallel
+    Issue: Distributed backend must be initialized before model parallel
     Fix: Ensure torch.distributed.init_process_group is called first
     """
     import torch.distributed as dist
 
-    # Check if already initialized
     if not dist.is_initialized():
-        # Initialize with proper backend
-        import os
-
         backend = os.getenv("DISTRIBUTED_BACKEND", "nccl")
         dist.init_process_group(backend=backend)
+        print(f"[Patch] Initialized distributed backend ({backend}) for Megatron 0.8.0+")
 
-    return original_func(*args, **kwargs)
+
+# ============================================================================
+# General Compatibility Patches
+# ============================================================================
 
 
-PatchRegistry.register(
-    FunctionPatch(
-        name="megatron_v08_init_order_fix",
-        description="Fix initialization order in Megatron 0.8.0+",
-        target_module="megatron.training.initialize",
-        target_function="initialize_megatron",
-        patch_function=patched_initialize_megatron_v08,
-        wrap=True,
-        framework="megatron",
-        version_range=">=0.8.0",
-        priority=PatchPriority.CRITICAL,
-    )
+@register_patch(
+    "megatron.cuda_device_max_connections",
+    backend="megatron",
+    phase="before_import_backend",
+    description="Set CUDA_DEVICE_MAX_CONNECTIONS for better performance",
 )
-
-
-# Example: Backward compatibility shim for renamed functions
-def get_args_shim():
-    """Shim for get_args that works across versions."""
-    try:
-        from megatron.training import get_args
-
-        return get_args()
-    except ImportError:
-        # Fallback for older versions
-        from megatron import get_args
-
-        return get_args()
-
-
-PatchRegistry.register(
-    FunctionPatch(
-        name="megatron_get_args_compat",
-        description="Compatibility shim for get_args across versions",
-        target_module="megatron",
-        target_function="get_args",
-        patch_function=get_args_shim,
-        wrap=False,
-        framework="megatron",
-        version_range="<0.7.0",
-        priority=PatchPriority.HIGH,
-    )
-)
+def _set_cuda_device_max_connections(ctx: PatchContext):
+    """Set CUDA_DEVICE_MAX_CONNECTIONS if not already set."""
+    if "CUDA_DEVICE_MAX_CONNECTIONS" not in os.environ:
+        os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+        print("[Patch] Set CUDA_DEVICE_MAX_CONNECTIONS=1")

@@ -10,122 +10,130 @@ DeepSeek Model-Specific Patches
 Handles DeepSeek model quirks and optimizations.
 """
 
-from primus.core.patches import (
-    FunctionPatch,
-    PatchContext,
-    PatchPriority,
-    PatchRegistry,
+from primus.core.patches import PatchContext, register_patch
+
+# ============================================================================
+# DeepSeek V2 Patches
+# ============================================================================
+
+
+@register_patch(
+    "megatron.deepseek_v2.fix_hang_overlap_param_gather",
+    backend="megatron",
+    phase="before_train",
+    description="Workaround DeepSeek V2 hang with overlap_param_gather_with_optimizer_step",
+    condition=lambda ctx: ctx.model_name and "deepseek_v2" in ctx.model_name.lower(),
 )
-
-
-# Example: DeepSeek V3 MLA attention fix
-def patched_deepseek_mla_attention(original_func, *args, **kwargs):
+def _fix_deepseek_v2_hang(ctx: PatchContext):
     """
-    Fix for DeepSeek V3 MLA (Multi-head Latent Attention) implementation.
+    Fix DeepSeek V2 training hang issue.
 
-    Issue: Original implementation has numerical instability with bf16
-    Fix: Add gradient scaling and numerical stability improvements
+    Issue: overlap_param_gather_with_optimizer_step causes hang with DeepSeek V2
+    Fix: Force disable this option
     """
-    import torch
+    args = ctx.extra.get("args")
+    if args is None:
+        return
 
-    # Enable gradient checkpointing for MLA layers
-    if hasattr(torch, "utils") and hasattr(torch.utils, "checkpoint"):
-        kwargs["use_checkpoint"] = True
-
-    # Call original with modifications
-    result = original_func(*args, **kwargs)
-
-    # Apply gradient scaling if needed
-    if torch.is_autocast_enabled():
-        result = result * 0.5  # Scale down to prevent overflow
-
-    return result
+    if hasattr(args, "overlap_param_gather_with_optimizer_step"):
+        old_value = getattr(args, "overlap_param_gather_with_optimizer_step")
+        if old_value:
+            print(
+                "[Patch] DeepSeek V2: Disabling overlap_param_gather_with_optimizer_step "
+                "to prevent training hang"
+            )
+            setattr(args, "overlap_param_gather_with_optimizer_step", False)
 
 
-PatchRegistry.register(
-    FunctionPatch(
-        name="deepseek_v3_mla_attention_fix",
-        description="Fix numerical instability in DeepSeek V3 MLA attention",
-        target_module="megatron.core.models.gpt.gpt_layer_specs",
-        target_function="get_gpt_layer_with_transformer_engine_spec",
-        patch_function=patched_deepseek_mla_attention,
-        wrap=True,
-        framework="megatron",
-        models=["deepseek_v3", "deepseek_v3_671B"],
-        priority=PatchPriority.HIGH,
-    )
+# ============================================================================
+# DeepSeek V3 Patches
+# ============================================================================
+
+
+@register_patch(
+    "megatron.deepseek_v3.moe_load_balance",
+    backend="megatron",
+    phase="before_train",
+    description="Fix MoE load balancing for DeepSeek V3 with many experts",
+    condition=lambda ctx: ctx.model_name and "deepseek_v3" in ctx.model_name.lower(),
 )
-
-
-# Example: DeepSeek MoE load balancing fix
-class DeepSeekMoEPatch:
-    """Custom patch for DeepSeek MoE load balancing."""
-
-    @staticmethod
-    def check_condition(context: PatchContext) -> bool:
-        """Only apply if using MoE."""
-        if context.config:
-            return context.config.get("num_experts", 0) > 1
-        return False
-
-    @staticmethod
-    def patched_moe_load_balance(original_func, *args, **kwargs):
-        """
-        Fix load balancing for DeepSeek MoE.
-
-        Issue: Default load balancing causes training hang with >256 experts
-        Fix: Use auxiliary loss with reduced weight
-        """
-        # Reduce auxiliary loss weight for large expert count
-        if "aux_loss_weight" not in kwargs:
-            kwargs["aux_loss_weight"] = 0.001  # Reduced from default 0.01
-
-        return original_func(*args, **kwargs)
-
-
-# Register with custom condition
-patch = FunctionPatch(
-    name="deepseek_moe_load_balance_fix",
-    description="Fix load balancing for DeepSeek MoE with many experts",
-    target_module="megatron.core.transformer.moe.moe_layer",
-    target_function="MoELayer",
-    patch_function=DeepSeekMoEPatch.patched_moe_load_balance,
-    wrap=True,
-    framework="megatron",
-    models=["deepseek_v3", "deepseek_v3_671B"],
-    priority=PatchPriority.NORMAL,
-)
-patch.check_condition = DeepSeekMoEPatch.check_condition
-PatchRegistry.register(patch)
-
-
-# Example: DeepSeek tokenizer compatibility
-def patched_deepseek_tokenizer_init(original_func, *args, **kwargs):
+def _fix_deepseek_v3_moe_load_balance(ctx: PatchContext):
     """
-    Fix tokenizer initialization for DeepSeek models.
+    Fix MoE load balancing for DeepSeek V3.
 
-    Issue: DeepSeek uses custom tokenizer that's incompatible with HF
-    Fix: Add compatibility layer
+    Issue: Default aux loss weight causes training hang with >256 experts
+    Fix: Reduce aux loss weight
     """
-    # Add DeepSeek-specific tokenizer args
-    if "add_bos_token" not in kwargs:
-        kwargs["add_bos_token"] = False
-    if "add_eos_token" not in kwargs:
-        kwargs["add_eos_token"] = False
+    args = ctx.extra.get("args")
+    if args is None:
+        return
 
-    return original_func(*args, **kwargs)
+    # Check if using MoE
+    num_experts = getattr(args, "num_experts", 0)
+    if num_experts > 1:
+        if hasattr(args, "moe_aux_loss_coeff"):
+            old_value = getattr(args, "moe_aux_loss_coeff", None)
+            if old_value is None or old_value > 0.001:
+                print(
+                    f"[Patch] DeepSeek V3 MoE: Setting moe_aux_loss_coeff=0.001 "
+                    f"(was {old_value}) for {num_experts} experts"
+                )
+                setattr(args, "moe_aux_loss_coeff", 0.001)
 
 
-PatchRegistry.register(
-    FunctionPatch(
-        name="deepseek_tokenizer_compat",
-        description="DeepSeek tokenizer compatibility fix",
-        target_module="megatron.training.tokenizer.tokenizer",
-        target_function="build_tokenizer",
-        patch_function=patched_deepseek_tokenizer_init,
-        wrap=True,
-        framework="megatron",
-        models=["deepseek_v2", "deepseek_v3", "deepseek_v3_671B"],
-        priority=PatchPriority.NORMAL,
-    )
+@register_patch(
+    "megatron.deepseek_v3.mla_attention_stability",
+    backend="megatron",
+    phase="before_train",
+    description="Improve numerical stability for DeepSeek V3 MLA attention",
+    condition=lambda ctx: ctx.model_name and "deepseek_v3" in ctx.model_name.lower(),
 )
+def _fix_deepseek_v3_mla_attention(ctx: PatchContext):
+    """
+    Improve numerical stability for DeepSeek V3 MLA (Multi-head Latent Attention).
+
+    Issue: MLA attention has numerical instability with bf16
+    Fix: Enable gradient checkpointing for MLA layers
+    """
+    args = ctx.extra.get("args")
+    if args is None:
+        return
+
+    if hasattr(args, "recompute_granularity"):
+        # Enable selective recomputation for attention layers
+        if not getattr(args, "recompute_granularity", None):
+            print("[Patch] DeepSeek V3 MLA: Enabling selective recomputation for stability")
+            setattr(args, "recompute_granularity", "selective")
+
+
+# ============================================================================
+# DeepSeek Tokenizer Patches
+# ============================================================================
+
+
+@register_patch(
+    "megatron.deepseek.tokenizer_compat",
+    backend="megatron",
+    phase="after_build_args",
+    description="DeepSeek tokenizer compatibility fix",
+    condition=lambda ctx: ctx.model_name and "deepseek" in ctx.model_name.lower(),
+)
+def _fix_deepseek_tokenizer(ctx: PatchContext):
+    """
+    Fix tokenizer compatibility for DeepSeek models.
+
+    Issue: DeepSeek uses custom tokenizer incompatible with default HF tokenizer
+    Fix: Adjust tokenizer settings
+    """
+    args = ctx.extra.get("args")
+    if args is None:
+        return
+
+    if hasattr(args, "tokenizer_type"):
+        tokenizer_type = getattr(args, "tokenizer_type", None)
+        if tokenizer_type == "GPT2BPETokenizer":
+            # DeepSeek-specific tokenizer settings
+            if hasattr(args, "vocab_extra_ids"):
+                if getattr(args, "vocab_extra_ids", 0) == 0:
+                    print("[Patch] DeepSeek: Setting vocab_extra_ids for custom tokenizer")
+                    setattr(args, "vocab_extra_ids", 100)

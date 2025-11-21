@@ -10,13 +10,11 @@
 #
 ###############################################################################
 
-import os
 
 from primus.backends.megatron.builders.argument_builder import MegatronArgBuilder
 from primus.backends.megatron.patches import apply_megatron_patches
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
-from primus.core.patches import PatchContext
 
 
 class MegatronAdapter(BackendAdapter):
@@ -49,24 +47,21 @@ class MegatronAdapter(BackendAdapter):
 
         # Detect Megatron version
         megatron_version = self._detect_megatron_version()
+        model_name = config.model if hasattr(config, "model") else None
 
-        # Create patch context
-        patch_context = PatchContext(
-            framework="megatron",
-            framework_version=megatron_version,
-            model_name=config.model,
-            config=config.params if hasattr(config, "params") else None,
+        # Phase 1: Before importing backend
+        apply_megatron_patches(
+            backend_version=megatron_version,
+            model_name=model_name,
+            phase="before_import_backend",
         )
 
-        # Apply all applicable patches
-        applied, failed = apply_megatron_patches(patch_context)
-
-        if failed > 0:
-            print(f"[Primus:MegatronAdapter] Warning: {failed} patches failed to apply")
-
-        # Extra env handling: distributed variables
-        if "CUDA_DEVICE_MAX_CONNECTIONS" not in os.environ:
-            os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+        # Phase 2: After importing backend
+        apply_megatron_patches(
+            backend_version=megatron_version,
+            model_name=model_name,
+            phase="after_import_backend",
+        )
 
         print(f"[Primus:MegatronAdapter] Backend prepared (version: {megatron_version})")
 
@@ -105,6 +100,7 @@ class MegatronAdapter(BackendAdapter):
         This layer:
             - Takes module_config.params (which already includes CLI overrides)
             - Fills missing fields using Megatron-LM defaults
+            - Applies patches (before/after build_args phases)
             - Produces a Megatron-compatible argparse-like Namespace
 
         Args:
@@ -113,6 +109,16 @@ class MegatronAdapter(BackendAdapter):
         Returns:
             SimpleNamespace with Megatron args
         """
+        megatron_version = self._detect_megatron_version()
+        model_name = module_config.model if hasattr(module_config, "model") else None
+
+        # Phase: Before building args
+        apply_megatron_patches(
+            backend_version=megatron_version,
+            model_name=model_name,
+            phase="before_build_args",
+            extra={"config": module_config.params},
+        )
 
         # 1. Instantiate the builder
         builder = MegatronArgBuilder()
@@ -123,6 +129,14 @@ class MegatronAdapter(BackendAdapter):
 
         # 3. Produce the final Megatron Namespace
         megatron_args = builder.finalize()
+
+        # Phase: After building args
+        apply_megatron_patches(
+            backend_version=megatron_version,
+            model_name=model_name,
+            phase="after_build_args",
+            extra={"args": megatron_args},
+        )
 
         print(f"[Primus:MegatronAdapter] Converted config → {len(vars(megatron_args))} Megatron args.")
 

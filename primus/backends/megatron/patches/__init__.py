@@ -10,44 +10,62 @@ Megatron Patch Collection
 This module registers all Megatron-specific patches with the PatchRegistry.
 
 Patches are organized by category:
-    - Version compatibility patches
-    - Model-specific patches (DeepSeek, Llama, etc)
-    - Bug fixes
-    - Performance optimizations
+    - compatibility_patches: Version compatibility fixes
+    - deepseek_patches: DeepSeek model-specific patches
+    - llama_patches: Llama model-specific patches
+    - performance_patches: Performance optimizations
+
+All patches are automatically registered on import via the @register_patch decorator.
 """
 
 # Import all patch modules to trigger registration
-from primus.backends.megatron.patches import (
+# Patches are registered via @register_patch decorator in each module
+from primus.backends.megatron.patches import (  # noqa: F401
     compatibility_patches,
     deepseek_patches,
     llama_patches,
     performance_patches,
 )
-from primus.core.patches import PatchContext, PatchRegistry
+from primus.core.patches import run_patches
 
 
-def register_all_patches():
-    """
-    Register all Megatron patches.
-
-    This is called automatically when the module is imported,
-    but can also be called explicitly if needed.
-    """
-    # Patches are registered via decorators in their respective modules
-
-
-def apply_megatron_patches(context: PatchContext):
+def apply_megatron_patches(
+    *,
+    backend_version: str = None,
+    primus_version: str = None,
+    model_name: str = None,
+    phase: str = "before_train",
+    extra: dict = None,
+) -> int:
     """
     Apply all applicable Megatron patches for the given context.
 
     Args:
-        context: Runtime context with framework version, model info, etc
+        backend_version: Megatron version (e.g., "0.8.0")
+        primus_version: Primus version
+        model_name: Model name (e.g., "llama3_70B", "deepseek_v3")
+        phase: Execution phase (default: "before_train")
+        extra: Additional context data (e.g., {"args": megatron_args})
 
     Returns:
-        Tuple of (applied_count, failed_count)
+        Number of patches applied
+
+    Example:
+        apply_megatron_patches(
+            backend_version="0.8.0",
+            model_name="deepseek_v3",
+            phase="before_train",
+            extra={"args": megatron_args},
+        )
     """
-    return PatchRegistry.apply_patches(context)
+    return run_patches(
+        backend="megatron",
+        phase=phase,
+        backend_version=backend_version,
+        primus_version=primus_version,
+        model_name=model_name,
+        extra=extra,
+    )
 
 
-# Auto-register patches on import
-register_all_patches()
+__all__ = ["apply_megatron_patches"]
