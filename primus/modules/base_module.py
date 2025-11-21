@@ -24,8 +24,8 @@ class BaseModule(ABC):
         self,
         module_name: str,
         primus_config: PrimusConfig,
-        module_rank: int,
-        module_world_size: int,
+        module_rank: int = None,
+        module_world_size: int = None,
         module_master_addr: str = None,
         module_master_port: int = None,
     ):
@@ -40,6 +40,16 @@ class BaseModule(ABC):
         set_global_variables(primus_config)
         self.platform = get_target_platform()
         self.cli_args = get_cli_args()
+
+        # Auto-detect distributed parameters from environment if not provided
+        if module_rank is None:
+            module_rank = int(os.environ.get("RANK", 0))
+        if module_world_size is None:
+            module_world_size = int(os.environ.get("WORLD_SIZE", 1))
+        if module_master_addr is None:
+            module_master_addr = os.environ.get("MASTER_ADDR", "localhost")
+        if module_master_port is None:
+            module_master_port = int(os.environ.get("MASTER_PORT", 29500))
 
         # distributed module worker infos
         checker.check_true(

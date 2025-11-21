@@ -10,7 +10,6 @@ MegatronPretrainTrainer: Primus wrapper for Megatron-LM pre-training.
 This trainer bridges Primus configuration system with Megatron-LM's training loop.
 """
 
-import os
 from types import SimpleNamespace
 
 from primus.backends.megatron.patches import apply_megatron_patches
@@ -46,20 +45,10 @@ class MegatronPretrainTrainer(BaseModule):
             module_config: Module-specific configuration
             backend_args: Megatron-LM argument namespace (from MegatronArgBuilder)
         """
-        # Extract distributed info from environment variables (set by launcher)
-        module_rank = int(os.environ.get("RANK", 0))
-        module_world_size = int(os.environ.get("WORLD_SIZE", 1))
-        module_master_addr = os.environ.get("MASTER_ADDR", "localhost")
-        module_master_port = int(os.environ.get("MASTER_PORT", 29500))
-
-        # Initialize BaseModule (handles distributed setup, logging, etc.)
+        # Initialize BaseModule (auto-detects distributed params from env vars)
         super().__init__(
             module_name=module_config.module,
             primus_config=primus_config,
-            module_rank=module_rank,
-            module_world_size=module_world_size,
-            module_master_addr=module_master_addr,
-            module_master_port=module_master_port,
         )
 
         # Store backend-specific args
