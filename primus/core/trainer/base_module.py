@@ -68,13 +68,6 @@ class BaseModule(ABC):
         self.master_port = self.context.master_port
         self.platform = self.context.platform
 
-        # Legacy compatibility properties (deprecated, use self.rank etc. directly)
-        self.module_rank = self.rank
-        self.module_world_size = self.world_size
-        self.module_local_rank = self.local_rank
-        self.module_master_addr = self.master_addr
-        self.module_master_port = self.master_port
-
     @abstractmethod
     def init(self, *args, **kwargs):
         """Initialize training components (model, optimizer, etc.)."""
@@ -105,20 +98,3 @@ class BaseModule(ABC):
     def trainable(self) -> bool:
         """Check if this module is trainable."""
         return getattr(self.module_config, "trainable", True)
-
-    # Methods for accessing distributed info
-    def get_module_master_address(self) -> str:
-        """Get master node address."""
-        return self.module_master_addr
-
-    def get_module_master_port(self) -> int:
-        """Get master node port."""
-        return self.module_master_port
-
-    def get_module_rank(self) -> int:
-        """Get this worker's rank."""
-        return self.module_rank
-
-    def get_module_world_size(self) -> int:
-        """Get total number of workers."""
-        return self.module_world_size
