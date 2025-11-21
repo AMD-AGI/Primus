@@ -49,7 +49,7 @@ def replace_turbo_fp8linear_modules(model: nn.Module, config: Float8QuantConfig)
                 logger.info(f"module {name} shape {module.weight.shape}, replaced to FP8Linear")
                 setattr(model, name, fp8_linear)
             else:
-                logger.info(f"module {name} cannot be replaced to FP8Linear")
+                logger.info(f"module {name} shape {module.weight.shape}, cannot be replaced to FP8Linear")
         else:
             replace_turbo_fp8linear_modules(module, config)
 
