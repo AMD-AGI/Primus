@@ -133,7 +133,5 @@ if __name__ == "__main__":
 
     args, unknown_args = parser.parse_known_args()
 
-    # Overrides reserved for future use (lr=xx style CLI overrides)
-    overrides = []
-
-    launch_train(args, overrides, module="pretrain")
+    # Use unknown_args as CLI overrides (e.g., batch_size=32, lr=0.001)
+    launch_train(args, overrides=unknown_args, module="pretrain")
