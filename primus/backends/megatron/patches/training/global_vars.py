@@ -6,7 +6,7 @@
 ###############################################################################
 
 
-from primus.modules.module_utils import debug_rank_0
+from primus.core.trainer.module_utils import debug_rank_0
 
 _GLOBAL_ARGS = None
 _GLOBAL_MLFLOW_WRITER = None

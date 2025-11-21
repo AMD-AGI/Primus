@@ -15,74 +15,109 @@ from primus.core.utils.global_vars import (
     get_target_platform,
     set_global_variables,
 )
-from primus.modules.trainer.pretrain_config import PretrainConfig
 
 from .module_utils import debug_rank_all, set_logging_rank
 
 
 class BaseModule(ABC):
+    """
+    Base class for all Primus modules (trainers, tools, etc.).
+
+    Responsibilities:
+        - Initialize distributed training environment
+        - Setup logging for distributed workers
+        - Provide access to platform and configuration
+        - Manage environment variables for distributed training
+    """
+
     def __init__(
         self,
-        module_name: str = None,
-        primus_config: PrimusConfig = None,
-        module_rank: int = 0,
-        module_world_size: int = 1,
+        module_name: str,
+        primus_config: PrimusConfig,
+        module_rank: int = None,
+        module_world_size: int = None,
         module_master_addr: str = None,
         module_master_port: int = None,
-        module_context: PretrainConfig = None,
     ):
-        # module will be initialized by multiple worker processes
-        self.module_name = module_name
-        self.module_context = module_context
+        """
+        Initialize BaseModule.
 
-        assert primus_config is not None
+        Args:
+            module_name: Name of the module (e.g., "pre_trainer")
+            primus_config: Primus configuration object
+            module_rank: Rank of this worker (auto-detected from RANK env var if None)
+            module_world_size: Total number of workers (auto-detected from WORLD_SIZE if None)
+            module_master_addr: Master node address (auto-detected from MASTER_ADDR if None)
+            module_master_port: Master node port (auto-detected from MASTER_PORT if None)
+        """
+        self.module_name = module_name
         self.primus_config = primus_config
         self.module_config = primus_config.get_module_config(module_name)
 
-        # set config into the global vars of worker process
+        # Set config into the global vars of worker process
         set_global_variables(primus_config)
         self.platform = get_target_platform()
         self.cli_args = get_cli_args()
 
-        # Auto-detect distributed info if not provided
-        if module_rank is None:
-            module_rank = int(os.getenv("RANK", "0"))
-        if module_world_size is None:
-            module_world_size = int(os.getenv("WORLD_SIZE", "1"))
-        if module_master_addr is None:
-            module_master_addr = os.getenv("MASTER_ADDR", "127.0.0.1")
-        if module_master_port is None:
-            module_master_port = int(os.getenv("MASTER_PORT", "29500"))
+        # Initialize distributed parameters
+        self._init_distributed_params(module_rank, module_world_size, module_master_addr, module_master_port)
 
-        # distributed module worker infos
-        checker.check_true(
-            module_master_port is not None,
-            msg=f"Must provide a master port for all module workers",
+        # Setup logger for worker
+        self.setup_worker_logger(self.module_rank, self.module_world_size)
+
+    def _init_distributed_params(
+        self,
+        module_rank: int = None,
+        module_world_size: int = None,
+        module_master_addr: str = None,
+        module_master_port: int = None,
+    ):
+        """
+        Initialize distributed training parameters.
+
+        Auto-detects from environment variables if not explicitly provided.
+        Sets up environment variables for downstream frameworks.
+        """
+        # Auto-detect from environment if not provided
+        module_rank = module_rank if module_rank is not None else int(os.environ.get("RANK", 0))
+        module_world_size = (
+            module_world_size if module_world_size is not None else int(os.environ.get("WORLD_SIZE", 1))
         )
-        if module_rank > 0:
+        module_master_addr = (
+            module_master_addr
+            if module_master_addr is not None
+            else os.environ.get("MASTER_ADDR", "localhost")
+        )
+        module_master_port = (
+            module_master_port
+            if module_master_port is not None
+            else int(os.environ.get("MASTER_PORT", 29500))
+        )
+
+        # Validate distributed parameters
+        if module_rank > 0 and module_master_addr == "localhost":
             checker.check_true(
-                module_master_addr is not None,
-                msg=f"Must provide master addr for workers with rank > 0",
+                False,
+                msg=f"Worker with rank {module_rank} must have a valid master address (not 'localhost')",
             )
+
+        # Store distributed info
         self.module_rank = module_rank
         self.module_world_size = module_world_size
-        if module_rank == 0 and module_master_addr is not None:
-            self.module_master_addr = self.platform.get_addr()
-        else:
-            self.module_master_addr = module_master_addr
+        # For rank 0, use actual platform address; for others, use provided address
+        self.module_master_addr = self.platform.get_addr() if module_rank == 0 else module_master_addr
         self.module_master_port = module_master_port
 
-        # Set the environment variables to make them accessible for workers if needed later.
+        # Calculate local rank
+        self.num_gpus_per_node = self.platform.get_gpus_per_node()
+        self.module_local_rank = self.module_rank % self.num_gpus_per_node
+
+        # Set environment variables for downstream frameworks (Megatron, PyTorch, etc.)
         os.environ["MASTER_ADDR"] = str(self.module_master_addr)
         os.environ["MASTER_PORT"] = str(self.module_master_port)
         os.environ["WORLD_SIZE"] = str(self.module_world_size)
         os.environ["RANK"] = str(self.module_rank)
-        self.num_gpus_per_node = self.platform.get_gpus_per_node()
-        self.module_local_rank = self.module_rank % self.num_gpus_per_node
         os.environ["LOCAL_RANK"] = str(self.module_local_rank)
-
-        # setup logger for worker
-        self.setup_worker_logger(module_rank, module_world_size)
 
     @abstractmethod
     def init(self, *args, **kwargs):
@@ -96,58 +131,70 @@ class BaseModule(ABC):
     def run(self, *args, **kwargs):
         raise NotImplementedError
 
-    def setup_worker_logger(self, rank, world_size):
-        # setup logger of dist module
+    def setup_worker_logger(self, rank: int, world_size: int):
+        """
+        Setup distributed logging for this worker.
+
+        Args:
+            rank: Worker rank
+            world_size: Total number of workers
+        """
+        # Determine log levels (use sink_level if specified, otherwise use defaults)
         sink_level = getattr(self.module_config, "sink_level", None)
-        if sink_level is not None:
-            self.module_config.file_sink_level = sink_level
-            self.module_config.stderr_sink_level = sink_level
+        file_sink_level = getattr(self.module_config, "file_sink_level", sink_level or "INFO")
+        stderr_sink_level = getattr(self.module_config, "stderr_sink_level", sink_level or "INFO")
+
+        # Create logger configuration
         logger_cfg = logger.LoggerConfig(
             exp_root_path=self.primus_config.exp_root_path,
             work_group=self.primus_config.exp_meta_info["work_group"],
             user_name=self.primus_config.exp_meta_info["user_name"],
             exp_name=self.primus_config.exp_meta_info["exp_name"],
             module_name=self.module_name,
-            file_sink_level=self.module_config.file_sink_level,
-            stderr_sink_level=self.module_config.stderr_sink_level,
+            file_sink_level=file_sink_level,
+            stderr_sink_level=stderr_sink_level,
             node_ip=self.platform.get_addr(),
             rank=rank,
             world_size=world_size,
         )
         logger.setup_logger(logger_cfg, is_head=False)
 
-        # use log_rank_0 before torch distributed initialize
+        # Set logging rank for rank-aware logging (log_rank_0, etc.)
         set_logging_rank(rank, world_size)
 
-        # monkey patch print function of builtins
+        # Monkey patch print function for distributed logging
         self.original_print = builtins.print
-        # builtins.print = log_rank_all
         builtins.print = debug_rank_all
 
+    # Properties for accessing configuration
     @property
     def exp_root_path(self) -> str:
+        """Get experiment root path."""
         return self.primus_config.exp_root_path
 
     @property
     def exp_meta_info(self) -> dict:
+        """Get experiment metadata (work_group, user_name, exp_name, etc.)."""
         return self.primus_config.exp_meta_info
 
+    @property
+    def trainable(self) -> bool:
+        """Check if this module is trainable."""
+        return getattr(self.module_config, "trainable", True)
+
+    # Methods for accessing distributed info
     def get_module_master_address(self) -> str:
+        """Get master node address."""
         return self.module_master_addr
 
     def get_module_master_port(self) -> int:
+        """Get master node port."""
         return self.module_master_port
 
     def get_module_rank(self) -> int:
+        """Get this worker's rank."""
         return self.module_rank
 
     def get_module_world_size(self) -> int:
-        raise self.module_world_size
-
-    @property
-    def get_module_config(self):
-        return self.module_config
-
-    @property
-    def trainable(self):
-        return self.module_config.trainable
+        """Get total number of workers."""
+        return self.module_world_size

@@ -15,7 +15,7 @@ from enum import Enum
 import torch
 from torch.autograd.graph import saved_tensors_hooks
 
-from primus.modules.module_utils import log_rank_all
+from primus.core.trainer.module_utils import log_rank_all
 
 
 def checksum(tensor):

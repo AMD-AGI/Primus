@@ -37,7 +37,7 @@ from megatron.training import get_args, print_rank_0
 
 from primus.backends.megatron.training.training import RollbackDataIteratorWrapper
 from primus.backends.megatron.training.utils import is_second_last_pipeline_stage
-from primus.modules.module_utils import log_rank_0, log_rank_all
+from primus.core.trainer.module_utils import log_rank_0, log_rank_all
 from primus.modules.trainer.megatron.utils import fwd_bwd_wrapper
 
 from .offload import ActivationStorePool, FakeActivationStore, partial_recompute

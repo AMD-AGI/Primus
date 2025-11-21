@@ -4,9 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from primus.core.trainer.base_module import BaseModule
+from primus.core.trainer.module_utils import log_rank_0
 from primus.core.utils.import_utils import get_model_provider
-from primus.modules.base_module import BaseModule
-from primus.modules.module_utils import log_rank_0
 
 
 class LightMegatronPretrainTrainer(BaseModule):

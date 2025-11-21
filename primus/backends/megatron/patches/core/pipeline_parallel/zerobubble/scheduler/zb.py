@@ -13,7 +13,7 @@ from typing import List, Set
 import pulp
 import torch
 
-from primus.modules.module_utils import log_rank_all
+from primus.core.trainer.module_utils import log_rank_all
 
 from .graph import FuncType, GraphConfig, ScheduledNode
 

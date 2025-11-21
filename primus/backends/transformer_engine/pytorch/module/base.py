@@ -13,7 +13,7 @@ from megatron.core.utils import is_te_min_version
 from transformer_engine.pytorch.module import base
 
 import primus.backends.transformer_engine.transformer_engine_torch as ptex
-from primus.modules.module_utils import log_rank_0, warning_rank_0
+from primus.core.trainer.module_utils import log_rank_0, warning_rank_0
 
 
 def get_cublas_workspace_size_bytes() -> None:

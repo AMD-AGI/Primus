@@ -9,9 +9,9 @@ import os
 from argparse import ArgumentParser, Namespace
 from types import SimpleNamespace
 
+from primus.core.trainer.module_utils import log_kv_rank_0, log_rank_0, warning_rank_0
 from primus.core.utils import checker
 from primus.core.utils.env import get_torchrun_env
-from primus.modules.module_utils import log_kv_rank_0, log_rank_0, warning_rank_0
 
 
 class MegatronLauncherAdapter:

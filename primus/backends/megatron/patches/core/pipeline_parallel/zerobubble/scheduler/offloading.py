@@ -11,7 +11,7 @@ import dataclasses
 from dataclasses import dataclass
 from typing import List
 
-from primus.modules.module_utils import log_rank_all
+from primus.core.trainer.module_utils import log_rank_all
 
 from .graph import BW, B, F, FuncType, GraphConfig, NodeKey, ScheduledNode, W
 

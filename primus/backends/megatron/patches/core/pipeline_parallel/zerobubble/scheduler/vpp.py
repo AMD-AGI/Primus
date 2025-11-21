@@ -7,7 +7,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from primus.modules.module_utils import log_rank_all
+from primus.core.trainer.module_utils import log_rank_all
 
 from .graph import BW, F, GraphConfig, ScheduledNode
 

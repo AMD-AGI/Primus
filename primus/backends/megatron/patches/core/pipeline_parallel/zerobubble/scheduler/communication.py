@@ -14,7 +14,7 @@ from typing import List, Tuple
 
 from megatron.training.global_vars import get_args
 
-from primus.modules.module_utils import log_rank_all
+from primus.core.trainer.module_utils import log_rank_all
 
 from .graph import BW, B, CommDirection, F, FuncType, GraphConfig, ScheduledNode
 
