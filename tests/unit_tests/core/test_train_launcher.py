@@ -7,7 +7,7 @@
 """Unit tests for train_launcher.py"""
 
 
-from primus.core.launcher.train_launcher import _parse_cli_overrides
+from primus.core.utils.arg_utils import parse_cli_overrides
 
 
 class TestParseCliOverrides:
@@ -16,49 +16,49 @@ class TestParseCliOverrides:
     def test_parse_simple_string(self):
         """Test parsing simple string values."""
         overrides = ["key=value"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {"key": "value"}
 
     def test_parse_integer(self):
         """Test parsing integer values."""
         overrides = ["batch_size=32", "num_layers=24"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {"batch_size": 32, "num_layers": 24}
 
     def test_parse_negative_integer(self):
         """Test parsing negative integer values."""
         overrides = ["offset=-10"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {"offset": -10}
 
     def test_parse_float(self):
         """Test parsing float values."""
         overrides = ["lr=0.001", "dropout=0.1"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {"lr": 0.001, "dropout": 0.1}
 
     def test_parse_boolean_true(self):
         """Test parsing boolean true values."""
         overrides = ["use_cache=true", "verbose=True"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {"use_cache": True, "verbose": True}
 
     def test_parse_boolean_false(self):
         """Test parsing boolean false values."""
         overrides = ["use_cache=false", "verbose=False"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {"use_cache": False, "verbose": False}
 
     def test_parse_nested_keys(self):
         """Test parsing nested keys with dot notation."""
         overrides = ["model.layers=24", "model.hidden_size=768"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {"model": {"layers": 24, "hidden_size": 768}}
 
     def test_parse_deeply_nested_keys(self):
         """Test parsing deeply nested keys."""
         overrides = ["optimizer.adam.lr=0.001", "optimizer.adam.beta1=0.9"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {"optimizer": {"adam": {"lr": 0.001, "beta1": 0.9}}}
 
     def test_parse_mixed_types(self):
@@ -70,7 +70,7 @@ class TestParseCliOverrides:
             "use_cache=true",
             "model.layers=24",
         ]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {
             "name": "my_model",
             "batch_size": 32,
@@ -82,25 +82,25 @@ class TestParseCliOverrides:
     def test_parse_value_with_equals(self):
         """Test parsing values that contain equals sign."""
         overrides = ["equation=x=y"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {"equation": "x=y"}
 
     def test_parse_empty_value(self):
         """Test parsing empty values."""
         overrides = ["key="]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {"key": ""}
 
     def test_parse_value_with_spaces(self):
         """Test parsing values with leading/trailing spaces."""
         overrides = ["key = value ", " name=test"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {"key": "value", "name": "test"}
 
     def test_parse_invalid_format_warning(self, capsys):
         """Test warning message for invalid format."""
         overrides = ["invalid_format", "valid_key=value"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {"valid_key": "value"}
         captured = capsys.readouterr()
         assert "Warning: Skipping invalid override format: invalid_format" in captured.out
@@ -108,25 +108,25 @@ class TestParseCliOverrides:
     def test_parse_empty_list(self):
         """Test parsing empty override list."""
         overrides = []
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {}
 
     def test_parse_string_with_digit(self):
         """Test that strings like filenames with digits are not converted to int."""
         overrides = ["checkpoint=checkpoint_1000.pt"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {"checkpoint": "checkpoint_1000.pt"}
 
     def test_parse_path_value(self):
         """Test parsing path values."""
         overrides = ["data_path=/path/to/data", "model_path=./models"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {"data_path": "/path/to/data", "model_path": "./models"}
 
     def test_nested_key_merge(self):
         """Test that nested keys merge correctly."""
         overrides = ["model.layers=24", "model.hidden_size=768", "optimizer.lr=0.001"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         assert result == {
             "model": {"layers": 24, "hidden_size": 768},
             "optimizer": {"lr": 0.001},
@@ -135,7 +135,7 @@ class TestParseCliOverrides:
     def test_override_with_scientific_notation(self):
         """Test parsing scientific notation floats."""
         overrides = ["lr=1e-4", "weight_decay=1.5e-5"]
-        result = _parse_cli_overrides(overrides)
+        result = parse_cli_overrides(overrides)
         # Scientific notation with decimal point is parsed as float
         assert result == {"lr": "1e-4", "weight_decay": 1.5e-5}
         # lr remains string because it doesn't have a decimal point before 'e'
