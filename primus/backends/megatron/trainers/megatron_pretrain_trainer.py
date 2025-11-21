@@ -10,10 +10,13 @@ MegatronPretrainTrainer: Primus wrapper for Megatron-LM pre-training.
 This trainer bridges Primus configuration system with Megatron-LM's training loop.
 """
 
+import logging
 from types import SimpleNamespace
 
 from primus.backends.megatron.patches import apply_megatron_patches
 from primus.core.config.primus_config import ModuleConfig, PrimusConfig
+
+log = logging.getLogger(__name__)
 
 
 class MegatronPretrainTrainer:
@@ -47,10 +50,21 @@ class MegatronPretrainTrainer:
         self.module_config = module_config
         self.backend_args = backend_args
 
-        # Will be set in init()
+        # Training components (will be set during training)
         self.model = None
         self.optimizer = None
         self.opt_param_scheduler = None
+
+        log.info(f"[MegatronPretrainTrainer] Initialized for model: {module_config.model or 'custom'}")
+
+    def setup(self):
+        """
+        Setup phase (optional, for compatibility with BaseModule interface).
+
+        Can be used for pre-initialization setup if needed.
+        """
+        log.info("[MegatronPretrainTrainer] Setup phase")
+        # Any pre-initialization setup can go here
 
     def init(self):
         """
@@ -62,9 +76,9 @@ class MegatronPretrainTrainer:
             - Creating optimizer
             - Loading checkpoints if specified
         """
-        print(f"[Primus:MegatronTrainer] Initializing Megatron training...")
-        print(f"[Primus:MegatronTrainer] Model: {self.module_config.model or 'custom'}")
-        print(f"[Primus:MegatronTrainer] Framework: {self.module_config.framework}")
+        log.info("[MegatronPretrainTrainer] Initializing Megatron training...")
+        log.info(f"[MegatronPretrainTrainer] Model: {self.module_config.model or 'custom'}")
+        log.info(f"[MegatronPretrainTrainer] Framework: {self.module_config.framework}")
 
         # Import Megatron modules (after backend setup in adapter)
         from megatron.training import get_args  # type: ignore
@@ -80,7 +94,7 @@ class MegatronPretrainTrainer:
 
         # Verify args were set correctly
         megatron_args = get_args()
-        print(f"[Primus:MegatronTrainer] Megatron initialized with {len(vars(megatron_args))} arguments")
+        log.info(f"[MegatronPretrainTrainer] Megatron initialized with {len(vars(megatron_args))} arguments")
 
     def run(self):
         """
@@ -93,7 +107,7 @@ class MegatronPretrainTrainer:
             - Checkpointing
             - Logging
         """
-        print(f"[Primus:MegatronTrainer] Starting Megatron training...")
+        log.info("[MegatronPretrainTrainer] Starting Megatron training...")
 
         # Apply before_train patches
         model_name = self.module_config.model if hasattr(self.module_config, "model") else None
@@ -113,6 +127,10 @@ class MegatronPretrainTrainer:
         # Get the model provider function
         model_provider = get_model_provider(self.backend_args)
 
+        log.info(
+            f"[MegatronPretrainTrainer] Using model provider for: {getattr(self.backend_args, 'model_type', 'GPT')}"
+        )
+
         # Execute Megatron's pretrain with our model provider
         pretrain(
             model_provider,
@@ -122,7 +140,7 @@ class MegatronPretrainTrainer:
             args_defaults={},
         )
 
-        print(f"[Primus:MegatronTrainer] Training completed.")
+        log.info("[MegatronPretrainTrainer] Training completed successfully.")
 
     def _detect_version(self) -> str:
         """Detect Megatron version."""
