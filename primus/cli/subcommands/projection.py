@@ -39,9 +39,9 @@ def register_subcommand(subparsers):
 
     # ---------- pretrain ----------
     pretrain = suite_parsers.add_parser("memory", help="Memory projection.")
-    from primus.core.launcher.parser import add_pretrain_parser
+    from primus.core.launcher.train_launcher import add_train_parser
 
-    add_pretrain_parser(pretrain)
+    add_train_parser(pretrain)
 
     parser.set_defaults(func=run)
 

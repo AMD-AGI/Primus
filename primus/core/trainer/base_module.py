@@ -8,7 +8,7 @@ import builtins
 import os
 from abc import ABC, abstractmethod
 
-from primus.core.launcher.config import PrimusConfig
+from primus.core.config.primus_config import PrimusConfig
 from primus.core.utils import checker, logger
 from primus.core.utils.global_vars import (
     get_cli_args,

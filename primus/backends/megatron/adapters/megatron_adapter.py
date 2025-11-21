@@ -13,11 +13,9 @@
 
 import os
 
-from primus.modules.trainer.backend_adapter import BackendAdapter
-from primus.modules.trainer.backend_registry import BackendRegistry
-from primus.modules.trainer.backends.megatron.builders.argument_builder import (
-    MegatronArgBuilder,
-)
+from primus.backends.megatron.builders.argument_builder import MegatronArgBuilder
+from primus.core.backend.backend_adapter import BackendAdapter
+from primus.core.backend.backend_registry import BackendRegistry
 
 # from primus.backend.megatron.patches import apply_megatron_patches
 

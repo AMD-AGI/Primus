@@ -11,7 +11,7 @@ modules:
     a.b: 1
 
   - name: pretrain_stage
-    module: pre_trainer
+    module: pretrain
     framework: megatron
     model: llama2_7B
     arguments:

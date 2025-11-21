@@ -48,6 +48,23 @@ class BackendRegistry:
     # Backend → list of setup hooks
     _setup_hooks: Dict[str, List[Callable]] = {}
 
+    @classmethod
+    def initialize(cls):
+        import importlib
+
+        backend_modules = [
+            "primus.backends.megatron",
+            "primus.backends.torchtitan",
+        ]
+
+        for mod in backend_modules:
+            try:
+                importlib.import_module(mod)
+            except ModuleNotFoundError as e:
+                raise ModuleNotFoundError(f"Backend module {mod} not found. {e}")
+            except Exception as e:
+                raise Exception(f"Error importing backend module {mod}. {e}")
+
     # ----------------------------------------------------------------------
     #  Path Name Registration
     # ----------------------------------------------------------------------

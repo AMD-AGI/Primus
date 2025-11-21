@@ -5,7 +5,7 @@
 ###############################################################################
 
 
-from primus.core.launcher.config import PrimusConfig
+from primus.core.config.primus_config import PrimusConfig
 
 _GLOBAL_CLI_ARGS = None
 _GLOBAL_PRIMUS_CFG = None

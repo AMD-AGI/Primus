@@ -1,0 +1,4 @@
+/var/spool/slurm-llnl/job52863/slurm_script: line 15: /var/spool/slurm-llnl/job52863/lib/common.sh: No such file or directory
+[ERROR] Failed to load common library: /var/spool/slurm-llnl/job52863/lib/common.sh
+slurmstepd: error: _xgetaddrinfo: getaddrinfo(aacnsvm1ctln01:6817) failed: Temporary failure in name resolution
+slurmstepd: error: slurm_set_addr: Unable to resolve "aacnsvm1ctln01"

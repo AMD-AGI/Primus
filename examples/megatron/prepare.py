@@ -21,7 +21,7 @@ from examples.scripts.utils import (
     log_info,
     write_patch_args,
 )
-from primus.core.launcher.config import PrimusConfig
+from primus.core.config.primus_config import PrimusConfig
 from primus.core.launcher.parser import load_primus_config
 from primus.pretrain import setup_backend_path
 

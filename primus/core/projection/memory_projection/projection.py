@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from primus.core.launcher.config import PrimusConfig
+from primus.core.config.primus_config import PrimusConfig
 from primus.core.projection.module_profilers.language_model import (
     build_profiler,
     get_language_model_profiler_spec,

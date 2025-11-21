@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 
 from examples.scripts.utils import log_error_and_exit, log_info
-from primus.core.launcher.config import PrimusConfig
+from primus.core.config.primus_config import PrimusConfig
 
 
 def log(msg, level="INFO"):

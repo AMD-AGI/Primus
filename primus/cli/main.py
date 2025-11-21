@@ -84,4 +84,7 @@ def main():
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--":
         sys.argv.pop(1)
+    from primus.core.backend.backend_registry import BackendRegistry
+
+    BackendRegistry.initialize()
     main()

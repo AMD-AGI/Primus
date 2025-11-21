@@ -1,4 +1,8 @@
-from __future__ import annotations
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
@@ -7,116 +11,65 @@ from typing import Any, Dict, Optional
 @dataclass
 class PretrainConfig:
     """
-    Configuration object for the 'pre_trainer' module.
-
-    This class represents the Primus-side configuration specifically for a
-    Megatron-based pre-training workflow.
-
-    YAML example:
-        - name: pretrain_stage
-          module: pre_trainer
-          framework: megatron
-          model: llama2_7B
-          overrides:
-            global_batch_size: 16
-            micro_batch_size: 1
-            lr: 1e-5
-
-    Fields
-    -------
-    name:
-        The name of this module instance within the workflow.
-    module:
-        Module type, fixed to "pre_trainer".
-    framework:
-        Training backend framework (e.g., "megatron").
-    model:
-        Predefined model preset name (e.g., "llama2_7B"). Primus resolves this
-        to a corresponding model YAML or built-in preset.
-    overrides:
-        A flat dictionary of Megatron argument overrides, merged into the final
-        Megatron arg namespace. These override both model defaults and
-        Megatron-LM defaults.
+    Pure Primus-side configuration for a pre-training module.
+    Backend-agnostic (NOT tied to Megatron / Titan).
     """
 
+    # core fields
     name: str
     module: str = "pre_trainer"
-    framework: str = "megatron"
-
-    # Model preset name, e.g. "llama2_7B".
+    framework: str = "megatron"  # or 'torchtitan' / 'light-megatron' / etc
     model: Optional[str] = None
 
-    # Flat dictionary of Megatron arg overrides:
-    #   {"global_batch_size": 16, "lr": 1e-5, ...}
+    # High-level arguments relevant to backend-specific builders
+    # e.g. { global_batch_size: 16, lr: 1e-5 }
     arguments: Dict[str, Any] = field(default_factory=dict)
 
-    # -----------------------------------------------
-    # Methods for Primus runtime
-    # -----------------------------------------------
-    def to_megatron_args(self) -> Dict[str, Any]:
-        """
-        Convert this config into a flat Megatron argument dict.
-        Only includes values provided via `arguments`.
-
-        Model presets are resolved outside this class.
-        """
-        return dict(self.arguments)
-
-    def describe(self) -> str:
-        """Human-readable summary for logging/debugging."""
-        return f"[PretrainConfig] model={self.model}, " f"arguments={len(self.arguments)} keys"
+    # preserve unknown keys for forward-compatibility
+    _extra_fields: Dict[str, Any] = field(default_factory=dict, init=False)
 
     # ----------------------------------------------------------------------
-    # Construction from YAML SimpleNamespace
+    # Debug / logging
+    # ----------------------------------------------------------------------
+    def describe(self) -> str:
+        return f"[PretrainConfig] name={self.name}, model={self.model}, " f"{len(self.arguments)} arguments"
+
+    # ----------------------------------------------------------------------
+    # Build from SimpleNamespace
     # ----------------------------------------------------------------------
     @classmethod
-    def from_simple_namespace(self, cls, ns) -> "PretrainConfig":
-        """
-        Construct a PretrainConfig object from a SimpleNamespace produced by
-        the Primus YAML parser.
+    def from_simple_namespace(cls, ns) -> "PretrainConfig":
 
-        Expected YAML structure:
-            - name: pretrain_stage
-              module: pre_trainer
-              framework: megatron
-              model: llama2_7B
-              arguments:
-                global_batch_size: 16
-                micro_batch_size: 1
+        if not hasattr(ns, "name"):
+            raise ValueError("[PretrainConfig] module entry missing 'name' field")
 
-        This method:
-            - Extracts core fields (name/module/framework/model)
-            - Validates and loads 'arguments' as a dict
-            - Preserves all additional YAML keys inside _extra_fields
-              (for debugging or future extensions)
-        """
-        # --- Core fields (strict) --------------------------------------------------
         name = getattr(ns, "name", None)
-        module = getattr(ns, "module", None)
-        framework = getattr(ns, "framework", None)
+        module = getattr(ns, "module", "pre_trainer")
+        framework = getattr(ns, "framework", "megatron")
         model = getattr(ns, "model", None)
 
-        # --- overrides must be a dict --------------------------------------------
-        arguments = getattr(ns, "arguments", {})
-        if overrides is None:
+        raw_args = getattr(ns, "arguments", {})
+        if raw_args is None:
             arguments = {}
-        elif not isinstance(arguments, dict):
-            raise TypeError(f"[PretrainConfig] 'arguments' must be a dict, " f"got {type(arguments)!r}")
+        elif not isinstance(raw_args, dict):
+            raise TypeError(f"[PretrainConfig] 'arguments' must be dict, got {type(raw_args)}")
+        else:
+            arguments = raw_args
 
-        # --- Create instance -------------------------------------------------------
         cfg = cls(
             name=name,
             module=module,
             framework=framework,
             model=model,
-            overrides=overrides,
+            arguments=arguments,
         )
 
-        # --- Preserve all additional YAML fields ----------------------------------
-        for key, value in ns.__dict__.items():
-            if key in ["name", "module", "framework", "model", "overrides"]:
+        # preserve unknown YAML keys
+        for key, val in ns.__dict__.items():
+            if key in ["name", "module", "framework", "model", "arguments"]:
                 continue
-            cfg._extra_fields[key] = value
-            setattr(cfg, key, value)
+
+            cfg._extra_fields[key] = val
+            setattr(cfg, key, val)
 
         return cfg

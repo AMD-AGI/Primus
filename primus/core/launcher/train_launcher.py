@@ -10,10 +10,10 @@ import sys
 from pathlib import Path
 
 from primus.core.backend.backend_registry import BackendRegistry
-from primus.core.trainer.pretrain_config import PretrainConfig
+from primus.core.config.primus_config import PrimusConfig
 
 
-def add_pretrain_parser(parser: argparse.ArgumentParser):
+def add_train_parser(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--config",
         type=str,
@@ -72,7 +72,7 @@ def _setup_backend_path(framework: str, backend_path=None, verbose=True):
 
     # 3) fallback
     backend_name = BackendRegistry.get_path_name(framework)
-    default_path = Path(__file__).resolve().parent.parent / "third_party" / backend_name
+    default_path = Path(__file__).resolve().parent.parent.parent.parent / "third_party" / backend_name
     candidate_paths.append(default_path)
 
     # Normalize
@@ -110,9 +110,9 @@ def setup_env(data_path: str):
 # ------------------------------------------------------------------------------
 
 
-def launch_pretrain(args, overrides):
+def launch_train(args, overrides, module: str):
     """
-    Unified pretraining entry point (framework-agnostic).
+    Unified training entry point (framework-agnostic).
 
     Steps:
         1. Load Primus config
@@ -134,18 +134,16 @@ def launch_pretrain(args, overrides):
     # 2 Load PrimusConfig ----------
     primus_cfg = PrimusConfig.from_file(cfg_path, args)
 
-    # Extract module-level pretrain config
+    # Extract module-level train config
     try:
-        pre_cfg = primus_cfg.get_module_config("pre_trainer")
+        train_cfg = primus_cfg.get_module_config(module)
     except ValueError as exc:
         raise RuntimeError(
-            "[Primus:Train] Config file missing required module 'pre_trainer'. "
-            "Please ensure your YAML defines a module entry with name/module 'pre_trainer'."
+            f"[Primus:Train] Config file missing required module '{module}'. {primus_cfg.module_keys}"
+            f"Please ensure your YAML defines a module entry with name/module '{module}'."
         ) from exc
 
-    trainer_cfg = PretrainConfig.from_simple_namespace(pre_cfg)
-
-    framework = trainer_cfg.framework
+    framework = train_cfg.framework
 
     # 3 Insert backend path (framework-agnostic) ----------
     _setup_backend_path(framework, backend_path=args.backend_path)
@@ -155,12 +153,12 @@ def launch_pretrain(args, overrides):
 
     # 5 Backend-specific setup ----------
     # Includes: patch pipeline, version fix, env overrides, etc.
-    adapter.prepare_backend(trainer_cfg)
+    adapter.prepare_backend(train_cfg)
 
     # 6 Create trainer (adapter ensures correct conversion/loader) ----------
     trainer = adapter.create_trainer(
         primus_config=primus_cfg,
-        module_context=trainer_cfg,
+        module_config=train_cfg,
     )
 
     # 7 Execute training lifecycle ----------
@@ -173,12 +171,12 @@ def launch_pretrain(args, overrides):
 # ------------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Primus Pretrain Launcher")
-    add_pretrain_parser(parser)
+    parser = argparse.ArgumentParser(description="Primus Train Launcher")
+    add_train_parser(parser)
 
     args, unknown_args = parser.parse_known_args()
 
     # Overrides reserved for future use (lr=xx style CLI overrides)
     overrides = []
 
-    launch_pretrain(args, overrides)
+    launch_train(args, overrides, module="pretrain")
