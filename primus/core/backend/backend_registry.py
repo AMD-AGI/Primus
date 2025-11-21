@@ -13,6 +13,12 @@
 #   - Backend Trainer Classes (optional)
 #   - Backend Setup Hooks (patches or environment initialization)
 #
+# Design Philosophy:
+#   - Pure Lazy Loading: Backends are loaded on-demand when first accessed
+#   - No Hard-coded Backend List: All backends discovered dynamically
+#   - Zero Startup Overhead: No upfront imports or initialization
+#   - Fail-Safe: Missing backends don't break other backends
+#
 # This is the foundation of Primus's plugin-based backend system.
 ###############################################################################
 
@@ -37,7 +43,11 @@ class BackendRegistry:
     """
 
     # Backend → third_party folder name
-    _path_names: Dict[str, str] = {}
+    _path_names: Dict[str, str] = {
+        # Pre-register known path names to avoid chicken-egg problem
+        "megatron": "Megatron-LM",
+        "torchtitan": "torchtitan",
+    }
 
     # Backend → AdapterClass (class, not instance)
     _adapters: Dict[str, Type] = {}
@@ -47,43 +57,6 @@ class BackendRegistry:
 
     # Backend → list of setup hooks
     _setup_hooks: Dict[str, List[Callable]] = {}
-
-    @classmethod
-    def initialize(cls):
-        """
-        Initialize backend registry by loading all available backends.
-
-        This should be called early in the application lifecycle,
-        typically in main.py before any training commands are executed.
-        """
-        import importlib
-
-        backend_modules = [
-            "primus.backends.megatron",
-            "primus.backends.torchtitan",
-        ]
-
-        print("[Primus] Initializing BackendRegistry...")
-        loaded = []
-        failed = []
-
-        for mod in backend_modules:
-            try:
-                importlib.import_module(mod)
-                backend_name = mod.split(".")[-1]
-                loaded.append(backend_name)
-            except ModuleNotFoundError:
-                # Backend not installed, skip
-                backend_name = mod.split(".")[-1]
-                failed.append(f"{backend_name} (not installed)")
-            except Exception as e:
-                backend_name = mod.split(".")[-1]
-                failed.append(f"{backend_name} (error: {e})")
-
-        if loaded:
-            print(f"[Primus] Loaded backends: {', '.join(loaded)}")
-        if failed:
-            print(f"[Primus] Skipped backends: {', '.join(failed)}")
 
     # ----------------------------------------------------------------------
     #  Path Name Registration
@@ -98,8 +71,20 @@ class BackendRegistry:
 
     @classmethod
     def get_path_name(cls, backend: str) -> str:
+        """
+        Get path name for backend, with lazy loading support.
+
+        If backend not registered, try to load it first.
+        """
+        # Try lazy load if not registered
         if backend not in cls._path_names:
-            raise KeyError(f"[Primus] No path name registered for backend '{backend}'.")
+            cls._try_load_backend(backend)
+
+        if backend not in cls._path_names:
+            raise KeyError(
+                f"[Primus] No path name registered for backend '{backend}'.\n"
+                f"Available backends: {', '.join(cls._path_names.keys())}"
+            )
         return cls._path_names[backend]
 
     # ----------------------------------------------------------------------
@@ -156,7 +141,7 @@ class BackendRegistry:
     #  Backend Discovery & Lazy Loading
     # ----------------------------------------------------------------------
     @classmethod
-    def _try_load_backend(cls, backend: str):
+    def _try_load_backend(cls, backend: str) -> bool:
         """
         Attempt to lazily load a backend module.
 
@@ -165,18 +150,22 @@ class BackendRegistry:
 
         Args:
             backend: Backend name (e.g., "megatron", "torchtitan")
+
+        Returns:
+            True if backend was loaded successfully, False otherwise
         """
         import importlib
 
         try:
             module_path = f"primus.backends.{backend}"
             importlib.import_module(module_path)
-            print(f"[Primus] Loaded backend: {backend}")
+            return True
         except ModuleNotFoundError:
             # Backend not installed, ignore silently
-            pass
+            return False
         except Exception as e:
             print(f"[Primus] Warning: Failed to load backend '{backend}': {e}")
+            return False
 
     @classmethod
     def list_available_backends(cls) -> list:

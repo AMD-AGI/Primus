@@ -68,11 +68,6 @@ def main():
     - preflight: Environment and configuration checks.
       ...
     """
-    # Initialize backend registry before parsing commands
-    from primus.core.backend.backend_registry import BackendRegistry
-
-    BackendRegistry.initialize()
-
     parser = argparse.ArgumentParser(prog="primus", description="Primus Unified CLI for Training & Utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)
 

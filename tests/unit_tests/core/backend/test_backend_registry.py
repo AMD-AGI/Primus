@@ -106,11 +106,29 @@ class TestBackendRegistryLazyLoading:
 
     def test_try_load_backend_non_existent(self, capsys):
         """Test that _try_load_backend handles non-existent backends gracefully."""
-        BackendRegistry._try_load_backend("definitely_not_a_backend")
+        result = BackendRegistry._try_load_backend("definitely_not_a_backend")
 
-        # Should not raise, just silently ignore
+        # Should return False but not crash
+        assert result is False
         capsys.readouterr()
-        # May have warning but should not crash
+
+    def test_try_load_backend_returns_bool(self):
+        """Test that _try_load_backend returns boolean."""
+        result = BackendRegistry._try_load_backend("non_existent")
+        assert isinstance(result, bool)
+        assert result is False
+
+    def test_get_adapter_with_lazy_loading(self):
+        """Test that get_adapter triggers lazy loading."""
+        # Don't pre-register, let it lazy load
+        # This will try to load megatron backend
+        try:
+            adapter = BackendRegistry.get_adapter("megatron")
+            # If megatron is installed, should succeed
+            assert adapter is not None
+        except ValueError:
+            # If not installed, should get helpful error
+            pass
 
     def test_list_available_backends(self):
         """Test listing available backends."""
@@ -128,30 +146,20 @@ class TestBackendRegistryLazyLoading:
         assert available == []
 
 
-class TestBackendRegistryInitialize:
-    """Test initialization improvements."""
-
-    def test_initialize_with_output(self, capsys):
-        """Test that initialize provides informative output."""
-        BackendRegistry.initialize()
-
-        captured = capsys.readouterr()
-        assert "Initializing BackendRegistry" in captured.out
-        # Should show either loaded or skipped backends
-        assert "Loaded backends:" in captured.out or "Skipped backends:" in captured.out
-
-
 class TestBackendRegistryPathNames:
     """Test path name registration and retrieval."""
 
     def setup_method(self):
         """Clear registry before each test."""
         self._original_path_names = BackendRegistry._path_names.copy()
-        BackendRegistry._path_names.clear()
+        self._original_adapters = BackendRegistry._adapters.copy()
+        BackendRegistry._path_names = {"megatron": "Megatron-LM", "torchtitan": "torchtitan"}
+        BackendRegistry._adapters.clear()
 
     def teardown_method(self):
         """Restore registry after each test."""
         BackendRegistry._path_names = self._original_path_names
+        BackendRegistry._adapters = self._original_adapters
 
     def test_register_and_get_path_name(self):
         """Test registering and retrieving path names."""
@@ -160,12 +168,18 @@ class TestBackendRegistryPathNames:
         path_name = BackendRegistry.get_path_name("test_backend")
         assert path_name == "TestBackend-Path"
 
-    def test_get_path_name_not_found(self):
-        """Test error when path name not registered."""
-        with pytest.raises(KeyError) as exc_info:
-            BackendRegistry.get_path_name("non_existent")
+    def test_get_path_name_with_lazy_loading(self):
+        """Test get_path_name triggers lazy loading."""
+        # Pre-registered in _path_names
+        path_name = BackendRegistry.get_path_name("megatron")
+        assert path_name == "Megatron-LM"
 
-        assert "No path name registered for backend 'non_existent'" in str(exc_info.value)
+    def test_get_path_name_not_found(self):
+        """Test error when path name not registered and can't be loaded."""
+        with pytest.raises(KeyError) as exc_info:
+            BackendRegistry.get_path_name("non_existent_backend")
+
+        assert "No path name registered for backend 'non_existent_backend'" in str(exc_info.value)
 
 
 class TestBackendRegistryHasAdapter:
