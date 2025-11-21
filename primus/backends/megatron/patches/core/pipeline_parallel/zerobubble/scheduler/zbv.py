@@ -9,7 +9,7 @@
 
 from collections import deque
 
-from primus.core.trainer.module_utils import log_rank_0
+from primus.core.utils.distributed_logging import log_rank_0
 
 from .graph import B, F, ScheduledNode, W
 

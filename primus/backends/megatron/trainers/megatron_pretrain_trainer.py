@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from primus.backends.megatron.patches import apply_megatron_patches
 from primus.core.config.primus_config import ModuleConfig, PrimusConfig
 from primus.core.trainer.base_module import BaseModule
-from primus.core.trainer.module_utils import log_rank_0
+from primus.core.utils.distributed_logging import log_rank_0
 
 
 class MegatronPretrainTrainer(BaseModule):

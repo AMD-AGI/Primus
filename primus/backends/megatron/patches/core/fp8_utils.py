@@ -10,7 +10,7 @@ from contextlib import nullcontext
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version
 
-from primus.core.trainer.module_utils import warning_rank_0
+from primus.core.utils.distributed_logging import warning_rank_0
 
 # Check if Transformer Engine is installed
 HAVE_TE = False

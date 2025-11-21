@@ -5,7 +5,7 @@
 ###############################################################################
 
 from primus.core.trainer.base_module import BaseModule
-from primus.core.trainer.module_utils import log_rank_0
+from primus.core.utils.distributed_logging import log_rank_0
 from primus.core.utils.import_utils import get_model_provider
 
 

@@ -12,7 +12,7 @@ from typing import List
 
 from megatron.training.global_vars import get_args
 
-from primus.core.trainer.module_utils import log_rank_all
+from primus.core.utils.distributed_logging import log_rank_all
 
 from .communication import (
     add_communication_nodes_without_sorting,

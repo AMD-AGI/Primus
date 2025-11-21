@@ -11,7 +11,7 @@ pattern_size = 6
 from collections import Counter, deque
 from dataclasses import dataclass
 
-from primus.core.trainer.module_utils import log_rank_all
+from primus.core.utils.distributed_logging import log_rank_all
 
 
 @dataclass(eq=True, frozen=True)

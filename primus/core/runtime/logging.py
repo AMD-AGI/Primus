@@ -14,8 +14,8 @@ distributed training.
 import builtins
 
 from primus.core.config.primus_config import PrimusConfig
-from primus.core.trainer.module_utils import debug_rank_all, set_logging_rank
 from primus.core.utils import logger
+from primus.core.utils.distributed_logging import debug_rank_all, set_logging_rank
 
 from .context import RuntimeContext
 

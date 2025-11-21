@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import List
 
-from primus.core.trainer.module_utils import log_rank_0, log_rank_all
+from primus.core.utils.distributed_logging import log_rank_0, log_rank_all
 
 
 class PassType(Enum):

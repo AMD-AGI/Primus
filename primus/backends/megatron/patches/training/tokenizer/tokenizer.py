@@ -14,7 +14,7 @@ from megatron.training.arguments import (
 from megatron.training.tokenizer import build_tokenizer as megatron_build_tokenizer
 from megatron.training.tokenizer.tokenizer import _HuggingFaceTokenizer
 
-from primus.core.trainer.module_utils import log_rank_0
+from primus.core.utils.distributed_logging import log_rank_0
 
 CUSTOM_TOKENIZER_TYPES = {
     "DeepSeekV2Tokenizer",

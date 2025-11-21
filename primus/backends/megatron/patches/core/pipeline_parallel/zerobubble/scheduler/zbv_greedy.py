@@ -10,7 +10,7 @@
 # Implementation of vhalf and vmin schedules of Pipeline Parallelism
 # with Controllable Memory (https://arxiv.org/abs/2405.15362)
 # The reordering is based on a greedy algorithm.
-from primus.core.trainer.module_utils import log_rank_all
+from primus.core.utils.distributed_logging import log_rank_all
 
 from .graph import B, F, ScheduledNode, W
 

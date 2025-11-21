@@ -4,16 +4,43 @@
 # See LICENSE for license information.
 ###############################################################################
 
+"""
+Distributed logging utilities for Primus.
+
+This module provides rank-aware logging functions that can be used before
+PyTorch distributed is initialized. The logging functions use global rank
+variables that are set once at the start of training.
+
+Functions:
+    - log_rank_0: Log only from rank 0
+    - log_rank_last: Log only from last rank
+    - log_rank_all: Log from all ranks
+    - log_kv_rank_0: Log key-value pairs from rank 0
+    - debug_rank_0: Debug log from rank 0
+    - debug_rank_all: Debug log from all ranks
+    - warning_rank_0: Warning log from rank 0
+    - error_rank_0: Error log from rank 0
+"""
+
 import inspect
 
 from primus.core.utils import logger
 
+# Global rank variables (set once at initialization)
 _rank = 0
 _world_size = 1
 
 
-######################################################log before torch distributed initialized
-def set_logging_rank(rank, world_size):
+def set_logging_rank(rank: int, world_size: int):
+    """
+    Set global rank variables for distributed logging.
+
+    This should be called once during initialization (in init_global_logger).
+
+    Args:
+        rank: Global rank of this process
+        world_size: Total number of processes
+    """
     global _rank
     global _world_size
     _rank = rank

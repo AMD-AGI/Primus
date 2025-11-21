@@ -21,7 +21,7 @@ from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEm
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer
 
-from primus.core.trainer.module_utils import warning_rank_0
+from primus.core.utils.distributed_logging import warning_rank_0
 
 
 class PrimusTorchFullyShardedDataParallel(TorchFullyShardedDataParallel):
