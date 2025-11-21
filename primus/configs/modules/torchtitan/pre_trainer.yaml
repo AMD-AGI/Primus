@@ -35,6 +35,7 @@ profiling:
 
 training:
   mock_data: true
+  debug_moe_force_load_balance: false
   dataset: c4
   dataset_path: null
   deterministic: false

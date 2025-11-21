@@ -9,15 +9,15 @@ export NCCL_IB_HCA="bnxt_re0,bnxt_re1,bnxt_re2,bnxt_re3,bnxt_re4,bnxt_re5,bnxt_r
 # export AINIC_LIB="/apps/gpuperf/ainic-driver-20251007/lib/"
 export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
 export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
-export NCCL_SOCKET_IFNAME="enp49s0f0np0"
-export GLOO_SOCKET_IFNAME="enp49s0f0np0"
+export NCCL_SOCKET_IFNAME="lo"
+export GLOO_SOCKET_IFNAME="lo"
 
 export DOCKER_IMAGE="docker.io/rocm/pyt-megatron-lm-jax-nightly-private:primus_rocm7.1_20251117"
 export CPUS_PER_TASK=128
-export HSA_NO_SCRATCH_RECLAIM=0 
+export HSA_NO_SCRATCH_RECLAIM=1 
 export NVTE_CK_USES_BWD_V3=1
 
-export EXP="examples/torchtitan/configs/MI300X/deepseek_v3_16b-pretrain.yaml"
+# export EXP="examples/torchtitan/configs/MI300X/deepseek_v3_16b-pretrain.yaml"
 mkdir -p data
 # the real number of nodes to run
 export NNODES=1
@@ -49,7 +49,7 @@ if [ "$FP8" = "True" ]; then
 fi
 
 export PRIMUS_TEAM="date-new-$(date +%Y%m%d)"
-export PRIMUS_USER=john
+export PRIMUS_USER=liying
 export PRIMUS_EXP_NAME=$CONFIG
 
 
@@ -61,28 +61,7 @@ echo $LOG_FILE
 
 EXPORT_CONFIG=$LOG_DIR/config.yaml
 
-bash ./examples/run_slurm_pretrain.sh   2>&1 | tee $LOG_FILE
+# bash ./examples/run_pretrain.sh   2>&1 | tee $LOG_FILE
 
-# bash ./examples/run_slurm_pretrain.sh --micro_batch_size $MBS \
-#                                       --global_batch_size $GBS \
-#                                       --tensor_model_parallel_size $TP \
-#                                       --expert_tensor_parallel_size $ETP \
-#                                       --pipeline_model_parallel_size $PP \
-#                                       --seq_length $SEQ_LENGTH \
-#                                       --expert_model_parallel_size $EP \
-#                                       --context_parallel_size $CP \
-#                                       --moe_router_force_load_balancing $BALANCE \
-#                                       --optimizer $OPTIMIZER \
-#                                       --cp_comm_type a2a \
-#                                       --recompute_num_layers $RECOMPUTE_LAYERS \
-#                                       --moe_use_legacy_grouped_gemm $LEGACY_GG \
-#                                       ${VPP_CONFIG} \
-#                                       ${FP8_CONFIG} \
-#                                       --profile True \
-#                                       --disable_profiler_activity_cpu True \
-#                                       --use_pytorch_profiler True \
-#                                       --profile_step_start 5 \
-#                                       --profile_step_end 6 \
-#                                       --train_iters 10 2>&1 | tee $LOG_FILE
-
-
+export EXP="examples/torchtitan/configs/MI300X/deepseek_v3_671b-pretrain.yaml"
+bash ./examples/run_pretrain.sh --model.n_layers 4 --model.n_dense_layers 1  2>&1 | tee $LOG_FILE
