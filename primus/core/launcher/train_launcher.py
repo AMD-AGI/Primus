@@ -116,14 +116,7 @@ def launch_train(args, overrides, module: str):
             f"Check your config file's 'framework' field and backend installation."
         ) from e
 
-    # 4 Backend-specific setup
-    # Includes: patch pipeline, version fix, env overrides, etc.
-    try:
-        adapter.prepare_backend(train_cfg)
-    except Exception as e:
-        raise RuntimeError(f"[Primus:Train] Backend preparation failed for '{framework}': {e}") from e
-
-    # 5 Create trainer (adapter ensures correct conversion/loader)
+    # 4 Create trainer (adapter handles backend setup, config conversion, and trainer loading)
     try:
         trainer = adapter.create_trainer(
             primus_config=primus_cfg,
@@ -132,7 +125,7 @@ def launch_train(args, overrides, module: str):
     except Exception as e:
         raise RuntimeError(f"[Primus:Train] Failed to create trainer for '{framework}': {e}") from e
 
-    # 6 Execute training lifecycle
+    # 5 Execute training lifecycle
     try:
         trainer.init()
         trainer.run()

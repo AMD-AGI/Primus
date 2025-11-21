@@ -4,10 +4,9 @@
 # This is the unified integration layer between Primus Runtime and Megatron-LM.
 #
 # Responsibilities:
-#   1. Insert Megatron path (handled by pretrain.py)
-#   2. Apply Megatron version-specific patches
-#   3. Convert Primus TypedConfig → Megatron native args
-#   4. Load Megatron Trainer class (multiple version fallback)
+#   1. Apply Megatron version-specific patches
+#   2. Convert Primus ModuleConfig → Megatron native args
+#   3. Load Megatron Trainer class (multiple version fallback)
 #
 ###############################################################################
 
@@ -34,9 +33,7 @@ class MegatronAdapter(BackendAdapter):
     def __init__(self, framework="megatron"):
         super().__init__(framework)
 
-    # ----------------------------------------------------------------------
     # 1. Backend Setup & Patches
-    # ----------------------------------------------------------------------
     def prepare_backend(self, config):
         """
         Megatron-specific environment preparation.
@@ -58,42 +55,38 @@ class MegatronAdapter(BackendAdapter):
 
         print(f"[Primus:MegatronAdapter] Backend prepared.")
 
-    # ----------------------------------------------------------------------
     # 2. Config → Megatron Args
-    # ----------------------------------------------------------------------
-    def convert_config(self, pretrain_config):
+    def convert_config(self, module_config):
         """
-        Convert Primus PretrainConfig → final Megatron-LM argument Namespace.
+        Convert Primus ModuleConfig → final Megatron-LM argument Namespace.
 
         This layer:
-            - Applies Primus config overrides
-            - Applies Primus CLI overrides (if any)
+            - Takes module_config.params (which already includes CLI overrides)
             - Fills missing fields using Megatron-LM defaults
             - Produces a Megatron-compatible argparse-like Namespace
+
+        Args:
+            module_config: ModuleConfig instance with params dict
+
+        Returns:
+            SimpleNamespace with Megatron args
         """
 
-        # 1. Instantiate the builder (does not take config directly)
+        # 1. Instantiate the builder
         builder = MegatronArgBuilder()
 
-        # 2. Feed in config values (flatten or direct dict)
-        #    NOTE: config must be a flat dict of Megatron-recognized fields.
-        #    If the config is nested (model/train/distributed), flatten it first.
-        builder.update(pretrain_config)
+        # 2. Feed in config params (already merged with CLI overrides in train_launcher)
+        #    module_config.params is a flat dict of Megatron-recognized fields.
+        builder.update(module_config.params)
 
-        # (Optional) 3. Also apply CLI overrides if available
-        if hasattr(self, "cli_args") and self.cli_args:
-            builder.update(self.cli_args)
-
-        # 4. Produce the final Megatron Namespace
+        # 3. Produce the final Megatron Namespace
         megatron_args = builder.finalize()
 
-        print(f"[Primus:MegatronAdapter] Converted config → " f"{len(vars(megatron_args))} Megatron args.")
+        print(f"[Primus:MegatronAdapter] Converted config → {len(vars(megatron_args))} Megatron args.")
 
         return megatron_args
 
-    # ----------------------------------------------------------------------
     # 3. Load Trainer Class (Version Adaptive)
-    # ----------------------------------------------------------------------
     def load_trainer_class(self):
         """Load Megatron trainer class registered via BackendRegistry."""
         try:
