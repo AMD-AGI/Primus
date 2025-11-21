@@ -24,8 +24,6 @@ def register_subcommand(subparsers):
         - sft: Supervised fine-tuning (instruction tuning, task adaptation)
 
     Future extensions:
-        - dpo: Direct Preference Optimization
-        - rlhf: Reinforcement Learning from Human Feedback
         - posttrain: General post-training workflows
 
     Examples:
@@ -68,16 +66,16 @@ def register_subcommand(subparsers):
     add_train_parser(pretrain)
 
     # ---------- sft ----------
-    sft = suite_parsers.add_parser(
-        "sft",
-        help="Supervised fine-tuning workflow (instruction tuning)",
-        description=(
-            "Fine-tune pre-trained models on supervised datasets for "
-            "instruction following, task adaptation, or domain specialization. "
-            "Supports full fine-tuning and parameter-efficient methods (LoRA, etc.)."
-        ),
-    )
-    add_train_parser(sft)
+    # sft = suite_parsers.add_parser(
+    #     "sft",
+    #     help="Supervised fine-tuning workflow (instruction tuning)",
+    #     description=(
+    #         "Fine-tune pre-trained models on supervised datasets for "
+    #         "instruction following, task adaptation, or domain specialization. "
+    #         "Supports full fine-tuning and parameter-efficient methods (LoRA, etc.)."
+    #     ),
+    # )
+    # add_train_parser(sft)
 
     parser.set_defaults(func=run)
 
