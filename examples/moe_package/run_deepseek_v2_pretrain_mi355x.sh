@@ -8,15 +8,17 @@
 ######################### Training Docker and Variables #########################
 # export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
 # export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ci_4096e28_20251114"
-export DOCKER_IMAGE="docker.io/tasimage/primus:pr-289"
+# export DOCKER_IMAGE="docker.io/tasimage/primus:pr-289"
+export DOCKER_IMAGE="rocm/mad-private:primus_rocm7.1_ci_45fd4f8_20251119"
 export CLEAN_DOCKER_CONTAINER=1
 
 ######################### Training Environment Variables #########################
 export HF_TOKEN=${HF_TOKEN:-"your_hf_token"}
 export WANDB_API_KEY=${WANDB_API_KEY:-"your_wandb_api_key"}
 # TODO
-export GPU_MAX_HW_QUEUES=2
-# export GPU_MAX_HW_QUEUES=8
+# export GPU_MAX_HW_QUEUES=2
+export GPU_MAX_HW_QUEUES=8
+export CPUS_PER_TASK=96
 
 # Set on Primus-Safe Platform
 # export MASTER_ADDR=${MASTER_ADDR:-localhost}
@@ -28,11 +30,14 @@ export GPU_MAX_HW_QUEUES=2
 # Set on AAC14 cluster
 export NNODES=4
 export USING_AINIC=1
-export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
-export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
-export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
+# export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
+# export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
+# export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
+export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7" # modify based on the GPU NiC settings
 export NCCL_SOCKET_IFNAME="enp193s0f1np1"
 export GLOO_SOCKET_IFNAME="enp193s0f1np1"
+export NCCL_IB_RETRY_CNT=20
+export NCCL_IB_TIMEOUT=300
 
 export HSA_NO_SCRATCH_RECLAIM=1
 export NVTE_CK_USES_BWD_V3=1
@@ -40,8 +45,6 @@ export NVTE_CK_USES_BWD_V3=1
 # export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=0
 
 ######################### Training Config #########################
-# MBS=12
-# GBS=768
 MBS=1
 GBS=256
 SEQ_LENGTH=4096
@@ -53,7 +56,7 @@ EP=8
 CP=1
 CP_COMM_TYPE="a2a" # p2p, a2a, allgather or a2a+p2p
 # TODO: set to true to enable MLA
-ENABLE_MLA=False
+ENABLE_MLA=True
 ENABLE_MTP=False
 LOAD_BALANCE=True
 OPTIMIZER=adam
@@ -80,10 +83,13 @@ TRAIN_ITERS=10
 # 10 - CPU NUMA binding helper
 # 11 - Manual GC helper
 # MoE_Features=(0 1 2 3 4 5 6 7 8 9 10 11)
-# MoE_Features=(0 11)
-MoE_Features=(3 11)
+MoE_Features=(0 11)
+# MoE_Features=(3 11)
 # MoE_Features=(3 4 11)
 # MoE_Features=(3 4 5 11)
+# MoE_Features=(3 4 5 6 11)
+# MoE_Features=(3 4 5 7 11) # amp_C error
+# MoE_Features=(3 4 5 6 10 11)
 # MoE_Features=(3 4 5 10 11)
 
 FEATURE_ARGS=()
@@ -256,7 +262,7 @@ if [ "$PROFILE" = "True" ]; then
 fi
 
 ######################### Training Experiments #########################
-PRIMUS_TEAM="date-$(date +%Y%m%d)"
+PRIMUS_TEAM="date-$(date +%Y%m%d)-DeepseekV2-Vultr-MI355X"
 export PRIMUS_TEAM
 PRIMUS_USER=user-tas
 export PRIMUS_USER
