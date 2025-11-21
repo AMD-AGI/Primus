@@ -1,0 +1,35 @@
+bases:
+  - trainer_base.yaml
+
+hardware: "gpu"
+steps: 1000
+log_period: 10
+enable_checkpointing: False
+async_checkpointing: False
+profiler: "xplane"
+skip_first_n_steps_for_profiler: 3
+profiler_steps: 1
+
+# data
+dataset_type: "hf"
+hf_path: "allenai/c4"  # for using https://huggingface.co/datasets/allenai/c4
+hf_data_dir: "en"
+hf_train_files: ""
+
+attention: "cudnn_flash_te"
+use_iota_embed: True
+shardy: False
+
+remat_policy: 'full'
+optimizer_memory_host_offload: False
+scan_layers: True
+param_scan_axis: 1
+
+logits_dot_in_fp32: False
+dtype: "bfloat16"
+quantization: ""
+quantize_kvcache: False
+kv_quant_axis: "heads_and_dkv"
+kv_quant_dtype: "int8"
+weight_dtype: bfloat16
+checkpoint_is_quantized: False # Set to True if reading from a saved aqt quantized checkpoint

@@ -1,7 +1,7 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:deepseek_v3-pretrain}
-workspace: ./output
+workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
   pre_trainer:

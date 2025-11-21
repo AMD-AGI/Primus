@@ -1,7 +1,7 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:deepseek_v2_lite-pretrain}
-workspace: ./output
+workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
   pre_trainer:
@@ -94,7 +94,8 @@ modules:
       turbo_deepep_num_cu: 32
       turbo_deepep_use_comm_stream: false
 
-      # sync-free moe support stage 1-2, 0 means not use sync-free moe
+      # sync-free moe support stage 0-3, 0 means not use sync-free moe
+      # stage 3 is completely no gpu-cpu sync in MoE, but cost more memory
       # stage 2 is recommended for better performance
       turbo_sync_free_moe_stage: 0
 

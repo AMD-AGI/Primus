@@ -1,0 +1,50 @@
+HloModule module
+
+ENTRY %main.123 (param: f32[1024]) -> f32[1024] {
+  %param = f32[1024] parameter(0)
+
+  %while.1 = while(%param), condition=%outer_loop.condition, body=%outer_loop.body
+  ROOT %result = f32[1024] get-tuple-element(%while.1), index=0
+}
+
+%outer_loop.condition (param: (s32[], f32[1024])) -> pred[] {
+  %param = (s32[], f32[1024]) parameter(0)
+  %counter = s32[] get-tuple-element(%param), index=0
+  %limit = s32[] constant(), literal=10
+  ROOT %compare = pred[] compare(%counter, %limit), direction=LT
+}
+
+%outer_loop.body (param: (s32[], f32[1024])) -> (s32[], f32[1024]) {
+  %counter = s32[] get-tuple-element(param), index=0
+  %data = f32[1024] get-tuple-element(param), index=1
+
+  %all-gather-start.1 = (f32[1024], f32[8192]) all-gather-start(f32[1024] %data), replica_groups={{0,1,2,3,4,5,6,7}}, dimensions={0}, metadata={op_name="allgather_layer1" source_file="/home/user/model.py" source_line=42}
+  %all-gather-done.1 = f32[8192] all-gather-done(%all-gather-start.1)
+
+  %while.2 = while(%all-gather-done.1), condition=%inner_loop.condition, body=%inner_loop.body
+
+  %all-reduce-start.1 = f32[8192] all-reduce-start(%while.2), replica_groups={{0,1,2,3},{4,5,6,7}}, to_apply=add, metadata={op_name="allreduce_final" source_file="/home/user/model.py" source_line=50}
+  %all-reduce-done.1 = f32[8192] all-reduce-done(%all-reduce-start.1)
+
+  %counter_new = s32[] add(%counter, s32[] constant(1))
+  ROOT %tuple = (s32[], f32[1024]) tuple(%counter_new, %data)
+}
+
+%inner_loop.condition (param: f32[8192]) -> pred[] {
+  %param_data = f32[8192] parameter(0)
+  %counter = s32[] constant(), literal=0
+  %limit = s32[] constant(), literal=5
+  ROOT %compare = pred[] compare(%counter, %limit), direction=LT
+}
+
+%inner_loop.body (param: f32[8192]) -> f32[8192] {
+  %data = f32[8192] parameter(0)
+
+  %reduce-scatter-start.1 = (f32[8192], f32[1024]) reduce-scatter-start(f32[8192] %data), replica_groups={{0,1,2,3,4,5,6,7}}, dimensions={0}, to_apply=add, metadata={op_name="reduce_scatter_inner" source_file="/home/user/model.py" source_line=45}
+  %reduce-scatter-done.1 = f32[1024] reduce-scatter-done(%reduce-scatter-start.1)
+
+  %all-reduce-start.2 = f32[1024] all-reduce-start(%reduce-scatter-done.1), replica_groups={{0,1,2,3,4,5,6,7}}, to_apply=add, metadata={op_name="allreduce_inner" source_file="/home/user/model.py" source_line=47}
+  %all-reduce-done.2 = f32[1024] all-reduce-done(%all-reduce-start.2)
+
+  ROOT %result = f32[8192] broadcast(%all-reduce-done.2), dimensions={0}
+}

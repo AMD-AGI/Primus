@@ -23,6 +23,7 @@ Optional Environment Variables:
 Example:
   export DATA_PATH=/mnt/data
   export EXP=examples/megatron/exp_pretrain.yaml
+  export BACKEND=MaxText
   NNODES=2 bash run_slurm_pretrain.sh
 EOF
 exit 0

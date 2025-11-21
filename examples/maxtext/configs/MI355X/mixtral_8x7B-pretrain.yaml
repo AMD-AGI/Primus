@@ -1,0 +1,42 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:mixtral_8x7B-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+
+    # model to run
+    model: mixtral_8x7B.yaml
+    overrides:
+      run_name: "mixtral_8x7b_training"
+      base_output_directory: "./output"
+      steps: 50
+      log_period: 10
+      profiler: ""
+
+      # data
+      dataset_type: "synthetic"
+      hf_access_token: ${HF_TOKEN:""}
+
+      # checkpoint
+      enable_checkpointing: False
+      async_checkpointing: False
+
+      # inter-node parallelism strategy
+      dcn_data_parallelism: -1
+      dcn_fsdp_parallelism: 1
+
+      # intra-node parallelism strategy
+      ici_fsdp_parallelism: 1
+      ici_data_parallelism: 1
+      ici_expert_parallelism: -1
+
+      sparse_matmul: False
+      megablox: False
+      capacity_factor: 1
+      max_target_length: 4096
+      per_device_batch_size: 12
+      remat_policy: "minimal"

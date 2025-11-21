@@ -6,13 +6,12 @@
 
 import argparse
 import math
+from datetime import datetime
 
 import torch
 
 from primus.tools.report import write_table_simple
-from primus.tools.utils import gather_records, get_current_device, is_rank_0
-
-from .gemm_bench_args import add_gemm_parser
+from primus.tools.utils import gather_records, is_rank_0
 
 CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
 
@@ -20,51 +19,41 @@ CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
 def maybe_transpose(tensor, transpose):
     return tensor.t() if transpose else tensor
 
+    from primus.tools.utils import get_current_device
 
-@torch.inference_mode()
-def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
-    assert dtype in [torch.float16, torch.bfloat16, torch.float32], f"Unsupported dtype: {dtype}"
+    CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
 
-    device = get_current_device()
-    dtype_size = torch.tensor([], dtype=dtype).element_size()
-    mem_size_bytes = (m * k + k * n + m * n) * dtype_size
-    num_rotations = max(2, math.ceil(CACHE_ROTATING_BUFFER_BYTES / max(1, mem_size_bytes)) + 1)
-    # num_run = 100
+    def maybe_transpose(tensor, transpose):
+        return tensor.t() if transpose else tensor
 
-    a_shape = (k, m) if trans_a else (m, k)
-    b_shape = (n, k) if trans_b else (k, n)
-    a_list = [torch.randn(a_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
-    b_list = [torch.randn(b_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
-    c_list = [torch.empty((m, n), device=device, dtype=dtype) for _ in range(num_rotations)]
+    @torch.inference_mode()
+    def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
+        assert dtype in [torch.float16, torch.bfloat16, torch.float32], f"Unsupported dtype: {dtype}"
 
-    # Warm-up
-    for i in range(num_rotations):
-        a = maybe_transpose(a_list[i], trans_a)
-        b = maybe_transpose(b_list[i], trans_b)
-        torch.matmul(a, b, out=c_list[i])
-    torch.cuda.synchronize()
+        device = get_current_device()
+        dtype_size = torch.tensor([], dtype=dtype).element_size()
+        mem_size_bytes = (m * k + k * n + m * n) * dtype_size
+        num_rotations = max(2, math.ceil(CACHE_ROTATING_BUFFER_BYTES / max(1, mem_size_bytes)) + 1)
+        # num_run = 100
 
-    # Timed run (duration-based)
-    target_ms = max(100.0, duration_s * 1000.0)
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
+        a_shape = (k, m) if trans_a else (m, k)
+        b_shape = (n, k) if trans_b else (k, n)
+        a_list = [torch.randn(a_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
+        b_list = [torch.randn(b_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
+        c_list = [torch.empty((m, n), device=device, dtype=dtype) for _ in range(num_rotations)]
 
-    total_calls = 0
-    start.record()
-
-    while True:
-        for _ in range(num_rotations):
+        # Warm-up
+        for i in range(num_rotations):
             a = maybe_transpose(a_list[i], trans_a)
             b = maybe_transpose(b_list[i], trans_b)
             torch.matmul(a, b, out=c_list[i])
-        end.record()
         torch.cuda.synchronize()
 
         total_calls += num_rotations
 
         elapsed = start.elapsed_time(end)  # ms
         if elapsed >= target_ms:
-            avg_time_ms = elapsed / total_calls
+            elapsed / total_calls
             break
 
     tflop = 2.0 * m * n * k / 1e12
@@ -85,6 +74,37 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
         "bandwidth_gbps": bandwidth,
         "arith_intensity": arith_intensity,
     }
+
+
+def build_gemm_base_preamble(args) -> str:
+    lines = [
+        "# Base GEMM Benchmark Report",
+        "",
+        f"- Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        f"- Cluster: amd-aig-poolside",
+        f"- Benchmark Duration: {args.duration} sec",
+        "",
+        "## GEMM Configuration",
+        f"- M: {args.M}",
+        f"- N: {args.N}",
+        f"- K: {args.K}",
+        f"- Transpose A: {args.trans_a}",
+        f"- Transpose B: {args.trans_b}",
+        f"- Dtype: {args.dtype}",
+        "",
+        "## GEMM Shape",
+        f"- A: ({args.M}, {args.K})" if not args.trans_a else f"- Aᵗ: ({args.K}, {args.M})",
+        f"- B: ({args.K}, {args.N})" if not args.trans_b else f"- Bᵗ: ({args.N}, {args.K})",
+        f"- C: ({args.M}, {args.N})",
+        "",
+        "## Metrics",
+        "- `avg_time_ms`: average time per matmul (ms)",
+        "- `tflops`: total TFLOPS (1e12 ops/sec)",
+        "- `bandwidth_gbps`: estimated memory bandwidth usage (GB/s)",
+        "- `arith_intensity`: arithmetic intensity (FLOPs per byte)",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def run_gemm_benchmark(args):
@@ -118,12 +138,6 @@ def run_gemm_benchmark(args):
             "host",
             "world",
             "rank",
-            "m",
-            "n",
-            "k",
-            "trans_a",
-            "trans_b",
-            "dtype",
             "avg_time_ms",
             "tflop",
             "tflops",
@@ -149,11 +163,13 @@ def run_gemm_benchmark(args):
                 row.append(v)
             rows_ll.append(row)
 
+        preamble = build_gemm_base_preamble(args)
         write_table_simple(
             header=header,
             rows=rows_ll,
             output_file=getattr(args, "output_file", None),
             append=getattr(args, "append", False),
+            preamble=preamble if not getattr(args, "append", False) else None,
         )
 
         print(f"[✔] GEMM benchmark finished. Results saved to {args.output_file}")

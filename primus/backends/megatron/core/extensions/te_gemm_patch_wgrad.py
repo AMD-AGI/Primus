@@ -658,14 +658,18 @@ class _LinearWithWGradSplit(torch.autograd.Function):
                     elif ctx.fuse_wgrad_accumulation:
                         pass
 
-                WeightGradStore.put(
-                    main_grad,
-                    functools.partial(pre_process, grad_output, inputmat_total),
-                    functools.partial(
-                        process_wgrad,
+                if WeightGradStore.split_bw():
+                    WeightGradStore.put(
                         main_grad,
-                    ),
-                )
+                        functools.partial(pre_process, grad_output, inputmat_total),
+                        functools.partial(
+                            process_wgrad,
+                            main_grad,
+                        ),
+                    )
+                else:
+                    grad_output, inputmat_total, _ = pre_process(grad_output, inputmat_total)
+                    process_wgrad(main_grad, grad_output, inputmat_total)
 
             # Synchronize tensor parallel communication
             if inputmat_total_work is not None:
