@@ -141,6 +141,71 @@ class BackendRegistry:
     #  Backend Discovery & Lazy Loading
     # ----------------------------------------------------------------------
     @classmethod
+    def setup_backend_path(cls, backend: str, backend_path=None, verbose=True) -> str:
+        """
+        Insert Python import path for backend modules.
+
+        Priority:
+            1. backend_path argument (--backend-path CLI option)
+            2. BACKEND_PATH environment variable
+            3. primus/third_party/<backend_dir_name>
+
+        Args:
+            backend: Backend name (e.g., "megatron", "torchtitan")
+            backend_path: Optional explicit path(s) to backend
+            verbose: Whether to print sys.path insertion message
+
+        Returns:
+            The path that was added to sys.path
+
+        Raises:
+            FileNotFoundError: If no valid backend path found
+        """
+        import os
+        import sys
+        from pathlib import Path
+
+        candidate_paths = []
+
+        # 1) CLI argument
+        if backend_path:
+            if isinstance(backend_path, str):
+                backend_path = [backend_path]
+            candidate_paths.extend(backend_path)
+
+        # 2) Environment variable
+        env_path = os.getenv("BACKEND_PATH")
+        if env_path:
+            candidate_paths.append(env_path)
+
+        # 3) Default fallback: third_party/<backend_dir_name>
+        backend_dir_name = cls.get_path_name(backend)
+        # Navigate from this file to primus root, then to third_party
+        primus_root = Path(__file__).resolve().parent.parent.parent
+        default_path = primus_root / "third_party" / backend_dir_name
+        candidate_paths.append(default_path)
+
+        # Normalize paths and remove duplicates
+        normalized = list(dict.fromkeys(os.path.abspath(os.path.normpath(p)) for p in candidate_paths))
+
+        # Insert first valid path
+        for p in normalized:
+            if os.path.exists(p):
+                if p not in sys.path:
+                    sys.path.insert(0, p)
+                    if verbose:
+                        print(f"[Primus] sys.path.insert → {p}")
+                return p
+
+        raise FileNotFoundError(
+            f"[Primus] No valid backend path for '{backend}'.\n"
+            f"Tried: {normalized}\n"
+            f"Hint: Use --backend_path to specify the backend installation path, or\n"
+            f"      set BACKEND_PATH environment variable, or\n"
+            f"      install backend to primus/third_party/{backend_dir_name}"
+        )
+
+    @classmethod
     def _try_load_backend(cls, backend: str) -> bool:
         """
         Attempt to lazily load a backend module.

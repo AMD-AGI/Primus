@@ -8,6 +8,8 @@
 Unit tests for BackendRegistry improvements.
 """
 
+import sys
+
 import pytest
 
 from primus.core.backend.backend_adapter import BackendAdapter
@@ -180,6 +182,80 @@ class TestBackendRegistryPathNames:
             BackendRegistry.get_path_name("non_existent_backend")
 
         assert "No path name registered for backend 'non_existent_backend'" in str(exc_info.value)
+
+
+class TestBackendRegistrySetupPath:
+    """Test setup_backend_path functionality."""
+
+    def setup_method(self):
+        """Save original state."""
+        self._original_path_names = BackendRegistry._path_names.copy()
+        self._original_sys_path = sys.path.copy()
+        BackendRegistry._path_names = {"megatron": "Megatron-LM", "test_backend": "TestBackend"}
+
+    def teardown_method(self):
+        """Restore original state."""
+        BackendRegistry._path_names = self._original_path_names
+        sys.path[:] = self._original_sys_path
+
+    def test_setup_backend_path_with_explicit_path(self, tmp_path):
+        """Test setup_backend_path with explicit backend_path argument."""
+        import sys
+
+        # Create a temporary backend directory
+        backend_dir = tmp_path / "explicit_backend"
+        backend_dir.mkdir()
+
+        # Setup with explicit path
+        result = BackendRegistry.setup_backend_path(
+            "test_backend", backend_path=str(backend_dir), verbose=False
+        )
+
+        assert result == str(backend_dir)
+        assert str(backend_dir) in sys.path
+
+    def test_setup_backend_path_with_env_var(self, tmp_path, monkeypatch):
+        """Test setup_backend_path with BACKEND_PATH environment variable."""
+        import sys
+
+        # Create a temporary backend directory
+        backend_dir = tmp_path / "env_backend"
+        backend_dir.mkdir()
+
+        # Set environment variable
+        monkeypatch.setenv("BACKEND_PATH", str(backend_dir))
+
+        # Setup should use env var
+        result = BackendRegistry.setup_backend_path("test_backend", verbose=False)
+
+        assert result == str(backend_dir)
+        assert str(backend_dir) in sys.path
+
+    def test_setup_backend_path_not_found(self):
+        """Test setup_backend_path raises error when backend not registered."""
+        with pytest.raises(KeyError) as exc_info:
+            BackendRegistry.setup_backend_path("non_existent_backend", verbose=False)
+
+        error_msg = str(exc_info.value)
+        assert "No path name registered" in error_msg
+        assert "Available backends:" in error_msg
+
+    def test_setup_backend_path_already_in_sys_path(self, tmp_path):
+        """Test setup_backend_path doesn't duplicate entries in sys.path."""
+        import sys
+
+        backend_dir = tmp_path / "duplicate_test"
+        backend_dir.mkdir()
+
+        # Add to sys.path manually
+        sys.path.insert(0, str(backend_dir))
+        initial_count = sys.path.count(str(backend_dir))
+
+        # Setup should not duplicate
+        BackendRegistry.setup_backend_path("test_backend", backend_path=str(backend_dir), verbose=False)
+
+        final_count = sys.path.count(str(backend_dir))
+        assert final_count == initial_count  # Should not increase
 
 
 class TestBackendRegistryHasAdapter:

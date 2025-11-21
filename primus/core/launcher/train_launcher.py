@@ -6,7 +6,6 @@
 
 import argparse
 import os
-import sys
 from pathlib import Path
 
 from primus.core.backend.backend_registry import BackendRegistry
@@ -41,58 +40,6 @@ def add_train_parser(parser: argparse.ArgumentParser):
         help="Optional path to export the final merged config to a file.",
     )
     return parser
-
-
-# ------------------------------------------------------------------------------
-# Framework-agnostic path handling
-# ------------------------------------------------------------------------------
-
-
-def _setup_backend_path(framework: str, backend_path=None, verbose=True):
-    """
-    Insert Python import path for backend modules.
-
-    Priority:
-        1. --backend-path
-        2. BACKEND_PATH env var
-        3. primus/third_party/<backend>
-    """
-    candidate_paths = []
-
-    # 1) CLI
-    if backend_path:
-        if isinstance(backend_path, str):
-            backend_path = [backend_path]
-        candidate_paths.extend(backend_path)
-
-    # 2) ENV
-    env_path = os.getenv("BACKEND_PATH")
-    if env_path:
-        candidate_paths.append(env_path)
-
-    # 3) fallback
-    backend_name = BackendRegistry.get_path_name(framework)
-    default_path = Path(__file__).resolve().parent.parent.parent.parent / "third_party" / backend_name
-    candidate_paths.append(default_path)
-
-    # Normalize
-    normalized = list(dict.fromkeys(os.path.abspath(os.path.normpath(p)) for p in candidate_paths))
-
-    # Insert first valid path
-    for p in normalized:
-        if os.path.exists(p):
-            if p not in sys.path:
-                sys.path.insert(0, p)
-                if verbose:
-                    print(f"[Primus] sys.path.insert → {p}")
-            return p
-
-    raise FileNotFoundError(f"[Primus] No valid backend path for '{framework}'. Tried: {normalized}")
-
-
-# ------------------------------------------------------------------------------
-# Environment Setup
-# ------------------------------------------------------------------------------
 
 
 def setup_env(data_path: str):
@@ -155,14 +102,9 @@ def launch_train(args, overrides, module: str):
 
     # 3 Insert backend path (framework-agnostic) ----------
     try:
-        _setup_backend_path(framework, backend_path=args.backend_path)
+        BackendRegistry.setup_backend_path(framework, backend_path=args.backend_path)
     except FileNotFoundError as e:
-        raise FileNotFoundError(
-            f"{e}\n"
-            f"Hint: Use --backend_path to specify the backend installation path, or\n"
-            f"      set BACKEND_PATH environment variable, or\n"
-            f"      install backend to primus/third_party/{BackendRegistry.get_path_name(framework)}"
-        ) from e
+        raise FileNotFoundError(f"{e}") from e
 
     # 4 Load backend adapter ----------
     try:
