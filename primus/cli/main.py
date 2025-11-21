@@ -68,6 +68,11 @@ def main():
     - preflight: Environment and configuration checks.
       ...
     """
+    # Initialize backend registry before parsing commands
+    from primus.core.backend.backend_registry import BackendRegistry
+
+    BackendRegistry.initialize()
+
     parser = argparse.ArgumentParser(prog="primus", description="Primus Unified CLI for Training & Utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -84,7 +89,4 @@ def main():
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--":
         sys.argv.pop(1)
-    from primus.core.backend.backend_registry import BackendRegistry
-
-    BackendRegistry.initialize()
     main()

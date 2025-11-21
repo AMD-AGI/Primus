@@ -138,32 +138,68 @@ def launch_train(args, overrides, module: str):
     try:
         train_cfg = primus_cfg.get_module_config(module)
     except ValueError as exc:
+        available_modules = [f"{m.module} (name: {m.name})" for m in primus_cfg._modules.values()]
         raise RuntimeError(
-            f"[Primus:Train] Config file missing required module '{module}'. {primus_cfg.module_keys}"
-            f"Please ensure your YAML defines a module entry with name/module '{module}'."
+            f"[Primus:Train] Config file missing required module '{module}'.\n"
+            f"Available modules in config: {', '.join(available_modules)}\n"
+            f"Please ensure your YAML defines a module with 'module: {module}'."
         ) from exc
 
+    # Validate framework is specified
     framework = train_cfg.framework
+    if not framework:
+        raise ValueError(
+            f"[Primus:Train] Module '{module}' missing 'framework' field.\n"
+            f"Please specify framework (e.g., 'megatron', 'torchtitan') in your config."
+        )
 
     # 3 Insert backend path (framework-agnostic) ----------
-    _setup_backend_path(framework, backend_path=args.backend_path)
+    try:
+        _setup_backend_path(framework, backend_path=args.backend_path)
+    except FileNotFoundError as e:
+        raise FileNotFoundError(
+            f"{e}\n"
+            f"Hint: Use --backend_path to specify the backend installation path, or\n"
+            f"      set BACKEND_PATH environment variable, or\n"
+            f"      install backend to primus/third_party/{BackendRegistry.get_path_name(framework)}"
+        ) from e
 
     # 4 Load backend adapter ----------
-    adapter = BackendRegistry.get_adapter(framework)
+    try:
+        adapter = BackendRegistry.get_adapter(framework)
+    except ValueError as e:
+        # Re-raise with additional context
+        raise ValueError(
+            f"{e}\n"
+            f"Requested framework: '{framework}'\n"
+            f"Check your config file's 'framework' field or install the backend."
+        ) from e
 
     # 5 Backend-specific setup ----------
     # Includes: patch pipeline, version fix, env overrides, etc.
-    adapter.prepare_backend(train_cfg)
+    try:
+        adapter.prepare_backend(train_cfg)
+    except Exception as e:
+        raise RuntimeError(f"[Primus:Train] Backend preparation failed for '{framework}': {e}") from e
 
     # 6 Create trainer (adapter ensures correct conversion/loader) ----------
-    trainer = adapter.create_trainer(
-        primus_config=primus_cfg,
-        module_config=train_cfg,
-    )
+    try:
+        trainer = adapter.create_trainer(
+            primus_config=primus_cfg,
+            module_config=train_cfg,
+        )
+    except Exception as e:
+        raise RuntimeError(f"[Primus:Train] Failed to create trainer for '{framework}': {e}") from e
 
     # 7 Execute training lifecycle ----------
-    trainer.init()
-    trainer.run()
+    try:
+        trainer.init()
+        trainer.run()
+    except KeyboardInterrupt:
+        print("\n[Primus:Train] Training interrupted by user (Ctrl+C)")
+        raise
+    except Exception as e:
+        raise RuntimeError(f"[Primus:Train] Training execution failed: {e}") from e
 
 
 # ------------------------------------------------------------------------------

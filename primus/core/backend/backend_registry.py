@@ -50,6 +50,12 @@ class BackendRegistry:
 
     @classmethod
     def initialize(cls):
+        """
+        Initialize backend registry by loading all available backends.
+
+        This should be called early in the application lifecycle,
+        typically in main.py before any training commands are executed.
+        """
         import importlib
 
         backend_modules = [
@@ -57,13 +63,27 @@ class BackendRegistry:
             "primus.backends.torchtitan",
         ]
 
+        print("[Primus] Initializing BackendRegistry...")
+        loaded = []
+        failed = []
+
         for mod in backend_modules:
             try:
                 importlib.import_module(mod)
-            except ModuleNotFoundError as e:
-                raise ModuleNotFoundError(f"Backend module {mod} not found. {e}")
+                backend_name = mod.split(".")[-1]
+                loaded.append(backend_name)
+            except ModuleNotFoundError:
+                # Backend not installed, skip
+                backend_name = mod.split(".")[-1]
+                failed.append(f"{backend_name} (not installed)")
             except Exception as e:
-                raise Exception(f"Error importing backend module {mod}. {e}")
+                backend_name = mod.split(".")[-1]
+                failed.append(f"{backend_name} (error: {e})")
+
+        if loaded:
+            print(f"[Primus] Loaded backends: {', '.join(loaded)}")
+        if failed:
+            print(f"[Primus] Skipped backends: {', '.join(failed)}")
 
     # ----------------------------------------------------------------------
     #  Path Name Registration
@@ -96,15 +116,106 @@ class BackendRegistry:
     @classmethod
     def get_adapter(cls, backend: str):
         """
-        Create a new adapter instance for backend.
+        Get adapter for backend (with lazy loading support).
+
+        Args:
+            backend: Backend name (e.g., "megatron", "torchtitan")
+
+        Returns:
+            Backend adapter instance
+
+        Raises:
+            ValueError: If backend not found or unavailable
+            RuntimeError: If adapter creation fails
         """
+        # Try lazy load if not registered
         if backend not in cls._adapters:
-            raise KeyError(f"[Primus] No adapter registered for backend '{backend}'.")
-        return cls._adapters[backend](backend)
+            cls._try_load_backend(backend)
+
+        # Still not found - provide helpful error
+        if backend not in cls._adapters:
+            available = list(cls._adapters.keys()) if cls._adapters else ["none"]
+            raise ValueError(
+                f"[Primus] Backend '{backend}' not found.\n"
+                f"Available backends: {', '.join(available)}\n"
+                f"Hint: Make sure '{backend}' is installed and properly configured."
+            )
+
+        # Create adapter instance with error handling
+        try:
+            return cls._adapters[backend](backend)
+        except Exception as e:
+            raise RuntimeError(f"[Primus] Failed to create adapter for '{backend}': {e}") from e
 
     @classmethod
     def has_adapter(cls, backend: str) -> bool:
+        """Check if adapter is registered for backend."""
         return backend in cls._adapters
+
+    # ----------------------------------------------------------------------
+    #  Backend Discovery & Lazy Loading
+    # ----------------------------------------------------------------------
+    @classmethod
+    def _try_load_backend(cls, backend: str):
+        """
+        Attempt to lazily load a backend module.
+
+        This enables on-demand loading of backends without importing
+        all backends at startup.
+
+        Args:
+            backend: Backend name (e.g., "megatron", "torchtitan")
+        """
+        import importlib
+
+        try:
+            module_path = f"primus.backends.{backend}"
+            importlib.import_module(module_path)
+            print(f"[Primus] Loaded backend: {backend}")
+        except ModuleNotFoundError:
+            # Backend not installed, ignore silently
+            pass
+        except Exception as e:
+            print(f"[Primus] Warning: Failed to load backend '{backend}': {e}")
+
+    @classmethod
+    def list_available_backends(cls) -> list:
+        """
+        List all currently registered backends.
+
+        Returns:
+            List of backend names
+        """
+        return list(cls._adapters.keys())
+
+    @classmethod
+    def discover_all_backends(cls):
+        """
+        Auto-discover and load all backends from primus/backends/.
+
+        This scans the backends directory and attempts to load each
+        backend module found.
+        """
+        from pathlib import Path
+
+        # Find backends directory relative to this file
+        backends_dir = Path(__file__).parent.parent.parent / "backends"
+
+        if not backends_dir.exists():
+            print(f"[Primus] Warning: Backends directory not found: {backends_dir}")
+            return
+
+        discovered = []
+        for item in backends_dir.iterdir():
+            if item.is_dir() and not item.name.startswith("_") and not item.name.startswith("."):
+                cls._try_load_backend(item.name)
+                if item.name in cls._adapters:
+                    discovered.append(item.name)
+
+        if discovered:
+            print(f"[Primus] Discovered backends: {', '.join(discovered)}")
+        else:
+            print("[Primus] Warning: No backends discovered")
 
     # ----------------------------------------------------------------------
     #  TrainerClass Registration (optional)
