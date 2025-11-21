@@ -100,31 +100,24 @@ def launch_train(args, overrides, module: str):
             f"Please specify framework (e.g., 'megatron', 'torchtitan') in your config."
         )
 
-    # 3 Insert backend path (framework-agnostic) ----------
+    # 3 Load backend adapter (automatically sets up path) ----------
     try:
-        BackendRegistry.setup_backend_path(framework, backend_path=args.backend_path)
-    except FileNotFoundError as e:
-        raise FileNotFoundError(f"{e}") from e
-
-    # 4 Load backend adapter ----------
-    try:
-        adapter = BackendRegistry.get_adapter(framework)
-    except ValueError as e:
-        # Re-raise with additional context
-        raise ValueError(
+        adapter = BackendRegistry.get_adapter(framework, backend_path=args.backend_path)
+    except (ValueError, FileNotFoundError, RuntimeError) as e:
+        raise type(e)(
             f"{e}\n"
             f"Requested framework: '{framework}'\n"
-            f"Check your config file's 'framework' field or install the backend."
+            f"Check your config file's 'framework' field and backend installation."
         ) from e
 
-    # 5 Backend-specific setup ----------
+    # 4 Backend-specific setup ----------
     # Includes: patch pipeline, version fix, env overrides, etc.
     try:
         adapter.prepare_backend(train_cfg)
     except Exception as e:
         raise RuntimeError(f"[Primus:Train] Backend preparation failed for '{framework}': {e}") from e
 
-    # 6 Create trainer (adapter ensures correct conversion/loader) ----------
+    # 5 Create trainer (adapter ensures correct conversion/loader) ----------
     try:
         trainer = adapter.create_trainer(
             primus_config=primus_cfg,
@@ -133,7 +126,7 @@ def launch_train(args, overrides, module: str):
     except Exception as e:
         raise RuntimeError(f"[Primus:Train] Failed to create trainer for '{framework}': {e}") from e
 
-    # 7 Execute training lifecycle ----------
+    # 6 Execute training lifecycle ----------
     try:
         trainer.init()
         trainer.run()

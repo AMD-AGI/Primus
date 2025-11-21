@@ -99,12 +99,18 @@ class BackendRegistry:
         cls._adapters[backend] = adapter_cls
 
     @classmethod
-    def get_adapter(cls, backend: str):
+    def get_adapter(cls, backend: str, backend_path=None):
         """
-        Get adapter for backend (with lazy loading support).
+        Get adapter for backend (with lazy loading and automatic path setup).
+
+        This method automatically:
+        1. Sets up backend path in sys.path (if not already done)
+        2. Lazy loads backend module if not registered
+        3. Creates and returns adapter instance
 
         Args:
             backend: Backend name (e.g., "megatron", "torchtitan")
+            backend_path: Optional explicit path(s) to backend installation
 
         Returns:
             Backend adapter instance
@@ -112,12 +118,32 @@ class BackendRegistry:
         Raises:
             ValueError: If backend not found or unavailable
             RuntimeError: If adapter creation fails
+            FileNotFoundError: If backend path cannot be found
         """
-        # Try lazy load if not registered
-        if backend not in cls._adapters:
-            cls._try_load_backend(backend)
+        # Step 1: Setup backend path (idempotent - won't duplicate if already in sys.path)
+        try:
+            cls.setup_backend_path(backend, backend_path=backend_path, verbose=True)
+        except KeyError:
+            # Backend path name not registered yet, will try to load backend first
+            pass
+        except FileNotFoundError as e:
+            # Path not found - provide helpful error
+            raise FileNotFoundError(
+                f"{e}\n" f"Requested backend: '{backend}'\n" f"This backend requires installation before use."
+            ) from e
 
-        # Still not found - provide helpful error
+        # Step 2: Try lazy load if not registered
+        if backend not in cls._adapters:
+            loaded = cls._try_load_backend(backend)
+            if loaded:
+                # After loading, try path setup again (backend may have registered path_name)
+                try:
+                    cls.setup_backend_path(backend, backend_path=backend_path, verbose=True)
+                except (KeyError, FileNotFoundError):
+                    # Ignore if still can't setup - backend might not need external path
+                    pass
+
+        # Step 3: Check if adapter is now available
         if backend not in cls._adapters:
             available = list(cls._adapters.keys()) if cls._adapters else ["none"]
             raise ValueError(
@@ -126,7 +152,7 @@ class BackendRegistry:
                 f"Hint: Make sure '{backend}' is installed and properly configured."
             )
 
-        # Create adapter instance with error handling
+        # Step 4: Create adapter instance with error handling
         try:
             return cls._adapters[backend](backend)
         except Exception as e:

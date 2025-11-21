@@ -125,11 +125,12 @@ class TestBackendRegistryLazyLoading:
         # Don't pre-register, let it lazy load
         # This will try to load megatron backend
         try:
-            adapter = BackendRegistry.get_adapter("megatron")
+            # Note: get_adapter now also tries setup_backend_path
+            adapter = BackendRegistry.get_adapter("megatron", backend_path=None)
             # If megatron is installed, should succeed
             assert adapter is not None
-        except ValueError:
-            # If not installed, should get helpful error
+        except (ValueError, FileNotFoundError):
+            # If not installed or path not found, should get helpful error
             pass
 
     def test_list_available_backends(self):
@@ -256,6 +257,50 @@ class TestBackendRegistrySetupPath:
 
         final_count = sys.path.count(str(backend_dir))
         assert final_count == initial_count  # Should not increase
+
+
+class TestBackendRegistryGetAdapterIntegration:
+    """Test get_adapter with automatic path setup."""
+
+    def setup_method(self):
+        """Save original state."""
+        self._original_adapters = BackendRegistry._adapters.copy()
+        self._original_path_names = BackendRegistry._path_names.copy()
+        self._original_sys_path = sys.path.copy()
+        BackendRegistry._adapters.clear()
+        BackendRegistry._path_names = {"test_backend": "TestBackend"}
+
+    def teardown_method(self):
+        """Restore original state."""
+        BackendRegistry._adapters = self._original_adapters
+        BackendRegistry._path_names = self._original_path_names
+        sys.path[:] = self._original_sys_path
+
+    def test_get_adapter_with_backend_path(self, tmp_path):
+        """Test get_adapter automatically sets up backend path."""
+        # Create backend directory
+        backend_dir = tmp_path / "test_backend_dir"
+        backend_dir.mkdir()
+
+        # Register adapter
+        BackendRegistry.register_adapter("test_backend", MockAdapter)
+
+        # get_adapter should setup path automatically
+        adapter = BackendRegistry.get_adapter("test_backend", backend_path=str(backend_dir))
+
+        assert adapter is not None
+        assert str(backend_dir) in sys.path
+
+    def test_get_adapter_path_not_found_error(self):
+        """Test get_adapter provides helpful error when path not found."""
+        # Register adapter but no valid path
+        BackendRegistry.register_adapter("test_backend", MockAdapter)
+
+        with pytest.raises(FileNotFoundError) as exc_info:
+            BackendRegistry.get_adapter("test_backend", backend_path="/non/existent/path")
+
+        error_msg = str(exc_info.value)
+        assert "Requested backend: 'test_backend'" in error_msg
 
 
 class TestBackendRegistryHasAdapter:
