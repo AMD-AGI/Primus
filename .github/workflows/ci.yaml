@@ -10,7 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 7ecd1edc31a3f1607e92b536b4250f9d98bfe423 # feat: unify fp8 gemm (#148)
+  PRIMUS_TURBO_COMMIT: 675fcdc3eef50fae2d869206ad5be0738138d940 # feat: add float4x2_e2m1 and float8_m8m0 data type (#156)
 
 jobs:
   code-lint:

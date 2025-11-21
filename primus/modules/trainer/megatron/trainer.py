@@ -551,7 +551,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             from megatron.core.models.gpt import gpt_layer_specs
 
             gpt_layer_specs.MLASelfAttention = PaddedPrimusMLASelfAttention
-        if self.use_turbo_parallel_linear:
+        if self.module_config.use_turbo_parallel_linear:
             warning_rank_0(f"MegatronTrainer: monkey patch MLA attention to support Primus-Turbo linear...")
 
             from megatron.core.transformer import multi_latent_attention
