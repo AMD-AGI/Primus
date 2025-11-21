@@ -52,3 +52,44 @@ def primus_model_provider(
         model.compute_language_model_loss = MethodType(wrapped_compute_language_model_loss, model)
 
     return model
+
+
+def get_model_provider(args):
+    """
+    Get the appropriate model provider function for Megatron.
+
+    This function determines which model architecture to use based on args
+    and returns a provider function that Megatron's pretrain() expects.
+
+    Args:
+        args: Megatron argument namespace
+
+    Returns:
+        Callable: Model provider function
+    """
+    from megatron.training.arguments import core_transformer_config_from_args
+
+    def model_provider(pre_process=True, post_process=True, vp_stage=None):
+        """Build the model."""
+        config = core_transformer_config_from_args(args)
+
+        # Determine model type
+        if hasattr(args, "model_type") and args.model_type == "mamba":
+            from megatron.core.models.mamba import MambaModel
+
+            model = MambaModel(config=config, pre_process=pre_process, post_process=post_process)
+        else:
+            # Default to GPT model
+            from megatron.core.models.gpt import GPTModel
+
+            model = GPTModel(
+                config=config,
+                num_tokentypes=0,
+                parallel_output=True,
+                pre_process=pre_process,
+                post_process=post_process,
+            )
+
+        return model
+
+    return model_provider
