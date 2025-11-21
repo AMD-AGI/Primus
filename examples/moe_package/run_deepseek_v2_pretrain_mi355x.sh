@@ -8,8 +8,8 @@
 ######################### Training Docker and Variables #########################
 # export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
 # export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ci_4096e28_20251114"
-# export DOCKER_IMAGE="docker.io/tasimage/primus:pr-289"
-export DOCKER_IMAGE="rocm/mad-private:primus_rocm7.1_ci_45fd4f8_20251119"
+export DOCKER_IMAGE="docker.io/tasimage/primus:pr-289"
+# export DOCKER_IMAGE="rocm/mad-private:primus_rocm7.1_ci_45fd4f8_20251119"
 export CLEAN_DOCKER_CONTAINER=1
 
 ######################### Training Environment Variables #########################
@@ -51,12 +51,12 @@ SEQ_LENGTH=4096
 TP=1
 ETP=1
 PP=4
-VPP=5
+VPP=1
 EP=8
 CP=1
 CP_COMM_TYPE="a2a" # p2p, a2a, allgather or a2a+p2p
 # TODO: set to true to enable MLA
-ENABLE_MLA=True
+ENABLE_MLA=False
 ENABLE_MTP=False
 LOAD_BALANCE=True
 OPTIMIZER=adam
