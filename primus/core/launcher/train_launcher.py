@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 
 from primus.core.backend.backend_registry import BackendRegistry
+from primus.core.config.merge_utils import deep_merge
 from primus.core.config.primus_config import PrimusConfig
 from primus.core.utils.arg_utils import parse_cli_overrides
 
@@ -93,10 +94,10 @@ def launch_train(args, overrides, module: str):
             f"Please ensure your YAML defines a module with 'module: {module}'."
         ) from exc
 
-    # Apply CLI overrides to module params
+    # Apply CLI overrides to module params (deep merge to preserve nested structures)
     if overrides:
         override_dict = parse_cli_overrides(overrides)
-        train_cfg.params.update(override_dict)
+        train_cfg.params = deep_merge(train_cfg.params, override_dict)
 
     # Validate framework is specified
     framework = train_cfg.framework
