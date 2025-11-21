@@ -34,6 +34,7 @@ except (ImportError, ModuleNotFoundError):
 
 
 SCALING_BLOCK_SIZE = 128
+MX_SCALING_BLOCK_SIZE = 32
 
 WARN_ONCE = True
 
@@ -42,14 +43,14 @@ if HAVE_TE and HAVE_TURBO:
     from megatron.core import parallel_state
     from megatron.core.enums import Fp8Recipe
     from megatron.core.extensions.transformer_engine import TEDelayedScaling
-    from primus_turbo.pytorch.core.float8 import ScalingGranularity
+    from primus_turbo.pytorch.core.low_precision import ScalingGranularity
 
     from primus.backends.megatron.core.extensions.primus_turbo import (
         PrimusTurboFloat8QuantConfig,
     )
 
     def te_fp8_format_mapping(te_format):
-        from primus_turbo.pytorch.core.float8 import Format as TurboFormat
+        from primus_turbo.pytorch.core.low_precision import Format as TurboFormat
         from transformer_engine.common.recipe import Format as TEFormat
 
         format_mapping = {
@@ -135,7 +136,11 @@ if HAVE_TE and HAVE_TURBO:
                     fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(fp8_format=fp8_format)
                 else:
                     fp8_recipe_none_reason = "Transformer Engine version < 2.1.0.dev0"
-                fp8_quant_config_none_reason = "Primus-Turbo not support MXFP8."
+                fp8_quant_config = PrimusTurboFloat8QuantConfig(
+                    granularity=ScalingGranularity.MX_BLOCKWISE,
+                    format=te_fp8_format_mapping(fp8_format),
+                    block_size=MX_SCALING_BLOCK_SIZE,
+                )
 
             global WARN_ONCE
             if WARN_ONCE:
@@ -194,7 +199,7 @@ if HAVE_TE and HAVE_TURBO:
 elif HAVE_TURBO:
     from megatron.core import parallel_state
     from megatron.core.enums import Fp8Recipe
-    from primus_turbo.pytorch.core.float8 import ScalingGranularity
+    from primus_turbo.pytorch.core.low_precision import ScalingGranularity
 
     from primus.backends.megatron.core.extensions.primus_turbo import (
         PrimusTurboFloat8QuantConfig,
@@ -235,24 +240,30 @@ elif HAVE_TURBO:
             import primus_turbo
 
             if config.fp8 == "e4m3":
-                fp8_format = primus_turbo.pytorch.core.float8.Format.E4M3
+                fp8_format = primus_turbo.pytorch.core.low_precision.Format.E4M3
             elif config.fp8 == "hybrid":
-                fp8_format = primus_turbo.pytorch.core.float8.Format.HYBRID
+                fp8_format = primus_turbo.pytorch.core.low_precision.Format.HYBRID
             else:
                 raise ValueError("E4M3 and HYBRID are the only supported FP8 formats.")
 
             # Select fp8
             fp8_quant_config = None
-            if config.fp8_quant_config == Fp8Recipe.tensorwise:
+            if config.fp8_recipe == Fp8Recipe.tensorwise:
                 fp8_quant_config = PrimusTurboFloat8QuantConfig(
                     fp8_format=fp8_format, granularity=ScalingGranularity.TENSORWISE
                 )
-            elif config.fp8_quant_config == Fp8Recipe.blockwise:
+            elif config.fp8_recipe == Fp8Recipe.blockwise:
                 fp8_quant_config = PrimusTurboFloat8QuantConfig(
                     fp8_format=fp8_format, granularity=ScalingGranularity.BLOCKWISE, block_size=128
                 )
+            elif config.fp8_recipe == Fp8Recipe.mxfp8:
+                fp8_quant_config = PrimusTurboFloat8QuantConfig(
+                    granularity=ScalingGranularity.MX_BLOCKWISE,
+                    format=te_fp8_format_mapping(fp8_format),
+                    block_size=MX_SCALING_BLOCK_SIZE,
+                )
             else:
-                raise ValueError("Primus-Turbo only supports tensorwise and blockwise scaling.")
+                raise ValueError(f"Not support fp8 recipe on Primus-Turbo: {config.fp8_recipe}.")
 
             if not is_init:
                 from primus.backends.megatron.core.extensions.primus_turbo import (
