@@ -5,13 +5,13 @@
 ###############################################################################
 
 import argparse
-import os
 from pathlib import Path
 
 from primus.core.backend.backend_registry import BackendRegistry
 from primus.core.config.merge_utils import deep_merge
 from primus.core.config.primus_config import PrimusConfig
 from primus.core.utils.arg_utils import parse_cli_overrides
+from primus.core.utils.env_setup import setup_training_env
 
 
 def add_train_parser(parser: argparse.ArgumentParser):
@@ -44,32 +44,18 @@ def add_train_parser(parser: argparse.ArgumentParser):
     return parser
 
 
-def setup_env(data_path: str):
-    """Setup HuggingFace cache path."""
-    if "HF_HOME" not in os.environ:
-        hf_home = os.path.join(data_path, "huggingface")
-        os.environ["HF_HOME"] = hf_home
-        print(f"[Primus] HF_HOME={hf_home}")
-    else:
-        print(f"[Primus] HF_HOME already set: {os.environ['HF_HOME']}")
-
-
-# ------------------------------------------------------------------------------
-# Main Training Flow
-# ------------------------------------------------------------------------------
-
-
 def launch_train(args, overrides, module: str):
     """
     Unified training entry point (framework-agnostic).
 
     Steps:
-        1. Load Primus config
-        2. Resolve backend path
-        3. Select backend adapter
-        4. BackendAdapter.prepare_backend()   ← backend specific
-        5. Create Trainer via adapter
-        6. trainer.init()/run()
+        1. Setup environment (cache paths, etc.)
+        2. Load Primus config
+        3. Resolve backend path
+        4. Select backend adapter
+        5. BackendAdapter.prepare_backend()   ← backend specific
+        6. Create Trainer via adapter
+        7. trainer.init()/run()
     """
 
     # 0 Validate config file
@@ -77,8 +63,8 @@ def launch_train(args, overrides, module: str):
     if not cfg_path.exists():
         raise FileNotFoundError(f"[Primus:Train] Config file not found: {cfg_path}")
 
-    # 1 Environment setup
-    setup_env(args.data_path)
+    # 1 Environment setup (HuggingFace cache, etc.)
+    setup_training_env(args.data_path, setup_hf=True)
 
     # 2 Load PrimusConfig
     primus_cfg = PrimusConfig.from_file(cfg_path, args)
