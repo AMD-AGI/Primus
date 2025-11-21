@@ -13,10 +13,10 @@
 import os
 
 from primus.backends.megatron.builders.argument_builder import MegatronArgBuilder
+from primus.backends.megatron.patches import apply_megatron_patches
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
-
-# from primus.backend.megatron.patches import apply_megatron_patches
+from primus.core.patches import PatchContext
 
 
 class MegatronAdapter(BackendAdapter):
@@ -40,20 +40,62 @@ class MegatronAdapter(BackendAdapter):
 
         Steps:
             - Run Primus setup hooks
-            - Apply patches (multi-version compatible)
-            - Lazy-import Megatron utilities
+            - Detect Megatron version
+            - Apply patches (version/model-specific)
+            - Set environment variables
         """
-        # Run setup hooks from BackendRegistry (patch, version detection)
+        # Run setup hooks from BackendRegistry
         BackendRegistry.run_setup("megatron")
 
-        # Apply internal Megatron patches (fix known issues)
-        # apply_megatron_patches()
+        # Detect Megatron version
+        megatron_version = self._detect_megatron_version()
+
+        # Create patch context
+        patch_context = PatchContext(
+            framework="megatron",
+            framework_version=megatron_version,
+            model_name=config.model,
+            config=config.params if hasattr(config, "params") else None,
+        )
+
+        # Apply all applicable patches
+        applied, failed = apply_megatron_patches(patch_context)
+
+        if failed > 0:
+            print(f"[Primus:MegatronAdapter] Warning: {failed} patches failed to apply")
 
         # Extra env handling: distributed variables
         if "CUDA_DEVICE_MAX_CONNECTIONS" not in os.environ:
             os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
 
-        print(f"[Primus:MegatronAdapter] Backend prepared.")
+        print(f"[Primus:MegatronAdapter] Backend prepared (version: {megatron_version})")
+
+    def _detect_megatron_version(self) -> str:
+        """
+        Detect Megatron-LM version.
+
+        Returns:
+            Version string (e.g., "0.8.0") or "unknown"
+        """
+        try:
+            import megatron
+
+            if hasattr(megatron, "__version__"):
+                return megatron.__version__
+            elif hasattr(megatron, "version"):
+                return megatron.version
+            else:
+                # Try to detect from git or package metadata
+                try:
+                    from importlib.metadata import version
+
+                    return version("megatron-lm")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return "unknown"
 
     # 2. Config → Megatron Args
     def convert_config(self, module_config):
