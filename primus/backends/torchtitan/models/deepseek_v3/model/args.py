@@ -14,7 +14,7 @@ from torchtitan.models.deepseek_v3 import DeepSeekV3ModelArgs
 @dataclass
 class DeepSeekV3ClassicModelArgs(DeepSeekV3ModelArgs):
     # Classical Attention
-    n_heads: int = 128
-    q_head: int = 40
-    n_kv_heads: int = 8
-    head_dim: int = 2048 // 128
+    n_heads: int = 16
+    q_head: int = 16
+    n_kv_heads: int = 16
+    head_dim: int = 128

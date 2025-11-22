@@ -35,8 +35,9 @@ classic_deepseekv3_args = {
         mscale=0.70,
         use_flex_attn=True,
         attn_mask_type="block_causal",
+        q_head=16,
         n_kv_heads=16,
-        head_dim=2048 // 128,
+        head_dim=128,
     ),
     "236B": DeepSeekV3ClassicModelArgs(
         vocab_size=102400,
@@ -73,8 +74,8 @@ classic_deepseekv3_args = {
         dim=7168,
         inter_dim=18432,
         moe_inter_dim=2048,
-        n_layers=24,
-        n_dense_layers=0,
+        n_layers=61,
+        n_dense_layers=3,
         n_heads=128,
         moe_args=MoEArgs(
             num_experts=256,
@@ -94,8 +95,8 @@ classic_deepseekv3_args = {
         v_head_dim=128,
         use_flex_attn=True,
         attn_mask_type="block_causal",
-        q_head=40,
-        n_kv_heads=128,
-        head_dim=16,
+        q_head=56,
+        n_kv_heads=8,
+        head_dim=128,
     ),
 }
