@@ -9,12 +9,12 @@ export NCCL_IB_HCA="bnxt_re0,bnxt_re1,bnxt_re2,bnxt_re3,bnxt_re4,bnxt_re5,bnxt_r
 # export AINIC_LIB="/apps/gpuperf/ainic-driver-20251007/lib/"
 export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
 export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
-export NCCL_SOCKET_IFNAME="lo"
-export GLOO_SOCKET_IFNAME="lo"
+# export NCCL_SOCKET_IFNAME="lo"
+# export GLOO_SOCKET_IFNAME="lo"
 
 export DOCKER_IMAGE="docker.io/rocm/pyt-megatron-lm-jax-nightly-private:primus_rocm7.1_20251117"
 export CPUS_PER_TASK=128
-export HSA_NO_SCRATCH_RECLAIM=1 
+export HSA_NO_SCRATCH_RECLAIM=1
 export NVTE_CK_USES_BWD_V3=1
 
 # export EXP="examples/torchtitan/configs/MI300X/deepseek_v3_16b-pretrain.yaml"
@@ -64,4 +64,4 @@ EXPORT_CONFIG=$LOG_DIR/config.yaml
 # bash ./examples/run_pretrain.sh   2>&1 | tee $LOG_FILE
 
 export EXP="examples/torchtitan/configs/MI300X/deepseek_v3_671b-pretrain.yaml"
-bash ./examples/run_pretrain.sh --model.n_layers 4 --model.n_dense_layers 1  2>&1 | tee $LOG_FILE
+bash ./examples/run_pretrain.sh --model.n_layers 4 --model.n_dense_layers 0  2>&1 | tee $LOG_FILE
