@@ -8,12 +8,36 @@
 Environment setup utilities for Primus training.
 
 This module provides functions to configure environment variables for various
-third-party libraries and frameworks used in training.
+third-party libraries and frameworks used in training, as well as utilities
+for retrieving distributed training environment variables.
 """
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional
+
+from primus.core.utils import constant_vars as const
+
+
+def get_torchrun_env() -> Dict[str, any]:
+    """
+    Get torchrun-provided environment variables with defaults.
+
+    Returns:
+        Dictionary containing:
+            - rank: Global rank (RANK env var or default)
+            - world_size: Total number of processes (WORLD_SIZE env var or default)
+            - master_addr: Master node address (MASTER_ADDR env var or default)
+            - master_port: Master node port (MASTER_PORT env var or default)
+            - local_rank: Local rank on current node (LOCAL_RANK env var or default)
+    """
+    return {
+        "rank": int(os.getenv("RANK", const.LOCAL_NODE_RANK)),
+        "world_size": int(os.getenv("WORLD_SIZE", const.LOCAL_WORLD_SIZE)),
+        "master_addr": os.getenv("MASTER_ADDR", const.LOCAL_MASTER_ADDR),
+        "master_port": int(os.getenv("MASTER_PORT", const.LOCAL_MASTER_PORT)),
+        "local_rank": int(os.getenv("LOCAL_RANK", const.LOCAL_NODE_RANK)),
+    }
 
 
 def setup_huggingface_cache(data_path: str, force: bool = False) -> str:

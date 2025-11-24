@@ -15,7 +15,7 @@ from primus.core.utils.distributed_logging import (
     log_rank_0,
     warning_rank_0,
 )
-from primus.core.utils.env import get_torchrun_env
+from primus.core.utils.env_setup import get_torchrun_env
 
 
 class MegatronLauncherAdapter:
