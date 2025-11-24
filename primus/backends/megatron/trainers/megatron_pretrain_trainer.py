@@ -8,11 +8,17 @@
 MegatronPretrainTrainer: Primus wrapper for Megatron-LM pre-training.
 
 This trainer bridges Primus configuration system with Megatron-LM's training loop.
+
+The trainer inherits from MegatronBaseTrainer which handles:
+    - Argument injection and Megatron runtime initialization
+    - Patch management (before_train, after_train) via template method
+    - Common Megatron setup patterns
+
+This class only needs to implement run_train() with the actual training logic.
 """
 
 from types import SimpleNamespace
 
-from primus.backends.megatron.patches import apply_megatron_patches
 from primus.backends.megatron.trainers.megatron_base_trainer import MegatronBaseTrainer
 from primus.core.config.primus_config import ModuleConfig, PrimusConfig
 from primus.core.utils.distributed_logging import log_rank_0
@@ -24,12 +30,13 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
 
     Inherits from MegatronBaseTrainer which handles:
         - Argument injection into Megatron runtime
+        - Patch management via template method pattern
         - Common Megatron initialization patterns
 
-    This class only needs to implement:
+    This class implements:
         - setup(): Pre-initialization setup (optional)
         - init(): Training-specific initialization
-        - run(): Execute training loop
+        - run_train(): Execute actual training loop (no patch management needed)
     """
 
     def __init__(
@@ -83,30 +90,27 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
 
         # Trainer-specific initialization can go here if needed
 
-    def run(self):
+    def run_train(self):
         """
         Execute Megatron pre-training using the standard Megatron calling pattern.
+
+        This method is called by MegatronBaseTrainer.run() after applying patches.
+        It focuses solely on the training logic without patch management.
         """
-        log_rank_0("Starting Megatron training...")
+        log_rank_0("Executing Megatron pretrain...")
 
-        # Apply before_train patches
-        model_name = self.module_config.model if hasattr(self.module_config, "model") else None
-        apply_megatron_patches(
-            backend_version=self._detect_version(),
-            model_name=model_name,
-            phase="before_train",
-            extra={"args": self.backend_args},
-        )
-
+        # Import Megatron components
         from megatron.core.enums import ModelType
         from megatron.training import inprocess_restart, pretrain
         from pretrain_gpt import forward_step, train_valid_test_datasets_provider
 
         from primus.backends.megatron.patches.model_provider import get_model_provider
 
+        # Configure training components
         train_valid_test_datasets_provider.is_distributed = True
         wrapped_pretrain, store = inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
 
+        # Execute training
         wrapped_pretrain(
             train_valid_test_datasets_provider,
             get_model_provider(),
@@ -115,4 +119,4 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             store=store,
         )
 
-        log_rank_0("Training completed successfully.")
+        log_rank_0("Megatron pretrain execution completed.")

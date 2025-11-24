@@ -9,25 +9,38 @@ MegatronBaseTrainer: Base class for all Megatron-LM trainers.
 
 This base class handles Megatron-specific initialization logic that is
 common across all Megatron training tasks (pretrain, sft, posttrain, etc.).
+
+Inherits from BaseTrainer which provides:
+    - Universal training workflow (run template method)
+    - Universal patch management (via run_patches)
+    - Consistent training lifecycle
+
+This class implements:
+    - Megatron runtime initialization (parse_args patching, etc.)
+    - ROCm compatibility patches
 """
 
 from types import SimpleNamespace
 
 from primus.core.config.primus_config import ModuleConfig, PrimusConfig
-from primus.core.trainer.base_module import BaseModule
+from primus.core.trainer.base_trainer import BaseTrainer
 from primus.core.utils.distributed_logging import log_rank_0
 
 
-class MegatronBaseTrainer(BaseModule):
+class MegatronBaseTrainer(BaseTrainer):
     """
     Base trainer class for all Megatron-LM training tasks.
 
     This class handles Megatron-specific concerns:
-        - Argument injection into Megatron's runtime
-        - Common initialization patterns
-        - Fallback mechanisms
+        - Argument injection into Megatron's runtime (parse_args patching)
+        - ROCm compatibility patches
+        - Megatron version detection
 
     All Megatron trainers (pretrain, sft, posttrain) should inherit from this class.
+
+    Note:
+        Patch management is handled by BaseTrainer via run_patches().
+        This class only handles Megatron-specific initialization.
     """
 
     def __init__(
@@ -44,14 +57,12 @@ class MegatronBaseTrainer(BaseModule):
             module_config: Module-specific configuration
             backend_args: Megatron-LM argument namespace (from MegatronArgBuilder)
         """
-        # Initialize BaseModule (auto-detects distributed params from env vars)
+        # Initialize BaseTrainer (auto-detects distributed params, stores configs)
         super().__init__(
-            module_name=module_config.module,
             primus_config=primus_config,
+            module_config=module_config,
+            backend_args=backend_args,
         )
-
-        # Store backend-specific args
-        self.backend_args = backend_args
 
         # Inject arguments into Megatron runtime by patching parse_args()
         log_rank_0("Injecting arguments into Megatron runtime...")
@@ -88,10 +99,10 @@ class MegatronBaseTrainer(BaseModule):
             self.backend_args.rank = dist_env["rank"]
             self.backend_args.local_rank = dist_env["local_rank"]
 
-            # Create a function that always returns our prepared args
-            def patched_parse_args(*args, **kwargs):
-                log_rank_0("parse_args() called, returning pre-configured args")
-                return self.backend_args
+            # Create a lambda that always returns our prepared args
+            patched_parse_args = lambda *args, **kwargs: (
+                log_rank_0("parse_args() called, returning pre-configured args") or self.backend_args
+            )
 
             # Patch both locations where parse_args might be defined/called
             megatron_args.parse_args = patched_parse_args
@@ -110,7 +121,15 @@ class MegatronBaseTrainer(BaseModule):
             return False
 
     def _detect_version(self) -> str:
-        """Detect Megatron version."""
+        """
+        Detect Megatron version.
+
+        Overrides BaseTrainer._detect_version() to provide accurate
+        Megatron version detection.
+
+        Returns:
+            Megatron version string (e.g., "0.8.0", "unknown")
+        """
         try:
             import megatron
 

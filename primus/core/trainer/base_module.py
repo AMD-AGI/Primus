@@ -26,24 +26,24 @@ class BaseModule(ABC):
 
     def __init__(
         self,
-        module_name: str,
         primus_config: PrimusConfig,
+        module_config,
     ):
         """
         Initialize BaseModule.
 
         Args:
-            module_name: Name of the module (e.g., "pre_trainer")
             primus_config: Primus configuration object
+            module_config: Module-specific configuration
 
         Note:
             Distributed environment and logging should be initialized globally
             before creating trainer instances. Use RuntimeContext to access
             distributed parameters.
         """
-        self.module_name = module_name
         self.primus_config = primus_config
-        self.module_config = primus_config.get_module_config(module_name)
+        self.module_config = module_config
+        self.module_name = module_config.module  # e.g., "pre_trainer"
 
         # Get runtime context (initialized globally in train_launcher)
         self.context = RuntimeContext.get_instance()
