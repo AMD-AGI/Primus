@@ -193,30 +193,21 @@ class BackendRegistry:
 
         candidate_paths = []
 
-        # Track source of each path for better error messages
-        path_sources = {}
-
         # 1) CLI argument
         if backend_path:
-            if isinstance(backend_path, str):
-                backend_path = [backend_path]
-            for p in backend_path:
-                candidate_paths.append(p)
-                path_sources[str(p)] = "CLI argument (--backend_path)"
+            candidate_paths.append(backend_path)
 
         # 2) Environment variable
         env_path = os.getenv("BACKEND_PATH")
         if env_path:
             candidate_paths.append(env_path)
-            path_sources[env_path] = "Environment variable (BACKEND_PATH)"
 
         # 3) Default fallback: third_party/<backend_dir_name>
         backend_dir_name = cls.get_path_name(backend)
-        # Navigate from this file to primus root, then to third_party
-        primus_root = Path(__file__).resolve().parent.parent.parent.parent
+        # Navigate from this file to primus root: primus/core/backend/backend_registry.py -> primus/
+        primus_root = Path(__file__).resolve().parents[2]  # [2] = primus root
         default_path = primus_root / "third_party" / backend_dir_name
         candidate_paths.append(default_path)
-        path_sources[str(default_path)] = "Default location (primus/third_party)"
 
         # Normalize paths and remove duplicates
         normalized = list(dict.fromkeys(os.path.abspath(os.path.normpath(p)) for p in candidate_paths))
