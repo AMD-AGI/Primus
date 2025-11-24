@@ -66,15 +66,14 @@ def init_distributed_env(
     local_rank = rank % num_gpus_per_node
 
     # Validate distributed parameters
-    if rank > 0 and master_addr == "localhost":
-        checker.check_true(
-            False,
-            msg=f"Worker with rank {rank} must have a valid master address (not 'localhost')",
-        )
+    if rank > 0:
+        checker.check_true(master_addr is not None, msg=f"Must provide master addr for workers with rank > 0")
 
     # For rank 0, use actual platform address
-    if rank == 0:
+    if rank == 0 and master_addr is None:
         master_addr = platform.get_addr()
+    else:
+        master_addr = master_addr
 
     # Set environment variables for downstream frameworks (Megatron, PyTorch, etc.)
     os.environ["MASTER_ADDR"] = str(master_addr)

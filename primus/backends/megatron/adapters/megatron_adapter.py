@@ -146,10 +146,10 @@ class MegatronAdapter(BackendAdapter):
     def load_trainer_class(self):
         """Load Megatron trainer class registered via BackendRegistry."""
         try:
-            return BackendRegistry.get_trainer(self.framework)
+            return BackendRegistry.get_trainer_class(self.framework)
         except ValueError as exc:
             raise RuntimeError(
                 "[Primus:MegatronAdapter] 'megatron' backend not registered. "
-                "Ensure primus.modules.trainer.megatron.pre_trainer defines the trainer "
+                "Ensure primus.backends.megatron.trainers defines the trainer "
                 "and imports BackendRegistry."
             ) from exc
