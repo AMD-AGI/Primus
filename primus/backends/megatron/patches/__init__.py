@@ -15,6 +15,7 @@ Patches are organized by category:
     - llama_patches: Llama model-specific patches
     - performance_patches: Performance optimizations
     - env_patches: Environment variable configuration
+    - mlflow_patches: MLflow logging integration
 
 All patches are automatically registered on import via the @register_patch decorator.
 """
@@ -26,6 +27,7 @@ from primus.backends.megatron.patches import (  # noqa: F401
     deepseek_patches,
     env_patches,
     llama_patches,
+    mlflow_patches,
     performance_patches,
 )
 from primus.core.patches import run_patches

@@ -13,6 +13,7 @@ Sets environment variables for optimal Megatron performance and compatibility.
 import os
 
 from primus.core.patches.patch_system import PatchContext, register_patch
+from primus.core.utils.distributed_logging import log_rank_0
 
 # ============================================================================
 # CUDA Device Configuration
@@ -50,4 +51,4 @@ def set_cuda_device_max_connections(ctx: PatchContext):
 
     # Set environment variable
     os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = cuda_connections
-    print(f"[Patch] Set CUDA_DEVICE_MAX_CONNECTIONS={cuda_connections} (FSDP={use_fsdp})")
+    log_rank_0(f"[Patch] Set CUDA_DEVICE_MAX_CONNECTIONS={cuda_connections} (FSDP={use_fsdp})")
