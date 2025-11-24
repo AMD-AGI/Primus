@@ -4,9 +4,11 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from functools import partial
 from types import MethodType
 from typing import Callable, Optional, Union
 
+import megatron.legacy.model
 import torch
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.mamba import MambaModel
@@ -16,7 +18,7 @@ from primus.backends.megatron.patches.core.extensions.logits_processor import (
     fused_softcap,
 )
 
-import megatron.legacy.model  # isort: skip
+from primus.core.utils.import_utils import lazy_import  # isort: skip
 
 g_final_logit_softcapping: Optional[float] = None
 original_compute_language_model_loss: Optional[MethodType] = None
@@ -56,42 +58,63 @@ def primus_model_provider(
     return model
 
 
-def get_model_provider(args):
+def get_model_provider():
     """
-    Get the appropriate model provider function for Megatron.
+    Resolve model_provider across Megatron versions.
 
-    This function determines which model architecture to use based on args
-    and returns a provider function that Megatron's pretrain() expects.
-
-    Args:
-        args: Megatron argument namespace
-
-    Returns:
-        Callable: Model provider function
+    - New:   model_provider + gpt_builder
+    - Mid:   model_provider only
+    - Old:   pretrain_gpt.model_provider
     """
-    from megatron.training.arguments import core_transformer_config_from_args
+    # Try to import model_provider
+    model_provider = lazy_import(
+        ["model_provider", "pretrain_gpt"], "model_provider", log_prefix="[Primus][MegatronCompat]"
+    )
 
-    def model_provider(pre_process=True, post_process=True, vp_stage=None):
-        """Build the model."""
-        config = core_transformer_config_from_args(args)
+    # Try to import gpt_builder (only exists in newer versions)
+    try:
+        gpt_builder = lazy_import(["gpt_builders"], "gpt_builder", log_prefix="[Primus][MegatronCompat]")
+        return partial(model_provider, gpt_builder)
+    except ImportError:
+        return model_provider
 
-        # Determine model type
-        if hasattr(args, "model_type") and args.model_type == "mamba":
-            from megatron.core.models.mamba import MambaModel
 
-            model = MambaModel(config=config, pre_process=pre_process, post_process=post_process)
-        else:
-            # Default to GPT model
-            from megatron.core.models.gpt import GPTModel
+# def get_model_provider(args):
+#     """
+#     Get the appropriate model provider function for Megatron.
 
-            model = GPTModel(
-                config=config,
-                num_tokentypes=0,
-                parallel_output=True,
-                pre_process=pre_process,
-                post_process=post_process,
-            )
+#     This function determines which model architecture to use based on args
+#     and returns a provider function that Megatron's pretrain() expects.
 
-        return model
+#     Args:
+#         args: Megatron argument namespace
 
-    return model_provider
+#     Returns:
+#         Callable: Model provider function
+#     """
+#     from megatron.training.arguments import core_transformer_config_from_args
+
+#     def model_provider(pre_process=True, post_process=True, vp_stage=None):
+#         """Build the model."""
+#         config = core_transformer_config_from_args(args)
+
+#         # Determine model type
+#         if hasattr(args, "model_type") and args.model_type == "mamba":
+#             from megatron.core.models.mamba import MambaModel
+
+#             model = MambaModel(config=config, pre_process=pre_process, post_process=post_process)
+#         else:
+#             # Default to GPT model
+#             from megatron.core.models.gpt import GPTModel
+
+#             model = GPTModel(
+#                 config=config,
+#                 num_tokentypes=0,
+#                 parallel_output=True,
+#                 pre_process=pre_process,
+#                 post_process=post_process,
+#             )
+
+#         return model
+
+#     return model_provider

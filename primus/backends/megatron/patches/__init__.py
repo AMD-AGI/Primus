@@ -14,6 +14,7 @@ Patches are organized by category:
     - deepseek_patches: DeepSeek model-specific patches
     - llama_patches: Llama model-specific patches
     - performance_patches: Performance optimizations
+    - env_patches: Environment variable configuration
 
 All patches are automatically registered on import via the @register_patch decorator.
 """
@@ -23,6 +24,7 @@ All patches are automatically registered on import via the @register_patch decor
 from primus.backends.megatron.patches import (  # noqa: F401
     compatibility_patches,
     deepseek_patches,
+    env_patches,
     llama_patches,
     performance_patches,
 )

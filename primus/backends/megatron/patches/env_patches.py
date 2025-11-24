@@ -1,0 +1,83 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""
+Megatron Environment Variable Patches
+
+Sets environment variables for optimal Megatron performance and compatibility.
+"""
+
+import os
+
+from primus.core.patches.patch_system import PatchContext, register_patch
+
+# ============================================================================
+# CUDA Device Configuration
+# ============================================================================
+
+
+@register_patch(
+    "megatron.env.cuda_device_max_connections",
+    backend="megatron",
+    phase="before_import_backend",
+    description="Set CUDA_DEVICE_MAX_CONNECTIONS based on FSDP configuration",
+)
+def set_cuda_device_max_connections(ctx: PatchContext):
+    """
+    Set CUDA_DEVICE_MAX_CONNECTIONS environment variable.
+
+    This controls the number of CUDA streams for device-to-device communication.
+
+    Strategy:
+        - FSDP (Fully Sharded Data Parallel): Use 8 connections for better overlap
+        - Non-FSDP (standard DDP/TP/PP): Use 1 connection to avoid contention
+
+    The value is determined by checking the config for FSDP usage.
+    """
+    # Get config from context
+    config = ctx.extra.get("config", {})
+
+    # Determine CUDA_DEVICE_MAX_CONNECTIONS based on FSDP usage
+    use_fsdp = config.get("use_torch_fsdp2", False) or config.get("use_custom_fsdp", False)
+
+    if use_fsdp:
+        cuda_connections = "8"
+    else:
+        cuda_connections = "1"
+
+    # Set environment variable
+    os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = cuda_connections
+    print(f"[Patch] Set CUDA_DEVICE_MAX_CONNECTIONS={cuda_connections} (FSDP={use_fsdp})")
+
+
+# ============================================================================
+# ROCm-Specific Environment Variables
+# ============================================================================
+
+
+@register_patch(
+    "megatron.env.rocm_optimization",
+    backend="megatron",
+    phase="before_import_backend",
+    description="Set ROCm-specific environment variables for optimal performance",
+)
+def set_rocm_env_vars(ctx: PatchContext):
+    """
+    Set ROCm-specific environment variables.
+
+    These variables optimize ROCm performance for Megatron workloads.
+    """
+    rocm_vars = {
+        # Enable async memory operations
+        "HSA_ENABLE_SDMA": "0",
+        # Optimize kernel launch
+        "GPU_MAX_HW_QUEUES": "8",
+    }
+
+    for key, value in rocm_vars.items():
+        if key not in os.environ:
+            os.environ[key] = value
+            print(f"[Patch] Set {key}={value}")

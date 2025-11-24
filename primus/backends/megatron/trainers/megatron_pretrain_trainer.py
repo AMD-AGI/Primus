@@ -86,13 +86,6 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
     def run(self):
         """
         Execute Megatron pre-training using the standard Megatron calling pattern.
-
-        This follows the standard Megatron pretrain pattern:
-            1. Import required Megatron modules
-            2. Setup data provider
-            3. Get model provider
-            4. Wrap pretrain() with inprocess_restart support
-            5. Call pretrain() with all required arguments
         """
         log_rank_0("Starting Megatron training...")
 
@@ -105,55 +98,19 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             extra={"args": self.backend_args},
         )
 
-        # Import Megatron core components
-        from megatron.core.enums import ModelType  # type: ignore
-        from megatron.training import inprocess_restart, pretrain  # type: ignore
+        from megatron.core.enums import ModelType
+        from megatron.training import inprocess_restart, pretrain
+        from pretrain_gpt import forward_step, train_valid_test_datasets_provider
 
-        from primus.backends.megatron.patches.data_provider import (  # type: ignore
-            get_train_valid_test_datasets_provider,
-        )
-
-        # Import forward step and data provider
-        # Note: These can be customized per model type
-        from primus.backends.megatron.patches.forward_step import (
-            get_forward_step,  # type: ignore
-        )
-
-        # Import Primus model provider
         from primus.backends.megatron.patches.model_provider import get_model_provider
 
-        # Get the model provider function
-        model_provider = get_model_provider(self.backend_args)
-        log_rank_0(f"Model provider: {getattr(self.backend_args, 'model_type', 'GPT')}")
-
-        # Get the forward step function
-        forward_step = get_forward_step(self.backend_args)
-        log_rank_0("Forward step function configured")
-
-        # Get the data provider
-        train_valid_test_datasets_provider = get_train_valid_test_datasets_provider(self.backend_args)
         train_valid_test_datasets_provider.is_distributed = True
-        log_rank_0("Dataset provider configured")
-
-        # Wrap pretrain with inprocess restart support
         wrapped_pretrain, store = inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
 
-        # Determine model type
-        model_type = ModelType.encoder_or_decoder
-        if hasattr(self.backend_args, "model_type"):
-            model_type_str = self.backend_args.model_type.upper()
-            if "ENCODER_AND_DECODER" in model_type_str:
-                model_type = ModelType.encoder_and_decoder
-            elif "ENCODER" in model_type_str:
-                model_type = ModelType.encoder_or_decoder
-
-        log_rank_0(f"Model type: {model_type}")
-
-        # Execute Megatron's pretrain with standard calling pattern
         wrapped_pretrain(
             train_valid_test_datasets_provider,
-            model_provider,
-            model_type,
+            get_model_provider(),
+            ModelType.encoder_or_decoder,
             forward_step,
             store=store,
         )
