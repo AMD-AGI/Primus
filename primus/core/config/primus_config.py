@@ -93,9 +93,9 @@ class PrimusConfig:
         self._platform = platform
         self._modules = {m.name: m for m in modules}
 
-        # Create workspace directory structure
-        self._config_root_path = os.path.join(workspace, work_group, user_name, exp_name)
-        file_utils.create_path_if_not_exists(self._config_root_path)
+        # Create experiment root directory
+        self._exp_root_path = os.path.join(workspace, work_group, user_name, exp_name)
+        file_utils.create_path_if_not_exists(self._exp_root_path)
 
     @classmethod
     def from_file(cls, config_file: str, cli_args: argparse.Namespace) -> "PrimusConfig":
@@ -258,9 +258,9 @@ class PrimusConfig:
         return self._cli_args
 
     @property
-    def config_root_path(self) -> str:
-        """Root directory for this experiment's outputs."""
-        return self._config_root_path
+    def exp_root_path(self) -> str:
+        """Root directory for this experiment's outputs (configs, logs, checkpoints)."""
+        return self._exp_root_path
 
     @property
     def config_meta_info(self) -> dict:
@@ -335,7 +335,7 @@ class PrimusConfig:
 
     def module_config_path(self, module_name: str) -> str:
         """Get export path for module configuration."""
-        return os.path.join(self._config_root_path, f"{module_name}.yaml")
+        return os.path.join(self._exp_root_path, f"{module_name}.yaml")
 
     def export_module_config(self, module_name: str) -> str:
         """

@@ -21,17 +21,14 @@ def register_subcommand(subparsers):
 
     Supported training workflows:
         - pretrain: Pre-training from scratch (language modeling)
-        - sft: Supervised fine-tuning (instruction tuning, task adaptation)
 
     Future extensions:
+        - sft: Supervised fine-tuning (instruction tuning, task adaptation)
         - posttrain: General post-training workflows
 
     Examples:
         # Pre-training
         primus train pretrain --config pretrain.yaml --backend-path /path/to/megatron
-
-        # Supervised fine-tuning
-        primus train sft --config sft.yaml --backend-path /path/to/megatron
 
     Args:
         subparsers: argparse subparsers object from main.py

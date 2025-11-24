@@ -1,0 +1,33 @@
+
+
+
+# Ignore Python envs
+venv/
+.env/
+.rocm/
+
+# Ignore third-party sources
+third_party/Megatron-LM/
+third_party/torchtitan/
+third_party/maxtext/
+Nemo/
+jax/
+ckpt/
+build/
+dist/
+tools/
+
+# Ignore caches
+__pycache__/
+*.pt
+*.pth
+*.bin
+*.so
+*.dll
+
+# Ignore generated logs
+*.log
+
+# Ignore huge datasets
+data/
+datasets/

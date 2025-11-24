@@ -13,6 +13,7 @@ from primus.core.config.primus_config import PrimusConfig
 from primus.core.runtime import init_distributed_env, init_global_logger
 from primus.core.utils.arg_utils import parse_cli_overrides
 from primus.core.utils.env_setup import setup_training_env
+from primus.core.utils.global_vars import set_global_variables
 
 
 def add_train_parser(parser: argparse.ArgumentParser):
@@ -51,8 +52,8 @@ def launch_train(args, overrides, module: str):
 
     Steps:
         1. Setup environment (cache paths, etc.)
-        2. Initialize distributed environment (once)
-        3. Load Primus config
+        2. Load Primus config (needed for platform info)
+        3. Initialize distributed environment (once)
         4. Initialize global logger (once)
         5. Resolve backend path
         6. Select backend adapter
@@ -69,11 +70,14 @@ def launch_train(args, overrides, module: str):
     # 1 Environment setup (HuggingFace cache, etc.)
     setup_training_env(args.data_path, setup_hf=True)
 
-    # 2 Initialize distributed environment (one-time global initialization)
-    init_distributed_env()
-
-    # 3 Load PrimusConfig
+    # 2 Load PrimusConfig (must come before distributed init as it needs platform info)
     primus_cfg = PrimusConfig.from_file(cfg_path, args)
+
+    # 2.5 Set global variables (needed for platform detection in distributed init)
+    set_global_variables(primus_cfg)
+
+    # 3 Initialize distributed environment (one-time global initialization)
+    init_distributed_env()
 
     # 4 Initialize global logger (one-time global initialization)
     init_global_logger(primus_cfg)

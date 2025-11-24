@@ -66,7 +66,7 @@ class BackendAdapter(ABC):
     # -----------------------------------------------------------
     # 4) Trainer Launcher (Final Step)
     # -----------------------------------------------------------
-    def create_trainer(self, primus_config, pretrain_config):
+    def create_trainer(self, primus_config, module_config):
         """
         Default implementation:
             - prepare backend
@@ -75,16 +75,16 @@ class BackendAdapter(ABC):
         """
 
         # Step 1: backend env/patch/detect
-        self.prepare_backend(pretrain_config)
+        self.prepare_backend(module_config)
 
         # Step 2: config translation
-        backend_args = self.convert_config(pretrain_config)
+        backend_args = self.convert_config(module_config)
 
         # Step 3: load trainer class from backend
         TrainerClass = self.load_trainer_class()
 
         return TrainerClass(
             primus_config=primus_config,
-            pretrain_config=pretrain_config,
+            module_config=module_config,
             backend_args=backend_args,
         )
