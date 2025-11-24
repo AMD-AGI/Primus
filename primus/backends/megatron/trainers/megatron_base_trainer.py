@@ -138,6 +138,9 @@ class MegatronBaseTrainer(BaseModule):
             megatron_args.parse_args = patched_parse_args
             megatron_init.parse_args = patched_parse_args
 
+            log_rank_0(f"Distributed environment info: {dist_env}")
+            log_rank_0(f"Backend args: {self.backend_args}")
+
             log_rank_0(
                 f"Patched parse_args with {len(vars(self.backend_args))} arguments "
                 f"(rank={self.backend_args.rank}, world_size={self.backend_args.world_size})"
