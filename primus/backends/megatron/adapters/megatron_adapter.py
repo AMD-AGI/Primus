@@ -157,6 +157,50 @@ class MegatronAdapter(BackendAdapter):
                 "and imports BackendRegistry."
             ) from exc
 
+    def create_trainer(self, primus_config, module_config):
+        """
+        Override create_trainer to inject Megatron args after trainer creation.
+
+        This ensures Megatron's argument injection happens at the right time,
+        without requiring trainers to know about adapter internals.
+
+        Steps:
+            1. Prepare backend (patches, env)
+            2. Convert config → backend_args
+            3. Create trainer instance
+            4. Inject args into Megatron runtime  ← **Additional step**
+            5. Return trainer
+
+        Returns:
+            Configured trainer instance ready to run
+        """
+        # Step 1: backend env/patch/detect
+        self.prepare_backend(module_config)
+
+        # Step 2: config translation
+        backend_args = self.convert_config(module_config)
+
+        # Step 3: load trainer class from backend
+        TrainerClass = self.load_trainer_class()
+
+        # Step 4: instantiate trainer
+        trainer = TrainerClass(
+            primus_config=primus_config,
+            module_config=module_config,
+            backend_args=backend_args,
+        )
+
+        # Step 5: Inject Megatron args (Megatron-specific requirement)
+        # This is done here so trainers don't need to know about injection
+        log_rank_0("[MegatronAdapter] Injecting arguments into Megatron runtime...")
+        success = self.inject_args(backend_args)
+
+        if not success:
+            log_rank_0("WARNING: Argument injection failed")
+            # Note: Fallback to sys.argv is handled in trainer if needed
+
+        return trainer
+
     # 4. Inject Arguments (Shared across all Megatron trainers)
     @staticmethod
     def inject_args(backend_args: SimpleNamespace) -> bool:

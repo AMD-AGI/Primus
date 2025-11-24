@@ -13,7 +13,6 @@ This trainer bridges Primus configuration system with Megatron-LM's training loo
 import sys
 from types import SimpleNamespace
 
-from primus.backends.megatron.adapters.megatron_adapter import MegatronAdapter
 from primus.backends.megatron.patches import apply_megatron_patches
 from primus.core.config.primus_config import ModuleConfig, PrimusConfig
 from primus.core.trainer.base_module import BaseModule
@@ -76,25 +75,17 @@ class MegatronPretrainTrainer(BaseModule):
         """
         Initialize Megatron training components.
 
-        Since MegatronAdapter.convert_config() has already:
-            - Merged all configs (preset + user + CLI)
-            - Filled in Megatron defaults
-            - Produced a complete SimpleNamespace
-
-        We inject this prepared args into Megatron using the adapter's
-        inject_args() method, which handles multiple injection strategies.
+        Note:
+            MegatronAdapter has already injected backend_args into Megatron's
+            runtime in create_trainer(). This method can focus on trainer-specific
+            initialization if needed.
         """
         log_rank_0(f"Initializing Megatron training...")
         log_rank_0(f"Model: {self.module_config.model or 'custom'}")
         log_rank_0(f"Framework: {self.module_config.framework}")
 
-        # Use MegatronAdapter's shared injection logic
-        # This works for pretrain, sft, posttrain, and any future Megatron trainers
-        success = MegatronAdapter.inject_args(self.backend_args)
-
-        if not success:
-            log_rank_0("WARNING: Argument injection failed, using sys.argv fallback")
-            self._set_args_via_argv()
+        # Trainer-specific initialization can go here if needed
+        # Argument injection is already handled by MegatronAdapter.create_trainer()
 
     def run(self):
         """
