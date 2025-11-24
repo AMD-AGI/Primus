@@ -139,11 +139,15 @@ class MegatronAdapter(BackendAdapter):
         megatron_args = builder.finalize()
 
         # Phase: After building args
+        # Pass args and config (which includes Primus metadata) to patches
         apply_megatron_patches(
             backend_version=megatron_version,
             model_name=model_name,
             phase="after_build_args",
-            extra={"args": megatron_args},
+            extra={
+                "args": megatron_args,
+                "config": module_config.params,  # Contains Primus metadata
+            },
         )
 
         print(f"[Primus:MegatronAdapter] Converted config → {len(vars(megatron_args))} Megatron args.")

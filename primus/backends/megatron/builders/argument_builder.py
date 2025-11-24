@@ -81,9 +81,20 @@ class MegatronArgBuilder:
         into the current override set.
 
         Any field with value None is ignored (meaning "not provided").
+        Primus metadata fields (prefixed with "primus_") are filtered out.
         """
+        # Filter out Primus metadata (these are for patches, not for Megatron)
+        primus_metadata_keys = {
+            "primus_work_group",
+            "primus_user_name",
+            "primus_exp_name",
+            "primus_workspace",
+            "primus_exp_root_path",
+        }
+
         for key, value in values.items():
-            if value is not None:
+            # Skip None values and Primus metadata
+            if value is not None and key not in primus_metadata_keys:
                 self.overrides[key] = value
         return self
 

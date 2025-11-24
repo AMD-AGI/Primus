@@ -123,15 +123,30 @@ class PrimusConfig:
         # Load platform configuration
         platform = cls._load_platform(config_dict, primus_home)
 
-        # Parse modules with model preset loading
-        modules = cls._parse_modules(config_dict.get("modules", []))
+        # Prepare Primus metadata to inject into modules
+        work_group = config_dict["work_group"]
+        user_name = config_dict["user_name"]
+        exp_name = config_dict["exp_name"]
+        workspace = config_dict["workspace"]
+        exp_root_path = os.path.join(workspace, work_group, user_name, exp_name)
+
+        primus_metadata = {
+            "primus_work_group": work_group,
+            "primus_user_name": user_name,
+            "primus_exp_name": exp_name,
+            "primus_workspace": workspace,
+            "primus_exp_root_path": exp_root_path,
+        }
+
+        # Parse modules with model preset loading and Primus metadata injection
+        modules = cls._parse_modules(config_dict.get("modules", []), primus_metadata)
 
         return cls(
             cli_args=cli_args,
-            work_group=config_dict["work_group"],
-            user_name=config_dict["user_name"],
-            exp_name=config_dict["exp_name"],
-            workspace=config_dict["workspace"],
+            work_group=work_group,
+            user_name=user_name,
+            exp_name=exp_name,
+            workspace=workspace,
             platform=platform,
             modules=modules,
         )
@@ -189,14 +204,22 @@ class PrimusConfig:
         return platform_cfg
 
     @staticmethod
-    def _parse_modules(modules_list: list) -> List[ModuleConfig]:
+    def _parse_modules(modules_list: list, primus_metadata: dict = None) -> List[ModuleConfig]:
         """
-        Parse modules list with model preset loading.
+        Parse modules list with model preset loading and Primus metadata injection.
 
         For each module:
             1. If 'model' is specified, load model preset via ModelPresetLoader
             2. Merge preset with user params (user params override preset)
-            3. Create ModuleConfig instance
+            3. Inject Primus metadata (work_group, exp_name, exp_root_path, etc.)
+            4. Create ModuleConfig instance
+
+        Args:
+            modules_list: List of module dictionaries from config
+            primus_metadata: Primus top-level metadata to inject into each module
+
+        Returns:
+            List of parsed ModuleConfig instances
         """
         parsed_modules = []
 
@@ -233,7 +256,11 @@ class PrimusConfig:
                 # Merge: model preset (base) + user params (override)
                 merged_params = deep_merge(model_preset, user_params)
             else:
-                merged_params = user_params
+                merged_params = user_params.copy()
+
+            # Inject Primus metadata into module params
+            if primus_metadata:
+                merged_params.update(primus_metadata)
 
             # Create ModuleConfig
             parsed_modules.append(

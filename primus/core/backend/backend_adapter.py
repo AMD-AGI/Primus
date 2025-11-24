@@ -80,7 +80,6 @@ class BackendAdapter(ABC):
         # Step 2: config translation
         backend_args = self.convert_config(module_config)
 
-        print(f"*************** {backend_args.__dict__}")
         # Print backend args for debugging (one per line)
         # print(f"\n{'='*80}")
         # print(f"Backend Arguments ({self.framework}):")
