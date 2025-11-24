@@ -22,10 +22,9 @@
 # This is the foundation of Primus's plugin-based backend system.
 ###############################################################################
 
-import logging
 from typing import Callable, Dict, List, Type
 
-log = logging.getLogger(__name__)
+from primus.core.utils.distributed_logging import log_rank_0
 
 
 class BackendRegistry:
@@ -221,7 +220,7 @@ class BackendRegistry:
                 if p not in sys.path:
                     sys.path.insert(0, p)
                     if verbose:
-                        log.info(f"[Primus] sys.path.insert → {p}")
+                        log_rank_0(f"[Primus] sys.path.insert → {p}")
                 return p
 
         raise FileNotFoundError(

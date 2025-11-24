@@ -60,7 +60,7 @@ class MegatronPretrainTrainer(BaseModule):
         self.optimizer = None
         self.opt_param_scheduler = None
 
-        log_rank_0(f"[MegatronPretrainTrainer] Initialized for model: {module_config.model or 'custom'}")
+        log_rank_0(f"Initialized for model: {module_config.model or 'custom'}")
 
     def setup(self):
         """
@@ -68,7 +68,7 @@ class MegatronPretrainTrainer(BaseModule):
 
         Can be used for pre-initialization setup if needed.
         """
-        log_rank_0("[MegatronPretrainTrainer] Setup phase")
+        log_rank_0("Setup phase")
         # Any pre-initialization setup can go here
 
     def init(self):
@@ -87,9 +87,9 @@ class MegatronPretrainTrainer(BaseModule):
         Strategy 2 (monkey patch) is more robust as it intercepts any
         parse_args() calls that might happen in pretrain().
         """
-        log_rank_0("[MegatronPretrainTrainer] Initializing Megatron training...")
-        log_rank_0(f"[MegatronPretrainTrainer] Model: {self.module_config.model or 'custom'}")
-        log_rank_0(f"[MegatronPretrainTrainer] Framework: {self.module_config.framework}")
+        log_rank_0(f"Initializing Megatron training...")
+        log_rank_0(f"Model: {self.module_config.model or 'custom'}")
+        log_rank_0(f"Framework: {self.module_config.framework}")
 
         # Strategy 1: Try direct injection first (fastest, least invasive)
         direct_injection_success = self._try_direct_injection()
@@ -99,12 +99,9 @@ class MegatronPretrainTrainer(BaseModule):
         self._patch_parse_args()
 
         if direct_injection_success:
-            log_rank_0(
-                "[MegatronPretrainTrainer] Args injected via both direct assignment "
-                "and parse_args patching"
-            )
+            log_rank_0("Args injected via both direct assignment and parse_args patching")
         else:
-            log_rank_0("[MegatronPretrainTrainer] Args injected via parse_args patching only")
+            log_rank_0("Args injected via parse_args patching only")
 
     def _try_direct_injection(self) -> bool:
         """
@@ -126,7 +123,7 @@ class MegatronPretrainTrainer(BaseModule):
             else:
                 return False
         except (ImportError, AttributeError) as e:
-            log_rank_0(f"[MegatronPretrainTrainer] Cannot directly inject args: {e}")
+            log_rank_0(f"Cannot directly inject args: {e}")
             return False
 
     def _patch_parse_args(self):
@@ -144,19 +141,16 @@ class MegatronPretrainTrainer(BaseModule):
 
             # Create a function that always returns our prepared args
             def patched_parse_args(*args, **kwargs):
-                log_rank_0("[MegatronPretrainTrainer] parse_args() called, " "returning pre-configured args")
+                log_rank_0("parse_args() called, returning pre-configured args")
                 return self.backend_args
 
             # Patch both locations where parse_args might be defined/called
             megatron_args.parse_args = patched_parse_args
             megatron_init.parse_args = patched_parse_args
 
-            log_rank_0(
-                f"[MegatronPretrainTrainer] Patched parse_args with "
-                f"{len(vars(self.backend_args))} arguments"
-            )
+            log_rank_0(f"Patched parse_args with {len(vars(self.backend_args))} arguments")
         except (ImportError, AttributeError) as e:
-            log_rank_0(f"[MegatronPretrainTrainer] WARNING: Cannot patch parse_args: {e}")
+            log_rank_0(f"WARNING: Cannot patch parse_args: {e}")
             # If we can't patch, we'll need sys.argv fallback
             self._set_args_via_argv()
 
@@ -171,7 +165,7 @@ class MegatronPretrainTrainer(BaseModule):
             4. Wrap pretrain() with inprocess_restart support
             5. Call pretrain() with all required arguments
         """
-        log_rank_0("[MegatronPretrainTrainer] Starting Megatron training...")
+        log_rank_0("Starting Megatron training...")
 
         # Apply before_train patches
         model_name = self.module_config.model if hasattr(self.module_config, "model") else None
@@ -201,18 +195,16 @@ class MegatronPretrainTrainer(BaseModule):
 
         # Get the model provider function
         model_provider = get_model_provider(self.backend_args)
-        log_rank_0(
-            f"[MegatronPretrainTrainer] Model provider: {getattr(self.backend_args, 'model_type', 'GPT')}"
-        )
+        log_rank_0(f"Model provider: {getattr(self.backend_args, 'model_type', 'GPT')}")
 
         # Get the forward step function
         forward_step = get_forward_step(self.backend_args)
-        log_rank_0("[MegatronPretrainTrainer] Forward step function configured")
+        log_rank_0("Forward step function configured")
 
         # Get the data provider
         train_valid_test_datasets_provider = get_train_valid_test_datasets_provider(self.backend_args)
         train_valid_test_datasets_provider.is_distributed = True
-        log_rank_0("[MegatronPretrainTrainer] Dataset provider configured")
+        log_rank_0("Dataset provider configured")
 
         # Wrap pretrain with inprocess restart support
         wrapped_pretrain, store = inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
@@ -226,7 +218,7 @@ class MegatronPretrainTrainer(BaseModule):
             elif "ENCODER" in model_type_str:
                 model_type = ModelType.encoder_or_decoder
 
-        log_rank_0(f"[MegatronPretrainTrainer] Model type: {model_type}")
+        log_rank_0(f"Model type: {model_type}")
 
         # Execute Megatron's pretrain with standard calling pattern
         wrapped_pretrain(
@@ -237,7 +229,7 @@ class MegatronPretrainTrainer(BaseModule):
             store=store,
         )
 
-        log_rank_0("[MegatronPretrainTrainer] Training completed successfully.")
+        log_rank_0("Training completed successfully.")
 
     def _set_args_via_argv(self):
         """
@@ -274,7 +266,7 @@ class MegatronPretrainTrainer(BaseModule):
         # Replace sys.argv
         self._original_argv = sys.argv
         sys.argv = argv_list
-        log_rank_0(f"[MegatronPretrainTrainer] Set sys.argv with {len(argv_list)} arguments")
+        log_rank_0(f"Set sys.argv with {len(argv_list)} arguments")
 
     def _detect_version(self) -> str:
         """Detect Megatron version."""

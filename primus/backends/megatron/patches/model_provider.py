@@ -12,7 +12,9 @@ from megatron.core.models.gpt import GPTModel
 from megatron.core.models.mamba import MambaModel
 from megatron.training import get_args
 
-from primus.backends.megatron.core.extensions.logits_processor import fused_softcap
+from primus.backends.megatron.patches.core.extensions.logits_processor import (
+    fused_softcap,
+)
 
 import megatron.legacy.model  # isort: skip
 
