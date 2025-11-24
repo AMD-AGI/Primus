@@ -7,7 +7,7 @@ venv/
 .rocm/
 
 # Ignore third-party sources
-third_party/Megatron-LM/
+# third_party/Megatron-LM/
 third_party/torchtitan/
 third_party/maxtext/
 Nemo/

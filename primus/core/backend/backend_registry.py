@@ -22,7 +22,10 @@
 # This is the foundation of Primus's plugin-based backend system.
 ###############################################################################
 
+import logging
 from typing import Callable, Dict, List, Type
+
+log = logging.getLogger(__name__)
 
 
 class BackendRegistry:
@@ -205,7 +208,7 @@ class BackendRegistry:
         # 3) Default fallback: third_party/<backend_dir_name>
         backend_dir_name = cls.get_path_name(backend)
         # Navigate from this file to primus root: primus/core/backend/backend_registry.py -> primus/
-        primus_root = Path(__file__).resolve().parents[2]  # [2] = primus root
+        primus_root = Path(__file__).resolve().parent.parent.parent.parent
         default_path = primus_root / "third_party" / backend_dir_name
         candidate_paths.append(default_path)
 
@@ -218,7 +221,7 @@ class BackendRegistry:
                 if p not in sys.path:
                     sys.path.insert(0, p)
                     if verbose:
-                        print(f"[Primus] sys.path.insert → {p}")
+                        log.info(f"[Primus] sys.path.insert → {p}")
                 return p
 
         raise FileNotFoundError(
