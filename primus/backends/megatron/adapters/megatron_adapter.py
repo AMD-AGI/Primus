@@ -1,4 +1,11 @@
 ###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+
+###############################################################################
 # Megatron Adapter (Full Production Implementation)
 #
 # This is the unified integration layer between Primus Runtime and Megatron-LM.
@@ -11,13 +18,11 @@
 #
 ###############################################################################
 
-from types import SimpleNamespace
 
 from primus.backends.megatron.builders.argument_builder import MegatronArgBuilder
 from primus.backends.megatron.patches import apply_megatron_patches
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
-from primus.core.utils.distributed_logging import log_rank_0
 
 
 class MegatronAdapter(BackendAdapter):
@@ -157,143 +162,5 @@ class MegatronAdapter(BackendAdapter):
                 "and imports BackendRegistry."
             ) from exc
 
-    def create_trainer(self, primus_config, module_config):
-        """
-        Override create_trainer to inject Megatron args after trainer creation.
-
-        This ensures Megatron's argument injection happens at the right time,
-        without requiring trainers to know about adapter internals.
-
-        Steps:
-            1. Prepare backend (patches, env)
-            2. Convert config → backend_args
-            3. Create trainer instance
-            4. Inject args into Megatron runtime  ← **Additional step**
-            5. Return trainer
-
-        Returns:
-            Configured trainer instance ready to run
-        """
-        # Step 1: backend env/patch/detect
-        self.prepare_backend(module_config)
-
-        # Step 2: config translation
-        backend_args = self.convert_config(module_config)
-
-        # Step 3: load trainer class from backend
-        TrainerClass = self.load_trainer_class()
-
-        # Step 4: instantiate trainer
-        trainer = TrainerClass(
-            primus_config=primus_config,
-            module_config=module_config,
-            backend_args=backend_args,
-        )
-
-        # Step 5: Inject Megatron args (Megatron-specific requirement)
-        # This is done here so trainers don't need to know about injection
-        log_rank_0("[MegatronAdapter] Injecting arguments into Megatron runtime...")
-        success = self.inject_args(backend_args)
-
-        if not success:
-            log_rank_0("WARNING: Argument injection failed")
-            # Note: Fallback to sys.argv is handled in trainer if needed
-
-        return trainer
-
-    # 4. Inject Arguments (Shared across all Megatron trainers)
-    @staticmethod
-    def inject_args(backend_args: SimpleNamespace) -> bool:
-        """
-        Inject pre-configured arguments into Megatron's runtime.
-
-        This method provides multiple strategies for argument injection:
-        1. Direct injection: Set megatron.training.global_vars._GLOBAL_ARGS
-        2. Monkey patching: Replace parse_args() to return our args
-
-        This is a static method so it can be called by any Megatron trainer
-        (pretrain, sft, posttrain, etc.) without needing adapter instance.
-
-        Args:
-            backend_args: Megatron argument namespace to inject
-
-        Returns:
-            True if injection succeeded via any strategy, False otherwise
-        """
-        # Strategy 1: Try direct injection first (fastest, least invasive)
-        direct_success = MegatronAdapter._try_direct_injection(backend_args)
-
-        # Strategy 2: Always patch parse_args as well (most reliable)
-        patch_success = MegatronAdapter._patch_parse_args(backend_args)
-
-        if direct_success:
-            log_rank_0("Args injected via both direct assignment and parse_args patching")
-        elif patch_success:
-            log_rank_0("Args injected via parse_args patching only")
-        else:
-            log_rank_0("WARNING: All injection strategies failed")
-            return False
-
-        return True
-
-    @staticmethod
-    def _try_direct_injection(backend_args: SimpleNamespace) -> bool:
-        """
-        Try to directly inject args into Megatron's global state.
-
-        Args:
-            backend_args: Megatron argument namespace
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            from megatron.training import global_vars  # type: ignore
-
-            # Try to set directly (some versions have _GLOBAL_ARGS)
-            if hasattr(global_vars, "_GLOBAL_ARGS"):
-                global_vars._GLOBAL_ARGS = backend_args
-                return True
-            elif hasattr(global_vars, "_set_args"):
-                global_vars._set_args(backend_args)
-                return True
-            else:
-                return False
-        except (ImportError, AttributeError) as e:
-            log_rank_0(f"Cannot directly inject args: {e}")
-            return False
-
-    @staticmethod
-    def _patch_parse_args(backend_args: SimpleNamespace) -> bool:
-        """
-        Monkey patch Megatron's parse_args to return our prepared args.
-
-        This is the most reliable way to inject args because:
-        1. Works with all Megatron versions
-        2. Intercepts parse_args() wherever it's called
-        3. Allows us to add custom logic (e.g., argument validation)
-
-        Args:
-            backend_args: Megatron argument namespace
-
-        Returns:
-            True if patching succeeded, False otherwise
-        """
-        try:
-            import megatron.training.arguments as megatron_args  # type: ignore
-            import megatron.training.initialize as megatron_init  # type: ignore
-
-            # Create a function that always returns our prepared args
-            def patched_parse_args(*args, **kwargs):
-                log_rank_0("parse_args() called, returning pre-configured args")
-                return backend_args
-
-            # Patch both locations where parse_args might be defined/called
-            megatron_args.parse_args = patched_parse_args
-            megatron_init.parse_args = patched_parse_args
-
-            log_rank_0(f"Patched parse_args with {len(vars(backend_args))} arguments")
-            return True
-        except (ImportError, AttributeError) as e:
-            log_rank_0(f"WARNING: Cannot patch parse_args: {e}")
-            return False
+    # Note: Use default create_trainer() from BackendAdapter
+    # Megatron-specific logic (arg injection) is handled in MegatronBaseTrainer

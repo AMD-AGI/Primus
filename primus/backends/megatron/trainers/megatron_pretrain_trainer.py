@@ -10,26 +10,26 @@ MegatronPretrainTrainer: Primus wrapper for Megatron-LM pre-training.
 This trainer bridges Primus configuration system with Megatron-LM's training loop.
 """
 
-import sys
 from types import SimpleNamespace
 
 from primus.backends.megatron.patches import apply_megatron_patches
+from primus.backends.megatron.trainers.megatron_base_trainer import MegatronBaseTrainer
 from primus.core.config.primus_config import ModuleConfig, PrimusConfig
-from primus.core.trainer.base_module import BaseModule
 from primus.core.utils.distributed_logging import log_rank_0
 
 
-class MegatronPretrainTrainer(BaseModule):
+class MegatronPretrainTrainer(MegatronBaseTrainer):
     """
     Trainer class for Megatron-LM pre-training.
 
-    Responsibilities:
-        1. Accept Primus configs and Megatron args
-        2. Initialize Megatron training environment
-        3. Execute Megatron's pretrain() function
+    Inherits from MegatronBaseTrainer which handles:
+        - Argument injection into Megatron runtime
+        - Common Megatron initialization patterns
 
-    This is a lightweight wrapper that delegates to Megatron-LM's native
-    training logic while maintaining Primus's configuration interface.
+    This class only needs to implement:
+        - setup(): Pre-initialization setup (optional)
+        - init(): Training-specific initialization
+        - run(): Execute training loop
     """
 
     def __init__(
@@ -39,21 +39,19 @@ class MegatronPretrainTrainer(BaseModule):
         backend_args: SimpleNamespace,
     ):
         """
-        Initialize Megatron trainer.
+        Initialize Megatron pretrain trainer.
 
         Args:
             primus_config: Full Primus configuration
             module_config: Module-specific configuration
             backend_args: Megatron-LM argument namespace (from MegatronArgBuilder)
         """
-        # Initialize BaseModule (auto-detects distributed params from env vars)
+        # Initialize base class (handles argument injection)
         super().__init__(
-            module_name=module_config.module,
             primus_config=primus_config,
+            module_config=module_config,
+            backend_args=backend_args,
         )
-
-        # Store backend-specific args
-        self.backend_args = backend_args
 
         # Training components (will be set during training)
         self.model = None
@@ -76,16 +74,14 @@ class MegatronPretrainTrainer(BaseModule):
         Initialize Megatron training components.
 
         Note:
-            MegatronAdapter has already injected backend_args into Megatron's
-            runtime in create_trainer(). This method can focus on trainer-specific
-            initialization if needed.
+            Argument injection is already done by MegatronBaseTrainer.__init__()
+            This method can be used for trainer-specific initialization.
         """
         log_rank_0(f"Initializing Megatron training...")
         log_rank_0(f"Model: {self.module_config.model or 'custom'}")
         log_rank_0(f"Framework: {self.module_config.framework}")
 
         # Trainer-specific initialization can go here if needed
-        # Argument injection is already handled by MegatronAdapter.create_trainer()
 
     def run(self):
         """
@@ -163,51 +159,3 @@ class MegatronPretrainTrainer(BaseModule):
         )
 
         log_rank_0("Training completed successfully.")
-
-    def _set_args_via_argv(self):
-        """
-        Fallback method: Convert backend_args to sys.argv format.
-
-        Used when we cannot directly inject args into Megatron's global state.
-        This converts the SimpleNamespace back to command-line format.
-        """
-        argv_list = ["megatron_pretrain"]  # Script name
-
-        # Convert all backend_args to command-line arguments
-        for key, value in vars(self.backend_args).items():
-            if value is None:
-                continue
-
-            # Convert to command-line format (underscore to hyphen)
-            arg_name = key.replace("_", "-")
-
-            # Handle different value types
-            if isinstance(value, bool):
-                # Boolean flags: only add if True
-                if value:
-                    argv_list.append(f"--{arg_name}")
-            elif isinstance(value, (list, tuple)):
-                # Lists: add each element
-                argv_list.append(f"--{arg_name}")
-                for item in value:
-                    argv_list.append(str(item))
-            else:
-                # Regular values: add key and value
-                argv_list.append(f"--{arg_name}")
-                argv_list.append(str(value))
-
-        # Replace sys.argv
-        self._original_argv = sys.argv
-        sys.argv = argv_list
-        log_rank_0(f"Set sys.argv with {len(argv_list)} arguments")
-
-    def _detect_version(self) -> str:
-        """Detect Megatron version."""
-        try:
-            import megatron
-
-            if hasattr(megatron, "__version__"):
-                return megatron.__version__
-        except Exception:
-            pass
-        return "unknown"
