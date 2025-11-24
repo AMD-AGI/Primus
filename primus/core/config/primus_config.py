@@ -263,8 +263,8 @@ class PrimusConfig:
         return self._exp_root_path
 
     @property
-    def config_meta_info(self) -> dict:
-        """Workspace metadata (work_group, user_name, exp_name)."""
+    def exp_meta_info(self) -> dict:
+        """Experiment metadata (work_group, user_name, exp_name)."""
         return {
             "work_group": self._work_group,
             "user_name": self._user_name,
