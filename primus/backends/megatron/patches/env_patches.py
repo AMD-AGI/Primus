@@ -51,33 +51,3 @@ def set_cuda_device_max_connections(ctx: PatchContext):
     # Set environment variable
     os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = cuda_connections
     print(f"[Patch] Set CUDA_DEVICE_MAX_CONNECTIONS={cuda_connections} (FSDP={use_fsdp})")
-
-
-# ============================================================================
-# ROCm-Specific Environment Variables
-# ============================================================================
-
-
-@register_patch(
-    "megatron.env.rocm_optimization",
-    backend="megatron",
-    phase="before_import_backend",
-    description="Set ROCm-specific environment variables for optimal performance",
-)
-def set_rocm_env_vars(ctx: PatchContext):
-    """
-    Set ROCm-specific environment variables.
-
-    These variables optimize ROCm performance for Megatron workloads.
-    """
-    rocm_vars = {
-        # Enable async memory operations
-        "HSA_ENABLE_SDMA": "0",
-        # Optimize kernel launch
-        "GPU_MAX_HW_QUEUES": "8",
-    }
-
-    for key, value in rocm_vars.items():
-        if key not in os.environ:
-            os.environ[key] = value
-            print(f"[Patch] Set {key}={value}")
