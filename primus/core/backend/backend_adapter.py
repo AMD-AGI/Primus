@@ -74,29 +74,13 @@ class BackendAdapter(ABC):
             - instantiate trainer
         """
 
-        # Step 1: backend env/patch/detect
+        # 1) backend env/patch/detect
         self.prepare_backend(module_config)
 
-        # Step 2: config translation
+        # 2) config translation
         backend_args = self.convert_config(module_config)
 
-        # Print backend args for debugging (one per line)
-        # print(f"\n{'='*80}")
-        # print(f"Backend Arguments ({self.framework}):")
-        # print(f"{'='*80}")
-        # if hasattr(backend_args, "__dict__"):
-        #     # SimpleNamespace or object with __dict__
-        #     for key, value in sorted(vars(backend_args).items()):
-        #         print(f"  {key:30s} = {value}")
-        # elif isinstance(backend_args, dict):
-        #     # Dictionary
-        #     for key, value in sorted(backend_args.items()):
-        #         print(f"  {key:30s} = {value}")
-        # else:
-        #     print(f"  {backend_args}")
-        # print(f"{'='*80}\n")
-
-        # Step 3: load trainer class from backend
+        # 3) load trainer class from backend
         TrainerClass = self.load_trainer_class()
 
         return TrainerClass(

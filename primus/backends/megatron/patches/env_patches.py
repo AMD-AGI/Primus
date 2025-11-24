@@ -12,7 +12,7 @@ Sets environment variables for optimal Megatron performance and compatibility.
 
 import os
 
-from primus.core.patches.patch_system import PatchContext, register_patch
+from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.distributed_logging import log_rank_0
 
 # ============================================================================

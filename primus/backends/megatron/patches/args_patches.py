@@ -16,7 +16,7 @@ Patches Megatron arguments for Primus-specific configurations:
 
 import os
 
-from primus.core.patches.patch_system import PatchContext, register_patch
+from primus.core.patches import PatchContext, register_patch
 
 
 @register_patch(

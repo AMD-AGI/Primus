@@ -10,7 +10,7 @@ Megatron MLflow Integration Patches
 Patches Megatron's training_log function to add MLflow logging support.
 """
 
-from primus.core.patches.patch_system import PatchContext, register_patch
+from primus.core.patches import PatchContext, register_patch
 
 
 @register_patch(
