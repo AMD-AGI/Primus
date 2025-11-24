@@ -73,6 +73,8 @@ def launch_train(args, overrides, module: str):
     # 2 Load PrimusConfig (must come before distributed init as it needs platform info)
     primus_cfg = PrimusConfig.from_file(cfg_path, args)
 
+    print(f"-------------------- {primus_cfg}")
+
     # 2.5 Set global variables (needed for platform detection in distributed init)
     set_global_variables(primus_cfg)
 

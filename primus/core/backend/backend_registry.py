@@ -24,7 +24,7 @@
 
 from typing import Callable, Dict, List, Type
 
-from primus.core.utils.distributed_logging import log_rank_0
+from primus.core.utils.distributed_logging import error_rank_0, log_rank_0
 
 
 class BackendRegistry:
@@ -251,11 +251,11 @@ class BackendRegistry:
             module_path = f"primus.backends.{backend}"
             importlib.import_module(module_path)
             return True
-        except ModuleNotFoundError:
-            # Backend not installed, ignore silently
-            return False
+        # except ModuleNotFoundError:
+        #     # Backend not installed, ignore silently
+        #     return False
         except Exception as e:
-            print(f"[Primus] Warning: Failed to load backend '{backend}': {e}")
+            error_rank_0(f"[Primus] Warning: Failed to load backend '{backend}': {e}")
             return False
 
     @classmethod
