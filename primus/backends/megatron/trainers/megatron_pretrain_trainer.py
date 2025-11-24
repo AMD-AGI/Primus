@@ -13,6 +13,7 @@ This trainer bridges Primus configuration system with Megatron-LM's training loo
 import sys
 from types import SimpleNamespace
 
+from primus.backends.megatron.adapters.megatron_adapter import MegatronAdapter
 from primus.backends.megatron.patches import apply_megatron_patches
 from primus.core.config.primus_config import ModuleConfig, PrimusConfig
 from primus.core.trainer.base_module import BaseModule
@@ -80,78 +81,19 @@ class MegatronPretrainTrainer(BaseModule):
             - Filled in Megatron defaults
             - Produced a complete SimpleNamespace
 
-        We inject this prepared args into Megatron using two strategies:
-            1. Direct injection: Set global_vars._GLOBAL_ARGS (if available)
-            2. Monkey patch: Replace parse_args() to return our args
-
-        Strategy 2 (monkey patch) is more robust as it intercepts any
-        parse_args() calls that might happen in pretrain().
+        We inject this prepared args into Megatron using the adapter's
+        inject_args() method, which handles multiple injection strategies.
         """
         log_rank_0(f"Initializing Megatron training...")
         log_rank_0(f"Model: {self.module_config.model or 'custom'}")
         log_rank_0(f"Framework: {self.module_config.framework}")
 
-        # Strategy 1: Try direct injection first (fastest, least invasive)
-        direct_injection_success = self._try_direct_injection()
+        # Use MegatronAdapter's shared injection logic
+        # This works for pretrain, sft, posttrain, and any future Megatron trainers
+        success = MegatronAdapter.inject_args(self.backend_args)
 
-        # Strategy 2: Always patch parse_args as well (most reliable)
-        # This ensures that if pretrain() calls parse_args(), it gets our args
-        self._patch_parse_args()
-
-        if direct_injection_success:
-            log_rank_0("Args injected via both direct assignment and parse_args patching")
-        else:
-            log_rank_0("Args injected via parse_args patching only")
-
-    def _try_direct_injection(self) -> bool:
-        """
-        Try to directly inject args into Megatron's global state.
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            from megatron.training import global_vars  # type: ignore
-
-            # Try to set directly (some versions have _GLOBAL_ARGS)
-            if hasattr(global_vars, "_GLOBAL_ARGS"):
-                global_vars._GLOBAL_ARGS = self.backend_args
-                return True
-            elif hasattr(global_vars, "_set_args"):
-                global_vars._set_args(self.backend_args)
-                return True
-            else:
-                return False
-        except (ImportError, AttributeError) as e:
-            log_rank_0(f"Cannot directly inject args: {e}")
-            return False
-
-    def _patch_parse_args(self):
-        """
-        Monkey patch Megatron's parse_args to return our prepared args.
-
-        This is the most reliable way to inject args because:
-        1. Works with all Megatron versions
-        2. Intercepts parse_args() wherever it's called
-        3. Allows us to add custom logic (e.g., argument validation)
-        """
-        try:
-            import megatron.training.arguments as megatron_args  # type: ignore
-            import megatron.training.initialize as megatron_init  # type: ignore
-
-            # Create a function that always returns our prepared args
-            def patched_parse_args(*args, **kwargs):
-                log_rank_0("parse_args() called, returning pre-configured args")
-                return self.backend_args
-
-            # Patch both locations where parse_args might be defined/called
-            megatron_args.parse_args = patched_parse_args
-            megatron_init.parse_args = patched_parse_args
-
-            log_rank_0(f"Patched parse_args with {len(vars(self.backend_args))} arguments")
-        except (ImportError, AttributeError) as e:
-            log_rank_0(f"WARNING: Cannot patch parse_args: {e}")
-            # If we can't patch, we'll need sys.argv fallback
+        if not success:
+            log_rank_0("WARNING: Argument injection failed, using sys.argv fallback")
             self._set_args_via_argv()
 
     def run(self):
