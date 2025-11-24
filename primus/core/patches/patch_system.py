@@ -39,7 +39,7 @@ Usage:
     # 2. Execute patches
     run_patches(
         backend="megatron",
-        phase="before_train",
+        phase="before_train",  # Can also use legacy names like "before_import_backend"
         backend_version="0.8.0",
         model_name="deepseek_v3",
         extra={"args": megatron_args},
@@ -67,19 +67,23 @@ class PatchContext:
 
     Attributes:
         backend: Backend name (e.g., "megatron", "torchtitan")
-        phase: Execution phase (e.g., "before_import", "before_train")
+        phase: Execution phase (e.g., "setup", "build_args", "before_train")
         backend_version: Backend version (e.g., "0.8.0", "commit:abc123")
         primus_version: Primus version (optional)
         model_name: Model name (e.g., "llama3_70B", "deepseek_v3")
         extra: Additional context data (e.g., {"args": megatron_args})
 
-    Phases:
-        - "before_import_backend": Before importing backend modules
-        - "after_import_backend": After importing backend modules
-        - "before_build_args": Before building backend arguments
-        - "after_build_args": After building backend arguments
-        - "before_train": Before starting training
-        - "after_train": After training completes
+    Phases (Simplified):
+        - "setup": Environment preparation (set env vars, configure runtime)
+        - "build_args": Argument building (modify config/args during build process)
+        - "before_train": Before starting training (hook training logic)
+
+    Legacy Phase Mapping (for backward compatibility):
+        - "before_import_backend" → "setup"
+        - "after_import_backend" → "setup"
+        - "before_build_args" → "build_args"
+        - "after_build_args" → "build_args"
+        - "after_train" → removed (no use case)
     """
 
     backend: str
@@ -88,6 +92,60 @@ class PatchContext:
     primus_version: Optional[str] = None
     model_name: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)
+
+
+# ============================================================================
+# Phase Constants and Mapping
+# ============================================================================
+
+# Simplified phases (only 3 phases)
+PHASES = [
+    "setup",  # Environment preparation
+    "build_args",  # Argument building
+    "before_train",  # Before training starts
+]
+
+# Legacy phase mapping (for backward compatibility)
+PHASE_ALIASES = {
+    "before_import_backend": "setup",
+    "after_import_backend": "setup",
+    "before_build_args": "build_args",
+    "after_build_args": "build_args",
+    "after_train": None,  # Removed (no use case)
+}
+
+
+def normalize_phase(phase: str) -> str:
+    """
+    Normalize phase name using alias mapping.
+
+    Args:
+        phase: Original phase name
+
+    Returns:
+        Normalized phase name
+
+    Raises:
+        ValueError: If phase is invalid
+    """
+    # Check if it's already a valid phase
+    if phase in PHASES:
+        return phase
+
+    # Check if it's a legacy phase
+    if phase in PHASE_ALIASES:
+        normalized = PHASE_ALIASES[phase]
+        if normalized is None:
+            raise ValueError(f"Phase '{phase}' has been removed. " f"Valid phases are: {', '.join(PHASES)}")
+        log.debug(f"[PatchSystem] Normalized legacy phase '{phase}' → '{normalized}'")
+        return normalized
+
+    # Invalid phase
+    raise ValueError(
+        f"Invalid phase '{phase}'. "
+        f"Valid phases are: {', '.join(PHASES)}. "
+        f"Legacy phases: {', '.join(PHASE_ALIASES.keys())}"
+    )
 
 
 # ============================================================================
@@ -284,7 +342,8 @@ def run_patches(
 
     Args:
         backend: Backend name (e.g., "megatron", "torchtitan")
-        phase: Execution phase (e.g., "before_train")
+        phase: Execution phase (e.g., "setup", "build_args", "before_train")
+                Legacy phases are automatically normalized
         backend_version: Backend version (e.g., "0.8.0")
         primus_version: Primus version
         model_name: Model name (e.g., "llama3_70B")
@@ -300,10 +359,13 @@ def run_patches(
         - PRIMUS_PATCHES="none": Disable all patches
         - PRIMUS_PATCHES="patch1,patch2": Enable only specified patches
     """
+    # Normalize phase (handles legacy phase names)
+    normalized_phase = normalize_phase(phase)
+
     # Create context
     ctx = PatchContext(
         backend=backend,
-        phase=phase,
+        phase=normalized_phase,
         backend_version=backend_version,
         primus_version=primus_version,
         model_name=model_name,
@@ -314,8 +376,10 @@ def run_patches(
     if enabled_ids is None:
         enabled_ids = _parse_enabled_patches_from_env()
 
+    # Log execution (show phase normalization if applicable)
+    phase_info = f"{phase}" if phase == normalized_phase else f"{phase} → {normalized_phase}"
     log.debug(
-        f"[PatchSystem] Running patches: backend={backend}, phase={phase}, "
+        f"[PatchSystem] Running patches: backend={backend}, phase={phase_info}, "
         f"version={backend_version}, model={model_name}, enabled={enabled_ids}"
     )
 
@@ -347,10 +411,10 @@ def run_patches(
 
     if applied_count > 0:
         log.info(
-            f"[PatchSystem] Applied {applied_count} patches for {backend}/{phase}: {', '.join(applied_patches)}"
+            f"[PatchSystem] Applied {applied_count} patches for {backend}/{normalized_phase}: {', '.join(applied_patches)}"
         )
     else:
-        log.debug(f"[PatchSystem] No patches applied for {backend}/{phase}")
+        log.debug(f"[PatchSystem] No patches applied for {backend}/{normalized_phase}")
 
     return applied_count
 

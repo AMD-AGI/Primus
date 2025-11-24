@@ -57,18 +57,12 @@ class MegatronAdapter(BackendAdapter):
         megatron_version = self._detect_megatron_version()
         model_name = config.model if hasattr(config, "model") else None
 
-        # Phase 1: Before importing backend
+        # Phase: Setup environment
         apply_megatron_patches(
             backend_version=megatron_version,
             model_name=model_name,
-            phase="before_import_backend",
-        )
-
-        # Phase 2: After importing backend
-        apply_megatron_patches(
-            backend_version=megatron_version,
-            model_name=model_name,
-            phase="after_import_backend",
+            phase="setup",
+            extra={"config": config.params if hasattr(config, "params") else {}},
         )
 
         print(f"[Primus:MegatronAdapter] Backend prepared (version: {megatron_version})")
@@ -120,11 +114,11 @@ class MegatronAdapter(BackendAdapter):
         megatron_version = self._detect_megatron_version()
         model_name = module_config.model if hasattr(module_config, "model") else None
 
-        # Phase: Before building args
+        # Phase: Build args (before and during arg building)
         apply_megatron_patches(
             backend_version=megatron_version,
             model_name=model_name,
-            phase="before_build_args",
+            phase="build_args",
             extra={"config": module_config.params},
         )
 
@@ -138,12 +132,11 @@ class MegatronAdapter(BackendAdapter):
         # 3. Produce the final Megatron Namespace
         megatron_args = builder.finalize()
 
-        # Phase: After building args
-        # Pass args and config (which includes Primus metadata) to patches
+        # Phase: Build args (after arg building - patches can modify args)
         apply_megatron_patches(
             backend_version=megatron_version,
             model_name=model_name,
-            phase="after_build_args",
+            phase="build_args",
             extra={
                 "args": megatron_args,
                 "config": module_config.params,  # Contains Primus metadata

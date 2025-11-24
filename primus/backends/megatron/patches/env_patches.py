@@ -23,7 +23,7 @@ from primus.core.utils.distributed_logging import log_rank_0
 @register_patch(
     "megatron.env.cuda_device_max_connections",
     backend="megatron",
-    phase="before_import_backend",
+    phase="setup",
     description="Set CUDA_DEVICE_MAX_CONNECTIONS based on FSDP configuration",
 )
 def set_cuda_device_max_connections(ctx: PatchContext):
