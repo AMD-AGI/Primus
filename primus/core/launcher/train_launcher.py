@@ -73,7 +73,7 @@ def launch_train(args, overrides, module: str):
     # 2 Load PrimusConfig (must come before distributed init as it needs platform info)
     primus_cfg = PrimusConfig.from_file(cfg_path, args)
 
-    print(f"-------------------- {primus_cfg}")
+    # print(f"-------------------- {primus_cfg}")
 
     # 2.5 Set global variables (needed for platform detection in distributed init)
     set_global_variables(primus_cfg)
@@ -100,10 +100,7 @@ def launch_train(args, overrides, module: str):
         override_dict = parse_cli_overrides(overrides)
         train_cfg.params = deep_merge(train_cfg.params, override_dict)
 
-    from primus.core.utils.distributed_logging import log_rank_0
-
-    log_rank_0(f"--------------------00000 {train_cfg.params}")
-
+    # log_rank_0(f"--------------------00000 {train_cfg.params}")
     # 7 Validate framework is specified
     framework = train_cfg.framework
     if not framework:

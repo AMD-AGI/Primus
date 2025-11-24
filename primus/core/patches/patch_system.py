@@ -320,27 +320,37 @@ def run_patches(
     )
 
     applied_count = 0
+    applied_patches = []
 
     for patch in PatchRegistry.iter_patches():
         # Filter by enabled_ids
         if enabled_ids is not None and patch.id not in enabled_ids:
+            log.debug(f"[PatchSystem] Skipped {patch.id} (not in enabled list)")
             continue
 
         # Check if patch applies
         if not patch.applies_to(ctx):
+            log.debug(f"[PatchSystem] Skipped {patch.id} (does not apply to context)")
             continue
 
         # Apply patch
         try:
+            log.debug(f"[PatchSystem] Applying {patch.id}: {patch.description}")
             patch.apply(ctx)
             applied_count += 1
+            applied_patches.append(patch.id)
+            log.info(f"[PatchSystem] ✓ Applied patch: {patch.id}")
         except Exception as e:
-            log.exception(f"[PatchSystem] Patch {patch.id} failed: {e}")
+            log.exception(f"[PatchSystem] ✗ Patch {patch.id} failed: {e}")
             # Continue with other patches (non-fatal)
             continue
 
     if applied_count > 0:
-        log.info(f"[PatchSystem] Applied {applied_count} patches for {backend}/{phase}")
+        log.info(
+            f"[PatchSystem] Applied {applied_count} patches for {backend}/{phase}: {', '.join(applied_patches)}"
+        )
+    else:
+        log.debug(f"[PatchSystem] No patches applied for {backend}/{phase}")
 
     return applied_count
 
