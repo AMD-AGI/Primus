@@ -13,7 +13,6 @@ def parse_yaml(path: str) -> dict:
     cfg = _load_yaml(path)
     cfg = _resolve_env(cfg)
     cfg = _apply_extends(path, cfg)  # main logic (deep merge presets)
-    print(f"--------------------11111 {cfg}")
     return cfg or {}
 
 
