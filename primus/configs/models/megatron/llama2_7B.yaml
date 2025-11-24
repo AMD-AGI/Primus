@@ -1,7 +1,7 @@
 extends:
   - llama2_base.yaml
 
-tokenizer_type: Llama2Tokenizer
+tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: meta-llama/Llama-2-7b-hf
 
 group_query_attention: false

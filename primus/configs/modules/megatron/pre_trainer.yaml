@@ -46,3 +46,5 @@ use_flash_attn: true
 bf16: true
 use_distributed_optimizer: true
 distributed_timeout_minutes: 60
+
+mock_data: true
