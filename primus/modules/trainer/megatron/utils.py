@@ -448,7 +448,7 @@ def validate_args_on_rocm(args):
 
     # Turbo FP8 linear check
     if args.fp8 and args.use_turbo_parallel_linear:
-        support_fp8_recipe = ["tensorwise", "blockwise"]
+        support_fp8_recipe = ["tensorwise", "blockwise", "mxfp8"]
         assert (
             args.fp8_recipe in support_fp8_recipe
         ), f"{args.fp8_recipe} recipe is not support when enable `use_turbo_parallel_linear`."

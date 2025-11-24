@@ -6,7 +6,10 @@
 
 import torch
 import torch.nn as nn
-from primus_turbo.pytorch.core.float8 import Float8QuantConfig, ScalingGranularity
+from primus_turbo.pytorch.core.low_precision import (
+    Float8QuantConfig,
+    ScalingGranularity,
+)
 from primus_turbo.pytorch.modules import Float8Linear
 from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims

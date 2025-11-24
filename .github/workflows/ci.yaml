@@ -10,7 +10,8 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 70b76508408474f254ac048cef2005179c6cb55b # fix(deepep): fix internode_combine hang when set num_worst_token > 0 (#149)
+  PRIMUS_TURBO_COMMIT: 675fcdc3eef50fae2d869206ad5be0738138d940 # feat: add float4x2_e2m1 and float8_m8m0 data type (#156)
+
 jobs:
   code-lint:
     runs-on: ubuntu-latest
