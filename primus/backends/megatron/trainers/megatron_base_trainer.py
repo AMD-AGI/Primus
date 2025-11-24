@@ -61,10 +61,8 @@ class MegatronBaseTrainer(BaseModule):
             )
         log_rank_0("Args injected via parse_args patching")
 
-        # Apply AMD-specific runtime patches if running on AMD GPUs
-        if self._is_amd_gpu():
-            self._patch_megatron_runtime_hooks()
-            log_rank_0("Applied AMD-specific Megatron runtime patches")
+        # Apply AMD GPU runtime patches (Primus only supports AMD GPUs)
+        self._patch_megatron_runtime_hooks()
 
     def _patch_parse_args(self) -> bool:
         """
@@ -122,53 +120,22 @@ class MegatronBaseTrainer(BaseModule):
             pass
         return "unknown"
 
-    def _is_amd_gpu(self) -> bool:
-        """
-        Detect if running on AMD GPUs.
-
-        Returns:
-            True if AMD GPU is detected, False otherwise
-        """
-        try:
-            import torch
-
-            # Check if CUDA is available and if it's actually ROCm
-            if torch.cuda.is_available():
-                # ROCm PyTorch reports cuda.is_available() as True
-                # Check for ROCm-specific attributes
-                if hasattr(torch.version, "hip"):
-                    return True
-                # Alternative: check device name
-                device_name = torch.cuda.get_device_name(0).lower()
-                if "amd" in device_name or "radeon" in device_name or "mi" in device_name:
-                    return True
-        except Exception as e:
-            log_rank_0(f"WARNING: Failed to detect GPU type: {e}")
-
-        return False
-
     def _patch_megatron_runtime_hooks(self):
         """
-        Apply AMD-specific patches to Megatron runtime.
+        Apply runtime patches to Megatron for ROCm compatibility.
 
-        This patches Megatron functions that are CUDA-specific and cause
-        issues on AMD GPUs (e.g., fused kernel compilation).
+        Primus only supports AMD GPUs with ROCm. This method patches
+        Megatron functions that try to compile CUDA-specific kernels.
         """
         try:
             import megatron.training.initialize as megatron_initialize  # type: ignore
 
-            # Skip CUDA fused kernel compilation for AMD GPUs
-            # This is required because Megatron tries to compile CUDA kernels
-            # that are not compatible with ROCm
-            getattr(megatron_initialize, "_compile_dependencies", None)
-
+            # Skip CUDA fused kernel compilation (not compatible with ROCm)
             def skip_compile_dependencies():
-                log_rank_0("Skipped Megatron _compile_dependencies() (AMD GPU detected)")
-                # Don't call the original function
+                log_rank_0("Skipped Megatron _compile_dependencies() for ROCm compatibility")
 
             megatron_initialize._compile_dependencies = skip_compile_dependencies
-
-            log_rank_0("Patched _compile_dependencies for AMD GPU compatibility")
+            log_rank_0("Applied Megatron runtime patches for ROCm")
 
         except (ImportError, AttributeError) as e:
             log_rank_0(f"WARNING: Failed to patch Megatron runtime hooks: {e}")
