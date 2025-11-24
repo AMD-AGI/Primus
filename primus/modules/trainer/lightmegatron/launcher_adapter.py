@@ -9,13 +9,13 @@ import os
 from argparse import ArgumentParser, Namespace
 from types import SimpleNamespace
 
+from primus.core.runtime.distributed import get_distributed_info
 from primus.core.utils import checker
 from primus.core.utils.distributed_logging import (
     log_kv_rank_0,
     log_rank_0,
     warning_rank_0,
 )
-from primus.core.utils.env_setup import get_torchrun_env
 
 
 class MegatronLauncherAdapter:
@@ -49,7 +49,7 @@ class MegatronLauncherAdapter:
         import megatron.training.arguments as megatron_args
         import megatron.training.initialize as megatron_init
 
-        dist_env = get_torchrun_env()
+        dist_env = get_distributed_info()
         self.known_args.world_size = dist_env["world_size"]
         self.known_args.rank = dist_env["rank"]
         self.known_args.local_rank = dist_env["local_rank"]
