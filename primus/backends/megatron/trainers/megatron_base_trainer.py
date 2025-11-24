@@ -53,27 +53,12 @@ class MegatronBaseTrainer(BaseModule):
         # Store backend-specific args
         self.backend_args = backend_args
 
-        # Inject arguments into Megatron runtime
-        self._inject_megatron_args()
-
-    def _inject_megatron_args(self):
-        """
-        Inject backend_args into Megatron's runtime.
-
-        We only use parse_args() patching strategy to avoid conflicts with
-        Megatron's initialize_megatron() which checks if args are already initialized.
-
-        Raises:
-            RuntimeError: If patching fails
-        """
+        # Inject arguments into Megatron runtime by patching parse_args()
         log_rank_0("Injecting arguments into Megatron runtime...")
-
-        # Patch parse_args() to return our pre-configured args
         if not self._patch_parse_args():
             raise RuntimeError(
                 "Failed to patch Megatron's parse_args(). " "Cannot inject arguments into Megatron runtime."
             )
-
         log_rank_0("Args injected via parse_args patching")
 
     def _patch_parse_args(self) -> bool:
