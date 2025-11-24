@@ -80,21 +80,22 @@ class BackendAdapter(ABC):
         # Step 2: config translation
         backend_args = self.convert_config(module_config)
 
+        print(f"*************** {backend_args.__dict__}")
         # Print backend args for debugging (one per line)
-        print(f"\n{'='*80}")
-        print(f"Backend Arguments ({self.framework}):")
-        print(f"{'='*80}")
-        if hasattr(backend_args, "__dict__"):
-            # SimpleNamespace or object with __dict__
-            for key, value in sorted(vars(backend_args).items()):
-                print(f"  {key:30s} = {value}")
-        elif isinstance(backend_args, dict):
-            # Dictionary
-            for key, value in sorted(backend_args.items()):
-                print(f"  {key:30s} = {value}")
-        else:
-            print(f"  {backend_args}")
-        print(f"{'='*80}\n")
+        # print(f"\n{'='*80}")
+        # print(f"Backend Arguments ({self.framework}):")
+        # print(f"{'='*80}")
+        # if hasattr(backend_args, "__dict__"):
+        #     # SimpleNamespace or object with __dict__
+        #     for key, value in sorted(vars(backend_args).items()):
+        #         print(f"  {key:30s} = {value}")
+        # elif isinstance(backend_args, dict):
+        #     # Dictionary
+        #     for key, value in sorted(backend_args.items()):
+        #         print(f"  {key:30s} = {value}")
+        # else:
+        #     print(f"  {backend_args}")
+        # print(f"{'='*80}\n")
 
         # Step 3: load trainer class from backend
         TrainerClass = self.load_trainer_class()

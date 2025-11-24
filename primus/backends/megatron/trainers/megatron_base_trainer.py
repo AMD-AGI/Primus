@@ -61,49 +61,25 @@ class MegatronBaseTrainer(BaseModule):
         """
         Inject backend_args into Megatron's runtime.
 
-        This uses multiple strategies to ensure arguments are properly set:
-        1. Direct injection into global_vars
-        2. Monkey patch parse_args()
-        3. Fallback to sys.argv conversion
+        We only use parse_args() patching strategy to avoid conflicts with
+        Megatron's initialize_megatron() which checks if args are already initialized.
+
+        Strategy:
+        - Monkey patch parse_args() to return our prepared args
+        - Fallback to sys.argv conversion if patching fails
         """
         log_rank_0("Injecting arguments into Megatron runtime...")
 
-        # Strategy 1: Try direct injection
-        direct_success = self._try_direct_injection()
-
-        # Strategy 2: Patch parse_args()
+        # Only use parse_args patching (not direct injection)
+        # Direct injection causes "args is already initialized" error
+        # when Megatron's pretrain() calls initialize_megatron()
         patch_success = self._patch_parse_args()
 
-        if direct_success:
-            log_rank_0("Args injected via both direct assignment and parse_args patching")
-        elif patch_success:
-            log_rank_0("Args injected via parse_args patching only")
+        if patch_success:
+            log_rank_0("Args injected via parse_args patching")
         else:
-            log_rank_0("WARNING: All injection strategies failed, using sys.argv fallback")
+            log_rank_0("WARNING: parse_args patching failed, using sys.argv fallback")
             self._set_args_via_argv()
-
-    def _try_direct_injection(self) -> bool:
-        """
-        Try to directly inject args into Megatron's global state.
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            from megatron.training import global_vars  # type: ignore
-
-            # Try to set directly (some versions have _GLOBAL_ARGS)
-            if hasattr(global_vars, "_GLOBAL_ARGS"):
-                global_vars._GLOBAL_ARGS = self.backend_args
-                return True
-            elif hasattr(global_vars, "_set_args"):
-                global_vars._set_args(self.backend_args)
-                return True
-            else:
-                return False
-        except (ImportError, AttributeError) as e:
-            log_rank_0(f"Cannot directly inject args: {e}")
-            return False
 
     def _patch_parse_args(self) -> bool:
         """

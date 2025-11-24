@@ -100,6 +100,10 @@ def launch_train(args, overrides, module: str):
         override_dict = parse_cli_overrides(overrides)
         train_cfg.params = deep_merge(train_cfg.params, override_dict)
 
+    from primus.core.utils.distributed_logging import log_rank_0
+
+    log_rank_0(f"--------------------00000 {train_cfg.params}")
+
     # 7 Validate framework is specified
     framework = train_cfg.framework
     if not framework:

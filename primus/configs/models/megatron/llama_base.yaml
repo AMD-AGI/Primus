@@ -1,5 +1,5 @@
-includes:
-  - ../../modules/megatron/pretrain_module.yaml
+extends:
+  - ../../modules/megatron/pre_trainer.yaml
 
 group_query_attention: false
 num_query_groups: null
