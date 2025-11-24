@@ -11,7 +11,6 @@ This base class handles Megatron-specific initialization logic that is
 common across all Megatron training tasks (pretrain, sft, posttrain, etc.).
 """
 
-import sys
 from types import SimpleNamespace
 
 from primus.core.config.primus_config import ModuleConfig, PrimusConfig
@@ -64,22 +63,18 @@ class MegatronBaseTrainer(BaseModule):
         We only use parse_args() patching strategy to avoid conflicts with
         Megatron's initialize_megatron() which checks if args are already initialized.
 
-        Strategy:
-        - Monkey patch parse_args() to return our prepared args
-        - Fallback to sys.argv conversion if patching fails
+        Raises:
+            RuntimeError: If patching fails
         """
         log_rank_0("Injecting arguments into Megatron runtime...")
 
-        # Only use parse_args patching (not direct injection)
-        # Direct injection causes "args is already initialized" error
-        # when Megatron's pretrain() calls initialize_megatron()
-        patch_success = self._patch_parse_args()
+        # Patch parse_args() to return our pre-configured args
+        if not self._patch_parse_args():
+            raise RuntimeError(
+                "Failed to patch Megatron's parse_args(). " "Cannot inject arguments into Megatron runtime."
+            )
 
-        if patch_success:
-            log_rank_0("Args injected via parse_args patching")
-        else:
-            log_rank_0("WARNING: parse_args patching failed, using sys.argv fallback")
-            self._set_args_via_argv()
+        log_rank_0("Args injected via parse_args patching")
 
     def _patch_parse_args(self) -> bool:
         """
@@ -125,43 +120,6 @@ class MegatronBaseTrainer(BaseModule):
         except (ImportError, AttributeError) as e:
             log_rank_0(f"WARNING: Cannot patch parse_args: {e}")
             return False
-
-    def _set_args_via_argv(self):
-        """
-        Fallback method: Convert backend_args to sys.argv format.
-
-        Used when we cannot directly inject args into Megatron's global state.
-        This converts the SimpleNamespace back to command-line format.
-        """
-        argv_list = ["megatron_trainer"]  # Script name
-
-        # Convert all backend_args to command-line arguments
-        for key, value in vars(self.backend_args).items():
-            if value is None:
-                continue
-
-            # Convert to command-line format (underscore to hyphen)
-            arg_name = key.replace("_", "-")
-
-            # Handle different value types
-            if isinstance(value, bool):
-                # Boolean flags: only add if True
-                if value:
-                    argv_list.append(f"--{arg_name}")
-            elif isinstance(value, (list, tuple)):
-                # Lists: add each element
-                argv_list.append(f"--{arg_name}")
-                for item in value:
-                    argv_list.append(str(item))
-            else:
-                # Regular values: add key and value
-                argv_list.append(f"--{arg_name}")
-                argv_list.append(str(value))
-
-        # Replace sys.argv
-        self._original_argv = sys.argv
-        sys.argv = argv_list
-        log_rank_0(f"Set sys.argv with {len(argv_list)} arguments")
 
     def _detect_version(self) -> str:
         """Detect Megatron version."""
