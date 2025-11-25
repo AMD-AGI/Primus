@@ -124,14 +124,21 @@ class MegatronBaseTrainer(BaseTrainer):
         Megatron version detection using the official method.
 
         Returns:
-            Megatron version string (e.g., "0.15.0rc8") or "unknown"
+            Megatron version string (e.g., "0.15.0rc8")
+
+        Raises:
+            RuntimeError: If version cannot be detected (critical requirement)
         """
         try:
             from megatron.core import package_info
 
             return package_info.__version__
-        except Exception:
-            return "unknown"
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to detect Megatron-LM version. "
+                "Please ensure Megatron-LM is properly installed and "
+                "megatron.core.package_info is available."
+            ) from e
 
     def _patch_megatron_runtime_hooks(self):
         """

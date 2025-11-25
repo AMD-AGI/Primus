@@ -174,19 +174,34 @@ class BaseTrainer(BaseModule):
         This method must be implemented by backend-specific trainers
         to provide accurate version detection for their backend.
 
+        Version detection is critical for:
+            - Applying version-specific patches
+            - Logging and debugging
+            - Ensuring compatibility
+
         Returns:
             Version string (e.g., "0.15.0rc8", "commit:abc123")
 
         Raises:
-            Can raise exceptions if version detection is critical.
-            Or return "unknown" if version is not available.
+            RuntimeError (or similar): If version detection fails and is critical.
+            Implementations should fail fast rather than silently return "unknown".
 
-        Example (MegatronBaseTrainer):
+        Example (MegatronBaseTrainer - fail fast):
             def detect_version(self) -> str:
                 try:
                     from megatron.core import package_info
                     return package_info.__version__
+                except Exception as e:
+                    raise RuntimeError(
+                        "Failed to detect Megatron-LM version. "
+                        "Please ensure Megatron-LM is properly installed."
+                    ) from e
+
+        Example (Optional backend - graceful fallback):
+            def detect_version(self) -> str:
+                try:
+                    return self.backend.get_version()
                 except Exception:
-                    return "unknown"
+                    return "unknown"  # Only if truly optional
         """
         raise NotImplementedError(f"{self.__class__.__name__} must implement detect_version()")
