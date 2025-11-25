@@ -81,6 +81,8 @@ modules:
 
       # Turbo
       enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
 
       # deepep
       use_turbo_deepep: false
@@ -93,5 +95,5 @@ modules:
       turbo_sync_free_moe_stage: 1
 
       # Cross entropy flags
-      cross_entropy_fusion_impl: "te"
-      cross_entropy_loss_fusion: true
+      # cross_entropy_fusion_impl: "te"
+      # cross_entropy_loss_fusion: true

@@ -60,10 +60,11 @@ modules:
       moe_use_legacy_grouped_gemm: false
       # fused topk router with aux score
       moe_use_fused_router_with_aux_score: false
+      # MLA
+      multi_latent_attention: false
 
       # Performance toggles
       # multi_latent_attention: false
-      # apply_rope_fusion: true
 
       # ckpt
       finetune: false
@@ -83,10 +84,6 @@ modules:
       enable_primus_turbo: false
       use_turbo_attention: false
       use_turbo_grouped_mlp: false
-
-      # pipeline_model_parallel_layout: "Et|(tt|)*6L"
-      # pipeline_model_parallel_layout: "Ett|(tt|)*6ttL"
-      # pipeline_model_parallel_layout: "Ettt|(tt|)*6tL"
 
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"
