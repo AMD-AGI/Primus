@@ -70,9 +70,13 @@ class BackendAdapter(ABC):
         Detect backend version for version-specific patches.
 
         Returns:
-            Version string (e.g., "0.8.0", "commit:abc123", "unknown")
+            Version string (e.g., "0.8.0", "commit:abc123")
 
-        Subclasses must implement this method.
+        Raises:
+            RuntimeError: If version cannot be detected
+
+        Subclasses must implement this method and should fail fast
+        if version detection is not possible.
         """
 
     # ============================================================================

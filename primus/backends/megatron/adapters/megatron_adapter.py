@@ -62,14 +62,21 @@ class MegatronAdapter(BackendAdapter):
         Detect Megatron-LM version.
 
         Returns:
-            Version string (e.g., "0.15.0rc8") or "unknown"
+            Version string (e.g., "0.15.0rc8")
+
+        Raises:
+            RuntimeError: If version cannot be detected
         """
         try:
             from megatron.core import package_info
 
             return package_info.__version__
-        except Exception:
-            return "unknown"
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to detect Megatron-LM version. "
+                "Please ensure Megatron-LM is properly installed and "
+                "megatron.core.package_info is available."
+            ) from e
 
     # 2. Config → Megatron Args
     def convert_config(self, module_config):
