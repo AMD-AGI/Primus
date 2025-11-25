@@ -113,8 +113,10 @@ class MegatronBaseTrainer(BaseTrainer):
             # Log backend args in a formatted way (one parameter per line)
             log_rank_0("Backend args:")
             args_dict = vars(self.backend_args)
+            # Find the longest key for alignment
+            max_key_length = max(len(key) for key in args_dict.keys()) if args_dict else 0
             for key, value in sorted(args_dict.items()):
-                log_rank_0(f"  {key}: {value}")
+                log_rank_0(f"  {key:<{max_key_length}} : {value}")
 
             log_rank_0(
                 f"Patched parse_args with {len(vars(self.backend_args))} arguments "
