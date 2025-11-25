@@ -22,7 +22,6 @@ This class implements:
 
 from types import SimpleNamespace
 
-from primus.backends.megatron.version import detect_megatron_version
 from primus.core.config.primus_config import ModuleConfig, PrimusConfig
 from primus.core.trainer.base_trainer import BaseTrainer
 from primus.core.utils.distributed_logging import log_rank_0
@@ -120,10 +119,7 @@ class MegatronBaseTrainer(BaseTrainer):
     @classmethod
     def detect_version(cls) -> str:
         """
-        Detect Megatron-LM version.
-
-        Implements BaseTrainer.detect_version() by delegating to the shared
-        detect_megatron_version() utility.
+        Detect Megatron-LM version using the official method.
 
         Returns:
             Megatron version string (e.g., "0.15.0rc8")
@@ -131,7 +127,16 @@ class MegatronBaseTrainer(BaseTrainer):
         Raises:
             RuntimeError: If version cannot be detected (critical requirement)
         """
-        return detect_megatron_version()
+        try:
+            from megatron.core import package_info
+
+            return package_info.__version__
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to detect Megatron-LM version. "
+                "Please ensure Megatron-LM is properly installed and "
+                "megatron.core.package_info is available."
+            ) from e
 
     def _patch_megatron_runtime_hooks(self):
         """

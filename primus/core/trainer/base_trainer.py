@@ -190,8 +190,11 @@ class BaseTrainer(BaseModule):
         Example (MegatronBaseTrainer - fail fast):
             @classmethod
             def detect_version(cls) -> str:
-                from primus.backends.megatron.version import detect_megatron_version
-                return detect_megatron_version()
+                try:
+                    from megatron.core import package_info
+                    return package_info.__version__
+                except Exception as e:
+                    raise RuntimeError("Failed to detect Megatron-LM version") from e
 
         Example (Optional backend - graceful fallback):
             @classmethod
