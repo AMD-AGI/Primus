@@ -20,7 +20,6 @@
 
 
 from primus.backends.megatron.builders.argument_builder import MegatronArgBuilder
-from primus.backends.megatron.version import detect_megatron_version
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
 from primus.core.utils.distributed_logging import log_rank_0
@@ -62,8 +61,8 @@ class MegatronAdapter(BackendAdapter):
         """
         Detect Megatron-LM version.
 
-        Delegates to the shared detect_megatron_version() utility to ensure
-        consistency with MegatronBaseTrainer.
+        Delegates to the trainer class's detect_version() classmethod to ensure
+        consistency and proper separation of concerns.
 
         Returns:
             Version string (e.g., "0.15.0rc8")
@@ -71,7 +70,9 @@ class MegatronAdapter(BackendAdapter):
         Raises:
             RuntimeError: If version cannot be detected
         """
-        return detect_megatron_version()
+        # Get trainer class and call its detect_version classmethod
+        TrainerClass = self.load_trainer_class()
+        return TrainerClass.detect_version()
 
     # 2. Config → Megatron Args
     def convert_config(self, module_config):
