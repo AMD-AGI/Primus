@@ -286,8 +286,6 @@ export SKIP_TRAIN=0
     # --pp_warmup True \
 # bash ./examples/run_slurm_pretrain.sh \
 bash ./examples/run_pretrain.sh \
---num_layers 13 \
---moe_layer_freq 1 \
     --micro_batch_size "$MBS" \
     --global_batch_size "$GBS" \
     --seq_length "$SEQ_LENGTH" \

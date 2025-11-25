@@ -19,7 +19,7 @@ create_attention_mask_in_dataloader: false
 gradient_accumulation_fusion: true
 ```
 
-- Most of the zero-bubble flags are writted in `zero_bubble.yaml`, others reuse megatron flags. Here are some examples for config your prefer PP stratages
+- Most of the zero-bubble flags are written in `zero_bubble.yaml`, others reuse megatron flags. Here are some examples for config your prefer PP stratages
 
 | pp strategy / flag | num_virtual_stages_per_pipeline_rank | patch_zero_bubble | zero_bubble_v_schedule | zero_bubble_v_schedule_mem_setup |
 |---|---|---|---|---|

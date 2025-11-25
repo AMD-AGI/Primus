@@ -21,7 +21,7 @@ modules:
       log_avg_reset_interval: 50
       moe_router_dtype: fp32
 
-      # hyber parameters
+      # hyper parameters
       train_iters: 50
       micro_batch_size: 4
       global_batch_size: 256

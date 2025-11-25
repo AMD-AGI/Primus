@@ -154,8 +154,8 @@ if [ "$USING_AINIC" == "1" ]; then
     LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
     LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
     # unset NCCL_IB_GID_INDEX
-    export NCCL_IB_GID_INDEX=1 # TODO: unset or set to 1?
-    # export NCCL_IB_ROCE_VERSION_NUM=2 # TODO: set or not?
+    export NCCL_IB_GID_INDEX=1
+    # export NCCL_IB_ROCE_VERSION_NUM=2
     export NCCL_MAX_P2P_CHANNELS=56
     export NCCL_IB_TC=104
     export NCCL_IB_FIFO_TC=192
