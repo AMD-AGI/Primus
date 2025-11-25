@@ -68,6 +68,11 @@ class MegatronBaseTrainer(BaseTrainer):
             backend_args=backend_args,
         )
 
+        # Log version information
+        log_rank_0(f"Megatron-LM version: {self.backend_version}")
+        log_rank_0(f"Model: {module_config.model}")
+        log_rank_0(f"Framework: {module_config.framework}")
+
         # Inject arguments into Megatron runtime by patching parse_args()
         log_rank_0("Injecting arguments into Megatron runtime...")
         if not self._patch_parse_args():
