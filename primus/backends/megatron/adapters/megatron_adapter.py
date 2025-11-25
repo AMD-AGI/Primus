@@ -107,16 +107,7 @@ class MegatronAdapter(BackendAdapter):
         # 3. Produce the final Megatron Namespace
         megatron_args = builder.finalize()
 
-        # Track what was provided vs what came from Megatron defaults
-        provided_keys = set(builder.overrides.keys())
-        all_keys = set(vars(megatron_args).keys())
-        default_keys = all_keys - provided_keys
-
-        log_rank_0(
-            f"[Primus:MegatronAdapter] Config conversion: "
-            f"{len(provided_keys)} provided, {len(default_keys)} from Megatron defaults, "
-            f"total {len(all_keys)} arguments"
-        )
+        log_rank_0(f"[Primus:MegatronAdapter] Converted config → {len(vars(megatron_args))} Megatron args")
 
         return megatron_args
 
