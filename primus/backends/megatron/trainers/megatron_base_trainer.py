@@ -112,7 +112,7 @@ class MegatronBaseTrainer(BaseTrainer):
             log_dict_aligned("Distributed environment info", dist_env)
 
             log_rank_0(
-                f"Patched parse_args successfully "
+                f"Patched parse_args with {len(vars(self.backend_args))} arguments "
                 f"(rank={self.backend_args.rank}, world_size={self.backend_args.world_size})"
             )
             return True
