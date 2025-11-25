@@ -7,8 +7,25 @@
 """
 Global logging initialization for Primus.
 
-This module handles one-time initialization of the logging system for
+This module handles initialization and management of the logging system for
 distributed training.
+
+Key features:
+    - One-time initialization with init_global_logger()
+    - Dynamic module_name updates for workflow scenarios (pretrain -> sft -> posttrain)
+    - Separate log directories per module_name
+    - Configurable logging levels per module
+
+Workflow example:
+    >>> from primus.core.runtime import init_global_logger, update_module_name
+    >>> 
+    >>> # Initialize for pretrain
+    >>> init_global_logger(config, module_name="pretrain")
+    >>> # Logs go to: logs/pretrain/rank-0/
+    >>> 
+    >>> # Switch to sft phase
+    >>> update_module_name("sft")
+    >>> # Logs now go to: logs/sft/rank-0/
 """
 
 import builtins
@@ -90,8 +107,11 @@ def init_global_logger(
         world_size=context.world_size,
     )
 
-    # Setup logger
-    logger.setup_logger(logger_cfg, is_head=False)
+    # Store logger config in context for later updates
+    context.logger_config = logger_cfg
+
+    # Setup logger and track file sink handlers
+    logger.setup_logger(logger_cfg, is_head=False, file_sink_handlers=context.file_sink_handlers)
 
     # Set logging rank for rank-aware logging (log_rank_0, etc.)
     set_logging_rank(context.rank, context.world_size)
@@ -103,4 +123,114 @@ def init_global_logger(
 
     print(
         f"[Primus:Runtime] Global logger initialized (rank={context.rank}, world_size={context.world_size})"
+    )
+
+
+def update_module_name(new_module_name: str, new_module_config=None) -> None:
+    """
+    Update module_name for the logger (for workflow scenarios).
+
+    This allows changing the logging context when transitioning between
+    workflow stages (e.g., pretrain -> sft -> posttrain). It will:
+        1. Remove old file sinks
+        2. Add new file sinks with updated module_name path
+        3. Re-bind module_name to logger
+        4. Optionally update logging levels from new_module_config
+
+    Args:
+        new_module_name: New module name (e.g., "sft", "posttrain")
+        new_module_config: Optional new module config to update logging levels from.
+                          Supports: sink_level, file_sink_level, stderr_sink_level
+
+    Raises:
+        RuntimeError: If logger has not been initialized yet
+
+    Example:
+        >>> init_global_logger(config, module_name="pretrain")
+        >>> # ... pretrain phase ...
+        >>> update_module_name("sft")  # Switch to sft phase
+        >>> # ... sft phase logs to new directory ...
+    """
+    context = RuntimeContext.get_instance()
+
+    if not context.logger_initialized:
+        raise RuntimeError(
+            "[Primus:Runtime] Logger must be initialized before updating module_name. "
+            "Call init_global_logger() first."
+        )
+
+    from loguru import logger as loguru_logger
+
+    from primus.core.utils import logger as logger_utils
+
+    # 1. Remove old file sinks
+    for handler_id in context.file_sink_handlers:
+        try:
+            loguru_logger.remove(handler_id)
+        except ValueError:
+            # Handler already removed, skip
+            pass
+    context.file_sink_handlers.clear()
+
+    # 2. Update module_name in stored config
+    old_logger_cfg = context.logger_config
+
+    # Determine new logging levels
+    file_sink_level = old_logger_cfg.file_sink_level
+    stderr_sink_level = old_logger_cfg.stderr_sink_level
+
+    if new_module_config is not None:
+        sink_level = new_module_config.params.get("sink_level")
+        if sink_level is not None:
+            file_sink_level = sink_level
+            stderr_sink_level = sink_level
+        else:
+            if new_module_config.params.get("file_sink_level") is not None:
+                file_sink_level = new_module_config.params.get("file_sink_level")
+            if new_module_config.params.get("stderr_sink_level") is not None:
+                stderr_sink_level = new_module_config.params.get("stderr_sink_level")
+
+    # Create new logger config with updated module_name
+    new_logger_cfg = logger.LoggerConfig(
+        exp_root_path=old_logger_cfg.exp_root_path,
+        work_group=old_logger_cfg.work_group,
+        user_name=old_logger_cfg.user_name,
+        exp_name=old_logger_cfg.exp_name,
+        module_name=new_module_name,
+        file_sink_level=file_sink_level,
+        stderr_sink_level=stderr_sink_level,
+        node_ip=old_logger_cfg.node_ip,
+        rank=old_logger_cfg.rank,
+        world_size=old_logger_cfg.world_size,
+    )
+
+    # Store updated config
+    context.logger_config = new_logger_cfg
+
+    # 3. Re-bind module_name to logger (this updates the extra field)
+    # Note: We need to access the global _logger from logger_utils
+    import primus.core.utils.logger as logger_module
+
+    logger_module._logger = logger_module._logger.bind(module_name=new_module_name)
+
+    # 4. Add new file sinks with updated path
+    log_path = f"{new_logger_cfg.exp_root_path}/logs/{new_module_name}/rank-{new_logger_cfg.rank}"
+    logger_utils.create_path_if_not_exists(log_path)
+
+    sinked_levels = ["debug", "info", "warning", "error"]
+    for sinked_level in sinked_levels:
+        handler_id = logger_utils.add_file_sink(
+            logger_module._logger,
+            log_path,
+            new_logger_cfg.file_sink_level,
+            "",  # prefix
+            False,  # is_head
+            sinked_level,
+        )
+        if handler_id is not None:
+            context.file_sink_handlers.append(handler_id)
+
+    print(
+        f"[Primus:Runtime] Logger module_name updated: {old_logger_cfg.module_name} -> {new_module_name} "
+        f"(rank={context.rank})"
     )

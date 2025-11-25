@@ -87,6 +87,12 @@ def add_file_sink(
     backtrace: bool = True,
     diagnose: bool = True,
 ):
+    """
+    Add a file sink to the logger.
+    
+    Returns:
+        int: Handler ID of the added sink, or None if not added
+    """
     assert level in [
         "trace",
         "debug",
@@ -108,7 +114,7 @@ def add_file_sink(
 
     sink_format = master_file_sink_format if is_head else file_sink_format
     if logger.level(level.upper()) >= logger.level(file_sink_level.upper()):
-        logger.add(
+        handler_id = logger.add(
             os.path.join(log_path, f"{prefix}{level}.log"),
             level=level.upper(),
             backtrace=backtrace,
@@ -122,13 +128,24 @@ def add_file_sink(
                 format_level_with_padding(record) and record["level"].no >= logger.level(level.upper()).no
             ),
         )
+        return handler_id
+    return None
 
 
 @call_once
 def setup_logger(
     cfg: LoggerConfig,
     is_head: bool = False,
+    file_sink_handlers: list = None,
 ):
+    """
+    Setup logger with file and stderr sinks.
+    
+    Args:
+        cfg: Logger configuration
+        is_head: Whether this is the master/head process
+        file_sink_handlers: Optional list to store file sink handler IDs
+    """
     create_path_if_not_exists(cfg.exp_root_path)
     if is_head:
         log_path = os.path.join(cfg.exp_root_path, f"logs/master")
@@ -172,7 +189,7 @@ def setup_logger(
     sink_file_prefix = f"master-" if is_head else ""
     sinked_levels = ["debug", "info", "warning", "error"]
     for sinked_level in sinked_levels:
-        add_file_sink(
+        handler_id = add_file_sink(
             loguru_logger,
             log_path,
             cfg.file_sink_level,
@@ -180,6 +197,8 @@ def setup_logger(
             is_head,
             sinked_level,
         )
+        if handler_id is not None and file_sink_handlers is not None:
+            file_sink_handlers.append(handler_id)
 
     sink_format = master_stderr_sink_format if is_head else stderr_sink_format
     loguru_logger.add(

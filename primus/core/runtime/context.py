@@ -57,6 +57,10 @@ class RuntimeContext:
         self.platform = None
         self.primus_config = None
 
+        # Logging state
+        self.logger_config = None  # Store current LoggerConfig for re-configuration
+        self.file_sink_handlers: list = []  # Track file sink handler IDs for updates
+
         # State flags
         self.logger_initialized: bool = False
         self.distributed_initialized: bool = False

@@ -13,10 +13,11 @@ for distributed training, logging, and environment setup.
 
 from .context import RuntimeContext
 from .distributed import init_distributed_env
-from .logging import init_global_logger
+from .logging import init_global_logger, update_module_name
 
 __all__ = [
     "RuntimeContext",
     "init_distributed_env",
     "init_global_logger",
+    "update_module_name",
 ]
