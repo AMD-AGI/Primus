@@ -67,7 +67,8 @@ class MegatronAdapter(BackendAdapter):
 
         print(f"[Primus:MegatronAdapter] Backend prepared (version: {megatron_version})")
 
-    def _detect_megatron_version(self) -> str:
+    # Override base class method for version detection
+    def detect_backend_version(self) -> str:
         """
         Detect Megatron-LM version.
 
@@ -93,11 +94,6 @@ class MegatronAdapter(BackendAdapter):
             pass
 
         return "unknown"
-
-    # Override base class method for version detection
-    def detect_backend_version(self) -> str:
-        """Detect Megatron version for patches."""
-        return self._detect_megatron_version()
 
     # 2. Config → Megatron Args
     def convert_config(self, module_config):
