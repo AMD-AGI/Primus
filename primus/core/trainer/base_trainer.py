@@ -166,13 +166,14 @@ class BaseTrainer(BaseModule):
         """
         raise NotImplementedError(f"{self.__class__.__name__} must implement run_train()")
 
+    @classmethod
     @abstractmethod
-    def detect_version(self) -> str:
+    def detect_version(cls) -> str:
         """
         Detect backend version.
 
-        This method must be implemented by backend-specific trainers
-        to provide accurate version detection for their backend.
+        This is a class method that must be implemented by backend-specific
+        trainers to provide accurate version detection for their backend.
 
         Version detection is critical for:
             - Applying version-specific patches
@@ -187,21 +188,18 @@ class BaseTrainer(BaseModule):
             Implementations should fail fast rather than silently return "unknown".
 
         Example (MegatronBaseTrainer - fail fast):
-            def detect_version(self) -> str:
-                try:
-                    from megatron.core import package_info
-                    return package_info.__version__
-                except Exception as e:
-                    raise RuntimeError(
-                        "Failed to detect Megatron-LM version. "
-                        "Please ensure Megatron-LM is properly installed."
-                    ) from e
+            @classmethod
+            def detect_version(cls) -> str:
+                from primus.backends.megatron.version import detect_megatron_version
+                return detect_megatron_version()
 
         Example (Optional backend - graceful fallback):
-            def detect_version(self) -> str:
+            @classmethod
+            def detect_version(cls) -> str:
                 try:
-                    return self.backend.get_version()
+                    import some_backend
+                    return some_backend.__version__
                 except Exception:
                     return "unknown"  # Only if truly optional
         """
-        raise NotImplementedError(f"{self.__class__.__name__} must implement detect_version()")
+        raise NotImplementedError(f"{cls.__name__} must implement detect_version()")
