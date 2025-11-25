@@ -252,7 +252,6 @@ class PrimusConfig:
 
                 # Load model preset
                 model_preset = ModelPresetLoader.load(model_name, framework)
-                print(f"--------------------22222 {model_preset}")
                 # Merge: model preset (base) + user params (override)
                 merged_params = deep_merge(model_preset, user_params)
             else:

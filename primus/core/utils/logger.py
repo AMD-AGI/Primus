@@ -16,6 +16,9 @@ from .file_utils import create_path_if_not_exists
 
 _logger = None
 
+# Global variable to track the maximum module format width
+_max_module_format_width = 23  # Start with a reasonable default
+
 LOGGING_BANNER = ">>>>>>>>>>"
 
 # "[<white>{process}</>]"
@@ -176,7 +179,30 @@ def setup_logger(
 
 
 def module_format(module_name: str, line: int):
-    return "[" + f"{module_name}.py:{line}".rjust(23, "-") + "] "
+    """
+    Format module location with dynamic width adjustment.
+
+    The width automatically adjusts based on the longest module name seen,
+    ensuring consistent alignment across all log messages.
+
+    Args:
+        module_name: Name of the module
+        line: Line number
+
+    Returns:
+        Formatted string like "[------------train.py:10] "
+    """
+    global _max_module_format_width
+
+    # Build the base string
+    location_str = f"{module_name}.py:{line}"
+
+    # Update max width if current string is longer
+    if len(location_str) > _max_module_format_width:
+        _max_module_format_width = len(location_str)
+
+    # Right-justify with '-' padding to the current max width
+    return "[" + location_str.rjust(_max_module_format_width, "-") + "] "
 
 
 def debug(__message: str, *args: Any, **kwargs: Any) -> None:
