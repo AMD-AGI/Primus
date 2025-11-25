@@ -12,14 +12,20 @@ from datetime import timedelta
 
 import torch
 from megatron.core.tensor_parallel import all_to_all
-
-# [H, S, TopK]
+# [H, S(Seq length), TopK]
 MODEL_PARAMS_TABLE = {
     "deepseek-v2-lite": (2048, 4096, 6),
     "deepseek-v2": (5120, 4096, 6),
     "deepseek-v3": (7168, 4096, 8),
     "mistral-8x7B": (4096, 4096, 2),
     "mistral-8x22B": (6144, 4096, 2),
+    "gpt-oss-120B": (2880, 4096, 4), # https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json
+    # note: Qwen3 pretraining has two stages with different setting https://qwen.ai/blog?id=qwen3
+    # "In the first stage (S1) ... context length of 4K tokens."
+    # "In the final stage, .. 32K tokens."
+    "Qwen3-235B-A22B-stage1": (4096, 4096, 8), # https://huggingface.co/Qwen/Qwen3-235B-A22B/blob/main/config.json
+    "Qwen3-235B-A22B-stage2": (4096, 32768, 8), 
+    "llama4-marverick": (5120, 1048576, 1),  # claimed native 1M context length https://modelscope.cn/models/LLM-Research/Llama-4-Maverick-17B-128E-Instruct/file/view/master/config.json?status=1
 }
 MBS_LIST = [1, 2, 3, 4, 5, 6, 7, 8]
 

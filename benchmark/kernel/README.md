@@ -43,12 +43,30 @@ torchrun --master_addr "0.0.0.0"   \
         --allgather-report-csv-path ./allgather_benchmark.csv \
         --reducescatter-report-csv-path ./reducescatter_benchmark.csv
 ```
-The above python script will generate command for rccl test. To launching the rccl test, use the following:
+To generate the rccl-test command without doing the real pytorch profile, for example
 ```
+WORLD_SIZE=4 LOCAL_RANK=0 RANK=0 python ./benchmark_fsdp.py  -dry
+```
+The above python script will generate command for rccl test. 
+
+To launching single node rccl test, do the following:
+```
+# build and install rccl tests
 git clone https://github.com/ROCm/rccl-tests.git
-cd rccl-tests && make -j
-./build/all_gather_perf -b  213909504  -e  213909504  -g 8 -d half
-./build/reduce_scatter_perf -b  213909504  -e  213909504  -g 8 -d half
+cd rccl-tests
+make -j
+
+# For multinode rccl-test, MPI is needed, please adjust the commands based on your env.
+apt install -y openmpi-bin openmpi-common libopenmpi-dev
+# We unset MPI HOME for building, as some docker env made the default env wrong
+make clean && unset MPI_HOME &&  make MPI=1 -j 
+
+# example commands
+HSA_NO_SCRATCH_RECLAIM=1 ./build/all_gather_perf -b  213909504  -e  213909504  -g 8 -d half
+HSA_NO_SCRATCH_RECLAIM=1 ./build/reduce_scatter_perf -b  213909504  -e  213909504  -g 8 -d half
+HSA_NO_SCRATCH_RECLAIM=1 ./build/reduce_scatter_perf -b  213909504  -e  213909504  -g 4 -d half
+
+HSA_NO_SCRATCH_RECLAIM=1 mpirun --allow-run-as-root -np 4 --bind-to numa ./build/reduce_scatter_perf -b  213909504  -e  213909504  -g 1 -d half
 ```
 To profile RCCL comm op in real workload, you can use the following setting:
 ```
