@@ -32,7 +32,7 @@ modules:
       profile_step_end: 7
       profile_step_start: 6
 
-      # hyber parameters
+      # hyper parameters
       train_iters: 20
       micro_batch_size: 4
       global_batch_size: 640

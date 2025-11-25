@@ -20,7 +20,7 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      # hyber parameters
+      # hyper parameters
       train_iters: 50
       micro_batch_size: 14
       global_batch_size: 896
