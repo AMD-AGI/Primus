@@ -181,12 +181,12 @@ class BackendAdapter(ABC):
         log_rank_0("Backend environment prepared successfully")
 
         # 3) config translation
-        log_rank_0("\n[Step 3/5] Converting Primus config to backend args...")
+        log_rank_0("[Step 3/5] Converting Primus config to backend args...")
         backend_args = self.convert_config(module_config)
         log_rank_0("Config conversion completed successfully")
 
         # 4) apply build_args patches (automatic for all backends)
-        log_rank_0("\n[Step 4/5] Applying build_args patches...")
+        log_rank_0("[Step 4/5] Applying build_args patches...")
         self._apply_build_args_patches(module_config, backend_args)
         log_rank_0("Build_args patches applied successfully")
 
@@ -201,7 +201,7 @@ class BackendAdapter(ABC):
 
         if primus_only_keys:
             log_rank_0(
-                f"\nPrimus-specific parameters (not passed to backend): {len(primus_only_keys)} parameters"
+                f"Primus-specific parameters (not passed to backend): {len(primus_only_keys)} parameters"
             )
             primus_only_params = {key: module_config.params[key] for key in sorted(primus_only_keys)}
             log_dict_aligned("Primus-specific parameters", primus_only_params)
