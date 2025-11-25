@@ -434,7 +434,7 @@ class PrimusTurboRowParallelLinear(TELinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         if not input_is_parallel:
-            raise ValueError(f"{__class__.name} layers do not support input_is_parallel = False")
+            raise ValueError(f"{__class__.__name__} layers do not support input_is_parallel = False")
 
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
@@ -531,7 +531,7 @@ class PrimusTurboColumnParallelLinear(TELinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         if gather_output:
-            raise ValueError(f"{__class__.name} layers do not support gather_output = True")
+            raise ValueError(f"{__class__.__name__} layers do not support gather_output = True")
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
         args = get_args()

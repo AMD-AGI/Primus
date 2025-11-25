@@ -9,6 +9,7 @@ from typing import Optional
 
 import torch.nn.functional as F
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.tensor_parallel.layers import ColumnParallelLinear
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.multi_latent_attention import (
     MLASelfAttention,
@@ -18,43 +19,20 @@ from megatron.core.transformer.spec_utils import build_module
 from megatron.core.transformer.transformer_config import MLATransformerConfig
 from megatron.core.utils import deprecate_inference_params
 
-try:
-    pass
-
-    HAVE_EINOPS = True
-except ImportError:
-    HAVE_EINOPS = False
-
-
-from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.tensor_parallel.layers import ColumnParallelLinear
-from megatron.core.transformer.enums import AttnMaskType
-from megatron.core.transformer.spec_utils import build_module
-from megatron.core.transformer.transformer_config import MLATransformerConfig
-from megatron.core.utils import deprecate_inference_params
-
-try:
-    from megatron.core.fusions.fused_mla_yarn_rope_apply import (
-        fused_apply_mla_rope_for_kv,
-        fused_apply_mla_rope_for_q,
-    )
-except:
-    fused_apply_mla_rope_for_kv = None
-    fused_apply_mla_rope_for_q = None
-
-
+# Import Transformer Engine
 try:
     from megatron.core.extensions.transformer_engine import (
         TEColumnParallelLinear,
         TELinear,
-        set_save_original_input,
     )
     from megatron.core.post_training.modelopt.layers import Linear
 
     HAVE_TE = True
 except ImportError:
-    TEColumnParallelLinear, TELinear, Linear, set_save_original_input = None, None, None, None
+    TEColumnParallelLinear, TELinear, Linear = None, None, None
     HAVE_TE = False
+
+# Import Primus-Turbo
 try:
     from primus.backends.megatron.core.extensions.primus_turbo import (
         PrimusTurboColumnParallelLinear,
