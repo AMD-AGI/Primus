@@ -177,6 +177,8 @@ docker_podman_proxy run --rm \
     "$DOCKER_IMAGE" /bin/bash -c "\
         echo '[NODE-${NODE_RANK}(${HOSTNAME})]: begin, time=$(date +"%Y.%m.%d %H:%M:%S")' && \
         cd $PRIMUS_PATH && \
+        sudo apt-get update && \
+        sudo apt-get install --reinstall binutils -y && \
         bash examples/run_pretrain.sh \"\$@\" 2>&1 && \
         echo '[NODE-${NODE_RANK}(${HOSTNAME})]: end, time=$(date +"%Y.%m.%d %H:%M:%S")'
     " bash "${ARGS[@]}"

@@ -9,6 +9,8 @@
 # export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
 # export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ci_4096e28_20251114"
 export DOCKER_IMAGE="docker.io/tasimage/primus:pr-289"
+# export DOCKER_IMAGE="docker.io/tasimage/primus:pr-300"
+# export DOCKER_IMAGE="docker.io/tasimage/primus:pr-282"
 export CLEAN_DOCKER_CONTAINER=1
 
 ######################### Training Environment Variables #########################
@@ -45,7 +47,8 @@ export NVTE_CK_USES_BWD_V3=1
 
 ######################### Training Config #########################
 MBS=8
-GBS=$((768 * NNODES))
+GBS=$((64 * NNODES))
+# GBS=$((768 * NNODES))
 SEQ_LENGTH=4096
 TP=1
 ETP=1
