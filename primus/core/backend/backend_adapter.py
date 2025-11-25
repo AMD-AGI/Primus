@@ -193,6 +193,19 @@ class BackendAdapter(ABC):
         # Log the final backend args in aligned format (after patches)
         log_dict_aligned("Final backend args (after patches)", backend_args)
 
+        # Log parameters that were in module_config but not converted to backend_args
+        # These are likely Primus-specific parameters
+        config_keys = set(module_config.params.keys())
+        backend_keys = set(vars(backend_args).keys())
+        primus_only_keys = config_keys - backend_keys
+
+        if primus_only_keys:
+            log_rank_0(
+                f"\nPrimus-specific parameters (not passed to backend): {len(primus_only_keys)} parameters"
+            )
+            primus_only_params = {key: module_config.params[key] for key in sorted(primus_only_keys)}
+            log_dict_aligned("Primus-specific parameters", primus_only_params)
+
         # 5) load trainer class from backend
         log_rank_0("[Step 5/5] Loading trainer class...")
         TrainerClass = self.load_trainer_class()
