@@ -34,9 +34,20 @@ export USING_AINIC=1
 # export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
 # export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
 # export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
-export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7" # modify based on the GPU NiC settings
-export NCCL_SOCKET_IFNAME="enp193s0f1np1"
-export GLOO_SOCKET_IFNAME="enp193s0f1np1"
+
+# Set on Vultr cluster
+# export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7" # modify based on the GPU NiC settings
+# export NCCL_SOCKET_IFNAME="enp193s0f1np1"
+# export GLOO_SOCKET_IFNAME="enp193s0f1np1"
+
+# Set on DLC cluster
+export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7"
+export ANP_HOME_DIR=/apps/shared/ankit/amd-anp
+export RCCL_HOME_DIR=/apps/shared/ankit/rccl
+export MPI_HOME_DIR=/apps/shared/ankit/mpi_5/ompi-5.0.8/install
+export NCCL_SOCKET_IFNAME="enp81s0f1"
+export GLOO_SOCKET_IFNAME="enp81s0f1"
+
 export NCCL_IB_RETRY_CNT=20
 export NCCL_IB_TIMEOUT=300
 

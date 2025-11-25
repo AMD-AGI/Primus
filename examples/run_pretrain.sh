@@ -153,21 +153,42 @@ if [ "$USING_AINIC" == "1" ]; then
     LOG_INFO_RANK0 "Using AINIC"
     LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
     LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
-    # unset NCCL_IB_GID_INDEX
-    export NCCL_IB_GID_INDEX=1
-    # export NCCL_IB_ROCE_VERSION_NUM=2
-    export NCCL_MAX_P2P_CHANNELS=56
-    export NCCL_IB_TC=104
-    export NCCL_IB_FIFO_TC=192
-    export NET_OPTIONAL_RECV_COMPLETION=1
-    export NCCL_IB_USE_INLINE=1
-    export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
-    export NCCL_GDR_FLUSH_DISABLE=1
-    export NCCL_DMABUF_ENABLE=0
+    # # unset NCCL_IB_GID_INDEX
+    # export NCCL_IB_GID_INDEX=1
+    # # export NCCL_IB_ROCE_VERSION_NUM=2
+    # export NCCL_MAX_P2P_CHANNELS=56
+    # export NCCL_IB_TC=104
+    # export NCCL_IB_FIFO_TC=192
+    # export NET_OPTIONAL_RECV_COMPLETION=1
+    # export NCCL_IB_USE_INLINE=1
+    # export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
+    # export NCCL_GDR_FLUSH_DISABLE=1
+    # export NCCL_DMABUF_ENABLE=0
+    # export NCCL_IGNORE_CPU_AFFINITY=1
+    # export NCCL_IB_QPS_PER_CONNECTION=1
+    # # export LD_LIBRARY_PATH=${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${ANP_HOME_DIR}/build/lib:$LD_LIBRARY_PATH
+    # # export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
+
+    # NOTE: Set on DLC cluster (Please use it if you are on DLC cluster)
+    export NUM_CHANNEL=64
+    export NUM_QP_PER_CHANNEL=6
+    export UCX_IB_GID_INDEX=1 
+    export NCCL_IB_GID_INDEX=1 
+    export NCCL_CHECKS_DISABLE=1 
+    export NCCL_IB_TC=96 
+    export NCCL_IB_FIFO_TC=184
+    export NCCL_CROSS_NIC=0 
+    export NCCL_LL128_FORCE_ENABLE=1
+    export NCCL_GDR_FLUSH_DISABLE=1 
+    export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0 
     export NCCL_IGNORE_CPU_AFFINITY=1
-    export NCCL_IB_QPS_PER_CONNECTION=1
-    # export LD_LIBRARY_PATH=${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${ANP_HOME_DIR}/build/lib:$LD_LIBRARY_PATH
-    # export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
+    export NCCL_PXN_DISABLE=1
+    export NET_OPTIONAL_RCV_COMPLETION=1
+    export NCCL_IB_USE_INLINE=1
+    export IONIC_LOCKFREE=all
+
+    export LD_LIBRARY_PATH=${AINIC_LIB}:${AINIC_LIB}/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib:${LD_LIBRARY_PATH}
+    export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
 else
     export NCCL_IB_GID_INDEX=3
 fi

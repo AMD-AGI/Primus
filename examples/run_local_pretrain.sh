@@ -105,10 +105,12 @@ if [ "$USING_AINIC" == "1" ]; then
     ENV_ARGS+=("--env" "AINIC_LIB")
     ENV_ARGS+=("--env" "RCCL_HOME_DIR")
     ENV_ARGS+=("--env" "ANP_HOME_DIR")
+    ENV_ARGS+=("--env" "MPI_HOME_DIR") # Set on DLC cluster
 
     VOLUME_ARGS+=(
         -v "$RCCL_HOME_DIR":"$RCCL_HOME_DIR"
         -v "$ANP_HOME_DIR":"$ANP_HOME_DIR"
+        -v "$MPI_HOME_DIR":"$MPI_HOME_DIR" # Set on DLC cluster
         -v /etc/libibverbs.d/:/etc/libibverbs.d
         -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/
     )
