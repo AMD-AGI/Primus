@@ -3,7 +3,15 @@
 import torch
 import torch.nn.functional as F
 import primus_turbo.pytorch as turbo
-from primus_turbo.pytorch.core.float8 import (
+# tyr to load primus_turbo.pytorch.core.float8, but it is not found
+try:
+    from primus_turbo.pytorch.core.float8 import (
+        Float8QuantConfig,
+        Format,
+        ScalingGranularity,
+    )
+except ImportError:
+    from primus_turbo.pytorch.core.low_precision import (
     Float8QuantConfig,
     Format,
     ScalingGranularity,
