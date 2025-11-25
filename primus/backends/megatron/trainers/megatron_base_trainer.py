@@ -97,10 +97,7 @@ class MegatronBaseTrainer(BaseTrainer):
             megatron_args.parse_args = patched_parse_args
             megatron_init.parse_args = patched_parse_args
 
-            log_rank_0(
-                f"Patched parse_args with {len(vars(self.backend_args))} arguments "
-                f"(rank={self.backend_args.rank}, world_size={self.backend_args.world_size})"
-            )
+            log_rank_0(f"Patched parse_args with {len(vars(self.backend_args))} arguments")
             return True
         except (ImportError, AttributeError) as e:
             log_rank_0(f"WARNING: Cannot patch parse_args: {e}")
