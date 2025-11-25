@@ -82,25 +82,15 @@ class MegatronArgBuilder:
 
         Only parameters that exist in Megatron's default arguments are accepted.
         Any field with value None is ignored (meaning "not provided").
-        Primus metadata fields are filtered out.
         Non-Megatron parameters are silently ignored.
         """
         # Get Megatron's supported parameters
         megatron_defaults = _load_megatron_defaults()
         megatron_keys = set(megatron_defaults.keys())
 
-        # Filter out Primus metadata (these are for patches, not for Megatron)
-        primus_metadata_keys = {
-            "primus_work_group",
-            "primus_user_name",
-            "primus_exp_name",
-            "primus_workspace",
-            "primus_exp_root_path",
-        }
-
         for key, value in values.items():
-            # Skip None values and Primus metadata
-            if value is None or key in primus_metadata_keys:
+            # Skip None values
+            if value is None:
                 continue
 
             # Only accept parameters that Megatron recognizes
