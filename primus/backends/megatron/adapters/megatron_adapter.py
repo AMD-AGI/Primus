@@ -65,33 +65,11 @@ class MegatronAdapter(BackendAdapter):
             Version string (e.g., "0.15.0rc8") or "unknown"
         """
         try:
-            # Try megatron.core.package_info first (official location)
             from megatron.core import package_info
 
             return package_info.__version__
         except Exception:
-            pass
-
-        try:
-            # Fallback: try megatron module level attributes
-            import megatron
-
-            if hasattr(megatron, "__version__"):
-                return megatron.__version__
-            elif hasattr(megatron, "version"):
-                return megatron.version
-        except Exception:
-            pass
-
-        try:
-            # Last resort: try package metadata
-            from importlib.metadata import version
-
-            return version("megatron-lm")
-        except Exception:
-            pass
-
-        return "unknown"
+            return "unknown"
 
     # 2. Config → Megatron Args
     def convert_config(self, module_config):
