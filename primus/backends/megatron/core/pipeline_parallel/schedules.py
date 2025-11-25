@@ -7,6 +7,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from primus.backends.megatron.core.pipeline_parallel.primuspipe.pipeline_launcher import PrimusPipelineParallelLauncher
 from megatron.core import parallel_state
 from megatron.core.pipeline_parallel.schedules import (
     forward_backward_no_pipelining,
@@ -111,3 +112,7 @@ def get_forward_backward_func_zbpp():
     else:
         forward_backward_func = forward_backward_no_pipelining
     return forward_backward_func
+
+
+def get_primus_pipeline_parallel_fwd_backward_func():
+    return PrimusPipelineParallelLauncher().run

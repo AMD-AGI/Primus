@@ -171,7 +171,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_te_tp_overlap()
         self.patch_mla_attention()
         self.patch_fp8_context()
-        self.patch_zbpp()
+        self.patch_pp()
         self.patch_custom_recompute_layer_ids()
 
         self.app_metrics = {}
@@ -599,7 +599,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         else:
             warning_rank_0("MegatronTrainer: Patch FileSystemWriterAsync successfully.")
 
-    def patch_zbpp(self):
+    def patch_pp(self):
         # patch optimizer
         if self.module_config.patch_zero_bubble:
             warning_rank_0(f"MegatronTrainer: Patch ZeroBubble PP")
@@ -677,6 +677,16 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             )
 
             ori_linear._Linear = _LinearWithWGradSplit
+
+        elif self.module_config.patch_primus_pipeline:
+            warning_rank_0(f"MegatronTrainer: Patch PrimusPipe PP")
+            import megatron.core.pipeline_parallel as ori_pp
+
+            from primus.backends.megatron.core.pipeline_parallel.schedules import (
+                get_primus_pipeline_parallel_fwd_backward_func,
+            )
+
+            ori_pp.get_forward_backward_func = get_primus_pipeline_parallel_fwd_backward_func
 
     def init(self, *init_args, **kwargs):
         allowed_keys = {

@@ -8,6 +8,7 @@ import functools
 from typing import List, Tuple, Union
 
 import torch
+from primus.backends.megatron.core.pipeline_parallel.wgrad_adapter import insert_wgrad_func_into_cache
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.cpp_extensions import general_grouped_gemm
@@ -35,11 +36,6 @@ from transformer_engine.pytorch.utils import (
     clear_tensor_data,
     requires_grad,
 )
-
-from primus.backends.megatron.core.pipeline_parallel.zerobubble.zbpp_utils import (
-    WeightGradStore,
-)
-
 
 class _GroupedLinearWithWGradSplit(torch.autograd.Function):
     """GroupedLinear semi-top level module
@@ -324,19 +320,7 @@ class _GroupedLinearWithWGradSplit(torch.autograd.Function):
                         handle_custom_ddp_from_mcore(w, wgrad) for w, wgrad in zip(weights, wgrad_list)
                     ]
 
-                if WeightGradStore.split_bw():
-                    WeightGradStore.put(
-                        wgrad_list,
-                        functools.partial(pre_process, grad_output, inputmats),
-                        functools.partial(
-                            process_wgrad,
-                            wgrad_list,
-                            kargs_dict,
-                        ),
-                    )
-                else:
-                    grad_output, inputmats, _ = pre_process(grad_output, inputmats)
-                    process_wgrad(wgrad_list, kargs_dict, grad_output, inputmats)
+                insert_wgrad_func_into_cache(wgrad_list, functools.partial(pre_process, grad_output, inputmats), functools.partial(process_wgrad, wgrad_list, kargs_dict))
 
                 wgrad_list_return = [None] * ctx.num_gemms
             else:
