@@ -34,6 +34,7 @@ from megatron.training.checkpointing import (
     save_checkpoint,
 )
 
+from primus.backends.megatron.core.optimizer.moun import get_megatron_muon_optimizer
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
 from primus.core.utils.import_utils import get_custom_fsdp, get_model_provider
 
@@ -678,6 +679,20 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
             ori_linear._Linear = _LinearWithWGradSplit
 
+    def patch_moun_optimizer(self):
+        if not self.module_config.optimizer == "muon":
+            return
+
+        warning_rank_0("MegatronTrainer: Patching Moun optimizer...")
+
+        import megatron.core.optimizer.optimizer_config as ori_optimizer_config
+
+        from primus.backends.megatron.core.optimizer.moun_optimizer_config import (
+            MounOptimizerConfig,
+        )
+
+        ori_optimizer_config.OptimizerConfig = MounOptimizerConfig
+
     def init(self, *init_args, **kwargs):
         allowed_keys = {
             "extra_args_provider",
@@ -1321,14 +1336,30 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         config = OptimizerConfig(**kwargs)
         config.timers = timers
         log_rank_0(f"-run get_megatron_optimizer")
-        optimizer = get_megatron_optimizer(
-            config,
-            model,
-            no_wd_decay_cond,
-            scale_lr_cond,
-            lr_mult,
-            use_gloo_process_groups=args.enable_gloo_process_groups,
-        )
+
+        if "muon" not in config.optimizer:
+            optimizer = get_megatron_optimizer(
+                config,
+                model,
+                no_wd_decay_cond,
+                scale_lr_cond,
+                lr_mult,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+                # If the user is asking for a non-zero embedding init std, skip weight decay for embeddings
+                #  to avoid embeddings from shrinking to zero as recommended in https://arxiv.org/abs/2312.16903
+                default_skip_embedding_weight_decay=args.embedding_init_method_std is not None,
+            )
+        else:
+            optimizer = get_megatron_muon_optimizer(
+                config,
+                model,
+                no_wd_decay_cond,
+                scale_lr_cond,
+                lr_mult,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+                layer_wise_distributed_optimizer="dist" in config.optimizer,
+            )
+
         opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
 
         if args.moe_use_upcycling:
