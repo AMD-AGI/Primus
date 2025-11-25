@@ -22,22 +22,23 @@ class BackendAdapter(ABC):
     def __init__(self, framework: str):
         self.framework = framework
 
-    # -----------------------------------------------------------
-    # 1) Backend Env Setup (Patch + Distributed + Path)
-    # -----------------------------------------------------------
+    # ============================================================================
+    # Abstract Methods (Must be implemented by subclasses)
+    # ============================================================================
+
     @abstractmethod
     def prepare_backend(self, config: Any):
         """
         Called before creating Trainer.
         Should:
             - setup sys.path for backend
-            - run backend-specific patches
+            - run backend-specific setup hooks
             - initialize distributed detect if needed
+
+        Note: setup patches are applied automatically by the base class
+        before this method is called.
         """
 
-    # -----------------------------------------------------------
-    # 2) Config Translation Layer
-    # -----------------------------------------------------------
     @abstractmethod
     def convert_config(self, config: Any) -> Dict[str, Any]:
         """
@@ -46,13 +47,27 @@ class BackendAdapter(ABC):
         Example:
             Primus PretrainConfig -> Megatron args OR Titan args
 
+        Note: build_args patches are applied automatically by the base class
+        after this method returns.
+
         Return:
             A dict or namespace containing args for the backend trainer.
         """
 
-    # -----------------------------------------------------------
-    # 2.5) Backend Version Detection (Optional)
-    # -----------------------------------------------------------
+    @abstractmethod
+    def load_trainer_class(self):
+        """
+        Return backend Trainer class.
+
+        Megatron → MegatronTrainer
+        Titan → TitanTrainer
+        Turbo → TurboTrainer
+        """
+
+    # ============================================================================
+    # Optional Override Methods
+    # ============================================================================
+
     def detect_backend_version(self) -> Optional[str]:
         """
         Detect backend version for version-specific patches.
@@ -64,9 +79,10 @@ class BackendAdapter(ABC):
         """
         return None
 
-    # -----------------------------------------------------------
-    # 2.6) Apply Setup Patches (Automatic)
-    # -----------------------------------------------------------
+    # ============================================================================
+    # Internal Methods (Do NOT override)
+    # ============================================================================
+
     def _apply_setup_patches(self, module_config):
         """
         Apply setup phase patches before backend preparation.
@@ -93,9 +109,6 @@ class BackendAdapter(ABC):
             },
         )
 
-    # -----------------------------------------------------------
-    # 2.7) Apply Build Args Patches (Automatic)
-    # -----------------------------------------------------------
     def _apply_build_args_patches(self, module_config, backend_args):
         """
         Apply build_args phase patches after config conversion.
@@ -125,30 +138,28 @@ class BackendAdapter(ABC):
             },
         )
 
-    # -----------------------------------------------------------
-    # 3) Trainer Loader
-    # -----------------------------------------------------------
-    @abstractmethod
-    def load_trainer_class(self):
-        """
-        Return backend Trainer class.
+    # ============================================================================
+    # Public API
+    # ============================================================================
 
-        Megatron → MegatronTrainer
-        Titan → TitanTrainer
-        Turbo → TurboTrainer
-        """
-
-    # -----------------------------------------------------------
-    # 4) Trainer Launcher (Final Step)
-    # -----------------------------------------------------------
     def create_trainer(self, primus_config, module_config):
         """
-        Default implementation:
-            - apply setup patches (automatic)
-            - prepare backend
-            - convert Primus config to backend args
-            - apply build_args patches (automatic)
-            - instantiate trainer
+        Create trainer instance with automatic patch application.
+
+        This is the main entry point that orchestrates the entire trainer
+        creation process:
+            1. Apply setup patches
+            2. Prepare backend environment
+            3. Convert config to backend args
+            4. Apply build_args patches
+            5. Load and instantiate trainer
+
+        Args:
+            primus_config: Global Primus configuration
+            module_config: Module-specific configuration
+
+        Returns:
+            Trainer instance ready to run
         """
 
         # 1) apply setup patches (automatic for all backends)
