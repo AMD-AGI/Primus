@@ -124,7 +124,7 @@ class MegatronBaseTrainer(BaseTrainer):
                 "    Skipped _compile_dependencies() because CUDA kernels are not compatible with ROCm"
             )
 
-            log_rank_0("Megatron-LM runtime patches applied successfully")
+            log_rank_0("Patched _compile_dependencies to skip CUDA kernel compilation")
 
         except (ImportError, AttributeError) as e:
             log_rank_0(f"WARNING: Failed to patch Megatron-LM runtime hooks: {e}")
