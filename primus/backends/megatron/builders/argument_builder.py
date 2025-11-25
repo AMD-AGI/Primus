@@ -107,17 +107,28 @@ class MegatronArgBuilder:
         Combine:
             - Megatron default arguments
             - Primus overrides (CLI + config)
+            - Distributed environment variables (runtime)
         and produce a final SimpleNamespace that can be passed directly
         to Megatron's training entrypoints.
 
         Fields not provided by Primus are automatically filled with Megatron's defaults.
+        Distributed environment (world_size, rank, local_rank) is injected automatically.
         """
+        from primus.core.runtime.distributed import get_distributed_info
+
         # Start with Megatron's defaults
         final = dict(_load_megatron_defaults())
 
         # Apply overrides (Primus CLI / config)
         for key, value in self.overrides.items():
             final[key] = value
+
+        # Inject distributed environment variables
+        # This ensures Megatron uses the correct distributed settings
+        dist_env = get_distributed_info()
+        final["world_size"] = dist_env["world_size"]
+        final["rank"] = dist_env["rank"]
+        final["local_rank"] = dist_env["local_rank"]
 
         # Convert to namespace (Megatron-LM expects argparse Namespace-like object)
         return SimpleNamespace(**final)

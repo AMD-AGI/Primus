@@ -86,7 +86,7 @@ class MegatronAdapter(BackendAdapter):
         This layer:
             - Takes module_config.params (which already includes CLI overrides)
             - Fills missing fields using Megatron-LM defaults
-            - Injects distributed environment variables
+            - Injects distributed environment variables (via builder)
             - Produces a Megatron-compatible argparse-like Namespace
 
         Note: build_args patches are applied automatically by the base class
@@ -98,8 +98,6 @@ class MegatronAdapter(BackendAdapter):
         Returns:
             SimpleNamespace with Megatron args
         """
-        from primus.core.runtime.distributed import get_distributed_info
-
         # 1. Instantiate the builder
         builder = MegatronArgBuilder()
 
@@ -107,15 +105,8 @@ class MegatronAdapter(BackendAdapter):
         #    module_config.params is a flat dict of Megatron-recognized fields.
         builder.update(module_config.params)
 
-        # 3. Produce the final Megatron Namespace
+        # 3. Produce the final Megatron Namespace (with distributed env injected)
         megatron_args = builder.finalize()
-
-        # 4. Inject distributed environment variables
-        # This ensures Megatron uses the correct distributed settings
-        dist_env = get_distributed_info()
-        megatron_args.world_size = dist_env["world_size"]
-        megatron_args.rank = dist_env["rank"]
-        megatron_args.local_rank = dist_env["local_rank"]
 
         log_rank_0(f"[Primus:MegatronAdapter] Converted config → {len(vars(megatron_args))} Megatron args")
 
