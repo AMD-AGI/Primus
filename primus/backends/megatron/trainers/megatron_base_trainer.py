@@ -24,7 +24,7 @@ from types import SimpleNamespace
 
 from primus.core.config.primus_config import ModuleConfig, PrimusConfig
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.core.utils.distributed_logging import log_rank_0
+from primus.core.utils.distributed_logging import log_dict_aligned, log_rank_0
 
 
 class MegatronBaseTrainer(BaseTrainer):
@@ -108,15 +108,11 @@ class MegatronBaseTrainer(BaseTrainer):
             megatron_args.parse_args = patched_parse_args
             megatron_init.parse_args = patched_parse_args
 
-            log_rank_0(f"Distributed environment info: {dist_env}")
+            # Log distributed environment info in aligned format
+            log_dict_aligned("Distributed environment info", dist_env)
 
-            # Log backend args in a formatted way (one parameter per line)
-            log_rank_0("Backend args:")
-            args_dict = vars(self.backend_args)
-            # Find the longest key for alignment
-            max_key_length = max(len(key) for key in args_dict.keys()) if args_dict else 0
-            for key, value in sorted(args_dict.items()):
-                log_rank_0(f"  {key:<{max_key_length}} : {value}")
+            # Log backend args in aligned format
+            log_dict_aligned("Backend args", self.backend_args)
 
             log_rank_0(
                 f"Patched parse_args with {len(vars(self.backend_args))} arguments "
