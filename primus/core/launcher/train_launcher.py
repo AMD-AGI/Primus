@@ -14,6 +14,7 @@ from primus.core.runtime import init_distributed_env, init_global_logger
 from primus.core.utils.arg_utils import parse_cli_overrides
 from primus.core.utils.env_setup import setup_training_env
 from primus.core.utils.global_vars import set_global_variables
+from primus.core.utils.distributed_logging import log_rank_0
 
 
 def add_train_parser(parser: argparse.ArgumentParser):
@@ -96,6 +97,7 @@ def launch_train(args, overrides, module: str):
     # 6 Apply CLI overrides to module params (deep merge to preserve nested structures)
     if overrides:
         override_dict = parse_cli_overrides(overrides)
+        log_rank_0(f"[Primus:TrainLauncher] Applying CLI overrides for module '{module}': {override_dict}")
         train_cfg.params = deep_merge(train_cfg.params, override_dict)
 
     # 7 Validate framework is specified
@@ -128,7 +130,7 @@ def launch_train(args, overrides, module: str):
     # 10 Execute training lifecycle
     try:
         # 1) Optional setup phase
-        # trainer.setup()
+        trainer.setup()
 
         # 2) Initialize training components
         trainer.init()

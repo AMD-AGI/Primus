@@ -120,11 +120,8 @@ def run_patches(
             # Continue with other patches (non-fatal)
             continue
 
-    if applied_count > 0:
-        log_rank_0(
-            f"[PatchSystem] Applied {applied_count} patches for {backend}/{phase}: {', '.join(applied_patches)}"
-        )
-    # else:
-    #     log_rank_0(f"[PatchSystem] No patches applied for {backend}/{phase}")
+    log_rank_0(
+        f"[PatchSystem] Applied {applied_count} patches for {backend}/{phase}: {applied_patches}"
+    )
 
     return applied_count

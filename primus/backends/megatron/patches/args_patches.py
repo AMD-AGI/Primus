@@ -17,6 +17,7 @@ Patches Megatron arguments for Primus-specific configurations:
 import os
 
 from primus.core.patches import PatchContext, register_patch
+from primus.core.utils.distributed_logging import log_rank_0
 
 
 @register_patch(
@@ -35,7 +36,7 @@ def patch_profile_tensorboard(ctx: PatchContext):
     args = ctx.extra.get("args")
     if args and getattr(args, "profile", False):
         args.disable_tensorboard = False
-        print("[Patch] Enabled TensorBoard for profiling (profile=True)")
+        log_rank_0("[Patch:megatron.args.profile_tensorboard] Enabled TensorBoard (profile=True)")
 
 
 @register_patch(
@@ -61,10 +62,12 @@ def patch_checkpoint_path(ctx: PatchContext):
         ckpt_path = os.path.abspath(os.path.join(exp_root, "checkpoints"))
 
         if hasattr(args, "save") and args.save is not None and args.save != ckpt_path:
-            print(f"[Patch] WARNING: args.save is deprecated, using: {ckpt_path}")
+            log_rank_0(
+                f"[Patch:megatron.args.checkpoint_path][WARN] args.save is deprecated; overriding to: {ckpt_path}"
+            )
 
         args.save = ckpt_path
-        print(f"[Patch] Checkpoint path: {ckpt_path}")
+        log_rank_0(f"[Patch:megatron.args.checkpoint_path] save → {ckpt_path}")
 
 
 @register_patch(
@@ -95,13 +98,16 @@ def patch_tensorboard_path(ctx: PatchContext):
                 and args.tensorboard_dir is not None
                 and args.tensorboard_dir != tb_path
             ):
-                print(f"[Patch] WARNING: args.tensorboard_dir is deprecated, using: {tb_path}")
+                log_rank_0(
+                    f"[Patch:megatron.args.tensorboard_path][WARN] args.tensorboard_dir is deprecated; "
+                    f"overriding to: {tb_path}"
+                )
 
             args.tensorboard_dir = tb_path
-            print(f"[Patch] TensorBoard directory: {tb_path}")
+            log_rank_0(f"[Patch:megatron.args.tensorboard_path] tensorboard_dir → {tb_path}")
         else:
             args.tensorboard_dir = None
-            print("[Patch] TensorBoard disabled")
+            log_rank_0("[Patch:megatron.args.tensorboard_path] TensorBoard disabled")
 
 
 @register_patch(
@@ -134,39 +140,40 @@ def patch_wandb_config(ctx: PatchContext):
         # Ensure wandb_project is None if W&B is disabled
         if hasattr(args, "wandb_project") and args.wandb_project is not None:
             args.wandb_project = None
-            print("[Patch] Disabled W&B project (disable_wandb=True)")
+        log_rank_0("[Patch:megatron.args.wandb_config] W&B disabled (disable_wandb=True)")
         return
 
     # Set W&B save directory
     wandb_path = exp_root
     if hasattr(args, "wandb_save_dir") and args.wandb_save_dir is not None:
         if args.wandb_save_dir != wandb_path:
-            print(f"[Patch] WARNING: args.wandb_save_dir is deprecated, using: {wandb_path}/wandb")
+            log_rank_0(
+                f"[Patch:megatron.args.wandb_config][WARN] args.wandb_save_dir is deprecated; "
+                f"overriding to: {wandb_path}/wandb"
+            )
     args.wandb_save_dir = wandb_path
 
     # Set W&B project name
     if not hasattr(args, "wandb_project") or args.wandb_project is None:
         args.wandb_project = f"{work_group}_{user_name}"
-        print(f"[Patch] Created W&B project name: {args.wandb_project}")
 
     # Set W&B experiment name
     if not hasattr(args, "wandb_exp_name") or args.wandb_exp_name is None:
         args.wandb_exp_name = exp_name
-        print(f"[Patch] Created W&B experiment name: {args.wandb_exp_name}")
 
     # Check for W&B API key
     if "WANDB_API_KEY" not in os.environ:
-        print(
-            "[Patch] WARNING: WANDB_API_KEY not set. "
-            "Set it before training or enable 'disable_wandb' in config."
+        log_rank_0(
+            "[Patch:megatron.args.wandb_config][WARN] WANDB_API_KEY not set; "
+            "set it before training or enable 'disable_wandb' in config."
         )
 
-    print(f"[Patch] W&B configuration:")
-    print(f"  - project: {args.wandb_project}")
-    print(f"  - exp_name: {args.wandb_exp_name}")
-    print(f"  - save_dir: {args.wandb_save_dir}")
-    if hasattr(args, "wandb_entity"):
-        print(f"  - entity: {args.wandb_entity}")
+    entity = getattr(args, "wandb_entity", None)
+    log_rank_0(
+        "[Patch:megatron.args.wandb_config] "
+        f"project={args.wandb_project!r}, exp_name={args.wandb_exp_name!r}, "
+        f"save_dir={args.wandb_save_dir!r}, entity={entity!r}"
+    )
 
 
 @register_patch(
@@ -190,20 +197,22 @@ def patch_logging_level(ctx: PatchContext):
 
     stderr_level = getattr(args, "stderr_sink_level", "INFO")
     if stderr_level not in level_map:
-        print(f"[Patch] WARNING: Invalid stderr_sink_level '{stderr_level}', using INFO")
+        log_rank_0(
+            f"[Patch:megatron.args.logging_level][WARN] Invalid stderr_sink_level '{stderr_level}', using INFO"
+        )
         stderr_level = "INFO"
 
     logging_level = level_map[stderr_level]
 
     if hasattr(args, "logging_level") and args.logging_level is not None:
         if args.logging_level != logging_level:
-            print(
-                f"[Patch] WARNING: args.logging_level is deprecated, "
+            log_rank_0(
+                "[Patch:megatron.args.logging_level][WARN] args.logging_level is deprecated; "
                 f"setting to {logging_level} (from stderr_sink_level={stderr_level})"
             )
 
     args.logging_level = logging_level
-    print(f"[Patch] Logging level: {logging_level} ({stderr_level})")
+    log_rank_0(f"[Patch:megatron.args.logging_level] logging_level={logging_level} ({stderr_level})")
 
 
 @register_patch(
@@ -236,7 +245,7 @@ def patch_data_path_split(ctx: PatchContext):
             if path is not None and isinstance(path, str):
                 path_list = path.split()
                 setattr(args, path_attr, path_list)
-                print(f"[Patch] Split {path_attr}: {path_list}")
+                log_rank_0(f"[Patch:megatron.args.data_path_split] {path_attr} → {path_list}")
 
     # Split all data paths
     split_path("data_path")
@@ -267,4 +276,4 @@ def patch_mock_data(ctx: PatchContext):
         args.train_data_path = None
         args.valid_data_path = None
         args.test_data_path = None
-        print("[Patch] Mock data enabled, disabled all data paths")
+        log_rank_0("[Patch:megatron.args.mock_data] Mock data enabled; all data paths set to None")

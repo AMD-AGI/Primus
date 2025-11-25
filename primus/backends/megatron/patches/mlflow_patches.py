@@ -41,25 +41,21 @@ def patch_training_log_for_mlflow(ctx: PatchContext):
         # Store the original function
         original_training_log = megatron_training.training_log
 
-        def patched_training_log(
-            loss_dict,
-            total_loss_dict,
-            learning_rate,
-            decoupled_learning_rate,
-            iteration,
-            loss_scale,
-            report_memory_flag,
-            skipped_iter,
-            grad_norm,
-            params_norm,
-            num_zeros_in_grad,
-            model=None,
-            optimizer=None,
-            noise_scale_logger=None,
-        ):
-            """Patched training_log with MLflow support."""
-            # Call the original function first
-            result = original_training_log(
+        def patched_training_log(*args, **kwargs):
+            """
+            Patched training_log with MLflow support.
+
+            Notes:
+                - Keep the same call signature as Megatron's training_log by using *args/**kwargs.
+                - Current Megatron version expects 11 positional args
+                  (see megatron/training/training.py::training_log).
+                - We only depend on the first 11 arguments for MLflow logging.
+            """
+            # Call the original function first (preserve behavior)
+            result = original_training_log(*args, **kwargs)
+
+            # Unpack the arguments we care about from the current Megatron signature.
+            (
                 loss_dict,
                 total_loss_dict,
                 learning_rate,
@@ -71,10 +67,7 @@ def patch_training_log_for_mlflow(ctx: PatchContext):
                 grad_norm,
                 params_norm,
                 num_zeros_in_grad,
-                model,
-                optimizer,
-                noise_scale_logger,
-            )
+            ) = args[:11]
 
             # Add MLflow logging
             try:

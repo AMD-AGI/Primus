@@ -24,6 +24,9 @@ from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
 from primus.core.utils.distributed_logging import log_rank_0
 
+# Trigger registration of all Megatron patches (args_patches, env_patches, etc.)
+import primus.backends.megatron.patches  # noqa: F401
+
 
 class MegatronAdapter(BackendAdapter):
     """

@@ -11,10 +11,17 @@ Argument parsing utilities for Primus CLI.
 
 def parse_cli_overrides(overrides: list) -> dict:
     """
-    Parse CLI override arguments in the format key=value.
+    Parse CLI override arguments.
+
+    Supported formats:
+        - "key=value"
+        - "nested.key=value"
+        - "--key value" (common CLI style, converted internally to "key=value")
 
     Args:
-        overrides: List of strings in the format ["key=value", "nested.key=value", ...]
+        overrides: List of raw CLI override tokens, e.g.:
+            ["lr=0.001", "batch_size=32"]
+            ["--train_iters", "10"]
 
     Returns:
         Dictionary with parsed key-value pairs
@@ -40,12 +47,32 @@ def parse_cli_overrides(overrides: list) -> dict:
         - "model.layers=24" becomes {"model": {"layers": 24}}
         - Multiple nested keys merge into the same parent dict
     """
-    result = {}
-    for item in overrides:
-        if "=" not in item:
-            print(f"[Primus] Warning: Skipping invalid override format: {item}")
+    # First normalise tokens to "key=value" form.
+    normalized: list[str] = []
+    i = 0
+    while i < len(overrides):
+        item = overrides[i]
+
+        # Already in key=value form (including "--key=value")
+        if "=" in item:
+            normalized.append(item)
+            i += 1
             continue
 
+        # Handle "--key value" → "key=value"
+        if item.startswith("--") and i + 1 < len(overrides) and "=" not in overrides[i + 1]:
+            key = item.lstrip("-")
+            value = overrides[i + 1]
+            normalized.append(f"{key}={value}")
+            i += 2
+            continue
+
+        # Fallback: invalid format, emit warning and skip
+        print(f"[Primus] Warning: Skipping invalid override format: {item}")
+        i += 1
+
+    result: dict = {}
+    for item in normalized:
         key, value = item.split("=", 1)
         key = key.strip()
         value = value.strip()
