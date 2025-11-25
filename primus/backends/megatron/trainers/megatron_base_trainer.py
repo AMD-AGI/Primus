@@ -69,7 +69,7 @@ class MegatronBaseTrainer(BaseTrainer):
         )
 
         # Log version information
-        log_rank_0(f"Megatron-LM version: {self._detect_version()}")
+        log_rank_0(f"Megatron-LM version: {self.detect_version()}")
         log_rank_0(f"Model: {module_config.model}")
         log_rank_0(f"Framework: {module_config.framework}")
 
@@ -116,15 +116,15 @@ class MegatronBaseTrainer(BaseTrainer):
             log_rank_0(f"WARNING: Cannot patch parse_args: {e}")
             return False
 
-    def _detect_version(self) -> str:
+    def detect_version(self) -> str:
         """
         Detect Megatron-LM version.
 
-        Overrides BaseTrainer._detect_version() to provide accurate
+        Implements BaseTrainer.detect_version() to provide accurate
         Megatron version detection using the official method.
 
         Returns:
-            Megatron version string (e.g., "0.15.0rc8")
+            Megatron version string (e.g., "0.15.0rc8") or "unknown"
         """
         try:
             from megatron.core import package_info

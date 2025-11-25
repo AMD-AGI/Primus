@@ -114,7 +114,7 @@ class BaseTrainer(BaseModule):
         patch_count = run_patches(
             backend=self.backend_name,
             phase="before_train",
-            backend_version=self._detect_version(),
+            backend_version=self.detect_version(),
             model_name=self.model_name,
             extra={
                 "args": self.backend_args,
@@ -133,7 +133,7 @@ class BaseTrainer(BaseModule):
         patch_count = run_patches(
             backend=self.backend_name,
             phase="after_train",
-            backend_version=self._detect_version(),
+            backend_version=self.detect_version(),
             model_name=self.model_name,
             extra={
                 "args": self.backend_args,
@@ -166,14 +166,27 @@ class BaseTrainer(BaseModule):
         """
         raise NotImplementedError(f"{self.__class__.__name__} must implement run_train()")
 
-    def _detect_version(self) -> str:
+    @abstractmethod
+    def detect_version(self) -> str:
         """
         Detect backend version.
 
-        This is a helper method that can be overridden by backend-specific
-        trainers to provide accurate version detection.
+        This method must be implemented by backend-specific trainers
+        to provide accurate version detection for their backend.
 
         Returns:
-            Version string (e.g., "0.8.0", "unknown")
+            Version string (e.g., "0.15.0rc8", "commit:abc123")
+
+        Raises:
+            Can raise exceptions if version detection is critical.
+            Or return "unknown" if version is not available.
+
+        Example (MegatronBaseTrainer):
+            def detect_version(self) -> str:
+                try:
+                    from megatron.core import package_info
+                    return package_info.__version__
+                except Exception:
+                    return "unknown"
         """
-        return "unknown"
+        raise NotImplementedError(f"{self.__class__.__name__} must implement detect_version()")
