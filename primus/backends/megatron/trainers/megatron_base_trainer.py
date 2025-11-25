@@ -57,6 +57,10 @@ class MegatronBaseTrainer(BaseTrainer):
             module_config: Module-specific configuration
             backend_args: Megatron-LM argument namespace (from MegatronArgBuilder)
         """
+        log_rank_0("=" * 80)
+        log_rank_0("Initializing MegatronBaseTrainer...")
+        log_rank_0("=" * 80)
+
         # Initialize BaseTrainer (auto-detects distributed params, stores configs)
         super().__init__(
             primus_config=primus_config,
@@ -74,6 +78,10 @@ class MegatronBaseTrainer(BaseTrainer):
 
         # Apply AMD GPU runtime patches (Primus only supports AMD GPUs)
         self._patch_megatron_runtime_hooks()
+
+        log_rank_0("=" * 80)
+        log_rank_0("MegatronBaseTrainer initialized successfully")
+        log_rank_0("=" * 80)
 
     def _patch_parse_args(self) -> bool:
         """
