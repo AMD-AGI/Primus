@@ -20,7 +20,6 @@
 
 
 from primus.backends.megatron.builders.argument_builder import MegatronArgBuilder
-from primus.backends.megatron.patches import apply_megatron_patches
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
 
@@ -46,26 +45,15 @@ class MegatronAdapter(BackendAdapter):
 
         Steps:
             - Run Primus setup hooks
-            - Detect Megatron version
-            - Apply patches (version/model-specific)
             - Set environment variables
+
+        Note: setup patches are applied automatically by the base class
+        before this method is called.
         """
         # Run setup hooks from BackendRegistry
         BackendRegistry.run_setup("megatron")
 
-        # Detect Megatron version
-        megatron_version = self._detect_megatron_version()
-        model_name = config.model if hasattr(config, "model") else None
-
-        # Phase: Setup environment
-        apply_megatron_patches(
-            backend_version=megatron_version,
-            model_name=model_name,
-            phase="setup",
-            extra={"config": config.params if hasattr(config, "params") else {}},
-        )
-
-        print(f"[Primus:MegatronAdapter] Backend prepared (version: {megatron_version})")
+        print(f"[Primus:MegatronAdapter] Backend prepared (version: {self.detect_backend_version()})")
 
     # Override base class method for version detection
     def detect_backend_version(self) -> str:

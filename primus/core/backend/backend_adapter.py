@@ -65,7 +65,36 @@ class BackendAdapter(ABC):
         return None
 
     # -----------------------------------------------------------
-    # 2.6) Apply Build Args Patches (Automatic)
+    # 2.6) Apply Setup Patches (Automatic)
+    # -----------------------------------------------------------
+    def _apply_setup_patches(self, module_config):
+        """
+        Apply setup phase patches before backend preparation.
+
+        This is called automatically by create_trainer() and should NOT
+        be overridden by subclasses unless you have a very good reason.
+
+        Args:
+            module_config: ModuleConfig instance
+        """
+        from primus.core.patches import run_patches
+
+        backend_version = self.detect_backend_version()
+        model_name = getattr(module_config, "model", None)
+
+        run_patches(
+            backend=self.framework,
+            phase="setup",
+            backend_version=backend_version,
+            model_name=model_name,
+            extra={
+                "config": module_config.params,
+                "module_config": module_config,
+            },
+        )
+
+    # -----------------------------------------------------------
+    # 2.7) Apply Build Args Patches (Automatic)
     # -----------------------------------------------------------
     def _apply_build_args_patches(self, module_config, backend_args):
         """
@@ -115,22 +144,26 @@ class BackendAdapter(ABC):
     def create_trainer(self, primus_config, module_config):
         """
         Default implementation:
+            - apply setup patches (automatic)
             - prepare backend
             - convert Primus config to backend args
             - apply build_args patches (automatic)
             - instantiate trainer
         """
 
-        # 1) backend env/patch/detect
+        # 1) apply setup patches (automatic for all backends)
+        self._apply_setup_patches(module_config)
+
+        # 2) backend env/patch/detect
         self.prepare_backend(module_config)
 
-        # 2) config translation
+        # 3) config translation
         backend_args = self.convert_config(module_config)
 
-        # 3) apply build_args patches (automatic for all backends)
+        # 4) apply build_args patches (automatic for all backends)
         self._apply_build_args_patches(module_config, backend_args)
 
-        # 4) load trainer class from backend
+        # 5) load trainer class from backend
         TrainerClass = self.load_trainer_class()
 
         return TrainerClass(
