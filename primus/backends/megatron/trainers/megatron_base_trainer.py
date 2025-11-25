@@ -74,12 +74,10 @@ class MegatronBaseTrainer(BaseTrainer):
         log_rank_0(f"Framework: {module_config.framework}")
 
         # Inject arguments into Megatron runtime by patching parse_args()
-        log_rank_0("Injecting arguments into Megatron runtime...")
         if not self._patch_parse_args():
             raise RuntimeError(
                 "Failed to patch Megatron's parse_args(). " "Cannot inject arguments into Megatron runtime."
             )
-        log_rank_0("Args injected via parse_args patching")
 
         # Apply AMD GPU runtime patches (Primus only supports AMD GPUs)
         self._patch_megatron_runtime_hooks()
@@ -87,34 +85,6 @@ class MegatronBaseTrainer(BaseTrainer):
         log_rank_0("=" * 80)
         log_rank_0("MegatronBaseTrainer initialized successfully")
         log_rank_0("=" * 80)
-
-    def _patch_parse_args(self) -> bool:
-        """
-        Monkey patch Megatron's parse_args to return our prepared args.
-
-        This also ensures distributed environment variables are set in the args.
-
-        Returns:
-            True if patching succeeded, False otherwise
-        """
-        try:
-            import megatron.training.arguments as megatron_args  # type: ignore
-            import megatron.training.initialize as megatron_init  # type: ignore
-
-            # Create a lambda that always returns our prepared args
-            patched_parse_args = lambda *args, **kwargs: (
-                log_rank_0("parse_args() called, returning pre-configured args") or self.backend_args
-            )
-
-            # Patch both locations where parse_args might be defined/called
-            megatron_args.parse_args = patched_parse_args
-            megatron_init.parse_args = patched_parse_args
-
-            log_rank_0(f"Patched parse_args with {len(vars(self.backend_args))} arguments")
-            return True
-        except (ImportError, AttributeError) as e:
-            log_rank_0(f"WARNING: Cannot patch parse_args: {e}")
-            return False
 
     @classmethod
     def detect_version(cls) -> str:
@@ -140,23 +110,54 @@ class MegatronBaseTrainer(BaseTrainer):
 
     def _patch_megatron_runtime_hooks(self):
         """
-        Apply runtime patches to Megatron for ROCm compatibility.
+        Patch Megatron-LM runtime for ROCm compatibility.
 
-        Primus only supports AMD GPUs with ROCm. This method patches
-        Megatron functions that try to compile CUDA-specific kernels.
+        Primus only supports AMD GPUs with ROCm, so this method patches
+        functions that would try to compile CUDA-specific kernels.
         """
         try:
             import megatron.training.initialize as megatron_initialize  # type: ignore
 
-            log_rank_0("Patching Megatron runtime for ROCm compatibility...")
-
             # Skip CUDA fused kernel compilation (not compatible with ROCm)
-            log_rank_0("  - Patching _compile_dependencies to skip CUDA kernel compilation")
+            log_rank_0("Patching _compile_dependencies to skip CUDA kernel compilation")
             megatron_initialize._compile_dependencies = lambda: log_rank_0(
-                "    [Patched] Skipped _compile_dependencies() - CUDA kernels not compatible with ROCm"
+                "    Skipped _compile_dependencies() because CUDA kernels are not compatible with ROCm"
             )
 
-            log_rank_0("Megatron runtime patches applied successfully")
+            log_rank_0("Megatron-LM runtime patches applied successfully")
 
         except (ImportError, AttributeError) as e:
-            log_rank_0(f"WARNING: Failed to patch Megatron runtime hooks: {e}")
+            log_rank_0(f"WARNING: Failed to patch Megatron-LM runtime hooks: {e}")
+
+    def _patch_parse_args(self) -> bool:
+        """
+        Patch Megatron-LM's parse_args to return pre-configured Primus arguments.
+
+        This ensures Megatron-LM uses the pre-configured Primus arguments.
+
+        Returns:
+            True if patching succeeded, False otherwise.
+        """
+        try:
+            import megatron.training.arguments as megatron_args  # type: ignore
+            import megatron.training.initialize as megatron_init  # type: ignore
+
+            log_rank_0("Patching Megatron-LM parse_args() to use pre-configured Primus arguments")
+
+            # Create a lambda that always returns our prepared args
+            patched_parse_args = lambda *args, **kwargs: (
+                log_rank_0("parse_args() called; returning pre-configured Primus arguments")
+                or self.backend_args
+            )
+
+            # Patch both locations where parse_args might be defined/called
+            megatron_args.parse_args = patched_parse_args
+            megatron_init.parse_args = patched_parse_args
+
+            log_rank_0(
+                f"Patched Megatron-LM parse_args(); Primus provided {len(vars(self.backend_args))} arguments"
+            )
+            return True
+        except (ImportError, AttributeError) as e:
+            log_rank_0(f"WARNING: Failed to patch Megatron-LM parse_args(): {e}")
+            return False
