@@ -22,6 +22,7 @@
 from primus.backends.megatron.builders.argument_builder import MegatronArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
+from primus.core.utils.distributed_logging import log_rank_0
 
 
 class MegatronAdapter(BackendAdapter):
@@ -53,7 +54,7 @@ class MegatronAdapter(BackendAdapter):
         # Run setup hooks from BackendRegistry
         BackendRegistry.run_setup("megatron")
 
-        print(f"[Primus:MegatronAdapter] Backend prepared (version: {self.detect_backend_version()})")
+        log_rank_0(f"[Primus:MegatronAdapter] Backend prepared (version: {self.detect_backend_version()})")
 
     # Override base class method for version detection
     def detect_backend_version(self) -> str:
@@ -112,7 +113,7 @@ class MegatronAdapter(BackendAdapter):
         # 3. Produce the final Megatron Namespace
         megatron_args = builder.finalize()
 
-        print(f"[Primus:MegatronAdapter] Converted config → {len(vars(megatron_args))} Megatron args.")
+        log_rank_0(f"[Primus:MegatronAdapter] Converted config → {len(vars(megatron_args))} Megatron args.")
 
         return megatron_args
 
@@ -127,6 +128,3 @@ class MegatronAdapter(BackendAdapter):
                 "Ensure primus.backends.megatron.trainers defines the trainer "
                 "and imports BackendRegistry."
             ) from exc
-
-    # Note: Use default create_trainer() from BackendAdapter
-    # Megatron-specific logic (arg injection) is handled in MegatronBaseTrainer
