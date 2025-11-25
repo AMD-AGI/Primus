@@ -204,8 +204,12 @@ def log_dict_aligned(
     else:
         data_dict = data
 
+    # Log separator before content
+    log_func("-" * 80)
+
     if not data_dict:
         log_func(f"{title}: (empty)")
+        log_func("-" * 80)  # Log separator after content
         return
 
     # Log title with parameter count
@@ -217,3 +221,6 @@ def log_dict_aligned(
     # Log each key-value pair with alignment
     for key, value in sorted(data_dict.items()):
         log_func(f"{indent}{str(key):<{max_key_length}} : {value}")
+
+    # Log separator after content
+    log_func("-" * 80)
