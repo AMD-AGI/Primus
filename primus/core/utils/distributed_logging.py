@@ -162,7 +162,8 @@ def log_dict_aligned(
     Log a dictionary or namespace in an aligned column format.
 
     This function logs key-value pairs with aligned columns for better readability.
-    Values are aligned vertically at the same column position.
+    Values are aligned vertically at the same column position. The title line
+    includes the total number of parameters.
 
     Args:
         title: Title to display before the data
@@ -171,7 +172,7 @@ def log_dict_aligned(
         rank_filter: Which ranks should log ("rank_0", "rank_all", "rank_last")
 
     Example output:
-        Backend args:
+        Backend args: (300 parameters)
           account_for_embedding_in_pipeline_split : False
           adam_beta1                              : 0.9
           adam_eps                                : 1e-08
@@ -197,8 +198,6 @@ def log_dict_aligned(
     else:
         log_func = log_rank_0  # Default to rank 0
 
-    log_func(f"{title}:")
-
     # Convert SimpleNamespace to dict if needed
     if isinstance(data, SimpleNamespace):
         data_dict = vars(data)
@@ -206,8 +205,11 @@ def log_dict_aligned(
         data_dict = data
 
     if not data_dict:
-        log_func(f"{indent}(empty)")
+        log_func(f"{title}: (empty)")
         return
+
+    # Log title with parameter count
+    log_func(f"{title}: ({len(data_dict)} parameters)")
 
     # Find the longest key for alignment
     max_key_length = max(len(str(key)) for key in data_dict.keys())
