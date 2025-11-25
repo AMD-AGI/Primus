@@ -260,7 +260,7 @@ export PRIMUS_TEAM
 PRIMUS_USER=user-tas
 export PRIMUS_USER
 # export PRIMUS_EXP_NAME="debug"
-export PRIMUS_EXP_NAME="MoEProxy_MI355X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_MLA${ENABLE_MLA}_MTP${ENABLE_MTP}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}-${PROFILE_STEP_START}-${PROFILE_STEP_END}_NoCPUTrace${DISABLE_CPU_TRACE}_Features${FEATURE_TAG}"
+export PRIMUS_EXP_NAME="MoEProxy_MI355X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_MLA${ENABLE_MLA}_MTP${ENABLE_MTP}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}-${PROFILE_STEP_START}-${PROFILE_STEP_END}_NoCPUTrace${DISABLE_CPU_TRACE}_Queue${GPU_MAX_HW_QUEUES}_Features${FEATURE_TAG}"
 
 LOG_DIR=./output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
 export DUMP_PP_DIR=$LOG_DIR/pp_dump
@@ -302,6 +302,7 @@ bash ./examples/run_slurm_pretrain.sh \
     --moe_router_force_load_balancing "$LOAD_BALANCE" \
     --optimizer "$OPTIMIZER" \
     --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
+    --torch_profiler_use_gzip False \
     "${MLA_ARGS[@]}" \
     "${MTP_ARGS[@]}" \
     "${VPP_ARGS[@]}" \
@@ -310,3 +311,5 @@ bash ./examples/run_slurm_pretrain.sh \
     "${FP8_ARGS[@]}" \
     "${PROFILE_ARGS[@]}" \
     --train_iters "$TRAIN_ITERS" 2>&1 | tee -a "$LOG_FILE"
+
+    # --torch_profiler_use_gzip False \
