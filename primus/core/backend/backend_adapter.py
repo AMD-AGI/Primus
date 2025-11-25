@@ -171,33 +171,33 @@ class BackendAdapter(ABC):
         log_rank_0("=" * 80)
 
         # 1) apply setup patches (automatic for all backends)
-        log_rank_0("\n[Step 1/5] Applying setup patches...")
+        log_rank_0("[Step 1/5] Applying setup patches...")
         self._apply_setup_patches(module_config)
         log_rank_0("Setup patches applied successfully")
 
         # 2) backend env/patch/detect
-        log_rank_0("\n[Step 2/5] Preparing backend environment...")
+        log_rank_0("[Step 2/5] Preparing backend environment...")
         self.prepare_backend(module_config)
         log_rank_0("Backend environment prepared successfully")
 
         # 3) config translation
-        log_rank_0("\n[Step 3/5] Converting Primus config to backend args...")
+        log_rank_0("[Step 3/5] Converting Primus config to backend args...")
         backend_args = self.convert_config(module_config)
         log_rank_0("Config conversion completed successfully")
 
         # 4) apply build_args patches (automatic for all backends)
-        log_rank_0("\n[Step 4/5] Applying build_args patches...")
+        log_rank_0("[Step 4/5] Applying build_args patches...")
         self._apply_build_args_patches(module_config, backend_args)
         log_rank_0("Build_args patches applied successfully")
 
         # 5) load trainer class from backend
-        log_rank_0("\n[Step 5/5] Loading trainer class...")
+        log_rank_0("[Step 5/5] Loading trainer class...")
         TrainerClass = self.load_trainer_class()
         log_rank_0(f"Trainer class loaded: {TrainerClass.__name__}")
 
-        log_rank_0("\n" + "=" * 80)
+        log_rank_0("" + "=" * 80)
         log_rank_0("Trainer creation completed successfully")
-        log_rank_0("=" * 80 + "\n")
+        log_rank_0("=" * 80 + "")
 
         return TrainerClass(
             primus_config=primus_config,

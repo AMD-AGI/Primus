@@ -109,7 +109,12 @@ class MegatronBaseTrainer(BaseTrainer):
             megatron_init.parse_args = patched_parse_args
 
             log_rank_0(f"Distributed environment info: {dist_env}")
-            log_rank_0(f"Backend args: {self.backend_args}")
+
+            # Log backend args in a formatted way (one parameter per line)
+            log_rank_0("Backend args:")
+            args_dict = vars(self.backend_args)
+            for key, value in sorted(args_dict.items()):
+                log_rank_0(f"  {key}: {value}")
 
             log_rank_0(
                 f"Patched parse_args with {len(vars(self.backend_args))} arguments "
