@@ -7,7 +7,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict
 
-from primus.core.utils.distributed_logging import log_rank_0
+from primus.core.utils.distributed_logging import log_dict_aligned, log_rank_0
 
 
 class BackendAdapter(ABC):
@@ -181,9 +181,12 @@ class BackendAdapter(ABC):
         log_rank_0("Backend environment prepared successfully")
 
         # 3) config translation
-        log_rank_0("[Step 3/5] Converting Primus config to backend args...")
+        log_rank_0("\n[Step 3/5] Converting Primus config to backend args...")
         backend_args = self.convert_config(module_config)
         log_rank_0("Config conversion completed successfully")
+
+        # Log the final backend args in aligned format
+        log_dict_aligned("Final backend args", backend_args)
 
         # 4) apply build_args patches (automatic for all backends)
         log_rank_0("[Step 4/5] Applying build_args patches...")
