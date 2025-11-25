@@ -83,6 +83,27 @@ class BaseModule(ABC):
         """Execute training loop."""
         raise NotImplementedError
 
+    def cleanup(self, on_error: bool = False):
+        """
+        Cleanup and finalize training resources.
+
+        This method is called after training completes (successfully or with error)
+        to clean up resources and perform finalization tasks.
+
+        Args:
+            on_error: Whether cleanup is being called due to an error
+
+        Typical cleanup tasks:
+            - Save final checkpoint (if not saved)
+            - Close file handles and logging
+            - Release GPU memory
+            - Cleanup temporary files
+            - Finalize distributed processes
+            - Generate training summary/report
+        """
+        # Default implementation does nothing
+        # Subclasses can override to add cleanup logic
+
     # Properties for accessing configuration
     @property
     def exp_root_path(self) -> str:

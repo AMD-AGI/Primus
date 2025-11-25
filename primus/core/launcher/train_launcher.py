@@ -130,12 +130,24 @@ def launch_train(args, overrides, module: str):
 
     # 10 Execute training lifecycle
     try:
+        # 1) Optional setup phase
+        # trainer.setup()
+
+        # 2) Initialize training components
         trainer.init()
+
+        # 3) Execute training
         trainer.run()
+
+        # 4) Cleanup and finalize
+        trainer.cleanup()
+
     except KeyboardInterrupt:
         print("\n[Primus:Train] Training interrupted by user (Ctrl+C)")
+        trainer.cleanup(on_error=True)
         raise
     except Exception as e:
+        trainer.cleanup(on_error=True)
         raise RuntimeError(f"[Primus:Train] Training execution failed: {e}") from e
 
 
