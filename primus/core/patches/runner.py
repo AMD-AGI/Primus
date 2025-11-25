@@ -10,15 +10,12 @@ Patch Execution Runner
 This module handles the execution of patches based on context.
 """
 
-import logging
 import os
 from typing import Any, Dict, List, Optional
 
 from primus.core.patches.context import PatchContext, normalize_phase
 from primus.core.patches.registry import PatchRegistry
-
-log = logging.getLogger(__name__)
-
+from primus.core.utils.distributed_logging import log_rank_0
 
 # ============================================================================
 # Environment Parsing
@@ -103,10 +100,10 @@ def run_patches(
 
     # Log execution (show phase normalization if applicable)
     phase_info = f"{phase}" if phase == normalized_phase else f"{phase} → {normalized_phase}"
-    log.debug(
-        f"[PatchSystem] Running patches: backend={backend}, phase={phase_info}, "
-        f"version={backend_version}, model={model_name}, enabled={enabled_ids}"
-    )
+    # log_rank_0(
+    #     f"[PatchSystem] Running patches: backend={backend}, phase={phase_info}, "
+    #     f"version={backend_version}, model={model_name}"
+    # )
 
     applied_count = 0
     applied_patches = []
@@ -114,31 +111,31 @@ def run_patches(
     for patch in PatchRegistry.iter_patches():
         # Filter by enabled_ids
         if enabled_ids is not None and patch.id not in enabled_ids:
-            log.debug(f"[PatchSystem] Skipped {patch.id} (not in enabled list)")
+            # log_rank_0(f"[PatchSystem] Skipped {patch.id} (not in enabled list)")
             continue
 
         # Check if patch applies
         if not patch.applies_to(ctx):
-            log.debug(f"[PatchSystem] Skipped {patch.id} (does not apply to context)")
+            # log_rank_0(f"[PatchSystem] Skipped {patch.id} (does not apply to context)")
             continue
 
         # Apply patch
         try:
-            log.debug(f"[PatchSystem] Applying {patch.id}: {patch.description}")
+            # log_rank_0(f"[PatchSystem] Applying {patch.id}: {patch.description}")
             patch.apply(ctx)
             applied_count += 1
             applied_patches.append(patch.id)
-            log.info(f"[PatchSystem] ✓ Applied patch: {patch.id}")
+            log_rank_0(f"[PatchSystem] ✓ Applied patch: {patch.id}")
         except Exception as e:
-            log.exception(f"[PatchSystem] ✗ Patch {patch.id} failed: {e}")
+            log_rank_0(f"[PatchSystem] ✗ Patch {patch.id} failed: {e}")
             # Continue with other patches (non-fatal)
             continue
 
     if applied_count > 0:
-        log.info(
+        log_rank_0(
             f"[PatchSystem] Applied {applied_count} patches for {backend}/{normalized_phase}: {', '.join(applied_patches)}"
         )
-    else:
-        log.debug(f"[PatchSystem] No patches applied for {backend}/{normalized_phase}")
+    # else:
+    #     log_rank_0(f"[PatchSystem] No patches applied for {backend}/{normalized_phase}")
 
     return applied_count

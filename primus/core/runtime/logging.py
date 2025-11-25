@@ -23,8 +23,7 @@ from .context import RuntimeContext
 def init_global_logger(
     primus_config: PrimusConfig,
     module_name: str = "primus",
-    file_sink_level: str = "INFO",
-    stderr_sink_level: str = "INFO",
+    module_config=None,
 ) -> None:
     """
     Initialize global logging system for distributed training.
@@ -38,8 +37,8 @@ def init_global_logger(
     Args:
         primus_config: Primus configuration object
         module_name: Name for the logger (default: "primus")
-        file_sink_level: Log level for file output
-        stderr_sink_level: Log level for stderr output
+        module_config: Optional module config to read logging levels from.
+                       Supports: sink_level, file_sink_level, stderr_sink_level
     """
     context = RuntimeContext.get_instance()
 
@@ -57,6 +56,25 @@ def init_global_logger(
 
     # Store primus_config in context
     context.set_primus_config(primus_config)
+
+    # Determine logging levels from module_config if provided
+    file_sink_level = "DEBUG"  # Default from module_base.yaml
+    stderr_sink_level = "INFO"  # Default from module_base.yaml
+
+    if module_config is not None:
+        # Access logging config from params dict
+        sink_level = module_config.params.get("sink_level")
+
+        # If sink_level is set, it overrides both file and stderr levels
+        if sink_level is not None:
+            file_sink_level = sink_level
+            stderr_sink_level = sink_level
+        else:
+            # Otherwise, use individual levels if specified
+            if module_config.params.get("file_sink_level") is not None:
+                file_sink_level = module_config.params.get("file_sink_level")
+            if module_config.params.get("stderr_sink_level") is not None:
+                stderr_sink_level = module_config.params.get("stderr_sink_level")
 
     # Create logger configuration
     logger_cfg = logger.LoggerConfig(

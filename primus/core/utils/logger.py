@@ -29,13 +29,13 @@ master_stderr_sink_format = (
     "<blue>(PrimusMaster  pid={process}) </>"
     "[<green>{time:YYYYMMDD HH:mm:ss}</>]"
     "[<cyan>node-{extra[rank]}/{extra[world_size]}</>]"
-    "[<level>{level: <5}</level>] "
+    "<level>{extra[level_padded]}</level>"
     "<level>{message}</level>"
 )
 stderr_sink_format = (
     "[<green>{time:YYYYMMDD HH:mm:ss}</>]"
     "[<cyan>rank-{extra[rank]}/{extra[world_size]}</>]"
-    "[<level>{level: <5}</level>] "
+    "<level>{extra[level_padded]}</level>"
     "<level>{message}</level>"
 )
 master_file_sink_format = (
@@ -44,7 +44,7 @@ master_file_sink_format = (
     "[<blue>{extra[user]}/{extra[team]}</>]"
     "[<magenta>{extra[module_name]: <11}</>]"
     "[<cyan>node-{extra[rank]}/{extra[world_size]}</>]"
-    "[<level>{level: <5}</level>] "
+    "<level>{extra[level_padded]}</level>"
     "<level>{message}</level>"
 )
 file_sink_format = (
@@ -53,7 +53,7 @@ file_sink_format = (
     "[<magenta>{extra[module_name]: <11}</>]"
     "[<cyan>ip-{extra[node_ip]}</>]"
     "[<cyan>rank-{extra[rank]}/{extra[world_size]}</>]"
-    "[<level>{level: <5}</level>] "
+    "<level>{extra[level_padded]}</level>"
     "<level>{message}</level>"
 )
 
@@ -96,6 +96,16 @@ def add_file_sink(
         "error",
         "critical",
     ]
+
+    # Level padding filter
+    def format_level_with_padding(record):
+        level_name = record["level"].name
+        bracket_content = f"[{level_name}]"
+        total_width = 11
+        padded = bracket_content.ljust(total_width)
+        record["extra"]["level_padded"] = padded
+        return True
+
     sink_format = master_file_sink_format if is_head else file_sink_format
     if logger.level(level.upper()) >= logger.level(file_sink_level.upper()):
         logger.add(
@@ -108,7 +118,9 @@ def add_file_sink(
             rotation=rotation,
             retention=retention,
             encoding=encoding,
-            filter=lambda record: record["level"].no >= logger.level(level.upper()).no,
+            filter=lambda record: (
+                format_level_with_padding(record) and record["level"].no >= logger.level(level.upper()).no
+            ),
         )
 
 
@@ -124,6 +136,26 @@ def setup_logger(
         log_path = os.path.join(cfg.exp_root_path, f"logs/{cfg.module_name}/rank-{cfg.rank}")
 
     from loguru import logger as loguru_logger
+
+    # Custom filter to add formatted level with padding outside brackets
+    def format_level_with_padding(record):
+        """
+        Add a formatted level field with padding outside brackets.
+
+        Format: [LEVEL] + spaces to align
+        Examples:
+            INFO     -> "[INFO]     " (total 11 chars)
+            WARNING  -> "[WARNING]  " (total 11 chars)
+            CRITICAL -> "[CRITICAL]" (total 11 chars)
+        """
+        level_name = record["level"].name
+        # [LEVEL] + padding to make total width 11 (including brackets)
+        # CRITICAL is 8 chars, +2 for brackets = 10, +1 space = 11
+        bracket_content = f"[{level_name}]"
+        total_width = 11  # [CRITICAL] = 10 chars, so 11 gives 1 space for longest
+        padded = bracket_content.ljust(total_width)
+        record["extra"]["level_padded"] = padded
+        return True
 
     # remove default stderr sink
     loguru_logger.remove(0)
@@ -157,18 +189,38 @@ def setup_logger(
         diagnose=True,
         format=sink_format,
         colorize=True,
-        filter=lambda record: record["level"].no >= loguru_logger.level(cfg.stderr_sink_level.upper()).no,
+        filter=lambda record: (
+            format_level_with_padding(record)
+            and record["level"].no >= loguru_logger.level(cfg.stderr_sink_level.upper()).no
+        ),
     )
 
     import logging
 
     class InterceptHandler(logging.Handler):
+        """
+        Custom handler that intercepts standard logging and routes to loguru.
+
+        This handler adds module location formatting ([module.py:line])
+        to all intercepted logs, ensuring consistent format across both
+        Primus code and third-party libraries (like Megatron).
+        """
+
         def emit(self, record):
             try:
                 level = loguru_logger.level(record.levelname).name
             except Exception:
                 level = record.levelno
-            loguru_logger.opt(depth=6, exception=record.exc_info).log(level, record.getMessage())
+
+            # Extract module name and line number from the log record
+            module_name = record.name.split(".")[-1] if record.name else "unknown"
+            line = record.lineno
+
+            # Format message with module location prefix (consistent with log_rank_0 format)
+            formatted_message = f"{module_format(module_name, line)}: {record.getMessage()}"
+
+            # Forward to loguru with proper depth to preserve stack trace
+            loguru_logger.opt(depth=6, exception=record.exc_info).log(level, formatted_message)
 
     logging.root.handlers = [InterceptHandler()]
     logging.root.setLevel(logging.NOTSET)

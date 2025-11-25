@@ -110,7 +110,7 @@ class BaseTrainer(BaseModule):
         log_rank_0("=" * 80)
 
         # 1) Apply before_train patches
-        log_rank_0("\n[1/3] Applying before_train patches...")
+        log_rank_0("[1/3] Applying before_train patches...")
         patch_count = run_patches(
             backend=self.backend_name,
             phase="before_train",
@@ -125,11 +125,11 @@ class BaseTrainer(BaseModule):
         log_rank_0(f"Applied {patch_count} patches")
 
         # 2) Execute training (implemented by subclass)
-        log_rank_0("\n[2/3] Executing training...")
+        log_rank_0("[2/3] Executing training...")
         self.run_train()
 
         # 3) Apply after_train patches (if any)
-        log_rank_0("\n[3/3] Applying after_train patches...")
+        log_rank_0("[3/3] Applying after_train patches...")
         patch_count = run_patches(
             backend=self.backend_name,
             phase="after_train",

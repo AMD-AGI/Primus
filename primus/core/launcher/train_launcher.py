@@ -73,18 +73,13 @@ def launch_train(args, overrides, module: str):
     # 2 Load PrimusConfig (must come before distributed init as it needs platform info)
     primus_cfg = PrimusConfig.from_file(cfg_path, args)
 
-    # print(f"-------------------- {primus_cfg}")
-
-    # 2.5 Set global variables (needed for platform detection in distributed init)
+    # Set global variables (needed for platform detection in distributed init)
     set_global_variables(primus_cfg)
 
     # 3 Initialize distributed environment (one-time global initialization)
     init_distributed_env()
 
-    # 4 Initialize global logger (one-time global initialization)
-    init_global_logger(primus_cfg)
-
-    # 5 Extract module-level train config
+    # 5 Extract module-level train config (needed for logger configuration)
     try:
         train_cfg = primus_cfg.get_module_config(module)
     except ValueError as exc:
@@ -95,12 +90,14 @@ def launch_train(args, overrides, module: str):
             f"Please ensure your YAML defines a module with 'module: {module}'."
         ) from exc
 
+    # 4 Initialize global logger with module config (one-time global initialization)
+    init_global_logger(primus_cfg, module_name=module, module_config=train_cfg)
+
     # 6 Apply CLI overrides to module params (deep merge to preserve nested structures)
     if overrides:
         override_dict = parse_cli_overrides(overrides)
         train_cfg.params = deep_merge(train_cfg.params, override_dict)
 
-    # log_rank_0(f"--------------------00000 {train_cfg.params}")
     # 7 Validate framework is specified
     framework = train_cfg.framework
     if not framework:
