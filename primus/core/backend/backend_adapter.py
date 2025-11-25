@@ -185,13 +185,13 @@ class BackendAdapter(ABC):
         backend_args = self.convert_config(module_config)
         log_rank_0("Config conversion completed successfully")
 
-        # Log the final backend args in aligned format
-        log_dict_aligned("Final backend args", backend_args)
-
         # 4) apply build_args patches (automatic for all backends)
-        log_rank_0("[Step 4/5] Applying build_args patches...")
+        log_rank_0("\n[Step 4/5] Applying build_args patches...")
         self._apply_build_args_patches(module_config, backend_args)
         log_rank_0("Build_args patches applied successfully")
+
+        # Log the final backend args in aligned format (after patches)
+        log_dict_aligned("Final backend args (after patches)", backend_args)
 
         # 5) load trainer class from backend
         log_rank_0("[Step 5/5] Loading trainer class...")
