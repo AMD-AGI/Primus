@@ -12,11 +12,11 @@ The mainstream MoE models today are DeepSeek-style architectures, spanning from 
 
 | Model | Total Params | Active Params | Notes |
 | --- | --- | --- | --- |
-| DeepSeek V2 Lite | 16B | 2.4B | `deepseek_v2_lite.yaml` |
-| DeepSeek V2 | 236B | 21B | `deepseek_v2.yaml` |
-| DeepSeek V3 | 671B | 37B | `deepseek_v3.yaml` |
-| DeepSeek Proxy 1T | 1T | 44B | `deepseek_proxy_1T.yaml` |
-| DeepSeek Proxy 2T | 2T | 80B | `deepseek_proxy_2T.yaml` |
+| DeepSeek-Proxy-16B  | 16B | 2.4B | `deepseek_v2_lite.yaml` |
+| DeepSeek-Proxy-236B | 236B | 21B | `deepseek_v2.yaml` |
+| DeepSeek-Proxy-671B | 671B | 37B | `deepseek_v3.yaml` |
+| DeepSeek-Proxy-1T   | 1T | 44B | `deepseek_proxy_1T.yaml` |
+| DeepSeek-Proxy-2T   | 2T | 80B | `deepseek_proxy_2T.yaml` |
 
 
 ## 3. Profiling and Analysis Workflow
@@ -173,19 +173,19 @@ AINIC, cp, hw_queue, manual gc (stability), fused crossentropy, aware-optimizer,
 
 ## 7. Model-Specific Optimization Guide
 
-This section provides an overview and practical guidance for optimizing different DeepSeek model variants on Primus/AMD MI-series hardware. Each sub-section covers a specific model family—DeepSeek V2 Lite, DeepSeek V2, DeepSeek V3, and ultra-large (1T+ parameters) models—with advice on configuration, baseline performance, bottleneck analysis, advanced tuning, and future directions.
+This section provides an overview and practical guidance for optimizing different DeepSeek model variants on Primus/AMD MI-series hardware. Each sub-section covers a specific model family—DeepSeek-Proxy-16B, DeepSeek-Proxy-236B, DeepSeek-Proxy-671B, and ultra-large (1T+ parameters) models—with advice on configuration, baseline performance, bottleneck analysis, advanced tuning, and future directions.
 
 ---
 
-### 7.1 DeepSeek V2 Lite Optimization
+### 7.1 DeepSeek-Proxy-16B Optimization
 
 #### 1. Model Overview and Configuration Files
 
-DeepSeek V2 Lite is a more memory- and compute-efficient variant, designed for high-throughput pretraining. Typical sizes range from 80B to 180B parameters. In Primus, you can find its configs and pretrain scripts under:
+DeepSeek-Proxy-16B is a more memory- and compute-efficient variant, designed for high-throughput pretraining. Typical sizes range from 80B to 180B parameters. In Primus, you can find its configs and pretrain scripts under:
 
 | Variant | Total Params | Active Params | Transformer Layers |
 | --- | --- | --- | --- |
-| DeepSeek V2 Lite | 16B | 2.4B | 27 |
+| DeepSeek-Proxy-16B | 16B | 2.4B | 27 |
 
 - Model Config: `primus/configs/models/megatron/deepseek_v2_lite.yaml`
 - Pretrain Script: `examples/moe_package/run_deepseek_v2_lite_pretrain_mi355x.sh`
@@ -194,9 +194,9 @@ DeepSeek V2 Lite is a more memory- and compute-efficient variant, designed for h
 
 AMD MI300/325/355 series GPUs offer very large memory pools. The easiest and most effective way to leverage this is to increase the micro batch size (mbs). For MoE models, the `EP` (expert parallel size) parameter enables scaling individual expert models across devices. For models exceeding 180B, you can further utilize pipeline parallelism (`PP`) to split the model, maximizing memory savings.
 
-The following bar chart illustrates how increasing the micro-batch size (MBS) during DeepSeekV2Lite training on an AMD MI355 GPU improves both throughput (tokens per second) and GPU memory utilization. By scaling up the MBS, you can achieve better hardware efficiency and model performance, within the limits of available memory resources.
+The following bar chart illustrates how increasing the micro-batch size (MBS) during DeepSeek-Proxy-16B training on an AMD MI355 GPU improves both throughput (tokens per second) and GPU memory utilization. By scaling up the MBS, you can achieve better hardware efficiency and model performance, within the limits of available memory resources.
 
-![DeepSeekV2Lite MI355 Batch Size Scaling – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_mbs_scaling_mi355.png)
+![DeepSeek-Proxy-16B MI355 Batch Size Scaling – Tokens/s and Memory Usage](figures/DeepSeekProxy16B_mbs_scaling_mi355.png)
 
 #### 3. Bottleneck Analysis
 
@@ -211,7 +211,7 @@ Perform a time breakdown analysis to identify performance bottlenecks (e.g., com
 
 #### 4. Performance Optimization
 
-This section summarizes our key optimization strategies used to enhance DeepSeek_V2_Lite MoE model training on AMD MI-series hardware. Each method addresses a specific bottleneck, providing both stability and performance improvements:
+This section summarizes our key optimization strategies used to enhance DeepSeek-Proxy-16B MoE model training on AMD MI-series hardware. Each method addresses a specific bottleneck, providing both stability and performance improvements:
 
 1. **Manual Garbage Collection (GC) for Performance Stability**
    We observed that, during MoE training, iteration time can fluctuate significantly due to memory allocation behavior. By introducing manual garbage collection, we can stabilize the training process and reduce these time variations. As a result, all subsequent benchmarking results in this guide are based on runs with manual GC enabled by default.
@@ -237,23 +237,23 @@ Through stepwise optimization, we observe a clear and significant boost in end-t
 
 **Figure 1**:
 Cumulative throughput (tokens/s per GPU) and GPU memory usage after successively enabling key optimization features. Each bar represents the combined effect of all optimizations up to that point.
-![DeepSeekV2Lite MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_tks_memory_mi355.png)
+![DeepSeekProxy16B MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekProxy16B_tks_memory_mi355.png)
 
 **Figure 2**:
 Per-feature throughput (tokens/s) and speedup relative to baseline. This illustrates the acceleration contributed by each optimization as it is introduced.
-![DeepSeekV2Lite MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_tks_speedup_mi355.png)
+![DeepSeekProxy16B MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekProxy16B_tks_speedup_mi355.png)
 
 ---
 
-### 7.2 DeepSeek V2 Optimization
+### 7.2 DeepSeek-Proxy-236B Optimization
 
 #### 1. Model Overview and Configuration Files
 
-DeepSeek V2 models scale up in size and complexity, and are optimized for maximum parallel throughput on MI-series hardware.
+DeepSeek-Proxy-236B models scale up in size and complexity, and are optimized for maximum parallel throughput on MI-series hardware.
 
 | Variant | Total Params | Active Params | Transformer Layers |
 | --- | --- | --- | --- |
-| DeepSeek V2 | 236B | 21B | 60 |
+| DeepSeek-Proxy-236B | 236B | 21B | 60 |
 
 - Model Config: `primus/configs/models/megatron/deepseek_v2.yaml`
 - Pretrain Script: `examples/moe_package/run_deepseek_v2_pretrain_mi355x.sh`
@@ -262,7 +262,7 @@ DeepSeek V2 models scale up in size and complexity, and are optimized for maximu
 
 Memory scaling via higher mbs and expert/model partitioning (`EP`, `PP`) is even more critical for these larger models. Start with the largest mbs that fits within memory, and iteratively tune parallelism parameters.
 
-*(Insert chart — to be added: MB Size vs. Performance for DeepSeek V2)*
+*(Insert chart — to be added: MB Size vs. Performance for DeepSeek-Proxy-236B)*
 
 #### 3. Bottleneck Analysis
 
@@ -274,7 +274,7 @@ Time breakdown—profile compute, communication, and idle periods to guide optim
 
 #### 4. Performance Optimization
 
-(Insert plot: "DeepSeek V2 Optimization Features vs. Tokens/s")
+(Insert plot: "DeepSeek-Proxy-36B Optimization Features vs. Tokens/s")
 
 | Optimization Feature            | Tokens/s/GPU | Memory (GB) |
 |---------------------------------|--------------|-------------|
@@ -295,15 +295,15 @@ Time breakdown—profile compute, communication, and idle periods to guide optim
 
 ---
 
-### 7.3 DeepSeek V3 Optimization
+### 7.3 DeepSeek-Proxy-671B Optimization
 
 #### 1. Model Overview and Configuration Files
 
-DeepSeek V3 introduces further architectural improvements, leveraging increased parameter and expert counts. Typically used for experiments over 250B parameters.
+DeepSeek-Proxy-671B introduces further architectural improvements, leveraging increased parameter and expert counts. Typically used for experiments over 250B parameters.
 
 | Variant | Total Params | Active Params | Transformer Layers |
 | --- | --- | --- | --- |
-| DeepSeek V3 | 671B | 37B | 61 |
+| DeepSeek-Proxy-671B | 671B | 37B | 61 |
 
 - Model Config: `primus/configs/models/megatron/deepseek_v3.yaml`
 - Pretrain Script: `examples/moe_package/run_deepseek_v3_pretrain_mi325x.sh`
@@ -312,11 +312,11 @@ DeepSeek V3 introduces further architectural improvements, leveraging increased 
 
 Utilize larger mbs, aggressive expert and pipeline partitioning. The MI325X platform especially allows for maximizing GPU memory utilization.
 
-*(Insert chart — MB Size vs. Memory/Throughput for DeepSeek V3)*
+*(Insert chart — MB Size vs. Memory/Throughput for DeepSeek-Proxy-671B)*
 
 #### 3. Bottleneck Analysis
 
-As above; perform time breakdown. For V3, communication overheads can dominate and may require additional tuning.
+As above; perform time breakdown. For DeepSeek-Proxy-671B, communication overheads can dominate and may require additional tuning.
 
 | Test Name | Compute Time | Comm Time | Idle Time | Misc Time |
 |-----------|--------------|-----------|-----------|-----------|
@@ -352,8 +352,8 @@ Models exceeding 1 trillion parameters push the boundaries of distributed traini
 
 | Variant | Total Params | Active Params | Transformer Layers |
 | --- | --- | --- | --- |
-| DeepSeek Proxy 1T | 1T | 44B | 96 |
-| DeepSeek Proxy 2T | 2T | 80B | 96 |
+| DeepSeek-Proxy-1T | 1T | 44B | 96 |
+| DeepSeek-Proxy-2T | 2T | 80B | 96 |
 
 - Model Configs:
   - `primus/configs/models/megatron/deepseek_proxy_1T.yaml`
@@ -415,6 +415,6 @@ Both time and memory breakdowns become essential at this scale. Memory view is c
 
 ## 9. References
 
-- DeepSeek V2 Lite / V2 / V3 Hugging Face pages for public configs and parameter counts.
+- DeepSeek family Hugging Face pages for public configs and parameter counts.
 - AMD ROCm™ docs and Instinct™ MI300 performance tuning guides.
 - Primus repository Megatron configs and READMEs (continuously updated best practices).
