@@ -18,9 +18,6 @@ RUN mkdir -p /opt && cd /opt && \
     pip3 install -r requirements.txt && \
     GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
 
-# RUN sudo apt update && sudo apt install rdma-core libibverbs-dev \
-#     ibverbs-utils libopenmpi-dev openmpi-bin -y
-
 # Set the default working directory
 WORKDIR /opt
 
