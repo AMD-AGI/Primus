@@ -200,6 +200,7 @@ class BackendAdapter(ABC):
         primus_only_keys = config_keys - backend_keys
 
         if primus_only_keys:
+            log_rank_0("")  # Add separator for better readability
             primus_only_params = {key: module_config.params[key] for key in sorted(primus_only_keys)}
             log_dict_aligned("Primus-specific parameters", primus_only_params)
 
