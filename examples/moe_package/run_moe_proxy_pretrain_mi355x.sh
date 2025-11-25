@@ -86,7 +86,9 @@ TRAIN_ITERS=10
 # 11 - Manual GC helper
 # MoE_Features=(0 1 2 3 4 5 6 7 8 9 10 11)
 # MoE_Features=(0 11)
-MoE_Features=(3 4 10 11)
+# MoE_Features=(3 4 11)
+MoE_Features=(3 10 11)
+# MoE_Features=(3 4 10 11)
 
 FEATURE_ARGS=()
 PRIMUS_TURBO_ENABLED="False"
