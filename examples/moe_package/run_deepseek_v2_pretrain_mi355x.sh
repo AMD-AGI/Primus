@@ -10,14 +10,15 @@
 # export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ci_4096e28_20251114"
 export DOCKER_IMAGE="docker.io/tasimage/primus:pr-289"
 # export DOCKER_IMAGE="rocm/mad-private:primus_rocm7.1_ci_45fd4f8_20251119"
+# export DOCKER_IMAGE="rocm/mad-private:primus_rocm7.1_ci_4b9c9f3_20251120"
 export CLEAN_DOCKER_CONTAINER=1
 
 ######################### Training Environment Variables #########################
 export HF_TOKEN=${HF_TOKEN:-"your_hf_token"}
 export WANDB_API_KEY=${WANDB_API_KEY:-"your_wandb_api_key"}
 # TODO
-# export GPU_MAX_HW_QUEUES=2
-export GPU_MAX_HW_QUEUES=8
+export GPU_MAX_HW_QUEUES=2
+# export GPU_MAX_HW_QUEUES=8
 export CPUS_PER_TASK=96
 
 # Set on Primus-Safe Platform
@@ -267,7 +268,7 @@ export PRIMUS_TEAM
 PRIMUS_USER=user-tas
 export PRIMUS_USER
 # export PRIMUS_EXP_NAME="debug"
-export PRIMUS_EXP_NAME="DeepSeekV2_MI355X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_MLA${ENABLE_MLA}_MTP${ENABLE_MTP}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}-${PROFILE_STEP_START}-${PROFILE_STEP_END}_NoCPUTrace${DISABLE_CPU_TRACE}_Features${FEATURE_TAG}"
+export PRIMUS_EXP_NAME="DeepSeekV2_MI355X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_MLA${ENABLE_MLA}_MTP${ENABLE_MTP}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}-${PROFILE_STEP_START}-${PROFILE_STEP_END}_NoCPUTrace${DISABLE_CPU_TRACE}_Queue${GPU_MAX_HW_QUEUES}_Features${FEATURE_TAG}"
 
 LOG_DIR=./output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
 export DUMP_PP_DIR=$LOG_DIR/pp_dump
@@ -314,6 +315,7 @@ bash ./examples/run_slurm_pretrain.sh \
     --moe_router_force_load_balancing "$LOAD_BALANCE" \
     --optimizer "$OPTIMIZER" \
     --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
+    --torch_profiler_use_gzip False \
     "${MLA_ARGS[@]}" \
     "${MTP_ARGS[@]}" \
     "${VPP_ARGS[@]}" \
