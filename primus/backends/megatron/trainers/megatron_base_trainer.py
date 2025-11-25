@@ -150,11 +150,15 @@ class MegatronBaseTrainer(BaseTrainer):
         try:
             import megatron.training.initialize as megatron_initialize  # type: ignore
 
+            log_rank_0("Patching Megatron runtime for ROCm compatibility...")
+
             # Skip CUDA fused kernel compilation (not compatible with ROCm)
+            log_rank_0("  - Patching _compile_dependencies to skip CUDA kernel compilation")
             megatron_initialize._compile_dependencies = lambda: log_rank_0(
-                "Skipped Megatron _compile_dependencies() for ROCm compatibility"
+                "    [Patched] Skipped _compile_dependencies() - CUDA kernels not compatible with ROCm"
             )
-            log_rank_0("Applied Megatron runtime patches for ROCm")
+
+            log_rank_0("Megatron runtime patches applied successfully")
 
         except (ImportError, AttributeError) as e:
             log_rank_0(f"WARNING: Failed to patch Megatron runtime hooks: {e}")
