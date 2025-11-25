@@ -13,7 +13,7 @@ This module handles the execution of patches based on context.
 import os
 from typing import Any, Dict, List, Optional
 
-from primus.core.patches.context import PatchContext, normalize_phase
+from primus.core.patches.context import PatchContext
 from primus.core.patches.registry import PatchRegistry
 from primus.core.utils.distributed_logging import log_rank_0
 
@@ -65,7 +65,6 @@ def run_patches(
     Args:
         backend: Backend name (e.g., "megatron", "torchtitan")
         phase: Execution phase (e.g., "setup", "build_args", "before_train")
-                Legacy phases are automatically normalized
         backend_version: Backend version (e.g., "0.8.0")
         primus_version: Primus version
         model_name: Model name (e.g., "llama3_70B")
@@ -81,13 +80,10 @@ def run_patches(
         - PRIMUS_PATCHES="none": Disable all patches
         - PRIMUS_PATCHES="patch1,patch2": Enable only specified patches
     """
-    # Normalize phase (handles legacy phase names)
-    normalized_phase = normalize_phase(phase)
-
     # Create context
     ctx = PatchContext(
         backend=backend,
-        phase=normalized_phase,
+        phase=phase,
         backend_version=backend_version,
         primus_version=primus_version,
         model_name=model_name,
@@ -97,13 +93,6 @@ def run_patches(
     # Parse enabled patches from env if not specified
     if enabled_ids is None:
         enabled_ids = _parse_enabled_patches_from_env()
-
-    # Log execution (show phase normalization if applicable)
-    phase_info = f"{phase}" if phase == normalized_phase else f"{phase} → {normalized_phase}"
-    # log_rank_0(
-    #     f"[PatchSystem] Running patches: backend={backend}, phase={phase_info}, "
-    #     f"version={backend_version}, model={model_name}"
-    # )
 
     applied_count = 0
     applied_patches = []
@@ -133,9 +122,9 @@ def run_patches(
 
     if applied_count > 0:
         log_rank_0(
-            f"[PatchSystem] Applied {applied_count} patches for {backend}/{normalized_phase}: {', '.join(applied_patches)}"
+            f"[PatchSystem] Applied {applied_count} patches for {backend}/{phase}: {', '.join(applied_patches)}"
         )
     # else:
-    #     log_rank_0(f"[PatchSystem] No patches applied for {backend}/{normalized_phase}")
+    #     log_rank_0(f"[PatchSystem] No patches applied for {backend}/{phase}")
 
     return applied_count

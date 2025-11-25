@@ -94,6 +94,11 @@ class MegatronAdapter(BackendAdapter):
 
         return "unknown"
 
+    # Override base class method for version detection
+    def detect_backend_version(self) -> str:
+        """Detect Megatron version for patches."""
+        return self._detect_megatron_version()
+
     # 2. Config → Megatron Args
     def convert_config(self, module_config):
         """
@@ -102,8 +107,10 @@ class MegatronAdapter(BackendAdapter):
         This layer:
             - Takes module_config.params (which already includes CLI overrides)
             - Fills missing fields using Megatron-LM defaults
-            - Applies patches (before/after build_args phases)
             - Produces a Megatron-compatible argparse-like Namespace
+
+        Note: build_args patches are applied automatically by the base class
+        after this method returns.
 
         Args:
             module_config: ModuleConfig instance with params dict
@@ -111,17 +118,6 @@ class MegatronAdapter(BackendAdapter):
         Returns:
             SimpleNamespace with Megatron args
         """
-        megatron_version = self._detect_megatron_version()
-        model_name = module_config.model if hasattr(module_config, "model") else None
-
-        # Phase: Build args (before and during arg building)
-        apply_megatron_patches(
-            backend_version=megatron_version,
-            model_name=model_name,
-            phase="build_args",
-            extra={"config": module_config.params},
-        )
-
         # 1. Instantiate the builder
         builder = MegatronArgBuilder()
 
@@ -131,17 +127,6 @@ class MegatronAdapter(BackendAdapter):
 
         # 3. Produce the final Megatron Namespace
         megatron_args = builder.finalize()
-
-        # Phase: Build args (after arg building - patches can modify args)
-        apply_megatron_patches(
-            backend_version=megatron_version,
-            model_name=model_name,
-            phase="build_args",
-            extra={
-                "args": megatron_args,
-                "config": module_config.params,  # Contains Primus metadata
-            },
-        )
 
         print(f"[Primus:MegatronAdapter] Converted config → {len(vars(megatron_args))} Megatron args.")
 

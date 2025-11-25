@@ -22,7 +22,7 @@ from primus.core.patches import PatchContext, register_patch
 @register_patch(
     "megatron.args.profile_tensorboard",
     backend="megatron",
-    phase="after_build_args",
+    phase="build_args",
     description="Enable TensorBoard when profiling is enabled",
 )
 def patch_profile_tensorboard(ctx: PatchContext):
@@ -41,7 +41,7 @@ def patch_profile_tensorboard(ctx: PatchContext):
 @register_patch(
     "megatron.args.checkpoint_path",
     backend="megatron",
-    phase="after_build_args",
+    phase="build_args",
     description="Set checkpoint save path based on experiment root",
 )
 def patch_checkpoint_path(ctx: PatchContext):
@@ -70,7 +70,7 @@ def patch_checkpoint_path(ctx: PatchContext):
 @register_patch(
     "megatron.args.tensorboard_path",
     backend="megatron",
-    phase="after_build_args",
+    phase="build_args",
     description="Set TensorBoard directory based on experiment root",
 )
 def patch_tensorboard_path(ctx: PatchContext):
@@ -107,7 +107,7 @@ def patch_tensorboard_path(ctx: PatchContext):
 @register_patch(
     "megatron.args.wandb_config",
     backend="megatron",
-    phase="after_build_args",
+    phase="build_args",
     description="Configure W&B project and experiment names",
 )
 def patch_wandb_config(ctx: PatchContext):
@@ -172,7 +172,7 @@ def patch_wandb_config(ctx: PatchContext):
 @register_patch(
     "megatron.args.logging_level",
     backend="megatron",
-    phase="after_build_args",
+    phase="build_args",
     description="Set logging level based on stderr_sink_level",
 )
 def patch_logging_level(ctx: PatchContext):
@@ -209,7 +209,7 @@ def patch_logging_level(ctx: PatchContext):
 @register_patch(
     "megatron.args.data_path_split",
     backend="megatron",
-    phase="after_build_args",
+    phase="build_args",
     description="Split space-separated data paths into lists",
 )
 def patch_data_path_split(ctx: PatchContext):
@@ -248,7 +248,7 @@ def patch_data_path_split(ctx: PatchContext):
 @register_patch(
     "megatron.args.mock_data",
     backend="megatron",
-    phase="after_build_args",
+    phase="build_args",
     description="Disable data paths when using mock data",
 )
 def patch_mock_data(ctx: PatchContext):

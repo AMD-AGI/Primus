@@ -7,69 +7,22 @@
 """
 Patch Context and Phase Management
 
-This module defines the execution context for patches and manages
-phase constants and normalization.
+This module defines the execution context for patches and phase constants.
 """
 
-import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-log = logging.getLogger(__name__)
-
-
 # ============================================================================
-# Phase Constants and Mapping
+# Phase Constants
 # ============================================================================
 
-# Simplified phases (only 3 phases)
+# Training lifecycle phases
 PHASES = [
     "setup",  # Environment preparation
     "build_args",  # Argument building
     "before_train",  # Before training starts
 ]
-
-# Legacy phase mapping (for backward compatibility)
-PHASE_ALIASES = {
-    "before_import_backend": "setup",
-    "after_import_backend": "setup",
-    "before_build_args": "build_args",
-    "after_build_args": "build_args",
-    "after_train": None,  # Removed (no use case)
-}
-
-
-def normalize_phase(phase: str) -> str:
-    """
-    Normalize phase name using alias mapping.
-
-    Args:
-        phase: Original phase name
-
-    Returns:
-        Normalized phase name
-
-    Raises:
-        ValueError: If phase is invalid
-    """
-    # Check if it's already a valid phase
-    if phase in PHASES:
-        return phase
-
-    # Check if it's a legacy phase
-    if phase in PHASE_ALIASES:
-        normalized = PHASE_ALIASES[phase]
-        if normalized is None:
-            raise ValueError(f"Phase '{phase}' has been removed. " f"Valid phases are: {', '.join(PHASES)}")
-        log.debug(f"[PatchSystem] Normalized legacy phase '{phase}' → '{normalized}'")
-        return normalized
-
-    # Invalid phase
-    raise ValueError(
-        f"Invalid phase '{phase}'. "
-        f"Valid phases are: {', '.join(PHASES)}. "
-        f"Legacy phases: {', '.join(PHASE_ALIASES.keys())}"
-    )
 
 
 # ============================================================================
@@ -90,17 +43,10 @@ class PatchContext:
         model_name: Model name (e.g., "llama3_70B", "deepseek_v3")
         extra: Additional context data (e.g., {"args": megatron_args})
 
-    Phases (Simplified):
+    Phases:
         - "setup": Environment preparation (set env vars, configure runtime)
         - "build_args": Argument building (modify config/args during build process)
         - "before_train": Before starting training (hook training logic)
-
-    Legacy Phase Mapping (for backward compatibility):
-        - "before_import_backend" → "setup"
-        - "after_import_backend" → "setup"
-        - "before_build_args" → "build_args"
-        - "after_build_args" → "build_args"
-        - "after_train" → removed (no use case)
     """
 
     backend: str
