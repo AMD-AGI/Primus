@@ -86,18 +86,21 @@ class BackendAdapter(ABC):
         This is called automatically by create_trainer() and should NOT
         be overridden by subclasses unless you have a very good reason.
 
+        Note: backend_version is NOT passed here because setup patches
+        must run BEFORE backend import, so we cannot detect version yet.
+        Setup patches should be version-agnostic (e.g., set env vars).
+
         Args:
             module_config: ModuleConfig instance
         """
         from primus.core.patches import run_patches
 
-        backend_version = self.detect_backend_version()
         model_name = getattr(module_config, "model", None)
 
         run_patches(
             backend=self.framework,
             phase="setup",
-            backend_version=backend_version,
+            backend_version=None,  # No version yet - setup runs before import
             model_name=model_name,
             extra={
                 "config": module_config.params,
