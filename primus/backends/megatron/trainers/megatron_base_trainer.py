@@ -88,17 +88,6 @@ class MegatronBaseTrainer(BaseTrainer):
             import megatron.training.arguments as megatron_args  # type: ignore
             import megatron.training.initialize as megatron_init  # type: ignore
 
-            from primus.core.runtime.distributed import get_distributed_info
-
-            # Get distributed environment info
-            dist_env = get_distributed_info()
-
-            # Update backend_args with distributed environment variables
-            # This ensures Megatron uses the correct distributed settings
-            self.backend_args.world_size = dist_env["world_size"]
-            self.backend_args.rank = dist_env["rank"]
-            self.backend_args.local_rank = dist_env["local_rank"]
-
             # Create a lambda that always returns our prepared args
             patched_parse_args = lambda *args, **kwargs: (
                 log_rank_0("parse_args() called, returning pre-configured args") or self.backend_args
@@ -107,9 +96,6 @@ class MegatronBaseTrainer(BaseTrainer):
             # Patch both locations where parse_args might be defined/called
             megatron_args.parse_args = patched_parse_args
             megatron_init.parse_args = patched_parse_args
-
-            # Log distributed environment info in aligned format
-            # log_dict_aligned("Distributed environment info", dist_env)
 
             log_rank_0(
                 f"Patched parse_args with {len(vars(self.backend_args))} arguments "
