@@ -48,7 +48,6 @@ class MegatronBaseTrainer(BaseTrainer):
         primus_config: PrimusConfig,
         module_config: ModuleConfig,
         backend_args: SimpleNamespace,
-        backend_version: str = "unknown",
     ):
         """
         Initialize Megatron base trainer.
@@ -57,7 +56,6 @@ class MegatronBaseTrainer(BaseTrainer):
             primus_config: Full Primus configuration
             module_config: Module-specific configuration
             backend_args: Megatron-LM argument namespace (from MegatronArgBuilder)
-            backend_version: Megatron-LM version string (from adapter)
         """
         log_rank_0("=" * 80)
         log_rank_0("Initializing MegatronBaseTrainer...")
@@ -70,11 +68,8 @@ class MegatronBaseTrainer(BaseTrainer):
             backend_args=backend_args,
         )
 
-        # Store backend version (provided by adapter)
-        self.backend_version = backend_version
-
         # Log version information
-        log_rank_0(f"Megatron-LM version: {self.backend_version}")
+        log_rank_0(f"Megatron-LM version: {self._detect_version()}")
         log_rank_0(f"Model: {module_config.model}")
         log_rank_0(f"Framework: {module_config.framework}")
 
@@ -120,6 +115,23 @@ class MegatronBaseTrainer(BaseTrainer):
         except (ImportError, AttributeError) as e:
             log_rank_0(f"WARNING: Cannot patch parse_args: {e}")
             return False
+
+    def _detect_version(self) -> str:
+        """
+        Detect Megatron-LM version.
+
+        Overrides BaseTrainer._detect_version() to provide accurate
+        Megatron version detection using the official method.
+
+        Returns:
+            Megatron version string (e.g., "0.15.0rc8")
+        """
+        try:
+            from megatron.core import package_info
+
+            return package_info.__version__
+        except Exception:
+            return "unknown"
 
     def _patch_megatron_runtime_hooks(self):
         """

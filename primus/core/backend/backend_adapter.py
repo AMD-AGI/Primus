@@ -212,12 +212,8 @@ class BackendAdapter(ABC):
         log_rank_0("Trainer creation completed successfully")
         log_rank_0("=" * 80 + "")
 
-        # Detect backend version and pass to trainer
-        backend_version = self.detect_backend_version()
-
         return TrainerClass(
             primus_config=primus_config,
             module_config=module_config,
             backend_args=backend_args,
-            backend_version=backend_version,
         )
