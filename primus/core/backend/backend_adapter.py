@@ -5,7 +5,7 @@
 ###############################################################################
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 
 class BackendAdapter(ABC):
@@ -64,20 +64,16 @@ class BackendAdapter(ABC):
         Turbo → TurboTrainer
         """
 
-    # ============================================================================
-    # Optional Override Methods
-    # ============================================================================
-
-    def detect_backend_version(self) -> Optional[str]:
+    @abstractmethod
+    def detect_backend_version(self) -> str:
         """
         Detect backend version for version-specific patches.
 
         Returns:
-            Version string (e.g., "0.8.0", "commit:abc123") or None
+            Version string (e.g., "0.8.0", "commit:abc123", "unknown")
 
-        Subclasses can override this to provide version detection.
+        Subclasses must implement this method.
         """
-        return None
 
     # ============================================================================
     # Internal Methods (Do NOT override)
