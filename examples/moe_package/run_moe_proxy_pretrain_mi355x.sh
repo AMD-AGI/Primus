@@ -10,7 +10,7 @@
 # export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ci_4096e28_20251114"
 # export DOCKER_IMAGE="docker.io/tasimage/primus:pr-289"
 # export DOCKER_IMAGE="docker.io/tasimage/primus:pr-300"
-export DOCKER_IMAGE="docker.io/tasimage/primus:pr-282"
+export DOCKER_IMAGE="docker.io/tasimage/primus:pr-282-gfx950"
 export CLEAN_DOCKER_CONTAINER=1
 
 ######################### Training Environment Variables #########################

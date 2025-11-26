@@ -73,4 +73,3 @@ modules:
       # Turbo
       enable_primus_turbo: true
       use_turbo_attention: false
-      use_turbo_grouped_mlp: false
