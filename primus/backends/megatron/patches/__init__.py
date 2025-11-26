@@ -17,6 +17,7 @@ Patches are organized by category:
     - env_patches: Environment variable configuration
     - mlflow_patches: MLflow logging integration
     - args_patches: Argument configuration and path setup
+    - te_patches: Transformer Engine integration patches
 
 All patches are automatically registered on import via the @register_patch decorator.
 """
@@ -31,6 +32,7 @@ from primus.backends.megatron.patches import (  # noqa: F401
     llama_patches,
     mlflow_patches,
     performance_patches,
+    te_patches,
 )
 from primus.core.patches import run_patches
 
