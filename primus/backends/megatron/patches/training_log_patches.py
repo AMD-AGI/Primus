@@ -106,15 +106,16 @@ class RocmMonitorExtension:
         rocm_mem_str = ""
 
         # 1. HIP Stats (Always available on ROCm)
-        if not getattr(self.args, "use_rocm_mem_info", False):
-            hip_free, hip_total = torch.cuda.mem_get_info()
-            hip_used = hip_total - hip_free
-            hip_ratio = hip_used / hip_total
-            hip_mem_str = (
-                f" hip mem usage/free/total/usage_ratio: "
-                f"{hip_used / 1024 ** 3:.2f}GB/{hip_free / 1024 ** 3:.2f}GB/"
-                f"{hip_total / 1024 ** 3:.2f}GB/{hip_ratio * 100:.2f}% |"
-            )
+        # We assume that if this extension is active, we want to see memory stats.
+        # HIP stats are cheap and always available via PyTorch.
+        hip_free, hip_total = torch.cuda.mem_get_info()
+        hip_used = hip_total - hip_free
+        hip_ratio = hip_used / hip_total
+        hip_mem_str = (
+            f" hip mem usage/free/total/usage_ratio: "
+            f"{hip_used / 1024 ** 3:.2f}GB/{hip_free / 1024 ** 3:.2f}GB/"
+            f"{hip_total / 1024 ** 3:.2f}GB/{hip_ratio * 100:.2f}% |"
+        )
 
         # 2. ROCm SMI Stats (If configured)
         iter_list = getattr(self.args, "use_rocm_mem_info_iters", [])
