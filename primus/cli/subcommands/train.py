@@ -12,7 +12,11 @@ def run(args, overrides):
     """
     Entry point for the 'train' subcommand.
     """
+    from primus.tools.utils import finalize_distributed, init_distributed
+
+    init_distributed()
     launch_train(args, overrides, module=args.suite)
+    finalize_distributed()
 
 
 def register_subcommand(subparsers):
