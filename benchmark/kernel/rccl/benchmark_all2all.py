@@ -25,7 +25,7 @@ MODEL_PARAMS_TABLE = {
     # "In the final stage, .. 32K tokens."
     "Qwen3-235B-A22B-stage1": (4096, 4096, 8), # https://huggingface.co/Qwen/Qwen3-235B-A22B/blob/main/config.json
     "Qwen3-235B-A22B-stage2": (4096, 32768, 8), 
-    "llama4-marverick": (5120, 1048576, 1),  # claimed native 1M context length https://modelscope.cn/models/LLM-Research/Llama-4-Maverick-17B-128E-Instruct/file/view/master/config.json?status=1
+    "llama4-maverick": (5120, 1048576, 1),  # claimed native 1M context length https://modelscope.cn/models/LLM-Research/Llama-4-Maverick-17B-128E-Instruct/file/view/master/config.json?status=1
 }
 MBS_LIST = [1, 2, 3, 4, 5, 6, 7, 8]
 
