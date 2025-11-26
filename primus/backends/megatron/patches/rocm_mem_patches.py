@@ -44,7 +44,6 @@ def patch_training_log_for_rocm_memory(ctx: PatchContext):
     """
     try:
         import megatron.training.training as megatron_training  # type: ignore
-        from megatron.training.global_vars import get_args  # type: ignore
         from megatron.training.utils import (
             print_rank_0 as original_print_rank_0,  # type: ignore
         )
@@ -52,8 +51,13 @@ def patch_training_log_for_rocm_memory(ctx: PatchContext):
         from primus.core.utils.distributed_logging import log_rank_0
         from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
 
+        # Get args from patch context
+        args = ctx.extra.get("args")
+        if not args:
+            log_rank_0("[Patch:megatron.rocm.memory_monitoring][SKIP] No args in context")
+            return
+
         # Check if ROCm monitoring is enabled at patch time
-        args = get_args()
         should_enable_patch = (
             hasattr(args, "log_throughput")
             and args.log_throughput
