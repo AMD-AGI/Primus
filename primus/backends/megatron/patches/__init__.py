@@ -15,6 +15,7 @@ Patches are organized by category:
     - args_patches: Argument configuration and path setup
     - te_patches: Transformer Engine integration patches
     - flops_patches: FLOPs calculation and performance profiling
+    - rocm_mem_patches: ROCm memory monitoring for AMD GPUs
 
 All patches are automatically registered on import via the @register_patch decorator.
 """
@@ -26,6 +27,7 @@ from primus.backends.megatron.patches import (  # noqa: F401
     env_patches,
     flops_patches,
     mlflow_patches,
+    rocm_mem_patches,
     te_patches,
 )
 from primus.core.patches import run_patches

@@ -212,8 +212,6 @@ def num_floating_point_operations(args, batch_size):
             )
         )
 
-    log_rank_0(f"Transformer FLOPs: {transformer_flops()}")
-
     # Main entrypoint for FLOPs calculation.
     if args.is_hybrid_model:
         # Calculate the number of each type of layer.
