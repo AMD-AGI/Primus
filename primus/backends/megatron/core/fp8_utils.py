@@ -42,14 +42,22 @@ if HAVE_TE and HAVE_TURBO:
     from megatron.core import parallel_state
     from megatron.core.enums import Fp8Recipe
     from megatron.core.extensions.transformer_engine import TEDelayedScaling
-    from primus_turbo.pytorch.core.float8 import ScalingGranularity
+    try:
+        from primus_turbo.pytorch.core.float8 import ScalingGranularity
+    except ImportError:
+        from primus_turbo.pytorch.core.low_precision import ScalingGranularity
+    
 
     from primus.backends.megatron.core.extensions.primus_turbo import (
         PrimusTurboFloat8QuantConfig,
     )
 
     def te_fp8_format_mapping(te_format):
-        from primus_turbo.pytorch.core.float8 import Format as TurboFormat
+        try:
+            from primus_turbo.pytorch.core.float8 import Format as TurboFormat
+        except ImportError:
+            from primus_turbo.pytorch.core.low_precision import Format as TurboFormat
+        # noqa: F811
         from transformer_engine.common.recipe import Format as TEFormat
 
         format_mapping = {
@@ -194,7 +202,10 @@ if HAVE_TE and HAVE_TURBO:
 elif HAVE_TURBO:
     from megatron.core import parallel_state
     from megatron.core.enums import Fp8Recipe
-    from primus_turbo.pytorch.core.float8 import ScalingGranularity
+    try:
+        from primus_turbo.pytorch.core.float8 import ScalingGranularity
+    except ImportError:
+        from primus_turbo.pytorch.core.low_precision import ScalingGranularity
 
     from primus.backends.megatron.core.extensions.primus_turbo import (
         PrimusTurboFloat8QuantConfig,
@@ -234,10 +245,20 @@ elif HAVE_TURBO:
             # fp8 training and this layer_no is in fp8
             import primus_turbo
 
-            if config.fp8 == "e4m3":
-                fp8_format = primus_turbo.pytorch.core.float8.Format.E4M3
-            elif config.fp8 == "hybrid":
-                fp8_format = primus_turbo.pytorch.core.float8.Format.HYBRID
+            # Pick the right Format enum once
+            try:
+                # Older API
+                from primus_turbo.pytorch.core.float8 import Format as FP8Format
+            except ImportError:
+                # Newer API
+                from primus_turbo.pytorch.core.low_precision import Format as FP8Format
+
+            fp8_str = config.fp8.lower()
+
+            if fp8_str == "e4m3":
+                fp8_format = FP8Format.E4M3
+            elif fp8_str == "hybrid":
+                fp8_format = FP8Format.HYBRID
             else:
                 raise ValueError("E4M3 and HYBRID are the only supported FP8 formats.")
 

@@ -67,11 +67,18 @@ class TorchTitanPretrainTrainer(BaseModule):
         self.JobConfigClass = JobConfig
 
         self.titan_config = self.build_job_config(cfg_dict, self.JobConfigClass)
+
+        # patch torchtitan moe
+        # background: we use turbo grouped mm for moe, so we need to patch the torchtitan moe
+        self.patch_torchtitan_moe()
+
         self.log_config(self.titan_config)
         self.trainer = None
 
         if hasattr(self.titan_config, "primus_turbo") and self.titan_config.primus_turbo.enable_primus_turbo:
             self.enable_primus_turbo_extension()
+
+        self.patch_classic_attention()
 
     def setup(self):
         pass
@@ -93,6 +100,64 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         titan_logging.logger = primus_logger
         titan_logging.init_logger = lambda: None
+
+    def patch_torchtitan_moe(self):
+        if not self.titan_config.primus_turbo.use_turbo_grouped_mm:
+            return
+        from primus.core.utils.logger import _logger as primus_logger
+
+        primus_logger.info("Monkey patch torchtitan moe...")
+        try:
+            import functools
+
+            import torchtitan.models.moe.moe
+
+            from primus.backends.torchtitan.models.moe.moe import (
+                _run_experts_grouped_mm,
+            )
+
+            # Get MoE FP8 configuration and create a partial function
+            use_moe_fp8 = self.titan_config.primus_turbo.use_moe_fp8
+            primus_logger.info(f"Set MoE FP8 mode: {use_moe_fp8}")
+
+            # Patch the grouped_mm function with use_fp8 parameter pre-set
+            torchtitan.models.moe.moe._run_experts_grouped_mm = functools.partial(
+                _run_experts_grouped_mm, use_fp8=use_moe_fp8
+            )
+            primus_logger.info("Successfully patched torchtitan moe with turbo grouped_mm")
+        except ImportError as e:
+            raise ImportError(
+                f"Failed to import primus_turbo for MoE grouped_mm patch. "
+                f"Please ensure primus_turbo is installed or set use_turbo_grouped_mm=False. "
+                f"Original error: {e}"
+            ) from e
+
+    def patch_classic_attention(self):
+        if not self.titan_config.primus_turbo.use_classic_attention:
+            return
+
+        from primus.core.utils.logger import _logger as primus_logger
+
+        primus_logger.info("Monkey patch classic attention...")
+
+        import torchtitan.models.deepseek_v3
+
+        from primus.backends.torchtitan.models.deepseek_v3 import (
+            classic_deepseekv3_args,
+        )
+        from primus.backends.torchtitan.models.deepseek_v3.model.args import (
+            DeepSeekV3ClassicModelArgs,
+        )
+        from primus.backends.torchtitan.models.deepseek_v3.model.model import (
+            MultiHeadAttention,
+        )
+
+        torchtitan.models.deepseek_v3.deepseekv3_args = classic_deepseekv3_args
+        torchtitan.models.deepseek_v3.DeepSeekV3ModelArgs = DeepSeekV3ClassicModelArgs
+
+        import torchtitan.models.deepseek_v3.model.model
+
+        torchtitan.models.deepseek_v3.model.model.Attention = MultiHeadAttention
 
     def patch_torch_dcp_consolidate(self):
         """
@@ -254,6 +319,22 @@ class TorchTitanPretrainTrainer(BaseModule):
             from primus.backends.torchtitan.models.llama3.model.model import Attention
 
             torchtitan.models.llama3.model.model.Attention = Attention
+
+            # ******* llama4 Attention Model *******
+            import torchtitan.models.llama4.model.model
+
+            from primus.backends.torchtitan.models.llama4.model.model import Attention
+
+            torchtitan.models.llama4.model.model.Attention = Attention
+
+            # ******* deepseek_v3 Attention Model *******
+            import torchtitan.models.deepseek_v3.model.model
+
+            from primus.backends.torchtitan.models.deepseek_v3.model.model import (
+                Attention,
+            )
+
+            torchtitan.models.deepseek_v3.model.model.Attention = Attention
             logger.warning(f"TorchtitanPretrainTrainer: Patch Turbo Attention")
 
         if self.titan_config.primus_turbo.use_turbo_mx_linear:
@@ -268,8 +349,23 @@ class TorchTitanPretrainTrainer(BaseModule):
             )
 
             _registry_model_converter_cls["mx"] = PrimusTubroMXConverter
-            torchtitan.components.quantization.mx.MXConverter = PrimusTubroMXConverter
+            torchtitan.components.quantization.mx.MXLinearConverter = PrimusTubroMXConverter
             logger.warning(f"TorchtitanPretrainTrainer: Patch Turbo MXLinear")
+
+        if self.titan_config.primus_turbo.use_turbo_float8_linear:
+            # ******* FP8Linear *******
+            import torchtitan.components.quantization.float8
+            from torchtitan.protocols.model_converter import (
+                _registry_model_converter_cls,
+            )
+
+            from primus.backends.torchtitan.components.quantization.float8 import (
+                PrimusTubroFP8Converter,
+            )
+
+            _registry_model_converter_cls["turbo_fp8_linear"] = PrimusTubroFP8Converter
+            torchtitan.components.quantization.float8.Float8LinearConverter = PrimusTubroFP8Converter
+            logger.warning(f"TorchtitanPretrainTrainer: Patch Turbo FP8Linear")
 
         if self.titan_config.primus_turbo.use_turbo_async_tp:
             # ******* Async TP *******
