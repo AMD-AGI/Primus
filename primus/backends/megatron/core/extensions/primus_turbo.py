@@ -29,16 +29,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_tensor_model_parallel_group_if_none
 from megatron.training.global_vars import get_args
-
-try:
-    from primus_turbo.pytorch.core.float8 import (
-        Float8QuantConfig,
-        ScalingGranularity,
-        ScalingStrategy,
-        check_fp8_support,
-    )
-except ImportError:
-    from primus_turbo.pytorch.core.low_precision import (
+from primus_turbo.pytorch.core.low_precision import (
     Float8QuantConfig,
     ScalingGranularity,
     ScalingStrategy,
