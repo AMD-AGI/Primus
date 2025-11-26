@@ -13,6 +13,7 @@ from .attention import AttentionProfiler
 from .dense_mlp import DenseMLPProfiler
 from .layer_norm import LayerNormProfiler
 from .moe_mlp import MoEMLPProfiler
+from .residual_add import ResidualAddProfiler
 from .router import RouterProfiler
 from .utils import benchmark_layer
 
@@ -83,16 +84,18 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
 
     def estimated_num_params(self, rank: int | None = None) -> int:
         return (
-            self.sub_profilers["layer_norm"].estimated_num_params(rank) * 2
+            self.sub_profilers["layer_norm"].estimated_num_params(rank) * 3
             + self.sub_profilers["self_attention"].estimated_num_params(rank)
             + self.sub_profilers["mlp"].estimated_num_params(rank)
+            + self.sub_profilers["residual_add"].estimated_num_params(rank) * 2
         )
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
         return (
-            self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 2
+            self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 3
             + self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len)
             + self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len)
+            + self.sub_profilers["residual_add"].estimated_activation_memory(batch_size, seq_len) * 2
         )
 
     def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
@@ -141,18 +144,20 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
 
     def estimated_num_params(self, rank: int | None = None) -> int:
         return (
-            self.sub_profilers["layer_norm"].estimated_num_params(rank) * 2
+            self.sub_profilers["layer_norm"].estimated_num_params(rank) * 3
             + self.sub_profilers["self_attention"].estimated_num_params(rank)
             + self.sub_profilers["mlp"].estimated_num_params(rank)
             + self.sub_profilers["router"].estimated_num_params(rank)
+            + self.sub_profilers["residual_add"].estimated_num_params(rank) * 2
         )
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
         return (
-            self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 2
+            self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 3
             + self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len)
             + self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len)
             + self.sub_profilers["router"].estimated_activation_memory(batch_size, seq_len)
+            + self.sub_profilers["residual_add"].estimated_activation_memory(batch_size, seq_len) * 2
         )
 
     def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
@@ -186,6 +191,7 @@ def get_dense_transformer_layer_profiler_spec(config: TrainingConfig) -> "Module
         sub_profiler_specs={
             "layer_norm": LayerNormProfiler,
             "self_attention": AttentionProfiler,
+            "residual_add": ResidualAddProfiler,
             "mlp": DenseMLPProfiler,
         },
     )
@@ -198,6 +204,7 @@ def get_moe_transformer_layer_profiler_spec(config: TrainingConfig) -> "ModulePr
         sub_profiler_specs={
             "layer_norm": LayerNormProfiler,
             "self_attention": AttentionProfiler,
+            "residual_add": ResidualAddProfiler,
             "router": RouterProfiler,
             "mlp": MoEMLPProfiler,
         },

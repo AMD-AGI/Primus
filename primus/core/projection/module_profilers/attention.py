@@ -74,7 +74,7 @@ class AttentionProfiler(BaseModuleProfiler):
         )
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
-        multiplier = 4  # for Q, K, V, O
+        multiplier = 5  # for Q, K, V, O
         return (
             batch_size
             * seq_len
