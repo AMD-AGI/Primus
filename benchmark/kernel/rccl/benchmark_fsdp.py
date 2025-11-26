@@ -70,7 +70,7 @@ def test_reducescatter(size, dtype, rank, local_rank, world_size, dry_run=False)
     if local_rank == 0:
         byte_size = size // world_size * torch.tensor([], dtype=dtype).element_size()
         print("ReduceScatter with total size(Byte): ", byte_size)
-        print("HSA_NO_SCRATCH_RECLAIM=1 ./build/reduce_scatter_perf -b ",byte_size," -e ",byte_size," -g 8 -d half # assuming dtype float16")
+        print("HSA_NO_SCRATCH_RECLAIM=1 ./build/reduce_scatter_perf -b ",byte_size," -e ",byte_size," -g ",world_size," -d half # assuming dtype float16")
         print("HSA_NO_SCRATCH_RECLAIM=1 mpirun --allow-run-as-root -np ",world_size," ./build/reduce_scatter_perf -b ",byte_size," -e ",byte_size," -g 1 -d half")
     if dry_run:
         return 0,0
