@@ -9,8 +9,23 @@ from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import TrainingConfig
 
+from .utils import benchmark_layer
+
 
 class MoEMLPProfiler(BaseModuleProfiler):
+    def __init__(self, config, sub_profilers=None):
+        super().__init__(config, sub_profilers)
+        self.module = None  # Will be set during benchmarking
+        self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
+        self._cache_key = None  # Cache key (batch_size, seq_len)
+
+    def set_module(self, module):
+        """Set the actual MoE MLP module for benchmarking."""
+        self.module = module
+        # Invalidate cache when module changes
+        self._cached_results = None
+        self._cache_key = None
+
     def estimated_num_params(self, rank: int | None = None) -> int:
         if self.config.model_config.moe_ffn_hidden_size is not None:
             moe_ffn = self.config.model_config.moe_ffn_hidden_size
@@ -51,9 +66,32 @@ class MoEMLPProfiler(BaseModuleProfiler):
             swiglu_scale = 2
         total += (num_tokens * self.config.model_config.moe_ffn_hidden_size * swiglu_scale) * 2  # bf16
         # Second Gemm
-        total += num_tokens * self.config.model_config.moe_ffn_hidden_size * 2  # bf16
+        total += num_tokens * self.config.model_config.hidden_size * 2  # bf16
 
         return total
+
+    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+        """Get or compute benchmark results (cached)."""
+        cache_key = (batch_size, seq_len)
+        if self._cached_results is None or self._cache_key != cache_key:
+            self._cached_results = benchmark_layer(
+                self.module,
+                [(seq_len, batch_size, self.config.model_config.hidden_size)],
+            )
+            self._cache_key = cache_key
+        return self._cached_results
+
+    def measured_forward_time(self, batch_size: int, seq_len: int) -> float:
+        forward_time, _, _ = self._get_benchmark_results(batch_size, seq_len)
+        return forward_time
+
+    def measured_backward_time(self, batch_size: int, seq_len: int) -> float:
+        _, backward_time, _ = self._get_benchmark_results(batch_size, seq_len)
+        return backward_time
+
+    def measured_activation_memory(self, batch_size: int, seq_len: int) -> int:
+        _, _, activation_memory = self._get_benchmark_results(batch_size, seq_len)
+        return activation_memory
 
 
 def get_moe_mlp_profiler_spec(config: TrainingConfig) -> ModuleProfilerSpec:
