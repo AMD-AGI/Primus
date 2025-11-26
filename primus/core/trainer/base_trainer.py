@@ -118,6 +118,7 @@ class BaseTrainer(BaseModule):
             model_name=self.model_name,
             extra={
                 "args": self.backend_args,
+                "config": self.module_config.params,
                 "primus_config": self.primus_config,
                 "module_config": self.module_config,
             },
@@ -137,6 +138,7 @@ class BaseTrainer(BaseModule):
             model_name=self.model_name,
             extra={
                 "args": self.backend_args,
+                "config": self.module_config.params,
                 "primus_config": self.primus_config,
                 "module_config": self.module_config,
             },

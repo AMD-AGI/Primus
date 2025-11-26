@@ -163,15 +163,7 @@ def patch_training_log_unified(ctx: PatchContext):
 
         # 1. Get Configuration
         args = ctx.extra.get("args")
-
-        # Try to get config dict from 'config' key (Adapter style)
         config = ctx.extra.get("config", {})
-
-        # If not found, try to get from 'module_config' object (BaseTrainer style)
-        if not config and "module_config" in ctx.extra:
-            module_config = ctx.extra["module_config"]
-            if hasattr(module_config, "params"):
-                config = module_config.params
 
         if not args:
             log_rank_0("[Patch:megatron.training_log][SKIP] No args in context")
