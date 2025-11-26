@@ -10,7 +10,8 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 70b76508408474f254ac048cef2005179c6cb55b # fix(deepep): fix internode_combine hang when set num_worst_token > 0 (#149)
+  PRIMUS_TURBO_COMMIT: 1fc5b8148dfd3070977fae1e9d2a46075d281ef8 # feat: jax backend support grouped_gemm (#157)
+
 jobs:
   code-lint:
     runs-on: ubuntu-latest
