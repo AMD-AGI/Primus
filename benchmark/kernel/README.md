@@ -49,7 +49,7 @@ WORLD_SIZE=4 LOCAL_RANK=0 RANK=0 python ./benchmark_fsdp.py  -dry
 ```
 The above python script will generate command for rccl test. 
 
-To launching single node rccl test, do the following:
+To launch single node rccl test, do the following:
 ```
 # build and install rccl tests
 git clone https://github.com/ROCm/rccl-tests.git
