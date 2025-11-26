@@ -5,6 +5,8 @@ from functools import lru_cache
 from types import SimpleNamespace
 from typing import Any, Dict, Mapping
 
+from primus.core.utils.distributed_logging import log_rank_0
+
 
 # ------------------------------------------------------------
 # Build the original Megatron argument parser
@@ -90,8 +92,8 @@ class MegatronArgBuilder:
 
         for key, value in values.items():
             # Skip None values
-            if value is None:
-                continue
+            # if value is None:
+            #     continue
 
             # Only accept parameters that Megatron recognizes
             if key in megatron_keys:
