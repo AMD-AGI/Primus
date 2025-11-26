@@ -10,7 +10,6 @@ Megatron Patch Collection
 This module registers all Megatron-specific patches with the PatchRegistry.
 
 Patches are organized by category:
-    - compatibility_patches: Version compatibility fixes
     - env_patches: Environment variable configuration
     - mlflow_patches: MLflow logging integration
     - args_patches: Argument configuration and path setup
@@ -23,7 +22,6 @@ All patches are automatically registered on import via the @register_patch decor
 # Patches are registered via @register_patch decorator in each module
 from primus.backends.megatron.patches import (  # noqa: F401
     args_patches,
-    compatibility_patches,
     env_patches,
     mlflow_patches,
     te_patches,
