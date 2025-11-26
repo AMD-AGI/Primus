@@ -86,11 +86,13 @@ class RocmMonitorExtension:
         """
         Intercepts the log string and injects memory stats if applicable.
         """
+        # Only inject stats if this looks like a training iteration log (has throughput)
         if "throughput per GPU" in log_string:
             try:
                 mem_stats = self._get_memory_stats()
                 if mem_stats:
-                    log_string = log_string.replace(" throughput per GPU", f"{mem_stats} throughput per GPU")
+                    # Append memory stats to the log string
+                    log_string += mem_stats
             except Exception:
                 pass  # Do not crash training for logging issues
 
