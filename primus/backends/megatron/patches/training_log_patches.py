@@ -64,6 +64,16 @@ class RocmMonitorExtension:
         self.config = config
         self.original_print = None
         self._megatron_training_module = None
+        self.current_iteration = 0
+
+    def update_context(self, func_args: tuple, func_kwargs: dict) -> None:
+        """Update current iteration from training_log arguments."""
+        # training_log signature:
+        # def training_log(loss_dict, total_loss_dict, learning_rate,
+        #                  decoupled_learning_rate, iteration, ...)
+        # iteration is the 5th argument (index 4)
+        if len(func_args) > 4:
+            self.current_iteration = func_args[4]
 
     def __enter__(self):
         """Swap print_rank_last with our enhanced version."""
@@ -116,15 +126,14 @@ class RocmMonitorExtension:
             f"{hip_total / 1024 ** 3:.2f}GB/{hip_ratio * 100:.2f}% |"
         )
 
-        # 2. ROCm SMI Stats (If configured)
-        # Check config from self.config (Primus specific parameters)
+        # 2. ROCm SMI Stats (Only if configured and iteration matches)
         use_rocm_mem = self.config.get("use_rocm_mem_info", False)
         rocm_iters = self.config.get("use_rocm_mem_info_iters", [])
 
-        if use_rocm_mem or rocm_iters:
-            # Note: We use config to decide enablement. For strict iteration control,
-            # we would need to parse iteration from log_string or args, but
-            # config-based check is sufficient and low-overhead here.
+        # Only call expensive SMI if globally enabled OR current iteration is in list
+        should_collect_smi = use_rocm_mem or (self.current_iteration in rocm_iters)
+
+        if should_collect_smi:
             local_rank = torch.cuda.current_device()
             r_total, r_used, r_free = get_rocm_smi_mem_info(local_rank)
             r_ratio = r_used / r_total
@@ -161,7 +170,15 @@ def patch_training_log_unified(ctx: PatchContext):
 
         # 1. Get Configuration
         args = ctx.extra.get("args")
+
+        # Try to get config dict from 'config' key (Adapter style)
         config = ctx.extra.get("config", {})
+
+        # If not found, try to get from 'module_config' object (BaseTrainer style)
+        if not config and "module_config" in ctx.extra:
+            module_config = ctx.extra["module_config"]
+            if hasattr(module_config, "params"):
+                config = module_config.params
 
         if not args:
             log_rank_0("[Patch:megatron.training_log][SKIP] No args in context")
@@ -175,19 +192,14 @@ def patch_training_log_unified(ctx: PatchContext):
         use_rocm_mem = config.get("use_rocm_mem_info", False)
         rocm_iters = config.get("use_rocm_mem_info_iters", [])
 
-        has_rocm_config = use_rocm_mem or (rocm_iters and len(rocm_iters) > 0)
+        enable_rocm_stats = (
+            hasattr(args, "log_throughput")
+            and args.log_throughput
+            and (use_rocm_mem or (rocm_iters and len(rocm_iters) > 0))
+        )
 
-        # Check dependencies
-        log_throughput = hasattr(args, "log_throughput") and args.log_throughput
-
-        if has_rocm_config:
-            if log_throughput:
-                extensions.append(RocmMonitorExtension(args, config))
-            else:
-                log_rank_0(
-                    "[Patch:megatron.training_log][WARN] ROCm memory monitoring configured but skipped "
-                    "because 'log_throughput' is False. Please set --log-throughput to enable."
-                )
+        if enable_rocm_stats:
+            extensions.append(RocmMonitorExtension(args, config))
 
         # -> Check MLflow (Placeholder for future implementation)
         # if enable_mlflow:
