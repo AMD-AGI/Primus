@@ -14,6 +14,7 @@ from .dense_mlp import DenseMLPProfiler
 from .layer_norm import LayerNormProfiler
 from .moe_mlp import MoEMLPProfiler
 from .router import RouterProfiler
+from .utils import benchmark_layer
 
 # Transformer Layer Data Flow
 #
@@ -60,101 +61,6 @@ from .router import RouterProfiler
 #             +----------------+
 
 
-def benchmark_layer(
-    layer_module, hidden_size: int, batch_size: int, seq_len: int, num_iterations: int = 10
-) -> tuple[float, float, int]:
-    """
-    Benchmark both forward and backward passes of a transformer layer using CUDA events.
-    Also measures activation memory used by the forward pass.
-
-    Args:
-        layer_module: The transformer layer module
-        hidden_size: Hidden size of the model
-        batch_size: Micro batch size
-        seq_len: Sequence length
-        num_iterations: Number of iterations to average over
-
-    Returns:
-        Tuple of (average forward time in ms, average backward time in ms, activation memory in bytes)
-    """
-    import torch
-
-    device = next(layer_module.parameters()).device
-
-    # Create dummy input
-    hidden_states = torch.randn(
-        seq_len, batch_size, hidden_size, device=device, dtype=torch.bfloat16, requires_grad=True
-    )
-
-    # Warm-up: forward and backward passes
-    for _ in range(3):
-        output = layer_module(hidden_states)
-        output[0].backward(torch.randn_like(output[0]))
-        layer_module.zero_grad()
-        hidden_states.grad = None
-
-    # Synchronize before timing
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-
-    # Measure forward and backward passes using CUDA events
-    forward_times = []
-    backward_times = []
-    activation_memories = []
-
-    for _ in range(num_iterations):
-        # Clear cache and reset memory stats before measuring
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats(device)
-        torch.cuda.synchronize(device)
-
-        # Get baseline memory
-        mem_before = torch.cuda.memory_allocated(device) if device.type == "cuda" else 0
-
-        # Measure forward pass
-        forward_start = torch.cuda.Event(enable_timing=True)
-        forward_end = torch.cuda.Event(enable_timing=True)
-
-        forward_start.record()
-        output = layer_module(hidden_states)
-        forward_end.record()
-
-        # Measure activation memory (peak memory during forward - baseline)
-        torch.cuda.synchronize(device)
-        mem_after_forward = torch.cuda.max_memory_allocated(device)
-        activation_memory = mem_after_forward - mem_before
-        activation_memories.append(activation_memory)
-
-        # Measure backward pass
-        grad_output = torch.randn_like(output[0])
-        backward_start = torch.cuda.Event(enable_timing=True)
-        backward_end = torch.cuda.Event(enable_timing=True)
-
-        backward_start.record()
-        output[0].backward(grad_output)
-        backward_end.record()
-
-        # Wait for all events to complete
-        torch.cuda.synchronize(device)
-
-        # Record times
-        forward_times.append(forward_start.elapsed_time(forward_end))
-        backward_times.append(backward_start.elapsed_time(backward_end))
-
-        # Clear gradients for next iteration
-        layer_module.zero_grad()
-        hidden_states.grad = None
-        del output, grad_output
-
-    avg_forward_time = sum(forward_times) / len(forward_times)
-    avg_backward_time = sum(backward_times) / len(backward_times)
-    avg_activation_memory = (
-        int(sum(activation_memories) / len(activation_memories)) if activation_memories else 0
-    )
-
-    return avg_forward_time, avg_backward_time, avg_activation_memory
-
-
 class DenseTransformerLayerProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
         super().__init__(config, sub_profilers)
@@ -162,9 +68,15 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
         self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
         self._cache_key = None  # Cache key (batch_size, seq_len)
 
+    def get_sub_profiler(self, name: str):
+        return self.sub_profilers.get(name)
+
     def set_layer_module(self, layer_module):
         """Set the actual transformer layer module for benchmarking."""
         self.layer_module = layer_module
+        self.sub_profilers["self_attention"].set_module(layer_module.self_attention)
+        self.sub_profilers["mlp"].set_module(layer_module.mlp)
+
         # Invalidate cache when layer changes
         self._cached_results = None
         self._cache_key = None
@@ -189,9 +101,7 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
         if self._cached_results is None or self._cache_key != cache_key:
             self._cached_results = benchmark_layer(
                 self.layer_module,
-                self.config.model_config.hidden_size,
-                batch_size,
-                seq_len,
+                [(seq_len, batch_size, self.config.model_config.hidden_size)],
             )
             self._cache_key = cache_key
         return self._cached_results
@@ -216,9 +126,15 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
         self._cache_key = None  # Cache key (batch_size, seq_len)
 
+    def get_sub_profiler(self, name: str):
+        return self.sub_profilers.get(name)
+
     def set_layer_module(self, layer_module):
         """Set the actual transformer layer module for benchmarking."""
         self.layer_module = layer_module
+        self.sub_profilers["self_attention"].set_module(layer_module.self_attention)
+        self.sub_profilers["mlp"].set_module(layer_module.mlp)
+
         # Invalidate cache when layer changes
         self._cached_results = None
         self._cache_key = None
@@ -244,7 +160,8 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
             self._cached_results = benchmark_layer(
-                self.layer_module, self.config.model_config.hidden_size, batch_size, seq_len
+                self.layer_module,
+                [(seq_len, batch_size, self.config.model_config.hidden_size)],
             )
             self._cache_key = cache_key
         return self._cached_results

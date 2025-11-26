@@ -217,19 +217,24 @@ class LanguageModelProfiler(BaseModuleProfiler):
         print(f"\n[Primus:Performance Projection] Found {len(all_layers)} transformer layers")
         print(f"[Primus:Performance Projection] This rank is responsible for layers: {self.layers}")
 
-        # Benchmark each layer assigned to this rank
+        # Benchmark each layer type (dense/MoE) once
         results = {}
+        profiled_types = set()
+
         for layer_idx in self.layers:
             if layer_idx >= len(all_layers):
                 print(f"[WARNING] Layer index {layer_idx} exceeds available layers ({len(all_layers)})")
                 continue
 
-            layer_module = all_layers[layer_idx]
             is_moe = self.config.model_config.moe_pattern[layer_idx]
+            layer_type = "moe" if is_moe else "dense"
 
-            print(
-                f"\n[Primus:Performance Projection] Benchmarking Layer {layer_idx} ({'MoE' if is_moe else 'Dense'})..."
-            )
+            if layer_type in profiled_types:
+                continue
+
+            layer_module = all_layers[layer_idx]
+
+            print(f"\n[Primus:Performance Projection] Benchmarking Layer {layer_idx} ({layer_type})...")
 
             # Get the appropriate profiler
             if is_moe:
@@ -244,15 +249,51 @@ class LanguageModelProfiler(BaseModuleProfiler):
             backward_time = layer_profiler.measured_backward_time(batch_size, seq_len)
             activation_memory = layer_profiler.measured_activation_memory(batch_size, seq_len)
 
-            results[layer_idx] = {
-                "type": "moe" if is_moe else "dense",
+            # Benchmark Attention
+            attn_profiler = layer_profiler.get_sub_profiler("self_attention")
+            attn_forward = attn_profiler.measured_forward_time(batch_size, seq_len)
+            attn_backward = attn_profiler.measured_backward_time(batch_size, seq_len)
+            attn_mem = attn_profiler.measured_activation_memory(batch_size, seq_len)
+
+            # Benchmark MLP
+            mlp_profiler = layer_profiler.get_sub_profiler("mlp")
+            mlp_forward = mlp_profiler.measured_forward_time(batch_size, seq_len)
+            mlp_backward = mlp_profiler.measured_backward_time(batch_size, seq_len)
+            mlp_mem = mlp_profiler.measured_activation_memory(batch_size, seq_len)
+
+            results[layer_type] = {
+                "type": layer_type,
                 "forward_time_ms": forward_time,
                 "backward_time_ms": backward_time,
                 "activation_memory_bytes": activation_memory,
+                "attention": {
+                    "forward_time_ms": attn_forward,
+                    "backward_time_ms": attn_backward,
+                    "activation_memory_bytes": attn_mem,
+                },
+                "mlp": {
+                    "forward_time_ms": mlp_forward,
+                    "backward_time_ms": mlp_backward,
+                    "activation_memory_bytes": mlp_mem,
+                },
             }
+
+            profiled_types.add(layer_type)
 
             print(f"  Forward time:  {forward_time:.2f} ms")
             print(f"  Backward time: {backward_time:.2f} ms")
             print(f"  Activation memory: {activation_memory / (1024**2):.2f} MB")
+            print(f"  Attention Forward: {attn_forward:.2f} ms, Backward: {attn_backward:.2f} ms")
+            print(f"  Attention Activation memory: {attn_mem / (1024**2):.2f} MB")
+            print(f"  MLP Forward: {mlp_forward:.2f} ms, Backward: {mlp_backward:.2f} ms")
+            print(f"  MLP Activation memory: {mlp_mem / (1024**2):.2f} MB")
 
-        return results
+        # Expand results to all layers
+        final_results = {}
+        for layer_idx in self.layers:
+            is_moe = self.config.model_config.moe_pattern[layer_idx]
+            layer_type = "moe" if is_moe else "dense"
+            if layer_type in results:
+                final_results[layer_idx] = results[layer_type]
+
+        return final_results
