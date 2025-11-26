@@ -91,10 +91,6 @@ class MegatronArgBuilder:
         megatron_keys = set(megatron_defaults.keys())
 
         for key, value in values.items():
-            # Skip None values
-            # if value is None:
-            #     continue
-
             # Only accept parameters that Megatron recognizes
             if key in megatron_keys:
                 self.overrides[key] = value
