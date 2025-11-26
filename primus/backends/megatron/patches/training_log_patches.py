@@ -17,7 +17,7 @@ Architecture:
 """
 
 import contextlib
-from typing import Any, List, Protocol
+from typing import Any, Dict, List, Protocol
 
 import torch
 
@@ -59,8 +59,9 @@ class RocmMonitorExtension:
     during the execution of training_log.
     """
 
-    def __init__(self, args: Any):
+    def __init__(self, args: Any, config: Dict[str, Any]):
         self.args = args
+        self.config = config
         self.original_print = None
         self._megatron_training_module = None
 
@@ -118,8 +119,11 @@ class RocmMonitorExtension:
         )
 
         # 2. ROCm SMI Stats (If configured)
-        iter_list = getattr(self.args, "use_rocm_mem_info_iters", [])
-        if getattr(self.args, "use_rocm_mem_info", False) or iter_list:
+        # Check config from self.config (Primus specific parameters)
+        use_rocm_mem = self.config.get("use_rocm_mem_info", False)
+        rocm_iters = self.config.get("use_rocm_mem_info_iters", [])
+
+        if use_rocm_mem or rocm_iters:
             # Note: We use config to decide enablement. For strict iteration control,
             # we would need to parse iteration from log_string or args, but
             # config-based check is sufficient and low-overhead here.
@@ -159,6 +163,8 @@ def patch_training_log_unified(ctx: PatchContext):
 
         # 1. Get Configuration
         args = ctx.extra.get("args")
+        config = ctx.extra.get("config", {})
+
         if not args:
             log_rank_0("[Patch:megatron.training_log][SKIP] No args in context")
             return
@@ -167,19 +173,18 @@ def patch_training_log_unified(ctx: PatchContext):
         extensions: List[Any] = []
 
         # -> Check ROCm Monitoring
+        # Primus specific parameters are in config, not args
+        use_rocm_mem = config.get("use_rocm_mem_info", False)
+        rocm_iters = config.get("use_rocm_mem_info_iters", [])
+
         enable_rocm_stats = (
             hasattr(args, "log_throughput")
             and args.log_throughput
-            and (
-                getattr(args, "use_rocm_mem_info", False)
-                or (
-                    hasattr(args, "use_rocm_mem_info_iters")
-                    and len(getattr(args, "use_rocm_mem_info_iters", [])) > 0
-                )
-            )
+            and (use_rocm_mem or (rocm_iters and len(rocm_iters) > 0))
         )
+
         if enable_rocm_stats:
-            extensions.append(RocmMonitorExtension(args))
+            extensions.append(RocmMonitorExtension(args, config))
 
         # -> Check MLflow (Placeholder for future implementation)
         # if enable_mlflow:
