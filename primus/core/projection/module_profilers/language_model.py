@@ -242,8 +242,17 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
             forward_time = layer_profiler.measured_forward_time(batch_size, seq_len)
             backward_time = layer_profiler.measured_backward_time(batch_size, seq_len)
+            activation_memory = layer_profiler.measured_activation_memory(batch_size, seq_len)
+
+            results[layer_idx] = {
+                "type": "moe" if is_moe else "dense",
+                "forward_time_ms": forward_time,
+                "backward_time_ms": backward_time,
+                "activation_memory_bytes": activation_memory,
+            }
 
             print(f"  Forward time:  {forward_time:.2f} ms")
             print(f"  Backward time: {backward_time:.2f} ms")
+            print(f"  Activation memory: {activation_memory / (1024**2):.2f} MB")
 
         return results
