@@ -97,8 +97,18 @@ jobs:
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker] Total elapsed time: ${elapsed} seconds"
 
+          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-gfx950"
+          start_time=$(date +%s)
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_gfx950 \
+               -t tasimage/primus:${{env.IMAGE_TAG}}-gfx950 \
+               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} .
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build primus docker-gfx950] Total elapsed time: ${elapsed} seconds"
+
           echo "> Docker tag image for Docker Hub"
           docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+          docker tag tasimage/primus:${{env.IMAGE_TAG}}-gfx950 docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950
 
           echo "> Login to Primus Docker Hub"
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
@@ -106,12 +116,14 @@ jobs:
           echo "> Docker push to Docker Hub"
           start_time=$(date +%s)
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [push primus docker] Total elapsed time: ${elapsed} seconds"
 
           # echo "> Docker cleanup local images"
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}
+          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-gfx950
           # echo "> build-docker success"
 
   run-unittest:

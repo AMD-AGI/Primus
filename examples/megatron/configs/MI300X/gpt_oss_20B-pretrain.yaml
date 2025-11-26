@@ -1,7 +1,7 @@
-work_group: ${PRIMUS_TEAM:amd}
-user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:deepseek_v3-pretrain}
-workspace: ${PRIMUS_WORKSPACE:./output}
+work_group: ${TEAM:amd}
+user_name: ${USER:root}
+exp_name: ${EXP_NAME:gpt_oss_20b}
+workspace: ./output
 
 modules:
   pre_trainer:
@@ -9,7 +9,7 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: ${PRIMUS_MODEL:deepseek_v3}.yaml
+    model: ${PRIMUS_MODEL:gpt_oss_20B}.yaml
     overrides:
       # log
       wandb_project: "Primus_DeepSeek_Pretrain"
@@ -20,10 +20,16 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
+      # profile
+      profile: true
+      use_pytorch_profiler: true
+      profile_step_end: 7
+      profile_step_start: 6
+
       # hyper parameters
-      train_iters: 50
+      train_iters: 20
       micro_batch_size: 4
-      global_batch_size: 256
+      global_batch_size: 640
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
       lr: 1.0e-5
@@ -47,7 +53,7 @@ modules:
 
       # data
       mock_data: true
-      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+      train_data_path: ${TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
 
@@ -62,6 +68,8 @@ modules:
       moe_use_fused_router_with_aux_score: false
       # MLA
       multi_latent_attention: false
+      # rope fusion
+      apply_rope_fusion: false
 
       # ckpt
       finetune: false
@@ -78,9 +86,21 @@ modules:
       eval_iters: 0
 
       # Turbo
-      enable_primus_turbo: false
-      use_turbo_attention: false
-      use_turbo_grouped_mlp: false
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: true
+
+      # deepep
+      use_turbo_deepep: true
+
+      # 64 or 80 for ep8, 32 for ep16-64 is best practice
+      turbo_deepep_num_cu: 64
+      turbo_deepep_use_comm_stream: false
+
+      # sync-free moe support stage 0-3, 0 means not use sync-free moe
+      # stage 3 is completely no gpu-cpu sync in MoE, but cost more memory
+      # stage 2 is recommended for better performance
+      turbo_sync_free_moe_stage: 2
 
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"

@@ -1,7 +1,7 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:deepseek_v3-pretrain}
-workspace: ${PRIMUS_WORKSPACE:./output}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v2-pretrain}
+workspace: ./output
 
 modules:
   pre_trainer:
@@ -9,7 +9,7 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: ${PRIMUS_MODEL:deepseek_v3}.yaml
+    model: ${PRIMUS_MODEL:deepseek_v2}.yaml
     overrides:
       # log
       wandb_project: "Primus_DeepSeek_Pretrain"
@@ -22,7 +22,7 @@ modules:
 
       # hyper parameters
       train_iters: 50
-      micro_batch_size: 4
+      micro_batch_size: 1
       global_batch_size: 256
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
@@ -40,7 +40,7 @@ modules:
 
       # parallel
       tensor_model_parallel_size: ${PRIMUS_TP:1}
-      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:4}
       expert_model_parallel_size: ${PRIMUS_EP:8}
       overlap_grad_reduce: true
       overlap_param_gather: true
@@ -57,7 +57,7 @@ modules:
       # fused wgrad gemm and accumulation
       gradient_accumulation_fusion: false
       # recommend set `false` in fp8
-      moe_use_legacy_grouped_gemm: false
+      moe_use_legacy_grouped_gemm: true
       # fused topk router with aux score
       moe_use_fused_router_with_aux_score: false
       # MLA
@@ -76,12 +76,3 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
       eval_iters: 0
-
-      # Turbo
-      enable_primus_turbo: false
-      use_turbo_attention: false
-      use_turbo_grouped_mlp: false
-
-      # Cross entropy flags
-      # cross_entropy_fusion_impl: "te"
-      # cross_entropy_loss_fusion: true

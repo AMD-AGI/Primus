@@ -19,8 +19,9 @@ modules:
       moe_router_force_load_balancing: true
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
+      moe_router_dtype: fp32
 
-      # hyber parameters
+      # hyper parameters
       train_iters: 50
       micro_batch_size: 4
       global_batch_size: 256
@@ -60,12 +61,11 @@ modules:
       moe_use_legacy_grouped_gemm: true
       # fused topk router with aux score
       moe_use_fused_router_with_aux_score: false
-      # pad 192/128 for deepseek attention
-      fused_padded_mla_attention: false
 
       # Performance toggles
-      #multi_latent_attention: false
+      multi_latent_attention: false
       #apply_rope_fusion: true
+      mtp_num_layers: null
 
       # ckpt
       finetune: false
@@ -85,12 +85,6 @@ modules:
       enable_primus_turbo: true
       use_turbo_attention: true
       use_turbo_grouped_mlp: true
-
-      # MoE overlap
-      # overlap_moe_expert_parallel_comm: true
-      # patch_moe_overlap: true
-      # delay_wgrad_compute: false
-      # moe_shared_expert_overlap: false
 
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"
