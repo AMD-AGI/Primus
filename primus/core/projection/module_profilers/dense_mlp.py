@@ -43,9 +43,6 @@ class DenseMLPProfiler(BaseModuleProfiler):
             // self.config.model_parallel_config.tensor_model_parallel_size
             // self.config.model_parallel_config.context_model_parallel_size
         )
-        # Calculate memory at different stages and take maximum
-        input_memory = num_tokens * self.config.model_config.hidden_size * 2  # bf16
-
         # Memory after first projection(s)
         if self.config.model_config.swiglu:
             # Need to store both gate and up projections for backward
@@ -53,10 +50,12 @@ class DenseMLPProfiler(BaseModuleProfiler):
         else:
             intermediate_memory = num_tokens * self.config.model_config.ffn_hidden_size * 2  # bf16
 
+        # After activation
+        activation_memory = num_tokens * self.config.model_config.ffn_hidden_size * 2  # bf16
         output_memory = num_tokens * self.config.model_config.hidden_size * 2  # bf16
 
         # Peak memory is input + intermediate (both needed for backward)
-        return input_memory + intermediate_memory + output_memory
+        return intermediate_memory + activation_memory + output_memory
 
     def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""

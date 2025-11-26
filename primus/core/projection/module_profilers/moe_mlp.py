@@ -54,19 +54,35 @@ class MoEMLPProfiler(BaseModuleProfiler):
             * seq_len
             // self.config.model_parallel_config.tensor_model_parallel_size
             // self.config.model_parallel_config.context_model_parallel_size
-            * self.config.model_config.moe_router_topk
         )
-        total = 0
-        # First Gemm
-        total += num_tokens * self.config.model_config.hidden_size * 2  # bf16
-        # Activation layer
-        # TODO: swiglu scalue
-        swiglu_scale = 1
+        topk_tokens = num_tokens * self.config.model_config.moe_router_topk
+
+        if self.config.model_config.moe_ffn_hidden_size is not None:
+            moe_ffn = self.config.model_config.moe_ffn_hidden_size
+        else:
+            moe_ffn = self.config.model_config.ffn_hidden_size
+
         if self.config.model_config.swiglu:
-            swiglu_scale = 2
-        total += (num_tokens * self.config.model_config.moe_ffn_hidden_size * swiglu_scale) * 2  # bf16
-        # Second Gemm
-        total += num_tokens * self.config.model_config.hidden_size * 2  # bf16
+            # Need to store both gate and up projections for backward
+            intermediate_memory = 2 * topk_tokens * moe_ffn * 2  # bf16
+        else:
+            intermediate_memory = topk_tokens * moe_ffn * 2  # bf16
+
+        # After activation
+        activation_memory = topk_tokens * moe_ffn * 2  # bf16
+        output_memory = topk_tokens * self.config.model_config.hidden_size * 2  # bf16
+        total = intermediate_memory + activation_memory + output_memory
+        if self.config.model_config.moe_shared_expert_intermediate_size is not None:
+            if self.config.model_config.swiglu:
+                # Need to store both gate and up projections for backward
+                intermediate_memory = 2 * num_tokens * moe_ffn * 2  # bf16
+            else:
+                intermediate_memory = num_tokens * moe_ffn * 2  # bf16
+
+            # After activation
+            activation_memory = num_tokens * moe_ffn * 2  # bf16
+            output_memory = num_tokens * self.config.model_config.hidden_size * 2  # bf16
+            total += intermediate_memory + activation_memory + output_memory
 
         return total
 
