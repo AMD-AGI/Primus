@@ -11,11 +11,10 @@ This module registers all Megatron-specific patches with the PatchRegistry.
 
 Patches are organized by category:
     - env_patches: Environment variable configuration
-    - mlflow_patches: MLflow logging integration
     - args_patches: Argument configuration and path setup
     - te_patches: Transformer Engine integration patches
     - flops_patches: FLOPs calculation and performance profiling
-    - rocm_mem_patches: ROCm memory monitoring for AMD GPUs
+    - training_log_patches: Unified patch for MLflow logging and ROCm memory monitoring
 
 All patches are automatically registered on import via the @register_patch decorator.
 """
@@ -26,9 +25,8 @@ from primus.backends.megatron.patches import (  # noqa: F401
     args_patches,
     env_patches,
     flops_patches,
-    mlflow_patches,
-    rocm_mem_patches,
     te_patches,
+    training_log_patches,
 )
 from primus.core.patches import run_patches
 
