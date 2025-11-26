@@ -30,19 +30,17 @@ def patch_training_log_for_rocm_memory(ctx: PatchContext):
     log string output with AMD GPU memory statistics.
 
     Strategy:
-        1. Store reference to original training_log and original print_rank_0
-        2. Replace print_rank_0 temporarily with a capturing version
-        3. Call original training_log (which calls print_rank_0)
-        4. Capture the log string, inject memory stats, and print
-        5. Restore original print_rank_0
+        1. Check if ROCm monitoring is enabled at patch time (not runtime)
+        2. If disabled, skip patching entirely (zero overhead)
+        3. If enabled, wrap training_log to inject memory stats
 
     Memory stats provided:
         - HIP memory (torch.cuda.mem_get_info): Fast, always available
         - ROCm memory (rocm-smi): More accurate, optional (controlled by args)
 
-    The patch only activates when:
+    The patch only applies when:
         - args.log_throughput is True
-        - Either args.use_rocm_mem_info is True OR current iteration is in use_rocm_mem_info_iters
+        - args.use_rocm_mem_info is True OR args.use_rocm_mem_info_iters is set
     """
     try:
         import megatron.training.training as megatron_training  # type: ignore
@@ -51,7 +49,30 @@ def patch_training_log_for_rocm_memory(ctx: PatchContext):
             print_rank_0 as original_print_rank_0,  # type: ignore
         )
 
+        from primus.core.utils.distributed_logging import log_rank_0
         from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
+
+        # Check if ROCm monitoring is enabled at patch time
+        args = get_args()
+        should_enable_patch = (
+            hasattr(args, "log_throughput")
+            and args.log_throughput
+            and (
+                getattr(args, "use_rocm_mem_info", False)
+                or (
+                    hasattr(args, "use_rocm_mem_info_iters")
+                    and len(getattr(args, "use_rocm_mem_info_iters", [])) > 0
+                )
+            )
+        )
+
+        if not should_enable_patch:
+            # ROCm monitoring disabled, skip patching entirely
+            log_rank_0(
+                "[Patch:megatron.rocm.memory_monitoring][SKIP] ROCm memory monitoring disabled "
+                "(log_throughput=False or use_rocm_mem_info not configured)"
+            )
+            return
 
         # Store the original training_log function
         original_training_log = megatron_training.training_log
@@ -75,37 +96,6 @@ def patch_training_log_for_rocm_memory(ctx: PatchContext):
             This wraps the original Megatron training_log and injects ROCm
             memory statistics into the throughput logging section.
             """
-            args = get_args()
-
-            # Check if we should add ROCm memory stats
-            should_add_rocm_stats = (
-                hasattr(args, "log_throughput")
-                and args.log_throughput
-                and (
-                    getattr(args, "use_rocm_mem_info", False)
-                    or (
-                        hasattr(args, "use_rocm_mem_info_iters")
-                        and iteration in getattr(args, "use_rocm_mem_info_iters", [])
-                    )
-                )
-            )
-
-            if not should_add_rocm_stats:
-                # No ROCm stats needed, just call original
-                return original_training_log(
-                    loss_dict,
-                    total_loss_dict,
-                    learning_rate,
-                    decoupled_learning_rate,
-                    iteration,
-                    loss_scale,
-                    report_memory_flag,
-                    skipped_iter,
-                    grad_norm,
-                    params_norm,
-                    num_zeros_in_grad,
-                )
-
             # Capture the log string from original function
             captured_lines = []
 
@@ -143,7 +133,7 @@ def patch_training_log_for_rocm_memory(ctx: PatchContext):
             # Process captured lines and inject ROCm memory stats
             for line in captured_lines:
                 # Check if this is the throughput line (contains "throughput per GPU")
-                if "throughput per GPU" in line and should_add_rocm_stats:
+                if "throughput per GPU" in line:
                     try:
                         # Get memory stats
                         hip_mem_str = ""
@@ -189,8 +179,6 @@ def patch_training_log_for_rocm_memory(ctx: PatchContext):
 
         # Replace Megatron's training_log with our patched version
         megatron_training.training_log = patched_training_log
-
-        from primus.core.utils.distributed_logging import log_rank_0
 
         log_rank_0("[Patch:megatron.rocm.memory_monitoring] Added ROCm memory monitoring to training_log")
 

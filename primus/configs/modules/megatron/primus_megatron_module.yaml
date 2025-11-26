@@ -11,7 +11,7 @@ disable_compile_dependencies: true
 #   with `rocm-smi` at every iteration.
 # - If `use_rocm_mem_info = False`, memory information will only be collected
 #   at the iterations specified in `use_rocm_mem_info_iters`.
-use_rocm_mem_info: false
+use_rocm_mem_info: true
 use_rocm_mem_info_iters: [1,2]
 
 # profiling
