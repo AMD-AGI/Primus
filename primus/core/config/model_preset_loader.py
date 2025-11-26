@@ -35,17 +35,7 @@ class ModelPresetLoader:
                 f"Expected: {preset_path}"
             )
 
-        # parse_yaml already handles:
-        #  - extends
-        #  - env vars
-        #  - nested extends
-        #  - circular extends detection
-        #  - deep merge
         preset = parse_yaml(preset_path)
-        
-        print(f"[ModelPresetLoader] Loaded preset for model='{model_name}', framework='{framework}':")
-        print(f"  Path: {preset_path}")
-        print(f"  Keys: {sorted(preset.keys())}")
 
         return preset
 
