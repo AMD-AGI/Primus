@@ -102,7 +102,7 @@ def benchmark(test_func, output_csv_path, rank, local_rank, world_size,dry_run=F
 
     for model_name, (d_model, d_ff, n_heads, n_kv_heads, d_qkv) in MODEL_PARAMS_TABLE.items():
             size = d_model*d_ff*3 + 2*d_model*n_heads*d_qkv + 2*d_model*n_kv_heads*d_qkv
-            size = (int(size))
+            size = int(size)
             if rank == 0:
                 print(f"\nModel Name {model_name} with size {size}")
             for dtype in [torch.float16]:
