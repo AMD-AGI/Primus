@@ -84,6 +84,8 @@ modules:
 
       # deepep
       use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
 
       # 64 or 80 for ep8, 32 for ep16-64 is best practice
       turbo_deepep_num_cu: 64
