@@ -26,13 +26,13 @@ def patch_training_log_for_rocm_memory(ctx: PatchContext):
     """
     Patch Megatron's training_log function to add ROCm memory monitoring.
 
-    This patch wraps the original training_log function and enhances the
-    log string output with AMD GPU memory statistics.
+    This patch wraps print_rank_last inside training_log to inject ROCm
+    memory statistics into the log string before printing.
 
     Strategy:
-        1. Check if ROCm monitoring is enabled at patch time (not runtime)
+        1. Check if ROCm monitoring is enabled at patch time
         2. If disabled, skip patching entirely (zero overhead)
-        3. If enabled, wrap training_log to inject memory stats
+        3. If enabled, replace print_rank_last to inject memory stats
 
     Memory stats provided:
         - HIP memory (torch.cuda.mem_get_info): Fast, always available
@@ -45,7 +45,7 @@ def patch_training_log_for_rocm_memory(ctx: PatchContext):
     try:
         import megatron.training.training as megatron_training  # type: ignore
         from megatron.training.utils import (
-            print_rank_0 as original_print_rank_0,  # type: ignore
+            print_rank_last as original_print_rank_last,  # type: ignore
         )
 
         from primus.core.utils.distributed_logging import log_rank_0
@@ -97,47 +97,19 @@ def patch_training_log_for_rocm_memory(ctx: PatchContext):
             """
             Patched training_log with ROCm memory monitoring.
 
-            This wraps the original Megatron training_log and injects ROCm
-            memory statistics into the throughput logging section.
+            This wraps print_rank_last to inject ROCm memory stats into the
+            log string before printing.
             """
-            # Capture the log string from original function
-            captured_lines = []
 
-            def capturing_print_rank_0(message):
-                """Temporary replacement for print_rank_0 that captures output."""
-                captured_lines.append(message)
+            def patched_print_rank_last(log_string):
+                """
+                Patched print_rank_last that injects ROCm memory stats.
 
-            # Replace print_rank_0 temporarily
-            import megatron.training.utils as megatron_utils
-
-            original_utils_print = megatron_utils.print_rank_0
-            megatron_utils.print_rank_0 = capturing_print_rank_0
-            megatron_training.print_rank_0 = capturing_print_rank_0
-
-            try:
-                # Call original function (it will call our capturing print)
-                result = original_training_log(
-                    loss_dict,
-                    total_loss_dict,
-                    learning_rate,
-                    decoupled_learning_rate,
-                    iteration,
-                    loss_scale,
-                    report_memory_flag,
-                    skipped_iter,
-                    grad_norm,
-                    params_norm,
-                    num_zeros_in_grad,
-                )
-            finally:
-                # Always restore original print_rank_0
-                megatron_utils.print_rank_0 = original_utils_print
-                megatron_training.print_rank_0 = original_utils_print
-
-            # Process captured lines and inject ROCm memory stats
-            for line in captured_lines:
-                # Check if this is the throughput line (contains "throughput per GPU")
-                if "throughput per GPU" in line:
+                Args:
+                    log_string: The original log string from training_log
+                """
+                # Check if this log contains throughput info
+                if "throughput per GPU" in log_string:
                     try:
                         # Get memory stats
                         hip_mem_str = ""
@@ -168,7 +140,7 @@ def patch_training_log_for_rocm_memory(ctx: PatchContext):
                             )
 
                         # Inject memory stats before "throughput per GPU"
-                        line = line.replace(
+                        log_string = log_string.replace(
                             " throughput per GPU", f"{hip_mem_str}{rocm_mem_str} throughput per GPU"
                         )
 
@@ -176,8 +148,33 @@ def patch_training_log_for_rocm_memory(ctx: PatchContext):
                         # Silently fail memory monitoring to avoid breaking training
                         pass
 
-                # Print the (possibly modified) line
-                original_print_rank_0(line)
+                # Call original print function
+                original_print_rank_last(log_string)
+
+            # Temporarily replace print_rank_last in the training module
+            import megatron.training.training as training_module
+
+            original_print = training_module.print_rank_last
+            training_module.print_rank_last = patched_print_rank_last
+
+            try:
+                # Call original training_log (it will use our patched print_rank_last)
+                result = original_training_log(
+                    loss_dict,
+                    total_loss_dict,
+                    learning_rate,
+                    decoupled_learning_rate,
+                    iteration,
+                    loss_scale,
+                    report_memory_flag,
+                    skipped_iter,
+                    grad_norm,
+                    params_norm,
+                    num_zeros_in_grad,
+                )
+            finally:
+                # Always restore original print_rank_last
+                training_module.print_rank_last = original_print
 
             return result
 
