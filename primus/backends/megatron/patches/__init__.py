@@ -14,6 +14,7 @@ Patches are organized by category:
     - mlflow_patches: MLflow logging integration
     - args_patches: Argument configuration and path setup
     - te_patches: Transformer Engine integration patches
+    - flops_patches: FLOPs calculation and performance profiling
 
 All patches are automatically registered on import via the @register_patch decorator.
 """
@@ -23,6 +24,7 @@ All patches are automatically registered on import via the @register_patch decor
 from primus.backends.megatron.patches import (  # noqa: F401
     args_patches,
     env_patches,
+    flops_patches,
     mlflow_patches,
     te_patches,
 )
