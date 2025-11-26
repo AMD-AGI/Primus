@@ -4,17 +4,20 @@ exp_name: exp_pretrain
 workspace: ./output
 
 modules:
-  - name: gemm_bench
-    module: benchmark_gemm
-    dtype: bf16
-    shapes: "llama2_7B"
-    a.b: 1
+  # - name: gemm_bench
+  #   module: benchmark_gemm
+  #   dtype: bf16
+  #   shapes: "llama2_7B"
+  #   a.b: 1
 
   - name: pretrain_stage
     module: pretrain
     framework: megatron
     model: llama2_7B
-    arguments:
-      global_batch_size: 16
-      micro_batch_size: 1
-      lr: 1e-5
+    params:
+      global_batch_size: 256
+      micro_batch_size: 4
+      train_iters: 50
+      eval_iters: 0
+      stderr_sink_level: DEBUG
+
