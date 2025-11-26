@@ -169,6 +169,11 @@ def patch_training_log_unified(ctx: PatchContext):
             log_rank_0("[Patch:megatron.training_log][SKIP] No args in context")
             return
 
+        # DEBUG: Inspect config keys to troubleshoot missing params
+        # log_rank_0(f"[Patch:megatron.training_log] Available config keys: {list(config.keys())}")
+        # if "use_rocm_mem_info" in config:
+        #     log_rank_0(f"  use_rocm_mem_info: {config['use_rocm_mem_info']}")
+
         # 2. Register Extensions
         extensions: List[Any] = []
 
@@ -176,6 +181,13 @@ def patch_training_log_unified(ctx: PatchContext):
         # Primus specific parameters are in config, not args
         use_rocm_mem = config.get("use_rocm_mem_info", False)
         rocm_iters = config.get("use_rocm_mem_info_iters", [])
+
+        # DEBUG: Confirm value reading
+        if use_rocm_mem or rocm_iters:
+            log_rank_0(
+                f"[Patch:megatron.training_log] Found ROCm config: enable={use_rocm_mem}, iters={rocm_iters}"
+            )
+
         has_rocm_config = use_rocm_mem or (rocm_iters and len(rocm_iters) > 0)
 
         # Check dependencies
