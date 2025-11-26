@@ -176,15 +176,19 @@ def patch_training_log_unified(ctx: PatchContext):
         # Primus specific parameters are in config, not args
         use_rocm_mem = config.get("use_rocm_mem_info", False)
         rocm_iters = config.get("use_rocm_mem_info_iters", [])
+        has_rocm_config = use_rocm_mem or (rocm_iters and len(rocm_iters) > 0)
 
-        enable_rocm_stats = (
-            hasattr(args, "log_throughput")
-            and args.log_throughput
-            and (use_rocm_mem or (rocm_iters and len(rocm_iters) > 0))
-        )
+        # Check dependencies
+        log_throughput = hasattr(args, "log_throughput") and args.log_throughput
 
-        if enable_rocm_stats:
-            extensions.append(RocmMonitorExtension(args, config))
+        if has_rocm_config:
+            if log_throughput:
+                extensions.append(RocmMonitorExtension(args, config))
+            else:
+                log_rank_0(
+                    "[Patch:megatron.training_log][WARN] ROCm memory monitoring configured but skipped "
+                    "because 'log_throughput' is False. Please set --log-throughput to enable."
+                )
 
         # -> Check MLflow (Placeholder for future implementation)
         # if enable_mlflow:
