@@ -62,9 +62,10 @@ from .router import RouterProfiler
 
 def benchmark_layer(
     layer_module, hidden_size: int, batch_size: int, seq_len: int, num_iterations: int = 10
-) -> tuple[float, float]:
+) -> tuple[float, float, int]:
     """
     Benchmark both forward and backward passes of a transformer layer using CUDA events.
+    Also measures activation memory used by the forward pass.
 
     Args:
         layer_module: The transformer layer module
@@ -74,7 +75,7 @@ def benchmark_layer(
         num_iterations: Number of iterations to average over
 
     Returns:
-        Tuple of (average forward time in ms, average backward time in ms)
+        Tuple of (average forward time in ms, average backward time in ms, activation memory in bytes)
     """
     import torch
 
@@ -99,8 +100,17 @@ def benchmark_layer(
     # Measure forward and backward passes using CUDA events
     forward_times = []
     backward_times = []
+    activation_memories = []
 
     for _ in range(num_iterations):
+        # Clear cache and reset memory stats before measuring
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.synchronize(device)
+
+        # Get baseline memory
+        mem_before = torch.cuda.memory_allocated(device) if device.type == "cuda" else 0
+
         # Measure forward pass
         forward_start = torch.cuda.Event(enable_timing=True)
         forward_end = torch.cuda.Event(enable_timing=True)
@@ -108,6 +118,12 @@ def benchmark_layer(
         forward_start.record()
         output = layer_module(hidden_states)
         forward_end.record()
+
+        # Measure activation memory (peak memory during forward - baseline)
+        torch.cuda.synchronize(device)
+        mem_after_forward = torch.cuda.max_memory_allocated(device)
+        activation_memory = mem_after_forward - mem_before
+        activation_memories.append(activation_memory)
 
         # Measure backward pass
         grad_output = torch.randn_like(output[0])
@@ -132,22 +148,25 @@ def benchmark_layer(
 
     avg_forward_time = sum(forward_times) / len(forward_times)
     avg_backward_time = sum(backward_times) / len(backward_times)
+    avg_activation_memory = (
+        int(sum(activation_memories) / len(activation_memories)) if activation_memories else 0
+    )
 
-    return avg_forward_time, avg_backward_time
+    return avg_forward_time, avg_backward_time, avg_activation_memory
 
 
 class DenseTransformerLayerProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
         super().__init__(config, sub_profilers)
         self.layer_module = None  # Will be set during benchmarking
-        self._cached_times = None  # Cache for (forward_time, backward_time)
+        self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
         self._cache_key = None  # Cache key (batch_size, seq_len)
 
     def set_layer_module(self, layer_module):
         """Set the actual transformer layer module for benchmarking."""
         self.layer_module = layer_module
         # Invalidate cache when layer changes
-        self._cached_times = None
+        self._cached_results = None
         self._cache_key = None
 
     def estimated_num_params(self, rank: int | None = None) -> int:
@@ -164,40 +183,44 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
             + self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len)
         )
 
-    def _get_benchmark_times(self, batch_size: int, seq_len: int) -> tuple[float, float]:
-        """Get or compute benchmark times (cached)."""
+    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+        """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
-        if self._cached_times is None or self._cache_key != cache_key:
-            self._cached_times = benchmark_layer(
+        if self._cached_results is None or self._cache_key != cache_key:
+            self._cached_results = benchmark_layer(
                 self.layer_module,
                 self.config.model_config.hidden_size,
                 batch_size,
                 seq_len,
             )
             self._cache_key = cache_key
-        return self._cached_times
+        return self._cached_results
 
     def measured_forward_time(self, batch_size: int, seq_len: int) -> float:
-        forward_time, _ = self._get_benchmark_times(batch_size, seq_len)
+        forward_time, _, _ = self._get_benchmark_results(batch_size, seq_len)
         return forward_time
 
     def measured_backward_time(self, batch_size: int, seq_len: int) -> float:
-        _, backward_time = self._get_benchmark_times(batch_size, seq_len)
+        _, backward_time, _ = self._get_benchmark_results(batch_size, seq_len)
         return backward_time
+
+    def measured_activation_memory(self, batch_size: int, seq_len: int) -> int:
+        _, _, activation_memory = self._get_benchmark_results(batch_size, seq_len)
+        return activation_memory
 
 
 class MoETransformerLayerProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
         super().__init__(config, sub_profilers)
         self.layer_module = None  # Will be set during benchmarking
-        self._cached_times = None  # Cache for (forward_time, backward_time)
+        self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
         self._cache_key = None  # Cache key (batch_size, seq_len)
 
     def set_layer_module(self, layer_module):
         """Set the actual transformer layer module for benchmarking."""
         self.layer_module = layer_module
         # Invalidate cache when layer changes
-        self._cached_times = None
+        self._cached_results = None
         self._cache_key = None
 
     def estimated_num_params(self, rank: int | None = None) -> int:
@@ -216,23 +239,27 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
             + self.sub_profilers["router"].estimated_activation_memory(batch_size, seq_len)
         )
 
-    def _get_benchmark_times(self, batch_size: int, seq_len: int) -> tuple[float, float]:
-        """Get or compute benchmark times (cached)."""
+    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+        """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
-        if self._cached_times is None or self._cache_key != cache_key:
-            self._cached_times = benchmark_layer(
+        if self._cached_results is None or self._cache_key != cache_key:
+            self._cached_results = benchmark_layer(
                 self.layer_module, self.config.model_config.hidden_size, batch_size, seq_len
             )
             self._cache_key = cache_key
-        return self._cached_times
+        return self._cached_results
 
     def measured_forward_time(self, batch_size: int, seq_len: int) -> float:
-        forward_time, _ = self._get_benchmark_times(batch_size, seq_len)
+        forward_time, _, _ = self._get_benchmark_results(batch_size, seq_len)
         return forward_time
 
     def measured_backward_time(self, batch_size: int, seq_len: int) -> float:
-        _, backward_time = self._get_benchmark_times(batch_size, seq_len)
+        _, backward_time, _ = self._get_benchmark_results(batch_size, seq_len)
         return backward_time
+
+    def measured_activation_memory(self, batch_size: int, seq_len: int) -> int:
+        _, _, activation_memory = self._get_benchmark_results(batch_size, seq_len)
+        return activation_memory
 
 
 def get_dense_transformer_layer_profiler_spec(config: TrainingConfig) -> "ModuleProfilerSpec":
