@@ -153,6 +153,7 @@ if [ "$USING_AINIC" == "1" ]; then
     LOG_INFO_RANK0 "Using AINIC"
     LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
     LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
+    LOG_INFO_RANK0 "MPI_HOME_DIR: $MPI_HOME_DIR"
     # unset NCCL_IB_GID_INDEX
     export NCCL_IB_GID_INDEX=1
     # export NCCL_IB_ROCE_VERSION_NUM=2
@@ -166,9 +167,29 @@ if [ "$USING_AINIC" == "1" ]; then
     export NCCL_DMABUF_ENABLE=0
     export NCCL_IGNORE_CPU_AFFINITY=1
     export NCCL_IB_QPS_PER_CONNECTION=1
-    export LD_LIBRARY_PATH=${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${ANP_HOME_DIR}/build/lib:$LD_LIBRARY_PATH
-    # export LD_LIBRARY_PATH=${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${ANP_HOME_DIR}/build/lib:$LD_LIBRARY_PATH
+
+    apt-get update &&
+    apt install jq dpkg-dev kmod xz-utils \
+    libfmt-dev libboost-all-dev \
+    libibverbs-dev ibverbs-utils infiniband-diags -y
+
+    cp "${PRIMUS_PATH}/ainic/ainic_bundle_1.117.1-a-42.tar.gz" /tmp/ainic_bundle_1.117.1-a-42.tar.gz && \
+    cd /tmp && \
+    tar zxf ainic_bundle_1.117.1-a-42.tar.gz && \
+    cd ainic_bundle_1.117.1-a-42 && \
+    tar zxf host_sw_pkg.tar.gz && \
+    cd host_sw_pkg && \
+    ./install.sh --domain=user -y 2>&1 | tee log_install.txt && \
+    cd "${PRIMUS_PATH}" || exit 1
+
+    # ls /usr/lib/x86_64-linux-gnu/libionic.so.1
+    # exit 0
+
+    # export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${ANP_HOME_DIR}/build/lib:/ompi-4.1.6/install/lib:$LD_LIBRARY_PATH
     # export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
+
+    export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
+    export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
 else
     export NCCL_IB_GID_INDEX=3
 fi

@@ -10,8 +10,8 @@
 # export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ci_4096e28_20251114"
 # export DOCKER_IMAGE="docker.io/tasimage/primus:pr-289"
 # export DOCKER_IMAGE="docker.io/tasimage/primus:pr-300"
-# export DOCKER_IMAGE="docker.io/tasimage/primus:pr-282-gfx950"
-export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ainic_ci_422b274_20251126"
+export DOCKER_IMAGE="docker.io/tasimage/primus:pr-282-gfx950"
+# export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ainic_ci_422b274_20251126"
 export CLEAN_DOCKER_CONTAINER=1
 
 ######################### Training Environment Variables #########################
@@ -32,12 +32,15 @@ export CPUS_PER_TASK=96
 # Set on AAC14 cluster
 export NNODES=4
 export USING_AINIC=1
-export REBUILD_TURBO=1
+export REBUILD_TURBO=0
 # export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
 # export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
 # export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
-export ANP_HOME_DIR="/workspace/amd-anp"
-export RCCL_HOME_DIR="/workspace/rccl"
+# export ANP_HOME_DIR="/workspace/amd-anp"
+# export RCCL_HOME_DIR="/workspace/rccl"
+export ANP_HOME_DIR="/mnt/shared/wenx/workspace/Primus/ainic/amd-anp"
+export RCCL_HOME_DIR="/mnt/shared/wenx/workspace/Primus/ainic/rccl"
+export MPI_HOME_DIR="/mnt/shared/wenx/workspace/Primus/ainic/ompi-4.1.6"
 export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7" # modify based on the GPU NiC settings
 export NCCL_SOCKET_IFNAME="enp193s0f1np1"
 export GLOO_SOCKET_IFNAME="enp193s0f1np1"
@@ -51,8 +54,8 @@ export NVTE_CK_USES_BWD_V3=1
 
 ######################### Training Config #########################
 MBS=8
-# GBS=$((64 * NNODES))
-GBS=$((768 * NNODES))
+GBS=$((64 * NNODES))
+# GBS=$((768 * NNODES))
 SEQ_LENGTH=4096
 TP=1
 ETP=1
@@ -73,7 +76,7 @@ PROFILE=False
 DISABLE_CPU_TRACE=False
 PROFILE_STEP_START=5
 PROFILE_STEP_END=6
-TRAIN_ITERS=10
+TRAIN_ITERS=5
 
 # MoE_Features legend:
 # 0 - Baseline (no extra optimization toggles)
@@ -264,7 +267,7 @@ if [ "$PROFILE" = "True" ]; then
 fi
 
 ######################### Training Experiments #########################
-PRIMUS_TEAM="date-$(date +%Y%m%d)-ssi-proxy-4nodes-mi355-vultr-1121"
+PRIMUS_TEAM="date-$(date +%Y%m%d)-ssi-proxy-4nodes-mi355-vultr"
 export PRIMUS_TEAM
 PRIMUS_USER=user-tas
 export PRIMUS_USER

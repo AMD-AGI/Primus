@@ -5,7 +5,7 @@ tokenizer_type: DeepSeekV2Tokenizer
 tokenizer_model: deepseek-ai/DeepSeek-V2-Lite
 
 # model
-num_layers: 56
+num_layers: 64
 hidden_size: 2048
 # num_layers: 48
 # hidden_size: 3072
