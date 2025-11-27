@@ -110,8 +110,8 @@ if [ "$USING_AINIC" == "1" ]; then
         -v "$RCCL_HOME_DIR":"$RCCL_HOME_DIR"
         -v "$ANP_HOME_DIR":"$ANP_HOME_DIR"
         -v /etc/libibverbs.d/:/etc/libibverbs.d
-        -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/
     )
+        # -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/
 fi
 
 export CLEAN_DOCKER_CONTAINER=${CLEAN_DOCKER_CONTAINER:-0}
