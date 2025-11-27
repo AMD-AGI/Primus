@@ -14,7 +14,7 @@ components (configs, blocks, etc.) to integrate Primus-specific behavior.
 from typing import Any
 
 from primus.core.patches import PatchContext, register_patch
-from primus.core.utils.distributed_logging import warning_rank_0
+from primus.core.utils.distributed_logging import log_rank_0, warning_rank_0
 
 
 @register_patch(
@@ -45,7 +45,7 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
         return
 
     try:
-        warning_rank_0("MegatronPatches: monkey patch TransformerConfig post_init...")
+        log_rank_0("MegatronPatches: monkey patch TransformerConfig post_init...")
 
         import megatron.core.transformer.transformer_config as config_mod
 
@@ -64,7 +64,7 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
         config_mod.TransformerConfig.__post_init__ = new_post_init
 
         # 3) Replace TransformerBlock in various Megatron models
-        warning_rank_0("MegatronPatches: monkey patch TransformerBlock checkpoint_forward...")
+        log_rank_0("MegatronPatches: monkey patch TransformerBlock checkpoint_forward...")
 
         import megatron.core.models.bert.bert_model as orig_bert_model
         import megatron.core.models.gpt.gpt_model as orig_gpt_model
@@ -74,7 +74,7 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
         import megatron.core.models.vision.radio as orig_radio
         import megatron.core.transformer.transformer_block as orig_transformer_block
 
-        from primus.backends.megatron.core.transformer.transformer_block import (
+        from primus.backends.megatron.patches.core.transformer.transformer_block import (
             PrimusTransformerBlock,
         )
 
