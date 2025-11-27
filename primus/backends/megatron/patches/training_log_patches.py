@@ -5,15 +5,33 @@
 ###############################################################################
 
 """
-Megatron Training Log Patches
+Megatron Training Log Patches (with stacking)
 
-This module provides an extensible patching mechanism for Megatron's training_log function.
-It allows multiple extensions (ROCm monitoring, MLflow, etc.) to hook into the
-training_log execution flow without coupling logic.
+This module provides an extensible AND stackable patching mechanism for
+Megatron's training_log function.
 
-Architecture:
-    - Extensions are implemented as Context Managers.
-    - A unified wrapper uses contextlib.ExitStack to manage multiple extensions dynamically.
+Features
+--------
+- Extensions are implemented as Context Managers (e.g., ROCm monitoring, MLflow).
+- A unified wrapper uses contextlib.ExitStack to manage multiple extensions.
+- Multiple patches on training_log will be *stacked* instead of overwriting
+  each other. Each new patch can append its own extensions to the wrapper.
+
+Design
+------
+We attach metadata to the patched function:
+
+    training_log._primus_training_log_wrapper = True
+    training_log._primus_original_training_log = <original_fn>
+    training_log._primus_extensions = [ext1, ext2, ...]
+
+When a new patch runs:
+    - If training_log is already wrapped, we re-use the original_fn and
+      existing extensions, then append new ones.
+    - If not, we wrap the current training_log and register our extensions.
+
+This avoids the "last patch wins" problem and allows multiple modules to
+contribute logging features safely.
 """
 
 import contextlib
@@ -65,6 +83,9 @@ class RocmMonitorExtension:
         self.original_print = None
         self._megatron_training_module = None
         self.call_count = 0
+        # Cache Primus-specific ROCm config to avoid repeated dict lookups
+        self.use_rocm_mem: bool = bool(config.get("use_rocm_mem_info", False))
+        self.rocm_iters = config.get("use_rocm_mem_info_iters", [])
 
     def update_context(self, func_args: tuple, func_kwargs: dict) -> None:
         """
@@ -85,12 +106,17 @@ class RocmMonitorExtension:
             # Inject the hooked function
             megatron_training.print_rank_last = self._hooked_print_rank_last
         except (ImportError, AttributeError):
-            pass  # Fail safe if module structure changes
+            # Fail safe if module structure changes or in CPU-only UTs.
+            self._megatron_training_module = None
+            self.original_print = None
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Restore original print_rank_last."""
         if self._megatron_training_module and self.original_print:
             self._megatron_training_module.print_rank_last = self.original_print
+        # Do not suppress exceptions from training_log.
+        return False
 
     def _hooked_print_rank_last(self, log_string: str):
         """
@@ -100,7 +126,7 @@ class RocmMonitorExtension:
             mem_stats = self._get_memory_stats()
             if mem_stats:
                 # Append memory stats to the log string
-                log_string += mem_stats
+                log_string = f"{log_string} {mem_stats}"
         except Exception:
             pass  # Do not crash training for logging issues
 
@@ -116,21 +142,24 @@ class RocmMonitorExtension:
         # 1. HIP Stats (Always available on ROCm)
         # We assume that if this extension is active, we want to see memory stats.
         # HIP stats are cheap and always available via PyTorch.
-        hip_free, hip_total = torch.cuda.mem_get_info()
-        hip_used = hip_total - hip_free
-        hip_ratio = hip_used / hip_total
-        hip_mem_str = (
-            f" hip mem usage/free/total/usage_ratio: "
-            f"{hip_used / 1024 ** 3:.2f}GB/{hip_free / 1024 ** 3:.2f}GB/"
-            f"{hip_total / 1024 ** 3:.2f}GB/{hip_ratio * 100:.2f}% |"
-        )
+        try:
+            hip_free, hip_total = torch.cuda.mem_get_info()
+            hip_used = hip_total - hip_free
+            hip_ratio = hip_used / hip_total
+            hip_mem_str = (
+                f" hip mem usage/free/total/usage_ratio: "
+                f"{hip_used / 1024 ** 3:.2f}GB/"
+                f"{hip_free / 1024 ** 3:.2f}GB/"
+                f"{hip_total / 1024 ** 3:.2f}GB/"
+                f"{hip_ratio * 100:.2f}%"
+            )
+        except Exception:
+            # CUDA/ROCm may not be initialized (e.g., CPU-only UT).
+            hip_mem_str = ""
 
         # 2. ROCm SMI Stats (Only if configured and iteration matches)
-        use_rocm_mem = self.config.get("use_rocm_mem_info", False)
-        rocm_iters = self.config.get("use_rocm_mem_info_iters", [])
-
         # Only call expensive SMI if globally enabled OR current iteration is in list
-        should_collect_smi = use_rocm_mem or (self.call_count in rocm_iters)
+        should_collect_smi = self.use_rocm_mem or (self.call_count in self.rocm_iters)
 
         if should_collect_smi:
             local_rank = torch.cuda.current_device()
@@ -138,11 +167,14 @@ class RocmMonitorExtension:
             r_ratio = r_used / r_total
             rocm_mem_str = (
                 f" rocm mem usage/free/total/usage_ratio: "
-                f"{r_used / 1024 ** 3:.2f}GB/{r_free / 1024 ** 3:.2f}GB/"
-                f"{r_total / 1024 ** 3:.2f}GB/{r_ratio * 100:.2f}% |"
+                f"{r_used / 1024 ** 3:.2f}GB/"
+                f"{r_free / 1024 ** 3:.2f}GB/"
+                f"{r_total / 1024 ** 3:.2f}GB/"
+                f"{r_ratio * 100:.2f}%"
             )
 
-        return f"{hip_mem_str}{rocm_mem_str}"
+        combined = " ".join(s for s in [hip_mem_str, rocm_mem_str] if s)
+        return combined.strip()
 
 
 # =============================================================================
