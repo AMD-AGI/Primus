@@ -23,6 +23,7 @@ All patches are automatically registered on import via the @register_patch decor
 # Patches are registered via @register_patch decorator in each module
 from primus.backends.megatron.patches import (  # noqa: F401
     args_patches,
+    checkpoint_patches,
     env_patches,
     flops_patches,
     fsdp_patches,

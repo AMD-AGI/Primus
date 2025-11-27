@@ -166,7 +166,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # monkey patch modules
         self.patch_moe_layer()
         self.patch_get_extra_te_kwargs()
-        self.patch_file_system_writer()
         self.patch_te_tp_overlap()
         self.patch_fp8_context()
         self.patch_zbpp()
@@ -494,21 +493,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             ori_moe_utils.fused_sort_chunks_by_index_with_probs = moe_sort_chunks_by_index_with_probs
             ori_moe_utils.fused_unpermute = moe_unpermute
             ori_moe_utils.HAVE_TE = True
-
-    def patch_file_system_writer(self):
-        warning_rank_0("MegatronTrainer: Patching FileSystemWriterAsync...")
-        try:
-            import megatron.core.dist_checkpointing.strategies.filesystem_async as filesystem_async_module
-
-            from primus.backends.megatron.core.dist_checkpointing.strategies.filesystem_async import (
-                PrimusFileSystemWriterAsync,
-            )
-
-            filesystem_async_module.FileSystemWriterAsync = PrimusFileSystemWriterAsync
-        except Exception:
-            warning_rank_0("MegatronTrainer: Patch FileSystemWriterAsync failed.")
-        else:
-            warning_rank_0("MegatronTrainer: Patch FileSystemWriterAsync successfully.")
 
     def patch_zbpp(self):
         # patch optimizer
