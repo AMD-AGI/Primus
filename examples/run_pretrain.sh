@@ -166,10 +166,18 @@ if [ "$USING_AINIC" == "1" ]; then
     export NCCL_DMABUF_ENABLE=0
     export NCCL_IGNORE_CPU_AFFINITY=1
     export NCCL_IB_QPS_PER_CONNECTION=1
+    export LD_LIBRARY_PATH=${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${ANP_HOME_DIR}/build/lib:$LD_LIBRARY_PATH
     # export LD_LIBRARY_PATH=${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${ANP_HOME_DIR}/build/lib:$LD_LIBRARY_PATH
     # export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
 else
     export NCCL_IB_GID_INDEX=3
+fi
+
+if [[ "$REBUILD_TURBO" == "1" ]]; then
+    cd "${PRIMUS_PATH}/third_party/Primus-Turbo" || exit 1 && pip3 install -r requirements.txt && \
+    pip3 install --extra-index-url https://test.pypi.org/simple ./dist/primus_turbo-0.1.1+1fc5b81-cp310-cp310-linux_x86_64.whl && \
+    cd "${PRIMUS_PATH}" || exit 1
+    # GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
 fi
 
 # Disable cross NIC communication for NCCL

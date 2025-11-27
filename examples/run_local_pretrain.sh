@@ -106,11 +106,13 @@ if [ "$USING_AINIC" == "1" ]; then
     ENV_ARGS+=("--env" "RCCL_HOME_DIR")
     ENV_ARGS+=("--env" "ANP_HOME_DIR")
 
-    VOLUME_ARGS+=(
-        -v "$RCCL_HOME_DIR":"$RCCL_HOME_DIR"
-        -v "$ANP_HOME_DIR":"$ANP_HOME_DIR"
-        -v /etc/libibverbs.d/:/etc/libibverbs.d
-    )
+    # VOLUME_ARGS+=(
+    #     -v "$RCCL_HOME_DIR":"$RCCL_HOME_DIR"
+    #     -v "$ANP_HOME_DIR":"$ANP_HOME_DIR"
+    #     -v /etc/libibverbs.d/:/etc/libibverbs.d
+    #     -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/
+    # )
+        # -v /etc/libibverbs.d/:/etc/libibverbs.d
         # -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/
 fi
 
@@ -127,6 +129,7 @@ docker_podman_proxy() {
         return 1
     fi
 }
+
 
 if [[ "${CLEAN_DOCKER_CONTAINER:-0}" == "1" ]]; then
     echo "Node-${NODE_RANK}: Cleaning up existing containers..."
@@ -162,6 +165,7 @@ docker_podman_proxy run --rm \
     --env GPU_MAX_HW_QUEUES \
     --env GLOO_SOCKET_IFNAME \
     --env REBUILD_BNXT \
+    --env REBUILD_TURBO \
     --env PATH_TO_BNXT_TAR_PACKAGE \
     --env MEGATRON_PATH \
     --env TORCHTITAN_PATH \
