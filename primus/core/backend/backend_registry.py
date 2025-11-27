@@ -127,7 +127,10 @@ class BackendRegistry:
             cls.setup_backend_path(backend, backend_path=backend_path, verbose=True)
         except KeyError:
             # Backend path name not registered yet, will try to load backend first
-            pass
+            log_rank_0(
+                f"[Primus] Backend path name for '{backend}' is not registered yet; "
+                "will attempt lazy backend loading before resolving path."
+            )
         except FileNotFoundError as e:
             # Path not found - provide helpful error
             raise FileNotFoundError(
