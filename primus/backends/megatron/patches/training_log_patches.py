@@ -64,16 +64,15 @@ class RocmMonitorExtension:
         self.config = config
         self.original_print = None
         self._megatron_training_module = None
-        self.current_iteration = 0
+        self.call_count = 0
 
     def update_context(self, func_args: tuple, func_kwargs: dict) -> None:
-        """Update current iteration from training_log arguments."""
-        # training_log signature:
-        # def training_log(loss_dict, total_loss_dict, learning_rate,
-        #                  decoupled_learning_rate, iteration, ...)
-        # iteration is the 5th argument (index 4)
-        if len(func_args) > 4:
-            self.current_iteration = func_args[4]
+        """
+        Update the context before entering.
+        We maintain a simple internal counter for logging steps to avoid
+        fragile dependency on 'training_log' argument positions.
+        """
+        self.call_count += 1
 
     def __enter__(self):
         """Swap print_rank_last with our enhanced version."""
@@ -131,7 +130,7 @@ class RocmMonitorExtension:
         rocm_iters = self.config.get("use_rocm_mem_info_iters", [])
 
         # Only call expensive SMI if globally enabled OR current iteration is in list
-        should_collect_smi = use_rocm_mem or (self.current_iteration in rocm_iters)
+        should_collect_smi = use_rocm_mem or (self.call_count in rocm_iters)
 
         if should_collect_smi:
             local_rank = torch.cuda.current_device()
