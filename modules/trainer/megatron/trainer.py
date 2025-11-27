@@ -169,7 +169,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_get_extra_te_kwargs()
         self.patch_file_system_writer()
         self.patch_te_tp_overlap()
-        self.patch_mla_attention()
         self.patch_fp8_context()
         self.patch_zbpp()
 
@@ -496,24 +495,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             ori_moe_utils.fused_sort_chunks_by_index_with_probs = moe_sort_chunks_by_index_with_probs
             ori_moe_utils.fused_unpermute = moe_unpermute
             ori_moe_utils.HAVE_TE = True
-
-    def patch_mla_attention(self):
-        if not self.module_config.fused_padded_mla_attention:
-            return
-
-        warning_rank_0(f"MegatronTrainer: monkey patch MLA attention to support padded fusion...")
-        # pad module definition
-        from megatron.core.transformer import multi_latent_attention
-
-        from primus.backends.megatron.core.transformer.multi_latent_attention import (
-            PaddedMLASelfAttention,
-        )
-
-        multi_latent_attention.MLASelfAttention = PaddedMLASelfAttention
-        # pad imported module
-        from megatron.core.models.gpt import gpt_layer_specs
-
-        gpt_layer_specs.MLASelfAttention = PaddedMLASelfAttention
 
     def patch_torch_fsdp(self):
         if not self.module_config.use_torch_fsdp2:

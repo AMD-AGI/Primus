@@ -92,3 +92,48 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
         warning_rank_0(
             "MegatronPatches: failed to apply custom_recompute_layer_ids patch: " f"{type(e).__name__}: {e}"
         )
+
+
+@register_patch(
+    "megatron.transformer.fused_padded_mla_attention",
+    backend="megatron",
+    phase="before_train",
+    description=(
+        "Monkey patch MLA attention to use Primus PaddedMLASelfAttention "
+        "when fused_padded_mla_attention is enabled."
+    ),
+)
+def patch_mla_attention(ctx: PatchContext):
+    """
+    Patch Megatron MLA attention to support padded fusion.
+
+    Behavior (moved from MegatronTrainer.patch_mla_attention):
+        - If module_config.fused_padded_mla_attention is True, replace
+          multi_latent_attention.MLASelfAttention and
+          gpt_layer_specs.MLASelfAttention with PaddedMLASelfAttention.
+    """
+    module_config: Any = ctx.extra.get("module_config")
+    if module_config is None or not getattr(module_config, "fused_padded_mla_attention", False):
+        return
+
+    try:
+        log_rank_0("MegatronPatches: monkey patch MLA attention to support padded fusion...")
+
+        # pad module definition
+        from megatron.core.transformer import multi_latent_attention
+
+        from primus.backends.megatron.patches.core.transformer.multi_latent_attention import (
+            PaddedMLASelfAttention,
+        )
+
+        multi_latent_attention.MLASelfAttention = PaddedMLASelfAttention
+
+        # pad imported module
+        from megatron.core.models.gpt import gpt_layer_specs
+
+        gpt_layer_specs.MLASelfAttention = PaddedMLASelfAttention
+
+    except (ImportError, AttributeError) as e:
+        warning_rank_0(
+            "MegatronPatches: failed to apply fused_padded_mla_attention patch: " f"{type(e).__name__}: {e}"
+        )
