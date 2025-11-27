@@ -164,7 +164,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         super().__init__(*args, **kwargs)
 
         # monkey patch modules
-        self.patch_moe_layer()
         self.patch_te_tp_overlap()
         self.patch_zbpp()
 
@@ -291,91 +290,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         te.pytorch.module.base.initialize_ub = initialize_ub
         te.pytorch.module.base.get_workspace = get_workspace
         te.pytorch.cpp_extensions.CommOverlapType = ptex.CommOverlapType
-
-    def patch_moe_layer(self):
-        if self.module_config.use_deprecated_20241209_moe_layer:
-            warning_rank_0(f"MegatronTrainer: monkey patch MoELayer with DeprecatedMoELayer...")
-            # patch module class
-            from primus.backends.megatron.core.transformer.moe.deprecated_20251209.experts import (
-                DeprecatedGroupedMLP,
-                DeprecatedSequentialMLP,
-                DeprecatedTEGroupedMLP,
-            )
-            from primus.backends.megatron.core.transformer.moe.deprecated_20251209.moe_layer import (
-                DeprecatedMoELayer,
-                DeprecatedMoESubmodules,
-            )
-
-            sys.modules["megatron.core.transformer.moe.moe_layer"].MoELayer = DeprecatedMoELayer
-            sys.modules["megatron.core.transformer.moe.moe_layer"].MoESubmodules = DeprecatedMoESubmodules
-            sys.modules["megatron.core.transformer.moe.experts"].GroupedMLP = DeprecatedGroupedMLP
-            sys.modules["megatron.core.transformer.moe.experts"].SequentialMLP = DeprecatedSequentialMLP
-            sys.modules["megatron.core.transformer.moe.experts"].TEGroupedMLP = DeprecatedTEGroupedMLP
-
-            # patch imported module
-            from megatron.core.models.gpt import moe_module_specs
-
-            moe_module_specs.MoELayer = DeprecatedMoELayer
-            moe_module_specs.MoESubmodules = DeprecatedMoESubmodules
-            moe_module_specs.GroupedMLP = DeprecatedGroupedMLP
-            moe_module_specs.SequentialMLP = DeprecatedSequentialMLP
-            moe_module_specs.TEGroupedMLP = DeprecatedTEGroupedMLP
-
-        if not self.module_config.disable_primus_topk_router:
-            warning_rank_0(f"MegatronTrainer: monkey patch TopKRouter...")
-            if self.module_config.use_deprecated_20241209_moe_layer:
-                from primus.backends.megatron.core.transformer.moe.deprecated_20251209.router import (
-                    DeprecatedTopKRouter,
-                )
-
-                sys.modules["megatron.core.transformer.moe.router"].TopKRouter = DeprecatedTopKRouter
-
-            # patch module class
-            from primus.backends.megatron.core.transformer.moe.router import (
-                PrimusTopKRouter,
-            )
-
-            sys.modules["megatron.core.transformer.moe.router"].TopKRouter = PrimusTopKRouter
-
-            # patch imported module
-            from megatron.core.transformer.moe import moe_layer
-
-            moe_layer.TopKRouter = PrimusTopKRouter
-
-            if self.module_config.use_deprecated_20241209_moe_layer:
-                from primus.backends.megatron.core.transformer.moe import (
-                    deprecated_20251209,
-                )
-
-                deprecated_20251209.moe_layer.TopKRouter = PrimusTopKRouter
-
-        if self.module_config.moe_permute_fusion:
-            warning_rank_0(f"MegatronTrainer: monkey patch permutation with latest fusion version...")
-            from megatron.core.extensions import (
-                transformer_engine as ori_transformer_engine,
-            )
-            from megatron.core.transformer.moe import moe_utils as ori_moe_utils
-
-            from primus.backends.transformer_engine.pytorch.permutation import (
-                moe_permute,
-                moe_permute_with_probs,
-                moe_sort_chunks_by_index,
-                moe_sort_chunks_by_index_with_probs,
-                moe_unpermute,
-            )
-
-            ori_transformer_engine.fused_permute = moe_permute
-            ori_transformer_engine.fused_permute_with_probs = moe_permute_with_probs
-            ori_transformer_engine.fused_sort_chunks_by_index = moe_sort_chunks_by_index
-            ori_transformer_engine.fused_sort_chunks_by_index_with_probs = moe_sort_chunks_by_index_with_probs
-            ori_transformer_engine.fused_unpermute = moe_unpermute
-
-            ori_moe_utils.fused_permute = moe_permute
-            ori_moe_utils.fused_permute_with_probs = moe_permute_with_probs
-            ori_moe_utils.fused_sort_chunks_by_index = moe_sort_chunks_by_index
-            ori_moe_utils.fused_sort_chunks_by_index_with_probs = moe_sort_chunks_by_index_with_probs
-            ori_moe_utils.fused_unpermute = moe_unpermute
-            ori_moe_utils.HAVE_TE = True
 
     def patch_zbpp(self):
         # patch optimizer
