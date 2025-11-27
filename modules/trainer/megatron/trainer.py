@@ -165,7 +165,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         # monkey patch modules
         self.patch_moe_layer()
-        self.patch_get_extra_te_kwargs()
         self.patch_te_tp_overlap()
         self.patch_fp8_context()
         self.patch_zbpp()
@@ -308,106 +307,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         te.pytorch.module.base.initialize_ub = initialize_ub
         te.pytorch.module.base.get_workspace = get_workspace
         te.pytorch.cpp_extensions.CommOverlapType = ptex.CommOverlapType
-
-    def patch_get_extra_te_kwargs(self):
-        warning_rank_0(f"MegatronTrainer: monkey patch get_extra_te_kwargs...")
-
-        import transformer_engine as te
-        from megatron.core.extensions import transformer_engine as te_ext
-
-        # Save the original _get_extra_te_kwargs function
-        original_get_extra_te_kwargs = te_ext._get_extra_te_kwargs
-
-        # Create a wrapped version of _get_extra_te_kwargs with custom overrides
-        def make_get_extra_te_kwargs_with_override(**overrides):
-            def _wrapped(config):
-                kwargs = original_get_extra_te_kwargs(config)
-                kwargs.update(overrides)
-                return kwargs
-
-            return _wrapped
-
-        def has_parameter(cls, param):
-            try:
-                return param in inspect.signature(cls.__init__).parameters
-            except Exception:
-                return False
-
-        # Patch TELinear
-        def patch_TELinear():
-            from megatron.core.extensions.transformer_engine import TELinear
-
-            if not self.module_config.no_fp8_weight_transpose_cache:
-                return
-            assert has_parameter(
-                te.pytorch.Linear, "keep_fp8_weight_transpose_cache"
-            ), "Current Transformer-Engine not support this feature"
-
-            orig_init = TELinear.__init__
-
-            def new_init(self, *args, **kwargs):
-                # Temporarily override the TE kwargs with our custom flag
-                te_ext._get_extra_te_kwargs = make_get_extra_te_kwargs_with_override(
-                    keep_fp8_weight_transpose_cache=False
-                )
-                try:
-                    orig_init(self, *args, **kwargs)
-                finally:
-                    # Always restore the original function after init
-                    te_ext._get_extra_te_kwargs = original_get_extra_te_kwargs
-
-            TELinear.__init__ = new_init
-
-        # Patch TELayerNormColumnParallelLinear
-        def patch_TELayerNormColumnParallelLinear():
-            from megatron.core.extensions.transformer_engine import (
-                TELayerNormColumnParallelLinear,
-            )
-
-            if not self.module_config.no_fp8_weight_transpose_cache:
-                return
-            assert has_parameter(
-                te.pytorch.LayerNormLinear, "keep_fp8_weight_transpose_cache"
-            ), "Current Transformer-Engine not support this feature"
-
-            orig_init = TELayerNormColumnParallelLinear.__init__
-
-            def new_init(self, *args, **kwargs):
-                # Temporarily override the TE kwargs with our custom flag
-                te_ext._get_extra_te_kwargs = make_get_extra_te_kwargs_with_override(
-                    keep_fp8_weight_transpose_cache=False
-                )
-                try:
-                    orig_init(self, *args, **kwargs)
-                finally:
-                    # Always restore the original function after init
-                    te_ext._get_extra_te_kwargs = original_get_extra_te_kwargs
-
-            TELayerNormColumnParallelLinear.__init__ = new_init
-
-        # Patch TEDelayedScaling
-        def patch_TEDelayedScaling():
-            from megatron.core.extensions.transformer_engine import TEDelayedScaling
-
-            if not has_parameter(te.common.recipe.DelayedScaling, "reduce_amax"):
-                return
-
-            orig_init = TEDelayedScaling.__init__
-
-            def new_init(self, *args, **kwargs):
-                # Temporarily override the TE kwargs with our custom flag
-                te_ext._get_extra_te_kwargs = make_get_extra_te_kwargs_with_override(reduce_amax=False)
-                try:
-                    orig_init(self, *args, **kwargs)
-                finally:
-                    # Always restore the original function after init
-                    te_ext._get_extra_te_kwargs = original_get_extra_te_kwargs
-
-            TEDelayedScaling.__init__ = new_init
-
-        patch_TELinear()
-        patch_TELayerNormColumnParallelLinear()
-        patch_TEDelayedScaling()
 
     def patch_moe_layer(self):
         if self.module_config.use_deprecated_20241209_moe_layer:
