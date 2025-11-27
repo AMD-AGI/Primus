@@ -86,6 +86,9 @@ while IFS='=' read -r name _; do
 done < <(env | grep "^PRIMUS_TURBO_")
 ENV_ARGS+=("--env" "EXP")
 ENV_ARGS+=("--env" "BACKEND")
+if [ "${BACKEND:-}" = "MaxText" ]; then
+    ENV_ARGS+=("--env" "DUMP_HLO")
+fi
 ENV_ARGS+=("--env" "HF_TOKEN")
 ENV_ARGS+=("--env" "ENABLE_NUMA_BINDING")
 ENV_ARGS+=("--env" "HSA_KERNARG_POOL_SIZE")
