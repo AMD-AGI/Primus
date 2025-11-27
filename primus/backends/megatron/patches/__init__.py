@@ -31,6 +31,7 @@ from primus.backends.megatron.patches import (  # noqa: F401
     te_patches,
     training_log_patches,
     transformer_patches,
+    zbpp_patches,
 )
 from primus.core.patches import run_patches
 
