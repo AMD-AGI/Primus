@@ -245,7 +245,7 @@ if [ "${BACKEND:-}" == "MaxText" ]; then
     if [ "${DUMP_HLO}" = "1" ]; then
         mkdir -p ${DUMP_HLO_DIR}
         export XLA_FLAGS="$XLA_FLAGS --xla_dump_to=$DUMP_HLO_DIR"
-        echo "XLA DUMP HLO enabled, dump to ${DUMP_HLO_DIR}"
+        echo "XLA HLO dumping enabled, output directory: ${DUMP_HLO_DIR}"
     fi
 
     export HIP_FORCE_DEV_KERNARG=1
