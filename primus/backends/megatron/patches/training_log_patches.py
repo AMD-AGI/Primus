@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Protocol
 import torch
 
 from primus.core.patches import PatchContext, register_patch
-from primus.core.utils.distributed_logging import log_rank_0
+from primus.core.utils.distributed_logging import log_rank_0, log_rank_all
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
 
 # =============================================================================
@@ -86,6 +86,9 @@ class RocmMonitorExtension:
         # Cache Primus-specific ROCm config to avoid repeated dict lookups
         self.use_rocm_mem: bool = bool(config.get("use_rocm_mem_info", False))
         self.rocm_iters = config.get("use_rocm_mem_info_iters", [])
+        # Cache last successful ROCm SMI stats string so we can reuse it on
+        # iterations where we intentionally skip expensive SMI queries.
+        self._last_rocm_mem_str: str = ""
 
     def update_context(self, func_args: tuple, func_kwargs: dict) -> None:
         """
@@ -131,8 +134,9 @@ class RocmMonitorExtension:
             pass  # Do not crash training for logging issues
 
         # Delegate to the original print function
-        if self.original_print:
-            self.original_print(log_string)
+        # if self.original_print:
+        #     self.original_print(log_string)
+        log_rank_all(f"{log_string}")
 
     def _get_memory_stats(self) -> str:
         """Collect HIP and ROCm-SMI memory stats."""
@@ -158,20 +162,32 @@ class RocmMonitorExtension:
             hip_mem_str = ""
 
         # 2. ROCm SMI Stats (Only if configured and iteration matches)
-        # Only call expensive SMI if globally enabled OR current iteration is in list
+        # Only call expensive SMI if globally enabled OR current iteration is in list.
+        # If we decide not to collect on this iteration but have a previously
+        # collected value, reuse the last known ROCm SMI stats to keep the log
+        # informative without incurring per-step overhead.
         should_collect_smi = self.use_rocm_mem or (self.call_count in self.rocm_iters)
 
         if should_collect_smi:
-            local_rank = torch.cuda.current_device()
-            r_total, r_used, r_free = get_rocm_smi_mem_info(local_rank)
-            r_ratio = r_used / r_total
-            rocm_mem_str = (
-                f" rocm mem usage/free/total/usage_ratio: "
-                f"{r_used / 1024 ** 3:.2f}GB/"
-                f"{r_free / 1024 ** 3:.2f}GB/"
-                f"{r_total / 1024 ** 3:.2f}GB/"
-                f"{r_ratio * 100:.2f}%"
-            )
+            try:
+                local_rank = torch.cuda.current_device()
+                r_total, r_used, r_free = get_rocm_smi_mem_info(local_rank)
+                r_ratio = r_used / r_total
+                rocm_mem_str = (
+                    f" rocm mem usage/free/total/usage_ratio: "
+                    f"{r_used / 1024 ** 3:.2f}GB/"
+                    f"{r_free / 1024 ** 3:.2f}GB/"
+                    f"{r_total / 1024 ** 3:.2f}GB/"
+                    f"{r_ratio * 100:.2f}%"
+                )
+                # Cache for reuse on non-sampled iterations
+                self._last_rocm_mem_str = rocm_mem_str
+            except Exception:
+                # If SMI fails, fall back to last known value (if any)
+                rocm_mem_str = self._last_rocm_mem_str
+        else:
+            # Not a sampling iteration; reuse last successful SMI stats if available.
+            rocm_mem_str = self._last_rocm_mem_str
 
         combined = " ".join(s for s in [hip_mem_str, rocm_mem_str] if s)
         return combined.strip()
@@ -351,5 +367,5 @@ def patch_training_log_unified(ctx: PatchContext):
     except AttributeError as e:
         log_rank_0(f"[Patch:megatron.training_log][WARN] Attribute error: {e}")
     except Exception as e:
-        # Catch-all to make sure patch系统本身不会炸掉训练。
+        # Catch-all to make sure patch does not crash training.
         log_rank_0(f"[Patch:megatron.training_log][ERROR] Unexpected error: {e}")
