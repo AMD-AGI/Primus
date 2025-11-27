@@ -16,7 +16,6 @@ import inspect
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.distributed_logging import log_rank_0
 
-
 # ============================================================================
 # FP8 Weight Transpose Cache Patches
 # ============================================================================
@@ -27,9 +26,11 @@ from primus.core.utils.distributed_logging import log_rank_0
     backend="megatron",
     phase="before_train",
     description="Disable FP8 weight transpose cache to reduce memory usage",
-    condition=lambda ctx: ctx.extra.get("module_config", {}).params.get("no_fp8_weight_transpose_cache", False)
-    if hasattr(ctx.extra.get("module_config", {}), "params")
-    else False,
+    condition=lambda ctx: (
+        ctx.extra.get("module_config", {}).params.get("no_fp8_weight_transpose_cache", False)
+        if hasattr(ctx.extra.get("module_config", {}), "params")
+        else False
+    ),
 )
 def disable_fp8_weight_transpose_cache(ctx: PatchContext):
     """
@@ -51,7 +52,9 @@ def disable_fp8_weight_transpose_cache(ctx: PatchContext):
         import transformer_engine as te
         from megatron.core.extensions import transformer_engine as te_ext
     except ImportError:
-        log_rank_0("[Patch:megatron.te.disable_fp8_weight_transpose_cache][SKIP] Transformer Engine not available")
+        log_rank_0(
+            "[Patch:megatron.te.disable_fp8_weight_transpose_cache][SKIP] Transformer Engine not available"
+        )
         return
 
     # Save the original _get_extra_te_kwargs function
@@ -173,3 +176,49 @@ def disable_fp8_weight_transpose_cache(ctx: PatchContext):
     else:
         log_rank_0("[Patch:megatron.te.disable_fp8_weight_transpose_cache][WARN] No TE classes patched")
 
+
+# ============================================================================
+# FP8 Context Patches
+# ============================================================================
+
+
+@register_patch(
+    "megatron.fp8.get_fp8_context",
+    backend="megatron",
+    phase="before_train",
+    description="Override Megatron get_fp8_context to use Primus implementation when fp8 is enabled",
+)
+def patch_fp8_context(ctx: PatchContext):
+    """
+    Patch Megatron's get_fp8_context functions to use Primus implementation.
+
+    Behavior (moved from MegatronTrainer.patch_fp8_context):
+        - When module_config.fp8 is True, replace:
+            * megatron.core.transformer.transformer_block.get_fp8_context
+            * megatron.core.ssm.mamba_block.get_fp8_context
+            * megatron.core.transformer.multi_token_prediction.get_fp8_context
+            * megatron.core.fp8_utils.get_fp8_context
+          with Primus's ROCm-friendly get_fp8_context.
+    """
+    module_config = ctx.extra.get("module_config")
+    if module_config is None or not getattr(module_config, "fp8", False):
+        return
+
+    try:
+        from megatron.core import fp8_utils
+        from megatron.core.ssm import mamba_block
+        from megatron.core.transformer import multi_token_prediction, transformer_block
+
+        from primus.backends.megatron.core.fp8_utils import get_fp8_context
+
+        log_rank_0("[Patch:megatron.fp8.get_fp8_context] Overriding get_fp8_context for fp8=True")
+
+        transformer_block.get_fp8_context = get_fp8_context
+        mamba_block.get_fp8_context = get_fp8_context
+        multi_token_prediction.get_fp8_context = get_fp8_context
+        fp8_utils.get_fp8_context = get_fp8_context
+
+    except ImportError as e:
+        log_rank_0(f"[Patch:megatron.fp8.get_fp8_context][SKIP] Import failed: {e}")
+    except AttributeError as e:
+        log_rank_0(f"[Patch:megatron.fp8.get_fp8_context][WARN] Attribute error: {e}")

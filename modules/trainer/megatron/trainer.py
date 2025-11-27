@@ -166,7 +166,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # monkey patch modules
         self.patch_moe_layer()
         self.patch_te_tp_overlap()
-        self.patch_fp8_context()
         self.patch_zbpp()
 
         self.app_metrics = {}
@@ -226,21 +225,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             import transformer_engine as te
 
             te.pytorch.RMSNorm = PrimusTurboRMSNorm
-
-    def patch_fp8_context(self):
-        from megatron.core import fp8_utils
-        from megatron.core.ssm import mamba_block
-        from megatron.core.transformer import multi_token_prediction, transformer_block
-
-        from primus.backends.megatron.core.fp8_utils import get_fp8_context
-
-        if self.module_config.fp8:
-            warning_rank_0(f"MegatronTrainer: Patch get_fp8_context...")
-            transformer_block.get_fp8_context = get_fp8_context
-            mamba_block.get_fp8_context = get_fp8_context
-            multi_token_prediction.get_fp8_context = get_fp8_context
-
-            fp8_utils.get_fp8_context = get_fp8_context
 
     def patch_te_tp_overlap(self):
         if not self.module_config.tp_comm_overlap:
