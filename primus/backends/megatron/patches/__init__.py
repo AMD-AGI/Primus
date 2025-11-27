@@ -25,6 +25,7 @@ from primus.backends.megatron.patches import (  # noqa: F401
     args_patches,
     env_patches,
     flops_patches,
+    fsdp_patches,
     te_patches,
     training_log_patches,
     transformer_patches,

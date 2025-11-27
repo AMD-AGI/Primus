@@ -165,7 +165,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         # monkey patch modules
         self.patch_moe_layer()
-        self.patch_torch_fsdp()
         self.patch_get_extra_te_kwargs()
         self.patch_file_system_writer()
         self.patch_te_tp_overlap()
@@ -495,35 +494,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             ori_moe_utils.fused_sort_chunks_by_index_with_probs = moe_sort_chunks_by_index_with_probs
             ori_moe_utils.fused_unpermute = moe_unpermute
             ori_moe_utils.HAVE_TE = True
-
-    def patch_torch_fsdp(self):
-        if not self.module_config.use_torch_fsdp2:
-            return
-
-        warning_rank_0("MegatronTrainer: Patching torch_FSDP2 with Primus implementation...")
-
-        try:
-            # Import custom FSDP wrapper
-            # Patch Megatron's internal reference to FSDP2 class
-            import megatron.core.distributed.torch_fully_sharded_data_parallel as torch_fsdp_module
-
-            from primus.backends.megatron.core.distributed.torch_fully_sharded_data_parallel import (
-                PrimusTorchFullyShardedDataParallel,
-            )
-
-            torch_fsdp_module.TorchTorchFullyShardedDataParallel = PrimusTorchFullyShardedDataParallel
-
-            # Patch training code reference
-            from megatron.training import training
-
-            training.torch_FSDP = PrimusTorchFullyShardedDataParallel
-
-            warning_rank_0("MegatronTrainer: torch_FSDP2 patch applied successfully.")
-
-        except ImportError as e:
-            raise RuntimeError("Failed to patch torch_FSDP2: missing dependencies") from e
-        except Exception as e:
-            raise RuntimeError("Unexpected error occurred during FSDP patching") from e
 
     def patch_file_system_writer(self):
         warning_rank_0("MegatronTrainer: Patching FileSystemWriterAsync...")
