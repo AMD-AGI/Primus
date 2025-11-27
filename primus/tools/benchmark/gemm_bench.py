@@ -50,25 +50,24 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
         elapsed / total_calls
         break
 
+    tflop = 2.0 * m * n * k / 1e12
+    tflops = tflop / (avg_time_ms / 1000.0)
+    bandwidth = mem_size_bytes / 1e9 / (avg_time_ms / 1000.0)
+    arith_intensity = (2.0 * m * n * k) / mem_size_bytes
 
-tflop = 2.0 * m * n * k / 1e12
-tflops = tflop / (avg_time_ms / 1000.0)
-bandwidth = mem_size_bytes / 1e9 / (avg_time_ms / 1000.0)
-arith_intensity = (2.0 * m * n * k) / mem_size_bytes
-
-return {
-    "m": m,
-    "n": n,
-    "k": k,
-    "trans_a": trans_a,
-    "trans_b": trans_b,
-    "dtype": str(dtype),
-    "avg_time_ms": avg_time_ms,
-    "tflop": tflop,
-    "tflops": tflops,
-    "bandwidth_gbps": bandwidth,
-    "arith_intensity": arith_intensity,
-}
+    return {
+        "m": m,
+        "n": n,
+        "k": k,
+        "trans_a": trans_a,
+        "trans_b": trans_b,
+        "dtype": str(dtype),
+        "avg_time_ms": avg_time_ms,
+        "tflop": tflop,
+        "tflops": tflops,
+        "bandwidth_gbps": bandwidth,
+        "arith_intensity": arith_intensity,
+    }
 
 
 def build_gemm_base_preamble(args) -> str:
