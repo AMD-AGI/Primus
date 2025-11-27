@@ -33,6 +33,7 @@ from megatron.training.checkpointing import (
     load_checkpoint,
     save_checkpoint,
 )
+from megatron.training.training import save_checkpoint_and_time
 
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
 from primus.core.utils.import_utils import get_custom_fsdp, get_model_provider
