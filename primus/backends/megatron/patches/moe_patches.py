@@ -59,12 +59,12 @@ def patch_moe_layer_and_router(ctx: PatchContext):
         warning_rank_0("MegatronPatches: monkey patch MoELayer with DeprecatedMoELayer...")
         try:
             # patch module class
-            from primus.backends.megatron.core.transformer.moe.deprecated_20251209.experts import (
+            from primus.backends.megatron.patches.core.transformer.moe.deprecated_20251209.experts import (
                 DeprecatedGroupedMLP,
                 DeprecatedSequentialMLP,
                 DeprecatedTEGroupedMLP,
             )
-            from primus.backends.megatron.core.transformer.moe.deprecated_20251209.moe_layer import (
+            from primus.backends.megatron.patches.core.transformer.moe.deprecated_20251209.moe_layer import (
                 DeprecatedMoELayer,
                 DeprecatedMoESubmodules,
             )

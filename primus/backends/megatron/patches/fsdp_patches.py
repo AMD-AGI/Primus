@@ -46,9 +46,9 @@ def patch_torch_fsdp(ctx: PatchContext):
         # Patch Megatron's internal reference to FSDP2 class
         import megatron.core.distributed.torch_fully_sharded_data_parallel as torch_fsdp_module
 
-        # from primus.backends.megatron.core.distributed.torch_fully_sharded_data_parallel import (
-        #     PrimusTorchFullyShardedDataParallel,
-        # )
+        from primus.backends.megatron.patches.core.distributed.torch_fully_sharded_data_parallel import (
+            PrimusTorchFullyShardedDataParallel,
+        )
 
         torch_fsdp_module.TorchTorchFullyShardedDataParallel = PrimusTorchFullyShardedDataParallel
 
