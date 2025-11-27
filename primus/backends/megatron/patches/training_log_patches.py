@@ -178,6 +178,70 @@ class RocmMonitorExtension:
 
 
 # =============================================================================
+# Helper: Training Log Wrapper with Stacking
+# =============================================================================
+
+
+def _wrap_training_log_with_extensions(
+    original_fn,
+    existing_extensions: List[Any],
+    new_extensions: List[Any],
+):
+    """
+    Create a new training_log wrapper that stacks existing + new extensions.
+
+    This function:
+        - Combines extension lists.
+        - Defines a new wrapper that uses ExitStack to enter all extensions.
+        - Attaches Primus metadata to enable future stacking.
+    """
+    all_extensions = list(existing_extensions) + list(new_extensions)
+
+    def _patched_training_log(*func_args, **func_kwargs):
+        # Use ExitStack to manage multiple extensions dynamically
+        with contextlib.ExitStack() as stack:
+            for ext in all_extensions:
+                # Allow extension to read current function args if needed
+                if hasattr(ext, "update_context"):
+                    try:
+                        ext.update_context(func_args, func_kwargs)
+                    except Exception:
+                        # Logging must not break training
+                        pass
+                # Enter the extension's context
+                stack.enter_context(ext)
+            # Execute original function within the combined context
+            return original_fn(*func_args, **func_kwargs)
+
+    # Attach metadata for stacking
+    setattr(_patched_training_log, "_primus_training_log_wrapper", True)
+    setattr(_patched_training_log, "_primus_original_training_log", original_fn)
+    setattr(_patched_training_log, "_primus_extensions", all_extensions)
+
+    return _patched_training_log
+
+
+def _get_training_log_wrapper_state(training_log_fn):
+    """
+    Inspect current training_log function and return:
+
+        is_wrapped: bool
+        original_fn: callable
+        existing_extensions: List[Any]
+
+    If not wrapped by Primus, original_fn is training_log_fn itself
+    and existing_extensions is an empty list.
+    """
+    is_wrapped = getattr(training_log_fn, "_primus_training_log_wrapper", False)
+    if is_wrapped:
+        original_fn = getattr(training_log_fn, "_primus_original_training_log", training_log_fn)
+        existing_extensions = getattr(training_log_fn, "_primus_extensions", [])
+        return True, original_fn, list(existing_extensions)
+    else:
+        return False, training_log_fn, []
+
+
+# =============================================================================
 # Main Patch Logic
 # =============================================================================
 
@@ -195,6 +259,11 @@ def patch_training_log_unified(ctx: PatchContext):
     This implementation uses a Chain of Responsibility pattern via Context Managers.
     Each feature (ROCm stats, MLflow) is an independent 'Extension' that manages
     its own setup and teardown around the original function call.
+
+    Additionally, this patch is *stackable*:
+        - If training_log is already patched by Primus, we keep its original_fn
+          and existing extensions, and simply append our new extensions.
+        - If not, we wrap the existing training_log for the first time.
     """
     try:
         import megatron.training.training as megatron_training  # type: ignore
@@ -203,63 +272,84 @@ def patch_training_log_unified(ctx: PatchContext):
         args = ctx.extra.get("args")
 
         # Try to get config dict from 'config' key (Adapter style)
-        config = ctx.extra.get("config", {})
+        config: Dict[str, Any] = ctx.extra.get("config", {}) or {}
 
         # If not found, try to get from 'module_config' object (BaseTrainer style)
         if not config and "module_config" in ctx.extra:
             module_config = ctx.extra["module_config"]
             if hasattr(module_config, "params"):
-                config = module_config.params
+                config = module_config.params  # type: ignore[assignment]
 
         if not args:
             log_rank_0("[Patch:megatron.training_log][SKIP] No args in context")
             return
 
-        # 2. Register Extensions
-        extensions: List[Any] = []
+        # 2. Decide which extensions to enable for this patch
+        new_extensions: List[Any] = []
 
-        # -> Check ROCm Monitoring
-        # Primus specific parameters are in config, not args
+        # -> ROCm Memory Monitoring
         use_rocm_mem = config.get("use_rocm_mem_info", False)
         rocm_iters = config.get("use_rocm_mem_info_iters", [])
 
         enable_rocm_stats = (
             hasattr(args, "log_throughput")
-            and args.log_throughput
+            and bool(getattr(args, "log_throughput"))
             and (use_rocm_mem or (rocm_iters and len(rocm_iters) > 0))
         )
 
         if enable_rocm_stats:
-            extensions.append(RocmMonitorExtension(args, config))
+            new_extensions.append(RocmMonitorExtension(args, config))
 
-        # -> Check MLflow (Placeholder for future implementation)
+        # -> MLflow / other extensions can be added here in the future:
         # if enable_mlflow:
-        #     extensions.append(MlflowExtension(ctx, args))
+        #     new_extensions.append(MlflowExtension(ctx, args))
 
-        if not extensions:
-            log_rank_0("[Patch:megatron.training_log][SKIP] No active extensions configured")
+        # 3. Inspect current training_log to see if it's already wrapped by Primus
+        is_wrapped, original_fn, existing_extensions = _get_training_log_wrapper_state(
+            megatron_training.training_log
+        )
+
+        if not new_extensions:
+            if is_wrapped:
+                # We don't remove existing extensions; just log and keep them.
+                log_rank_0(
+                    "[Patch:megatron.training_log][INFO] "
+                    "No new extensions; keeping existing wrapper "
+                    f"({len(existing_extensions)} existing extensions)"
+                )
+            else:
+                log_rank_0(
+                    "[Patch:megatron.training_log][SKIP] " "No active extensions configured for this patch"
+                )
             return
 
-        # 3. Apply Wrapper
-        _original_training_log = megatron_training.training_log
+        # 4. Create a new wrapper that stacks old + new extensions
+        patched_fn = _wrap_training_log_with_extensions(
+            original_fn=original_fn,
+            existing_extensions=existing_extensions,
+            new_extensions=new_extensions,
+        )
 
-        def _patched_training_log(*func_args, **func_kwargs):
-            # Use ExitStack to manage multiple extensions dynamically
-            with contextlib.ExitStack() as stack:
-                for ext in extensions:
-                    # Allow extension to read current function args if needed
-                    if hasattr(ext, "update_context"):
-                        ext.update_context(func_args, func_kwargs)
-                    # Enter the extension's context
-                    stack.enter_context(ext)
+        # 5. Install the new wrapper
+        megatron_training.training_log = patched_fn
 
-                # Execute original function within the combined context
-                return _original_training_log(*func_args, **func_kwargs)
+        log_rank_0(
+            "[Patch:megatron.training_log] Applied wrapper: "
+            f"{len(existing_extensions)} existing extensions + "
+            f"{len(new_extensions)} new = "
+            f"{len(existing_extensions) + len(new_extensions)} total"
+        )
 
-        megatron_training.training_log = _patched_training_log
-        log_rank_0(f"[Patch:megatron.training_log] Applied wrapper with {len(extensions)} extensions")
+        # NOTE:
+        # If Primus's PatchContext adds support for register_cleanup in the future,
+        # we could register a cleanup handler here to restore
+        # training_log = original_fn.
+        # For now, we keep the wrapper active for the lifetime of the process.
 
     except ImportError as e:
         log_rank_0(f"[Patch:megatron.training_log][SKIP] Import failed: {e}")
     except AttributeError as e:
         log_rank_0(f"[Patch:megatron.training_log][WARN] Attribute error: {e}")
+    except Exception as e:
+        # Catch-all to make sure patch系统本身不会炸掉训练。
+        log_rank_0(f"[Patch:megatron.training_log][ERROR] Unexpected error: {e}")
