@@ -89,7 +89,7 @@ def add_file_sink(
 ):
     """
     Add a file sink to the logger.
-    
+
     Returns:
         int: Handler ID of the added sink, or None if not added
     """
@@ -140,7 +140,7 @@ def setup_logger(
 ):
     """
     Setup logger with file and stderr sinks.
-    
+
     Args:
         cfg: Logger configuration
         is_head: Whether this is the master/head process
@@ -393,4 +393,4 @@ def error(__message: str, *args: Any, **kwargs: Any) -> None:
 def error_with_caller(__message: str, module_name: str, function_name: str, line: int) -> None:
     global _logger
     __message = f"{module_format(module_name, line)}: {__message}"
-    _logger.warning(__message)
+    _logger.error(__message)

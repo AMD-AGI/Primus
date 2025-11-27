@@ -51,7 +51,7 @@ def patch_zero_bubble_pipeline(ctx: PatchContext):
     try:
         import megatron.core.optimizer as optimizer
 
-        from primus.backends.megatron.core.optimizer.zbpp_optimizer import (
+        from primus.backends.megatron.patches.core.optimizer.zbpp_optimizer import (
             ZeroBubblePPChainedOptimizer,
         )
 
@@ -59,7 +59,7 @@ def patch_zero_bubble_pipeline(ctx: PatchContext):
 
         import megatron.core.pipeline_parallel as ori_pp
 
-        from primus.backends.megatron.core.pipeline_parallel.schedules import (
+        from primus.backends.megatron.patches.core.pipeline_parallel.schedules import (
             get_forward_backward_func_zbpp,
         )
 
@@ -67,7 +67,7 @@ def patch_zero_bubble_pipeline(ctx: PatchContext):
 
         import megatron.core.tensor_parallel.layers as ori_layers
 
-        from primus.backends.megatron.core.tensor_parallel.layers import (
+        from primus.backends.megatron.patches.core.tensor_parallel.layers import (
             LinearWithGradAccumulationAndAsyncCommunication,
         )
 

@@ -383,9 +383,9 @@ else
     LAST_NODE=$((NNODES - 1))
     FILTERS=()
     # Add local rank 0 on the first node
-    if [ "$NODE_RANK" -eq 0 ]; then
-        FILTERS+=(0)
-    fi
+    # if [ "$NODE_RANK" -eq 0 ]; then
+    #     FILTERS+=(0)
+    # fi
 
     # Add the last local rank on the last node
     if [ "$NODE_RANK" -eq "$LAST_NODE" ]; then
