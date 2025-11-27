@@ -249,6 +249,7 @@ class BackendRegistry:
             True if backend was loaded successfully, False otherwise
         """
         import importlib
+        import traceback
 
         try:
             module_path = f"primus.backends.{backend}"
@@ -258,7 +259,12 @@ class BackendRegistry:
         #     # Backend not installed, ignore silently
         #     return False
         except Exception as e:
-            error_rank_0(f"[Primus] Warning: Failed to load backend '{backend}': {e}")
+            tb = traceback.format_exc()
+            error_rank_0(
+                "[Primus] Warning: Failed to load backend "
+                f"'{backend}' from {module_path}: {e}\n"
+                f"[Primus] Import traceback for backend '{backend}':\n{tb}"
+            )
             return False
 
     @classmethod
