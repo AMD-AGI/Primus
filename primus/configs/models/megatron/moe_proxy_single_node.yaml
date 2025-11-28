@@ -1,12 +1,14 @@
-bases:
+extends:
   - deepseek_v2_base.yaml
 
 tokenizer_type: DeepSeekV2Tokenizer
 tokenizer_model: deepseek-ai/DeepSeek-V2-Lite
 
 # model
-num_layers: 48
-hidden_size: 3072
+num_layers: 64
+hidden_size: 2048
+# num_layers: 48
+# hidden_size: 3072
 num_attention_heads: 32
 group_query_attention: true
 num_query_groups: 8
@@ -16,13 +18,13 @@ multi_latent_attention: false
 apply_rope_fusion: true
 
 # moe
-# num_experts: 128
-# moe_router_topk: 2 # sparsity=64
-# moe_ffn_hidden_size: 2048
+num_experts: 128
+moe_router_topk: 2 # sparsity=64
+moe_ffn_hidden_size: 2048
 
-num_experts: 256
-moe_router_topk: 4 # sparsity=64
-moe_ffn_hidden_size: 1024
+# num_experts: 256
+# moe_router_topk: 4 # sparsity=64
+# moe_ffn_hidden_size: 1024
 
 # no group
 moe_router_num_groups: null # int

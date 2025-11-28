@@ -4,3 +4,4 @@ bases:
 model_name: "deepseek2-16b"
 attention: "cudnn_flash_te"
 use_iota_embed: True
+tokenizer_path: "deepseek-ai/DeepSeek-V2-Lite"

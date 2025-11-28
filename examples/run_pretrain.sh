@@ -149,10 +149,15 @@ export NCCL_CHECKS_DISABLE=1
 
 # Set InfiniBand GID index for NCCL communication
 if [ "$USING_AINIC" == "1" ]; then
-    # Setup Pollara specific args
+    export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
+    export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
+    export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi-4.1.6"}
+
     LOG_INFO_RANK0 "Using AINIC"
     LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
     LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
+    LOG_INFO_RANK0 "MPI_HOME_DIR: $MPI_HOME_DIR"
+
     # unset NCCL_IB_GID_INDEX
     export NCCL_IB_GID_INDEX=1
     # export NCCL_IB_ROCE_VERSION_NUM=2
@@ -166,8 +171,9 @@ if [ "$USING_AINIC" == "1" ]; then
     export NCCL_DMABUF_ENABLE=0
     export NCCL_IGNORE_CPU_AFFINITY=1
     export NCCL_IB_QPS_PER_CONNECTION=1
-    # export LD_LIBRARY_PATH=${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${ANP_HOME_DIR}/build/lib:$LD_LIBRARY_PATH
-    # export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
+
+    export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
+    export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
 else
     export NCCL_IB_GID_INDEX=3
 fi
@@ -236,10 +242,17 @@ LOG_INFO_RANK0 ""
 
 # ----------------- Performance tuning -----------------
 if [ "${BACKEND:-}" == "MaxText" ]; then
+    export DUMP_HLO_DIR=${DUMP_HLO_DIR:-"${PRIMUS_PATH}/output/xla_dump_hlo"}
+    export DUMP_HLO=${DUMP_HLO:-0}
     export NVTE_ALLOW_NONDETERMINISTIC_ALGO=1
     export XLA_PYTHON_CLIENT_MEM_FRACTION=.97
     export NVTE_USE_HIPBLASLT=1
     export XLA_FLAGS="--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_graph_level=0 --xla_gpu_enable_latency_hiding_scheduler=True --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=False --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=FALSE"
+    if [ "${DUMP_HLO}" = "1" ]; then
+        mkdir -p "${DUMP_HLO_DIR}"
+        export XLA_FLAGS="$XLA_FLAGS --xla_dump_to=$DUMP_HLO_DIR"
+        echo "XLA HLO dumping enabled, output directory: ${DUMP_HLO_DIR}"
+    fi
 
     export HIP_FORCE_DEV_KERNARG=1
     export HSA_FORCE_FINE_GRAIN_PCIE=1
