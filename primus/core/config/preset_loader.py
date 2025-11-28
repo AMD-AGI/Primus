@@ -6,12 +6,12 @@ from primus.core.config.merge_utils import deep_merge
 from primus.core.config.yaml_loader import parse_yaml
 
 
-class ModelPresetLoader:
+class PresetLoader:
     """
-    Load framework-aware model presets with full extends support.
+    Load framework-aware presets (models, modules) with full extends support.
 
     Usage:
-      preset = ModelPresetLoader.load("llama2_7B", framework="megatron")
+      preset = PresetLoader.load("llama2_7B", framework="megatron")
     """
 
     @staticmethod

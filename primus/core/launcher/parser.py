@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Tuple
 
-from primus.core.config.model_preset_loader import ModelPresetLoader
+from primus.core.config.preset_loader import PresetLoader
 from primus.core.launcher.config import PrimusConfig
 from primus.core.utils import constant_vars, yaml_utils
 
@@ -303,13 +303,13 @@ class PrimusParser(object):
         # ---- Load module config ----
         model_format = self.get_model_format(framework)
 
-        module_config_dict = ModelPresetLoader.load(module.config, model_format, config_type="modules")
+        module_config_dict = PresetLoader.load(module.config, model_format, config_type="modules")
         module_config = yaml_utils.dict_to_nested_namespace(module_config_dict)
         module_config.name = f"exp.modules.{module_name}.config"
         module_config.framework = framework
 
         # ---- Load model config ----
-        model_config_dict = ModelPresetLoader.load(module.model, model_format, config_type="models")
+        model_config_dict = PresetLoader.load(module.model, model_format, config_type="models")
         model_config = yaml_utils.dict_to_nested_namespace(model_config_dict)
         model_config.name = f"exp.modules.{module_name}.model"
 
