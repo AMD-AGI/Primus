@@ -1,4 +1,3 @@
-# primus/core/config/merge_utils.py
 
 import copy
 from typing import Any, Dict
