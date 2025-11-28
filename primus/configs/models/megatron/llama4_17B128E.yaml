@@ -1,4 +1,4 @@
-bases:
+extends:
   - llama4_base.yaml
 
 
