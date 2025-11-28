@@ -40,8 +40,39 @@ def _resolve_env(obj):
 
 
 def _resolve_env_in_string(s: str):
-    """Replace ${VAR} and ${VAR:default} patterns."""
+    """
+    Replace environment variable patterns in a string.
 
+    This function replaces `${VAR}` and `${VAR:default}` patterns in the input string
+    with the value of the corresponding environment variable, or a default value if provided.
+
+    Parameters
+    ----------
+    s : str
+        The input string possibly containing environment variable patterns.
+
+    Returns
+    -------
+    str or int or float
+        The string with environment variables replaced. If the result is a numeric value,
+        it is converted to int or float.
+
+    Raises
+    ------
+    ValueError
+        If a required environment variable is not set and no default is provided.
+
+    Examples
+    --------
+    >>> os.environ["FOO"] = "bar"
+    >>> _resolve_env_in_string("Value: ${FOO}")
+    'Value: bar'
+    >>> _resolve_env_in_string("Value: ${MISSING:default}")
+    'Value: default'
+    >>> _resolve_env_in_string("${NUM}")
+    # If os.environ["NUM"] = "42", returns 42 (int)
+    42
+    """
     def replace_match(m):
         var, default = m.group(1), m.group(2)
 
