@@ -38,14 +38,21 @@ class PresetLoader:
         configs_root = os.path.dirname(models_dir)
 
         preset_path = os.path.join(configs_root, config_type, framework, filename)
-
-        if not os.path.exists(preset_path):
-            raise FileNotFoundError(
-                f"[Primus] Preset '{name}' not found for framework '{framework}' in '{config_type}'.\n"
-                f"Expected: {preset_path}"
+        # Validate that the path stays within configs_root
+        abs_preset_path = os.path.abspath(preset_path)
+        abs_configs_root = os.path.abspath(configs_root)
+        if not abs_preset_path.startswith(abs_configs_root + os.sep):
+            raise ValueError(
+                f"[Primus] Invalid preset path: path traversal detected for '{preset_path}'."
             )
 
-        preset = parse_yaml(preset_path)
+        if not os.path.exists(abs_preset_path):
+            raise FileNotFoundError(
+                f"[Primus] Preset '{name}' not found for framework '{framework}' in '{config_type}'.\n"
+                f"Expected: {abs_preset_path}"
+            )
+
+        preset = parse_yaml(abs_preset_path)
 
         return preset
 
