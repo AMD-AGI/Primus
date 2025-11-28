@@ -16,6 +16,14 @@ class TestYamlLoader:
         result = parse_yaml(str(cfg_file))
         assert result == {"a": 1, "b": "test"}
 
+    def test_parse_yaml_empty(self, tmp_path):
+        """Test parsing an empty YAML file raises ValueError."""
+        cfg_file = tmp_path / "empty.yaml"
+        cfg_file.write_text("")
+
+        with pytest.raises(ValueError, match="is empty or invalid"):
+            parse_yaml(str(cfg_file))
+
     def test_parse_yaml_extends(self, tmp_path):
         """Test recursive extends merging."""
         base_content = """
