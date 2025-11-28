@@ -1,9 +1,0 @@
-[primus-run-slurm] MASTER_ADDR=gpu-29
-[primus-run-slurm] MASTER_PORT=1234
-[primus-run-slurm] NNODES=1
-[primus-run-slurm] NODE_RANK=0
-[primus-run-slurm] GPUS_PER_NODE=8
-[primus-run-slurm] NODE_LIST: gpu-29
-[primus-slurm-entry][ERROR] Script not found: /var/spool/slurm-llnl/job38306/primus-cli-container.sh
-slurmstepd: error: _xgetaddrinfo: getaddrinfo(aacnsvm1ctln01:6817) failed: Temporary failure in name resolution
-slurmstepd: error: slurm_set_addr: Unable to resolve "aacnsvm1ctln01"
