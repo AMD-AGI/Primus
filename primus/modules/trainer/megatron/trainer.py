@@ -198,7 +198,6 @@ def _load_megatron_defaults() -> Dict[str, Any]:
     """
     args = parser.parse_args([])  # Parse an empty list -> only defaults
     return vars(args).copy()  # Convert Namespace -> dict and cache
-    return vars(args).copy()  # Convert Namespace → dict and cache
 
 
 class MegatronTrainer(BaseTrainer, BaseModule):
