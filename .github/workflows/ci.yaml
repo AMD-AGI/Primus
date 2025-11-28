@@ -109,7 +109,7 @@ jobs:
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-gfx950-ainic"
           start_time=$(date +%s)
           mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
-          cp -rd /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.1-a-42.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/
+          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.1-a-42.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_gfx950_ainic \
                -t tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
