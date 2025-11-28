@@ -62,8 +62,11 @@ def _resolve_env_in_string(s: str):
     Returns
     -------
     str or int or float
-        The string with environment variables replaced. If the result is a numeric value,
-        it is converted to int or float.
+        The resolved value.
+        - If environment variable substitution occurs:
+            - If the resulting string represents a number, it is converted to int or float.
+            - Otherwise, returns the substituted string.
+        - If no substitution occurs: returns the original string unchanged (even if it looks numeric).
 
     Raises
     ------
