@@ -187,7 +187,7 @@ def _build_megatron_parser() -> argparse.ArgumentParser:
 # ------------------------------------------------------------
 # Load Megatron's default values (cached)
 # ------------------------------------------------------------
-@lru_cache(maxsize=1)
+# @functools.lru_cache(maxsize=1)
 def _load_megatron_defaults() -> Dict[str, Any]:
     """
     Load all default values defined by Megatron-LM's argparse.
