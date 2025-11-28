@@ -1,61 +1,63 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025, Advanced Micro Devices.
+# All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
 """
-Patch Context and Phase Management
+Patch Context and Phase Management.
 
-This module defines the execution context for patches and phase constants.
+This module defines the execution context for patches and a list of valid phases.
 """
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
-# ============================================================================
-# Phase Constants
-# ============================================================================
+# -----------------------------------------------------------------------------
+# Patch Execution Phases
+# -----------------------------------------------------------------------------
 
-# Training lifecycle phases
+# Core lifecycle phases used by Primus
 PHASES = [
-    "setup",  # Environment preparation
-    "build_args",  # Argument building
-    "before_train",  # Before training starts
-    # Reserved extension points (future additions):
+    "setup",  # Before building args or trainer construction
+    "build_args",  # During backend argument construction
+    "before_train",  # Right before training starts
+    # Additional phases could be added in the future:
     # "after_train",
     # "before_eval",
     # "after_eval",
 ]
 
 
-# ============================================================================
+# -----------------------------------------------------------------------------
 # Patch Context
-# ============================================================================
+# -----------------------------------------------------------------------------
 
 
 @dataclass
 class PatchContext:
     """
-    Patch execution context.
+    Patch execution context object passed to all patches.
 
     Attributes:
         backend:
             Backend name (e.g., "megatron", "torchtitan").
         phase:
-            Execution phase (e.g., "setup", "build_args", "before_train").
+            Training lifecycle phase (e.g., "setup", "build_args", "before_train").
         backend_version:
-            Backend version identifier (e.g., "0.8.0", "commit:abc123").
+            Version or commit hash of the backend (e.g., "0.8.0", "commit:abc123").
         primus_version:
-            Primus version (optional, used for Primus-side compatibility patches).
+            Primus version string (used for Primus-side compatibility patches).
         model_name:
-            Model name (e.g., "llama3_70B", "deepseek_v3").
+            Model preset name (e.g., "llama3_70B", "deepseek_v3").
         module_name:
-            Primus module name (e.g., "pre_trainer", "sft_trainer") if applicable.
+            Primus module name (e.g., "pre_trainer", "sft_trainer").
         platform:
-            Platform identifier (e.g., "MI300X", "MI355X") if available.
+            Hardware platform identifier (e.g., "MI300X", "MI355X").
         extra:
-            Additional context data (e.g., {"args": megatron_args, "config": module_config}).
+            Arbitrary additional information passed by the caller
+            (e.g., {"args": megatron_args, "config": module_config}).
     """
 
     backend: str
