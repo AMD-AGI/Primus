@@ -108,10 +108,12 @@ jobs:
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-gfx950-ainic"
           start_time=$(date +%s)
-          cp -rd /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.1-a-42.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/
+          mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
+          cp -rd /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.1-a-42.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_gfx950_ainic \
                -t tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic \
-               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} .
+               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+               --build-arg AINIC_BUNDLE_PATH=ainic .
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker-gfx950-ainic] Total elapsed time: ${elapsed} seconds"

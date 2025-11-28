@@ -3,6 +3,7 @@ FROM docker.io/rocm/primus:v25.9_gfx950
 
 # Specify the commit of Primus-Turbo when building: docker build --build-arg PRIMUS_TURBO_COMMIT=xxx .)
 ARG PRIMUS_TURBO_COMMIT
+ARG AINIC_BUNDLE_PATH
 
 # Install basic dependencies
 RUN apt-get update
@@ -35,9 +36,9 @@ RUN apt-get update && \
 # WARNING: If these paths are missing, tools and libraries may not function correctly.
 # INFO: Installation completed successfully
 
+COPY ${AINIC_BUNDLE_PATH}/ainic_bundle_1.117.1-a-42.tar.gz /opt/
 RUN cd ${WORKDIR} && \
     echo "Building ainic bundle... current directory: ${WORKDIR}" && \
-    cp ./ainic_bundle_1.117.1-a-42.tar.gz ./ && ls -la && \
     tar zxf ainic_bundle_1.117.1-a-42.tar.gz && \
     cd ainic_bundle_1.117.1-a-42 && \
     tar zxf host_sw_pkg.tar.gz && \
