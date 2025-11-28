@@ -90,6 +90,10 @@ def _resolve_env_in_string(s: str):
 
 
 def _try_numeric(v: str):
+    """
+    Attempt to convert a string value to int or float.
+    Returns the original string if conversion fails.
+    """
     try:
         if re.fullmatch(r"-?\d+", v):
             return int(v)
