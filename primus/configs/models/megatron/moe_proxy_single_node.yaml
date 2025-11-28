@@ -1,4 +1,4 @@
-bases:
+extends:
   - deepseek_v2_base.yaml
 
 tokenizer_type: DeepSeekV2Tokenizer

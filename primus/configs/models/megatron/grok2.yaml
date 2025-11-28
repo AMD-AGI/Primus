@@ -1,4 +1,4 @@
-bases:
+extends:
   - grok_base.yaml
 
 # https://huggingface.co/xai-org/grok-2
