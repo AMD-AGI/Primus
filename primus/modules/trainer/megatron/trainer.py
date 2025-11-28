@@ -196,8 +196,8 @@ def _load_megatron_defaults() -> Dict[str, Any]:
     We call parser.parse_args([]), which returns a Namespace containing ONLY
     default values (because no CLI arguments are provided).
     """
-    parser = _build_megatron_parser()
-    args = parser.parse_args([])  # Parse an empty list → only defaults
+    args = parser.parse_args([])  # Parse an empty list -> only defaults
+    return vars(args).copy()  # Convert Namespace -> dict and cache
     return vars(args).copy()  # Convert Namespace → dict and cache
 
 
