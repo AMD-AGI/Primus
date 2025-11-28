@@ -10,7 +10,9 @@
 # export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ci_4096e28_20251114"
 # export DOCKER_IMAGE="docker.io/tasimage/primus:pr-289"
 # export DOCKER_IMAGE="docker.io/tasimage/primus:pr-300"
-export DOCKER_IMAGE="docker.io/tasimage/primus:pr-282-gfx950"
+# export DOCKER_IMAGE="docker.io/tasimage/primus:pr-282-gfx950"
+export DOCKER_IMAGE="docker.io/tasimage/primus:pr-308-gfx950-ainic"
+# export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ainic_ci_422b274_20251126"
 export CLEAN_DOCKER_CONTAINER=1
 
 ######################### Training Environment Variables #########################
@@ -28,18 +30,23 @@ export CPUS_PER_TASK=96
 # export NODE_RANK=${PET_NODE_RANK:-0}
 # export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
-# Set on AAC14 cluster
+# Set on MI355X cluster
 export NNODES=4
 export USING_AINIC=1
+# AAC14 cluster
 # export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
 # export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
 # export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
+# vultr cluster
 export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7" # modify based on the GPU NiC settings
+export ANP_HOME_DIR="/opt/amd-anp"
+export RCCL_HOME_DIR="/opt/rccl"
+export MPI_HOME_DIR="/opt/ompi-4.1.6"
 export NCCL_SOCKET_IFNAME="enp193s0f1np1"
 export GLOO_SOCKET_IFNAME="enp193s0f1np1"
+
 export NCCL_IB_RETRY_CNT=20
 export NCCL_IB_TIMEOUT=300
-
 export HSA_NO_SCRATCH_RECLAIM=1
 export NVTE_CK_USES_BWD_V3=1
 # export USE_ROCM_AITER_ROPE_BACKEND=0
@@ -69,7 +76,7 @@ PROFILE=False
 DISABLE_CPU_TRACE=False
 PROFILE_STEP_START=5
 PROFILE_STEP_END=6
-TRAIN_ITERS=10
+TRAIN_ITERS=5
 
 # MoE_Features legend:
 # 0 - Baseline (no extra optimization toggles)
@@ -260,7 +267,7 @@ if [ "$PROFILE" = "True" ]; then
 fi
 
 ######################### Training Experiments #########################
-PRIMUS_TEAM="date-$(date +%Y%m%d)-ssi-proxy-4nodes-mi355-vultr-1121"
+PRIMUS_TEAM="date-$(date +%Y%m%d)-ssi-proxy-4nodes-mi355-vultr"
 export PRIMUS_TEAM
 PRIMUS_USER=user-tas
 export PRIMUS_USER
