@@ -1,4 +1,4 @@
-bases:
+extends:
   - qwen2.5_base.yaml
 
 tokenizer_type: HuggingFaceTokenizer
