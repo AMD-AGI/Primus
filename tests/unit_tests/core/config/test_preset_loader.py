@@ -1,3 +1,4 @@
+import os
 from unittest.mock import patch
 
 import pytest
@@ -11,7 +12,7 @@ class TestPresetLoader:
     @patch("primus.core.config.preset_loader.MODELS_ROOT")
     def test_load_success(self, mock_models_root, mock_parse_yaml):
         # Mock file structure path
-        mock_models_root.__file__ = "/mock/primus/configs/models/__init__.py"
+        mock_models_root.__file__ = os.path.join(os.sep, "mock", "primus", "configs", "models", "__init__.py")
 
         # Mock parse_yaml return
         expected_config = {"model": "test"}
@@ -24,13 +25,17 @@ class TestPresetLoader:
             assert result == expected_config
 
             # Verify path construction
-            expected_path = "/mock/primus/configs/models/my_framework/my_model.yaml"
+            # Note: PresetLoader steps out two levels from models/__init__.py to find root
+            # then joins with config_type ("models"), framework, and model name
+            expected_path = os.path.join(
+                os.sep, "mock", "primus", "configs", "models", "my_framework", "my_model.yaml"
+            )
             mock_exists.assert_called_with(expected_path)
             mock_parse_yaml.assert_called_with(expected_path)
 
     @patch("primus.core.config.preset_loader.MODELS_ROOT")
     def test_load_not_found(self, mock_models_root):
-        mock_models_root.__file__ = "/mock/primus/configs/models/__init__.py"
+        mock_models_root.__file__ = os.path.join(os.sep, "mock", "primus", "configs", "models", "__init__.py")
 
         with patch("os.path.exists", return_value=False):
             with pytest.raises(FileNotFoundError, match="Preset 'missing' not found"):
