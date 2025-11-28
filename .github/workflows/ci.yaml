@@ -113,7 +113,8 @@ jobs:
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_gfx950_ainic \
                -t tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
-               --build-arg AINIC_BUNDLE_PATH=ainic .
+               --build-arg AINIC_BUNDLE_PATH=ainic \
+               $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker-gfx950-ainic] Total elapsed time: ${elapsed} seconds"
