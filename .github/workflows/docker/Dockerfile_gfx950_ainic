@@ -52,7 +52,7 @@ RUN cd ${WORKDIR} && \
 # ethtool -i enp9s0
 # ibv_devinfo -vv | grep GID
 
-# =============================== Build UCI ===============================
+# =============================== Build UCX ===============================
 RUN cd ${WORKDIR} && wget https://github.com/openucx/ucx/releases/download/v1.18.0/ucx-1.18.0.tar.gz && \
     mkdir -p ucx-1.18.0 && \
     tar -zxf ucx-1.18.0.tar.gz -C ucx-1.18.0 --strip-components=1 && \
