@@ -15,7 +15,6 @@ import os
 import statistics
 import sys
 import time
-from functools import lru_cache
 from typing import Any, Dict
 
 import megatron
