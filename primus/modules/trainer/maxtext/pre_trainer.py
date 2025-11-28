@@ -4,6 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from typing import Any, Dict
+
 from primus.core.utils import checker
 from primus.modules.base_module import BaseModule
 from primus.modules.module_utils import error_rank_0, log_rank_0, warning_rank_0
@@ -11,7 +13,7 @@ from primus.modules.module_utils import error_rank_0, log_rank_0, warning_rank_0
 
 class MaxTextPretrainTrainer(BaseModule):
     def __init__(self, *args, **kwargs):
-        kwargs.pop("extra_args", None)
+        extra_args = kwargs.pop("extra_args", None)
         super().__init__(*args, **kwargs)
 
         # important: make sure patch maxtext logger first
@@ -28,6 +30,8 @@ class MaxTextPretrainTrainer(BaseModule):
         self.primus_cfg.export_module_config("pre_trainer")
         self.pre_trainer_cfg_path = self.primus_cfg.module_config_path("pre_trainer")
 
+        self.override_model_args = self.patch_model_args(extra_args)
+
     def setup(self):
         log_rank_0(f"setup MaxText")
 
@@ -37,7 +41,9 @@ class MaxTextPretrainTrainer(BaseModule):
 
         from primus.backends.maxtext.train import initialize
 
-        self.train_config, self.recorder, self.diagnostic_config = initialize(argv)
+        self.train_config, self.recorder, self.diagnostic_config = initialize(
+            argv, **self.override_model_args
+        )
 
     def run(self, *args, **kwargs):
         log_rank_0(f"run MaxText...")
@@ -45,6 +51,38 @@ class MaxTextPretrainTrainer(BaseModule):
         from primus.backends.maxtext.train import run
 
         run(self.train_config, self.recorder, self.diagnostic_config)
+
+    def patch_model_args(self, model_overrides: Dict[str, Any]):
+        """
+        Monkey patch maxtext cli args to override model args dynamically.
+        Supports nested overrides like:
+            {"model.num_experts": 16, "model.base_num_decoder_layers": 4}
+
+        All override keys MUST start with "model.".
+        """
+
+        if not model_overrides:
+            warning_rank_0("MaxText Pre-Trainer: No model_overrides provided, skip patch.")
+            return {}
+
+        warning_rank_0(f"MaxText Pre-Trainer: Applying model_overrides: {model_overrides}")
+
+        # --- Step 1. Flatten any nested dict under 'model'
+        flat_overrides = {}
+        for k, v in model_overrides.items():
+            if k != "model" or not isinstance(v, dict):
+                raise ValueError(
+                    f"MaxText Pre-Trainer: Invalid override keys detected: {k}. "
+                    "These parameters belong to the model configuration and must be specified "
+                    "with the 'model.' prefix"
+                )
+            for subk, subv in v.items():
+                if isinstance(subv, dict):
+                    raise ValueError(
+                        f"MaxText Pre-Trainer: Invalid override key-value detected: {k}.{subk}-{subv}"
+                    )
+                flat_overrides[subk] = subv
+        return flat_overrides
 
     def patch_maxtext_logger(self):
         import logging
