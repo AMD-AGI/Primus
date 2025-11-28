@@ -107,6 +107,9 @@ class PrimusRuntime:
     def _initialize_environment(self) -> None:
         assert self.ctx is not None, "TrainContext must be initialized before environment setup."
         data_path = self.ctx.data_path
+        # Ensure data directory exists before environment setup.
+        if not data_path.exists():
+            data_path.mkdir(parents=True, exist_ok=True)
         # setup_training_env expects a string path.
         setup_training_env(str(data_path), setup_hf=True)
 
