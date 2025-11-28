@@ -10,7 +10,8 @@
 # export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ci_4096e28_20251114"
 # export DOCKER_IMAGE="docker.io/tasimage/primus:pr-289"
 # export DOCKER_IMAGE="docker.io/tasimage/primus:pr-300"
-export DOCKER_IMAGE="docker.io/tasimage/primus:pr-282-gfx950"
+# export DOCKER_IMAGE="docker.io/tasimage/primus:pr-282-gfx950"
+export DOCKER_IMAGE="docker.io/tasimage/primus:pr-308-gfx950-ainic"
 # export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ainic_ci_422b274_20251126"
 export CLEAN_DOCKER_CONTAINER=1
 
@@ -38,9 +39,12 @@ export REBUILD_TURBO=0
 # export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
 # export ANP_HOME_DIR="/workspace/amd-anp"
 # export RCCL_HOME_DIR="/workspace/rccl"
-export ANP_HOME_DIR="/mnt/shared/wenx/workspace/Primus/ainic/amd-anp"
-export RCCL_HOME_DIR="/mnt/shared/wenx/workspace/Primus/ainic/rccl"
-export MPI_HOME_DIR="/mnt/shared/wenx/workspace/Primus/ainic/ompi-4.1.6"
+# export ANP_HOME_DIR="/mnt/shared/wenx/workspace/Primus/ainic/amd-anp"
+# export RCCL_HOME_DIR="/mnt/shared/wenx/workspace/Primus/ainic/rccl"
+# export MPI_HOME_DIR="/mnt/shared/wenx/workspace/Primus/ainic/ompi-4.1.6"
+export ANP_HOME_DIR="/opt/amd-anp"
+export RCCL_HOME_DIR="/opt/rccl"
+export MPI_HOME_DIR="/opt/ompi-4.1.6"
 export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7" # modify based on the GPU NiC settings
 export NCCL_SOCKET_IFNAME="enp193s0f1np1"
 export GLOO_SOCKET_IFNAME="enp193s0f1np1"
@@ -298,7 +302,7 @@ echo "RECOMPUTE_ARGS=${RECOMPUTE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "PROFILE_ARGS=${PROFILE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "--------------------------------" | tee -a "$LOG_FILE"
 
-export SKIP_TRAIN=0
+export SKIP_TRAIN=1
 
 bash ./examples/run_slurm_pretrain.sh \
     --micro_batch_size "$MBS" \

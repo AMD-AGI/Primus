@@ -168,19 +168,19 @@ if [ "$USING_AINIC" == "1" ]; then
     export NCCL_IGNORE_CPU_AFFINITY=1
     export NCCL_IB_QPS_PER_CONNECTION=1
 
-    apt-get update &&
-    apt install jq dpkg-dev kmod xz-utils \
-    libfmt-dev libboost-all-dev \
-    libibverbs-dev ibverbs-utils infiniband-diags -y
+    # apt-get update &&
+    # apt install jq dpkg-dev kmod xz-utils \
+    # libfmt-dev libboost-all-dev \
+    # libibverbs-dev ibverbs-utils infiniband-diags -y
 
-    cp "${PRIMUS_PATH}/ainic/ainic_bundle_1.117.1-a-42.tar.gz" /tmp/ainic_bundle_1.117.1-a-42.tar.gz && \
-    cd /tmp && \
-    tar zxf ainic_bundle_1.117.1-a-42.tar.gz && \
-    cd ainic_bundle_1.117.1-a-42 && \
-    tar zxf host_sw_pkg.tar.gz && \
-    cd host_sw_pkg && \
-    ./install.sh --domain=user -y 2>&1 | tee log_install.txt && \
-    cd "${PRIMUS_PATH}" || exit 1
+    # cp "${PRIMUS_PATH}/ainic/ainic_bundle_1.117.1-a-42.tar.gz" /tmp/ainic_bundle_1.117.1-a-42.tar.gz && \
+    # cd /tmp && \
+    # tar zxf ainic_bundle_1.117.1-a-42.tar.gz && \
+    # cd ainic_bundle_1.117.1-a-42 && \
+    # tar zxf host_sw_pkg.tar.gz && \
+    # cd host_sw_pkg && \
+    # ./install.sh --domain=user -y 2>&1 | tee log_install.txt && \
+    # cd "${PRIMUS_PATH}" || exit 1
 
     # ls /usr/lib/x86_64-linux-gnu/libionic.so.1
     # exit 0

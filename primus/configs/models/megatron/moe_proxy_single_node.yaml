@@ -18,13 +18,13 @@ multi_latent_attention: false
 apply_rope_fusion: true
 
 # moe
-# num_experts: 128
-# moe_router_topk: 2 # sparsity=64
-# moe_ffn_hidden_size: 2048
+num_experts: 128
+moe_router_topk: 2 # sparsity=64
+moe_ffn_hidden_size: 2048
 
-num_experts: 256
-moe_router_topk: 4 # sparsity=64
-moe_ffn_hidden_size: 1024
+# num_experts: 256
+# moe_router_topk: 4 # sparsity=64
+# moe_ffn_hidden_size: 1024
 
 # no group
 moe_router_num_groups: null # int

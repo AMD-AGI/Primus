@@ -82,7 +82,8 @@ ENV MPI_PATH=${WORKDIR}/ompi-4.1.6/install
 RUN cd ${WORKDIR} && \
     git clone https://github.com/ROCm/rccl.git && \
     cd rccl && git checkout drop/2025-08 && \
-    ./install.sh -l --prefix build/ --disable-mscclpp --disable-msccl-kernel 2>&1 | tee log_rccl_install.txt && \
+    ./install.sh -l --prefix build/ --disable-mscclpp \
+        --disable-msccl-kernel --amdgpu_targets="gfx950" 2>&1 | tee log_rccl_install.txt && \
     cd ${WORKDIR}
 
 ENV RCCL_HOME=${WORKDIR}/rccl
@@ -91,6 +92,7 @@ ENV RCCL_HOME=${WORKDIR}/rccl
 
 RUN cd ${WORKDIR} && git clone https://github.com/rocm/amd-anp.git && \
 cd amd-anp && git checkout tags/v1.1.0-5 && \
+sed -i '5a CFLAGS += --offload-arch=gfx950' ./Makefile && head -10 ./Makefile && \
 make -j 16 RCCL_BUILD=${RCCL_HOME}/build/release \
            MPI_INCLUDE=${MPI_PATH}/include/ \
            MPI_LIB_PATH=${MPI_PATH}/lib/ \
