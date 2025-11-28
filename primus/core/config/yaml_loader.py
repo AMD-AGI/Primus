@@ -11,9 +11,11 @@ ENV_PATTERN = re.compile(r"\${([^:{}]+)(?::([^}]*))?}")
 def parse_yaml(path: str) -> dict:
     """Load YAML with env replacement and extends merging."""
     cfg = _load_yaml(path)
+    if cfg is None:
+        raise ValueError(f"YAML configuration file '{path}' is empty or invalid.")
     cfg = _resolve_env(cfg)
     cfg = _apply_extends(path, cfg)  # main logic (deep merge presets)
-    return cfg or {}
+    return cfg
 
 
 # ================================================================
