@@ -38,14 +38,11 @@ export LOG_DIR=${LOG_DIR:-"./output"}
 LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
 
-    #  --nodelist="chi[2820-2822,2824]" \
-    #  --nodelist="chi[2742-2743,2761-2762]" \
 srun -N "${NNODES}" \
      --exclusive \
      --export ALL \
      --ntasks-per-node=1 \
-     --nodelist="chi[2820-2822,2824]" \
-     --cpus-per-task="${CPUS_PER_TASK:-256}" \
+     --cpus-per-task="${CPUS_PER_TASK:-128}" \
      bash -c "
           readarray -t node_array < <(scontrol show hostnames \"\$SLURM_JOB_NODELIST\")
           if [ \"\$SLURM_NODEID\" = \"0\" ]; then

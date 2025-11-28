@@ -149,11 +149,15 @@ export NCCL_CHECKS_DISABLE=1
 
 # Set InfiniBand GID index for NCCL communication
 if [ "$USING_AINIC" == "1" ]; then
-    # Setup Pollara specific args
+    export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
+    export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
+    export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi-4.1.6"}
+
     LOG_INFO_RANK0 "Using AINIC"
     LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
     LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
     LOG_INFO_RANK0 "MPI_HOME_DIR: $MPI_HOME_DIR"
+
     # unset NCCL_IB_GID_INDEX
     export NCCL_IB_GID_INDEX=1
     # export NCCL_IB_ROCE_VERSION_NUM=2
@@ -168,37 +172,10 @@ if [ "$USING_AINIC" == "1" ]; then
     export NCCL_IGNORE_CPU_AFFINITY=1
     export NCCL_IB_QPS_PER_CONNECTION=1
 
-    # apt-get update &&
-    # apt install jq dpkg-dev kmod xz-utils \
-    # libfmt-dev libboost-all-dev \
-    # libibverbs-dev ibverbs-utils infiniband-diags -y
-
-    # cp "${PRIMUS_PATH}/ainic/ainic_bundle_1.117.1-a-42.tar.gz" /tmp/ainic_bundle_1.117.1-a-42.tar.gz && \
-    # cd /tmp && \
-    # tar zxf ainic_bundle_1.117.1-a-42.tar.gz && \
-    # cd ainic_bundle_1.117.1-a-42 && \
-    # tar zxf host_sw_pkg.tar.gz && \
-    # cd host_sw_pkg && \
-    # ./install.sh --domain=user -y 2>&1 | tee log_install.txt && \
-    # cd "${PRIMUS_PATH}" || exit 1
-
-    # ls /usr/lib/x86_64-linux-gnu/libionic.so.1
-    # exit 0
-
-    # export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${ANP_HOME_DIR}/build/lib:/ompi-4.1.6/install/lib:$LD_LIBRARY_PATH
-    # export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
-
     export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
     export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
 else
     export NCCL_IB_GID_INDEX=3
-fi
-
-if [[ "$REBUILD_TURBO" == "1" ]]; then
-    cd "${PRIMUS_PATH}/third_party/Primus-Turbo" || exit 1 && pip3 install -r requirements.txt && \
-    pip3 install --extra-index-url https://test.pypi.org/simple ./dist/primus_turbo-0.1.1+1fc5b81-cp310-cp310-linux_x86_64.whl && \
-    cd "${PRIMUS_PATH}" || exit 1
-    # GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
 fi
 
 # Disable cross NIC communication for NCCL

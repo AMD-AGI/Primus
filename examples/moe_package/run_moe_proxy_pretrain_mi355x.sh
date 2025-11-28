@@ -30,27 +30,23 @@ export CPUS_PER_TASK=96
 # export NODE_RANK=${PET_NODE_RANK:-0}
 # export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
-# Set on AAC14 cluster
+# Set on MI355X cluster
 export NNODES=4
 export USING_AINIC=1
-export REBUILD_TURBO=0
+# AAC14 cluster
 # export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
 # export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
 # export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
-# export ANP_HOME_DIR="/workspace/amd-anp"
-# export RCCL_HOME_DIR="/workspace/rccl"
-# export ANP_HOME_DIR="/mnt/shared/wenx/workspace/Primus/ainic/amd-anp"
-# export RCCL_HOME_DIR="/mnt/shared/wenx/workspace/Primus/ainic/rccl"
-# export MPI_HOME_DIR="/mnt/shared/wenx/workspace/Primus/ainic/ompi-4.1.6"
+# vultr clsuter
+export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7" # modify based on the GPU NiC settings
 export ANP_HOME_DIR="/opt/amd-anp"
 export RCCL_HOME_DIR="/opt/rccl"
 export MPI_HOME_DIR="/opt/ompi-4.1.6"
-export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7" # modify based on the GPU NiC settings
 export NCCL_SOCKET_IFNAME="enp193s0f1np1"
 export GLOO_SOCKET_IFNAME="enp193s0f1np1"
+
 export NCCL_IB_RETRY_CNT=20
 export NCCL_IB_TIMEOUT=300
-
 export HSA_NO_SCRATCH_RECLAIM=1
 export NVTE_CK_USES_BWD_V3=1
 # export USE_ROCM_AITER_ROPE_BACKEND=0
@@ -302,7 +298,7 @@ echo "RECOMPUTE_ARGS=${RECOMPUTE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "PROFILE_ARGS=${PROFILE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "--------------------------------" | tee -a "$LOG_FILE"
 
-export SKIP_TRAIN=1
+export SKIP_TRAIN=0
 
 bash ./examples/run_slurm_pretrain.sh \
     --micro_batch_size "$MBS" \
