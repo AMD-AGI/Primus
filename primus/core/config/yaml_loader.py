@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 import os
 import re
 
@@ -75,6 +81,7 @@ def _resolve_env_in_string(s: str):
     # If os.environ["NUM"] = "42", returns 42 (int)
     42
     """
+
     def replace_match(m):
         var, default = m.group(1), m.group(2)
 
