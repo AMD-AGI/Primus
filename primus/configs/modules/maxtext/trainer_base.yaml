@@ -147,7 +147,7 @@ mtp_loss_scaling_factor: 0.1
 # first auxiliary prediction head. Set to 0 to disable this specific evaluation
 mtp_eval_target_module: 0
 
-# mixture of experts (moe) : a part moved to model_base.yaml
+# mixture of experts (moe): a part moved to model_base.yaml
 expert_balance: False
 use_random_routing: False # whether to use random routing for debug/test purpose
 megablox: True
@@ -244,13 +244,13 @@ param_scan_axis: 1
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
-# moved to model_base.yml
+# moved to model_base.yaml
 
 # MLA parameters
-# moved to model_base.yml
+# moved to model_base.yaml
 
 # Combine matmuls for QKV and MLP
-# moved to model_base.yml
+# moved to model_base.yaml
 
 record_internal_nn_metrics: 0
 

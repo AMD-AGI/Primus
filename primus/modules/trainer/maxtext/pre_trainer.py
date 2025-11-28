@@ -30,7 +30,7 @@ class MaxTextPretrainTrainer(BaseModule):
         self.primus_cfg.export_module_config("pre_trainer")
         self.pre_trainer_cfg_path = self.primus_cfg.module_config_path("pre_trainer")
 
-        self.override_model_args = self.patch_model_args(extra_args)
+        self.override_model_args = self.prepare_model_overrides(extra_args)
 
     def setup(self):
         log_rank_0(f"setup MaxText")
@@ -52,7 +52,7 @@ class MaxTextPretrainTrainer(BaseModule):
 
         run(self.train_config, self.recorder, self.diagnostic_config)
 
-    def patch_model_args(self, override_args: Dict[str, Any]):
+    def prepare_model_overrides(self, override_args: Dict[str, Any]):
         """
         Monkey patch maxtext cli args to override model args dynamically.
         Supports nested overrides like:
@@ -70,11 +70,11 @@ class MaxTextPretrainTrainer(BaseModule):
         # --- Step 1. Flatten any nested dict under 'model'
         flat_overrides = {}
         for k, v in override_args.items():
-            if k != "model" or not isinstance(v, dict):
+            if k != "model":
+                raise ValueError(f"MaxText Pre-Trainer: Nested dicts are not supported for override key {k}.")
+            if not isinstance(v, dict):
                 raise ValueError(
-                    f"MaxText Pre-Trainer: Invalid override keys detected: {k}. "
-                    "These parameters belong to the model configuration and must be specified "
-                    "under the 'model' key"
+                    f"MaxText Pre-Trainer: The value for 'model' must be a dict, got {type(v).__name__}."
                 )
             for subk, subv in v.items():
                 if isinstance(subv, dict):
