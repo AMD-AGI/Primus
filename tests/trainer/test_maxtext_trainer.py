@@ -286,7 +286,7 @@ class TestMaxTextTrainer(PrimusUT):
             ],
         )
 
-    def test_mixtral_8x7B_FP8(self):
+    def test_grok1_FP8(self):
         run_script(
             self.__class__.__name__,
             "grok1-FP8",
