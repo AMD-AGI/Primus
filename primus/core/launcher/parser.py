@@ -302,20 +302,14 @@ class PrimusParser(object):
 
         # ---- Load module config ----
         model_format = self.get_model_format(framework)
-        module_config_file = os.path.join(self.primus_home, "configs/modules", model_format, module.config)
-        module_config = yaml_utils.parse_yaml_to_namespace(module_config_file)
+
+        module_config_dict = ModelPresetLoader.load(module.config, model_format, config_type="modules")
+        module_config = yaml_utils.dict_to_nested_namespace(module_config_dict)
         module_config.name = f"exp.modules.{module_name}.config"
         module_config.framework = framework
 
         # ---- Load model config ----
-        # Handle suffix for ModelPresetLoader
-        model_name = module.model
-        if model_name.endswith(".yaml"):
-            model_name = model_name[:-5]
-        elif model_name.endswith(".yml"):
-            model_name = model_name[:-4]
-
-        model_config_dict = ModelPresetLoader.load(model_name, model_format)
+        model_config_dict = ModelPresetLoader.load(module.model, model_format, config_type="models")
         model_config = yaml_utils.dict_to_nested_namespace(model_config_dict)
         model_config.name = f"exp.modules.{module_name}.model"
 

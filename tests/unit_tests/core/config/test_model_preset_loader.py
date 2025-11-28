@@ -33,7 +33,7 @@ class TestModelPresetLoader:
         mock_models_root.__file__ = "/mock/primus/configs/models/__init__.py"
 
         with patch("os.path.exists", return_value=False):
-            with pytest.raises(FileNotFoundError, match="Model preset 'missing' not found"):
+            with pytest.raises(FileNotFoundError, match="Preset 'missing' not found"):
                 ModelPresetLoader.load("missing", "framework")
 
     def test_merge_with_user_params(self):

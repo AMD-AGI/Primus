@@ -15,10 +15,10 @@ class ModelPresetLoader:
     """
 
     @staticmethod
-    def load(model_name: str, framework: str) -> Dict:
+    def load(name: str, framework: str, config_type: str = "models") -> Dict:
         """
         Load:
-            primus/configs/models/<framework>/<model_name>.yaml
+            primus/configs/<config_type>/<framework>/<name>[.yaml]
 
         And automatically resolve:
             - extends: [...]
@@ -26,12 +26,22 @@ class ModelPresetLoader:
             - deep merge
             - env replacement
         """
-        base_dir = os.path.dirname(MODELS_ROOT.__file__)
-        preset_path = os.path.join(base_dir, framework, f"{model_name}.yaml")
+        # Handle suffix
+        if name.endswith(".yaml") or name.endswith(".yml"):
+            filename = name
+        else:
+            filename = f"{name}.yaml"
+
+        # Resolve base directory: primus/configs
+        # MODELS_ROOT.__file__ -> primus/configs/models/__init__.py
+        models_dir = os.path.dirname(MODELS_ROOT.__file__)
+        configs_root = os.path.dirname(models_dir)
+
+        preset_path = os.path.join(configs_root, config_type, framework, filename)
 
         if not os.path.exists(preset_path):
             raise FileNotFoundError(
-                f"[Primus] Model preset '{model_name}' not found for framework '{framework}'.\n"
+                f"[Primus] Preset '{name}' not found for framework '{framework}' in '{config_type}'.\n"
                 f"Expected: {preset_path}"
             )
 
