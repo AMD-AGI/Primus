@@ -6,6 +6,8 @@ import yaml
 from primus.core.config.merge_utils import deep_merge
 
 ENV_PATTERN = re.compile(r"\${([^:{}]+)(?::([^}]*))?}")
+# Matches floats like: 1.2, .5, 1., 1e5, 1.2e-5, -1.2
+FLOAT_PATTERN = re.compile(r"^-?(?:(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)$")
 
 
 def parse_yaml(path: str) -> dict:
@@ -94,12 +96,19 @@ def _try_numeric(v: str):
     Attempt to convert a string value to int or float.
     Returns the original string if conversion fails.
     """
-    try:
-        if re.fullmatch(r"-?\d+", v):
-            return int(v)
-        return float(v)
-    except ValueError:
-        return v
+    # 1. Integer check
+    if re.fullmatch(r"-?\d+", v):
+        return int(v)
+
+    # 2. Float check using regex to avoid exceptions for non-numeric strings
+    if FLOAT_PATTERN.fullmatch(v):
+        try:
+            return float(v)
+        except ValueError:
+            return v
+
+    # 3. Return original string
+    return v
 
 
 # ================================================================
