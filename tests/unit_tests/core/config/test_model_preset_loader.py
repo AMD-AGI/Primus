@@ -2,13 +2,13 @@ from unittest.mock import patch
 
 import pytest
 
-from primus.core.configs.model_preset_loader import ModelPresetLoader
+from primus.core.config.model_preset_loader import ModelPresetLoader
 
 
 class TestModelPresetLoader:
 
-    @patch("primus.core.configs.model_preset_loader.parse_yaml")
-    @patch("primus.core.configs.model_preset_loader.MODELS_ROOT")
+    @patch("primus.core.config.model_preset_loader.parse_yaml")
+    @patch("primus.core.config.model_preset_loader.MODELS_ROOT")
     def test_load_success(self, mock_models_root, mock_parse_yaml):
         # Mock file structure path
         mock_models_root.__file__ = "/mock/primus/configs/models/__init__.py"
@@ -28,7 +28,7 @@ class TestModelPresetLoader:
             mock_exists.assert_called_with(expected_path)
             mock_parse_yaml.assert_called_with(expected_path)
 
-    @patch("primus.core.configs.model_preset_loader.MODELS_ROOT")
+    @patch("primus.core.config.model_preset_loader.MODELS_ROOT")
     def test_load_not_found(self, mock_models_root):
         mock_models_root.__file__ = "/mock/primus/configs/models/__init__.py"
 

@@ -1,6 +1,6 @@
 import pytest
 
-from primus.core.configs.yaml_loader import _resolve_env_in_string, parse_yaml
+from primus.core.config.yaml_loader import _resolve_env_in_string, parse_yaml
 
 
 class TestYamlLoader:

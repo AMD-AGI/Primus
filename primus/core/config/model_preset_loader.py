@@ -2,8 +2,8 @@ import os
 from typing import Dict
 
 from primus.configs import models as MODELS_ROOT
-from primus.core.configs.merge_utils import deep_merge
-from primus.core.configs.yaml_loader import parse_yaml
+from primus.core.config.merge_utils import deep_merge
+from primus.core.config.yaml_loader import parse_yaml
 
 
 class ModelPresetLoader:

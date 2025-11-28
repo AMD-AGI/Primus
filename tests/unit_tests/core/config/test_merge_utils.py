@@ -1,4 +1,4 @@
-from primus.core.configs.merge_utils import deep_merge, shallow_merge
+from primus.core.config.merge_utils import deep_merge, shallow_merge
 
 
 class TestMergeUtils:

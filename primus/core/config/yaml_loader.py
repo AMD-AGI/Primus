@@ -3,7 +3,7 @@ import re
 
 import yaml
 
-from primus.core.configs.merge_utils import deep_merge
+from primus.core.config.merge_utils import deep_merge
 
 ENV_PATTERN = re.compile(r"\${([^:{}]+)(?::([^}]*))?}")
 
