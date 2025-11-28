@@ -48,9 +48,7 @@ class PresetLoader:
         abs_preset_path = os.path.abspath(preset_path)
         abs_configs_root = os.path.abspath(configs_root)
         if os.path.commonpath([abs_preset_path, abs_configs_root]) != abs_configs_root:
-            raise ValueError(
-                f"[Primus] Invalid preset path: path traversal detected for '{preset_path}'."
-            )
+            raise ValueError(f"[Primus] Invalid preset path: path traversal detected for '{preset_path}'.")
 
         if not os.path.exists(abs_preset_path):
             raise FileNotFoundError(
