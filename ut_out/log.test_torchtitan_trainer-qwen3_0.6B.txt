@@ -1,0 +1,171 @@
+W1031 07:04:29.803000 107935 torch/distributed/run.py:803]
+W1031 07:04:29.803000 107935 torch/distributed/run.py:803] *****************************************
+W1031 07:04:29.803000 107935 torch/distributed/run.py:803] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed.
+W1031 07:04:29.803000 107935 torch/distributed/run.py:803] *****************************************
+[Primus CLI] HF_HOME already set: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data/huggingface
+[PrimusConfig] Detected unknown override keys: ['model']
+[Primus] sys.path.insert: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/torchtitan
+[[32m20251031 07:04:31[0m][[36mrank-1/8[0m][[33m[1mWARNING[0m] [33m[1m[PrimusPatch][AMP] nn.Embedding.__init__ patched for AMP/mixed precision alignment.[0m
+[[32m20251031 07:04:31[0m][[36mrank-1/8[0m][[33m[1mWARNING[0m] [33m[1m[PrimusPatch][Dataset] Patched datasets.load_dataset successfully.[0m
+[[32m20251031 07:04:32[0m][[36mrank-1/8[0m][[33m[1mWARNING[0m] [33m[1m[PrimusPatch][DCP] Installed fallback for missing torch.distributed.checkpoint._consolidate_hf_safetensors.consolidate_safetensors_files_on_every_rank, HuggingFace safetensors export will be disabled.[0m
+[[32m20251031 07:04:32[0m][[36mrank-1/8[0m][[33m[1mWARNING[0m] [33m[1m[PrimusPatch][Pipe] Installed fallback: ScheduleDualPipeV -> Schedule1F1B[0m
+[[32m20251031 07:04:32[0m][[36mrank-1/8[0m][[33m[1mWARNING[0m] [33m[1m[PrimusPatch][FlexAttn] AuxOutput not found. This torch build predates the new debug/profiling return type. Injecting a lightweight stub so Titan model imports can succeed.[0m
+[[32m20251031 07:04:32[0m][[36mrank-1/8[0m][[33m[1mWARNING[0m] [33m[1m[PrimusPatch][FlexAttn] Injected fallback AuxOutput stub (Titan does not rely on this).[0m
+[[32m20251031 07:04:32[0m][[36mrank-1/8[0m][[33m[1mWARNING[0m] [33m[1m[PrimusPatch][Checkpoint] checkpoint_wrapper patched successfully[0m
+[[32m20251031 07:04:32[0m][[36mrank-1/8[0m][[33m[1mWARNING[0m] [33m[1m[PrimusPatch][ModelOverride] Applying model_overrides: {'model': {'n_layers': 4}}[0m
+[[32m20251031 07:04:32[0m][[36mrank-1/8[0m][[33m[1mWARNING[0m] [33m[1m[PrimusPatch][ModelOverride] Applying overrides: {'model.n_layers': 4}[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[33m[1mWARNING[0m] [33m[1m[PrimusPatch][ModelOverride] get_train_spec for 'qwen3' successfully monkey patched (flavor=0.6B).[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mMokey patch torchtitan logger...[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mLoaded and merged custom JobConfig from primus.backends.torchtitan.primus_turbo_extensions.config_extension[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1m========== TorchTitan Config ==========[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments activation_checkpoint.early_stop.................................. False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments activation_checkpoint.mode........................................ none[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments activation_checkpoint.per_op_sac_force_recompute_mm_shapes_by_fqns ['moe.router.gate'][0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments activation_checkpoint.selective_ac_option......................... 2[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.async_mode............................................. disabled[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.create_seed_checkpoint................................. False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.enable................................................. False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.enable_first_step_checkpoint........................... False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.exclude_from_loading................................... [][0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.export_dtype........................................... float16[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.folder................................................. checkpoint[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.initial_load_in_hf..................................... False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.initial_load_model_only................................ True[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.initial_load_path...................................... None[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.interval............................................... 500[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.keep_latest_k.......................................... 10[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.last_save_in_hf........................................ False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.last_save_model_only................................... False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments checkpoint.load_step.............................................. -1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments comm.init_timeout_seconds......................................... 300[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments comm.save_traces_folder........................................... comm_traces[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments comm.trace_buf_size............................................... 20000[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments comm.train_timeout_seconds........................................ 100[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments compile.components................................................ ['model', 'loss'][0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments compile.enable.................................................... True[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments experimental.custom_args_module................................... primus.backends.torchtitan.primus_turbo_extensions.config_extension[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments experimental.custom_import........................................ [0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments fault_tolerance.enable............................................ False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments fault_tolerance.group_size........................................ 0[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments fault_tolerance.min_replica_size.................................. 1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments fault_tolerance.process_group..................................... gloo[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments fault_tolerance.process_group_timeout_ms.......................... 10000[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments fault_tolerance.replica_id........................................ 0[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments fault_tolerance.semi_sync_method.................................. None[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments float8.emulate.................................................... False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments float8.enable_fsdp_float8_all_gather.............................. False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments float8.filter_fqns................................................ [][0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments float8.moe_fqns_prototype......................................... [][0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments float8.precompute_float8_dynamic_scale_for_fsdp................... False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments float8.recipe_name................................................ None[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments job.config_file................................................... None[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments job.description................................................... Qwen 3 0.6B training[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments job.dump_folder................................................... ./outputs[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments job.print_args.................................................... False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments lr_scheduler.decay_ratio.......................................... None[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments lr_scheduler.decay_type........................................... linear[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments lr_scheduler.min_lr_factor........................................ 0.0[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments lr_scheduler.warmup_steps......................................... 2[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments memory_estimation.disable_fake_mode............................... False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments memory_estimation.enable.......................................... False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments metrics.disable_color_printing.................................... False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments metrics.enable_tensorboard........................................ False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments metrics.enable_wandb.............................................. False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments metrics.log_freq.................................................. 1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments metrics.save_for_all_ranks........................................ False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments metrics.save_tb_folder............................................ tb[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments model.converters.................................................. [][0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments model.flavor...................................................... 0.6B[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments model.hf_assets_path.............................................. /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data/torchtitan/Qwen3-0.6B[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments model.name........................................................ qwen3[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments model.print_after_conversion...................................... False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments model.tokenizer_path.............................................. None[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments mx.filter_fqns.................................................... ['output'][0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments mx.moe_fqns_prototype............................................. [][0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments mx.mxfp8_dim1_cast_kernel_choice.................................. triton[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments mx.recipe_name.................................................... mxfp8_cublas[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments optimizer.beta1................................................... 0.9[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments optimizer.beta2................................................... 0.95[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments optimizer.early_step_in_backward.................................. False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments optimizer.eps..................................................... 1e-08[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments optimizer.implementation.......................................... fused[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments optimizer.lr...................................................... 0.0003[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments optimizer.name.................................................... AdamW[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments optimizer.weight_decay............................................ 0.1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.context_parallel_degree............................... 1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.context_parallel_rotate_method........................ allgather[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.data_parallel_replicate_degree........................ 1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.data_parallel_shard_degree............................ -1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.disable_loss_parallel................................. False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.enable_async_tensor_parallel.......................... False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.enable_compiled_autograd.............................. False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.expert_parallel_degree................................ 1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.expert_tensor_parallel_degree......................... 1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.fsdp_reshard_after_forward............................ default[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.module_fqns_per_model_part............................ None[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.pipeline_parallel_degree.............................. 1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.pipeline_parallel_first_stage_less_layers............. 1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.pipeline_parallel_last_stage_less_layers.............. 1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.pipeline_parallel_layers_per_stage.................... None[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.pipeline_parallel_microbatch_size..................... 1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.pipeline_parallel_schedule............................ 1F1B[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.pipeline_parallel_schedule_csv........................ [0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.pipeline_parallel_split_points........................ [][0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments parallelism.tensor_parallel_degree................................ 1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments primus_turbo.enable_attention_float8.............................. False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments primus_turbo.enable_embedding_autocast............................ True[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments primus_turbo.enable_primus_turbo.................................. False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments primus_turbo.use_turbo_async_tp................................... True[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments primus_turbo.use_turbo_attention.................................. True[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments primus_turbo.use_turbo_mx_linear.................................. True[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments profiling.enable_memory_snapshot.................................. False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments profiling.enable_profiling........................................ False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments profiling.profile_freq............................................ 10[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments profiling.save_memory_snapshot_folder............................. memory_snapshot[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments profiling.save_traces_folder...................................... profile_traces[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments training.dataset.................................................. c4[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments training.dataset_path............................................. None[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments training.deterministic............................................ False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments training.enable_cpu_offload....................................... False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments training.gc_debug................................................. False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments training.gc_freq.................................................. 50[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments training.global_batch_size........................................ -1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments training.local_batch_size......................................... 4[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments training.max_norm................................................. 1.0[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments training.mixed_precision_param.................................... bfloat16[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments training.mixed_precision_reduce................................... float32[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments training.seed..................................................... None[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments training.seq_len.................................................. 4096[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments training.steps.................................................... 3[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments validation.dataset................................................ c4_validation[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments validation.dataset_path........................................... None[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments validation.enable................................................. False[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments validation.freq................................................... 10[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments validation.local_batch_size....................................... 8[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments validation.seq_len................................................ 2048[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1marguments validation.steps.................................................. -1[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mStarting job: Qwen 3 0.6B training[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[33m[1mWARNING[0m] [33m[1mENV[TORCH_NCCL_ASYNC_ERROR_HANDLING] = 1 will be overridden to 3 based on job config[0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mBuilding 1-D device mesh with ['dp_shard'], [8][0m
+[[32m20251031 07:04:34[0m][[36mrank-1/8[0m][[1mINFO [0m] [1m[GC] Initial GC collection 0.00 seconds[0m
+[[32m20251031 07:04:37[0m][[36mrank-1/8[0m][[33m[1mWARNING[0m] [33m[1m[PrimusPatch][ModelOverride] Successfully patched model_args['0.6B'] for 'qwen3' with {'model.n_layers': 4}. Diff(before→after): {'_enforced': 'This field is used to enforce all fields have defaults.', 'dim': 1024, 'n_layers': 28, 'n_heads': 16, 'n_kv_heads': 8, 'vocab_size': 151936, 'head_dim': 128, 'hidden_dim': 3072, 'norm_eps': 1e-06, 'rope_theta': 1000000, 'qk_norm': True, 'max_seq_len': 4096, 'depth_init': True, 'use_flex_attn': False, 'attn_mask_type': 'causal', 'eos_id': 151645, 'enable_weight_tying': True} → {'_enforced': 'This field is used to enforce all fields have defaults.', 'dim': 1024, 'n_layers': 4, 'n_heads': 16, 'n_kv_heads': 8, 'vocab_size': 151936, 'head_dim': 128, 'hidden_dim': 3072, 'norm_eps': 1e-06, 'rope_theta': 1000000, 'qk_norm': True, 'max_seq_len': 4096, 'depth_init': True, 'use_flex_attn': False, 'attn_mask_type': 'causal', 'eos_id': 151645, 'enable_weight_tying': True}[0m
+[[32m20251031 07:04:37[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mLoading tokenizer from tokenizer.json[0m
+[[32m20251031 07:04:38[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mPreparing c4 dataset from allenai/c4[0m
+[[32m20251031 07:04:38[0m][[36mrank-1/8[0m][[33m[1mWARNING[0m] [33m[1m[PrimusPatch][MockDataset] load_dataset('allenai/c4') is mocked.[0m
+[[32m20251031 07:04:38[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mBuilding qwen3 0.6B with Qwen3ModelArgs(_enforced='This field is used to enforce all fields have defaults.', dim=1024, n_layers=4, n_heads=16, n_kv_heads=8, vocab_size=151936, head_dim=128, hidden_dim=3072, norm_eps=1e-06, rope_theta=1000000, qk_norm=True, max_seq_len=4096, depth_init=True, use_flex_attn=False, attn_mask_type='causal', eos_id=151645, enable_weight_tying=True)[0m
+[[32m20251031 07:04:38[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mCUDA capacity: AMD Instinct MI300X with 191.98GiB memory[0m
+[[32m20251031 07:04:38[0m][[36mrank-1/8[0m][[1mINFO [0m] [1m[34mModel qwen3 0.6B [31msize: 218,507,264 total parameters[39m[0m
+[[32m20251031 07:04:38[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mCompiling the loss function with torch.compile[0m
+[[32m20251031 07:04:38[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mCompiling each TransformerBlock with torch.compile[0m
+[[32m20251031 07:04:38[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mApplied FSDP to the model[0m
+[[32m20251031 07:04:38[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mPeak FLOPS used for computing MFU: 1.300e+15[0m
+[[32m20251031 07:04:38[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mCUDA memory usage for model: 0.20GiB(0.10%)[0m
+[[32m20251031 07:04:38[0m][[36mrank-1/8[0m][[33m[1mWARNING[0m] [33m[1mmodel.safetensors.index.json not found at hf_assets_path: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data/torchtitan/Qwen3-0.6B/model.safetensors.index.json.                     Defaulting to saving a single safetensors file if checkpoint is saved in HF format[0m
+[[32m20251031 07:04:38[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mMixed precision training is handled by fully_shard[0m
+[[32m20251031 07:04:38[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mTrainer is initialized with local batch size 4, global batch size 32, gradient accumulation steps 1, sequence length 4096, total steps 3 (warmup 2)[0m
+[[32m20251031 07:04:38[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mTraining starts at step 1[0m
+[[32m20251031 07:04:44[0m][[36mrank-1/8[0m][[1mINFO [0m] [1m[31mstep:  1  [32mloss: 11.8889  [38;2;180;60;0mgrad_norm: 52.8817  [38;2;54;234;195mmemory: 13.70GiB(7.14%)  [34mtps: 2,635  [36mtflops: 3.98  [35mmfu: 0.31%[39m[0m
+[[32m20251031 07:04:44[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mSynchronizing and adjusting timeout for all ProcessGroups to 0:01:40[0m
+[[32m20251031 07:04:44[0m][[36mrank-1/8[0m][[1mINFO [0m] [1m[31mstep:  2  [32mloss:  6.0672  [38;2;180;60;0mgrad_norm: 22.2103  [38;2;54;234;195mmemory: 18.35GiB(9.56%)  [34mtps: 167,094  [36mtflops: 252.71  [35mmfu: 19.44%[39m[0m
+[[32m20251031 07:04:44[0m][[36mrank-1/8[0m][[1mINFO [0m] [1m[31mstep:  3  [32mloss:  5.3888  [38;2;180;60;0mgrad_norm: 21.6378  [38;2;54;234;195mmemory: 18.35GiB(9.56%)  [34mtps: 125,660  [36mtflops: 190.04  [35mmfu: 14.62%[39m[0m
+[[32m20251031 07:04:44[0m][[36mrank-1/8[0m][[1mINFO [0m] [1mTraining completed[0m

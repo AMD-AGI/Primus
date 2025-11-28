@@ -1,0 +1,79 @@
+work_group: amd
+user_name: root
+exp_name: llama3_8B-pretrain
+workspace: ./output
+modules:
+  pre_trainer:
+    profiling:
+      enable_profiling: true
+      save_traces_folder: profile_trace
+      profile_freq: 100
+    metrics:
+      log_freq: 10
+      enable_tensorboard: true
+      save_tb_folder: tb
+    optimizer:
+      name: AdamW
+      lr: 0.0003
+      eps: 1.0e-08
+    lr_scheduler:
+      warmup_steps: 200
+    training:
+      batch_size: 1
+      seq_len: 8192
+      max_norm: 1.0
+      steps: 1000
+      compile: false
+      dataset: c4
+    parallelism:
+      data_parallel_replicate_degree: 1
+      data_parallel_shard_degree: -1
+      tensor_parallel_degree: 1
+      pipeline_parallel_degree: 1
+      context_parallel_degree: 1
+    checkpoint:
+      enable_checkpoint: false
+      folder: checkpoint
+      interval: 500
+      model_weights_only: false
+      export_dtype: float32
+      async_mode: disabled
+    activation_checkpoint:
+      mode: selective
+      selective_ac_option: op
+    float8:
+      enable_fsdp_float8_all_gather: false
+      precompute_float8_dynamic_scale_for_fsdp: false
+      filter_fqns:
+      - output
+    experimental:
+      custom_args_module: primus.backends.torchtitan.primus_turbo_extensions.config_extension
+    primus_turbo:
+      enable_primus_turbo: false
+      enable_attention_float8: false
+    trainable: false
+    sink_level: null
+    file_sink_level: DEBUG
+    stderr_sink_level: INFO
+    name: pre_trainer
+    framework: torchtitan
+    job:
+      dump_folder: ./outputs
+      description: Llama 3 8B training
+    model:
+      name: llama3
+      flavor: 8B
+      tokenizer_path: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data/torchtitan/meta-llama/Llama-3.1-8B/original/tokenizer.model
+      converters: []
+name: PrimusConfig
+config_file: examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml
+platform:
+  name: azure
+  num_nodes_env_key: NNODES
+  node_rank_env_key: NODE_RANK
+  master_addr_env_key: MASTER_ADDR
+  master_port_env_key: MASTER_PORT
+  gpus_per_node_env_key: GPUS_PER_NODE
+  master_sink_level: INFO
+  workspace: ./output
+  config: platform_azure.yaml

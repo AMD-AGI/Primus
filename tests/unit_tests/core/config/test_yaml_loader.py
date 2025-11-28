@@ -97,7 +97,10 @@ class TestYamlLoader:
         cfg_file = tmp_path / "error.yaml"
         cfg_file.write_text(content)
 
-        with pytest.raises(ValueError, match=r"NON_EXISTENT_VAR.*required.*not set"):
+        # Use exact string match (pytest handles regex escaping automatically for simple strings if needed,
+        # but explicit check is better)
+        expected_msg = "Environment variable 'NON_EXISTENT_VAR' is required but not set."
+        with pytest.raises(ValueError, match=expected_msg):
             parse_yaml(str(cfg_file))
 
     def test_resolve_env_in_string_helpers(self, monkeypatch):

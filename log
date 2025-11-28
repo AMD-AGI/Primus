@@ -1,0 +1,1572 @@
+[NODE-0(gpu-43)] [INFO] ==========Training cluster info==========
+[NODE-0(gpu-43)] [INFO] MASTER_ADDR: localhost
+[NODE-0(gpu-43)] [INFO] MASTER_PORT: 1234
+[NODE-0(gpu-43)] [INFO] NNODES: 1
+[NODE-0(gpu-43)] [INFO] NODE_RANK: 0
+[NODE-0(gpu-43)] [INFO] GPUS_PER_NODE: 8
+
+[NODE-0(gpu-43)] [INFO] Pip installing required packages ...
+[NODE-0(gpu-43)] [INFO] ==========Training info==========
+[NODE-0(gpu-43)] [INFO] EXP: examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml
+[NODE-0(gpu-43)] [INFO] TRAIN_LOG: output/log_torchrun_pretrain_llama3.1_8B-pretrain.txt
+[NODE-0(gpu-43)] [INFO] PRIMUS_PATH: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI
+[NODE-0(gpu-43)] [INFO] DATA_PATH: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data
+[NODE-0(gpu-43)] [INFO] HF_HOME: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data/huggingface
+
+Info: Skipping bonded or storage device mlx5_bond_0
+[NODE-0(gpu-43)] [INFO] ==========NCCL and Network Settings==========
+[NODE-0(gpu-43)] [INFO] NCCL_DEBUG:
+[NODE-0(gpu-43)] [INFO] NCCL_CHECKS_DISABLE: 1
+[NODE-0(gpu-43)] [INFO] NCCL_IB_GID_INDEX: 3
+[NODE-0(gpu-43)] [INFO] NCCL_CROSS_NIC: 0
+[NODE-0(gpu-43)] [INFO] NCCL_IB_HCA: mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_5:1,mlx5_6:1,mlx5_9:1
+[NODE-0(gpu-43)] [INFO] NCCL_SOCKET_IFNAME: ens6np0
+[NODE-0(gpu-43)] [INFO] GLOO_SOCKET_IFNAME: ens6np0
+
+[NODE-0(gpu-43)] [INFO] ==========AMD-specific GPU optimizations==========
+[NODE-0(gpu-43)] [INFO] HSA_ENABLE_SDMA: 1
+[NODE-0(gpu-43)] [INFO] HSA_NO_SCRATCH_RECLAIM: 0
+[NODE-0(gpu-43)] [INFO] RCCL_MSCCL_ENABLE: 0
+[NODE-0(gpu-43)] [INFO] RCCL_MSCCLPP_ENABLE: 0
+[NODE-0(gpu-43)] [INFO] RCCL_MSCCLPP_FORCE_ENABLE: 0
+[NODE-0(gpu-43)] [INFO] RCCL_MSCCLPP_THRESHOLD: 1073741824
+[NODE-0(gpu-43)] [INFO] MSCCLPP_DISABLE_CHANNEL_CACHE: FALSE
+[NODE-0(gpu-43)] [INFO] TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK: 0
+
+[NODE-0(gpu-43)] [INFO] ==========Performance tuning==========
+[NODE-0(gpu-43)] [INFO] GPU_MAX_HW_QUEUES: 2
+[NODE-0(gpu-43)] [INFO] CUDA_DEVICE_MAX_CONNECTIONS: 1
+[NODE-0(gpu-43)] [INFO] TORCH_NCCL_HIGH_PRIORITY: 1
+[NODE-0(gpu-43)] [INFO] CUDA_DEVICE_MAX_CONNECTIONS: 1
+[NODE-0(gpu-43)] [INFO] TORCH_NCCL_HIGH_PRIORITY: 1
+[NODE-0(gpu-43)] [INFO] NCCL_PXN_DISABLE: 1
+[NODE-0(gpu-43)] [INFO] NCCL_P2P_NET_CHUNKSIZE: 524288
+[NODE-0(gpu-43)] [INFO] NVTE_CK_USES_BWD_V3: 1
+[NODE-0(gpu-43)] [INFO] NVTE_USE_CAST_TRANSPOSE_TRITON: 1
+[NODE-0(gpu-43)] [INFO] NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE: 0
+[NODE-0(gpu-43)] [INFO] PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:
+
+[NODE-0(gpu-43)] [INFO] Skip bnxt rebuild. REBUILD_BNXT=0, PATH_TO_BNXT_TAR_PACKAGE=
+[NODE-0(gpu-43)] [INFO] ========== Training tuning info ==========
+[NODE-0(gpu-43)] [INFO] TE_HIPBLASLT_TUNING:
+[NODE-0(gpu-43)] [INFO] TE_HIPBLASLT_TUNING_RUN_COUNT: 10
+[NODE-0(gpu-43)] [INFO] TE_HIPBLASLT_TUNING_ALGO_COUNT: 50
+[NODE-0(gpu-43)] [INFO] PRIMUS_HIPBLASLT_TUNING_STAGE:
+[NODE-0(gpu-43)] [INFO] HIPBLASLT_LOG_MASK:
+[NODE-0(gpu-43)] [INFO] HIPBLASLT_LOG_FILE:
+[NODE-0(gpu-43)] [INFO] HIPBLASLT_LOG_LEVEL:
+[NODE-0(gpu-43)] [INFO] HIPBLASLT_TUNING_OVERRIDE_FILE:
+
+[NODE-0(gpu-43)] [INFO] Running backend prepare: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/examples/megatron/prepare.py
+[NODE-0(gpu-43)] [INFO] ========== Prepare Megatron dataset ==========
+[NODE-0(gpu-43)] [INFO] BACKEND_PATH None
+[NODE-0(gpu-43)] [INFO] PRIMUS_PATH is set to: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI
+[NODE-0(gpu-43)] [INFO] DATA_PATH is set to: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data
+[NODE-0(gpu-43)] [INFO] EXP is set to: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml
+[NODE-0(gpu-43)] [INFO] PATCH-ARGS is set to: /tmp/primus_patch_args.jpVBMc.yaml
+[NODE-0(gpu-43)] [INFO] 'mock_data: true', Skipping dataset preparation.
+[NODE-0(gpu-43)] [INFO] No backend_path provided, falling back to: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM
+[NODE-0(gpu-43)] [INFO] Building Megatron dataset helper in /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/datasets
+make: Nothing to be done for 'default'.
+[Primus] sys.path.insert: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM
+[NODE-0(gpu-43)] [INFO] Loading patch args from /tmp/primus_patch_args.jpVBMc.yaml
+[NODE-0(gpu-43)] [INFO] Patched TRAIN args:  --backend_path /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM
+[NODE-0(gpu-43)] [INFO] Launching distributed training with command: torchrun --nproc_per_node 8 --nnodes 1 --node_rank 0 --master_addr localhost --master_port 1234  primus/cli/main.py train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml  --backend_path /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM
+W1027 09:01:34.864000 2067 torch/distributed/run.py:811]
+W1027 09:01:34.864000 2067 torch/distributed/run.py:811] *****************************************
+W1027 09:01:34.864000 2067 torch/distributed/run.py:811] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed.
+W1027 09:01:34.864000 2067 torch/distributed/run.py:811] *****************************************
+[Primus CLI] HF_HOME already set: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data/huggingface
+[Primus CLI] HF_HOME already set: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data/huggingface
+[Primus CLI] HF_HOME already set: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data/huggingface
+[Primus CLI] HF_HOME already set: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data/huggingface
+[Primus CLI] HF_HOME already set: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data/huggingface
+[Primus CLI] HF_HOME already set: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data/huggingface
+[Primus CLI] HF_HOME already set: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data/huggingface
+[Primus CLI] HF_HOME already set: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/data/huggingface
+[Primus] sys.path.insert: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM
+[Primus] sys.path.insert: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM
+[Primus] sys.path.insert: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM
+[Primus] sys.path.insert: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM
+[Primus] sys.path.insert: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM
+[Primus] sys.path.insert: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM
+[Primus] sys.path.insert: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM
+[Primus] sys.path.insert: /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM
+Supported flash-attn versions are >= 2.1.1, <= 2.8.0.post2. Found flash-attn 2.8.3.
+Supported flash-attn versions are >= 2.1.1, <= 2.8.0.post2. Found flash-attn 2.8.3.
+Supported flash-attn versions are >= 2.1.1, <= 2.8.0.post2. Found flash-attn 2.8.3.
+Supported flash-attn versions are >= 2.1.1, <= 2.8.0.post2. Found flash-attn 2.8.3.
+Supported flash-attn versions are >= 2.1.1, <= 2.8.0.post2. Found flash-attn 2.8.3.
+Supported flash-attn versions are >= 2.1.1, <= 2.8.0.post2. Found flash-attn 2.8.3.
+Supported flash-attn versions are >= 2.1.1, <= 2.8.0.post2. Found flash-attn 2.8.3.
+Supported flash-attn versions are >= 2.1.1, <= 2.8.0.post2. Found flash-attn 2.8.3.
+/opt/venv/lib/python3.10/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+  Overriding a previously registered kernel for the same operator and the same dispatch key
+  operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+    registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922
+  dispatch key: ADInplaceOrView
+  previous kernel: no debug info
+       new kernel: registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+  self.m.impl(
+/opt/venv/lib/python3.10/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+  Overriding a previously registered kernel for the same operator and the same dispatch key
+  operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+    registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922
+  dispatch key: ADInplaceOrView
+  previous kernel: no debug info
+       new kernel: registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+  self.m.impl(
+/opt/venv/lib/python3.10/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+  Overriding a previously registered kernel for the same operator and the same dispatch key
+  operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+    registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922
+  dispatch key: ADInplaceOrView
+  previous kernel: no debug info
+       new kernel: registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+  self.m.impl(
+[92mSuccessfully preprocessed all matching files.[0m
+/opt/venv/lib/python3.10/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+  Overriding a previously registered kernel for the same operator and the same dispatch key
+  operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+    registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922
+  dispatch key: ADInplaceOrView
+  previous kernel: no debug info
+       new kernel: registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+  self.m.impl(
+/opt/venv/lib/python3.10/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+  Overriding a previously registered kernel for the same operator and the same dispatch key
+  operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+    registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922
+  dispatch key: ADInplaceOrView
+  previous kernel: no debug info
+       new kernel: registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+  self.m.impl(
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/inference/unified_memory.py:83: UserWarning: Failed to create unified memory mempool.
+  warnings.warn("Failed to create unified memory mempool.")
+[92mSuccessfully preprocessed all matching files.[0m
+/opt/venv/lib/python3.10/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+  Overriding a previously registered kernel for the same operator and the same dispatch key
+  operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+    registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922
+  dispatch key: ADInplaceOrView
+  previous kernel: no debug info
+       new kernel: registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+  self.m.impl(
+/opt/venv/lib/python3.10/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+  Overriding a previously registered kernel for the same operator and the same dispatch key
+  operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+    registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922
+  dispatch key: ADInplaceOrView
+  previous kernel: no debug info
+       new kernel: registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+  self.m.impl(
+/opt/venv/lib/python3.10/site-packages/torch/library.py:356: UserWarning: Warning only once for all operators,  other operators may also be overridden.
+  Overriding a previously registered kernel for the same operator and the same dispatch key
+  operator: flash_attn::_flash_attn_backward(Tensor dout, Tensor q, Tensor k, Tensor v, Tensor out, Tensor softmax_lse, Tensor(a6!)? dq, Tensor(a7!)? dk, Tensor(a8!)? dv, float dropout_p, float softmax_scale, bool causal, SymInt window_size_left, SymInt window_size_right, float softcap, Tensor? alibi_slopes, bool deterministic, Tensor? rng_state=None) -> Tensor
+    registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922
+  dispatch key: ADInplaceOrView
+  previous kernel: no debug info
+       new kernel: registered at /opt/venv/lib/python3.10/site-packages/torch/_library/custom_ops.py:922 (Triggered internally at /pytorch/aten/src/ATen/core/dispatch/OperatorEntry.cpp:208.)
+  self.m.impl(
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/inference/unified_memory.py:83: UserWarning: Failed to create unified memory mempool.
+  warnings.warn("Failed to create unified memory mempool.")
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/inference/unified_memory.py:83: UserWarning: Failed to create unified memory mempool.
+  warnings.warn("Failed to create unified memory mempool.")
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/inference/unified_memory.py:83: UserWarning: Failed to create unified memory mempool.
+  warnings.warn("Failed to create unified memory mempool.")
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/inference/unified_memory.py:83: UserWarning: Failed to create unified memory mempool.
+  warnings.warn("Failed to create unified memory mempool.")
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/inference/unified_memory.py:83: UserWarning: Failed to create unified memory mempool.
+  warnings.warn("Failed to create unified memory mempool.")
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/inference/unified_memory.py:83: UserWarning: Failed to create unified memory mempool.
+  warnings.warn("Failed to create unified memory mempool.")
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/inference/unified_memory.py:83: UserWarning: Failed to create unified memory mempool.
+  warnings.warn("Failed to create unified memory mempool.")
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'repr' attribute with value False was provided to the `Field()` function, which has no effect in the context it was used. 'repr' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'frozen' attribute with value True was provided to the `Field()` function, which has no effect in the context it was used. 'frozen' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'repr' attribute with value False was provided to the `Field()` function, which has no effect in the context it was used. 'repr' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'frozen' attribute with value True was provided to the `Field()` function, which has no effect in the context it was used. 'frozen' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'repr' attribute with value False was provided to the `Field()` function, which has no effect in the context it was used. 'repr' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'frozen' attribute with value True was provided to the `Field()` function, which has no effect in the context it was used. 'frozen' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'repr' attribute with value False was provided to the `Field()` function, which has no effect in the context it was used. 'repr' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'frozen' attribute with value True was provided to the `Field()` function, which has no effect in the context it was used. 'frozen' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'repr' attribute with value False was provided to the `Field()` function, which has no effect in the context it was used. 'repr' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'frozen' attribute with value True was provided to the `Field()` function, which has no effect in the context it was used. 'frozen' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'repr' attribute with value False was provided to the `Field()` function, which has no effect in the context it was used. 'repr' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'frozen' attribute with value True was provided to the `Field()` function, which has no effect in the context it was used. 'frozen' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'repr' attribute with value False was provided to the `Field()` function, which has no effect in the context it was used. 'repr' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'frozen' attribute with value True was provided to the `Field()` function, which has no effect in the context it was used. 'frozen' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'repr' attribute with value False was provided to the `Field()` function, which has no effect in the context it was used. 'repr' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+/opt/venv/lib/python3.10/site-packages/pydantic/_internal/_generate_schema.py:2249: UnsupportedFieldAttributeWarning: The 'frozen' attribute with value True was provided to the `Field()` function, which has no effect in the context it was used. 'frozen' is field-specific metadata, and can only be attached to a model field using `Annotated` metadata or by assignment. This may have happened because an `Annotated` type alias using the `type` statement was used, or if the `Field()` function was attached to a single member of a union type.
+  warnings.warn(
+[aiter] import [module_aiter_enum] under /opt/venv/lib/python3.10/site-packages/aiter/jit/module_aiter_enum.so
+[aiter] import [module_aiter_enum] under /opt/venv/lib/python3.10/site-packages/aiter/jit/module_aiter_enum.so
+[aiter] import [module_aiter_enum] under /opt/venv/lib/python3.10/site-packages/aiter/jit/module_aiter_enum.so
+/opt/venv/lib/python3.10/site-packages/apex/transformer/functional/fused_rope.py:49: UserWarning: Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0
+  warnings.warn("Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0", UserWarning)
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/energy_monitor.py:9: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  from pynvml import (
+[aiter] import [module_aiter_enum] under /opt/venv/lib/python3.10/site-packages/aiter/jit/module_aiter_enum.so
+[aiter] import [module_aiter_enum] under /opt/venv/lib/python3.10/site-packages/aiter/jit/module_aiter_enum.so
+[aiter] import [module_aiter_enum] under /opt/venv/lib/python3.10/site-packages/aiter/jit/module_aiter_enum.so
+[aiter] import [module_aiter_enum] under /opt/venv/lib/python3.10/site-packages/aiter/jit/module_aiter_enum.so
+[aiter] import [module_aiter_enum] under /opt/venv/lib/python3.10/site-packages/aiter/jit/module_aiter_enum.so
+fused_indices_to_multihot has reached end of life. Please migrate to a non-experimental function.
+/opt/venv/lib/python3.10/site-packages/apex/transformer/functional/fused_rope.py:49: UserWarning: Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0
+  warnings.warn("Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0", UserWarning)
+/opt/venv/lib/python3.10/site-packages/apex/transformer/functional/fused_rope.py:49: UserWarning: Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0
+  warnings.warn("Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0", UserWarning)
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/energy_monitor.py:9: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  from pynvml import (
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/energy_monitor.py:9: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  from pynvml import (
+/opt/venv/lib/python3.10/site-packages/apex/transformer/functional/fused_rope.py:49: UserWarning: Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0
+  warnings.warn("Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0", UserWarning)
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/energy_monitor.py:9: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  from pynvml import (
+/opt/venv/lib/python3.10/site-packages/apex/transformer/functional/fused_rope.py:49: UserWarning: Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0
+  warnings.warn("Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0", UserWarning)
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/energy_monitor.py:9: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  from pynvml import (
+fused_indices_to_multihot has reached end of life. Please migrate to a non-experimental function.
+fused_indices_to_multihot has reached end of life. Please migrate to a non-experimental function.
+/opt/venv/lib/python3.10/site-packages/apex/transformer/functional/fused_rope.py:49: UserWarning: Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0
+  warnings.warn("Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0", UserWarning)
+/opt/venv/lib/python3.10/site-packages/apex/transformer/functional/fused_rope.py:49: UserWarning: Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0
+  warnings.warn("Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0", UserWarning)
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/energy_monitor.py:9: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  from pynvml import (
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/energy_monitor.py:9: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  from pynvml import (
+fused_indices_to_multihot has reached end of life. Please migrate to a non-experimental function.
+/opt/venv/lib/python3.10/site-packages/apex/transformer/functional/fused_rope.py:49: UserWarning: Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0
+  warnings.warn("Aiter backend is selected for fused RoPE. This has lower precision. To disable aiter, export USE_ROCM_AITER_ROPE_BACKEND=0", UserWarning)
+/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/core/energy_monitor.py:9: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  from pynvml import (
+fused_indices_to_multihot has reached end of life. Please migrate to a non-experimental function.
+fused_indices_to_multihot has reached end of life. Please migrate to a non-experimental function.
+fused_indices_to_multihot has reached end of life. Please migrate to a non-experimental function.
+fused_indices_to_multihot has reached end of life. Please migrate to a non-experimental function.
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[33m[1mWARNING[0m] [33m[1m[trainer.py:438]: MegatronTrainer: monkey patch TopKRouter...[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[33m[1mWARNING[0m] [33m[1m[trainer.py:308]: MegatronTrainer: monkey patch get_extra_te_kwargs...[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[33m[1mWARNING[0m] [33m[1m[trainer.py:541]: MegatronTrainer: Patching FileSystemWriterAsync...[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[33m[1mWARNING[0m] [33m[1m[trainer.py:553]: MegatronTrainer: Patch FileSystemWriterAsync successfully.[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:647] : -run update_primus_config...[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:755] : -rank:              0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:756] : -local_rank:        0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:757] : -world_size:        8[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:774] : -save:              /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/output/amd/root/llama3.1_8B-pretrain/checkpoints[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:781] : -auto_continue_train:False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:817] : -disable_tensorboard:True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:818] :   -tensorboard_dir: None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[---------trainer.py:834] : args.wandb_project is disabled, as args.disable_wandb=True.[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:835] : -disable_wandb:     True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:841] :   -wandb_project:   None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:842] :   -wandb_exp_name:  None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:843] :   -wandb_save_dir:  None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:844] :   -wandb_entity:    None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:847] : -disable_mlflow:    True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:861] :   -mlflow_run_name: None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:862] :   -mlflow_experiment_name:None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[-----import_utils.py:30] : [Primus][MegatronCompat] Loaded model_provider from model_provider[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[-----import_utils.py:30] : [Primus][MegatronCompat] Loaded gpt_builder from gpt_builders[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[---------trainer.py:655] : -run initialize_megatron...[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[--------trainer.py:1089] : -load:              None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[--------trainer.py:1090] : -use_checkpoint_args:False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[-------arguments.py:416] : using world size: 8, data-parallel size: 8, context-parallel size: 1, hierarchical context-parallel sizes: None, tensor-model-parallel size: 1, pipeline-model-parallel size: 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[-------arguments.py:598] : Number of virtual stages per pipeline stage: None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[-------arguments.py:722] : accumulate and all-reduce gradients in fp32 for bfloat16 data type.[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[-------arguments.py:733] : using torch.bfloat16 for parameters ...[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1191] : ------------------------ arguments ------------------------[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   account_for_embedding_in_pipeline_split ......... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   account_for_loss_in_pipeline_split .............. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   accumulate_allreduce_grads_in_fp32 .............. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   adam_beta1 ...................................... 0.9[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   adam_beta2 ...................................... 0.95[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   adam_eps ........................................ 1e-08[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   add_bias_linear ................................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   add_position_embedding .......................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   add_qkv_bias .................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   adlr_autoresume ................................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   adlr_autoresume_interval ........................ 1000[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   align_grad_reduce ............................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   align_param_gather .............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   allow_padding_num_layers ........................ True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   app_tag_run_name ................................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   app_tag_run_version ............................. 0.0.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   apply_layernorm_1p .............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   apply_query_key_layer_scaling ................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   apply_residual_connection_post_layernorm ........ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   apply_rope_fusion ............................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   async_save ...................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   async_tensor_model_parallel_allreduce ........... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   attention_backend ............................... auto[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   attention_dropout ............................... 0.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   attention_softmax_in_fp32 ....................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   attn_logit_softcapping .......................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   auto_continue_train ............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   auto_detect_ckpt_format ......................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   auto_offload_time ............................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   barrier_with_L1_time ............................ True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   bert_binary_head ................................ True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   bert_embedder_type .............................. megatron[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   bert_load ....................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   bf16 ............................................ True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   bias_dropout_fusion ............................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   bias_gelu_fusion ................................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   bias_swiglu_fusion .............................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   biencoder_projection_dim ........................ 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   biencoder_shared_query_context_model ............ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   block_data_path ................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   calc_ft_timeouts ................................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   calculate_per_token_loss ........................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   check_for_large_grads ........................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   check_for_nan_in_loss_and_grad .................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   check_for_spiky_loss ............................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   check_weight_hash_across_dp_replicas_interval ... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ckpt_assume_constant_structure .................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ckpt_convert_format ............................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ckpt_convert_save ............................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ckpt_convert_update_legacy_dist_opt_format ...... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ckpt_format ..................................... torch[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ckpt_fully_parallel_load ........................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ckpt_fully_parallel_save ........................ True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ckpt_fully_parallel_save_deprecated ............. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ckpt_step ....................................... None[0m
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 402, in hf_raise_for_status
+    response.raise_for_status()
+  File "/opt/venv/lib/python3.10/site-packages/requests/models.py", line 1026, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url: https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 479, in cached_files
+    hf_hub_download(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1007, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1114, in _hf_hub_download_to_cache_dir
+    _raise_on_head_call_error(head_call_error, force_download, local_files_only)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1655, in _raise_on_head_call_error
+    raise head_call_error
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1543, in _get_metadata_or_catch_error
+    metadata = get_hf_file_metadata(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1460, in get_hf_file_metadata
+    r = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 283, in _request_wrapper
+    response = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 307, in _request_wrapper
+    hf_raise_for_status(response)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 419, in hf_raise_for_status
+    raise _format(GatedRepoError, message, response) from e
+huggingface_hub.errors.GatedRepoError: 401 Client Error. (Request ID: Root=1-68ff34ff-31c5092179583ff2493c362c;cb5c5fd8-e059-4208-a194-e7a5c4930169)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 43, in <module>
+    main()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 35, in main
+    args.func(args, unknown_args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/train_cli.py", line 15, in run
+    launch_pretrain_from_cli(args, overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 164, in launch_pretrain_from_cli
+    launch_pretrain_trainer(primus_cfg=primus_cfg, extra_args=unknown_overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 133, in launch_pretrain_trainer
+    trainer.init()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 656, in init
+    self.initialize_megatron(
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 1130, in initialize_megatron
+    global_vars._GLOBAL_TOKENIZER = build_tokenizer(args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/backends/megatron/training/tokenizer/tokenizer.py", line 44, in build_tokenizer
+    tokenizer = _HuggingFaceTokenizer(args.tokenizer_model)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/training/tokenizer/tokenizer.py", line 144, in __init__
+    self._tokenizer = transformers.AutoTokenizer.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/tokenization_auto.py", line 1069, in from_pretrained
+    config = AutoConfig.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/configuration_auto.py", line 1250, in from_pretrained
+    config_dict, unused_kwargs = PretrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 649, in get_config_dict
+    config_dict, kwargs = cls._get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 708, in _get_config_dict
+    resolved_config_file = cached_file(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 321, in cached_file
+    file = cached_files(path_or_repo_id=path_or_repo_id, filenames=[filename], **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 543, in cached_files
+    raise OSError(
+OSError: You are trying to access a gated repo.
+Make sure to have access to it at https://huggingface.co/meta-llama/Llama-3.1-8B.
+401 Client Error. (Request ID: Root=1-68ff34ff-31c5092179583ff2493c362c;cb5c5fd8-e059-4208-a194-e7a5c4930169)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   classes_fraction ................................ 1.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   clip_grad ....................................... 1.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   clone_scatter_output_in_embedding ............... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   config_logger_dir ............................... [0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   consumed_train_samples .......................... 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   consumed_valid_samples .......................... 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   context_parallel_size ........................... 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   cp_comm_type .................................... p2p[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   cpu_offload ..................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   create_attention_mask_in_dataloader ............. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   cross_entropy_fusion_impl ....................... te[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   cross_entropy_loss_fusion ....................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   cuda_graph_scope ................................ full[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   cuda_graph_warmup_steps ......................... 3[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   data_args_path .................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   data_cache_path ................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   data_parallel_random_init ....................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   data_parallel_sharding_strategy ................. no_shard[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   data_parallel_size .............................. 8[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   data_path ....................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   data_per_class_fraction ......................... 1.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   data_sharding ................................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   dataloader_type ................................. cyclic[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ddp_average_in_collective ....................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ddp_bucket_size ................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ddp_num_buckets ................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ddp_pad_buckets_for_high_nccl_busbw ............. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   debug_scheduler_table ........................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   decoder_first_pipeline_num_layers ............... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   decoder_last_pipeline_num_layers ................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   decoder_num_layers .............................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   decoder_pipeline_manual_split_list .............. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   decoder_seq_length .............................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   decoupled_lr .................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   decoupled_min_lr ................................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   decrease_batch_size_if_needed ................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   defer_embedding_wgrad_compute ................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   delay_wgrad_compute ............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   deprecated_use_mcore_models ..................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   deterministic_mode .............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   dino_bottleneck_size ............................ 256[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   dino_freeze_last_layer .......................... 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   dino_head_hidden_size ........................... 2048[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   dino_local_crops_number ......................... 10[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   dino_local_img_size ............................. 96[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   dino_norm_last_layer ............................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   dino_teacher_temp ............................... 0.07[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   dino_warmup_teacher_temp ........................ 0.04[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   dino_warmup_teacher_temp_epochs ................. 30[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   disable_compile_dependencies .................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   disable_last_saving ............................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   disable_mamba_mem_eff_path ...................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   disable_mlflow .................................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   disable_primus_topk_router ...................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   disable_profiler_activity_cpu ................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   disable_straggler_on_startup .................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   disable_tensorboard ............................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   disable_wandb ................................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   dist_ckpt_format_deprecated ..................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   dist_ckpt_strictness ............................ assume_ok_unexpected[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   distribute_saved_activations .................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   distributed_backend ............................. nccl[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   distributed_timeout_minutes ..................... 60[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   dump_pp_data .................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   embedding_path .................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   empty_unused_memory_level ....................... 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   enable_1f1b_v ................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   enable_cuda_graph ............................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   enable_exactly_numeric_match .................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   enable_experimental ............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   enable_ft_package ............................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   enable_gloo_process_groups ...................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   enable_one_logger ............................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   enable_optimizer_post_validation ................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   enable_primus_turbo ............................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   enable_turbo_attention_float8 ................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   enable_zb_runtime ............................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   enable_zero_bubble .............................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   encoder_num_layers .............................. 32[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   encoder_pipeline_model_parallel_size ............ 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   encoder_seq_length .............................. 8192[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   encoder_tensor_model_parallel_size .............. 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   end_weight_decay ................................ 0.1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   eod_mask_loss ................................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   error_injection_rate ............................ 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   error_injection_type ............................ transient_error[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   eval_interval ................................... 1000[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   eval_iters ...................................... 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   evidence_data_path .............................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   exit_duration_in_mins ........................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   exit_interval ................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   exit_on_missing_checkpoint ...................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   exit_signal_handler ............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   exp_avg_dtype ................................... torch.float32[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   exp_avg_sq_dtype ................................ torch.float32[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   expert_model_parallel_size ...................... 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   expert_tensor_parallel_size ..................... 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   external_cuda_graph ............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ffn_hidden_size ................................. 14336[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   file_sink_level ................................. DEBUG[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   final_logit_softcapping ......................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   finetune ........................................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   first_last_layers_bf16 .......................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   flash_decode .................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fp16 ............................................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fp16_lm_cross_entropy ........................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fp32_residual_connection ........................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fp4 ............................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fp4_param ....................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fp4_recipe ...................................... nvfp4[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fp8 ............................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fp8_amax_compute_algo ........................... max[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fp8_amax_history_len ............................ 1024[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fp8_interval .................................... 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fp8_margin ...................................... 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fp8_param_gather ................................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fp8_recipe ...................................... delayed[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fp8_wgrad ....................................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   framework ....................................... megatron[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   full_validation ................................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   fused_padded_mla_attention ...................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   global_batch_size ............................... 128[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   grad_reduce_in_bf16 ............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   gradient_accumulation_fusion .................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   gradient_reduce_div_fusion ...................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   group_query_attention ........................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   grouped_gemm_backend ............................ turbo-gg[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   grpo_clamp_eps_lower ............................ 0.01[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   grpo_clamp_eps_upper ............................ 0.01[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   grpo_default_temperature ........................ 1.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   grpo_default_top_p .............................. 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   grpo_entropy_term_weight ........................ 0.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   grpo_filter_groups_with_same_reward ............. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   grpo_group_size ................................. 2[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   grpo_iterations ................................. 2[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   grpo_kl_beta .................................... 0.001[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   grpo_prompts_per_step ........................... 32[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   head_lr_mult .................................... 1.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   heterogeneous_layers_config_encoded_json ........ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   heterogeneous_layers_config_path ................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   hidden_dropout .................................. 0.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   hidden_size ..................................... 4096[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   hierarchical_context_parallel_sizes ............. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   high_priority_stream_groups ..................... [][0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   hybrid_attention_ratio .......................... 0.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   hybrid_mlp_ratio ................................ 0.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   hybrid_override_pattern ......................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   hysteresis ...................................... 2[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ict_head_size ................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   ict_load ........................................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   img_h ........................................... 224[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   img_w ........................................... 224[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   indexer_batch_size .............................. 128[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   indexer_log_interval ............................ 1000[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   inference_batch_times_seqlen_threshold .......... -1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   inference_dynamic_batching ...................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   inference_dynamic_batching_buffer_guaranteed_fraction  0.2[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   inference_dynamic_batching_buffer_overflow_factor  None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   inference_dynamic_batching_buffer_size_gb ....... 40.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   inference_dynamic_batching_max_requests_override  None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   inference_dynamic_batching_max_tokens_override .. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   inference_max_requests .......................... 8[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   inference_max_seq_length ........................ 2560[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   inference_rng_tracker ........................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   init_method_std ................................. 0.008[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   init_method_xavier_uniform ...................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   init_model_with_meta_device ..................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   initial_loss_scale .............................. 4294967296[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   inprocess_restart ............................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   interleave_group_size ........................... 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   is_hybrid_model ................................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   iter_per_epoch .................................. 1250[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   iterations_to_skip .............................. [][0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   keep_fp8_transpose_cache_when_using_custom_fsdp . False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   kv_channels ..................................... 128[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   kv_lora_rank .................................... 32[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   langrl_env_config ............................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   langrl_inference_server_conversation_template ... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   langrl_inference_server_type .................... inplace_megatron[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   lazy_mpu_init ................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   legacy_tokenizer ................................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   load ............................................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   load_main_params_from_ckpt ...................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   local_rank ...................................... 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_avg_reset_interval .......................... 50[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_avg_skip_iterations ......................... 2[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_batch_size_to_tensorboard ................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_interval .................................... 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_learning_rate_to_tensorboard ................ True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_loss_scale_to_tensorboard ................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_memory_to_tensorboard ....................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_num_zeros_in_grad ........................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_params_norm ................................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_progress .................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_straggler ................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_throughput .................................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_timers_to_tensorboard ....................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_validation_ppl_to_tensorboard ............... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   log_world_size_to_tensorboard ................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   logging_level ................................... 10[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   loss_scale ...................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   loss_scale_window ............................... 1000[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   lr .............................................. 1e-05[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   lr_decay_iters .................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   lr_decay_samples ................................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   lr_decay_style .................................. cosine[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   lr_warmup_fraction .............................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   lr_warmup_init .................................. 0.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   lr_warmup_iters ................................. 2[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   lr_warmup_samples ............................... 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   lr_wsd_decay_iters .............................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   lr_wsd_decay_samples ............................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   lr_wsd_decay_style .............................. exponential[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   main_grads_dtype ................................ torch.float32[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   main_params_dtype ............................... torch.float32[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   make_vocab_size_divisible_by .................... 128[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mamba_head_dim .................................. 64[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mamba_num_groups ................................ 8[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mamba_num_heads ................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mamba_state_dim ................................. 128[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   manual_gc ....................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   manual_gc_eval .................................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   manual_gc_interval .............................. 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mask_factor ..................................... 1.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mask_prob ....................................... 0.15[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mask_type ....................................... random[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   masked_softmax_fusion ........................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   max_position_embeddings ......................... 8192[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   max_tokens_to_oom ............................... 12000[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   memory_snapshot_path ............................ snapshot.pickle[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   merge_file ...................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   micro_batch_size ................................ 2[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   microbatch_group_size_per_vp_stage .............. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   min_loss_scale .................................. 1.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   min_lr .......................................... 0.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mlflow_experiment_name .......................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mlflow_run_name ................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mmap_bin_files .................................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mock_data ....................................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_aux_loss_coeff .............................. 0.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_enable_deepep ............................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_expert_capacity_factor ...................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_extended_tp ................................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_ffn_hidden_size ............................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_grouped_gemm ................................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_input_jitter_eps ............................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_layer_freq .................................. 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_layer_recompute ............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_pad_expert_input_to_capacity ................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_per_layer_logging ........................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_permute_fusion .............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_router_bias_update_rate ..................... 0.001[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_router_dtype ................................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_router_enable_expert_bias ................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_router_force_load_balancing ................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_router_group_topk ........................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_router_load_balancing_type .................. aux_loss[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_router_num_groups ........................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_router_pre_softmax .......................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_router_score_function ....................... softmax[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_router_topk ................................. 2[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_router_topk_scaling_factor .................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_shared_expert_intermediate_size ............. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_shared_expert_overlap ....................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_token_dispatcher_type ....................... allgather[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_token_drop_policy ........................... probs[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_use_fused_router_with_aux_score ............. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_use_legacy_grouped_gemm ..................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_use_upcycling ............................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   moe_z_loss_coeff ................................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mscale .......................................... 1.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mscale_all_dim .................................. 1.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mtp_loss_scaling_factor ......................... 0.1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   mtp_num_layers .................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   multi_latent_attention .......................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   multiple_validation_sets ........................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   name ............................................ pre_trainer[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   nccl_communicator_config_path ................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   no_fp8_weight_transpose_cache ................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   no_load_optim ................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   no_load_rng ..................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   no_persist_layer_norm ........................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   no_save_optim ................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   no_save_rng ..................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   non_persistent_ckpt_type ........................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   non_persistent_global_ckpt_dir .................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   non_persistent_local_ckpt_algo .................. fully_parallel[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   non_persistent_local_ckpt_dir ................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   non_persistent_save_interval .................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   norm_epsilon .................................... 1e-06[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   normalization ................................... RMSNorm[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   num_attention_heads ............................. 32[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   num_channels .................................... 3[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   num_classes ..................................... 1000[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   num_dataset_builder_threads ..................... 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   num_distributed_optimizer_instances ............. 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   num_experts ..................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   num_layers ...................................... 32[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   num_layers_at_end_in_bf16 ....................... 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   num_layers_at_start_in_bf16 ..................... 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   num_layers_per_virtual_pipeline_stage ........... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   num_query_groups ................................ 8[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   num_seq_splits .................................. 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   num_virtual_stages_per_pipeline_rank ............ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   num_workers ..................................... 8[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   offload_chunk_num ............................... 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   offload_overlap_sr .............................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   offload_time .................................... 1.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   one_logger_async ................................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   one_logger_project .............................. megatron-lm[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   one_logger_run_name ............................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   onnx_safe ....................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   openai_gelu ..................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   optimizer ....................................... adam[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   optimizer_cpu_offload ........................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   optimizer_offload_fraction ...................... 1.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   output_bert_embeddings .......................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   overlap_cpu_optimizer_d2h_h2d ................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   overlap_grad_reduce ............................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   overlap_moe_expert_parallel_comm ................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   overlap_p2p_comm ................................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   overlap_param_gather ............................ True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   overlap_param_gather_with_optimizer_step ........ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   override_opt_param_scheduler .................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   parallel_output ................................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   params_dtype .................................... torch.bfloat16[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   patch_dim ....................................... 16[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   patch_zero_bubble ............................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   per_split_data_args_path ........................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   perform_initialization .......................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   perform_rl_step ................................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   pin_cpu_grads ................................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   pin_cpu_params .................................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   pipeline_model_parallel_comm_backend ............ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   pipeline_model_parallel_layout .................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   pipeline_model_parallel_size .................... 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   pipeline_model_parallel_split_rank .............. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   position_embedding_type ......................... rope[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   pp_warmup ....................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   pre_communication_optimization .................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   pretrained_checkpoint ........................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   profile ......................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   profile_memory_iter ............................. -1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   profile_ranks ................................... [0][0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   profile_step_end ................................ 12[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   profile_step_start .............................. 10[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   q_lora_rank ..................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   qk_head_dim ..................................... 128[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   qk_l2_norm ...................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   qk_layernorm .................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   qk_pos_emb_head_dim ............................. 64[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   query_in_block_prob ............................. 0.1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   quick_geglu ..................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rampup_batch_size ............................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rank ............................................ 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   recompute_granularity ........................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   recompute_method ................................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   recompute_num_layers ............................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   record_memory_history ........................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   replication ..................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   replication_factor .............................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   replication_jump ................................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rerun_mode ...................................... disabled[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   reset_attention_mask ............................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   reset_position_ids .............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   result_rejected_tracker_filename ................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   retriever_report_topk_accuracies ................ [][0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   retriever_score_scaling ......................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   retriever_seq_length ............................ 256[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   retro_add_retriever ............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   retro_attention_gate ............................ 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   retro_cyclic_train_iters ........................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   retro_encoder_attention_dropout ................. 0.1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   retro_encoder_hidden_dropout .................... 0.1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   retro_encoder_layers ............................ 2[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   retro_num_neighbors ............................. 2[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   retro_num_retrieved_chunks ...................... 2[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   retro_project_dir ............................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   retro_verify_neighbor_count ..................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rl_calculate_intra_group_similarity ............. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rl_importance_sampling_truncation_coef .......... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rl_inference_logprobs_is_correction ............. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rl_offload_kv_cache_during_training ............. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rl_offload_optimizer_during_inference ........... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rl_partial_rollouts ............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rl_prompts_per_eval ............................. 32[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rl_remove_kv_cache_during_training .............. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rl_reset_cuda_graphs ............................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rope_scaling_factor ............................. 8.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rope_type ....................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rotary_base ..................................... 500000[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rotary_interleaved .............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rotary_percent .................................. 1.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rotary_scaling_factor ........................... 40[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   rotary_seq_len_interpolation_factor ............. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   router_logit_softcapping ........................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   run_workload_inspector_server ................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   s3_cache_path ................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   sample_rate ..................................... 1.0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   save ............................................ /shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/output/amd/root/llama3.1_8B-pretrain/checkpoints[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   save_interval ................................... 20000[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   save_retain_interval ............................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   scatter_gather_tensors_in_pipeline .............. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   seed ............................................ 1234[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   seq_length ...................................... 8192[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   sequence_parallel ............................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   sgd_momentum .................................... 0.9[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   sharp_enabled_group ............................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   short_seq_prob .................................. 0.1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   sink_level ...................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   skip_train ...................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   skipped_train_samples ........................... 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   spec ............................................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   split ........................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   squared_relu .................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   standalone_embedding_stage ...................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   start_weight_decay .............................. 0.1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   stderr_sink_level ............................... DEBUG[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   straggler_ctrlr_port ............................ 65535[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   straggler_minmax_count .......................... 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   suggested_communication_unit_size ............... 400000000[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   swiglu .......................................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   swin_backbone_type .............................. tiny[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   te_rng_tracker .................................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tensor_model_parallel_size ...................... 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tensorboard_dir ................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tensorboard_log_interval ........................ 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tensorboard_queue_size .......................... 1000[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   test_data_path .................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   test_mode ....................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tiktoken_num_special_tokens ..................... 1000[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tiktoken_pattern ................................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tiktoken_special_tokens ......................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   timing_log_level ................................ 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   timing_log_option ............................... minmax[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   titles_data_path ................................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tokenizer_model ................................. meta-llama/Llama-3.1-8B[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tokenizer_type .................................. Llama3Tokenizer[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   torch_profiler_record_shapes .................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   torch_profiler_use_gzip ......................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   torch_profiler_with_stack ....................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tp_comm_bootstrap_backend ....................... nccl[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tp_comm_bulk_dgrad .............................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tp_comm_bulk_wgrad .............................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tp_comm_overlap ................................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tp_comm_overlap_ag .............................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tp_comm_overlap_cfg ............................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tp_comm_overlap_rs .............................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tp_comm_overlap_rs_dgrad ........................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tp_comm_split_ag ................................ True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   tp_comm_split_rs ................................ True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   train_data_path ................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   train_iters ..................................... 50[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   train_samples ................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   train_sync_interval ............................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   trainable ....................................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   transformer_impl ................................ transformer_engine[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   transformer_pipeline_model_parallel_size ........ 1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   trust_remote_code ............................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   turbo_deepep_num_cu ............................. 32[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   turbo_deepep_use_comm_stream .................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   turbo_sync_free_moe_stage ....................... 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   untie_embeddings_and_output_weights ............. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_checkpoint_args ............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_checkpoint_opt_param_scheduler .............. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_cpu_initialization .......................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_custom_fsdp ................................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_deprecated_20241209_moe_layer ............... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_dist_ckpt ................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_dist_ckpt_deprecated ........................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_distributed_optimizer ....................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_flash_attn .................................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_legacy_models ............................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_megatron_fsdp ............................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_mp_args_from_checkpoint_args ................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_one_sent_docs ............................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_persistent_ckpt_worker ...................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_precision_aware_optimizer ................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_pytorch_profiler ............................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_ring_exchange_p2p ........................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_rocm_mem_info ............................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_rocm_mem_info_iters ......................... [1, 2][0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_rope_scaling ................................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_rotary_position_embeddings .................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_sharp ....................................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_te_activation_func .......................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_tokenizer_model_from_checkpoint_args ........ True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_torch_fsdp2 ................................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_torch_optimizer_for_cpu_offload ............. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_tp_pp_dp_mapping ............................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-7/8[0m][[34m[1mDEBUG[0m] [34m[1m[-----global_vars.py:236] : WARNING: one_logger package is required to enable e2e metrics tracking. please go to https://confluence.nvidia.com/display/MLWFO/Package+Repositories for details to install it[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_turbo_attention ............................. True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_turbo_deepep ................................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_turbo_fused_act_with_probs .................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_turbo_grouped_mlp ........................... True[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   use_turbo_parallel_linear ....................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   v_head_dim ...................................... 128[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   valid_data_path ................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   variable_seq_lengths ............................ False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   virtual_pipeline_model_parallel_size ............ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   vision_backbone_type ............................ vit[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   vision_pretraining .............................. False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   vision_pretraining_type ......................... classify[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   vocab_extra_ids ................................. 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   vocab_file ...................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   vocab_size ...................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   wandb_entity .................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   wandb_exp_name .................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   wandb_project ................................... None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   wandb_save_dir .................................. None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   weight_decay .................................... 0.1[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   weight_decay_incr_style ......................... constant[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   wgrad_deferral_limit ............................ 0[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   world_size ...................................... 8[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   yaml_cfg ........................................ None[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   zero_bubble_adaptive_memory_limit_percentile .... 85[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   zero_bubble_max_pending_backward ................ auto[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   zero_bubble_pipeline_timers_end_iter ............ 110[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   zero_bubble_pipeline_timers_start_iter .......... 100[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   zero_bubble_v_schedule .......................... False[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1198] :   zero_bubble_v_schedule_mem_setup ................ half[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[34m[1mDEBUG[0m] [34m[1m[------arguments.py:1199] : -------------------- end of arguments ---------------------[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[--------trainer.py:1116] : -monkey patch megatron.training.global_vars._set_wandb_writer...[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[--------trainer.py:1121] : -set_global_variables...[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[--------trainer.py:1123] : -set_primus_global_variables...[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[--------trainer.py:1128] : -build_tokenizer...[0m
+[[32m20251027 09:01:51[0m][[36mrank-0/8[0m][[1mINFO [0m] [1m[--------tokenizer.py:40] : -building Llama3Tokenizer tokenizer...[0m
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 402, in hf_raise_for_status
+    response.raise_for_status()
+  File "/opt/venv/lib/python3.10/site-packages/requests/models.py", line 1026, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url: https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 479, in cached_files
+    hf_hub_download(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1007, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1114, in _hf_hub_download_to_cache_dir
+    _raise_on_head_call_error(head_call_error, force_download, local_files_only)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1655, in _raise_on_head_call_error
+    raise head_call_error
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1543, in _get_metadata_or_catch_error
+    metadata = get_hf_file_metadata(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1460, in get_hf_file_metadata
+    r = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 283, in _request_wrapper
+    response = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 307, in _request_wrapper
+    hf_raise_for_status(response)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 419, in hf_raise_for_status
+    raise _format(GatedRepoError, message, response) from e
+huggingface_hub.errors.GatedRepoError: 401 Client Error. (Request ID: Root=1-68ff34ff-2d583647265053d85b82c340;acb6ee72-a690-4f0a-b1c2-7760237abe37)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 43, in <module>
+    main()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 35, in main
+    args.func(args, unknown_args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/train_cli.py", line 15, in run
+    launch_pretrain_from_cli(args, overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 164, in launch_pretrain_from_cli
+    launch_pretrain_trainer(primus_cfg=primus_cfg, extra_args=unknown_overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 133, in launch_pretrain_trainer
+    trainer.init()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 656, in init
+    self.initialize_megatron(
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 1130, in initialize_megatron
+    global_vars._GLOBAL_TOKENIZER = build_tokenizer(args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/backends/megatron/training/tokenizer/tokenizer.py", line 44, in build_tokenizer
+    tokenizer = _HuggingFaceTokenizer(args.tokenizer_model)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/training/tokenizer/tokenizer.py", line 144, in __init__
+    self._tokenizer = transformers.AutoTokenizer.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/tokenization_auto.py", line 1069, in from_pretrained
+    config = AutoConfig.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/configuration_auto.py", line 1250, in from_pretrained
+    config_dict, unused_kwargs = PretrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 649, in get_config_dict
+    config_dict, kwargs = cls._get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 708, in _get_config_dict
+    resolved_config_file = cached_file(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 321, in cached_file
+    file = cached_files(path_or_repo_id=path_or_repo_id, filenames=[filename], **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 543, in cached_files
+    raise OSError(
+OSError: You are trying to access a gated repo.
+Make sure to have access to it at https://huggingface.co/meta-llama/Llama-3.1-8B.
+401 Client Error. (Request ID: Root=1-68ff34ff-2d583647265053d85b82c340;acb6ee72-a690-4f0a-b1c2-7760237abe37)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 402, in hf_raise_for_status
+    response.raise_for_status()
+  File "/opt/venv/lib/python3.10/site-packages/requests/models.py", line 1026, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url: https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 479, in cached_files
+    hf_hub_download(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1007, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1114, in _hf_hub_download_to_cache_dir
+    _raise_on_head_call_error(head_call_error, force_download, local_files_only)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1655, in _raise_on_head_call_error
+    raise head_call_error
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1543, in _get_metadata_or_catch_error
+    metadata = get_hf_file_metadata(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1460, in get_hf_file_metadata
+    r = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 283, in _request_wrapper
+    response = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 307, in _request_wrapper
+    hf_raise_for_status(response)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 419, in hf_raise_for_status
+    raise _format(GatedRepoError, message, response) from e
+huggingface_hub.errors.GatedRepoError: 401 Client Error. (Request ID: Root=1-68ff34ff-1a7a72cc5101527625761626;5ce2b75a-0c78-4945-a8f7-5ed80dccebdc)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 43, in <module>
+    main()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 35, in main
+    args.func(args, unknown_args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/train_cli.py", line 15, in run
+    launch_pretrain_from_cli(args, overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 164, in launch_pretrain_from_cli
+    launch_pretrain_trainer(primus_cfg=primus_cfg, extra_args=unknown_overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 133, in launch_pretrain_trainer
+    trainer.init()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 656, in init
+    self.initialize_megatron(
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 1130, in initialize_megatron
+    global_vars._GLOBAL_TOKENIZER = build_tokenizer(args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/backends/megatron/training/tokenizer/tokenizer.py", line 44, in build_tokenizer
+    tokenizer = _HuggingFaceTokenizer(args.tokenizer_model)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/training/tokenizer/tokenizer.py", line 144, in __init__
+    self._tokenizer = transformers.AutoTokenizer.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/tokenization_auto.py", line 1069, in from_pretrained
+    config = AutoConfig.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/configuration_auto.py", line 1250, in from_pretrained
+    config_dict, unused_kwargs = PretrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 649, in get_config_dict
+    config_dict, kwargs = cls._get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 708, in _get_config_dict
+    resolved_config_file = cached_file(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 321, in cached_file
+    file = cached_files(path_or_repo_id=path_or_repo_id, filenames=[filename], **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 543, in cached_files
+    raise OSError(
+OSError: You are trying to access a gated repo.
+Make sure to have access to it at https://huggingface.co/meta-llama/Llama-3.1-8B.
+401 Client Error. (Request ID: Root=1-68ff34ff-1a7a72cc5101527625761626;5ce2b75a-0c78-4945-a8f7-5ed80dccebdc)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 402, in hf_raise_for_status
+    response.raise_for_status()
+  File "/opt/venv/lib/python3.10/site-packages/requests/models.py", line 1026, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url: https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 479, in cached_files
+    hf_hub_download(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1007, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1114, in _hf_hub_download_to_cache_dir
+    _raise_on_head_call_error(head_call_error, force_download, local_files_only)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1655, in _raise_on_head_call_error
+    raise head_call_error
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1543, in _get_metadata_or_catch_error
+    metadata = get_hf_file_metadata(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1460, in get_hf_file_metadata
+    r = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 283, in _request_wrapper
+    response = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 307, in _request_wrapper
+    hf_raise_for_status(response)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 419, in hf_raise_for_status
+    raise _format(GatedRepoError, message, response) from e
+huggingface_hub.errors.GatedRepoError: 401 Client Error. (Request ID: Root=1-68ff34ff-777698c90487a42d44a0d2c0;8b8cd170-3b20-41ee-bfcc-2bc35ef17429)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 43, in <module>
+    main()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 35, in main
+    args.func(args, unknown_args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/train_cli.py", line 15, in run
+    launch_pretrain_from_cli(args, overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 164, in launch_pretrain_from_cli
+    launch_pretrain_trainer(primus_cfg=primus_cfg, extra_args=unknown_overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 133, in launch_pretrain_trainer
+    trainer.init()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 656, in init
+    self.initialize_megatron(
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 1130, in initialize_megatron
+    global_vars._GLOBAL_TOKENIZER = build_tokenizer(args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/backends/megatron/training/tokenizer/tokenizer.py", line 44, in build_tokenizer
+    tokenizer = _HuggingFaceTokenizer(args.tokenizer_model)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/training/tokenizer/tokenizer.py", line 144, in __init__
+    self._tokenizer = transformers.AutoTokenizer.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/tokenization_auto.py", line 1069, in from_pretrained
+    config = AutoConfig.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/configuration_auto.py", line 1250, in from_pretrained
+    config_dict, unused_kwargs = PretrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 649, in get_config_dict
+    config_dict, kwargs = cls._get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 708, in _get_config_dict
+    resolved_config_file = cached_file(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 321, in cached_file
+    file = cached_files(path_or_repo_id=path_or_repo_id, filenames=[filename], **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 543, in cached_files
+    raise OSError(
+OSError: You are trying to access a gated repo.
+Make sure to have access to it at https://huggingface.co/meta-llama/Llama-3.1-8B.
+401 Client Error. (Request ID: Root=1-68ff34ff-777698c90487a42d44a0d2c0;8b8cd170-3b20-41ee-bfcc-2bc35ef17429)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 402, in hf_raise_for_status
+    response.raise_for_status()
+  File "/opt/venv/lib/python3.10/site-packages/requests/models.py", line 1026, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url: https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 479, in cached_files
+    hf_hub_download(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1007, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1114, in _hf_hub_download_to_cache_dir
+    _raise_on_head_call_error(head_call_error, force_download, local_files_only)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1655, in _raise_on_head_call_error
+    raise head_call_error
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1543, in _get_metadata_or_catch_error
+    metadata = get_hf_file_metadata(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1460, in get_hf_file_metadata
+    r = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 283, in _request_wrapper
+    response = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 307, in _request_wrapper
+    hf_raise_for_status(response)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 419, in hf_raise_for_status
+    raise _format(GatedRepoError, message, response) from e
+huggingface_hub.errors.GatedRepoError: 401 Client Error. (Request ID: Root=1-68ff3500-077a6f9e6fe349ca27d92c57;2dc5da60-3d70-4552-bf8a-0951c3b79e15)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 43, in <module>
+    main()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 35, in main
+    args.func(args, unknown_args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/train_cli.py", line 15, in run
+    launch_pretrain_from_cli(args, overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 164, in launch_pretrain_from_cli
+    launch_pretrain_trainer(primus_cfg=primus_cfg, extra_args=unknown_overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 133, in launch_pretrain_trainer
+    trainer.init()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 656, in init
+    self.initialize_megatron(
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 1130, in initialize_megatron
+    global_vars._GLOBAL_TOKENIZER = build_tokenizer(args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/backends/megatron/training/tokenizer/tokenizer.py", line 44, in build_tokenizer
+    tokenizer = _HuggingFaceTokenizer(args.tokenizer_model)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/training/tokenizer/tokenizer.py", line 144, in __init__
+    self._tokenizer = transformers.AutoTokenizer.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/tokenization_auto.py", line 1069, in from_pretrained
+    config = AutoConfig.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/configuration_auto.py", line 1250, in from_pretrained
+    config_dict, unused_kwargs = PretrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 649, in get_config_dict
+    config_dict, kwargs = cls._get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 708, in _get_config_dict
+    resolved_config_file = cached_file(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 321, in cached_file
+    file = cached_files(path_or_repo_id=path_or_repo_id, filenames=[filename], **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 543, in cached_files
+    raise OSError(
+OSError: You are trying to access a gated repo.
+Make sure to have access to it at https://huggingface.co/meta-llama/Llama-3.1-8B.
+401 Client Error. (Request ID: Root=1-68ff3500-077a6f9e6fe349ca27d92c57;2dc5da60-3d70-4552-bf8a-0951c3b79e15)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 402, in hf_raise_for_status
+    response.raise_for_status()
+  File "/opt/venv/lib/python3.10/site-packages/requests/models.py", line 1026, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url: https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 479, in cached_files
+    hf_hub_download(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1007, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1114, in _hf_hub_download_to_cache_dir
+    _raise_on_head_call_error(head_call_error, force_download, local_files_only)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1655, in _raise_on_head_call_error
+    raise head_call_error
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1543, in _get_metadata_or_catch_error
+    metadata = get_hf_file_metadata(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1460, in get_hf_file_metadata
+    r = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 283, in _request_wrapper
+    response = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 307, in _request_wrapper
+    hf_raise_for_status(response)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 419, in hf_raise_for_status
+    raise _format(GatedRepoError, message, response) from e
+huggingface_hub.errors.GatedRepoError: 401 Client Error. (Request ID: Root=1-68ff3500-5e2c0a8949df51c461936844;bcdd31c0-9198-4204-88b7-14fa9219e69e)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 43, in <module>
+    main()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 35, in main
+    args.func(args, unknown_args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/train_cli.py", line 15, in run
+    launch_pretrain_from_cli(args, overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 164, in launch_pretrain_from_cli
+    launch_pretrain_trainer(primus_cfg=primus_cfg, extra_args=unknown_overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 133, in launch_pretrain_trainer
+    trainer.init()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 656, in init
+    self.initialize_megatron(
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 1130, in initialize_megatron
+    global_vars._GLOBAL_TOKENIZER = build_tokenizer(args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/backends/megatron/training/tokenizer/tokenizer.py", line 44, in build_tokenizer
+    tokenizer = _HuggingFaceTokenizer(args.tokenizer_model)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/training/tokenizer/tokenizer.py", line 144, in __init__
+    self._tokenizer = transformers.AutoTokenizer.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/tokenization_auto.py", line 1069, in from_pretrained
+    config = AutoConfig.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/configuration_auto.py", line 1250, in from_pretrained
+    config_dict, unused_kwargs = PretrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 649, in get_config_dict
+    config_dict, kwargs = cls._get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 708, in _get_config_dict
+    resolved_config_file = cached_file(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 321, in cached_file
+    file = cached_files(path_or_repo_id=path_or_repo_id, filenames=[filename], **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 543, in cached_files
+    raise OSError(
+OSError: You are trying to access a gated repo.
+Make sure to have access to it at https://huggingface.co/meta-llama/Llama-3.1-8B.
+401 Client Error. (Request ID: Root=1-68ff3500-5e2c0a8949df51c461936844;bcdd31c0-9198-4204-88b7-14fa9219e69e)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 402, in hf_raise_for_status
+    response.raise_for_status()
+  File "/opt/venv/lib/python3.10/site-packages/requests/models.py", line 1026, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url: https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 479, in cached_files
+    hf_hub_download(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1007, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1114, in _hf_hub_download_to_cache_dir
+    _raise_on_head_call_error(head_call_error, force_download, local_files_only)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1655, in _raise_on_head_call_error
+    raise head_call_error
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1543, in _get_metadata_or_catch_error
+    metadata = get_hf_file_metadata(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1460, in get_hf_file_metadata
+    r = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 283, in _request_wrapper
+    response = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 307, in _request_wrapper
+    hf_raise_for_status(response)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 419, in hf_raise_for_status
+    raise _format(GatedRepoError, message, response) from e
+huggingface_hub.errors.GatedRepoError: 401 Client Error. (Request ID: Root=1-68ff3500-4afa85a3198d48b56f290b82;1aecd6e6-dcb4-4c86-9e4e-cec713b50edf)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 43, in <module>
+    main()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 35, in main
+    args.func(args, unknown_args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/train_cli.py", line 15, in run
+    launch_pretrain_from_cli(args, overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 164, in launch_pretrain_from_cli
+    launch_pretrain_trainer(primus_cfg=primus_cfg, extra_args=unknown_overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 133, in launch_pretrain_trainer
+    trainer.init()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 656, in init
+    self.initialize_megatron(
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 1130, in initialize_megatron
+    global_vars._GLOBAL_TOKENIZER = build_tokenizer(args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/backends/megatron/training/tokenizer/tokenizer.py", line 44, in build_tokenizer
+    tokenizer = _HuggingFaceTokenizer(args.tokenizer_model)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/training/tokenizer/tokenizer.py", line 144, in __init__
+    self._tokenizer = transformers.AutoTokenizer.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/tokenization_auto.py", line 1069, in from_pretrained
+    config = AutoConfig.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/configuration_auto.py", line 1250, in from_pretrained
+    config_dict, unused_kwargs = PretrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 649, in get_config_dict
+    config_dict, kwargs = cls._get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 708, in _get_config_dict
+    resolved_config_file = cached_file(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 321, in cached_file
+    file = cached_files(path_or_repo_id=path_or_repo_id, filenames=[filename], **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 543, in cached_files
+    raise OSError(
+OSError: You are trying to access a gated repo.
+Make sure to have access to it at https://huggingface.co/meta-llama/Llama-3.1-8B.
+401 Client Error. (Request ID: Root=1-68ff3500-4afa85a3198d48b56f290b82;1aecd6e6-dcb4-4c86-9e4e-cec713b50edf)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 402, in hf_raise_for_status
+    response.raise_for_status()
+  File "/opt/venv/lib/python3.10/site-packages/requests/models.py", line 1026, in raise_for_status
+    raise HTTPError(http_error_msg, response=self)
+requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url: https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 479, in cached_files
+    hf_hub_download(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1007, in hf_hub_download
+    return _hf_hub_download_to_cache_dir(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1114, in _hf_hub_download_to_cache_dir
+    _raise_on_head_call_error(head_call_error, force_download, local_files_only)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1655, in _raise_on_head_call_error
+    raise head_call_error
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1543, in _get_metadata_or_catch_error
+    metadata = get_hf_file_metadata(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_validators.py", line 114, in _inner_fn
+    return fn(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 1460, in get_hf_file_metadata
+    r = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 283, in _request_wrapper
+    response = _request_wrapper(
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/file_download.py", line 307, in _request_wrapper
+    hf_raise_for_status(response)
+  File "/opt/venv/lib/python3.10/site-packages/huggingface_hub/utils/_http.py", line 419, in hf_raise_for_status
+    raise _format(GatedRepoError, message, response) from e
+huggingface_hub.errors.GatedRepoError: 401 Client Error. (Request ID: Root=1-68ff3500-183b4bfe629c287a42a9ddb3;b507efcc-f968-455f-8d6d-c632aa708440)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 43, in <module>
+    main()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/main.py", line 35, in main
+    args.func(args, unknown_args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/cli/train_cli.py", line 15, in run
+    launch_pretrain_from_cli(args, overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 164, in launch_pretrain_from_cli
+    launch_pretrain_trainer(primus_cfg=primus_cfg, extra_args=unknown_overrides)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/pretrain.py", line 133, in launch_pretrain_trainer
+    trainer.init()
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 656, in init
+    self.initialize_megatron(
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/modules/trainer/megatron/trainer.py", line 1130, in initialize_megatron
+    global_vars._GLOBAL_TOKENIZER = build_tokenizer(args)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/primus/backends/megatron/training/tokenizer/tokenizer.py", line 44, in build_tokenizer
+    tokenizer = _HuggingFaceTokenizer(args.tokenizer_model)
+  File "/shared/amdgpu/home/xiaoming_peng_qle/workspace/dev/Primus-CLI/third_party/Megatron-LM/megatron/training/tokenizer/tokenizer.py", line 144, in __init__
+    self._tokenizer = transformers.AutoTokenizer.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/tokenization_auto.py", line 1069, in from_pretrained
+    config = AutoConfig.from_pretrained(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/models/auto/configuration_auto.py", line 1250, in from_pretrained
+    config_dict, unused_kwargs = PretrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 649, in get_config_dict
+    config_dict, kwargs = cls._get_config_dict(pretrained_model_name_or_path, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/configuration_utils.py", line 708, in _get_config_dict
+    resolved_config_file = cached_file(
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 321, in cached_file
+    file = cached_files(path_or_repo_id=path_or_repo_id, filenames=[filename], **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/transformers/utils/hub.py", line 543, in cached_files
+    raise OSError(
+OSError: You are trying to access a gated repo.
+Make sure to have access to it at https://huggingface.co/meta-llama/Llama-3.1-8B.
+401 Client Error. (Request ID: Root=1-68ff3500-183b4bfe629c287a42a9ddb3;b507efcc-f968-455f-8d6d-c632aa708440)
+
+Cannot access gated repo for url https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/config.json.
+Access to model meta-llama/Llama-3.1-8B is restricted. You must have access to it and be authenticated to access it. Please log in.
+W1027 09:01:53.959000 2067 torch/distributed/elastic/multiprocessing/api.py:940] Sending process 2134 closing signal SIGTERM
+W1027 09:01:53.959000 2067 torch/distributed/elastic/multiprocessing/api.py:940] Sending process 2135 closing signal SIGTERM
+W1027 09:01:53.961000 2067 torch/distributed/elastic/multiprocessing/api.py:940] Sending process 2136 closing signal SIGTERM
+W1027 09:01:53.964000 2067 torch/distributed/elastic/multiprocessing/api.py:940] Sending process 2137 closing signal SIGTERM
+W1027 09:01:53.964000 2067 torch/distributed/elastic/multiprocessing/api.py:940] Sending process 2138 closing signal SIGTERM
+W1027 09:01:53.965000 2067 torch/distributed/elastic/multiprocessing/api.py:940] Sending process 2139 closing signal SIGTERM
+W1027 09:01:53.967000 2067 torch/distributed/elastic/multiprocessing/api.py:940] Sending process 2140 closing signal SIGTERM
+E1027 09:01:54.147000 2067 torch/distributed/elastic/multiprocessing/api.py:914] failed (exitcode: 1) local_rank: 7 (pid: 2141) of binary: /opt/venv/bin/python
+Traceback (most recent call last):
+  File "/opt/venv/bin/torchrun", line 33, in <module>
+    sys.exit(load_entry_point('torch==2.10.0.dev20251019+rocm7.0', 'console_scripts', 'torchrun')())
+  File "/opt/venv/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 362, in wrapper
+    return f(*args, **kwargs)
+  File "/opt/venv/lib/python3.10/site-packages/torch/distributed/run.py", line 946, in main
+    run(args)
+  File "/opt/venv/lib/python3.10/site-packages/torch/distributed/run.py", line 937, in run
+    elastic_launch(
+  File "/opt/venv/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 159, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/opt/venv/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 300, in launch_agent
+    raise ChildFailedError(
+torch.distributed.elastic.multiprocessing.errors.ChildFailedError:
+============================================================
+primus/cli/main.py FAILED
+------------------------------------------------------------
+Failures:
+[1]:
+  time      : 2025-10-27_09:01:54
+  host      : gpu-43
+  rank      : 0 (local_rank: 0)
+  exitcode  : -15 (pid: 2134)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 2134
+[2]:
+  time      : 2025-10-27_09:01:54
+  host      : gpu-43
+  rank      : 1 (local_rank: 1)
+  exitcode  : -15 (pid: 2135)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 2135
+[3]:
+  time      : 2025-10-27_09:01:54
+  host      : gpu-43
+  rank      : 2 (local_rank: 2)
+  exitcode  : -15 (pid: 2136)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 2136
+[4]:
+  time      : 2025-10-27_09:01:54
+  host      : gpu-43
+  rank      : 3 (local_rank: 3)
+  exitcode  : -15 (pid: 2137)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 2137
+[5]:
+  time      : 2025-10-27_09:01:54
+  host      : gpu-43
+  rank      : 4 (local_rank: 4)
+  exitcode  : -15 (pid: 2138)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 2138
+[6]:
+  time      : 2025-10-27_09:01:54
+  host      : gpu-43
+  rank      : 5 (local_rank: 5)
+  exitcode  : 1 (pid: 2139)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+[7]:
+  time      : 2025-10-27_09:01:54
+  host      : gpu-43
+  rank      : 6 (local_rank: 6)
+  exitcode  : -15 (pid: 2140)
+  error_file: <N/A>
+  traceback : Signal 15 (SIGTERM) received by PID 2140
+------------------------------------------------------------
+Root Cause (first observed failure):
+[0]:
+  time      : 2025-10-27_09:01:53
+  host      : gpu-43
+  rank      : 7 (local_rank: 7)
+  exitcode  : 1 (pid: 2141)
+  error_file: <N/A>
+  traceback : To enable traceback see: https://pytorch.org/docs/stable/elastic/errors.html
+============================================================
+[NODE-0(gpu-43)] [INFO] torchrun exited with code 1
+[NODE-0(gpu-43)] [ERROR] torchrun exited with code 1
