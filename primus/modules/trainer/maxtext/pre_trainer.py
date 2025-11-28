@@ -52,29 +52,29 @@ class MaxTextPretrainTrainer(BaseModule):
 
         run(self.train_config, self.recorder, self.diagnostic_config)
 
-    def patch_model_args(self, model_overrides: Dict[str, Any]):
+    def patch_model_args(self, override_args: Dict[str, Any]):
         """
         Monkey patch maxtext cli args to override model args dynamically.
         Supports nested overrides like:
-            {"model.num_experts": 16, "model.base_num_decoder_layers": 4}
+            {"model": {"num_experts": 16, "base_num_decoder_layers": 4}}
 
-        All override keys MUST start with "model.".
+        All override keys MUST be under the "model" key.
         """
 
-        if not model_overrides:
-            warning_rank_0("MaxText Pre-Trainer: No model_overrides provided, skip patch.")
+        if not override_args:
+            warning_rank_0("MaxText Pre-Trainer: No override_args provided, skip patch.")
             return {}
 
-        warning_rank_0(f"MaxText Pre-Trainer: Applying model_overrides: {model_overrides}")
+        warning_rank_0(f"MaxText Pre-Trainer: Applying override_args: {override_args}")
 
         # --- Step 1. Flatten any nested dict under 'model'
         flat_overrides = {}
-        for k, v in model_overrides.items():
+        for k, v in override_args.items():
             if k != "model" or not isinstance(v, dict):
                 raise ValueError(
                     f"MaxText Pre-Trainer: Invalid override keys detected: {k}. "
                     "These parameters belong to the model configuration and must be specified "
-                    "with the 'model.' prefix"
+                    "under the 'model' key"
                 )
             for subk, subv in v.items():
                 if isinstance(subv, dict):
