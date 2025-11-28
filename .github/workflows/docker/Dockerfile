@@ -8,19 +8,9 @@ ARG PRIMUS_TURBO_COMMIT
 # Install basic dependencies
 RUN apt-get update
 
-# Clone and install the Primus-Turbo
-WORKDIR /opt
-RUN mkdir -p /opt && cd /opt && \
-    git clone https://github.com/AMD-AGI/Primus-Turbo.git && \
-    cd Primus-Turbo && \
-    git checkout ${PRIMUS_TURBO_COMMIT} && \
-    git submodule update --init --recursive && \
-    pip3 install -r requirements.txt && \
-    GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
-
-RUN apt-get install --reinstall binutils -y && apt-get install numactl -y
-
 # LLVM has issue on DeepEP. Need to apply those patches
+# https://ontrack-internal.amd.com/browse/SWDEV-540592
+# https://github.com/ROCm/unified-training-dockers/pull/503/files#diff-8b71bb34f4f4023cd6dbcb5e49eaeebeba5ac5af0beaf19fd5bb6ab2526f79edR61
 ARG LLVM_REPO=https://github.com/ROCm/llvm-project.git
 ARG LLVM_BRANCH=release/rocm-rel-7.0
 
@@ -28,7 +18,7 @@ WORKDIR /opt
 COPY 7.0-deepep-swdev-540592.patch /opt/
 RUN git config --global user.email "you@example.com"
 RUN git config --global user.name "Your Name"
-RUN cd /opt \
+RUN mkdir -p /opt && cd /opt \
     && git clone ${LLVM_REPO} \
     && cd llvm-project \
     && git checkout ${LLVM_BRANCH} \
@@ -47,6 +37,19 @@ RUN cd /opt \
     && cd ../.. \
     && rm -rf llvm-project \
     && cd /opt
+
+    # Clone and install the Primus-Turbo
+WORKDIR /opt
+RUN mkdir -p /opt && cd /opt && \
+    git clone https://github.com/AMD-AGI/Primus-Turbo.git && \
+    cd Primus-Turbo && \
+    git checkout ${PRIMUS_TURBO_COMMIT} && \
+    git submodule update --init --recursive && \
+    pip3 install -r requirements.txt && \
+    GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
+
+RUN apt-get install --reinstall binutils -y && apt-get install numactl -y
+
 
 # Set the default working directory
 WORKDIR /opt
