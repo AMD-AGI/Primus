@@ -36,7 +36,8 @@ RUN apt-get update && \
 # INFO: Installation completed successfully
 
 RUN cd ${WORKDIR} && \
-    cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.1-a-42.tar.gz ./ && \
+    echo "Building ainic bundle... current directory: ${WORKDIR}" && \
+    cp ./ainic_bundle_1.117.1-a-42.tar.gz ./ && ls -la && \
     tar zxf ainic_bundle_1.117.1-a-42.tar.gz && \
     cd ainic_bundle_1.117.1-a-42 && \
     tar zxf host_sw_pkg.tar.gz && \
