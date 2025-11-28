@@ -92,7 +92,8 @@ jobs:
           start_time=$(date +%s)
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
                -t tasimage/primus:${{env.IMAGE_TAG}} \
-               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} .
+               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+               $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker] Total elapsed time: ${elapsed} seconds"
