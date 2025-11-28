@@ -5,6 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import argparse
 import dataclasses
 import functools
 import gc
@@ -14,6 +15,8 @@ import os
 import statistics
 import sys
 import time
+from functools import lru_cache
+from typing import Any, Dict
 
 import megatron
 import torch
@@ -157,6 +160,44 @@ from .utils import schedule_wrapper, set_wandb_writer_patch, validate_args_on_ro
 
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
+
+
+# ------------------------------------------------------------
+# Build the original Megatron argument parser
+# ------------------------------------------------------------
+def _build_megatron_parser() -> argparse.ArgumentParser:
+    """
+    Construct Megatron-LM's official argparse parser without touching sys.argv.
+
+    This function directly calls:
+        megatron.training.arguments.add_megatron_arguments(parser)
+
+    We do NOT parse command-line arguments here; we simply want Megatron's
+    argument *definitions* (names, defaults, types).
+    """
+    from megatron.training.arguments import add_megatron_arguments
+
+    parser = argparse.ArgumentParser(
+        description="Primus Megatron arguments",
+        allow_abbrev=False,  # Disable abbreviation to avoid unexpected behaviors
+    )
+    return add_megatron_arguments(parser)
+
+
+# ------------------------------------------------------------
+# Load Megatron's default values (cached)
+# ------------------------------------------------------------
+@lru_cache(maxsize=1)
+def _load_megatron_defaults() -> Dict[str, Any]:
+    """
+    Load all default values defined by Megatron-LM's argparse.
+
+    We call parser.parse_args([]), which returns a Namespace containing ONLY
+    default values (because no CLI arguments are provided).
+    """
+    parser = _build_megatron_parser()
+    args = parser.parse_args([])  # Parse an empty list → only defaults
+    return vars(args).copy()  # Convert Namespace → dict and cache
 
 
 class MegatronTrainer(BaseTrainer, BaseModule):
@@ -1147,7 +1188,21 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # args = parse_args(extra_args_provider, ignore_unknown_args)
 
         # Use trainer args from primus
-        args = self.module_config
+        # args = self.module_config
+
+        # Merge Megatron defaults with Primus config
+        # 1. Load Megatron defaults
+        megatron_defaults = _load_megatron_defaults()
+
+        # 2. Convert Primus config to dict
+        primus_args = vars(self.module_config)
+
+        # 3. Merge: defaults < primus_args
+        merged_args = megatron_defaults.copy()
+        merged_args.update(primus_args)
+
+        # 4. Convert to Namespace
+        args = argparse.Namespace(**merged_args)
 
         # Prep for checkpoint conversion.
         if args.ckpt_convert_format is not None:
