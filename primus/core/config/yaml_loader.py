@@ -14,7 +14,7 @@ def parse_yaml(path: str) -> dict:
     if cfg is None:
         raise ValueError(f"YAML configuration file '{path}' is empty or invalid.")
     cfg = _resolve_env(cfg)
-    cfg = _apply_extends(path, cfg)  # main logic (deep merge presets)
+    cfg = _apply_extends(path, cfg)  # Apply extends inheritance with deep merge of preset configurations
     return cfg
 
 
