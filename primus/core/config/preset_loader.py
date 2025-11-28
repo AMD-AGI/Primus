@@ -41,7 +41,7 @@ class PresetLoader:
         # Validate that the path stays within configs_root
         abs_preset_path = os.path.abspath(preset_path)
         abs_configs_root = os.path.abspath(configs_root)
-        if not abs_preset_path.startswith(abs_configs_root + os.sep):
+        if os.path.commonpath([abs_preset_path, abs_configs_root]) != abs_configs_root:
             raise ValueError(
                 f"[Primus] Invalid preset path: path traversal detected for '{preset_path}'."
             )
