@@ -25,7 +25,7 @@ ARG LLVM_REPO=https://github.com/ROCm/llvm-project.git
 ARG LLVM_BRANCH=release/rocm-rel-7.0
 
 WORKDIR /opt
-COPY .github/workflows/docker/7.0-deepep-swdev-540592.patch /opt/
+COPY 7.0-deepep-swdev-540592.patch /opt/
 RUN git config --global user.email "you@example.com"
 RUN git config --global user.name "Your Name"
 RUN cd /opt \
