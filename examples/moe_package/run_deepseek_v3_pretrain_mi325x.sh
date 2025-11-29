@@ -74,7 +74,13 @@ export TRAIN_ITERS=${TRAIN_ITERS:-5}
 # 10 - CPU NUMA binding helper
 # 11 - Manual GC helper
 # MoE_Features=(0 1 2 3 4 5 6 7 8 9 10 11)
-MoE_Features=(0 3 11)
+
+if [ -z "${MoE_Features}" ]; then
+    MoE_Features=(0 3 11)
+else
+    # Convert string to array
+    read -ra MoE_Features <<< "$MoE_Features"
+fi
 
 FEATURE_ARGS=()
 PRIMUS_TURBO_ENABLED="False"
@@ -86,6 +92,7 @@ ensure_primus_turbo() {
 }
 
 for feature in "${MoE_Features[@]}"; do
+    echo "Processing feature: ${feature}"
     case "$feature" in
     0) ;;
     1)
