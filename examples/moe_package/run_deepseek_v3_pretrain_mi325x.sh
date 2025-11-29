@@ -6,16 +6,16 @@
 ###############################################################################
 
 ######################### Training Docker and Variables #########################
-# export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
-export DOCKER_IMAGE="docker.io/tasimage/primus:pr-289"
+export DOCKER_IMAGE="docker.io/tasimage/primus:pr-316"
 export CLEAN_DOCKER_CONTAINER=1
 
 ######################### Training Environment Variables #########################
 export HF_TOKEN=${HF_TOKEN:-"your_hf_token"}
 export WANDB_API_KEY=${WANDB_API_KEY:-"your_wandb_api_key"}
-# TODO
-export GPU_MAX_HW_QUEUES=2
-# export GPU_MAX_HW_QUEUES=8
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
+export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
+# export USE_ROCM_AITER_ROPE_BACKEND=0
 
 # Set on Primus-Safe Platform
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
@@ -33,33 +33,32 @@ export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 # export NCCL_SOCKET_IFNAME="enp193s0f1np1"
 # export GLOO_SOCKET_IFNAME="enp193s0f1np1"
 
-export HSA_NO_SCRATCH_RECLAIM=1
-export NVTE_CK_USES_BWD_V3=1
-# export USE_ROCM_AITER_ROPE_BACKEND=0
-
 ######################### Training Config #########################
-MBS=1
-GBS=256
-SEQ_LENGTH=4096
-TP=1
-ETP=1
-PP=2
-VPP=4
-EP=16
-CP=1
-CP_COMM_TYPE="a2a" # p2p, a2a, allgather or a2a+p2p
-ENABLE_MLA=False
-ENABLE_MTP=False
-LOAD_BALANCE=True
-OPTIMIZER=adam
-RECOMPUTE_LAYERS=0
-LEGACY_GG=True
-FP8=False # True for fp8, False for bf16
-PROFILE=False
-DISABLE_CPU_TRACE=True
-PROFILE_STEP_START=5
-PROFILE_STEP_END=6
-TRAIN_ITERS=5
+export MBS=${MBS:-1}
+export GBS=${GBS:-4096}
+export NUM_LAYERS=${NUM_LAYERS:-61}
+export MOE_LAYER_FREQ=${MOE_LAYER_FREQ:-1}
+export SEQ_LENGTH=${SEQ_LENGTH:-4096}
+export TP=${TP:-1}
+export ETP=${ETP:-1}
+export PP=${PP:-8}
+export VPP=${VPP:-1}
+export EP=${EP:-16}
+export CP=${CP:-1}
+export CP_COMM_TYPE=${CP_COMM_TYPE:-"a2a"}            # p2p, a2a, allgather or a2a+p2p
+export ENABLE_MLA=${ENABLE_MLA:-False}
+export ENABLE_MTP=${ENABLE_MTP:-False}
+export LOAD_BALANCE=${LOAD_BALANCE:-True}
+export PP_WARMUP=${PP_WARMUP:-True}
+export OPTIMIZER=${OPTIMIZER:-"adam"}
+export RECOMPUTE_LAYERS=${RECOMPUTE_LAYERS:-0}
+export LEGACY_GG=${LEGACY_GG:-True}
+export FP8=${FP8:-False}                              # True for fp8, False for bf16
+export PROFILE=${PROFILE:-False}
+export DISABLE_CPU_TRACE=${DISABLE_CPU_TRACE:-True}
+export PROFILE_STEP_START=${PROFILE_STEP_START:-5}
+export PROFILE_STEP_END=${PROFILE_STEP_END:-6}
+export TRAIN_ITERS=${TRAIN_ITERS:-5}
 
 # MoE_Features legend:
 # 0 - Baseline (no extra optimization toggles)
@@ -221,7 +220,7 @@ else
 fi
 
 VPP_ARGS=()
-if [ $VPP -gt 1 ]; then
+if [ "$VPP" -gt 1 ]; then
     VPP_ARGS+=("--num_virtual_stages_per_pipeline_rank" "$VPP")
 fi
 
@@ -263,7 +262,7 @@ mkdir -p "$LOG_DIR"
 rm -rf "$LOG_FILE"
 
 ######################### Training Job #########################
-export EXP="examples/megatron/configs/MI300X/deepseek_v3-pretrain.yaml"
+export EXP="examples/moe_package/configs/MI325X/deepseek_v3-pretrain-baseline.yaml"
 
 echo "--------------------------------" | tee -a "$LOG_FILE"
 echo "Begin Training... $(date +%Y%m%d_%H%M%S)" | tee -a "$LOG_FILE"
@@ -281,11 +280,10 @@ echo "--------------------------------" | tee -a "$LOG_FILE"
 
 export SKIP_TRAIN=0
 
-    # --num_layers 16 \
-    # --moe_layer_freq 1 \
-    # --pp_warmup True \
 # bash ./examples/run_slurm_pretrain.sh \
 bash ./examples/run_pretrain.sh \
+    --num_layers "$NUM_LAYERS" \
+    --moe_layer_freq "$MOE_LAYER_FREQ" \
     --micro_batch_size "$MBS" \
     --global_batch_size "$GBS" \
     --seq_length "$SEQ_LENGTH" \
@@ -296,6 +294,7 @@ bash ./examples/run_pretrain.sh \
     --context_parallel_size "$CP" \
     --cp_comm_type "$CP_COMM_TYPE" \
     --mock_data True \
+    --pp_warmup "${PP_WARMUP:-True}" \
     --moe_router_force_load_balancing "$LOAD_BALANCE" \
     --optimizer "$OPTIMIZER" \
     --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
