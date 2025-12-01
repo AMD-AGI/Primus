@@ -71,7 +71,7 @@ class MaxTextPretrainTrainer(BaseModule):
         flat_overrides = {}
         for k, v in override_args.items():
             if k != "model":
-                raise ValueError(f"MaxText Pre-Trainer: Nested dicts are not supported for override key {k}.")
+                raise ValueError(f"Only the 'model' key is supported for overrides, found: {k}")
             if not isinstance(v, dict):
                 raise ValueError(
                     f"MaxText Pre-Trainer: The value for 'model' must be a dict, got {type(v).__name__}."
