@@ -38,6 +38,7 @@ export LOG_DIR=${LOG_DIR:-"./output"}
 LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
 
+    #  --nodelist="chi[2877-2884]" \
 srun -N "${NNODES}" \
      --exclusive \
      --export ALL \

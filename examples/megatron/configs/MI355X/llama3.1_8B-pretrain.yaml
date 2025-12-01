@@ -69,7 +69,3 @@ modules:
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"
       # cross_entropy_loss_fusion: true
-
-      # Turbo
-      enable_primus_turbo: true
-      use_turbo_attention: false
