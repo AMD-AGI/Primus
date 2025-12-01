@@ -449,6 +449,12 @@ def validate_args_on_rocm(args):
             args.fp8_recipe in support_fp8_recipe
         ), f"{args.fp8_recipe} recipe is not support when enable `use_turbo_parallel_linear`."
 
+    # NOTE: mxfp8 environment variable must be set to 1 to enable mxfp8 recipe on ROCm.
+    if args.fp8_recipe == "mxfp8":
+        assert (
+            os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") == "1"
+        ), "Please set `NVTE_ROCM_ENABLE_MXFP8=1` to enable `mxfp8` recipe."
+
     # dump pp data
     if args.dump_pp_data and args.pipeline_model_parallel_size == 1:
         args.dump_pp_data = False

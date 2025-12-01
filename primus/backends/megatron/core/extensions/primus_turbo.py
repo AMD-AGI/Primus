@@ -49,14 +49,18 @@ from transformer_engine.pytorch.fp8 import (
 class PrimusTurboFloat8QuantConfig(Float8QuantConfig):
 
     def block_scaling(self):
-        return self.granularity == ScalingGranularity.BLOCKWISE
+        return self.granularity == ScalingGranularity.BLOCKWISE and self.strategy == ScalingStrategy.DYNAMIC
 
     def current_scaling(self):
         return self.granularity == ScalingGranularity.TENSORWISE and self.strategy == ScalingStrategy.DYNAMIC
 
     def mxfp8_scaling(self):
         # NOTE: The mxfp8 recipe only support e4m3 format in megatron-lm backend.
-        return self.granularity == ScalingGranularity.MX_BLOCKWISE and self.format == Format.E4M3
+        return (
+            self.granularity == ScalingGranularity.MX_BLOCKWISE
+            and self.strategy == ScalingStrategy.DYNAMIC
+            and self.format == Format.E4M3
+        )
 
 
 class PrimusTurboFP8GlobalStateManager(FP8GlobalStateManager):
