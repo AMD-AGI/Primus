@@ -17,7 +17,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from primus.core.backend.backend_adapter import BackendAdapter
+import primus.core.backend.backend_adapter as adapter_module
 
 
 class DummyTrainer:
@@ -34,7 +34,7 @@ class DummyTrainer:
         self.backend_args = backend_args
 
 
-class DummyBackendAdapter(BackendAdapter):
+class DummyBackendAdapter(adapter_module.BackendAdapter):
     """
     Minimal concrete BackendAdapter implementation for tests.
 
@@ -55,7 +55,11 @@ class DummyBackendAdapter(BackendAdapter):
 
     def convert_config(self, config: Any) -> Dict[str, Any]:
         self.convert_calls.append(config)
-        # Use SimpleNamespace so vars(backend_args) works in BackendAdapter
+        # Use SimpleNamespace instead of a plain dict so that BackendAdapter
+        # can treat backend_args like a real backend object:
+        #   - vars(backend_args) works (matching how real argparse.Namespace behaves)
+        #   - attribute-style access (backend_args.lr) is available, which
+        #     mirrors how Megatron/Titan trainers typically consume args.
         return SimpleNamespace(
             lr=1e-4,
             global_batch_size=128,
@@ -149,8 +153,10 @@ def test_create_trainer_orchestrates_flow(monkeypatch, primus_config, module_con
     import primus.core.backend.backend_adapter as adapter_module
 
     monkeypatch.setattr(adapter_module, "log_rank_0", lambda *args, **kwargs: None)
-    # BackendAdapter uses log_dict_aligned without importing it explicitly,
-    # so provide a no-op implementation for tests.
+    # BackendAdapter uses log_dict_aligned without importing it explicitly.
+    # Use raising=False so the test remains robust even if the module does not
+    # yet define log_dict_aligned (older versions, refactors, etc.): in that
+    # case monkeypatch.setattr becomes a no-op instead of failing the test.
     monkeypatch.setattr(
         adapter_module,
         "log_dict_aligned",

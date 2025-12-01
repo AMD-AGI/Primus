@@ -208,9 +208,9 @@ class BackendAdapter(ABC):
         TrainerClass = self.load_trainer_class()
         log_rank_0(f"Trainer class loaded: {TrainerClass.__name__}")
 
-        log_rank_0("" + "=" * 80)
+        log_rank_0("=" * 80)
         log_rank_0("Trainer creation completed successfully")
-        log_rank_0("=" * 80 + "")
+        log_rank_0("=" * 80)
 
         return TrainerClass(
             primus_config=primus_config,

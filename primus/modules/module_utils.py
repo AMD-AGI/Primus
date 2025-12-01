@@ -180,14 +180,16 @@ def log_dict_aligned(
     log_func("-" * 80)
 
     if not data_dict:
+        # Empty dictionary or namespace: log a short message and return early
         log_func(f"{title}: (empty)")
         log_func("-" * 80)  # Log separator after content
         return
 
+    # Non-empty dictionary or namespace
     # Log title with parameter count
     log_func(f"{title}: ({len(data_dict)} parameters)")
 
-    # Find the longest key for alignment
+    # Find the longest key for alignment (safe because data_dict is non-empty)
     max_key_length = max(len(str(key)) for key in data_dict.keys())
 
     # Log each key-value pair with alignment
