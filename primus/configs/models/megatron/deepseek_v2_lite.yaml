@@ -1,4 +1,4 @@
-bases:
+extends:
   - deepseek_v2_base.yaml
 
 # https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite

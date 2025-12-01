@@ -1,4 +1,4 @@
-includes:
+extends:
   - ../module_base.yaml
   - primus_megatron_module.yaml
   - primus_turbo.yaml

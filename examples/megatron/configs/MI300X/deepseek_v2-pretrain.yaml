@@ -20,7 +20,7 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      # hyber parameters
+      # hyper parameters
       train_iters: 50
       micro_batch_size: 1
       global_batch_size: 256
@@ -65,8 +65,8 @@ modules:
       moe_use_legacy_grouped_gemm: true
       # fused topk router with aux score
       moe_use_fused_router_with_aux_score: false
-      # pad 192/128 for deepseek attention
-      fused_padded_mla_attention: false
+      # MLA
+      multi_latent_attention: false
 
       # ckpt
       finetune: false
@@ -81,3 +81,26 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
       eval_iters: 0
+
+      # Turbo
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: true
+
+      # deepep
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+
+      # 64 or 80 for ep8, 32 for ep16-64 is best practice
+      turbo_deepep_num_cu: 64
+      turbo_deepep_use_comm_stream: false
+
+      # sync-free moe support stage 0-3, 0 means not use sync-free moe
+      # stage 3 is completely no gpu-cpu sync in MoE, but cost more memory
+      # stage 2 is recommended for better performance
+      turbo_sync_free_moe_stage: 2
+
+      # Cross entropy flags
+      # cross_entropy_fusion_impl: "te"
+      # cross_entropy_loss_fusion: true

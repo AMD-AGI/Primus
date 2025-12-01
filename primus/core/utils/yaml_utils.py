@@ -5,103 +5,15 @@
 ###############################################################################
 
 import json
-import os
-import re
 from types import SimpleNamespace
 
 import yaml
 
+from primus.core.config.yaml_loader import parse_yaml as _parse_yaml_core
+
 
 def parse_yaml(yaml_file: str):
-    def replace_env_variables(config):
-        """Recursively replace environment variable placeholders in the config."""
-
-        def try_convert_numeric(value: str):
-            """Try to convert a string to int or float, else return original string."""
-            try:
-                if re.fullmatch(r"-?\d+", value):
-                    return int(value)
-                return float(value)  # handles 1.0, -1.5, 1e-5, etc.
-            except ValueError:
-                return value
-
-        def replace_match(m):
-            """
-            Replace matched environment variable patterns.
-            - If no default is provided: require the environment variable to be set.
-            - If a default is provided: use it when the environment variable is not set.
-            """
-            var_name = m.group(1)
-            default = m.group(2)
-
-            if default is None:
-                # ${VAR} → must be set in environment
-                if var_name not in os.environ:
-                    raise ValueError(
-                        f"Environment variable '{var_name}' is required but not set, "
-                        f"and no default value is provided."
-                    )
-                return os.environ[var_name]
-            else:
-                # ${VAR:default} → use default if VAR is not set
-                return os.environ.get(var_name, default)
-
-        if isinstance(config, dict):
-            return {replace_env_variables(key): replace_env_variables(value) for key, value in config.items()}
-        elif isinstance(config, list):
-            return [replace_env_variables(item) for item in config]
-        elif isinstance(config, str):
-            pattern = re.compile(r"\${([^:{}]+)(?::([^}]*))?}")
-            replaced = pattern.sub(replace_match, config)
-
-            if replaced == config:
-                return replaced
-
-            if replaced != config and replaced == config.strip():
-                return replaced
-
-            return try_convert_numeric(replaced)
-
-        return config
-
-    with open(yaml_file, "r") as f:
-        config = yaml.load(f, Loader=yaml.SafeLoader)
-        config = replace_env_variables(config)
-
-        if config is None:
-            return {}
-
-        if "bases" in config:
-            for base_file in config["bases"]:
-                full_base_file = os.path.join(os.path.dirname(yaml_file), base_file)
-                base_config = parse_yaml(full_base_file)
-                # key must in base config
-                for key in config:
-                    if key != "bases":
-                        assert key in base_config, (
-                            f"The argument '{key}' in the a config file '{yaml_file}' "
-                            f"cannot be found in the base config file '{base_file}'."
-                        )
-                for key, value in base_config.items():
-                    if key != "bases" and key not in config:
-                        config[key] = value
-            # remove bases config
-            del config["bases"]
-
-        if "includes" in config:
-            for include_file in config["includes"]:
-                full_include_file = os.path.join(os.path.dirname(yaml_file), include_file)
-                include_config = parse_yaml(full_include_file)
-                # overrides if exist
-                for key, value in include_config.items():
-                    if key == "includes":
-                        continue
-                    if key not in config:
-                        config[key] = value
-            # remove includes config
-            del config["includes"]
-
-        return config
+    return _parse_yaml_core(yaml_file)
 
 
 def dict_to_nested_namespace(d: dict):

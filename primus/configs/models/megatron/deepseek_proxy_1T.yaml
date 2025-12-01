@@ -1,4 +1,4 @@
-bases:
+extends:
   - deepseek_v2_base.yaml
 
 # 1T total params, 44B active params

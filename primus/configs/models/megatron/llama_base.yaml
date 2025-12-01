@@ -1,4 +1,4 @@
-bases:
+extends:
   - language_model.yaml
 
 group_query_attention: false

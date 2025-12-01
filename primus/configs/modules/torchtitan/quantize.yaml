@@ -1,0 +1,66 @@
+# Quantize Configuration for TorchTitan
+# This configuration controls quantized training for linear layers and grouped GEMMs
+
+quantize:
+  # Configuration for nn.Linear layers
+  linear:
+    # FP8 (Float8) training config for nn.Linear layers
+    float8:
+      # Whether to enable float8 all-gather in FSDP
+      # Recommended for tensorwise scaling
+      enable_fsdp_float8_all_gather: false
+
+      # Whether to precompute float8 scales dynamically for FSDP
+      # Recommended for tensorwise scaling
+      precompute_float8_dynamic_scale_for_fsdp: false
+
+      # Float8 recipe name: "tensorwise", "rowwise", or "rowwise_with_gw_hp"
+      # If specified, creates float8 config from recipe name
+      recipe_name: null
+
+      # List of fully qualified names (FQNs) of modules to skip applying float8 training
+      # nn.Linear modules with any dim size not divisible by 16 are always skipped
+      # Example: ["attention.wq", "attention.wk", "attention.wv", "output"]
+      filter_fqns: []
+
+      # If true, use emulation instead of hardware accelerated gemm
+      # For test purposes only (CI without sm_89 capability)
+      # Not compatible with torch.compile
+      emulate: false
+
+    # MX (Microscaling) training config for nn.Linear layers
+    mx:
+      # Kernel choice for mxfp8 dim1 cast: "triton", "cuda", or "torch"
+      # CUDA is recommended for best performance
+      mxfp8_dim1_cast_kernel_choice: "triton"
+
+      # MX recipe name (default: "mxfp8_cublas")
+      # See: https://github.com/pytorch/ao/tree/main/torchao/prototype/mx_formats
+      recipe_name: "mxfp8_cublas"
+
+      # List of FQNs to skip applying mxfp8 training
+      # nn.Linear modules with any dim size not divisible by 16 are also skipped
+      # By default, the output layer is always skipped
+      # Example: ["attention.wq", "attention.wk", "attention.wv", "output"]
+      filter_fqns: ["output"]
+
+  # Configuration for grouped GEMMs (typically for MoE models)
+  grouped_mm:
+    # FP8 training config for grouped GEMMs
+    float8:
+      # Prototype feature: List of FQNs of MoE Layers to apply FP8 dynamic quantization
+      # Performance optimization still in progress
+      # Requires torchao nightly build
+      # Example: ["experts"]
+      fqns: []
+
+    # MX training config for grouped GEMMs
+    mx:
+      # Quantization recipe name for grouped GEMMs
+      recipe_name: "mxfp8"
+
+      # Prototype feature: List of FQNs of MoE modules to apply MXFP8 dynamic quantization
+      # Performance optimization still in progress
+      # Requires torchao nightly build
+      # Example: ["experts"]
+      fqns: []

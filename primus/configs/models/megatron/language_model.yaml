@@ -1,4 +1,4 @@
-includes:
+extends:
   - primus_megatron_model.yaml
 
 

@@ -8,5 +8,5 @@ markdown2
 weasyprint
 tyro
 blobfile
-mlflow==3.4.0
+mlflow
 pyrsmi

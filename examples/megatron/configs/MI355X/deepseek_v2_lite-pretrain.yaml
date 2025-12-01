@@ -20,10 +20,10 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      # hyber parameters
+      # hyper parameters
       train_iters: 50
-      micro_batch_size: 4
-      global_batch_size: 640
+      micro_batch_size: 14
+      global_batch_size: 896
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
       lr: 1.0e-5
@@ -86,14 +86,16 @@ modules:
 
       # deepep
       use_turbo_deepep: false
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
 
       # 64 or 80 for ep8, 32 for ep16-64 is best practice
-      turbo_deepep_num_cu: 32
+      turbo_deepep_num_cu: 64
       turbo_deepep_use_comm_stream: false
 
       # sync-free moe support stage 1-2, 0 means not use sync-free moe
       # stage 2 is recommended for better performance
-      turbo_sync_free_moe_stage: 0
+      turbo_sync_free_moe_stage: 1
 
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"

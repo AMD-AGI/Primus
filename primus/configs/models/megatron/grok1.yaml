@@ -1,4 +1,4 @@
-bases:
+extends:
   - grok_base.yaml
 
 # https://github.com/xai-org/grok-1

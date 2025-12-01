@@ -137,7 +137,7 @@ class HLOSimplifier:
     Key features:
       * Parse computations from HLO text dump
       * Identify and traverse from ENTRY computation
-      * Follow control flow (while loops, conditionals)
+      * Follow control flow (while loops, conditionals, call operations)
       * Extract communication ops, computation ops, or both based on --op mode
       * Produce hierarchical, indented skeleton output
       * Always print full op_name metadata paths if available
@@ -669,7 +669,7 @@ class HLOSimplifier:
         """
         Recursively traverse computation to generate execution skeleton.
 
-        Prints control flow structures (while, conditional) and selected operations
+        Prints control flow structures (while, conditional, call) and selected operations
         based on --op mode (communication/computation/all).
 
         Args:
@@ -740,6 +740,21 @@ class HLOSimplifier:
                         kw = "if" if idx == 0 else "elif"
                         print(tab + f"{kw} branch{idx} (%{b}):")
                         self.walk_computation(b, bind + 2, mult, stack, False)
+                    continue
+
+            # -------- Call operations --------
+            # Extract to_apply=%foo or calls=%foo and recursively walk
+            if " call(" in line:
+                m_to_apply = re.search(r"to_apply=%([^\s,}]+)", line)
+                m_calls = re.search(r"calls=%([^\s,}]+)", line)
+                callee = None
+                if m_to_apply:
+                    callee = m_to_apply.group(1).lstrip("%")
+                elif m_calls:
+                    callee = m_calls.group(1).lstrip("%")
+
+                if callee:
+                    self.walk_computation(callee, bind, mult, stack, False)
                     continue
 
             # -------- Operation extraction based on --op mode --------

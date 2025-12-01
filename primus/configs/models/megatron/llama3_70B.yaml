@@ -1,4 +1,4 @@
-bases:
+extends:
   - llama3_base.yaml
 
 tokenizer_type: Llama3Tokenizer

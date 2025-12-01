@@ -1,4 +1,4 @@
-bases:
+extends:
   - trainer_base.yaml
 
 hardware: "gpu"

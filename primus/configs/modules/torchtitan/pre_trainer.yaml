@@ -1,5 +1,6 @@
-includes:
+extends:
   - ../module_base.yaml
+  - quantize.yaml
 
 lr_scheduler:
   decay_ratio: null
