@@ -10,7 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 1fc5b8148dfd3070977fae1e9d2a46075d281ef8 # feat: jax backend support grouped_gemm (#157)
+  PRIMUS_TURBO_COMMIT: d71d856c080c9187d8e323e9eb6d85904517a21f # feat(deepep): support single-node moe_dispatch/combine on jax. (#162)
 
 jobs:
   code-lint:
