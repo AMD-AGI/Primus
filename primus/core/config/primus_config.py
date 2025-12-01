@@ -36,7 +36,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
-from primus.core.config import yaml_loader
+from primus.core.config import config_loader
 from primus.core.config.merge_utils import deep_merge
 from primus.core.config.model_preset_loader import ModelPresetLoader
 from primus.core.utils import file_utils, yaml_utils
@@ -114,8 +114,8 @@ class PrimusConfig:
         """
         primus_home = Path(__file__).resolve().parent.parent.parent
 
-        # Load YAML → dict (handles extends, env vars)
-        config_dict = yaml_loader.parse_yaml(config_file)
+        # Load config → dict (YAML or TOML; handles env vars)
+        config_dict = config_loader.parse_config(config_file)
 
         # Validate required metadata
         cls._validate_meta_info(config_dict)
