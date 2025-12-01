@@ -2485,18 +2485,31 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     hip_used_mem = hip_total_mem - hip_free_mem
                     hip_mem_usage = hip_used_mem / hip_total_mem
                     log_string += (
-                        f" hip mem usage/free/total/usage_ratio: {hip_used_mem/1024/1024/1024:.2f}GB/"
+                        f" hip mem usage/free/total/usage_ratio: {hip_used_mem/1024/1024/1024:.2f}GiB/"
                     )
-                    log_string += f"{hip_free_mem/1024/1024/1024:.2f}GB/"
-                    log_string += f"{hip_total_mem/1024/1024/1024:.2f}GB/{hip_mem_usage*100:.2f}% |"
+                    log_string += f"{hip_free_mem/1024/1024/1024:.2f}GiB/"
+                    log_string += f"{hip_total_mem/1024/1024/1024:.2f}GiB/{hip_mem_usage*100:.2f}% |"
 
                 if args.use_rocm_mem_info or iteration in args.use_rocm_mem_info_iters:
                     rocm_mem_usage = rocm_used_mem / rocm_total_mem
+
+                    # get the max rocm_mem_usage
+                    usage_tensor = torch.tensor([rocm_mem_usage], device="cuda", dtype=torch.float32)
+                    world_size = dist.get_world_size()
+                    gathered_usage = [torch.zeros_like(usage_tensor) for _ in range(world_size)]
+                    dist.all_gather(gathered_usage, usage_tensor)
+
+                    rocm_mem_usages = [t.item() for t in gathered_usage]
+                    max_usage = max(rocm_mem_usages)
+                    max_rank = rocm_mem_usages.index(max_usage)
+
                     log_string += (
-                        f" rocm mem usage/free/total/usage_ratio: {rocm_used_mem/1024/1024/1024:.2f}GB/"
+                        f" rocm mem usage/free/total/usage_ratio: {rocm_used_mem/1024/1024/1024:.2f}GiB/"
                     )
-                    log_string += f"{rocm_free_mem/1024/1024/1024:.2f}GB/"
-                    log_string += f"{rocm_total_mem/1024/1024/1024:.2f}GB/{rocm_mem_usage*100:.2f}% |"
+                    log_string += f"{rocm_free_mem/1024/1024/1024:.2f}GiB/"
+                    log_string += f"{rocm_total_mem/1024/1024/1024:.2f}GiB/{rocm_mem_usage*100:.2f}% |"
+                    log_string += f" rank-{max_rank} max mem usage/usage_ratio: "
+                    log_string += f"{rocm_total_mem*max_usage/1024/1024/1024:.2f}GiB/{max_usage*100:.2f}% |"
 
                 log_string += (
                     f" throughput per GPU (TFLOP/s/GPU): {throughput:.1f}/"
@@ -2538,17 +2551,17 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                             iteration,
                         )
                         writer.add_scalar(
-                            f"{mem_collector}_used_mem(GB)",
+                            f"{mem_collector}_used_mem(GiB)",
                             used_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         writer.add_scalar(
-                            f"{mem_collector}_free_mem(GB)",
+                            f"{mem_collector}_free_mem(GiB)",
                             free_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         writer.add_scalar(
-                            f"{mem_collector}_total_mem(GB)",
+                            f"{mem_collector}_total_mem(GiB)",
                             total_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
@@ -2560,15 +2573,15 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                             iteration,
                         )
                         wandb_writer.log(
-                            {f"{mem_collector}_used_mem(GB)": used_mem / 1024 / 1024 / 1024},
+                            {f"{mem_collector}_used_mem(GiB)": used_mem / 1024 / 1024 / 1024},
                             iteration,
                         )
                         wandb_writer.log(
-                            {f"{mem_collector}_free_mem(GB)": free_mem / 1024 / 1024 / 1024},
+                            {f"{mem_collector}_free_mem(GiB)": free_mem / 1024 / 1024 / 1024},
                             iteration,
                         )
                         wandb_writer.log(
-                            {f"{mem_collector}_total_mem(GB)": total_mem / 1024 / 1024 / 1024},
+                            {f"{mem_collector}_total_mem(GiB)": total_mem / 1024 / 1024 / 1024},
                             iteration,
                         )
                         wandb_writer.log({f"{mem_collector}_mem_usage(%)": mem_usage * 100.0}, iteration)
@@ -2580,17 +2593,17 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_used_mem(GB)",
+                            f"{mem_collector}_used_mem(GiB)",
                             used_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_free_mem(GB)",
+                            f"{mem_collector}_free_mem(GiB)",
                             free_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_total_mem(GB)",
+                            f"{mem_collector}_total_mem(GiB)",
                             total_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
