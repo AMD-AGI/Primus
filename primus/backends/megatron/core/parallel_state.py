@@ -8,6 +8,7 @@
 ###############################################################################
 
 import torch
+from primus.backends.megatron.core.pipeline_parallel.schedules import is_v_schedule_enabled
 from megatron.core.parallel_state import (
     get_pipeline_model_parallel_rank,
     get_pipeline_model_parallel_world_size,
@@ -28,11 +29,10 @@ def default_embedding_ranks(pp_ranks, split_rank=None):
     if len(pp_ranks) == 1:
         return [pp_ranks[0]]
     elif split_rank is not None and pp_ranks[split_rank] not in (pp_ranks[0], pp_ranks[-1]):
-        assert not get_args().zero_bubble_v_schedule
-        assert not get_args().enable_1f1b_v
+        assert not is_v_schedule_enabled()
         return [pp_ranks[0], pp_ranks[split_rank], pp_ranks[-1]]
     else:
-        if get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v:
+        if is_v_schedule_enabled():
             return [pp_ranks[0]]
         return [pp_ranks[0], pp_ranks[-1]]
 
@@ -46,7 +46,7 @@ def is_pipeline_last_stage(ignore_virtual=False, vp_stage=None):
             vp_stage = get_virtual_pipeline_model_parallel_rank()
 
         virtual_pipeline_model_parallel_world_size = get_virtual_pipeline_model_parallel_world_size()
-        if get_args().patch_zero_bubble and get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v:
+        if is_v_schedule_enabled():
             assert virtual_pipeline_model_parallel_world_size == 2
             return get_pipeline_model_parallel_rank() == 0 and vp_stage == (
                 get_virtual_pipeline_model_parallel_world_size() - 1
@@ -71,7 +71,7 @@ def is_rank_in_embedding_group(ignore_virtual=False):
         return False
     if ignore_virtual:
         return rank in _EMBEDDING_GLOBAL_RANKS
-    if get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v:
+    if is_v_schedule_enabled():
         return is_pipeline_first_stage(ignore_virtual=False) or is_pipeline_last_stage(ignore_virtual=False)
     if rank in _EMBEDDING_GLOBAL_RANKS:
         if rank == _EMBEDDING_GLOBAL_RANKS[0]:

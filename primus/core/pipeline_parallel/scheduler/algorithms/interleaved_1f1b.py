@@ -1,3 +1,4 @@
+from typing import Any
 from ..scheduler_node import FuncType, SchedulerNode
 from .base import PipelineScheduleAlgo
 
@@ -18,7 +19,7 @@ class ScheduleInterleaved1F1B(PipelineScheduleAlgo):
         super().__init__(pp_size, vpp_size, micro_batches)
         assert vpp_size > 1, "Interleaved 1F1B requires vpp_size > 1"
 
-    def direction_map(self, rank: int, chunk: int, func_type: FuncType) -> dict[str, int]:
+    def direction_map(self, rank: int, chunk: int, func_type: FuncType) -> dict[str, Any]:
         """Map communication directions for interleaved schedule
 
         In interleaved mode, even chunks go forward, odd chunks go backward.
@@ -108,23 +109,34 @@ class ScheduleInterleaved1F1B(PipelineScheduleAlgo):
                     fwd_chunk += 1
 
                 fwd_mini_batch = i % self.pp_size + (i // vpp_range_len * self.pp_size)
+
+                recv_node, send_node = self.generate_send_recv_nodes(
+                    rank, fwd_mini_batch, fwd_chunk, FuncType.F
+                )
+                if recv_node is not None:
+                    rank_schedule.append(recv_node)
+
                 rank_schedule.append(
                     SchedulerNode(func_type=FuncType.F, mini_batch=fwd_mini_batch, chunk=fwd_chunk, args=None)
                 )
 
+                if send_node is not None:
+                    rank_schedule.append(send_node)
+
             # 1f1b steady phase
             for i in range(num_of_warmup_phases, self.micro_batches * self.vpp_size):
+                # cal fwd info
                 if i % vpp_range_len == 0:
                     fwd_chunk = 0
                 elif i % self.pp_size == 0:
                     fwd_chunk += 1
 
                 fwd_mini_batch = i % self.pp_size + (i // vpp_range_len * self.pp_size)
-
-                rank_schedule.append(
-                    SchedulerNode(func_type=FuncType.F, mini_batch=fwd_mini_batch, chunk=fwd_chunk, args=None)
+                f_recv_node, f_send_node = self.generate_send_recv_nodes(
+                    rank, fwd_mini_batch, fwd_chunk, FuncType.F
                 )
 
+                # cal bwd info
                 backward_i = i - num_of_warmup_phases
                 if backward_i % vpp_range_len == 0:
                     bwd_chunk = self.vpp_size - 1
@@ -132,11 +144,30 @@ class ScheduleInterleaved1F1B(PipelineScheduleAlgo):
                     bwd_chunk -= 1
 
                 bwd_mini_batch = backward_i % self.pp_size + (backward_i // vpp_range_len * self.pp_size)
+                b_recv_node, b_send_node = self.generate_send_recv_nodes(
+                    rank, bwd_mini_batch, bwd_chunk, FuncType.BW
+                )
+
+                #insert schedule table
+                if f_recv_node is not None:
+                    rank_schedule.append(f_recv_node)
+                if b_recv_node is not None:
+                    rank_schedule.append(b_recv_node)
+
+                rank_schedule.append(
+                    SchedulerNode(func_type=FuncType.F, mini_batch=fwd_mini_batch, chunk=fwd_chunk, args=None)
+                )
+
                 rank_schedule.append(
                     SchedulerNode(
                         func_type=FuncType.BW, mini_batch=bwd_mini_batch, chunk=bwd_chunk, args=None
                     )
                 )
+                
+                if f_send_node is not None:
+                    rank_schedule.append(f_send_node)
+                if b_send_node is not None:
+                    rank_schedule.append(b_send_node)
 
             # cooldown phase
             for backward_i in range(
@@ -149,17 +180,29 @@ class ScheduleInterleaved1F1B(PipelineScheduleAlgo):
 
                 bwd_mini_batch = backward_i % self.pp_size + (backward_i // vpp_range_len * self.pp_size)
 
+                bwd_recv_node, bwd_send_node = self.generate_send_recv_nodes(
+                    rank, bwd_mini_batch, bwd_chunk, FuncType.BW
+                )
+                if bwd_recv_node is not None:
+                    rank_schedule.append(bwd_recv_node)
+
                 rank_schedule.append(
                     SchedulerNode(
                         func_type=FuncType.BW, mini_batch=bwd_mini_batch, chunk=bwd_chunk, args=None
                     )
                 )
 
-        schedule_table = self.add_communication_nodes(schedule_table)
+                if bwd_send_node is not None:
+                    rank_schedule.append(bwd_send_node)
+
+        # schedule_table = self.add_communication_nodes(schedule_table, mode="async_p2p")
+
         return schedule_table
 
 
 if __name__ == "__main__":
     schedule = ScheduleInterleaved1F1B(pp_size=4, vpp_size=2, micro_batches=16)
     schedule_table = schedule.generate_schedule_table()
-    schedule.print_schedule_table(schedule_table, filter=[FuncType.BW])
+    # schedule.print_schedule_table(schedule_table, filter=[FuncType.BW])
+
+    print(schedule.direction_map(0, 0, FuncType.F), schedule.direction_map(0, 1, FuncType.F))

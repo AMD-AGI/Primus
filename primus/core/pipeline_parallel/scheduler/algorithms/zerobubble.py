@@ -53,23 +53,55 @@ class ScheduleZeroBubble(PipelineScheduleAlgo):
 
             # Warmup: only forward passes
             for i in range(warm_up_phases):
+
+                recv_node, send_node = self.generate_send_recv_nodes(
+                    rank, i, 0, FuncType.F
+                )
+                if recv_node is not None:
+                    schedule_table[rank].append(recv_node)
+                
                 schedule_table[rank].append(
                     SchedulerNode(func_type=FuncType.F, mini_batch=i, chunk=0, args=None)
                 )
+
+                if send_node is not None:
+                    schedule_table[rank].append(send_node)
 
             # Steady state: F-B-W pattern
             # The key insight: we can do W (weight grad) without blocking the pipeline
             for i in range(warm_up_phases, self.micro_batches):
+
+                fwd_recv_node, fwd_send_node = self.generate_send_recv_nodes(
+                    rank, i, 0, FuncType.F
+                )
+                if fwd_recv_node is not None:
+                    w_node = None
+                    
+                    if len(schedule_table[rank]) > 0 and schedule_table[rank][len(schedule_table[rank]) - 1].func_type == FuncType.W:
+                        w_node = schedule_table[rank].pop()
+
+                    schedule_table[rank].append(fwd_recv_node)
+                    if w_node is not None:
+                        schedule_table[rank].append(w_node)
                 # Forward for current microbatch
                 schedule_table[rank].append(
                     SchedulerNode(func_type=FuncType.F, mini_batch=i, chunk=0, args=None)
                 )
+                if fwd_send_node is not None:
+                    schedule_table[rank].append(fwd_send_node)
 
                 # Backward for earlier microbatch (B only, without W)
                 bw_idx = i - warm_up_phases
+                bwd_recv_node, bwd_send_node = self.generate_send_recv_nodes(
+                    rank, bw_idx, 0, FuncType.B
+                )
+                if bwd_recv_node is not None:
+                    schedule_table[rank].append(bwd_recv_node)
                 schedule_table[rank].append(
                     SchedulerNode(func_type=FuncType.B, mini_batch=bw_idx, chunk=0, args=None)
                 )
+                if bwd_send_node is not None:
+                    schedule_table[rank].append(bwd_send_node)
 
                 # Weight gradient can be scheduled flexibly
                 if bw_idx >= rank:
@@ -79,10 +111,24 @@ class ScheduleZeroBubble(PipelineScheduleAlgo):
 
             # Cooldown: remaining B and W passes
             for i in range(self.micro_batches - warm_up_phases, self.micro_batches):
+                bwd_recv_node, bwd_send_node = self.generate_send_recv_nodes(
+                    rank, i, 0, FuncType.B
+                )
+                if bwd_recv_node is not None:
+                    w_node = None
+                    if len(schedule_table[rank]) > 0 and schedule_table[rank][len(schedule_table[rank]) - 1].func_type == FuncType.W:
+                        w_node = schedule_table[rank].pop()
+
+                    if bwd_recv_node is not None:
+                        schedule_table[rank].append(bwd_recv_node)
+                    if w_node is not None:
+                        schedule_table[rank].append(w_node)
+                
                 schedule_table[rank].append(
                     SchedulerNode(func_type=FuncType.B, mini_batch=i, chunk=0, args=None)
                 )
-
+                if bwd_send_node is not None:
+                    schedule_table[rank].append(bwd_send_node)
                 schedule_table[rank].append(
                     SchedulerNode(func_type=FuncType.W, mini_batch=i - rank, chunk=0, args=None)
                 )
@@ -92,7 +138,7 @@ class ScheduleZeroBubble(PipelineScheduleAlgo):
                     SchedulerNode(func_type=FuncType.W, mini_batch=i - rank, chunk=0, args=None)
                 )
 
-        schedule_table = self.add_communication_nodes(schedule_table)
+        #schedule_table = self.add_communication_nodes(schedule_table)
 
         return schedule_table
 

@@ -38,60 +38,68 @@ def _async_send_recv_op(
     if group.rank() % 2 == 0:
         if send_next_nodes is not None:
             for node in send_next_nodes:
-                send_next_req = torch.distributed.isend(
-                    tensor=node.args["send_buffers"][0], dst=node.args["to_pp_rank"], group=even_send_odd_recv_group
-                )
-                node.args["req"] = send_next_req
+                for send_buffer in node.args["send_buffers"]:
+                    send_next_req = torch.distributed.isend(
+                        tensor=send_buffer, dst=node.args["to_pp_rank"], group=even_send_odd_recv_group
+                    )
+                    node.args["req"] = send_next_req
 
         if recv_prev_nodes is not None:
             for node in recv_prev_nodes:
-                recv_prev_req = torch.distributed.irecv(
-                    tensor=node.args["recv_buffers"][0], src=node.args["from_pp_rank"], group=even_recv_odd_send_group
-                )
-                node.args["req"] = recv_prev_req
+                for recv_buffer in node.args["recv_buffers"]:
+                    recv_prev_req = torch.distributed.irecv(
+                        tensor=recv_buffer, src=node.args["from_pp_rank"], group=even_recv_odd_send_group
+                    )
+                    node.args["req"] = recv_prev_req
 
         if send_prev_nodes is not None:
             for node in send_prev_nodes:
-                send_prev_req = torch.distributed.isend(
-                    tensor=node.args["send_buffers"][0], dst=node.args["to_pp_rank"], group=even_send_odd_recv_group
-                )
-                node.args["req"] = send_prev_req
+                for send_buffer in node.args["send_buffers"]:
+                    send_prev_req = torch.distributed.isend(
+                        tensor=send_buffer, dst=node.args["to_pp_rank"], group=even_send_odd_recv_group
+                    )
+                    node.args["req"] = send_prev_req
 
         if recv_next_nodes is not None:
             for node in recv_next_nodes:
-                recv_next_req = torch.distributed.irecv(
-                    tensor=node.args["recv_buffers"][0], src=node.args["from_pp_rank"], group=even_recv_odd_send_group
-                )
-                node.args["req"] = recv_next_req
+                for recv_buffer in node.args["recv_buffers"]:
+                    recv_next_req = torch.distributed.irecv(
+                        tensor=recv_buffer, src=node.args["from_pp_rank"], group=even_recv_odd_send_group
+                    )
+                    node.args["req"] = recv_next_req
 
     else:
         if recv_prev_nodes is not None:
             for node in recv_prev_nodes:
-                recv_prev_req = torch.distributed.irecv(
-                    tensor=node.args["recv_buffers"][0], src=node.args["from_pp_rank"], group=even_send_odd_recv_group
-                )
-                node.args["req"] = recv_prev_req
+                for recv_buffer in node.args["recv_buffers"]:
+                    recv_prev_req = torch.distributed.irecv(
+                        tensor=recv_buffer, src=node.args["from_pp_rank"], group=even_send_odd_recv_group
+                    )
+                    node.args["req"] = recv_prev_req
 
         if send_next_nodes is not None:
             for node in send_next_nodes:
-                send_next_req = torch.distributed.isend(
-                    tensor=node.args["send_buffers"][0], dst=node.args["to_pp_rank"], group=even_recv_odd_send_group
-                )
-                node.args["req"] = send_next_req
+                for send_buffer in node.args["send_buffers"]:
+                    send_next_req = torch.distributed.isend(
+                        tensor=send_buffer, dst=node.args["to_pp_rank"], group=even_recv_odd_send_group
+                    )
+                    node.args["req"] = send_next_req
 
         if recv_next_nodes is not None:
             for node in recv_next_nodes:
-                recv_next_req = torch.distributed.irecv(
-                        tensor=node.args["recv_buffers"][0], src=node.args["from_pp_rank"], group=even_send_odd_recv_group
-                )
-                node.args["req"] = recv_next_req
+                for recv_buffer in node.args["recv_buffers"]:
+                    recv_next_req = torch.distributed.irecv(
+                        tensor=recv_buffer, src=node.args["from_pp_rank"], group=even_send_odd_recv_group
+                    )
+                    node.args["req"] = recv_next_req
 
         if send_prev_nodes is not None:
             for node in send_prev_nodes:
-                send_prev_req = torch.distributed.isend(
-                    tensor=node.args["send_buffers"][0], dst=node.args["to_pp_rank"], group=even_recv_odd_send_group
-                )
-                node.args["req"] = send_prev_req
+                for send_buffer in node.args["send_buffers"]:
+                    send_prev_req = torch.distributed.isend(
+                        tensor=send_buffer, dst=node.args["to_pp_rank"], group=even_recv_odd_send_group
+                    )
+                    node.args["req"] = send_prev_req
 
 
 def _init_send_recv_buffers(node: SchedulerNode, idx: int, scheduler_table: list[SchedulerNode]):
@@ -111,7 +119,7 @@ def _init_send_recv_buffers(node: SchedulerNode, idx: int, scheduler_table: list
         for i in range(len(node.args["send_tensor_shapes"])):
             assert node.args["send_tensor_shapes"][i] == node.args["send_buffers"][i].shape, f"send_buffer_shape and send_buffer_size must have the same size {node.args['send_tensor_shapes'][i]} {node.args['send_buffers'][i].shape} node.func_type: {node.func_type} node.mini_batch: {node.mini_batch} node.chunk: {node.chunk}"
 
-        print(f"node {node} send_buffers: {len(node.args['send_buffers'])} | {node.args['send_buffers'][0].shape}")
+        #print(f"node {node} send_buffers: {len(node.args['send_buffers'])} | {node.args['send_buffers'][0].shape}")
 
     elif node.func_type in [FuncType.RF, FuncType.RB]:
         node.args["recv_buffers"] = []
@@ -124,7 +132,7 @@ def _init_send_recv_buffers(node: SchedulerNode, idx: int, scheduler_table: list
                     dtype=node.args["dtype"]
                 )
         )
-        print(f"node {node} recv_buffers: {len(node.args['recv_buffers'])} | {node.args['recv_buffers'][0].shape}")
+        #print(f"node {node} recv_buffers: {len(node.args['recv_buffers'])} | {node.args['recv_buffers'][0].shape}")
 
 def _batch_send_recv(p2p_nodes: list[SchedulerNode], mode="batch_p2p"):
     ops = []
@@ -134,6 +142,8 @@ def _batch_send_recv(p2p_nodes: list[SchedulerNode], mode="batch_p2p"):
     resv_next_nodes = []
 
     for comm_node in p2p_nodes:
+        assert comm_node.args["from_pp_rank"] != comm_node.args["to_pp_rank"]
+
         if comm_node.args["from_pp_rank"] < comm_node.args["to_pp_rank"]:
             if comm_node.func_type in [FuncType.SF, FuncType.SB]:
                 send_next_nodes.append(comm_node)
@@ -187,6 +197,21 @@ def batch_p2p_communication_handler(node: SchedulerNode, idx: int, scheduler_tab
 
     _init_send_recv_buffers(node, idx, scheduler_table)
 
+    comm_pair = {
+        FuncType.RF: FuncType.SF,
+        FuncType.RB: FuncType.SB,
+    }
+
+    if node.args["from_pp_rank"] == node.args["to_pp_rank"]: # copy if recv node
+        if node.func_type in [FuncType.RF, FuncType.RB]:
+            send_idx = find_prev_node_with_type(scheduler_table, idx, [comm_pair[node.func_type]], chunk=node.args["recv_from_chunk"])
+            assert send_idx is not None, "send_idx not found"
+            node.args["recv_buffers"] = [x.clone().detach().requires_grad_(True) for x in scheduler_table[send_idx].args["send_buffers"]]
+            
+            deallocate_output_tensor(scheduler_table[send_idx].args["send_buffers"][0], node.args["config"].deallocate_pipeline_outputs)
+            scheduler_table[send_idx].args["send_buffers"] = None
+        return
+
     COMMUNICATION_NODE_CACHE.append(node)
 
     if idx + 1 < len(scheduler_table) and scheduler_table[idx + 1].func_type in [
@@ -197,7 +222,7 @@ def batch_p2p_communication_handler(node: SchedulerNode, idx: int, scheduler_tab
     ]:
         return
 
-    _batch_send_recv(COMMUNICATION_NODE_CACHE, mode="async_send_recv_op")
+    _batch_send_recv(COMMUNICATION_NODE_CACHE, mode="batch_p2p")
 
     send_fwd_nodes = [ node for node in COMMUNICATION_NODE_CACHE if node.func_type == FuncType.SF ]
     send_bwd_nodes = [ node for node in COMMUNICATION_NODE_CACHE if node.func_type == FuncType.SB ]

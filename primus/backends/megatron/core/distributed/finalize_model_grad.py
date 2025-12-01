@@ -10,6 +10,7 @@
 from typing import List, Optional
 
 import torch
+from primus.backends.megatron.core.pipeline_parallel.schedules import is_v_schedule_enabled
 from megatron.core import parallel_state
 from megatron.core.distributed.finalize_model_grads import (
     _allreduce_layernorm_grads,
@@ -58,7 +59,7 @@ def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torc
         from megatron.training import get_args
 
         last_layer_rank = parallel_state.get_pipeline_model_parallel_last_rank()
-        if get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v:
+        if is_v_schedule_enabled():
             last_layer_rank = parallel_state.get_pipeline_model_parallel_first_rank()
         torch.distributed.broadcast(
             num_tokens,

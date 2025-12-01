@@ -11,3 +11,7 @@ local/
 output
 experiment
 data
+*ppdata
+*.log*
+*.tar.gz
+*.sh

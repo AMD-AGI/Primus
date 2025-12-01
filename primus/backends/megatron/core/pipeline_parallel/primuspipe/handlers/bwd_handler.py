@@ -29,6 +29,12 @@ def megatron_bwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[Sc
     input_tensors = scheduler_table[fwd_node_idx].args["inputs"]
 
     recv_node_idx = find_prev_node_with_type(scheduler_table, idx, [FuncType.RB])
+
+    if recv_node_idx is not None and "req" in scheduler_table[recv_node_idx].args:
+        scheduler_table[recv_node_idx].args["req"].wait()
+        scheduler_table[recv_node_idx].args["req"] = None
+        del scheduler_table[recv_node_idx].args["req"]
+
     output_grad = scheduler_table[recv_node_idx].args["recv_buffers"] if recv_node_idx is not None else [None] * len(node.args["send_tensor_shapes"])
 
     # run backward
@@ -39,7 +45,6 @@ def megatron_bwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[Sc
         )
     
     WGRAD_RUNNING_CACHE.set_current_minibatch_and_chunk(node.mini_batch, node.chunk)
-    # print(f"input_tensors: {input_tensors} {outputs} {output_grad}")
     input_tensor_grad = backward_step_(
         input_tensors, outputs, output_grad, node.args["model_type"], node.args["config"]
     )
@@ -52,5 +57,5 @@ def megatron_bwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[Sc
 
     assert isinstance(input_tensor_grad, list), "input_tensor_grad should be a list"
 
-    node.args["outputs"] = [grad.clone().detach() for grad in input_tensor_grad]
+    node.args["outputs"] = [grad.clone().detach() for grad in input_tensor_grad if grad is not None]
 

@@ -16,110 +16,117 @@ class ScheduleZBVFormatted(VFoldScheduleAlgo):
         # as large of the number of microbatches needed to fully utilize the pipeline
         n_micro = max(2 * self.pp_group_size - 1, self.micro_batches)
         # rank_ops: list[Optional[_Action]] = [None for _ in range(rank)]
-        rank_ops = [[] for _ in range(self.pp_size)]
+        schedule_table = [[] for _ in range(self.pp_size)]
+        time_step = [i for i in range(self.pp_size)]
+
+        time_step_nodes = [dict() for _ in range(self.pp_size)]
 
         # Forward and backward action counts for stage chunk 0 and chunk 1
 
+        def insert_time_step_nodes(rank, time_step, node):
+            if node is None: return
+            if node.args is None:
+                node.args = {}
+            node.args["time_step"] = time_step
+            if time_step in time_step_nodes[rank]:
+                time_step_nodes[rank][time_step].append(node)
+            else:
+                time_step_nodes[rank][time_step] = [node]
+
+        
+        def insert_computation_node(rank, mini_batch, chunk, func_type):
+            if func_type == FuncType.W:
+                insert_time_step_nodes(rank, time_step[rank], SchedulerNode(func_type=func_type, mini_batch=mini_batch, chunk=chunk, args=None))
+                time_step[rank] += 1
+            else:
+                recv_node, send_node = self.generate_send_recv_nodes(
+                    rank, mini_batch, chunk, func_type
+                )
+                insert_time_step_nodes(rank, time_step[rank], recv_node)
+                insert_time_step_nodes(rank, time_step[rank], SchedulerNode(func_type=func_type, mini_batch=mini_batch, chunk=chunk, args=None))
+                time_step[rank] += 1
+                insert_time_step_nodes(rank, time_step[rank], send_node)
+        
         for rank in range(self.pp_size):
             # warm-up phase
             warmup_n1 = 2 * (self.pp_size - rank) - 1
             f0_cnt, f1_cnt, b0_cnt, b1_cnt = 0, 0, 0, 0
 
             for _ in range(warmup_n1):
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.F, mini_batch=f0_cnt, chunk=0, args=None)
-                )
+
+                insert_computation_node(rank, f0_cnt, 0, FuncType.F)
                 f0_cnt += 1
+
             warmup_n2 = rank
             for _ in range(warmup_n2):
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.F, mini_batch=f1_cnt, chunk=1, args=None)
-                )
+                insert_computation_node(rank, f1_cnt, 1, FuncType.F)
                 f1_cnt += 1
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.F, mini_batch=f0_cnt, chunk=0, args=None)
-                )
+
+                insert_computation_node(rank, f0_cnt, 0, FuncType.F)
                 f0_cnt += 1
+
             warmup_n3 = self.pp_group_size - rank
             for _ in range(warmup_n3):
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.F, mini_batch=f1_cnt, chunk=1, args=None)
-                )
+                insert_computation_node(rank, f1_cnt, 1, FuncType.F)
                 f1_cnt += 1
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.B, mini_batch=b1_cnt, chunk=1, args=None)
-                )
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.W, mini_batch=b1_cnt, chunk=1, args=None)
-                )
+                
+
+                insert_computation_node(rank, b1_cnt, 1, FuncType.B)
+                insert_computation_node(rank, b1_cnt, 1, FuncType.W)
                 b1_cnt += 1
+
             # stable phase
             while f1_cnt < f0_cnt or f0_cnt < n_micro:
                 if f0_cnt < n_micro:
-                    rank_ops[rank].append(
-                        SchedulerNode(func_type=FuncType.F, mini_batch=f0_cnt, chunk=0, args=None)
-                    )
+                    insert_computation_node(rank, f0_cnt, 0, FuncType.F)
                     f0_cnt += 1
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.B, mini_batch=b0_cnt, chunk=0, args=None)
-                )
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.W, mini_batch=b0_cnt, chunk=0, args=None)
-                )
+
+                insert_computation_node(rank, b0_cnt, 0, FuncType.B)
+                insert_computation_node(rank, b0_cnt, 0, FuncType.W)
                 b0_cnt += 1
 
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.F, mini_batch=f1_cnt, chunk=1, args=None)
-                )
+                insert_computation_node(rank, f1_cnt, 1, FuncType.F)
                 f1_cnt += 1
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.B, mini_batch=b1_cnt, chunk=1, args=None)
-                )
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.W, mini_batch=b1_cnt, chunk=1, args=None)
-                )
+                insert_computation_node(rank, b1_cnt, 1, FuncType.B)
+                insert_computation_node(rank, b1_cnt, 1, FuncType.W)
                 b1_cnt += 1
             # cool-down phase
             w0_cnt, w1_cnt = b0_cnt, b1_cnt
             cooldown_n1 = rank
             for _ in range(cooldown_n1):
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.B, mini_batch=b0_cnt, chunk=0, args=None)
-                )
+                insert_computation_node(rank, b0_cnt, 0, FuncType.B)
                 b0_cnt += 1
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.B, mini_batch=b1_cnt, chunk=1, args=None)
-                )
+                insert_computation_node(rank, b1_cnt, 1, FuncType.B)
                 b1_cnt += 1
             cooldown_n2 = self.pp_group_size - rank
             for _ in range(cooldown_n2):
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.B, mini_batch=b0_cnt, chunk=0, args=None)
-                )
+                insert_computation_node(rank, b0_cnt, 0, FuncType.B)
                 b0_cnt += 1
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.W, mini_batch=w0_cnt, chunk=0, args=None)
-                )
+                insert_computation_node(rank, w0_cnt, 0, FuncType.W)
                 w0_cnt += 1
             while w1_cnt < b1_cnt:
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.W, mini_batch=w1_cnt, chunk=1, args=None)
-                )
+                insert_computation_node(rank, w1_cnt, 1, FuncType.W)
                 w1_cnt += 1
             while w0_cnt < b0_cnt:
-                rank_ops[rank].append(
-                    SchedulerNode(func_type=FuncType.W, mini_batch=w0_cnt, chunk=0, args=None)
-                )
+                insert_computation_node(rank, w0_cnt, 0, FuncType.W)
                 w0_cnt += 1
 
             assert w0_cnt == b0_cnt and b0_cnt == f0_cnt
             assert w1_cnt == b1_cnt and b1_cnt == f1_cnt
 
-        schedule_table = self.add_communication_nodes(rank_ops)
+        for rank in range(self.pp_size):
+
+            for time_step, nodes in time_step_nodes[rank].items():
+                compute_nodes = [node for node in nodes if node.func_type in [FuncType.F, FuncType.B, FuncType.W]]
+                comm_nodes = [node for node in nodes if node.func_type in [FuncType.SF, FuncType.SB, FuncType.RF, FuncType.RB]]
+
+                schedule_table[rank].extend(comm_nodes)
+                schedule_table[rank].extend(compute_nodes)
+
         return schedule_table
 
 
 if __name__ == "__main__":
     schedule = ScheduleZBVFormatted(pp_size=4, vpp_size=2, micro_batches=16)
     schedule_table = schedule.generate_schedule_table()
-    schedule.print_schedule_table(schedule_table, [FuncType.F, FuncType.B, FuncType.W])
+    schedule.print_schedule_table(schedule_table)

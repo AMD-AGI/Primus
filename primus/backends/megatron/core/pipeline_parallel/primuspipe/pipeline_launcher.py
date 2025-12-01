@@ -68,9 +68,9 @@ class PrimusPipelineParallelLauncher:
 
         self.schedule_instance = produce_schedule_instance(self.pp_algorithm, self.pp_size, self.vpp_size, num_microbatches)
         self.schedule_table = self.schedule_instance.generate_schedule_table()
-        if self.pp_rank == 0:
-            print(f"debug self.pp_size, self.vpp_size, num_microbatches {self.pp_size} {self.vpp_size} {num_microbatches}")
-            self.schedule_instance.print_schedule_table(self.schedule_table)
+        # if self.pp_rank == 0:
+        #     print(f"debug self.pp_size, self.vpp_size, num_microbatches {self.pp_size} {self.vpp_size} {num_microbatches}")
+        #     self.schedule_instance.print_schedule_table(self.schedule_table)
         self.last_pp_stage_rank = self.schedule_instance.last_pp_stage_rank()
 
 
@@ -256,7 +256,7 @@ class PrimusPipelineParallelLauncher:
                 pg_collection=pg_collection,
             )
 
-        assert len(WGradRunningCache.cache) == 0, "WGradRunningCache is not empty"
+        assert WGradRunningCache.is_empty(), "WGradRunningCache is not empty"
 
         return self.forward_data_store
 

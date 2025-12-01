@@ -308,12 +308,12 @@ def draw(task_data_list):
 
 
 def main():
-    show_exps = ["1f1b", "1f1b-interleaved", "zero-bubble-1f1b", "zbv", "v-half", "v-min"]
+    show_exps = ["zbb-no-reorder", "zbb-reorder"]
     task_list = [
         {
             "title": exp,
-            "iter_to_vis": [i for i in range(5, 6)],
-            "log_path": f"./pp_data/{exp}/",
+            "iter_to_vis": [i for i in range(4, 5)],
+            "log_path": f"./deepseek_v2_lite-ppdata/{exp}/",
         }
         for exp in show_exps
     ]

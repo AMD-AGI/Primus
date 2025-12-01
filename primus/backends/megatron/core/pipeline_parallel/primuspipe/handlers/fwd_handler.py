@@ -28,6 +28,11 @@ def megatron_fwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[Sc
     # prepare input, if not found, input is None(fwd_func will handle it)
     idx = find_prev_node_with_type(scheduler_table, idx, [FuncType.RF])
 
+    if idx is not None and "req" in scheduler_table[idx].args:
+        scheduler_table[idx].args["req"].wait()
+        scheduler_table[idx].args["req"] = None
+        del scheduler_table[idx].args["req"]
+
     input_tensors = [None] * len(node.args["recv_tensor_shapes"]) if idx is None else scheduler_table[idx].args["recv_buffers"]
     forward_step_func = forward_step
     if get_args().dump_pp_data:

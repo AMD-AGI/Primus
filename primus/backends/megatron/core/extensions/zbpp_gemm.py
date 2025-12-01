@@ -148,7 +148,7 @@ class GroupedLinearWithWeightGradientStore(torch.autograd.Function):
                 with torch.no_grad():
                     _weight.main_grad.add_(_wgrad)
 
-            insert_wgrad_func_into_cache(weight, functools.partial(pre_process, grad_output, input, ctx.trans_b), functools.partial(process_wgrad, weight, ctx.weight_shape_ori))
+        insert_wgrad_func_into_cache(weight, functools.partial(pre_process, grad_output, input, ctx.trans_b), functools.partial(process_wgrad, weight, ctx.weight_shape_ori))
 
         return grad_a, None, None, None, None, None, None, None
 

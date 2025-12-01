@@ -116,3 +116,7 @@ def get_forward_backward_func_zbpp():
 
 def get_primus_pipeline_parallel_fwd_backward_func():
     return PrimusPipelineParallelLauncher().run
+
+def is_v_schedule_enabled():
+    args = get_args()
+    return (args.patch_zero_bubble and args.enable_zero_bubble and (args.zero_bubble_v_schedule or args.enable_1f1b_v)) or ("zbv" in args.pp_algorithm and args.patch_primus_pipeline)

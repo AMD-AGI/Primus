@@ -11,8 +11,8 @@ class ScheduleRunner:
 
     def run(self, scheduler_table, rank: int):
         for idx, node in enumerate(scheduler_table[rank]):
-            print(f"node {node} start")
+            # print(f"node {node} start")
             func = self.handle_func_dict[node.func_type]
             func(node, idx, scheduler_table[rank])
-            print(f"node {node} end")
+            # print(f"node {node} end")
 

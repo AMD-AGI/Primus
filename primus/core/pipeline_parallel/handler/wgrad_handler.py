@@ -1,5 +1,6 @@
 from typing import Callable
 
+from primus.modules.module_utils import log_rank_all
 from primus.core.pipeline_parallel.scheduler.scheduler_node import SchedulerNode
 
 
@@ -16,8 +17,9 @@ class WGradRunningCache:
 
     @classmethod
     def append(cls, wgrad_func: Callable):
-        assert cls.cur_minibatch is not None, "current minibatch is not set"
-        assert cls.cur_chunk is not None, "current chunk is not set"
+        if cls.cur_minibatch is None or cls.cur_chunk is None:
+            wgrad_func()
+            return
         if cls.cur_minibatch not in cls.cache:
             cls.cache[cls.cur_minibatch] = {}
         if cls.cur_chunk not in cls.cache[cls.cur_minibatch]:
@@ -26,11 +28,21 @@ class WGradRunningCache:
 
     @classmethod
     def flush(cls, minibatch: int, chunk: int):
-        assert minibatch in cls.cache, "minibatch not found in cache"
-        assert chunk in cls.cache[minibatch], "chunk not found in cache"
-        for wgrad_func in cls.cache[minibatch][chunk]:
+        assert minibatch in cls.cache, f"minibatch {minibatch} not found in cache"
+        assert chunk in cls.cache[minibatch], f"chunk {chunk} not found in cache"
+
+        for idx, wgrad_func in enumerate(cls.cache[minibatch][chunk]):
             wgrad_func()
-        del cls.cache[minibatch][chunk]  # release memory
+            cls.cache[minibatch][chunk][idx] = None # release memory
+        
+        del cls.cache[minibatch][chunk]
+
+    @classmethod
+    def is_empty(cls):
+        for minibatch in cls.cache:
+            if len(cls.cache[minibatch]) > 0:
+                return False
+        return True
 
 
 WGRAD_RUNNING_CACHE = WGradRunningCache()

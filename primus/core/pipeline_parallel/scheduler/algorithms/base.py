@@ -83,6 +83,39 @@ class PipelineScheduleAlgo(ABC):
 
     def last_pp_stage_rank(self) -> int:
         return self.pp_size - 1
+
+    def generate_send_recv_nodes(self, rank: int, mini_batch: int, chunk: int, func_type: FuncType):
+        direction_info = self.direction_map(rank, chunk, func_type)
+        prev_node, prev_node_type = direction_info["prev"]
+        next_node, next_node_type = direction_info["next"]
+        recv_from_chunk = direction_info["recv_from_chunk"]
+        send_to_chunk = direction_info["send_to_chunk"]
+        send_node, recv_node = None, None
+
+        if prev_node is not None:
+            recv_node = SchedulerNode(
+                func_type=prev_node_type,
+                mini_batch=mini_batch,
+                chunk=chunk,
+                args={
+                    "from_pp_rank": prev_node,
+                    "to_pp_rank": rank,
+                    "recv_from_chunk": recv_from_chunk,
+                },
+            )
+        if next_node is not None:
+            send_node = SchedulerNode(
+                func_type=next_node_type,
+                mini_batch=mini_batch,
+                chunk=chunk,
+                args={
+                    "from_pp_rank": rank,
+                    "to_pp_rank": next_node,
+                    "send_to_chunk": send_to_chunk,
+                },
+            )
+
+        return recv_node, send_node
     
 class VFoldScheduleAlgo(PipelineScheduleAlgo):
     def __init__(self, pp_size, vpp_size, micro_batches):

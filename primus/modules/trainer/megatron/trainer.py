@@ -601,6 +601,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
     def patch_pp(self):
         # patch optimizer
+        args = self.module_config
+        is_v_schedule = (args.patch_zero_bubble and args.enable_zero_bubble and (args.zero_bubble_v_schedule or args.enable_1f1b_v)) or ("zbv" in args.pp_algorithm and args.patch_primus_pipeline)
+
         if self.module_config.patch_zero_bubble:
             warning_rank_0(f"MegatronTrainer: Patch ZeroBubble PP")
             import megatron.core.optimizer as optimizer
@@ -620,6 +623,17 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
             ori_pp.get_forward_backward_func = get_forward_backward_func_zbpp
 
+        elif self.module_config.patch_primus_pipeline:
+            warning_rank_0(f"MegatronTrainer: Patch PrimusPipe PP")
+            import megatron.core.pipeline_parallel as ori_pp
+
+            from primus.backends.megatron.core.pipeline_parallel.schedules import (
+                get_primus_pipeline_parallel_fwd_backward_func,
+            )
+
+            ori_pp.get_forward_backward_func = get_primus_pipeline_parallel_fwd_backward_func
+
+        if self.module_config.patch_primus_pipeline or self.module_config.patch_zero_bubble:
             # patch linear to split d_w and d_input
             import megatron.core.tensor_parallel.layers as ori_layers
 
@@ -632,7 +646,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             )
 
             # patch zbv-related code
-            if self.module_config.zero_bubble_v_schedule or self.module_config.enable_1f1b_v:
+            if is_v_schedule:
                 import megatron.core.parallel_state as ori_parallel_state
 
                 from primus.backends.megatron.core.parallel_state import (
@@ -677,16 +691,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             )
 
             ori_linear._Linear = _LinearWithWGradSplit
-
-        elif self.module_config.patch_primus_pipeline:
-            warning_rank_0(f"MegatronTrainer: Patch PrimusPipe PP")
-            import megatron.core.pipeline_parallel as ori_pp
-
-            from primus.backends.megatron.core.pipeline_parallel.schedules import (
-                get_primus_pipeline_parallel_fwd_backward_func,
-            )
-
-            ori_pp.get_forward_backward_func = get_primus_pipeline_parallel_fwd_backward_func
 
     def init(self, *init_args, **kwargs):
         allowed_keys = {

@@ -9,6 +9,7 @@
 
 from typing import Optional
 
+from primus.backends.megatron.core.pipeline_parallel.schedules import is_v_schedule_enabled
 from megatron.core import parallel_state
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training.global_vars import get_args
@@ -88,9 +89,7 @@ def get_transformer_layer_offset(
                     + num_layers_per_virtual_model_chunk_in_last_pipeline_stage
                 )
 
-                if get_args().patch_zero_bubble and (
-                    get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v
-                ):
+                if is_v_schedule_enabled():
                     assert config.virtual_pipeline_model_parallel_size == 2
                     parallel_state.get_pipeline_model_parallel_world_size()
                     if pipeline_rank == 0:
@@ -155,9 +154,7 @@ def get_transformer_layer_offset(
                 total_virtual_chunks = num_layers // vp_size
                 offset = vp_stage * total_virtual_chunks + (pipeline_rank * num_layers_per_virtual_rank)
 
-                if get_args().patch_zero_bubble and (
-                    get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v
-                ):
+                if is_v_schedule_enabled():
                     assert config.virtual_pipeline_model_parallel_size == 2
                     if pipeline_rank == 0:
                         if vp_stage == 0:

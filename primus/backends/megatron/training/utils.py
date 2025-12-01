@@ -33,13 +33,9 @@ def print_second_last_pipeline_stage(message):
 
 def is_pipeline_stage_containing_loss():
     args = get_args()
+    is_v_schedule = (args.patch_zero_bubble and args.enable_zero_bubble and (args.zero_bubble_v_schedule or args.enable_1f1b_v)) or ("zbv" in args.pp_algorithm and args.patch_primus_pipeline)
 
-    if (
-        args.patch_zero_bubble
-        and args.num_virtual_stages_per_pipeline_rank == 2
-        and args.enable_zero_bubble
-        and (args.zero_bubble_v_schedule or args.enable_1f1b_v)
-    ):
+    if is_v_schedule:
         return mpu.is_pipeline_first_stage(ignore_virtual=True)
     else:
         return mpu.is_pipeline_last_stage(ignore_virtual=True)
