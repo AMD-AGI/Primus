@@ -7,7 +7,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict
 
-from primus.modules.module_utils import log_rank_0
+from primus.modules.module_utils import log_dict_aligned, log_rank_0
 
 
 class BackendAdapter(ABC):
