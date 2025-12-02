@@ -279,8 +279,6 @@ class TestBackendRegistrySetupPath:
 
     def test_setup_backend_path_already_in_sys_path(self, tmp_path):
         """Test setup_backend_path doesn't duplicate entries in sys.path."""
-        import sys
-
         backend_dir = tmp_path / "duplicate_test"
         backend_dir.mkdir()
 
