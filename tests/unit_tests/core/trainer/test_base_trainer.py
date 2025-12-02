@@ -13,7 +13,6 @@ from typing import Any, Dict, List
 
 import pytest
 
-import primus.core.trainer.base_trainer as base_trainer
 from primus.core.trainer.base_trainer import BaseTrainer
 
 
@@ -23,9 +22,8 @@ class DummyTrainer(BaseTrainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.run_calls: int = 0
-        # Track how many times detect_version is called for this class
-        if not hasattr(self.__class__, "detect_calls"):
-            self.__class__.detect_calls = 0  # type: ignore[attr-defined]
+        # Track how many times detect_version is called on this instance
+        self.detect_calls: int = 0
 
     def init(self, *args, **kwargs):
         """No-op init for testing."""
@@ -38,20 +36,14 @@ class DummyTrainer(BaseTrainer):
     def run_train(self):
         self.run_calls += 1
 
-    @classmethod
-    def detect_version(cls) -> str:
+    def detect_version(self) -> str:
         # Increment per-call counter to validate BaseTrainer.run usage
-        cls.detect_calls += 1  # type: ignore[attr-defined]
+        self.detect_calls += 1
         return "test-version"
 
 
 class TestBaseTrainerPatchIntegration:
     """Verify that BaseTrainer.run wires patch execution correctly."""
-
-    def setup_method(self):
-        # Reset per-test counters
-        if hasattr(DummyTrainer, "detect_calls"):
-            DummyTrainer.detect_calls = 0  # type: ignore[attr-defined]
 
     def test_run_invokes_patches_and_training(self, monkeypatch):
         # Silence logging inside BaseTrainer
@@ -64,7 +56,7 @@ class TestBaseTrainerPatchIntegration:
             # Return a deterministic patch count so BaseTrainer logging works
             return 1
 
-        monkeypatch.setattr(base_trainer, "run_patches", fake_run_patches)
+        monkeypatch.setattr("primus.core.trainer.base_trainer.run_patches", fake_run_patches)
 
         primus_config = SimpleNamespace(exp_root_path="/tmp/exp", exp_meta_info={})
         module_config = SimpleNamespace(framework="megatron", model="llama2_7B", trainable=True)
@@ -78,7 +70,7 @@ class TestBaseTrainerPatchIntegration:
         assert trainer.run_calls == 1
 
         # detect_version is called once per phase (before_train and after_train)
-        assert DummyTrainer.detect_calls == 2  # type: ignore[attr-defined]
+        assert trainer.detect_calls == 2
 
         # Patches were invoked twice: before_train and after_train
         assert len(calls) == 2
@@ -120,7 +112,7 @@ class TestBaseTrainerPatchIntegration:
             calls.append(kwargs)
             return 1
 
-        monkeypatch.setattr(base_trainer, "run_patches", fake_run_patches)
+        monkeypatch.setattr("primus.core.trainer.base_trainer.run_patches", fake_run_patches)
 
         primus_config = SimpleNamespace(exp_root_path="/tmp/exp", exp_meta_info={})
         module_config = SimpleNamespace(framework="megatron", model="llama2_7B", trainable=True)

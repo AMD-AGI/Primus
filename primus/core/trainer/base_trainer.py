@@ -136,6 +136,7 @@ class BaseTrainer(TrainerComponent):
                 "module_config": self.module_config,
             },
         )
+        module_utils.log_rank_0(f"Applied {patch_count} patches")
 
         module_utils.log_rank_0("=" * 80)
         module_utils.log_rank_0("Training workflow completed successfully.")
