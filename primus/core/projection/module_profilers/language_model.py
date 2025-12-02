@@ -199,23 +199,89 @@ class LanguageModelProfiler(BaseModuleProfiler):
         return total_act
 
     def run_layer_benchmark(self, model, batch_size: int, seq_len: int) -> dict:
-        # Handle both single model and list of model chunks (virtual pipeline parallelism)
-        models = model if isinstance(model, list) else [model]
-        print(f"[Primus:Performance Projection] Models: {models}")
+        """Benchmark transformer layers plus embedding/output layers on this rank."""
 
-        # Extract transformer layers from all model chunks
+        def unwrap_module(module):
+            """Recursively unwrap DistributedDataParallel / pipeline wrappers."""
+            return unwrap_module(module.module) if hasattr(module, "module") else module
+
+        model_chunks = model if isinstance(model, list) else [model]
+
+        embedding_module = None
+        output_module = None
         all_layers = []
-        for model in models:
-            model_chunk = model.module.module
-            if hasattr(model_chunk, "decoder") and hasattr(model_chunk.decoder, "layers"):
-                all_layers.extend(model_chunk.decoder.layers)
-            elif hasattr(model_chunk, "layers"):
-                all_layers.extend(model_chunk.layers)
+
+        for chunk in model_chunks:
+            unwrapped = unwrap_module(chunk)
+
+            language_model = getattr(unwrapped, "language_model", None)
+            if language_model is not None:
+                if hasattr(language_model, "embedding"):
+                    embedding_module = language_model.embedding
+                if hasattr(language_model, "output_layer"):
+                    output_module = language_model.output_layer
+
+                if hasattr(language_model, "encoder") and hasattr(language_model.encoder, "layers"):
+                    all_layers.extend(language_model.encoder.layers)
+                elif hasattr(language_model, "decoder") and hasattr(language_model.decoder, "layers"):
+                    all_layers.extend(language_model.decoder.layers)
+                elif hasattr(language_model, "layers"):
+                    all_layers.extend(language_model.layers)
+                continue
+
+            if hasattr(unwrapped, "decoder") and hasattr(unwrapped.decoder, "layers"):
+                all_layers.extend(unwrapped.decoder.layers)
+            elif hasattr(unwrapped, "layers"):
+                all_layers.extend(unwrapped.layers)
             else:
-                raise ValueError(f"Cannot find transformer layers in model chunk: {type(model_chunk)}")
+                raise ValueError(f"Cannot find transformer layers in model chunk: {type(unwrapped)}")
+            if hasattr(unwrapped, "embedding"):
+                embedding_module = unwrapped.embedding
+            if hasattr(unwrapped, "output_layer"):
+                output_module = unwrapped.output_layer
 
         print(f"\n[Primus:Performance Projection] Found {len(all_layers)} transformer layers")
         print(f"[Primus:Performance Projection] This rank is responsible for layers: {self.layers}")
+
+        # Benchmark embedding if this rank hosts it.
+        if 0 in self.layers:
+            if embedding_module is None:
+                print("[Primus:Performance Projection] WARNING: Embedding module not found on this rank.")
+            else:
+                print("[Primus:Performance Projection] Benchmarking embedding layer...")
+                profiler = self.sub_profilers["embedding"]
+                module = (
+                    embedding_module.word_embeddings
+                    if hasattr(embedding_module, "word_embeddings")
+                    else embedding_module
+                )
+                profiler.set_module(module)
+                emb_forward = profiler.measured_forward_time(batch_size, seq_len)
+                emb_backward = profiler.measured_backward_time(batch_size, seq_len)
+                emb_mem = profiler.measured_activation_memory(batch_size, seq_len)
+                print(
+                    f"  Embedding -> fwd: {emb_forward:.2f} ms, "
+                    f"bwd: {emb_backward:.2f} ms, "
+                    f"act: {emb_mem / (1024**2):.2f} MB"
+                )
+
+        # Benchmark output layer if this rank hosts the final layer.
+        last_layer_id = self.config.model_config.num_layers - 1
+        if last_layer_id in self.layers:
+            if output_module is None:
+                print("[Primus:Performance Projection] WARNING: Output layer module not found on this rank.")
+            else:
+                print("[Primus:Performance Projection] Benchmarking output layer...")
+                profiler = self.sub_profilers["output_layer"]
+                profiler.set_module(output_module)
+                out_forward = profiler.measured_forward_time(batch_size, seq_len)
+                out_backward = profiler.measured_backward_time(batch_size, seq_len)
+                out_mem = profiler.measured_activation_memory(batch_size, seq_len)
+                print(
+                    f"  Output Layer -> fwd: {out_forward:.2f} ms, "
+                    f"bwd: {out_backward:.2f} ms, "
+                    f"act: {out_mem / (1024**2):.2f} MB"
+                )
 
         # Benchmark each layer type (dense/MoE) once
         results = {}
