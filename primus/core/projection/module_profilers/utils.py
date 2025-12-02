@@ -13,7 +13,7 @@ import torch
 def benchmark_layer(
     layer_module: torch.nn.Module,
     input_shapes: List[Union[Tuple[int, ...], Tuple[Tuple[int, ...], torch.dtype]]],
-    num_iterations: int = 20,
+    num_iterations: int = 10,
 ) -> tuple[float, float, int]:
     """
     Benchmark both forward and backward passes of a transformer layer using CUDA events.

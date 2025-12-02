@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import math
 import os
 from pathlib import Path
 
@@ -16,6 +17,114 @@ from primus.core.projection.training_config import (
     convert_primus_config_to_projection_config,
 )
 from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
+
+_MAX_EXPERT_PARALLEL_SIZE = 8
+
+
+def _has_dense_layers(moe_layer_freq):
+    """Best-effort detection of whether the original config contains dense layers."""
+    if moe_layer_freq is None:
+        return True
+    if isinstance(moe_layer_freq, int):
+        return moe_layer_freq != 1  # 1 => every layer is MoE
+    if isinstance(moe_layer_freq, (list, tuple)):
+        return any(layer_flag == 0 for layer_flag in moe_layer_freq)
+    if isinstance(moe_layer_freq, str):
+        try:
+            evaluated = eval(moe_layer_freq, {}, {})
+            if isinstance(evaluated, (list, tuple)):
+                return any(layer_flag == 0 for layer_flag in evaluated)
+        except Exception:
+            pass
+    return True
+
+
+def _limit_layers_for_projection(module_config):
+    """
+    Restrict the transformer stack to at most one dense layer and one MoE layer.
+    """
+    has_moe = getattr(module_config, "num_experts", None)
+    has_moe = has_moe is not None and module_config.num_experts > 0
+    original_layers = getattr(module_config, "num_layers", 1) or 1
+    original_moe_layout = getattr(module_config, "moe_layer_freq", None)
+    dense_layers_present = _has_dense_layers(original_moe_layout)
+    max_layers = 2 if has_moe and dense_layers_present else 1
+    target_layers = max(1, min(original_layers, max_layers))
+    module_config.num_layers = target_layers
+
+    if has_moe:
+        if not dense_layers_present:
+            module_config.moe_layer_freq = [1] * target_layers
+        elif target_layers == 1:
+            module_config.moe_layer_freq = [1]
+        else:
+            dense_then_moe = [0, 1]
+            if target_layers > 2:
+                dense_then_moe.extend([0] * (target_layers - 2))
+            module_config.moe_layer_freq = dense_then_moe
+    else:
+        module_config.moe_layer_freq = [0] * target_layers
+
+    pipeline_mp = getattr(module_config, "pipeline_model_parallel_size", 1) or 1
+    if target_layers % pipeline_mp != 0:
+        module_config.pipeline_model_parallel_size = 1
+
+    for attr in ("num_layers_per_virtual_pipeline_stage", "num_virtual_stages_per_pipeline_rank"):
+        if hasattr(module_config, attr):
+            setattr(module_config, attr, None)
+
+
+def _rescale_expert_parallelism(module_config):
+    """
+    Cap expert_model_parallel_size so that EP * TP * CP <= 8 and adjust num_experts.
+    """
+    expert_mp_size = getattr(module_config, "expert_model_parallel_size", None)
+    if expert_mp_size is None or expert_mp_size <= _MAX_EXPERT_PARALLEL_SIZE:
+        current_tp = getattr(module_config, "tensor_model_parallel_size", 1) or 1
+        current_cp = getattr(module_config, "context_parallel_size", 1) or 1
+        if expert_mp_size is None:
+            expert_mp_size = 1
+        if expert_mp_size * current_tp * current_cp <= _MAX_EXPERT_PARALLEL_SIZE:
+            return None
+
+    num_experts = getattr(module_config, "num_experts", None)
+    current_tp = getattr(module_config, "tensor_model_parallel_size", 1) or 1
+    current_cp = getattr(module_config, "context_parallel_size", 1) or 1
+    total_parallel_product = max(1, current_tp * current_cp)
+    max_ep_allowed = max(1, _MAX_EXPERT_PARALLEL_SIZE // total_parallel_product)
+    new_expert_mp = min(expert_mp_size, _MAX_EXPERT_PARALLEL_SIZE, max_ep_allowed)
+
+    if new_expert_mp == expert_mp_size:
+        print(
+            "[Primus:Performance Projection] Expert parallelism already within limit "
+            f"(EP={expert_mp_size}, TP={current_tp}, CP={current_cp})."
+        )
+        return None
+
+    prev_num_experts = num_experts
+    if num_experts is not None:
+        experts_per_rank = math.ceil(num_experts / expert_mp_size)
+        module_config.num_experts = max(new_expert_mp * experts_per_rank, new_expert_mp)
+
+    module_config.expert_model_parallel_size = new_expert_mp
+    print(
+        "[Primus:Performance Projection] Rescaled expert parallelism "
+        f"(EP {expert_mp_size} -> {new_expert_mp}, TP={current_tp}, CP={current_cp})."
+    )
+    if prev_num_experts is not None:
+        print(
+            "[Primus:Performance Projection] Adjusted num_experts "
+            f"{prev_num_experts} -> {module_config.num_experts} "
+            "(preserving experts per rank)."
+        )
+    return {
+        "ep_before": expert_mp_size,
+        "ep_after": new_expert_mp,
+        "tp": current_tp,
+        "cp": current_cp,
+        "num_experts_before": prev_num_experts,
+        "num_experts_after": getattr(module_config, "num_experts", None),
+    }
 
 
 def launch_projection_from_cli(args, overrides):
@@ -34,6 +143,9 @@ def launch_projection_from_cli(args, overrides):
 
     # Load Primus configuration
     primus_config, unknown_overrides = load_primus_config(args, overrides)
+    module_config = primus_config.get_module_config("pre_trainer")
+    _limit_layers_for_projection(module_config)
+    rescale_info = _rescale_expert_parallelism(module_config)
     training_config = convert_primus_config_to_projection_config(primus_config)
 
     print("\n" + "=" * 100)
@@ -71,10 +183,6 @@ def launch_projection_from_cli(args, overrides):
     print("[Primus:Performance Projection] Setting up model and optimizer...")
     trainer.setup()
 
-    print(f"\n[Primus:Performance Projection] Model setup complete:")
-    print(f"  Model type: {type(trainer.model)}")
-    print(f"  Number of model chunks: {len(trainer.model) if isinstance(trainer.model, list) else 1}")
-
     # Build the model profiler for comparison
     print("\n[Primus:Performance Projection] Building model profiler...")
     model_profiler_spec = get_language_model_profiler_spec(training_config)
@@ -89,6 +197,17 @@ def launch_projection_from_cli(args, overrides):
     print(f"  Batch Size: {batch_size}")
     print(f"  Sequence Length: {seq_len}")
     print(f"  Layers on this rank: {len(model_profiler.layers)}")
+    if rescale_info:
+        note = (
+            f"  NOTE: MoE rescaled -> EP {rescale_info['ep_before']} -> {rescale_info['ep_after']}"
+            f" (TP={rescale_info['tp']}, CP={rescale_info['cp']})"
+        )
+        if rescale_info["num_experts_before"] is not None:
+            note += (
+                f", num_experts {rescale_info['num_experts_before']}"
+                f" -> {rescale_info['num_experts_after']}"
+            )
+        print(note)
 
     # Run layer benchmarking
     print("\n" + "=" * 100)
