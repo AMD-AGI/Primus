@@ -263,7 +263,7 @@ jobs:
           start_time=$(date +%s)
           echo "✅ [Pip install requirements] started at: $(date)"
           mkdir -p  ${PRIMUS_WORKDIR}/primus-cache
-          python3 install --upgrade pip setuptools
+          python3 -m pip install --upgrade pip setuptools
           pip3 install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm7.0
           MAX_JOBS=128 pip3 install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --no-build-isolation --no-clean -r requirements.txt
           end_time=$(date +%s)

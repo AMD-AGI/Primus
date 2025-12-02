@@ -22,8 +22,8 @@ modules:
       hf_access_token: ${HF_TOKEN:""}
 
       # checkpoint
-      enable_checkpointing: False
-      async_checkpointing: False
+      enable_checkpointing: false
+      async_checkpointing: false
 
       # inter-node parallelism strategy
       dcn_data_parallelism: -1
@@ -40,9 +40,9 @@ modules:
       ici_tensor_parallelism: 1
       ici_pipeline_parallelism: 1
 
-      megablox: False
+      megablox: false
       capacity_factor: 1.25
-      sparse_matmul: False
+      sparse_matmul: false
       sharding_tolerance: 0.05
       max_target_length: 4096
       per_device_batch_size: 8

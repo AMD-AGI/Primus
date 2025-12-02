@@ -21,8 +21,8 @@ modules:
       hf_access_token: ${HF_TOKEN:""}
 
       # checkpoint
-      enable_checkpointing: False
-      async_checkpointing: False
+      enable_checkpointing: false
+      async_checkpointing: false
 
       # inter-node parallelism strategy
       dcn_data_parallelism: -1

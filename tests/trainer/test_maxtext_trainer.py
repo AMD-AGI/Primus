@@ -85,8 +85,6 @@ class TestMaxTextTrainer(PrimusUT):
             "llama3_8B-BF16",
             exp_path="examples/maxtext/configs/MI300X/llama3_8B-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -100,8 +98,6 @@ class TestMaxTextTrainer(PrimusUT):
             "llama3_8B-FP8",
             exp_path="examples/maxtext/configs/MI300X/llama3_8B-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -117,8 +113,6 @@ class TestMaxTextTrainer(PrimusUT):
             "llama3_70B-BF16",
             exp_path="examples/maxtext/configs/MI300X/llama3_70B-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -132,8 +126,6 @@ class TestMaxTextTrainer(PrimusUT):
             "llama3_70B-FP8",
             exp_path="examples/maxtext/configs/MI300X/llama3_70B-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -149,8 +141,6 @@ class TestMaxTextTrainer(PrimusUT):
             "llama3_3_70B-BF16",
             exp_path="examples/maxtext/configs/MI300X/llama3.3_70B-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -164,8 +154,6 @@ class TestMaxTextTrainer(PrimusUT):
             "llama3_3_70B-FP8",
             exp_path="examples/maxtext/configs/MI300X/llama3.3_70B-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -181,8 +169,6 @@ class TestMaxTextTrainer(PrimusUT):
             "llama2_7B-BF16",
             exp_path="examples/maxtext/configs/MI300X/llama2_7B-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -196,8 +182,6 @@ class TestMaxTextTrainer(PrimusUT):
             "llama2_7B-FP8",
             exp_path="examples/maxtext/configs/MI300X/llama2_7B-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -213,8 +197,6 @@ class TestMaxTextTrainer(PrimusUT):
             "llama2_70B-BF16",
             exp_path="examples/maxtext/configs/MI300X/llama2_70B-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -228,8 +210,6 @@ class TestMaxTextTrainer(PrimusUT):
             "llama2_70B-FP8",
             exp_path="examples/maxtext/configs/MI300X/llama2_70B-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -245,8 +225,6 @@ class TestMaxTextTrainer(PrimusUT):
             "mixtral_8x7B-BF16",
             exp_path="examples/maxtext/configs/MI300X/mixtral_8x7B-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -260,8 +238,6 @@ class TestMaxTextTrainer(PrimusUT):
             "mixtral_8x7B-FP8",
             exp_path="examples/maxtext/configs/MI300X/mixtral_8x7B-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -277,8 +253,6 @@ class TestMaxTextTrainer(PrimusUT):
             "grok1-BF16",
             exp_path="examples/maxtext/configs/MI300X/grok1-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -292,8 +266,6 @@ class TestMaxTextTrainer(PrimusUT):
             "grok1-FP8",
             exp_path="examples/maxtext/configs/MI300X/grok1-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -309,8 +281,6 @@ class TestMaxTextTrainer(PrimusUT):
             "dpsk_v2_16B-BF16",
             exp_path="examples/maxtext/configs/MI300X/deepseek_v2_16B-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
@@ -324,8 +294,6 @@ class TestMaxTextTrainer(PrimusUT):
             "dpsk_v2_16B-FP8",
             exp_path="examples/maxtext/configs/MI300X/deepseek_v2_16B-pretrain.yaml",
             extra_args=[
-                "--override_model_config",
-                "True",
                 "--model.base_num_decoder_layers",
                 "4",
                 "--steps",
