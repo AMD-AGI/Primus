@@ -162,14 +162,13 @@ class BaseTrainer(TrainerComponent):
         """
         raise NotImplementedError(f"{self.__class__.__name__} must implement run_train()")
 
-    @classmethod
     @abstractmethod
-    def detect_version(cls) -> str:
+    def detect_version(self) -> str:
         """
         Detect backend version.
 
-        This is a class method that must be implemented by backend-specific
-        trainers to provide accurate version detection for their backend.
+        This method must be implemented by backend-specific trainers
+        to provide accurate version detection for their backend.
 
         Version detection is critical for:
             - Applying version-specific patches
@@ -184,8 +183,7 @@ class BaseTrainer(TrainerComponent):
             Implementations should fail fast rather than silently return "unknown".
 
         Example (MegatronBaseTrainer - fail fast):
-            @classmethod
-            def detect_version(cls) -> str:
+            def detect_version(self) -> str:
                 try:
                     from megatron.core import package_info
                     return package_info.__version__
@@ -193,12 +191,11 @@ class BaseTrainer(TrainerComponent):
                     raise RuntimeError("Failed to detect Megatron-LM version") from e
 
         Example (Optional backend - graceful fallback):
-            @classmethod
-            def detect_version(cls) -> str:
+            def detect_version(self) -> str:
                 try:
                     import some_backend
                     return some_backend.__version__
                 except Exception:
                     return "unknown"  # Only if truly optional
         """
-        raise NotImplementedError(f"{cls.__name__} must implement detect_version()")
+        raise NotImplementedError(f"{self.__class__.__name__} must implement detect_version()")
