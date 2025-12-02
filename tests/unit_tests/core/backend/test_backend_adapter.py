@@ -155,7 +155,6 @@ def test_apply_build_args_patches_uses_detected_version(monkeypatch, module_conf
 
 def test_create_trainer_orchestrates_flow(monkeypatch, primus_config, module_config):
     # Silence logging in tests
-    import primus.core.backend.backend_adapter as adapter_module
 
     monkeypatch.setattr(adapter_module, "log_rank_0", lambda *args, **kwargs: None)
     # BackendAdapter uses log_dict_aligned without importing it explicitly.
