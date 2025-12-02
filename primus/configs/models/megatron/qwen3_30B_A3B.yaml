@@ -1,0 +1,44 @@
+extends:
+  - qwen2.5_base.yaml
+
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: Qwen/Qwen3-30B-A3B
+
+# model
+num_layers: 48
+hidden_size: 2048
+ffn_hidden_size: 6144
+num_attention_heads: 32
+
+# moe
+moe_layer_freq: "1"
+num_experts: 128
+moe_router_topk: 8
+moe_ffn_hidden_size: 768
+
+# gqa
+group_query_attention: true
+num_query_groups: 4
+qk_layernorm: true
+kv_channels: 128
+
+swiglu: true
+bias_swiglu_fusion: false
+add_bias_linear: false
+attention_softmax_in_fp32: true
+untie_embeddings_and_output_weights: true
+hidden_dropout: 0.0
+attention_dropout: 0.0
+
+position_embedding_type: rope
+rotary_base: 1000000
+rotary_percent: 1.0
+rotary_seq_len_interpolation_factor: 1
+normalization: RMSNorm
+
+# max_position_embeddings: 40960
+norm_epsilon: 1.0e-6
+init_method_std: 0.008
+
+apply_rope_fusion: true
+masked_softmax_fusion: false
