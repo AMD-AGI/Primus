@@ -15,7 +15,6 @@ import os
 import statistics
 import sys
 import time
-from typing import Any, Dict
 
 import megatron
 import torch
@@ -161,44 +160,6 @@ from .utils import schedule_wrapper, set_wandb_writer_patch, validate_args_on_ro
 
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
-
-
-# ------------------------------------------------------------
-# Build the original Megatron argument parser
-# ------------------------------------------------------------
-def _build_megatron_parser() -> argparse.ArgumentParser:
-    """
-    Construct Megatron-LM's official argparse parser without touching sys.argv.
-
-    This function directly calls:
-        megatron.training.arguments.add_megatron_arguments(parser)
-
-    We do NOT parse command-line arguments here; we simply want Megatron's
-    argument *definitions* (names, defaults, types).
-    """
-    from megatron.training.arguments import add_megatron_arguments
-
-    parser = argparse.ArgumentParser(
-        description="Primus Megatron arguments",
-        allow_abbrev=False,  # Disable abbreviation to avoid unexpected behaviors
-    )
-    return add_megatron_arguments(parser)
-
-
-# ------------------------------------------------------------
-# Load Megatron's default values (cached)
-# ------------------------------------------------------------
-# @functools.lru_cache(maxsize=1)
-def _load_megatron_defaults() -> Dict[str, Any]:
-    """
-    Load all default values defined by Megatron-LM's argparse.
-
-    We call parser.parse_args([]), which returns a Namespace containing ONLY
-    default values (because no CLI arguments are provided).
-    """
-    parser = _build_megatron_parser()
-    args = parser.parse_args([])  # Parse an empty list -> only defaults
-    return vars(args).copy()  # Convert Namespace -> dict and cache
 
 
 class MegatronTrainer(BaseTrainer, BaseModule):
