@@ -135,7 +135,7 @@ from megatron.training.utils import (
 )
 from megatron.training.yaml_arguments import validate_yaml
 
-from primus.backends.megatron.argument_builder import MegatronArgBuilder
+from primus.backends.megatron.argument_builder import _load_megatron_defaults
 from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from primus.backends.megatron.model_provider import primus_model_provider
 from primus.backends.megatron.training.global_vars import (
@@ -146,6 +146,7 @@ from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenize
 from primus.core.utils import checker, file_utils
 from primus.core.utils.flops_estimator import num_floating_point_operations
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
+from primus.core.utils.yaml_utils import nested_namespace_to_dict
 from primus.modules.base_module import BaseModule
 from primus.modules.module_utils import (
     debug_rank_0,
@@ -1156,12 +1157,19 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # Use trainer args from primus
         # args = self.module_config
 
-        # Build Megatron arguments by merging Primus config into Megatron defaults
-        builder = MegatronArgBuilder()
-        builder.update(self.module_config)
-        merged_ns = builder.finalize()
-        # Keep using argparse.Namespace for compatibility with downstream Megatron utilities
-        args = argparse.Namespace(**vars(merged_ns))
+        # Build Megatron arguments by merging Primus config into Megatron defaults.
+        # 1) Load Megatron defaults (no Primus overrides)
+        megatron_defaults = _load_megatron_defaults()
+
+        # 2) Convert Primus module_config (nested namespace) to a plain dict
+        primus_args = nested_namespace_to_dict(self.module_config)
+
+        # 3) Merge: defaults < primus_args
+        merged_args = megatron_defaults.copy()
+        merged_args.update(primus_args)
+
+        # 4) Convert to Namespace for compatibility with downstream Megatron utilities
+        args = argparse.Namespace(**merged_args)
 
         # Prep for checkpoint conversion.
         if args.ckpt_convert_format is not None:
