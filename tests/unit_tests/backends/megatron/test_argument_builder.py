@@ -11,7 +11,7 @@ Focus areas:
     1. Parameter filtering: only Megatron-recognized params accepted
     2. Override mechanism: Primus config overrides defaults
     3. Distributed env injection: automatic injection of world_size, rank, local_rank
-    4. None value handling: None values are ignored
+    4. None value handling: None values override defaults
     5. Integration: complete workflow from config to final namespace
 """
 

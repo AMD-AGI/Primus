@@ -25,7 +25,7 @@ def _build_megatron_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         description="Primus Megatron arguments",
-        allow_abbrev=False,  # Disable abbreviation to avoid unexpected behaviors
+        allow_abbrev=False,  # Disable abbreviation to avoid unexpected behaviour
     )
     return add_megatron_arguments(parser)
 
