@@ -38,7 +38,6 @@ from megatron.training.checkpointing import (
 from megatron.training.training import save_checkpoint_and_time
 
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
-from primus.core.utils import yaml_utils
 from primus.core.utils.import_utils import get_custom_fsdp, get_model_provider
 
 try:
@@ -137,6 +136,7 @@ from megatron.training.utils import (
 )
 from megatron.training.yaml_arguments import validate_yaml
 
+from primus.backends.megatron.argument_builder import MegatronArgBuilder
 from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from primus.backends.megatron.model_provider import primus_model_provider
 from primus.backends.megatron.training.global_vars import (
@@ -1191,19 +1191,12 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # Use trainer args from primus
         # args = self.module_config
 
-        # Merge Megatron defaults with Primus config
-        # 1. Load Megatron defaults
-        megatron_defaults = _load_megatron_defaults()
-
-        # 2. Convert Primus config to dict
-        primus_args = yaml_utils.nested_namespace_to_dict(self.module_config)
-
-        # 3. Merge: defaults < primus_args
-        merged_args = megatron_defaults.copy()
-        merged_args.update(primus_args)
-
-        # 4. Convert to Namespace
-        args = argparse.Namespace(**merged_args)
+        # Build Megatron arguments by merging Primus config into Megatron defaults
+        builder = MegatronArgBuilder()
+        builder.update(self.module_config)
+        merged_ns = builder.finalize()
+        # Keep using argparse.Namespace for compatibility with downstream Megatron utilities
+        args = argparse.Namespace(**vars(merged_ns))
 
         # Prep for checkpoint conversion.
         if args.ckpt_convert_format is not None:
