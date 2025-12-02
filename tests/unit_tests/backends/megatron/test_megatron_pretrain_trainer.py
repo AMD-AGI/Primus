@@ -85,7 +85,7 @@ class TestMegatronPretrainTrainer:
         # 2) megatron.training with inprocess_restart and pretrain
         def fake_pretrain(*args, **kwargs):
             # This should not be called directly; wrapped_pretrain is used instead.
-            pass
+            raise AssertionError("fake_pretrain was called directly; expected wrapped_pretrain to be used")
 
         def wrapped_pretrain(*args, **kwargs):
             calls.append((args, kwargs))
