@@ -39,10 +39,10 @@ class TestMegatronArgBuilderFiltering:
         builder = MegatronArgBuilder()
         builder.update(
             {
-                "num_layers": 32,  # ✓ Megatron param
-                "hidden_size": 4096,  # ✓ Megatron param
-                "disable_mlflow": True,  # ✗ Primus param (filtered)
-                "file_sink_level": "DEBUG",  # ✗ Primus param (filtered)
+                "num_layers": 32,  # (accepted) Megatron param
+                "hidden_size": 4096,  # (accepted) Megatron param
+                "disable_mlflow": True,  # (filtered) Primus param
+                "file_sink_level": "DEBUG",  # (filtered) Primus param
             }
         )
 

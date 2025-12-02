@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 from functools import lru_cache
 from types import SimpleNamespace
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, Mapping, Union
 
 from primus.core.utils.env import get_torchrun_env
 
@@ -83,7 +83,7 @@ class MegatronArgBuilder:
     # ------------------------------------------------------------------
     # Add values to the override dictionary
     # ------------------------------------------------------------------
-    def update(self, values: Mapping[str, Any] | SimpleNamespace) -> "MegatronArgBuilder":
+    def update(self, values: Union[Mapping[str, Any], SimpleNamespace]) -> "MegatronArgBuilder":
         """
         Merge a collection of values (e.g., CLI args or config) into the
         current override set.
