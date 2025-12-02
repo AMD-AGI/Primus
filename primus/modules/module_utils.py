@@ -190,7 +190,7 @@ def log_dict_aligned(
     log_func(f"{title}: ({len(data_dict)} parameters)")
 
     # Find the longest key for alignment (safe because data_dict is non-empty)
-    max_key_length = max(len(str(key)) for key in data_dict.keys())
+    max_key_length = max(len(str(key)) for key in data_dict)
 
     # Log each key-value pair with alignment
     for key, value in sorted(data_dict.items()):

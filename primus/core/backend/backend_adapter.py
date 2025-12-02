@@ -196,7 +196,7 @@ class BackendAdapter(ABC):
         # Log parameters that were in module_config but not converted to backend_args
         # These are likely Primus-specific parameters
         config_keys = set(module_config.params.keys())
-        backend_keys = set(vars(backend_args).keys())
+        backend_keys = set(vars(backend_args))
         primus_only_keys = config_keys - backend_keys
 
         if primus_only_keys:

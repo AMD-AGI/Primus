@@ -28,7 +28,12 @@ class DummyTrainer:
     that BackendAdapter.create_trainer wires everything correctly.
     """
 
-    def __init__(self, primus_config, module_config, backend_args):
+    def __init__(
+        self,
+        primus_config: Any,
+        module_config: Any,
+        backend_args: Any,
+    ):
         self.primus_config = primus_config
         self.module_config = module_config
         self.backend_args = backend_args
@@ -42,7 +47,7 @@ class DummyBackendAdapter(adapter_module.BackendAdapter):
     the orchestration performed by the base class.
     """
 
-    def __init__(self, framework: str = "dummy", version: str = "1.0.0"):
+    def __init__(self, framework: str = "test_framework", version: str = "1.0.0"):
         super().__init__(framework=framework)
         self._version = version
         self.prepare_calls: List[Any] = []
