@@ -7,27 +7,9 @@
 """
 Megatron Patch Collection
 
-This module registers all Megatron-specific patches with the PatchRegistry.
-
-Patches are organized by category:
-    - env_patches: Environment variable configuration
-    - mlflow_patches: MLflow logging integration
-    - args_patches: Argument configuration and path setup
-    - te_patches: Transformer Engine integration patches
-    - flops_patches: FLOPs calculation and performance profiling
-
-All patches are automatically registered on import via the @register_patch decorator.
+This module defines the public entrypoint for applying Megatron-specific patches.
 """
 
-# Import all patch modules to trigger registration
-# Patches are registered via @register_patch decorator in each module
-from primus.backends.megatron.patches import (  # noqa: F401
-    args_patches,
-    env_patches,
-    flops_patches,
-    mlflow_patches,
-    te_patches,
-)
 from primus.core.patches import run_patches
 
 
