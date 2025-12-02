@@ -26,7 +26,7 @@ export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 # export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
 # Set on Vultr cluster
-export NNODES=4
+export NNODES=8
 export USING_AINIC=1
 export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7" # modify based on the GPU NiC settings
 export NCCL_SOCKET_IFNAME="enp193s0f1np1"
@@ -82,6 +82,7 @@ if [ -z "${MoE_Features}" ]; then
     # MoE_Features=(0 3 4 8 10)
     # MoE_Features=(0 3 4 8 10 11)
     MoE_Features=(0 3 4 5 8 10 11)
+    # MoE_Features=(0 3 4 5 7 8 10 11)
 else
     # Convert string to array
     # shellcheck disable=SC2128
@@ -190,12 +191,38 @@ for feature in "${MoE_Features[@]}"; do
         # TODO: need tuning for the pipeline layout pattern
         # 94 layers
 
+        # PP4 VPP6
+        # 6 virtual stages per pipeline rank, so 24 total pipeline segments (PP4*VPP6)
+        # To balance 94 layers: 94/24 = approx 3-4 layers per stage
+        # This gives 3+4*22+3=94
+        # 1+22+1 = 24 chunks
+        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*3|(t*4|)*22,t*3,L'")
+
         # PP4 VPP3
         # 3 virtual stages per pipeline rank, so 12 total pipeline segments (PP4*VPP3)
         # To balance 94 layers: 94/12 = approx 7-8 layers per stage
         # This gives 7+8+8+8+8+8+8+8+8+8+8+7=94
         # 1+10+1 = 12 chunks
-        FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*7|(t*8|)*10,t*7,L'")
+        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*7|(t*8|)*10,t*7,L'")
+
+        # PP4 VPP2
+        # 2 virtual stages per pipeline rank, so 8 total pipeline segments (PP4*VPP2)
+        # To balance 94 layers: 94/8 = approx 11-12 layers per stage
+        # This gives 11+12*6+11=94
+        # 1+6+1 = 8 chunks
+        FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*11|(t*12|)*6,t*11,L'")
+
+        # PP4 VPP1
+        # 1 virtual stage per pipeline rank, so 4 total pipeline segments (PP4*VPP1)
+        # To balance 94 layers: 94/4 = approx 23-24 layers per stage
+        # This gives 23+24+24+23=94
+        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*23|t*24|t*24|t*23,L'")
+
+        # PP2 VPP1
+        # 1 virtual stage per pipeline rank, so 2 total pipeline segments (PP2*VPP1)
+        # To balance 94 layers: 94/2 = approx 47 layers per stage
+        # This gives 47+47=94
+        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*47|t*47,L'")
         VPP=1
         ;;
     9)
