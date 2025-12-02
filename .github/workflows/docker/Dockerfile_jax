@@ -10,7 +10,7 @@ RUN apt-get update
 # Clone and install the Primus-Turbo
 WORKDIR /opt
 ENV PRIMUS_TURBO_FRAMEWORK="JAX"
-RUN python3 install --upgrade pip setuptools && \
+RUN python3 -m pip install --upgrade pip setuptools && \
     pip3 install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm7.0 && \
     mkdir -p /opt && cd /opt && \
     git clone https://github.com/AMD-AGI/Primus-Turbo.git && \
