@@ -12,8 +12,8 @@ import sys
 
 import pytest
 
+import primus.core.backend.backend_registry as registry_module
 from primus.core.backend.backend_adapter import BackendAdapter
-from primus.core.backend.backend_registry import BackendRegistry
 
 
 class MockAdapter(BackendAdapter):
@@ -38,12 +38,10 @@ class TestBackendRegistryErrorHandling:
     def setup_method(self):
         """Clear registry before each test."""
         # Save original state
-        import primus.core.backend.backend_registry as registry_module
-
-        self._original_adapters = BackendRegistry._adapters.copy()
-        self._original_path_names = BackendRegistry._path_names.copy()
-        BackendRegistry._adapters.clear()
-        BackendRegistry._path_names.clear()
+        self._original_adapters = registry_module.BackendRegistry._adapters.copy()
+        self._original_path_names = registry_module.BackendRegistry._path_names.copy()
+        registry_module.BackendRegistry._adapters.clear()
+        registry_module.BackendRegistry._path_names.clear()
 
         # Silence logging dependencies (logger may not be initialized in tests)
         self._orig_log_rank_0 = registry_module.log_rank_0
@@ -53,21 +51,19 @@ class TestBackendRegistryErrorHandling:
 
     def teardown_method(self):
         """Restore registry after each test."""
-        import primus.core.backend.backend_registry as registry_module
-
-        BackendRegistry._adapters = self._original_adapters
-        BackendRegistry._path_names = self._original_path_names
+        registry_module.BackendRegistry._adapters = self._original_adapters
+        registry_module.BackendRegistry._path_names = self._original_path_names
         registry_module.log_rank_0 = self._orig_log_rank_0
         registry_module.error_rank_0 = self._orig_error_rank_0
 
     def test_get_adapter_not_found_helpful_error(self):
         """Test that get_adapter provides helpful error when backend not found."""
         # Register one backend
-        BackendRegistry.register_adapter("test_backend", MockAdapter)
+        registry_module.BackendRegistry.register_adapter("test_backend", MockAdapter)
 
         # Try to get non-existent backend
         with pytest.raises(ValueError) as exc_info:
-            BackendRegistry.get_adapter("non_existent")
+            registry_module.BackendRegistry.get_adapter("non_existent")
 
         error_msg = str(exc_info.value)
         assert "Backend 'non_existent' not found" in error_msg
@@ -77,7 +73,7 @@ class TestBackendRegistryErrorHandling:
     def test_get_adapter_empty_registry_error(self):
         """Test error message when no backends are registered."""
         with pytest.raises(ValueError) as exc_info:
-            BackendRegistry.get_adapter("any_backend")
+            registry_module.BackendRegistry.get_adapter("any_backend")
 
         error_msg = str(exc_info.value)
         assert "Backend 'any_backend' not found" in error_msg
@@ -88,6 +84,7 @@ class TestBackendRegistryErrorHandling:
 
         class FailingAdapter(BackendAdapter):
             def __init__(self, framework):
+                super().__init__(framework)
                 raise RuntimeError("Adapter initialization failed")
 
             def prepare_backend(self, config):
@@ -102,10 +99,10 @@ class TestBackendRegistryErrorHandling:
             def detect_backend_version(self) -> str:
                 return "test-version"
 
-        BackendRegistry.register_adapter("failing", FailingAdapter)
+        registry_module.BackendRegistry.register_adapter("failing", FailingAdapter)
 
         with pytest.raises(RuntimeError) as exc_info:
-            BackendRegistry.get_adapter("failing")
+            registry_module.BackendRegistry.get_adapter("failing")
 
         error_msg = str(exc_info.value)
         assert "Failed to create adapter for 'failing'" in error_msg
@@ -117,10 +114,8 @@ class TestBackendRegistryLazyLoading:
 
     def setup_method(self):
         """Clear registry before each test."""
-        import primus.core.backend.backend_registry as registry_module
-
-        self._original_adapters = BackendRegistry._adapters.copy()
-        BackendRegistry._adapters.clear()
+        self._original_adapters = registry_module.BackendRegistry._adapters.copy()
+        registry_module.BackendRegistry._adapters.clear()
 
         # Silence logging dependencies
         self._orig_log_rank_0 = registry_module.log_rank_0
@@ -130,23 +125,20 @@ class TestBackendRegistryLazyLoading:
 
     def teardown_method(self):
         """Restore registry after each test."""
-        import primus.core.backend.backend_registry as registry_module
-
-        BackendRegistry._adapters = self._original_adapters
+        registry_module.BackendRegistry._adapters = self._original_adapters
         registry_module.log_rank_0 = self._orig_log_rank_0
         registry_module.error_rank_0 = self._orig_error_rank_0
 
-    def test_try_load_backend_non_existent(self, capsys):
+    def test_try_load_backend_non_existent(self):
         """Test that _try_load_backend handles non-existent backends gracefully."""
-        result = BackendRegistry._try_load_backend("definitely_not_a_backend")
+        result = registry_module.BackendRegistry._try_load_backend("definitely_not_a_backend")
 
         # Should return False but not crash
         assert result is False
-        capsys.readouterr()
 
     def test_try_load_backend_returns_bool(self):
         """Test that _try_load_backend returns boolean."""
-        result = BackendRegistry._try_load_backend("non_existent")
+        result = registry_module.BackendRegistry._try_load_backend("non_existent")
         assert isinstance(result, bool)
         assert result is False
 
@@ -156,7 +148,7 @@ class TestBackendRegistryLazyLoading:
         # This will try to load megatron backend
         try:
             # Note: get_adapter now also tries setup_backend_path
-            adapter = BackendRegistry.get_adapter("megatron", backend_path=None)
+            adapter = registry_module.BackendRegistry.get_adapter("megatron", backend_path=None)
             # If megatron is installed, should succeed
             assert adapter is not None
         except (ValueError, FileNotFoundError):
@@ -165,17 +157,17 @@ class TestBackendRegistryLazyLoading:
 
     def test_list_available_backends(self):
         """Test listing available backends."""
-        BackendRegistry.register_adapter("backend1", MockAdapter)
-        BackendRegistry.register_adapter("backend2", MockAdapter)
+        registry_module.BackendRegistry.register_adapter("backend1", MockAdapter)
+        registry_module.BackendRegistry.register_adapter("backend2", MockAdapter)
 
-        available = BackendRegistry.list_available_backends()
+        available = registry_module.BackendRegistry.list_available_backends()
         assert "backend1" in available
         assert "backend2" in available
         assert len(available) == 2
 
     def test_list_available_backends_empty(self):
         """Test listing when no backends registered."""
-        available = BackendRegistry.list_available_backends()
+        available = registry_module.BackendRegistry.list_available_backends()
         assert available == []
 
 
@@ -184,12 +176,10 @@ class TestBackendRegistryPathNames:
 
     def setup_method(self):
         """Clear registry before each test."""
-        import primus.core.backend.backend_registry as registry_module
-
-        self._original_path_names = BackendRegistry._path_names.copy()
-        self._original_adapters = BackendRegistry._adapters.copy()
-        BackendRegistry._path_names = {"megatron": "Megatron-LM", "torchtitan": "torchtitan"}
-        BackendRegistry._adapters.clear()
+        self._original_path_names = registry_module.BackendRegistry._path_names.copy()
+        self._original_adapters = registry_module.BackendRegistry._adapters.copy()
+        registry_module.BackendRegistry._path_names = {"megatron": "Megatron-LM", "torchtitan": "torchtitan"}
+        registry_module.BackendRegistry._adapters.clear()
 
         # Silence logging dependencies
         self._orig_log_rank_0 = registry_module.log_rank_0
@@ -199,30 +189,28 @@ class TestBackendRegistryPathNames:
 
     def teardown_method(self):
         """Restore registry after each test."""
-        import primus.core.backend.backend_registry as registry_module
-
-        BackendRegistry._path_names = self._original_path_names
-        BackendRegistry._adapters = self._original_adapters
+        registry_module.BackendRegistry._path_names = self._original_path_names
+        registry_module.BackendRegistry._adapters = self._original_adapters
         registry_module.log_rank_0 = self._orig_log_rank_0
         registry_module.error_rank_0 = self._orig_error_rank_0
 
     def test_register_and_get_path_name(self):
         """Test registering and retrieving path names."""
-        BackendRegistry.register_path_name("test_backend", "TestBackend-Path")
+        registry_module.BackendRegistry.register_path_name("test_backend", "TestBackend-Path")
 
-        path_name = BackendRegistry.get_path_name("test_backend")
+        path_name = registry_module.BackendRegistry.get_path_name("test_backend")
         assert path_name == "TestBackend-Path"
 
     def test_get_path_name_with_lazy_loading(self):
         """Test get_path_name triggers lazy loading."""
         # Pre-registered in _path_names
-        path_name = BackendRegistry.get_path_name("megatron")
+        path_name = registry_module.BackendRegistry.get_path_name("megatron")
         assert path_name == "Megatron-LM"
 
     def test_get_path_name_not_found(self):
         """Test error when path name not registered and can't be loaded."""
         with pytest.raises(KeyError) as exc_info:
-            BackendRegistry.get_path_name("non_existent_backend")
+            registry_module.BackendRegistry.get_path_name("non_existent_backend")
 
         assert "No path name registered for backend 'non_existent_backend'" in str(exc_info.value)
 
@@ -232,11 +220,12 @@ class TestBackendRegistrySetupPath:
 
     def setup_method(self):
         """Save original state."""
-        import primus.core.backend.backend_registry as registry_module
-
-        self._original_path_names = BackendRegistry._path_names.copy()
+        self._original_path_names = registry_module.BackendRegistry._path_names.copy()
         self._original_sys_path = sys.path.copy()
-        BackendRegistry._path_names = {"megatron": "Megatron-LM", "test_backend": "TestBackend"}
+        registry_module.BackendRegistry._path_names = {
+            "megatron": "Megatron-LM",
+            "test_backend": "TestBackend",
+        }
 
         # Silence logging dependencies
         self._orig_log_rank_0 = registry_module.log_rank_0
@@ -246,23 +235,19 @@ class TestBackendRegistrySetupPath:
 
     def teardown_method(self):
         """Restore original state."""
-        import primus.core.backend.backend_registry as registry_module
-
-        BackendRegistry._path_names = self._original_path_names
+        registry_module.BackendRegistry._path_names = self._original_path_names
         sys.path[:] = self._original_sys_path
         registry_module.log_rank_0 = self._orig_log_rank_0
         registry_module.error_rank_0 = self._orig_error_rank_0
 
     def test_setup_backend_path_with_explicit_path(self, tmp_path):
         """Test setup_backend_path with explicit backend_path argument."""
-        import sys
-
         # Create a temporary backend directory
         backend_dir = tmp_path / "explicit_backend"
         backend_dir.mkdir()
 
         # Setup with explicit path
-        result = BackendRegistry.setup_backend_path(
+        result = registry_module.BackendRegistry.setup_backend_path(
             "test_backend", backend_path=str(backend_dir), verbose=False
         )
 
@@ -271,8 +256,6 @@ class TestBackendRegistrySetupPath:
 
     def test_setup_backend_path_with_env_var(self, tmp_path, monkeypatch):
         """Test setup_backend_path with BACKEND_PATH environment variable."""
-        import sys
-
         # Create a temporary backend directory
         backend_dir = tmp_path / "env_backend"
         backend_dir.mkdir()
@@ -281,7 +264,7 @@ class TestBackendRegistrySetupPath:
         monkeypatch.setenv("BACKEND_PATH", str(backend_dir))
 
         # Setup should use env var
-        result = BackendRegistry.setup_backend_path("test_backend", verbose=False)
+        result = registry_module.BackendRegistry.setup_backend_path("test_backend", verbose=False)
 
         assert result == str(backend_dir)
         assert str(backend_dir) in sys.path
@@ -289,7 +272,7 @@ class TestBackendRegistrySetupPath:
     def test_setup_backend_path_not_found(self):
         """Test setup_backend_path raises error when backend not registered."""
         with pytest.raises(KeyError) as exc_info:
-            BackendRegistry.setup_backend_path("non_existent_backend", verbose=False)
+            registry_module.BackendRegistry.setup_backend_path("non_existent_backend", verbose=False)
 
         error_msg = str(exc_info.value)
         assert "No path name registered" in error_msg
@@ -307,7 +290,9 @@ class TestBackendRegistrySetupPath:
         initial_count = sys.path.count(str(backend_dir))
 
         # Setup should not duplicate
-        BackendRegistry.setup_backend_path("test_backend", backend_path=str(backend_dir), verbose=False)
+        registry_module.BackendRegistry.setup_backend_path(
+            "test_backend", backend_path=str(backend_dir), verbose=False
+        )
 
         final_count = sys.path.count(str(backend_dir))
         assert final_count == initial_count  # Should not increase
@@ -318,13 +303,11 @@ class TestBackendRegistryGetAdapterIntegration:
 
     def setup_method(self):
         """Save original state."""
-        import primus.core.backend.backend_registry as registry_module
-
-        self._original_adapters = BackendRegistry._adapters.copy()
-        self._original_path_names = BackendRegistry._path_names.copy()
+        self._original_adapters = registry_module.BackendRegistry._adapters.copy()
+        self._original_path_names = registry_module.BackendRegistry._path_names.copy()
         self._original_sys_path = sys.path.copy()
-        BackendRegistry._adapters.clear()
-        BackendRegistry._path_names = {"test_backend": "TestBackend"}
+        registry_module.BackendRegistry._adapters.clear()
+        registry_module.BackendRegistry._path_names = {"test_backend": "TestBackend"}
 
         # Silence logging dependencies
         self._orig_log_rank_0 = registry_module.log_rank_0
@@ -334,10 +317,8 @@ class TestBackendRegistryGetAdapterIntegration:
 
     def teardown_method(self):
         """Restore original state."""
-        import primus.core.backend.backend_registry as registry_module
-
-        BackendRegistry._adapters = self._original_adapters
-        BackendRegistry._path_names = self._original_path_names
+        registry_module.BackendRegistry._adapters = self._original_adapters
+        registry_module.BackendRegistry._path_names = self._original_path_names
         sys.path[:] = self._original_sys_path
         registry_module.log_rank_0 = self._orig_log_rank_0
         registry_module.error_rank_0 = self._orig_error_rank_0
@@ -349,10 +330,10 @@ class TestBackendRegistryGetAdapterIntegration:
         backend_dir.mkdir()
 
         # Register adapter
-        BackendRegistry.register_adapter("test_backend", MockAdapter)
+        registry_module.BackendRegistry.register_adapter("test_backend", MockAdapter)
 
         # get_adapter should setup path automatically
-        adapter = BackendRegistry.get_adapter("test_backend", backend_path=str(backend_dir))
+        adapter = registry_module.BackendRegistry.get_adapter("test_backend", backend_path=str(backend_dir))
 
         assert adapter is not None
         assert str(backend_dir) in sys.path
@@ -360,10 +341,10 @@ class TestBackendRegistryGetAdapterIntegration:
     def test_get_adapter_path_not_found_error(self):
         """Test get_adapter provides helpful error when path not found."""
         # Register adapter but no valid path
-        BackendRegistry.register_adapter("test_backend", MockAdapter)
+        registry_module.BackendRegistry.register_adapter("test_backend", MockAdapter)
 
         with pytest.raises(FileNotFoundError) as exc_info:
-            BackendRegistry.get_adapter("test_backend", backend_path="/non/existent/path")
+            registry_module.BackendRegistry.get_adapter("test_backend", backend_path="/non/existent/path")
 
         error_msg = str(exc_info.value)
         assert "Requested backend: 'test_backend'" in error_msg
@@ -374,22 +355,22 @@ class TestBackendRegistryHasAdapter:
 
     def setup_method(self):
         """Clear registry before each test."""
-        self._original_adapters = BackendRegistry._adapters.copy()
-        BackendRegistry._adapters.clear()
+        self._original_adapters = registry_module.BackendRegistry._adapters.copy()
+        registry_module.BackendRegistry._adapters.clear()
 
     def teardown_method(self):
         """Restore registry after each test."""
-        BackendRegistry._adapters = self._original_adapters
+        registry_module.BackendRegistry._adapters = self._original_adapters
 
     def test_has_adapter_true(self):
         """Test has_adapter returns True for registered adapter."""
-        BackendRegistry.register_adapter("test_backend", MockAdapter)
+        registry_module.BackendRegistry.register_adapter("test_backend", MockAdapter)
 
-        assert BackendRegistry.has_adapter("test_backend") is True
+        assert registry_module.BackendRegistry.has_adapter("test_backend") is True
 
     def test_has_adapter_false(self):
         """Test has_adapter returns False for non-registered adapter."""
-        assert BackendRegistry.has_adapter("non_existent") is False
+        assert registry_module.BackendRegistry.has_adapter("non_existent") is False
 
 
 class TestBackendRegistryTrainerClasses:
@@ -397,12 +378,12 @@ class TestBackendRegistryTrainerClasses:
 
     def setup_method(self):
         """Clear trainer classes before each test."""
-        self._original_trainer_classes = BackendRegistry._trainer_classes.copy()
-        BackendRegistry._trainer_classes.clear()
+        self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
+        registry_module.BackendRegistry._trainer_classes.clear()
 
     def teardown_method(self):
         """Restore trainer classes after each test."""
-        BackendRegistry._trainer_classes = self._original_trainer_classes
+        registry_module.BackendRegistry._trainer_classes = self._original_trainer_classes
 
     def test_register_and_get_trainer_class(self):
         """Test registering and retrieving trainer classes."""
@@ -410,15 +391,15 @@ class TestBackendRegistryTrainerClasses:
         class DummyTrainer:
             pass
 
-        BackendRegistry.register_trainer_class("test_backend", DummyTrainer)
+        registry_module.BackendRegistry.register_trainer_class("test_backend", DummyTrainer)
 
-        trainer_cls = BackendRegistry.get_trainer_class("test_backend")
+        trainer_cls = registry_module.BackendRegistry.get_trainer_class("test_backend")
         assert trainer_cls is DummyTrainer
 
     def test_get_trainer_class_not_found(self):
         """Test error when trainer class not registered."""
         with pytest.raises(KeyError) as exc_info:
-            BackendRegistry.get_trainer_class("non_existent_backend")
+            registry_module.BackendRegistry.get_trainer_class("non_existent_backend")
 
         assert "No trainer class registered for backend 'non_existent_backend'" in str(exc_info.value)
 
@@ -428,9 +409,9 @@ class TestBackendRegistryTrainerClasses:
         class DummyTrainer:
             pass
 
-        assert BackendRegistry.has_trainer_class("test_backend") is False
-        BackendRegistry.register_trainer_class("test_backend", DummyTrainer)
-        assert BackendRegistry.has_trainer_class("test_backend") is True
+        assert registry_module.BackendRegistry.has_trainer_class("test_backend") is False
+        registry_module.BackendRegistry.register_trainer_class("test_backend", DummyTrainer)
+        assert registry_module.BackendRegistry.has_trainer_class("test_backend") is True
 
 
 class TestBackendRegistrySetupHooks:
@@ -438,12 +419,12 @@ class TestBackendRegistrySetupHooks:
 
     def setup_method(self):
         """Clear setup hooks before each test."""
-        self._original_setup_hooks = BackendRegistry._setup_hooks.copy()
-        BackendRegistry._setup_hooks.clear()
+        self._original_setup_hooks = registry_module.BackendRegistry._setup_hooks.copy()
+        registry_module.BackendRegistry._setup_hooks.clear()
 
     def teardown_method(self):
         """Restore setup hooks after each test."""
-        BackendRegistry._setup_hooks = self._original_setup_hooks
+        registry_module.BackendRegistry._setup_hooks = self._original_setup_hooks
 
     def test_register_and_run_setup_hooks_in_order(self, capsys):
         """Test that setup hooks are run in registration order."""
@@ -455,10 +436,10 @@ class TestBackendRegistrySetupHooks:
         def hook2():
             calls.append("hook2")
 
-        BackendRegistry.register_setup_hook("test_backend", hook1)
-        BackendRegistry.register_setup_hook("test_backend", hook2)
+        registry_module.BackendRegistry.register_setup_hook("test_backend", hook1)
+        registry_module.BackendRegistry.register_setup_hook("test_backend", hook2)
 
-        BackendRegistry.run_setup("test_backend")
+        registry_module.BackendRegistry.run_setup("test_backend")
         captured = capsys.readouterr()
 
         assert "[Primus:BackendSetup] Running 2 setup hooks for backend 'test_backend'." in captured.out
@@ -466,7 +447,7 @@ class TestBackendRegistrySetupHooks:
 
     def test_run_setup_no_hooks_is_noop(self, capsys):
         """Test that run_setup is a no-op when no hooks are registered."""
-        BackendRegistry.run_setup("unregistered_backend")
+        registry_module.BackendRegistry.run_setup("unregistered_backend")
         captured = capsys.readouterr()
         # No output expected when there are no hooks
         assert captured.out == ""
@@ -477,9 +458,9 @@ class TestBackendRegistrySetupHooks:
         def failing_hook():
             raise RuntimeError("hook failed")
 
-        BackendRegistry.register_setup_hook("test_backend", failing_hook)
+        registry_module.BackendRegistry.register_setup_hook("test_backend", failing_hook)
 
-        BackendRegistry.run_setup("test_backend")
+        registry_module.BackendRegistry.run_setup("test_backend")
         captured = capsys.readouterr()
 
         assert "[Primus:BackendSetup] Running 1 setup hooks for backend 'test_backend'." in captured.out
