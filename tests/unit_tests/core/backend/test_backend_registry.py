@@ -83,12 +83,10 @@ class TestBackendRegistryErrorHandling:
         """Test error handling when adapter creation fails."""
 
         class FailingAdapter(BackendAdapter):
-            def __init__(self, framework):
-                super().__init__(framework)
+            def __init__(self, _framework):
                 raise RuntimeError("Adapter initialization failed")
 
             def prepare_backend(self, config):
-                super().__init__(framework)
                 pass
 
             def convert_config(self, config):
