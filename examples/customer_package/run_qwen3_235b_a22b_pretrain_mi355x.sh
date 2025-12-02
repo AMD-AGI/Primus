@@ -28,13 +28,15 @@ export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 # Set on Vultr cluster
 export NNODES=4
 export USING_AINIC=1
-export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
+export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7" # modify based on the GPU NiC settings
 export NCCL_SOCKET_IFNAME="enp193s0f1np1"
 export GLOO_SOCKET_IFNAME="enp193s0f1np1"
+export NCCL_IB_RETRY_CNT=20
+export NCCL_IB_TIMEOUT=300
 
 ######################### Training Config #########################
 export MBS=${MBS:-1}
-export GBS=${GBS:-4096}
+export GBS=${GBS:-256}
 export NUM_LAYERS=${NUM_LAYERS:-94}
 export MOE_LAYER_FREQ=${MOE_LAYER_FREQ:-1}
 export SEQ_LENGTH=${SEQ_LENGTH:-4096}
@@ -55,7 +57,7 @@ export PROFILE=${PROFILE:-False}
 export DISABLE_CPU_TRACE=${DISABLE_CPU_TRACE:-True}
 export PROFILE_STEP_START=${PROFILE_STEP_START:-5}
 export PROFILE_STEP_END=${PROFILE_STEP_END:-6}
-export TRAIN_ITERS=${TRAIN_ITERS:-5}
+export TRAIN_ITERS=${TRAIN_ITERS:-10}
 
 # MoE_Features legend:
 # 0 - Baseline (no extra optimization toggles)
@@ -63,7 +65,7 @@ export TRAIN_ITERS=${TRAIN_ITERS:-5}
 # 2 - Turbo grouped GEMM / MLP fusion
 # 3 - Loss fusion helper
 # 4 - DeepEP acceleration
-# 5 - Sync-free MoE (stage 2)
+# 5 - Sync-free MoE (stage 1)
 # 6 - 1F1B MoE overlap
 # 7 - Zero-bubble pipeline optimizations
 # 8 - Arbitrary pipeline partition (8-way custom layout)
@@ -73,7 +75,13 @@ export TRAIN_ITERS=${TRAIN_ITERS:-5}
 # MoE_Features=(0 1 2 3 4 5 6 7 8 9 10 11)
 
 if [ -z "${MoE_Features}" ]; then
-    MoE_Features=(0 3 8 10 11)
+    # MoE_Features=(0 3 8)
+    # MoE_Features=(0 3 4 8)
+    # MoE_Features=(0 3 5 8) # bad
+    # MoE_Features=(0 3 4 5 8) # bad
+    # MoE_Features=(0 3 4 8 10)
+    # MoE_Features=(0 3 4 8 10 11)
+    MoE_Features=(0 3 4 5 8 10 11)
 else
     # Convert string to array
     # shellcheck disable=SC2128

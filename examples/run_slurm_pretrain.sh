@@ -39,6 +39,7 @@ LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
 
     #  --nodelist="chi[2877-2884]" \
+    #  --nodelist="chi[2879-2882]" \
 srun -N "${NNODES}" \
      --exclusive \
      --export ALL \
