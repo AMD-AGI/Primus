@@ -251,9 +251,6 @@ class BackendRegistry:
             module_path = f"primus.backends.{backend}"
             importlib.import_module(module_path)
             return True
-        # except ModuleNotFoundError:
-        #     # Backend not installed, ignore silently
-        #     return False
         except Exception as e:
             error_rank_0(f"[Primus] Warning: Failed to load backend '{backend}': {e}")
             return False
