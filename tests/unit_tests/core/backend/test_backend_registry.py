@@ -84,6 +84,7 @@ class TestBackendRegistryErrorHandling:
 
         class FailingAdapter(BackendAdapter):
             def __init__(self, _framework):
+                super().__init__(_framework)
                 raise RuntimeError("Adapter initialization failed")
 
             def prepare_backend(self, config):
@@ -177,7 +178,10 @@ class TestBackendRegistryPathNames:
         """Clear registry before each test."""
         self._original_path_names = registry_module.BackendRegistry._path_names.copy()
         self._original_adapters = registry_module.BackendRegistry._adapters.copy()
-        registry_module.BackendRegistry._path_names = {"megatron": "Megatron-LM", "torchtitan": "torchtitan"}
+        registry_module.BackendRegistry._path_names.clear()
+        registry_module.BackendRegistry._path_names.update(
+            {"megatron": "Megatron-LM", "torchtitan": "torchtitan"}
+        )
         registry_module.BackendRegistry._adapters.clear()
 
         # Silence logging dependencies
@@ -188,8 +192,10 @@ class TestBackendRegistryPathNames:
 
     def teardown_method(self):
         """Restore registry after each test."""
-        registry_module.BackendRegistry._path_names = self._original_path_names
-        registry_module.BackendRegistry._adapters = self._original_adapters
+        registry_module.BackendRegistry._path_names.clear()
+        registry_module.BackendRegistry._path_names.update(self._original_path_names)
+        registry_module.BackendRegistry._adapters.clear()
+        registry_module.BackendRegistry._adapters.update(self._original_adapters)
         registry_module.log_rank_0 = self._orig_log_rank_0
         registry_module.error_rank_0 = self._orig_error_rank_0
 
@@ -221,10 +227,13 @@ class TestBackendRegistrySetupPath:
         """Save original state."""
         self._original_path_names = registry_module.BackendRegistry._path_names.copy()
         self._original_sys_path = sys.path.copy()
-        registry_module.BackendRegistry._path_names = {
-            "megatron": "Megatron-LM",
-            "test_backend": "TestBackend",
-        }
+        registry_module.BackendRegistry._path_names.clear()
+        registry_module.BackendRegistry._path_names.update(
+            {
+                "megatron": "Megatron-LM",
+                "test_backend": "TestBackend",
+            }
+        )
 
         # Silence logging dependencies
         self._orig_log_rank_0 = registry_module.log_rank_0
@@ -304,7 +313,8 @@ class TestBackendRegistryGetAdapterIntegration:
         self._original_path_names = registry_module.BackendRegistry._path_names.copy()
         self._original_sys_path = sys.path.copy()
         registry_module.BackendRegistry._adapters.clear()
-        registry_module.BackendRegistry._path_names = {"test_backend": "TestBackend"}
+        registry_module.BackendRegistry._path_names.clear()
+        registry_module.BackendRegistry._path_names.update({"test_backend": "TestBackend"})
 
         # Silence logging dependencies
         self._orig_log_rank_0 = registry_module.log_rank_0
@@ -314,8 +324,10 @@ class TestBackendRegistryGetAdapterIntegration:
 
     def teardown_method(self):
         """Restore original state."""
-        registry_module.BackendRegistry._adapters = self._original_adapters
-        registry_module.BackendRegistry._path_names = self._original_path_names
+        registry_module.BackendRegistry._adapters.clear()
+        registry_module.BackendRegistry._adapters.update(self._original_adapters)
+        registry_module.BackendRegistry._path_names.clear()
+        registry_module.BackendRegistry._path_names.update(self._original_path_names)
         sys.path[:] = self._original_sys_path
         registry_module.log_rank_0 = self._orig_log_rank_0
         registry_module.error_rank_0 = self._orig_error_rank_0

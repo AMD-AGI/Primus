@@ -131,7 +131,7 @@ class BackendRegistry:
         except FileNotFoundError as e:
             # Path not found - provide helpful error
             raise FileNotFoundError(
-                f"{e}\n" f"Requested backend: '{backend}'\n" f"This backend requires installation before use."
+                f"{e}\n" f"Requested backend: '{backend}'\n" "This backend requires installation before use."
             ) from e
 
         # Step 2: Try lazy load if not registered
@@ -206,8 +206,8 @@ class BackendRegistry:
 
         # 3) Default fallback: third_party/<backend_dir_name>
         backend_dir_name = cls.get_path_name(backend)
-        # Navigate from this file to primus root: primus/core/backend/backend_registry.py -> primus/
-        primus_root = Path(__file__).resolve().parent.parent.parent.parent
+        # Navigate from this file to project root: primus/core/backend/backend_registry.py -> <repo_root>/
+        primus_root = Path(__file__).resolve().parents[3]
         default_path = primus_root / "third_party" / backend_dir_name
         candidate_paths.append(default_path)
 
