@@ -108,7 +108,7 @@ class TestMegatronArgBuilderFiltering:
 class TestMegatronArgBuilderOverrides:
     """Test override mechanism: Primus config overrides defaults."""
 
-    @patch("primus.backends.megatron.argument_builder.get_distributed_info")
+    @patch("primus.backends.megatron.argument_builder.get_torchrun_env")
     @patch("primus.backends.megatron.argument_builder._load_megatron_defaults")
     def test_primus_overrides_defaults(self, mock_load_defaults, mock_dist_info):
         """Test that Primus config overrides Megatron defaults."""
@@ -136,7 +136,7 @@ class TestMegatronArgBuilderOverrides:
         # Check default
         assert result.batch_size == 16
 
-    @patch("primus.backends.megatron.argument_builder.get_distributed_info")
+    @patch("primus.backends.megatron.argument_builder.get_torchrun_env")
     @patch("primus.backends.megatron.argument_builder._load_megatron_defaults")
     def test_multiple_updates(self, mock_load_defaults, mock_dist_info):
         """Test that multiple update calls accumulate overrides."""
@@ -156,7 +156,7 @@ class TestMegatronArgBuilderOverrides:
         assert result.num_layers == 32
         assert result.hidden_size == 4096
 
-    @patch("primus.backends.megatron.argument_builder.get_distributed_info")
+    @patch("primus.backends.megatron.argument_builder.get_torchrun_env")
     @patch("primus.backends.megatron.argument_builder._load_megatron_defaults")
     def test_later_update_overwrites(self, mock_load_defaults, mock_dist_info):
         """Test that later updates overwrite earlier ones."""
@@ -175,7 +175,7 @@ class TestMegatronArgBuilderOverrides:
 class TestMegatronArgBuilderDistributedEnv:
     """Test distributed environment injection."""
 
-    @patch("primus.backends.megatron.argument_builder.get_distributed_info")
+    @patch("primus.backends.megatron.argument_builder.get_torchrun_env")
     @patch("primus.backends.megatron.argument_builder._load_megatron_defaults")
     def test_distributed_env_injected(self, mock_load_defaults, mock_dist_info):
         """Test that distributed env is automatically injected."""
@@ -189,7 +189,7 @@ class TestMegatronArgBuilderDistributedEnv:
         assert result.rank == 3
         assert result.local_rank == 3
 
-    @patch("primus.backends.megatron.argument_builder.get_distributed_info")
+    @patch("primus.backends.megatron.argument_builder.get_torchrun_env")
     @patch("primus.backends.megatron.argument_builder._load_megatron_defaults")
     def test_distributed_env_overrides_config(self, mock_load_defaults, mock_dist_info):
         """Test that distributed env overrides any config values."""
@@ -219,7 +219,7 @@ class TestMegatronArgBuilderDistributedEnv:
 class TestMegatronArgBuilderIntegration:
     """Integration tests for complete workflow."""
 
-    @patch("primus.backends.megatron.argument_builder.get_distributed_info")
+    @patch("primus.backends.megatron.argument_builder.get_torchrun_env")
     @patch("primus.backends.megatron.argument_builder._load_megatron_defaults")
     def test_complete_workflow(self, mock_load_defaults, mock_dist_info):
         """Test complete workflow: defaults → overrides → dist env → namespace."""
@@ -262,7 +262,7 @@ class TestMegatronArgBuilderIntegration:
         # Check result is SimpleNamespace
         assert isinstance(result, SimpleNamespace)
 
-    @patch("primus.backends.megatron.argument_builder.get_distributed_info")
+    @patch("primus.backends.megatron.argument_builder.get_torchrun_env")
     @patch("primus.backends.megatron.argument_builder._load_megatron_defaults")
     def test_finalize_creates_new_namespace_each_time(self, mock_load_defaults, mock_dist_info):
         """Test that finalize() creates a new namespace each time."""
@@ -281,7 +281,7 @@ class TestMegatronArgBuilderIntegration:
         # But with same content
         assert result1.num_layers == result2.num_layers
 
-    @patch("primus.backends.megatron.argument_builder.get_distributed_info")
+    @patch("primus.backends.megatron.argument_builder.get_torchrun_env")
     @patch("primus.backends.megatron.argument_builder._load_megatron_defaults")
     def test_builder_reusable(self, mock_load_defaults, mock_dist_info):
         """Test that builder can be reused with different updates."""
@@ -314,7 +314,7 @@ class TestMegatronArgBuilderChaining:
 
         assert result is builder
 
-    @patch("primus.backends.megatron.argument_builder.get_distributed_info")
+    @patch("primus.backends.megatron.argument_builder.get_torchrun_env")
     @patch("primus.backends.megatron.argument_builder._load_megatron_defaults")
     def test_chained_updates(self, mock_load_defaults, mock_dist_info):
         """Test chained update calls."""

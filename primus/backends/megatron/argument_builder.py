@@ -5,7 +5,7 @@ from functools import lru_cache
 from types import SimpleNamespace
 from typing import Any, Dict, Mapping
 
-from primus.core.runtime.distributed import get_distributed_info
+from primus.core.utils.env import get_torchrun_env
 
 
 # ------------------------------------------------------------
@@ -128,7 +128,7 @@ class MegatronArgBuilder:
 
         # Inject distributed environment variables
         # This ensures Megatron uses the correct distributed settings
-        dist_env = get_distributed_info()
+        dist_env = get_torchrun_env()
         final["world_size"] = dist_env["world_size"]
         final["rank"] = dist_env["rank"]
         final["local_rank"] = dist_env["local_rank"]
