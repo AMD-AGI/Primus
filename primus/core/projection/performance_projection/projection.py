@@ -30,12 +30,9 @@ def _has_dense_layers(moe_layer_freq):
     if isinstance(moe_layer_freq, (list, tuple)):
         return any(layer_flag == 0 for layer_flag in moe_layer_freq)
     if isinstance(moe_layer_freq, str):
-        try:
-            evaluated = eval(moe_layer_freq, {}, {})
-            if isinstance(evaluated, (list, tuple)):
-                return any(layer_flag == 0 for layer_flag in evaluated)
-        except Exception:
-            pass
+        evaluated = eval(moe_layer_freq, {}, {})
+        if isinstance(evaluated, (list, tuple)):
+            return any(layer_flag == 0 for layer_flag in evaluated)
     return True
 
 
