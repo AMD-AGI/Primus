@@ -88,6 +88,7 @@ class TestBackendRegistryErrorHandling:
                 raise RuntimeError("Adapter initialization failed")
 
             def prepare_backend(self, config):
+                super().__init__(framework)
                 pass
 
             def convert_config(self, config):
