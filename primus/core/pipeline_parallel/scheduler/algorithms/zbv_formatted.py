@@ -39,13 +39,17 @@ class ScheduleZBVFormatted(VFoldScheduleAlgo):
                 insert_time_step_nodes(rank, time_step[rank], SchedulerNode(func_type=func_type, mini_batch=mini_batch, chunk=chunk, args=None))
                 time_step[rank] += 1
             else:
-                recv_node, send_node = self.generate_send_recv_nodes(
+                compute_node = SchedulerNode(func_type=func_type, mini_batch=mini_batch, chunk=chunk, args=None)
+                insert_time_step_nodes(rank, time_step[rank], compute_node)
+                time_step[rank] += 1
+                send_node_info, recv_node_info = self.generate_send_recv_nodes_comm_pair(
                     rank, mini_batch, chunk, func_type
                 )
-                insert_time_step_nodes(rank, time_step[rank], recv_node)
-                insert_time_step_nodes(rank, time_step[rank], SchedulerNode(func_type=func_type, mini_batch=mini_batch, chunk=chunk, args=None))
-                time_step[rank] += 1
-                insert_time_step_nodes(rank, time_step[rank], send_node)
+                if send_node_info is not None:
+                    send_rank, send_node = send_node_info
+                    recv_rank, recv_node = recv_node_info
+                    insert_time_step_nodes(send_rank, time_step[send_rank], send_node)
+                    insert_time_step_nodes(recv_rank, time_step[rank], recv_node)
         
         for rank in range(self.pp_size):
             # warm-up phase
@@ -116,7 +120,9 @@ class ScheduleZBVFormatted(VFoldScheduleAlgo):
 
         for rank in range(self.pp_size):
 
-            for time_step, nodes in time_step_nodes[rank].items():
+            for time_step in sorted(time_step_nodes[rank].keys()):
+                nodes = time_step_nodes[rank][time_step]
+
                 compute_nodes = [node for node in nodes if node.func_type in [FuncType.F, FuncType.B, FuncType.W]]
                 comm_nodes = [node for node in nodes if node.func_type in [FuncType.SF, FuncType.SB, FuncType.RF, FuncType.RB]]
 

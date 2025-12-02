@@ -65,12 +65,13 @@ class PrimusPipelineParallelLauncher:
         p2p_communicator: Optional[P2PCommunicator] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
+        kwargs = {}
 
-        self.schedule_instance = produce_schedule_instance(self.pp_algorithm, self.pp_size, self.vpp_size, num_microbatches)
+        if self.pp_algorithm == "zbv-greedy":
+            kwargs["cached_fwd_chunks_limit"] = get_args().cached_fwd_chunks_limit
+
+        self.schedule_instance = produce_schedule_instance(self.pp_algorithm, self.pp_size, self.vpp_size, num_microbatches, **kwargs)
         self.schedule_table = self.schedule_instance.generate_schedule_table()
-        # if self.pp_rank == 0:
-        #     print(f"debug self.pp_size, self.vpp_size, num_microbatches {self.pp_size} {self.vpp_size} {num_microbatches}")
-        #     self.schedule_instance.print_schedule_table(self.schedule_table)
         self.last_pp_stage_rank = self.schedule_instance.last_pp_stage_rank()
 
 
@@ -86,9 +87,6 @@ class PrimusPipelineParallelLauncher:
 
         if p2p_communicator is not None:
             warning_rank_0("p2p_communicator is provided, but PrimusPipelineParallelLauncher will not use it")
-            p2p_communicator = P2PCommunicator(
-                pp_group=parallel_state.get_pipeline_model_parallel_group(), config=config
-            )
 
 
         if pg_collection is None:
@@ -197,7 +195,6 @@ class PrimusPipelineParallelLauncher:
             tp_group=tp_group,
             cp_group=cp_group,
         )
-        bootstrap_and_profile_p2p_communication(config, [send_tensor_shapes], [recv_tensor_shapes], p2p_communicator)
 
         total_num_tokens = torch.zeros([], dtype=torch.int, device="cuda")
         for node in self.schedule_table[self.pp_rank]:

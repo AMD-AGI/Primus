@@ -163,6 +163,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self.is_v_schedule = (self.module_config.patch_zero_bubble and self.module_config.enable_zero_bubble and (self.module_config.zero_bubble_v_schedule or self.module_config.enable_1f1b_v)) or ("zbv" in self.module_config.pp_algorithm and self.module_config.patch_primus_pipeline)
+
         # monkey patch modules
         self.patch_moe_layer()
         self.patch_torch_fsdp()
@@ -181,6 +183,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
+
 
     def patch_custom_recompute_layer_ids(self):
         if self.module_config.recompute_layer_ids is None:
@@ -602,7 +605,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
     def patch_pp(self):
         # patch optimizer
         args = self.module_config
-        is_v_schedule = (args.patch_zero_bubble and args.enable_zero_bubble and (args.zero_bubble_v_schedule or args.enable_1f1b_v)) or ("zbv" in args.pp_algorithm and args.patch_primus_pipeline)
 
         if self.module_config.patch_zero_bubble:
             warning_rank_0(f"MegatronTrainer: Patch ZeroBubble PP")
@@ -646,7 +648,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             )
 
             # patch zbv-related code
-            if is_v_schedule:
+            if self.is_v_schedule:
                 import megatron.core.parallel_state as ori_parallel_state
 
                 from primus.backends.megatron.core.parallel_state import (
@@ -2586,7 +2588,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             total_loss_dict[skipped_iters_key] = 0
             total_loss_dict[nan_iters_key] = 0
 
-            if get_args().patch_zero_bubble and get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v:
+            if self.is_v_schedule:
                 log_rank_0(log_string)
             else:
                 log_rank_last(log_string)

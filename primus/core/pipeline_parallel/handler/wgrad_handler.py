@@ -1,5 +1,7 @@
 from typing import Callable
 
+from primus.modules.trainer.megatron.utils import fwd_bwd_wrapper
+from megatron.training.global_vars import get_args
 from primus.modules.module_utils import log_rank_all
 from primus.core.pipeline_parallel.scheduler.scheduler_node import SchedulerNode
 
@@ -49,4 +51,8 @@ WGRAD_RUNNING_CACHE = WGradRunningCache()
 
 
 def default_wgrad_handler(node: SchedulerNode, idx: int, scheduler_table: list[SchedulerNode]):
-    WGRAD_RUNNING_CACHE.flush(node.mini_batch, node.chunk)
+    cal_stored_grad_func = WGRAD_RUNNING_CACHE.flush
+    if get_args().dump_pp_data:
+        cal_stored_grad_func = fwd_bwd_wrapper(WGRAD_RUNNING_CACHE.flush, "wgrad", minibatch=node.mini_batch, chunk=node.chunk)
+
+    cal_stored_grad_func(node.mini_batch, node.chunk)

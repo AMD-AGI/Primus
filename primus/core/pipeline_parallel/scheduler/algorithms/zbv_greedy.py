@@ -6,7 +6,6 @@ class ScheduleZBVGreedy(VFoldScheduleAlgo):
     """ZBVGreedy Pipeline Schedule"""
 
     def __init__(self, pp_size, vpp_size, micro_batches, cached_fwd_chunks_limit=None):
-
         if cached_fwd_chunks_limit is None:
             cached_fwd_chunks_limit = pp_size * vpp_size
         assert vpp_size == 2, "VFold1F1B requires vpp_size == 2"
@@ -20,6 +19,17 @@ class ScheduleZBVGreedy(VFoldScheduleAlgo):
         memory_time_map = [[0] * (2 * 3 * self.micro_batches * self.pp_size) for _ in range(self.pp_size)]
 
         wgrad_node_queue = [[] for _ in range(self.pp_size)]
+        time_step_nodes = [dict() for _ in range(self.pp_size)]
+
+        def insert_time_step_nodes(rank, time_step, node):
+            if node is None: return
+            if node.args is None:
+                node.args = {}
+            node.args["time_step"] = time_step
+            if time_step in time_step_nodes[rank]:
+                time_step_nodes[rank][time_step].append(node)
+            else:
+                time_step_nodes[rank][time_step] = [node]
 
         def greedy_insert_node(rank, cur_time_stamp, node):
             for i in range(cur_time_stamp, len(time_stamp_map[rank])):
@@ -35,9 +45,32 @@ class ScheduleZBVGreedy(VFoldScheduleAlgo):
                                 break
                         if not exceed_mem:
                             time_stamp_map[rank][i] = node
+                            insert_time_step_nodes(rank, i, node)
+
+                            # insert send and recv nodes
+                            send_node_info, recv_node_info = self.generate_send_recv_nodes_comm_pair(
+                                rank, node.mini_batch, node.chunk, node.func_type
+                            )
+                            if send_node_info is not None:
+                                send_rank, send_node = send_node_info
+                                recv_rank, recv_node = recv_node_info
+                                insert_time_step_nodes(send_rank, i + 1, send_node)
+                                insert_time_step_nodes(recv_rank, i + 1, recv_node)
                             return i
                 elif time_stamp_map[rank][i] is None:
                     time_stamp_map[rank][i] = node
+                    insert_time_step_nodes(rank, i, node)
+                    if node.func_type == FuncType.B:
+                        # insert send and recv nodes
+                        send_node_info, recv_node_info = self.generate_send_recv_nodes_comm_pair(
+                            rank, node.mini_batch, node.chunk, node.func_type
+                        )
+                        if send_node_info is not None:
+                            send_rank, send_node = send_node_info
+                            recv_rank, recv_node = recv_node_info
+                            insert_time_step_nodes(send_rank, i + 1, send_node)
+                            insert_time_step_nodes(recv_rank, i + 1, recv_node)
+
                     return i
             return -1
 
@@ -82,6 +115,7 @@ class ScheduleZBVGreedy(VFoldScheduleAlgo):
 
                         insert_idx = greedy_insert_node(cur_rank, cur_time_stamp, schedule_node)
 
+
                     cur_time_stamp = insert_idx
 
                     if insert_nodes_type == FuncType.F:  # forward may increase activation memory
@@ -112,17 +146,21 @@ class ScheduleZBVGreedy(VFoldScheduleAlgo):
                 assert backward_node_time != -1
                 wgrad_insert_idx = greedy_insert_node(rank, backward_node_time, wgrad_node)
 
-        # convert time_stamp_map to schedule_table
         for rank in range(self.pp_size):
-            for node in time_stamp_map[rank]:
-                if node is not None and not isinstance(node, bool):
-                    schedule_table[rank].append(node)
-        schedule_table = self.add_communication_nodes(schedule_table)
+
+            for time_step in sorted(time_step_nodes[rank].keys()):
+                nodes = time_step_nodes[rank][time_step]
+
+                compute_nodes = [node for node in nodes if node.func_type in [FuncType.F, FuncType.B, FuncType.W]]
+                comm_nodes = [node for node in nodes if node.func_type in [FuncType.SF, FuncType.SB, FuncType.RF, FuncType.RB]]
+
+                schedule_table[rank].extend(comm_nodes)
+                schedule_table[rank].extend(compute_nodes)
 
         return schedule_table
 
 
 if __name__ == "__main__":
-    schedule = ScheduleZBVGreedy(pp_size=4, vpp_size=2, micro_batches=16)
+    schedule = ScheduleZBVGreedy(pp_size=8, vpp_size=2, micro_batches=16, cached_fwd_chunks_limit=12)
     schedule_table = schedule.generate_schedule_table()
-    schedule.print_schedule_table(schedule_table, [FuncType.F, FuncType.B, FuncType.W])
+    schedule.print_schedule_table(schedule_table)

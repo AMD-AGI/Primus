@@ -110,9 +110,12 @@ def _init_send_recv_buffers(node: SchedulerNode, idx: int, scheduler_table: list
             FuncType.SB: [FuncType.B, FuncType.BW],
         }
         prev_node = find_prev_node_with_type(scheduler_table, idx, prev_nodes_indicate_map[node.func_type])
-        assert prev_node is not None, "prev_node not found"
+        assert prev_node is not None, f"prev_node not found {node.__str__()}"
         node.args["send_buffers"] = scheduler_table[prev_node].args["outputs"]
         node.args["prev_node_idx"] = prev_node
+
+        if node.func_type == FuncType.SB:
+            scheduler_table[prev_node].args["outputs"] = None
 
         # check send buffer shape and size
         assert len(node.args["send_buffers"]) == len(node.args["send_tensor_shapes"]), "send_buffer_shape and send_buffer_size must have the same number of dimensions"
@@ -135,6 +138,8 @@ def _init_send_recv_buffers(node: SchedulerNode, idx: int, scheduler_table: list
         #print(f"node {node} recv_buffers: {len(node.args['recv_buffers'])} | {node.args['recv_buffers'][0].shape}")
 
 def _batch_send_recv(p2p_nodes: list[SchedulerNode], mode="batch_p2p"):
+    if len(p2p_nodes) == 0:
+        return
     ops = []
     send_prev_nodes = []
     resv_prev_nodes = []
@@ -207,12 +212,12 @@ def batch_p2p_communication_handler(node: SchedulerNode, idx: int, scheduler_tab
             send_idx = find_prev_node_with_type(scheduler_table, idx, [comm_pair[node.func_type]], chunk=node.args["recv_from_chunk"])
             assert send_idx is not None, "send_idx not found"
             node.args["recv_buffers"] = [x.clone().detach().requires_grad_(True) for x in scheduler_table[send_idx].args["send_buffers"]]
-            
-            deallocate_output_tensor(scheduler_table[send_idx].args["send_buffers"][0], node.args["config"].deallocate_pipeline_outputs)
-            scheduler_table[send_idx].args["send_buffers"] = None
-        return
+            if node.func_type == FuncType.RF:
+                deallocate_output_tensor(scheduler_table[send_idx].args["send_buffers"][0], node.args["config"].deallocate_pipeline_outputs)
 
-    COMMUNICATION_NODE_CACHE.append(node)
+            scheduler_table[send_idx].args["send_buffers"] = None
+    else:
+        COMMUNICATION_NODE_CACHE.append(node)
 
     if idx + 1 < len(scheduler_table) and scheduler_table[idx + 1].func_type in [
         FuncType.SF,
@@ -220,9 +225,9 @@ def batch_p2p_communication_handler(node: SchedulerNode, idx: int, scheduler_tab
         FuncType.RF,
         FuncType.RB,
     ]:
-        return
-
-    _batch_send_recv(COMMUNICATION_NODE_CACHE, mode="batch_p2p")
+        if "time_step" not in scheduler_table[idx + 1].args or scheduler_table[idx + 1].args["time_step"] == scheduler_table[idx].args["time_step"]:
+            return
+    _batch_send_recv(COMMUNICATION_NODE_CACHE, mode="async_p2p")
 
     send_fwd_nodes = [ node for node in COMMUNICATION_NODE_CACHE if node.func_type == FuncType.SF ]
     send_bwd_nodes = [ node for node in COMMUNICATION_NODE_CACHE if node.func_type == FuncType.SB ]

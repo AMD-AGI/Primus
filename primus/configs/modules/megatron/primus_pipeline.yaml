@@ -1,3 +1,5 @@
 patch_primus_pipeline: false
 
 pp_algorithm: "1f1b-interleaved" # "1f1b", "1f1b-interleaved", "zero-bubble", "zbv-formatted", "zbv-greedy"
+
+cached_fwd_chunks_limit: 16

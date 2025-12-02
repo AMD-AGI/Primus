@@ -14,6 +14,17 @@ class FuncType(Enum):
     RF = "RECV_FORWARD"
     RB = "RECV_BACKWARD"
 
+    def reverse(self):
+        reverse_map = {
+            FuncType.F: FuncType.B,
+            FuncType.B: FuncType.F,
+            FuncType.SF: FuncType.RF,
+            FuncType.SB: FuncType.RB,
+            FuncType.RF: FuncType.SF,
+            FuncType.RB: FuncType.SB,
+        }
+        return reverse_map[self]
+
 
 @dataclass
 class SchedulerNode:
