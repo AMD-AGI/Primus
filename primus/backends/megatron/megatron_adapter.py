@@ -5,20 +5,6 @@
 ###############################################################################
 
 
-###############################################################################
-# Megatron Adapter (Full Production Implementation)
-#
-# This is the unified integration layer between Primus Runtime and Megatron-LM.
-#
-# Responsibilities:
-#   1. Apply Megatron version-specific patches
-#   2. Convert Primus ModuleConfig → Megatron native args
-#   3. Load Megatron Trainer class (multiple version fallback)
-#   4. Inject arguments into Megatron's runtime
-#
-###############################################################################
-
-
 from primus.backends.megatron.argument_builder import MegatronArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
