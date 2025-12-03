@@ -374,7 +374,6 @@ inference_max_seq_length: 2560 # int, (prefill + decode)
 
 create_attention_mask_in_dataloader: true
 num_dataset_builder_threads: 1
-s3_cache_path: null
 ict_head_size: null
 biencoder_projection_dim: 0
 biencoder_shared_query_context_model: false
