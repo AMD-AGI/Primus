@@ -14,8 +14,10 @@ export SKIP_TRAIN=0
 ######################### Training Environment Variables #########################
 export HF_TOKEN=${HF_TOKEN:-"your_hf_token"}
 export WANDB_API_KEY=${WANDB_API_KEY:-"your_wandb_api_key"}
-export GPU_MAX_HW_QUEUES=2
-export CPUS_PER_TASK=96
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
+export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
+# export USE_ROCM_AITER_ROPE_BACKEND=0
 
 # Set on Primus-Safe Platform
 # export MASTER_ADDR=${MASTER_ADDR:-localhost}
@@ -25,7 +27,7 @@ export CPUS_PER_TASK=96
 # export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
 # vultr cluster
-export NNODES=${NNODES:-4}
+export NNODES=${NNODES:-1}
 export USING_AINIC=${USING_AINIC:-1}
 export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7" # modify based on the GPU NiC settings
 export NCCL_SOCKET_IFNAME="enp193s0f1np1"
@@ -33,62 +35,173 @@ export GLOO_SOCKET_IFNAME="enp193s0f1np1"
 export NCCL_IB_RETRY_CNT=20
 export NCCL_IB_TIMEOUT=300
 
-export HSA_NO_SCRATCH_RECLAIM=1
-export NVTE_CK_USES_BWD_V3=1
-# export USE_ROCM_AITER_ROPE_BACKEND=0
-# export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=0
-
-
 ######################### Training Config #########################
-export MBS=${MBS:-8}
-export GBS=${GBS:-256}
-# export GBS=${GBS:-$((64 * NNODES))}
+export MBS=${MBS:-1}
+export GBS=${GBS:-4096}
+export NUM_LAYERS=${NUM_LAYERS:-48}
+export MOE_LAYER_FREQ=${MOE_LAYER_FREQ:-1}
 export SEQ_LENGTH=${SEQ_LENGTH:-4096}
 export TP=${TP:-1}
 export ETP=${ETP:-1}
-export PP=${PP:-1}
+export PP=${PP:-8}
 export VPP=${VPP:-1}
-export EP=${EP:-1}
+export EP=${EP:-16}
 export CP=${CP:-1}
-export CP_COMM_TYPE=${CP_COMM_TYPE:-"a2a"} # p2p, a2a, allgather or a2a+p2p
-export OPTIMIZER=${OPTIMIZER:-adam}
+export CP_COMM_TYPE=${CP_COMM_TYPE:-"a2a"}            # p2p, a2a, allgather or a2a+p2p
+export LOAD_BALANCE=${LOAD_BALANCE:-True}
+export PP_WARMUP=${PP_WARMUP:-False}
+export OPTIMIZER=${OPTIMIZER:-"adam"}
 export RECOMPUTE_LAYERS=${RECOMPUTE_LAYERS:-0}
-export FP8=${FP8:-False} # True for fp8, False for bf16
+export LEGACY_GG=${LEGACY_GG:-False}
+export FP8=${FP8:-False}                              # True for fp8, False for bf16
 export PROFILE=${PROFILE:-False}
-export DISABLE_CPU_TRACE=${DISABLE_CPU_TRACE:-False}
+export DISABLE_CPU_TRACE=${DISABLE_CPU_TRACE:-True}
 export PROFILE_STEP_START=${PROFILE_STEP_START:-5}
 export PROFILE_STEP_END=${PROFILE_STEP_END:-6}
-export TRAIN_ITERS=${TRAIN_ITERS:-10}
+export TRAIN_ITERS=${TRAIN_ITERS:-5}
 
-# Features legend:
+# MoE_Features legend:
 # 0 - Baseline (no extra optimization toggles)
-# 1 - Loss fusion helper
-# 2 - CPU NUMA binding helper
-# 3 - Manual GC helper
+# 1 - Turbo attention acceleration
+# 2 - Turbo grouped GEMM / MLP fusion
+# 3 - Loss fusion helper
+# 4 - DeepEP acceleration
+# 5 - Sync-free MoE (stage 1)
+# 6 - 1F1B MoE overlap
+# 7 - Zero-bubble pipeline optimizations
+# 8 - Arbitrary pipeline partition (8-way custom layout)
+# 9 - Recompute selected layers helper
+# 10 - CPU NUMA binding helper
+# 11 - Manual GC helper
+# MoE_Features=(0 1 2 3 4 5 6 7 8 9 10 11)
 
 if [ -z "${MoE_Features}" ]; then
-    MoE_Features=(0 1)
+    MoE_Features=(0 3 11)
 else
     # Convert string to array
     # shellcheck disable=SC2128
-    read -ra MoE_Features <<< "${MoE_Features}"
+    read -ra MoE_Features <<< "$MoE_Features"
 fi
 
 FEATURE_ARGS=()
+PRIMUS_TURBO_ENABLED="False"
+ensure_primus_turbo() {
+    if [ "$PRIMUS_TURBO_ENABLED" = "False" ]; then
+        FEATURE_ARGS+=("--enable_primus_turbo" "True")
+        PRIMUS_TURBO_ENABLED="True"
+    fi
+}
 
 for feature in "${MoE_Features[@]}"; do
+    echo "Processing feature: ${feature}"
     case "$feature" in
     0) ;;
     1)
+        ensure_primus_turbo
+        FEATURE_ARGS+=("--use_turbo_attention" "True")
+        ;;
+    2)
+        ensure_primus_turbo
+        FEATURE_ARGS+=("--use_turbo_grouped_mlp" "True")
+        ;;
+    3)
         FEATURE_ARGS+=("--cross_entropy_fusion_impl" "te")
         FEATURE_ARGS+=("--cross_entropy_loss_fusion" "True")
         ;;
-    2)
+    4)
+        ensure_primus_turbo
+        FEATURE_ARGS+=("--use_turbo_deepep" "True")
+        FEATURE_ARGS+=("--turbo_deepep_num_cu" "32")
+        FEATURE_ARGS+=("--turbo_deepep_use_comm_stream" "False")
+        FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
+        FEATURE_ARGS+=("--moe_router_dtype" "fp32")
+        ;;
+    5)
+        ensure_primus_turbo
+        # mi355
+        # sync_free moe stage 1 will open router and permutation fusion
+        FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "1")
+
+        # mi300/mi325
+        # sync_free moe stage 2 will open deepep automatically
+        # FEATURE_ARGS+=("--turbo_sync_free_moe_stage" "2")
+        # FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
+        # FEATURE_ARGS+=("--moe_use_legacy_grouped_gemm" "True")
+        # FEATURE_ARGS+=("--moe_router_dtype" "fp32")
+        ;;
+    6)
+        FEATURE_ARGS+=("--overlap_moe_expert_parallel_comm" "True")
+        FEATURE_ARGS+=("--patch_moe_overlap" "False") # TODO: error
+        FEATURE_ARGS+=("--delay_wgrad_compute" "False")
+        FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
+        ;;
+    7)
+        ensure_primus_turbo
+        # required flags for zero bubble
+        FEATURE_ARGS+=("--overlap_grad_reduce" "False")
+        FEATURE_ARGS+=("--overlap_param_gather" "False")
+        FEATURE_ARGS+=("--no_persist_layer_norm" "True")
+        FEATURE_ARGS+=("--create_attention_mask_in_dataloader" "False")
+        FEATURE_ARGS+=("--gradient_accumulation_fusion" "True")
+
+        # default strategy is zero bubble
+        PP_STRATEGY="zbv" # 1f1b, vpp, zb1p, zbv, v-half, v-min
+
+        case "$PP_STRATEGY" in
+        1f1b)
+            VPP=1
+            ;;
+        vpp)
+            ;;
+        zb1p)
+            FEATURE_ARGS+=("--patch_zero_bubble" "True")
+            VPP=1
+            ;;
+        zbv)
+            FEATURE_ARGS+=("--patch_zero_bubble" "True")
+            FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
+            FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "zb")
+            VPP=2
+            ;;
+        v-half)
+            FEATURE_ARGS+=("--patch_zero_bubble" "True")
+            FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
+            FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "half")
+            VPP=2
+            ;;
+        v-min)
+            FEATURE_ARGS+=("--patch_zero_bubble" "True")
+            FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
+            FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "min")
+            VPP=2
+            ;;
+        *)
+            echo "Unsupported PP_STRATEGY: ${PP_STRATEGY}. Supported values: 1f1b, vpp, zb1p, zbv, v-half, v-min." >&2
+            exit 1
+            ;;
+        esac
+        ;;
+    8)
+        # TODO: need tuning for the pipeline layout pattern
+        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et*3|(tt|)*29,m|L")
+        # 32 stages for PP8VPP4
+        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et|(tt|)*30L")
+        # pp2 vpp4
+        # 1 + 6 + 1 stages
+        # 1 + 2*6 = 13 layers
+        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" 'Et|(tt|)*6L')
+        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" 'Et|tt|tt|tt|tt|tt|tt|L')
+        VPP=1
+        ;;
+    9)
+        FEATURE_ARGS+=("--recompute_layer_ids" "0,1,2,3")
+        ;;
+    10)
         # Enable NUMA binding for better memory locality (increase stability for large models)
         export ENABLE_NUMA_BINDING=1
         export HSA_KERNARG_POOL_SIZE=12582912
         ;;
-    3)
+    11)
         FEATURE_ARGS+=("--manual_gc" "True")
         FEATURE_ARGS+=("--manual_gc_interval" "1")
         ;;
@@ -98,7 +211,6 @@ done
 
 FEATURE_LIST="${MoE_Features[*]}"
 FEATURE_TAG=$(printf "%s" "${FEATURE_LIST}" | tr ' ' '-')
-
 
 VPP_ARGS=()
 if [ "$VPP" -gt 1 ]; then
@@ -111,9 +223,11 @@ if [ "$FP8" = "True" ]; then
 fi
 
 RECOMPUTE_ARGS=()
-RECOMPUTE_ARGS+=("--recompute_granularity" "full")
-RECOMPUTE_ARGS+=("--recompute_method" "block")
-RECOMPUTE_ARGS+=("--recompute_num_layers" "${RECOMPUTE_LAYERS}")
+if [ "$RECOMPUTE_LAYERS" -gt 0 ]; then
+    RECOMPUTE_ARGS+=("--recompute_granularity" "full")
+    RECOMPUTE_ARGS+=("--recompute_method" "block")
+    RECOMPUTE_ARGS+=("--recompute_num_layers" "${RECOMPUTE_LAYERS}")
+fi
 
 PROFILE_ARGS=()
 if [ "$PROFILE" = "True" ]; then
@@ -126,12 +240,12 @@ if [ "$PROFILE" = "True" ]; then
 fi
 
 ######################### Training Experiments #########################
-PRIMUS_TEAM="date-$(date +%Y%m%d)-qwen3_30B_A3B"
+PRIMUS_TEAM="date-$(date +%Y%m%d)"
 export PRIMUS_TEAM
 PRIMUS_USER=user-tas
 export PRIMUS_USER
 # export PRIMUS_EXP_NAME="debug"
-export PRIMUS_EXP_NAME="Qwen3_30B_A3B_MI355X_FP8${FP8}_NNODES${NNODES}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Profile${PROFILE}-${PROFILE_STEP_START}-${PROFILE_STEP_END}_NoCPUTrace${DISABLE_CPU_TRACE}_Queue${GPU_MAX_HW_QUEUES}_Features${FEATURE_TAG}"
+export PRIMUS_EXP_NAME="Qwen3_30B_A3B_MI355X_FP8${FP8}_NNODES${NNODES}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_MLA${ENABLE_MLA}_MTP${ENABLE_MTP}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}-${PROFILE_STEP_START}-${PROFILE_STEP_END}_NoCPUTrace${DISABLE_CPU_TRACE}_Features${FEATURE_TAG}"
 
 LOG_DIR=./output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
 export DUMP_PP_DIR=$LOG_DIR/pp_dump
@@ -141,7 +255,6 @@ mkdir -p "$LOG_DIR"
 rm -rf "$LOG_FILE"
 
 ######################### Training Job #########################
-export PRIMUS_MODEL=qwen3_30B_A3B
 export EXP="examples/megatron/configs/MI355X/qwen3_30B_A3B-pretrain.yaml"
 
 echo "--------------------------------" | tee -a "$LOG_FILE"
@@ -157,6 +270,8 @@ echo "PROFILE_ARGS=${PROFILE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "--------------------------------" | tee -a "$LOG_FILE"
 
 bash ./examples/run_slurm_pretrain.sh \
+    --num_layers "$NUM_LAYERS" \
+    --moe_layer_freq "$MOE_LAYER_FREQ" \
     --micro_batch_size "$MBS" \
     --global_batch_size "$GBS" \
     --seq_length "$SEQ_LENGTH" \
@@ -167,8 +282,10 @@ bash ./examples/run_slurm_pretrain.sh \
     --context_parallel_size "$CP" \
     --cp_comm_type "$CP_COMM_TYPE" \
     --mock_data True \
+    --pp_warmup "${PP_WARMUP:-True}" \
+    --moe_router_force_load_balancing "$LOAD_BALANCE" \
     --optimizer "$OPTIMIZER" \
-    --torch_profiler_use_gzip False \
+    --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
     "${VPP_ARGS[@]}" \
     "${FEATURE_ARGS[@]}" \
     "${RECOMPUTE_ARGS[@]}" \

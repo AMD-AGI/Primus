@@ -55,7 +55,7 @@ modules:
       # 20250321: need latest megatron docker image
       moe_permute_fusion: false
       # fused wgrad gemm and accumulation
-      gradient_accumulation_fusion: false
+      gradient_accumulation_fusion: true
       # recommend set `false` in fp8
       moe_use_legacy_grouped_gemm: false
       # fused topk router with aux score
