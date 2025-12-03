@@ -16,12 +16,15 @@ from typing import Any, Dict, List, Optional
 
 from primus.core.backend.backend_registry import BackendRegistry
 from primus.core.config.merge_utils import deep_merge
-from primus.core.config.primus_config import PrimusConfig
-from primus.core.runtime import init_distributed_env, init_global_logger
+from primus.core.config.primus_config import (
+    get_module_config,
+    get_module_map,
+    load_primus_config,
+)
 from primus.core.utils.arg_utils import parse_cli_overrides
-from primus.core.utils.distributed_logging import log_rank_0
 from primus.core.utils.env_setup import setup_training_env
 from primus.core.utils.global_vars import set_global_variables
+from primus.modules.module_utils import log_rank_0
 
 # ---------------------------------------------------------------------------
 # Context & Hooks
@@ -138,15 +141,15 @@ class PrimusRuntime:
         if not cfg_path.exists():
             raise FileNotFoundError(f"[Primus:TrainRuntime] Config file not found: {cfg_path}")
 
-        primus_cfg = PrimusConfig.from_file(cfg_path, self.args)
+        primus_cfg = load_primus_config(cfg_path, self.args)
 
         # For platform detection in distributed init.
         set_global_variables(primus_cfg)
 
         try:
-            module_cfg = primus_cfg.get_module_config(module_name)
+            module_cfg = get_module_config(primus_cfg, module_name)
         except ValueError as exc:
-            available_modules = [f"{m.module} (name: {m.name})" for m in primus_cfg._modules.values()]
+            available_modules = list(get_module_map(primus_cfg).keys())
             raise RuntimeError(
                 f"[Primus:TrainRuntime] Missing required module '{module_name}'.\n"
                 f"Available modules: {', '.join(available_modules)}\n"
@@ -168,15 +171,31 @@ class PrimusRuntime:
 
     def _initialize_distributed_context(self) -> None:
         assert self.ctx is not None, "TrainContext must be initialized before distributed init."
-        init_distributed_env()
+        # Use legacy distributed init if available; fallback to no-op.
+        try:
+            from primus.core.launcher.initialize import (
+                init_distributed_env,  # type: ignore
+            )
+
+            init_distributed_env()
+        except ImportError:
+            log_rank_0("[Primus:TrainRuntime] init_distributed_env not available; skipping.")
 
     def _initialize_logging(self) -> None:
         assert self.ctx is not None, "TrainContext must be initialized before logger init."
-        init_global_logger(
-            self.ctx.primus_config,
-            module_name=self.ctx.module_name,
-            module_config=self.ctx.module_config,
-        )
+        # Use legacy logger init if available; otherwise rely on module_utils logging.
+        try:
+            from primus.core.launcher.initialize import (
+                init_global_logger,  # type: ignore
+            )
+
+            init_global_logger(
+                self.ctx.primus_config,
+                module_name=self.ctx.module_name,
+                module_config=self.ctx.module_config,
+            )
+        except ImportError:
+            log_rank_0("[Primus:TrainRuntime] init_global_logger not available; skipping.")
 
     def _initialize_backend(self) -> None:
         assert self.ctx is not None, "TrainContext must be initialized before backend adapter."
