@@ -6,12 +6,12 @@ import subprocess
 from pathlib import Path
 from typing import Dict, MutableMapping, Optional, Union
 
-
 PathLike = Union[str, Path]
 _SECRET_PATTERN = re.compile(r"(TOKEN|SECRET|KEY)", re.IGNORECASE)
 
 
 # ---------- env collector ----------
+
 
 def get_env_variables():
     """
@@ -24,16 +24,16 @@ def get_env_variables():
             env_vars[k] = v
     return env_vars
 
+
 def format_env_variables() -> str:
     """
     Format env vars as 'KEY=VALUE' lines.
     """
-    return "\n".join(
-        f"{k}={v}" 
-        for k, v in sorted(get_env_variables().items())
-    )
+    return "\n".join(f"{k}={v}" for k, v in sorted(get_env_variables().items()))
+
 
 # ---------- git helpers ----------
+
 
 def find_git_root(start: Path, max_depth: int = 10) -> Optional[Path]:
     """
@@ -49,6 +49,7 @@ def find_git_root(start: Path, max_depth: int = 10) -> Optional[Path]:
         current = parent
     return None
 
+
 def _run_git(args: list[str], cwd: Path) -> Optional[str]:
     """Run a git command in `cwd` and return stripped stdout or None on error."""
     try:
@@ -62,6 +63,7 @@ def _run_git(args: list[str], cwd: Path) -> Optional[str]:
         return None
     out = out.strip()
     return out or None
+
 
 def _collect_repo_git_metadata(
     meta: MutableMapping[str, str],
@@ -109,8 +111,8 @@ def _collect_repo_git_metadata(
         if len(parts) < 2:
             continue
 
-        raw_commit = parts[0]   # e.g. "-8f3e2bf..."
-        path = parts[1]         # e.g. "third_party/Megatron-LM"
+        raw_commit = parts[0]  # e.g. "-8f3e2bf..."
+        path = parts[1]  # e.g. "third_party/Megatron-LM"
 
         commit_hash = raw_commit.lstrip("-+U")  # strip status marker
         ref = None
@@ -122,7 +124,9 @@ def _collect_repo_git_metadata(
         if ref:
             meta[f"{key_prefix}_ref"] = ref
 
+
 # ---------- main git collector ----------
+
 
 def collect_git_metadata(
     primus_root: PathLike | None = None,
