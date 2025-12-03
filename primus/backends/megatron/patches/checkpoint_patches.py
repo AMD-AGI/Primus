@@ -43,7 +43,7 @@ def patch_filesystem_writer_async(ctx: PatchContext):
         )
 
         filesystem_async_module.FileSystemWriterAsync = PrimusFileSystemWriterAsync
-    except Exception:
-        warning_rank_0("MegatronPatches: Patch FileSystemWriterAsync failed.")
+    except Exception as e:  # pragma: no cover - best-effort logging
+        warning_rank_0(f"MegatronPatches: Patch FileSystemWriterAsync failed: {e}")
     else:
         log_rank_0("MegatronPatches: Patch FileSystemWriterAsync successfully.")
