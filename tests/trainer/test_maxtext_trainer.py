@@ -5,16 +5,15 @@
 ###############################################################################
 
 import os
-import pytest
 import subprocess
 import sys
 import time
 
+import pytest
 from absl.testing import absltest
 
 from primus.core.utils import logger
 from tests.utils import PrimusUT
-
 
 SKIP_TEST = os.getenv("JAX_SKIP_UT", "0") == "1"
 
