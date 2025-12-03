@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:llama3.1_8B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v3-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
@@ -9,24 +9,24 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: llama3.1_8B.yaml
+    model: ${PRIMUS_MODEL:deepseek_v3}.yaml
     overrides:
       # log
       wandb_project: "Primus_DeepSeek_Pretrain"
-      # disable_wandb: false
-      # disable_tensorboard: false
       stderr_sink_level: DEBUG
 
+      # debug
+      moe_router_force_load_balancing: true
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
+      moe_router_dtype: fp32
 
+      # hyper parameters
       train_iters: 50
-      micro_batch_size: 2
-      global_batch_size: 128
-
-      seq_length: 8192
-      max_position_embeddings: 8192
-
+      micro_batch_size: 4
+      global_batch_size: 256
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
       lr: 1.0e-5
       min_lr: 0.0
       lr_warmup_iters: 2
@@ -40,18 +40,32 @@ modules:
       norm_epsilon: 1.0e-6
 
       # parallel
-      tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 1
-      expert_model_parallel_size: 1
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
       overlap_grad_reduce: true
       overlap_param_gather: true
-      gradient_accumulation_fusion: false
 
       # data
       mock_data: true
-      train_data_path: null
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
+
+      # fusion
+      # 20250321: need latest megatron docker image
+      moe_permute_fusion: false
+      # fused wgrad gemm and accumulation
+      gradient_accumulation_fusion: false
+      # recommend set `false` in fp8
+      moe_use_legacy_grouped_gemm: true
+      # fused topk router with aux score
+      moe_use_fused_router_with_aux_score: false
+
+      # Performance toggles
+      multi_latent_attention: false
+      #apply_rope_fusion: true
+      mtp_num_layers: null
 
       # ckpt
       finetune: false
@@ -65,6 +79,12 @@ modules:
       no_save_rng: null
       disable_last_saving: true
       ckpt_format: torch
+      eval_iters: 0
+
+      # Turbo
+      # enable_primus_turbo: false
+      # use_turbo_attention: false
+      # use_turbo_grouped_mlp: false
 
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"

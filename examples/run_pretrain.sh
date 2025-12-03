@@ -142,7 +142,7 @@ export HIP_VISIBLE_DEVICES
 
 # ----------------- NCCL and Network Settings -----------------
 # VERSION, WARN, INFO, DEBUG, TRACE
-export NCCL_DEBUG=
+export NCCL_DEBUG=${NCCL_DEBUG:-}
 
 # Disable NCCL internal checks to reduce overhead
 export NCCL_CHECKS_DISABLE=1
