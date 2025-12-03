@@ -6,6 +6,8 @@
 ###############################################################################
 
 
+import os
+import re
 from primus.modules.module_utils import debug_rank_0
 
 _GLOBAL_ARGS = None
@@ -39,6 +41,27 @@ def set_primus_global_variables(args):
 
     _set_mlflow_writer(args)
 
+def get_env_variables():
+    """
+    Filter environment variables for secrets and return as dict.
+    """
+    SECRET_PATTERN = re.compile(r"(TOKEN|SECRET|KEY)", re.IGNORECASE)
+    
+    env_vars = {}
+    for k, v in os.environ.items():
+        # Skip anything that looks secret-ish
+        if SECRET_PATTERN.search(k) is None:
+            env_vars[k] = v
+    return env_vars
+
+def format_env_variables() -> str:
+    """
+    Format env vars as 'KEY=VALUE' lines.
+    """
+    return "\n".join(
+        f"{k}={v}" 
+        for k, v in sorted(get_env_variables().items())
+    )
 
 def _set_mlflow_writer(args):
     global _GLOBAL_MLFLOW_WRITER
@@ -58,7 +81,15 @@ def _set_mlflow_writer(args):
             mlflow.set_experiment(experiment_name=args.mlflow_experiment_name)
 
         mlflow.start_run(run_name=args.mlflow_run_name)
+        # 1) Original args
         mlflow.log_params(vars(args))
+        # 2) Env as params (with prefix to avoid collisions)
+        try:
+            env_params = {f"env__{k}": v for k, v in get_env_variables().items()}
+            mlflow.log_params(env_params)
+        except Exception as e:
+            debug_rank_0(f"WARNING: Failed to log environment variables to MLflow: {e}")
+
         _GLOBAL_MLFLOW_WRITER = mlflow
 
 
