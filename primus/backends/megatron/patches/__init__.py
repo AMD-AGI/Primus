@@ -18,6 +18,9 @@ from primus.backends.megatron.patches import (  # noqa: F401
     checkpoint_patches as _checkpoint_patches,
 )
 from primus.backends.megatron.patches import (  # noqa: F401
+    flops_patches as _flops_patches,
+)
+from primus.backends.megatron.patches import (  # noqa: F401
     training_log_patches as _training_log_patches,
 )
 from primus.core.patches import run_patches
