@@ -38,7 +38,7 @@ class TrainContext:
     module_name: str
 
     # Configs
-    primus_config: PrimusConfig
+    primus_config: Any
     module_config: Any
     framework: str
 
