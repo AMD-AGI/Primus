@@ -143,13 +143,13 @@ def patch_wandb_config(ctx: PatchContext):
         log_rank_0("[Patch:megatron.args.wandb_config] W&B disabled (disable_wandb=True)")
         return
 
-    # Set W&B save directory
-    wandb_path = exp_root
+    # Set W&B save directory (dedicated 'wandb' subdirectory under experiment root)
+    wandb_path = os.path.join(exp_root, "wandb")
     if hasattr(args, "wandb_save_dir") and args.wandb_save_dir is not None:
         if args.wandb_save_dir != wandb_path:
             log_rank_0(
                 f"[Patch:megatron.args.wandb_config][WARN] args.wandb_save_dir is deprecated; "
-                f"overriding to: {wandb_path}/wandb"
+                f"overriding to: {wandb_path}"
             )
     args.wandb_save_dir = wandb_path
 
@@ -242,10 +242,23 @@ def patch_data_path_split(ctx: PatchContext):
     def split_path(path_attr):
         if hasattr(args, path_attr):
             path = getattr(args, path_attr)
-            if path is not None and isinstance(path, str):
+            if path is None:
+                return
+            if isinstance(path, str):
                 path_list = path.split()
                 setattr(args, path_attr, path_list)
                 log_rank_0(f"[Patch:megatron.args.data_path_split] {path_attr} → {path_list}")
+            elif isinstance(path, list):
+                # Already in list form; log for visibility but do not modify.
+                log_rank_0(
+                    f"[Patch:megatron.args.data_path_split] {path_attr} already list; keeping value: {path}"
+                )
+            else:
+                # Unexpected type; log a warning to aid debugging.
+                log_rank_0(
+                    f"[Patch:megatron.args.data_path_split][WARN] {path_attr} has unsupported type "
+                    f"{type(path).__name__}; value left unchanged: {path}"
+                )
 
     # Split all data paths
     split_path("data_path")
