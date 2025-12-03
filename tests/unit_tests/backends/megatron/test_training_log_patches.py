@@ -154,9 +154,15 @@ def test_rocm_monitor_hooked_print_rank_last_injects_stats(monkeypatch: pytest.M
 
 def test_rocm_monitor_hooked_print_rank_last_swallows_errors(monkeypatch: pytest.MonkeyPatch):
     # Force mem_get_info to raise and ensure we still log something.
+    def _raise_oom():
+        raise RuntimeError("OOM probe failed")
+
+    def _raise_smi():
+        raise RuntimeError("SMI failed")
+
     fake_torch = SimpleNamespace(
         cuda=SimpleNamespace(
-            mem_get_info=lambda: (_ for _ in ()).throw(RuntimeError("OOM probe failed")),
+            mem_get_info=_raise_oom,
             current_device=lambda: 0,
         )
     )
@@ -166,7 +172,7 @@ def test_rocm_monitor_hooked_print_rank_last_swallows_errors(monkeypatch: pytest
     )
     monkeypatch.setattr(
         "primus.backends.megatron.patches.training_log_patches.get_rocm_smi_mem_info",
-        lambda rank: (_ for _ in ()).throw(RuntimeError("SMI failed")),
+        lambda rank: _raise_smi(),
     )
 
     captured = []

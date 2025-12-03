@@ -131,11 +131,9 @@ class RocmMonitorExtension:
                 # Append memory stats to the log string
                 log_string = f"{log_string} {mem_stats}"
         except Exception:
-            pass  # Do not crash training for logging issues
+            # Logging must never break training; swallow any errors here.
+            pass
 
-        # Delegate to the original print function
-        # if self.original_print:
-        #     self.original_print(log_string)
         log_rank_all(f"{log_string}")
 
     def _get_memory_stats(self) -> str:
