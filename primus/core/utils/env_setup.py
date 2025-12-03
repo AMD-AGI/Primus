@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Optional
 
 
+def _ensure_directory(path: str) -> None:
+    """Create directory if it does not exist."""
+    Path(path).mkdir(parents=True, exist_ok=True)
+
+
 def setup_huggingface_cache(data_path: str, force: bool = False) -> str:
     """
     Setup HuggingFace cache directory.
@@ -36,8 +41,7 @@ def setup_huggingface_cache(data_path: str, force: bool = False) -> str:
     os.environ["HF_HOME"] = hf_home
     print(f"[Primus:Env] Set HF_HOME={hf_home}")
 
-    # Create directory if it doesn't exist
-    Path(hf_home).mkdir(parents=True, exist_ok=True)
+    _ensure_directory(hf_home)
 
     return hf_home
 
@@ -62,8 +66,7 @@ def setup_torch_cache(data_path: str, force: bool = False) -> str:
     os.environ["TORCH_HOME"] = torch_home
     print(f"[Primus:Env] Set TORCH_HOME={torch_home}")
 
-    # Create directory if it doesn't exist
-    Path(torch_home).mkdir(parents=True, exist_ok=True)
+    _ensure_directory(torch_home)
 
     return torch_home
 
@@ -88,8 +91,7 @@ def setup_transformers_cache(data_path: str, force: bool = False) -> str:
     os.environ["TRANSFORMERS_CACHE"] = transformers_cache
     print(f"[Primus:Env] Set TRANSFORMERS_CACHE={transformers_cache}")
 
-    # Create directory if it doesn't exist
-    Path(transformers_cache).mkdir(parents=True, exist_ok=True)
+    _ensure_directory(transformers_cache)
 
     return transformers_cache
 

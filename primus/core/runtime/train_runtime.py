@@ -260,10 +260,7 @@ class PrimusRuntime:
             return
 
         try:
-            if error is not None:
-                ctx.trainer.cleanup(on_error=True)
-            else:
-                ctx.trainer.cleanup()
+            ctx.trainer.cleanup(on_error=error is not None)
         except Exception:
             # We are already in error path; swallow cleanup errors.
             pass

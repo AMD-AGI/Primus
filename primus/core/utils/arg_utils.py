@@ -82,17 +82,21 @@ def parse_cli_overrides(overrides: list) -> dict:
             # Try boolean
             if value.lower() in ("true", "false"):
                 value = value.lower() == "true"
-            # Try int
-            elif value.isdigit() or (value.startswith("-") and value[1:].isdigit()):
-                value = int(value)
-            # Try float
+            # Try float (handles negative values as well)
             elif "." in value:
                 try:
                     value = float(value)
                 except ValueError:
-                    pass  # Keep as string
-        except (ValueError, AttributeError):
-            pass  # Keep as string
+                    pass  # Keep as string if float conversion fails
+            else:
+                # Fallback to integer parsing (including negative ints)
+                try:
+                    value = int(value)
+                except ValueError:
+                    pass  # Keep as string if int conversion fails
+        except AttributeError:
+            # Non-string values are left as-is
+            pass
 
         # Handle nested keys (e.g., model.layers -> {"model": {"layers": ...}})
         if "." in key:
