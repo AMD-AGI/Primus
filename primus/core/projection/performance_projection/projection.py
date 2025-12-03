@@ -146,6 +146,28 @@ def _aggregate_layer_timings(layer_results: dict) -> dict | None:
     }
 
 
+def _extract_stage_overheads(layer_results: dict) -> dict:
+    if not layer_results:
+        return {}
+
+    def _get(entry):
+        if not entry:
+            return None
+        return {
+            "fwd": entry.get("forward_time_ms", 0.0) or 0.0,
+            "bwd": entry.get("backward_time_ms", 0.0) or 0.0,
+        }
+
+    overheads = {}
+    embedding = _get(layer_results.get("embedding"))
+    if embedding:
+        overheads["first"] = embedding
+    output = _get(layer_results.get("output"))
+    if output:
+        overheads["last"] = output
+    return overheads
+
+
 def _compute_micro_batches(runtime_cfg, module_cfg_snapshot) -> int:
     global_batch = getattr(runtime_cfg, "global_batch_size", None) or 1
     micro_batch = getattr(runtime_cfg, "micro_batch_size", None) or 1
@@ -166,8 +188,18 @@ def _build_scheduler_sim_config(module_cfg_snapshot, training_config, profiling_
     if timings is None:
         return None
 
+    stage_overheads = _extract_stage_overheads(profiling_results)
+
     pp_size = getattr(module_cfg_snapshot, "pipeline_model_parallel_size", 1) or 1
     vpp_size = getattr(module_cfg_snapshot, "virtual_pipeline_model_parallel_size", 1) or 1
+    total_layers = getattr(module_cfg_snapshot, "num_layers", 1) or 1
+    layers_per_stage = total_layers // pp_size
+
+    # Timings are measured per transformer layer; scale by layers assigned to each pipeline stage.
+    fwd_time = timings["fwd_time"] * layers_per_stage
+    bwd_time = timings["bwd_time"] * layers_per_stage
+    wgrad_time = timings["wgrad_time"] * layers_per_stage
+
     micro_batches = _compute_micro_batches(training_config.runtime_config, module_cfg_snapshot)
 
     if vpp_size > 1:
@@ -188,12 +220,37 @@ def _build_scheduler_sim_config(module_cfg_snapshot, training_config, profiling_
         }
 
     return {
-        "fwd_time": timings["fwd_time"],
-        "bwd_time": timings["bwd_time"],
-        "wgrad_time": timings["wgrad_time"],
+        "fwd_time": fwd_time,
+        "bwd_time": bwd_time,
+        "wgrad_time": wgrad_time,
         "output_dir": str(Path.cwd() / "pp_simulation_result"),
         "schedulers": [scheduler],
+        "stage_overheads": stage_overheads,
     }
+
+
+def _report_simulation_throughput(sim_results, runtime_config):
+    if not sim_results:
+        return
+
+    seq_len = getattr(runtime_config, "sequence_length", None)
+    micro_batch_size = getattr(runtime_config, "micro_batch_size", None)
+
+    for sim in sim_results:
+        summary = (sim or {}).get("summary") or {}
+        step_time_ms = summary.get("step_time_ms")
+        micro_batches = summary.get("micro_batches") or 1
+        num_gpus = summary.get("pp_size")
+
+        tokens_per_step = seq_len * micro_batch_size * micro_batches
+        tokens_per_gpu_sec = tokens_per_step * 1000 / step_time_ms / num_gpus
+        scheduler_name = sim.get("name", "unknown")
+        print(
+            "[Primus:Performance Projection] "
+            f"Scheduler '{scheduler_name}': {tokens_per_gpu_sec:,.2f} tokens/GPU/s "
+            f"(step_time={step_time_ms:.4f}s, seq_len={seq_len}, "
+            f"micro_batch={micro_batch_size}, micro_batches={micro_batches})"
+        )
 
 
 def launch_projection_from_cli(args, overrides):
@@ -295,4 +352,5 @@ def launch_projection_from_cli(args, overrides):
     if sim_config is not None:
         print("\n[Primus:Performance Projection] Running pipeline schedule simulator...")
         runner = SchedulerSimulationRunner(sim_config)
-        runner.run()
+        simulation_runs = runner.run()
+        _report_simulation_throughput(simulation_runs, training_config.runtime_config)

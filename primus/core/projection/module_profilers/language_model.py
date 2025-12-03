@@ -243,6 +243,9 @@ class LanguageModelProfiler(BaseModuleProfiler):
         print(f"\n[Primus:Performance Projection] Found {len(all_layers)} transformer layers")
         print(f"[Primus:Performance Projection] This rank is responsible for layers: {self.layers}")
 
+        embedding_stats = None
+        output_stats = None
+
         # Benchmark embedding if this rank hosts it.
         if 0 in self.layers:
             if embedding_module is None:
@@ -264,6 +267,12 @@ class LanguageModelProfiler(BaseModuleProfiler):
                     f"bwd: {emb_backward:.2f} ms, "
                     f"act: {emb_mem / (1024**2):.2f} MB"
                 )
+                embedding_stats = {
+                    "type": "embedding",
+                    "forward_time_ms": emb_forward,
+                    "backward_time_ms": emb_backward,
+                    "activation_memory_bytes": emb_mem,
+                }
 
         # Benchmark output layer if this rank hosts the final layer.
         last_layer_id = self.config.model_config.num_layers - 1
@@ -282,6 +291,12 @@ class LanguageModelProfiler(BaseModuleProfiler):
                     f"bwd: {out_backward:.2f} ms, "
                     f"act: {out_mem / (1024**2):.2f} MB"
                 )
+                output_stats = {
+                    "type": "output",
+                    "forward_time_ms": out_forward,
+                    "backward_time_ms": out_backward,
+                    "activation_memory_bytes": out_mem,
+                }
 
         # Benchmark each layer type (dense/MoE) once
         results = {}
@@ -361,5 +376,10 @@ class LanguageModelProfiler(BaseModuleProfiler):
             layer_type = "moe" if is_moe else "dense"
             if layer_type in results:
                 final_results[layer_idx] = results[layer_type]
+
+        if embedding_stats is not None:
+            final_results["embedding"] = embedding_stats
+        if output_stats is not None:
+            final_results["output"] = output_stats
 
         return final_results

@@ -15,6 +15,7 @@ class SchedulerSimulationRunner:
         self.fwd_time = float(self.config["fwd_time"])
         self.bwd_time = float(self.config["bwd_time"])
         self.wgrad_time = float(self.config["wgrad_time"])
+        self.stage_overheads = self.config.get("stage_overheads") or {}
 
         self.time_ref_dict = {
             FuncType.F: self.fwd_time,
@@ -32,7 +33,52 @@ class SchedulerSimulationRunner:
 
         self.debug_simulator = int(os.getenv("DEBUG_SIMULATOR", "0") == "1")
 
+    def _stage_overhead(
+        self, rank: int, chunk: int | None, func_type: FuncType, scheduler_config: dict
+    ) -> float:
+        extra = 0.0
+        first_stage = self.stage_overheads.get("first")
+        last_stage = self.stage_overheads.get("last")
+        pp_size = scheduler_config.get("pp_size", 1) or 1
+        vpp_size = scheduler_config.get("vpp_size", 1) or 1
+        chunk_idx = chunk or 0
+        chunk_idx = chunk_idx % vpp_size
+        stage_index = rank * vpp_size + chunk_idx
+        last_stage_index = pp_size * vpp_size - 1
+
+        def _key(ft: FuncType) -> str | None:
+            if ft == FuncType.F:
+                return "fwd"
+            if ft in (FuncType.B, FuncType.BW, FuncType.W):
+                return "bwd"
+            return None
+
+        key = _key(func_type)
+        if key is None:
+            return 0.0
+        if stage_index == 0 and first_stage:
+            extra += first_stage.get(key, 0.0) or 0.0
+        if stage_index == last_stage_index and last_stage:
+            extra += last_stage.get(key, 0.0) or 0.0
+        return extra
+
+    def _summarize_simulation_result(self, simulation_result: list[dict], scheduler_config: dict) -> dict:
+        rank_totals = [rank.get("total", 0.0) for rank in simulation_result]
+        step_time_ms = max(rank_totals) if rank_totals else 0.0
+        critical_rank = rank_totals.index(step_time_ms) if rank_totals else None
+        max_memory = max((rank.get("memory", 0.0) for rank in simulation_result), default=0.0)
+        return {
+            "step_time_ms": step_time_ms,
+            "rank_totals": rank_totals,
+            "critical_rank": critical_rank,
+            "max_memory": max_memory,
+            "micro_batches": scheduler_config.get("micro_batches"),
+            "pp_size": scheduler_config.get("pp_size"),
+            "vpp_size": scheduler_config.get("vpp_size"),
+        }
+
     def run(self):
+        run_summaries = []
         for scheduler_config in self.config["schedulers"]:
             class_path = scheduler_config["class"]
             module_path, class_name = class_path.rsplit(".", 1)
@@ -50,6 +96,16 @@ class SchedulerSimulationRunner:
                 scheduler_instance.print_schedule_table(schedule_table)
             simulation_result = self.simulate_scheduler_table(schedule_table, scheduler_config)
             self.dump_simulation_result(simulation_result, scheduler_config)
+            summary = self._summarize_simulation_result(simulation_result, scheduler_config)
+            run_summaries.append(
+                {
+                    "name": scheduler_config["name"],
+                    "config": scheduler_config,
+                    "summary": summary,
+                    "per_rank": simulation_result,
+                }
+            )
+        return run_summaries
 
     def simulate_scheduler_table(self, schedule_table: list[list[SchedulerNode]], scheduler_config: dict):
 
@@ -136,9 +192,11 @@ class SchedulerSimulationRunner:
                     simulation_result[current_rank][f"{self._result_key_dict[node.func_type]}_start"].append(
                         rank_clock[current_rank]
                     )
-                    rank_clock[current_rank] += (
-                        self.time_ref_dict[node.func_type] / scheduler_config["vpp_size"]
+                    duration = self.time_ref_dict[node.func_type] / scheduler_config["vpp_size"]
+                    duration += self._stage_overhead(
+                        current_rank, getattr(node, "chunk", 0), node.func_type, scheduler_config
                     )
+                    rank_clock[current_rank] += duration
                     simulation_result[current_rank][f"{self._result_key_dict[node.func_type]}_end"].append(
                         rank_clock[current_rank]
                     )
