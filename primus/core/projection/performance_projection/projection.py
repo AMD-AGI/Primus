@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import copy
 import math
 import os
 from pathlib import Path
@@ -12,6 +13,9 @@ from primus.core.launcher.parser import load_primus_config
 from primus.core.projection.module_profilers.language_model import (
     build_profiler,
     get_language_model_profiler_spec,
+)
+from primus.core.projection.performance_projection.simulator import (
+    SchedulerSimulationRunner,
 )
 from primus.core.projection.training_config import (
     convert_primus_config_to_projection_config,
@@ -62,10 +66,8 @@ def _limit_layers_for_projection(module_config):
     else:
         module_config.moe_layer_freq = [0] * target_layers
 
-    pipeline_mp = getattr(module_config, "pipeline_model_parallel_size", 1) or 1
-    if target_layers % pipeline_mp != 0:
-        module_config.pipeline_model_parallel_size = 1
-
+    # disable pipeline model parallelism
+    module_config.pipeline_model_parallel_size = 1
     for attr in ("num_layers_per_virtual_pipeline_stage", "num_virtual_stages_per_pipeline_rank"):
         if hasattr(module_config, attr):
             setattr(module_config, attr, None)
@@ -124,6 +126,76 @@ def _rescale_expert_parallelism(module_config):
     }
 
 
+def _aggregate_layer_timings(layer_results: dict) -> dict | None:
+    if not layer_results:
+        return None
+
+    moe_results = [result for result in layer_results.values() if result.get("type") == "moe"]
+    if not moe_results:
+        return None
+
+    forward = sum(result["forward_time_ms"] for result in moe_results)
+    backward = sum(result["backward_time_ms"] for result in moe_results)
+    count = len(moe_results)
+
+    return {
+        "fwd_time": forward / count,
+        "bwd_time": backward / count,
+        # Weight gradients share the same kernel as backward in our approximation.
+        "wgrad_time": backward / count,
+    }
+
+
+def _compute_micro_batches(runtime_cfg, module_cfg_snapshot) -> int:
+    global_batch = getattr(runtime_cfg, "global_batch_size", None) or 1
+    micro_batch = getattr(runtime_cfg, "micro_batch_size", None) or 1
+    data_parallel_size = (
+        getattr(module_cfg_snapshot, "data_parallel_size", None)
+        or getattr(runtime_cfg, "data_parallel_size", None)
+        or 1
+    )
+
+    denominator = micro_batch * data_parallel_size
+    if denominator <= 0:
+        return 1
+    return max(1, math.ceil(global_batch / denominator))
+
+
+def _build_scheduler_sim_config(module_cfg_snapshot, training_config, profiling_results):
+    timings = _aggregate_layer_timings(profiling_results)
+    if timings is None:
+        return None
+
+    pp_size = getattr(module_cfg_snapshot, "pipeline_model_parallel_size", 1) or 1
+    vpp_size = getattr(module_cfg_snapshot, "virtual_pipeline_model_parallel_size", 1) or 1
+    micro_batches = _compute_micro_batches(training_config.runtime_config, module_cfg_snapshot)
+
+    if vpp_size > 1:
+        scheduler = {
+            "name": "interleaved_1f1b",
+            "class": "primus.core.projection.pipeline_simulation.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
+            "pp_size": pp_size,
+            "vpp_size": vpp_size,
+            "micro_batches": micro_batches,
+        }
+    else:
+        scheduler = {
+            "name": "basic_1f1b",
+            "class": "primus.core.projection.pipeline_simulation.scheduler.algorithms.basic_1f1b.Schedule1F1B",
+            "pp_size": pp_size,
+            "vpp_size": 1,
+            "micro_batches": micro_batches,
+        }
+
+    return {
+        "fwd_time": timings["fwd_time"],
+        "bwd_time": timings["bwd_time"],
+        "wgrad_time": timings["wgrad_time"],
+        "output_dir": str(Path.cwd() / "pp_simulation_result"),
+        "schedulers": [scheduler],
+    }
+
+
 def launch_projection_from_cli(args, overrides):
     """
     Entry point for the 'performance_projection' subcommand.
@@ -141,6 +213,8 @@ def launch_projection_from_cli(args, overrides):
     # Load Primus configuration
     primus_config, unknown_overrides = load_primus_config(args, overrides)
     module_config = primus_config.get_module_config("pre_trainer")
+    print(module_config)
+    module_config_for_sim = copy.deepcopy(module_config)
     _limit_layers_for_projection(module_config)
     rescale_info = _rescale_expert_parallelism(module_config)
     training_config = convert_primus_config_to_projection_config(primus_config)
@@ -211,8 +285,14 @@ def launch_projection_from_cli(args, overrides):
     print("[Primus:Performance Projection] Starting layer benchmarking...")
     print("=" * 100)
 
-    model_profiler.run_layer_benchmark(
+    profiling_results = model_profiler.run_layer_benchmark(
         model=trainer.model,
         batch_size=batch_size,
         seq_len=seq_len,
     )
+
+    sim_config = _build_scheduler_sim_config(module_config_for_sim, training_config, profiling_results)
+    if sim_config is not None:
+        print("\n[Primus:Performance Projection] Running pipeline schedule simulator...")
+        runner = SchedulerSimulationRunner(sim_config)
+        runner.run()
