@@ -41,7 +41,7 @@ import torch
 
 from primus.core.patches import PatchContext, register_patch
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
-from primus.modules.module_utils import log_rank_0, log_rank_all
+from primus.modules.module_utils import log_rank_0, log_rank_all, warning_rank_0
 
 # =============================================================================
 # Extension Protocol
@@ -53,15 +53,12 @@ class TrainingLogExtension(Protocol):
 
     def update_context(self, func_args: tuple, func_kwargs: dict) -> None:
         """Optional: Update extension state based on training_log arguments."""
-        ...
 
     def __enter__(self):
         """Prepare environment (e.g., swap functions, log metrics)."""
-        ...
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Restore environment."""
-        ...
 
 
 # =============================================================================
@@ -130,9 +127,9 @@ class RocmMonitorExtension:
             if mem_stats:
                 # Append memory stats to the log string
                 log_string = f"{log_string} {mem_stats}"
-        except Exception:
-            # Logging must never break training; swallow any errors here.
-            pass
+        except Exception as e:
+            # Logging must never break training; emit a warning and continue.
+            warning_rank_0(f"[Patch:megatron.training_log] Failed to append memory stats: {e}")
 
         log_rank_all(f"{log_string}")
 
