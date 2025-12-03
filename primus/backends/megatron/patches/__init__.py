@@ -10,6 +10,10 @@ Megatron Patch Collection
 This module defines the public entrypoint for applying Megatron-specific patches.
 """
 
+# Import patch modules for side-effect registration via @register_patch.
+# NOTE: These imports are intentionally unused; they register patches with
+# the core patch registry when this package is imported.
+from primus.backends.megatron.patches import args_patches as _args_patches  # noqa: F401
 from primus.core.patches import run_patches
 
 
