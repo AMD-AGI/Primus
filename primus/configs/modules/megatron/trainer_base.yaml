@@ -390,8 +390,6 @@ embedding_path: null
 indexer_batch_size: 128
 indexer_log_interval: 1000
 
-parallel_output: false
-
 enable_ft_package: false
 calc_ft_timeouts: false
 run_workload_inspector_server: false
