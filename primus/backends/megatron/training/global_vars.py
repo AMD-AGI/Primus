@@ -8,6 +8,9 @@
 
 import os
 import re
+from pathlib import Path
+import json
+from primus.backends.megatron.training.git_metadata import get_env_variables, collect_git_metadata
 from primus.modules.module_utils import debug_rank_0
 
 _GLOBAL_ARGS = None
@@ -41,28 +44,6 @@ def set_primus_global_variables(args):
 
     _set_mlflow_writer(args)
 
-def get_env_variables():
-    """
-    Filter environment variables for secrets and return as dict.
-    """
-    SECRET_PATTERN = re.compile(r"(TOKEN|SECRET|KEY)", re.IGNORECASE)
-    
-    env_vars = {}
-    for k, v in os.environ.items():
-        # Skip anything that looks secret-ish
-        if SECRET_PATTERN.search(k) is None:
-            env_vars[k] = v
-    return env_vars
-
-def format_env_variables() -> str:
-    """
-    Format env vars as 'KEY=VALUE' lines.
-    """
-    return "\n".join(
-        f"{k}={v}" 
-        for k, v in sorted(get_env_variables().items())
-    )
-
 def _set_mlflow_writer(args):
     global _GLOBAL_MLFLOW_WRITER
     _ensure_var_is_not_initialized(_GLOBAL_MLFLOW_WRITER, "mlflow writer")
@@ -81,14 +62,59 @@ def _set_mlflow_writer(args):
             mlflow.set_experiment(experiment_name=args.mlflow_experiment_name)
 
         mlflow.start_run(run_name=args.mlflow_run_name)
+
         # 1) Original args
         mlflow.log_params(vars(args))
+
         # 2) Env as params (with prefix to avoid collisions)
         try:
             env_params = {f"env__{k}": v for k, v in get_env_variables().items()}
             mlflow.log_params(env_params)
         except Exception as e:
             debug_rank_0(f"WARNING: Failed to log environment variables to MLflow: {e}")
+
+        # 3) Git metadata
+        try:
+            # This will:
+            #  - log Primus as git/primus_*
+            #  - scan /workspace (parent of Primus) for other git repos
+            git_meta = collect_git_metadata()
+
+            if git_meta:
+                # 3a) Minimal tags we actually care about
+                summary_keys = [
+                    "git/primus_commit",
+                    "git/primus_dirty",
+                    "git/primus_turbo_commit",
+                    "git/aiter_commit",
+                    "git/amdiffusion_benchmark_commit",
+                    "git/megatron_lm_commit",
+                    "git/torchtitan_commit",
+                    "git/torchtune_commit",
+                    "git/transformer_engine_commit",
+                ]
+                summary_tags = {k: git_meta[k] for k in summary_keys if k in git_meta}
+
+                # MLflow "source" tags
+                primus_commit = git_meta.get("git/primus_commit", None)
+                primus_remote = git_meta.get("git/primus_remote", None)
+
+                if primus_commit:
+                    mlflow.set_tag("mlflow.source.git.commit", primus_commit)
+                if primus_remote:
+                    mlflow.set_tag("mlflow.source.git.repoURL", primus_remote)
+
+                if summary_tags:
+                    mlflow.set_tags(summary_tags)
+
+                # 3b) Full metadata as a single artifact for exact reproducibility
+                mlflow.log_text(
+                    json.dumps(git_meta, indent=2, sort_keys=True),
+                    "system/git_metadata.json",
+                )
+
+        except Exception as e:
+            debug_rank_0(f"WARNING: Failed to log git metadata to MLflow: {e}")
 
         _GLOBAL_MLFLOW_WRITER = mlflow
 
