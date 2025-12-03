@@ -40,8 +40,8 @@ from typing import Any, Dict, List, Protocol
 import torch
 
 from primus.core.patches import PatchContext, register_patch
-from primus.core.utils.distributed_logging import log_rank_0, log_rank_all
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
+from primus.modules.module_utils import log_rank_0, log_rank_all
 
 # =============================================================================
 # Extension Protocol
