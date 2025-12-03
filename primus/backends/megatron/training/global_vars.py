@@ -6,11 +6,12 @@
 ###############################################################################
 
 
-import os
-import re
-from pathlib import Path
 import json
-from primus.backends.megatron.training.git_metadata import get_env_variables, collect_git_metadata
+
+from primus.backends.megatron.training.git_metadata import (
+    collect_git_metadata,
+    get_env_variables,
+)
 from primus.modules.module_utils import debug_rank_0
 
 _GLOBAL_ARGS = None
@@ -43,6 +44,7 @@ def set_primus_global_variables(args):
     set_args(args)
 
     _set_mlflow_writer(args)
+
 
 def _set_mlflow_writer(args):
     global _GLOBAL_MLFLOW_WRITER
