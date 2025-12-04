@@ -1,5 +1,5 @@
 model_name: "default"
-override_model_config: False # When set to true allows overriding model parameters via CLI for the purpose of debugging/testing.
+override_model_config: true # When set to true allows overriding model parameters via CLI for the purpose of debugging/testing.
 normalization_layer_epsilon: 1.e-05
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
@@ -10,9 +10,9 @@ sliding_window_size: 0
 chunk_attn_window_size: 0
 attn_logits_soft_cap: 0.0
 final_logits_soft_cap: 0.0
-use_post_attn_norm: False
-use_post_ffw_norm: False
-mla_naive_kvcache: True
+use_post_attn_norm: false
+use_post_ffw_norm: false
+mla_naive_kvcache: true
 
 # MLA parameters
 q_lora_rank: 0
@@ -22,8 +22,8 @@ qk_rope_head_dim: 64
 v_head_dim: 128
 
 # Combine matmuls for QKV and MLP
-fused_qkv: False
-fused_mlp: False
+fused_qkv: false
+fused_mlp: false
 
 decoder_block: "llama2" # which style of DecoderBlock to use.
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
@@ -38,8 +38,8 @@ base_num_decoder_layers: 16
 head_dim: 128
 mlp_activations: ["silu", "linear"]
 dropout_rate: 0.0
-logits_via_embedding: False
-normalize_embedding_logits: True  # whether to normalize pre-softmax logits if logits_via_embedding is true
+logits_via_embedding: false
+normalize_embedding_logits: true  # whether to normalize pre-softmax logits if logits_via_embedding is true
 
 # deepseek moe
 base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)
@@ -47,7 +47,7 @@ first_num_dense_layers: 0 # number of initial dense layers in the model
 shared_experts: 1
 routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
-routed_bias: False # a flag if a bias term is added for routing
+routed_bias: false # a flag if a bias term is added for routing
 n_routing_groups: -1 # number of groups for routing, disabled by default
 topk_routing_group: -1 # number of top groups to route inputs. For EP,
 # sending activations to a maximum of topk_routing_group distinct devices can yield performance benefits.
@@ -58,13 +58,13 @@ topk_routing_group: -1 # number of top groups to route inputs. For EP,
 inhomogeneous_layer_cycle_interval: 1
 
 # Use iota operator in Embed
-use_iota_embed: False
+use_iota_embed: false
 # use positional embedding
-use_untrainable_positional_embedding: False
+use_untrainable_positional_embedding: false
 trainable_position_size: -1  # enable gpt3 position embedding with a positive trainable_position_size
 # RoPE parameters
 rope_type: "default" # one of "default", "llama3.1" or "yarn"
-rope_use_scale: True # apply rope scaling for llama3.1 (see class `LLaMARotaryEmbedding` for more)
+rope_use_scale: true # apply rope scaling for llama3.1 (see class `LLaMARotaryEmbedding` for more)
 rope_min_timescale: 1
 rope_max_timescale: 10_000 # Timescale For global Attention
 local_rope_max_timescale: -1 # If positive used for local window Attention, otherwise `rope_max_timescale` is used for both local and global
@@ -81,7 +81,7 @@ mscale: 1.0
 # Whether to apply Query/Key normalization.
 # NOTE: non-Llama4 models use RMSNorm before RoPE
 # whereas Llama4 models use L2Norm after RoPE
-use_qk_norm: False
+use_qk_norm: false
 # Every `X` layers will NOT use RoPE
 nope_layer_interval: -1
 # Every `X` layers is MoE layer
@@ -89,7 +89,7 @@ interleave_moe_layer_step: 1
 # dynamically scale the attention temperature for each query token based on sequence length
 # Recommended for long sequences (e.g., >32k tokens) to maintain stable output results
 # See (https://arxiv.org/abs/2501.19399) for more details
-temperature_tuning: False
+temperature_tuning: false
 
 image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
 
@@ -97,7 +97,7 @@ image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model
 num_experts: 1
 num_experts_per_tok: 1
 load_balance_loss_weight: 0.01 # weight for the load balance loss
-norm_topk_prob: False # Boolean to enable the top-k probability normalization. Qwen3-specific normalization of router weights.
+norm_topk_prob: false # Boolean to enable the top-k probability normalization. Qwen3-specific normalization of router weights.
 
 max_target_length: 2048 # Maximum sequence length
 
@@ -111,4 +111,4 @@ tokenizer_path: "assets/tokenizer.llama2"
 
 # When dropout is false the model is a deterministic function of the
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
-enable_dropout: True
+enable_dropout: true
