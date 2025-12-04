@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict
+from typing import Any
 
 from primus.core.launcher.parser import PrimusParser
 from primus.core.utils import constant_vars
@@ -97,11 +97,7 @@ def load_primus_config(config_path: Path, cli_args: Any | None = None) -> Simple
         reserved_keys = {"name", "framework", "config", "model", "params"}
 
         # Start from any existing params dict if present.
-        existing_params = getattr(module_cfg, "params", None)
-        if isinstance(existing_params, dict):
-            params = dict(existing_params)
-        else:
-            params = {}
+        params = dict(getattr(module_cfg, "params", {}))
 
         for key, value in list(vars(module_cfg).items()):
             # Skip reserved and private attributes.
@@ -130,8 +126,4 @@ def get_module_config(cfg: SimpleNamespace, module_name: str) -> SimpleNamespace
         if getattr(m, "name", None) == module_name:
             return m
 
-    raise ValueError(
-        f"Primus config ({getattr(cfg, 'config_file', '')}) has no module named {module_name}"
-    )
-
-
+    raise ValueError(f"Primus config ({getattr(cfg, 'config_file', '')}) has no module named {module_name}")
