@@ -22,8 +22,13 @@ class TestPrimusRuntime(PrimusUT):
         args = self._build_args(config="non_existent.yaml")
         runtime = PrimusRuntime(args=args)
 
-        with self.assertRaises(FileNotFoundError):
+        with self.assertRaises(RuntimeError) as ctx:
             runtime.run_train_module(module_name="pre_trainer", overrides=[])
+
+        # The original FileNotFoundError is wrapped in RuntimeError
+        msg = str(ctx.exception)
+        self.assertIn("Config file not found", msg)
+        self.assertIn("non_existent.yaml", msg)
 
     def test_missing_module_raises_runtime_error(self):
         # Use a real example config but request an invalid module name.
@@ -42,7 +47,7 @@ class TestPrimusRuntime(PrimusUT):
         args = self._build_args()
         runtime = PrimusRuntime(args=args)
 
-        # Fake module config with params dict.
+        # Fake module config with params dict and required attributes.
         module_cfg = SimpleNamespace(
             name="pre_trainer",
             framework="megatron",

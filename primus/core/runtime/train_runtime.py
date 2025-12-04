@@ -121,13 +121,13 @@ class PrimusRuntime:
 
         framework = module_cfg.framework
         if not framework:
-            raise ValueError(f"[Primus:TrainRuntime] Module '{module_cfg.name}' missing 'framework'.")
+            raise ValueError(f"[Primus:TrainRuntime] Module '{module_name}' missing 'framework'.")
 
         # Initialize TrainContext based on raw configuration (before CLI overrides).
         self.ctx = TrainContext(
             config_path=cfg_path,
             data_path=Path(getattr(self.args, "data_path", "./data")),
-            module_name=module_cfg.name,
+            module_name=module_name,
             primus_config=primus_cfg,
             module_config=module_cfg,
             framework=framework,
