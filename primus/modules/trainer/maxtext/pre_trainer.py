@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import os
 from typing import Any, Dict
 
 from primus.core.utils import checker
@@ -30,6 +31,7 @@ class MaxTextPretrainTrainer(BaseModule):
         self.primus_cfg.export_module_config("pre_trainer")
         self.pre_trainer_cfg_path = self.primus_cfg.module_config_path("pre_trainer")
 
+        self.patch_wandb()
         self.override_model_args = self.prepare_model_overrides(extra_args)
 
     def setup(self):
@@ -135,6 +137,23 @@ class MaxTextPretrainTrainer(BaseModule):
 
         orig_checkpointing.create_orbax_checkpoint_manager = create_orbax_checkpoint_manager
         warning_rank_0("MaxText Pre-Trainer: patch checkpointing successfully.")
+
+    def patch_wandb(self):
+        def set_default_wandb_project(exp_meta_info):
+            work_group = exp_meta_info["work_group"]
+            user_name = exp_meta_info["user_name"]
+            os.environ["WANDB_PROJECT"] = f"Primus-MaxText-Pretrain-{work_group}_{user_name}"
+
+        set_default_wandb_project(self.primus_cfg.exp_meta_info)
+
+        import MaxText.metric_logger as orig_metric_logger
+        import MaxText.train as orig_train
+
+        from primus.backends.maxtext.metric_logger import PrimusMetricLogger
+
+        orig_metric_logger.MetricLogger = PrimusMetricLogger
+        orig_train.MetricLogger = PrimusMetricLogger
+        warning_rank_0("MaxText Pre-Trainer: patch wandb successfully.")
 
     def patch_input_pipeline(self):
         import MaxText.input_pipeline._hf_data_processing as orig_hf_data_processing

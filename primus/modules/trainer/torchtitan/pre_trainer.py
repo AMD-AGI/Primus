@@ -116,10 +116,12 @@ class TorchTitanPretrainTrainer(BaseModule):
         exp_name = self.primus_cfg.exp_meta_info["exp_name"]
 
         if os.getenv("WANDB_PROJECT") is None:
-            os.environ["WANDB_PROJECT"] = f"Primus-Titan-{work_group}_{user_name}"
+            os.environ["WANDB_PROJECT"] = f"Primus-Titan-Pretrain-{work_group}_{user_name}"
         if os.getenv("WANDB_RUN_NAME") is None:
             os.environ["WANDB_RUN_NAME"] = exp_name
-        wandb_save_dir = os.path.join(self.titan_config.job.dump_folder, self.titan_config.metrics.save_tb_folder)
+        wandb_save_dir = os.path.join(
+            self.titan_config.job.dump_folder, self.titan_config.metrics.save_tb_folder
+        )
 
         primus_logger.info(f"torchtitan wandb_project: {os.getenv('WANDB_PROJECT')}")
         primus_logger.info(f"torchtitan wandb_exp_name: {os.getenv('WANDB_RUN_NAME')}")

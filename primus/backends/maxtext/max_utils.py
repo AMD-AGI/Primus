@@ -49,3 +49,45 @@ def save_device_information(config):
     device_info_path = os.path.join(config.base_output_directory, "device_info.json")
     with open(device_info_path, "w") as f:
         json.dump(device_info, f, indent=4)
+
+
+def initialize_wandb_writer(config):
+    if jax.process_index() != 0:
+        return
+
+    def safe_get_config(config, key, default=None):
+        try:
+            return getattr(config, key)
+        except KeyError:
+            return default
+
+    import wandb
+
+    if safe_get_config(config, "wandb_save_dir") is None or config.wandb_save_dir is "":
+        wandb_save_dir = os.path.join(config.base_output_directory, "wandb")
+    else:
+        wandb_save_dir = config.wandb_save_dir
+
+    if safe_get_config(config, "wandb_project") is None or config.wandb_project is "":
+        wandb_project = os.getenv("WANDB_PROJECT", "Primus-MaxText-Pretrain")
+    else:
+        wandb_project = config.wandb_project
+    if safe_get_config(config, "wandb_exp_name") is None or config.wandb_exp_name is "":
+        wandb_exp_name = config.run_name
+    else:
+        wandb_exp_name = config.wandb_exp_name
+
+    if config.enable_wandb and "WANDB_API_KEY" not in os.environ:
+        max_logging.log(
+            "The environment variable WANDB_API_KEY is not set. Please set it or login wandb before proceeding"
+        )
+
+    os.makedirs(wandb_save_dir, exist_ok=True)
+    wandb.init(project=wandb_project, name=wandb_exp_name, dir=wandb_save_dir, config=config)
+    max_logging.log(f"WandB logging enabled: {wandb_save_dir=}, {wandb_project=}, {wandb_exp_name=}")
+    return wandb
+
+
+def close_wandb_writer(wandb_writer):
+    if jax.process_index() == 0:
+        wandb_writer.finish()
