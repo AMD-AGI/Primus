@@ -10,7 +10,8 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 70b76508408474f254ac048cef2005179c6cb55b # fix(deepep): fix internode_combine hang when set num_worst_token > 0 (#149)
+  PRIMUS_TURBO_COMMIT: 1fc5b8148dfd3070977fae1e9d2a46075d281ef8 # feat: jax backend support grouped_gemm (#157)
+
 jobs:
   code-lint:
     runs-on: ubuntu-latest
@@ -96,8 +97,32 @@ jobs:
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker] Total elapsed time: ${elapsed} seconds"
 
+          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-gfx950"
+          start_time=$(date +%s)
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_gfx950 \
+               -t tasimage/primus:${{env.IMAGE_TAG}}-gfx950 \
+               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} .
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build primus docker-gfx950] Total elapsed time: ${elapsed} seconds"
+
+          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-gfx950-ainic"
+          start_time=$(date +%s)
+          mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
+          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.1-a-42.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_gfx950_ainic \
+               -t tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic \
+               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+               --build-arg AINIC_BUNDLE_PATH=ainic \
+               $GITHUB_WORKSPACE/.github/workflows/docker
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build primus docker-gfx950-ainic] Total elapsed time: ${elapsed} seconds"
+
           echo "> Docker tag image for Docker Hub"
           docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+          docker tag tasimage/primus:${{env.IMAGE_TAG}}-gfx950 docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950
+          docker tag tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic
 
           echo "> Login to Primus Docker Hub"
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
@@ -105,12 +130,16 @@ jobs:
           echo "> Docker push to Docker Hub"
           start_time=$(date +%s)
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [push primus docker] Total elapsed time: ${elapsed} seconds"
 
           # echo "> Docker cleanup local images"
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}
+          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-gfx950
+          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic
           # echo "> build-docker success"
 
   run-unittest:

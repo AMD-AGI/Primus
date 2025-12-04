@@ -189,7 +189,7 @@ def train_loop(config, recorder, state=None):
     return state
 
 
-def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]:
+def initialize(argv: Sequence[str], **kwargs) -> tuple[pyconfig.HyperParameters, Any, Any]:
     """Initialization of hyperparameters and utilities"""
     pathwaysutils.initialize()
     jax.config.update("jax_default_prng_impl", "unsafe_rbg")
@@ -203,7 +203,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]
         )
     # TODO: mazumdera@ : ensure missing mandatory fields in base.yml are filled in in argv,
     # or fill in here
-    config = pyconfig.initialize(argv)
+    config = pyconfig.initialize(argv, **kwargs)
     jax.config.update("jax_use_shardy_partitioner", config.shardy)
     max_utils.print_system_information()
     validate_train_config(config)

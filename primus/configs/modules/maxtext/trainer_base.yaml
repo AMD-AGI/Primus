@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-includes:
+extends:
   - ../module_base.yaml
 
 trainable: true
@@ -19,9 +19,6 @@ trainable: true
 # This sentinel is a reminder to choose a real run name.
 # If there is already a checkpoint under this run, that checkpoint will auto-resume.
 run_name: ""
-
-override_model_config: False # When set to true allows overriding model parameters via CLI for the purpose of debugging/testing.
-normalization_layer_epsilon: 1.e-05
 
 ################################## CHECKPOINTING ##################################
 # Checkpointing makes the following choices in the following order, starting with (1):
@@ -128,22 +125,11 @@ quantization_calibration_method: "absmax"
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
 
-decoder_block: "llama2" # which style of DecoderBlock to use.
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
 weight_dtype: "float32"
-global_parameter_scale: 1
-base_emb_dim: 2048
-base_num_query_heads: 16
-base_num_kv_heads: 16
-base_mlp_dim: 7168
-base_num_decoder_layers: 16
-head_dim: 128
-mlp_activations: ["silu", "linear"]
-dropout_rate: 0.0
-logits_via_embedding: False
-normalize_embedding_logits: True  # whether to normalize pre-softmax logits if logits_via_embedding is true
+# moved to model_base.yaml
 logits_dot_in_fp32: False  # whether to use fp32 in logits_dense or shared_embedding dot product for stability
 cast_logits_to_fp32: True # whether to cast the logits to fp32. The higher precision is generally beneficial, but it can vary slightly.
 float32_qk_product: False # in dot_product attention, whether to cast to fp32 the inputs to qk product
@@ -161,20 +147,16 @@ mtp_loss_scaling_factor: 0.1
 # first auxiliary prediction head. Set to 0 to disable this specific evaluation
 mtp_eval_target_module: 0
 
-# mixture of experts (moe)
+# mixture of experts (moe): a part moved to model_base.yaml
 expert_balance: False
-num_experts: 1
-num_experts_per_tok: 1
+use_random_routing: False # whether to use random routing for debug/test purpose
 megablox: True
 sparse_matmul: True
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
-load_balance_loss_weight: 0.01 # weight for the load balance loss
-use_random_routing: False # whether to use random routing for debug/test purpose
 # Tunable tiling dimensions used for Megablox
 tile_batch_seq: 512
 tile_activation_dim: 1024
 tile_weight_dim: 1024
-norm_topk_prob: False # Boolean to enable the top-k probability normalization. Qwen3-specific normalization of router weights.
 
 # How the expert axis is used to shard attention weights and activations
 # "fsdp" (ep acts as fsdp parallelism)
@@ -182,20 +164,12 @@ norm_topk_prob: False # Boolean to enable the top-k probability normalization. Q
 expert_shard_attention_option: "fsdp"
 
 # deepseek moe
-base_moe_mlp_dim: 7168 # intermediate dimension at MoE layer (use base_mlp_dim if not DeepSeek style)
-first_num_dense_layers: 0 # number of initial dense layers in the model
-shared_experts: 1
-routed_scaling_factor: 1.0 # scaling factor for routing scores
-routed_score_func: "" # scoring function for routing
-routed_bias: False # a flag if a bias term is added for routing
-n_routing_groups: -1 # number of groups for routing, disabled by default
-topk_routing_group: -1 # number of top groups to route inputs. For EP,
-# sending activations to a maximum of topk_routing_group distinct devices can yield performance benefits.
+# move to model_base.yaml
 
 # For complex architectures like llama4 there are repeated sets of
 # inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]
 # which can only be scanned together in one large block of inhomogeneous_layer_cycle_interval=4 layers.
-inhomogeneous_layer_cycle_interval: 1
+# move to model_base.yaml
 
 # pipeline parallelism
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.
@@ -270,26 +244,13 @@ param_scan_axis: 1
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
-attention: 'autoselected' # Supported attention: autoselected, dot_product, flash, cudnn_flash_te
-attention_type: 'global' # Supported attention_type: global, local_sliding, chunk, mla
-sliding_window_size: 0
-chunk_attn_window_size: 0
-attn_logits_soft_cap: 0.0
-final_logits_soft_cap: 0.0
-use_post_attn_norm: False
-use_post_ffw_norm: False
-mla_naive_kvcache: True
+# moved to model_base.yaml
 
 # MLA parameters
-q_lora_rank: 0
-kv_lora_rank: 512
-qk_nope_head_dim: 128
-qk_rope_head_dim: 64
-v_head_dim: 128
+# moved to model_base.yaml
 
 # Combine matmuls for QKV and MLP
-fused_qkv: False
-fused_mlp: False
+# moved to model_base.yaml
 
 record_internal_nn_metrics: 0
 
@@ -433,12 +394,7 @@ ici_expert_parallelism: 1
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
 num_slices: -1
 
-# Tokenizer
-vocab_size: 32_000 # powers of 2 for sharding
-# tfds pipeline supports tokenizer_type: sentencepiece, huggingface, tiktoken
-# grain pipeline supports tokenizer_type: sentencepiece, huggingface
-# hf pipeline only supports huggingface type, and will ignore tokenizer_type flag
-tokenizer_type: "sentencepiece" # Currently supporting: "tiktoken", "sentencepiece", "huggingface"
+# Tokenizer: apart moved to model_base.yaml
 use_chat_template: False
 tokenize_train_data: True  # False if the dataset is pre-tokenized
 tokenize_eval_data: True  # False if the dataset is pre-tokenized
@@ -524,7 +480,7 @@ learning_rate_schedule_steps: -1 # By default the length of the schedule is set 
 # However you may choose a longer schedule (learning_rate_schedule_steps > steps), in which case the training will end before
 # dropping fully down. Or you may choose a shorter schedule, where the unspecified steps will have a learning rate of 0.
 
-max_target_length: 2048 # Maximum sequence length
+# max_target_length: 2048 # Maximum sequence length, moved to model_base.yaml
 max_prefill_predict_length: 64 # Maximum length for the prefill when doing autoregression
 prompt: "I love to" # Prompt for language model sampling.
 load_from_prefill_dir: False # If true, decode.py doesn't "prefill" but just reads from directory
@@ -561,7 +517,7 @@ dump_hlo_upload_all: False # If true all hosts dump HLO, false only jax.process_
 
 # When dropout is false the model is a deterministic function of the
 # data_shuffle_seed and init_weights_seed (i.e. reproducible losses)
-enable_dropout: True
+# enable_dropout: True
 enable_data_shuffling: True
 data_shuffle_seed: 0
 init_weights_seed: 0
@@ -591,25 +547,8 @@ collect_stack_trace: False
 stack_trace_to_cloud: False  # Uploads to cloud logging if True, else to the console if False.
 stack_trace_interval_seconds: 600  # Stack trace collection frequency in seconds.
 
-# Use iota operator in Embed
-use_iota_embed: False
-# use positional embedding
-use_untrainable_positional_embedding: False
-trainable_position_size: -1  # enable gpt3 position embedding with a positive trainable_position_size
-# RoPE parameters
-rope_type: "default" # one of "default", "llama3.1" or "yarn"
-rope_use_scale: True # apply rope scaling for llama3.1 (see class `LLaMARotaryEmbedding` for more)
-rope_min_timescale: 1
-rope_max_timescale: 10_000 # Timescale For global Attention
-local_rope_max_timescale: -1 # If positive used for local window Attention, otherwise `rope_max_timescale` is used for both local and global
-
-# yarn RoPE parameters
-max_position_embeddings: 163840
-original_max_position_embeddings: 4096
-rope_factor: 40
-beta_fast: 32
-beta_slow: 1
-mscale: 1.0
+# Embedding
+# move to model_base.yaml
 
 # Ahead of time Compilation (aka AOT)
 # Only set these arguments if you are running train_compile or loading a compiled train step.
@@ -760,25 +699,14 @@ prefix_caching_dram_byte: 100_000_000_000 # 100 GB
 enable_padding_causal_mask: True
 
 # Llama4-specific
-# Whether to apply Query/Key normalization.
-# NOTE: non-Llama4 models use RMSNorm before RoPE
-# whereas Llama4 models use L2Norm after RoPE
-use_qk_norm: False
-# Every `X` layers will NOT use RoPE
-nope_layer_interval: -1
-# Every `X` layers is MoE layer
-interleave_moe_layer_step: 1
-# dynamically scale the attention temperature for each query token based on sequence length
-# Recommended for long sequences (e.g., >32k tokens) to maintain stable output results
-# See (https://arxiv.org/abs/2501.19399) for more details
-temperature_tuning: False
+# move to model_base.yaml
 
 # Multimodal flags
 use_multimodal: False
 freeze_vision_encoder_params: True
 dtype_mm: "float32"  # Data type for multimodal model's vision encoder
 remat_policy_for_vit: "minimal"  # Remat policy for multimodal model's vision encoder. Check `remat_policy` for options.
-image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config
+# image_size_for_vit: 896 # Default for Gemma3, and should be overwritten by model's config, move to model_base.yaml
 image_path: "" # Local image path used for decoding
 image_placeholder: "<|image|>"
 

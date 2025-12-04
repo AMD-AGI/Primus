@@ -1,4 +1,4 @@
-bases:
+extends:
   - trainer_base.yaml
 
 hardware: "gpu"
@@ -16,8 +16,6 @@ hf_path: "allenai/c4"  # for using https://huggingface.co/datasets/allenai/c4
 hf_data_dir: "en"
 hf_train_files: ""
 
-attention: "cudnn_flash_te"
-use_iota_embed: True
 shardy: False
 
 remat_policy: 'full'

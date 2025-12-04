@@ -20,7 +20,7 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      # hyber parameters
+      # hyper parameters
       train_iters: 50
       micro_batch_size: 4
       global_batch_size: 256
@@ -60,8 +60,8 @@ modules:
       moe_use_legacy_grouped_gemm: false
       # fused topk router with aux score
       moe_use_fused_router_with_aux_score: false
-      # pad 192/128 for deepseek attention
-      fused_padded_mla_attention: false
+      # MLA
+      multi_latent_attention: false
 
 
       # ckpt
