@@ -22,7 +22,8 @@ class PrimusMetricLogger(MetricLogger):
 
     def __init__(self, config, learning_rate_schedule):
         super().__init__(config, learning_rate_schedule)
-        self.wandb_writer = initialize_wandb_writer(config)
+        if self.config.enable_wandb:
+            self.wandb_writer = initialize_wandb_writer(config)
 
     def write_metrics(self, metrics, step, is_training=True):
         """Entry point for all metrics writing in Train's Main."""
@@ -32,7 +33,7 @@ class PrimusMetricLogger(MetricLogger):
 
     def write_metrics_to_wandb(self, metrics, step, is_training):
         """Writes metrics to WandB."""
-        if jax.process_index() != 0:
+        if jax.process_index() != 0 or self.wandb_writer is None:
             return
 
         log_dict = {}
@@ -41,7 +42,7 @@ class PrimusMetricLogger(MetricLogger):
             log_dict[name] = float(np.array(metrics["scalar"][name]))
 
         for name in metrics.get("scalars", []):
-            # multi scalers flatten
+            # multi scalars flatten
             for k, v in metrics["scalars"][name].items():
                 log_dict[f"{name}/{k}"] = float(v)
 
@@ -59,9 +60,10 @@ class PrimusMetricLogger(MetricLogger):
         max_utils.add_text_to_summary_writer("libtpu_init_args", os.environ["LIBTPU_INIT_ARGS"], self.writer)
         maxtext_utils.add_config_to_summary_writer(self.config, self.writer)
 
-        if self.config.enable_wandb:
+        if self.wandb_writer is not None:
             self.wandb_writer.log({"num_model_parameters": str(num_model_parameters)})
 
     def flush_metrics_and_cleanup(self):
         super().flush_metrics_and_cleanup()
-        close_wandb_writer(self.wandb_writer)
+        if self.config.enable_wandb:
+            close_wandb_writer(self.wandb_writer)

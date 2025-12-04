@@ -149,10 +149,12 @@ class MaxTextPretrainTrainer(BaseModule):
         import MaxText.metric_logger as orig_metric_logger
         import MaxText.train as orig_train
 
+        import primus.backends.maxtext.train as primus_train
         from primus.backends.maxtext.metric_logger import PrimusMetricLogger
 
         orig_metric_logger.MetricLogger = PrimusMetricLogger
         orig_train.MetricLogger = PrimusMetricLogger
+        primus_train.MetricLogger = PrimusMetricLogger
         warning_rank_0("MaxText Pre-Trainer: patch wandb successfully.")
 
     def patch_input_pipeline(self):

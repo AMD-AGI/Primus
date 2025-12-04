@@ -32,6 +32,7 @@ from MaxText import (
     train_utils,
 )
 from MaxText.data_loader import DataLoader
+from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
     _merge_dpo_state,
     _split_dpo_state,
@@ -48,8 +49,6 @@ from MaxText.utils.goodput_utils import (
     maybe_record_goodput,
 )
 from MaxText.vertex_tensorboard import VertexTensorboardManager
-
-from primus.backends.maxtext.metric_logger import PrimusMetricLogger as MetricLogger
 
 
 def validate_train_config(config):

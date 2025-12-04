@@ -110,7 +110,7 @@ class TorchTitanPretrainTrainer(BaseModule):
         if not self.titan_config.metrics.enable_wandb:
             return
 
-        primus_logger.warning("Mokey patch torchtitan wandb...")
+        primus_logger.warning("Monkey patch torchtitan wandb...")
         work_group = self.primus_cfg.exp_meta_info["work_group"]
         user_name = self.primus_cfg.exp_meta_info["user_name"]
         exp_name = self.primus_cfg.exp_meta_info["exp_name"]

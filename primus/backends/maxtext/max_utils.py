@@ -52,8 +52,8 @@ def save_device_information(config):
 
 
 def initialize_wandb_writer(config):
-    if jax.process_index() != 0:
-        return
+    if jax.process_index() != 0 or not config.enable_wandb:
+        return None
 
     def safe_get_config(config, key, default=None):
         try:
@@ -63,16 +63,16 @@ def initialize_wandb_writer(config):
 
     import wandb
 
-    if safe_get_config(config, "wandb_save_dir") is None or config.wandb_save_dir is "":
+    if safe_get_config(config, "wandb_save_dir") is None or config.wandb_save_dir == "":
         wandb_save_dir = os.path.join(config.base_output_directory, "wandb")
     else:
         wandb_save_dir = config.wandb_save_dir
 
-    if safe_get_config(config, "wandb_project") is None or config.wandb_project is "":
+    if safe_get_config(config, "wandb_project") is None or config.wandb_project == "":
         wandb_project = os.getenv("WANDB_PROJECT", "Primus-MaxText-Pretrain")
     else:
         wandb_project = config.wandb_project
-    if safe_get_config(config, "wandb_exp_name") is None or config.wandb_exp_name is "":
+    if safe_get_config(config, "wandb_exp_name") is None or config.wandb_exp_name == "":
         wandb_exp_name = config.run_name
     else:
         wandb_exp_name = config.wandb_exp_name
@@ -81,13 +81,15 @@ def initialize_wandb_writer(config):
         max_logging.log(
             "The environment variable WANDB_API_KEY is not set. Please set it or login wandb before proceeding"
         )
+        return None
 
     os.makedirs(wandb_save_dir, exist_ok=True)
-    wandb.init(project=wandb_project, name=wandb_exp_name, dir=wandb_save_dir, config=config)
+
+    wandb.init(project=wandb_project, name=wandb_exp_name, dir=wandb_save_dir, config=config.get_keys())
     max_logging.log(f"WandB logging enabled: {wandb_save_dir=}, {wandb_project=}, {wandb_exp_name=}")
     return wandb
 
 
 def close_wandb_writer(wandb_writer):
-    if jax.process_index() == 0:
+    if jax.process_index() == 0 and wandb_writer is not None:
         wandb_writer.finish()
