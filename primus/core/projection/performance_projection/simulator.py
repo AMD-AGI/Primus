@@ -11,19 +11,7 @@ from primus.core.projection.pipeline_simulation.scheduler.scheduler_node import 
 class SchedulerSimulationRunner:
     def __init__(self, config: dict):
         self.config = config
-
-        self.fwd_time = float(self.config["fwd_time"])
-        self.bwd_time = float(self.config["bwd_time"])
-        self.wgrad_time = float(self.config["wgrad_time"])
-        self.stage_overheads = self.config.get("stage_overheads") or {}
-
-        self.time_ref_dict = {
-            FuncType.F: self.fwd_time,
-            FuncType.B: self.bwd_time,
-            FuncType.W: self.wgrad_time,
-            FuncType.BW: self.bwd_time + self.wgrad_time,
-        }
-
+        self.chunk_time_ms = self.config.get("chunk_time_ms")
         self._result_key_dict = {
             FuncType.F: "fwd",
             FuncType.B: "bwd",
@@ -32,35 +20,6 @@ class SchedulerSimulationRunner:
         }
 
         self.debug_simulator = int(os.getenv("DEBUG_SIMULATOR", "0") == "1")
-
-    def _stage_overhead(
-        self, rank: int, chunk: int | None, func_type: FuncType, scheduler_config: dict
-    ) -> float:
-        extra = 0.0
-        first_stage = self.stage_overheads.get("first")
-        last_stage = self.stage_overheads.get("last")
-        pp_size = scheduler_config.get("pp_size", 1) or 1
-        vpp_size = scheduler_config.get("vpp_size", 1) or 1
-        chunk_idx = chunk or 0
-        chunk_idx = chunk_idx % vpp_size
-        stage_index = rank * vpp_size + chunk_idx
-        last_stage_index = pp_size * vpp_size - 1
-
-        def _key(ft: FuncType) -> str | None:
-            if ft == FuncType.F:
-                return "fwd"
-            if ft in (FuncType.B, FuncType.BW, FuncType.W):
-                return "bwd"
-            return None
-
-        key = _key(func_type)
-        if key is None:
-            return 0.0
-        if stage_index == 0 and first_stage:
-            extra += first_stage.get(key, 0.0) or 0.0
-        if stage_index == last_stage_index and last_stage:
-            extra += last_stage.get(key, 0.0) or 0.0
-        return extra
 
     def _summarize_simulation_result(self, simulation_result: list[dict], scheduler_config: dict) -> dict:
         rank_totals = [rank.get("total", 0.0) for rank in simulation_result]
@@ -76,6 +35,30 @@ class SchedulerSimulationRunner:
             "pp_size": scheduler_config.get("pp_size"),
             "vpp_size": scheduler_config.get("vpp_size"),
         }
+
+    def _chunk_duration(
+        self, rank: int, chunk: int | None, func_type: FuncType, scheduler_config: dict
+    ) -> float:
+        chunk_idx = chunk or 0
+        assert self.chunk_time_ms is not None
+        chunk_entry = self.chunk_time_ms[rank][chunk_idx]
+        assert chunk_entry is not None
+        if func_type == FuncType.F:
+            duration = chunk_entry.get("fwd")
+        elif func_type == FuncType.B:
+            duration = chunk_entry.get("bwd")
+        elif func_type == FuncType.W:
+            duration = chunk_entry.get("wgrad")
+        elif func_type == FuncType.BW:
+            bwd = chunk_entry.get("bwd", 0.0)
+            wgrad = chunk_entry.get("wgrad", bwd)
+            duration = bwd + wgrad
+        else:
+            duration = None
+        if duration is not None and duration > 0:
+            return float(duration)
+        else:
+            raise ValueError(f"Duration is not found.")
 
     def run(self):
         run_summaries = []
@@ -192,8 +175,7 @@ class SchedulerSimulationRunner:
                     simulation_result[current_rank][f"{self._result_key_dict[node.func_type]}_start"].append(
                         rank_clock[current_rank]
                     )
-                    duration = self.time_ref_dict[node.func_type] / scheduler_config["vpp_size"]
-                    duration += self._stage_overhead(
+                    duration = self._chunk_duration(
                         current_rank, getattr(node, "chunk", 0), node.func_type, scheduler_config
                     )
                     rank_clock[current_rank] += duration

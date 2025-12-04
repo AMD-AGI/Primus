@@ -11,6 +11,7 @@ from pathlib import Path
 
 from primus.core.launcher.parser import load_primus_config
 from primus.core.projection.module_profilers.language_model import (
+    LanguageModelProfiler,
     build_profiler,
     get_language_model_profiler_spec,
 )
@@ -126,81 +127,149 @@ def _rescale_expert_parallelism(module_config):
     }
 
 
-def _aggregate_layer_timings(layer_results: dict) -> dict | None:
-    if not layer_results:
-        return None
-
-    moe_results = [result for result in layer_results.values() if result.get("type") == "moe"]
-    if not moe_results:
-        return None
-
-    forward = sum(result["forward_time_ms"] for result in moe_results)
-    backward = sum(result["backward_time_ms"] for result in moe_results)
-    count = len(moe_results)
-
-    return {
-        "fwd_time": forward / count,
-        "bwd_time": backward / count,
-        # Weight gradients share the same kernel as backward in our approximation.
-        "wgrad_time": backward / count,
-    }
-
-
-def _extract_stage_overheads(layer_results: dict) -> dict:
+def _extract_layer_type_timings(layer_results: dict) -> dict[str, dict[str, float]]:
     if not layer_results:
         return {}
-
-    def _get(entry):
-        if not entry:
-            return None
-        return {
-            "fwd": entry.get("forward_time_ms", 0.0) or 0.0,
-            "bwd": entry.get("backward_time_ms", 0.0) or 0.0,
+    type_timings: dict[str, dict[str, float]] = {}
+    for result in layer_results.values():
+        layer_type = result.get("type")
+        if layer_type not in ("dense", "moe"):
+            continue
+        if layer_type in type_timings:
+            continue
+        forward = float(result.get("forward_time_ms", 0.0) or 0.0)
+        backward = float(result.get("backward_time_ms", 0.0) or 0.0)
+        type_timings[layer_type] = {
+            "forward": forward,
+            "backward": backward,
+            # weight grad measured together with backward in our approximation
+            "wgrad": backward,
         }
-
-    overheads = {}
-    embedding = _get(layer_results.get("embedding"))
-    if embedding:
-        overheads["first"] = embedding
-    output = _get(layer_results.get("output"))
-    if output:
-        overheads["last"] = output
-    return overheads
+    return type_timings
 
 
-def _compute_micro_batches(runtime_cfg, module_cfg_snapshot) -> int:
+def _add_io_layer_timings(chunk_timings: list[list[dict]], profiling_results: dict):
+    if not chunk_timings:
+        return
+
+    embedding = profiling_results.get("embedding")
+    if embedding and chunk_timings[0]:
+        first_chunk = chunk_timings[0][0]
+        first_chunk["fwd"] += embedding.get("forward_time_ms", 0.0) or 0.0
+        emb_bwd = embedding.get("backward_time_ms", 0.0) or 0.0
+        first_chunk["bwd"] += emb_bwd
+        first_chunk["wgrad"] += emb_bwd
+
+    output = profiling_results.get("output")
+    if output and chunk_timings[-1]:
+        last_chunk = chunk_timings[-1][-1]
+        last_chunk["fwd"] += output.get("forward_time_ms", 0.0) or 0.0
+        out_bwd = output.get("backward_time_ms", 0.0) or 0.0
+        last_chunk["bwd"] += out_bwd
+        last_chunk["wgrad"] += out_bwd
+
+
+def _build_chunk_time_matrix(training_config, layer_results: dict) -> list[list[dict]] | None:
+    model_cfg = getattr(training_config, "model_config", None)
+    mp_cfg = getattr(training_config, "model_parallel_config", None)
+    if model_cfg is None or mp_cfg is None:
+        return None
+
+    total_layers = getattr(model_cfg, "num_layers", 0) or 0
+    if total_layers <= 0:
+        return None
+
+    layer_type_pattern = getattr(model_cfg, "moe_pattern", None)
+    if not isinstance(layer_type_pattern, (list, tuple)) or len(layer_type_pattern) != total_layers:
+        layer_type_pattern = [0] * total_layers
+    type_timings = _extract_layer_type_timings(layer_results)
+    if not type_timings:
+        return None
+
+    pp_size = getattr(mp_cfg, "pipeline_model_parallel_size", 1) or 1
+    vpp_size = getattr(mp_cfg, "virtual_pipeline_model_parallel_size", 1) or 1
+    tp_size = getattr(mp_cfg, "tensor_model_parallel_size", 1) or 1
+    cp_size = getattr(mp_cfg, "context_model_parallel_size", 1) or 1
+    ep_size = getattr(mp_cfg, "expert_model_parallel_size", 1) or 1
+
+    mp_group = tp_size * cp_size * ep_size
+    chunk_timings: list[list[dict]] = []
+    for pp_rank in range(pp_size):
+        layers = LanguageModelProfiler.get_layers_for_rank(
+            None,
+            global_rank=pp_rank * mp_group,
+            n_layers=total_layers,
+            pp_size=pp_size,
+            tp_size=tp_size,
+            cp_size=cp_size,
+            ep_size=ep_size,
+            num_virtual_pipeline_stages=vpp_size,
+        )
+        if not layers:
+            chunk_timings.append([{"fwd": 0.0, "bwd": 0.0, "wgrad": 0.0} for _ in range(vpp_size)])
+            continue
+
+        layers_per_chunk = len(layers) // vpp_size if vpp_size else len(layers)
+        if layers_per_chunk == 0:
+            chunk_timings.append([{"fwd": 0.0, "bwd": 0.0, "wgrad": 0.0} for _ in range(vpp_size)])
+            continue
+
+        rank_chunks = []
+        for chunk_idx in range(vpp_size):
+            start = chunk_idx * layers_per_chunk
+            end = start + layers_per_chunk
+            chunk_layers = layers[start:end]
+            chunk_entry = {"fwd": 0.0, "bwd": 0.0, "wgrad": 0.0}
+            for layer_idx in chunk_layers:
+                layer_type = "moe" if layer_type_pattern[layer_idx] else "dense"
+                metrics = type_timings.get(layer_type)
+                if not metrics:
+                    continue
+                chunk_entry["fwd"] += metrics["forward"]
+                chunk_entry["bwd"] += metrics["backward"]
+                chunk_entry["wgrad"] += metrics["wgrad"]
+            rank_chunks.append(chunk_entry)
+        chunk_timings.append(rank_chunks)
+    _add_io_layer_timings(chunk_timings, layer_results)
+    return chunk_timings
+
+
+def _compute_micro_batches(runtime_cfg, model_parallel_config) -> int:
     global_batch = getattr(runtime_cfg, "global_batch_size", None) or 1
     micro_batch = getattr(runtime_cfg, "micro_batch_size", None) or 1
-    data_parallel_size = (
-        getattr(module_cfg_snapshot, "data_parallel_size", None)
-        or getattr(runtime_cfg, "data_parallel_size", None)
-        or 1
-    )
+    data_parallel_size = getattr(runtime_cfg, "data_parallel_size", None) or 1
+    expert_model_parallel_size = getattr(model_parallel_config, "expert_model_parallel_size", None) or 1
 
-    denominator = micro_batch * data_parallel_size
+    denominator = micro_batch * data_parallel_size * expert_model_parallel_size
+
+    print(
+        f"global_batch: {global_batch}, micro_batch: {micro_batch}, data_parallel_size: {data_parallel_size}, expert_model_parallel_size: {expert_model_parallel_size}, denominator: {denominator}"
+    )
     if denominator <= 0:
         return 1
     return max(1, math.ceil(global_batch / denominator))
 
 
-def _build_scheduler_sim_config(module_cfg_snapshot, training_config, profiling_results):
-    timings = _aggregate_layer_timings(profiling_results)
-    if timings is None:
-        return None
+def _build_scheduler_sim_config(training_config, profiling_results):
+    chunk_time_matrix = _build_chunk_time_matrix(training_config, profiling_results)
+    assert chunk_time_matrix is not None
 
-    stage_overheads = _extract_stage_overheads(profiling_results)
+    if chunk_time_matrix:
+        print("\n[Primus:Performance Projection] Per-chunk timings (ms):")
+        for rank_idx, rank_chunks in enumerate(chunk_time_matrix):
+            for chunk_idx, chunk in enumerate(rank_chunks):
+                fwd = chunk.get("fwd", 0.0)
+                bwd = chunk.get("bwd", 0.0)
+                print(
+                    f"  Rank {rank_idx:02d} Chunk {chunk_idx:02d} -> " f"fwd={fwd:.2f} ms, bwd={bwd:.2f} ms"
+                )
 
-    pp_size = getattr(module_cfg_snapshot, "pipeline_model_parallel_size", 1) or 1
-    vpp_size = getattr(module_cfg_snapshot, "virtual_pipeline_model_parallel_size", 1) or 1
-    total_layers = getattr(module_cfg_snapshot, "num_layers", 1) or 1
-    layers_per_stage = total_layers // pp_size
+    mp_cfg = training_config.model_parallel_config
+    pp_size = getattr(mp_cfg, "pipeline_model_parallel_size", 1) or 1
+    vpp_size = getattr(mp_cfg, "virtual_pipeline_model_parallel_size", 1) or 1
+    print(f"pp_size: {pp_size}, vpp_size: {vpp_size}")
 
-    # Timings are measured per transformer layer; scale by layers assigned to each pipeline stage.
-    fwd_time = timings["fwd_time"] * layers_per_stage
-    bwd_time = timings["bwd_time"] * layers_per_stage
-    wgrad_time = timings["wgrad_time"] * layers_per_stage
-
-    micro_batches = _compute_micro_batches(training_config.runtime_config, module_cfg_snapshot)
+    micro_batches = _compute_micro_batches(training_config.runtime_config, mp_cfg)
 
     if vpp_size > 1:
         scheduler = {
@@ -220,12 +289,9 @@ def _build_scheduler_sim_config(module_cfg_snapshot, training_config, profiling_
         }
 
     return {
-        "fwd_time": fwd_time,
-        "bwd_time": bwd_time,
-        "wgrad_time": wgrad_time,
+        "chunk_time_ms": chunk_time_matrix,
         "output_dir": str(Path.cwd() / "pp_simulation_result"),
         "schedulers": [scheduler],
-        "stage_overheads": stage_overheads,
     }
 
 
@@ -241,6 +307,23 @@ def _report_simulation_throughput(sim_results, runtime_config):
         step_time_ms = summary.get("step_time_ms")
         micro_batches = summary.get("micro_batches") or 1
         num_gpus = summary.get("pp_size")
+        pp_size = summary.get("pp_size") or 1
+
+        per_rank = sim.get("per_rank") or []
+        last_rank_idx = min(pp_size - 1, len(per_rank) - 1)
+        scheduled_layers = per_rank[last_rank_idx] if last_rank_idx >= 0 else {}
+        fwd_time = sum(
+            end - start
+            for start, end in zip(scheduled_layers.get("fwd_start", []), scheduled_layers.get("fwd_end", []))
+        )
+        bwd_time = sum(
+            end - start
+            for start, end in zip(scheduled_layers.get("bwd_start", []), scheduled_layers.get("bwd_end", []))
+        )
+        print(f"fwd_time: {fwd_time}, bwd_time: {bwd_time}")
+        total_layer_time = fwd_time + bwd_time
+        bubble_time = step_time_ms - total_layer_time
+        bubble_ratio = bubble_time / step_time_ms
 
         tokens_per_step = seq_len * micro_batch_size * micro_batches
         tokens_per_gpu_sec = tokens_per_step * 1000 / step_time_ms / num_gpus
@@ -248,8 +331,13 @@ def _report_simulation_throughput(sim_results, runtime_config):
         print(
             "[Primus:Performance Projection] "
             f"Scheduler '{scheduler_name}': {tokens_per_gpu_sec:,.2f} tokens/GPU/s "
-            f"(step_time={step_time_ms:.4f}s, seq_len={seq_len}, "
+            f"(step_time={step_time_ms:.4f}ms, seq_len={seq_len}, "
             f"micro_batch={micro_batch_size}, micro_batches={micro_batches})"
+        )
+        print(
+            "[Primus:Performance Projection] "
+            f"  Last rank bubble: {bubble_time:.2f} ms "
+            f"(ratio={bubble_ratio:.2%})"
         )
 
 
@@ -269,18 +357,11 @@ def launch_projection_from_cli(args, overrides):
 
     # Load Primus configuration
     primus_config, unknown_overrides = load_primus_config(args, overrides)
+    primus_config_original = copy.deepcopy(primus_config)
     module_config = primus_config.get_module_config("pre_trainer")
-    print(module_config)
-    module_config_for_sim = copy.deepcopy(module_config)
     _limit_layers_for_projection(module_config)
     rescale_info = _rescale_expert_parallelism(module_config)
     training_config = convert_primus_config_to_projection_config(primus_config)
-
-    print("\n" + "=" * 100)
-    print("[Primus:Performance Projection] Configuration:")
-    print("=" * 100)
-    print(training_config)
-    print("=" * 100)
 
     # Get distributed environment variables
     master_addr = os.getenv("MASTER_ADDR", "127.0.0.1")
@@ -324,7 +405,6 @@ def launch_projection_from_cli(args, overrides):
     print(f"  World Size: {world_size}")
     print(f"  Batch Size: {batch_size}")
     print(f"  Sequence Length: {seq_len}")
-    print(f"  Layers on this rank: {len(model_profiler.layers)}")
     if rescale_info:
         note = (
             f"  NOTE: MoE rescaled -> EP {rescale_info['ep_before']} -> {rescale_info['ep_after']}"
@@ -348,7 +428,8 @@ def launch_projection_from_cli(args, overrides):
         seq_len=seq_len,
     )
 
-    sim_config = _build_scheduler_sim_config(module_config_for_sim, training_config, profiling_results)
+    training_config = convert_primus_config_to_projection_config(primus_config_original)
+    sim_config = _build_scheduler_sim_config(training_config, profiling_results)
     if sim_config is not None:
         print("\n[Primus:Performance Projection] Running pipeline schedule simulator...")
         runner = SchedulerSimulationRunner(sim_config)
