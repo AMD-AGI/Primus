@@ -318,14 +318,14 @@ if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
     LOG_INFO "Rebuilding Primus Turbo from source..."
     mkdir -p "/workspace/turbo"
     cd "/workspace/turbo"
-    
+
     # Clean up old directory if exists to avoid git clone conflicts
     if [ -d "Primus-Turbo" ]; then
         LOG_INFO "Removing existing Primus-Turbo directory..."
         rm -rf Primus-Turbo
     fi
-    
-    git clone https://github.com/AMD-AGI/Primus-Turbo.git --recursive 
+
+    git clone https://github.com/AMD-AGI/Primus-Turbo.git --recursive
     cd Primus-Turbo
     pip3 install -r requirements.txt
     # Set GPU_ARCHS to compile Turbo for multiple AMD GPU architectures.

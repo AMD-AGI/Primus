@@ -13,6 +13,7 @@ try:
 except ImportError:
     from primus_turbo.pytorch.core.low_precision import Float8QuantConfig, ScalingGranularity
 
+import torch.nn as nn
 from primus_turbo.pytorch.modules.linear_fp8 import Float8Linear
 from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims
@@ -21,9 +22,6 @@ from torchtitan.protocols.model_converter import (
     register_model_converter,
 )
 from torchtitan.tools.logging import logger
-
-
-import torch.nn as nn
 
 
 def module_filter_fn(mod: nn.Module, fqn: str, filter_fqns: list[str]) -> bool:
@@ -36,9 +34,7 @@ def module_filter_fn(mod: nn.Module, fqn: str, filter_fqns: list[str]) -> bool:
         return False
 
     # All dims must be divisible by 16 due to float8 tensorcore hardware requirements.
-    dims_multiples_of_128 = (
-        mod.weight.shape[0] % 128 == 0 and mod.weight.shape[1] % 128 == 0
-    )
+    dims_multiples_of_128 = mod.weight.shape[0] % 128 == 0 and mod.weight.shape[1] % 128 == 0
 
     # If the fqn matches any filtered fqn, then we should not convert this module.
     is_filtered_fqn = any(filter_fqn in fqn for filter_fqn in filter_fqns)

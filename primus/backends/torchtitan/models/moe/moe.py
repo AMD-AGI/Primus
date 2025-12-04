@@ -1,8 +1,7 @@
-
-
+import primus_turbo.pytorch as turbo
 import torch
 import torch.nn.functional as F
-import primus_turbo.pytorch as turbo
+
 # tyr to load primus_turbo.pytorch.core.float8, but it is not found
 try:
     from primus_turbo.pytorch.core.float8 import (
@@ -12,10 +11,10 @@ try:
     )
 except ImportError:
     from primus_turbo.pytorch.core.low_precision import (
-    Float8QuantConfig,
-    Format,
-    ScalingGranularity,
-)
+        Float8QuantConfig,
+        Format,
+        ScalingGranularity,
+    )
 
 
 def _run_experts_grouped_mm(
@@ -34,21 +33,18 @@ def _run_experts_grouped_mm(
             format=Format.E4M3,
             granularity=ScalingGranularity.TENSORWISE,  # or ROWWISE ,TENSORWISE
         )
-    
+
         h = F.silu(
             turbo.ops.grouped_gemm_fp8(
-                x.bfloat16(), w1.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True,
-                config=fp8_cfg
+                x.bfloat16(), w1.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True, config=fp8_cfg
             )
         )
         h = h * turbo.ops.grouped_gemm_fp8(
-            x.bfloat16(), w3.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True,
-            config=fp8_cfg
+            x.bfloat16(), w3.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True, config=fp8_cfg
         )
-    
+
         out = turbo.ops.grouped_gemm_fp8(
-            h, w2.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True,
-            config=fp8_cfg
+            h, w2.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True, config=fp8_cfg
         ).type_as(x)
     else:
         h = F.silu(
@@ -63,5 +59,5 @@ def _run_experts_grouped_mm(
         out = turbo.ops.grouped_gemm(
             h, w2.bfloat16(), group_lens=num_tokens_per_expert, trans_b=True
         ).type_as(x)
- 
+
     return out
