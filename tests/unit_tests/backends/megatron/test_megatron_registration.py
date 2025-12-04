@@ -38,8 +38,7 @@ class TestMegatronBackendRegistration:
         """Verify that megatron -> Megatron-LM path mapping is registered."""
         # BackendRegistry should have path name registered
         assert BackendRegistry.has_adapter("megatron"), (
-            "Megatron backend not loaded. "
-            "Check primus/backends/megatron/__init__.py imports are working."
+            "Megatron backend not loaded. " "Check primus/backends/megatron/__init__.py imports are working."
         )
 
         path_name = BackendRegistry.get_path_name("megatron")
@@ -52,8 +51,7 @@ class TestMegatronBackendRegistration:
         """Verify that MegatronAdapter is registered for 'megatron' backend."""
         # Check registration
         assert BackendRegistry.has_adapter("megatron"), (
-            "MegatronAdapter not registered. "
-            "Check BackendRegistry.register_adapter() call in __init__.py"
+            "MegatronAdapter not registered. " "Check BackendRegistry.register_adapter() call in __init__.py"
         )
 
         # Verify correct adapter class is registered (not instance)
@@ -88,14 +86,12 @@ class TestMegatronBackendRegistration:
             adapter = BackendRegistry.get_adapter("megatron")
 
         # Verify instance type
-        assert isinstance(adapter, MegatronAdapter), (
-            f"Expected MegatronAdapter instance, got {type(adapter).__name__}"
-        )
+        assert isinstance(
+            adapter, MegatronAdapter
+        ), f"Expected MegatronAdapter instance, got {type(adapter).__name__}"
 
         # Verify adapter framework attribute
-        assert adapter.framework == "megatron", (
-            f"Expected framework='megatron', got '{adapter.framework}'"
-        )
+        assert adapter.framework == "megatron", f"Expected framework='megatron', got '{adapter.framework}'"
 
     def test_trainer_class_can_be_retrieved(self):
         """Verify trainer class retrieval through adapter."""
@@ -106,9 +102,9 @@ class TestMegatronBackendRegistration:
 
         # Adapter should be able to load the registered trainer class
         trainer_cls = adapter.load_trainer_class()
-        assert trainer_cls is MegatronPretrainTrainer, (
-            f"Expected MegatronPretrainTrainer from adapter, got {trainer_cls}"
-        )
+        assert (
+            trainer_cls is MegatronPretrainTrainer
+        ), f"Expected MegatronPretrainTrainer from adapter, got {trainer_cls}"
 
     def test_megatron_in_available_backends_list(self):
         """Verify megatron appears in list of available backends."""
@@ -214,4 +210,3 @@ class TestMegatronRegistrationFailures:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-
