@@ -146,7 +146,7 @@ jobs:
     env:
       PRIMUS_WORKDIR: /apps/tas/0_public/primus_k8s_ci
     needs: [code-lint]
-    runs-on: [tas-k8s]
+    runs-on: [primus-pytorch-gfx942-gbt8n]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Set commit hash to env
