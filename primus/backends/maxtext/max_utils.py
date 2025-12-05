@@ -85,7 +85,7 @@ def initialize_wandb_writer(config):
 
     os.makedirs(wandb_save_dir, exist_ok=True)
 
-    wandb.init(project=wandb_project, name=wandb_exp_name, dir=wandb_save_dir, config=config.get_keys())
+    wandb.init(project=wandb_project, name=wandb_exp_name, dir=wandb_save_dir, config=dict(config.get_keys()))
     max_logging.log(f"WandB logging enabled: {wandb_save_dir=}, {wandb_project=}, {wandb_exp_name=}")
     return wandb
 

@@ -22,6 +22,7 @@ class PrimusMetricLogger(MetricLogger):
 
     def __init__(self, config, learning_rate_schedule):
         super().__init__(config, learning_rate_schedule)
+        self.wandb_writer = None
         if self.config.enable_wandb:
             self.wandb_writer = initialize_wandb_writer(config)
 
@@ -61,7 +62,7 @@ class PrimusMetricLogger(MetricLogger):
         maxtext_utils.add_config_to_summary_writer(self.config, self.writer)
 
         if self.wandb_writer is not None:
-            self.wandb_writer.log({"num_model_parameters": str(num_model_parameters)})
+            self.wandb_writer.log({"num_model_parameters": num_model_parameters})
 
     def flush_metrics_and_cleanup(self):
         super().flush_metrics_and_cleanup()
