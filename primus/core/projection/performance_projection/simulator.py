@@ -60,6 +60,13 @@ class SchedulerSimulationRunner:
         else:
             raise ValueError(f"Duration is not found.")
 
+    def _chunk_activation(self, rank: int, chunk: int | None) -> float:
+        if self.chunk_time_ms is None:
+            return 0.0
+        chunk_idx = chunk or 0
+        chunk_entry = self.chunk_time_ms[rank][chunk_idx]
+        return float(chunk_entry.get("activation", 0.0) or 0.0)
+
     def run(self):
         run_summaries = []
         for scheduler_config in self.config["schedulers"]:
@@ -72,7 +79,7 @@ class SchedulerSimulationRunner:
 
             scheduler_instance = scheduler_class(**scheduler_params)
             schedule_table = scheduler_instance.generate_schedule_table()
-            print(f"\n{'='*80}")
+            print(f"{'='*80}")
             print(f"Scheduler: {scheduler_config['name']}")
             print(f"{'='*80}")
             if self.debug_simulator:
@@ -189,7 +196,8 @@ class SchedulerSimulationRunner:
                         node.chunk
                     )
                     if node.func_type == FuncType.F:
-                        rank_memory[current_rank] += 2.0 / scheduler_config["vpp_size"]
+                        act_gb = self._chunk_activation(current_rank, getattr(node, "chunk", 0))
+                        rank_memory[current_rank] += act_gb
                         simulation_result[current_rank]["memory"] = max(
                             simulation_result[current_rank]["memory"], rank_memory[current_rank]
                         )
@@ -197,13 +205,14 @@ class SchedulerSimulationRunner:
                             rank_memory[current_rank]
                         )
                     elif node.func_type in [FuncType.BW, FuncType.W]:
-                        rank_memory[current_rank] -= 2.0 / scheduler_config["vpp_size"]
-
+                        act_gb = self._chunk_activation(current_rank, getattr(node, "chunk", 0))
+                        rank_memory[current_rank] = rank_memory[current_rank] - act_gb
+                        simulation_result[current_rank]["activation_memory_usage"].append(
+                            rank_memory[current_rank]
+                        )
                 rank_idx[current_rank] += 1
 
             current_rank = (current_rank + 1) % len(schedule_table)
-
-        print(f"max memory: {[ r['memory'] for r in simulation_result]}")
 
         return simulation_result
 
