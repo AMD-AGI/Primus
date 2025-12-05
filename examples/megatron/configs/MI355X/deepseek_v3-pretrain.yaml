@@ -63,8 +63,6 @@ modules:
       # MLA
       multi_latent_attention: false
 
-      # Performance toggles
-      # multi_latent_attention: false
 
       # ckpt
       finetune: false
