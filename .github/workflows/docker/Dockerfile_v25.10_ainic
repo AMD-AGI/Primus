@@ -83,7 +83,7 @@ ENV MPI_PATH=${WORKDIR}/ompi-4.1.6/install
 RUN cd ${WORKDIR} && \
     git clone https://github.com/ROCm/rccl.git && \
     cd rccl && git checkout rocm-7.1.0 && \
-    ./install.sh -l --prefix build/ --disable-mscclpp \
+    ./install.sh -l --prefix build/ --disable-mscclpp-kernel \
         --disable-msccl-kernel --amdgpu_targets="gfx950" 2>&1 | tee log_rccl_install.txt && \
     cd ${WORKDIR}
 
