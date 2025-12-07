@@ -78,15 +78,14 @@ class BackendRegistry:
 
         If backend not registered, try to load it first.
         """
-        # Try lazy load if not registered
+        # Lazily load backend if not registered
         if backend not in cls._path_names:
-            cls._try_load_backend(backend)
+            cls._load_backend(backend)
 
-        if backend not in cls._path_names:
-            raise KeyError(
-                f"[Primus] No path name registered for backend '{backend}'.\n"
-                f"Available backends: {', '.join(cls._path_names.keys())}"
-            )
+        assert backend in cls._path_names, (
+            f"No path name registered for backend '{backend}'.\n"
+            f"Available backends: {', '.join(cls._path_names.keys())}"
+        )
         return cls._path_names[backend]
 
     # ----------------------------------------------------------------------
@@ -106,9 +105,10 @@ class BackendRegistry:
         Get adapter for backend (with lazy loading and automatic path setup).
 
         This method automatically:
-        1. Sets up backend path in sys.path (if not already done)
-        2. Lazy loads backend module if not registered
-        3. Creates and returns adapter instance
+        1. Returns an already-registered adapter if available
+        2. Otherwise sets up backend path in sys.path
+        3. Lazily loads the backend module (which is expected to register the adapter)
+        4. Creates and returns the adapter instance
 
         Args:
             backend: Backend name (e.g., "megatron", "torchtitan")
@@ -118,47 +118,24 @@ class BackendRegistry:
             Backend adapter instance
 
         Raises:
-            ValueError: If backend not found or unavailable
-            RuntimeError: If adapter creation fails
-            FileNotFoundError: If backend path cannot be found
+            AssertionError: If backend cannot be found/registered
+            ImportError: If backend module import fails
         """
-        # Step 1: Setup backend path (idempotent - won't duplicate if already in sys.path)
-        try:
+        # Fast path: adapter already registered
+        if backend not in cls._adapters:
+            # Step 1: Setup backend path (idempotent - won't duplicate if already in sys.path)
             cls.setup_backend_path(backend, backend_path=backend_path, verbose=True)
-        except KeyError:
-            # Backend path name not registered yet, will try to load backend first
-            pass
-        except FileNotFoundError as e:
-            # Path not found - provide helpful error
-            raise FileNotFoundError(
-                f"{e}\n" f"Requested backend: '{backend}'\n" "This backend requires installation before use."
-            ) from e
 
-        # Step 2: Try lazy load if not registered
-        if backend not in cls._adapters:
-            loaded = cls._try_load_backend(backend)
-            if loaded:
-                # After loading, try path setup again (backend may have registered path_name)
-                try:
-                    cls.setup_backend_path(backend, backend_path=backend_path, verbose=True)
-                except (KeyError, FileNotFoundError):
-                    # Ignore if still can't setup - backend might not need external path
-                    pass
+            # Step 2: Lazily load backend (expected to register adapter)
+            cls._load_backend(backend)
 
-        # Step 3: Check if adapter is now available
-        if backend not in cls._adapters:
-            available = list(cls._adapters.keys()) if cls._adapters else ["none"]
-            raise ValueError(
-                f"[Primus] Backend '{backend}' not found.\n"
-                f"Available backends: {', '.join(available)}\n"
-                f"Hint: Make sure '{backend}' is installed and properly configured."
-            )
-
-        # Step 4: Create adapter instance with error handling
-        try:
-            return cls._adapters[backend](backend)
-        except Exception as e:
-            raise RuntimeError(f"[Primus] Failed to create adapter for '{backend}': {e}") from e
+        # Step 3: Ensure adapter is available, then create instance
+        assert backend in cls._adapters, (
+            f"[Primus] Backend '{backend}' not found.\n"
+            f"Available backends: {', '.join(cls._adapters.keys()) if cls._adapters else 'none'}\n"
+            f"Hint: Make sure '{backend}' is installed and properly configured."
+        )
+        return cls._adapters[backend](backend)
 
     @classmethod
     def has_adapter(cls, backend: str) -> bool:
@@ -193,46 +170,53 @@ class BackendRegistry:
         import sys
         from pathlib import Path
 
-        candidate_paths = []
+        def _use_backend_path(path: str, error_msg: str) -> str:
+            """
+            Normalize, validate existence, insert into sys.path (if needed),
+            and return the normalized path. On failure, raises via assert.
+            """
+            norm_path = os.path.abspath(os.path.normpath(str(path)))
+            if os.path.exists(norm_path):
+                if norm_path not in sys.path:
+                    sys.path.insert(0, norm_path)
+                    log_rank_0(f"sys.path.insert → {norm_path}")
+                return norm_path
 
-        # 1) CLI argument
+            assert False, error_msg
+
+        # 1) CLI argument: if provided, it must exist. No fallback.
         if backend_path:
-            candidate_paths.append(backend_path)
+            cli_error = (
+                f"Backend path not found for '{backend}'.\n"
+                f"Requested path: {backend_path}\n"
+                f"Hint: Fix --backend_path or remove it to use BACKEND_PATH or the default third_party location."
+            )
+            return _use_backend_path(backend_path, cli_error)
 
-        # 2) Environment variable
+        # 2) Environment variable: if set, it must exist. No fallback.
         env_path = os.getenv("BACKEND_PATH")
         if env_path:
-            candidate_paths.append(env_path)
+            env_error = (
+                f"BACKEND_PATH does not exist for '{backend}'.\n"
+                f"BACKEND_PATH={env_path}\n"
+                f"Hint: Fix BACKEND_PATH or unset it to use the default third_party location."
+            )
+            return _use_backend_path(env_path, env_error)
 
-        # 3) Default fallback: third_party/<backend_dir_name>
+        # 3) Default: primus/third_party/<backend_dir_name> must exist.
         backend_dir_name = cls.get_path_name(backend)
         # Navigate from this file to project root: primus/core/backend/backend_registry.py -> <repo_root>/
         primus_root = Path(__file__).resolve().parents[3]
         default_path = primus_root / "third_party" / backend_dir_name
-        candidate_paths.append(default_path)
-
-        # Normalize paths and remove duplicates
-        normalized = list(dict.fromkeys(os.path.abspath(os.path.normpath(p)) for p in candidate_paths))
-
-        # Insert first valid path
-        for p in normalized:
-            if os.path.exists(p):
-                if p not in sys.path:
-                    sys.path.insert(0, p)
-                    if verbose:
-                        log_rank_0(f"[Primus] sys.path.insert → {p}")
-                return p
-
-        raise FileNotFoundError(
-            f"[Primus] No valid backend path for '{backend}'.\n"
-            f"Tried: {normalized}\n"
-            f"Hint: Use --backend_path to specify the backend installation path, or\n"
-            f"      set BACKEND_PATH environment variable, or\n"
-            f"      install backend to primus/third_party/{backend_dir_name}"
+        default_error = (
+            f"No valid backend path for '{backend}'.\n"
+            f"Tried default path: {default_path}\n"
+            f"Hint: Install backend to primus/third_party/{backend_dir_name} or provide a valid --backend_path/BACKEND_PATH."
         )
+        return _use_backend_path(default_path, default_error)
 
     @classmethod
-    def _try_load_backend(cls, backend: str) -> bool:
+    def _load_backend(cls, backend: str) -> None:
         """
         Attempt to lazily load a backend module.
 
@@ -243,17 +227,15 @@ class BackendRegistry:
             backend: Backend name (e.g., "megatron", "torchtitan")
 
         Returns:
-            True if backend was loaded successfully, False otherwise
+            None. Import errors are treated as unrecoverable and will be raised directly.
         """
         import importlib
 
-        try:
-            module_path = f"primus.backends.{backend}"
-            importlib.import_module(module_path)
-            return True
-        except Exception as e:
-            error_rank_0(f"[Primus] Warning: Failed to load backend '{backend}': {e}")
-            return False
+        module_path = f"primus.backends.{backend}"
+        importlib.import_module(module_path)
+
+    # Backward-compatible alias; old name kept for tests and external callers.
+    _try_load_backend = _load_backend
 
     @classmethod
     def list_available_backends(cls) -> list:
@@ -285,14 +267,14 @@ class BackendRegistry:
         discovered = []
         for item in backends_dir.iterdir():
             if item.is_dir() and not item.name.startswith("_") and not item.name.startswith("."):
-                cls._try_load_backend(item.name)
+                cls._load_backend(item.name)
                 if item.name in cls._adapters:
                     discovered.append(item.name)
 
         if discovered:
-            print(f"[Primus] Discovered backends: {', '.join(discovered)}")
+            log_rank_0(f"[Primus] Discovered backends: {', '.join(discovered)}")
         else:
-            print("[Primus] Warning: No backends discovered")
+            log_rank_0("[Primus] Warning: No backends discovered")
 
     # ----------------------------------------------------------------------
     #  TrainerClass Registration (optional)
@@ -307,8 +289,7 @@ class BackendRegistry:
 
     @classmethod
     def get_trainer_class(cls, backend: str):
-        if backend not in cls._trainer_classes:
-            raise KeyError(f"[Primus] No trainer class registered for backend '{backend}'.")
+        assert backend in cls._trainer_classes, f"[Primus] No trainer class registered for backend '{backend}'."
         return cls._trainer_classes[backend]
 
     @classmethod

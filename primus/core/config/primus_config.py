@@ -117,7 +117,7 @@ def load_primus_config(config_path: Path, cli_args: Any | None = None) -> Simple
     return cfg
 
 
-def get_module_config(cfg: SimpleNamespace, module_name: str) -> SimpleNamespace:
+def get_module_config(cfg: SimpleNamespace, module_name: str) -> SimpleNamespace | None:
     """
     Fetch a single module config from `cfg.modules` by name.
     """
@@ -126,4 +126,12 @@ def get_module_config(cfg: SimpleNamespace, module_name: str) -> SimpleNamespace
         if getattr(m, "name", None) == module_name:
             return m
 
-    raise ValueError(f"Primus config ({getattr(cfg, 'config_file', '')}) has no module named {module_name}")
+    return None
+
+
+def get_module_names(cfg: SimpleNamespace) -> list[str]:
+    """
+    Return a list of module names from `cfg.modules`.
+    """
+    modules = getattr(cfg, "modules", None) or []
+    return [getattr(m, "name", None) for m in modules if getattr(m, "name", None)]

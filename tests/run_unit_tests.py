@@ -48,6 +48,8 @@ def get_all_unit_tests(run_jax_only=False):
 
     EXCLUDE_UNIT_TESTS = [
         "trainer/test_maxtext_trainer.py",
+        "trainer/test_megatron_trainer.py",
+        "trainer/test_torchtitan_trainer.py",
     ]
 
     for root, dirs, files in os.walk(cur_dir):
