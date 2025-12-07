@@ -94,10 +94,12 @@ ENV RCCL_HOME=${WORKDIR}/rccl
 RUN cd ${WORKDIR} && git clone https://github.com/rocm/amd-anp.git && \
 cd amd-anp && git checkout tags/v1.3.0 && \
 sed -i '5a CFLAGS += --offload-arch=gfx950' ./Makefile && head -10 ./Makefile && \
-make -j 16 RCCL_BUILD=${RCCL_HOME}/build/release \
+make -j 16 RCCL_HOME=${RCCL_HOME} \
            MPI_INCLUDE=${MPI_PATH}/include/ \
            MPI_LIB_PATH=${MPI_PATH}/lib/ \
-           ROCM_PATH=${ROCM_PATH} 2>&1 | tee log_amd_anp_build.txt
+           ROCM_PATH=${ROCM_PATH} && \
+make RCCL_HOME=$RCCL_HOME ROCM_PATH=${ROCM_PATH} install \
+    2>&1 | tee log_amd_anp_build.txt
 
 # Set the default working directory
 WORKDIR /opt
