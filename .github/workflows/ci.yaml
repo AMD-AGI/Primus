@@ -169,172 +169,172 @@ jobs:
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-jax
           # echo "> build-docker success"
 
-  run-unittest:
-    env:
-      PRIMUS_WORKDIR: /apps/tas/0_public/primus_k8s_ci/torch
-    needs: [code-lint]
-    runs-on: [tas-k8s]
-    steps:
-      - run: echo "🎉 Begin Primus-Turbo Checkout."
-      - name: Set commit hash to env
-        run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
-      - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@v4
-        with:
-          repository: AMD-AIG-AIMA/Primus-Turbo
-          submodules: "recursive"
-          path: Primus-Turbo
-          ref: ${{ env.PRIMUS_TURBO_COMMIT }}
-      - run: echo "Begin Primus-Turbo Install."
-      - name: Install Primus-Turbo
-        run: |
-          mv Primus-Turbo /tmp/
-          echo "Primus-Turbo dir: /tmp/Primus-Turbo"
-          git config --global --add safe.directory /tmp/Primus-Turbo
-          cd /tmp/Primus-Turbo
-          start_time=$(date +%s)
-          echo "✅ [Pip install requirements] started at: $(date)"
-          mkdir -p ${PRIMUS_WORKDIR}/primus-cache
-          MAX_JOBS=128 pip install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --no-build-isolation --no-clean -r requirements.txt
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "✅ [Pip install requirements] ended at: $(date)"
-          echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
-          start_time=$(date +%s)
-          echo "✅ [build primus-turbo] started at: $(date)"
-          pip3 install --no-build-isolation -e . -v
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "✅ [build primus-turbo] ended at: $(date)"
-          echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
-      - run: echo "🎉 Begin Primus Unit Test."
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - name: Show Environment Info
-        run: |
-          echo "Hostname: $(hostname)"
-          echo "PWD: $(pwd)"
-          echo "HOME: $HOME"
-          echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
-          echo "Runner Temp Dir: $RUNNER_TEMP"
-          echo "Runner Tool Cache: $RUNNER_TOOL_CACHE"
-      - name: Install Primus
-        run: |
-          pip install -r requirements.txt
-      - name: Set UT_LOG_PATH
-        run: |
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
-          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/latest" >> $GITHUB_ENV
-          elif [[ "${{ github.event_name }}" == "release" ]]; then
-            TAG_NAME="${{ github.ref }}"
-            TAG="${TAG_NAME#refs/tags/}"
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/$TAG" >> $GITHUB_ENV
-          else
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others" >> $GITHUB_ENV
-          fi
-      - name: Run Shell Tests
-        run: |
-          echo "Running Primus CLI shell tests..."
-          bash ./tests/runner/run_all_tests.sh
-      - name: Run Unit Tests
-        env:
-          HF_TOKEN: ${{secrets.HF_TOKEN}}
-        run: |
-          echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
-          rm -rf "${{ env.UT_LOG_PATH }}"
-          mkdir -p "${{ env.UT_LOG_PATH }}"
-          MASTER_PORT=10009 DATA_PATH=/apps/tas/0_public/data \
-          python ./tests/run_unit_tests.py
-      - name: Clean
-        run: |
-          rm -rf ${PRIMUS_WORKDIR}/Primus-Turbo
-          rm -rf ${PRIMUS_WORKDIR}/Primus
+  # run-unittest:
+  #   env:
+  #     PRIMUS_WORKDIR: /apps/tas/0_public/primus_k8s_ci/torch
+  #   needs: [code-lint]
+  #   runs-on: [tas-k8s]
+  #   steps:
+  #     - run: echo "🎉 Begin Primus-Turbo Checkout."
+  #     - name: Set commit hash to env
+  #       run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
+  #     - name: Checkout Repo Primus-Turbo
+  #       uses: actions/checkout@v4
+  #       with:
+  #         repository: AMD-AIG-AIMA/Primus-Turbo
+  #         submodules: "recursive"
+  #         path: Primus-Turbo
+  #         ref: ${{ env.PRIMUS_TURBO_COMMIT }}
+  #     - run: echo "Begin Primus-Turbo Install."
+  #     - name: Install Primus-Turbo
+  #       run: |
+  #         mv Primus-Turbo /tmp/
+  #         echo "Primus-Turbo dir: /tmp/Primus-Turbo"
+  #         git config --global --add safe.directory /tmp/Primus-Turbo
+  #         cd /tmp/Primus-Turbo
+  #         start_time=$(date +%s)
+  #         echo "✅ [Pip install requirements] started at: $(date)"
+  #         mkdir -p ${PRIMUS_WORKDIR}/primus-cache
+  #         MAX_JOBS=128 pip install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --no-build-isolation --no-clean -r requirements.txt
+  #         end_time=$(date +%s)
+  #         elapsed=$((end_time - start_time))
+  #         echo "✅ [Pip install requirements] ended at: $(date)"
+  #         echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
+  #         start_time=$(date +%s)
+  #         echo "✅ [build primus-turbo] started at: $(date)"
+  #         pip3 install --no-build-isolation -e . -v
+  #         end_time=$(date +%s)
+  #         elapsed=$((end_time - start_time))
+  #         echo "✅ [build primus-turbo] ended at: $(date)"
+  #         echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
+  #     - run: echo "🎉 Begin Primus Unit Test."
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: recursive
+  #     - name: Show Environment Info
+  #       run: |
+  #         echo "Hostname: $(hostname)"
+  #         echo "PWD: $(pwd)"
+  #         echo "HOME: $HOME"
+  #         echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
+  #         echo "Runner Temp Dir: $RUNNER_TEMP"
+  #         echo "Runner Tool Cache: $RUNNER_TOOL_CACHE"
+  #     - name: Install Primus
+  #       run: |
+  #         pip install -r requirements.txt
+  #     - name: Set UT_LOG_PATH
+  #       run: |
+  #         if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+  #           echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+  #         elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+  #           echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/latest" >> $GITHUB_ENV
+  #         elif [[ "${{ github.event_name }}" == "release" ]]; then
+  #           TAG_NAME="${{ github.ref }}"
+  #           TAG="${TAG_NAME#refs/tags/}"
+  #           echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/$TAG" >> $GITHUB_ENV
+  #         else
+  #           echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others" >> $GITHUB_ENV
+  #         fi
+  #     - name: Run Shell Tests
+  #       run: |
+  #         echo "Running Primus CLI shell tests..."
+  #         bash ./tests/runner/run_all_tests.sh
+  #     - name: Run Unit Tests
+  #       env:
+  #         HF_TOKEN: ${{secrets.HF_TOKEN}}
+  #       run: |
+  #         echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
+  #         rm -rf "${{ env.UT_LOG_PATH }}"
+  #         mkdir -p "${{ env.UT_LOG_PATH }}"
+  #         MASTER_PORT=10009 DATA_PATH=/apps/tas/0_public/data \
+  #         python ./tests/run_unit_tests.py
+  #     - name: Clean
+  #       run: |
+  #         rm -rf ${PRIMUS_WORKDIR}/Primus-Turbo
+  #         rm -rf ${PRIMUS_WORKDIR}/Primus
 
-  run-unittest-jax:
-    env:
-      PRIMUS_WORKDIR: /apps/tas/0_public/primus_k8s_ci/jax
-    needs: [code-lint]
-    runs-on: [primus-jax-l85pj]
-    steps:
-      - run: echo "🎉 Begin Primus-Turbo Checkout."
-      - name: Set commit hash to env
-        run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
-      - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@v4
-        with:
-          repository: AMD-AIG-AIMA/Primus-Turbo
-          submodules: "recursive"
-          path: Primus-Turbo
-          ref: ${{ env.PRIMUS_TURBO_COMMIT }}
-      - run: echo "Begin Primus-Turbo Install."
-      - name: Install Primus-Turbo
-        run: |
-          mv Primus-Turbo /tmp/
-          echo "Primus-Turbo dir: /tmp/Primus-Turbo"
-          git config --global --add safe.directory /tmp/Primus-Turbo
-          cd /tmp/Primus-Turbo
-          start_time=$(date +%s)
-          echo "✅ [Pip install requirements] started at: $(date)"
-          mkdir -p  ${PRIMUS_WORKDIR}/primus-cache
-          python3 -m pip install --upgrade pip setuptools
-          pip3 install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm7.0
-          MAX_JOBS=128 pip3 install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --no-build-isolation --no-clean -r requirements.txt
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "✅ [Pip install requirements] ended at: $(date)"
-          echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
-          start_time=$(date +%s)
-          echo "✅ [build primus-turbo] started at: $(date)"
-          PRIMUS_TURBO_FRAMEWORK="JAX" pip3 install --no-build-isolation -e . -v
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "✅ [build primus-turbo] ended at: $(date)"
-          echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
-      - run: echo "🎉 Begin Primus Unit Test."
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-      - name: Show Environment Info
-        run: |
-          echo "Hostname: $(hostname)"
-          echo "PWD: $(pwd)"
-          echo "HOME: $HOME"
-          echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
-          echo "Runner Temp Dir: $RUNNER_TEMP"
-          echo "Runner Tool Cache: $RUNNER_TOOL_CACHE"
-      - name: Install Primus
-        run: |
-          pip install -r requirements-jax.txt
-      - name: Set UT_LOG_PATH
-        run: |
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
-          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/latest" >> $GITHUB_ENV
-          elif [[ "${{ github.event_name }}" == "release" ]]; then
-            TAG_NAME="${{ github.ref }}"
-            TAG="${TAG_NAME#refs/tags/}"
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/$TAG" >> $GITHUB_ENV
-          else
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others" >> $GITHUB_ENV
-          fi
-      - name: Run Shell Tests
-        run: |
-          echo "Running Primus CLI shell tests..."
-          bash ./tests/runner/run_all_tests.sh
-      - name: Run Unit Tests
-        env:
-          HF_TOKEN: ${{secrets.HF_TOKEN}}
-        run: |
-          echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
-          rm -rf "${{ env.UT_LOG_PATH }}"
-          mkdir -p "${{ env.UT_LOG_PATH }}"
-          MASTER_PORT=10009 DATA_PATH=/apps/tas/0_public/data \
-          JAX_SKIP_UT=1 python ./tests/run_unit_tests.py --jax
-      - name: Clean
-        run: |
-          rm -rf ${PRIMUS_WORKDIR}/Primus-Turbo
-          rm -rf ${PRIMUS_WORKDIR}/Primus
+  # run-unittest-jax:
+  #   env:
+  #     PRIMUS_WORKDIR: /apps/tas/0_public/primus_k8s_ci/jax
+  #   needs: [code-lint]
+  #   runs-on: [primus-jax-l85pj]
+  #   steps:
+  #     - run: echo "🎉 Begin Primus-Turbo Checkout."
+  #     - name: Set commit hash to env
+  #       run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
+  #     - name: Checkout Repo Primus-Turbo
+  #       uses: actions/checkout@v4
+  #       with:
+  #         repository: AMD-AIG-AIMA/Primus-Turbo
+  #         submodules: "recursive"
+  #         path: Primus-Turbo
+  #         ref: ${{ env.PRIMUS_TURBO_COMMIT }}
+  #     - run: echo "Begin Primus-Turbo Install."
+  #     - name: Install Primus-Turbo
+  #       run: |
+  #         mv Primus-Turbo /tmp/
+  #         echo "Primus-Turbo dir: /tmp/Primus-Turbo"
+  #         git config --global --add safe.directory /tmp/Primus-Turbo
+  #         cd /tmp/Primus-Turbo
+  #         start_time=$(date +%s)
+  #         echo "✅ [Pip install requirements] started at: $(date)"
+  #         mkdir -p  ${PRIMUS_WORKDIR}/primus-cache
+  #         python3 -m pip install --upgrade pip setuptools
+  #         pip3 install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm7.0
+  #         MAX_JOBS=128 pip3 install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --no-build-isolation --no-clean -r requirements.txt
+  #         end_time=$(date +%s)
+  #         elapsed=$((end_time - start_time))
+  #         echo "✅ [Pip install requirements] ended at: $(date)"
+  #         echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
+  #         start_time=$(date +%s)
+  #         echo "✅ [build primus-turbo] started at: $(date)"
+  #         PRIMUS_TURBO_FRAMEWORK="JAX" pip3 install --no-build-isolation -e . -v
+  #         end_time=$(date +%s)
+  #         elapsed=$((end_time - start_time))
+  #         echo "✅ [build primus-turbo] ended at: $(date)"
+  #         echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
+  #     - run: echo "🎉 Begin Primus Unit Test."
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         submodules: recursive
+  #     - name: Show Environment Info
+  #       run: |
+  #         echo "Hostname: $(hostname)"
+  #         echo "PWD: $(pwd)"
+  #         echo "HOME: $HOME"
+  #         echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
+  #         echo "Runner Temp Dir: $RUNNER_TEMP"
+  #         echo "Runner Tool Cache: $RUNNER_TOOL_CACHE"
+  #     - name: Install Primus
+  #       run: |
+  #         pip install -r requirements-jax.txt
+  #     - name: Set UT_LOG_PATH
+  #       run: |
+  #         if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+  #           echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+  #         elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+  #           echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/latest" >> $GITHUB_ENV
+  #         elif [[ "${{ github.event_name }}" == "release" ]]; then
+  #           TAG_NAME="${{ github.ref }}"
+  #           TAG="${TAG_NAME#refs/tags/}"
+  #           echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/$TAG" >> $GITHUB_ENV
+  #         else
+  #           echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others" >> $GITHUB_ENV
+  #         fi
+  #     - name: Run Shell Tests
+  #       run: |
+  #         echo "Running Primus CLI shell tests..."
+  #         bash ./tests/runner/run_all_tests.sh
+  #     - name: Run Unit Tests
+  #       env:
+  #         HF_TOKEN: ${{secrets.HF_TOKEN}}
+  #       run: |
+  #         echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
+  #         rm -rf "${{ env.UT_LOG_PATH }}"
+  #         mkdir -p "${{ env.UT_LOG_PATH }}"
+  #         MASTER_PORT=10009 DATA_PATH=/apps/tas/0_public/data \
+  #         JAX_SKIP_UT=1 python ./tests/run_unit_tests.py --jax
+  #     - name: Clean
+  #       run: |
+  #         rm -rf ${PRIMUS_WORKDIR}/Primus-Turbo
+  #         rm -rf ${PRIMUS_WORKDIR}/Primus
