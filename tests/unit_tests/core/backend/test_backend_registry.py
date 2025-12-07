@@ -200,9 +200,9 @@ class TestBackendRegistryPathNames:
 
     def test_get_path_name_not_found(self):
         """Test error when path name not registered and can't be loaded."""
-        # The new core runtime treats missing backends as import errors.
-        with pytest.raises(ImportError):
-            registry_module.BackendRegistry.get_path_name("non_existent_backend")
+        # get_path_name returns None when backend/path name cannot be resolved.
+        path_name = registry_module.BackendRegistry.get_path_name("non_existent_backend")
+        assert path_name is None
 
 
 class TestBackendRegistrySetupPath:
@@ -264,8 +264,8 @@ class TestBackendRegistrySetupPath:
 
     def test_setup_backend_path_not_found(self):
         """Test setup_backend_path raises error when backend not registered."""
-        # Missing backend now fails during backend module import.
-        with pytest.raises(ImportError):
+        # Missing backend now fails when resolving path name (assertion).
+        with pytest.raises(AssertionError):
             registry_module.BackendRegistry.setup_backend_path("non_existent_backend", verbose=False)
 
     def test_setup_backend_path_already_in_sys_path(self, tmp_path):
