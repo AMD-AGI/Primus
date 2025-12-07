@@ -15,7 +15,6 @@ import os
 import statistics
 import sys
 import time
-from typing import Any, Dict
 
 import megatron
 import torch
@@ -38,7 +37,6 @@ from megatron.training.checkpointing import (
 from megatron.training.training import save_checkpoint_and_time
 
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
-from primus.core.utils import yaml_utils
 from primus.core.utils.import_utils import get_custom_fsdp, get_model_provider
 
 try:
@@ -137,6 +135,7 @@ from megatron.training.utils import (
 )
 from megatron.training.yaml_arguments import validate_yaml
 
+from primus.backends.megatron.argument_builder import _load_megatron_defaults
 from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from primus.backends.megatron.model_provider import primus_model_provider
 from primus.backends.megatron.training.global_vars import (
@@ -147,6 +146,7 @@ from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenize
 from primus.core.utils import checker, file_utils
 from primus.core.utils.flops_estimator import num_floating_point_operations
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
+from primus.core.utils.yaml_utils import nested_namespace_to_dict
 from primus.modules.base_module import BaseModule
 from primus.modules.module_utils import (
     debug_rank_0,
@@ -161,44 +161,6 @@ from .utils import schedule_wrapper, set_wandb_writer_patch, validate_args_on_ro
 
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
-
-
-# ------------------------------------------------------------
-# Build the original Megatron argument parser
-# ------------------------------------------------------------
-def _build_megatron_parser() -> argparse.ArgumentParser:
-    """
-    Construct Megatron-LM's official argparse parser without touching sys.argv.
-
-    This function directly calls:
-        megatron.training.arguments.add_megatron_arguments(parser)
-
-    We do NOT parse command-line arguments here; we simply want Megatron's
-    argument *definitions* (names, defaults, types).
-    """
-    from megatron.training.arguments import add_megatron_arguments
-
-    parser = argparse.ArgumentParser(
-        description="Primus Megatron arguments",
-        allow_abbrev=False,  # Disable abbreviation to avoid unexpected behaviors
-    )
-    return add_megatron_arguments(parser)
-
-
-# ------------------------------------------------------------
-# Load Megatron's default values (cached)
-# ------------------------------------------------------------
-# @functools.lru_cache(maxsize=1)
-def _load_megatron_defaults() -> Dict[str, Any]:
-    """
-    Load all default values defined by Megatron-LM's argparse.
-
-    We call parser.parse_args([]), which returns a Namespace containing ONLY
-    default values (because no CLI arguments are provided).
-    """
-    parser = _build_megatron_parser()
-    args = parser.parse_args([])  # Parse an empty list -> only defaults
-    return vars(args).copy()  # Convert Namespace -> dict and cache
 
 
 class MegatronTrainer(BaseTrainer, BaseModule):
@@ -1191,18 +1153,18 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # Use trainer args from primus
         # args = self.module_config
 
-        # Merge Megatron defaults with Primus config
-        # 1. Load Megatron defaults
+        # Build Megatron arguments by merging Primus config into Megatron defaults.
+        # 1) Load Megatron defaults (no Primus overrides)
         megatron_defaults = _load_megatron_defaults()
 
-        # 2. Convert Primus config to dict
-        primus_args = yaml_utils.nested_namespace_to_dict(self.module_config)
+        # 2) Convert Primus module_config (nested namespace) to a plain dict
+        primus_args = nested_namespace_to_dict(self.module_config)
 
-        # 3. Merge: defaults < primus_args
+        # 3) Merge: defaults < primus_args
         merged_args = megatron_defaults.copy()
         merged_args.update(primus_args)
 
-        # 4. Convert to Namespace
+        # 4) Convert to Namespace for compatibility with downstream Megatron utilities
         args = argparse.Namespace(**merged_args)
 
         # Prep for checkpoint conversion.

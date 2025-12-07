@@ -1,2 +1,7 @@
+extends:
+  - model_base.yaml
+
 model_name: "llama3.3-70b"
 tokenizer_path: "meta-llama/Llama-3.3-70B-Instruct"
+attention: "cudnn_flash_te"
+use_iota_embed: true
