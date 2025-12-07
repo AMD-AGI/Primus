@@ -37,6 +37,7 @@ RUN apt-get update && \
 # INFO: Installation completed successfully
 
 COPY ${AINIC_BUNDLE_PATH}/ainic_bundle_1.117.5-a-38.tar.gz /opt/
+COPY ${AINIC_BUNDLE_PATH}/amd-anp-v1.3.0.patch /opt/
 RUN cd ${WORKDIR} && \
     echo "Building ainic bundle... current directory: ${WORKDIR}" && \
     tar zxf ainic_bundle_1.117.5-a-38.tar.gz && \
@@ -93,6 +94,7 @@ ENV RCCL_HOME=${WORKDIR}/rccl
 
 # sed -i '5a CFLAGS += --offload-arch=gfx950' ./Makefile && head -10 ./Makefile && \
 
+WORKDIR /opt
 COPY ${AINIC_BUNDLE_PATH}/amd-anp-v1.3.0.patch /opt/
 RUN cd ${WORKDIR} && git clone https://github.com/rocm/amd-anp.git && \
 cd amd-anp && git checkout tags/v1.3.0 && \
