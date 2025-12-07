@@ -303,8 +303,8 @@ class PrimusParser(object):
             return
 
         # Validate required keys
-        for key in ("config", "model"):
-            yaml_utils.check_key_in_namespace(module, key)
+        # for key in ("config", "model"):
+        #     yaml_utils.check_key_in_namespace(module, key)
 
         # ---- Load module config ----
         model_format = self.get_model_format(framework)
@@ -313,7 +313,7 @@ class PrimusParser(object):
         module_config = yaml_utils.dict_to_nested_namespace(module_config_dict)
         module_config.name = f"exp.modules.{module_name}.config"
         module_config.framework = framework
-        module_config.model = module.model
+        # module_config.model = module.model
 
         # ---- Load model config ----
         model_config_dict = PresetLoader.load(module.model, model_format, config_type="models")
