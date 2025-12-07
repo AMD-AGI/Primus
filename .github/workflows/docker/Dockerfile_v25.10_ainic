@@ -91,9 +91,12 @@ ENV RCCL_HOME=${WORKDIR}/rccl
 
 # =============================== Build AMD ANP ===============================
 
+# sed -i '5a CFLAGS += --offload-arch=gfx950' ./Makefile && head -10 ./Makefile && \
+
+COPY ${AINIC_BUNDLE_PATH}/amd-anp-v1.3.0.patch /opt/
 RUN cd ${WORKDIR} && git clone https://github.com/rocm/amd-anp.git && \
 cd amd-anp && git checkout tags/v1.3.0 && \
-sed -i '5a CFLAGS += --offload-arch=gfx950' ./Makefile && head -10 ./Makefile && \
+git apply /opt/amd-anp-v1.3.0.patch && \
 make -j 16 RCCL_HOME=${RCCL_HOME} \
            MPI_INCLUDE=${MPI_PATH}/include/ \
            MPI_LIB_PATH=${MPI_PATH}/lib/ \
