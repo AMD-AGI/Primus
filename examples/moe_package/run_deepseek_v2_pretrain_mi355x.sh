@@ -6,7 +6,8 @@
 ###############################################################################
 
 ######################### Training Docker and Variables #########################
-export DOCKER_IMAGE="docker.io/tasimage/primus:pr-316-gfx950-ainic"
+# export DOCKER_IMAGE="docker.io/tasimage/primus:pr-316-gfx950-ainic"
+export DOCKER_IMAGE="docker.io/tasimage/primus:pr-316-v25.10-ainic"
 # export DOCKER_IMAGE="docker.io/rocm/megatron-lm:v25.10"
 export CLEAN_DOCKER_CONTAINER=1
 export SKIP_TRAIN=0
