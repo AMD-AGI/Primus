@@ -6,22 +6,15 @@
 ###############################################################################
 
 ######################### Training Docker and Variables #########################
-# export DOCKER_IMAGE=${DOCKER_IMAGE:="docker.io/rocm/pytorch-training-private:20250929_gfx950_25dot9_rc4"}
-# export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ci_4096e28_20251114"
-# export DOCKER_IMAGE="docker.io/tasimage/primus:pr-289"
-# export DOCKER_IMAGE="docker.io/tasimage/primus:pr-300"
-# export DOCKER_IMAGE="docker.io/tasimage/primus:pr-282-gfx950"
-export DOCKER_IMAGE="docker.io/tasimage/primus:pr-308-gfx950-ainic"
-# export DOCKER_IMAGE="docker.io/rocm/mad-private:primus_rocm7.1_ainic_ci_422b274_20251126"
+export DOCKER_IMAGE="docker.io/tasimage/primus:pr-316-gfx950-ainic"
 export CLEAN_DOCKER_CONTAINER=1
+export SKIP_TRAIN=0
 
 ######################### Training Environment Variables #########################
 export HF_TOKEN=${HF_TOKEN:-"your_hf_token"}
 export WANDB_API_KEY=${WANDB_API_KEY:-"your_wandb_api_key"}
-# TODO
-export GPU_MAX_HW_QUEUES=2
-# export GPU_MAX_HW_QUEUES=8
-export CPUS_PER_TASK=96
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+export CPUS_PER_TASK=${CPUS_PER_TASK:-96}
 
 # Set on Primus-Safe Platform
 # export MASTER_ADDR=${MASTER_ADDR:-localhost}
@@ -31,52 +24,47 @@ export CPUS_PER_TASK=96
 # export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
 # Set on MI355X cluster
-export NNODES=4
-export USING_AINIC=1
+export NNODES=${NNODES:-4}
+export USING_AINIC=${USING_AINIC:-1}
 # AAC14 cluster
 # export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
 # export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
 # export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
 # vultr cluster
-export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7" # modify based on the GPU NiC settings
-export ANP_HOME_DIR="/opt/amd-anp"
-export RCCL_HOME_DIR="/opt/rccl"
-export MPI_HOME_DIR="/opt/ompi-4.1.6"
-export NCCL_SOCKET_IFNAME="enp193s0f1np1"
-export GLOO_SOCKET_IFNAME="enp193s0f1np1"
-
-export NCCL_IB_RETRY_CNT=20
-export NCCL_IB_TIMEOUT=300
-export HSA_NO_SCRATCH_RECLAIM=1
-export NVTE_CK_USES_BWD_V3=1
-# export USE_ROCM_AITER_ROPE_BACKEND=0
-# export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=0
+export NCCL_IB_HCA=${NCCL_IB_HCA:-"ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7"}
+export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-"enp193s0f1np1"}
+export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-"enp193s0f1np1"}
+export NCCL_IB_RETRY_CNT=${NCCL_IB_RETRY_CNT:-20}
+export NCCL_IB_TIMEOUT=${NCCL_IB_TIMEOUT:-300}
+export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
+export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 
 ######################### Training Config #########################
-MBS=8
-GBS=$((64 * NNODES))
-# GBS=$((768 * NNODES))
-SEQ_LENGTH=4096
-TP=1
-ETP=1
-PP=1
-VPP=1
-EP=8
-CP=1
-CP_COMM_TYPE="a2a" # p2p, a2a, allgather or a2a+p2p
+export MBS=${MBS:-8}
+export GA=${GA:-12}
+export GBS=${GBS:-$((GA * MBS * NNODES * 8))}
+# export GBS=${GBS:-$((768 * NNODES))}
+export SEQ_LENGTH=${SEQ_LENGTH:-4096}
+export TP=${TP:-1}
+export ETP=${ETP:-1}
+export PP=${PP:-1}
+export VPP=${VPP:-1}
+export EP=${EP:-8}
+export CP=${CP:-1}
+export CP_COMM_TYPE=${CP_COMM_TYPE:-"a2a"} # p2p, a2a, allgather or a2a+p2p
 # TODO: set to true to enable MLA
-ENABLE_MLA=False
-ENABLE_MTP=False
-LOAD_BALANCE=True
-OPTIMIZER=adam
-RECOMPUTE_LAYERS=0
-LEGACY_GG=True
-FP8=False # True for fp8, False for bf16
-PROFILE=False
-DISABLE_CPU_TRACE=False
-PROFILE_STEP_START=5
-PROFILE_STEP_END=6
-TRAIN_ITERS=5
+export ENABLE_MLA=${ENABLE_MLA:-False}
+export ENABLE_MTP=${ENABLE_MTP:-False}
+export LOAD_BALANCE=${LOAD_BALANCE:-True}
+export OPTIMIZER=${OPTIMIZER:-adam}
+export RECOMPUTE_LAYERS=${RECOMPUTE_LAYERS:-0}
+export LEGACY_GG=${LEGACY_GG:-True}
+export FP8=${FP8:-False} # True for fp8, False for bf16
+export PROFILE=${PROFILE:-False}
+export DISABLE_CPU_TRACE=${DISABLE_CPU_TRACE:-False}
+export PROFILE_STEP_START=${PROFILE_STEP_START:-5}
+export PROFILE_STEP_END=${PROFILE_STEP_END:-6}
+export TRAIN_ITERS=${TRAIN_ITERS:-10}
 
 # MoE_Features legend:
 # 0 - Baseline (no extra optimization toggles)
@@ -240,7 +228,7 @@ else
 fi
 
 VPP_ARGS=()
-if [ $VPP -gt 1 ]; then
+if [ "$VPP" -gt 1 ]; then
     VPP_ARGS+=("--num_virtual_stages_per_pipeline_rank" "$VPP")
 fi
 
@@ -272,7 +260,7 @@ export PRIMUS_TEAM
 PRIMUS_USER=user-tas
 export PRIMUS_USER
 # export PRIMUS_EXP_NAME="debug"
-export PRIMUS_EXP_NAME="MoEProxy_MI355X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_MLA${ENABLE_MLA}_MTP${ENABLE_MTP}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}-${PROFILE_STEP_START}-${PROFILE_STEP_END}_NoCPUTrace${DISABLE_CPU_TRACE}_Queue${GPU_MAX_HW_QUEUES}_Features${FEATURE_TAG}"
+export PRIMUS_EXP_NAME="MoEProxy_MI355X_FP8${FP8}_NNODES${NNODES}_GA${GA}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_MLA${ENABLE_MLA}_MTP${ENABLE_MTP}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}-${PROFILE_STEP_START}-${PROFILE_STEP_END}_NoCPUTrace${DISABLE_CPU_TRACE}_Queue${GPU_MAX_HW_QUEUES}_Features${FEATURE_TAG}"
 
 LOG_DIR=./output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
 export DUMP_PP_DIR=$LOG_DIR/pp_dump
@@ -298,7 +286,6 @@ echo "RECOMPUTE_ARGS=${RECOMPUTE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "PROFILE_ARGS=${PROFILE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "--------------------------------" | tee -a "$LOG_FILE"
 
-export SKIP_TRAIN=0
 
 bash ./examples/run_slurm_pretrain.sh \
     --micro_batch_size "$MBS" \

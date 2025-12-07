@@ -120,10 +120,24 @@ jobs:
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker-gfx950-ainic] Total elapsed time: ${elapsed} seconds"
 
+          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-v25.10-ainic"
+          start_time=$(date +%s)
+          mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
+          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.1-a-42.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_v25.10_ainic \
+               -t tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic \
+               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+               --build-arg AINIC_BUNDLE_PATH=ainic \
+               $GITHUB_WORKSPACE/.github/workflows/docker
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build primus docker-v25.10-ainic] Total elapsed time: ${elapsed} seconds"
+
           echo "> Docker tag image for Docker Hub"
           docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}
           docker tag tasimage/primus:${{env.IMAGE_TAG}}-gfx950 docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950
           docker tag tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic
+          docker tag tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic
 
           echo "> Login to Primus Docker Hub"
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
@@ -133,6 +147,7 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [push primus docker] Total elapsed time: ${elapsed} seconds"
@@ -141,6 +156,7 @@ jobs:
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-gfx950
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic
+          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic
           # echo "> build-docker success"
 
   # run-unittest:

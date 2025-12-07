@@ -1,0 +1,105 @@
+# Base image
+FROM docker.io/rocm/primus:v25.10
+
+# Specify the commit of Primus-Turbo when building: docker build --build-arg PRIMUS_TURBO_COMMIT=xxx .)
+ARG PRIMUS_TURBO_COMMIT
+ARG AINIC_BUNDLE_PATH
+
+# Install basic dependencies
+RUN apt-get update
+
+# Clone and install the Primus-Turbo
+WORKDIR /opt
+RUN mkdir -p /opt && cd /opt && \
+    git clone https://github.com/AMD-AGI/Primus-Turbo.git && \
+    cd Primus-Turbo && \
+    git checkout ${PRIMUS_TURBO_COMMIT} && \
+    git submodule update --init --recursive && \
+    pip3 install -r requirements.txt && \
+    GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
+
+RUN apt-get install --reinstall binutils -y && apt-get install numactl -y
+
+WORKDIR /opt
+ENV WORKDIR=/opt
+ENV ROCM_PATH=/opt/rocm
+
+RUN apt-get update && \
+    apt-get install jq dpkg-dev kmod xz-utils \
+    libfmt-dev libboost-all-dev \
+    libibverbs-dev ibverbs-utils infiniband-diags -y
+
+# =============================== Build AINIC Driver ===============================
+# WARNING: Please ensure the following environment variables are correctly set:
+# WARNING:     1. PATH: /usr/sbin must be included.
+# WARNING:     2. LD_LIBRARY_PATH: /usr/lib must be included.
+# WARNING: If these paths are missing, tools and libraries may not function correctly.
+# INFO: Installation completed successfully
+
+COPY ${AINIC_BUNDLE_PATH}/ainic_bundle_1.117.1-a-42.tar.gz /opt/
+RUN cd ${WORKDIR} && \
+    echo "Building ainic bundle... current directory: ${WORKDIR}" && \
+    tar zxf ainic_bundle_1.117.1-a-42.tar.gz && \
+    cd ainic_bundle_1.117.1-a-42 && \
+    tar zxf host_sw_pkg.tar.gz && \
+    cd host_sw_pkg && \
+    ./install.sh --domain=user -y 2>&1 | tee log_install.txt && \
+    cd /opt
+
+# =============================== Test AINIC Driver ===============================
+# ibv_devices
+# rdma link
+# ethtool -i enp9s0
+# ibv_devinfo -vv | grep GID
+
+# =============================== Build UCX ===============================
+RUN cd ${WORKDIR} && wget https://github.com/openucx/ucx/releases/download/v1.18.0/ucx-1.18.0.tar.gz && \
+    mkdir -p ucx-1.18.0 && \
+    tar -zxf ucx-1.18.0.tar.gz -C ucx-1.18.0 --strip-components=1 && \
+    cd ucx-1.18.0 && mkdir build && cd build && \
+    ../configure --prefix=${WORKDIR}/ucx-1.18.0/install --with-rocm=${ROCM_PATH} 2>&1 | tee log_ucx_configure.txt && \
+    make -j 16 2>&1 | tee log_ucx_build.txt && \
+    make install && \
+    cd ${WORKDIR}
+
+ENV UCX_INSTALL_DIR=${WORKDIR}/ucx-1.18.0/install
+
+# =============================== Build MPI ===============================
+RUN cd ${WORKDIR} && \
+    wget https://download.open-mpi.org/release/open-mpi/v4.1/openmpi-4.1.6.tar.gz && \
+    mkdir -p ompi-4.1.6 && \
+    tar -zxf openmpi-4.1.6.tar.gz -C ompi-4.1.6 --strip-components=1 && \
+    cd ompi-4.1.6 && mkdir build && cd build && \
+    ../configure --prefix=${WORKDIR}/ompi-4.1.6/install --with-ucx=${UCX_INSTALL_DIR} \
+        --disable-oshmem --disable-mpi-fortran 2>&1 | tee log_mpi_configure.txt && \
+    make -j 16 2>&1 | tee log_mpi_build.txt && \
+    make install && \
+    cd ${WORKDIR}
+
+ENV MPI_PATH=${WORKDIR}/ompi-4.1.6/install
+
+# =============================== Build RCCL ===============================
+RUN cd ${WORKDIR} && \
+    git clone https://github.com/ROCm/rccl.git && \
+    cd rccl && git checkout drop/2025-08 && \
+    ./install.sh -l --prefix build/ --disable-mscclpp \
+        --disable-msccl-kernel --amdgpu_targets="gfx950" 2>&1 | tee log_rccl_install.txt && \
+    cd ${WORKDIR}
+
+ENV RCCL_HOME=${WORKDIR}/rccl
+
+# =============================== Build AMD ANP ===============================
+
+RUN cd ${WORKDIR} && git clone https://github.com/rocm/amd-anp.git && \
+cd amd-anp && git checkout tags/v1.1.0-5 && \
+sed -i '5a CFLAGS += --offload-arch=gfx950' ./Makefile && head -10 ./Makefile && \
+make -j 16 RCCL_BUILD=${RCCL_HOME}/build/release \
+           MPI_INCLUDE=${MPI_PATH}/include/ \
+           MPI_LIB_PATH=${MPI_PATH}/lib/ \
+           ROCM_PATH=${ROCM_PATH} 2>&1 | tee log_amd_anp_build.txt
+
+# Set the default working directory
+WORKDIR /opt
+
+# check the installed Primus-Turbo package
+RUN python3 -m pip show primus-turbo || true
