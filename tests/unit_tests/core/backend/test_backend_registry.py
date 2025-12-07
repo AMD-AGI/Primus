@@ -135,14 +135,11 @@ class TestBackendRegistryLazyLoading:
         """Test that get_adapter triggers lazy loading."""
         # Don't pre-register, let it lazy load
         # This will try to load megatron backend
-        try:
-            # Note: get_adapter now also tries setup_backend_path
-            adapter = registry_module.BackendRegistry.get_adapter("megatron", backend_path=None)
-            # If megatron is installed, should succeed
-            assert adapter is not None
-        except (ValueError, FileNotFoundError):
-            # If not installed or path not found, should get helpful error
-            pass
+        # Note: get_adapter now also tries setup_backend_path
+        adapter = registry_module.BackendRegistry.get_adapter("megatron", backend_path=None)
+        # If megatron is installed and registered correctly, this should not raise
+        # and must return a non-None adapter instance.
+        assert adapter is not None
 
     def test_list_available_backends(self):
         """Test listing available backends."""
