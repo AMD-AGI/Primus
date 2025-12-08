@@ -68,20 +68,23 @@ Unlike dense models, MoE training introduces a unique challenge: the MoE layer j
 
 To tackle the MoE training bottlenecks outlined above (grouped GEMM inefficiency, all-to-all communication overhead, CPU sync & launch delays, pipeline imbalance, and memory pressure), we introduce the following optimizations:
 
-### Feature 1 – Turbo Grouped MLP @kyle
+### Feature 1 – Turbo Grouped GEMM
 - Description: Primus-Turbo leverages fused CK (Composable Kernel) grouped GEMM to handle all experts in a single kernel launch, outperforming the traditional multi-stream approach that overlaps expert computations but still suffers from scheduling overhead.
+  In addition, Primus-Turbo also supports selecting the fastest grouped GEMM backend for different kernels in the forward and backward passes, further boosting performance.
+  The following bar chart compares the speedup of grouped GEMM after applying Primus-Turbo autotune versus the original multi-stream version. The benchmark was conducted on MI325x.
 
-### Feature 2 – Loss Fusion Helper
-- Description: Modern LLMs often have massive vocab sizes, which makes the loss computation a memory hog. Loss fusion fuse the caculation into a single kernel, reduce both memory footprint and kernel overhead in one shot.
+![Grouped GEMM speedup comparison](./figures/turbo-groupedgemm.png)
 
-### Feature 3 – DeepEP Acceleration @huang zhen
 
-- Description: DeepEP (Deep Expert Parallelism) optimizes expert token dispatch in Mixture-of-Experts (MoE) models by significantly reducing redundant cross-node data movement required by traditional all-to-all communication. By leveraging GPU-based index calculation instead of CPU-side coordination, our adapted DeepEP implementation eliminates costly CPU-GPU synchronizations, enabling a fully sync-free pipeline. Built on open-source DeepEP and further tuned for Primus, this solution not only accelerates dispatch and router operations but also achieves higher scaling efficiency, especially critical for large-scale, multi-node training. DeepEP thus enables more efficient expert utilization, reduces communication bottlenecks, and paves the way for scalable, high-performance MoE training.
-This figure illustrates the key differences between DeepEP and standard all-to-all communication in MoE models. With DeepEP, redundant data transmission between GPUs is minimized by more intelligently routing tokens to experts, drastically reducing unnecessary cross-node data movement. As a result, DeepEP improves overall data transfer efficiency and leads to higher scalability and throughput during large-scale MoE training.
+### Feature 2 – DeepEP Acceleration
+
+- Description: DeepEP optimizes expert token dispatch in Mixture-of-Experts (MoE) models by significantly reducing redundant cross-node data movement required by traditional all-to-all communication. By leveraging GPU-based index calculation instead of CPU-side coordination, our adapted DeepEP implementation eliminates costly CPU-GPU synchronizations, enabling a fully sync-free pipeline. Built on open-source DeepEP and further tuned for Primus, this solution not only accelerates dispatch and router operations but also achieves higher scaling efficiency, especially critical for large-scale, multi-node training. DeepEP thus enables more efficient expert utilization, reduces communication bottlenecks, and paves the way for scalable, high-performance MoE training.
+
+  This figure illustrates the key differences between DeepEP and standard all-to-all communication in MoE models. With DeepEP, redundant data transmission between GPUs is minimized by more intelligently routing tokens to experts, drastically reducing unnecessary cross-node data movement. As a result, DeepEP improves overall data transfer efficiency and leads to higher scalability and throughput during large-scale MoE training.
 
 ![deepep introduction](./figures/deepep-intro.png)
 
-### Feature 4 – Sync-Free MoE
+### Feature 3 – Sync-Free MoE
 - Description: The dynamic shape of MoE (such as, required hip/cuda kernel results to allocate device memory) can lead to D2H synchronization and cause significant CPU overhead. This may increase device idle time and impose considerable performance impact on training, which becomes particularly noticeable when context-parallelism is enabled. We have eliminated all CPU synchronization throughout MoE pipeline—from Router to Dispatcher, Permutation, and GroupMLP —reducing the idle time. The sync-free MoE workflow is like this:
 
 ![Sync-Free MoE Workflow](./figures/sync-free-moe-workflow.png)
@@ -107,7 +110,7 @@ Sync-Free-related function parameters or options  in Primus-Megatron MoE, as fol
    - `use_turbo_groupmlp`: Primus-Megatron option to use Turbo's GroupMLP which accepted CUDA `num_token_per_experts` as parameter.
    - `use_turbo_groupmlp_act`: Primus-Megatron option to use Turbo's activation which accepted CUDA `num_token_per_experts` as parameter.
 
-### Feature 5 – 1F1B MoE Overlap @yuankai @lihuan
+### Feature 4 – 1F1B MoE Overlap
 
 - Description: Overlaps expert communication with backward compute using 1F1B scheduling.
 - Args:
@@ -117,7 +120,7 @@ Sync-Free-related function parameters or options  in Primus-Megatron MoE, as fol
   - `--moe_shared_expert_overlap False`
 - TODO: revisit once the patch flag can be safely re-enabled.
 
-### Feature 6 – Zero-Bubble Pipeline @yao cheng
+### Feature 5 – Zero-Bubble Pipeline
 
 - Description: Applies the zero-bubble virtual-pipeline schedule. References:
   - `primus/backends/megatron/core/pipeline_parallel/zerobubble/README.md`
@@ -133,19 +136,22 @@ Sync-Free-related function parameters or options  in Primus-Megatron MoE, as fol
 | `v-half` | 2 | true | true | half |
 | `v-min` | 2 | true | true | min |
 
-### Feature 7 – Arbitrary Pipeline Partition
+### Feature 6 – Arbitrary Pipeline Partition
 
 - Description: Forces a manually curated pipeline layout (e.g., `Et|(tt|)*6L`) to balance memory/compute.
 - Args:
   - `--pipeline_model_parallel_layout Et|(tt|)*6L` (commented patterns in the script show other options)
 - Notes: Still experimental; expect to tune per model depth.
 
-### Feature 8 – Recompute Selected Layers @liying
+### Feature 7 – Recompute Selected Layers
 
 - Description: Recomputes the first four transformer layers to save activation memory without enabling full recompute.
 - Args:
   - `--recompute_layer_ids 0,1,2,3`
 - Notes: Keep `RECOMPUTE_LAYERS` at `0` so this helper remains the only recompute knob.
+
+### Feature 8 – Loss Fusion Helper
+- Description: Modern LLMs often have massive vocab sizes, which makes the loss computation a memory hog. Loss fusion fuse the caculation into a single kernel, reduce both memory footprint and kernel overhead in one shot.
 
 ### Feature 9 – CPU Launch Optimization
 
@@ -168,7 +174,7 @@ This section provides an overview and practical guidance for optimizing differen
 
 #### 1. Model Overview and Configuration Files
 
-DeepSeek-V2-Lite is a more memory- and compute-efficient variant, designed for high-throughput pretraining. Typical sizes range from 80B to 180B parameters. In Primus, you can find its configs and pretrain scripts under:
+DeepSeek-V2-Lite is a more memory and compute-efficient variant, designed for high-throughput pretraining. Typical sizes range from 80B to 180B parameters. In Primus, you can find its configs and pretrain scripts under:
 
 | Variant | Total Params | Active Params | Transformer Layers |
 | --- | --- | --- | --- |
@@ -181,7 +187,7 @@ DeepSeek-V2-Lite is a more memory- and compute-efficient variant, designed for h
 
 AMD MI300/325/355 series GPUs offer very large memory pools. The easiest and most effective way to leverage this is to increase the micro batch size (mbs). For MoE models, the `EP` (expert parallel size) parameter enables scaling individual expert models across devices. For models exceeding 180B, you can further utilize pipeline parallelism (`PP`) to split the model, maximizing memory savings.
 
-The following bar chart illustrates how increasing the micro-batch size (MBS) during DeepSeek-V2-Lite training on an AMD MI355 GPU improves both throughput (tokens per second) and GPU memory utilization. By scaling up the MBS, you can achieve better hardware efficiency and model performance, within the limits of available memory resources.
+The following bar chart illustrates how increasing the micro-batch size (MBS) during DeepSeek-V2-Lite training on an AMD **MI355** GPU improves both throughput (tokens per second) and GPU memory utilization. By scaling up the MBS, you can achieve better hardware efficiency and model performance, within the limits of available memory resources.
 
 ![DeepSeek-V2-Lite MI355 Batch Size Scaling – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_mbs_scaling_mi355.png)
 
@@ -245,7 +251,7 @@ This section summarizes our key optimization strategies used to enhance DeepSeek
 4. **Sync-Free Mode to Resolve CPU D2H Synchronization Overheads**
 6. **Reducing Pipeline Bubble Ratio via Interleaved Pipeline Parallelism (Interleaved PP)**
 
-Each of these optimizations contributes incrementally to more stable, efficient, and scalable MoE training. Additionally, we have observed that enabling VPP (Virtual Pipeline Parallelism) further enhances the effectiveness of sync-free mode. Through stepwise optimization, we observe a clear and significant boost in end-to-end training performance. The figures below summarize the measured throughput improvements and memory utilization as each optimization feature is incrementally enabled.
+Each of these optimizations contributes incrementally to more stable, efficient, and scalable MoE training. Additionally, we have observed that enabling VPP (Virtual Pipeline Parallelism) further enhances the effectiveness of sync-free mode. Through stepwise optimization, we observe a clear and significant boost in end-to-end training performance. The figures below summarize the measured throughput improvements and memory utilization on **MI355X** as each optimization feature is incrementally enabled.
 
 **Figure 1**:
 Per-feature throughput (tokens/s) and speedup relative to baseline. This illustrates the acceleration contributed by each optimization as it is introduced.
