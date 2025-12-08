@@ -1,246 +1,368 @@
 # MoE Training Best Practices on AMD GPUs
 
-This document summarizes the best practices for training Mixture-of-Experts (MoE) models on AMD Instinct™ MI300-series GPUs and the ROCm ecosystem. It covers large-scale sparse model distributed training strategies, key performance bottlenecks, practical optimization techniques, and hands-on engineering tips specifically for AMD platforms. Whether you’re new to MoE distributed architectures or working to optimize trillion-parameter models for scalability and performance, this guide will help you identify typical bottlenecks and implement solutions to maximize efficiency on AMD GPUs.
+This guide covers best practices for training Mixture-of-Experts (MoE) models on AMD Instinct™ MI300/MI355-series GPUs with the ROCm ecosystem. Whether you're new to MoE distributed architectures or optimizing trillion-parameter models, this document will help you identify bottlenecks and maximize efficiency on AMD hardware.
 
-## 1. MoE Model Overview
-
-Mixture of Experts (MoE) is a model architecture designed to efficiently scale neural networks by routing inputs through a subset of specialized sub-models, or "experts." Each expert is a part of a larger ensemble and is trained to handle specific types of data or tasks. The architecture includes a gating mechanism that dynamically routes data to the most relevant experts based on the input, allowing only a few paths to be activated per input. This enables the model to maintain a large capacity while using fewer computational resources, as only a fraction of the model is used during inference. MoE models have shown success in massively increasing model capacity without proportionally increasing computation cost, proving effective in areas like natural language processing.
-
-
-## 2. Representative Models
-
-The mainstream MoE models today are DeepSeek-style architectures, spanning from 16B up to 200B+ parameters. Recently, even larger MoE models have started to appear in the open-source community. To keep pace, we also include 1T and 2T proxy models for evaluating how increasing model scale impacts memory footprint, performance, scalability, and corresponding optimization strategies. The table below summarizes the key model configurations for commonly used open-source DeepSeek models as well as large proxy models.
-
-| Model | Total Params | Active Params | Notes |
-| --- | --- | --- | --- |
-| DeepSeek-v2-Lite  | 16B | 2.4B | `deepseek_v2_lite.yaml` |
-| DeepSeek-v2 | 236B | 21B | `deepseek_v2.yaml` |
-| DeepSeek-Proxy-1T   | 1T | 44B | `deepseek_proxy_1T.yaml` |
-| DeepSeek-Proxy-2T   | 2T | 80B | `deepseek_proxy_2T.yaml` |
-
-
-## 3. Profiling and Analysis Workflow
-
-For performance analysis and bottleneck identification during MoE model training, we recommend the following workflow:
-
-- **Step 1: Torch Profiler + TraceLens**
-  Torch Profiler provides detailed runtime traces of operator execution time, memory usage, and GPU utilization during training. You can use `profile_step_start` and `profile_step_end` to precisely control the profiling window, making it easy to pinpoint bottlenecks and optimization opportunities.
-
-
-- **Step 2: Detailed Bottleneck Analysis with TraceLen**
-  [TraceLens](https://github.com/AMD-AGI/TraceLens/tree/main) is a Python tool designed to automate the analysis of trace files and deliver actionable performance insights, it's a specialized tool designed by AMD for fine-grained identification of performance bottlenecks such as communication stalls, unbalanced compute, or inefficient operator fusion. Its key features include:
-
-    - **Hierarchical Performance Breakdown**: Visualize bottlenecks from a high-level GPU timeline down to individual operator and shape granularity.
-    - **Roofline and Efficiency Analysis**: Quickly assess operation efficiency (TFLOP/s, memory bandwidth) and identify whether kernels are compute- or memory-bound.
-    - **Multi-GPU Communication Diagnostics**: Separate pure communication time from synchronization, highlighting collective operation bottlenecks and bandwidth utilization.
-    - **Trace Comparison & Diff**: Directly compare traces to measure optimization effects and identify regressions.
-    - **Replay Generation**: Easily create minimal reproducers for any event, facilitating targeted debugging and kernel verification.
-    - **Simple API**: Get started with ready-made scripts or extend functionality using a flexible Python interface.
-
-- **Step 3: Memory Projection**
-  Memory projection enables comprehensive VRAM usage analysis, identifying memory bottlenecks in the model. By projecting memory consumption across layers, optimizer states, and expert routing, it guides targeted adjustments to model structure, parallelization strategy, and memory optimizations for improved scaling efficiency.
-
-- **Step 4: Pipeline Parallelism Visualization**
-  Primus provides a built-in PP (pipeline-parallel) visualization tool [pp_vis](https://github.com/AMD-AGI/Primus/tree/main/tools/visualization/pp_vis) that helps diagnose and visualize pipeline-stage utilization across ranks. This tool is valuable for discovering pipeline bubbles or imbalances that limit throughput.
-
-
-
-## 4. Baseline Bottleneck Highlights
-
-Unlike dense models, MoE training introduces a unique challenge: the MoE layer juggles multiple experts and relies on routers to dispatch tokens dynamically. This added complexity opens the door to several performance pitfalls:
-
-- **Grouped GEMM overhead**: Even with multi-stream tricks to overlap expert computations, timeline traces still show noticeable gaps—there's room to squeeze out more efficiency.
-
-- **All-to-all communication**: The all-to-all collectives in MoE can eat up a surprisingly large chunk of runtime, especially once you scale beyond a single node with EP ≥ 8.
-
-- **CPU sync & launch delays**: Profiling often reveals big gaps between kernels. The culprits? Lots of tiny ops plus CPU-side syncs that stall the launch queue.
-
-- **Too many small kernels**: MoE layers are packed with fine-grained operators, which hammers the kernel launch path and bloats CPU overhead.
-
-- **PP load imbalance**: Using `pp_vis`, we've spotted cases where uneven work across pipeline stages quietly drags down overall throughput.
-
-- **Memory crunch**: GPU memory is always tight. Push it too far and you're forced into recomputation—burning extra FLOPs just to stay afloat.
-
-
-
-## 5. Performance Optimizations
-
-To tackle the MoE training bottlenecks outlined above (grouped GEMM inefficiency, all-to-all communication overhead, CPU sync & launch delays, pipeline imbalance, and memory pressure), we introduce the following optimizations:
-
-### Feature 1 – Turbo Grouped GEMM
-- Description: Primus-Turbo leverages fused CK (Composable Kernel) grouped GEMM to handle all experts in a single kernel launch, outperforming the traditional multi-stream approach that overlaps expert computations but still suffers from scheduling overhead.
-  In addition, Primus-Turbo also supports selecting the fastest grouped GEMM backend for different kernels in the forward and backward passes, further boosting performance.
-  The following bar chart compares the speedup of grouped GEMM after applying Primus-Turbo autotune versus the original multi-stream version. The benchmark was conducted on MI325x.
-
-![Grouped GEMM speedup comparison](./figures/turbo-groupedgemm.png)
-
-
-### Feature 2 – DeepEP Acceleration
-
-- Description: DeepEP optimizes expert token dispatch in Mixture-of-Experts (MoE) models by significantly reducing redundant cross-node data movement required by traditional all-to-all communication. By leveraging GPU-based index calculation instead of CPU-side coordination, our adapted DeepEP implementation eliminates costly CPU-GPU synchronizations, enabling a fully sync-free pipeline. Built on open-source DeepEP and further tuned for Primus, this solution not only accelerates dispatch and router operations but also achieves higher scaling efficiency, especially critical for large-scale, multi-node training. DeepEP thus enables more efficient expert utilization, reduces communication bottlenecks, and paves the way for scalable, high-performance MoE training.
-
-  This figure illustrates the key differences between DeepEP and standard all-to-all communication in MoE models. With DeepEP, redundant data transmission between GPUs is minimized by more intelligently routing tokens to experts, drastically reducing unnecessary cross-node data movement. As a result, DeepEP improves overall data transfer efficiency and leads to higher scalability and throughput during large-scale MoE training.
-
-![deepep introduction](./figures/deepep-intro.png)
-
-### Feature 3 – Sync-Free MoE
-- Description: The dynamic shape of MoE (such as, required hip/cuda kernel results to allocate device memory) can lead to D2H synchronization and cause significant CPU overhead. This may increase device idle time and impose considerable performance impact on training, which becomes particularly noticeable when context-parallelism is enabled. We have eliminated all CPU synchronization throughout MoE pipeline—from Router to Dispatcher, Permutation, and GroupMLP —reducing the idle time. The sync-free MoE workflow is like this:
-
-![Sync-Free MoE Workflow](./figures/sync-free-moe-workflow.png)
-
-We provide Primus users with the `--turbo_sync_free_moe_stage` option, which supports four levels of sync-free MoE (from 0 to 3), summarized as follows:
-
-| Level | Value | Description                                                                     |
-|-------|-------|---------------------------------------------------------------------------------|
-|  0    | Default | **Disable** sync-free MoE (standard, baseline implementation)                     |
-|  1    |   1   | Remove synchronization for **Router** and **Permutation**                        |
-|  2    |   2   | Remove synchronization for **Router**, **DeepEP**, and **GroupMLP**              |
-|  3    |   3   | Remove **all** MoE synchronization (full sync-free pipeline) <br> :warning: **Note:** This mode will consume significantly more additional GPU memory. If you do not have enough memory available, it is recommended **not to use stage 3**.
-
-Sync-Free-related function parameters or options  in Primus-Megatron MoE, as following:
-- Router:
-    - `fused_group_topk_routing_with_aux_score`: Primus-Megatron option to enable router fusion.
-- DeepEP
-   - `use_cuda_num_token_per_expert`: Turbo-DeepEP dispatch parameter to return `num_tokens_per_experts` by CUDA tensor
-   - `num_worst_token`: Turbo-DeepEP dispatch parameter to eliminate notify-dispatch CPU busy-wait
-- permuatation
-   - `moe_permutation_fusion`: Primus-Megatron option to enable permutation fusion.
-- groupmlp
-   - `use_turbo_groupmlp`: Primus-Megatron option to use Turbo's GroupMLP which accepted CUDA `num_token_per_experts` as parameter.
-   - `use_turbo_groupmlp_act`: Primus-Megatron option to use Turbo's activation which accepted CUDA `num_token_per_experts` as parameter.
-
-### Feature 4 – 1F1B MoE Overlap
-
-- Description: The 1F1B (1-Forward-1-Backward) overlap scheduling feature is designed to optimize the utilization of both compute and communication resources during MoE training. Traditionally, the communication of expert dispatch and aggregation (such as during all-to-all or DeepEP operations) occurs sequentially with respect to the forward and backward pass, resulting in idle compute or communication hardware for significant time periods. By leveraging 1F1B scheduling, the training interleaves the communication required for one micro-batch’s experts with the backward computation of a preceding micro-batch. This means that while the model is calculating backward gradients for micro-batch N-1, the expert tokens for micro-batch N are already being communicated, thus reducing pipeline stalls. F1B overlap is particularly beneficial at larger scales, where communication costs often dominate.
-
-### Feature 5 – Arbitrary Pipeline Partition
-- Description: This feature allows users to enforce a custom or manually designed pipeline partitioning scheme, rather than relying on default or automatic partitioning logic. By specifying an explicit pipeline layout, users can finely control how model layers are divided across pipeline stages. This approach can help to achieve an optimal balance between memory usage and compute efficiency tailored to specific hardware setups or model architectures. Manual pipeline partitioning is especially useful when trying to minimize memory bottlenecks, achieve more even stage workloads, or experiment with new partitioning strategies in large models. To use this functionality, specify your desired partition pattern in the configuration, ensuring that the pattern reflects the target balance between computational resources and available memory per device.
-
-### Feature 6 – Recompute Selected Layers
-- Description: Recomputes the first four transformer layers to save activation memory without enabling full recompute.
-- Args:
-  - `--recompute_layer_ids 0,1,2,3`
-- Notes: Keep `RECOMPUTE_LAYERS` at `0` so this helper remains the only recompute knob.
-
-### Feature 7 – Loss Fusion Helper
-- Description: Modern LLMs often have massive vocab sizes, which makes the loss computation a memory hog. Loss fusion fuse the caculation into a single kernel, reduce both memory footprint and kernel overhead in one shot.
-
-### Feature 8 – CPU Launch Optimization
-
-- Description: In large-scale MoE model training, CPU kernel launch efficiency is critical due to the high number of operators. We optimize this from two aspects: (1) NUMA binding, which pinpoints each GPU process to its associated NUMA socket for improved memory and compute access; (2) increasing the kernel argument pool size in HIP runtime to raise the upper limit of concurrent kernel launches, preventing launch bottlenecks.
-  - **NUMA binding usage**: Before running, set `export ENABLE_NUMA_BINDING=1` in Primus to pin each GPU process to its associated NUMA node, improving memory bandwidth utilization and training stability for large models.
-  - **Increase HIP kernel argument pool size**: Set `export HSA_KERNARG_POOL_SIZE=12582912` to raise the maximum number of concurrent kernel launches in the HIP runtime, helping to alleviate launch bottlenecks during large-scale MoE training.
-
-### Feature 9 – Manual GC Helper
-- Description: Forces periodic host GC to mitigate long-running Python fragmentation on multi-day runs.
-  In our training experiments with large-scale MoE models, we noticed that even with load balancing enabled, the performance of each iteration can still fluctuate noticeably. By enabling manual GC, these iteration time jitters are effectively eliminated, leading to more stable and consistent training performance. As a result, all subsequent benchmarking results in this guide are produced with manual GC enabled by default to ensure fair and reliable performance comparisons.
-
-
-## 7. Model-Specific Optimization Guide
-
-This section provides an overview and practical guidance for optimizing different DeepSeek model variants on Primus/AMD MI-series hardware. Each sub-section covers a specific model family like DeepSeek-V2-Lite, DeepSeek-V2, and ultra-large (1T+ parameters) models—with advice on configuration, baseline performance, bottleneck analysis, advanced tuning, and future directions.
+You'll learn about:
+- Large-scale sparse model distributed training strategies
+- Key performance bottlenecks and how to diagnose them
+- Practical optimization techniques for AMD platforms
 
 ---
 
-### 7.1 DeepSeek-V2-Lite Optimization
+## 1. MoE Model Overview
 
-#### 1. Model Overview and Configuration Files
+Mixture of Experts (MoE) is an architecture that efficiently scales neural networks by routing inputs through specialized sub-models called "experts." Instead of activating the entire model for every input, a gating mechanism dynamically selects the most relevant experts, allowing only a fraction of the network to process each token.
 
-DeepSeek-V2-Lite is a more memory and compute-efficient variant, designed for high-throughput pretraining. Typical sizes range from 80B to 180B parameters. In Primus, you can find its configs and pretrain scripts under:
+**Key benefits:**
+- **Large capacity with efficient compute**: Maintain billions of parameters while using only a subset during inference
+- **Specialized expertise**: Each expert learns to handle specific patterns in the data
+- **Cost-effective scaling**: Increase model size without proportionally increasing computation
+
+MoE models have proven highly effective in natural language processing and are increasingly used for massively scaled language models.
+
+---
+
+## 2. Representative Models
+
+Most modern open-source MoE models follow DeepSeek-style architectures, ranging from 16B to 200B+ parameters. To evaluate how increasing scale impacts memory, performance, and optimization strategies, we also include 1T and 2T proxy models.
+
+The table below summarizes commonly used model configurations:
+
+| Model | Total Params | Active Params | Notes |
+| --- | --- | --- | --- |
+| DeepSeek-v2-Lite | 16B | 2.4B | `deepseek_v2_lite.yaml` |
+| DeepSeek-v2 | 236B | 21B | `deepseek_v2.yaml` |
+| DeepSeek-Proxy-1T | 1T | 44B | `deepseek_proxy_1T.yaml` |
+| DeepSeek-Proxy-2T | 2T | 80B | `deepseek_proxy_2T.yaml` |
+
+---
+
+## 3. Profiling and Analysis Workflow
+
+To identify performance bottlenecks during MoE training, we recommend this workflow:
+
+### Step 1: Torch Profiler + TraceLens
+
+Torch Profiler captures detailed runtime traces including operator execution time, memory usage, and GPU utilization. Use `profile_step_start` and `profile_step_end` to precisely control the profiling window and pinpoint bottlenecks.
+
+### Step 2: Detailed Bottleneck Analysis with TraceLens
+
+[TraceLens](https://github.com/AMD-AGI/TraceLens/tree/main) is an AMD-developed Python tool that automates trace analysis and delivers actionable insights. Key features include:
+
+- **Hierarchical Performance Breakdown**: Visualize bottlenecks from high-level GPU timelines down to individual operators
+- **Roofline and Efficiency Analysis**: Assess operation efficiency (TFLOP/s, memory bandwidth) and identify compute vs. memory-bound kernels
+- **Multi-GPU Communication Diagnostics**: Separate communication time from synchronization, highlighting collective operation bottlenecks
+- **Trace Comparison & Diff**: Compare traces to measure optimization impact and identify regressions
+- **Replay Generation**: Create minimal reproducers for targeted debugging and kernel verification
+- **Simple API**: Get started quickly with ready-made scripts or extend with a flexible Python interface
+
+### Step 3: Memory Projection
+
+Memory projection provides comprehensive VRAM usage analysis across layers, optimizer states, and expert routing. This guides targeted adjustments to model structure, parallelization strategy, and memory optimizations for better scaling efficiency.
+
+### Step 4: Pipeline Parallelism Visualization
+
+Primus includes a built-in pipeline parallelism visualization tool ([pp_vis](https://github.com/AMD-AGI/Primus/tree/main/tools/visualization/pp_vis)) that helps diagnose pipeline-stage utilization across ranks. Use this to discover pipeline bubbles or imbalances that limit throughput.
+
+---
+
+## 4. Baseline Bottleneck Highlights
+
+Unlike dense models, MoE training introduces unique challenges. The MoE layer juggles multiple experts and relies on routers to dispatch tokens dynamically. This complexity creates several performance pitfalls:
+
+- **Grouped GEMM overhead**: Even with multi-stream tricks to overlap expert computations, timeline traces show noticeable gaps with room for improvement
+
+- **All-to-all communication**: These collectives can consume a large chunk of runtime, especially when scaling beyond a single node with EP ≥ 8
+
+- **CPU sync & launch delays**: Profiling often reveals large gaps between kernels caused by numerous small operations and CPU-side synchronizations that stall the launch queue
+
+- **Too many small kernels**: MoE layers contain many fine-grained operators, which stress the kernel launch path and increase CPU overhead
+
+- **Pipeline load imbalance**: Using `pp_vis`, we've identified cases where uneven work distribution across pipeline stages quietly degrades overall throughput
+
+- **Memory pressure**: GPU memory is always constrained. Pushing too hard forces recomputation, burning extra FLOPs just to fit the model
+
+---
+
+## 5. Performance Optimizations
+
+To address the MoE training bottlenecks above, we've developed the following optimizations:
+
+### Feature 1: Turbo Grouped GEMM
+
+**Description**: Primus-Turbo uses fused CK (Composable Kernel) grouped GEMM to process all experts in a single kernel launch, outperforming the traditional multi-stream approach that still suffers from scheduling overhead.
+
+Primus-Turbo also supports selecting the fastest grouped GEMM backend for different kernels in forward and backward passes, further boosting performance.
+
+The chart below compares grouped GEMM speedup after Primus-Turbo autotune versus the original multi-stream version (benchmarked on MI325x):
+
+![Grouped GEMM speedup comparison](./figures/turbo-groupedgemm.png)
+
+---
+
+### Feature 2: DeepEP Acceleration
+
+**Description**: DeepEP optimizes expert token dispatch by significantly reducing redundant cross-node data movement required by traditional all-to-all communication.
+
+Key improvements:
+- **GPU-based index calculation** instead of CPU-side coordination
+- **Eliminates costly CPU-GPU synchronizations** for a fully sync-free pipeline
+- **Higher scaling efficiency**, especially critical for large-scale, multi-node training
+
+Built on open-source DeepEP and tuned for Primus, this solution accelerates dispatch and router operations while minimizing communication bottlenecks.
+
+The figure below illustrates how DeepEP minimizes redundant data transmission between GPUs by intelligently routing tokens to experts:
+
+![DeepEP introduction](./figures/deepep-intro.png)
+
+---
+
+### Feature 3: Sync-Free MoE
+
+**Description**: The dynamic shapes in MoE (such as allocating device memory based on kernel results) can lead to device-to-host synchronization and significant CPU overhead. This increases device idle time and impacts training performance, especially when context parallelism is enabled.
+
+We've eliminated all CPU synchronization throughout the MoE pipeline—from Router to Dispatcher, Permutation, and GroupMLP—reducing idle time.
+
+The sync-free MoE workflow:
+
+![Sync-Free MoE Workflow](./figures/sync-free-moe-workflow.png)
+
+Primus provides the `--turbo_sync_free_moe_stage` option with four levels:
+
+| Level | Value | Description |
+|-------|-------|-------------|
+| 0 | Default | **Disable** sync-free MoE (standard baseline implementation) |
+| 1 | 1 | Remove synchronization for **Router** and **Permutation** |
+| 2 | 2 | Remove synchronization for **Router**, **DeepEP**, and **GroupMLP** |
+| 3 | 3 | Remove **all** MoE synchronization (full sync-free pipeline)<br>⚠️ **Warning:** This mode consumes significantly more GPU memory. Only use if you have sufficient memory available. |
+
+**Sync-Free related parameters in Primus-Megatron MoE:**
+
+- **Router**:
+  - `fused_group_topk_routing_with_aux_score`: Enable router fusion
+
+- **DeepEP**:
+  - `use_cuda_num_token_per_expert`: Return `num_tokens_per_experts` as CUDA tensor
+  - `num_worst_token`: Eliminate notify-dispatch CPU busy-wait
+
+- **Permutation**:
+  - `moe_permutation_fusion`: Enable permutation fusion
+
+- **GroupMLP**:
+  - `use_turbo_groupmlp`: Use Turbo's GroupMLP with CUDA `num_token_per_experts` parameter
+  - `use_turbo_groupmlp_act`: Use Turbo's activation with CUDA `num_token_per_experts` parameter
+
+---
+
+### Feature 4: 1F1B MoE Overlap
+
+**Description**: The 1F1B (1-Forward-1-Backward) overlap scheduling optimizes both compute and communication resource utilization during MoE training.
+
+Traditional approach: Communication for expert dispatch and aggregation (all-to-all or DeepEP) occurs sequentially with forward/backward passes, leaving hardware idle.
+
+**1F1B approach**: Interleaves communication for one micro-batch with the backward computation of the preceding micro-batch. While calculating backward gradients for micro-batch N-1, expert tokens for micro-batch N are already being communicated, reducing pipeline stalls.
+
+This is particularly beneficial at larger scales where communication costs dominate.
+
+---
+
+### Feature 5: Arbitrary Pipeline Partition
+
+**Description**: This feature allows custom or manual pipeline partitioning schemes instead of default automatic partitioning. By specifying an explicit pipeline layout, you can finely control how model layers are divided across pipeline stages.
+
+**Benefits**:
+- Achieve optimal balance between memory usage and compute efficiency
+- Tailor partitioning to specific hardware setups or model architectures
+- Minimize memory bottlenecks and achieve more even stage workloads
+- Experiment with new partitioning strategies for large models
+
+To use this feature, specify your desired partition pattern in the configuration, ensuring it reflects the target balance between computational resources and available memory per device.
+
+---
+
+### Feature 6: Recompute Selected Layers
+
+**Description**: Recompute specific transformer layers to save activation memory without enabling full recomputation.
+
+**Usage**:
+```bash
+--recompute_layer_ids 0,1,2,3
+```
+
+**Example**: Recomputes the first four transformer layers to save activation memory.
+
+**Note**: Keep `RECOMPUTE_LAYERS` at `0` so this option remains the only recompute control.
+
+---
+
+### Feature 7: Loss Fusion Helper
+
+**Description**: Modern LLMs often have massive vocabulary sizes, making loss computation memory-intensive. Loss fusion combines calculations into a single kernel, reducing both memory footprint and kernel overhead.
+
+---
+
+### Feature 8: CPU Launch Optimization
+
+**Description**: In large-scale MoE training, CPU kernel launch efficiency is critical due to the high number of operators. We optimize this through:
+
+**1. NUMA Binding**: Pins each GPU process to its associated NUMA socket for improved memory and compute access
+
+**Usage**:
+```bash
+export ENABLE_NUMA_BINDING=1
+```
+
+This improves memory bandwidth utilization and training stability for large models.
+
+**2. Increase HIP Kernel Argument Pool Size**: Raises the maximum number of concurrent kernel launches to prevent launch bottlenecks
+
+**Usage**:
+```bash
+export HSA_KERNARG_POOL_SIZE=12582912
+```
+
+---
+
+### Feature 9: Manual GC Helper
+
+**Description**: Forces periodic host garbage collection to mitigate long-running Python memory fragmentation on multi-day training runs.
+
+In our experiments with large-scale MoE models, even with load balancing enabled, iteration time can fluctuate noticeably. Enabling manual GC effectively eliminates these jitters, leading to more stable and consistent training performance.
+
+**Note**: All subsequent benchmarking results in this guide use manual GC enabled by default to ensure fair and reliable comparisons.
+
+---
+
+## 6. Model-Specific Optimization Guide
+
+This section provides practical guidance for optimizing different DeepSeek model variants on Primus/AMD MI-series hardware. Each subsection covers a specific model family with advice on configuration, baseline performance, bottleneck analysis, and advanced tuning.
+
+---
+
+### 6.1 DeepSeek-V2-Lite Optimization
+
+#### Overview and Configuration
+
+DeepSeek-V2-Lite is a memory and compute-efficient variant designed for high-throughput pretraining.
 
 | Variant | Total Params | Active Params | Transformer Layers |
 | --- | --- | --- | --- |
 | DeepSeek-V2-Lite | 16B | 2.4B | 27 |
 
+**Configuration files:**
 - Model Config: `primus/configs/models/megatron/deepseek_v2_lite.yaml`
 - Pretrain Script: `examples/moe_package/run_deepseek_v2_lite_pretrain_mi355x.sh`
 
-#### 2. Baseline Performance Testing
+---
 
-AMD MI300/325/355 series GPUs offer very large memory pools. The easiest and most effective way to leverage this is to increase the micro batch size (mbs). For MoE models, the `EP` (expert parallel size) parameter enables scaling individual expert models across devices. For models exceeding 180B, you can further utilize pipeline parallelism (`PP`) to split the model, maximizing memory savings.
+#### Baseline Performance Testing
 
-The following bar chart illustrates how increasing the micro-batch size (MBS) during DeepSeek-V2-Lite training on an AMD **MI355** GPU improves both throughput (tokens per second) and GPU memory utilization. By scaling up the MBS, you can achieve better hardware efficiency and model performance, within the limits of available memory resources.
+AMD MI300/325/355 series GPUs offer very large memory pools. The most effective way to leverage this is to increase the micro-batch size (MBS).
+
+**Scaling strategies:**
+- **EP (Expert Parallel size)**: Enables scaling individual expert models across devices
+- **PP (Pipeline Parallelism)**: For models exceeding 180B, split the model to maximize memory savings
+
+The chart below shows how increasing micro-batch size (MBS) during DeepSeek-V2-Lite training on AMD **MI355X** improves both throughput (tokens/s) and GPU memory utilization:
 
 ![DeepSeek-V2-Lite MI355 Batch Size Scaling – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_mbs_scaling_mi355.png)
 
-#### 3. Performance Optimization
+---
 
-This section summarizes our key optimization strategies used to enhance DeepSeek-V2-Lite MoE model training on AMD MI-series hardware. Each method addresses a specific bottleneck, providing both stability and performance improvements:
+#### Performance Optimization
 
-1. **Manual Garbage Collection (GC) for Performance Stability**
-   We observed that, during MoE training, iteration time can fluctuate significantly due to memory allocation behavior. By introducing manual garbage collection, we can stabilize the training process and reduce these time variations. As a result, all subsequent benchmarking results in this guide are based on runs with manual GC enabled by default.
+Our key optimization strategies for DeepSeek-V2-Lite on AMD MI-series hardware:
 
-2. **Loss Fusion to Optimize Memory Footprint**
-   The memory consumed by the loss computation becomes substantial, primarily due to the extremely large vocabulary size. Employing loss fusion techniques reduces memory usage for this phase by approximately 7.4%, while also improving overall end-to-end training throughput.
+**1. Manual Garbage Collection (GC) for Performance Stability**
 
-3. **DeepEP Optimization for AllToAll Communication**
-   AllToAll-based inter-device communication is a critical bottleneck, especially as token traffic and expert parallelism scale up. By incorporating DeepEP (Deep Expert Parallel) optimizations, we reduce redundant token data transfer, increase token movement efficiency, and significantly improve training performance.
+During MoE training, iteration time can fluctuate significantly due to memory allocation behavior. Manual garbage collection stabilizes the training process and reduces time variations. All subsequent benchmarks use manual GC enabled by default.
 
-4. **Sync-Free Mode to Resolve CPU D2H Synchronization Overheads**
-   Profiling shows that CPU device-to-host (d2h) synchronizations in the MoE layers can induce large kernel launch latencies, preventing effective overlapping of communication and computation. Enabling sync-free mode eliminates these synchronizations, resulting in a well-overlapped, higher-performance kernel launch sequence.
+**2. Loss Fusion to Optimize Memory Footprint**
 
-5. **NUMA Binding for Improved CPU Affinity and Memory Access**
-   On multi-socket (NUMA) systems, poor CPU thread placement can degrade throughput. Applying NUMA binding strategies ensures better CPU affinity, reduces memory latency, and boosts pipeline scheduling efficiency, further supporting high-throughput training.
+With extremely large vocabulary sizes, loss computation becomes memory-intensive. Loss fusion reduces memory usage for this phase by approximately **7.4%** while improving overall end-to-end throughput.
 
-6. **Micro-Batch Size (MBS) Scaling via Memory Savings from Prior Optimizations**
-   The combined effect of the optimizations above has reduced the MBS=12 training run's peak memory usage from 99.79% to 84.28%. This memory headroom allows us to increase the micro-batch size to 14, unlocking additional throughput improvements and maximizing hardware utilization.
+**3. DeepEP Optimization for AllToAll Communication**
 
-Each of these optimizations contributes incrementally to more stable, efficient, and scalable MoE training. We recommend applying them sequentially for best results.
+AllToAll-based inter-device communication is a critical bottleneck as token traffic and expert parallelism scale up. DeepEP optimization reduces redundant token data transfer, increases efficiency, and significantly improves training performance.
 
-Through stepwise optimization, we observe a clear and significant boost in end-to-end training performance. The figures below summarize the measured throughput improvements and memory utilization as each optimization feature is incrementally enabled.
+**4. Sync-Free Mode to Resolve CPU D2H Synchronization Overheads**
 
-**Figure 1**:
-Cumulative throughput (tokens/s per GPU) and GPU memory usage after successively enabling key optimization features. Each bar represents the combined effect of all optimizations up to that point.
-![DeepSeekV2Lite MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_tks_memory_mi355.png)
+Profiling shows that CPU device-to-host (D2H) synchronizations in MoE layers induce large kernel launch latencies, preventing effective overlapping of communication and computation. Sync-free mode eliminates these synchronizations, resulting in well-overlapped, higher-performance kernel launches.
 
-**Figure 2**:
-Per-feature throughput (tokens/s) and speedup relative to baseline. This illustrates the acceleration contributed by each optimization as it is introduced.
-![DeepSeekV2Lite MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_tks_speedup_mi355.png)
+**5. NUMA Binding for Improved CPU Affinity and Memory Access**
+
+On multi-socket (NUMA) systems, poor CPU thread placement degrades throughput. NUMA binding ensures better CPU affinity, reduces memory latency, and boosts pipeline scheduling efficiency.
+
+**6. Micro-Batch Size (MBS) Scaling via Memory Savings**
+
+The combined optimizations above reduced peak memory usage from **99.79%** to **84.28%** for MBS=12 training runs. This memory headroom allows increasing micro-batch size to 14, unlocking additional throughput improvements and maximizing hardware utilization.
 
 ---
 
-### 7.2 DeepSeek-V2 Optimization
+#### Results
 
-#### 1. Model Overview and Configuration Files
+Through stepwise optimization, we observe significant boosts in end-to-end training performance.
 
-DeepSeek-V2 models scale up in size and complexity, and are optimized for maximum parallel throughput on MI-series hardware.
+**Figure 1**: Cumulative throughput (tokens/s per GPU) and GPU memory usage after successively enabling key optimization features:
+
+![DeepSeekV2Lite MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_tks_memory_mi355.png)
+
+**Figure 2**: Per-feature throughput (tokens/s) and speedup relative to baseline:
+
+![DeepSeekV2Lite MI355 Optimization – Tokens/s and Speedup](figures/DeepSeekV2Lite_tks_speedup_mi355.png)
+
+---
+
+### 6.2 DeepSeek-V2 Optimization
+
+#### Overview and Configuration
+
+DeepSeek-V2 models scale up in size and complexity, optimized for maximum parallel throughput on MI-series hardware.
 
 | Variant | Total Params | Active Params | Transformer Layers |
 | --- | --- | --- | --- |
 | DeepSeek-V2 | 236B | 21B | 60 |
 
+**Configuration files:**
 - Model Config: `primus/configs/models/megatron/deepseek_v2.yaml`
 - Pretrain Script: `examples/moe_package/run_deepseek_v2_pretrain_mi355x.sh`
 
-#### 2. Performance Optimization
+---
 
-This section summarizes our key optimization strategies used to enhance DeepSeek-V2 MoE model training on AMD MI-series hardware. Each method addresses a specific bottleneck, providing both stability and performance improvements:
+#### Performance Optimization
 
-1. **Manual Garbage Collection (GC) for Performance Stability**
-2. **Loss Fusion to Optimize Memory Footprint**
-3. **DeepEP Optimization for AllToAll Communication**
-5. **NUMA Binding for Improved CPU Affinity and Memory Access**
-4. **Sync-Free Mode to Resolve CPU D2H Synchronization Overheads**
-6. **Reducing Pipeline Bubble Ratio via Interleaved Pipeline Parallelism (Interleaved PP)**
+Our key optimization strategies for DeepSeek-V2:
 
-Each of these optimizations contributes incrementally to more stable, efficient, and scalable MoE training. Additionally, we have observed that enabling VPP (Virtual Pipeline Parallelism) further enhances the effectiveness of sync-free mode. Through stepwise optimization, we observe a clear and significant boost in end-to-end training performance. The figures below summarize the measured throughput improvements and memory utilization on **MI355X** as each optimization feature is incrementally enabled.
+1. **Manual Garbage Collection (GC)** for performance stability
+2. **Loss Fusion** to optimize memory footprint
+3. **DeepEP Optimization** for AllToAll communication
+4. **NUMA Binding** for improved CPU affinity and memory access
+5. **Sync-Free Mode** to resolve CPU D2H synchronization overheads
+6. **Interleaved Pipeline Parallelism (Interleaved PP)** to reduce pipeline bubble ratio
 
-**Figure 1**:
-Per-feature throughput (tokens/s) and speedup relative to baseline. This illustrates the acceleration contributed by each optimization as it is introduced.
-![DeepSeekV2 MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekV2_tks_speedup_mi355.png)
-
-#### 3. Future Optimization Directions
-
-- Explore deeper fusion between permute operations and DeepEP kernels.
-- Investigate more effective scheduling to further overlap communication and computation.
-- Continue tuning pipeline partition and recompute strategies for larger model fits.
+**Note**: We observed that enabling VPP (Virtual Pipeline Parallelism) further enhances the effectiveness of sync-free mode.
 
 ---
 
+#### Results
 
-### 7.3 Optimizing 1 Trillion+ Parameter Models
+The figure below shows per-feature throughput (tokens/s) and speedup relative to baseline on **MI355X**:
 
-#### 1. Model Overview and Configuration Files
+![DeepSeekV2 MI355 Optimization – Tokens/s and Speedup](figures/DeepSeekV2_tks_speedup_mi355.png)
+
+---
+
+#### Future Optimization Directions
+
+- Explore deeper fusion between permute operations and DeepEP kernels
+- Investigate more effective scheduling to further overlap communication and computation
+- Continue tuning pipeline partition and recompute strategies for larger model fits
+
+---
+
+### 6.3 Optimizing 1 Trillion+ Parameter Models
+
+#### Overview and Configuration
 
 Models exceeding 1 trillion parameters push the boundaries of distributed training. Configuration typically requires combining all advanced parallelism and memory optimization techniques.
 
@@ -249,115 +371,136 @@ Models exceeding 1 trillion parameters push the boundaries of distributed traini
 | DeepSeek-Proxy-1T | 1T | 44B | 96 |
 | DeepSeek-Proxy-2T | 2T | 80B | 96 |
 
-- Model Configs:
-  - `primus/configs/models/megatron/deepseek_proxy_1T.yaml`
-  - `primus/configs/models/megatron/deepseek_proxy_2T.yaml`
+**Configuration files:**
+- `primus/configs/models/megatron/deepseek_proxy_1T.yaml`
+- `primus/configs/models/megatron/deepseek_proxy_2T.yaml`
 - Pretrain Script (example): `examples/moe_package/run_ultra_1T_pretrain.sh`
 
-#### 2. Memory Projection
+---
 
-Memory projection is a crucial aspect when training ultra-large models. Without careful analysis of memory usage, a lot of time can be wasted endlessly adjusting model architecture or distributed training strategies just to fit the model in GPU memory.
+#### Memory Projection
 
-We simulated distributed training of 1T and 2T parameter models on a 1K-GPU cluster, breaking down the memory footprint across different components: model parameters, gradients, activations, optimizer states, and the main param/grad used in mixed precision training. Our analysis revealed that, unlike smaller models, ultra-large models have a memory breakdown dominated by activations.
+Memory projection is crucial when training ultra-large models. Without careful analysis, you can waste significant time adjusting model architecture or distributed training strategies just to fit the model in GPU memory.
 
-Below, you’ll find the memory usage charts for the 1T and 2T models, followed by our key takeaways.
+We simulated distributed training of 1T and 2T parameter models on a 1024-GPU cluster, breaking down memory footprint across: model parameters, gradients, activations, optimizer states, and main param/grad used in mixed precision training.
+
+**Key finding**: Unlike smaller models, ultra-large models have memory consumption dominated by activations.
 
 ---
 
 **1T Model, 768 GPUs – Memory Usage Analysis**
 
-- The largest memory consumer by far is activations.
-  - Enabling CP2 (activation checkpointing) can reduce activation memory use by about half, saving ~76GB per GPU;
-  - However, aggressive checkpointing may hurt performance.
-- Increasing EP (expert parallelism) from 8 to 16 doesn't significantly lower memory consumption, but does add to all-to-all communication time.
-- Raising PP (pipeline parallelism) from 24 to 48 also doesn’t substantially reduce memory use; instead, it increases pipeline ‘bubbles’ (idle time, e.g., vpp4 → vpp2) as well as more activation memory.
-- **Conclusion:**
-  - On MI300X, the most efficient config by memory projection is: PP24 EP8 CP2.
-  - On MI355X, the most efficient config by memory projection is: PP24 EP8.
+Key observations:
+- **Activations are the largest memory consumer**
+  - Enabling CP2 (context parallelism) reduces activation memory by about half, saving ~76GB per GPU
+  - However, aggressive checkpointing may hurt performance
+- **Increasing EP** (8→16) doesn't significantly lower memory but adds all-to-all communication time
+- **Raising PP** (24→48) doesn't substantially reduce memory; instead, it increases pipeline bubbles and activation memory
 
-![moe-proxy-1t-memory-projection](figures/moe-proxy-1t-memory-projection.png)
+**Conclusions:**
+- **MI300X optimal config**: PP24 EP8 CP2
+- **MI355X optimal config**: PP24 EP8 (no checkpointing needed)
+
+![1T Model Memory Projection](figures/moe-proxy-1t-memory-projection.png)
 
 ---
 
 **2T Model, 768 GPUs – Memory Usage Analysis**
 
-- Again, activations take up the most memory.
-  - Enabling CP2 can halve activation memory usage, saving ~131GB per GPU;
-  - But as before, this may come with some performance trade-offs.
-- With CP2, the EP8 setting can’t fit in MI300X memory, but does fit on MI355X.
-- Increasing EP from 8 to 16 doesn’t reduce memory; it just adds to all2all communication time.
-- Increasing PP from 24 to 48 fails to help with memory either, but increases pipeline bubbles and activation memory.
-- **Conclusion:**
-  - On MI300X, the most effective config is PP24 EP16 CP2.
-  - On MI355X, the optimal setup is PP24 EP8 CP2, taking advantage of larger DP sizes.
+Key observations:
+- **Activations again dominate memory usage**
+  - Enabling CP2 halves activation memory, saving ~131GB per GPU
+  - Performance trade-offs may apply
+- **With CP2**, EP8 doesn't fit on MI300X but works on MI355X
+- **Increasing EP** (8→16) doesn't reduce memory, only adds all-to-all communication time
+- **Increasing PP** (24→48) doesn't help with memory, but increases pipeline bubbles and activation memory
 
-![moe-proxy-2t-memory-projection](figures/moe-proxy-2t-memory-projection.png)
+**Conclusions:**
+- **MI300X optimal config**: PP24 EP16 CP2
+- **MI355X optimal config**: PP24 EP8 CP2 (benefits from larger DP sizes)
 
-
-#### 3. Pipeline Bubble Projection and Insights
-
-When scaling up to a large number of machines, the global batch size is often constrained. This means each iteration contains fewer microbatches—i.e., a lower gradient accumulation (GA). In the context of pipeline parallelism, this reduction leads to a higher pipeline bubble ratio, degrading overall training efficiency. However, employing the interleaved pipeline parallel (interleaved PP) algorithm allows us to significantly reduce bubbles, thereby maintaining usable efficiency.
-
-**Let’s break down the calculation with an example:**
-
-- Suppose we have 64 nodes, using the following distributed training configuration: PP=16, EP=8, global tokens=2 million, microbatch size=1.
-- The effective GA is therefore:
-
-  $$ GA = \frac{2M\ \text{tokens}}{4096\ \text{seq}} \Big/ \left(\frac{64 \times 8}{16}\right) \Big/ 1 = 16 $$
-
-- If we use vanilla pipeline parallelism (VPP=1), the bubble ratio is:
-
-  $$ bubbleratio = \frac{\text{PP}-1}{\text{PP}-1 + GA \times VPP} = \frac{16-1}{16-1+16 \times 1} \approx 48.43\% $$
-
-- Increasing interleaving to VPP=6,
-
-  $$ bubbleratio = \frac{15}{15+16 \times 6} \approx 13.51\% $$
-
-  This is a substantial reduction.
-
-To verify these observations, we conducted the tests on a 64-node setup. The measured bubble ratios closely matched our theoretical estimates, confirming the accuracy of this approach.
-
-![bubble ratio](figures/moe-proxy-500b-bubble-ratio.png)
-
-**In summary:** Utilizing interleaved pipeline parallelism (VPP) is an effective way to mitigate pipeline bubble overheads that emerge with large machine counts, thereby preserving computational efficiency for ultra-scale training.
-
-
-#### 4. Optimizing the Inter-Node Token Dispatch and Combine
-
-In our empirical studies, we found that as EP (Expert Parallelism) increases, the scalability of training degrades rapidly. Through detailed profiling and time breakdown analysis, we discovered that alltoall communication accounts for as much as 25%–30% of total training time. As a result, this part of the pipeline must be optimized using DeepEP, which can significantly improve communication efficiency and ensure good EP scaling performance. The specifics of our experiments are as follows:
-
-We tested a 2T model on 1024 MI300X GPUs, comparing AllToAll and DeepEP across different EP sizes.
-
-- As EP increases, AllToAll performance drops sharply and training efficiency suffers.
-- DeepEP, on the other hand, demonstrates much better scalability and maintains nearly flat performance as EP grows.
-- End-to-end, DeepEP delivers a 1.05× to 7.66× speedup over AllToAll.
+![2T Model Memory Projection](figures/moe-proxy-2t-memory-projection.png)
 
 ---
 
-The following figure shows the time breakdown for training, clearly illustrating how DeepEP reduces communication overhead:
+#### Pipeline Bubble Projection and Insights
 
-![alltoall-vs-deepep-breakdown](figures/moe-proxy-2t-alltoall-vs-deepep-breakdown.png)
+When scaling to many machines, global batch size is often constrained, meaning each iteration contains fewer microbatches (lower gradient accumulation, or GA). In pipeline parallelism, this leads to higher pipeline bubble ratios, degrading training efficiency.
+
+**Solution**: Interleaved pipeline parallelism (Interleaved PP) significantly reduces bubbles and maintains efficiency.
+
+**Example calculation:**
+
+Suppose we have 64 nodes with configuration: PP=16, EP=8, global tokens=2M, microbatch size=1.
+
+Effective GA:
+
+$$
+GA = \frac{2M\ \text{tokens}}{4096\ \text{seq}} \div \left(\frac{64 \times 8}{16}\right) \div 1 = 16
+$$
+
+With vanilla pipeline parallelism (VPP=1), bubble ratio:
+
+$$
+\text{bubble ratio} = \frac{PP-1}{PP-1 + GA \times VPP} = \frac{16-1}{16-1+16 \times 1} \approx 48.43\%
+$$
+
+With interleaved pipeline (VPP=6), bubble ratio:
+
+$$
+\text{bubble ratio} = \frac{15}{15+16 \times 6} \approx 13.51\%
+$$
+
+This is a substantial reduction. We verified these calculations on a 64-node setup, and measured bubble ratios closely matched theoretical estimates:
+
+![Bubble Ratio](figures/moe-proxy-500b-bubble-ratio.png)
+
+**Summary**: Interleaved pipeline parallelism (VPP) effectively mitigates pipeline bubble overheads at large scales, preserving computational efficiency for ultra-scale training.
 
 ---
 
-The following curve shows end-to-end EP scaling when using DeepEP:
+#### Optimizing Inter-Node Token Dispatch and Combine
 
-![deepep-ep-scaling](figures/moe-proxy-2t-deepep-ep-scaling.png)
+In our studies, as EP (Expert Parallelism) increases, training scalability degrades rapidly. Through detailed profiling, we discovered that all-to-all communication accounts for **25%–30%** of total training time.
 
-#### 4. Other MoE Optimizations
+**Solution**: DeepEP optimization significantly improves communication efficiency and ensures good EP scaling performance.
 
-In ultra-large scale models, using **1F1B Overlap** (One-Forward-One-Backward overlapping) can further hide the communication overhead and improve training throughput. By interleaving the forward and backward passes, communication and computation can proceed concurrently, thus reducing idle time and increasing resource utilization.
+**Experiment**: 2T model on 1024 MI300X GPUs, comparing AllToAll vs. DeepEP across different EP sizes.
 
-Moreover, **fine-grained adjustment of pipeline parallel (PP) partitions** enables more balanced workload splitting. Carefully tuning the PP splits minimizes pipeline bubbles and waiting time between stages, leading to a smoother pipeline and better overall efficiency.
+**Results:**
+- As EP increases, AllToAll performance drops sharply
+- DeepEP demonstrates much better scalability and maintains nearly flat performance
+- End-to-end, DeepEP delivers **1.05× to 7.66×** speedup over AllToAll
 
-For recomputation (activation checkpointing), only specific pipeline stages perform recomputation, rather than having every virtual pipeline parallel (VPP) stage recompute identical layers, can reduce redundant work and further boost performance.
+---
 
-Together, these optimizations—1F1B overlap, fine-grained PP partitioning, and selective recomputation—are key strategies to maximize throughput and efficiency in trillion-parameter MoE model training.
+Time breakdown showing how DeepEP reduces communication overhead:
 
+![AllToAll vs DeepEP Breakdown](figures/moe-proxy-2t-alltoall-vs-deepep-breakdown.png)
 
+---
 
-## 8. References
-- [Primus](https://github.com/AMD-AGI/Primus) training framework.
-- AMD ROCm™ docs and Instinct™ MI300X/MI355X [performance benchmark guides](https://github.com/ROCm/MAD/blob/develop/benchmark/megatron_lm/README_primus.md).
-- Training a model with [Primus](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/primus-megatron.html?model=primus_pyt_megatron_lm_train_llama-3.3-70b) and Megatron-LM.
-- [Migrating workloads](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/previous-versions/megatron-lm-primus-migration-guide.html) to Primus (Megatron backend) from Megatron-LM.
+End-to-end EP scaling with DeepEP:
+
+![DeepEP EP Scaling](figures/moe-proxy-2t-deepep-ep-scaling.png)
+
+---
+
+#### Other MoE Optimizations
+
+**1F1B Overlap**: In ultra-large models, One-Forward-One-Backward overlapping further hides communication overhead and improves throughput. By interleaving forward and backward passes, communication and computation proceed concurrently, reducing idle time.
+
+**Fine-grained PP Partition Adjustment**: Carefully tuning pipeline parallel (PP) splits enables more balanced workload distribution, minimizing pipeline bubbles and waiting time between stages for smoother execution.
+
+**Selective Recomputation**: Only specific pipeline stages perform recomputation rather than having every virtual pipeline parallel (VPP) stage recompute identical layers, reducing redundant work and boosting performance.
+
+**Summary**: Together, these optimizations—1F1B overlap, fine-grained PP partitioning, and selective recomputation—are key strategies to maximize throughput and efficiency in trillion-parameter MoE model training.
+
+---
+
+## 7. References
+
+- [Primus](https://github.com/AMD-AGI/Primus) training framework
+- AMD ROCm™ docs and Instinct™ MI300X/MI355X [performance benchmark guides](https://github.com/ROCm/MAD/blob/develop/benchmark/megatron_lm/README_primus.md)
+- Training a model with [Primus](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/primus-megatron.html?model=primus_pyt_megatron_lm_train_llama-3.3-70b) and Megatron-LM
+- [Migrating workloads](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/previous-versions/megatron-lm-primus-migration-guide.html) to Primus (Megatron backend) from Megatron-LM
