@@ -266,7 +266,7 @@ Per-feature throughput (tokens/s) and speedup relative to baseline. This illustr
 ---
 
 
-### 7.4 Optimizing 1 Trillion+ Parameter Models
+### 7.3 Optimizing 1 Trillion+ Parameter Models
 
 #### 1. Model Overview and Configuration Files
 
@@ -282,61 +282,105 @@ Models exceeding 1 trillion parameters push the boundaries of distributed traini
   - `primus/configs/models/megatron/deepseek_proxy_2T.yaml`
 - Pretrain Script (example): `examples/moe_package/run_ultra_1T_pretrain.sh`
 
-#### 2. Baseline Performance Testing
+#### 2. Memory Projection
 
-Maximizing mbs is crucial, but will also require leveraging `EP`, `PP`, and possibly tensor parallel (`TP`) at high scales. Expect to build a custom configuration based on your hardware cluster.
+Memory projection is a crucial aspect when training ultra-large models. Without careful analysis of memory usage, a lot of time can be wasted endlessly adjusting model architecture or distributed training strategies just to fit the model in GPU memory.
 
-*(Insert chart/figure: MB Size vs. HW Utilization in 1T+ Models)*
+We simulated distributed training of 1T and 2T parameter models on a 1K-GPU cluster, breaking down the memory footprint across different components: model parameters, gradients, activations, optimizer states, and the main param/grad used in mixed precision training. Our analysis revealed that, unlike smaller models, ultra-large models have a memory breakdown dominated by activations.
 
-#### 3. Bottleneck and Memory Analysis
-
-Both time and memory breakdowns become essential at this scale. Memory view is critically important for debugging OOM or suboptimal fits.
-
-| Test Name | Compute Time | Comm Time | Idle Time | Misc Time |
-|-----------|--------------|-----------|-----------|-----------|
-|           |              |           |           |           |
-
-*Below: (Insert memory breakdown analysis plot for 1T+ models)*
-
-#### 4. Performance Optimization
-
-(Insert combined plot: Optimization Steps vs. Throughput for 1T+ runs)
-
-| Optimization Feature            | Tokens/s/GPU | Memory (GB) |
-|---------------------------------|--------------|-------------|
-| Baseline                        |              |             |
-| Turbo Attention                 |              |             |
-| Recompute/Selective Recompute   |              |             |
-| NUMA Binding                    |              |             |
-| GC and Memory Fragmentation Fix |              |             |
-
-#### 5. Future Optimization Priorities
-
-- Permute + DeepEP fusion kernels for both forward and backward passes.
-- Research into even more efficient communication/computation pipelines.
-- Scaling adaptive MoE gating for resource-aware load balancing.
-- Software support for hardware-level memory compression.
+Below, you’ll find the memory usage charts for the 1T and 2T models, followed by our key takeaways.
 
 ---
 
+**1T Model, 768 GPUs – Memory Usage Analysis**
+
+- The largest memory consumer by far is activations.
+  - Enabling CP2 (activation checkpointing) can reduce activation memory use by about half, saving ~76GB per GPU;
+  - However, aggressive checkpointing may hurt performance.
+- Increasing EP (expert parallelism) from 8 to 16 doesn't significantly lower memory consumption, but does add to all-to-all communication time.
+- Raising PP (pipeline parallelism) from 24 to 48 also doesn’t substantially reduce memory use; instead, it increases pipeline ‘bubbles’ (idle time, e.g., vpp4 → vpp2) as well as more activation memory.
+- **Conclusion:**
+  - On MI300X, the most efficient config by memory projection is: PP24 EP8 CP2.
+  - On MI355X, the most efficient config by memory projection is: PP24 EP8.
+
+![moe-proxy-1t-memory-projection](figures/moe-proxy-1t-memory-projection.png)
+
+---
+
+**2T Model, 768 GPUs – Memory Usage Analysis**
+
+- Again, activations take up the most memory.
+  - Enabling CP2 can halve activation memory usage, saving ~131GB per GPU;
+  - But as before, this may come with some performance trade-offs.
+- With CP2, the EP8 setting can’t fit in MI300X memory, but does fit on MI355X.
+- Increasing EP from 8 to 16 doesn’t reduce memory; it just adds to all2all communication time.
+- Increasing PP from 24 to 48 fails to help with memory either, but increases pipeline bubbles and activation memory.
+- **Conclusion:**
+  - On MI300X, the most effective config is PP24 EP16 CP2.
+  - On MI355X, the optimal setup is PP24 EP8 CP2, taking advantage of larger DP sizes.
+
+![moe-proxy-2t-memory-projection](figures/moe-proxy-2t-memory-projection.png)
 
 
-## 8. Code and Reproduction
+#### 3. Pipeline Bubble Projection and Insights
 
-### 8.1 Key Files
+When scaling up to a large number of machines, the global batch size is often constrained. This means each iteration contains fewer microbatches—i.e., a lower gradient accumulation (GA). In the context of pipeline parallelism, this reduction leads to a higher pipeline bubble ratio, degrading overall training efficiency. However, employing the interleaved pipeline parallel (interleaved PP) algorithm allows us to significantly reduce bubbles, thereby maintaining usable efficiency.
 
-- `examples/moe_package/run_deepseek_v3_pretrain_mi325x.sh`: Main training script that aggregates all toggles.
-- `examples/megatron/configs/MI300X/deepseek_v3-pretrain.yaml`: Experiment entry point referencing a model YAML.
-- `primus/configs/models/megatron/*.yaml`: Definitive source for model size, depth, and expert settings.
+**Let’s break down the calculation with an example:**
 
-### 8.2 Script Usage
+- Suppose we have 64 nodes, using the following distributed training configuration: PP=16, EP=8, global tokens=2 million, microbatch size=1.
+- The effective GA is therefore:
 
-1. Adjust `MoE_Features`, parallel sizes, profiling, and MTP settings as needed.
-2. Prepare a ROCm/MI300X environment (Docker image referenced near the top of the script).
-3. Run `bash examples/moe_package/run_deepseek_v3_pretrain_mi325x.sh`. Logs and exported configs land under `./output/<team>/<user>/<exp_name>/`.
+  $$ GA = \frac{2M\ \text{tokens}}{4096\ \text{seq}} \Big/ \left(\frac{64 \times 8}{16}\right) \Big/ 1 = 16 $$
 
-## 9. References
+- If we use vanilla pipeline parallelism (VPP=1), the bubble ratio is:
 
-- DeepSeek family Hugging Face pages for public configs and parameter counts.
-- AMD ROCm™ docs and Instinct™ MI300 performance tuning guides.
-- Primus repository Megatron configs and READMEs (continuously updated best practices).
+  $$
+  \text{bubbleratio} = \frac{\text{PP}-1}{\text{PP}-1 + GA \times VPP} = \frac{16-1}{16-1+16 \times 1} \approx 48.43\%
+  $$
+
+- Increasing interleaving to VPP=6,
+
+  $$
+  \text{bubbleratio} = \frac{15}{15+16 \times 6} \approx 13.51\%
+  $$
+
+  This is a substantial reduction.
+
+To verify these observations, we conducted the tests on a 64-node setup. The measured bubble ratios closely matched our theoretical estimates, confirming the accuracy of this approach.
+
+![bubble ratio](figures/moe-proxy-500b-bubble-ratio.png)
+
+**In summary:** Utilizing interleaved pipeline parallelism (VPP) is an effective way to mitigate pipeline bubble overheads that emerge with large machine counts, thereby preserving computational efficiency for ultra-scale training.
+
+
+#### 4. Optimizing the Inter-Node Token Dispatch and Combine
+
+
+In our empirical studies, we found that as EP (Expert Parallelism) increases, the scalability of training degrades rapidly. Through detailed profiling and time breakdown analysis, we discovered that alltoall communication accounts for as much as 25%–30% of total training time. As a result, this part of the pipeline must be optimized using DeepEP, which can significantly improve communication efficiency and ensure good EP scaling performance. The specifics of our experiments are as follows:
+
+We tested a 2T model on 1024 MI300X GPUs, comparing AllToAll and DeepEP across different EP sizes.
+
+- As EP increases, AllToAll performance drops sharply and training efficiency suffers.
+- DeepEP, on the other hand, demonstrates much better scalability and maintains nearly flat performance as EP grows.
+- End-to-end, DeepEP delivers a 1.05× to 7.66× speedup over AllToAll.
+
+---
+
+The following figure shows the time breakdown for training, clearly illustrating how DeepEP reduces communication overhead:
+
+![alltoall-vs-deepep-breakdown](figures/moe-proxy-2t-alltoall-vs-deepep-breakdown.png)
+
+---
+
+The following curve shows end-to-end EP scaling when using DeepEP:
+
+![deepep-ep-scaling](figures/moe-proxy-2t-deepep-ep-scaling.png)
+
+
+
+## 8. References
+- [Primus](https://github.com/AMD-AGI/Primus) training framework.
+- AMD ROCm™ docs and Instinct™ MI300X/MI355X [performance benchmark guides](https://github.com/ROCm/MAD/blob/develop/benchmark/megatron_lm/README_primus.md).
+- Training a model with [Primus](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/primus-megatron.html?model=primus_pyt_megatron_lm_train_llama-3.3-70b) and Megatron-LM.
+- [Migrating workloads](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/previous-versions/megatron-lm-primus-migration-guide.html) to Primus (Megatron backend) from Megatron-LM.
