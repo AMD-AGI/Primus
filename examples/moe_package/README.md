@@ -70,21 +70,19 @@ To tackle the MoE training bottlenecks outlined above (grouped GEMM inefficiency
 
 ### Feature 1 – Turbo Grouped MLP @kyle
 - Description: Primus-Turbo leverages fused CK (Composable Kernel) grouped GEMM to handle all experts in a single kernel launch, outperforming the traditional multi-stream approach that overlaps expert computations but still suffers from scheduling overhead.
-- Args:
-  - `--enable_primus_turbo True`
-  - `--use_turbo_grouped_mlp True`
 
 ### Feature 2 – Loss Fusion Helper
 - Description: Modern LLMs often have massive vocab sizes, which makes the loss computation a memory hog. Loss fusion fuse the caculation into a single kernel, reduce both memory footprint and kernel overhead in one shot.
 
 ### Feature 3 – DeepEP Acceleration @huang zhen
 
-- Description: Activates DeepEP kernels for router/a2a efficiency.
+- Description: DeepEP (Deep Expert Parallelism) optimizes expert token dispatch in Mixture-of-Experts (MoE) models by significantly reducing redundant cross-node data movement required by traditional all-to-all communication. By leveraging GPU-based index calculation instead of CPU-side coordination, our adapted DeepEP implementation eliminates costly CPU-GPU synchronizations, enabling a fully sync-free pipeline. Built on open-source DeepEP and further tuned for Primus, this solution not only accelerates dispatch and router operations but also achieves higher scaling efficiency, especially critical for large-scale, multi-node training. DeepEP thus enables more efficient expert utilization, reduces communication bottlenecks, and paves the way for scalable, high-performance MoE training.
+This figure illustrates the key differences between DeepEP and standard all-to-all communication in MoE models. With DeepEP, redundant data transmission between GPUs is minimized by more intelligently routing tokens to experts, drastically reducing unnecessary cross-node data movement. As a result, DeepEP improves overall data transfer efficiency and leads to higher scalability and throughput during large-scale MoE training.
+
+![deepep introduction](./figures/deepep-intro.png)
 
 ### Feature 4 – Sync-Free MoE
-The dynamic shape of MoE (such as, required hip/cuda kernel results to allocate device memory) can lead to D2H synchronization and cause significant CPU overhead. This may increase device idle time and impose considerable performance impact on training, which becomes particularly noticeable when context-parallelism is enabled.
-
-We have eliminated all CPU synchronization throughout MoE pipeline—from Router to Dispatcher, Permutation, and GroupMLP —reducing the idle time. The sync-free MoE workflow is like this:
+- Description: The dynamic shape of MoE (such as, required hip/cuda kernel results to allocate device memory) can lead to D2H synchronization and cause significant CPU overhead. This may increase device idle time and impose considerable performance impact on training, which becomes particularly noticeable when context-parallelism is enabled. We have eliminated all CPU synchronization throughout MoE pipeline—from Router to Dispatcher, Permutation, and GroupMLP —reducing the idle time. The sync-free MoE workflow is like this:
 
 ![Sync-Free MoE Workflow](./figures/sync-free-moe-workflow.png)
 
@@ -149,38 +147,32 @@ Sync-Free-related function parameters or options  in Primus-Megatron MoE, as fol
   - `--recompute_layer_ids 0,1,2,3`
 - Notes: Keep `RECOMPUTE_LAYERS` at `0` so this helper remains the only recompute knob.
 
-### Feature 9 – CPU NUMA Binding Helper
+### Feature 9 – CPU Launch Optimization
 
-- Description: Binds processes to NUMA domains on multi-socket systems, reducing HSA kernarg traffic.
-- Optimization principle: *TBD*
-- Args / Env:
-  - `export ENABLE_NUMA_BINDING=1`
-  - `export HSA_KERNARG_POOL_SIZE=12582912`
+- Description: In large-scale MoE model training, CPU kernel launch efficiency is critical due to the high number of operators. We optimize this from two aspects: (1) NUMA binding, which pinpoints each GPU process to its associated NUMA socket for improved memory and compute access; (2) increasing the kernel argument pool size in HIP runtime to raise the upper limit of concurrent kernel launches, preventing launch bottlenecks.
+  - **NUMA binding usage**: Before running, set `export ENABLE_NUMA_BINDING=1` in Primus to pin each GPU process to its associated NUMA node, improving memory bandwidth utilization and training stability for large models.
+  - **Increase HIP kernel argument pool size**: Set `export HSA_KERNARG_POOL_SIZE=12582912` to raise the maximum number of concurrent kernel launches in the HIP runtime, helping to alleviate launch bottlenecks during large-scale MoE training.
 
 ### Feature 10 – Manual GC Helper
-
 - Description: Forces periodic host GC to mitigate long-running Python fragmentation on multi-day runs.
-- Args:
-  - `--manual_gc True`
-  - `--manual_gc_interval 1`
-- Notes: Only needed when `train_iters` is large or the allocator starts spiking host memory.
+  In our training experiments with large-scale MoE models, we noticed that even with load balancing enabled, the performance of each iteration can still fluctuate noticeably. By enabling manual GC, these iteration time jitters are effectively eliminated, leading to more stable and consistent training performance. As a result, all subsequent benchmarking results in this guide are produced with manual GC enabled by default to ensure fair and reliable performance comparisons.
 
 
 ## 7. Model-Specific Optimization Guide
 
-This section provides an overview and practical guidance for optimizing different DeepSeek model variants on Primus/AMD MI-series hardware. Each sub-section covers a specific model family—DeepSeek-Proxy-16B, DeepSeek-Proxy-236B, DeepSeek-Proxy-671B, and ultra-large (1T+ parameters) models—with advice on configuration, baseline performance, bottleneck analysis, advanced tuning, and future directions.
+This section provides an overview and practical guidance for optimizing different DeepSeek model variants on Primus/AMD MI-series hardware. Each sub-section covers a specific model family like DeepSeek-V2-Lite, DeepSeek-V2, and ultra-large (1T+ parameters) models—with advice on configuration, baseline performance, bottleneck analysis, advanced tuning, and future directions.
 
 ---
 
-### 7.1 DeepSeek-Proxy-16B Optimization
+### 7.1 DeepSeek-V2-Lite Optimization
 
 #### 1. Model Overview and Configuration Files
 
-DeepSeek-Proxy-16B is a more memory- and compute-efficient variant, designed for high-throughput pretraining. Typical sizes range from 80B to 180B parameters. In Primus, you can find its configs and pretrain scripts under:
+DeepSeek-V2-Lite is a more memory- and compute-efficient variant, designed for high-throughput pretraining. Typical sizes range from 80B to 180B parameters. In Primus, you can find its configs and pretrain scripts under:
 
 | Variant | Total Params | Active Params | Transformer Layers |
 | --- | --- | --- | --- |
-| DeepSeek-Proxy-16B | 16B | 2.4B | 27 |
+| DeepSeek-V2-Lite | 16B | 2.4B | 27 |
 
 - Model Config: `primus/configs/models/megatron/deepseek_v2_lite.yaml`
 - Pretrain Script: `examples/moe_package/run_deepseek_v2_lite_pretrain_mi355x.sh`
@@ -189,24 +181,13 @@ DeepSeek-Proxy-16B is a more memory- and compute-efficient variant, designed for
 
 AMD MI300/325/355 series GPUs offer very large memory pools. The easiest and most effective way to leverage this is to increase the micro batch size (mbs). For MoE models, the `EP` (expert parallel size) parameter enables scaling individual expert models across devices. For models exceeding 180B, you can further utilize pipeline parallelism (`PP`) to split the model, maximizing memory savings.
 
-The following bar chart illustrates how increasing the micro-batch size (MBS) during DeepSeek-Proxy-16B training on an AMD MI355 GPU improves both throughput (tokens per second) and GPU memory utilization. By scaling up the MBS, you can achieve better hardware efficiency and model performance, within the limits of available memory resources.
+The following bar chart illustrates how increasing the micro-batch size (MBS) during DeepSeek-V2-Lite training on an AMD MI355 GPU improves both throughput (tokens per second) and GPU memory utilization. By scaling up the MBS, you can achieve better hardware efficiency and model performance, within the limits of available memory resources.
 
-![DeepSeek-Proxy-16B MI355 Batch Size Scaling – Tokens/s and Memory Usage](figures/DeepSeekProxy16B_mbs_scaling_mi355.png)
+![DeepSeek-V2-Lite MI355 Batch Size Scaling – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_mbs_scaling_mi355.png)
 
-#### 3. Bottleneck Analysis
+#### 3. Performance Optimization
 
-Perform a time breakdown analysis to identify performance bottlenecks (e.g., compute bound vs. communication bound). Use profiling tools to collect metrics such as compute time, comm time, and idle time.
-
-| Test Name | Compute Time | Comm Time | Idle Time | Misc Time |
-|-----------|--------------|-----------|-----------|-----------|
-|           |              |           |           |           |
-|           |              |           |           |           |
-
-*Table left blank for future data entry.*
-
-#### 4. Performance Optimization
-
-This section summarizes our key optimization strategies used to enhance DeepSeek-Proxy-16B MoE model training on AMD MI-series hardware. Each method addresses a specific bottleneck, providing both stability and performance improvements:
+This section summarizes our key optimization strategies used to enhance DeepSeek-V2-Lite MoE model training on AMD MI-series hardware. Each method addresses a specific bottleneck, providing both stability and performance improvements:
 
 1. **Manual Garbage Collection (GC) for Performance Stability**
    We observed that, during MoE training, iteration time can fluctuate significantly due to memory allocation behavior. By introducing manual garbage collection, we can stabilize the training process and reduce these time variations. As a result, all subsequent benchmarking results in this guide are based on runs with manual GC enabled by default.
@@ -232,61 +213,49 @@ Through stepwise optimization, we observe a clear and significant boost in end-t
 
 **Figure 1**:
 Cumulative throughput (tokens/s per GPU) and GPU memory usage after successively enabling key optimization features. Each bar represents the combined effect of all optimizations up to that point.
-![DeepSeekProxy16B MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekProxy16B_tks_memory_mi355.png)
+![DeepSeekV2Lite MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_tks_memory_mi355.png)
 
 **Figure 2**:
 Per-feature throughput (tokens/s) and speedup relative to baseline. This illustrates the acceleration contributed by each optimization as it is introduced.
-![DeepSeekProxy16B MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekProxy16B_tks_speedup_mi355.png)
+![DeepSeekV2Lite MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_tks_speedup_mi355.png)
 
 ---
 
-### 7.2 DeepSeek-Proxy-236B Optimization
+### 7.2 DeepSeek-V2 Optimization
 
 #### 1. Model Overview and Configuration Files
 
-DeepSeek-Proxy-236B models scale up in size and complexity, and are optimized for maximum parallel throughput on MI-series hardware.
+DeepSeek-V2 models scale up in size and complexity, and are optimized for maximum parallel throughput on MI-series hardware.
 
 | Variant | Total Params | Active Params | Transformer Layers |
 | --- | --- | --- | --- |
-| DeepSeek-Proxy-236B | 236B | 21B | 60 |
+| DeepSeek-V2 | 236B | 21B | 60 |
 
 - Model Config: `primus/configs/models/megatron/deepseek_v2.yaml`
 - Pretrain Script: `examples/moe_package/run_deepseek_v2_pretrain_mi355x.sh`
 
-#### 2. Baseline Performance Testing
+#### 2. Performance Optimization
 
-Memory scaling via higher mbs and expert/model partitioning (`EP`, `PP`) is even more critical for these larger models. Start with the largest mbs that fits within memory, and iteratively tune parallelism parameters.
+This section summarizes our key optimization strategies used to enhance DeepSeek-V2 MoE model training on AMD MI-series hardware. Each method addresses a specific bottleneck, providing both stability and performance improvements:
 
-*(Insert chart — to be added: MB Size vs. Performance for DeepSeek-Proxy-236B)*
+1. **Manual Garbage Collection (GC) for Performance Stability**
+2. **Loss Fusion to Optimize Memory Footprint**
+3. **DeepEP Optimization for AllToAll Communication**
+5. **NUMA Binding for Improved CPU Affinity and Memory Access**
+4. **Sync-Free Mode to Resolve CPU D2H Synchronization Overheads**
+6. **Reducing Pipeline Bubble Ratio via Interleaved Pipeline Parallelism (Interleaved PP)**
 
-#### 3. Bottleneck Analysis
+Each of these optimizations contributes incrementally to more stable, efficient, and scalable MoE training. Additionally, we have observed that enabling VPP (Virtual Pipeline Parallelism) further enhances the effectiveness of sync-free mode. Through stepwise optimization, we observe a clear and significant boost in end-to-end training performance. The figures below summarize the measured throughput improvements and memory utilization as each optimization feature is incrementally enabled.
 
-Time breakdown—profile compute, communication, and idle periods to guide optimization.
+**Figure 1**:
+Per-feature throughput (tokens/s) and speedup relative to baseline. This illustrates the acceleration contributed by each optimization as it is introduced.
+![DeepSeekV2 MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekV2_tks_speedup_mi355.png)
 
-| Test Name | Compute Time | Comm Time | Idle Time | Misc Time |
-|-----------|--------------|-----------|-----------|-----------|
-|           |              |           |           |           |
-
-#### 4. Performance Optimization
-
-(Insert plot: "DeepSeek-Proxy-36B Optimization Features vs. Tokens/s")
-
-| Optimization Feature            | Tokens/s/GPU | Memory (GB) |
-|---------------------------------|--------------|-------------|
-| Baseline                        |              |             |
-| Turbo Attention                 |              |             |
-| Grouped GEMM/MLP Fusion         |              |             |
-| DeepEP                          |              |             |
-| NUMA Binding                    |              |             |
-| (others as relevant)            |              |             |
-
-#### 5. Future Optimization Directions
+#### 3. Future Optimization Directions
 
 - Explore deeper fusion between permute operations and DeepEP kernels.
 - Investigate more effective scheduling to further overlap communication and computation.
-- Develop adaptive expert assignment for improved MoE load balancing.
 - Continue tuning pipeline partition and recompute strategies for larger model fits.
-- Enable automatic tuning of hw queues and memory pools.
 
 ---
 
