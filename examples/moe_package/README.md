@@ -112,54 +112,27 @@ Sync-Free-related function parameters or options  in Primus-Megatron MoE, as fol
 
 ### Feature 4 – 1F1B MoE Overlap
 
-- Description: Overlaps expert communication with backward compute using 1F1B scheduling.
-- Args:
-  - `--overlap_moe_expert_parallel_comm True`
-  - `--patch_moe_overlap False` (temporary workaround for known issue)
-  - `--delay_wgrad_compute False`
-  - `--moe_shared_expert_overlap False`
-- TODO: revisit once the patch flag can be safely re-enabled.
+- Description: The 1F1B (1-Forward-1-Backward) overlap scheduling feature is designed to optimize the utilization of both compute and communication resources during MoE training. Traditionally, the communication of expert dispatch and aggregation (such as during all-to-all or DeepEP operations) occurs sequentially with respect to the forward and backward pass, resulting in idle compute or communication hardware for significant time periods. By leveraging 1F1B scheduling, the training interleaves the communication required for one micro-batch’s experts with the backward computation of a preceding micro-batch. This means that while the model is calculating backward gradients for micro-batch N-1, the expert tokens for micro-batch N are already being communicated, thus reducing pipeline stalls. F1B overlap is particularly beneficial at larger scales, where communication costs often dominate.
 
-### Feature 5 – Zero-Bubble Pipeline
+### Feature 5 – Arbitrary Pipeline Partition
+- Description: This feature allows users to enforce a custom or manually designed pipeline partitioning scheme, rather than relying on default or automatic partitioning logic. By specifying an explicit pipeline layout, users can finely control how model layers are divided across pipeline stages. This approach can help to achieve an optimal balance between memory usage and compute efficiency tailored to specific hardware setups or model architectures. Manual pipeline partitioning is especially useful when trying to minimize memory bottlenecks, achieve more even stage workloads, or experiment with new partitioning strategies in large models. To use this functionality, specify your desired partition pattern in the configuration, ensuring that the pattern reflects the target balance between computational resources and available memory per device.
 
-- Description: Applies the zero-bubble virtual-pipeline schedule. References:
-  - `primus/backends/megatron/core/pipeline_parallel/zerobubble/README.md`
-  - `primus/configs/modules/megatron/zero_bubble.yaml`
-- PP strategy presets:
-
-| strategy | `--num_virtual_stages_per_pipeline_rank` | `--patch_zero_bubble` | `--zero_bubble_v_schedule` | `--zero_bubble_v_schedule_mem_setup` |
-| --- | --- | --- | --- | --- |
-| `1f1b` | 1 | false | - | - |
-| `vpp` | custom | false | - | - |
-| `zb1p` | 1 | true | false | - |
-| `zbv` | 2 | true | true | zb |
-| `v-half` | 2 | true | true | half |
-| `v-min` | 2 | true | true | min |
-
-### Feature 6 – Arbitrary Pipeline Partition
-
-- Description: Forces a manually curated pipeline layout (e.g., `Et|(tt|)*6L`) to balance memory/compute.
-- Args:
-  - `--pipeline_model_parallel_layout Et|(tt|)*6L` (commented patterns in the script show other options)
-- Notes: Still experimental; expect to tune per model depth.
-
-### Feature 7 – Recompute Selected Layers
-
+### Feature 6 – Recompute Selected Layers
 - Description: Recomputes the first four transformer layers to save activation memory without enabling full recompute.
 - Args:
   - `--recompute_layer_ids 0,1,2,3`
 - Notes: Keep `RECOMPUTE_LAYERS` at `0` so this helper remains the only recompute knob.
 
-### Feature 8 – Loss Fusion Helper
+### Feature 7 – Loss Fusion Helper
 - Description: Modern LLMs often have massive vocab sizes, which makes the loss computation a memory hog. Loss fusion fuse the caculation into a single kernel, reduce both memory footprint and kernel overhead in one shot.
 
-### Feature 9 – CPU Launch Optimization
+### Feature 8 – CPU Launch Optimization
 
 - Description: In large-scale MoE model training, CPU kernel launch efficiency is critical due to the high number of operators. We optimize this from two aspects: (1) NUMA binding, which pinpoints each GPU process to its associated NUMA socket for improved memory and compute access; (2) increasing the kernel argument pool size in HIP runtime to raise the upper limit of concurrent kernel launches, preventing launch bottlenecks.
   - **NUMA binding usage**: Before running, set `export ENABLE_NUMA_BINDING=1` in Primus to pin each GPU process to its associated NUMA node, improving memory bandwidth utilization and training stability for large models.
   - **Increase HIP kernel argument pool size**: Set `export HSA_KERNARG_POOL_SIZE=12582912` to raise the maximum number of concurrent kernel launches in the HIP runtime, helping to alleviate launch bottlenecks during large-scale MoE training.
 
-### Feature 10 – Manual GC Helper
+### Feature 9 – Manual GC Helper
 - Description: Forces periodic host GC to mitigate long-running Python fragmentation on multi-day runs.
   In our training experiments with large-scale MoE models, we noticed that even with load balancing enabled, the performance of each iteration can still fluctuate noticeably. By enabling manual GC, these iteration time jitters are effectively eliminated, leading to more stable and consistent training performance. As a result, all subsequent benchmarking results in this guide are produced with manual GC enabled by default to ensure fair and reliable performance comparisons.
 
@@ -356,7 +329,6 @@ To verify these observations, we conducted the tests on a 64-node setup. The mea
 
 #### 4. Optimizing the Inter-Node Token Dispatch and Combine
 
-
 In our empirical studies, we found that as EP (Expert Parallelism) increases, the scalability of training degrades rapidly. Through detailed profiling and time breakdown analysis, we discovered that alltoall communication accounts for as much as 25%–30% of total training time. As a result, this part of the pipeline must be optimized using DeepEP, which can significantly improve communication efficiency and ensure good EP scaling performance. The specifics of our experiments are as follows:
 
 We tested a 2T model on 1024 MI300X GPUs, comparing AllToAll and DeepEP across different EP sizes.
@@ -376,6 +348,16 @@ The following figure shows the time breakdown for training, clearly illustrating
 The following curve shows end-to-end EP scaling when using DeepEP:
 
 ![deepep-ep-scaling](figures/moe-proxy-2t-deepep-ep-scaling.png)
+
+#### 4. Other MoE Optimizations
+
+In ultra-large scale models, using **1F1B Overlap** (One-Forward-One-Backward overlapping) can further hide the communication overhead and improve training throughput. By interleaving the forward and backward passes, communication and computation can proceed concurrently, thus reducing idle time and increasing resource utilization.
+
+Moreover, **fine-grained adjustment of pipeline parallel (PP) partitions** enables more balanced workload splitting. Carefully tuning the PP splits minimizes pipeline bubbles and waiting time between stages, leading to a smoother pipeline and better overall efficiency.
+
+For recomputation (activation checkpointing), only specific pipeline stages perform recomputation, rather than having every virtual pipeline parallel (VPP) stage recompute identical layers, can reduce redundant work and further boost performance.
+
+Together, these optimizations—1F1B overlap, fine-grained PP partitioning, and selective recomputation—are key strategies to maximize throughput and efficiency in trillion-parameter MoE model training.
 
 
 
