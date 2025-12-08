@@ -11,6 +11,7 @@ export DOCKER_IMAGE="docker.io/tasimage/primus:pr-316-v25.10-ainic"
 # export DOCKER_IMAGE="docker.io/rocm/megatron-lm:v25.10"
 export CLEAN_DOCKER_CONTAINER=1
 export SKIP_TRAIN=0
+export CPUS_PER_TASK=96
 
 ######################### Training Environment Variables #########################
 export HF_TOKEN=${HF_TOKEN:-"your_hf_token"}
@@ -43,7 +44,7 @@ export SEQ_LENGTH=${SEQ_LENGTH:-4096}
 export TP=${TP:-1}
 export ETP=${ETP:-1}
 export PP=${PP:-4}
-export VPP=${VPP:-1}
+export VPP=${VPP:-5}
 export EP=${EP:-8}
 export CP=${CP:-1}
 export CP_COMM_TYPE=${CP_COMM_TYPE:-"a2a"} # p2p, a2a, allgather or a2a+p2p
@@ -58,7 +59,7 @@ export PROFILE=${PROFILE:-False}
 export DISABLE_CPU_TRACE=${DISABLE_CPU_TRACE:-False}
 export PROFILE_STEP_START=${PROFILE_STEP_START:-5}
 export PROFILE_STEP_END=${PROFILE_STEP_END:-6}
-export TRAIN_ITERS=${TRAIN_ITERS:-5}
+export TRAIN_ITERS=${TRAIN_ITERS:-10}
 
 # MoE_Features legend:
 # 0 - Baseline (no extra optimization toggles)
@@ -75,14 +76,11 @@ export TRAIN_ITERS=${TRAIN_ITERS:-5}
 # 11 - Manual GC helper
 # MoE_Features=(0 1 2 3 4 5 6 7 8 9 10 11)
 if [ -z "${MoE_Features}" ]; then
-    MoE_Features=(0 11)
+    # MoE_Features=(0 11)
     # MoE_Features=(3 11)
     # MoE_Features=(3 4 11)
-    # MoE_Features=(3 4 5 11)
-    # MoE_Features=(3 4 5 6 11)
-    # MoE_Features=(3 4 5 7 11) # amp_C error
-    # MoE_Features=(3 4 5 6 10 11)
-    # MoE_Features=(3 4 5 10 11)
+    # MoE_Features=(3 4 10 11)
+    MoE_Features=(3 4 5 10 11)
 else
     # Convert string to array
     # shellcheck disable=SC2128

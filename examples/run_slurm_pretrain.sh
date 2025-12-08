@@ -42,6 +42,9 @@ mkdir -p "$LOG_DIR"
     #  --nodelist="chi[2879-2882]" \
     #  --nodelist="chi[2878-2885]" \
     #  --nodelist=chi[2820-2822,2824] \
+    #  --nodelist=chi[2874-2875,2877-2878] \
+    #  --nodelist=chi[2874-2875,2877-2878] \
+    #  --nodelist=chi[2762,2766,2772,2774] \
 srun -N "${NNODES}" \
      --exclusive \
      --export ALL \
