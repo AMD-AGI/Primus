@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import os
 from dataclasses import asdict, is_dataclass
 from typing import Any, Dict, Optional
 
@@ -75,6 +76,8 @@ class TorchTitanPretrainTrainer(BaseModule):
         self.log_config(self.titan_config)
         self.trainer = None
 
+        self.patch_torchtitan_wandb()
+
         if hasattr(self.titan_config, "primus_turbo") and self.titan_config.primus_turbo.enable_primus_turbo:
             self.enable_primus_turbo_extension()
 
@@ -100,6 +103,30 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         titan_logging.logger = primus_logger
         titan_logging.init_logger = lambda: None
+
+    def patch_torchtitan_wandb(self):
+        from primus.core.utils.logger import _logger as primus_logger
+
+        if not self.titan_config.metrics.enable_wandb:
+            return
+
+        primus_logger.warning("Monkey patch torchtitan wandb...")
+        work_group = self.primus_cfg.exp_meta_info["work_group"]
+        user_name = self.primus_cfg.exp_meta_info["user_name"]
+        exp_name = self.primus_cfg.exp_meta_info["exp_name"]
+
+        if os.getenv("WANDB_PROJECT") is None:
+            os.environ["WANDB_PROJECT"] = f"Primus-Titan-Pretrain-{work_group}_{user_name}"
+        if os.getenv("WANDB_RUN_NAME") is None:
+            os.environ["WANDB_RUN_NAME"] = exp_name
+        wandb_save_dir = os.path.join(
+            self.titan_config.job.dump_folder, self.titan_config.metrics.save_tb_folder
+        )
+
+        primus_logger.info(f"torchtitan wandb_project: {os.getenv('WANDB_PROJECT')}")
+        primus_logger.info(f"torchtitan wandb_exp_name: {os.getenv('WANDB_RUN_NAME')}")
+        primus_logger.info(f"torchtitan wandb_entity: {os.getenv('WANDB_TEAM')}")
+        primus_logger.info(f"torchtitan wandb_save_dir under: {wandb_save_dir}")
 
     def patch_torchtitan_moe(self):
         if not self.titan_config.primus_turbo.use_turbo_grouped_mm:
