@@ -83,19 +83,12 @@ def _set_mlflow_writer(args):
             git_meta = collect_git_metadata()
 
             if git_meta:
-                # 3a) Minimal tags we actually care about
-                summary_keys = [
-                    "git/primus_commit",
-                    "git/primus_dirty",
-                    "git/primus_turbo_commit",
-                    "git/aiter_commit",
-                    "git/amdiffusion_benchmark_commit",
-                    "git/megatron_lm_commit",
-                    "git/torchtitan_commit",
-                    "git/torchtune_commit",
-                    "git/transformer_engine_commit",
-                ]
-                summary_tags = {k: git_meta[k] for k in summary_keys if k in git_meta}
+                # 3a) Auto-select top-level repo commits/dirty (excludes submodules)
+                summary_tags = {
+                    k: v
+                    for k, v in git_meta.items()
+                    if "/submodule/" not in k and k.endswith(("_commit", "_dirty"))
+                }
 
                 # MLflow "source" tags
                 primus_commit = git_meta.get("git/primus_commit", None)
