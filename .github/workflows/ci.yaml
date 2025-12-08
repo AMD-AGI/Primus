@@ -130,8 +130,8 @@ jobs:
 
           echo "> Docker tag image for Docker Hub"
           docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}
-          docker tag tasimage/primus:${{env.IMAGE_TAG}}-gfx950 docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950
-          docker tag tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic
+          # docker tag tasimage/primus:${{env.IMAGE_TAG}}-gfx950 docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950
+          # docker tag tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic
           docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
           echo "> Login to Primus Docker Hub"
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
