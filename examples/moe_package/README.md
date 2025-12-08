@@ -307,15 +307,11 @@ When scaling up to a large number of machines, the global batch size is often co
 
 - If we use vanilla pipeline parallelism (VPP=1), the bubble ratio is:
 
-  $$
-  \text{bubbleratio} = \frac{\text{PP}-1}{\text{PP}-1 + GA \times VPP} = \frac{16-1}{16-1+16 \times 1} \approx 48.43\%
-  $$
+  $$ bubbleratio = \frac{\text{PP}-1}{\text{PP}-1 + GA \times VPP} = \frac{16-1}{16-1+16 \times 1} \approx 48.43\% $$
 
 - Increasing interleaving to VPP=6,
 
-  $$
-  \text{bubbleratio} = \frac{15}{15+16 \times 6} \approx 13.51\%
-  $$
+  $$ bubbleratio = \frac{15}{15+16 \times 6} \approx 13.51\% $$
 
   This is a substantial reduction.
 
