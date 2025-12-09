@@ -41,7 +41,7 @@ The table below summarizes commonly used model configurations:
 
 To identify performance bottlenecks during MoE training, we recommend this workflow:
 
-### Step 1: Torch Profiler + TraceLens
+### Step 1: Torch Profiler
 
 Torch Profiler captures detailed runtime traces including operator execution time, memory usage, and GPU utilization. Use `profile_step_start` and `profile_step_end` to precisely control the profiling window and pinpoint bottlenecks.
 
@@ -58,11 +58,11 @@ Torch Profiler captures detailed runtime traces including operator execution tim
 
 ### Step 3: Memory Projection
 
-Memory projection provides comprehensive VRAM usage analysis across layers, optimizer states, and expert routing. This guides targeted adjustments to model structure, parallelization strategy, and memory optimizations for better scaling efficiency.
+[Memory projection](https://github.com/AMD-AGI/Primus/blob/main/primus/cli/subcommands/projection.py) provides comprehensive VRAM usage analysis across layers, optimizer states, and expert routing. This guides targeted adjustments to model structure, parallelization strategy, and memory optimizations for better scaling efficiency.
 
 ### Step 4: Pipeline Parallelism Visualization
 
-Primus includes a built-in pipeline parallelism visualization tool ([pp_vis](https://github.com/AMD-AGI/Primus/tree/main/tools/visualization/pp_vis)) that helps diagnose pipeline-stage utilization across ranks. Use this to discover pipeline bubbles or imbalances that limit throughput.
+Primus includes a built-in pipeline parallelism visualization tool [pp_vis](https://github.com/AMD-AGI/Primus/tree/main/tools/visualization/pp_vis) that helps diagnose pipeline-stage utilization across ranks. Use this to discover pipeline bubbles or imbalances that limit throughput.
 
 ---
 
@@ -279,7 +279,7 @@ During MoE training, iteration time can fluctuate significantly due to memory al
 
 **2. Loss Fusion to Optimize Memory Footprint**
 
-With extremely large vocabulary sizes, loss computation becomes memory-intensive. Loss fusion reduces memory usage for this phase by approximately **7.4%** while improving overall end-to-end throughput.
+With extremely large vocabulary sizes, loss computation becomes memory-intensive. Loss fusion reduces memory usage for this phase while improving overall end-to-end throughput.
 
 **3. DeepEP Optimization for AllToAll Communication**
 

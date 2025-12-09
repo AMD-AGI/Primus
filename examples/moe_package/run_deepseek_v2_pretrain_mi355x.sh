@@ -288,8 +288,6 @@ echo "RECOMPUTE_ARGS=${RECOMPUTE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "PROFILE_ARGS=${PROFILE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "--------------------------------" | tee -a "$LOG_FILE"
 
-# --num_layers 8 \
-# --moe_layer_freq 1 \
 bash ./examples/run_slurm_pretrain.sh \
     --micro_batch_size "$MBS" \
     --global_batch_size "$GBS" \
