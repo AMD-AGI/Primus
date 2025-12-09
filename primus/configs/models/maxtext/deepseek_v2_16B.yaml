@@ -1,2 +1,7 @@
+extends:
+  - model_base.yaml
+
 model_name: "deepseek2-16b"
+attention: "cudnn_flash_te"
+use_iota_embed: true
 tokenizer_path: "deepseek-ai/DeepSeek-V2-Lite"

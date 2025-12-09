@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import argparse
 import os
 import subprocess
 import sys
@@ -16,11 +17,34 @@ UNIT_TEST_PASS = True
 EXCLUDE_UNIT_TESTS = []
 
 
-def get_all_unit_tests():
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run Primus unit tests")
+    parser.add_argument(
+        "--jax",
+        action="store_true",
+        help="Run only JAX unit test: tests/trainer/test_maxtext_trainer.py",
+    )
+    return parser.parse_args()
+
+
+def get_all_unit_tests(run_jax_only=False):
+    """
+    When run_jax_only = True:
+        only return tests/trainer/test_maxtext_trainer.py
+
+    Otherwise:
+        return all tests except test_maxtext_trainer.py
+    """
     global DISTRIBUTED_UNIT_TESTS, EXCLUDE_UNIT_TESTS
 
     cur_dir = "./tests"
     unit_tests = {}
+
+    if run_jax_only:
+        jax_ut = "trainer/test_maxtext_trainer.py"
+        jax_ut_full = os.path.join(cur_dir, jax_ut)
+
+        return {jax_ut_full: 1}
 
     EXCLUDE_UNIT_TESTS = [
         "trainer/test_maxtext_trainer.py",
@@ -60,7 +84,8 @@ def launch_unit_test(ut_path, nproc_per_node):
 
 
 def main():
-    unit_tests = get_all_unit_tests()
+    args = parse_args()
+    unit_tests = get_all_unit_tests(run_jax_only=args.jax)
 
     for ut_path, gpus in unit_tests.items():
         launch_unit_test(ut_path, gpus)

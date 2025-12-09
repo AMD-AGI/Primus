@@ -90,6 +90,7 @@ if [ "${BACKEND:-}" = "MaxText" ]; then
     ENV_ARGS+=("--env" "DUMP_HLO")
 fi
 ENV_ARGS+=("--env" "HF_TOKEN")
+ENV_ARGS+=("--env" "WANDB_API_KEY")
 ENV_ARGS+=("--env" "ENABLE_NUMA_BINDING")
 ENV_ARGS+=("--env" "HSA_KERNARG_POOL_SIZE")
 echo "ENV_ARGS: ${ENV_ARGS[*]}"

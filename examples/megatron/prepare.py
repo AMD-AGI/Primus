@@ -168,6 +168,12 @@ def build_megatron_helper(primus_path: Path, patch_args: Path, backend_path: str
     if ret.returncode != 0:
         log_error_and_exit("Building Megatron C++ helper failed.")
 
+    emerging_optimizers_path = primus_path / "third_party/Emerging-Optimizers"
+    log_info(f"Building Emerging Optimizers in {emerging_optimizers_path}")
+    ret = subprocess.run(["pip", "install", "-e", str(emerging_optimizers_path)], check=True)
+    if ret.returncode != 0:
+        log_error_and_exit("Building Emerging Optimizers failed.")
+
 
 # ---------- Main ----------
 def main():

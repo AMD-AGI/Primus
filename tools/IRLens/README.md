@@ -50,13 +50,17 @@ EXAMPLES:
 
 ## DEMO
 
+You can run the following command:
 ```
-$ ./IRLens_analyze_hlo_ir.py examples/tiny-hlo.txt
+./IRLens_analyze_hlo_ir.py examples/tiny-hlo.txt
+```
+The output may look like:
+```
 ENTRY %main.123:
   while i in range(10):
     %outer_loop.body:
       all-gather-start | f32[1024], f32[8192] | allgather_layer1 | /home/user/model.py:42
-      while i in range(5):
+      while j in range(5):
         %inner_loop.body:
           reduce-scatter-start | f32[8192], f32[1024] | reduce_scatter_inner | /home/user/model.py:45
           all-reduce-start | f32[1024] | allreduce_inner | /home/user/model.py:47

@@ -38,7 +38,9 @@ class ModelConfig:
     kv_channels: int = 0
     group_query_attention: bool = False
     num_query_groups: int = 0
+    qk_layernorm: bool = False
     multi_latent_attention: bool = False
+    use_flash_attn: bool = False
     qk_head_dim: int = 0
     qk_pos_emb_head_dim: int = 0
     v_head_dim: int = 0
@@ -101,10 +103,12 @@ def megatron_derive_default_args(args):
     args.share_embeddings_and_output_weights = not args.untie_embeddings_and_output_weights
 
     if args.num_experts is None:
-        moe_pattern = [0] * args.num_layers
+        args.moe_pattern = [0] * args.num_layers
     else:
         if isinstance(args.moe_layer_freq, int):
             args.moe_pattern = [1 if (i % args.moe_layer_freq == 0) else 0 for i in range(args.num_layers)]
+        elif isinstance(args.moe_layer_freq, list):
+            args.moe_pattern = args.moe_layer_freq
         elif isinstance(args.moe_layer_freq, str):
             try:
                 args.moe_pattern = eval(args.moe_layer_freq)
@@ -112,7 +116,7 @@ def megatron_derive_default_args(args):
                 raise ValueError(f"Invalid moe_layer_freq format: {args.moe_layer_freq}")
             assert (
                 len(args.moe_pattern) == args.num_layers
-            ), f"Invalid moe_layer_freq length: {len(moe_pattern)} (expected {args.num_layers})"
+            ), f"Invalid moe_layer_freq length: {len(args.moe_pattern)} (expected {args.num_layers})"
 
     # naming conversion
     args.sequence_length = args.seq_length

@@ -5,6 +5,8 @@
 ###############################################################################
 
 
+from types import SimpleNamespace
+
 from primus.core.launcher.config import PrimusConfig
 
 _GLOBAL_CLI_ARGS = None
@@ -70,7 +72,16 @@ def _set_target_platform(cfg: PrimusConfig):
     if _GLOBAL_TARGET_PLATFORM:
         return
 
-    platform_config = cfg.platform_config
+    platform_config = getattr(cfg, "platform_config", None)
+    if platform_config is None:
+        # Fallback for configs that don't provide a platform/platform_config.
+        # Defaults to a simple local platform with INFO sink level.
+        platform_config = SimpleNamespace(
+            name="local",
+            master_sink_level="INFO",
+            gpus_per_node_env_key=None,
+        )
+        setattr(cfg, "platform_config", platform_config)
     if platform_config.name and platform_config.name != "local":
         from primus.platforms import RemotePlatform
 

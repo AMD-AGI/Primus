@@ -1,0 +1,22 @@
+extends:
+  - model_base.yaml
+
+base_emb_dim: 6144
+base_num_query_heads: 48
+base_num_kv_heads: 8
+base_mlp_dim: 32768               # Changed from Mixtral's 16384
+base_num_decoder_layers: 64        # Changed from Mixtral's 56
+head_dim: 128
+base_moe_mlp_dim: 32768           # Changed from Mixtral's 16384
+mlp_activations: ["silu","linear"]
+vocab_size: 131072                # Changed from Mixtral's 32768
+enable_dropout: false
+logits_via_embedding: false
+normalization_layer_epsilon: 1.0e-5
+num_experts: 8
+num_experts_per_tok: 2
+rope_max_timescale: 1_000_000
+decoder_block: "mixtral"
+tokenizer_path: "mistralai/Mixtral-8x22B-v0.1"
+attention: "cudnn_flash_te"
+use_iota_embed: true

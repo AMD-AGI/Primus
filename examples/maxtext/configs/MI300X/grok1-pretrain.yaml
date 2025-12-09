@@ -1,0 +1,62 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:grok1-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+
+    # model to run
+    model: grok1.yaml
+    overrides:
+      run_name: "grok1_training"
+      base_output_directory: "./output"
+      steps: 50
+      log_period: 10
+
+      # data
+      dataset_type: "synthetic"
+      hf_access_token: ${HF_TOKEN:""}
+
+      # checkpoint
+      enable_checkpointing: false
+      async_checkpointing: false
+
+      # inter-node parallelism strategy
+      dcn_data_parallelism: -1
+      dcn_fsdp_parallelism: 1
+
+      # intra-node parallelism strategy
+      ici_fsdp_parallelism: 1
+      ici_data_parallelism: 1
+      ici_expert_parallelism: 8
+
+      per_device_batch_size: 4
+
+      profiler: ""
+      upload_all_profiler_results: true
+      skip_first_n_steps_for_profiler: 3
+      profiler_steps: 1
+
+      remat_policy: "full"
+      use_iota_embed: true
+      scan_layers: true
+
+      logits_dot_in_fp32: false
+      dtype: "bfloat16"
+      quantization: "fp8" #"nanoo_fp8"
+      quantize_kvcache: false
+      kv_quant_axis: "heads_and_dkv"
+      kv_quant_dtype: "int8"
+      weight_dtype: "bfloat16"
+      checkpoint_is_quantized: false
+      shardy: false
+
+      sparse_matmul: false # ValueError("Sparse matmul doesn't support using expert and pipeline parallelism together.")
+      megablox: false
+      max_target_length: 8192           # Increased from 4096
+      capacity_factor: 1
+
+      expert_balance: true
