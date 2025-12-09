@@ -11,7 +11,8 @@ from typing import Optional
 
 from megatron.core import parallel_state
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.training.global_vars import get_args
+
+from primus.modules.trainer.megatron.utils import is_v_schedule_enabled
 
 
 def get_transformer_layer_offset(
@@ -88,21 +89,20 @@ def get_transformer_layer_offset(
                     + num_layers_per_virtual_model_chunk_in_last_pipeline_stage
                 )
 
-                if get_args().patch_zero_bubble and (
-                    get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v
-                ):
+                if is_v_schedule_enabled():
                     assert config.virtual_pipeline_model_parallel_size == 2
                     parallel_state.get_pipeline_model_parallel_world_size()
-                    if pipeline_rank == 0:
-                        if vp_stage == 0:
-                            offset = pipeline_rank
-                        else:
-                            offset = (
-                                total_virtual_chunks
-                                - (num_layers_per_virtual_model_chunk_in_last_pipeline_stage)
-                                - pipeline_rank
-                                - 1
-                            )
+                    if vp_stage == 0:
+                        offset = (
+                            num_layers_per_virtual_model_chunk_in_first_pipeline_stage
+                            + pipeline_rank * num_layers_per_vritual_model_chunk_in_middle_pipeline_stage
+                        )
+                    else:
+                        offset = (
+                            config.num_layers
+                            - num_layers_per_virtual_model_chunk_in_last_pipeline_stage
+                            - (pipeline_rank * num_layers_per_vritual_model_chunk_in_middle_pipeline_stage)
+                        )
                 else:
                     # Calculate the layer offset with interleaved uneven pipeline parallelism
                     if pipeline_rank == 0:
@@ -155,15 +155,14 @@ def get_transformer_layer_offset(
                 total_virtual_chunks = num_layers // vp_size
                 offset = vp_stage * total_virtual_chunks + (pipeline_rank * num_layers_per_virtual_rank)
 
-                if get_args().patch_zero_bubble and (
-                    get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v
-                ):
+                if is_v_schedule_enabled():
                     assert config.virtual_pipeline_model_parallel_size == 2
-                    if pipeline_rank == 0:
-                        if vp_stage == 0:
-                            offset = pipeline_rank
-                        else:
-                            offset = total_virtual_chunks - pipeline_rank - 1
+
+                    if vp_stage == 0:
+                        offset = pipeline_rank * num_layers_per_virtual_rank
+                    else:
+                        offset = num_layers - (num_layers_per_virtual_rank * (pipeline_rank + 1))
+                        # offset = total_virtual_chunks - pipeline_rank - 1
                 # Reduce the offset of embedding layer from the total layer number
                 if (
                     config.account_for_embedding_in_pipeline_split

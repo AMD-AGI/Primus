@@ -44,6 +44,20 @@ from transformer_engine.pytorch.fp8 import (
 )
 
 
+def use_split_wgrad_op():
+    args = get_args()
+    if args.patch_primus_pipeline and args.pp_algorithm in [
+        "zero-bubble",
+        "zbv-formatted",
+        "v-half",
+        "v-min",
+    ]:
+        return True
+    elif args.patch_zero_bubble and args.enable_zero_bubble:
+        return True
+    return False
+
+
 class PrimusTurboFloat8QuantConfig(Float8QuantConfig):
 
     def block_scaling(self):
@@ -327,8 +341,7 @@ class PrimusTurboRowParallelLinear(TELinear):
 
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
-        args = get_args()
-        if args.patch_zero_bubble and args.enable_zero_bubble:
+        if use_split_wgrad_op():
             from .zbpp_gemm import gemm_with_weight_gradient_store
 
             self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
@@ -423,9 +436,7 @@ class PrimusTurboColumnParallelLinear(TELinear):
             raise ValueError("Transformer Engine linear layers do not support gather_output = True")
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
-        args = get_args()
-
-        if args.patch_zero_bubble and args.enable_zero_bubble:
+        if use_split_wgrad_op():
             from .zbpp_gemm import gemm_with_weight_gradient_store
 
             self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
@@ -528,8 +539,7 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
 
-        args = get_args()
-        if args.patch_zero_bubble and args.enable_zero_bubble:
+        if use_split_wgrad_op():
             from .zbpp_gemm import gemm_with_weight_gradient_store
 
             self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
@@ -631,8 +641,7 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         # and we don't have to deal with the zero length Tensor.
         self.te_return_bias = skip_bias_add and bias
 
-        args = get_args()
-        if args.patch_zero_bubble and args.enable_zero_bubble:
+        if use_split_wgrad_op():
 
             from .zbpp_gemm import gemm_with_weight_gradient_store
 
@@ -731,9 +740,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         )
         args = get_args()
 
-        if (args.patch_zero_bubble and args.enable_zero_bubble) or (
-            args.patch_moe_overlap and args.overlap_moe_expert_parallel_comm
-        ):
+        if use_split_wgrad_op() or (args.patch_moe_overlap and args.overlap_moe_expert_parallel_comm):
             from .zbpp_gemm import grouped_gemm_with_weight_gradient_store
 
             self.grouped_gemm = functools.partial(
@@ -785,7 +792,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         gemm_kargs = [dict(), dict()]
         if permuted_local_hidden_states.nelement() != 0:
             # Reshape the weights for the grouped GEMMs.
-            if args.patch_zero_bubble and args.enable_zero_bubble:
+            if use_split_wgrad_op():
 
                 w1 = self.weight1
                 w2 = self.weight2
@@ -852,7 +859,9 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             # No token is allocated for local experts.
             assert torch.count_nonzero(tokens_per_expert) == 0
             # Make sure params of experts still have gradients even given zero tokens.
-            assert not args.patch_zero_bubble, "Zero bubble not support torch.matmul backend yet"
+            assert (
+                not args.patch_zero_bubble and not args.patch_primus_pipeline
+            ), "Zero bubble or primus pipeline not support torch.matmul backend yet"
             w1 = self.weight1.view(self.config.hidden_size, -1)
             w2 = self.weight2.view(-1, self.config.hidden_size)
             h = torch.matmul(permuted_local_hidden_states, w1)
