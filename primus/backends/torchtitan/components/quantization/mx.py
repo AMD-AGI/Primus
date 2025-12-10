@@ -6,14 +6,11 @@
 
 import torch
 import torch.nn as nn
-
-# Compatibility for different primus_turbo versions
-try:
-    from primus_turbo.pytorch.core.float8 import Float8QuantConfig, ScalingGranularity
-except ImportError:
-    from primus_turbo.pytorch.core.low_precision import Float8QuantConfig, ScalingGranularity
-
-from primus_turbo.pytorch.modules.linear_fp8 import Float8Linear
+from primus_turbo.pytorch.core.low_precision import (
+    Float8QuantConfig,
+    ScalingGranularity,
+)
+from primus_turbo.pytorch.modules import Float8Linear
 from torchtitan.config.job_config import JobConfig
 from torchtitan.distributed import ParallelDims
 from torchtitan.protocols.model_converter import (

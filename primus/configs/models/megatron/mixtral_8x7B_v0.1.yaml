@@ -1,4 +1,4 @@
-bases:
+extends:
   - mixtral_base.yaml
 
 # model parameters

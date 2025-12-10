@@ -137,7 +137,7 @@ class HLOSimplifier:
     Key features:
       * Parse computations from HLO text dump
       * Identify and traverse from ENTRY computation
-      * Follow control flow (while loops, conditionals)
+      * Follow control flow (while loops, conditionals, call operations)
       * Extract communication ops, computation ops, or both based on --op mode
       * Produce hierarchical, indented skeleton output
       * Always print full op_name metadata paths if available
@@ -665,11 +665,12 @@ class HLOSimplifier:
         mult: int,
         stack: Optional[Set[str]] = None,
         is_entry: bool = False,
+        loop_depth: int = 0,
     ) -> None:
         """
         Recursively traverse computation to generate execution skeleton.
 
-        Prints control flow structures (while, conditional) and selected operations
+        Prints control flow structures (while, conditional, call) and selected operations
         based on --op mode (communication/computation/all).
 
         Args:
@@ -678,6 +679,7 @@ class HLOSimplifier:
             mult: Loop multiplier for operation count statistics
             stack: Recursion guard to prevent infinite loops
             is_entry: Whether this is the ENTRY computation
+            loop_depth: Current loop nesting depth for unique variable naming
         """
         if stack is None:
             stack = set()
@@ -708,18 +710,19 @@ class HLOSimplifier:
                 if m:
                     cond, body = m.group(1), m.group(2)
                     info = self.get_loop_info(cond, body, line)
+                    comment = f"  # {while_name}" if self.show_name and while_name else ""
 
+                    v = chr(ord("i") + loop_depth)
                     if info.n is not None:
-                        v = f"iv{info.tuple_index}" if info.tuple_index is not None else "i"
-                        comment = f"  # {while_name}" if self.show_name and while_name else ""
+                        if self.show_name and info.tuple_index is not None:
+                            v = f"{v}_iv{info.tuple_index}"
                         print(tab + f"while {v} in range({info.n}):{comment}")
                         count = info.n
                     else:
-                        comment = f"  # {while_name}" if self.show_name and while_name else ""
-                        print(tab + f"while <unknown>:{comment}")
+                        print(tab + f"while {v} in range(<unknown>):{comment}")
                         count = 1
 
-                    self.walk_computation(body, bind + 2, mult * count, stack, False)
+                    self.walk_computation(body, bind + 2, mult * count, stack, False, loop_depth + 1)
                     continue
 
             # -------- Conditional branches --------
@@ -728,9 +731,9 @@ class HLOSimplifier:
                 if m:
                     t, f = m.group(1), m.group(2)
                     print(tab + f"if %{t}:")
-                    self.walk_computation(t, bind + 2, mult, stack, False)
+                    self.walk_computation(t, bind + 2, mult, stack, False, loop_depth)
                     print(tab + "else:")
-                    self.walk_computation(f, bind + 2, mult, stack, False)
+                    self.walk_computation(f, bind + 2, mult, stack, False, loop_depth)
                     continue
 
                 m = BRANCH_COMP_RE.search(line)
@@ -739,7 +742,22 @@ class HLOSimplifier:
                     for idx, b in enumerate(branches):
                         kw = "if" if idx == 0 else "elif"
                         print(tab + f"{kw} branch{idx} (%{b}):")
-                        self.walk_computation(b, bind + 2, mult, stack, False)
+                        self.walk_computation(b, bind + 2, mult, stack, False, loop_depth)
+                    continue
+
+            # -------- Call operations --------
+            # Extract to_apply=%foo or calls=%foo and recursively walk
+            if " call(" in line:
+                m_to_apply = re.search(r"to_apply=%([^\s,}]+)", line)
+                m_calls = re.search(r"calls=%([^\s,}]+)", line)
+                callee = None
+                if m_to_apply:
+                    callee = m_to_apply.group(1).lstrip("%")
+                elif m_calls:
+                    callee = m_calls.group(1).lstrip("%")
+
+                if callee:
+                    self.walk_computation(callee, bind, mult, stack, False, loop_depth)
                     continue
 
             # -------- Operation extraction based on --op mode --------
@@ -877,7 +895,7 @@ class HLOSimplifier:
         sys.stdout = _ListWriter(captured)
 
         try:
-            self.walk_computation(self.entry_name, 0, 1, set(), True)
+            self.walk_computation(self.entry_name, 0, 1, set(), True, 0)
 
             if self.op_type in ("communication", "all"):
                 print("\n")

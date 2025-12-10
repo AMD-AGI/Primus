@@ -5,6 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import argparse
 import dataclasses
 import functools
 import gc
@@ -33,7 +34,12 @@ from megatron.training.checkpointing import (
     load_checkpoint,
     save_checkpoint,
 )
+from megatron.training.training import save_checkpoint_and_time
 
+from primus.backends.megatron.core.optimizer.moun import get_megatron_muon_optimizer
+from primus.backends.megatron.core.optimizer.moun_optimizer_config import (
+    MounOptimizerConfig,
+)
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
 from primus.core.utils.import_utils import get_custom_fsdp, get_model_provider
 
@@ -133,6 +139,7 @@ from megatron.training.utils import (
 )
 from megatron.training.yaml_arguments import validate_yaml
 
+from primus.backends.megatron.argument_builder import _load_megatron_defaults
 from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from primus.backends.megatron.model_provider import primus_model_provider
 from primus.backends.megatron.training.global_vars import (
@@ -143,6 +150,7 @@ from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenize
 from primus.core.utils import checker, file_utils
 from primus.core.utils.flops_estimator import num_floating_point_operations
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
+from primus.core.utils.yaml_utils import nested_namespace_to_dict
 from primus.modules.base_module import BaseModule
 from primus.modules.module_utils import (
     debug_rank_0,
@@ -1151,7 +1159,21 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # args = parse_args(extra_args_provider, ignore_unknown_args)
 
         # Use trainer args from primus
-        args = self.module_config
+        # args = self.module_config
+
+        # Build Megatron arguments by merging Primus config into Megatron defaults.
+        # 1) Load Megatron defaults (no Primus overrides)
+        megatron_defaults = _load_megatron_defaults()
+
+        # 2) Convert Primus module_config (nested namespace) to a plain dict
+        primus_args = nested_namespace_to_dict(self.module_config)
+
+        # 3) Merge: defaults < primus_args
+        merged_args = megatron_defaults.copy()
+        merged_args.update(primus_args)
+
+        # 4) Convert to Namespace for compatibility with downstream Megatron utilities
+        args = argparse.Namespace(**merged_args)
 
         # Prep for checkpoint conversion.
         if args.ckpt_convert_format is not None:
@@ -1319,20 +1341,39 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         unwrapped_model = unwrap_model(model)
 
         kwargs = {}
-        for f in dataclasses.fields(OptimizerConfig):
-            if hasattr(args, f.name):
-                kwargs[f.name] = getattr(args, f.name)
-        config = OptimizerConfig(**kwargs)
-        config.timers = timers
-        log_rank_0(f"-run get_megatron_optimizer")
-        optimizer = get_megatron_optimizer(
-            config,
-            model,
-            no_wd_decay_cond,
-            scale_lr_cond,
-            lr_mult,
-            use_gloo_process_groups=args.enable_gloo_process_groups,
-        )
+
+        if "muon" not in args.optimizer:
+            for f in dataclasses.fields(OptimizerConfig):
+                if hasattr(args, f.name):
+                    kwargs[f.name] = getattr(args, f.name)
+            config = OptimizerConfig(**kwargs)
+            config.timers = timers
+
+            optimizer = get_megatron_optimizer(
+                config,
+                model,
+                no_wd_decay_cond,
+                scale_lr_cond,
+                lr_mult,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+            )
+        else:
+            for f in dataclasses.fields(MounOptimizerConfig):
+                if hasattr(args, f.name):
+                    kwargs[f.name] = getattr(args, f.name)
+
+            config = MounOptimizerConfig(**kwargs)
+            config.timers = timers
+            optimizer = get_megatron_muon_optimizer(
+                config,
+                model,
+                no_wd_decay_cond,
+                scale_lr_cond,
+                lr_mult,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+                layer_wise_distributed_optimizer="dist" in config.optimizer,
+            )
+
         opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
 
         if args.moe_use_upcycling:
@@ -2433,18 +2474,31 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     hip_used_mem = hip_total_mem - hip_free_mem
                     hip_mem_usage = hip_used_mem / hip_total_mem
                     log_string += (
-                        f" hip mem usage/free/total/usage_ratio: {hip_used_mem/1024/1024/1024:.2f}GB/"
+                        f" hip mem usage/free/total/usage_ratio: {hip_used_mem/1024/1024/1024:.2f}GiB/"
                     )
-                    log_string += f"{hip_free_mem/1024/1024/1024:.2f}GB/"
-                    log_string += f"{hip_total_mem/1024/1024/1024:.2f}GB/{hip_mem_usage*100:.2f}% |"
+                    log_string += f"{hip_free_mem/1024/1024/1024:.2f}GiB/"
+                    log_string += f"{hip_total_mem/1024/1024/1024:.2f}GiB/{hip_mem_usage*100:.2f}% |"
 
                 if args.use_rocm_mem_info or iteration in args.use_rocm_mem_info_iters:
                     rocm_mem_usage = rocm_used_mem / rocm_total_mem
+
+                    # get the max rocm_mem_usage
+                    usage_tensor = torch.tensor([rocm_mem_usage], device="cuda", dtype=torch.float32)
+                    world_size = dist.get_world_size()
+                    gathered_usage = [torch.zeros_like(usage_tensor) for _ in range(world_size)]
+                    dist.all_gather(gathered_usage, usage_tensor)
+
+                    rocm_mem_usages = [t.item() for t in gathered_usage]
+                    max_usage = max(rocm_mem_usages)
+                    max_rank = rocm_mem_usages.index(max_usage)
+
                     log_string += (
-                        f" rocm mem usage/free/total/usage_ratio: {rocm_used_mem/1024/1024/1024:.2f}GB/"
+                        f" rocm mem usage/free/total/usage_ratio: {rocm_used_mem/1024/1024/1024:.2f}GiB/"
                     )
-                    log_string += f"{rocm_free_mem/1024/1024/1024:.2f}GB/"
-                    log_string += f"{rocm_total_mem/1024/1024/1024:.2f}GB/{rocm_mem_usage*100:.2f}% |"
+                    log_string += f"{rocm_free_mem/1024/1024/1024:.2f}GiB/"
+                    log_string += f"{rocm_total_mem/1024/1024/1024:.2f}GiB/{rocm_mem_usage*100:.2f}% |"
+                    log_string += f" rank-{max_rank} max mem usage/usage_ratio: "
+                    log_string += f"{rocm_total_mem*max_usage/1024/1024/1024:.2f}GiB/{max_usage*100:.2f}% |"
 
                 log_string += (
                     f" throughput per GPU (TFLOP/s/GPU): {throughput:.1f}/"
@@ -2486,17 +2540,17 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                             iteration,
                         )
                         writer.add_scalar(
-                            f"{mem_collector}_used_mem(GB)",
+                            f"{mem_collector}_used_mem(GiB)",
                             used_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         writer.add_scalar(
-                            f"{mem_collector}_free_mem(GB)",
+                            f"{mem_collector}_free_mem(GiB)",
                             free_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         writer.add_scalar(
-                            f"{mem_collector}_total_mem(GB)",
+                            f"{mem_collector}_total_mem(GiB)",
                             total_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
@@ -2508,15 +2562,15 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                             iteration,
                         )
                         wandb_writer.log(
-                            {f"{mem_collector}_used_mem(GB)": used_mem / 1024 / 1024 / 1024},
+                            {f"{mem_collector}_used_mem(GiB)": used_mem / 1024 / 1024 / 1024},
                             iteration,
                         )
                         wandb_writer.log(
-                            {f"{mem_collector}_free_mem(GB)": free_mem / 1024 / 1024 / 1024},
+                            {f"{mem_collector}_free_mem(GiB)": free_mem / 1024 / 1024 / 1024},
                             iteration,
                         )
                         wandb_writer.log(
-                            {f"{mem_collector}_total_mem(GB)": total_mem / 1024 / 1024 / 1024},
+                            {f"{mem_collector}_total_mem(GiB)": total_mem / 1024 / 1024 / 1024},
                             iteration,
                         )
                         wandb_writer.log({f"{mem_collector}_mem_usage(%)": mem_usage * 100.0}, iteration)
@@ -2528,17 +2582,17 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_used_mem(GB)",
+                            f"{mem_collector}_used_mem(GiB)",
                             used_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_free_mem(GB)",
+                            f"{mem_collector}_free_mem(GiB)",
                             free_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_total_mem(GB)",
+                            f"{mem_collector}_total_mem(GiB)",
                             total_mem / 1024 / 1024 / 1024,
                             iteration,
                         )

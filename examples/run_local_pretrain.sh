@@ -86,7 +86,13 @@ while IFS='=' read -r name _; do
 done < <(env | grep "^PRIMUS_TURBO_")
 ENV_ARGS+=("--env" "EXP")
 ENV_ARGS+=("--env" "BACKEND")
+if [ "${BACKEND:-}" = "MaxText" ]; then
+    ENV_ARGS+=("--env" "DUMP_HLO")
+fi
 ENV_ARGS+=("--env" "HF_TOKEN")
+ENV_ARGS+=("--env" "WANDB_API_KEY")
+ENV_ARGS+=("--env" "ENABLE_NUMA_BINDING")
+ENV_ARGS+=("--env" "HSA_KERNARG_POOL_SIZE")
 echo "ENV_ARGS: ${ENV_ARGS[*]}"
 
 HOSTNAME=$(hostname)
@@ -95,6 +101,14 @@ ARGS=("$@")
 VOLUME_ARGS=(-v "$PRIMUS_PATH":"$PRIMUS_PATH" -v "$DATA_PATH":"$DATA_PATH")
 if [[ -f "$PATH_TO_BNXT_TAR_PACKAGE" ]]; then
     VOLUME_ARGS+=(-v "$PATH_TO_BNXT_TAR_PACKAGE":"$PATH_TO_BNXT_TAR_PACKAGE")
+fi
+
+# using ainic
+if [ "$USING_AINIC" == "1" ]; then
+    ENV_ARGS+=("--env" "USING_AINIC")
+    ENV_ARGS+=("--env" "RCCL_HOME_DIR")
+    ENV_ARGS+=("--env" "ANP_HOME_DIR")
+    ENV_ARGS+=("--env" "MPI_HOME_DIR")
 fi
 
 export CLEAN_DOCKER_CONTAINER=${CLEAN_DOCKER_CONTAINER:-0}
@@ -122,6 +136,13 @@ if [[ "${CLEAN_DOCKER_CONTAINER:-0}" == "1" ]]; then
     else
         echo "Node-${NODE_RANK}: No containers to remove."
     fi
+fi
+
+if [[ "${SKIP_TRAIN:-0}" == "1" ]]; then
+    echo "Node-${NODE_RANK}: Skipping training container launch."
+    exit 0
+else
+    echo "Node-${NODE_RANK}: Launching training container."
 fi
 
 # ------------------ Launch Training Container ------------------

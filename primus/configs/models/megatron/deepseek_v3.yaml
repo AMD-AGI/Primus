@@ -1,4 +1,4 @@
-bases:
+extends:
   - deepseek_v3_base.yaml
 
 # https://huggingface.co/deepseek-ai/DeepSeek-V3
