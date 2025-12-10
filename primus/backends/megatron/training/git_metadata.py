@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import warnings
 from pathlib import Path
 from typing import Dict, MutableMapping, Optional, Union
 
@@ -44,18 +45,21 @@ def format_env_variables() -> str:
 # ---------- git helpers ----------
 
 
-def find_git_root(start: Path, max_depth: int = _MAX_GIT_ROOT_SEARCH_DEPTH) -> Optional[Path]:
+def find_git_repository_root(start: Path, max_depth: int = _MAX_GIT_ROOT_SEARCH_DEPTH) -> Optional[Path]:
     """
-    Walk up from `start` until a `.git` directory is found, the filesystem root is reached,
-    or the maximum number of parent directories (`max_depth`) has been checked.
+    Search upward from `start` to find the root of a git repository.
+
+    Walks up the directory tree until a `.git` directory is found, the filesystem
+    root is reached, or the maximum number of parent directories (`max_depth`)
+    has been checked.
 
     Args:
         start (Path): The directory to start searching from.
         max_depth (int): The maximum number of parent directories to check.
 
     Returns:
-        Optional[Path]: The path to the git root directory if found within `max_depth` levels,
-        otherwise None.
+        Optional[Path]: The path to the git repository root if found within
+        `max_depth` levels, otherwise None.
     """
     current = start
     for _ in range(max_depth):
@@ -154,14 +158,22 @@ def collect_git_metadata(
     Collect git metadata for:
       - Primus repo (label `primus`)
       - all other git repos directly under workspace_root
-        (labelled by directory name, lowercased with '-' -> '_')
+        (labelled by directory name, lowercased with '-' -> '_';
+        collisions are resolved by appending '_1', '_2', etc.)
       - plus all their submodules (recursively)
 
     Any directory that is missing or not a git repo is silently skipped.
     """
     # 1) Locate Primus root (starting from this file's path or cwd)
     if primus_root is None:
-        primus_root = find_git_root(Path.cwd()) or Path.cwd()
+        primus_root = find_git_repository_root(Path.cwd())
+        if primus_root is None:
+            warnings.warn(
+                f"No git repository found searching upward from {Path.cwd()}. "
+                "Git metadata collection may be incomplete.",
+                stacklevel=2,
+            )
+            primus_root = Path.cwd()
     primus_root = Path(primus_root)
 
     meta: Dict[str, str] = {}
@@ -171,6 +183,7 @@ def collect_git_metadata(
 
     # 3) Workspace: siblings under /workspace (or parent of Primus root)
     ws_root = Path(workspace_root) if workspace_root is not None else primus_root.parent
+    seen_labels: Dict[str, int] = {}
     if ws_root.is_dir():
         for child in ws_root.iterdir():
             if not child.is_dir():
@@ -180,7 +193,16 @@ def collect_git_metadata(
             if not (child / ".git").exists():
                 continue
 
-            label = child.name.lower().replace("-", "_")
+            # Normalize label; detect and resolve collisions by appending a numeric suffix.
+            # e.g., 'my-repo', 'My_Repo', 'my_repo' all normalize to 'my_repo',
+            # so duplicates become 'my_repo_1', 'my_repo_2', etc.
+            base_label = child.name.lower().replace("-", "_")
+            if base_label in seen_labels:
+                label = f"{base_label}_{seen_labels[base_label]}"
+                seen_labels[base_label] += 1
+            else:
+                label = base_label
+                seen_labels[base_label] = 1
             _collect_repo_git_metadata(meta, label, child)
 
     return meta
