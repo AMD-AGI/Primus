@@ -250,8 +250,8 @@ DeepSeek-V2-Lite is a memory and compute-efficient variant designed for high-thr
 | DeepSeek-V2-Lite | 16B | 2.4B | 27 |
 
 **Configuration files:**
-- Model Config: `primus/configs/models/megatron/deepseek_v2_lite.yaml`
-- Pretrain Script: `examples/moe_package/run_deepseek_v2_lite_pretrain_mi355x.sh`
+- Model Config: [primus/configs/models/megatron/deepseek_v2_lite.yaml](https://github.com/AMD-AGI/Primus/blob/main/primus/configs/models/megatron/deepseek_v2_lite.yaml)
+- Pretrain Script: [examples/moe_package/run_deepseek_v2_lite_pretrain_mi355x.sh](https://github.com/AMD-AGI/Primus/blob/main/examples/moe_package/run_deepseek_v2_lite_pretrain_mi355x.sh)
 
 ---
 
@@ -324,8 +324,8 @@ DeepSeek-V2 models scale up in size and complexity, optimized for maximum parall
 | DeepSeek-V2 | 236B | 21B | 60 |
 
 **Configuration files:**
-- Model Config: `primus/configs/models/megatron/deepseek_v2.yaml`
-- Pretrain Script: `examples/moe_package/run_deepseek_v2_pretrain_mi355x.sh`
+- Model Config: [primus/configs/models/megatron/deepseek_v2.yaml](https://github.com/AMD-AGI/Primus/blob/main/primus/configs/models/megatron/deepseek_v2.yaml)
+- Pretrain Script: [examples/moe_package/run_deepseek_v2_pretrain_mi355x.sh](https://github.com/AMD-AGI/Primus/blob/main/examples/moe_package/run_deepseek_v2_pretrain_mi355x.sh)
 
 ---
 

@@ -71,18 +71,13 @@ export TRAIN_ITERS=${TRAIN_ITERS:-10}
 # 3 - Loss fusion helper
 # 4 - DeepEP acceleration
 # 5 - Sync-free MoE (stage 1)
-# 6 - 1F1B MoE overlap
-# 7 - Zero-bubble pipeline optimizations
-# 8 - Arbitrary pipeline partition (8-way custom layout)
-# 9 - Recompute selected layers helper
-# 10 - CPU NUMA binding helper
-# 11 - Manual GC helper
-# MoE_Features=(0 1 2 3 4 5 6 7 8 9 10 11)
-# MoE_Features=(0 11)
-# MoE_Features=(3 11)
-# MoE_Features=(3 4 11)
-# MoE_Features=(3 4 5 11)
-MoE_Features=(3 4 5 10 11)
+# 6 - CPU NUMA binding helper
+# 7 - Manual GC helper
+# MoE_Features=(0 7)
+# MoE_Features=(3 7)
+# MoE_Features=(3 4 7)
+# MoE_Features=(3 4 5 7)
+MoE_Features=(3 4 5 6 7)
 
 FEATURE_ARGS=()
 PRIMUS_TURBO_ENABLED="False"
@@ -130,77 +125,11 @@ for feature in "${MoE_Features[@]}"; do
         # FEATURE_ARGS+=("--moe_router_dtype" "fp32")
         ;;
     6)
-        FEATURE_ARGS+=("--overlap_moe_expert_parallel_comm" "True")
-        FEATURE_ARGS+=("--patch_moe_overlap" "False") # TODO: error
-        FEATURE_ARGS+=("--delay_wgrad_compute" "False")
-        FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
-        ;;
-    7)
-        ensure_primus_turbo
-        # required flags for zero bubble
-        FEATURE_ARGS+=("--overlap_grad_reduce" "False")
-        FEATURE_ARGS+=("--overlap_param_gather" "False")
-        FEATURE_ARGS+=("--no_persist_layer_norm" "True")
-        FEATURE_ARGS+=("--create_attention_mask_in_dataloader" "False")
-        FEATURE_ARGS+=("--gradient_accumulation_fusion" "True")
-
-        # default strategy is zero bubble
-        PP_STRATEGY="zbv" # 1f1b, vpp, zb1p, zbv, v-half, v-min
-
-        case "$PP_STRATEGY" in
-        1f1b)
-            VPP=1
-            ;;
-        vpp)
-            ;;
-        zb1p)
-            FEATURE_ARGS+=("--patch_zero_bubble" "True")
-            VPP=1
-            ;;
-        zbv)
-            FEATURE_ARGS+=("--patch_zero_bubble" "True")
-            FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
-            FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "zb")
-            VPP=2
-            ;;
-        v-half)
-            FEATURE_ARGS+=("--patch_zero_bubble" "True")
-            FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
-            FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "half")
-            VPP=2
-            ;;
-        v-min)
-            FEATURE_ARGS+=("--patch_zero_bubble" "True")
-            FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
-            FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "min")
-            VPP=2
-            ;;
-        *)
-            echo "Unsupported PP_STRATEGY: ${PP_STRATEGY}. Supported values: 1f1b, vpp, zb1p, zbv, v-half, v-min." >&2
-            exit 1
-            ;;
-        esac
-        ;;
-    8)
-        # TODO: need tuning for the pipeline layout pattern
-        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et*3|(tt|)*29,m|L")
-        # 32 stages for PP8VPP4
-        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et|(tt|)*30L")
-        # pp2 vpp4
-        # 1 + 6 + 1 stages
-        # 1 + 2*6 = 13 layers
-        FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et|(tt|)*6L")
-        VPP=1
-        ;;
-    9)
-        FEATURE_ARGS+=("--recompute_layer_ids" "0,1,2,3")
-        ;;
-    10)
         # Enable NUMA binding for better memory locality (increase stability for large models)
         export ENABLE_NUMA_BINDING=1
         export HSA_KERNARG_POOL_SIZE=12582912
         ;;
-    11)
+    7)
         FEATURE_ARGS+=("--manual_gc" "True")
         FEATURE_ARGS+=("--manual_gc_interval" "1")
         ;;
@@ -245,7 +174,6 @@ fi
 
 PROFILE_ARGS=()
 if [ "$PROFILE" = "True" ]; then
-    # --profile-ranks 0 1 2 3 4 5 6 7
     PROFILE_ARGS+=("--profile" "True")
     PROFILE_ARGS+=("--disable_profiler_activity_cpu" "${DISABLE_CPU_TRACE}")
     PROFILE_ARGS+=("--use_pytorch_profiler" "True")
@@ -258,7 +186,6 @@ PRIMUS_TEAM="date-$(date +%Y%m%d)-DeepSeekV2Lite"
 export PRIMUS_TEAM
 PRIMUS_USER=user-tas
 export PRIMUS_USER
-# export PRIMUS_EXP_NAME="debug"
 export PRIMUS_EXP_NAME="DeepSeekV2Lite_MI355X_FP8${FP8}_MBS${MBS}_GBS${GBS}_SEQ${SEQ_LENGTH}_MLA${ENABLE_MLA}_MTP${ENABLE_MTP}_REC${RECOMPUTE_LAYERS}_TP${TP}_ETP${ETP}_PP${PP}_VPP${VPP}_EP${EP}_CP${CP}_Balance${LOAD_BALANCE}_LegacyGG${LEGACY_GG}_Profile${PROFILE}-${PROFILE_STEP_START}-${PROFILE_STEP_END}_NoCPUTrace${DISABLE_CPU_TRACE}_HQ${GPU_MAX_HW_QUEUES}_Features${FEATURE_TAG}"
 
 LOG_DIR=./output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
