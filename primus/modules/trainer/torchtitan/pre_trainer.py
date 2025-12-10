@@ -81,8 +81,6 @@ class TorchTitanPretrainTrainer(BaseModule):
         if hasattr(self.titan_config, "primus_turbo") and self.titan_config.primus_turbo.enable_primus_turbo:
             self.enable_primus_turbo_extension()
 
-        self.patch_classic_attention()
-
     def setup(self):
         pass
 
@@ -397,6 +395,10 @@ class TorchTitanPretrainTrainer(BaseModule):
         if self.titan_config.primus_turbo.use_turbo_async_tp:
             # ******* Async TP *******
             self.patch_torch_async_tp()
+
+        if self.titan_config.primus_turbo.use_classic_attention:
+            self.patch_classic_attention()
+            logger.warning(f"TorchtitanPretrainTrainer: Patch Classic Attention")
 
         from primus.core.utils.logger import _logger as primus_logger
 
