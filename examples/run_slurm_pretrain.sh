@@ -38,7 +38,12 @@ export LOG_DIR=${LOG_DIR:-"./output"}
 LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
 
+JOB_NAME=${JOB_NAME:-"primus_train"}
+TIME_LIMIT=${TIME_LIMIT:-"8:00:00"}
+
 srun -N "${NNODES}" \
+     --job-name="${JOB_NAME}" \
+     --time="${TIME_LIMIT}" \
      --exclusive \
      --export ALL \
      --ntasks-per-node=1 \
