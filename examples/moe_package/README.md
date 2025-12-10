@@ -7,6 +7,10 @@ You'll learn about:
 - Key performance bottlenecks and how to diagnose them
 - Practical optimization techniques for AMD platforms
 
+All feature demonstrations and benchmarking results in this guide have been evaluated using Primus as the foundation. [Primus/Primus-LM](https://github.com/AMD-AGI/Primus) is a highly flexible and high-performance framework purpose-built for large-scale foundation model training and inference on AMD GPUs. As the training framework layer of the Primus ecosystem, Primus-LM collaborates with components such as [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo/) (high-performance operators) and [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE) (stability and compatibility infrastructure) to deliver a comprehensive, scalable, and production-ready solution for state-of-the-art large model development.
+
+For more information, including configuration examples and advanced optimizations, please refer to the official [Primus documentation](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/primus-megatron.html) and [GitHub repository](https://github.com/AMD-AGI/Primus).
+
 ---
 
 ## 1. MoE Model Overview
@@ -214,7 +218,7 @@ export ENABLE_NUMA_BINDING=1
 
 This improves memory bandwidth utilization and training stability for large models.
 
-**2. Increase HIP Kernel Argument Pool Size**: Raises the maximum number of concurrent kernel launches to prevent launch bottlenecks
+**2. Increase HIP Kernel Argument Pool Size**: During MoE model training, a large number of operators require frequent kernel launches. If the HIP kernel launch argument pool size is insufficient, it can cause launch bottlenecks and stalls. To address this, we increase the kernel argument pool size to 12MB, which is sufficient to meet the requirements of most large-scale MoE model training workloads and helps ensure efficient and smooth kernel launches.
 
 **Usage**:
 ```bash
@@ -243,7 +247,7 @@ This section provides practical guidance for optimizing different DeepSeek model
 
 #### Overview and Configuration
 
-DeepSeek-V2-Lite is a memory and compute-efficient variant designed for high-throughput pretraining.
+[DeepSeek-V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite) is a memory and compute-efficient variant designed for high-throughput pretraining.
 
 | Variant | Total Params | Active Params | Transformer Layers |
 | --- | --- | --- | --- |
@@ -257,7 +261,7 @@ DeepSeek-V2-Lite is a memory and compute-efficient variant designed for high-thr
 
 #### Baseline Performance Testing
 
-AMD MI300/325/355 series GPUs offer very large memory pools. The most effective way to leverage this is to increase the micro-batch size (MBS).
+AMD MI300X/MI355X series GPUs offer exceptionally large memory pools, making them ideal for scaling up micro-batch sizes (MBS) to maximize throughput and efficiency. Specifically, the MI300X features 192 GB of HBM3 memory per card with a peak memory bandwidth of approximately 5.325 TB/s, while the MI355X (part of the MI350 series) provides 288 GB of HBM3E memory per card with bandwidth up to 8 TB/s. The most effective way to leverage these substantial resources is to increase the micro-batch size (MBS).
 
 **Scaling strategies:**
 - **EP (Expert Parallel size)**: Enables scaling individual expert models across devices
@@ -317,7 +321,7 @@ Through stepwise optimization, we observe significant boosts in end-to-end train
 
 #### Overview and Configuration
 
-DeepSeek-V2 models scale up in size and complexity, optimized for maximum parallel throughput on MI-series hardware.
+[DeepSeek-V2](https://huggingface.co/deepseek-ai/DeepSeek-V2) models scale up in size and complexity, optimized for maximum parallel throughput on MI-series hardware.
 
 | Variant | Total Params | Active Params | Transformer Layers |
 | --- | --- | --- | --- |
