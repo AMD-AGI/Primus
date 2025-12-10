@@ -1,0 +1,41 @@
+bases:
+  - language_model.yaml
+
+# Mamba-specific configuration
+# Note: Mamba-specific parameters (spec, is_hybrid_model, mamba_state_dim, etc.) 
+# must be set in the pretrain config overrides, not here
+
+model_type: mamba
+use_legacy_models: false
+
+# Position embeddings - Mamba typically doesn't use position embeddings
+position_embedding_type: rope
+use_rotary_position_embeddings: false
+
+# Tokenizer (should be set in specific model configs)
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: null
+
+# Model architecture
+num_layers: 24
+hidden_size: 1024
+ffn_hidden_size: null
+
+# Standard transformer settings that may be used by hybrid models
+num_attention_heads: 16
+attention_dropout: 0.0
+hidden_dropout: 0.0
+
+# Embeddings
+untie_embeddings_and_output_weights: true
+
+# Other settings
+apply_residual_connection_post_layernorm: false
+add_bias_linear: false
+swiglu: false
+
+# Normalization
+norm_epsilon: 1.0e-5
+
+# Initialization
+init_method_std: 0.02
