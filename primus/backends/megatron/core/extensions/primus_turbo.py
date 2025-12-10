@@ -198,9 +198,17 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
 
         args = get_args()
         if args.enable_turbo_attention_float8:
-            self.attn = pt.ops.flash_attn_fp8_func
+            self.attn = (
+                pt.ops.flash_attn_fp8_usp_func
+                if self.config.context_parallel_size > 1
+                else pt.ops.flash_attn_fp8_func
+            )
         else:
-            self.attn = pt.ops.flash_attn_func
+            self.attn = (
+                pt.ops.flash_attn_usp_func
+                if self.config.context_parallel_size > 1
+                else pt.ops.flash_attn_func
+            )
         if pg_collection is None:
             # For backward compatibility, remove in v0.14 and raise error
             # raise ValueError("TEDotProductAttention was called without ProcessGroupCollection")
@@ -216,13 +224,13 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                 assert hasattr(
                     pg_collection, "hcp"
                 ), "TEDotProductAttention pg_collection must have hierarchical cp pg"
-        self.ulysses_group = None
-        self.ring_group = None
+
+        self.attn_kwargs = {}
         if self.config.context_parallel_size > 1:
-            self.ulysses_group = pg_collection.cp
+            self.attn_kwargs["ulysses_group"] = pg_collection.cp
             # TODO (limou)
             # enable ring attention
-            self.ring_group = dist.new_group(ranks=[dist.get_rank()])
+            self.attn_kwargs["ring_group"] = dist.new_group(ranks=[dist.get_rank()])
 
         assert config.window_size is None, "primus_turbo does not support sliding window attention"
         # Check version
@@ -295,8 +303,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             deterministic=False,
             return_lse=False,
             return_attn_probs=False,
-            ulysses_group=self.ulysses_group,
-            ring_group=self.ring_group,
+            **self.attn_kwargs,
         )
 
         o = o.reshape(o.shape[0], o.shape[1], -1).transpose(0, 1)
