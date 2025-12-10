@@ -8,6 +8,7 @@ extends:
 # model architecture
 use_legacy_models: false
 deprecated_use_mcore_models: false
+model_type: gpt # gpt or mamba
 num_layers: 24
 encoder_num_layers: null
 decoder_num_layers: null
