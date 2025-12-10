@@ -136,7 +136,7 @@ def _collect_repo_git_metadata(
         raw_commit = parts[0]  # e.g. "-8f3e2bf..."
         path = parts[1]  # e.g. "third_party/Megatron-LM"
 
-        commit_hash = raw_commit.lstrip(_SUBMODULE_STATUS_MARKERS)
+        commit_hash = raw_commit[1:] if raw_commit[0] in _SUBMODULE_STATUS_MARKERS else raw_commit
         ref = None
         if len(parts) >= 3 and parts[2].startswith("("):
             ref = parts[2].strip("()")
@@ -195,7 +195,7 @@ def collect_git_metadata(
 
             # Normalize label; detect and resolve collisions by appending a numeric suffix.
             # e.g., 'my-repo', 'My_Repo', 'my_repo' all normalize to 'my_repo',
-            # so duplicates become 'my_repo_1', 'my_repo_2', etc.
+            # so the first occurrence is 'my_repo', the second becomes 'my_repo_1', the third 'my_repo_2', etc.
             base_label = child.name.lower().replace("-", "_")
             if base_label in seen_labels:
                 label = f"{base_label}_{seen_labels[base_label]}"
