@@ -10,7 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: d71d856c080c9187d8e323e9eb6d85904517a21f # feat(deepep): support single-node moe_dispatch/combine on jax. (#162)
+  PRIMUS_TURBO_COMMIT: 006d15d7e83f63a3d655408e5ca69ce0a501a0ed # Fix import error of usp attention package (#177)
 
 jobs:
   code-lint:
