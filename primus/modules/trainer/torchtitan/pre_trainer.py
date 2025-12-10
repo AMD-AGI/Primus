@@ -162,7 +162,6 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         torchtitan.models.deepseek_v3.model.model.Attention = MultiHeadAttention
 
-        
     def patch_torchtitan_wandb(self):
         from primus.core.utils.logger import _logger as primus_logger
 
