@@ -47,7 +47,7 @@ To identify performance bottlenecks during MoE training, we recommend this workf
 
 ### Step 1: Torch Profiler
 
-Torch Profiler captures detailed runtime traces including operator execution time, memory usage, and GPU utilization. Use `profile_step_start` and `profile_step_end` to precisely control the profiling window and pinpoint bottlenecks.
+Torch Profiler provides comprehensive runtime traces that record operator execution times, memory consumption, and GPU utilization, enabling fine-grained visibility into your training workload. After generating a trace with Torch Profiler, you can load it into [https://ui.perfetto.dev/](https://ui.perfetto.dev/) for interactive timeline analysis. This web-based tool allows you to examine system-level bottlenecks—such as CPU/GPU overlap, kernel scheduling, kernel launch delays, and idle gaps—and to inspect the performance characteristics of individual kernels. For more systematic or in-depth analysis, especially when you need hierarchical breakdowns and optimization recommendations, you can further utilize AMD's TraceLens tool (introduced in the following section).
 
 ### Step 2: Detailed Bottleneck Analysis with TraceLens
 
@@ -142,17 +142,17 @@ Primus provides the `--turbo_sync_free_moe_stage` option with four levels:
 
 **Sync-Free related parameters in Primus-Megatron MoE:**
 
-- **Router**:
+- **Router** (Level 1+):
   - `fused_group_topk_routing_with_aux_score`: Enable router fusion
 
-- **DeepEP**:
+- **Permutation** (Level 1+):
+  - `moe_permutation_fusion`: Enable permutation fusion
+
+- **DeepEP** (Level 2+):
   - `use_cuda_num_token_per_expert`: Return `num_tokens_per_experts` as CUDA tensor
   - `num_worst_token`: Eliminate notify-dispatch CPU busy-wait
 
-- **Permutation**:
-  - `moe_permutation_fusion`: Enable permutation fusion
-
-- **GroupMLP**:
+- **GroupMLP** (Level 2+):
   - `use_turbo_groupmlp`: Use Turbo's GroupMLP with CUDA `num_token_per_experts` parameter
   - `use_turbo_groupmlp_act`: Use Turbo's activation with CUDA `num_token_per_experts` parameter
 
@@ -506,5 +506,5 @@ End-to-end EP scaling with DeepEP:
 
 - [Primus](https://github.com/AMD-AGI/Primus) training framework
 - AMD ROCm™ docs and Instinct™ MI300X/MI355X [performance benchmark guides](https://github.com/ROCm/MAD/blob/develop/benchmark/megatron_lm/README_primus.md)
-- Training a model with [Primus](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/primus-megatron.html?model=primus_pyt_megatron_lm_train_llama-3.3-70b) and Megatron-LM
-- [Migrating workloads](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/previous-versions/megatron-lm-primus-migration-guide.html) to Primus (Megatron backend) from Megatron-LM
+- [Training a model with Primus and Megatron-LM](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/primus-megatron.html)
+- [Migrating workloads to Primus (Megatron backend) from Megatron-LM](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/previous-versions/megatron-lm-primus-migration-guide.html)
