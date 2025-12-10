@@ -9,6 +9,15 @@ from typing import Dict, MutableMapping, Optional, Union
 PathLike = Union[str, Path]
 _SECRET_PATTERN = re.compile(r"(TOKEN|SECRET|KEY)", re.IGNORECASE)
 
+# Git submodule status markers (prefix characters in `git submodule status` output):
+#   - : submodule not initialized
+#   + : currently checked-out commit differs from the one recorded in the superproject
+#   U : submodule has merge conflicts
+_SUBMODULE_STATUS_MARKERS = "-+U"
+
+# Maximum directory depth to search upward when looking for a .git directory
+_MAX_GIT_ROOT_SEARCH_DEPTH = 10
+
 
 # ---------- env collector ----------
 
@@ -35,7 +44,7 @@ def format_env_variables() -> str:
 # ---------- git helpers ----------
 
 
-def find_git_root(start: Path, max_depth: int = 10) -> Optional[Path]:
+def find_git_root(start: Path, max_depth: int = _MAX_GIT_ROOT_SEARCH_DEPTH) -> Optional[Path]:
     """
     Walk up from `start` until we find a `.git` directory or hit filesystem root.
     """
@@ -78,7 +87,7 @@ def _collect_repo_git_metadata(
       git/primus_branch
       git/primus_remote
       git/primus_dirty
-      git/primus/submodule/TransformerEngine_commit
+      git/primus/submodule/third_party--Megatron-LM_commit
     """
     commit = _run_git(["rev-parse", "HEAD"], cwd=repo_path)
     if not commit:
@@ -114,12 +123,12 @@ def _collect_repo_git_metadata(
         raw_commit = parts[0]  # e.g. "-8f3e2bf..."
         path = parts[1]  # e.g. "third_party/Megatron-LM"
 
-        commit_hash = raw_commit.lstrip("-+U")  # strip status marker
+        commit_hash = raw_commit.lstrip(_SUBMODULE_STATUS_MARKERS)
         ref = None
         if len(parts) >= 3 and parts[2].startswith("("):
             ref = parts[2].strip("()")
 
-        key_prefix = f"{base}/submodule/{path.replace('/', '_')}"
+        key_prefix = f"{base}/submodule/{path.replace('/', '--')}"
         meta[f"{key_prefix}_commit"] = commit_hash
         if ref:
             meta[f"{key_prefix}_ref"] = ref

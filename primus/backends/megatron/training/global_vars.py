@@ -79,7 +79,7 @@ def _set_mlflow_writer(args):
         try:
             # This will:
             #  - log Primus as git/primus_*
-            #  - scan /workspace (parent of Primus) for other git repos
+            #  - scan the parent directory of Primus (workspace_root, defaults to primus_root.parent) for other git repos
             git_meta = collect_git_metadata()
 
             if git_meta:
