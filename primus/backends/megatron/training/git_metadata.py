@@ -46,7 +46,16 @@ def format_env_variables() -> str:
 
 def find_git_root(start: Path, max_depth: int = _MAX_GIT_ROOT_SEARCH_DEPTH) -> Optional[Path]:
     """
-    Walk up from `start` until we find a `.git` directory or hit filesystem root.
+    Walk up from `start` until a `.git` directory is found, the filesystem root is reached,
+    or the maximum number of parent directories (`max_depth`) has been checked.
+
+    Args:
+        start (Path): The directory to start searching from.
+        max_depth (int): The maximum number of parent directories to check.
+
+    Returns:
+        Optional[Path]: The path to the git root directory if found within `max_depth` levels,
+        otherwise None.
     """
     current = start
     for _ in range(max_depth):
