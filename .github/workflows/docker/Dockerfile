@@ -18,6 +18,8 @@ RUN mkdir -p /opt && cd /opt && \
     pip3 install -r requirements.txt && \
     GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
 
+RUN apt-get install --reinstall binutils -y && apt-get install numactl -y
+
 # Set the default working directory
 WORKDIR /opt
 

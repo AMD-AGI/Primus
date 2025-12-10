@@ -1,4 +1,4 @@
-includes:
+extends:
   - primus_megatron_model.yaml
 
 
@@ -74,7 +74,7 @@ attention_softmax_in_fp32: false
 
 # fusion
 bias_gelu_fusion: true
-cross_entropy_loss_fusion: False
+cross_entropy_loss_fusion: false
 cross_entropy_fusion_impl: "native" # "native", "te"
 bias_swiglu_fusion: true
 masked_softmax_fusion: true
@@ -185,7 +185,7 @@ tp_comm_overlap_cfg: null
 # Debug Options
 tp_comm_overlap_ag: true
 tp_comm_overlap_rs: true
-tp_comm_overlap_rs_dgrad: False
+tp_comm_overlap_rs_dgrad: false
 tp_comm_split_ag: true
 tp_comm_split_rs: true
 tp_comm_bulk_wgrad: true

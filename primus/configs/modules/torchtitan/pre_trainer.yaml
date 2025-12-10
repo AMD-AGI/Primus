@@ -1,4 +1,4 @@
-includes:
+extends:
   - ../module_base.yaml
   - quantize.yaml
 

@@ -1,4 +1,4 @@
-includes:
+extends:
   - ../module_base.yaml
   - primus_megatron_module.yaml
   - primus_turbo.yaml
@@ -136,7 +136,7 @@ dist_ckpt_format_deprecated: null
 ckpt_format: torch_dist # 'torch', 'torch_dist', 'zarr'
 ckpt_convert_format: null # 'torch', 'torch_dist', 'zarr'
 ckpt_convert_save: null
-ckpt_convert_update_legacy_dist_opt_format: False
+ckpt_convert_update_legacy_dist_opt_format: false
 ckpt_fully_parallel_save_deprecated: false
 ckpt_fully_parallel_save: true
 async_save: null

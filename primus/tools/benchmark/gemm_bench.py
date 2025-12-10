@@ -11,7 +11,7 @@ from datetime import datetime
 import torch
 
 from primus.tools.report import write_table_simple
-from primus.tools.utils import gather_records, is_rank_0
+from primus.tools.utils import gather_records, get_current_device, is_rank_0
 
 CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
 
@@ -19,42 +19,36 @@ CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
 def maybe_transpose(tensor, transpose):
     return tensor.t() if transpose else tensor
 
-    from primus.tools.utils import get_current_device
 
-    CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
+@torch.inference_mode()
+def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
+    assert dtype in [torch.float16, torch.bfloat16, torch.float32], f"Unsupported dtype: {dtype}"
 
-    def maybe_transpose(tensor, transpose):
-        return tensor.t() if transpose else tensor
+    device = get_current_device()
+    dtype_size = torch.tensor([], dtype=dtype).element_size()
+    mem_size_bytes = (m * k + k * n + m * n) * dtype_size
+    num_rotations = max(2, math.ceil(CACHE_ROTATING_BUFFER_BYTES / max(1, mem_size_bytes)) + 1)
+    # num_run = 100
 
-    @torch.inference_mode()
-    def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
-        assert dtype in [torch.float16, torch.bfloat16, torch.float32], f"Unsupported dtype: {dtype}"
+    a_shape = (k, m) if trans_a else (m, k)
+    b_shape = (n, k) if trans_b else (k, n)
+    a_list = [torch.randn(a_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
+    b_list = [torch.randn(b_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
+    c_list = [torch.empty((m, n), device=device, dtype=dtype) for _ in range(num_rotations)]
 
-        device = get_current_device()
-        dtype_size = torch.tensor([], dtype=dtype).element_size()
-        mem_size_bytes = (m * k + k * n + m * n) * dtype_size
-        num_rotations = max(2, math.ceil(CACHE_ROTATING_BUFFER_BYTES / max(1, mem_size_bytes)) + 1)
-        # num_run = 100
+    # Warm-up
+    for i in range(num_rotations):
+        a = maybe_transpose(a_list[i], trans_a)
+        b = maybe_transpose(b_list[i], trans_b)
+        torch.matmul(a, b, out=c_list[i])
+    torch.cuda.synchronize()
 
-        a_shape = (k, m) if trans_a else (m, k)
-        b_shape = (n, k) if trans_b else (k, n)
-        a_list = [torch.randn(a_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
-        b_list = [torch.randn(b_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
-        c_list = [torch.empty((m, n), device=device, dtype=dtype) for _ in range(num_rotations)]
+    total_calls += num_rotations
 
-        # Warm-up
-        for i in range(num_rotations):
-            a = maybe_transpose(a_list[i], trans_a)
-            b = maybe_transpose(b_list[i], trans_b)
-            torch.matmul(a, b, out=c_list[i])
-        torch.cuda.synchronize()
-
-        total_calls += num_rotations
-
-        elapsed = start.elapsed_time(end)  # ms
-        if elapsed >= target_ms:
-            elapsed / total_calls
-            break
+    elapsed = start.elapsed_time(end)  # ms
+    if elapsed >= target_ms:
+        elapsed / total_calls
+        break
 
     tflop = 2.0 * m * n * k / 1e12
     tflops = tflop / (avg_time_ms / 1000.0)

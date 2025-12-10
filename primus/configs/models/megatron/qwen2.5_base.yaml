@@ -1,4 +1,4 @@
-bases:
+extends:
   - llama_base.yaml
 
 group_query_attention: true
