@@ -9,6 +9,7 @@ from typing import Callable, List, Optional, Tuple
 
 import primus_turbo.pytorch as pt
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 import transformer_engine as te
 from megatron.core import tensor_parallel
@@ -197,11 +198,9 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
 
         args = get_args()
         if args.enable_turbo_attention_float8:
-            self.attn = pt.ops.attention_fp8_blockwise
-            self.attention_backend = "triton"
+            self.attn = pt.ops.flash_attn_fp8_func
         else:
             self.attn = pt.ops.flash_attn_func
-            self.attention_backend = "ck"
         if pg_collection is None:
             # For backward compatibility, remove in v0.14 and raise error
             # raise ValueError("TEDotProductAttention was called without ProcessGroupCollection")
@@ -217,9 +216,13 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                 assert hasattr(
                     pg_collection, "hcp"
                 ), "TEDotProductAttention pg_collection must have hierarchical cp pg"
-        self.cp_param_bundle = None
+        self.ulysses_group = None
+        self.ring_group = None
         if self.config.context_parallel_size > 1:
-            self.cp_param_bundle = {"cp_group": pg_collection.cp, "cp_comm_type": cp_comm_type}
+            self.ulysses_group = pg_collection.cp
+            # TODO (limou)
+            # enable ring attention
+            self.ring_group = dist.new_group(ranks=[dist.get_rank()])
 
         assert config.window_size is None, "primus_turbo does not support sliding window attention"
         # Check version
@@ -292,8 +295,8 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             deterministic=False,
             return_lse=False,
             return_attn_probs=False,
-            backend_type=self.attention_backend,
-            cp_param_bundle=self.cp_param_bundle,
+            ulysses_group=self.ulysses_group,
+            ring_group=self.ring_group,
         )
 
         o = o.reshape(o.shape[0], o.shape[1], -1).transpose(0, 1)
