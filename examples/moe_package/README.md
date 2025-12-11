@@ -520,10 +520,18 @@ Aurelien Bouteiller, Edgar Gabriel
 **mori Team:**
 Di Tian, Yutong Wu
 
+---
+
+## 9. References
+
+- [AMD Instinct™ MI355X GPUs](https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html): Official product page for AMD's MI355X accelerators, used as the hardware platform for all experiments in this guide.
+- [DeepSeek Hugging Face Model Definitions](https://huggingface.co/deepseek-ai): Pretrained DeepSeek models and configuration files.
+- [DeepEP Open Source Repository](https://github.com/deepseek-ai/DeepEP): Source code and documentation for DeepEP, a high-performance MoE implementation.
+- [Megatron-LM](https://github.com/NVIDIA/Megatron-LM): Transformer model training framework and MoE implementation, widely used for benchmarking and comparison.
 
 ---
 
-## 9. EndNodes
+## 10. EndNodes
 
 [1] Test Environment
 
@@ -554,9 +562,7 @@ DeepSeek-V2 pretraining throughput (tokens/second/GPU) was tested with BF16 prec
 - PyTorch 2.9.0
 - AMD ROCm 7.1.0 software
 
-
-
 ---
 
-## 10. Disclaimers
+## 11. Disclaimers
 Third-party content is licensed to you directly by the third party that owns the content and is not licensed to you by AMD. ALL LINKED THIRD-PARTY CONTENT IS PROVIDED “AS IS” WITHOUT A WARRANTY OF ANY KIND. USE OF SUCH THIRD-PARTY CONTENT IS DONE AT YOUR SOLE DISCRETION AND UNDER NO CIRCUMSTANCES WILL AMD BE LIABLE TO YOU FOR ANY THIRD-PARTY CONTENT. YOU ASSUME ALL RISK AND ARE SOLELY RESPONSIBLE FOR ANY DAMAGES THAT MAY ARISE FROM YOUR USE OF THIRD-PARTY CONTENT.
