@@ -158,15 +158,17 @@ Primus provides the `--turbo_sync_free_moe_stage` option with four levels:
 
 ---
 
-### Feature 4: 1F1B MoE Overlap
+### Feature 4: 1F1B A2A Overlap
 
-**Description**: The 1F1B (1-Forward-1-Backward) overlap scheduling optimizes both compute and communication resource utilization during MoE training.
+**Description**: The 1F1B (1-Forward-1-Backward) a2a overlap scheduling optimizes both compute and communication resource utilization during MoE training.
 
 Traditional approach: Communication for expert dispatch and aggregation (all-to-all or DeepEP) occurs sequentially with forward/backward passes, leaving hardware idle.
 
 **1F1B approach**: Interleaves communication for one micro-batch with the backward computation of the preceding micro-batch. While calculating backward gradients for micro-batch N-1, expert tokens for micro-batch N are already being communicated, reducing pipeline stalls.
 
 This is particularly beneficial at larger scales where communication costs dominate.
+
+![Sync-Free MoE Workflow](./figures/1f1b_a2a_overlap.png)
 
 ---
 
