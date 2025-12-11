@@ -18,7 +18,7 @@ Requirements:
 Optional Environment Variables:
   NNODES          Number of nodes to use [default: 1]
   MASTER_PORT     Master port [default: 12345]
-  LOG_DIR         Directory for log output [default: ./output]
+  LOG_DIR         Directory for log output [default: ./output/<model_name>/<timestamp>]
 
 Example:
   export DATA_PATH=/mnt/data
@@ -34,9 +34,16 @@ export NNODES=${NNODES:-1}
 
 SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 
-export LOG_DIR=${LOG_DIR:-"./output"}
+# Extract model name from EXP config path (e.g., deepseek_v2_lite-pretrain from .../deepseek_v2_lite-pretrain.yaml)
+MODEL_NAME=$(basename "${EXP:-unknown}" .yaml)
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+export LOG_DIR=${LOG_DIR:-"./output/${MODEL_NAME}/${TIMESTAMP}"}
 LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
+
+# IMPORTANT: Set PRIMUS_WORKSPACE to match LOG_DIR so Python code uses the same unique directory
+# This ensures tensorboard traces, checkpoints, and logs all go to the same timestamped folder
+export PRIMUS_WORKSPACE="${LOG_DIR}"
 
 JOB_NAME=${JOB_NAME:-"primus_train"}
 TIME_LIMIT=${TIME_LIMIT:-"8:00:00"}
