@@ -1,0 +1,94 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:mamba_370M-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: mamba_370M.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_Mamba_Pretrain"
+      # disable_wandb: false
+      # disable_tensorboard: false
+      stderr_sink_level: DEBUG
+
+      eval_iters: 0
+
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      train_iters: 50
+      micro_batch_size: 4
+      global_batch_size: 256
+
+      seq_length: 2048
+      max_position_embeddings: 2048
+
+      lr: 3.0e-4
+      min_lr: 0.0
+      lr_warmup_iters: 5
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.02
+      norm_epsilon: 1.0e-5
+
+      # Mamba-specific: must provide spec
+      spec: ['megatron.core.models.mamba.mamba_layer_specs', 'mamba_stack_spec']
+      
+      # Tokenizer
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: meta-llama/Llama-3.2-1B
+      
+      # Mamba SSM parameters
+      is_hybrid_model: false
+      hybrid_attention_ratio: 0.0
+      hybrid_mlp_ratio: 0.0
+      mamba_state_dim: 16
+      mamba_head_dim: 64
+      mamba_num_groups: 8
+
+      # parallel
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # data
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # Turbo - may need to disable for Mamba if not supported
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
+
+      # Cross entropy flags
+      # cross_entropy_fusion_impl: "native"
+      # cross_entropy_loss_fusion: false
+
