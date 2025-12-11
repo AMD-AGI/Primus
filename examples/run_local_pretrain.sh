@@ -164,6 +164,7 @@ docker_podman_proxy run --rm \
     --env TORCHTITAN_PATH \
     --env MAXTEXT_PATH \
     --env BACKEND_PATH \
+    --env REBUILD_PRIMUS_TURBO \
     "${ENV_ARGS[@]}" \
     --ipc=host --network=host \
     --device=/dev/kfd --device=/dev/dri \

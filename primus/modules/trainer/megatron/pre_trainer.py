@@ -235,6 +235,25 @@ class MegatronPretrainTrainer(MegatronTrainer):
                 DataLoaderStore.push(data_iterator, h2d_stream=False)
                 tokens, labels, loss_mask, attention_mask, position_ids = DataLoaderStore.pop()
 
+        # Determine if model supports loss_mask parameter
+        # MambaModel doesn't accept loss_mask in forward(), while GPTModel does
+        model_type = getattr(args, 'model_type', 'gpt')
+        supports_loss_mask = (model_type != 'mamba')
+        
+        # Alternative check: inspect the actual model class
+        # This is a fallback in case model_type isn't set correctly
+        if not supports_loss_mask:
+            # Already determined it's Mamba, no need for further checks
+            pass
+        else:
+            # Double-check by inspecting the actual model object
+            from megatron.core.models.mamba import MambaModel
+            from megatron.core.utils import get_attr_wrapped_model
+            
+            actual_model = get_attr_wrapped_model(model, 'forward', return_model_obj=True)
+            if isinstance(actual_model, MambaModel):
+                supports_loss_mask = False
+
         with stimer:
             if return_schedule_plan:
                 assert (
@@ -256,17 +275,30 @@ class MegatronPretrainTrainer(MegatronTrainer):
                         TransformerModelChunkSchedulePlan,
                     )
 
+                    schedule_kwargs = {"labels": labels}
+                    if supports_loss_mask:
+                        schedule_kwargs["loss_mask"] = loss_mask
+
                     schedule_plan = TransformerModelChunkSchedulePlan(
-                        model, tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+                        model, tokens, position_ids, attention_mask, **schedule_kwargs
                     )
                 else:
+                    schedule_kwargs = {"labels": labels}
+                    if supports_loss_mask:
+                        schedule_kwargs["loss_mask"] = loss_mask
+
                     schedule_plan = model.build_schedule_plan(
-                        tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+                        tokens, position_ids, attention_mask, **schedule_kwargs
                     )
                 return schedule_plan, partial(self.loss_func, loss_mask)
             else:
+                # Build forward kwargs based on model type
+                forward_kwargs = {"labels": labels}
+                if supports_loss_mask:
+                    forward_kwargs["loss_mask"] = loss_mask
+
                 output_tensor = model(
-                    tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+                    tokens, position_ids, attention_mask, **forward_kwargs
                 )
 
         return output_tensor, partial(self.loss_func, loss_mask)
