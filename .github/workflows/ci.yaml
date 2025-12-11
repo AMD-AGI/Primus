@@ -10,7 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 006d15d7e83f63a3d655408e5ca69ce0a501a0ed # Fix import error of usp attention package (#177)
+  PRIMUS_TURBO_COMMIT: b1e35ef1db43cd309790747272c045b274559025 # setup: if aiter already installed, skipping (#178)
 
 jobs:
   code-lint:
