@@ -34,40 +34,25 @@ def lazy_import(paths, symbol, log_prefix="[Primus]"):
     raise ImportError(f"{log_prefix} {symbol} not found in any of: {paths}")
 
 
-def get_model_provider(model_type="gpt"):
+def get_model_provider():
     """
-    Resolve model_provider across Megatron versions and model types.
+    Resolve model_provider across Megatron versions.
 
-    Args:
-        model_type (str): Type of model - 'gpt' or 'mamba'. Defaults to 'gpt'.
-
-    - New:   model_provider + gpt_builder/mamba_builder
+    - New:   model_provider + gpt_builder
     - Mid:   model_provider only
-    - Old:   pretrain_gpt.model_provider / pretrain_mamba.model_provider
+    - Old:   pretrain_gpt.model_provider
     """
     # Try to import model_provider
-    if model_type == "mamba":
-        model_provider = lazy_import(
-            ["model_provider", "pretrain_mamba"], "model_provider", log_prefix="[Primus][MegatronCompat]"
-        )
-        # Try to import mamba_builder (for Mamba models)
-        try:
-            mamba_builder = lazy_import(["mamba_builders"], "mamba_builder", log_prefix="[Primus][MegatronCompat]")
-            return partial(model_provider, mamba_builder)
-        except ImportError:
-            return model_provider
-    else:
-        # Default GPT behavior
-        model_provider = lazy_import(
-            ["model_provider", "pretrain_gpt"], "model_provider", log_prefix="[Primus][MegatronCompat]"
-        )
+    model_provider = lazy_import(
+        ["model_provider", "pretrain_gpt"], "model_provider", log_prefix="[Primus][MegatronCompat]"
+    )
 
-        # Try to import gpt_builder (only exists in newer versions)
-        try:
-            gpt_builder = lazy_import(["gpt_builders"], "gpt_builder", log_prefix="[Primus][MegatronCompat]")
-            return partial(model_provider, gpt_builder)
-        except ImportError:
-            return model_provider
+    # Try to import gpt_builder (only exists in newer versions)
+    try:
+        gpt_builder = lazy_import(["gpt_builders"], "gpt_builder", log_prefix="[Primus][MegatronCompat]")
+        return partial(model_provider, gpt_builder)
+    except ImportError:
+        return model_provider
 
 
 def get_custom_fsdp():

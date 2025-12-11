@@ -970,15 +970,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.valid_data_path = None
             args.test_data_path = None
 
-        # Determine model type (gpt or mamba)
-        model_type = getattr(args, 'model_type', 'gpt')
-        log_rank_0(f"-detected model_type: {model_type}")
-
         if args.final_logit_softcapping is not None and args.final_logit_softcapping > 0.0:
             log_rank_0(f"-enable final_logit_softcapping: {args.final_logit_softcapping}")
-            self.model_provider = functools.partial(primus_model_provider, get_model_provider(model_type=model_type))
+            self.model_provider = functools.partial(primus_model_provider, get_model_provider())
         else:
-            self.model_provider = get_model_provider(model_type=model_type)
+            self.model_provider = get_model_provider()
 
         if args.router_logit_softcapping is not None and args.router_logit_softcapping > 0.0:
             log_rank_0(f"-enable router_logit_softcapping: {args.router_logit_softcapping}")
