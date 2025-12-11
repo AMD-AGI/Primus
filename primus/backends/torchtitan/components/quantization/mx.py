@@ -34,7 +34,9 @@ def replace_turbo_mxlinear_modules(model: nn.Module, config: Float8QuantConfig):
 class PrimusTubroMXConverter(ModelConverter):
     def __init__(self, job_config: JobConfig, parallel_dims: ParallelDims):
         self.enabled = True
-        self.config = Float8QuantConfig(granularity=ScalingGranularity.BLOCKWISE, block_size=SCALING_BLOCK_SIZE)
+        self.config = Float8QuantConfig(
+            granularity=ScalingGranularity.BLOCKWISE, block_size=SCALING_BLOCK_SIZE
+        )
 
     def convert(self, model: nn.Module):
         if not self.enabled:

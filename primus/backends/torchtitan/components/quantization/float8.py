@@ -23,9 +23,6 @@ from torchtitan.protocols.model_converter import (
 from torchtitan.tools.logging import logger
 
 
-import torch.nn as nn
-
-
 def module_filter_fn(mod: nn.Module, fqn: str, filter_fqns: list[str]) -> bool:
     """
     Filter function to determine which modules should be converted.
@@ -36,9 +33,7 @@ def module_filter_fn(mod: nn.Module, fqn: str, filter_fqns: list[str]) -> bool:
         return False
 
     # All dims must be divisible by 16 due to float8 tensorcore hardware requirements.
-    dims_multiples_of_128 = (
-        mod.weight.shape[0] % 128 == 0 and mod.weight.shape[1] % 128 == 0
-    )
+    dims_multiples_of_128 = mod.weight.shape[0] % 128 == 0 and mod.weight.shape[1] % 128 == 0
 
     # If the fqn matches any filtered fqn, then we should not convert this module.
     is_filtered_fqn = any(filter_fqn in fqn for filter_fqn in filter_fqns)

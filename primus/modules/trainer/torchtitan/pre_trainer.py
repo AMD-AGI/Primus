@@ -104,6 +104,64 @@ class TorchTitanPretrainTrainer(BaseModule):
         titan_logging.logger = primus_logger
         titan_logging.init_logger = lambda: None
 
+    def patch_torchtitan_moe(self):
+        if not self.titan_config.primus_turbo.use_turbo_grouped_mm:
+            return
+        from primus.core.utils.logger import _logger as primus_logger
+
+        primus_logger.info("Monkey patch torchtitan moe...")
+        try:
+            import functools
+
+            import torchtitan.models.moe.moe
+
+            from primus.backends.torchtitan.models.moe.moe import (
+                _run_experts_grouped_mm,
+            )
+
+            # Get MoE FP8 configuration and create a partial function
+            use_moe_fp8 = self.titan_config.primus_turbo.use_moe_fp8
+            primus_logger.info(f"Set MoE FP8 mode: {use_moe_fp8}")
+
+            # Patch the grouped_mm function with use_fp8 parameter pre-set
+            torchtitan.models.moe.moe._run_experts_grouped_mm = functools.partial(
+                _run_experts_grouped_mm, use_fp8=use_moe_fp8
+            )
+            primus_logger.info("Successfully patched torchtitan moe with turbo grouped_mm")
+        except ImportError as e:
+            raise ImportError(
+                f"Failed to import primus_turbo for MoE grouped_mm patch. "
+                f"Please ensure primus_turbo is installed or set use_turbo_grouped_mm=False. "
+                f"Original error: {e}"
+            ) from e
+
+    def patch_classic_attention(self):
+        if not self.titan_config.primus_turbo.use_classic_attention:
+            return
+
+        from primus.core.utils.logger import _logger as primus_logger
+
+        primus_logger.info("Monkey patch classic attention...")
+
+        import torchtitan.models.deepseek_v3
+
+        from primus.backends.torchtitan.models.deepseek_v3 import (
+            classic_deepseekv3_args,
+        )
+        from primus.backends.torchtitan.models.deepseek_v3.model.args import (
+            DeepSeekV3ClassicModelArgs,
+        )
+        from primus.backends.torchtitan.models.deepseek_v3.model.model import (
+            MultiHeadAttention,
+        )
+
+        torchtitan.models.deepseek_v3.deepseekv3_args = classic_deepseekv3_args
+        torchtitan.models.deepseek_v3.DeepSeekV3ModelArgs = DeepSeekV3ClassicModelArgs
+
+        import torchtitan.models.deepseek_v3.model.model
+
+        torchtitan.models.deepseek_v3.model.model.Attention = MultiHeadAttention
+
     def patch_torchtitan_wandb(self):
         from primus.core.utils.logger import _logger as primus_logger
 
@@ -397,6 +455,10 @@ class TorchTitanPretrainTrainer(BaseModule):
         if self.titan_config.primus_turbo.use_turbo_async_tp:
             # ******* Async TP *******
             self.patch_torch_async_tp()
+
+        if self.titan_config.primus_turbo.use_classic_attention:
+            self.patch_classic_attention()
+            logger.warning(f"TorchtitanPretrainTrainer: Patch Classic Attention")
 
         from primus.core.utils.logger import _logger as primus_logger
 
