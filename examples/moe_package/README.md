@@ -164,9 +164,7 @@ Primus provides the `--turbo_sync_free_moe_stage` option with four levels:
 
 Traditional approach: Communication for expert dispatch and aggregation (all-to-all or DeepEP) occurs sequentially with forward/backward passes, leaving hardware idle.
 
-**1F1B approach**: Interleaves communication for one micro-batch with the backward computation of the preceding micro-batch. While calculating backward gradients for micro-batch N-1, expert tokens for micro-batch N are already being communicated, reducing pipeline stalls.
-
-This is particularly beneficial at larger scales where communication costs dominate.
+**1F1B approach**: Interleaves communication for one micro-batch with the backward computation of the preceding micro-batch. While calculating backward gradients for micro-batch N-1, expert tokens for micro-batch N are already being communicated, reducing pipeline stalls. Specifically, one more forward pass is added in the warmup phase based on the vanilla interleaved-1f1b-pipeline parallelism so as to create independency between the forward pass and the subsequent backward pass in the steady 1f1b phase, keeping the same bubble rate and almost same peak memory. Then the computation and a2a communication can be overlapped between the adjacent forward pass and backward pass, contributing to the speedup of the 1f1b phase, which could be even faster by splitting the input gradient compute and the parameters gradient compute at larger scales where communication costs dominate.
 
 ![Sync-Free MoE Workflow](./figures/1f1b_a2a_overlap.png)
 
@@ -494,7 +492,7 @@ End-to-end EP scaling with DeepEP:
 
 #### Other MoE Optimizations
 
-**1F1B Overlap**: In ultra-large models, One-Forward-One-Backward overlapping further hides communication overhead and improves throughput. By interleaving forward and backward passes, communication and computation proceed concurrently, reducing idle time.
+**1F1B A2A Overlap**: In ultra-large models, One-Forward-One-Backward overlapping further hides communication overhead and improves throughput. By interleaving forward and backward passes, communication and computation proceed concurrently, reducing idle time. More details and corresponding experiments of popular LLMs like DeepSeek-V3 will be published in a tech blog soon.
 
 **Fine-grained PP Partition Adjustment**: Carefully tuning pipeline parallel (PP) splits enables more balanced workload distribution, minimizing pipeline bubbles and waiting time between stages for smoother execution.
 
