@@ -548,6 +548,7 @@ DeepSeek-V2-Lite pretraining throughput (tokens/second/GPU) was tested with BF16
 
 
 [2] Test Environment
+
 DeepSeek-V2 pretraining throughput (tokens/second/GPU) was tested with BF16 precision on 4 MI355X nodes (32 GPUs total) using a maximum sequence length of 4096 tokens. Server manufacturers may vary configurations, which can yield different results. Performance may also vary based on the use of the latest drivers and optimizations.
 
 **AMD system configuration:**
