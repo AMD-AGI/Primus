@@ -36,8 +36,8 @@ The table below summarizes commonly used model configurations:
 | --- | --- | --- | --- |
 | DeepSeek-v2-Lite | 16B | 2.4B | `deepseek_v2_lite.yaml` |
 | DeepSeek-v2 | 236B | 21B | `deepseek_v2.yaml` |
-| DeepSeek-Proxy-1T | 1T | 44B | `deepseek_proxy_1T.yaml` |
-| DeepSeek-Proxy-2T | 2T | 80B | `deepseek_proxy_2T.yaml` |
+| MoE-1T | 1T | 44B | `deepseek_proxy_1T.yaml` |
+| MoE-2T | 2T | 80B | `deepseek_proxy_2T.yaml` |
 
 ---
 
@@ -303,7 +303,7 @@ The combined optimizations above reduced peak memory usage from **99.79%** to **
 
 ---
 
-#### Results
+#### Results [1]
 
 Through stepwise optimization, we observe significant boosts in end-to-end training performance.
 
@@ -348,7 +348,7 @@ Our key optimization strategies for DeepSeek-V2:
 
 ---
 
-#### Results
+#### Results [2]
 
 The figure below shows per-feature throughput (tokens/s) and speedup relative to baseline on **MI355X**:
 
@@ -372,8 +372,8 @@ Models exceeding 1 trillion parameters push the boundaries of distributed traini
 
 | Variant | Total Params | Active Params | Transformer Layers |
 | --- | --- | --- | --- |
-| DeepSeek-Proxy-1T | 1T | 44B | 96 |
-| DeepSeek-Proxy-2T | 2T | 80B | 96 |
+| MoE-1T | 1T | 44B | 96 |
+| MoE-2T | 2T | 80B | 96 |
 
 **Configuration files:**
 - `primus/configs/models/megatron/deepseek_proxy_1T.yaml`
@@ -498,13 +498,71 @@ End-to-end EP scaling with DeepEP:
 
 **Selective Recomputation**: Only specific pipeline stages perform recomputation rather than having every virtual pipeline parallel (VPP) stage recompute identical layers, reducing redundant work and boosting performance.
 
-**Summary**: Together, these optimizations—1F1B overlap, fine-grained PP partitioning, and selective recomputation—are key strategies to maximize throughput and efficiency in trillion-parameter MoE model training.
+---
+
+## 7. Summary
+This article summarizes best practices for training MoE models on AMD GPUs. It covers a range of optimization strategies that can be applied during MoE training, including communication and pipeline parallelism improvements. Comprehensive performance analysis and benchmarking are provided for both common MoE models and two ultra-large models exceeding 1 trillion parameters. These practical guidelines are informed by real experimental results, ensuring their effectiveness in real-world scenarios. We believe these insights can help users achieve optimal performance when training MoE models on AMD GPU platforms.
 
 ---
 
-## 7. References
+## 8. Acknowledgments
 
-- [Primus](https://github.com/AMD-AGI/Primus) training framework
-- AMD ROCm™ docs and Instinct™ MI300X/MI355X [performance benchmark guides](https://github.com/ROCm/MAD/blob/develop/benchmark/megatron_lm/README_primus.md)
-- [Training a model with Primus and Megatron-LM](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/primus-megatron.html)
-- [Migrating workloads to Primus (Megatron backend) from Megatron-LM](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/training/benchmark-docker/previous-versions/megatron-lm-primus-migration-guide.html)
+We would like to express our sincere gratitude to the following teams and individuals for their invaluable contributions and collaboration, their expertise and support have been instrumental in advancing the progress of this project.
+
+**composable_kernel(CK) Team:**
+Thomas Ning, Sami Remes, Shyh-Chyi Lin, Aviral Goel
+
+**aiter Team:**
+Curlas Huang, Shengnan Xu, Jim Guo, Dan Yao
+
+**AIG-Models Team:**
+Arthur Huang, Dong Li
+
+**ROCm/DeepEP Team:**
+Amir Akbarzadeh, Li Li
+
+**rocSHMEM Team:**
+Aurelien Bouteiller, Edgar Gabriel
+
+**mori Team:**
+Di Tian, Yutong Wu
+
+
+---
+
+## 9. EndNodes
+
+[1] Test Environment
+
+DeepSeek-V2-Lite pretraining throughput (tokens/second/GPU) was tested with BF16 precision on a single MI355X node with a maximum sequence length of 4096 tokens. Server manufacturers may vary configurations, which can yield different results. Performance may also vary based on the use of the latest drivers and optimizations.
+
+**AMD system configuration:**
+- Dual AMD EPYC 9575F 64-core processor
+- 8× AMD Instinct MI355X GPUs
+- 2 NUMA nodes per socket
+- Host OS: Ubuntu 22.04.5 LTS with Linux kernel 6.8.0-87-generic
+- Host GPU driver: ROCm 7.1 + amdgpu 6.16.6
+- VBIOS version: 00156977
+- PyTorch 2.9.0
+- AMD ROCm 7.1.0 software
+
+
+[2] Test Environment
+DeepSeek-V2 pretraining throughput (tokens/second/GPU) was tested with BF16 precision on 4 MI355X nodes (32 GPUs total) using a maximum sequence length of 4096 tokens. Server manufacturers may vary configurations, which can yield different results. Performance may also vary based on the use of the latest drivers and optimizations.
+
+**AMD system configuration:**
+- Dual AMD EPYC 9575F 64-core processor
+- 32× AMD Instinct MI355X GPUs
+- 2 NUMA nodes per socket
+- Host OS: Ubuntu 22.04.5 LTS with Linux kernel 6.8.0-87-generic
+- Host GPU driver: ROCm 7.1 + amdgpu 6.16.6
+- VBIOS version: 00156977
+- PyTorch 2.9.0
+- AMD ROCm 7.1.0 software
+
+
+
+---
+
+## 10. Disclaimers
+Third-party content is licensed to you directly by the third party that owns the content and is not licensed to you by AMD. ALL LINKED THIRD-PARTY CONTENT IS PROVIDED “AS IS” WITHOUT A WARRANTY OF ANY KIND. USE OF SUCH THIRD-PARTY CONTENT IS DONE AT YOUR SOLE DISCRETION AND UNDER NO CIRCUMSTANCES WILL AMD BE LIABLE TO YOU FOR ANY THIRD-PARTY CONTENT. YOU ASSUME ALL RISK AND ARE SOLELY RESPONSIBLE FOR ANY DAMAGES THAT MAY ARISE FROM YOUR USE OF THIRD-PARTY CONTENT.
