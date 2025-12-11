@@ -28,7 +28,7 @@ MoE models have proven highly effective in natural language processing and are i
 
 ## 2. Representative Models
 
-Most modern open-source MoE models follow DeepSeek-style architectures, ranging from 16B to 200B+ parameters. To evaluate how increasing scale impacts memory, performance, and optimization strategies, we also include 1T and 2T proxy models.
+Most modern open-source MoE models follow DeepSeek-style architectures, ranging from 16B to 200B+ parameters. To evaluate how increasing scale impacts memory, performance, and optimization strategies, we also include 1T and 2T MoE models.
 
 The table below summarizes commonly used model configurations:
 
@@ -36,8 +36,8 @@ The table below summarizes commonly used model configurations:
 | --- | --- | --- | --- |
 | DeepSeek-v2-Lite | 16B | 2.4B | `deepseek_v2_lite.yaml` |
 | DeepSeek-v2 | 236B | 21B | `deepseek_v2.yaml` |
-| MoE-1T | 1T | 44B | `deepseek_proxy_1T.yaml` |
-| MoE-2T | 2T | 80B | `deepseek_proxy_2T.yaml` |
+| MoE-1T | 1T | 44B | `moe_1T.yaml` |
+| MoE-2T | 2T | 80B | `moe_2T.yaml` |
 
 ---
 
@@ -305,13 +305,7 @@ The combined optimizations above reduced peak memory usage from **99.79%** to **
 
 #### Results [1]
 
-Through stepwise optimization, we observe significant boosts in end-to-end training performance.
-
-**Figure 1**: Cumulative throughput (tokens/s per GPU) and GPU memory usage after successively enabling key optimization features:
-
-![DeepSeekV2Lite MI355 Optimization – Tokens/s and Memory Usage](figures/DeepSeekV2Lite_tks_memory_mi355.png)
-
-**Figure 2**: Per-feature throughput (tokens/s) and speedup relative to baseline:
+The figure below shows per-feature throughput (tokens/s) and speedup relative to baseline on **MI355X**:
 
 ![DeepSeekV2Lite MI355 Optimization – Tokens/s and Speedup](figures/DeepSeekV2Lite_tks_speedup_mi355.png)
 
@@ -376,9 +370,8 @@ Models exceeding 1 trillion parameters push the boundaries of distributed traini
 | MoE-2T | 2T | 80B | 96 |
 
 **Configuration files:**
-- `primus/configs/models/megatron/deepseek_proxy_1T.yaml`
-- `primus/configs/models/megatron/deepseek_proxy_2T.yaml`
-- Pretrain Script (example): `examples/moe_package/run_ultra_1T_pretrain.sh`
+- `primus/configs/models/megatron/moe_1T.yaml`
+- `primus/configs/models/megatron/moe_2T.yaml`
 
 ---
 
@@ -405,7 +398,7 @@ Key observations:
 - **MI300X optimal config**: PP24 EP8 CP2
 - **MI355X optimal config**: PP24 EP8 (no checkpointing needed)
 
-![1T Model Memory Projection](figures/moe-proxy-1t-memory-projection.png)
+![1T Model Memory Projection](figures/moe-1t-memory-projection.png)
 
 ---
 
@@ -423,7 +416,7 @@ Key observations:
 - **MI300X optimal config**: PP24 EP16 CP2
 - **MI355X optimal config**: PP24 EP8 CP2 (benefits from larger DP sizes)
 
-![2T Model Memory Projection](figures/moe-proxy-2t-memory-projection.png)
+![2T Model Memory Projection](figures/moe-2t-memory-projection.png)
 
 ---
 
@@ -457,7 +450,7 @@ $$
 
 This is a substantial reduction. We verified these calculations on a 64-node setup, and measured bubble ratios closely matched theoretical estimates:
 
-![Bubble Ratio](figures/moe-proxy-500b-bubble-ratio.png)
+![Bubble Ratio](figures/moe-500b-bubble-ratio.png)
 
 **Summary**: Interleaved pipeline parallelism (VPP) effectively mitigates pipeline bubble overheads at large scales, preserving computational efficiency for ultra-scale training.
 
@@ -480,13 +473,13 @@ In our studies, as EP (Expert Parallelism) increases, training scalability degra
 
 Time breakdown showing how DeepEP reduces communication overhead:
 
-![AllToAll vs DeepEP Breakdown](figures/moe-proxy-2t-alltoall-vs-deepep-breakdown.png)
+![AllToAll vs DeepEP Breakdown](figures/moe-2t-alltoall-vs-deepep-breakdown.png)
 
 ---
 
 End-to-end EP scaling with DeepEP:
 
-![DeepEP EP Scaling](figures/moe-proxy-2t-deepep-ep-scaling.png)
+![DeepEP EP Scaling](figures/moe-2t-deepep-ep-scaling.png)
 
 ---
 
