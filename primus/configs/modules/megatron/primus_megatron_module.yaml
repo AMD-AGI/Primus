@@ -5,6 +5,8 @@ disable_wandb: true
 disable_mlflow: true
 mlflow_run_name: null
 mlflow_experiment_name: null
+mlflow_upload_traces: true  # Upload profiler trace files to MLflow
+mlflow_upload_logs: true    # Upload training log files to MLflow
 disable_compile_dependencies: true
 # NOTE:
 # - If `use_rocm_mem_info = True`, ROCm memory information will be collected
