@@ -111,7 +111,10 @@ def upload_trace_files_to_mlflow(
 
     log_rank_0(f"[MLflow] Searching for trace files in: {tensorboard_dir}")
     trace_files = _get_all_trace_files(tensorboard_dir)
-    log_rank_0(f"[MLflow] Found {len(trace_files)} trace files: {trace_files[:5]}...")  # Show first 5
+    if len(trace_files) > 5:
+        log_rank_0(f"[MLflow] Found {len(trace_files)} trace files: {trace_files[:5]}...")
+    else:
+        log_rank_0(f"[MLflow] Found {len(trace_files)} trace files: {trace_files}")
 
     if not trace_files:
         log_rank_0("[MLflow] No trace files found to upload")
