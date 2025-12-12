@@ -105,11 +105,19 @@ def _parse_kv_overrides(args: list[str]) -> dict:
             # Format: --flag (boolean True)
             val = True
 
-        # Try to evaluate the value to correct type (int, float, bool, etc.)
-        try:
-            val = eval(val, {}, {})
-        except Exception:
-            pass  # Leave as string if evaluation fails
+        # Normalize common lowercase booleans before eval, e.g. "true"/"false".
+        if isinstance(val, str):
+            lower_val = val.lower()
+            if lower_val == "true":
+                val = True
+            elif lower_val == "false":
+                val = False
+            else:
+                # Try to evaluate the value to correct type (int, float, etc.)
+                try:
+                    val = eval(val, {}, {})
+                except Exception:
+                    pass  # Leave as string if evaluation fails
 
         # Handle nested keys, e.g., modules.pre_trainer.lr
         d = overrides

@@ -1,0 +1,25 @@
+extends:
+  - qwen2.5_base.yaml
+
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: Qwen/Qwen3-30B-A3B
+
+# model
+num_layers: 48
+hidden_size: 2048
+ffn_hidden_size: 6144
+num_attention_heads: 32
+
+# moe
+moe_layer_freq: "1"
+num_experts: 128
+moe_router_topk: 8
+moe_ffn_hidden_size: 768
+
+# gqa
+group_query_attention: true
+num_query_groups: 4
+qk_layernorm: true
+kv_channels: 128
+
+bias_swiglu_fusion: false

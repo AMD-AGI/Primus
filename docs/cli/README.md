@@ -40,7 +40,7 @@ primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
 | Mode | Use Case | Command Example |
 |------|----------|-----------------|
 | **Direct** | Local development, quick validation | `primus-cli direct -- train pretrain` |
-| **Container** | Environment isolation, dependency management | `primus-cli container --image rocm/primus:v25.9 -- train pretrain` |
+| **Container** | Environment isolation, dependency management | `primus-cli container --image rocm/primus:v25.10 -- train pretrain` |
 | **Slurm** | Multi-node distributed training | `primus-cli slurm srun -N 8 -- train pretrain` |
 
 ## 📖 Learn More

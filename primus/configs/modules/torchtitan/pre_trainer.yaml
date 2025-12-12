@@ -35,6 +35,7 @@ profiling:
 
 training:
   mock_data: true
+  debug_moe_force_load_balance: false
   dataset: c4
   dataset_path: null
   deterministic: false
@@ -103,20 +104,20 @@ compile:
     - model
     - loss
 
-float8:
-  enable_fsdp_float8_all_gather: false
-  precompute_float8_dynamic_scale_for_fsdp: false
-  recipe_name: null
-  filter_fqns: []
-  emulate: false
-  moe_fqns_prototype: []
+# float8:
+#   enable_fsdp_float8_all_gather: false
+#   precompute_float8_dynamic_scale_for_fsdp: false
+#   recipe_name: null
+#   filter_fqns: []
+#   emulate: false
+#   moe_fqns_prototype: []
 
-mx:
-  mxfp8_dim1_cast_kernel_choice: triton
-  recipe_name: mxfp8_cublas
-  filter_fqns:
-    - output
-  moe_fqns_prototype: []
+# mx:
+#   mxfp8_dim1_cast_kernel_choice: triton
+#   recipe_name: mxfp8_cublas
+#   filter_fqns:
+#     - output
+#   moe_fqns_prototype: []
 
 comm:
   init_timeout_seconds: 300
@@ -154,6 +155,10 @@ primus_turbo:
   enable_primus_turbo : true
   enable_attention_float8 : false
   use_turbo_attention: true
+  use_classic_attention: false
   use_turbo_async_tp: true
   use_turbo_mx_linear: true
+  use_turbo_float8_linear: true
+  use_turbo_grouped_mm: false
+  use_moe_fp8: true
   enable_embedding_autocast: true

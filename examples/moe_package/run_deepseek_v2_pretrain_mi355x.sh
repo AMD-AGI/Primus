@@ -6,16 +6,20 @@
 ###############################################################################
 
 ######################### Training Docker and Variables #########################
-export DOCKER_IMAGE="docker.io/tasimage/primus:pr-308-gfx950-ainic"
+# export DOCKER_IMAGE="docker.io/tasimage/primus:pr-316-gfx950-ainic"
+export DOCKER_IMAGE="docker.io/tasimage/primus:pr-316-v25.10-ainic"
+# export DOCKER_IMAGE="docker.io/rocm/megatron-lm:v25.10"
 export CLEAN_DOCKER_CONTAINER=1
+export SKIP_TRAIN=0
+export CPUS_PER_TASK=96
 
 ######################### Training Environment Variables #########################
 export HF_TOKEN=${HF_TOKEN:-"your_hf_token"}
 export WANDB_API_KEY=${WANDB_API_KEY:-"your_wandb_api_key"}
-# TODO
-export GPU_MAX_HW_QUEUES=2
-# export GPU_MAX_HW_QUEUES=8
-export CPUS_PER_TASK=96
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
+export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
+# export USE_ROCM_AITER_ROPE_BACKEND=0
 
 # Set on Primus-Safe Platform
 # export MASTER_ADDR=${MASTER_ADDR:-localhost}
@@ -24,47 +28,38 @@ export CPUS_PER_TASK=96
 # export NODE_RANK=${PET_NODE_RANK:-0}
 # export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
-# Set on AAC14 cluster
+# Set on Vultr cluster
 export NNODES=4
-export USING_AINIC=1
-# export NCCL_IB_HCA="rocep105s0,rocep121s0,rocep137s0,rocep153s0,rocep233s0,rocep249s0,rocep25s0,rocep9s0"
-# export ANP_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/amd-anp-1.1.0-5"
-# export RCCL_HOME_DIR="/shared/apps/ubuntu/rocm-7.0.1/rccl-drop-2025-08"
+export USING_AINIC=${USING_AINIC:-1}
 export NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7" # modify based on the GPU NiC settings
 export NCCL_SOCKET_IFNAME="enp193s0f1np1"
 export GLOO_SOCKET_IFNAME="enp193s0f1np1"
 export NCCL_IB_RETRY_CNT=20
 export NCCL_IB_TIMEOUT=300
 
-export HSA_NO_SCRATCH_RECLAIM=1
-export NVTE_CK_USES_BWD_V3=1
-# export USE_ROCM_AITER_ROPE_BACKEND=0
-# export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=0
-
 ######################### Training Config #########################
-MBS=1
-GBS=256
-SEQ_LENGTH=4096
-TP=1
-ETP=1
-PP=4
-VPP=1
-EP=8
-CP=1
-CP_COMM_TYPE="a2a" # p2p, a2a, allgather or a2a+p2p
-# TODO: set to true to enable MLA
-ENABLE_MLA=False
-ENABLE_MTP=False
-LOAD_BALANCE=True
-OPTIMIZER=adam
-RECOMPUTE_LAYERS=0
-LEGACY_GG=True
-FP8=False # True for fp8, False for bf16
-PROFILE=False
-DISABLE_CPU_TRACE=False
-PROFILE_STEP_START=5
-PROFILE_STEP_END=6
-TRAIN_ITERS=10
+export MBS=${MBS:-1}
+export GBS=${GBS:-256}
+export SEQ_LENGTH=${SEQ_LENGTH:-4096}
+export TP=${TP:-1}
+export ETP=${ETP:-1}
+export PP=${PP:-4}
+export VPP=${VPP:-5}
+export EP=${EP:-8}
+export CP=${CP:-1}
+export CP_COMM_TYPE=${CP_COMM_TYPE:-"a2a"} # p2p, a2a, allgather or a2a+p2p
+export ENABLE_MLA=${ENABLE_MLA:-True}
+export ENABLE_MTP=${ENABLE_MTP:-False}
+export LOAD_BALANCE=${LOAD_BALANCE:-True}
+export OPTIMIZER=${OPTIMIZER:-adam}
+export RECOMPUTE_LAYERS=${RECOMPUTE_LAYERS:-0}
+export LEGACY_GG=${LEGACY_GG:-True}
+export FP8=${FP8:-False} # True for fp8, False for bf16
+export PROFILE=${PROFILE:-False}
+export DISABLE_CPU_TRACE=${DISABLE_CPU_TRACE:-False}
+export PROFILE_STEP_START=${PROFILE_STEP_START:-5}
+export PROFILE_STEP_END=${PROFILE_STEP_END:-6}
+export TRAIN_ITERS=${TRAIN_ITERS:-10}
 
 # MoE_Features legend:
 # 0 - Baseline (no extra optimization toggles)
@@ -73,21 +68,19 @@ TRAIN_ITERS=10
 # 3 - Loss fusion helper
 # 4 - DeepEP acceleration
 # 5 - Sync-free MoE (stage 1/2)
-# 6 - 1F1B MoE overlap
-# 7 - Zero-bubble pipeline optimizations
-# 8 - Arbitrary pipeline partition (8-way custom layout)
-# 9 - Recompute selected layers helper
-# 10 - CPU NUMA binding helper
-# 11 - Manual GC helper
-# MoE_Features=(0 1 2 3 4 5 6 7 8 9 10 11)
-MoE_Features=(0 11)
-# MoE_Features=(3 11)
-# MoE_Features=(3 4 11)
-# MoE_Features=(3 4 5 11)
-# MoE_Features=(3 4 5 6 11)
-# MoE_Features=(3 4 5 7 11) # amp_C error
-# MoE_Features=(3 4 5 6 10 11)
-# MoE_Features=(3 4 5 10 11)
+# 6 - CPU NUMA binding helper
+# 7 - Manual GC helper
+if [ -z "${MoE_Features}" ]; then
+    # MoE_Features=(0 7)
+    # MoE_Features=(3 7)
+    # MoE_Features=(3 4 7)
+    # MoE_Features=(3 4 6 7)
+    MoE_Features=(3 4 5 6 7)
+else
+    # Convert string to array
+    # shellcheck disable=SC2128
+    read -ra MoE_Features <<< "$MoE_Features"
+fi
 
 FEATURE_ARGS=()
 PRIMUS_TURBO_ENABLED="False"
@@ -135,77 +128,11 @@ for feature in "${MoE_Features[@]}"; do
         # FEATURE_ARGS+=("--moe_router_dtype" "fp32")
         ;;
     6)
-        FEATURE_ARGS+=("--overlap_moe_expert_parallel_comm" "True")
-        FEATURE_ARGS+=("--patch_moe_overlap" "False") # TODO: error
-        FEATURE_ARGS+=("--delay_wgrad_compute" "False")
-        FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
-        ;;
-    7)
-        ensure_primus_turbo
-        # required flags for zero bubble
-        FEATURE_ARGS+=("--overlap_grad_reduce" "False")
-        FEATURE_ARGS+=("--overlap_param_gather" "False")
-        FEATURE_ARGS+=("--no_persist_layer_norm" "True")
-        FEATURE_ARGS+=("--create_attention_mask_in_dataloader" "False")
-        FEATURE_ARGS+=("--gradient_accumulation_fusion" "True")
-
-        # default strategy is zero bubble
-        PP_STRATEGY="zbv" # 1f1b, vpp, zb1p, zbv, v-half, v-min
-
-        case "$PP_STRATEGY" in
-        1f1b)
-            VPP=1
-            ;;
-        vpp)
-            ;;
-        zb1p)
-            FEATURE_ARGS+=("--patch_zero_bubble" "True")
-            VPP=1
-            ;;
-        zbv)
-            FEATURE_ARGS+=("--patch_zero_bubble" "True")
-            FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
-            FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "zb")
-            VPP=2
-            ;;
-        v-half)
-            FEATURE_ARGS+=("--patch_zero_bubble" "True")
-            FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
-            FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "half")
-            VPP=2
-            ;;
-        v-min)
-            FEATURE_ARGS+=("--patch_zero_bubble" "True")
-            FEATURE_ARGS+=("--zero_bubble_v_schedule" "True")
-            FEATURE_ARGS+=("--zero_bubble_v_schedule_mem_setup" "min")
-            VPP=2
-            ;;
-        *)
-            echo "Unsupported PP_STRATEGY: ${PP_STRATEGY}. Supported values: 1f1b, vpp, zb1p, zbv, v-half, v-min." >&2
-            exit 1
-            ;;
-        esac
-        ;;
-    8)
-        # TODO: need tuning for the pipeline layout pattern
-        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et*3|(tt|)*29,m|L")
-        # 32 stages for PP8VPP4
-        # FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et|(tt|)*30L")
-        # pp2 vpp4
-        # 1 + 6 + 1 stages
-        # 1 + 2*6 = 13 layers
-        FEATURE_ARGS+=("--pipeline_model_parallel_layout" "Et|(tt|)*6L")
-        VPP=1
-        ;;
-    9)
-        FEATURE_ARGS+=("--recompute_layer_ids" "0,1,2,3")
-        ;;
-    10)
         # Enable NUMA binding for better memory locality (increase stability for large models)
         export ENABLE_NUMA_BINDING=1
         export HSA_KERNARG_POOL_SIZE=12582912
         ;;
-    11)
+    7)
         FEATURE_ARGS+=("--manual_gc" "True")
         FEATURE_ARGS+=("--manual_gc_interval" "1")
         ;;
@@ -232,7 +159,7 @@ else
 fi
 
 VPP_ARGS=()
-if [ $VPP -gt 1 ]; then
+if [ "$VPP" -gt 1 ]; then
     VPP_ARGS+=("--num_virtual_stages_per_pipeline_rank" "$VPP")
 fi
 
@@ -290,12 +217,6 @@ echo "RECOMPUTE_ARGS=${RECOMPUTE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "PROFILE_ARGS=${PROFILE_ARGS[*]}" | tee -a "$LOG_FILE"
 echo "--------------------------------" | tee -a "$LOG_FILE"
 
-export SKIP_TRAIN=0
-
-    # --pp_warmup True \
-    # --multi_latent_attention True \
-# --num_layers 8 \
-# --moe_layer_freq 1 \
 bash ./examples/run_slurm_pretrain.sh \
     --micro_batch_size "$MBS" \
     --global_batch_size "$GBS" \

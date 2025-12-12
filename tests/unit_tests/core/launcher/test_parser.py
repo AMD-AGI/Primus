@@ -60,6 +60,37 @@ class TestPrimusParser(PrimusUT):
         expected = {"a": 1, "b": {"c": 2}, "flag": True}
         self.assertEqual(result, expected)
 
+    def test_parse_boolean_strings_equal_format(self):
+        args = ["--flag_true=true", "--flag_false=false", "--flag_mixed=True", "--flag_mixed2=False"]
+        result = _parse_kv_overrides(args)
+        expected = {
+            "flag_true": True,
+            "flag_false": False,
+            "flag_mixed": True,
+            "flag_mixed2": False,
+        }
+        self.assertEqual(result, expected)
+
+    def test_parse_boolean_strings_space_format(self):
+        args = [
+            "--flag_true",
+            "true",
+            "--flag_false",
+            "false",
+            "--flag_mixed",
+            "True",
+            "--flag_mixed2",
+            "False",
+        ]
+        result = _parse_kv_overrides(args)
+        expected = {
+            "flag_true": True,
+            "flag_false": False,
+            "flag_mixed": True,
+            "flag_mixed2": False,
+        }
+        self.assertEqual(result, expected)
+
     def test_override_check_pass(self):
         # Simulate pre_trainer config
         ns = SimpleNamespace(a=1, b=SimpleNamespace(c=2), flag=False)
