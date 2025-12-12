@@ -319,6 +319,7 @@ class PrimusParser(object):
         model_config_dict = PresetLoader.load(module.model, model_format, config_type="models")
         model_config = yaml_utils.dict_to_nested_namespace(model_config_dict)
         model_config.name = f"exp.modules.{module_name}.model"
+        model_config.model = module.model
 
         # Avoid 'model' key conflicts when merging module + model presets:
         # - Keep module_config.model as the user-specified model identifier

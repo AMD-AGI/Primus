@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from primus.core.backend.backend_registry import BackendRegistry
 from primus.core.config.merge_utils import deep_merge
 from primus.core.config.primus_config import get_module_config, get_module_names, load_primus_config
+from primus.core.runtime.logging import init_worker_logger
 from primus.core.utils.arg_utils import parse_cli_overrides
 from primus.core.utils.env_setup import setup_training_env
 from primus.core.utils.global_vars import set_global_variables
@@ -89,7 +90,7 @@ class PrimusRuntime:
             self._safe_cleanup(error=e)
             raise RuntimeError(f"Training execution failed: {e}") from e
 
-    # --------------------------- Internal Steps --------------------------- #
+    # --------------------------- Internal Steps --------------------------- #ide_str}")
 
     def _initialize_runtime_environment(self) -> None:
         """Initialize full runtime environment before creating backend/trainer."""
@@ -101,8 +102,7 @@ class PrimusRuntime:
         """Load backend adapter, create trainer and execute its lifecycle."""
         self._initialize_backend()
         self._initialize_trainer()
-        exit(0)
-        # self._run_trainer_lifecycle()
+        self._run_trainer_lifecycle()
 
     def _initialize_environment(self) -> None:
         assert self.ctx is not None, "TrainContext must be initialized before environment setup."
@@ -174,31 +174,15 @@ class PrimusRuntime:
 
         print(f"[Primus:Env] rank: {self.ctx.rank}, world_size: {self.ctx.world_size}, local_rank: {self.ctx.local_rank}, local_world_size: {self.ctx.local_world_size}, master_addr: {self.ctx.master_addr}, master_port: {self.ctx.master_port}")
 
-        # Use legacy distributed init if available; fallback to no-op.
-        # try:
-        #     from primus.core.launcher.initialize import (
-        #         init_distributed_env,  # type: ignore
-        #     )
-
-        #     init_distributed_env()
-        # except ImportError:
-        #     log_rank_0("[Primus:TrainRuntime] init_distributed_env not available; skipping.")
 
     def _initialize_logging(self) -> None:
         assert self.ctx is not None, "TrainContext must be initialized before logger init."
         # Use legacy logger init if available; otherwise rely on module_utils logging.
-        try:
-            from primus.core.launcher.initialize import (
-                init_global_logger,  # type: ignore
-            )
-
-            init_global_logger(
-                self.ctx.primus_config,
-                module_name=self.ctx.module_name,
-                module_config=self.ctx.module_config,
-            )
-        except ImportError:
-            log_rank_0("[Primus:TrainRuntime] init_global_logger not available; skipping.")
+        init_worker_logger(
+            primus_config=self.ctx.primus_config,
+            module_name=self.ctx.module_name,
+            module_config=self.ctx.module_config,
+        )
 
     def _initialize_backend(self) -> None:
         assert self.ctx is not None, "TrainContext must be initialized before backend adapter."
