@@ -10,7 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: b1e35ef1db43cd309790747272c045b274559025 # setup: if aiter already installed, skipping (#178)
+  PRIMUS_TURBO_COMMIT: b0816fb1aa25d12fc05877a3f05d44c5fec0acd5 # cicd update docker image to v25.10 (#183)
 
 jobs:
   code-lint:
