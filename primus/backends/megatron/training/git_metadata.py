@@ -166,14 +166,14 @@ def collect_git_metadata(
     """
     # 1) Locate Primus root (starting from this file's path or cwd)
     if primus_root is None:
-        primus_root = find_git_repository_root(Path.cwd())
+        primus_root = find_git_repository_root(Path(__file__).parent)
         if primus_root is None:
             warnings.warn(
-                f"No git repository found searching upward from {Path.cwd()}. "
+                f"No git repository found searching upward from {Path(__file__).parent}. "
                 "Git metadata collection may be incomplete.",
                 stacklevel=2,
             )
-            primus_root = Path.cwd()
+            primus_root = Path(__file__).parent
     primus_root = Path(primus_root)
 
     meta: Dict[str, str] = {}
