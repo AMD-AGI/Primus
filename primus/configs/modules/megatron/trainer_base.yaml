@@ -3,6 +3,7 @@ extends:
   - primus_megatron_module.yaml
   - primus_turbo.yaml
   - zero_bubble.yaml
+  - primus_pipeline.yaml
 
 trainable: true
 
