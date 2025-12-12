@@ -110,8 +110,8 @@ if [ "$USING_AINIC" == "1" ]; then
     ENV_ARGS+=("--env" "ANP_HOME_DIR")
     ENV_ARGS+=("--env" "MPI_HOME_DIR")
 
-    VOLUME_ARGS+=(-v /mnt/shared:/mnt/shared)
-    VOLUME_ARGS+=(-v /etc/libibverbs.d/:/etc/libibverbs.d:ro)
+    # VOLUME_ARGS+=(-v /mnt/shared:/mnt/shared)
+    # VOLUME_ARGS+=(-v /etc/libibverbs.d/:/etc/libibverbs.d:ro)
     # VOLUME_ARGS+=(-v /usr/lib/x86_64-linux-gnu/libibverbs/:/usr/lib/x86_64-linux-gnu/libibverbs/:ro)
 fi
 
