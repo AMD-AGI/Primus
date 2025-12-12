@@ -10,7 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: d71d856c080c9187d8e323e9eb6d85904517a21f # feat(deepep): support single-node moe_dispatch/combine on jax. (#162)
+  PRIMUS_TURBO_COMMIT: b1e35ef1db43cd309790747272c045b274559025 # setup: if aiter already installed, skipping (#178)
 
 jobs:
   code-lint:
@@ -149,6 +149,7 @@ jobs:
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker-jax] Total elapsed time: ${elapsed} seconds"
 
+          echo "> Docker tag image for Docker Hub"
           docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
@@ -156,16 +157,16 @@ jobs:
 
           # echo "> Docker cleanup local images"
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}
-          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-gfx950
-          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic
+          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-v25.09-ainic
+          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-jax
-          # echo "> build-docker success"
+          echo "> build-docker success"
 
   run-unittest:
     env:
       PRIMUS_WORKDIR: /apps/tas/0_public/primus_k8s_ci/torch
     needs: [code-lint]
-    runs-on: [primus-pytorch-runner-xrlc6]
+    runs-on: [primus-lm-cicd-rx2s6]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Set commit hash to env

@@ -315,7 +315,31 @@ export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
 
 # Note: Disable fp32 atomic due if you find any accuracy issue.
-export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:0}
+export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:-0}
+
+# install primus turbo from source
+export REBUILD_PRIMUS_TURBO=${REBUILD_PRIMUS_TURBO:-0}
+if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
+    LOG_INFO "Rebuilding Primus Turbo from source..."
+    mkdir -p "/workspace/turbo"
+    cd "/workspace/turbo" || exit
+
+    # Clean up old directory if exists to avoid git clone conflicts
+    if [ -d "Primus-Turbo" ]; then
+        LOG_INFO "Removing existing Primus-Turbo directory..."
+        rm -rf Primus-Turbo
+    fi
+
+    git clone https://github.com/AMD-AGI/Primus-Turbo.git --recursive
+    cd Primus-Turbo || exit
+    pip3 install -r requirements.txt
+    # Set GPU_ARCHS to compile Turbo for multiple AMD GPU architectures.
+    GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
+    cd "${PRIMUS_PATH}" || exit
+    LOG_INFO "Rebuilding Primus Turbo from source done."
+else
+    LOG_INFO "Skip Primus Turbo rebuild. REBUILD_PRIMUS_TURBO=$REBUILD_PRIMUS_TURBO"
+fi
 
 # nvte debug envs
 export NVTE_DEBUG=0 # 0, 1

@@ -68,6 +68,8 @@ modules:
       # MLA
       multi_latent_attention: false
 
+      multi_latent_attention: true
+
       # ckpt
       finetune: false
       auto_continue_train: false
