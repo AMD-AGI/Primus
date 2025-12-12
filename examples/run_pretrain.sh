@@ -122,12 +122,28 @@ fi
 # CACHE_TAG="${OS_VER}_py${PY_VER}_rocm${ROCM_VER}_amdgpu${AMDGPU_VER}_kernel${KERNEL_VER}_${HOSTNAME}"
 # export AITER_JIT_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}_aiter_cache"
 
+# Extract model name from EXP config path (e.g., deepseek_v2_lite-pretrain from .../deepseek_v2_lite-pretrain.yaml)
+MODEL_NAME=$(basename "${EXP:-unknown}" .yaml)
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-TRAIN_LOG=${TRAIN_LOG:-"output/log_mp_pretrain_$(basename "$EXP" .yaml).txt"}
+# Always append model_name/timestamp to ensure unique output directories per run
+# This prevents the bug where traces from previous runs get uploaded to MLflow
+BASE_LOG_DIR=${LOG_DIR:-"./output"}
+export LOG_DIR="${BASE_LOG_DIR}/${MODEL_NAME}/${TIMESTAMP}"
+
+# IMPORTANT: Set PRIMUS_WORKSPACE to match LOG_DIR so Python code uses the same unique directory
+# This ensures tensorboard traces, checkpoints, and logs all go to the same timestamped folder
+export PRIMUS_WORKSPACE="${LOG_DIR}"
+
+mkdir -p "$LOG_DIR"
+
+TRAIN_LOG="${LOG_DIR}/log_mp_pretrain.txt"
 
 LOG_INFO_RANK0 "==========Training info=========="
 LOG_INFO_RANK0 "EXP: $EXP"
 LOG_INFO_RANK0 "EXP: $BACKEND"
+LOG_INFO_RANK0 "LOG_DIR: $LOG_DIR"
+LOG_INFO_RANK0 "PRIMUS_WORKSPACE: $PRIMUS_WORKSPACE"
 LOG_INFO_RANK0 "TRAIN_LOG: $TRAIN_LOG"
 LOG_INFO_RANK0 "PRIMUS_PATH: $PRIMUS_PATH"
 LOG_INFO_RANK0 "DATA_PATH: $DATA_PATH"
