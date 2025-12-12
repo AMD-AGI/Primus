@@ -18,7 +18,8 @@ Requirements:
 Optional Environment Variables:
   NNODES          Number of nodes to use [default: 1]
   MASTER_PORT     Master port [default: 12345]
-  LOG_DIR         Directory for log output [default: ./output/<model_name>/<timestamp>]
+  LOG_DIR         Base directory for log output [default: ./output]
+                  Note: <model_name>/<timestamp> is always appended to ensure unique runs
 
 Example:
   export DATA_PATH=/mnt/data
@@ -37,7 +38,11 @@ SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 # Extract model name from EXP config path (e.g., deepseek_v2_lite-pretrain from .../deepseek_v2_lite-pretrain.yaml)
 MODEL_NAME=$(basename "${EXP:-unknown}" .yaml)
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-export LOG_DIR=${LOG_DIR:-"./output/${MODEL_NAME}/${TIMESTAMP}"}
+
+# Always append model_name/timestamp to ensure unique output directories per run
+# This prevents the bug where traces from previous runs get uploaded to MLflow
+BASE_LOG_DIR=${LOG_DIR:-"./output"}
+export LOG_DIR="${BASE_LOG_DIR}/${MODEL_NAME}/${TIMESTAMP}"
 LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
 
