@@ -64,47 +64,7 @@ class PrimusPipelineParallelLauncher:
 
         self.forward_data_store = []
 
-    def run(
-        self,
-        *,
-        forward_step_func,
-        data_iterator: Union[Iterator, List[Iterator]],
-        model: Union[torch.nn.Module, List[torch.nn.Module]],
-        num_microbatches: int,
-        seq_length: int,
-        micro_batch_size: int,
-        decoder_seq_length: Optional[int] = None,
-        forward_only: bool = False,
-        collect_non_loss_data: bool = False,
-        first_val_step: Optional[bool] = None,
-        adjust_tensor_shapes_fn: Optional[Callable] = None,
-        p2p_communicator: Optional[P2PCommunicator] = None,
-        pg_collection: Optional[ProcessGroupCollection] = None,
-    ):
-        self.schedule_instance = produce_schedule_instance(
-            self.pp_algorithm, self.pp_size, self.vpp_size, num_microbatches
-        )
-
-        if not hasattr(self.schedule_instance, "schedule_table"):
-            self.schedule_table = self.schedule_instance.generate_schedule_table()
-            setattr(self.schedule_instance, "schedule_table", self.schedule_table)
-        else:
-            self.schedule_table = getattr(self.schedule_instance, "schedule_table")
-
-        self.last_pp_stage_rank = self.schedule_instance.last_pp_stage_rank()
-
-        assert not forward_only, "forward_only is not supported yet"
-        assert adjust_tensor_shapes_fn is None, "adjust_tensor_shapes_fn is not supported yet"
-        if not isinstance(model, list):
-            model = [model]
-        config = get_model_config(model[0])
-        model_type = get_model_type(model[0])
-
-        if config.overlap_p2p_comm and config.batch_p2p_comm:
-            raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
-
-        if p2p_communicator is not None:
-            warning_rank_0("p2p_communicator is provided, but PrimusPipelineParallelLauncher will not use it")
+    def _init_check_pg_collection(self, model_type, pg_collection: Optional[ProcessGroupCollection] = None):
 
         if pg_collection is None:
             tp_group = parallel_state.get_tensor_model_parallel_group()
@@ -144,8 +104,75 @@ class PrimusPipelineParallelLauncher:
             )
             assert hasattr(pg_collection, "pp"), "pg_collection must have a pp_group"
             assert hasattr(pg_collection, "dp_cp"), "pg_collection must have a dp_cp_group"
-            tp_group = pg_collection.tp
-            cp_group = pg_collection.cp
+
+        return pg_collection
+
+    def _get_send_recv_tensor_shapes(
+        self, config, model_type, seq_length, micro_batch_size, decoder_seq_length, pg_collection
+    ):
+        tp_group = pg_collection.tp
+        cp_group = pg_collection.cp
+        recv_tensor_shapes = get_tensor_shapes(
+            seq_length=seq_length,
+            micro_batch_size=micro_batch_size,
+            decoder_seq_length=decoder_seq_length,
+            config=config,
+            tp_group=tp_group,
+            cp_group=cp_group,
+        )
+        send_tensor_shapes = get_tensor_shapes(
+            seq_length=seq_length,
+            micro_batch_size=micro_batch_size,
+            decoder_seq_length=decoder_seq_length,
+            config=config,
+            tp_group=tp_group,
+            cp_group=cp_group,
+        )
+
+        return recv_tensor_shapes, send_tensor_shapes
+
+    def run(
+        self,
+        *,
+        forward_step_func,
+        data_iterator: Union[Iterator, List[Iterator]],
+        model: Union[torch.nn.Module, List[torch.nn.Module]],
+        num_microbatches: int,
+        seq_length: int,
+        micro_batch_size: int,
+        decoder_seq_length: Optional[int] = None,
+        forward_only: bool = False,
+        collect_non_loss_data: bool = False,
+        first_val_step: Optional[bool] = None,
+        adjust_tensor_shapes_fn: Optional[Callable] = None,
+        p2p_communicator: Optional[P2PCommunicator] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        self.schedule_instance = produce_schedule_instance(
+            self.pp_algorithm, self.pp_size, self.vpp_size, num_microbatches
+        )
+
+        if not hasattr(self.schedule_instance, "schedule_table"):
+            self.schedule_table = self.schedule_instance.generate_schedule_table()
+            setattr(self.schedule_instance, "schedule_table", self.schedule_table)
+        else:
+            self.schedule_table = getattr(self.schedule_instance, "schedule_table")
+
+        self.last_pp_stage_rank = self.schedule_instance.last_pp_stage_rank()
+
+        assert not forward_only, "forward_only is not supported yet"
+        assert adjust_tensor_shapes_fn is None, "adjust_tensor_shapes_fn is not supported yet"
+        if not isinstance(model, list):
+            model = [model]
+        config = get_model_config(model[0])
+        model_type = get_model_type(model[0])
+        pg_collection = self._init_check_pg_collection(model_type, pg_collection)
+
+        if config.overlap_p2p_comm and config.batch_p2p_comm:
+            raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
+
+        if p2p_communicator is not None:
+            warning_rank_0("p2p_communicator is provided, but PrimusPipelineParallelLauncher will not use it")
 
         # Needed only when gradients are finalized in M-Core
         if config.finalize_model_grads_func is not None and not forward_only:
@@ -195,21 +222,8 @@ class PrimusPipelineParallelLauncher:
 
         disable_grad_sync()
 
-        recv_tensor_shapes = get_tensor_shapes(
-            seq_length=seq_length,
-            micro_batch_size=micro_batch_size,
-            decoder_seq_length=decoder_seq_length,
-            config=config,
-            tp_group=tp_group,
-            cp_group=cp_group,
-        )
-        send_tensor_shapes = get_tensor_shapes(
-            seq_length=seq_length,
-            micro_batch_size=micro_batch_size,
-            decoder_seq_length=decoder_seq_length,
-            config=config,
-            tp_group=tp_group,
-            cp_group=cp_group,
+        recv_tensor_shapes, send_tensor_shapes = self._get_send_recv_tensor_shapes(
+            config, model_type, seq_length, micro_batch_size, decoder_seq_length, pg_collection
         )
 
         total_num_tokens = torch.zeros([], dtype=torch.int, device="cuda")
@@ -242,10 +256,10 @@ class PrimusPipelineParallelLauncher:
             elif node.func_type in [FuncType.RF, FuncType.RB]:
                 node.args["recv_tensor_shapes"] = recv_tensor_shapes
                 node.args["dtype"] = config.pipeline_dtype
-                node.args["pp_group"] = pp_group
+                node.args["pp_group"] = pg_collection.pp
             elif node.func_type in [FuncType.SF, FuncType.SB]:
                 node.args["send_tensor_shapes"] = send_tensor_shapes
-                node.args["pp_group"] = pp_group
+                node.args["pp_group"] = pg_collection.pp
 
         self.schedule_runner.run(self.schedule_table, self.pp_rank)
 
@@ -260,7 +274,7 @@ class PrimusPipelineParallelLauncher:
                 config,
                 embedding_module,
                 self.schedule_instance.last_pp_stage_rank() == self.pp_rank,
-                tp_group,
+                pg_collection.tp,
             )
 
             # Finalize model grads (perform full grad all-reduce / reduce-scatter for

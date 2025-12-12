@@ -188,6 +188,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_fp8_context()
         self.patch_pp()
         self.patch_custom_recompute_layer_ids()
+        self.patch_pipeline_parallel_layer_layout()
 
         self.app_metrics = {}
 
@@ -196,6 +197,16 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
+
+    def patch_pipeline_parallel_layer_layout(self):
+        warning_rank_0(f"MegatronTrainer: monkey patch PipelineParallelLayerLayout...")
+        import megatron.core.transformer.pipeline_parallel_layer_layout as orig_pipeline_parallel_layer_layout
+
+        from primus.backends.megatron.core.transformer.pipeline_parallel_layer_layout import (
+            PrimusPipelineParallelLayerLayout,
+        )
+
+        orig_pipeline_parallel_layer_layout.PipelineParallelLayerLayout = PrimusPipelineParallelLayerLayout
 
     def patch_custom_recompute_layer_ids(self):
         if self.module_config.recompute_layer_ids is None:

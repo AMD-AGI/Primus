@@ -10,6 +10,7 @@
 from typing import Optional
 
 from megatron.core import parallel_state
+from megatron.core.transformer.enums import LayerType
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 from primus.modules.trainer.megatron.utils import is_v_schedule_enabled
@@ -22,8 +23,12 @@ def get_transformer_layer_offset(
     pipeline_rank = pp_rank if pp_rank is not None else parallel_state.get_pipeline_model_parallel_rank()
 
     if config.pipeline_model_parallel_size > 1:
+        if config.pipeline_model_parallel_layout:
+            offset = config.pipeline_model_parallel_layout.get_layer_offset(
+                layer_type=LayerType.decoder, vp_stage=vp_stage
+            )
 
-        if (
+        elif (
             config.num_layers_in_first_pipeline_stage is not None
             or config.num_layers_in_last_pipeline_stage is not None
         ):
