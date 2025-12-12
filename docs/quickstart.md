@@ -21,7 +21,7 @@ rocm-smi && docker --version
 
 ```bash
 # Pull Docker image
-docker pull docker.io/rocm/primus:v25.9_gfx942
+docker pull docker.io/rocm/primus:v25.10_gfx942
 
 # Clone repository
 git clone --recurse-submodules https://github.com/AMD-AIG-AIMA/Primus.git
@@ -32,7 +32,7 @@ cd Primus
 
 ```bash
 # Run a quick benchmark in container
-./runner/primus-cli container --image rocm/primus:v25.9_gfx942 \
+./runner/primus-cli container --image rocm/primus:v25.10_gfx942 \
   -- benchmark gemm -M 4096 -N 4096 -K 4096
 ```
 
@@ -50,7 +50,7 @@ Use the Docker image you just pulled:
 
 ```bash
 # Run training in container (recommended for getting started)
-./runner/primus-cli container --image rocm/primus:v25.9_gfx942 \
+./runner/primus-cli container --image rocm/primus:v25.10_gfx942 \
   -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml
 ```
 
@@ -62,7 +62,7 @@ Use the Docker image you just pulled:
   --config examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml
 
 # Slurm mode (for multi-node cluster)
-./runner/primus-cli slurm srun -N 8 -p gpu -- container --image rocm/primus:v25.9_gfx942 \
+./runner/primus-cli slurm srun -N 8 -p gpu -- container --image rocm/primus:v25.10_gfx942 \
   -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml
 ```
 

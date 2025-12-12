@@ -6,8 +6,8 @@
 
 import torch
 from torch.nn.attention.flex_attention import BlockMask
-from torchtitan.models.llama3.model.model import Attention as TTAttention
-from torchtitan.models.llama3.model.model import apply_rotary_emb
+from torchtitan.models.llama4.model.model import Attention as TTAttention
+from torchtitan.models.llama4.model.model import apply_rotary_emb
 
 AttentionMasksType = dict[str, BlockMask] | BlockMask
 
@@ -29,7 +29,8 @@ class Attention(TTAttention):
         xk = xk.view(bs, seqlen, -1, self.head_dim)
         xv = xv.view(bs, seqlen, -1, self.head_dim)
 
-        xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
+        if self.use_rope:
+            xq, xk = apply_rotary_emb(xq, xk, freqs_cis=freqs_cis)
 
         # repeat k/v heads if n_kv_heads < n_heads
         # xk = repeat_kv(xk, self.n_rep)  # (bs, seqlen, n_local_heads, head_dim)
