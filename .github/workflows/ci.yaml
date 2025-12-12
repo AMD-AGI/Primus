@@ -20,7 +20,7 @@ jobs:
         python-version: ["3.12"]
     steps:
       - run: echo "🎉 Begin Primus Python Lint."
-      - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub! ${{ secrets.PRIMUS_WORKSPACE }}"
+      - run: echo "🐧 This job is now running on a ${{ runner.os }} server hosted by GitHub! ${{secrets.PRIMUS_WORKSPACE}}"
       - uses: actions/checkout@v4
       - run: git config --global --add safe.directory /github/workspace
       - name: Set up Python
