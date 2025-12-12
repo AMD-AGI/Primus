@@ -73,13 +73,17 @@ export HSA_ENABLE_SDMA=1  # Enable system DMA (SDMA) engine for better GPU IO th
 # Prevent scratch memory space from being reclaimed
 export HSA_NO_SCRATCH_RECLAIM=1  # Helps stabilize large memory usage patterns (e.g. KV cache, MoE experts)
 
-export NCCL_IB_GID_INDEX=3
+#export NCCL_IB_GID_INDEX=3
+# GID_INDEX is 1 for AI NIC
+export NCCL_IB_GID_INDEX=1
 export NCCL_CROSS_NIC=0
-NCCL_IB_HCA=$(bash "${PRIMUS_PATH}"/examples/scripts/get_nccl_ib_hca.sh)
+#NCCL_IB_HCA=$(bash "${PRIMUS_PATH}"/examples/scripts/get_nccl_ib_hca.sh)
+NCCL_IB_HCA="ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7"
 export NCCL_IB_HCA
 export NCCL_IB_GDR_LEVEL=2
 export NCCL_NET_GDR_LEVEL=2
-IP_INTERFACE=$(bash "${PRIMUS_PATH}"/examples/scripts/get_ip_interface.sh)
+#IP_INTERFACE=$(bash "${PRIMUS_PATH}"/examples/scripts/get_ip_interface.sh)
+IP_INTERFACE="enp193s0f1np1"
 export IP_INTERFACE
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-${IP_INTERFACE}}
 export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-${IP_INTERFACE}}
@@ -92,6 +96,11 @@ export TORCH_NCCL_HIGH_PRIORITY=1
 # VERSION, WARN, INFO, DEBUG
 export NCCL_DEBUG=""
 
+export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
+export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
+export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi-4.1.6"}
+
+export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
 if [ "$NODE_RANK" = "0" ]; then
     echo "==========Preflight cluster info=========="
     echo "[NODE-$NODE_RANK] MASTER_ADDR: $MASTER_ADDR"
@@ -130,12 +139,13 @@ if [ "$RUN_ENV" = "torchrun" ]; then
     )
 
     pip install -qr requirements.txt && \
-    apt install -y -qq libpango-1.0-0 libgdk-pixbuf2.0-0 libffi-dev libcairo2 && \
+    #apt install -y -qq libpango-1.0-0 libgdk-pixbuf2.0-0 libffi-dev libcairo2 && \
     torchrun "${DISTRIBUTED_ARGS[@]}" tools/preflight/preflight_perf_test.py \
         2>&1 | tee $PREFLIGHT_LOG
 
 elif [ "$RUN_ENV" = "slurm" ]; then
-    export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10_gfx942"}
+    #export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10_gfx942"}
+    export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/tasimage/primus:pr-308-gfx950-ainic"}
 
     bash "${PRIMUS_PATH}"/tools/docker/docker_podman_proxy.sh run --rm \
         --env SLURM_MASTER_ADDR=$SLURM_MASTER_ADDR \
@@ -174,7 +184,6 @@ elif [ "$RUN_ENV" = "slurm" ]; then
         -v $PRIMUS_PATH:$PRIMUS_PATH \
         $DOCKER_IMAGE /bin/bash -c \
             "echo '[NODE-${NODE_RANK}]: begin, time=$(date +"%Y.%m.%d %H:%M:%S")' && \
-            apt install -y -qq libpango-1.0-0 libgdk-pixbuf2.0-0 libffi-dev libcairo2 && \
             cd $PRIMUS_PATH && \
             pip install -qr requirements.txt && \
             PYTHONPATH=${MEGATRON_PATH}:${PRIMUS_PATH}:${PYTHONPATH} \

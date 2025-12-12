@@ -16,5 +16,5 @@ SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 srun -N ${NUM_NODES} \
      --exclusive \
      --ntasks-per-node=1 \
-     --cpus-per-task=256 \
+     --cpus-per-task=128 \
      bash ${SCRIPT_DIR}/run_preflight.sh 2>&1 | tee output/log_slurm_preflight.txt
