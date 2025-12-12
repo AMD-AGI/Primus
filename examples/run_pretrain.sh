@@ -142,7 +142,7 @@ export HIP_VISIBLE_DEVICES
 
 # ----------------- NCCL and Network Settings -----------------
 # VERSION, WARN, INFO, DEBUG, TRACE
-export NCCL_DEBUG=
+export NCCL_DEBUG=${NCCL_DEBUG:-}
 
 # Disable NCCL internal checks to reduce overhead
 export NCCL_CHECKS_DISABLE=1
@@ -172,6 +172,11 @@ if [ "$USING_AINIC" == "1" ]; then
     export NCCL_IGNORE_CPU_AFFINITY=1
     export NCCL_IB_QPS_PER_CONNECTION=1
 
+    # v25.10
+    # export LD_LIBRARY_PATH=/etc/libibverbs.d:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
+    # export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-anp.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
+
+    # v25.09
     export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
     export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
 else
@@ -317,7 +322,7 @@ export REBUILD_PRIMUS_TURBO=${REBUILD_PRIMUS_TURBO:-0}
 if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
     LOG_INFO "Rebuilding Primus Turbo from source..."
     mkdir -p "/workspace/turbo"
-    cd "/workspace/turbo"
+    cd "/workspace/turbo" || exit
 
     # Clean up old directory if exists to avoid git clone conflicts
     if [ -d "Primus-Turbo" ]; then
@@ -326,11 +331,11 @@ if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
     fi
 
     git clone https://github.com/AMD-AGI/Primus-Turbo.git --recursive
-    cd Primus-Turbo
+    cd Primus-Turbo || exit
     pip3 install -r requirements.txt
     # Set GPU_ARCHS to compile Turbo for multiple AMD GPU architectures.
     GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
-    cd "${PRIMUS_PATH}"
+    cd "${PRIMUS_PATH}" || exit
     LOG_INFO "Rebuilding Primus Turbo from source done."
 else
     LOG_INFO "Skip Primus Turbo rebuild. REBUILD_PRIMUS_TURBO=$REBUILD_PRIMUS_TURBO"
