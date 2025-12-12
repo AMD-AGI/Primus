@@ -2007,8 +2007,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 upload_traces=getattr(args, "mlflow_upload_traces", True),
                 upload_logs=getattr(args, "mlflow_upload_logs", True),
             )
-            mlflow_writer.end_run()
-
         # If any exit conditions (signal handler, duration, iterations) have been reached, exit.
         if should_exit:
             wandb_writer = get_wandb_writer()
