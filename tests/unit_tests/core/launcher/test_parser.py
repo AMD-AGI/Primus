@@ -72,7 +72,16 @@ class TestPrimusParser(PrimusUT):
         self.assertEqual(result, expected)
 
     def test_parse_boolean_strings_space_format(self):
-        args = ["--flag_true", "true", "--flag_false", "false", "--flag_mixed", "True", "--flag_mixed2", "False"]
+        args = [
+            "--flag_true",
+            "true",
+            "--flag_false",
+            "false",
+            "--flag_mixed",
+            "True",
+            "--flag_mixed2",
+            "False",
+        ]
         result = _parse_kv_overrides(args)
         expected = {
             "flag_true": True,
