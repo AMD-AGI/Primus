@@ -1,0 +1,82 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:MoE-Proxy-Pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: ${PRIMUS_MODEL:ssi_moe_414B.yaml}
+    overrides:
+      # log
+      wandb_project: "Primus_MoE-Proxy_Pretrain"
+      # disable_wandb: false
+      # disable_tensorboard: false
+      stderr_sink_level: DEBUG
+
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      moe_router_force_load_balancing: true
+
+      train_iters: 10
+      micro_batch_size: 1
+      global_batch_size: 256
+
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+
+      lr: 1.0e-4
+      min_lr: 1.0e-5
+      lr_warmup_iters: 2
+      lr_decay_iters: 320000
+      lr_decay_style: cosine
+      weight_decay: 1.0e-1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # parallel
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 8
+      expert_model_parallel_size: 8
+      sequence_parallel: 1
+      overlap_grad_reduce: true
+      moe_shared_expert_overlap: true
+
+      overlap_param_gather: true
+      use_torch_fsdp2: false
+      use_distributed_optimizer: true
+      gradient_accumulation_fusion: true
+      ckpt_format: torch
+
+      # data
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+
+      # recompute
+      # recompute_granularity: full # full, selective
+      # recompute_method: block # uniform, block
+      # recompute_num_layers: 80 # int
+
+      # Cross entropy flags
+      # cross_entropy_fusion_impl: "te"
+      # cross_entropy_loss_fusion: true
