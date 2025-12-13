@@ -28,6 +28,8 @@ Example:
 
     EXP=examples/megatron/exp_pretrain.yaml bash examples/run_pretrain.sh
 
+Note: BACKEND is auto-detected from the EXP path (megatron or torchtitan)
+
 EOF
 }
 
@@ -66,30 +68,20 @@ export NNODES=${NNODES:-1}
 export NODE_RANK=${NODE_RANK:-0}
 export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
+
 LOG_INFO_RANK0 "==========Training cluster info=========="
 LOG_INFO_RANK0 "MASTER_ADDR: $MASTER_ADDR"
 LOG_INFO_RANK0 "MASTER_PORT: $MASTER_PORT"
 LOG_INFO_RANK0 "NNODES: $NNODES"
 LOG_INFO_RANK0 "NODE_RANK: $NODE_RANK"
 LOG_INFO_RANK0 "GPUS_PER_NODE: $GPUS_PER_NODE"
-if [ "${BACKEND:-}" = "MaxText" ]; then
-    export JAX_COORDINATOR_IP=$MASTER_ADDR
-    export JAX_COORDINATOR_PORT=$MASTER_PORT
-    LOG_INFO_RANK0 "JAX_COORDINATOR_IP: $JAX_COORDINATOR_IP"
-    LOG_INFO_RANK0 "JAX_COORDINATOR_PORT: $JAX_COORDINATOR_PORT"
-fi
 LOG_INFO_RANK0 ""
 
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
 export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 
-LOG_INFO_RANK0 "Pip installing required packages ..."
-if [ "${BACKEND:-}" != "MaxText" ]; then
-    pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
-else
-    pip install -r "$PRIMUS_PATH/requirements-jax.txt"  --quiet
-fi
+pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
 
 # -------------------- EXP Check --------------------
 if [ -z "${EXP:-}" ]; then
@@ -98,10 +90,32 @@ if [ -z "${EXP:-}" ]; then
     exit 1
 fi
 
+# Convert relative EXP path to absolute path if needed
+if [[ ! "$EXP" = /* ]]; then
+    EXP="${PRIMUS_PATH}/${EXP}"
+fi
+
 # Ensure EXP file exists, otherwise exit with error
 if [ ! -f "${EXP}" ]; then
     LOG_ERROR "The specified EXP file does not exist: ${EXP}" \
               "Primus will use the configuration in EXP to train the model."
+    exit 1
+fi
+
+# -------------------- Auto-detect BACKEND --------------------
+# Extract backend from EXP path (check both relative and absolute paths)
+EXP_BASENAME=$(basename "$(dirname "$EXP")")
+EXP_PARENT=$(basename "$(dirname "$(dirname "$EXP")")")
+
+if [[ "$EXP" == */examples/megatron/* ]] || [[ "$EXP" == examples/megatron/* ]]; then
+    export BACKEND="megatron"
+    LOG_INFO_RANK0 "Auto-detected BACKEND=megatron from EXP path"
+elif [[ "$EXP" == */examples/torchtitan/* ]] || [[ "$EXP" == examples/torchtitan/* ]]; then
+    export BACKEND="torchtitan"
+    LOG_INFO_RANK0 "Auto-detected BACKEND=torchtitan from EXP path"
+else
+    LOG_ERROR "Could not auto-detect BACKEND from EXP path: ${EXP}" \
+              "EXP path must contain 'examples/megatron/' or 'examples/torchtitan/'"
     exit 1
 fi
 
@@ -123,11 +137,10 @@ fi
 # export AITER_JIT_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}_aiter_cache"
 
 
-TRAIN_LOG=${TRAIN_LOG:-"output/log_mp_pretrain_$(basename "$EXP" .yaml).txt"}
+TRAIN_LOG=${TRAIN_LOG:-"output/log_torchrun_pretrain_$(basename "$EXP" .yaml).txt"}
 
 LOG_INFO_RANK0 "==========Training info=========="
 LOG_INFO_RANK0 "EXP: $EXP"
-LOG_INFO_RANK0 "EXP: $BACKEND"
 LOG_INFO_RANK0 "TRAIN_LOG: $TRAIN_LOG"
 LOG_INFO_RANK0 "PRIMUS_PATH: $PRIMUS_PATH"
 LOG_INFO_RANK0 "DATA_PATH: $DATA_PATH"
@@ -142,46 +155,13 @@ export HIP_VISIBLE_DEVICES
 
 # ----------------- NCCL and Network Settings -----------------
 # VERSION, WARN, INFO, DEBUG, TRACE
-export NCCL_DEBUG=${NCCL_DEBUG:-}
+export NCCL_DEBUG=
 
 # Disable NCCL internal checks to reduce overhead
 export NCCL_CHECKS_DISABLE=1
 
 # Set InfiniBand GID index for NCCL communication
-if [ "$USING_AINIC" == "1" ]; then
-    export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
-    export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
-    export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi-4.1.6"}
-
-    LOG_INFO_RANK0 "Using AINIC"
-    LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
-    LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
-    LOG_INFO_RANK0 "MPI_HOME_DIR: $MPI_HOME_DIR"
-
-    # unset NCCL_IB_GID_INDEX
-    export NCCL_IB_GID_INDEX=1
-    # export NCCL_IB_ROCE_VERSION_NUM=2
-    export NCCL_MAX_P2P_CHANNELS=56
-    export NCCL_IB_TC=104
-    export NCCL_IB_FIFO_TC=192
-    export NET_OPTIONAL_RECV_COMPLETION=1
-    export NCCL_IB_USE_INLINE=1
-    export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
-    export NCCL_GDR_FLUSH_DISABLE=1
-    export NCCL_DMABUF_ENABLE=0
-    export NCCL_IGNORE_CPU_AFFINITY=1
-    export NCCL_IB_QPS_PER_CONNECTION=1
-
-    # v25.10
-    # export LD_LIBRARY_PATH=/etc/libibverbs.d:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
-    # export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-anp.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
-
-    # v25.09
-    export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
-    export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
-else
-    export NCCL_IB_GID_INDEX=3
-fi
+export NCCL_IB_GID_INDEX=3
 
 # Disable cross NIC communication for NCCL
 export NCCL_CROSS_NIC=0
@@ -229,10 +209,8 @@ export RCCL_MSCCLPP_FORCE_ENABLE=0
 export RCCL_MSCCLPP_THRESHOLD=$((1*1024*1024*1024)) # default 1 MB
 # https://github.com/microsoft/mscclpp/blob/main/include/mscclpp/env.hpp#L82-L87
 export MSCCLPP_DISABLE_CHANNEL_CACHE=FALSE
-if [ "${BACKEND:-}" != "MaxText" ]; then
-    # pytorch need set this env to enable register comm
-    export TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=0
-fi
+# pytorch need set this env to enable register comm
+export TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=0
 
 LOG_INFO_RANK0 "==========AMD-specific GPU optimizations=========="
 LOG_INFO_RANK0 "HSA_ENABLE_SDMA: $HSA_ENABLE_SDMA"
@@ -246,60 +224,15 @@ LOG_INFO_RANK0 "TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK: $TORCH_NCCL_USE_T
 LOG_INFO_RANK0 ""
 
 # ----------------- Performance tuning -----------------
-if [ "${BACKEND:-}" == "MaxText" ]; then
-    export DUMP_HLO_DIR=${DUMP_HLO_DIR:-"${PRIMUS_PATH}/output/xla_dump_hlo"}
-    export DUMP_HLO=${DUMP_HLO:-0}
-    export NVTE_ALLOW_NONDETERMINISTIC_ALGO=1
-    export XLA_PYTHON_CLIENT_MEM_FRACTION=.97
-    export NVTE_USE_HIPBLASLT=1
-    export XLA_FLAGS="--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_graph_level=0 --xla_gpu_enable_latency_hiding_scheduler=True --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=False --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=FALSE"
-    if [ "${DUMP_HLO}" = "1" ]; then
-        mkdir -p "${DUMP_HLO_DIR}"
-        export XLA_FLAGS="$XLA_FLAGS --xla_dump_to=$DUMP_HLO_DIR"
-        echo "XLA HLO dumping enabled, output directory: ${DUMP_HLO_DIR}"
-    fi
-
-    export HIP_FORCE_DEV_KERNARG=1
-    export HSA_FORCE_FINE_GRAIN_PCIE=1
-    export NVTE_FUSED_ATTN=1
-    export NVTE_CK_USES_BWD_V3=1
-    export NVTE_CK_USES_FWD_V3=1
-    export NVTE_CK_IS_V3_ATOMIC_FP32=0
-    export NVTE_CK_HOW_V3_BF16_CVT=2
-    export NVTE_FUSED_ATTN_CK=1
-    export NVTE_FUSED_ATTN_AOTRITON=0
-
-    LOG_INFO_RANK0 "==========Performance tuning for MaxText=========="
-    LOG_INFO_RANK0 "NVTE_ALLOW_NONDETERMINISTIC_ALGO: $NVTE_ALLOW_NONDETERMINISTIC_ALGO"
-    LOG_INFO_RANK0 "XLA_PYTHON_CLIENT_MEM_FRACTION: $XLA_PYTHON_CLIENT_MEM_FRACTION"
-    LOG_INFO_RANK0 "NVTE_USE_HIPBLASLT: $NVTE_USE_HIPBLASLT"
-    LOG_INFO_RANK0 "XLA_FLAGS: $XLA_FLAGS"
-    LOG_INFO_RANK0 "HIP_FORCE_DEV_KERNARG: $HIP_FORCE_DEV_KERNARG"
-    LOG_INFO_RANK0 "HSA_FORCE_FINE_GRAIN_PCIE: $HSA_FORCE_FINE_GRAIN_PCIE"
-    LOG_INFO_RANK0 "NVTE_FUSED_ATTN: $NVTE_FUSED_ATTN"
-    LOG_INFO_RANK0 "NVTE_CK_USES_BWD_V3: $NVTE_CK_USES_BWD_V3"
-    LOG_INFO_RANK0 "NVTE_CK_USES_FWD_V3: $NVTE_CK_USES_FWD_V3"
-    LOG_INFO_RANK0 "NVTE_CK_IS_V3_ATOMIC_FP32: $NVTE_CK_IS_V3_ATOMIC_FP32"
-    LOG_INFO_RANK0 "NVTE_CK_HOW_V3_BF16_CVT: $NVTE_CK_HOW_V3_BF16_CVT"
-    LOG_INFO_RANK0 "NVTE_FUSED_ATTN_CK: $NVTE_FUSED_ATTN_CK"
-    LOG_INFO_RANK0 "NVTE_FUSED_ATTN_AOTRITON: $NVTE_FUSED_ATTN_AOTRITON"
-fi
 
 # Limit GPU hardware queues to 2 for performance stability
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 
-# Increase HSA kernarg pool size to 12MB for models with lot of kernels
-# export HSA_KERNARG_POOL_SIZE=${HSA_KERNARG_POOL_SIZE:-12582912}
-
-# Enable NUMA binding for better memory locality (may increase stability for large models)
-export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-0}
-
 # Limit max CUDA device connections to reduce PCIe traffic
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
-if [ "${BACKEND:-}" != "MaxText" ]; then
-    # Prioritize NCCL communication for PyTorch for higher throughput
-    export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
-fi
+
+# Prioritize NCCL communication for PyTorch for higher throughput
+export TORCH_NCCL_HIGH_PRIORITY=1
 
 # In multi-node training, PXN can be enabled to improve inter-node all-to-all
 # communication efficiency, but it will increase GPU memory usage.
@@ -308,38 +241,11 @@ export NCCL_PXN_DISABLE=${NCCL_PXN_DISABLE:-1}
 export NCCL_P2P_NET_CHUNKSIZE=${NCCL_P2P_NET_CHUNKSIZE:-524288}
 
 # optimize nvte fp8 cast transpose
-export NVTE_USE_CAST_TRANSPOSE_TRITON=${NVTE_USE_CAST_TRANSPOSE_TRITON:-1}
-export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE:-0}
+export NVTE_USE_CAST_TRANSPOSE_TRITON=1
+export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=0
 
 # Note: Disable v3 due to accuracy issues. Will fix after TE version 2.1.
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
-
-# Note: Disable fp32 atomic due if you find any accuracy issue.
-export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:-0}
-
-# install primus turbo from source
-export REBUILD_PRIMUS_TURBO=${REBUILD_PRIMUS_TURBO:-0}
-if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
-    LOG_INFO "Rebuilding Primus Turbo from source..."
-    mkdir -p "/workspace/turbo"
-    cd "/workspace/turbo" || exit
-
-    # Clean up old directory if exists to avoid git clone conflicts
-    if [ -d "Primus-Turbo" ]; then
-        LOG_INFO "Removing existing Primus-Turbo directory..."
-        rm -rf Primus-Turbo
-    fi
-
-    git clone https://github.com/AMD-AGI/Primus-Turbo.git --recursive
-    cd Primus-Turbo || exit
-    pip3 install -r requirements.txt
-    # Set GPU_ARCHS to compile Turbo for multiple AMD GPU architectures.
-    GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
-    cd "${PRIMUS_PATH}" || exit
-    LOG_INFO "Rebuilding Primus Turbo from source done."
-else
-    LOG_INFO "Skip Primus Turbo rebuild. REBUILD_PRIMUS_TURBO=$REBUILD_PRIMUS_TURBO"
-fi
 
 # nvte debug envs
 export NVTE_DEBUG=0 # 0, 1
@@ -349,8 +255,6 @@ export PATCH_TE_FLASH_ATTN=${PATCH_TE_FLASH_ATTN:-0}
 
 LOG_INFO_RANK0 "==========Performance tuning=========="
 LOG_INFO_RANK0 "GPU_MAX_HW_QUEUES: $GPU_MAX_HW_QUEUES"
-LOG_INFO_RANK0 "HSA_KERNARG_POOL_SIZE: $HSA_KERNARG_POOL_SIZE"
-LOG_INFO_RANK0 "ENABLE_NUMA_BINDING: $ENABLE_NUMA_BINDING"
 LOG_INFO_RANK0 "CUDA_DEVICE_MAX_CONNECTIONS: $CUDA_DEVICE_MAX_CONNECTIONS"
 LOG_INFO_RANK0 "TORCH_NCCL_HIGH_PRIORITY: $TORCH_NCCL_HIGH_PRIORITY"
 LOG_INFO_RANK0 "CUDA_DEVICE_MAX_CONNECTIONS: $CUDA_DEVICE_MAX_CONNECTIONS"
@@ -360,7 +264,6 @@ LOG_INFO_RANK0 "NCCL_P2P_NET_CHUNKSIZE: $NCCL_P2P_NET_CHUNKSIZE"
 LOG_INFO_RANK0 "NVTE_CK_USES_BWD_V3: $NVTE_CK_USES_BWD_V3"
 LOG_INFO_RANK0 "NVTE_USE_CAST_TRANSPOSE_TRITON: $NVTE_USE_CAST_TRANSPOSE_TRITON"
 LOG_INFO_RANK0 "NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE: $NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE"
-LOG_INFO_RANK0 "PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: $PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32"
 if [[ "$PATCH_TE_FLASH_ATTN" == "1" ]]; then
     LOG_INFO_RANK0 'Patching _flash_attn_max_version in attention.py...'
     sed -i 's/_flash_attn_max_version = PkgVersion(\".*\")/_flash_attn_max_version = PkgVersion(\"3.0.0.post1\")/' \
@@ -389,19 +292,7 @@ else
   LOG_INFO "Skip bnxt rebuild. REBUILD_BNXT=$REBUILD_BNXT, PATH_TO_BNXT_TAR_PACKAGE=$PATH_TO_BNXT_TAR_PACKAGE"
 fi
 
-# -------------------- Install required packages for Jax --------------------
-install_pkgs_for_maxtext() {
-    LOG_INFO_RANK0 "========== Install required packages for Jax/MaxText =========="
-    apt install iproute2 -y
-    apt install -y linux-headers-"$(uname -r)" libelf-dev
-    apt install -y gcc make libtool autoconf librdmacm-dev rdmacm-utils infiniband-diags ibverbs-utils perftest ethtool libibverbs-dev \
-        rdma-core strace libibmad5 libibnetdisc5 ibverbs-providers libibumad-dev libibumad3 libibverbs1 libnl-3-dev libnl-route-3-dev
-    LOG_INFO_RANK0 "========== Install required packages for Jax/MaxText Done =========="
-}
 
-if [[ "$NNODES" -gt 1 ]] && [[ "${BACKEND:-}" == "MaxText" ]]; then
-    install_pkgs_for_maxtext
-fi
 
 # -------------------- HipBLASLt Tuning --------------------
 handle_hipblaslt_tuning() {
@@ -478,9 +369,6 @@ run_prepare_experiment() {
     if [[ -n "${BACKEND_PATH}" ]]; then
         BACKEND_ARG=(--backend_path "$BACKEND_PATH")
     fi
-    if [[ -n "${BACKEND}" ]]; then
-        BACKEND_ARG+=("--backend" "$BACKEND")
-    fi
 
     # Run the prepare_experiment.py script with required and optional arguments
     if ! python3 "$SCRIPT" \
@@ -537,25 +425,18 @@ else
     LOG_INFO_RANK0 "No patch args file found at $PRIMUS_PATCH_ARGS_FILE, skipping patch args."
 fi
 
-
 # -------------------- Launch Training --------------------
-if [ "${BACKEND:-}" == "MaxText" ]; then
-    CMD="python primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
-else
-    DISTRIBUTED_ARGS=(
-        --nproc_per_node "${GPUS_PER_NODE}"
-        --nnodes "${NNODES}"
-        --node_rank "${NODE_RANK}"
-        --master_addr "${MASTER_ADDR}"
-        --master_port "${MASTER_PORT}"
-    )
-    if [[ "$ENABLE_NUMA_BINDING" == "1" ]]; then
-        apt-get install numactl -y > /dev/null 2>&1
-        NUMA_LAUNCHER="--no-python ./runner/helpers/numa_bind.sh python3"
-    fi
+DISTRIBUTED_ARGS=(
+    --nproc_per_node "${GPUS_PER_NODE}"
+    --nnodes "${NNODES}"
+    --node_rank "${NODE_RANK}"
+    --master_addr "${MASTER_ADDR}"
+    --master_port "${MASTER_PORT}"
+)
 
-    CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS ${NUMA_LAUNCHER} primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
-fi
+
+CMD="torchrun ${DISTRIBUTED_ARGS[*]} $TORCHRUN_EXTRA_ARGS primus/cli/main.py train pretrain --config $EXP $TRAIN_EXTRA_ARGS $*"
+
 LOG_INFO "Launching distributed training with command: $CMD"
 
 eval "$CMD" 2>&1 | tee "$TRAIN_LOG"
@@ -567,15 +448,90 @@ if [ "${PRIMUS_HIPBLASLT_TUNING_STAGE:-0}" -eq 1 ]; then
          "and tune the gemm with a single node."
 fi
 
-LOG_INFO "primus launcher exited with code $exit_code"
+LOG_INFO "torchrun exited with code $exit_code"
 
 if [[ $exit_code -ne 0 ]]; then
     if [[ $exit_code -ge 128 ]]; then
         signal=$((exit_code - 128))
-        LOG_ERROR "primus launcher crashed due to signal $signal"
+        LOG_ERROR "torchrun crashed due to signal $signal"
     else
-        LOG_ERROR "primus launcher exited with code $exit_code"
+        LOG_ERROR "torchrun exited with code $exit_code"
     fi
 fi
 
-exit "$exit_code"
+
+if [[ "$BACKEND" == "megatron" ]]; then
+    # ====== MEGATRON BACKEND ======
+    num_warmup=$(grep 'lr_warmup_iters' ${TRAIN_LOG} | sed -E 's/.*\.+ ([0-9,]+).*/\1/' | tr -d ',' 2>/dev/null)
+    if [ -z "$num_warmup" ]; then
+        num_warmup=0
+    fi
+    echo "Num warmup: $num_warmup"
+
+    # Show sample iteration line for debugging
+    # echo "Sample iteration line from log:"
+    # grep 'iteration' ${TRAIN_LOG} | grep -E 'tokens|throughput|elapsed' | head -1
+    
+    # Try multiple patterns to extract values
+    tps_values=$(grep 'iteration' ${TRAIN_LOG} | sed -En 's/.*tokens per GPU[^:]*:[^0-9]*([0-9]+\.?[0-9]*).*/\1/p' 2>/dev/null)
+    if [ -z "$tps_values" ]; then
+        tps_values=$(grep 'iteration' ${TRAIN_LOG} | sed -En 's/.*tokens\/s\/GPU[^:]*:[^0-9]*([0-9]+\.?[0-9]*).*/\1/p' 2>/dev/null)
+    fi
+    
+    tflops_values=$(grep 'iteration' ${TRAIN_LOG} | sed -En 's/.*throughput per GPU[^:]*:[^0-9]*([0-9]+\.?[0-9]*).*/\1/p' 2>/dev/null)
+    if [ -z "$tflops_values" ]; then
+        tflops_values=$(grep 'iteration' ${TRAIN_LOG} | sed -En 's/.*TFLOP\/s\/GPU[^:]*:[^0-9]*([0-9]+\.?[0-9]*).*/\1/p' 2>/dev/null)
+    fi
+    
+    mem_pct_values=$(grep 'usage_ratio' "${TRAIN_LOG}" \
+      | sed -En 's/.*usage_ratio:[[:space:]]*[^/]*\/[^/]*\/[^/]*\/([0-9]+\.?[0-9]*)%.*/\1/p' 2>/dev/null)
+    
+    elapsed_time_values=$(grep 'iteration' ${TRAIN_LOG} | sed -En 's/.*elapsed time per iteration[^:]*:[^0-9]*([0-9]+\.?[0-9]*).*/\1/p' 2>/dev/null)
+    if [ -z "$elapsed_time_values" ]; then
+        elapsed_time_values=$(grep 'iteration' ${TRAIN_LOG} | sed -En 's/.*\(ms\)[^:]*:[^0-9]*([0-9]+\.?[0-9]*).*/\1/p' 2>/dev/null)
+    fi
+
+    # Debug: count extracted values
+    tps_count=$(echo "$tps_values" | grep -c '[0-9]' 2>/dev/null || echo 0)
+    tflops_count=$(echo "$tflops_values" | grep -c '[0-9]' 2>/dev/null || echo 0)
+    elapsed_count=$(echo "$elapsed_time_values" | grep -c '[0-9]' 2>/dev/null || echo 0)
+    echo "Extracted values: TPS=$tps_count, TFLOPS=$tflops_count, Elapsed=$elapsed_count"
+
+    avg_tps=$(echo "$tps_values" | tail -n +$((num_warmup + 1)) | awk 'NF > 0 && $0 > 0 {sum += 1/$0; count++} END {if (count == 0 || sum == 0) print "N/A"; else printf "%.2f", count/sum}')
+    avg_tflops=$(echo "$tflops_values" | tail -n +$((num_warmup + 1)) | awk 'NF > 0 && $0 > 0 {sum += 1/$0; count++} END {if (count == 0 || sum == 0) print "N/A"; else printf "%.2f", count/sum}')
+    avg_mem_pct=$(echo "$mem_pct_values" | tail -n +$((num_warmup + 1)) | awk 'NF > 0 {sum+=$1; count++} END {if(count==0) print "N/A"; else printf "%.4f", sum/count}')
+    avg_elapsed_time=$(echo "$elapsed_time_values" | tail -n +$((num_warmup + 1)) | awk 'NF > 0 && $0 > 0 {sum+=$1; count++} END {if(count==0) print "N/A"; else printf "%.4f", sum/count}')
+
+    echo "Harmonic mean of TPS (excluding first $num_warmup steps): $avg_tps" | tee -a ${TRAIN_LOG}
+    echo "Harmonic mean of TFLOPS (excluding first $num_warmup steps): $avg_tflops" | tee -a ${TRAIN_LOG}
+    echo "Arithmetic mean of memory percentage (excluding first $num_warmup steps): $avg_mem_pct" | tee -a ${TRAIN_LOG}
+    echo "Arithmetic mean of elapsed time (ms) (excluding first $num_warmup steps): $avg_elapsed_time" | tee -a ${TRAIN_LOG}
+
+
+
+elif [[ "$BACKEND" == "torchtitan" ]]; then
+    echo "Using Torchtitan log parser"
+
+    num_warmup=$(grep 'lr_scheduler.warmup_steps' ${TRAIN_LOG} | sed -E 's/.*\.+ ([0-9,]+).*/\1/' | tr -d ',' 2>/dev/null)
+    echo "Num warmup (first steps skipped): $num_warmup"
+
+    tps_values=$(grep 'INFO' "${TRAIN_LOG}" | sed -En 's/.*tps:[[:space:]]*([0-9.,]+).*/\1/p' | tr -d ',' 2>/dev/null)
+    tflops_values=$(grep 'INFO' "${TRAIN_LOG}" | sed -En 's/.*tflops:[[:space:]]*([0-9.,]+).*/\1/p' 2>/dev/null)
+    mfu_values=$(grep 'INFO' "${TRAIN_LOG}" | sed -En 's/.*mfu:[[:space:]]*([0-9.,]+)%.*/\1/p' 2>/dev/null)
+    mem_values=$(grep 'INFO' "${TRAIN_LOG}" | sed -En 's/.*memory:[[:space:]]*[0-9.,]+GiB\(([0-9.]+)%\).*/\1/p' 2>/dev/null)
+
+    #echo "Extracted TPS values:" $tps_values
+    #echo "Extracted TFLOPS values:" $tflops_values
+    #echo "Extracted MFU values:" $mfu_values
+    #echo "Extracted Memory % values:" $mem_values
+
+    avg_tps=$(echo "$tps_values" | tail -n +$((num_warmup + 1)) | awk 'NF>0{if($0==0)z=1;else{sum+=1/$0;c++}}END{if(z||c==0||sum==0)print"N/A";else printf"%.2f",c/sum}')
+    avg_tflops=$(echo "$tflops_values" | tail -n +$((num_warmup + 1)) | awk 'NF>0{if($0==0)z=1;else{sum+=1/$0;c++}}END{if(z||c==0||sum==0)print"N/A";else printf"%.2f",c/sum}')
+    avg_mfu=$(echo "$mfu_values" | tail -n +$((num_warmup + 1)) | awk '{sum+=$1;c++}END{if(c==0)print"N/A";else printf"%.4f",sum/c}')
+    avg_mem=$(echo "$mem_values" | tail -n +$((num_warmup + 1)) | awk '{sum+=$1;c++}END{if(c==0)print"N/A";else printf"%.4f",sum/c}')
+
+    echo "Harmonic mean of TPS (excluding first $num_warmup steps): $avg_tps" | tee -a "${TRAIN_LOG}"
+    echo "Harmonic mean of TFLOPS (excluding first $num_warmup steps): $avg_tflops" | tee -a "${TRAIN_LOG}"
+    echo "Arithmetic mean of MFU (excluding first $num_warmup steps): $avg_mfu" | tee -a "${TRAIN_LOG}"
+    echo "Arithmetic mean of memory percentage (excluding first $num_warmup steps): $avg_mem" | tee -a "${TRAIN_LOG}"
+fi
