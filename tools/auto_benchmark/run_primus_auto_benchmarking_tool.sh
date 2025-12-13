@@ -76,8 +76,8 @@ sleep 0.2
 # ------------------------------------------
 echo -e "${STAR} ${BOLD}Available Model Configs:${RESET} (${CYAN}$BACKEND${RESET})"
 
-# Use find and sort -u to get unique files
-CONFIG_LIST=($(find "$CONFIG_DIR" -name "*.yaml" -type f | sort -u))
+# Use find and sort -u to get unique files, excluding edited and override configs
+CONFIG_LIST=($(find "$CONFIG_DIR" -name "*.yaml" -type f ! -name "*_edited.yaml" ! -name "*_override.yaml" | sort -u))
 
 if [[ ${#CONFIG_LIST[@]} -eq 0 ]]; then
     echo -e "${RED}No configs found in $CONFIG_DIR${RESET}"
@@ -423,6 +423,16 @@ mkdir -p "$LOG_DIR"
 TOTAL_CONFIGS=${#SELECTED_CONFIGS[@]}
 CURRENT=1
 
+# Arrays to store benchmark results
+declare -a BENCHMARK_MODELS
+declare -a BENCHMARK_BACKENDS
+declare -a BENCHMARK_LOGS
+declare -a BENCHMARK_TPS
+declare -a BENCHMARK_TFLOPS
+declare -a BENCHMARK_MFU
+declare -a BENCHMARK_MEMORY
+declare -a BENCHMARK_TIME
+
 for CFG_FILE in "${SELECTED_CONFIGS[@]}"; do
     MODEL_NAME=$(basename "$CFG_FILE" .yaml)
     TIMESTAMP=$(date +"%Y-%m-%d_%H-%M-%S")
@@ -439,7 +449,7 @@ for CFG_FILE in "${SELECTED_CONFIGS[@]}"; do
     
     # Apply parameter overrides if any
     if [[ ${#PARAM_OVERRIDES[@]} -gt 0 ]]; then
-        OVERRIDE_CONFIG="$LOG_DIR/${MODEL_NAME}_${BACKEND}_${DEVICE}_${TIMESTAMP}_override.yaml"
+        OVERRIDE_CONFIG="$CONFIG_DIR/${MODEL_NAME}_override.yaml"
         cp "$WORKING_CONFIG" "$OVERRIDE_CONFIG"
         
         echo -e "${STAR} ${BOLD}Applying parameter overrides...${RESET}"
@@ -452,10 +462,11 @@ for CFG_FILE in "${SELECTED_CONFIGS[@]}"; do
         WORKING_CONFIG="$OVERRIDE_CONFIG"
         echo -e " ${CHECK} Override config saved: ${YELLOW}$OVERRIDE_CONFIG${RESET}\n"
     elif [[ -n "${EDITED_CONFIGS[$CFG_FILE]}" ]]; then
-        # Save edited config to logs directory
-        SAVED_CONFIG="$LOG_DIR/${MODEL_NAME}_${BACKEND}_${DEVICE}_${TIMESTAMP}_edited.yaml"
+        # Save edited config to the backend config directory to maintain proper path structure
+        SAVED_CONFIG="$CONFIG_DIR/${MODEL_NAME}_edited.yaml"
         cp "$WORKING_CONFIG" "$SAVED_CONFIG"
         WORKING_CONFIG="$SAVED_CONFIG"
+        echo -e " ${CHECK} Edited config saved: ${YELLOW}$SAVED_CONFIG${RESET}\n"
     fi
 
     echo -e "${STAR} ${BOLD}Starting Benchmark ${CURRENT}/${TOTAL_CONFIGS}...${RESET}"
@@ -473,7 +484,7 @@ for CFG_FILE in "${SELECTED_CONFIGS[@]}"; do
     bash $RUN_SCRIPT 2>&1 | tee "$LOG_FILE"
 
     echo
-    echo -e "${GREEN}==========================================${RESET}"
+    echo -e "${GREEN}===========================================${RESET}"
     echo -e " ${BOLD}${GREEN}Benchmark ${CURRENT}/${TOTAL_CONFIGS} Completed!${RESET}"
     echo -e " Log saved at:"
     echo -e "   ${CYAN}$LOG_FILE${RESET}"
@@ -481,8 +492,66 @@ for CFG_FILE in "${SELECTED_CONFIGS[@]}"; do
         echo -e " Override config saved at:"
         echo -e "   ${CYAN}$OVERRIDE_CONFIG${RESET}"
     fi
-    echo -e "${GREEN}==========================================${RESET}"
+    echo -e "${GREEN}===========================================${RESET}"
     echo
+
+    # Extract metrics from log file
+    echo -e "${INFO} ${BOLD}Extracting metrics from log...${RESET}"
+    
+    TPS=$(grep "Harmonic mean of TPS (excluding first" "$LOG_FILE" | tail -1 | grep -oE '[0-9]+\.[0-9]+')
+    TFLOPS=$(grep "Harmonic mean of TFLOPS (excluding first" "$LOG_FILE" | tail -1 | grep -oE '[0-9]+\.[0-9]+')
+    
+    # Check backend to determine which metrics to extract
+    if [[ "$BACKEND" == "torchtitan" ]]; then
+        MFU=$(grep "Arithmetic mean of MFU (excluding first" "$LOG_FILE" | tail -1 | grep -oE '[0-9]+\.[0-9]+')
+        MEMORY=$(grep "Arithmetic mean of memory percentage (excluding first" "$LOG_FILE" | tail -1 | grep -oE '[0-9]+\.[0-9]+')
+        ELAPSED_TIME=""
+    else
+        # megatron backend
+        MEMORY=$(grep "Arithmetic mean of memory percentage (excluding first" "$LOG_FILE" | tail -1 | grep -oE '[0-9]+\.[0-9]+')
+        ELAPSED_TIME=$(grep "Arithmetic mean of elapsed time (ms) (excluding first" "$LOG_FILE" | tail -1 | grep -oE '[0-9]+\.[0-9]+')
+        MFU=""
+    fi
+    
+    # Store results
+    BENCHMARK_MODELS+=("$MODEL_NAME")
+    BENCHMARK_BACKENDS+=("$BACKEND")
+    BENCHMARK_LOGS+=("$LOG_FILE")
+    BENCHMARK_TPS+=("${TPS:-N/A}")
+    BENCHMARK_TFLOPS+=("${TFLOPS:-N/A}")
+    BENCHMARK_MFU+=("${MFU:-N/A}")
+    BENCHMARK_MEMORY+=("${MEMORY:-N/A}")
+    BENCHMARK_TIME+=("${ELAPSED_TIME:-N/A}")
+    
+    if [[ "$BACKEND" == "torchtitan" ]]; then
+        if [[ -n "$TPS" && -n "$TFLOPS" && -n "$MFU" && -n "$MEMORY" ]]; then
+            echo -e " ${CHECK} ${GREEN}Metrics extracted successfully${RESET}"
+            echo -e "   ${DOT} TPS: ${CYAN}${TPS}${RESET}"
+            echo -e "   ${DOT} TFLOPS: ${CYAN}${TFLOPS}${RESET}"
+            echo -e "   ${DOT} MFU: ${CYAN}${MFU}${RESET}"
+            echo -e "   ${DOT} Memory: ${CYAN}${MEMORY}%${RESET}"
+        else
+            echo -e " ${YELLOW}⚠ Warning: Could not extract all metrics from log${RESET}"
+        fi
+    else
+        if [[ -n "$TPS" && -n "$TFLOPS" && -n "$MEMORY" && -n "$ELAPSED_TIME" ]]; then
+            echo -e " ${CHECK} ${GREEN}Metrics extracted successfully${RESET}"
+            echo -e "   ${DOT} TPS: ${CYAN}${TPS}${RESET}"
+            echo -e "   ${DOT} TFLOPS: ${CYAN}${TFLOPS}${RESET}"
+            echo -e "   ${DOT} Memory: ${CYAN}${MEMORY}%${RESET}"
+            echo -e "   ${DOT} Elapsed Time: ${CYAN}${ELAPSED_TIME} ms${RESET}"
+        else
+            echo -e " ${YELLOW}⚠ Warning: Could not extract all metrics from log${RESET}"
+        fi
+    fi
+    echo
+
+    # Cleanup edited/override config files
+    if [[ "$WORKING_CONFIG" != "$CFG_FILE" && -f "$WORKING_CONFIG" ]]; then
+        echo -e "${INFO} Cleaning up temporary config: ${DIM}$(basename $WORKING_CONFIG)${RESET}"
+        rm -f "$WORKING_CONFIG"
+        echo -e " ${CHECK} ${GREEN}Temporary config removed${RESET}\n"
+    fi
 
     ((CURRENT++))
 
@@ -497,3 +566,41 @@ echo
 echo -e "${MAGENTA}${BOLD}=========================================${RESET}"
 echo -e "${MAGENTA}${BOLD}  All ${TOTAL_CONFIGS} Benchmark(s) Completed!${RESET}"
 echo -e "${MAGENTA}${BOLD}=========================================${RESET}"
+echo
+
+# Display summary table
+echo -e "${STAR} ${BOLD}${CYAN}Benchmark Results Summary${RESET}"
+echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+printf "${BOLD}%-25s %-12s %-15s %-15s %-15s %-15s %-20s${RESET}\n" "Model" "Backend" "TPS" "TFLOPS" "MFU" "Memory (%)" "Time (ms)"
+echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+
+for i in "${!BENCHMARK_MODELS[@]}"; do
+    MODEL="${BENCHMARK_MODELS[$i]}"
+    BACKEND_NAME="${BENCHMARK_BACKENDS[$i]}"
+    TPS="${BENCHMARK_TPS[$i]}"
+    TFLOPS="${BENCHMARK_TFLOPS[$i]}"
+    MFU="${BENCHMARK_MFU[$i]}"
+    MEMORY="${BENCHMARK_MEMORY[$i]}"
+    TIME="${BENCHMARK_TIME[$i]}"
+    
+    # Show - for metrics not applicable to the backend
+    if [[ "$BACKEND_NAME" == "torchtitan" ]]; then
+        TIME="-"
+    else
+        MFU="-"
+    fi
+    
+    printf "${CYAN}%-25s${RESET} " "$MODEL"
+    printf "${MAGENTA}%-12s${RESET} " "$BACKEND_NAME"
+    printf "${GREEN}%-15s${RESET} " "$TPS"
+    printf "${GREEN}%-15s${RESET} " "$TFLOPS"
+    printf "${YELLOW}%-15s${RESET} " "$MFU"
+    printf "${YELLOW}%-15s${RESET} " "$MEMORY"
+    printf "${MAGENTA}%-20s${RESET}\n" "$TIME"
+done
+
+echo -e "${DIM}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+echo -e "${DIM}Note: MFU (Model FLOPs Utilization) for torchtitan | Time (ms) for megatron${RESET}"
+echo
+echo -e "${INFO} ${BOLD}Log files saved in:${RESET} ${CYAN}$LOG_DIR${RESET}"
+echo
