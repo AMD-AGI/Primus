@@ -16,7 +16,7 @@ Usage: bash run_local_pretrain.sh
 This script launches a Primus pretraining task inside a Docker/Podman container.
 
 Environment Variables:
-    DOCKER_IMAGE   Docker image to use [Default: docker.io/rocm/primus:v25.9_gfx942]
+    DOCKER_IMAGE   Docker image to use [Default: docker.io/rocm/primus:v25.10_gfx942]
     MASTER_ADDR    Master node IP or hostname [Default: localhost]
     MASTER_PORT    Master node port [Default: 1234]
     NNODES         Total number of nodes [Default: 1]
@@ -44,7 +44,7 @@ EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
 if [ "${BACKEND:-}" = "MaxText" ]; then
     DOCKER_IMAGE="docker.io/rocm/jax-training:maxtext-v25.9"
 fi
-DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.9_gfx942"}
+DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10_gfx942"}
 
 # Project root
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
@@ -109,6 +109,10 @@ if [ "$USING_AINIC" == "1" ]; then
     ENV_ARGS+=("--env" "RCCL_HOME_DIR")
     ENV_ARGS+=("--env" "ANP_HOME_DIR")
     ENV_ARGS+=("--env" "MPI_HOME_DIR")
+
+    # VOLUME_ARGS+=(-v /mnt/shared:/mnt/shared)
+    # VOLUME_ARGS+=(-v /etc/libibverbs.d/:/etc/libibverbs.d:ro)
+    # VOLUME_ARGS+=(-v /usr/lib/x86_64-linux-gnu/libibverbs/:/usr/lib/x86_64-linux-gnu/libibverbs/:ro)
 fi
 
 export CLEAN_DOCKER_CONTAINER=${CLEAN_DOCKER_CONTAINER:-0}
@@ -164,6 +168,7 @@ docker_podman_proxy run --rm \
     --env TORCHTITAN_PATH \
     --env MAXTEXT_PATH \
     --env BACKEND_PATH \
+    --env REBUILD_PRIMUS_TURBO \
     "${ENV_ARGS[@]}" \
     --ipc=host --network=host \
     --device=/dev/kfd --device=/dev/dri \
