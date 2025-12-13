@@ -109,7 +109,7 @@ class BaseTrainer(TrainerComponent):
         patch_count = run_patches(
             backend=self.backend_name,
             phase="before_train",
-            backend_version=self.detect_version(),
+            backend_version=type(self).detect_version(),
             model_name=self.model_name,
             extra={
                 "args": self.backend_args,
@@ -128,7 +128,7 @@ class BaseTrainer(TrainerComponent):
         patch_count = run_patches(
             backend=self.backend_name,
             phase="after_train",
-            backend_version=self.detect_version(),
+            backend_version=type(self).detect_version(),
             model_name=self.model_name,
             extra={
                 "args": self.backend_args,
@@ -162,8 +162,9 @@ class BaseTrainer(TrainerComponent):
         """
         raise NotImplementedError(f"{self.__class__.__name__} must implement run_train()")
 
+    @classmethod
     @abstractmethod
-    def detect_version(self) -> str:
+    def detect_version(cls) -> str:
         """
         Detect backend version.
 
@@ -183,7 +184,8 @@ class BaseTrainer(TrainerComponent):
             Implementations should fail fast rather than silently return "unknown".
 
         Example (MegatronBaseTrainer - fail fast):
-            def detect_version(self) -> str:
+            @classmethod
+            def detect_version(cls) -> str:
                 try:
                     from megatron.core import package_info
                     return package_info.__version__
@@ -191,11 +193,12 @@ class BaseTrainer(TrainerComponent):
                     raise RuntimeError("Failed to detect Megatron-LM version") from e
 
         Example (Optional backend - graceful fallback):
-            def detect_version(self) -> str:
+            @classmethod
+            def detect_version(cls) -> str:
                 try:
                     import some_backend
                     return some_backend.__version__
                 except Exception:
                     return "unknown"  # Only if truly optional
         """
-        raise NotImplementedError(f"{self.__class__.__name__} must implement detect_version()")
+        raise NotImplementedError(f"{cls.__name__} must implement detect_version()")

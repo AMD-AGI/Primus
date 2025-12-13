@@ -9,8 +9,8 @@ from unittest.mock import Mock
 import pytest
 
 from primus.core.patches.context import PatchContext
-from primus.core.patches.registry import PatchRegistry, register_patch
-from primus.core.patches.runner import _parse_enabled_patches_from_env, run_patches
+from primus.core.patches.patch_registry import PatchRegistry, register_patch
+from primus.core.patches.patch_runner import _parse_enabled_patches_from_env, run_patches
 
 
 class TestPatchRunner:
@@ -32,7 +32,7 @@ class TestPatchRunner:
 
     def test_run_patches_execution_and_context_fields(self, monkeypatch):
         # Avoid touching global logger in unit tests
-        monkeypatch.setattr("primus.core.patches.runner.log_rank_0", lambda *args, **kwargs: None)
+        monkeypatch.setattr("primus.core.patches.patch_runner.log_rank_0", lambda *args, **kwargs: None)
 
         mock_handler = Mock()
 
@@ -67,7 +67,7 @@ class TestPatchRunner:
         assert ctx_arg.extra == extra
 
     def test_run_patches_priority_and_tiebreaker(self, monkeypatch):
-        monkeypatch.setattr("primus.core.patches.runner.log_rank_0", lambda *args, **kwargs: None)
+        monkeypatch.setattr("primus.core.patches.patch_runner.log_rank_0", lambda *args, **kwargs: None)
         order = []
 
         @register_patch("p2", priority=10)
@@ -99,7 +99,7 @@ class TestPatchRunner:
 
         # Backend filter only
         called.clear()
-        monkeypatch.setattr("primus.core.patches.runner.log_rank_0", lambda *args, **kwargs: None)
+        monkeypatch.setattr("primus.core.patches.patch_runner.log_rank_0", lambda *args, **kwargs: None)
         count = run_patches(backend="megatron", phase="x")
         assert count == 1  # Only p1 runs
         assert called == ["p1"]
@@ -125,7 +125,7 @@ class TestPatchRunner:
         # "none" disables all
         called.clear()
         monkeypatch.setenv("PRIMUS_PATCHES", "none")
-        monkeypatch.setattr("primus.core.patches.runner.log_rank_0", lambda *args, **kwargs: None)
+        monkeypatch.setattr("primus.core.patches.patch_runner.log_rank_0", lambda *args, **kwargs: None)
         count = run_patches(backend="x", phase="y")
         assert count == 0
         assert called == []
@@ -145,7 +145,7 @@ class TestPatchRunner:
         assert sorted(called) == ["p1", "p2"]
 
     def test_dry_run(self, monkeypatch):
-        monkeypatch.setattr("primus.core.patches.runner.log_rank_0", lambda *args, **kwargs: None)
+        monkeypatch.setattr("primus.core.patches.patch_runner.log_rank_0", lambda *args, **kwargs: None)
         mock_handler = Mock()
 
         @register_patch("p1")
@@ -157,7 +157,7 @@ class TestPatchRunner:
         mock_handler.assert_not_called()
 
     def test_stop_on_error(self, monkeypatch):
-        monkeypatch.setattr("primus.core.patches.runner.log_rank_0", lambda *args, **kwargs: None)
+        monkeypatch.setattr("primus.core.patches.patch_runner.log_rank_0", lambda *args, **kwargs: None)
 
         @register_patch("fail")
         def p1(ctx):

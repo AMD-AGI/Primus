@@ -5,7 +5,7 @@
 ###############################################################################
 
 from primus.core.patches.patch import FunctionPatch
-from primus.core.patches.registry import PatchRegistry, register_patch
+from primus.core.patches.patch_registry import PatchRegistry, register_patch
 
 
 class TestPatchRegistry:

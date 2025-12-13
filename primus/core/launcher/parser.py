@@ -304,9 +304,15 @@ class PrimusParser(object):
         if not has_config and not has_model:
             return
 
+        # If we only have a model but no config, assume this module has already
+        # been flattened (e.g., from a previously exported config) and skip
+        # re-processing. This allows PrimusParser.export → parse cycles.
+        if not has_config and has_model:
+            return
+
         # Validate required keys
-        for key in ("config", "model"):
-            yaml_utils.check_key_in_namespace(module, key)
+        # for key in ("config", "model"):
+        #     yaml_utils.check_key_in_namespace(module, key)
 
         # ---- Load module config ----
         model_format = self.get_model_format(framework)
@@ -315,11 +321,20 @@ class PrimusParser(object):
         module_config = yaml_utils.dict_to_nested_namespace(module_config_dict)
         module_config.name = f"exp.modules.{module_name}.config"
         module_config.framework = framework
+        # module_config.model = module.model
 
         # ---- Load model config ----
         model_config_dict = PresetLoader.load(module.model, model_format, config_type="models")
         model_config = yaml_utils.dict_to_nested_namespace(model_config_dict)
         model_config.name = f"exp.modules.{module_name}.model"
+        model_config.model = module.model
+
+        # Avoid 'model' key conflicts when merging module + model presets:
+        # - Keep module_config.model as the user-specified model identifier
+        # - Treat detailed model metadata from the model preset as 'model_info'
+        # if hasattr(model_config, "model"):
+        #     setattr(model_config, "model_info", getattr(model_config, "model"))
+        #     delattr(model_config, "model")
 
         # ---- Merge: config + model ----
         yaml_utils.merge_namespace(module_config, model_config, allow_override=False, excepts=["name"])
