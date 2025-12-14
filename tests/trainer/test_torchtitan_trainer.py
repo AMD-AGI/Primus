@@ -86,6 +86,8 @@ class TestTorchTitanTrainer(PrimusUT):
                 "4",
                 "--training.steps",
                 "3",
+                "--training.mock_data",
+                "True",
             ],
         )
 
@@ -94,7 +96,14 @@ class TestTorchTitanTrainer(PrimusUT):
             self.__class__.__name__,
             "llama3_8B-FP8",
             exp_path="examples/torchtitan/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml",
-            extra_args=["--model.n_layers", "4", "--training.steps", "3"],
+            extra_args=[
+                "--model.n_layers",
+                "4",
+                "--training.steps",
+                "3",
+                "--training.mock_data",
+                "True",
+            ],
         )
 
     def test_llama3_1_405B(self):
@@ -107,6 +116,8 @@ class TestTorchTitanTrainer(PrimusUT):
                 "4",
                 "--training.steps",
                 "3",
+                "--training.mock_data",
+                "True",
             ],
         )
 
@@ -120,6 +131,8 @@ class TestTorchTitanTrainer(PrimusUT):
                 "4",
                 "--training.steps",
                 "3",
+                "--training.mock_data",
+                "True",
             ],
         )
 
@@ -133,6 +146,8 @@ class TestTorchTitanTrainer(PrimusUT):
                 "4",
                 "--training.steps",
                 "3",
+                "--training.mock_data",
+                "True",
             ],
         )
 
@@ -146,6 +161,8 @@ class TestTorchTitanTrainer(PrimusUT):
                 "4",
                 "--training.steps",
                 "3",
+                "--training.mock_data",
+                "True",
             ],
         )
 
@@ -159,6 +176,8 @@ class TestTorchTitanTrainer(PrimusUT):
                 "4",
                 "--training.steps",
                 "3",
+                "--training.mock_data",
+                "True",
             ],
         )
 
@@ -172,6 +191,8 @@ class TestTorchTitanTrainer(PrimusUT):
                 "4",
                 "--training.steps",
                 "3",
+                "--training.mock_data",
+                "True",
             ],
         )
 
@@ -189,6 +210,8 @@ class TestTorchTitanTrainer(PrimusUT):
                 "3",
                 "--primus_turbo.enable_primus_turbo",
                 "False",
+                "--training.mock_data",
+                "True",
             ],
         )
 
@@ -206,5 +229,7 @@ class TestTorchTitanTrainer(PrimusUT):
                 "3",
                 "--primus_turbo.enable_primus_turbo",
                 "False",
+                "--training.mock_data",
+                "True",
             ],
         )
