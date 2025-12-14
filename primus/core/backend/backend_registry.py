@@ -24,7 +24,7 @@
 
 from typing import Callable, Dict, List, Type
 
-from primus.modules.module_utils import error_rank_0, log_rank_0
+from primus.modules.module_utils import log_rank_0
 
 
 class BackendRegistry:
@@ -289,7 +289,9 @@ class BackendRegistry:
 
     @classmethod
     def get_trainer_class(cls, backend: str):
-        assert backend in cls._trainer_classes, f"[Primus] No trainer class registered for backend '{backend}'."
+        assert (
+            backend in cls._trainer_classes
+        ), f"[Primus] No trainer class registered for backend '{backend}'."
         return cls._trainer_classes[backend]
 
     @classmethod

@@ -10,7 +10,10 @@ import pytest
 
 from primus.core.patches.context import PatchContext
 from primus.core.patches.patch_registry import PatchRegistry, register_patch
-from primus.core.patches.patch_runner import _parse_enabled_patches_from_env, run_patches
+from primus.core.patches.patch_runner import (
+    _parse_enabled_patches_from_env,
+    run_patches,
+)
 
 
 class TestPatchRunner:

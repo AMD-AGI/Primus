@@ -336,7 +336,9 @@ class TestBackendRegistryGetAdapterIntegration:
 
         # In the new logic, if the adapter is already registered, backend_path
         # is ignored and get_adapter succeeds.
-        adapter = registry_module.BackendRegistry.get_adapter("test_backend", backend_path="/non/existent/path")
+        adapter = registry_module.BackendRegistry.get_adapter(
+            "test_backend", backend_path="/non/existent/path"
+        )
         assert isinstance(adapter, MockAdapter)
 
 

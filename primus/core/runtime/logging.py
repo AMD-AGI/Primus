@@ -18,23 +18,23 @@ Key features:
 
 Workflow example:
     >>> from primus.core.runtime import init_global_logger, update_module_name
-    >>> 
+    >>>
     >>> # Initialize for pretrain
     >>> init_global_logger(config, module_name="pretrain")
     >>> # Logs go to: logs/pretrain/rank-0/
-    >>> 
+    >>>
     >>> # Switch to sft phase
     >>> update_module_name("sft")
     >>> # Logs now go to: logs/sft/rank-0/
 """
 
 import builtins
-from math import dist
 from typing import Any
 
 from primus.core.utils import logger
-from primus.modules.module_utils import debug_rank_all, set_logging_rank
 from primus.core.utils.env import get_torchrun_env
+from primus.modules.module_utils import debug_rank_all, set_logging_rank
+
 # from primus.core.utils.distributed_logging import debug_rank_all, set_logging_rank
 
 
