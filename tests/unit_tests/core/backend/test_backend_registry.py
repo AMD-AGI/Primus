@@ -45,16 +45,13 @@ class TestBackendRegistryErrorHandling:
 
         # Silence logging dependencies (logger may not be initialized in tests)
         self._orig_log_rank_0 = registry_module.log_rank_0
-        self._orig_error_rank_0 = registry_module.error_rank_0
         registry_module.log_rank_0 = lambda *args, **kwargs: None
-        registry_module.error_rank_0 = lambda *args, **kwargs: None
 
     def teardown_method(self):
         """Restore registry after each test."""
         registry_module.BackendRegistry._adapters = self._original_adapters
         registry_module.BackendRegistry._path_names = self._original_path_names
         registry_module.log_rank_0 = self._orig_log_rank_0
-        registry_module.error_rank_0 = self._orig_error_rank_0
 
     def test_get_adapter_not_found_helpful_error(self):
         """Test that get_adapter provides helpful error when backend not found."""
@@ -111,15 +108,12 @@ class TestBackendRegistryLazyLoading:
 
         # Silence logging dependencies
         self._orig_log_rank_0 = registry_module.log_rank_0
-        self._orig_error_rank_0 = registry_module.error_rank_0
         registry_module.log_rank_0 = lambda *args, **kwargs: None
-        registry_module.error_rank_0 = lambda *args, **kwargs: None
 
     def teardown_method(self):
         """Restore registry after each test."""
         registry_module.BackendRegistry._adapters = self._original_adapters
         registry_module.log_rank_0 = self._orig_log_rank_0
-        registry_module.error_rank_0 = self._orig_error_rank_0
 
     def test_try_load_backend_non_existent(self):
         """Test that _try_load_backend handles non-existent backends gracefully."""
@@ -172,9 +166,7 @@ class TestBackendRegistryPathNames:
 
         # Silence logging dependencies
         self._orig_log_rank_0 = registry_module.log_rank_0
-        self._orig_error_rank_0 = registry_module.error_rank_0
         registry_module.log_rank_0 = lambda *args, **kwargs: None
-        registry_module.error_rank_0 = lambda *args, **kwargs: None
 
     def teardown_method(self):
         """Restore registry after each test."""
@@ -183,7 +175,6 @@ class TestBackendRegistryPathNames:
         registry_module.BackendRegistry._adapters.clear()
         registry_module.BackendRegistry._adapters.update(self._original_adapters)
         registry_module.log_rank_0 = self._orig_log_rank_0
-        registry_module.error_rank_0 = self._orig_error_rank_0
 
     def test_register_and_get_path_name(self):
         """Test registering and retrieving path names."""
@@ -200,9 +191,9 @@ class TestBackendRegistryPathNames:
 
     def test_get_path_name_not_found(self):
         """Test error when path name not registered and can't be loaded."""
-        # get_path_name returns None when backend/path name cannot be resolved.
-        path_name = registry_module.BackendRegistry.get_path_name("non_existent_backend")
-        assert path_name is None
+        # In the new lazy-loading logic, an unknown backend triggers a ModuleNotFoundError.
+        with pytest.raises(ModuleNotFoundError):
+            registry_module.BackendRegistry.get_path_name("non_existent_backend")
 
 
 class TestBackendRegistrySetupPath:
@@ -222,16 +213,13 @@ class TestBackendRegistrySetupPath:
 
         # Silence logging dependencies
         self._orig_log_rank_0 = registry_module.log_rank_0
-        self._orig_error_rank_0 = registry_module.error_rank_0
         registry_module.log_rank_0 = lambda *args, **kwargs: None
-        registry_module.error_rank_0 = lambda *args, **kwargs: None
 
     def teardown_method(self):
         """Restore original state."""
         registry_module.BackendRegistry._path_names = self._original_path_names
         sys.path[:] = self._original_sys_path
         registry_module.log_rank_0 = self._orig_log_rank_0
-        registry_module.error_rank_0 = self._orig_error_rank_0
 
     def test_setup_backend_path_with_explicit_path(self, tmp_path):
         """Test setup_backend_path with explicit backend_path argument."""
@@ -264,8 +252,8 @@ class TestBackendRegistrySetupPath:
 
     def test_setup_backend_path_not_found(self):
         """Test setup_backend_path raises error when backend not registered."""
-        # Missing backend now fails when resolving path name (assertion).
-        with pytest.raises(AssertionError):
+        # Missing backend now fails during lazy loading with ModuleNotFoundError.
+        with pytest.raises(ModuleNotFoundError):
             registry_module.BackendRegistry.setup_backend_path("non_existent_backend", verbose=False)
 
     def test_setup_backend_path_already_in_sys_path(self, tmp_path):
@@ -300,9 +288,7 @@ class TestBackendRegistryGetAdapterIntegration:
 
         # Silence logging dependencies
         self._orig_log_rank_0 = registry_module.log_rank_0
-        self._orig_error_rank_0 = registry_module.error_rank_0
         registry_module.log_rank_0 = lambda *args, **kwargs: None
-        registry_module.error_rank_0 = lambda *args, **kwargs: None
 
     def teardown_method(self):
         """Restore original state."""
@@ -312,7 +298,6 @@ class TestBackendRegistryGetAdapterIntegration:
         registry_module.BackendRegistry._path_names.update(self._original_path_names)
         sys.path[:] = self._original_sys_path
         registry_module.log_rank_0 = self._orig_log_rank_0
-        registry_module.error_rank_0 = self._orig_error_rank_0
 
     def test_get_adapter_with_backend_path(self, tmp_path):
         """Test get_adapter automatically sets up backend path."""
