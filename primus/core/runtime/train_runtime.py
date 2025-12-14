@@ -192,14 +192,7 @@ class PrimusRuntime:
         assert self.ctx is not None, "TrainContext must be initialized before backend adapter."
         backend_path = getattr(self.args, "backend_path", None)
 
-        try:
-            adapter = BackendRegistry.get_adapter(backend=self.ctx.framework, backend_path=backend_path)
-        except Exception as e:
-            # Preserve original error type but enrich with framework context for easier debugging.
-            raise ValueError(
-                f"[Primus:TrainRuntime] Requested framework '{self.ctx.framework}' "
-                f"failed to resolve backend adapter (backend_path={backend_path}): {e}"
-            ) from e
+        adapter = BackendRegistry.get_adapter(backend=self.ctx.framework, backend_path=backend_path)
 
         assert (
             adapter is not None
@@ -212,16 +205,10 @@ class PrimusRuntime:
             self.ctx is not None and self.ctx.adapter is not None
         ), "Backend adapter must be loaded before creating trainer."
 
-        try:
-            trainer = self.ctx.adapter.create_trainer(
-                primus_config=self.ctx.primus_config,
-                module_config=self.ctx.module_config,
-            )
-        except Exception as e:
-            # Wrap adapter errors into a clear RuntimeError with framework context.
-            raise RuntimeError(
-                f"Failed to create trainer instance for framework '{self.ctx.framework}': {e}"
-            ) from e
+        trainer = self.ctx.adapter.create_trainer(
+            primus_config=self.ctx.primus_config,
+            module_config=self.ctx.module_config,
+        )
 
         assert trainer is not None, f"Failed to create trainer instance for framework '{self.ctx.framework}'."
 
