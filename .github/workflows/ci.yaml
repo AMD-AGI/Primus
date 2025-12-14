@@ -233,6 +233,10 @@ jobs:
           echo "Running Primus CLI shell tests..."
           bash ./tests/runner/run_all_tests.sh
       - name: Run Unit Tests
+        run: |
+          echo "Running Primus core tests..."
+          pytest tests/unit_tests/
+      - name: Run Model Tests
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
         run: |
