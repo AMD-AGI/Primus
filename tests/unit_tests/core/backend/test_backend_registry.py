@@ -103,8 +103,15 @@ class TestBackendRegistryLazyLoading:
 
     def setup_method(self):
         """Clear registry before each test."""
+        # Reset adapter registry state
         self._original_adapters = registry_module.BackendRegistry._adapters.copy()
         registry_module.BackendRegistry._adapters.clear()
+
+        # Ensure backend module can be re-imported so that lazy loading
+        # re-runs registration even if other tests imported it earlier.
+        self._orig_megatron_module = sys.modules.get("primus.backends.megatron")
+        if "primus.backends.megatron" in sys.modules:
+            del sys.modules["primus.backends.megatron"]
 
         # Silence logging dependencies
         self._orig_log_rank_0 = registry_module.log_rank_0
@@ -114,6 +121,12 @@ class TestBackendRegistryLazyLoading:
         """Restore registry after each test."""
         registry_module.BackendRegistry._adapters = self._original_adapters
         registry_module.log_rank_0 = self._orig_log_rank_0
+
+        # Restore original backend module to avoid impacting other tests
+        if self._orig_megatron_module is not None:
+            sys.modules["primus.backends.megatron"] = self._orig_megatron_module
+        else:
+            sys.modules.pop("primus.backends.megatron", None)
 
     def test_try_load_backend_non_existent(self):
         """Test that _try_load_backend handles non-existent backends gracefully."""
