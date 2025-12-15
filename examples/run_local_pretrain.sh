@@ -162,6 +162,10 @@ docker_podman_proxy run --rm \
     --env GPUS_PER_NODE \
     --env DATA_PATH \
     --env TRAIN_LOG \
+    --env PRIMUS_WORKSPACE \
+    --env PRIMUS_EXP_NAME \
+    --env PRIMUS_TEAM \
+    --env PRIMUS_USER \
     --env HSA_NO_SCRATCH_RECLAIM \
     --env NVTE_CK_USES_BWD_V3 \
     --env GPU_MAX_HW_QUEUES \
