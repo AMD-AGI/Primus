@@ -282,7 +282,7 @@ def _build_scheduler_sim_config(training_config, profiling_results):
     if vpp_size > 1:
         scheduler = {
             "name": "interleaved_1f1b",
-            "class": "primus.core.projection.pipeline_simulation.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
+            "class": "primus.core.pipeline_parallel.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
             "pp_size": pp_size,
             "vpp_size": vpp_size,
             "micro_batches": micro_batches,
@@ -290,7 +290,7 @@ def _build_scheduler_sim_config(training_config, profiling_results):
     else:
         scheduler = {
             "name": "basic_1f1b",
-            "class": "primus.core.projection.pipeline_simulation.scheduler.algorithms.basic_1f1b.Schedule1F1B",
+            "class": "primus.core.pipeline_parallel.scheduler.algorithms.basic_1f1b.Schedule1F1B",
             "pp_size": pp_size,
             "vpp_size": 1,
             "micro_batches": micro_batches,
