@@ -153,6 +153,7 @@ use_random_routing: false # whether to use random routing for debug/test purpose
 megablox: true
 sparse_matmul: true
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
+use_primus_turbo_grouped_gemm: false # requires sparse_matmul=true and JAX_ENABLE_X64=1
 # Tunable tiling dimensions used for Megablox
 tile_batch_seq: 512
 tile_activation_dim: 1024
