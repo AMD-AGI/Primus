@@ -131,9 +131,10 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BASE_LOG_DIR=${LOG_DIR:-"./output"}
 export LOG_DIR="${BASE_LOG_DIR}/${MODEL_NAME}/${TIMESTAMP}"
 
-# IMPORTANT: Set PRIMUS_WORKSPACE to match LOG_DIR so Python code uses the same unique directory
-# This ensures tensorboard traces, checkpoints, and logs all go to the same timestamped folder
-export PRIMUS_WORKSPACE="${LOG_DIR}"
+# IMPORTANT: Set PRIMUS_WORKSPACE to base output dir and let Primus handle the structure
+# PRIMUS_EXP_NAME includes model_name/timestamp for unique runs without path duplication
+export PRIMUS_WORKSPACE="${BASE_LOG_DIR}"
+export PRIMUS_EXP_NAME="${MODEL_NAME}/${TIMESTAMP}"
 
 mkdir -p "$LOG_DIR"
 
