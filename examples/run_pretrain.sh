@@ -130,7 +130,7 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 # Always append model_name/timestamp to ensure unique output directories per run
 # This prevents the bug where traces from previous runs get uploaded to MLflow
 BASE_LOG_DIR=${LOG_DIR:-"./output"}
-export LOG_DIR="${BASE_LOG_DIR}/${MODEL_NAME}/${TIMESTAMP}"
+export LOG_DIR="${BASE_LOG_DIR}/${MODEL_NAME}_${TIMESTAMP}"
 
 # Set PRIMUS environment variables for output paths
 # Use underscore instead of slash to avoid issues with trace filenames
