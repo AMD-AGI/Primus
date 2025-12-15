@@ -36,9 +36,13 @@ class DummyTrainer(BaseTrainer):
     def run_train(self):
         self.run_calls += 1
 
-    def detect_version(self) -> str:
+    @classmethod
+    def detect_version(cls) -> str:
         # Increment per-call counter to validate BaseTrainer.run usage
-        self.detect_calls += 1
+        # NOTE: For classmethod, we use a simple class attribute counter.
+        if not hasattr(cls, "detect_calls_counter"):
+            cls.detect_calls_counter = 0  # type: ignore[attr-defined]
+        cls.detect_calls_counter += 1  # type: ignore[attr-defined]
         return "test-version"
 
 
@@ -64,13 +68,16 @@ class TestBaseTrainerPatchIntegration:
 
         trainer = DummyTrainer(primus_config, module_config, backend_args=backend_args)
 
+        # Reset class-level detect counter before run
+        DummyTrainer.detect_calls_counter = 0  # type: ignore[attr-defined]
+
         trainer.run()
 
         # Training loop executed exactly once
         assert trainer.run_calls == 1
 
         # detect_version is called once per phase (before_train and after_train)
-        assert trainer.detect_calls == 2
+        assert DummyTrainer.detect_calls_counter == 2  # type: ignore[attr-defined]
 
         # Patches were invoked twice: before_train and after_train
         assert len(calls) == 2
