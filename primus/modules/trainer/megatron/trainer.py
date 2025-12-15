@@ -564,20 +564,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             ori_moe_utils.HAVE_TE = True
 
     def patch_mla_attention(self):
-        if self.module_config.fused_padded_mla_attention:
-            warning_rank_0(f"MegatronTrainer: monkey patch MLA attention to support padded fusion...")
-            # pad module definition
-            from megatron.core.transformer import multi_latent_attention
-
-            from primus.backends.megatron.core.transformer.multi_latent_attention import (
-                PaddedPrimusMLASelfAttention,
-            )
-
-            multi_latent_attention.MLASelfAttention = PaddedPrimusMLASelfAttention
-            # pad imported module
-            from megatron.core.models.gpt import gpt_layer_specs
-
-            gpt_layer_specs.MLASelfAttention = PaddedPrimusMLASelfAttention
         if self.module_config.use_turbo_parallel_linear:
             warning_rank_0(f"MegatronTrainer: monkey patch MLA attention to support Primus-Turbo linear...")
 
