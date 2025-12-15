@@ -38,6 +38,14 @@ export LOG_DIR=${LOG_DIR:-"./output"}
 LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
 
+# IMPORTANT: Set PRIMUS_WORKSPACE to base output dir and let Primus handle the structure
+# PRIMUS_EXP_NAME includes model_name/timestamp for unique runs without path duplication
+export PRIMUS_WORKSPACE="${BASE_LOG_DIR}"
+export PRIMUS_EXP_NAME="${MODEL_NAME}/${TIMESTAMP}"
+
+JOB_NAME=${JOB_NAME:-"primus_train"}
+TIME_LIMIT=${TIME_LIMIT:-"8:00:00"}
+
 srun -N "${NNODES}" \
      --exclusive \
      --export ALL \

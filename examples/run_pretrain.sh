@@ -123,7 +123,19 @@ fi
 # export AITER_JIT_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}_aiter_cache"
 
 
-TRAIN_LOG=${TRAIN_LOG:-"output/log_mp_pretrain_$(basename "$EXP" .yaml).txt"}
+# Always append model_name/timestamp to ensure unique output directories per run
+# This prevents the bug where traces from previous runs get uploaded to MLflow
+BASE_LOG_DIR=${LOG_DIR:-"./output"}
+export LOG_DIR="${BASE_LOG_DIR}/${MODEL_NAME}/${TIMESTAMP}"
+
+# IMPORTANT: Set PRIMUS_WORKSPACE to base output dir and let Primus handle the structure
+# PRIMUS_EXP_NAME includes model_name/timestamp for unique runs without path duplication
+export PRIMUS_WORKSPACE="${BASE_LOG_DIR}"
+export PRIMUS_EXP_NAME="${MODEL_NAME}/${TIMESTAMP}"
+
+mkdir -p "$LOG_DIR"
+
+TRAIN_LOG="${LOG_DIR}/log_mp_pretrain.txt"
 
 LOG_INFO_RANK0 "==========Training info=========="
 LOG_INFO_RANK0 "EXP: $EXP"
