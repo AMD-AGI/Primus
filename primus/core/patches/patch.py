@@ -10,15 +10,12 @@ Patch Implementation.
 Defines the FunctionPatch class used to represent executable patches.
 """
 
-import logging
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional, Set
 
 from primus.core.patches.context import PatchContext
 from primus.core.patches.utils import version_in_range
-
-log = logging.getLogger(__name__)
-
+from primus.modules.module_utils import log_rank_0
 
 # -----------------------------------------------------------------------------
 # FunctionPatch
@@ -101,12 +98,6 @@ class FunctionPatch:
 
     def apply(self, ctx: PatchContext) -> None:
         """Invoke the patch handler."""
-        log.debug(
-            "[Patch] Applying %s (priority=%s, backend=%s, phase=%s, tags=%s)",
-            self.id,
-            self.priority,
-            self.backend,
-            self.phase,
-            ",".join(sorted(self.tags)) if self.tags else "",
-        )
+        log_rank_0(f" --------------------------------------------------------------------------------")
+        log_rank_0(f"[Patch] Applying {self.id} (backend={self.backend}, phase={self.phase})")
         self.handler(ctx)

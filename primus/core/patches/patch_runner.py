@@ -93,6 +93,7 @@ def run_patches(
     )
 
     for patch in patches:
+        # log_rank_0(f"[PatchSystem] Applying patch: {patch.id} (priority={patch.priority}) {patch}")
         # ID filter
         if enabled_ids is not None and patch.id not in enabled_ids:
             continue
@@ -119,6 +120,10 @@ def run_patches(
             if stop_on_error:
                 raise
 
-    log_rank_0(f"[PatchSystem] Applied {applied_count} patches for {backend}/{phase}: " f"{applied_ids}")
+    total_patches = len(patches)
+    log_rank_0(
+        f"[PatchSystem] Applied {applied_count}/{total_patches} patches for {backend}/{phase}: "
+        f"{applied_ids}"
+    )
 
     return applied_count

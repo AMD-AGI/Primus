@@ -14,14 +14,10 @@ This module defines the public entrypoint for applying Megatron-specific patches
 # NOTE: These imports are intentionally unused; they register patches with
 # the core patch registry when this package is imported.
 from primus.backends.megatron.patches import args_patches as _args_patches  # noqa: F401
-from primus.backends.megatron.patches import (  # noqa: F401
-    checkpoint_patches as _checkpoint_patches,
-)
-from primus.backends.megatron.patches import env_patches as _env_patches  # noqa: F401
-from primus.backends.megatron.patches import (  # noqa: F401
-    flops_patches as _flops_patches,
-)
-from primus.backends.megatron.patches import (  # noqa: F401
+from primus.backends.megatron.patches import checkpoint_patches as _checkpoint_patches
+from primus.backends.megatron.patches import env_patches as _env_patches
+from primus.backends.megatron.patches import flops_patches as _flops_patches
+from primus.backends.megatron.patches import (
     training_log_patches as _training_log_patches,
 )
 from primus.core.patches import run_patches

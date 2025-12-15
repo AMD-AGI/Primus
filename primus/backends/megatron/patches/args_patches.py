@@ -17,26 +17,7 @@ Patches Megatron arguments for Primus-specific configurations:
 import os
 
 from primus.core.patches import PatchContext, register_patch
-from primus.modules.module_utils import log_rank_0
-
-
-@register_patch(
-    "megatron.args.profile_tensorboard",
-    backend="megatron",
-    phase="build_args",
-    description="Enable TensorBoard when profiling is enabled",
-)
-def patch_profile_tensorboard(ctx: PatchContext):
-    """
-    Ensure TensorBoard is enabled when profiling is active.
-
-    Profiling requires TensorBoard for visualization, so we force
-    disable_tensorboard=False when profile=True.
-    """
-    args = ctx.extra.get("args")
-    if args and getattr(args, "profile", False):
-        args.disable_tensorboard = False
-        log_rank_0("[Patch:megatron.args.profile_tensorboard] Enabled TensorBoard (profile=True)")
+from primus.modules.module_utils import log_kv_rank_0, log_rank_0, warning_rank_0
 
 
 @register_patch(
@@ -52,14 +33,11 @@ def patch_checkpoint_path(ctx: PatchContext):
     Sets args.save to <exp_root>/checkpoints and warns if user
     provided a different path.
     """
-    args = ctx.extra.get("args")
-    config = ctx.extra.get("config", {})
+    args = ctx.extra.get("backend_args", {})
+    primus_config = ctx.extra.get("primus_config", {})
 
-    # Get exp_root_path from config (injected by PrimusConfig)
-    exp_root = config.get("primus_exp_root_path")
-
-    if args and exp_root:
-        ckpt_path = os.path.abspath(os.path.join(exp_root, "checkpoints"))
+    if args and primus_config.exp_root_path:
+        ckpt_path = os.path.abspath(os.path.join(primus_config.exp_root_path, "checkpoints"))
 
         if hasattr(args, "save") and args.save is not None and args.save != ckpt_path:
             log_rank_0(
@@ -83,30 +61,24 @@ def patch_tensorboard_path(ctx: PatchContext):
     Sets args.tensorboard_dir to <exp_root>/tensorboard if TensorBoard
     is enabled, otherwise sets it to None.
     """
-    args = ctx.extra.get("args")
-    config = ctx.extra.get("config", {})
 
-    # Get exp_root_path from config (injected by PrimusConfig)
-    exp_root = config.get("primus_exp_root_path")
+    args = ctx.extra.get("backend_args", {})
+    primus_config = ctx.extra.get("primus_config", {})
+    module_config = ctx.extra.get("module_config", {})
 
-    if args and exp_root:
-        if not getattr(args, "disable_tensorboard", False):
-            tb_path = os.path.abspath(os.path.join(exp_root, "tensorboard"))
+    disable_tensorboard = getattr(module_config.params, "disable_tensorboard", False)
 
-            if (
-                hasattr(args, "tensorboard_dir")
-                and args.tensorboard_dir is not None
-                and args.tensorboard_dir != tb_path
-            ):
-                log_rank_0(
-                    f"[Patch:megatron.args.tensorboard_path][WARN] args.tensorboard_dir is deprecated; "
-                    f"overriding to: {tb_path}"
-                )
+    if args and getattr(args, "profile", False):
+        disable_tensorboard = False
+        log_rank_0("[Patch:megatron.args.profile_tensorboard] Enabled TensorBoard (profile=True)")
 
+    exp_root_path = primus_config.exp_root_path
+    if args and exp_root_path:
+        if not disable_tensorboard:
+            tb_path = os.path.abspath(os.path.join(exp_root_path, "tensorboard"))
             args.tensorboard_dir = tb_path
             log_rank_0(f"[Patch:megatron.args.tensorboard_path] tensorboard_dir → {tb_path}")
         else:
-            args.tensorboard_dir = None
             log_rank_0("[Patch:megatron.args.tensorboard_path] TensorBoard disabled")
 
 
@@ -123,57 +95,55 @@ def patch_wandb_config(ctx: PatchContext):
     Sets up W&B project name, experiment name, and save directory
     based on Primus experiment metadata.
     """
-    args = ctx.extra.get("args")
-    config = ctx.extra.get("config", {})
+    args = ctx.extra.get("backend_args", {})
+    module_config = ctx.extra.get("module_config", {})
+    primus_config = ctx.extra.get("primus_config", {})
 
     # Get Primus metadata from config (injected by PrimusConfig)
-    exp_root = config.get("primus_exp_root_path")
-    work_group = config.get("primus_work_group", "default")
-    user_name = config.get("primus_user_name", "user")
-    exp_name = config.get("primus_exp_name", "experiment")
+    exp_root_path = primus_config.exp_root_path
+    work_group = primus_config.exp_meta_info["work_group"]
+    user_name = primus_config.exp_meta_info["user_name"]
+    exp_name = primus_config.exp_meta_info["exp_name"]
 
-    if not args or not exp_root:
+    if not args or not exp_root_path:
         return
 
     # Check if W&B is enabled
-    if getattr(args, "disable_wandb", False):
-        # Ensure wandb_project is None if W&B is disabled
+    disable_wandb = getattr(module_config.params, "disable_wandb", False)
+    if not disable_wandb:
+        # Set W&B save directory (dedicated 'wandb' subdirectory under experiment root)
+        wandb_path = os.path.join(exp_root_path, "wandb")
+        if hasattr(args, "wandb_save_dir") and args.wandb_save_dir is not None:
+            warning_rank_0(
+                f"[Patch:megatron.args.wandb_config] args.wandb_save_dir is deprecated; overriding to: {wandb_path}"
+            )
+
+        log_rank_0(f"[Patch:megatron.args.wandb_config] wandb_save_dir → {wandb_path}")
+        args.wandb_save_dir = wandb_path
+
+        # Set W&B project name
+        if not hasattr(args, "wandb_project") or args.wandb_project is None:
+            args.wandb_project = f"{work_group}_{user_name}"
+            log_rank_0(f"[Patch:megatron.args.wandb_config] wandb_project → {args.wandb_project}")
+
+        # Set W&B experiment name
+        if not hasattr(args, "wandb_exp_name") or args.wandb_exp_name is None:
+            args.wandb_exp_name = exp_name
+            log_rank_0(f"[Patch:megatron.args.wandb_config] wandb_exp_name → {args.wandb_exp_name}")
+    else:
         if hasattr(args, "wandb_project") and args.wandb_project is not None:
             args.wandb_project = None
-        log_rank_0("[Patch:megatron.args.wandb_config] W&B disabled (disable_wandb=True)")
-        return
 
-    # Set W&B save directory (dedicated 'wandb' subdirectory under experiment root)
-    wandb_path = os.path.join(exp_root, "wandb")
-    if hasattr(args, "wandb_save_dir") and args.wandb_save_dir is not None:
-        if args.wandb_save_dir != wandb_path:
-            log_rank_0(
-                f"[Patch:megatron.args.wandb_config][WARN] args.wandb_save_dir is deprecated; "
-                f"overriding to: {wandb_path}"
-            )
-    args.wandb_save_dir = wandb_path
-
-    # Set W&B project name
-    if not hasattr(args, "wandb_project") or args.wandb_project is None:
-        args.wandb_project = f"{work_group}_{user_name}"
-
-    # Set W&B experiment name
-    if not hasattr(args, "wandb_exp_name") or args.wandb_exp_name is None:
-        args.wandb_exp_name = exp_name
-
-    # Check for W&B API key
-    if "WANDB_API_KEY" not in os.environ:
-        log_rank_0(
-            "[Patch:megatron.args.wandb_config][WARN] WANDB_API_KEY not set; "
-            "set it before training or enable 'disable_wandb' in config."
+    if not disable_wandb and "WANDB_API_KEY" not in os.environ:
+        warning_rank_0(
+            "The environment variable WANDB_API_KEY is not set. "
+            "Please set it before proceeding or enable 'disable_wandb' in yaml config"
         )
-
-    entity = getattr(args, "wandb_entity", None)
-    log_rank_0(
-        "[Patch:megatron.args.wandb_config] "
-        f"project={args.wandb_project!r}, exp_name={args.wandb_exp_name!r}, "
-        f"save_dir={args.wandb_save_dir!r}, entity={entity!r}"
-    )
+    log_kv_rank_0(f"[Patch:megatron.args.wandb_config] -disable_wandb", f"{disable_wandb}")
+    log_kv_rank_0(f"[Patch:megatron.args.wandb_config]   -wandb_project", f"{args.wandb_project}")
+    log_kv_rank_0(f"[Patch:megatron.args.wandb_config]   -wandb_exp_name", f"{args.wandb_exp_name}")
+    log_kv_rank_0(f"[Patch:megatron.args.wandb_config]   -wandb_save_dir", f"{args.wandb_save_dir}")
+    log_kv_rank_0(f"[Patch:megatron.args.wandb_config]   -wandb_entity", f"{args.wandb_entity}")
 
 
 @register_patch(
@@ -234,37 +204,27 @@ def patch_data_path_split(ctx: PatchContext):
     - valid_data_path
     - test_data_path
     """
-    args = ctx.extra.get("args")
+    args = ctx.extra.get("backend_args", {})
     if not args:
         return
 
-    # Helper function to split path
-    def split_path(path_attr):
-        if hasattr(args, path_attr):
-            path = getattr(args, path_attr)
-            if path is None:
-                return
-            if isinstance(path, str):
-                path_list = path.split()
-                setattr(args, path_attr, path_list)
-                log_rank_0(f"[Patch:megatron.args.data_path_split] {path_attr} → {path_list}")
-            elif isinstance(path, list):
-                # Already in list form; log for visibility but do not modify.
-                log_rank_0(
-                    f"[Patch:megatron.args.data_path_split] {path_attr} already list; keeping value: {path}"
-                )
-            else:
-                # Unexpected type; log a warning to aid debugging.
-                log_rank_0(
-                    f"[Patch:megatron.args.data_path_split][WARN] {path_attr} has unsupported type "
-                    f"{type(path).__name__}; value left unchanged: {path}"
-                )
+    data_path = getattr(args, "data_path", None)
+    train_data_path = getattr(args, "train_data_path", None)
+    valid_data_path = getattr(args, "valid_data_path", None)
+    test_data_path = getattr(args, "test_data_path", None)
 
-    # Split all data paths
-    split_path("data_path")
-    split_path("train_data_path")
-    split_path("valid_data_path")
-    split_path("test_data_path")
+    if data_path is not None:
+        args.data_path = data_path.split(" ")
+        log_kv_rank_0(f"[Patch:megatron.args.data_path_split]   -data_path", f"{args.data_path}")
+    if train_data_path is not None:
+        args.train_data_path = train_data_path.split(" ")
+        log_kv_rank_0(f"[Patch:megatron.args.data_path_split]   -train_data_path", f"{args.train_data_path}")
+    if valid_data_path is not None:
+        args.valid_data_path = valid_data_path.split(" ")
+        log_kv_rank_0(f"[Patch:megatron.args.data_path_split]   -valid_data_path", f"{args.valid_data_path}")
+    if test_data_path is not None:
+        args.test_data_path = test_data_path.split(" ")
+        log_kv_rank_0(f"[Patch:megatron.args.data_path_split]   -test_data_path", f"{args.test_data_path}")
 
 
 @register_patch(
@@ -280,13 +240,22 @@ def patch_mock_data(ctx: PatchContext):
     When mock_data=True, sets all data paths to None to prevent
     Megatron from trying to load actual data files.
     """
-    args = ctx.extra.get("args")
-    if not args:
+    args = ctx.extra.get("backend_args", {})
+    module_config = ctx.extra.get("module_config", {})
+
+    if not args or not module_config:
         return
 
-    if getattr(args, "mock_data", False):
+    mock_data = getattr(module_config.params, "mock_data", False)
+    if mock_data:
         args.data_path = None
         args.train_data_path = None
         args.valid_data_path = None
         args.test_data_path = None
-        log_rank_0("[Patch:megatron.args.mock_data] Mock data enabled; all data paths set to None")
+        log_rank_0(f"[Patch:megatron.args.mock_data] Mock data enabled; all data paths set to None")
+
+    log_kv_rank_0(f"[Patch:megatron.args.mock_data] -mock_data", f"{mock_data}")
+    log_kv_rank_0(f"[Patch:megatron.args.mock_data]   -data_path", f"{args.data_path}")
+    log_kv_rank_0(f"[Patch:megatron.args.mock_data]   -train_data_path", f"{args.train_data_path}")
+    log_kv_rank_0(f"[Patch:megatron.args.mock_data]   -valid_data_path", f"{args.valid_data_path}")
+    log_kv_rank_0(f"[Patch:megatron.args.mock_data]   -test_data_path", f"{args.test_data_path}")
