@@ -39,14 +39,14 @@ MODEL_NAME=$(basename "${EXP}" .yaml)
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 BASE_LOG_DIR=${LOG_DIR:-"./output"}
-export LOG_DIR="${BASE_LOG_DIR}/${MODEL_NAME}_${TIMESTAMP}"
+export LOG_DIR="${BASE_LOG_DIR}/${MODEL_NAME}/${TIMESTAMP}"
 LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
 
 # Set PRIMUS environment variables for output paths
 # Use underscore instead of slash to avoid issues with trace filenames
 export PRIMUS_WORKSPACE="${BASE_LOG_DIR}"
-export PRIMUS_EXP_NAME="${MODEL_NAME}_${TIMESTAMP}"
+export PRIMUS_EXP_NAME="${MODEL_NAME}/${TIMESTAMP}"
 export PRIMUS_TEAM=""
 export PRIMUS_USER=""
 
