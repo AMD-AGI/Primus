@@ -181,7 +181,9 @@ class TestMegatronRegistrationFailures:
         try:
             # Without registration, get_adapter should fail gracefully
             # (after attempting lazy load)
-            with pytest.raises(ValueError, match="Backend 'megatron' not found"):
+            # In the new core runtime, this is treated as an unrecoverable error
+            # and results in an AssertionError from BackendRegistry.
+            with pytest.raises(AssertionError, match="Backend 'megatron' not found"):
                 # Mock setup_backend_path to prevent actual path operations
                 from unittest.mock import patch
 
@@ -200,7 +202,7 @@ class TestMegatronRegistrationFailures:
 
         try:
             # Without trainer registration, get_trainer_class should fail
-            with pytest.raises(KeyError, match="No trainer class registered"):
+            with pytest.raises(AssertionError, match="No trainer class registered"):
                 BackendRegistry.get_trainer_class("megatron")
         finally:
             # Restore

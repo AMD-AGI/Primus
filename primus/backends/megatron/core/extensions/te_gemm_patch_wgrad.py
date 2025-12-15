@@ -59,8 +59,8 @@ from transformer_engine.pytorch.utils import (
     requires_grad,
 )
 
-from primus.backends.megatron.core.pipeline_parallel.zerobubble.zbpp_utils import (
-    WeightGradStore,
+from primus.backends.megatron.core.pipeline_parallel.wgrad_adapter import (
+    insert_wgrad_func_into_cache,
 )
 
 
@@ -658,18 +658,11 @@ class _LinearWithWGradSplit(torch.autograd.Function):
                     elif ctx.fuse_wgrad_accumulation:
                         pass
 
-                if WeightGradStore.split_bw():
-                    WeightGradStore.put(
-                        main_grad,
-                        functools.partial(pre_process, grad_output, inputmat_total),
-                        functools.partial(
-                            process_wgrad,
-                            main_grad,
-                        ),
-                    )
-                else:
-                    grad_output, inputmat_total, _ = pre_process(grad_output, inputmat_total)
-                    process_wgrad(main_grad, grad_output, inputmat_total)
+                insert_wgrad_func_into_cache(
+                    main_grad,
+                    functools.partial(pre_process, grad_output, inputmat_total),
+                    functools.partial(process_wgrad, main_grad),
+                )
 
             # Synchronize tensor parallel communication
             if inputmat_total_work is not None:
