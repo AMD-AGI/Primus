@@ -23,6 +23,7 @@ This class implements:
 from typing import Any
 
 from primus.core.trainer.base_trainer import BaseTrainer
+from primus.modules.module_utils import log_rank_0
 
 
 class MegatronBaseTrainer(BaseTrainer):
@@ -62,7 +63,7 @@ class MegatronBaseTrainer(BaseTrainer):
         )
 
         # Log version information
-        log_rank_0(f"Megatron-LM version: {self.detect_version()}")
+        log_rank_0(f"Megatron-LM version: {type(self).detect_version()}")
         log_rank_0(f"Model: {module_config.model}")
         log_rank_0(f"Framework: {module_config.framework}")
 
@@ -79,7 +80,8 @@ class MegatronBaseTrainer(BaseTrainer):
         log_rank_0("MegatronBaseTrainer initialized successfully")
         log_rank_0("=" * 80)
 
-    def detect_version(self) -> str:
+    @classmethod
+    def detect_version(cls) -> str:
         """
         Detect Megatron-LM version using the official method.
 
