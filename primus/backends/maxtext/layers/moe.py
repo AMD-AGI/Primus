@@ -82,3 +82,50 @@ class PrimusRoutedMoE(RoutedMoE):
             ############################################# end ####################################################
             ##########################################
         return super().dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
+
+    def sparse_matmul(
+        self,
+        inputs,
+        gate_logits,
+        pre_bias_logits,
+        w0_kernel,
+        w1_kernel,
+        wo_kernel,
+    ):
+        """Perform sparse matrix multiplication with optional Primus Turbo backend."""
+        if not self.config.use_primus_turbo_grouped_gemm:
+            return super().sparse_matmul(
+                inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
+            )
+
+        # Use primus_turbo grouped_gemm backend
+        try:
+            from primus_turbo.jax.lax.grouped_gemm import grouped_gemm
+        except ImportError:
+            # Fallback to original implementation if primus_turbo is not available
+            # jax.debug.print("[PrimusRoutedMoE] primus_turbo not available, using default ragged_dot")
+            return super().sparse_matmul(
+                inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
+            )
+
+        # jax.debug.print("[PrimusRoutedMoE] Using primus_turbo grouped_gemm")
+        _orig_ragged_dot = jax.lax.ragged_dot
+
+        def _turbo_ragged_dot(*, lhs, rhs, group_sizes, preferred_element_type=None, **kwargs):
+            group_lens = group_sizes.astype(jnp.int64)
+            return grouped_gemm(
+                lhs,          # [total_tokens, emb_dim]
+                rhs,          # [num_experts, emb_dim, intermediate_dim]
+                group_lens,   # [num_experts] int64
+                transA=False,
+                transB=False,
+                num_cu=-1,    # Use all compute units
+            )
+
+        jax.lax.ragged_dot = _turbo_ragged_dot
+        try:
+            return super().sparse_matmul(
+                inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
+            )
+        finally:
+            jax.lax.ragged_dot = _orig_ragged_dot
