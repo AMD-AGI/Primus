@@ -2065,9 +2065,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             wandb_writer = get_wandb_writer()
             if wandb_writer:
                 wandb_writer.finish()
-            ft_integration.shutdown()
+            mlflow_writer = get_mlflow_writer()
             if mlflow_writer:
                 mlflow_writer.end_run()
+            ft_integration.shutdown()
             sys.exit(exit_code)
 
         return iteration, num_floating_point_operations_so_far
