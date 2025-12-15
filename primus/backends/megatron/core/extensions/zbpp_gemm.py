@@ -21,8 +21,8 @@ from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
     grouped_gemm_compute_offs,
 )
 
-from primus.backends.megatron.core.pipeline_parallel.zerobubble.zbpp_utils import (
-    WeightGradStore,
+from primus.backends.megatron.core.pipeline_parallel.wgrad_adapter import (
+    insert_wgrad_func_into_cache,
 )
 
 
@@ -70,20 +70,11 @@ class LinearWithWeightGradientStore(torch.autograd.Function):
         else:
             wgrad_gemm_accum_func = fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16
 
-        if WeightGradStore.split_bw():
-            WeightGradStore.put(
-                weight,
-                functools.partial(pre_process, grad_output, input),
-                functools.partial(
-                    process_wgrad,
-                    weight,
-                    wgrad_gemm_accum_func=wgrad_gemm_accum_func,
-                ),
-            )
-        else:
-            grad_output, input, _ = pre_process(grad_output, input)
-            process_wgrad(weight, grad_output, input, None, wgrad_gemm_accum_func)
-        # grad_weight = gemm_impl(grad_output.t(), input)
+        insert_wgrad_func_into_cache(
+            weight,
+            functools.partial(pre_process, grad_output, input),
+            functools.partial(process_wgrad, weight, wgrad_gemm_accum_func=wgrad_gemm_accum_func),
+        )
 
         return grad_input, None, grad_bias, None, None
 
@@ -165,19 +156,11 @@ class GroupedLinearWithWeightGradientStore(torch.autograd.Function):
                 with torch.no_grad():
                     _weight.main_grad.add_(_wgrad)
 
-        if WeightGradStore.split_bw():
-            WeightGradStore.put(
-                weight,
-                functools.partial(pre_process, grad_output, input, ctx.trans_b),
-                functools.partial(
-                    process_wgrad,
-                    weight,
-                    ctx.weight_shape_ori,
-                ),
-            )
-        else:
-            pre_process(grad_output, input, ctx.trans_b)
-            process_wgrad(weight, ctx.weight_shape_ori, grad_output, input)
+        insert_wgrad_func_into_cache(
+            weight,
+            functools.partial(pre_process, grad_output, input, ctx.trans_b),
+            functools.partial(process_wgrad, weight, ctx.weight_shape_ori),
+        )
 
         return grad_a, None, None, None, None, None, None, None
 

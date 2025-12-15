@@ -161,7 +161,12 @@ from primus.modules.module_utils import (
 )
 from primus.modules.trainer.base_trainer import BaseTrainer
 
-from .utils import schedule_wrapper, set_wandb_writer_patch, validate_args_on_rocm
+from .utils import (
+    is_v_schedule_enabled,
+    schedule_wrapper,
+    set_wandb_writer_patch,
+    validate_args_on_rocm,
+)
 
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
@@ -171,6 +176,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self.is_v_schedule = is_v_schedule_enabled(self.module_config)
+
         # monkey patch modules
         self.patch_moe_layer()
         self.patch_torch_fsdp()
@@ -179,8 +186,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_te_tp_overlap()
         self.patch_mla_attention()
         self.patch_fp8_context()
-        self.patch_zbpp()
+        self.patch_pp()
         self.patch_custom_recompute_layer_ids()
+        self.patch_pipeline_parallel_layer_layout()
 
         self.app_metrics = {}
 
@@ -189,6 +197,16 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
+
+    def patch_pipeline_parallel_layer_layout(self):
+        warning_rank_0(f"MegatronTrainer: monkey patch PipelineParallelLayerLayout...")
+        import megatron.core.transformer.pipeline_parallel_layer_layout as orig_pipeline_parallel_layer_layout
+
+        from primus.backends.megatron.core.transformer.pipeline_parallel_layer_layout import (
+            PrimusPipelineParallelLayerLayout,
+        )
+
+        orig_pipeline_parallel_layer_layout.PipelineParallelLayerLayout = PrimusPipelineParallelLayerLayout
 
     def patch_custom_recompute_layer_ids(self):
         if self.module_config.recompute_layer_ids is None:
@@ -607,8 +625,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         else:
             warning_rank_0("MegatronTrainer: Patch FileSystemWriterAsync successfully.")
 
-    def patch_zbpp(self):
+    def patch_pp(self):
         # patch optimizer
+
         if self.module_config.patch_zero_bubble:
             warning_rank_0(f"MegatronTrainer: Patch ZeroBubble PP")
             import megatron.core.optimizer as optimizer
@@ -628,6 +647,17 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
             ori_pp.get_forward_backward_func = get_forward_backward_func_zbpp
 
+        elif self.module_config.patch_primus_pipeline:
+            warning_rank_0(f"MegatronTrainer: Patch PrimusPipe PP")
+            import megatron.core.pipeline_parallel as ori_pp
+
+            from primus.backends.megatron.core.pipeline_parallel.schedules import (
+                get_primus_pipeline_parallel_fwd_backward_func,
+            )
+
+            ori_pp.get_forward_backward_func = get_primus_pipeline_parallel_fwd_backward_func
+
+        if self.module_config.patch_primus_pipeline or self.module_config.patch_zero_bubble:
             # patch linear to split d_w and d_input
             import megatron.core.tensor_parallel.layers as ori_layers
 
@@ -640,7 +670,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             )
 
             # patch zbv-related code
-            if self.module_config.zero_bubble_v_schedule or self.module_config.enable_1f1b_v:
+            if self.is_v_schedule:
                 import megatron.core.parallel_state as ori_parallel_state
 
                 from primus.backends.megatron.core.parallel_state import (
@@ -2626,7 +2656,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             total_loss_dict[skipped_iters_key] = 0
             total_loss_dict[nan_iters_key] = 0
 
-            if get_args().patch_zero_bubble and get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v:
+            if self.is_v_schedule:
                 log_rank_0(log_string)
             else:
                 log_rank_last(log_string)
