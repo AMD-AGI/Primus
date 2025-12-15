@@ -469,7 +469,7 @@ class TrainingIteration:
             if multi_chunks:
                 parallel_state.set_virtual_pipeline_model_parallel_rank(node.chunk)
             set_seq_split_idx(node.seq_split_idx)
-            DataLoaderStore.push(conf.data_iterator[node.chunk], h2d_stream=True)
+            DataLoaderStore.push(conf.data_iterator[node.chunk], h2d_stream=True, vp_stage=node.chunk)
         scheduled_node = conf.schedules[idx]
         if multi_chunks:
             parallel_state.set_virtual_pipeline_model_parallel_rank(scheduled_node.chunk)
@@ -487,7 +487,7 @@ class TrainingIteration:
             if multi_chunks:
                 parallel_state.set_virtual_pipeline_model_parallel_rank(scheduled_node.chunk)
             set_seq_split_idx(scheduled_node.seq_split_idx)
-            DataLoaderStore.push(conf.data_iterator[scheduled_node.chunk])
+            DataLoaderStore.push(conf.data_iterator[scheduled_node.chunk], vp_stage=scheduled_node.chunk)
 
     def schedule_f_impl(self, scheduled_node: ScheduledNode):
         conf = self.iteration_config
@@ -532,7 +532,7 @@ class TrainingIteration:
         from primus.modules.trainer.megatron.pre_trainer import DataLoaderStore
 
         if len(DataLoaderStore.cache) == 0:
-            DataLoaderStore.push(conf.data_iterator[scheduled_node.chunk])
+            DataLoaderStore.push(conf.data_iterator[scheduled_node.chunk], vp_stage=scheduled_node.chunk)
 
         forward_step_ = forward_step
         if get_args().dump_pp_data:
