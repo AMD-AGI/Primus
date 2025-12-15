@@ -311,8 +311,8 @@ class PrimusParser(object):
             return
 
         # Validate required keys
-        # for key in ("config", "model"):
-        #     yaml_utils.check_key_in_namespace(module, key)
+        for key in ("config", "model"):
+            yaml_utils.check_key_in_namespace(module, key)
 
         # ---- Load module config ----
         model_format = self.get_model_format(framework)
@@ -321,13 +321,15 @@ class PrimusParser(object):
         module_config = yaml_utils.dict_to_nested_namespace(module_config_dict)
         module_config.name = f"exp.modules.{module_name}.config"
         module_config.framework = framework
-        # module_config.model = module.model
 
         # ---- Load model config ----
         model_config_dict = PresetLoader.load(module.model, model_format, config_type="models")
         model_config = yaml_utils.dict_to_nested_namespace(model_config_dict)
         model_config.name = f"exp.modules.{module_name}.model"
-        model_config.model = module.model
+        # Only set the top-level `model` field when it does not already exist in the
+        # loaded model preset, so that presets can define their own `model` metadata.
+        if not yaml_utils.has_key_in_namespace(model_config, "model"):
+            model_config.model = module.model
 
         # Avoid 'model' key conflicts when merging module + model presets:
         # - Keep module_config.model as the user-specified model identifier
