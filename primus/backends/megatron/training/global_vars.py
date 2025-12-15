@@ -8,6 +8,8 @@
 
 from primus.modules.module_utils import debug_rank_0
 
+from .mlflow_artifacts import upload_artifacts_to_mlflow
+
 _GLOBAL_ARGS = None
 _GLOBAL_MLFLOW_WRITER = None
 _GLOBAL_EXP_ROOT_PATH = None
@@ -99,8 +101,6 @@ def upload_mlflow_artifacts(
     args = get_args()
     exp_root_path = get_exp_root_path()
     tensorboard_dir = getattr(args, "tensorboard_dir", None) if args else None
-
-    from .mlflow_artifacts import upload_artifacts_to_mlflow
 
     return upload_artifacts_to_mlflow(
         mlflow_writer=mlflow_writer,
