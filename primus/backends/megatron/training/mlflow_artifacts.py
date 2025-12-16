@@ -298,6 +298,7 @@ def generate_tracelens_report(
     trace_file: str,
     output_dir: str,
     report_name: Optional[str] = None,
+    output_format: str = "csv",
 ) -> Optional[str]:
     """
     Generate a TraceLens analysis report for a single trace file.
@@ -306,6 +307,7 @@ def generate_tracelens_report(
         trace_file: Path to the PyTorch profiler trace file (JSON/JSON.GZ)
         output_dir: Directory to save the report
         report_name: Optional custom name for the report
+        output_format: Output format - "csv" (default) or "html"
 
     Returns:
         Path to the generated report, or None if generation failed
@@ -317,21 +319,26 @@ def generate_tracelens_report(
     os.makedirs(output_dir, exist_ok=True)
 
     # Generate report name from trace filename if not provided
+    ext = ".csv" if output_format == "csv" else ".html"
     if report_name is None:
         base_name = os.path.basename(trace_file)
         # Remove extensions like .json.gz
-        for ext in [".json.gz", ".json", ".pt.trace.json.gz", ".pt.trace.json"]:
-            if base_name.endswith(ext):
-                base_name = base_name[: -len(ext)]
+        for trace_ext in [".json.gz", ".json", ".pt.trace.json.gz", ".pt.trace.json"]:
+            if base_name.endswith(trace_ext):
+                base_name = base_name[: -len(trace_ext)]
                 break
-        report_name = f"{base_name}_analysis.html"
+        report_name = f"{base_name}_analysis{ext}"
 
     output_path = os.path.join(output_dir, report_name)
 
     try:
-        # Try using tracelens CLI
+        # Try using tracelens CLI with format option
+        cmd = ["tracelens", "analyze", trace_file, "-o", output_path]
+        if output_format == "csv":
+            cmd.extend(["--format", "csv"])
+
         result = subprocess.run(
-            ["tracelens", "analyze", trace_file, "-o", output_path],
+            cmd,
             capture_output=True,
             text=True,
             timeout=300,  # 5 minute timeout per trace
@@ -342,8 +349,12 @@ def generate_tracelens_report(
             return output_path
         else:
             # Try alternative: tracelens as Python module
+            cmd = [sys.executable, "-m", "tracelens", "analyze", trace_file, "-o", output_path]
+            if output_format == "csv":
+                cmd.extend(["--format", "csv"])
+
             result = subprocess.run(
-                [sys.executable, "-m", "tracelens", "analyze", trace_file, "-o", output_path],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=300,
@@ -352,6 +363,12 @@ def generate_tracelens_report(
                 log_rank_0(f"[TraceLens] Generated report: {report_name}")
                 return output_path
 
+            # If tracelens doesn't support CSV, fall back to custom CSV generation
+            if output_format == "csv":
+                csv_path = _generate_trace_summary_csv(trace_file, output_dir, report_name)
+                if csv_path:
+                    return csv_path
+
             warning_rank_0(f"[TraceLens] Failed to generate report: {result.stderr}")
             return None
 
@@ -359,10 +376,118 @@ def generate_tracelens_report(
         warning_rank_0(f"[TraceLens] Report generation timed out for: {trace_file}")
         return None
     except FileNotFoundError:
+        # tracelens not found, use fallback CSV generation
+        if output_format == "csv":
+            csv_path = _generate_trace_summary_csv(trace_file, output_dir, report_name)
+            if csv_path:
+                return csv_path
         warning_rank_0("[TraceLens] tracelens command not found")
         return None
     except Exception as e:
         warning_rank_0(f"[TraceLens] Error generating report: {e}")
+        return None
+
+
+def _generate_trace_summary_csv(
+    trace_file: str,
+    output_dir: str,
+    report_name: str,
+) -> Optional[str]:
+    """
+    Generate a CSV summary from a PyTorch profiler trace file.
+
+    This is a fallback when TraceLens is not available.
+    Extracts key metrics from the trace JSON and writes to CSV.
+
+    Args:
+        trace_file: Path to the trace file
+        output_dir: Output directory
+        report_name: Name for the CSV file
+
+    Returns:
+        Path to generated CSV or None if failed
+    """
+    import csv
+    import gzip
+    import json
+
+    try:
+        # Load trace file
+        if trace_file.endswith(".gz"):
+            with gzip.open(trace_file, "rt", encoding="utf-8") as f:
+                trace_data = json.load(f)
+        else:
+            with open(trace_file, "r", encoding="utf-8") as f:
+                trace_data = json.load(f)
+
+        # Extract events from trace
+        events = trace_data.get("traceEvents", [])
+        if not events:
+            warning_rank_0(f"[TraceLens] No events found in trace: {trace_file}")
+            return None
+
+        # Aggregate kernel/operation statistics
+        op_stats = {}
+        for event in events:
+            if event.get("cat") in ["kernel", "gpu_memcpy", "cuda_runtime", "cpu_op"]:
+                name = event.get("name", "unknown")
+                dur = event.get("dur", 0)  # duration in microseconds
+
+                if name not in op_stats:
+                    op_stats[name] = {"count": 0, "total_us": 0, "min_us": float("inf"), "max_us": 0}
+
+                op_stats[name]["count"] += 1
+                op_stats[name]["total_us"] += dur
+                op_stats[name]["min_us"] = min(op_stats[name]["min_us"], dur)
+                op_stats[name]["max_us"] = max(op_stats[name]["max_us"], dur)
+
+        if not op_stats:
+            warning_rank_0(f"[TraceLens] No kernel/op events found in trace: {trace_file}")
+            return None
+
+        # Sort by total time descending
+        sorted_ops = sorted(op_stats.items(), key=lambda x: x[1]["total_us"], reverse=True)
+
+        # Write CSV
+        output_path = os.path.join(output_dir, report_name)
+        with open(output_path, "w", newline="", encoding="utf-8") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(
+                [
+                    "Operation",
+                    "Count",
+                    "Total Time (ms)",
+                    "Avg Time (ms)",
+                    "Min Time (ms)",
+                    "Max Time (ms)",
+                    "% of Total",
+                ]
+            )
+
+            total_time = sum(stats["total_us"] for _, stats in sorted_ops)
+            for name, stats in sorted_ops:
+                avg_us = stats["total_us"] / stats["count"] if stats["count"] > 0 else 0
+                pct = (stats["total_us"] / total_time * 100) if total_time > 0 else 0
+                writer.writerow(
+                    [
+                        name,
+                        stats["count"],
+                        f"{stats['total_us'] / 1000:.3f}",
+                        f"{avg_us / 1000:.3f}",
+                        f"{stats['min_us'] / 1000:.3f}",
+                        f"{stats['max_us'] / 1000:.3f}",
+                        f"{pct:.2f}",
+                    ]
+                )
+
+        log_rank_0(f"[TraceLens] Generated CSV summary: {report_name} ({len(sorted_ops)} operations)")
+        return output_path
+
+    except json.JSONDecodeError as e:
+        warning_rank_0(f"[TraceLens] Failed to parse trace JSON: {e}")
+        return None
+    except Exception as e:
+        warning_rank_0(f"[TraceLens] Error generating CSV summary: {e}")
         return None
 
 
@@ -371,6 +496,7 @@ def generate_tracelens_reports(
     output_dir: str,
     ranks: Optional[List[int]] = None,
     max_reports: Optional[int] = None,
+    output_format: str = "csv",
 ) -> List[str]:
     """
     Generate TraceLens analysis reports for trace files.
@@ -380,13 +506,13 @@ def generate_tracelens_reports(
         output_dir: Directory to save the generated reports
         ranks: List of ranks to generate reports for (None = all ranks)
         max_reports: Maximum number of reports to generate (None = unlimited)
+        output_format: Output format - "csv" (default, recommended for MLflow) or "html"
 
     Returns:
         List of paths to generated reports
     """
-    if not _ensure_tracelens_installed():
-        warning_rank_0("[TraceLens] Cannot generate reports: TraceLens not available")
-        return []
+    # Try to install tracelens, but continue with fallback if not available
+    _ensure_tracelens_installed()
 
     trace_files = _get_all_trace_files(tensorboard_dir)
     if not trace_files:
@@ -403,11 +529,13 @@ def generate_tracelens_reports(
         trace_files = trace_files[:max_reports]
         log_rank_0(f"[TraceLens] Limited to {max_reports} reports")
 
-    log_rank_0(f"[TraceLens] Generating reports for {len(trace_files)} trace files...")
+    log_rank_0(
+        f"[TraceLens] Generating {output_format.upper()} reports for {len(trace_files)} trace files..."
+    )
 
     generated_reports = []
     for trace_file in trace_files:
-        report_path = generate_tracelens_report(trace_file, output_dir)
+        report_path = generate_tracelens_report(trace_file, output_dir, output_format=output_format)
         if report_path:
             generated_reports.append(report_path)
 
