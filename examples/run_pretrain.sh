@@ -123,11 +123,28 @@ fi
 # export AITER_JIT_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}_aiter_cache"
 
 
-TRAIN_LOG=${TRAIN_LOG:-"output/log_mp_pretrain_$(basename "$EXP" .yaml).txt"}
+# Extract model name from EXP config file path (e.g., deepseek_v2_lite-pretrain.yaml -> deepseek_v2_lite-pretrain)
+MODEL_NAME=$(basename "${EXP}" .yaml)
+
+# Only generate new timestamp/paths if not already set by run_slurm_pretrain.sh
+# This ensures: 1) single-node gets fresh timestamp, 2) multi-node shares same directory
+if [ -z "${PRIMUS_EXP_NAME}" ]; then
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    export PRIMUS_WORKSPACE=${PRIMUS_WORKSPACE:-"./output"}
+    export PRIMUS_EXP_NAME="${MODEL_NAME}_${TIMESTAMP}"
+    export LOG_DIR="${PRIMUS_WORKSPACE}/${PRIMUS_EXP_NAME}"
+fi
+# Clear work_group and user_name to simplify path: workspace/exp_name
+export PRIMUS_TEAM=""
+export PRIMUS_USER=""
+
+mkdir -p "$LOG_DIR"
+TRAIN_LOG="${LOG_DIR}/log_mp_pretrain.txt"
 
 LOG_INFO_RANK0 "==========Training info=========="
 LOG_INFO_RANK0 "EXP: $EXP"
-LOG_INFO_RANK0 "EXP: $BACKEND"
+LOG_INFO_RANK0 "BACKEND: $BACKEND"
+LOG_INFO_RANK0 "OUTPUT_DIR: ${LOG_DIR}"
 LOG_INFO_RANK0 "TRAIN_LOG: $TRAIN_LOG"
 LOG_INFO_RANK0 "PRIMUS_PATH: $PRIMUS_PATH"
 LOG_INFO_RANK0 "DATA_PATH: $DATA_PATH"
@@ -142,46 +159,13 @@ export HIP_VISIBLE_DEVICES
 
 # ----------------- NCCL and Network Settings -----------------
 # VERSION, WARN, INFO, DEBUG, TRACE
-export NCCL_DEBUG=${NCCL_DEBUG:-}
+export NCCL_DEBUG=
 
 # Disable NCCL internal checks to reduce overhead
 export NCCL_CHECKS_DISABLE=1
 
 # Set InfiniBand GID index for NCCL communication
-if [ "$USING_AINIC" == "1" ]; then
-    export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
-    export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
-    export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi-4.1.6"}
-
-    LOG_INFO_RANK0 "Using AINIC"
-    LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
-    LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
-    LOG_INFO_RANK0 "MPI_HOME_DIR: $MPI_HOME_DIR"
-
-    # unset NCCL_IB_GID_INDEX
-    export NCCL_IB_GID_INDEX=1
-    # export NCCL_IB_ROCE_VERSION_NUM=2
-    export NCCL_MAX_P2P_CHANNELS=56
-    export NCCL_IB_TC=104
-    export NCCL_IB_FIFO_TC=192
-    export NET_OPTIONAL_RECV_COMPLETION=1
-    export NCCL_IB_USE_INLINE=1
-    export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
-    export NCCL_GDR_FLUSH_DISABLE=1
-    export NCCL_DMABUF_ENABLE=0
-    export NCCL_IGNORE_CPU_AFFINITY=1
-    export NCCL_IB_QPS_PER_CONNECTION=1
-
-    # v25.10
-    # export LD_LIBRARY_PATH=/etc/libibverbs.d:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
-    # export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-anp.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
-
-    # v25.09
-    export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
-    export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
-else
-    export NCCL_IB_GID_INDEX=3
-fi
+export NCCL_IB_GID_INDEX=3
 
 # Disable cross NIC communication for NCCL
 export NCCL_CROSS_NIC=0
@@ -247,17 +231,10 @@ LOG_INFO_RANK0 ""
 
 # ----------------- Performance tuning -----------------
 if [ "${BACKEND:-}" == "MaxText" ]; then
-    export DUMP_HLO_DIR=${DUMP_HLO_DIR:-"${PRIMUS_PATH}/output/xla_dump_hlo"}
-    export DUMP_HLO=${DUMP_HLO:-0}
     export NVTE_ALLOW_NONDETERMINISTIC_ALGO=1
     export XLA_PYTHON_CLIENT_MEM_FRACTION=.97
     export NVTE_USE_HIPBLASLT=1
     export XLA_FLAGS="--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_graph_level=0 --xla_gpu_enable_latency_hiding_scheduler=True --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=False --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=FALSE"
-    if [ "${DUMP_HLO}" = "1" ]; then
-        mkdir -p "${DUMP_HLO_DIR}"
-        export XLA_FLAGS="$XLA_FLAGS --xla_dump_to=$DUMP_HLO_DIR"
-        echo "XLA HLO dumping enabled, output directory: ${DUMP_HLO_DIR}"
-    fi
 
     export HIP_FORCE_DEV_KERNARG=1
     export HSA_FORCE_FINE_GRAIN_PCIE=1
@@ -315,31 +292,7 @@ export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
 
 # Note: Disable fp32 atomic due if you find any accuracy issue.
-export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:-0}
-
-# install primus turbo from source
-export REBUILD_PRIMUS_TURBO=${REBUILD_PRIMUS_TURBO:-0}
-if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
-    LOG_INFO "Rebuilding Primus Turbo from source..."
-    mkdir -p "/workspace/turbo"
-    cd "/workspace/turbo" || exit
-
-    # Clean up old directory if exists to avoid git clone conflicts
-    if [ -d "Primus-Turbo" ]; then
-        LOG_INFO "Removing existing Primus-Turbo directory..."
-        rm -rf Primus-Turbo
-    fi
-
-    git clone https://github.com/AMD-AGI/Primus-Turbo.git --recursive
-    cd Primus-Turbo || exit
-    pip3 install -r requirements.txt
-    # Set GPU_ARCHS to compile Turbo for multiple AMD GPU architectures.
-    GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
-    cd "${PRIMUS_PATH}" || exit
-    LOG_INFO "Rebuilding Primus Turbo from source done."
-else
-    LOG_INFO "Skip Primus Turbo rebuild. REBUILD_PRIMUS_TURBO=$REBUILD_PRIMUS_TURBO"
-fi
+export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:0}
 
 # nvte debug envs
 export NVTE_DEBUG=0 # 0, 1

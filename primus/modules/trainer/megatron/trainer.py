@@ -144,7 +144,9 @@ from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_me
 from primus.backends.megatron.model_provider import primus_model_provider
 from primus.backends.megatron.training.global_vars import (
     get_mlflow_writer,
+    set_exp_root_path,
     set_primus_global_variables,
+    upload_mlflow_artifacts,
 )
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
@@ -564,22 +566,20 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             ori_moe_utils.HAVE_TE = True
 
     def patch_mla_attention(self):
-        if not self.module_config.fused_padded_mla_attention:
-            return
+        if self.module_config.use_turbo_parallel_linear:
+            warning_rank_0(f"MegatronTrainer: monkey patch MLA attention to support Primus-Turbo linear...")
 
-        warning_rank_0(f"MegatronTrainer: monkey patch MLA attention to support padded fusion...")
-        # pad module definition
-        from megatron.core.transformer import multi_latent_attention
+            from megatron.core.transformer import multi_latent_attention
 
-        from primus.backends.megatron.core.transformer.multi_latent_attention import (
-            PaddedMLASelfAttention,
-        )
+            from primus.backends.megatron.core.transformer.multi_latent_attention import (
+                PrimusMLASelfAttention,
+            )
 
-        multi_latent_attention.MLASelfAttention = PaddedMLASelfAttention
-        # pad imported module
-        from megatron.core.models.gpt import gpt_layer_specs
+            multi_latent_attention.MLASelfAttention = PrimusMLASelfAttention
 
-        gpt_layer_specs.MLASelfAttention = PaddedMLASelfAttention
+            from megatron.core.models.gpt import gpt_layer_specs
+
+            gpt_layer_specs.MLASelfAttention = PrimusMLASelfAttention
 
     def patch_torch_fsdp(self):
         if not self.module_config.use_torch_fsdp2:
@@ -1243,6 +1243,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         set_global_variables(args, build_tokenizer=False)
         log_rank_0(f"-set_primus_global_variables...")
         set_primus_global_variables(args)
+        # Set exp_root_path for MLflow artifact logging
+        set_exp_root_path(self.exp_root_path)
         args = get_args()
 
         # set tokenizer
@@ -2048,6 +2050,14 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if args.enable_ft_package and ft_integration.get_rank_monitor_client() is not None:
             ft_integration.get_rank_monitor_client().shutdown_workload_monitoring()
 
+        # Always upload artifacts and close MLflow run when training completes
+        mlflow_writer = get_mlflow_writer()
+        if mlflow_writer:
+            # Upload trace files and log files to MLflow before ending the run
+            upload_mlflow_artifacts(
+                upload_traces=getattr(args, "mlflow_upload_traces", True),
+                upload_logs=getattr(args, "mlflow_upload_logs", True),
+            )
         # If any exit conditions (signal handler, duration, iterations) have been reached, exit.
         if should_exit:
             wandb_writer = get_wandb_writer()
@@ -2601,29 +2611,29 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                         )
                         wandb_writer.log({f"{mem_collector}_mem_usage(%)": mem_usage * 100.0}, iteration)
                     if mlflow_writer:
-                        mlflow_writer.log_metric("throughput(tflops/sec/gpu)", throughput, iteration)
+                        mlflow_writer.log_metric("throughput_tflops_per_sec_per_gpu", throughput, iteration)
                         mlflow_writer.log_metric(
-                            "token_throughput(tokens/sec/gpu)",
+                            "token_throughput_tokens_per_sec_per_gpu",
                             token_throughput,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_used_mem(GiB)",
+                            f"{mem_collector}_used_mem_GiB",
                             used_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_free_mem(GiB)",
+                            f"{mem_collector}_free_mem_GiB",
                             free_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_total_mem(GiB)",
+                            f"{mem_collector}_total_mem_GiB",
                             total_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_mem_usage(%)", mem_usage * 100.0, iteration
+                            f"{mem_collector}_mem_usage_percent", mem_usage * 100.0, iteration
                         )
             assert learning_rate is not None
             # Decoupled_learning_rate should be not None only on first and last pipeline stage.

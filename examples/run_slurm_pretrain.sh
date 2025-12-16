@@ -34,7 +34,22 @@ export NNODES=${NNODES:-1}
 
 SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 
-export LOG_DIR=${LOG_DIR:-"./output"}
+# -------------------- Unique Output Directory Per Run --------------------
+# Extract model name from EXP config file path (e.g., deepseek_v2_lite-pretrain.yaml -> deepseek_v2_lite-pretrain)
+MODEL_NAME=$(basename "${EXP:-unknown}" .yaml)
+# Export TIMESTAMP so all nodes use the same value (prevents multi-node race condition)
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+export TIMESTAMP
+
+# Set PRIMUS environment variables for output paths
+BASE_LOG_DIR=${LOG_DIR:-"./output"}
+export PRIMUS_WORKSPACE="${BASE_LOG_DIR}"
+export PRIMUS_EXP_NAME="${MODEL_NAME}_${TIMESTAMP}"
+export LOG_DIR="${PRIMUS_WORKSPACE}/${PRIMUS_EXP_NAME}"
+# Clear work_group and user_name to simplify path: workspace/exp_name
+export PRIMUS_TEAM=""
+export PRIMUS_USER=""
+
 LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
 
@@ -42,7 +57,7 @@ srun -N "${NNODES}" \
      --exclusive \
      --export ALL \
      --ntasks-per-node=1 \
-     --cpus-per-task="${CPUS_PER_TASK:-128}" \
+     --cpus-per-task="${CPUS_PER_TASK:-256}" \
      bash -c "
           readarray -t node_array < <(scontrol show hostnames \"\$SLURM_JOB_NODELIST\")
           if [ \"\$SLURM_NODEID\" = \"0\" ]; then
@@ -57,6 +72,5 @@ srun -N "${NNODES}" \
           export NNODES=\${SLURM_NNODES}
           export NODE_RANK=\${SLURM_PROCID}
           export GPUS_PER_NODE=\${SLURM_GPUS_ON_NODE}
-          export REBUILD_PRIMUS_TURBO=\${REBUILD_PRIMUS_TURBO}
           bash ${SCRIPT_DIR}/run_local_pretrain.sh \"\$@\" 2>&1 | tee ${LOG_FILE}
      " bash "$@"

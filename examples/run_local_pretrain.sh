@@ -16,7 +16,7 @@ Usage: bash run_local_pretrain.sh
 This script launches a Primus pretraining task inside a Docker/Podman container.
 
 Environment Variables:
-    DOCKER_IMAGE   Docker image to use [Default: docker.io/rocm/primus:v25.10_gfx942]
+    DOCKER_IMAGE   Docker image to use [Default: docker.io/rocm/primus:v25.10]
     MASTER_ADDR    Master node IP or hostname [Default: localhost]
     MASTER_PORT    Master node port [Default: 1234]
     NNODES         Total number of nodes [Default: 1]
@@ -44,7 +44,7 @@ EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
 if [ "${BACKEND:-}" = "MaxText" ]; then
     DOCKER_IMAGE="docker.io/rocm/jax-training:maxtext-v25.9"
 fi
-DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10_gfx942"}
+DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10"}
 
 # Project root
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
@@ -93,6 +93,10 @@ ENV_ARGS+=("--env" "HF_TOKEN")
 ENV_ARGS+=("--env" "WANDB_API_KEY")
 ENV_ARGS+=("--env" "ENABLE_NUMA_BINDING")
 ENV_ARGS+=("--env" "HSA_KERNARG_POOL_SIZE")
+ENV_ARGS+=("--env" "DATABRICKS_TOKEN")
+ENV_ARGS+=("--env" "DATABRICKS_HOST")
+ENV_ARGS+=("--env" "MLFLOW_TRACKING_URI")
+ENV_ARGS+=("--env" "MLFLOW_REGISTRY_URI")
 echo "ENV_ARGS: ${ENV_ARGS[*]}"
 
 HOSTNAME=$(hostname)
@@ -158,6 +162,12 @@ docker_podman_proxy run --rm \
     --env GPUS_PER_NODE \
     --env DATA_PATH \
     --env TRAIN_LOG \
+    --env PRIMUS_WORKSPACE \
+    --env PRIMUS_EXP_NAME \
+    --env TIMESTAMP \
+    --env LOG_DIR \
+    --env PRIMUS_TEAM \
+    --env PRIMUS_USER \
     --env HSA_NO_SCRATCH_RECLAIM \
     --env NVTE_CK_USES_BWD_V3 \
     --env GPU_MAX_HW_QUEUES \
