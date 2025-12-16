@@ -125,17 +125,18 @@ fi
 
 # Extract model name from EXP config file path (e.g., deepseek_v2_lite-pretrain.yaml -> deepseek_v2_lite-pretrain)
 MODEL_NAME=$(basename "${EXP}" .yaml)
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# Always append model_name/timestamp to ensure unique output directories per run
-# This prevents the bug where traces from previous runs get uploaded to MLflow
-BASE_LOG_DIR=${LOG_DIR:-"./output"}
-export LOG_DIR="${BASE_LOG_DIR}/${MODEL_NAME}_${TIMESTAMP}"
+# Only generate timestamp if not already set (preserves value from run_slurm_pretrain.sh for multi-node)
+TIMESTAMP=${TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}
 
-# Set PRIMUS environment variables for output paths
-# Use underscore instead of slash to be consistent with trace filenames
-export PRIMUS_WORKSPACE="${BASE_LOG_DIR}"
-export PRIMUS_EXP_NAME="${MODEL_NAME}_${TIMESTAMP}"
+# Only set PRIMUS variables if not already set (preserves values from run_slurm_pretrain.sh)
+# This prevents multi-node race conditions where each node gets a different timestamp
+if [ -z "${PRIMUS_EXP_NAME}" ]; then
+    BASE_LOG_DIR=${LOG_DIR:-"./output"}
+    export LOG_DIR="${BASE_LOG_DIR}/${MODEL_NAME}_${TIMESTAMP}"
+    export PRIMUS_WORKSPACE="${BASE_LOG_DIR}"
+    export PRIMUS_EXP_NAME="${MODEL_NAME}_${TIMESTAMP}"
+fi
 
 mkdir -p "$LOG_DIR"
 

@@ -36,7 +36,9 @@ SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 
 # Extract model name from EXP config file path (e.g., deepseek_v2_lite-pretrain.yaml -> deepseek_v2_lite-pretrain)
 MODEL_NAME=$(basename "${EXP}" .yaml)
+# Export TIMESTAMP so all nodes use the same value (prevents multi-node race condition)
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+export TIMESTAMP
 
 BASE_LOG_DIR=${LOG_DIR:-"./output"}
 export LOG_DIR="${BASE_LOG_DIR}/${MODEL_NAME}_${TIMESTAMP}"
