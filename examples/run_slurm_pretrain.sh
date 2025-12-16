@@ -44,11 +44,9 @@ LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
 
 # Set PRIMUS environment variables for output paths
-# Use underscore instead of slash to avoid issues with trace filenames
+# Use underscore instead of slash to be consistent with trace filenames
 export PRIMUS_WORKSPACE="${BASE_LOG_DIR}"
 export PRIMUS_EXP_NAME="${MODEL_NAME}_${TIMESTAMP}"
-export PRIMUS_TEAM=""
-export PRIMUS_USER=""
 
 JOB_NAME=${JOB_NAME:-"primus_train"}
 TIME_LIMIT=${TIME_LIMIT:-"8:00:00"}

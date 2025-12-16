@@ -133,11 +133,9 @@ BASE_LOG_DIR=${LOG_DIR:-"./output"}
 export LOG_DIR="${BASE_LOG_DIR}/${MODEL_NAME}_${TIMESTAMP}"
 
 # Set PRIMUS environment variables for output paths
-# Use underscore instead of slash to avoid issues with trace filenames
+# Use underscore instead of slash to be consistent with trace filenames
 export PRIMUS_WORKSPACE="${BASE_LOG_DIR}"
 export PRIMUS_EXP_NAME="${MODEL_NAME}_${TIMESTAMP}"
-export PRIMUS_TEAM=""
-export PRIMUS_USER=""
 
 mkdir -p "$LOG_DIR"
 
