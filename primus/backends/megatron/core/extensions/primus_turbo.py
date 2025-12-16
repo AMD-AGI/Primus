@@ -32,9 +32,11 @@ from megatron.core.utils import get_tensor_model_parallel_group_if_none
 from megatron.training.global_vars import get_args
 from primus_turbo.pytorch.core.low_precision import (
     Float8QuantConfig,
+    Format,
     ScalingGranularity,
     ScalingStrategy,
     check_fp8_support,
+    check_mxfp8_support,
 )
 from torch import Tensor
 from transformer_engine.pytorch.fp8 import (
@@ -45,13 +47,35 @@ from transformer_engine.pytorch.fp8 import (
 )
 
 
+def use_split_wgrad_op():
+    args = get_args()
+    if args.patch_primus_pipeline and args.pp_algorithm in [
+        "zero-bubble",
+        "zbv-formatted",
+        "v-half",
+        "v-min",
+    ]:
+        return True
+    elif args.patch_zero_bubble and args.enable_zero_bubble:
+        return True
+    return False
+
+
 class PrimusTurboFloat8QuantConfig(Float8QuantConfig):
 
     def block_scaling(self):
-        return self.granularity == ScalingGranularity.BLOCKWISE
+        return self.granularity == ScalingGranularity.BLOCKWISE and self.strategy == ScalingStrategy.DYNAMIC
 
     def current_scaling(self):
         return self.granularity == ScalingGranularity.TENSORWISE and self.strategy == ScalingStrategy.DYNAMIC
+
+    def mxfp8_scaling(self):
+        # NOTE: The mxfp8 recipe only support e4m3 format in megatron-lm backend.
+        return (
+            self.granularity == ScalingGranularity.MX_BLOCKWISE
+            and self.strategy == ScalingStrategy.DYNAMIC
+            and self.format == Format.E4M3
+        )
 
 
 class PrimusTurboFP8GlobalStateManager(FP8GlobalStateManager):
@@ -100,6 +124,9 @@ class PrimusTurboFP8GlobalStateManager(FP8GlobalStateManager):
         if enabled_turbo:
             fp8_available, reason_for_no_fp8 = check_fp8_support()
             assert fp8_available, reason_for_no_fp8
+            if turbo_fp8_quant_config.mxfp8_scaling():
+                mxfp8_available, reason_for_no_mxfp8 = check_mxfp8_support()
+                assert mxfp8_available, reason_for_no_mxfp8
 
     @classmethod
     def get_turbo_fp8_quant_config(cls) -> PrimusTurboFloat8QuantConfig:
@@ -312,6 +339,107 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         return o
 
 
+class PrimusTurboLinear(TELinear):
+    """
+    Wrapper for the Transformer-Engine's `Linear` layer
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        parallel_mode: Optional[str],
+        config: ModelParallelConfig,
+        init_method: Callable,
+        bias: bool,
+        skip_bias_add: bool,
+        skip_weight_param_allocation: bool,
+        tp_comm_buffer_name: Optional[str] = None,
+        is_expert: bool = False,
+        symmetric_ar_type: Optional[str] = None,
+        tp_group: Optional[torch.distributed.ProcessGroup] = None,
+    ):
+        if parallel_mode != "duplicated":
+            raise ValueError(f"{__class__.__name__} only support `parallel_mode=duplicated`. ")
+
+        tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
+
+        if use_split_wgrad_op():
+            from .zbpp_gemm import gemm_with_weight_gradient_store
+
+            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+        else:
+            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
+                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
+            )
+
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            parallel_mode="row",
+            config=config,
+            init_method=(
+                condition_init_method(config, init_method)
+                if not config.use_cpu_initialization
+                else lambda w: None
+            ),
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            skip_weight_param_allocation=False,
+            # We don't currently use this for row parallel layers # pylint: disable=line-too-long
+            is_expert=is_expert,
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            symmetric_ar_type=config.symmetric_ar_type,
+            tp_group=tp_group,
+        )
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Sharding along axis 1, bias not sharded"""
+        state_dict = self.state_dict(prefix="", keep_vars=True)
+        return make_sharded_tensors_for_checkpoint(state_dict, prefix, {"weight": 1}, sharded_offsets)
+
+    def __repr__(self):
+        return (
+            f"{type(self).__name__}(in_features={self.in_features}, "
+            f"out_features={self.out_features}, bias={self.use_bias}, TP={self.tp_size})"
+        )
+
+    def forward(
+        self,
+        input_: torch.Tensor,
+    ):
+        # weights = [getattr(self, name) for name in self.weight_names]
+        # weights = torch.cat(weights, dim=0)  # or set weights = self._parameters['weight']
+        weights = self._parameters["weight"]
+        if self.use_bias:
+            bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
+        original_shape = input_.size()
+        if not input_.is_contiguous():
+            input_ = input_.contiguous()
+        input_ = input_.view(-1, original_shape[-1])
+
+        if PrimusTurboFP8GlobalStateManager.is_turbo_fp8_enabled():
+            quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
+            if quant_config.block_scaling():
+                fp8_gemm = pt.ops.gemm_fp8_blockwise
+            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
+                fp8_gemm = pt.ops.gemm_fp8
+            else:
+                raise ValueError("Not support quant config.")
+
+            out = fp8_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
+        else:
+            out = self.gemm(input_, weights)
+
+        out = out.view(original_shape[0], original_shape[1], -1)
+        if self.te_return_bias:
+            return out, bias_tensor
+        if self.use_bias:
+            return out + bias_tensor, None
+        return out, None
+
+
 class PrimusTurboRowParallelLinear(TELinear):
     """
     Wrapper for the Transformer-Engine's `Linear` layer but specialized similar
@@ -333,7 +461,7 @@ class PrimusTurboRowParallelLinear(TELinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         if not input_is_parallel:
-            raise ValueError("Transformer Engine linear layers do not support input_is_parallel = False")
+            raise ValueError(f"{__class__.__name__} layers do not support input_is_parallel = False")
 
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
@@ -396,7 +524,7 @@ class PrimusTurboRowParallelLinear(TELinear):
             quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
             if quant_config.block_scaling():
                 fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling():
+            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -430,12 +558,10 @@ class PrimusTurboColumnParallelLinear(TELinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         if gather_output:
-            raise ValueError("Transformer Engine linear layers do not support gather_output = True")
+            raise ValueError(f"{__class__.__name__} layers do not support gather_output = True")
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
-        args = get_args()
-
-        if args.patch_zero_bubble and args.enable_zero_bubble:
+        if use_split_wgrad_op():
             from .zbpp_gemm import gemm_with_weight_gradient_store
 
             self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
@@ -494,7 +620,7 @@ class PrimusTurboColumnParallelLinear(TELinear):
             quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
             if quant_config.block_scaling():
                 fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling():
+            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -538,8 +664,7 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
 
-        args = get_args()
-        if args.patch_zero_bubble and args.enable_zero_bubble:
+        if use_split_wgrad_op():
             from .zbpp_gemm import gemm_with_weight_gradient_store
 
             self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
@@ -586,7 +711,7 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
             quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
             if quant_config.block_scaling():
                 fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling():
+            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -641,8 +766,7 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         # and we don't have to deal with the zero length Tensor.
         self.te_return_bias = skip_bias_add and bias
 
-        args = get_args()
-        if args.patch_zero_bubble and args.enable_zero_bubble:
+        if use_split_wgrad_op():
 
             from .zbpp_gemm import gemm_with_weight_gradient_store
 
@@ -710,7 +834,7 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
             if quant_config.block_scaling():
                 fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling():
+            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -741,9 +865,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         )
         args = get_args()
 
-        if (args.patch_zero_bubble and args.enable_zero_bubble) or (
-            args.patch_moe_overlap and args.overlap_moe_expert_parallel_comm
-        ):
+        if use_split_wgrad_op() or (args.patch_moe_overlap and args.overlap_moe_expert_parallel_comm):
             from .zbpp_gemm import grouped_gemm_with_weight_gradient_store
 
             self.grouped_gemm = functools.partial(
@@ -795,7 +917,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         gemm_kargs = [dict(), dict()]
         if permuted_local_hidden_states.nelement() != 0:
             # Reshape the weights for the grouped GEMMs.
-            if args.patch_zero_bubble and args.enable_zero_bubble:
+            if use_split_wgrad_op():
 
                 w1 = self.weight1
                 w2 = self.weight2
@@ -862,7 +984,9 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             # No token is allocated for local experts.
             assert torch.count_nonzero(tokens_per_expert) == 0
             # Make sure params of experts still have gradients even given zero tokens.
-            assert not args.patch_zero_bubble, "Zero bubble not support torch.matmul backend yet"
+            assert (
+                not args.patch_zero_bubble and not args.patch_primus_pipeline
+            ), "Zero bubble or primus pipeline not support torch.matmul backend yet"
             w1 = self.weight1.view(self.config.hidden_size, -1)
             w2 = self.weight2.view(-1, self.config.hidden_size)
             h = torch.matmul(permuted_local_hidden_states, w1)

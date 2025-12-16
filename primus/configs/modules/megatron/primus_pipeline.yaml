@@ -1,0 +1,7 @@
+patch_primus_pipeline: false
+
+pp_algorithm: "1f1b-interleaved" # "1f1b", "1f1b-interleaved", "zero-bubble", "zbv-formatted", "zbv-greedy"
+
+cached_fwd_chunks_limit: 16
+
+communication_method: "async_p2p" # "async_p2p", "batch_p2p"

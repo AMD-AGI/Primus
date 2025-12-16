@@ -308,15 +308,16 @@ def draw(task_data_list):
 
 
 def main():
-    show_exps = ["1f1b", "1f1b-interleaved", "zero-bubble-1f1b", "zbv", "v-half", "v-min"]
+    show_exps = ["pp8", "pp8_vpp2"]
     task_list = [
         {
             "title": exp,
-            "iter_to_vis": [i for i in range(5, 6)],
-            "log_path": f"./pp_data/{exp}/",
+            "iter_to_vis": [i for i in range(7, 8)],
+            "log_path": f"./pp_data_example/gpu8_layer64_gbs16/{exp}/",
         }
         for exp in show_exps
     ]
+
     matplotlib.use("WebAgg")
 
     task_data_list = get_task_data(task_list)

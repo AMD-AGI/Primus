@@ -36,8 +36,8 @@ from transformer_engine.pytorch.utils import (
     requires_grad,
 )
 
-from primus.backends.megatron.core.pipeline_parallel.zerobubble.zbpp_utils import (
-    WeightGradStore,
+from primus.backends.megatron.core.pipeline_parallel.wgrad_adapter import (
+    insert_wgrad_func_into_cache,
 )
 
 
@@ -324,19 +324,11 @@ class _GroupedLinearWithWGradSplit(torch.autograd.Function):
                         handle_custom_ddp_from_mcore(w, wgrad) for w, wgrad in zip(weights, wgrad_list)
                     ]
 
-                if WeightGradStore.split_bw():
-                    WeightGradStore.put(
-                        wgrad_list,
-                        functools.partial(pre_process, grad_output, inputmats),
-                        functools.partial(
-                            process_wgrad,
-                            wgrad_list,
-                            kargs_dict,
-                        ),
-                    )
-                else:
-                    grad_output, inputmats, _ = pre_process(grad_output, inputmats)
-                    process_wgrad(wgrad_list, kargs_dict, grad_output, inputmats)
+                insert_wgrad_func_into_cache(
+                    wgrad_list,
+                    functools.partial(pre_process, grad_output, inputmats),
+                    functools.partial(process_wgrad, wgrad_list, kargs_dict),
+                )
 
                 wgrad_list_return = [None] * ctx.num_gemms
             else:
