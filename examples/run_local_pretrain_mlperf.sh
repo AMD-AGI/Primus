@@ -39,7 +39,7 @@ fi
 EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
 
 # Default docker image
-DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.9_gfx942"}
+DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10"}
 
 # Project root
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
@@ -141,4 +141,5 @@ docker_podman_proxy run --rm \
         cd $PRIMUS_PATH && \
         bash examples/run_pretrain_mlperf.sh \"\$@\" 2>&1 && \
         echo '[NODE-${NODE_RANK}(${HOSTNAME})]: end, time=$(date +"%Y.%m.%d %H:%M:%S")'
+
     " bash "${ARGS[@]}"
