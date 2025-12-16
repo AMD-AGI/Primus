@@ -19,6 +19,8 @@ def load_backend_trainer(framework: str):
         from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
 
         return MegatronPretrainTrainer
+        #from primus.modules.trainer.megatron.mlperf_pre_trainer import MLPerfMegatronPretrainTrainer
+        #return MLPerfMegatronPretrainTrainer        
     elif framework == "light-megatron":
         from primus.modules.trainer.lightmegatron.pre_trainer import (
             LightMegatronPretrainTrainer,
