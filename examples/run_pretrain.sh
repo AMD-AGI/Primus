@@ -126,16 +126,13 @@ fi
 # Extract model name from EXP config file path (e.g., deepseek_v2_lite-pretrain.yaml -> deepseek_v2_lite-pretrain)
 MODEL_NAME=$(basename "${EXP}" .yaml)
 
-# Only generate timestamp if not already set (preserves value from run_slurm_pretrain.sh for multi-node)
-TIMESTAMP=${TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}
-
-# Only set PRIMUS variables if not already set (preserves values from run_slurm_pretrain.sh)
-# This prevents multi-node race conditions where each node gets a different timestamp
+# Only generate new timestamp/paths if not already set by run_slurm_pretrain.sh
+# This ensures: 1) single-node gets fresh timestamp, 2) multi-node shares same directory
 if [ -z "${PRIMUS_EXP_NAME}" ]; then
-    BASE_LOG_DIR=${LOG_DIR:-"./output"}
-    export LOG_DIR="${BASE_LOG_DIR}/${MODEL_NAME}_${TIMESTAMP}"
-    export PRIMUS_WORKSPACE="${BASE_LOG_DIR}"
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    export PRIMUS_WORKSPACE=${PRIMUS_WORKSPACE:-"./output"}
     export PRIMUS_EXP_NAME="${MODEL_NAME}_${TIMESTAMP}"
+    export LOG_DIR="${PRIMUS_WORKSPACE}/${PRIMUS_EXP_NAME}"
 fi
 
 mkdir -p "$LOG_DIR"

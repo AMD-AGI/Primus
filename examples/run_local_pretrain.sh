@@ -164,6 +164,8 @@ docker_podman_proxy run --rm \
     --env TRAIN_LOG \
     --env PRIMUS_WORKSPACE \
     --env PRIMUS_EXP_NAME \
+    --env TIMESTAMP \
+    --env LOG_DIR \
     --env PRIMUS_TEAM \
     --env PRIMUS_USER \
     --env HSA_NO_SCRATCH_RECLAIM \
