@@ -84,7 +84,7 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
         import megatron.core.models.vision.radio as orig_radio
         import megatron.core.transformer.transformer_block as orig_transformer_block
 
-        from primus.backends.megatron.patches.core.transformer.transformer_block import (
+        from primus.backends.megatron.core.transformer.transformer_block import (
             PrimusTransformerBlock,
         )
 
