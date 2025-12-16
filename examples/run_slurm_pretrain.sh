@@ -34,24 +34,24 @@ export NNODES=${NNODES:-1}
 
 SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 
+# -------------------- Unique Output Directory Per Run --------------------
 # Extract model name from EXP config file path (e.g., deepseek_v2_lite-pretrain.yaml -> deepseek_v2_lite-pretrain)
-MODEL_NAME=$(basename "${EXP}" .yaml)
+MODEL_NAME=$(basename "${EXP:-unknown}" .yaml)
 # Export TIMESTAMP so all nodes use the same value (prevents multi-node race condition)
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 export TIMESTAMP
 
-BASE_LOG_DIR=${LOG_DIR:-"./output"}
-export LOG_DIR="${BASE_LOG_DIR}/${MODEL_NAME}_${TIMESTAMP}"
-LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
-mkdir -p "$LOG_DIR"
-
 # Set PRIMUS environment variables for output paths
-# Use underscore instead of slash to be consistent with trace filenames
+BASE_LOG_DIR=${LOG_DIR:-"./output"}
 export PRIMUS_WORKSPACE="${BASE_LOG_DIR}"
 export PRIMUS_EXP_NAME="${MODEL_NAME}_${TIMESTAMP}"
+export LOG_DIR="${PRIMUS_WORKSPACE}/${PRIMUS_EXP_NAME}"
+# Clear work_group and user_name to simplify path: workspace/exp_name
+export PRIMUS_TEAM=""
+export PRIMUS_USER=""
 
-JOB_NAME=${JOB_NAME:-"primus_train"}
-TIME_LIMIT=${TIME_LIMIT:-"8:00:00"}
+LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
+mkdir -p "$LOG_DIR"
 
 srun -N "${NNODES}" \
      --exclusive \

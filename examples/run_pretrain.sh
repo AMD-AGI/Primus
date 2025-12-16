@@ -134,14 +134,17 @@ if [ -z "${PRIMUS_EXP_NAME}" ]; then
     export PRIMUS_EXP_NAME="${MODEL_NAME}_${TIMESTAMP}"
     export LOG_DIR="${PRIMUS_WORKSPACE}/${PRIMUS_EXP_NAME}"
 fi
+# Clear work_group and user_name to simplify path: workspace/exp_name
+export PRIMUS_TEAM=""
+export PRIMUS_USER=""
 
 mkdir -p "$LOG_DIR"
-
 TRAIN_LOG="${LOG_DIR}/log_mp_pretrain.txt"
 
 LOG_INFO_RANK0 "==========Training info=========="
 LOG_INFO_RANK0 "EXP: $EXP"
-LOG_INFO_RANK0 "EXP: $BACKEND"
+LOG_INFO_RANK0 "BACKEND: $BACKEND"
+LOG_INFO_RANK0 "OUTPUT_DIR: ${LOG_DIR}"
 LOG_INFO_RANK0 "TRAIN_LOG: $TRAIN_LOG"
 LOG_INFO_RANK0 "PRIMUS_PATH: $PRIMUS_PATH"
 LOG_INFO_RANK0 "DATA_PATH: $DATA_PATH"
