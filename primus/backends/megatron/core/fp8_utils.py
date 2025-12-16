@@ -34,7 +34,6 @@ except (ImportError, ModuleNotFoundError):
 
 
 SCALING_BLOCK_SIZE = 128
-MX_SCALING_BLOCK_SIZE = 32
 
 WARN_ONCE = True
 
@@ -43,7 +42,7 @@ if HAVE_TE and HAVE_TURBO:
     from megatron.core import parallel_state
     from megatron.core.enums import Fp8Recipe
     from megatron.core.extensions.transformer_engine import TEDelayedScaling
-    from primus_turbo.pytorch.core.low_precision import ScaleDtype, ScalingGranularity
+    from primus_turbo.pytorch.core.low_precision import ScalingGranularity
 
     from primus.backends.megatron.core.extensions.primus_turbo import (
         PrimusTurboFloat8QuantConfig,
@@ -136,12 +135,7 @@ if HAVE_TE and HAVE_TURBO:
                     fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(fp8_format=fp8_format)
                 else:
                     fp8_recipe_none_reason = "Transformer Engine version < 2.1.0.dev0"
-                fp8_quant_config = PrimusTurboFloat8QuantConfig(
-                    granularity=ScalingGranularity.MX_BLOCKWISE,
-                    format=te_fp8_format_mapping(fp8_format),
-                    block_size=MX_SCALING_BLOCK_SIZE,
-                    scale_dtype=ScaleDtype.E8M0,
-                )
+                fp8_quant_config_none_reason = "Primus-Turbo not support MXFP8."
 
             global WARN_ONCE
             if WARN_ONCE:
@@ -194,6 +188,88 @@ if HAVE_TE and HAVE_TURBO:
             assert not (
                 config.first_last_layers_bf16 and isinstance(fp8_recipe, TEDelayedScaling)
             ), "Delayed scaling does not support first / last layer in BF16."
+
+        return fp8_context
+
+elif HAVE_TURBO:
+    from megatron.core import parallel_state
+    from megatron.core.enums import Fp8Recipe
+    from primus_turbo.pytorch.core.low_precision import ScalingGranularity
+
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        PrimusTurboFloat8QuantConfig,
+    )
+
+    def get_fp8_context(config: TransformerConfig, layer_no: int = -1, is_init: bool = False):
+        """Return fp8 context manager.
+
+        Arguments:
+            config (TransformerConfig): Configuration object.
+            layer_no (int): *Global* layer index (including layers on other
+                pipeline-parallel ranks).
+            is_init (bool): Whether the context is fp8_model_init (True) or fp8_autocast (False).
+
+        Returns:
+            FP8 context.
+            If layer_no < 0, we return a fp8 context for all layers regardless of layer_no.
+            We return nullcontext() when: a) not using fp8 to train, b) layer_no is a layer
+            that needs to be trained in bf16.
+        """
+        num_bf16_layers_at_start = config.num_layers_at_start_in_bf16 if config.first_last_layers_bf16 else 0
+        num_bf16_layers_at_end = config.num_layers_at_end_in_bf16 if config.first_last_layers_bf16 else 0
+        # Since layer_no is a global layer index, additional checks on whether
+        # we are in the first or last pipeline-parallel rank are not needed.
+        is_first_layer = layer_no < num_bf16_layers_at_start
+        is_last_layer = layer_no >= config.num_layers - num_bf16_layers_at_end
+
+        need_fp8_context = config.fp8 if not is_init else config.fp8_param
+
+        if not need_fp8_context:
+            # bf16 training
+            fp8_context = nullcontext()
+        elif layer_no >= 0 and config.first_last_layers_bf16 and (is_first_layer or is_last_layer):
+            # fp8 training but this layer_no should be bf16
+            fp8_context = nullcontext()
+        else:
+            # fp8 training and this layer_no is in fp8
+            import primus_turbo
+
+            if config.fp8 == "e4m3":
+                fp8_format = primus_turbo.pytorch.core.low_precision.Format.E4M3
+            elif config.fp8 == "hybrid":
+                fp8_format = primus_turbo.pytorch.core.low_precision.Format.HYBRID
+            else:
+                raise ValueError("E4M3 and HYBRID are the only supported FP8 formats.")
+
+            # Select fp8
+            fp8_quant_config = None
+            if config.fp8_quant_config == Fp8Recipe.tensorwise:
+                fp8_quant_config = PrimusTurboFloat8QuantConfig(
+                    fp8_format=fp8_format, granularity=ScalingGranularity.TENSORWISE
+                )
+            elif config.fp8_quant_config == Fp8Recipe.blockwise:
+                fp8_quant_config = PrimusTurboFloat8QuantConfig(
+                    fp8_format=fp8_format, granularity=ScalingGranularity.BLOCKWISE, block_size=128
+                )
+            else:
+                raise ValueError("Primus-Turbo only supports tensorwise and blockwise scaling.")
+
+            if not is_init:
+                from primus.backends.megatron.core.extensions.primus_turbo import (
+                    primus_turbo_fp8_autocast,
+                )
+
+                # NOTE: Disable Transformer Engine FP8
+                fp8_context = primus_turbo_fp8_autocast(
+                    enabled=False,
+                    fp8_recipe=None,
+                    fp8_group=None,
+                    enabled_turbo=True,
+                    turbo_fp8_quant_config=fp8_quant_config,
+                )
+            else:
+                # NOTE: Primus-Turbo does not support fp8_model_init yet.
+                fp8_context = nullcontext()
 
         return fp8_context
 

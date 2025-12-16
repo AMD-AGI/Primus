@@ -57,11 +57,17 @@ modules:
       test_data_path: null
 
       # fusion
+      # 20250321: need latest megatron docker image
+      moe_permute_fusion: false
       # fused wgrad gemm and accumulation
       gradient_accumulation_fusion: false
       # recommend set `false` in fp8
       moe_use_legacy_grouped_gemm: true
+      # fused topk router with aux score
+      moe_use_fused_router_with_aux_score: false
       # MLA
+      multi_latent_attention: false
+
       multi_latent_attention: true
 
       # ckpt
@@ -84,7 +90,7 @@ modules:
       use_turbo_grouped_mlp: false
 
       # deepep
-      use_turbo_deepep: true
+      use_turbo_deepep: false
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 

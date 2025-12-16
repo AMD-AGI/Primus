@@ -207,7 +207,7 @@ slurm:
 
 # Container configuration
 container:
-  image: "rocm/primus:v25.10"
+  image: "rocm/primus:v25.10_gfx942"
   options:
     cpus: "32"
     memory: "256G"

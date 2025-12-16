@@ -26,15 +26,7 @@ def _install_fake_megatron_training(monkeypatch: pytest.MonkeyPatch):
     def fake_training_log(*args, **kwargs):
         return "ok"
 
-    # Provide a minimal `get_model` stub so that any code which expects
-    # `megatron.training.training.get_model` (e.g., Primus monkey patches in
-    # `primus.pretrain.load_backend_trainer`) can safely import and patch this
-    # fake training module during tests without raising AttributeError.
-    def fake_get_model(*args, **kwargs):
-        return None
-
     training_mod.training_log = fake_training_log
-    training_mod.get_model = fake_get_model
 
     # Wire the package hierarchy: megatron.training.training
     training_pkg.training = training_mod
