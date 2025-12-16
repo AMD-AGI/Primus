@@ -10,7 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: b0816fb1aa25d12fc05877a3f05d44c5fec0acd5 # cicd update docker image to v25.10 (#183)
+  PRIMUS_TURBO_COMMIT: 935a6314b1e6f57894c198a0b8def3053a8e903f # feat(mxfp4): Add mxfp4 gemm and fix scale calculate of mxfp8 (#179)
 
 jobs:
   code-lint:
