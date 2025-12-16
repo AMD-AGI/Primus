@@ -17,6 +17,7 @@ from primus.backends.megatron.patches import args_patches as _args_patches  # no
 from primus.backends.megatron.patches import checkpoint_patches as _checkpoint_patches
 from primus.backends.megatron.patches import env_patches as _env_patches
 from primus.backends.megatron.patches import flops_patches as _flops_patches
+from primus.backends.megatron.patches import fsdp_patches as _fsdp_patches
 from primus.backends.megatron.patches import (
     training_log_patches as _training_log_patches,
 )
