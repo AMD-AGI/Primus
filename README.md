@@ -47,7 +47,7 @@ Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-ru
 1. **Pull the latest Docker image**
 
     ```bash
-    docker pull docker.io/rocm/primus:v25.10_gfx942
+    docker pull docker.io/rocm/primus:v25.10
     ```
 
 2. **Clone the repository**
@@ -61,7 +61,7 @@ Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-ru
 
     ```bash
     # Run training in container
-    ./runner/primus-cli container --image rocm/primus:v25.10_gfx942 \
+    ./runner/primus-cli container --image rocm/primus:v25.10 \
       -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml
     ```
 
