@@ -21,6 +21,7 @@ from primus.backends.megatron.patches import fsdp_patches as _fsdp_patches
 from primus.backends.megatron.patches import (
     training_log_patches as _training_log_patches,
 )
+from primus.backends.megatron.patches import transformer_patches as _transformer_patches
 from primus.core.patches import run_patches
 
 
