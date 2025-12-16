@@ -85,6 +85,7 @@ def run_patches(
     applied_count = 0
     applied_ids: List[str] = []
 
+    log_rank_0("--------------------------------------------------------------------------------")
     log_rank_0(
         f"[Patch] Executing patches: backend={backend}, phase={phase}, "
         f"backend_version={backend_version}, primus_version={primus_version}, "
@@ -111,6 +112,8 @@ def run_patches(
 
         # Execute patch
         try:
+            log_rank_0("--------------------------------------------------------------------------------")
+            log_rank_0(f"[Patch] Applying {patch.id}: {patch.description}")
             patch.apply(ctx)
             applied_count += 1
             applied_ids.append(patch.id)
@@ -124,5 +127,6 @@ def run_patches(
     log_rank_0(
         f"[Patch] Applied {applied_count}/{total_patches} patches for {backend}/{phase}: " f"{applied_ids}"
     )
+    log_rank_0("--------------------------------------------------------------------------------")
 
     return applied_count
