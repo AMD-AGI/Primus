@@ -11,7 +11,7 @@ import jax
 import jax.numpy as jnp
 from MaxText.layers import quantizations
 from MaxText.layers.moe import COMBINE, DISPATCH, RoutedMoE
-
+from MaxText import max_logging
 
 class PrimusRoutedMoE(RoutedMoE):
     def __init__(self, *args, **kwargs):
@@ -93,7 +93,7 @@ class PrimusRoutedMoE(RoutedMoE):
         wo_kernel,
     ):
         """Perform sparse matrix multiplication with optional Primus Turbo backend."""
-        if not self.config.use_primus_turbo_grouped_gemm:
+        if not self.config.primus_turbo_grouped_gemm:
             return super().sparse_matmul(
                 inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
             )
@@ -103,12 +103,12 @@ class PrimusRoutedMoE(RoutedMoE):
             from primus_turbo.jax.lax.grouped_gemm import grouped_gemm
         except ImportError:
             # Fallback to original implementation if primus_turbo is not available
-            # jax.debug.print("[PrimusRoutedMoE] primus_turbo not available, using default ragged_dot")
+            max_logging.log("WARNING: primus_turbo not available, using default ragged_dot in MoE")
             return super().sparse_matmul(
                 inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
             )
 
-        # jax.debug.print("[PrimusRoutedMoE] Using primus_turbo grouped_gemm")
+        # max_logging.log("Using primus_turbo grouped_gemm in MoE")
         _orig_ragged_dot = jax.lax.ragged_dot
 
         def _turbo_ragged_dot(*, lhs, rhs, group_sizes, preferred_element_type=None, **kwargs):
