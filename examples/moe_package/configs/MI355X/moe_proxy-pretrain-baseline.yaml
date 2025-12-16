@@ -65,8 +65,6 @@ modules:
       moe_use_legacy_grouped_gemm: true
       # fused topk router with aux score
       moe_use_fused_router_with_aux_score: false
-      # pad 192/128 for deepseek attention
-      fused_padded_mla_attention: false
       # MLA
       multi_latent_attention: false
 
