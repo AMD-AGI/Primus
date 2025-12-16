@@ -32,11 +32,11 @@ modules:
       fp8: null  # Set to "e4m3" or "hybrid" for FP8 training
 
       # hyper parameters
-      train_iters: 200
+      train_iters: 10000
       micro_batch_size: 4
       global_batch_size: 640
-      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
-      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      seq_length: ${PRIMUS_SEQ_LENGTH:8192}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:8192}
       lr: 1.0e-5
       min_lr: 0.0
       lr_warmup_iters: 2
