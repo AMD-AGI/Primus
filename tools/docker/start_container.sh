@@ -7,10 +7,11 @@
 
 PRIMUS_PATH=$(realpath "$(dirname "$0")/../..")
 DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10"}
-DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
+DATA_PATH=${DATA_PATH:-"/data/mlperf_llama31_8b/data"}
+HF_TOKEN=${HF_TOKEN:-""}
 
 bash "${PRIMUS_PATH}"/tools/docker/docker_podman_proxy.sh run -d \
-    --name dev_primus \
+    --name dev_primus-$USER \
     --ipc=host \
     --network=host \
     --device=/dev/kfd \
@@ -22,6 +23,7 @@ bash "${PRIMUS_PATH}"/tools/docker/docker_podman_proxy.sh run -d \
     --group-add video \
     --privileged \
     --env DATA_PATH="${DATA_PATH}" \
+    --env HF_TOKEN="${HF_TOKEN}" \
     -v "${PRIMUS_PATH}:/workspace/Primus" \
     -v "${DATA_PATH}:${DATA_PATH}" \
     -v /data/mlperf_llama31_8b/data:/data \
