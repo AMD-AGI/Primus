@@ -86,7 +86,7 @@ class BackendAdapter(ABC):
     # Internal Methods (Do NOT override)
     # ============================================================================
 
-    def _apply_setup_patches(self, module_config):
+    def _apply_setup_patches(self, primus_config, module_config):
         """
         Apply setup phase patches before backend preparation.
 
@@ -110,8 +110,8 @@ class BackendAdapter(ABC):
             backend_version=None,  # No version yet - setup runs before import
             model_name=model_name,
             extra={
-                "config": module_config.params,
                 "module_config": module_config,
+                "primus_config": primus_config,
             },
         )
 
@@ -172,7 +172,7 @@ class BackendAdapter(ABC):
 
         # 1) apply setup patches (automatic for all backends)
         log_rank_0("[Step 1/5] Applying setup patches...")
-        self._apply_setup_patches(module_config)
+        self._apply_setup_patches(primus_config, module_config)
         log_rank_0("Setup patches applied successfully")
 
         # 2) backend env/patch/detect
