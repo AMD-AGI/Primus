@@ -259,3 +259,59 @@ def patch_mock_data(ctx: PatchContext):
     log_kv_rank_0(f"[Patch:megatron.args.mock_data]   -train_data_path", f"{args.train_data_path}")
     log_kv_rank_0(f"[Patch:megatron.args.mock_data]   -valid_data_path", f"{args.valid_data_path}")
     log_kv_rank_0(f"[Patch:megatron.args.mock_data]   -test_data_path", f"{args.test_data_path}")
+
+
+@register_patch(
+    "megatron.args.sequence_parallel_tp1",
+    backend="megatron",
+    phase="build_args",
+    description="Disable sequence_parallel when tensor_model_parallel_size == 1",
+)
+def patch_sequence_parallel_tp1(ctx: PatchContext):
+    """
+    Align sequence_parallel behavior with trainer defaults:
+
+        if args.tensor_model_parallel_size == 1:
+            args.sequence_parallel = False
+    """
+    args = ctx.extra.get("backend_args", {})
+    if not args:
+        return
+
+    tp_size = getattr(args, "tensor_model_parallel_size", None)
+    if tp_size == 1:
+        # Only log when we actually change the flag.
+        if getattr(args, "sequence_parallel", None):
+            log_rank_0(
+                "[Patch:megatron.args.sequence_parallel_tp1] "
+                "sequence_parallel=True is incompatible with tp_size=1; forcing to False."
+            )
+        args.sequence_parallel = False
+        log_kv_rank_0(
+            "[Patch:megatron.args.sequence_parallel_tp1] -sequence_parallel", f"{args.sequence_parallel}"
+        )
+
+
+@register_patch(
+    "megatron.args.iterations_to_skip_default",
+    backend="megatron",
+    phase="build_args",
+    description="Ensure iterations_to_skip has a list default instead of None",
+)
+def patch_iterations_to_skip_default(ctx: PatchContext):
+    """
+    Align iterations_to_skip behavior with trainer defaults:
+
+        if args.iterations_to_skip is None:
+            args.iterations_to_skip = []
+    """
+    args = ctx.extra.get("backend_args", {})
+    if not args:
+        return
+
+    if getattr(args, "iterations_to_skip", None) is None:
+        args.iterations_to_skip = []
+        log_kv_rank_0(
+            "[Patch:megatron.args.iterations_to_skip_default] -iterations_to_skip",
+            f"{args.iterations_to_skip}",
+        )

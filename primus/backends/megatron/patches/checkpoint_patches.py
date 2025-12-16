@@ -34,7 +34,7 @@ def patch_filesystem_writer_async(ctx: PatchContext):
           with PrimusFileSystemWriterAsync.
     """
 
-    log_rank_0("MegatronPatches: Patching FileSystemWriterAsync...")
+    log_rank_0("[Patch:megatron.checkpoint.filesystem_writer_async] Patching FileSystemWriterAsync...")
     try:
         import megatron.core.dist_checkpointing.strategies.filesystem_async as filesystem_async_module
 
@@ -44,6 +44,10 @@ def patch_filesystem_writer_async(ctx: PatchContext):
 
         filesystem_async_module.FileSystemWriterAsync = PrimusFileSystemWriterAsync
     except Exception as e:  # pragma: no cover - best-effort logging
-        warning_rank_0(f"MegatronPatches: Patch FileSystemWriterAsync failed: {e}")
+        warning_rank_0(
+            f"[Patch:megatron.checkpoint.filesystem_writer_async] Patch FileSystemWriterAsync failed: {e}"
+        )
     else:
-        log_rank_0("MegatronPatches: Patch FileSystemWriterAsync successfully.")
+        log_rank_0(
+            "[Patch:megatron.checkpoint.filesystem_writer_async] Patch FileSystemWriterAsync successfully."
+        )
