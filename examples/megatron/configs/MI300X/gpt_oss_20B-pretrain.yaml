@@ -32,7 +32,7 @@ modules:
       fp8: null  # Set to "e4m3" or "hybrid" for FP8 training
 
       # hyper parameters
-      train_iters: 10000
+      train_iters: 20
       micro_batch_size: 4
       global_batch_size: 640
       seq_length: ${PRIMUS_SEQ_LENGTH:8192}
@@ -57,7 +57,7 @@ modules:
       overlap_param_gather: true
 
       # data
-      mock_data: false
+      mock_data: true
       train_data_path: "10 /data/c4-train.en_6_text_document"
       valid_data_path: "/data/c4-validation-91205-samples.en_text_document"
       test_data_path: "/data/c4-validation-91205-samples.en_text_document"
