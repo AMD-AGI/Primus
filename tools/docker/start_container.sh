@@ -6,7 +6,7 @@
 ###############################################################################
 
 PRIMUS_PATH=$(realpath "$(dirname "$0")/../..")
-DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10_gfx942"}
+DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10"}
 DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 
 bash "${PRIMUS_PATH}"/tools/docker/docker_podman_proxy.sh run -d \
@@ -24,5 +24,9 @@ bash "${PRIMUS_PATH}"/tools/docker/docker_podman_proxy.sh run -d \
     --env DATA_PATH="${DATA_PATH}" \
     -v "${PRIMUS_PATH}:/workspace/Primus" \
     -v "${DATA_PATH}:${DATA_PATH}" \
+    -v /data/mlperf_llama31_8b/data:/data \
+    -v "${PWD}:/workspace/code" \
+    -v "${PWD}/../AMD:/workspace/AMD" \
+    -v "${PWD}/../utilities:/workspace/utilities" \
     -w "/workspace/Primus" \
     "$DOCKER_IMAGE" sleep infinity
