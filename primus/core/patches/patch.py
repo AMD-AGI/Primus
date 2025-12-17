@@ -15,6 +15,7 @@ from typing import Callable, List, Optional, Set
 
 from primus.core.patches.context import PatchContext
 from primus.core.patches.utils import version_in_range
+from primus.modules.module_utils import log_rank_0
 
 # -----------------------------------------------------------------------------
 # FunctionPatch
@@ -82,14 +83,31 @@ class FunctionPatch:
     def applies_to(self, ctx: PatchContext) -> bool:
         """Return True if this patch should be applied to the given context."""
         if self.backend is not None and self.backend != ctx.backend:
+            log_rank_0(
+                f"[Patch] ⊘ Skipped: {self.id} (backend mismatch: "
+                f"expected={self.backend}, actual={ctx.backend})"
+            )
             return False
         if self.phase is not None and self.phase != ctx.phase:
+            log_rank_0(
+                f"[Patch] ⊘ Skipped: {self.id} (phase mismatch: "
+                f"expected={self.phase}, actual={ctx.phase})"
+            )
             return False
         if not self._match_backend_version(ctx):
+            log_rank_0(
+                f"[Patch] ⊘ Skipped: {self.id} (backend version mismatch: "
+                f"required={self.backend_version_patterns}, actual={ctx.backend_version})"
+            )
             return False
         if not self._match_primus_version(ctx):
+            log_rank_0(
+                f"[Patch] ⊘ Skipped: {self.id} (primus version mismatch: "
+                f"required={self.primus_version_patterns}, actual={ctx.primus_version})"
+            )
             return False
         if self.condition is not None and not self.condition(ctx):
+            log_rank_0(f"[Patch] ⊘ Skipped: {self.id} (condition not met)")
             return False
         return True
 
