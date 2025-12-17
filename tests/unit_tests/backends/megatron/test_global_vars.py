@@ -210,7 +210,7 @@ class TestUploadMLflowArtifacts:
         mock_upload_artifacts.return_value = {"traces": 0, "logs": 0, "tracelens_reports": 0}
 
         # Call with empty ranks list
-        result = upload_mlflow_artifacts(
+        upload_mlflow_artifacts(
             tracelens_ranks=[],
             upload_tracelens_report=True,
         )
