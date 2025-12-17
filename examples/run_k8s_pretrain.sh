@@ -15,7 +15,7 @@ GPU="8"
 EXP_PATH=""
 DATA_PATH=""
 BACKEND="megatron"
-IMAGE="docker.io/rocm/primus:v25.10_gfx942"
+IMAGE="docker.io/rocm/primus:v25.10"
 HF_TOKEN="${HF_TOKEN:-}"
 WORKSPACE="primus-safe-pretrain"
 NODELIST=""
@@ -38,7 +38,7 @@ Options for create:
     --backend <name>            Training backend, e.g. megatron | torchtitan(default: megatron)
     --exp <exp_path>            Path to EXP config (optional)
     --data_path <data_path>     Data path (optional)
-    --image <docker_image>      Docker image to use (default: docker.io/rocm/primus:v25.10_gfx942)
+    --image <docker_image>      Docker image to use (default: docker.io/rocm/primus:v25.10)
     --hf_token <token>          HuggingFace token (default: from env HF_TOKEN)
     --workspace <workspace>     Workspace name (default: safe-cluster-dev)
     --nodelist <node1,node2>    Comma-separated list of node names to run on (optional)
