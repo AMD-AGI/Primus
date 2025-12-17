@@ -12,7 +12,7 @@ components (configs, blocks, etc.) to integrate Primus-specific behavior.
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0, warning_rank_0
+from primus.modules.module_utils import log_rank_0
 
 
 def _has_recompute_layer_ids(ctx: PatchContext) -> bool:
@@ -45,52 +45,45 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
     """
     args = get_args(ctx)
 
-    try:
-        import megatron.core.transformer.transformer_config as config_mod
+    import megatron.core.transformer.transformer_config as config_mod
 
-        # 1) Attach Primus-provided recompute_layer_ids to TransformerConfig
-        config_mod.TransformerConfig.recompute_layer_ids = args.recompute_layer_ids
+    # 1) Attach Primus-provided recompute_layer_ids to TransformerConfig
+    config_mod.TransformerConfig.recompute_layer_ids = args.recompute_layer_ids
 
-        # 2) Wrap __post_init__ to temporarily clear recompute_granularity
-        orig_post_init = config_mod.TransformerConfig.__post_init__
+    # 2) Wrap __post_init__ to temporarily clear recompute_granularity
+    orig_post_init = config_mod.TransformerConfig.__post_init__
 
-        def new_post_init(self):
-            tmp = getattr(self, "recompute_granularity", None)
-            self.recompute_granularity = None
-            orig_post_init(self)
-            self.recompute_granularity = tmp
+    def new_post_init(self):
+        tmp = getattr(self, "recompute_granularity", None)
+        self.recompute_granularity = None
+        orig_post_init(self)
+        self.recompute_granularity = tmp
 
-        config_mod.TransformerConfig.__post_init__ = new_post_init
+    config_mod.TransformerConfig.__post_init__ = new_post_init
 
-        # 3) Replace TransformerBlock in various Megatron models
-        log_rank_0("MegatronPatches: monkey patch TransformerBlock checkpoint_forward...")
+    # 3) Replace TransformerBlock in various Megatron models
+    log_rank_0("MegatronPatches: monkey patch TransformerBlock checkpoint_forward...")
 
-        import megatron.core.models.bert.bert_model as orig_bert_model
-        import megatron.core.models.gpt.gpt_model as orig_gpt_model
-        import megatron.core.models.retro.decoder_attention as orig_decoder_attention
-        import megatron.core.models.T5.t5_model as orig_t5_model
-        import megatron.core.models.vision.clip_vit_model as orig_clip_vit_model
-        import megatron.core.models.vision.radio as orig_radio
-        import megatron.core.transformer.transformer_block as orig_transformer_block
+    import megatron.core.models.bert.bert_model as orig_bert_model
+    import megatron.core.models.gpt.gpt_model as orig_gpt_model
+    import megatron.core.models.retro.decoder_attention as orig_decoder_attention
+    import megatron.core.models.T5.t5_model as orig_t5_model
+    import megatron.core.models.vision.clip_vit_model as orig_clip_vit_model
+    import megatron.core.models.vision.radio as orig_radio
+    import megatron.core.transformer.transformer_block as orig_transformer_block
 
-        from primus.backends.megatron.core.transformer.transformer_block import (
-            PrimusTransformerBlock,
-        )
+    from primus.backends.megatron.core.transformer.transformer_block import (
+        PrimusTransformerBlock,
+    )
 
-        # Apply the same replacement that previously lived in MegatronTrainer
-        orig_transformer_block.TransformerBlock = PrimusTransformerBlock
-        orig_bert_model.TransformerBlock = PrimusTransformerBlock
-        orig_gpt_model.TransformerBlock = PrimusTransformerBlock
-        orig_decoder_attention.TransformerBlock = PrimusTransformerBlock
-        orig_t5_model.TransformerBlock = PrimusTransformerBlock
-        orig_clip_vit_model.TransformerBlock = PrimusTransformerBlock
-        orig_radio.TransformerBlock = PrimusTransformerBlock
-
-    except (ImportError, AttributeError) as e:
-        # Fail-safe: do not break training if Megatron internals change.
-        warning_rank_0(
-            f"[Patch:megatron.transformer.custom_recompute_layer_ids] Failed to apply custom_recompute_layer_ids patch: {type(e).__name__}: {e}"
-        )
+    # Apply the same replacement that previously lived in MegatronTrainer
+    orig_transformer_block.TransformerBlock = PrimusTransformerBlock
+    orig_bert_model.TransformerBlock = PrimusTransformerBlock
+    orig_gpt_model.TransformerBlock = PrimusTransformerBlock
+    orig_decoder_attention.TransformerBlock = PrimusTransformerBlock
+    orig_t5_model.TransformerBlock = PrimusTransformerBlock
+    orig_clip_vit_model.TransformerBlock = PrimusTransformerBlock
+    orig_radio.TransformerBlock = PrimusTransformerBlock
 
 
 def _is_turbo_parallel_linear_enabled(ctx: PatchContext) -> bool:
@@ -117,24 +110,18 @@ def patch_mla_attention(ctx: PatchContext):
           multi_latent_attention.MLASelfAttention and
           gpt_layer_specs.MLASelfAttention with PaddedMLASelfAttention.
     """
-    try:
-        log_rank_0("MegatronPatches: monkey patch MLA attention to support padded fusion...")
+    log_rank_0("MegatronPatches: monkey patch MLA attention to support padded fusion...")
 
-        # pad module definition
-        from megatron.core.transformer import multi_latent_attention
+    # pad module definition
+    from megatron.core.transformer import multi_latent_attention
 
-        from primus.backends.megatron.core.transformer.multi_latent_attention import (
-            PrimusMLASelfAttention,
-        )
+    from primus.backends.megatron.core.transformer.multi_latent_attention import (
+        PrimusMLASelfAttention,
+    )
 
-        multi_latent_attention.MLASelfAttention = PrimusMLASelfAttention
+    multi_latent_attention.MLASelfAttention = PrimusMLASelfAttention
 
-        # pad imported module
-        from megatron.core.models.gpt import gpt_layer_specs
+    # pad imported module
+    from megatron.core.models.gpt import gpt_layer_specs
 
-        gpt_layer_specs.MLASelfAttention = PrimusMLASelfAttention
-
-    except (ImportError, AttributeError) as e:
-        warning_rank_0(
-            f"[Patch:megatron.transformer.patch_mla_attention] Failed to apply patch_mla_attention patch: {type(e).__name__}: {e}"
-        )
+    gpt_layer_specs.MLASelfAttention = PrimusMLASelfAttention

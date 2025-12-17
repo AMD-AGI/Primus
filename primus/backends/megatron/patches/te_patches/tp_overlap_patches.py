@@ -14,7 +14,7 @@ Handles different TE versions (< 2.0 and >= 2.0) with appropriate APIs.
 import functools
 
 from primus.core.patches import PatchContext, get_args, register_patch
-from primus.modules.module_utils import log_rank_0, warning_rank_0
+from primus.modules.module_utils import log_rank_0
 
 
 def _check_tp_overlap_conditions(ctx: PatchContext) -> bool:
@@ -73,43 +73,39 @@ def patch_tp_te_overlap_v2(ctx: PatchContext):
 
     This version uses general_gemm API introduced in TE 2.0.
     """
-    try:
-        import transformer_engine as te
-        import transformer_engine_torch as tex
+    import transformer_engine as te
+    import transformer_engine_torch as tex
 
-        from primus.backends.transformer_engine import transformer_engine_torch as ptex
-        from primus.backends.transformer_engine.pytorch.cpp_extensions.gemm import (
-            general_gemm,
-        )
-        from primus.backends.transformer_engine.pytorch.module.base import (
-            get_workspace,
-            initialize_ub,
-        )
+    from primus.backends.transformer_engine import transformer_engine_torch as ptex
+    from primus.backends.transformer_engine.pytorch.cpp_extensions.gemm import (
+        general_gemm,
+    )
+    from primus.backends.transformer_engine.pytorch.module.base import (
+        get_workspace,
+        initialize_ub,
+    )
 
-        log_rank_0("[Patch:megatron.patch.tp_te_overlap.v2] Patching TE TP overlap (TE >= 2.0)...")
+    log_rank_0("[Patch:megatron.patch.tp_te_overlap.v2] Patching TE TP overlap (TE >= 2.0)...")
 
-        # Patch CommOverlap types
-        tex.CommOverlap = ptex.CommOverlap
-        tex.CommOverlapP2P = ptex.CommOverlapP2P
-        tex.CommOverlapType = ptex.CommOverlapType
+    # Patch CommOverlap types
+    tex.CommOverlap = ptex.CommOverlap
+    tex.CommOverlapP2P = ptex.CommOverlapP2P
+    tex.CommOverlapType = ptex.CommOverlapType
 
-        # Patch general_gemm
-        prev_general_gemm = te.pytorch.cpp_extensions.general_gemm
-        te.pytorch.cpp_extensions.general_gemm = functools.partial(general_gemm, orig_func=prev_general_gemm)
-        te.pytorch.module.linear.general_gemm = functools.partial(general_gemm, orig_func=prev_general_gemm)
-        te.pytorch.module.layernorm_linear.general_gemm = functools.partial(
-            general_gemm, orig_func=prev_general_gemm
-        )
+    # Patch general_gemm
+    prev_general_gemm = te.pytorch.cpp_extensions.general_gemm
+    te.pytorch.cpp_extensions.general_gemm = functools.partial(general_gemm, orig_func=prev_general_gemm)
+    te.pytorch.module.linear.general_gemm = functools.partial(general_gemm, orig_func=prev_general_gemm)
+    te.pytorch.module.layernorm_linear.general_gemm = functools.partial(
+        general_gemm, orig_func=prev_general_gemm
+    )
 
-        # Patch workspace helpers
-        te.pytorch.module.base.initialize_ub = initialize_ub
-        te.pytorch.module.base.get_workspace = get_workspace
-        te.pytorch.cpp_extensions.CommOverlapType = ptex.CommOverlapType
+    # Patch workspace helpers
+    te.pytorch.module.base.initialize_ub = initialize_ub
+    te.pytorch.module.base.get_workspace = get_workspace
+    te.pytorch.cpp_extensions.CommOverlapType = ptex.CommOverlapType
 
-        log_rank_0("[Patch:megatron.patch.tp_te_overlap.v2] Successfully patched TE TP overlap")
-
-    except Exception as e:
-        warning_rank_0(f"[Patch:megatron.patch.tp_te_overlap.v2][SKIP] Failed to apply patch: {e}")
+    log_rank_0("[Patch:megatron.patch.tp_te_overlap.v2] Successfully patched TE TP overlap")
 
 
 @register_patch(
@@ -125,44 +121,40 @@ def patch_tp_te_overlap_v1(ctx: PatchContext):
 
     This version uses gemm and fp8_gemm APIs for older TE versions.
     """
-    try:
-        import transformer_engine as te
-        import transformer_engine_torch as tex
+    import transformer_engine as te
+    import transformer_engine_torch as tex
 
-        from primus.backends.transformer_engine import transformer_engine_torch as ptex
-        from primus.backends.transformer_engine.pytorch.cpp_extensions.gemm import (
-            fp8_gemm,
-            gemm,
-        )
-        from primus.backends.transformer_engine.pytorch.module.base import (
-            get_workspace,
-            initialize_ub,
-        )
+    from primus.backends.transformer_engine import transformer_engine_torch as ptex
+    from primus.backends.transformer_engine.pytorch.cpp_extensions.gemm import (
+        fp8_gemm,
+        gemm,
+    )
+    from primus.backends.transformer_engine.pytorch.module.base import (
+        get_workspace,
+        initialize_ub,
+    )
 
-        log_rank_0("[Patch:megatron.patch.tp_te_overlap.v1] Patching TE TP overlap (TE < 2.0)...")
+    log_rank_0("[Patch:megatron.patch.tp_te_overlap.v1] Patching TE TP overlap (TE < 2.0)...")
 
-        # Patch CommOverlap types
-        tex.CommOverlap = ptex.CommOverlap
-        tex.CommOverlapP2P = ptex.CommOverlapP2P
-        tex.CommOverlapType = ptex.CommOverlapType
-        tex.CommOverlapAlgo = ptex.CommOverlapAlgo
+    # Patch CommOverlap types
+    tex.CommOverlap = ptex.CommOverlap
+    tex.CommOverlapP2P = ptex.CommOverlapP2P
+    tex.CommOverlapType = ptex.CommOverlapType
+    tex.CommOverlapAlgo = ptex.CommOverlapAlgo
 
-        # Patch gemm and fp8_gemm
-        prev_gemm = te.pytorch.cpp_extensions.gemm
-        prev_fp8_gemm = te.pytorch.cpp_extensions.fp8_gemm
+    # Patch gemm and fp8_gemm
+    prev_gemm = te.pytorch.cpp_extensions.gemm
+    prev_fp8_gemm = te.pytorch.cpp_extensions.fp8_gemm
 
-        te.pytorch.cpp_extensions.CommOverlapAlgo = ptex.CommOverlapAlgo
-        te.pytorch.cpp_extensions.gemm = functools.partial(gemm, orig_func=prev_gemm)
-        te.pytorch.module.linear.gemm = functools.partial(gemm, orig_func=prev_gemm)
-        te.pytorch.cpp_extensions.fp8_gemm = functools.partial(fp8_gemm, orig_func=prev_fp8_gemm)
-        te.pytorch.module.linear.fp8_gemm = functools.partial(fp8_gemm, orig_func=prev_fp8_gemm)
+    te.pytorch.cpp_extensions.CommOverlapAlgo = ptex.CommOverlapAlgo
+    te.pytorch.cpp_extensions.gemm = functools.partial(gemm, orig_func=prev_gemm)
+    te.pytorch.module.linear.gemm = functools.partial(gemm, orig_func=prev_gemm)
+    te.pytorch.cpp_extensions.fp8_gemm = functools.partial(fp8_gemm, orig_func=prev_fp8_gemm)
+    te.pytorch.module.linear.fp8_gemm = functools.partial(fp8_gemm, orig_func=prev_fp8_gemm)
 
-        # Patch workspace helpers
-        te.pytorch.module.base.initialize_ub = initialize_ub
-        te.pytorch.module.base.get_workspace = get_workspace
-        te.pytorch.cpp_extensions.CommOverlapType = ptex.CommOverlapType
+    # Patch workspace helpers
+    te.pytorch.module.base.initialize_ub = initialize_ub
+    te.pytorch.module.base.get_workspace = get_workspace
+    te.pytorch.cpp_extensions.CommOverlapType = ptex.CommOverlapType
 
-        log_rank_0("[Patch:megatron.patch.tp_te_overlap.v1] Successfully patched TE TP overlap")
-
-    except Exception as e:
-        warning_rank_0(f"[Patch:megatron.patch.tp_te_overlap.v1][SKIP] Failed to apply patch: {e}")
+    log_rank_0("[Patch:megatron.patch.tp_te_overlap.v1] Successfully patched TE TP overlap")
