@@ -25,10 +25,6 @@ bash "${PRIMUS_PATH}"/tools/docker/docker_podman_proxy.sh run -d \
     --env DATA_PATH="${DATA_PATH}" \
     --env HF_TOKEN="${HF_TOKEN}" \
     -v "${PRIMUS_PATH}:/workspace/Primus" \
-    -v "${DATA_PATH}:${DATA_PATH}" \
-    -v /data/mlperf_llama31_8b/data:/data \
-    -v "${PWD}:/workspace/code" \
-    -v "${PWD}/../AMD:/workspace/AMD" \
-    -v "${PWD}/../utilities:/workspace/utilities" \
+    -v "${DATA_PATH}:/data \
     -w "/workspace/Primus" \
     "$DOCKER_IMAGE" sleep infinity
