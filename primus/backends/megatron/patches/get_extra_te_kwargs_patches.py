@@ -13,8 +13,13 @@ to customize Transformer Engine layer initialization parameters.
 
 import inspect
 
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
+
+
+def _no_fp8_weight_transpose_cache_enabled(ctx: PatchContext) -> bool:
+    """Check if no_fp8_weight_transpose_cache is enabled in module_config."""
+    return getattr(get_args(ctx), "no_fp8_weight_transpose_cache", False)
 
 
 @register_patch(
@@ -22,11 +27,7 @@ from primus.modules.module_utils import log_rank_0
     backend="megatron",
     phase="before_train",
     description="Override _get_extra_te_kwargs to customize TE layer initialization parameters",
-    condition=lambda ctx: (
-        ctx.extra.get("module_config", {}).params.get("no_fp8_weight_transpose_cache", False)
-        if hasattr(ctx.extra.get("module_config", {}), "params")
-        else False
-    ),
+    condition=_no_fp8_weight_transpose_cache_enabled,
 )
 def patch_get_extra_te_kwargs(ctx: PatchContext):
     """
