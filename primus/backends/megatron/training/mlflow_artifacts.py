@@ -373,7 +373,7 @@ def generate_tracelens_report(
             # CSV: Multiple files in a subdirectory per rank
             csv_subdir = os.path.join(output_dir, report_name)
             os.makedirs(csv_subdir, exist_ok=True)
-            dfs = generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
+            generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
 
             # Collect all generated CSV files
             csv_files = glob.glob(os.path.join(csv_subdir, "*.csv"))
