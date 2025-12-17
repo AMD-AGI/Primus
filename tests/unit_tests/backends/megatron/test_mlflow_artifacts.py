@@ -20,8 +20,6 @@ import tempfile
 from types import SimpleNamespace
 from unittest.mock import Mock, patch, call
 
-import pytest
-
 from primus.backends.megatron.training import mlflow_artifacts
 
 
