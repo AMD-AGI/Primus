@@ -42,10 +42,9 @@ EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
 
 # Default docker image
 if [ "${BACKEND:-}" = "MaxText" ]; then
-    DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/jax-training:maxtext-v25.9"}
-else
-    DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10"}
+    DOCKER_IMAGE="docker.io/rocm/jax-training:maxtext-v25.9"
 fi
+DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10"}
 
 # Project root
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
