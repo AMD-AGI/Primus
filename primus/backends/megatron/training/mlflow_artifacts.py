@@ -45,18 +45,9 @@ def _get_all_trace_files(tensorboard_dir: str) -> list:
     # Using specific patterns to avoid matching unrelated JSON files
     patterns = ["*.pt.trace.json", "*.pt.trace.json.gz"]
     for pattern in patterns:
-        trace_files.extend(glob.glob(os.path.join(tensorboard_dir, pattern)))
         trace_files.extend(glob.glob(os.path.join(tensorboard_dir, "**", pattern), recursive=True))
 
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_files = []
-    for f in trace_files:
-        if f not in seen:
-            seen.add(f)
-            unique_files.append(f)
-
-    return unique_files
+    return trace_files
 
 
 def _get_all_log_files(exp_root_path: str) -> list:
