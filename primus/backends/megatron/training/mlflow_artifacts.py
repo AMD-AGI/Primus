@@ -30,7 +30,6 @@ def _get_all_trace_files(tensorboard_dir: str) -> list:
     Trace files are typically named like:
     - *.pt.trace.json
     - *.pt.trace.json.gz
-    but we also fall back to generic JSON/JSON.GZ patterns.
 
     Args:
         tensorboard_dir: Path to the tensorboard directory containing trace files
