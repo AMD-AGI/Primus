@@ -60,8 +60,6 @@ def patch_deprecated_moe_layer(ctx: PatchContext):
         - Replace core MoELayer / MoESubmodules / experts with deprecated versions
         - Sync replacements into gpt.moe_module_specs
     """
-    log_rank_0("[Patch:megatron.moe.deprecated_layer] Patching with DeprecatedMoELayer...")
-
     # patch module class
     from primus.backends.megatron.core.transformer.moe.deprecated_20251209.experts import (
         DeprecatedGroupedMLP,
@@ -88,6 +86,27 @@ def patch_deprecated_moe_layer(ctx: PatchContext):
     moe_module_specs.SequentialMLP = DeprecatedSequentialMLP
     moe_module_specs.TEGroupedMLP = DeprecatedTEGroupedMLP
 
+    log_rank_0(
+        f"[Patch:megatron.moe.deprecated_layer]   Patched megatron.core.models.gpt.moe_module_specs.MoELayer "
+        f"-> {DeprecatedMoELayer.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.moe.deprecated_layer]   Patched megatron.core.models.gpt.moe_module_specs.MoESubmodules "
+        f"-> {DeprecatedMoESubmodules.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.moe.deprecated_layer]   Patched megatron.core.models.gpt.moe_module_specs.GroupedMLP "
+        f"-> {DeprecatedGroupedMLP.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.moe.deprecated_layer]   Patched megatron.core.models.gpt.moe_module_specs.SequentialMLP "
+        f"-> {DeprecatedSequentialMLP.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.moe.deprecated_layer]   Patched megatron.core.models.gpt.moe_module_specs.TEGroupedMLP "
+        f"-> {DeprecatedTEGroupedMLP.__name__}"
+    )
+
 
 # =============================================================================
 # Patch 2: Primus TopKRouter
@@ -109,8 +128,6 @@ def patch_primus_topk_router(ctx: PatchContext):
         - Replace TopKRouter with PrimusTopKRouter
         - If deprecated MoE is enabled, also patch deprecated router
     """
-    log_rank_0("[Patch:megatron.moe.primus_topk_router] Patching TopKRouter...")
-
     # Check if deprecated MoE is also enabled
     use_deprecated_moe = getattr(get_args(ctx), "use_deprecated_20241209_moe_layer", False)
 
@@ -120,12 +137,19 @@ def patch_primus_topk_router(ctx: PatchContext):
         )
 
         sys.modules["megatron.core.transformer.moe.router"].TopKRouter = DeprecatedTopKRouter
+        log_rank_0(
+            f"[Patch:megatron.moe.primus_topk_router]   Patched megatron.core.transformer.moe.router.TopKRouter "
+            f"-> {DeprecatedTopKRouter.__name__}"
+        )
 
     # patch module class
     from primus.backends.megatron.core.transformer.moe.router import PrimusTopKRouter
 
     sys.modules["megatron.core.transformer.moe.router"].TopKRouter = PrimusTopKRouter
-
+    log_rank_0(
+        f"[Patch:megatron.moe.primus_topk_router]   Patched megatron.core.transformer.moe.router.TopKRouter "
+        f"-> {PrimusTopKRouter.__name__}"
+    )
     # patch imported module
     from megatron.core.transformer.moe import moe_layer
 
@@ -135,6 +159,10 @@ def patch_primus_topk_router(ctx: PatchContext):
         from primus.backends.megatron.core.transformer.moe import deprecated_20251209
 
         deprecated_20251209.moe_layer.TopKRouter = PrimusTopKRouter
+        log_rank_0(
+            f"[Patch:megatron.moe.primus_topk_router]   Patched megatron.core.transformer.moe.deprecated_20251209.moe_layer.TopKRouter "
+            f"-> {PrimusTopKRouter.__name__}"
+        )
 
 
 # =============================================================================
@@ -175,6 +203,26 @@ def patch_moe_permute_fusion(ctx: PatchContext):
     ori_transformer_engine.fused_sort_chunks_by_index = moe_sort_chunks_by_index
     ori_transformer_engine.fused_sort_chunks_by_index_with_probs = moe_sort_chunks_by_index_with_probs
     ori_transformer_engine.fused_unpermute = moe_unpermute
+    log_rank_0(
+        f"[Patch:megatron.moe.permute_fusion]   Patched megatron.core.extensions.transformer_engine.fused_permute "
+        f"-> {moe_permute.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.moe.permute_fusion]   Patched megatron.core.extensions.transformer_engine.fused_permute_with_probs "
+        f"-> {moe_permute_with_probs.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.moe.permute_fusion]   Patched megatron.core.extensions.transformer_engine.fused_sort_chunks_by_index "
+        f"-> {moe_sort_chunks_by_index.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.moe.permute_fusion]   Patched megatron.core.extensions.transformer_engine.fused_sort_chunks_by_index_with_probs "
+        f"-> {moe_sort_chunks_by_index_with_probs.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.moe.permute_fusion]   Patched megatron.core.extensions.transformer_engine.fused_unpermute "
+        f"-> {moe_unpermute.__name__}"
+    )
 
     ori_moe_utils.fused_permute = moe_permute
     ori_moe_utils.fused_permute_with_probs = moe_permute_with_probs
@@ -182,3 +230,26 @@ def patch_moe_permute_fusion(ctx: PatchContext):
     ori_moe_utils.fused_sort_chunks_by_index_with_probs = moe_sort_chunks_by_index_with_probs
     ori_moe_utils.fused_unpermute = moe_unpermute
     ori_moe_utils.HAVE_TE = True
+    log_rank_0(
+        f"[Patch:megatron.moe.permute_fusion]   Patched megatron.core.transformer.moe.moe_utils.fused_permute "
+        f"-> {moe_permute.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.moe.permute_fusion]   Patched megatron.core.transformer.moe.moe_utils.fused_permute_with_probs "
+        f"-> {moe_permute_with_probs.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.moe.permute_fusion]   Patched megatron.core.transformer.moe.moe_utils.fused_sort_chunks_by_index "
+        f"-> {moe_sort_chunks_by_index.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.moe.permute_fusion]   Patched megatron.core.transformer.moe.moe_utils.fused_sort_chunks_by_index_with_probs "
+        f"-> {moe_sort_chunks_by_index_with_probs.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.moe.permute_fusion]   Patched megatron.core.transformer.moe.moe_utils.fused_unpermute "
+        f"-> {moe_unpermute.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.moe.permute_fusion]   Patched megatron.core.transformer.moe.moe_utils.HAVE_TE to True"
+    )

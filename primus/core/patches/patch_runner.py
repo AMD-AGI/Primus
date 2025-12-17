@@ -101,7 +101,6 @@ def run_patches(
 
         # Applicability filter
         if not patch.applies_to(ctx):
-            log_rank_0(f"[Patch] ⊘ Skipped: {patch.id} (condition not met or version mismatch)")
             continue
 
         # Dry-run mode
