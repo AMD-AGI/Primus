@@ -100,7 +100,7 @@ def upload_mlflow_artifacts(
 
     args = get_args()
     exp_root_path = get_exp_root_path()
-    tensorboard_dir = getattr(args, "tensorboard_dir", None) if args else None
+    tensorboard_dir = getattr(args, "tensorboard_dir", None)
 
     return upload_artifacts_to_mlflow(
         mlflow_writer=mlflow_writer,
