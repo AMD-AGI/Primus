@@ -10,7 +10,7 @@ mlflow_upload_logs: true             # Upload training log files to MLflow
 mlflow_upload_tracelens_report: false  # Generate and upload TraceLens analysis reports
 mlflow_tracelens_ranks: null         # List of ranks to analyze with TraceLens (null = all)
 mlflow_tracelens_max_reports: null   # Max number of TraceLens reports (null = unlimited)
-mlflow_tracelens_output_format: all  # TraceLens report format: all (xlsx+csv), xlsx, csv, or html (html not yet supported, falls back to xlsx+csv)
+mlflow_tracelens_output_format: all  # TraceLens report format: all (xlsx+csv), xlsx, or csv
 disable_compile_dependencies: true
 # NOTE:
 # - If `use_rocm_mem_info = True`, ROCm memory information will be collected
