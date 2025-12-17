@@ -165,7 +165,40 @@ export NCCL_DEBUG=
 export NCCL_CHECKS_DISABLE=1
 
 # Set InfiniBand GID index for NCCL communication
-export NCCL_IB_GID_INDEX=3
+if [ "$USING_AINIC" == "1" ]; then
+    export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
+    export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
+    export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi-4.1.6"}
+
+    LOG_INFO_RANK0 "Using AINIC"
+    LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
+    LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
+    LOG_INFO_RANK0 "MPI_HOME_DIR: $MPI_HOME_DIR"
+
+    # unset NCCL_IB_GID_INDEX
+    export NCCL_IB_GID_INDEX=1
+    # export NCCL_IB_ROCE_VERSION_NUM=2
+    export NCCL_MAX_P2P_CHANNELS=56
+    export NCCL_IB_TC=104
+    export NCCL_IB_FIFO_TC=192
+    export NET_OPTIONAL_RECV_COMPLETION=1
+    export NCCL_IB_USE_INLINE=1
+    export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
+    export NCCL_GDR_FLUSH_DISABLE=1
+    export NCCL_DMABUF_ENABLE=0
+    export NCCL_IGNORE_CPU_AFFINITY=1
+    export NCCL_IB_QPS_PER_CONNECTION=1
+
+    # v25.10
+    # export LD_LIBRARY_PATH=/etc/libibverbs.d:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
+    # export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-anp.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
+
+    # v25.09
+    export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
+    export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
+else
+    export NCCL_IB_GID_INDEX=3
+fi
 
 # Disable cross NIC communication for NCCL
 export NCCL_CROSS_NIC=0
@@ -295,7 +328,7 @@ export NVTE_ROCM_ENABLE_MXFP8=1
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
 
 # Note: Disable fp32 atomic due if you find any accuracy issue.
-export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:0}
+export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:-0}
 
 # nvte debug envs
 export NVTE_DEBUG=0 # 0, 1
