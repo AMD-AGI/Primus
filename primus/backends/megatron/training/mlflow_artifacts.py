@@ -65,17 +65,26 @@ def _validate_path_component(path_component: str, allow_separators: bool = False
     if not path_component:
         raise ValueError("Path component cannot be empty")
 
+    # Check for absolute paths BEFORE normalization to prevent bypasses
+    if os.path.isabs(path_component):
+        raise ValueError(f"Absolute paths are not allowed: {path_component}")
+
     # Normalize the path to resolve any .. or . references
     normalized = os.path.normpath(path_component)
 
-    # Check for absolute paths
-    if os.path.isabs(normalized):
-        raise ValueError(f"Absolute paths are not allowed: {path_component}")
-
-    # Check for parent directory references (more comprehensive check)
-    # Check for '..' at start or after any separator (both / and \)
-    if normalized.startswith("..") or "/.." in normalized or "\\.." in normalized:
+    # After normalization, check if the path still tries to escape
+    # by checking if '..' appears as a separate path component
+    path_parts = normalized.split(os.sep)
+    if ".." in path_parts:
         raise ValueError(f"Parent directory references are not allowed: {path_component}")
+
+    # Additional check for alternative separators (both / and \ on all platforms)
+    # Check before and after normalization to catch edge cases
+    if "/" in path_component or "\\" in path_component:
+        alt_sep = "/" if os.sep == "\\" else "\\"
+        alt_parts = path_component.replace(alt_sep, os.sep).split(os.sep)
+        if ".." in alt_parts:
+            raise ValueError(f"Parent directory references are not allowed: {path_component}")
 
     # Check for path separators if not allowed (check both / and \ on all platforms)
     if not allow_separators and ("/" in normalized or "\\" in normalized):
@@ -488,7 +497,8 @@ def generate_tracelens_report(
             dfs = generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
 
             # Collect all generated CSV files
-            csv_files = glob.glob(os.path.join(csv_subdir, "*.csv"))
+            # Note: csv_subdir is already validated, but we avoid os.path.join for consistency
+            csv_files = glob.glob(f"{csv_subdir}{os.sep}*.csv")
             if csv_files:
                 log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
                 generated_files.extend(csv_files)
@@ -511,7 +521,8 @@ def generate_tracelens_report(
             generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
 
             # Collect all generated CSV files
-            csv_files = glob.glob(os.path.join(csv_subdir, "*.csv"))
+            # Note: csv_subdir is already validated, but we avoid os.path.join for consistency
+            csv_files = glob.glob(f"{csv_subdir}{os.sep}*.csv")
             if csv_files:
                 log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
                 generated_files.extend(csv_files)
