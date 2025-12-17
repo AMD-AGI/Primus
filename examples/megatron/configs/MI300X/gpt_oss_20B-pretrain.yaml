@@ -57,7 +57,7 @@ modules:
       overlap_param_gather: ${PRIMUS_OVERLAP_PARAM_GATHER:true}
 
       # data
-      mock_data: ${PRIMUS_MOCK_DATA:false}
+      mock_data: false
       train_data_path: "10 /data/c4-train.en_6_text_document"
       valid_data_path: "/data/c4-validation-91205-samples.en_text_document"
       test_data_path: "/data/c4-validation-91205-samples.en_text_document"
