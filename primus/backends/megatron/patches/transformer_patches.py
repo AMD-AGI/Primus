@@ -78,12 +78,40 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
 
     # Apply the same replacement that previously lived in MegatronTrainer
     orig_transformer_block.TransformerBlock = PrimusTransformerBlock
+    log_rank_0(
+        f"[Patch:megatron.transformer.recompute_layer_ids]   Patched megatron.core.transformer.transformer_block.TransformerBlock "
+        f"-> {PrimusTransformerBlock.__name__}"
+    )
     orig_bert_model.TransformerBlock = PrimusTransformerBlock
+    log_rank_0(
+        f"[Patch:megatron.transformer.recompute_layer_ids]   Patched megatron.core.models.bert.bert_model.TransformerBlock "
+        f"-> {PrimusTransformerBlock.__name__}"
+    )
     orig_gpt_model.TransformerBlock = PrimusTransformerBlock
+    log_rank_0(
+        f"[Patch:megatron.transformer.recompute_layer_ids]   Patched megatron.core.models.gpt.gpt_model.TransformerBlock "
+        f"-> {PrimusTransformerBlock.__name__}"
+    )
     orig_decoder_attention.TransformerBlock = PrimusTransformerBlock
+    log_rank_0(
+        f"[Patch:megatron.transformer.recompute_layer_ids]   Patched megatron.core.models.retro.decoder_attention.TransformerBlock "
+        f"-> {PrimusTransformerBlock.__name__}"
+    )
     orig_t5_model.TransformerBlock = PrimusTransformerBlock
+    log_rank_0(
+        f"[Patch:megatron.transformer.recompute_layer_ids]   Patched megatron.core.models.T5.t5_model.TransformerBlock "
+        f"-> {PrimusTransformerBlock.__name__}"
+    )
     orig_clip_vit_model.TransformerBlock = PrimusTransformerBlock
+    log_rank_0(
+        f"[Patch:megatron.transformer.recompute_layer_ids]   Patched megatron.core.models.vision.clip_vit_model.TransformerBlock "
+        f"-> {PrimusTransformerBlock.__name__}"
+    )
     orig_radio.TransformerBlock = PrimusTransformerBlock
+    log_rank_0(
+        f"[Patch:megatron.transformer.recompute_layer_ids]   Patched megatron.core.models.vision.radio.TransformerBlock "
+        f"-> {PrimusTransformerBlock.__name__}"
+    )
 
 
 def _is_turbo_parallel_linear_enabled(ctx: PatchContext) -> bool:
