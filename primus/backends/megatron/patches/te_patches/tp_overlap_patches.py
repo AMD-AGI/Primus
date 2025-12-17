@@ -19,10 +19,7 @@ from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 def _check_tp_overlap_conditions(ctx: PatchContext) -> bool:
     """Helper to check basic TP overlap conditions."""
-    try:
-        args = get_args(ctx)
-    except AssertionError:
-        return False
+    args = get_args(ctx)
 
     if not getattr(args, "tp_comm_overlap", False):
         return False

@@ -18,20 +18,14 @@ from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 def _is_zbpp_enabled(ctx: PatchContext) -> bool:
     """Check if Zero-Bubble PP is enabled in module_config."""
-    try:
-        args = get_args(ctx)
-        return getattr(args, "patch_zero_bubble", False)
-    except AssertionError:
-        return False
+    args = get_args(ctx)
+    return getattr(args, "patch_zero_bubble", False)
 
 
 def _is_zbv_enabled(ctx: PatchContext) -> bool:
     """Check if Zero-Bubble V-schedule is enabled in module_config."""
-    try:
-        args = get_args(ctx)
-        return getattr(args, "zero_bubble_v_schedule", False) or getattr(args, "enable_1f1b_v", False)
-    except AssertionError:
-        return False
+    args = get_args(ctx)
+    return getattr(args, "zero_bubble_v_schedule", False) or getattr(args, "enable_1f1b_v", False)
 
 
 @register_patch(
