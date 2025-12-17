@@ -326,7 +326,7 @@ def generate_tracelens_report(
                       - "all" (default): Both XLSX and CSV files
                       - "xlsx": Single multi-tab Excel file with detailed analysis
                       - "csv": Multiple CSV files (kernels, memory, communication, etc.)
-                      - "html": Interactive HTML report
+                      - "html": Interactive HTML report (not yet supported, falls back to xlsx+csv)
 
     Returns:
         List of paths to generated report files
@@ -376,12 +376,27 @@ def generate_tracelens_report(
                 generated_files.extend(csv_files)
 
         if output_format == "html":
-            warning_rank_0("[TraceLens] HTML format not yet supported, using xlsx+csv")
-            # Fall through to xlsx
+            warning_rank_0("[TraceLens] HTML format not yet supported, generating xlsx+csv instead")
+            # Generate both XLSX and CSV formats as fallback
+            # XLSX: Single file with multiple tabs
             xlsx_path = os.path.join(output_dir, f"{report_name}_analysis.xlsx")
             dfs = generate_perf_report_pytorch(trace_file, output_xlsx_path=xlsx_path)
             if os.path.exists(xlsx_path):
+                log_rank_0(
+                    f"[TraceLens] Generated XLSX report with {len(dfs)} tabs: {os.path.basename(xlsx_path)}"
+                )
                 generated_files.append(xlsx_path)
+            
+            # CSV: Multiple files in a subdirectory
+            csv_subdir = os.path.join(output_dir, report_name)
+            os.makedirs(csv_subdir, exist_ok=True)
+            dfs = generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
+            
+            # Collect all generated CSV files
+            csv_files = glob.glob(os.path.join(csv_subdir, "*.csv"))
+            if csv_files:
+                log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
+                generated_files.extend(csv_files)
 
         if generated_files:
             return generated_files
@@ -524,6 +539,7 @@ def generate_tracelens_reports(
                       - "all" (default): Both XLSX and CSV files
                       - "xlsx": Multi-tab Excel with detailed analysis
                       - "csv": Multiple CSV files per rank (kernels, memory, comm, etc.)
+                      - "html": Interactive HTML report (not yet supported, falls back to xlsx+csv)
 
     Returns:
         List of paths to all generated report files
@@ -583,7 +599,7 @@ def upload_tracelens_reports_to_mlflow(
         exp_root_path: Root path of the experiment (for saving reports)
         ranks: List of ranks to analyze (None = all ranks, [0] = rank 0 only)
         max_reports: Maximum number of reports to generate
-        output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
+        output_format: Report format - "all" (default, xlsx+csv), "xlsx", "csv", or "html" (falls back to xlsx+csv)
         artifact_path: MLflow artifact subdirectory for reports
 
     Returns:
@@ -672,7 +688,7 @@ def upload_artifacts_to_mlflow(
         tracelens_ranks: List of ranks to generate TraceLens reports for
                         (None = all ranks, [0] = rank 0 only)
         tracelens_max_reports: Maximum number of TraceLens reports to generate
-        tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
+        tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", "csv", or "html" (falls back to xlsx+csv)
 
     Returns:
         Dictionary with counts of uploaded files:
