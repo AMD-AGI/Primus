@@ -410,8 +410,8 @@ def generate_tracelens_report(
         warning_rank_0(f"[TraceLens] No output files generated for: {trace_file}")
         return []
 
-    except ImportError:
-        log_rank_0("[TraceLens] TraceLens not available, using fallback CSV summary")
+    except ImportError as e:
+        log_rank_0(f"[TraceLens] Failed to import TraceLens ({e}), using fallback CSV summary")
         # Fallback to simple CSV summary
         csv_path = _generate_trace_summary_csv(trace_file, output_dir, f"{report_name}_summary.csv")
         return [csv_path] if csv_path else []
