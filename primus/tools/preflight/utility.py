@@ -11,8 +11,9 @@ from pathlib import Path
 import markdown2
 import torch
 import torch.distributed as dist
-from global_vars import RANK, WORLD_SIZE
 from weasyprint import HTML
+
+from primus.tools.preflight.global_vars import RANK, WORLD_SIZE
 
 
 def log(msg):

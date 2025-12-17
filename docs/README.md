@@ -35,7 +35,7 @@ Get help and find answers:
 
 - **[FAQ](./faq.md)** - Frequently asked questions and troubleshooting
 - **[Examples](../examples/README.md)** - Real-world training examples and templates
-- **[Preflight Tool](../tools/preflight/README.md)** - Cluster sanity checker to verify environment readiness
+- **[Preflight Tool](../primus/tools/preflight/README.md)** - Cluster sanity checker to verify environment readiness
 
 ## 🎯 Quick Navigation by Use Case
 
