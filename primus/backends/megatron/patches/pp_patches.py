@@ -35,7 +35,6 @@ def patch_zero_bubble_pp(ctx: PatchContext):
         - Replace ChainedOptimizer with ZeroBubblePPChainedOptimizer
         - Replace get_forward_backward_func with get_forward_backward_func_zbpp
     """
-    log_rank_0("[Patch:megatron.pp.zero_bubble_optimizer] Patching ZeroBubble PP...")
 
     # Patch optimizer
     import megatron.core.optimizer as optimizer
@@ -45,7 +44,10 @@ def patch_zero_bubble_pp(ctx: PatchContext):
     )
 
     optimizer.ChainedOptimizer = ZeroBubblePPChainedOptimizer
-    log_rank_0("[Patch:megatron.pp.zero_bubble_optimizer] Patched ChainedOptimizer")
+    log_rank_0(
+        f"[Patch:megatron.pp.zero_bubble_optimizer]   Patched megatron.core.optimizer.ChainedOptimizer "
+        f"-> {ZeroBubblePPChainedOptimizer.__name__}"
+    )
 
     # Patch get_forward_backward_func
     import megatron.core.pipeline_parallel as ori_pp
@@ -55,7 +57,10 @@ def patch_zero_bubble_pp(ctx: PatchContext):
     )
 
     ori_pp.get_forward_backward_func = get_forward_backward_func_zbpp
-    log_rank_0("[Patch:megatron.pp.zero_bubble_optimizer] Patched get_forward_backward_func")
+    log_rank_0(
+        f"[Patch:megatron.pp.zero_bubble_optimizer]   Patched megatron.core.pipeline_parallel.get_forward_backward_func "
+        f"-> {get_forward_backward_func_zbpp.__name__}"
+    )
 
 
 def _is_primus_pipeline_enabled(ctx: PatchContext) -> bool:
@@ -83,7 +88,6 @@ def patch_primus_pipeline(ctx: PatchContext):
     Behavior:
         - Replace get_forward_backward_func with get_primus_pipeline_parallel_fwd_backward_func
     """
-    log_rank_0("[Patch:megatron.pp.primus_pipeline] Patching Primus Pipeline...")
 
     import megatron.core.pipeline_parallel as ori_pp
 
@@ -92,7 +96,10 @@ def patch_primus_pipeline(ctx: PatchContext):
     )
 
     ori_pp.get_forward_backward_func = get_primus_pipeline_parallel_fwd_backward_func
-    log_rank_0("[Patch:megatron.pp.primus_pipeline] Patched get_forward_backward_func")
+    log_rank_0(
+        f"[Patch:megatron.pp.primus_pipeline]   Patched megatron.core.pipeline_parallel.get_forward_backward_func "
+        f"-> {get_primus_pipeline_parallel_fwd_backward_func.__name__}"
+    )
 
 
 def _is_pp_enabled(ctx: PatchContext) -> bool:
@@ -116,8 +123,6 @@ def patch_linear_grad_split(ctx: PatchContext):
         - Replace LinearWithGradAccumulationAndAsyncCommunication with Primus version
           that splits weight gradient and input gradient computation
     """
-    log_rank_0("[Patch:megatron.pp.linear_grad_split] Patching Linear layer for gradient splitting...")
-
     import megatron.core.tensor_parallel.layers as ori_layers
 
     from primus.backends.megatron.core.tensor_parallel.layers import (
@@ -128,7 +133,8 @@ def patch_linear_grad_split(ctx: PatchContext):
         LinearWithGradAccumulationAndAsyncCommunication
     )
     log_rank_0(
-        "[Patch:megatron.pp.linear_grad_split] Patched LinearWithGradAccumulationAndAsyncCommunication"
+        f"[Patch:megatron.pp.linear_grad_split]   Patched megatron.core.tensor_parallel.layers.LinearWithGradAccumulationAndAsyncCommunication "
+        f"-> {LinearWithGradAccumulationAndAsyncCommunication.__name__}"
     )
 
 
@@ -173,8 +179,6 @@ def patch_v_schedule_support(ctx: PatchContext):
         - Patch finalize_model_grads
         - Patch get_transformer_layer_offset
     """
-    log_rank_0("[Patch:megatron.pp.v_schedule_support] Patching components for V-schedule...")
-
     # Patch parallel_state
     import megatron.core.parallel_state as ori_parallel_state
 
@@ -187,7 +191,18 @@ def patch_v_schedule_support(ctx: PatchContext):
     ori_parallel_state.default_embedding_ranks = default_embedding_ranks
     ori_parallel_state.is_pipeline_last_stage = is_pipeline_last_stage
     ori_parallel_state.is_rank_in_embedding_group = is_rank_in_embedding_group
-    log_rank_0("[Patch:megatron.pp.v_schedule_support] Patched parallel_state functions")
+    log_rank_0(
+        f"[Patch:megatron.pp.v_schedule_support]   Patched megatron.core.parallel_state.default_embedding_ranks "
+        f"-> {default_embedding_ranks.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.pp.v_schedule_support]   Patched megatron.core.parallel_state.is_pipeline_last_stage "
+        f"-> {is_pipeline_last_stage.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.pp.v_schedule_support]   Patched megatron.core.parallel_state.is_rank_in_embedding_group "
+        f"-> {is_rank_in_embedding_group.__name__}"
+    )
 
     # Patch finalize_model_grads
     import megatron.core.distributed.finalize_model_grads as ori_finalize_model_grads
@@ -197,7 +212,10 @@ def patch_v_schedule_support(ctx: PatchContext):
     )
 
     ori_finalize_model_grads.finalize_model_grads = finalize_model_grads
-    log_rank_0("[Patch:megatron.pp.v_schedule_support] Patched finalize_model_grads")
+    log_rank_0(
+        f"[Patch:megatron.pp.v_schedule_support]   Patched megatron.core.distributed.finalize_model_grads.finalize_model_grads "
+        f"-> {finalize_model_grads.__name__}"
+    )
 
     # Patch get_transformer_layer_offset
     import megatron.core.transformer.transformer_layer as ori_transformer_layer
@@ -207,7 +225,10 @@ def patch_v_schedule_support(ctx: PatchContext):
     )
 
     ori_transformer_layer.get_transformer_layer_offset = get_transformer_layer_offset
-    log_rank_0("[Patch:megatron.pp.v_schedule_support] Patched get_transformer_layer_offset")
+    log_rank_0(
+        f"[Patch:megatron.pp.v_schedule_support]   Patched megatron.core.transformer.transformer_layer.get_transformer_layer_offset "
+        f"-> {get_transformer_layer_offset.__name__}"
+    )
 
 
 @register_patch(
@@ -225,8 +246,6 @@ def patch_te_wgrad_split(ctx: PatchContext):
         - Replace TE _GroupedLinear with _GroupedLinearWithWGradSplit
         - Replace TE _Linear with _LinearWithWGradSplit
     """
-    log_rank_0("[Patch:megatron.pp.te_wgrad_split] Patching TE layers for weight gradient splitting...")
-
     # Patch TE grouped_linear
     import transformer_engine.pytorch.module.grouped_linear as ori_grouped_linear
 
@@ -235,7 +254,10 @@ def patch_te_wgrad_split(ctx: PatchContext):
     )
 
     ori_grouped_linear._GroupedLinear = _GroupedLinearWithWGradSplit
-    log_rank_0("[Patch:megatron.pp.te_wgrad_split] Patched TE _GroupedLinear")
+    log_rank_0(
+        f"[Patch:megatron.pp.te_wgrad_split]   Patched transformer_engine.pytorch.module.grouped_linear._GroupedLinear "
+        f"-> {_GroupedLinearWithWGradSplit.__name__}"
+    )
 
     # Patch TE linear
     import transformer_engine.pytorch.module.linear as ori_linear
@@ -245,7 +267,10 @@ def patch_te_wgrad_split(ctx: PatchContext):
     )
 
     ori_linear._Linear = _LinearWithWGradSplit
-    log_rank_0("[Patch:megatron.pp.te_wgrad_split] Patched TE _Linear")
+    log_rank_0(
+        f"[Patch:megatron.pp.te_wgrad_split]   Patched transformer_engine.pytorch.module.linear._Linear "
+        f"-> {_LinearWithWGradSplit.__name__}"
+    )
 
 
 @register_patch(
@@ -262,8 +287,6 @@ def patch_pipeline_parallel_layer_layout(ctx: PatchContext):
         - Replace megatron.core.transformer.pipeline_parallel_layer_layout.PipelineParallelLayerLayout
           with PrimusPipelineParallelLayerLayout
     """
-    log_rank_0("[Patch:megatron.pp.pipeline_parallel_layer_layout] Patching PipelineParallelLayerLayout...")
-
     import megatron.core.transformer.pipeline_parallel_layer_layout as orig_pipeline_parallel_layer_layout
 
     from primus.backends.megatron.core.transformer.pipeline_parallel_layer_layout import (
@@ -271,4 +294,7 @@ def patch_pipeline_parallel_layer_layout(ctx: PatchContext):
     )
 
     orig_pipeline_parallel_layer_layout.PipelineParallelLayerLayout = PrimusPipelineParallelLayerLayout
-    log_rank_0("[Patch:megatron.pp.pipeline_parallel_layer_layout] Patched PipelineParallelLayerLayout")
+    log_rank_0(
+        f"[Patch:megatron.pp.pipeline_parallel_layer_layout]   Patched megatron.core.transformer.pipeline_parallel_layer_layout.PipelineParallelLayerLayout "
+        f"-> {PrimusPipelineParallelLayerLayout.__name__}"
+    )
