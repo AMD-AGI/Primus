@@ -57,7 +57,7 @@ srun -N "${NNODES}" \
      --exclusive \
      --export ALL \
      --ntasks-per-node=1 \
-     --cpus-per-task="${CPUS_PER_TASK:-256}" \
+     --cpus-per-task="${CPUS_PER_TASK:-128}" \
      bash -c "
           readarray -t node_array < <(scontrol show hostnames \"\$SLURM_JOB_NODELIST\")
           if [ \"\$SLURM_NODEID\" = \"0\" ]; then
