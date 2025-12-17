@@ -18,8 +18,7 @@ from primus.modules.module_utils import log_rank_0
 
 def _is_fsdp2_enabled(ctx: PatchContext) -> bool:
     """Check if FSDP2 is enabled in backend_args."""
-    args = ctx.extra.get("backend_args")
-    return args is not None and getattr(args, "use_torch_fsdp2", False)
+    return getattr(ctx.extra.get("backend_args"), "use_torch_fsdp2", False)
 
 
 @register_patch(
