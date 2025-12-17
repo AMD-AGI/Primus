@@ -30,7 +30,7 @@ from primus.modules.module_utils import log_rank_0, warning_rank_0
         "Primus TopKRouter, and permutation fusion."
     ),
 )
-def patch_moe_layer_and_router(ctx: PatchContext):
+def patch_moe_layer(ctx: PatchContext):
     """
     Patch Megatron MoE components based on module_config flags.
 

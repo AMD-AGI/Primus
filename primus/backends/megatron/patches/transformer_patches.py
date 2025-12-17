@@ -105,12 +105,12 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
 
 
 @register_patch(
-    "megatron.transformer.fused_padded_mla_attention",
+    "megatron.transformer.patch_mla_attention",
     backend="megatron",
     phase="before_train",
     description=(
         "Monkey patch MLA attention to use Primus PaddedMLASelfAttention "
-        "when fused_padded_mla_attention is enabled."
+        "when use_turbo_parallel_linear is enabled."
     ),
 )
 def patch_mla_attention(ctx: PatchContext):
@@ -124,9 +124,9 @@ def patch_mla_attention(ctx: PatchContext):
     """
     module_config: Any = ctx.extra.get("module_config")
     params = getattr(module_config, "params", None)
-    if params is None or not getattr(params, "fused_padded_mla_attention", False):
+    if params is None or not getattr(params, "use_turbo_parallel_linear", False):
         warning_rank_0(
-            "[Patch:megatron.transformer.fused_padded_mla_attention][SKIP] No fused_padded_mla_attention in params"
+            "[Patch:megatron.transformer.fused_padded_mla_attention][SKIP] No use_turbo_parallel_linear in params"
         )
         return
 
@@ -137,17 +137,17 @@ def patch_mla_attention(ctx: PatchContext):
         from megatron.core.transformer import multi_latent_attention
 
         from primus.backends.megatron.core.transformer.multi_latent_attention import (
-            PaddedMLASelfAttention,
+            PrimusMLASelfAttention,
         )
 
-        multi_latent_attention.MLASelfAttention = PaddedMLASelfAttention
+        multi_latent_attention.MLASelfAttention = PrimusMLASelfAttention
 
         # pad imported module
         from megatron.core.models.gpt import gpt_layer_specs
 
-        gpt_layer_specs.MLASelfAttention = PaddedMLASelfAttention
+        gpt_layer_specs.MLASelfAttention = PrimusMLASelfAttention
 
     except (ImportError, AttributeError) as e:
         warning_rank_0(
-            f"[Patch:megatron.transformer.fused_padded_mla_attention] Failed to apply fused_padded_mla_attention patch: {type(e).__name__}: {e}"
+            f"[Patch:megatron.transformer.patch_mla_attention] Failed to apply patch_mla_attention patch: {type(e).__name__}: {e}"
         )
