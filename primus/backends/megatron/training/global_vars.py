@@ -135,6 +135,8 @@ def _ensure_var_is_not_initialized(var, name):
 
 def destroy_global_vars():
     global _GLOBAL_ARGS
+    global _GLOBAL_MLFLOW_WRITER
     global _GLOBAL_EXP_ROOT_PATH
     _GLOBAL_ARGS = None
+    _GLOBAL_MLFLOW_WRITER = None
     _GLOBAL_EXP_ROOT_PATH = None
