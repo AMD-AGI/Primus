@@ -16,6 +16,12 @@ from primus.core.patches import PatchContext, register_patch
 from primus.modules.module_utils import log_rank_0
 
 
+def _is_fsdp2_enabled(ctx: PatchContext) -> bool:
+    """Check if FSDP2 is enabled in backend_args."""
+    args = ctx.extra.get("backend_args")
+    return args is not None and getattr(args, "use_torch_fsdp2", False)
+
+
 @register_patch(
     "megatron.patch.torch_fsdp2",
     backend="megatron",
@@ -24,19 +30,17 @@ from primus.modules.module_utils import log_rank_0
         "Replace Megatron's TorchFullyShardedDataParallel with Primus implementation "
         "when use_torch_fsdp2 is enabled."
     ),
+    condition=_is_fsdp2_enabled,
 )
 def patch_torch_fsdp(ctx: PatchContext):
     """
     Patch Megatron to use Primus's TorchFullyShardedDataParallel wrapper.
 
     Behavior (moved from MegatronTrainer.patch_torch_fsdp):
-        - If module_config.use_torch_fsdp2 is True:
+        - If backend_args.use_torch_fsdp2 is True:
             * Patch megatron.core.distributed.torch_fully_sharded_data_parallel.
             * Patch megatron.training.training.torch_FSDP reference.
     """
-    args = ctx.extra.get("backend_args", {})
-    if not args or not getattr(args, "use_torch_fsdp2", False):
-        return
 
     log_rank_0("[Patch:megatron.fsdp.torch_fsdp2] Patching torch_FSDP2 with Primus implementation...")
 
