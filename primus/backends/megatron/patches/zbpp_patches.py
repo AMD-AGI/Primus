@@ -54,6 +54,10 @@ def patch_zero_bubble_pipeline(ctx: PatchContext):
     )
 
     optimizer.ChainedOptimizer = ZeroBubblePPChainedOptimizer
+    log_rank_0(
+        f"[Patch:megatron.zbpp.enable]   Patched megatron.core.optimizer.ChainedOptimizer "
+        f"-> {ZeroBubblePPChainedOptimizer.__name__}"
+    )
 
     import megatron.core.pipeline_parallel as ori_pp
 
@@ -62,6 +66,10 @@ def patch_zero_bubble_pipeline(ctx: PatchContext):
     )
 
     ori_pp.get_forward_backward_func = get_forward_backward_func_zbpp
+    log_rank_0(
+        f"[Patch:megatron.zbpp.enable]   Patched megatron.core.pipeline_parallel.get_forward_backward_func "
+        f"-> {get_forward_backward_func_zbpp.__name__}"
+    )
 
     import megatron.core.tensor_parallel.layers as ori_layers
 
@@ -71,6 +79,10 @@ def patch_zero_bubble_pipeline(ctx: PatchContext):
 
     ori_layers.LinearWithGradAccumulationAndAsyncCommunication = (
         LinearWithGradAccumulationAndAsyncCommunication
+    )
+    log_rank_0(
+        f"[Patch:megatron.zbpp.enable]   Patched megatron.core.tensor_parallel.layers.LinearWithGradAccumulationAndAsyncCommunication "
+        f"-> {LinearWithGradAccumulationAndAsyncCommunication.__name__}"
     )
 
     log_rank_0("[Patch:megatron.zbpp.enable] Zero-Bubble PP patches applied successfully")
