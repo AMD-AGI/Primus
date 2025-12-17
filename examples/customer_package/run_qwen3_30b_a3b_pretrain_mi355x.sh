@@ -37,15 +37,15 @@ export NCCL_IB_TIMEOUT=300
 
 ######################### Training Config #########################
 export MBS=${MBS:-1}
-export GBS=${GBS:-4096}
+export GBS=${GBS:-256}
 export NUM_LAYERS=${NUM_LAYERS:-48}
 export MOE_LAYER_FREQ=${MOE_LAYER_FREQ:-1}
 export SEQ_LENGTH=${SEQ_LENGTH:-4096}
 export TP=${TP:-1}
 export ETP=${ETP:-1}
-export PP=${PP:-8}
+export PP=${PP:-1}
 export VPP=${VPP:-1}
-export EP=${EP:-16}
+export EP=${EP:-8}
 export CP=${CP:-1}
 export CP_COMM_TYPE=${CP_COMM_TYPE:-"a2a"}            # p2p, a2a, allgather or a2a+p2p
 export LOAD_BALANCE=${LOAD_BALANCE:-True}
@@ -76,7 +76,7 @@ export TRAIN_ITERS=${TRAIN_ITERS:-5}
 # MoE_Features=(0 1 2 3 4 5 6 7 8 9 10 11)
 
 if [ -z "${MoE_Features}" ]; then
-    MoE_Features=(0 3 11)
+    MoE_Features=(0 3 4 5 10 11)
 else
     # Convert string to array
     # shellcheck disable=SC2128
@@ -255,7 +255,7 @@ mkdir -p "$LOG_DIR"
 rm -rf "$LOG_FILE"
 
 ######################### Training Job #########################
-export EXP="examples/megatron/configs/MI355X/qwen3_30B_A3B-pretrain.yaml"
+export EXP="examples/megatron/configs/MI355X/qwen3_30B_A3B-BF16-pretrain.yaml"
 
 echo "--------------------------------" | tee -a "$LOG_FILE"
 echo "Begin Training... $(date +%Y%m%d_%H%M%S)" | tee -a "$LOG_FILE"
