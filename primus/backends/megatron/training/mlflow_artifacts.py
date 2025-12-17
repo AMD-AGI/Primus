@@ -154,16 +154,16 @@ def upload_trace_files_to_mlflow(
             mlflow_writer.log_artifact(trace_file, artifact_path=artifact_subpath)
             uploaded_count += 1
             log_rank_0(f"[MLflow] Uploaded trace file: {os.path.basename(trace_file)}")
+        except PermissionError as e:
+            # Authentication or file permission issues
+            warning_rank_0(
+                f"[MLflow] Permission denied uploading trace file {trace_file}: {e}"
+            )
         except (ConnectionError, TimeoutError, OSError) as e:
             # Network or connection issues - log with type for debugging
             warning_rank_0(
                 f"[MLflow] Failed to upload trace file {trace_file} "
                 f"due to {type(e).__name__}: {e}"
-            )
-        except PermissionError as e:
-            # Authentication or file permission issues
-            warning_rank_0(
-                f"[MLflow] Permission denied uploading trace file {trace_file}: {e}"
             )
         except Exception as e:
             # Catch-all for unexpected errors - log with exception type
@@ -220,16 +220,16 @@ def upload_log_files_to_mlflow(
 
             mlflow_writer.log_artifact(log_file, artifact_path=artifact_subpath)
             uploaded_count += 1
+        except PermissionError as e:
+            # Authentication or file permission issues
+            warning_rank_0(
+                f"[MLflow] Permission denied uploading log file {log_file}: {e}"
+            )
         except (ConnectionError, TimeoutError, OSError) as e:
             # Network or connection issues - log with type for debugging
             warning_rank_0(
                 f"[MLflow] Failed to upload log file {log_file} "
                 f"due to {type(e).__name__}: {e}"
-            )
-        except PermissionError as e:
-            # Authentication or file permission issues
-            warning_rank_0(
-                f"[MLflow] Permission denied uploading log file {log_file}: {e}"
             )
         except Exception as e:
             # Catch-all for unexpected errors - log with exception type
@@ -687,16 +687,16 @@ def upload_tracelens_reports_to_mlflow(
             mlflow_writer.log_artifact(report_path, artifact_path=artifact_path)
             uploaded_count += 1
             log_rank_0(f"[MLflow] Uploaded TraceLens report: {os.path.basename(report_path)}")
+        except PermissionError as e:
+            # Authentication or file permission issues
+            warning_rank_0(
+                f"[MLflow] Permission denied uploading report {report_path}: {e}"
+            )
         except (ConnectionError, TimeoutError, OSError) as e:
             # Network or connection issues - log with type for debugging
             warning_rank_0(
                 f"[MLflow] Failed to upload report {report_path} "
                 f"due to {type(e).__name__}: {e}"
-            )
-        except PermissionError as e:
-            # Authentication or file permission issues
-            warning_rank_0(
-                f"[MLflow] Permission denied uploading report {report_path}: {e}"
             )
         except Exception as e:
             # Catch-all for unexpected errors - log with exception type
