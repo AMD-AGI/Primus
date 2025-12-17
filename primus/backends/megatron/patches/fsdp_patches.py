@@ -41,8 +41,6 @@ def patch_torch_fsdp(ctx: PatchContext):
             * Patch megatron.training.training.torch_FSDP reference.
     """
 
-    log_rank_0("[Patch:megatron.fsdp.torch_fsdp2] Patching torch_FSDP2 with Primus implementation...")
-
     # Import custom FSDP wrapper
     # Patch Megatron's internal reference to FSDP2 class
     import megatron.core.distributed.torch_fully_sharded_data_parallel as torch_fsdp_module
@@ -54,13 +52,15 @@ def patch_torch_fsdp(ctx: PatchContext):
     torch_fsdp_module.TorchTorchFullyShardedDataParallel = PrimusTorchFullyShardedDataParallel
     log_rank_0(
         "[Patch:megatron.fsdp.torch_fsdp2]   Patched "
-        "megatron.core.distributed.torch_fully_sharded_data_parallel.TorchTorchFullyShardedDataParallel"
+        "megatron.core.distributed.torch_fully_sharded_data_parallel.TorchTorchFullyShardedDataParallel "
+        f"-> {PrimusTorchFullyShardedDataParallel.__name__}"
     )
 
     # Patch training code reference
     from megatron.training import training
 
     training.torch_FSDP = PrimusTorchFullyShardedDataParallel
-    log_rank_0("[Patch:megatron.fsdp.torch_fsdp2]   Patched megatron.training.training.torch_FSDP")
-
-    log_rank_0("[Patch:megatron.fsdp.torch_fsdp2] torch_FSDP2 patch applied successfully.")
+    log_rank_0(
+        f"[Patch:megatron.fsdp.torch_fsdp2]   Patched megatron.training.training.torch_FSDP "
+        f"-> {PrimusTorchFullyShardedDataParallel.__name__}"
+    )
