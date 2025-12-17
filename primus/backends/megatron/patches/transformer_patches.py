@@ -120,8 +120,16 @@ def patch_mla_attention(ctx: PatchContext):
     )
 
     multi_latent_attention.MLASelfAttention = PrimusMLASelfAttention
+    log_rank_0(
+        f"[Patch:megatron.transformer.mla_attention]   Patched megatron.core.transformer.multi_latent_attention.MLASelfAttention "
+        f"-> {PrimusMLASelfAttention.__name__}"
+    )
 
     # pad imported module
     from megatron.core.models.gpt import gpt_layer_specs
 
     gpt_layer_specs.MLASelfAttention = PrimusMLASelfAttention
+    log_rank_0(
+        f"[Patch:megatron.transformer.mla_attention]   Patched megatron.core.models.gpt.gpt_layer_specs.MLASelfAttention "
+        f"-> {PrimusMLASelfAttention.__name__}"
+    )
