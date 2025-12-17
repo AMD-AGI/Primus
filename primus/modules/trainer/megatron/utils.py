@@ -474,7 +474,7 @@ def _get_sync_free_moe_options(stage: int) -> dict:
 def validate_args_on_rocm(args):
     # Deterministic mode
     if args.deterministic_mode:
-        # NOTE: ome version triton compile exist potential racing condition issue.
+        # NOTE: Some version triton compile exist potential racing condition issue.
         assert (
             os.environ.get("TORCH_COMPILE_DISABLE", "0") == "1"
         ), "TORCH_COMPILE_DISABLE must be set to 1 in deterministic mode."

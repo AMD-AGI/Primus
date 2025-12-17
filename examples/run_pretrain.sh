@@ -325,7 +325,7 @@ if [ "${PRIMUS_DETERMINISTIC:-}" == "1" ]; then
     export NCCL_ALGO="Ring"
     export NVTE_ALLOW_NONDETERMINISTIC_ALGO=0
     export ROCBLAS_DEFAULT_ATOMICS_MODE=0
-    # Disable torch compile to avoid racing condition issue in some version triton compiler.
+    # Disable torch compile to avoid race condition issue in some version triton compiler.
     export TORCH_COMPILE_DISABLE=1
 fi
 
