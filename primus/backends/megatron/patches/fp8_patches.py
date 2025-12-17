@@ -17,8 +17,7 @@ from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 def _is_fp8_enabled(ctx: PatchContext) -> bool:
     """Check if FP8 is enabled in module_config."""
-    args = get_args(ctx)
-    return getattr(args, "fp8", False)
+    return getattr(get_args(ctx), "fp8", False)
 
 
 @register_patch(
