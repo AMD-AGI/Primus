@@ -11,8 +11,13 @@ This module contains patches that modify Megatron's pipeline parallelism
 implementation to support ZeroBubble PP and Primus Pipeline optimizations.
 """
 
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0, warning_rank_0
+
+
+def _is_zero_bubble_enabled(ctx: PatchContext) -> bool:
+    """Check if ZeroBubble PP is enabled in module_config."""
+    return getattr(get_args(ctx), "patch_zero_bubble", False)
 
 
 @register_patch(
@@ -20,6 +25,7 @@ from primus.modules.module_utils import log_rank_0, warning_rank_0
     backend="megatron",
     phase="before_train",
     description="Patch optimizer and forward_backward_func for ZeroBubble PP",
+    condition=_is_zero_bubble_enabled,
 )
 def patch_zero_bubble_pp(ctx: PatchContext):
     """
@@ -29,12 +35,6 @@ def patch_zero_bubble_pp(ctx: PatchContext):
         - Replace ChainedOptimizer with ZeroBubblePPChainedOptimizer
         - Replace get_forward_backward_func with get_forward_backward_func_zbpp
     """
-    module_config = ctx.extra.get("module_config")
-    params = getattr(module_config, "params", None)
-    if params is None or not getattr(params, "patch_zero_bubble", False):
-        log_rank_0("[Patch:megatron.pp.zero_bubble_optimizer][SKIP] patch_zero_bubble is not enabled")
-        return
-
     log_rank_0("[Patch:megatron.pp.zero_bubble_optimizer] Patching ZeroBubble PP...")
 
     try:
@@ -62,11 +62,23 @@ def patch_zero_bubble_pp(ctx: PatchContext):
         warning_rank_0(f"[Patch:megatron.pp.zero_bubble_optimizer][SKIP] Failed to apply patch: {e}")
 
 
+def _is_primus_pipeline_enabled(ctx: PatchContext) -> bool:
+    """Check if Primus Pipeline is enabled (and ZeroBubble is not)."""
+    args = get_args(ctx)
+    if not getattr(args, "patch_primus_pipeline", False):
+        return False
+    # ZeroBubble takes precedence over Primus Pipeline
+    if getattr(args, "patch_zero_bubble", False):
+        return False
+    return True
+
+
 @register_patch(
     "megatron.pp.primus_pipeline",
     backend="megatron",
     phase="before_train",
     description="Patch forward_backward_func for Primus Pipeline",
+    condition=_is_primus_pipeline_enabled,
 )
 def patch_primus_pipeline(ctx: PatchContext):
     """
@@ -75,19 +87,6 @@ def patch_primus_pipeline(ctx: PatchContext):
     Behavior:
         - Replace get_forward_backward_func with get_primus_pipeline_parallel_fwd_backward_func
     """
-    module_config = ctx.extra.get("module_config")
-    params = getattr(module_config, "params", None)
-    if params is None or not getattr(params, "patch_primus_pipeline", False):
-        log_rank_0("[Patch:megatron.pp.primus_pipeline][SKIP] patch_primus_pipeline is not enabled")
-        return
-
-    # Skip if ZeroBubble is enabled (it takes precedence)
-    if getattr(params, "patch_zero_bubble", False):
-        log_rank_0(
-            "[Patch:megatron.pp.primus_pipeline][SKIP] ZeroBubble PP is enabled, skipping Primus Pipeline"
-        )
-        return
-
     log_rank_0("[Patch:megatron.pp.primus_pipeline] Patching Primus Pipeline...")
 
     try:
@@ -104,11 +103,18 @@ def patch_primus_pipeline(ctx: PatchContext):
         warning_rank_0(f"[Patch:megatron.pp.primus_pipeline][SKIP] Failed to apply patch: {e}")
 
 
+def _is_pp_enabled(ctx: PatchContext) -> bool:
+    """Check if either Primus Pipeline or ZeroBubble PP is enabled."""
+    args = get_args(ctx)
+    return getattr(args, "patch_primus_pipeline", False) or getattr(args, "patch_zero_bubble", False)
+
+
 @register_patch(
     "megatron.pp.linear_grad_split",
     backend="megatron",
     phase="before_train",
     description="Patch Linear layer to split d_w and d_input for PP optimization",
+    condition=_is_pp_enabled,
 )
 def patch_linear_grad_split(ctx: PatchContext):
     """
@@ -118,21 +124,6 @@ def patch_linear_grad_split(ctx: PatchContext):
         - Replace LinearWithGradAccumulationAndAsyncCommunication with Primus version
           that splits weight gradient and input gradient computation
     """
-    module_config = ctx.extra.get("module_config")
-    params = getattr(module_config, "params", None)
-    if params is None:
-        warning_rank_0("[Patch:megatron.pp.linear_grad_split][SKIP] No params in module_config")
-        return
-
-    patch_primus = getattr(params, "patch_primus_pipeline", False)
-    patch_zbpp = getattr(params, "patch_zero_bubble", False)
-
-    if not (patch_primus or patch_zbpp):
-        log_rank_0(
-            "[Patch:megatron.pp.linear_grad_split][SKIP] Neither patch_primus_pipeline nor patch_zero_bubble is enabled"
-        )
-        return
-
     log_rank_0("[Patch:megatron.pp.linear_grad_split] Patching Linear layer for gradient splitting...")
 
     try:
@@ -153,11 +144,37 @@ def patch_linear_grad_split(ctx: PatchContext):
         warning_rank_0(f"[Patch:megatron.pp.linear_grad_split][SKIP] Failed to apply patch: {e}")
 
 
+def _is_v_schedule_enabled(ctx: PatchContext) -> bool:
+    """Check if V-schedule is enabled in either ZeroBubble or Primus Pipeline."""
+    args = get_args(ctx)
+    patch_primus = getattr(args, "patch_primus_pipeline", False)
+    patch_zbpp = getattr(args, "patch_zero_bubble", False)
+
+    if not (patch_primus or patch_zbpp):
+        return False
+
+    # Check if V-schedule is enabled using the same logic as is_v_schedule_enabled()
+    # V-schedule is enabled if:
+    # 1. Zero Bubble is enabled with V-schedule flags, OR
+    # 2. Primus Pipeline is enabled with V-schedule algorithms
+    if patch_zbpp:
+        enable_zero_bubble = getattr(args, "enable_zero_bubble", False)
+        zero_bubble_v_schedule = getattr(args, "zero_bubble_v_schedule", False)
+        enable_1f1b_v = getattr(args, "enable_1f1b_v", False)
+        return enable_zero_bubble and (zero_bubble_v_schedule or enable_1f1b_v)
+    elif patch_primus:
+        pp_algorithm = getattr(args, "pp_algorithm", None)
+        return pp_algorithm in ("zbv-formatted", "v-half", "v-min")
+
+    return False
+
+
 @register_patch(
     "megatron.pp.v_schedule_support",
     backend="megatron",
     phase="before_train",
     description="Patch various components for V-schedule support in ZeroBubble PP",
+    condition=_is_v_schedule_enabled,
 )
 def patch_v_schedule_support(ctx: PatchContext):
     """
@@ -168,37 +185,6 @@ def patch_v_schedule_support(ctx: PatchContext):
         - Patch finalize_model_grads
         - Patch get_transformer_layer_offset
     """
-    module_config = ctx.extra.get("module_config")
-    params = getattr(module_config, "params", None)
-    if params is None:
-        warning_rank_0("[Patch:megatron.pp.v_schedule_support][SKIP] No params in module_config")
-        return
-
-    patch_primus = getattr(params, "patch_primus_pipeline", False)
-    patch_zbpp = getattr(params, "patch_zero_bubble", False)
-
-    if not (patch_primus or patch_zbpp):
-        log_rank_0("[Patch:megatron.pp.v_schedule_support][SKIP] PP patches not enabled")
-        return
-
-    # Check if V-schedule is enabled using the same logic as is_v_schedule_enabled()
-    # V-schedule is enabled if:
-    # 1. Zero Bubble is enabled with V-schedule flags, OR
-    # 2. Primus Pipeline is enabled with V-schedule algorithms
-    is_v_schedule = False
-    if patch_zbpp:
-        enable_zero_bubble = getattr(params, "enable_zero_bubble", False)
-        zero_bubble_v_schedule = getattr(params, "zero_bubble_v_schedule", False)
-        enable_1f1b_v = getattr(params, "enable_1f1b_v", False)
-        is_v_schedule = enable_zero_bubble and (zero_bubble_v_schedule or enable_1f1b_v)
-    elif patch_primus:
-        pp_algorithm = getattr(params, "pp_algorithm", None)
-        is_v_schedule = pp_algorithm in ("zbv-formatted", "v-half", "v-min")
-
-    if not is_v_schedule:
-        log_rank_0("[Patch:megatron.pp.v_schedule_support][SKIP] V-schedule is not enabled")
-        return
-
     log_rank_0("[Patch:megatron.pp.v_schedule_support] Patching components for V-schedule...")
 
     try:
@@ -245,6 +231,7 @@ def patch_v_schedule_support(ctx: PatchContext):
     backend="megatron",
     phase="before_train",
     description="Patch Transformer Engine Linear layers for weight gradient splitting",
+    condition=_is_pp_enabled,
 )
 def patch_te_wgrad_split(ctx: PatchContext):
     """
@@ -254,19 +241,6 @@ def patch_te_wgrad_split(ctx: PatchContext):
         - Replace TE _GroupedLinear with _GroupedLinearWithWGradSplit
         - Replace TE _Linear with _LinearWithWGradSplit
     """
-    module_config = ctx.extra.get("module_config")
-    params = getattr(module_config, "params", None)
-    if params is None:
-        warning_rank_0("[Patch:megatron.pp.te_wgrad_split][SKIP] No params in module_config")
-        return
-
-    patch_primus = getattr(params, "patch_primus_pipeline", False)
-    patch_zbpp = getattr(params, "patch_zero_bubble", False)
-
-    if not (patch_primus or patch_zbpp):
-        log_rank_0("[Patch:megatron.pp.te_wgrad_split][SKIP] PP patches not enabled")
-        return
-
     log_rank_0("[Patch:megatron.pp.te_wgrad_split] Patching TE layers for weight gradient splitting...")
 
     try:
