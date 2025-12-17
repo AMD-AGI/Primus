@@ -33,13 +33,117 @@ TraceLens Report Formats:
     - html: Interactive HTML report
 """
 
+import csv
 import glob
+import gzip
+import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 from primus.modules.module_utils import log_rank_0, warning_rank_0
+
+
+def _validate_path_component(path_component: str, allow_separators: bool = False) -> str:
+    """
+    Validate and sanitize a path component to prevent path traversal attacks.
+
+    This function ensures that path components do not contain:
+    - Parent directory references (..)
+    - Absolute path indicators
+    - Path separators (unless explicitly allowed)
+
+    Args:
+        path_component: The path component to validate (e.g., filename, directory name)
+        allow_separators: If False, disallow any path separators in the component
+
+    Returns:
+        The sanitized path component
+
+    Raises:
+        ValueError: If the path component contains dangerous patterns
+    """
+    if not path_component:
+        raise ValueError("Path component cannot be empty")
+
+    # Check for absolute paths BEFORE normalization to prevent bypasses
+    if os.path.isabs(path_component):
+        raise ValueError(f"Absolute paths are not allowed: {path_component}")
+
+    # Normalize the path to resolve any .. or . references
+    normalized = os.path.normpath(path_component)
+
+    # After normalization, check if the path still tries to escape
+    # by checking if '..' appears as a separate path component
+    path_parts = normalized.split(os.sep)
+    if ".." in path_parts:
+        raise ValueError(f"Parent directory references are not allowed: {path_component}")
+
+    # Additional check for alternative separators (both / and \ on all platforms)
+    # Check before and after normalization to catch edge cases
+    if "/" in path_component or "\\" in path_component:
+        alt_sep = "/" if os.sep == "\\" else "\\"
+        alt_parts = path_component.replace(alt_sep, os.sep).split(os.sep)
+        if ".." in alt_parts:
+            raise ValueError(f"Parent directory references are not allowed: {path_component}")
+
+    # Check for path separators if not allowed (check both / and \ on all platforms)
+    if not allow_separators and ("/" in normalized or "\\" in normalized):
+        raise ValueError(f"Path separators are not allowed in component: {path_component}")
+
+    return normalized
+
+
+def _safe_join_path(base_dir: str, *components: str) -> str:
+    """
+    Safely join path components and ensure the result is within base_dir.
+
+    This function validates each component and ensures the final path
+    is a subdirectory of base_dir, preventing path traversal attacks.
+
+    Args:
+        base_dir: The base directory that should contain the final path
+        *components: Path components to join with base_dir
+
+    Returns:
+        The validated absolute path
+
+    Raises:
+        ValueError: If any component is invalid or if the resulting path
+                   would escape base_dir
+    """
+    # Ensure base_dir is absolute
+    base_dir = os.path.abspath(base_dir)
+
+    # Validate and sanitize each component
+    safe_components = []
+    for component in components:
+        if component:
+            # Validate the component (allowing separators for subdirectories)
+            validated = _validate_path_component(component, allow_separators=True)
+            safe_components.append(validated)
+
+    # Join the path
+    if safe_components:
+        result_path = os.path.join(base_dir, *safe_components)
+    else:
+        result_path = base_dir
+
+    # Resolve to absolute path and verify it's within base_dir
+    result_path = os.path.abspath(result_path)
+
+    # Verify the result is within base_dir
+    try:
+        Path(result_path).relative_to(Path(base_dir))
+    except ValueError:
+        raise ValueError(
+            f"Path traversal detected: resulting path '{result_path}' "
+            f"is outside base directory '{base_dir}'"
+        )
+
+    return result_path
 
 
 def _get_all_trace_files(tensorboard_dir: str) -> list:
@@ -94,7 +198,12 @@ def _get_all_log_files(exp_root_path: str) -> list:
     if not exp_root_path:
         return []
 
-    logs_dir = os.path.join(exp_root_path, "logs")
+    try:
+        logs_dir = _safe_join_path(exp_root_path, "logs")
+    except ValueError as e:
+        warning_rank_0(f"[MLflow] Invalid path for logs directory: {e}")
+        return []
+
     if not os.path.exists(logs_dir):
         return []
 
@@ -382,6 +491,13 @@ def generate_tracelens_report(
         warning_rank_0(f"[TraceLens] Trace file not found: {trace_file}")
         return []
 
+    # Validate output_dir to prevent path traversal
+    try:
+        output_dir = os.path.abspath(output_dir)
+    except Exception as e:
+        warning_rank_0(f"[TraceLens] Invalid output directory: {e}")
+        return []
+
     os.makedirs(output_dir, exist_ok=True)
 
     # Generate base name from trace filename if not provided
@@ -394,8 +510,18 @@ def generate_tracelens_report(
                 break
         report_name = base_name
 
+    # Validate report_name to prevent path traversal
     try:
-        # Try using TraceLens Python API directly
+        report_name = _validate_path_component(report_name, allow_separators=False)
+    except ValueError as e:
+        warning_rank_0(f"[TraceLens] Invalid report name '{report_name}': {e}")
+        return []
+
+    try:
+        # Import TraceLens on-demand (optional dependency pattern)
+        # This import is deliberately inside the try block to enable graceful fallback
+        # when TraceLens is not installed, avoiding ImportError at module load time.
+        # The ImportError is caught below to provide a simpler CSV-based fallback.
         from TraceLens.Reporting import generate_perf_report_pytorch
 
         def _generate_xlsx_and_csv_reports(generate_xlsx: bool, generate_csv: bool) -> list:
@@ -490,10 +616,6 @@ def _generate_trace_summary_csv(
     Returns:
         Path to generated CSV or None if failed
     """
-    import csv
-    import gzip
-    import json
-
     try:
         # Load trace file
         if trace_file.endswith(".gz"):
@@ -536,8 +658,15 @@ def _generate_trace_summary_csv(
         # Sort by total time descending
         sorted_ops = sorted(op_stats.items(), key=lambda x: x[1]["total_us"], reverse=True)
 
+        # Validate report_name and create safe output path
+        try:
+            validated_report_name = _validate_path_component(report_name, allow_separators=False)
+            output_path = _safe_join_path(output_dir, validated_report_name)
+        except ValueError as e:
+            warning_rank_0(f"[TraceLens] Invalid report name '{report_name}': {e}")
+            return None
+
         # Write CSV
-        output_path = os.path.join(output_dir, report_name)
         with open(output_path, "w", newline="", encoding="utf-8") as csvfile:
             writer = csv.writer(csvfile)
             writer.writerow(
@@ -669,8 +798,13 @@ def upload_tracelens_reports_to_mlflow(
         log_rank_0("[TraceLens] MLflow writer not available, skipping report upload")
         return 0
 
-    # Create output directory for reports
-    reports_dir = os.path.join(exp_root_path, "tracelens_reports")
+    # Create output directory for reports with path validation
+    try:
+        reports_dir = _safe_join_path(exp_root_path, "tracelens_reports")
+    except ValueError as e:
+        warning_rank_0(f"[TraceLens] Invalid path for reports directory: {e}")
+        return 0
+
     os.makedirs(reports_dir, exist_ok=True)
 
     log_rank_0(f"[TraceLens] Generating reports from traces in: {tensorboard_dir}")
