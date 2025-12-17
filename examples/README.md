@@ -49,7 +49,7 @@ We recommend using the official [rocm/megatron-lm Docker image](https://hub.dock
 
 ```bash
 # Pull the latest Docker image
-docker pull docker.io/rocm/primus:v25.9_gfx942
+docker pull docker.io/rocm/primus:v25.10
 
 ```
 
@@ -87,7 +87,7 @@ You do not need to enter the Docker container. Just set the config and run.
 
 ```bash
 # Example for megatron llama3.1_8B
-EXP=examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_local_pretrain.sh
+EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml bash ./examples/run_local_pretrain.sh
 
 # examples for torchtitan llama3.1_8B
 EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_local_pretrain.sh
@@ -111,7 +111,7 @@ docker exec -it dev_primus bash
 cd Primus && pip install -r requirements.txt
 
 # Example for megatron llama3.1_8B
-EXP=examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_pretrain.sh
+EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml bash ./examples/run_pretrain.sh
 
 # examples for torchtitan llama3.1_8B
 EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_pretrain.sh
@@ -126,11 +126,11 @@ Multi-node training is launched via **SLURM**.
 Specify the number of nodes and the model config:
 
 ```bash
-export DOCKER_IMAGE="docker.io/rocm/primus:v25.9_gfx942"
+export DOCKER_IMAGE="docker.io/rocm/primus:v25.10"
 export NNODES=8
 
 # Example for megatron llama3.1_8B
-EXP=examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
+EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
 
 # examples for torchtitan llama3.1_8b
 EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
@@ -156,7 +156,7 @@ It is recommended to reduce `train_iters` for faster shape generation.
 # ./output/tune_hipblaslt/${PRIMUS_MODEL}/gemm_shape
 
 export PRIMUS_HIPBLASLT_TUNING_STAGE=1
-export EXP=examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml
+export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 NNODES=1 bash ./examples/run_slurm_pretrain.sh
 ```
 
@@ -173,7 +173,7 @@ It typically takes 10–30 minutes depending on model size and shape complexity.
 # ./output/tune_hipblaslt/${PRIMUS_MODEL}/gemm_tune/tune_hipblas_gemm_results.txt
 
 export PRIMUS_HIPBLASLT_TUNING_STAGE=2
-export EXP=examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml
+export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 NNODES=1 bash ./examples/run_slurm_pretrain.sh
 ```
 
@@ -185,7 +185,7 @@ In this final stage, the tuned kernel is loaded for efficient training:
 
 ```bash
 export PRIMUS_HIPBLASLT_TUNING_STAGE=3
-export EXP=examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml
+export EXP=examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 NNODES=1 bash ./examples/run_slurm_pretrain.sh
 ```
 
@@ -195,18 +195,18 @@ The following models are supported out of the box via provided configuration fil
 
 | Model            | Huggingface Config | Megatron Config | TorchTitan Config |
 | ---------------- | ------------------ | --------------- | ----------------- |
-| llama2_7B        | [meta-llama/Llama-2-7b-hf](https://huggingface.co/meta-llama/Llama-2-7b-hf)         | [llama2_7B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml)               | |
-| llama2_70B       | [meta-llama/Llama-2-70b-hf](https://huggingface.co/meta-llama/Llama-2-70b-hf)       | [llama2_70B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama2_70B-pretrain.yaml)             | |
-| llama3_8B        | [meta-llama/Meta-Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B)     | [llama3_8B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3_8B-pretrain.yaml)               | |
-| llama3_70B       | [meta-llama/Meta-Llama-3-70B](https://huggingface.co/meta-llama/Meta-Llama-3-70B)   | [llama3_70B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3_70B-pretrain.yaml)             | |
-| llama3.1_8B      | [meta-llama/Llama-3.1-8B](https://huggingface.co/meta-llama/Llama-3.1-8B)           | [llama3.1_8B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml)           | [llama3.1_8B-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml)|
-| llama3.1_70B     | [meta-llama/Llama-3.1-70B](https://huggingface.co/meta-llama/Llama-3.1-70B)         | [llama3.1_70B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3.1_70B-pretrain.yaml)         | [llama3.1_70B-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/torchtitan/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml)|
-| llama3.1_405B     | [meta-llama/Llama-3.1-405B](https://huggingface.co/meta-llama/Llama-3.1-405B)         | [llama3.1_405B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3.1_405B-pretrain.yaml)         | [llama3.1_405B-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/torchtitan/configs/MI300X/llama3.1_405B-pretrain.yaml)|
-| deepseek_v2_lite | [deepseek-ai/DeepSeek-V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite) | [deepseek_v2_lite-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/deepseek_v2_lite-pretrain.yaml) | |
-| deepseek_v2      | [deepseek-ai/DeepSeek-V2](https://huggingface.co/deepseek-ai/DeepSeek-V2)           | [deepseek_v2-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/deepseek_v2-pretrain.yaml)           | |
-| deepseek_v3      | [deepseek-ai/DeepSeek-V3](https://huggingface.co/deepseek-ai/DeepSeek-V3)           | [deepseek_v3-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/deepseek_v3-pretrain.yaml)           | |
-| Mixtral-8x7B-v0.1 | [mistralai/Mixtral-8x7B-v0.1 ](https://huggingface.co/mistralai/Mixtral-8x7B-v0.1)           | [mixtral_8x7B_v0.1-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-pretrain.yaml)           | |
-| Mixtral-8x22B-v0.1 | [mistralai/Mixtral-8x22B-v0.1 ](https://huggingface.co/mistralai/Mixtral-8x22B-v0.1)           | [mixtral_8x22B_v0.1-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/mixtral_8x22B_v0.1-pretrain.yaml)           | |
+| llama2_7B        | [meta-llama/Llama-2-7b-hf](https://huggingface.co/meta-llama/Llama-2-7b-hf)         | [llama2_7B-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml)               | |
+| llama2_70B       | [meta-llama/Llama-2-70b-hf](https://huggingface.co/meta-llama/Llama-2-70b-hf)       | [llama2_70B-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama2_70B-BF16-pretrain.yaml)             | |
+| llama3_8B        | [meta-llama/Meta-Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B)     | [llama3_8B-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3_8B-BF16-pretrain.yaml)               | |
+| llama3_70B       | [meta-llama/Meta-Llama-3-70B](https://huggingface.co/meta-llama/Meta-Llama-3-70B)   | [llama3_70B-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3_70B-BF16-pretrain.yaml)             | |
+| llama3.1_8B      | [meta-llama/Llama-3.1-8B](https://huggingface.co/meta-llama/Llama-3.1-8B)           | [llama3.1_8B-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml)           | [llama3.1_8B-BF16-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml)|
+| llama3.1_70B     | [meta-llama/Llama-3.1-70B](https://huggingface.co/meta-llama/Llama-3.1-70B)         | [llama3.1_70B-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml)         | [llama3.1_70B-BF16-pretrain.yaml](https://github.com/AMD-AGI/Primus/blob/main/examples/torchtitan/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml)|
+| llama3.1_405B     | [meta-llama/Llama-3.1-405B](https://huggingface.co/meta-llama/Llama-3.1-405B)         | [llama3.1_405B-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/llama3.1_405B-BF16-pretrain.yaml)         | [llama3.1_405B-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/torchtitan/configs/MI300X/llama3.1_405B-BF16-pretrain.yaml)|
+| deepseek_v2_lite | [deepseek-ai/DeepSeek-V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite) | [deepseek_v2_lite-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml) | |
+| deepseek_v2      | [deepseek-ai/DeepSeek-V2](https://huggingface.co/deepseek-ai/DeepSeek-V2)           | [deepseek_v2-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/deepseek_v2-BF16-pretrain.yaml)           | |
+| deepseek_v3      | [deepseek-ai/DeepSeek-V3](https://huggingface.co/deepseek-ai/DeepSeek-V3)           | [deepseek_v3-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/deepseek_v3-BF16-pretrain.yaml)           | |
+| Mixtral-8x7B-v0.1 | [mistralai/Mixtral-8x7B-v0.1 ](https://huggingface.co/mistralai/Mixtral-8x7B-v0.1)           | [mixtral_8x7B_v0.1-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml)           | |
+| Mixtral-8x22B-v0.1 | [mistralai/Mixtral-8x22B-v0.1 ](https://huggingface.co/mistralai/Mixtral-8x22B-v0.1)           | [mixtral_8x22B_v0.1-BF16-pretrain.yaml](https://github.com/AMD-AIG-AIMA/Primus/blob/main/examples/megatron/configs/MI300X/mixtral_8x22B_v0.1-BF16-pretrain.yaml)           | |
 
 ---
 
@@ -221,7 +221,7 @@ EXP=examples/megatron/configs/MI300X/<model_config> bash ./examples/run_local_pr
 For example, to run the llama3.1_8B model quickly:
 
 ```bash
-EXP=examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_local_pretrain.sh
+EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml bash ./examples/run_local_pretrain.sh
 
 EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_local_pretrain.sh
 ```
@@ -233,7 +233,7 @@ For multi-node training via SLURM, use:
 export NNODES=8
 
 #run megatron
-EXP=examples/megatron/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
+EXP=examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
 
 # run torchtitan
 EXP=examples/torchtitan/configs/MI300X/llama3.1_8B-pretrain.yaml bash ./examples/run_slurm_pretrain.sh
@@ -285,7 +285,7 @@ When using the `create` command to start a new training workload, the following 
 | `--gpu`        | Number of GPUs                                       | 8                                        |
 | `--exp`        | Path to experiment (training config) file (required) | —                                        |
 | `--data_path`  | Path to training data                                | —                                        |
-| `--image`      | Docker image to use                                  | `docker.io/rocm/primus:v25.9_gfx942` |
+| `--image`      | Docker image to use                                  | `docker.io/rocm/primus:v25.10` |
 | `--hf_token`   | HuggingFace token                                    | Read from env var `HF_TOKEN`             |
 | `--workspace`  | Workspace name                                       | `primus-safe-pretrain`                   |
 | `--nodelist`   | Comma-separated list of node hostnames to run on     | —                                        |
@@ -297,7 +297,7 @@ Create a training workload with 2 replicas and custom config:
 
 ```bash
 bash examples/run_k8s_pretrain.sh --url http://api.example.com create --replica 2 --cpu 96 --gpu 4 \
-  --exp examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml --data_path /mnt/data/train \
+  --exp examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml --data_path /mnt/data/train \
   --image docker.io/custom/image:latest --hf_token myhf_token --workspace team-dev
 
 #result:

@@ -11,8 +11,16 @@ def run(args, overrides):
     """
     if args.suite == "pretrain":
         # Select which training entry to use.
-        # Default to the legacy pretrain flow to avoid breaking existing users.
-        runtime_entry = getattr(args, "train_runtime", "legacy")
+        #
+        # To avoid changing the existing CLI surface, the choice between the
+        # legacy and core runtime is controlled via an environment variable:
+        #
+        #   PRIMUS_TRAIN_RUNTIME = "legacy" | "core"
+        #
+        # Default is "legacy" to keep current training workflows unchanged.
+        from os import getenv
+
+        runtime_entry = getenv("PRIMUS_TRAIN_RUNTIME", "legacy").strip().lower()
 
         if runtime_entry == "core":
             # New core runtime path: mirror `train_launcher.launch_train`.
@@ -61,18 +69,6 @@ def register_subcommand(subparsers):
     from primus.core.launcher.parser import add_pretrain_parser
 
     add_pretrain_parser(pretrain)
-
-    # Select which training pipeline to use: legacy (default) or new core runtime.
-    pretrain.add_argument(
-        "--train-runtime",
-        dest="train_runtime",
-        choices=["legacy", "core"],
-        default="legacy",
-        help=(
-            "Select training runtime implementation. "
-            "'legacy' uses the existing pretrain flow; 'core' uses the new core runtime."
-        ),
-    )
 
     parser.set_defaults(func=run)
 

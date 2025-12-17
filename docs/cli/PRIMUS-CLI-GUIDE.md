@@ -97,7 +97,7 @@ primus-cli container [container-options] -- <Primus-command>
 **Common Options**:
 | Option | Description | Example |
 |--------|-------------|---------|
-| `--image IMAGE` | Specify container image | `--image rocm/primus:v25.9` |
+| `--image IMAGE` | Specify container image | `--image rocm/primus:v25.10` |
 | `--volume PATH[:PATH]` | Mount directory | `--volume /data:/data` |
 | `--cpus N` | Limit CPU cores | `--cpus 16` |
 | `--memory SIZE` | Limit memory size | `--memory 128G` |
@@ -207,7 +207,7 @@ slurm:
 
 # Container configuration
 container:
-  image: "rocm/primus:v25.9_gfx942"
+  image: "rocm/primus:v25.10"
   options:
     cpus: "32"
     memory: "256G"
@@ -618,7 +618,7 @@ Step 4: primus-cli-container.sh (on each node)
   ├─ Load container.* config (image, devices, mounts, etc.)
   ├─ Parse container params: --image rocm/megatron-lm:v25.8_py310
   ├─ Merge config and CLI params
-  │   Config: image=rocm/primus:v25.9
+  │   Config: image=rocm/primus:v25.10
   │   CLI: --image rocm/megatron-lm:v25.8_py310
   │   Result: image=rocm/megatron-lm:v25.8_py310
   ├─ Build container options

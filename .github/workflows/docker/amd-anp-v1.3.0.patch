@@ -1,0 +1,30 @@
+diff --git a/Makefile b/Makefile
+index f50b051..97c1ce0 100644
+--- a/Makefile
++++ b/Makefile
+@@ -3,6 +3,7 @@ TARGET = build/$(PLUGIN_NAME)
+ CC = /opt/rocm/bin/hipcc
+ CFLAGS = -fPIC -O2 -O3 -DNDEBUG -MMD -MP
+ CFLAGS += -DTARGET_PLUGIN
++CFLAGS += --offload-arch=gfx950
+ INCLUDES = -Iinclude \
+ 		   -I/opt/rocm/include \
+ 		   -I/usr/include \
+diff --git a/src/net_ib.cc b/src/net_ib.cc
+index a8b29e3..0506245 100644
+--- a/src/net_ib.cc
++++ b/src/net_ib.cc
+@@ -912,10 +912,10 @@ ncclResult_t anpNetInit(ncclDebugLogger_t logFunction, ncclProfilerCallback_t pr
+             ncclIbDevs[ncclNIbDevs].portAttr = portAttr;
+             ncclIbDevs[ncclNIbDevs].portNum = port_num;
+             ncclIbDevs[ncclNIbDevs].link = portAttr.link_layer;
+-            if (portAttr.active_speed_ex)
++            // if (portAttr.active_speed_ex)
+               // A non-zero active_speed_ex indicates XDR rate (0x100) or higher
+-              ncclIbDevs[ncclNIbDevs].speed = ncclIbSpeed(portAttr.active_speed_ex) * ncclIbWidth(portAttr.active_width);
+-            else
++            //  ncclIbDevs[ncclNIbDevs].speed = ncclIbSpeed(portAttr.active_speed_ex) * ncclIbWidth(portAttr.active_width);
++            // else
+               ncclIbDevs[ncclNIbDevs].speed = ncclIbSpeed(portAttr.active_speed) * ncclIbWidth(portAttr.active_width);
+             ncclIbDevs[ncclNIbDevs].context = context;
+             ncclIbDevs[ncclNIbDevs].pdRefs = 0;

@@ -192,9 +192,9 @@ def log_dict_aligned(
     # Find the longest key for alignment (safe because data_dict is non-empty)
     max_key_length = max(len(str(key)) for key in data_dict)
 
-    # Log each key-value pair with alignment
+    # Log each key-value pair with alignment, including value type
     for key, value in sorted(data_dict.items()):
-        log_func(f"{indent}{str(key):<{max_key_length}} : {value}")
+        log_func(f"{indent}{str(key):<{max_key_length}} : {value} ({type(value).__name__})")
 
     # Log separator after content
     log_func("-" * 80)

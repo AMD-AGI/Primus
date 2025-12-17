@@ -10,7 +10,6 @@
 """General utilities."""
 import torch
 from megatron.core import mpu, parallel_state
-from megatron.training import get_args
 
 
 def is_second_last_pipeline_stage():
@@ -32,14 +31,9 @@ def print_second_last_pipeline_stage(message):
 
 
 def is_pipeline_stage_containing_loss():
-    args = get_args()
+    from primus.modules.trainer.megatron.utils import is_v_schedule_enabled
 
-    if (
-        args.patch_zero_bubble
-        and args.num_virtual_stages_per_pipeline_rank == 2
-        and args.enable_zero_bubble
-        and (args.zero_bubble_v_schedule or args.enable_1f1b_v)
-    ):
+    if is_v_schedule_enabled():
         return mpu.is_pipeline_first_stage(ignore_virtual=True)
     else:
         return mpu.is_pipeline_last_stage(ignore_virtual=True)

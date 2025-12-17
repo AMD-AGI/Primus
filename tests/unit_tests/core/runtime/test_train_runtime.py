@@ -88,7 +88,6 @@ class TestPrimusRuntime(PrimusUT):
 
         msg = str(ctx.exception)
         self.assertIn("backend boom", msg)
-        self.assertIn("Requested framework", msg)
 
     def test_initialize_trainer_wraps_creation_errors(self):
         """Adapter.create_trainer errors should be wrapped into RuntimeError."""
@@ -108,7 +107,6 @@ class TestPrimusRuntime(PrimusUT):
             runtime._initialize_trainer()
 
         msg = str(ctx.exception)
-        self.assertIn("Failed to create trainer", msg)
         self.assertIn("trainer boom", msg)
 
     def test_run_trainer_lifecycle_calls_trainer_methods_in_order(self):

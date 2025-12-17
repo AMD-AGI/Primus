@@ -36,6 +36,10 @@ from megatron.training.checkpointing import (
 )
 from megatron.training.training import save_checkpoint_and_time
 
+from primus.backends.megatron.core.optimizer.moun import get_megatron_muon_optimizer
+from primus.backends.megatron.core.optimizer.moun_optimizer_config import (
+    MounOptimizerConfig,
+)
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
 from primus.core.utils.import_utils import get_custom_fsdp, get_model_provider
 
@@ -157,7 +161,12 @@ from primus.modules.module_utils import (
 )
 from primus.modules.trainer.base_trainer import BaseTrainer
 
-from .utils import schedule_wrapper, set_wandb_writer_patch, validate_args_on_rocm
+from .utils import (
+    is_v_schedule_enabled,
+    schedule_wrapper,
+    set_wandb_writer_patch,
+    validate_args_on_rocm,
+)
 
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
@@ -167,6 +176,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self.is_v_schedule = is_v_schedule_enabled(self.module_config)
+
         # monkey patch modules
         self.patch_moe_layer()
         self.patch_torch_fsdp()
@@ -175,8 +186,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_te_tp_overlap()
         self.patch_mla_attention()
         self.patch_fp8_context()
-        self.patch_zbpp()
+        self.patch_pp()
         self.patch_custom_recompute_layer_ids()
+        self.patch_pipeline_parallel_layer_layout()
 
         self.app_metrics = {}
 
@@ -185,6 +197,16 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
+
+    def patch_pipeline_parallel_layer_layout(self):
+        warning_rank_0(f"MegatronTrainer: monkey patch PipelineParallelLayerLayout...")
+        import megatron.core.transformer.pipeline_parallel_layer_layout as orig_pipeline_parallel_layer_layout
+
+        from primus.backends.megatron.core.transformer.pipeline_parallel_layer_layout import (
+            PrimusPipelineParallelLayerLayout,
+        )
+
+        orig_pipeline_parallel_layer_layout.PipelineParallelLayerLayout = PrimusPipelineParallelLayerLayout
 
     def patch_custom_recompute_layer_ids(self):
         if self.module_config.recompute_layer_ids is None:
@@ -542,22 +564,20 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             ori_moe_utils.HAVE_TE = True
 
     def patch_mla_attention(self):
-        if not self.module_config.fused_padded_mla_attention:
-            return
+        if self.module_config.use_turbo_parallel_linear:
+            warning_rank_0(f"MegatronTrainer: monkey patch MLA attention to support Primus-Turbo linear...")
 
-        warning_rank_0(f"MegatronTrainer: monkey patch MLA attention to support padded fusion...")
-        # pad module definition
-        from megatron.core.transformer import multi_latent_attention
+            from megatron.core.transformer import multi_latent_attention
 
-        from primus.backends.megatron.core.transformer.multi_latent_attention import (
-            PaddedMLASelfAttention,
-        )
+            from primus.backends.megatron.core.transformer.multi_latent_attention import (
+                PrimusMLASelfAttention,
+            )
 
-        multi_latent_attention.MLASelfAttention = PaddedMLASelfAttention
-        # pad imported module
-        from megatron.core.models.gpt import gpt_layer_specs
+            multi_latent_attention.MLASelfAttention = PrimusMLASelfAttention
 
-        gpt_layer_specs.MLASelfAttention = PaddedMLASelfAttention
+            from megatron.core.models.gpt import gpt_layer_specs
+
+            gpt_layer_specs.MLASelfAttention = PrimusMLASelfAttention
 
     def patch_torch_fsdp(self):
         if not self.module_config.use_torch_fsdp2:
@@ -603,8 +623,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         else:
             warning_rank_0("MegatronTrainer: Patch FileSystemWriterAsync successfully.")
 
-    def patch_zbpp(self):
+    def patch_pp(self):
         # patch optimizer
+
         if self.module_config.patch_zero_bubble:
             warning_rank_0(f"MegatronTrainer: Patch ZeroBubble PP")
             import megatron.core.optimizer as optimizer
@@ -624,6 +645,17 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
             ori_pp.get_forward_backward_func = get_forward_backward_func_zbpp
 
+        elif self.module_config.patch_primus_pipeline:
+            warning_rank_0(f"MegatronTrainer: Patch PrimusPipe PP")
+            import megatron.core.pipeline_parallel as ori_pp
+
+            from primus.backends.megatron.core.pipeline_parallel.schedules import (
+                get_primus_pipeline_parallel_fwd_backward_func,
+            )
+
+            ori_pp.get_forward_backward_func = get_primus_pipeline_parallel_fwd_backward_func
+
+        if self.module_config.patch_primus_pipeline or self.module_config.patch_zero_bubble:
             # patch linear to split d_w and d_input
             import megatron.core.tensor_parallel.layers as ori_layers
 
@@ -636,7 +668,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             )
 
             # patch zbv-related code
-            if self.module_config.zero_bubble_v_schedule or self.module_config.enable_1f1b_v:
+            if self.is_v_schedule:
                 import megatron.core.parallel_state as ori_parallel_state
 
                 from primus.backends.megatron.core.parallel_state import (
@@ -1333,20 +1365,39 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         unwrapped_model = unwrap_model(model)
 
         kwargs = {}
-        for f in dataclasses.fields(OptimizerConfig):
-            if hasattr(args, f.name):
-                kwargs[f.name] = getattr(args, f.name)
-        config = OptimizerConfig(**kwargs)
-        config.timers = timers
-        log_rank_0(f"-run get_megatron_optimizer")
-        optimizer = get_megatron_optimizer(
-            config,
-            model,
-            no_wd_decay_cond,
-            scale_lr_cond,
-            lr_mult,
-            use_gloo_process_groups=args.enable_gloo_process_groups,
-        )
+
+        if "muon" not in args.optimizer:
+            for f in dataclasses.fields(OptimizerConfig):
+                if hasattr(args, f.name):
+                    kwargs[f.name] = getattr(args, f.name)
+            config = OptimizerConfig(**kwargs)
+            config.timers = timers
+
+            optimizer = get_megatron_optimizer(
+                config,
+                model,
+                no_wd_decay_cond,
+                scale_lr_cond,
+                lr_mult,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+            )
+        else:
+            for f in dataclasses.fields(MounOptimizerConfig):
+                if hasattr(args, f.name):
+                    kwargs[f.name] = getattr(args, f.name)
+
+            config = MounOptimizerConfig(**kwargs)
+            config.timers = timers
+            optimizer = get_megatron_muon_optimizer(
+                config,
+                model,
+                no_wd_decay_cond,
+                scale_lr_cond,
+                lr_mult,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+                layer_wise_distributed_optimizer="dist" in config.optimizer,
+            )
+
         opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
 
         if args.moe_use_upcycling:
@@ -2608,7 +2659,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             total_loss_dict[skipped_iters_key] = 0
             total_loss_dict[nan_iters_key] = 0
 
-            if get_args().patch_zero_bubble and get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v:
+            if self.is_v_schedule:
                 log_rank_0(log_string)
             else:
                 log_rank_last(log_string)

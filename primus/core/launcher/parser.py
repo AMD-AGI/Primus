@@ -105,11 +105,19 @@ def _parse_kv_overrides(args: list[str]) -> dict:
             # Format: --flag (boolean True)
             val = True
 
-        # Try to evaluate the value to correct type (int, float, bool, etc.)
-        try:
-            val = eval(val, {}, {})
-        except Exception:
-            pass  # Leave as string if evaluation fails
+        # Normalize common lowercase booleans before eval, e.g. "true"/"false".
+        if isinstance(val, str):
+            lower_val = val.lower()
+            if lower_val == "true":
+                val = True
+            elif lower_val == "false":
+                val = False
+            else:
+                # Try to evaluate the value to correct type (int, float, etc.)
+                try:
+                    val = eval(val, {}, {})
+                except Exception:
+                    pass  # Leave as string if evaluation fails
 
         # Handle nested keys, e.g., modules.pre_trainer.lr
         d = overrides
@@ -296,6 +304,12 @@ class PrimusParser(object):
         if not has_config and not has_model:
             return
 
+        # If we only have a model but no config, assume this module has already
+        # been flattened (e.g., from a previously exported config) and skip
+        # re-processing. This allows PrimusParser.export → parse cycles.
+        if not has_config and has_model:
+            return
+
         # Validate required keys
         for key in ("config", "model"):
             yaml_utils.check_key_in_namespace(module, key)
@@ -312,6 +326,17 @@ class PrimusParser(object):
         model_config_dict = PresetLoader.load(module.model, model_format, config_type="models")
         model_config = yaml_utils.dict_to_nested_namespace(model_config_dict)
         model_config.name = f"exp.modules.{module_name}.model"
+        # Only set the top-level `model` field when it does not already exist in the
+        # loaded model preset, so that presets can define their own `model` metadata.
+        if not yaml_utils.has_key_in_namespace(model_config, "model"):
+            model_config.model = module.model
+
+        # Avoid 'model' key conflicts when merging module + model presets:
+        # - Keep module_config.model as the user-specified model identifier
+        # - Treat detailed model metadata from the model preset as 'model_info'
+        # if hasattr(model_config, "model"):
+        #     setattr(model_config, "model_info", getattr(model_config, "model"))
+        #     delattr(model_config, "model")
 
         # ---- Merge: config + model ----
         yaml_utils.merge_namespace(module_config, model_config, allow_override=False, excepts=["name"])
