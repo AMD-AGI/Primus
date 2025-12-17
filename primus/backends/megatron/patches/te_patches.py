@@ -12,6 +12,7 @@ Handles FP8 configurations and memory optimizations.
 """
 
 import functools
+import importlib.util
 
 from primus.core.patches import PatchContext, register_patch
 from primus.modules.module_utils import log_rank_0, warning_rank_0
@@ -143,96 +144,155 @@ def patch_primus_turbo_backend(ctx: PatchContext):
 # ============================================================================
 
 
-@register_patch(
-    "megatron.patch.tp_te_overlap",
-    backend="megatron",
-    phase="before_train",
-    description="Enable Transformer Engine tensor-parallel communication overlap with Primus patches",
-)
-def patch_tp_te_overlap(ctx: PatchContext):
-    """
-    Patch Transformer Engine to enable TP communication overlap.
-
-    Behavior (moved from MegatronTrainer.patch_te_tp_overlap):
-        - Guarded by module_config.tp_comm_overlap.
-        - For FP8, disallow rs / bulk overlap combinations and raise if enabled.
-        - Patch transformer_engine / transformer_engine_torch general_gemm or
-          gemm/fp8_gemm and workspace helpers to Primus implementations.
-    """
+def _check_tp_overlap_conditions(ctx: PatchContext) -> bool:
+    """Helper to check basic TP overlap conditions."""
     module_config = ctx.extra.get("module_config")
     params = getattr(module_config, "params", None)
     if params is None:
-        warning_rank_0("[Patch:megatron.patch.tp_te_overlap][SKIP] No params in module_config")
-        return
+        return False
 
     if not getattr(params, "tp_comm_overlap", False):
-        warning_rank_0("[Patch:megatron.patch.tp_te_overlap][SKIP] tp_comm_overlap is not enabled in params")
-        return
+        return False
 
+    # Check FP8 incompatible settings
     if getattr(params, "fp8", False):
         if (
             getattr(params, "tp_comm_overlap_rs", False)
             or getattr(params, "tp_comm_bulk_dgrad", False)
             or getattr(params, "tp_comm_bulk_wgrad", False)
         ):
-            warning_rank_0(
-                "[Patch:megatron.patch.tp_te_overlap][WARN] FP8 Async-tp not support for rs, bulk overlap! "
-                "Please set tp_comm_overlap_rs=False, "
-                "tp_comm_bulk_dgrad=False, tp_comm_bulk_wgrad=False"
-            )
-            return
+            return False
 
+    return True
+
+
+def _is_te_v2_or_above(ctx: PatchContext) -> bool:
+    """Check if TE version is 2.0 or above."""
+    if not _check_tp_overlap_conditions(ctx):
+        return False
+    try:
+        from megatron.core.utils import is_te_min_version
+
+        return is_te_min_version("2.0")
+    except Exception:
+        return False
+
+
+def _is_te_below_v2(ctx: PatchContext) -> bool:
+    """Check if TE version is below 2.0."""
+    if not _check_tp_overlap_conditions(ctx):
+        return False
+    try:
+        from megatron.core.utils import is_te_min_version
+
+        return not is_te_min_version("2.0")
+    except Exception:
+        return False
+
+
+@register_patch(
+    "megatron.patch.tp_te_overlap.v2",
+    backend="megatron",
+    phase="before_train",
+    description="Enable TE TP communication overlap for TE >= 2.0 (using general_gemm)",
+    condition=_is_te_v2_or_above,
+)
+def patch_tp_te_overlap_v2(ctx: PatchContext):
+    """
+    Patch Transformer Engine TP overlap for TE >= 2.0.
+
+    This version uses general_gemm API introduced in TE 2.0.
+    """
     try:
         import transformer_engine as te
         import transformer_engine_torch as tex
-        from megatron.core.utils import is_te_min_version
 
         from primus.backends.transformer_engine import transformer_engine_torch as ptex
+        from primus.backends.transformer_engine.pytorch.cpp_extensions.gemm import (
+            general_gemm,
+        )
         from primus.backends.transformer_engine.pytorch.module.base import (
             get_workspace,
             initialize_ub,
         )
 
-        log_rank_0("[Patch:megatron.patch.tp_te_overlap] Patching transformer_engine TP overlap...")
+        log_rank_0("[Patch:megatron.patch.tp_te_overlap.v2] Patching TE TP overlap (TE >= 2.0)...")
 
+        # Patch CommOverlap types
         tex.CommOverlap = ptex.CommOverlap
         tex.CommOverlapP2P = ptex.CommOverlapP2P
         tex.CommOverlapType = ptex.CommOverlapType
 
-        if is_te_min_version("2.0"):
-            from primus.backends.transformer_engine.pytorch.cpp_extensions.gemm import (
-                general_gemm,
-            )
+        # Patch general_gemm
+        prev_general_gemm = te.pytorch.cpp_extensions.general_gemm
+        te.pytorch.cpp_extensions.general_gemm = functools.partial(general_gemm, orig_func=prev_general_gemm)
+        te.pytorch.module.linear.general_gemm = functools.partial(general_gemm, orig_func=prev_general_gemm)
+        te.pytorch.module.layernorm_linear.general_gemm = functools.partial(
+            general_gemm, orig_func=prev_general_gemm
+        )
 
-            prev_general_gemm = te.pytorch.cpp_extensions.general_gemm
-            te.pytorch.cpp_extensions.general_gemm = functools.partial(
-                general_gemm, orig_func=prev_general_gemm
-            )
-            te.pytorch.module.linear.general_gemm = functools.partial(
-                general_gemm, orig_func=prev_general_gemm
-            )
-            te.pytorch.module.layernorm_linear.general_gemm = functools.partial(
-                general_gemm, orig_func=prev_general_gemm
-            )
-        else:
-            from primus.backends.transformer_engine.pytorch.cpp_extensions.gemm import (
-                fp8_gemm,
-                gemm,
-            )
-
-            prev_gemm = te.pytorch.cpp_extensions.gemm
-            prev_fp8_gemm = te.pytorch.cpp_extensions.fp8_gemm
-
-            tex.CommOverlapAlgo = ptex.CommOverlapAlgo
-            te.pytorch.cpp_extensions.CommOverlapAlgo = ptex.CommOverlapAlgo
-            te.pytorch.cpp_extensions.gemm = functools.partial(gemm, orig_func=prev_gemm)
-            te.pytorch.module.linear.gemm = functools.partial(gemm, orig_func=prev_gemm)
-            te.pytorch.cpp_extensions.fp8_gemm = functools.partial(fp8_gemm, orig_func=prev_fp8_gemm)
-            te.pytorch.module.linear.fp8_gemm = functools.partial(fp8_gemm, orig_func=prev_fp8_gemm)
-
+        # Patch workspace helpers
         te.pytorch.module.base.initialize_ub = initialize_ub
         te.pytorch.module.base.get_workspace = get_workspace
         te.pytorch.cpp_extensions.CommOverlapType = ptex.CommOverlapType
 
+        log_rank_0("[Patch:megatron.patch.tp_te_overlap.v2] Successfully patched TE TP overlap")
+
     except Exception as e:
-        warning_rank_0(f"[Patch:megatron.patch.tp_te_overlap][SKIP] Failed to apply patch: {e}")
+        warning_rank_0(f"[Patch:megatron.patch.tp_te_overlap.v2][SKIP] Failed to apply patch: {e}")
+
+
+@register_patch(
+    "megatron.patch.tp_te_overlap.v1",
+    backend="megatron",
+    phase="before_train",
+    description="Enable TE TP communication overlap for TE < 2.0 (using gemm/fp8_gemm)",
+    condition=_is_te_below_v2,
+)
+def patch_tp_te_overlap_v1(ctx: PatchContext):
+    """
+    Patch Transformer Engine TP overlap for TE < 2.0.
+
+    This version uses gemm and fp8_gemm APIs for older TE versions.
+    """
+    try:
+        import transformer_engine as te
+        import transformer_engine_torch as tex
+
+        from primus.backends.transformer_engine import transformer_engine_torch as ptex
+        from primus.backends.transformer_engine.pytorch.cpp_extensions.gemm import (
+            fp8_gemm,
+            gemm,
+        )
+        from primus.backends.transformer_engine.pytorch.module.base import (
+            get_workspace,
+            initialize_ub,
+        )
+
+        log_rank_0("[Patch:megatron.patch.tp_te_overlap.v1] Patching TE TP overlap (TE < 2.0)...")
+
+        # Patch CommOverlap types
+        tex.CommOverlap = ptex.CommOverlap
+        tex.CommOverlapP2P = ptex.CommOverlapP2P
+        tex.CommOverlapType = ptex.CommOverlapType
+        tex.CommOverlapAlgo = ptex.CommOverlapAlgo
+
+        # Patch gemm and fp8_gemm
+        prev_gemm = te.pytorch.cpp_extensions.gemm
+        prev_fp8_gemm = te.pytorch.cpp_extensions.fp8_gemm
+
+        te.pytorch.cpp_extensions.CommOverlapAlgo = ptex.CommOverlapAlgo
+        te.pytorch.cpp_extensions.gemm = functools.partial(gemm, orig_func=prev_gemm)
+        te.pytorch.module.linear.gemm = functools.partial(gemm, orig_func=prev_gemm)
+        te.pytorch.cpp_extensions.fp8_gemm = functools.partial(fp8_gemm, orig_func=prev_fp8_gemm)
+        te.pytorch.module.linear.fp8_gemm = functools.partial(fp8_gemm, orig_func=prev_fp8_gemm)
+
+        # Patch workspace helpers
+        te.pytorch.module.base.initialize_ub = initialize_ub
+        te.pytorch.module.base.get_workspace = get_workspace
+        te.pytorch.cpp_extensions.CommOverlapType = ptex.CommOverlapType
+
+        log_rank_0("[Patch:megatron.patch.tp_te_overlap.v1] Successfully patched TE TP overlap")
+
+    except Exception as e:
+        warning_rank_0(f"[Patch:megatron.patch.tp_te_overlap.v1][SKIP] Failed to apply patch: {e}")
