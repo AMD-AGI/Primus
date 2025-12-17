@@ -32,11 +32,11 @@ def patch_fp8_context(ctx: PatchContext):
     Patch Megatron's get_fp8_context functions to use Primus implementation.
 
     Behavior (moved from MegatronTrainer.patch_fp8_context):
-        - When module_config.fp8 is True, replace:
-            * megatron.core.transformer.transformer_block.get_fp8_context
-            * megatron.core.ssm.mamba_block.get_fp8_context
-            * megatron.core.transformer.multi_token_prediction.get_fp8_context
-            * megatron.core.fp8_utils.get_fp8_context
+        - When module_config.fp8 is True, replace get_fp8_context in:
+            * megatron.core.transformer.transformer_block
+            * megatron.core.ssm.mamba_block
+            * megatron.core.transformer.multi_token_prediction
+            * megatron.core.fp8_utils
           with Primus's ROCm-friendly get_fp8_context.
     """
     from megatron.core import fp8_utils
@@ -47,7 +47,14 @@ def patch_fp8_context(ctx: PatchContext):
 
     log_rank_0("[Patch:megatron.fp8.get_fp8_context] Overriding get_fp8_context for fp8=True")
 
-    transformer_block.get_fp8_context = get_fp8_context
-    mamba_block.get_fp8_context = get_fp8_context
-    multi_token_prediction.get_fp8_context = get_fp8_context
-    fp8_utils.get_fp8_context = get_fp8_context
+    # Patch get_fp8_context in all relevant modules
+    modules_to_patch = {
+        "transformer_block": transformer_block,
+        "mamba_block": mamba_block,
+        "multi_token_prediction": multi_token_prediction,
+        "fp8_utils": fp8_utils,
+    }
+
+    for module_name, module in modules_to_patch.items():
+        module.get_fp8_context = get_fp8_context
+        log_rank_0(f"[Patch:megatron.fp8.get_fp8_context]   Patched {module_name}.get_fp8_context")
