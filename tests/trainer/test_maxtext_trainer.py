@@ -72,7 +72,7 @@ def run_script(
             except Exception as log_err:
                 logger.warning(f"[{tag}] Failed to read train log: {log_err}")
 
-        if "completed step: 2" in stdout_output:
+        if "after training is done" in stdout_output:
             logger.warning(f"[{tag}] Training likely succeeded despite return code != 0.")
             logger.warning(f"stderr excerpt:\n{stderr_output[:1000]}")
         else:
