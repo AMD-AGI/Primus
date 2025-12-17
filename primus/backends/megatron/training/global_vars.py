@@ -87,6 +87,11 @@ def upload_mlflow_artifacts(
     artifacts are uploaded. Only the rank that initialized MLflow
     (typically rank world_size - 1) should call this.
 
+    Important: In distributed training scenarios, all ranks should reach a
+    synchronization barrier BEFORE calling this function to ensure all ranks
+    have finished writing their log and trace files. This prevents incomplete
+    or missing log files in the artifacts.
+
     Args:
         upload_traces: Whether to upload profiler trace files
         upload_logs: Whether to upload training log files

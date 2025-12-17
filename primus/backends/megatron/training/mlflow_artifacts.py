@@ -20,8 +20,6 @@ import glob
 import os
 from typing import Optional
 
-import torch
-
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
@@ -33,22 +31,12 @@ def _get_all_trace_files(tensorboard_dir: str) -> list:
     - *.pt.trace.json
     - *.pt.trace.json.gz
 
-    In distributed training scenarios, this function ensures synchronization
-    by adding a barrier to guarantee all ranks have finished writing their
-    profiler trace files before the MLflow rank collects them for upload.
-
     Args:
         tensorboard_dir: Path to the tensorboard directory containing trace files
 
     Returns:
         List of paths to trace files
     """
-    # In distributed training, ensure all ranks have finished writing trace files
-    # before collecting them for upload. This barrier prevents the MLflow rank
-    # from collecting incomplete trace files while other ranks are still writing.
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
-
     if not tensorboard_dir or not os.path.exists(tensorboard_dir):
         return []
 
@@ -79,23 +67,12 @@ def _get_all_log_files(exp_root_path: str) -> list:
     - {exp_root_path}/logs/master/master-*.log
     - {exp_root_path}/logs/{module_name}/rank-{rank}/*.log
 
-    In distributed training scenarios, this function ensures synchronization
-    by adding a barrier to guarantee all ranks have finished writing their logs
-    before the MLflow rank collects them for upload. This prevents incomplete
-    or missing log files in the artifacts.
-
     Args:
         exp_root_path: Root path of the experiment
 
     Returns:
         List of paths to log files
     """
-    # In distributed training, ensure all ranks have finished writing logs
-    # before collecting them for upload. This barrier prevents the MLflow rank
-    # from collecting incomplete log files while other ranks are still writing.
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
-
     if not exp_root_path:
         return []
 
@@ -229,6 +206,11 @@ def upload_artifacts_to_mlflow(
 
     This is the main entry point for uploading artifacts to MLflow.
     It handles both trace files from profiling and log files from training.
+
+    Important: In distributed training scenarios, all ranks should reach a
+    synchronization barrier BEFORE calling this function to ensure all ranks
+    have finished writing their log and trace files. Only the rank with the
+    MLflow writer should then call this function to perform the actual upload.
 
     Args:
         mlflow_writer: The MLflow module instance (from get_mlflow_writer())

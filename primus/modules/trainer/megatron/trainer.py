@@ -2050,6 +2050,12 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if args.enable_ft_package and ft_integration.get_rank_monitor_client() is not None:
             ft_integration.get_rank_monitor_client().shutdown_workload_monitoring()
 
+        # In distributed training, synchronize all ranks before artifact upload
+        # to ensure all ranks have finished writing their log and trace files.
+        # This prevents the MLflow rank from collecting incomplete files.
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
         # Upload artifacts to MLflow before training completes
         mlflow_writer = get_mlflow_writer()
         if mlflow_writer:
