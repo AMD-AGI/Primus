@@ -23,6 +23,7 @@ from primus.backends.megatron.patches import (
     get_extra_te_kwargs_patches as _get_extra_te_kwargs_patches,
 )
 from primus.backends.megatron.patches import pp_patches as _pp_patches
+from primus.backends.megatron.patches import te_patches as _te_patches
 from primus.backends.megatron.patches import (
     training_log_patches as _training_log_patches,
 )
