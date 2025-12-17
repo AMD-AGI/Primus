@@ -36,6 +36,7 @@ try:
         PrimusTurboColumnParallelLinear,
         PrimusTurboGroupedMLP,
         PrimusTurboLayerNormColumnParallelLinear,
+        PrimusTurboLinear,
         PrimusTurboRowParallelLinear,
     )
 
@@ -58,7 +59,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
 
     def linear(self) -> type:
         """Which linear module TE backend uses"""
-        return TELinear
+        return PrimusTurboLinear if self.cfg.use_turbo_parallel_linear else TELinear
 
     def column_parallel_linear(self) -> type:
         """Which column parallel linear module TE backend uses"""
