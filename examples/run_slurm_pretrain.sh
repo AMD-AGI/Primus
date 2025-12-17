@@ -67,6 +67,8 @@ srun -N "${NNODES}" \
               echo \"SLURM_GPUS_ON_NODE: \${SLURM_GPUS_ON_NODE}\"
               echo \"\"
           fi
+          # Log TIMESTAMP on each node to verify consistency across nodes
+          echo \"[Node \$SLURM_NODEID] TIMESTAMP=\${TIMESTAMP}\"
           export MASTER_ADDR=\${node_array[0]}
           export MASTER_PORT=\${MASTER_PORT}
           export NNODES=\${SLURM_NNODES}

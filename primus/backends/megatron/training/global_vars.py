@@ -100,7 +100,7 @@ def upload_mlflow_artifacts(
 
     args = get_args()
     exp_root_path = get_exp_root_path()
-    tensorboard_dir = getattr(args, "tensorboard_dir", None) if args else None
+    tensorboard_dir = getattr(args, "tensorboard_dir", None)
 
     return upload_artifacts_to_mlflow(
         mlflow_writer=mlflow_writer,
@@ -135,6 +135,8 @@ def _ensure_var_is_not_initialized(var, name):
 
 def destroy_global_vars():
     global _GLOBAL_ARGS
+    global _GLOBAL_MLFLOW_WRITER
     global _GLOBAL_EXP_ROOT_PATH
     _GLOBAL_ARGS = None
+    _GLOBAL_MLFLOW_WRITER = None
     _GLOBAL_EXP_ROOT_PATH = None
