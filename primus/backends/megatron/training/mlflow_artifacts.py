@@ -27,9 +27,9 @@ def _get_all_trace_files(tensorboard_dir: str) -> list:
     """
     Find all profiler trace files in the tensorboard directory.
 
-    Trace files are typically named like:
-    - primus-megatron-exp[...]-rank[0].*.json
-    - primus-megatron-exp[...]-rank[0].*.json.gz
+    Trace files follow PyTorch profiler naming convention:
+    - *.pt.trace.json (uncompressed trace files)
+    - *.pt.trace.json.gz (compressed trace files)
 
     Args:
         tensorboard_dir: Path to the tensorboard directory containing trace files
@@ -41,8 +41,9 @@ def _get_all_trace_files(tensorboard_dir: str) -> list:
         return []
 
     trace_files = []
-    # Look for JSON trace files (both compressed and uncompressed)
-    patterns = ["*.json", "*.json.gz", "*.pt.trace.json", "*.pt.trace.json.gz"]
+    # Look for PyTorch profiler trace files (both compressed and uncompressed)
+    # Using specific patterns to avoid matching unrelated JSON files
+    patterns = ["*.pt.trace.json", "*.pt.trace.json.gz"]
     for pattern in patterns:
         trace_files.extend(glob.glob(os.path.join(tensorboard_dir, pattern)))
         trace_files.extend(glob.glob(os.path.join(tensorboard_dir, "**", pattern), recursive=True))
