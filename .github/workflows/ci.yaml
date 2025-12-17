@@ -119,7 +119,8 @@ jobs:
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-slime-rocm7-mi355"
           start_time=$(date +%s)
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.slime.rocm7.gfx950 \
-               -t tasimage/primus:${{env.IMAGE_TAG}}-slime-rocm7-mi355 .
+               -t tasimage/primus:${{env.IMAGE_TAG}}-slime-rocm7-mi355 \
+               $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker-slime-rocm7-mi355] Total elapsed time: ${elapsed} seconds"
