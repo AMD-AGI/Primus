@@ -330,6 +330,19 @@ export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
 # Note: Disable fp32 atomic due if you find any accuracy issue.
 export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:-0}
 
+# NOTE: Primus Turbo rebuild logic
+# The previous Primus Turbo rebuild logic that existed in this script
+# has been intentionally removed to keep this entrypoint focused on
+# experiment configuration and runtime environment setup.
+#
+# This script no longer rebuilds Primus Turbo from source. If you need
+# to rebuild Primus Turbo, please use the dedicated build tooling or
+# follow the instructions in the Primus Turbo build documentation for
+# your environment.
+#
+# Keeping the rebuild workflow separate from the training launcher helps
+# avoid unexpected rebuilds and makes CI, deployment, and debugging
+# more predictable.
 # nvte debug envs
 export NVTE_DEBUG=0 # 0, 1
 export NVTE_DEBUG_LEVEL=0 # 0, 1, 2
