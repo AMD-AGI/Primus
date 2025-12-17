@@ -263,8 +263,23 @@ def upload_trace_files_to_mlflow(
             mlflow_writer.log_artifact(trace_file, artifact_path=artifact_subpath)
             uploaded_count += 1
             log_rank_0(f"[MLflow] Uploaded trace file: {os.path.basename(trace_file)}")
+        except PermissionError as e:
+            # Authentication or file permission issues
+            warning_rank_0(
+                f"[MLflow] Permission denied uploading trace file {trace_file}: {e}"
+            )
+        except (ConnectionError, TimeoutError, OSError) as e:
+            # Network or connection issues - log with type for debugging
+            warning_rank_0(
+                f"[MLflow] Failed to upload trace file {trace_file} "
+                f"due to {type(e).__name__}: {e}"
+            )
         except Exception as e:
-            warning_rank_0(f"[MLflow] Failed to upload trace file {trace_file}: {e}")
+            # Catch-all for unexpected errors - log with exception type
+            warning_rank_0(
+                f"[MLflow] Failed to upload trace file {trace_file} "
+                f"due to unexpected {type(e).__name__}: {e}"
+            )
 
     log_rank_0(f"[MLflow] Uploaded {uploaded_count} trace files to '{artifact_path}'")
     return uploaded_count
@@ -314,8 +329,23 @@ def upload_log_files_to_mlflow(
 
             mlflow_writer.log_artifact(log_file, artifact_path=artifact_subpath)
             uploaded_count += 1
+        except PermissionError as e:
+            # Authentication or file permission issues
+            warning_rank_0(
+                f"[MLflow] Permission denied uploading log file {log_file}: {e}"
+            )
+        except (ConnectionError, TimeoutError, OSError) as e:
+            # Network or connection issues - log with type for debugging
+            warning_rank_0(
+                f"[MLflow] Failed to upload log file {log_file} "
+                f"due to {type(e).__name__}: {e}"
+            )
         except Exception as e:
-            warning_rank_0(f"[MLflow] Failed to upload log file {log_file}: {e}")
+            # Catch-all for unexpected errors - log with exception type
+            warning_rank_0(
+                f"[MLflow] Failed to upload log file {log_file} "
+                f"due to unexpected {type(e).__name__}: {e}"
+            )
 
     log_rank_0(f"[MLflow] Uploaded {uploaded_count} log files to '{artifact_path}'")
     return uploaded_count
@@ -445,7 +475,18 @@ def generate_tracelens_report(
 
     Returns:
         List of paths to generated report files
+
+    Raises:
+        ValueError: If output_format is not one of the supported values
     """
+    # Validate output_format parameter
+    valid_formats = {"all", "xlsx", "csv", "html"}
+    if output_format not in valid_formats:
+        raise ValueError(
+            f"Invalid output_format '{output_format}'. "
+            f"Must be one of: {', '.join(sorted(valid_formats))}"
+        )
+
     if not os.path.exists(trace_file):
         warning_rank_0(f"[TraceLens] Trace file not found: {trace_file}")
         return []
@@ -483,54 +524,59 @@ def generate_tracelens_report(
         # The ImportError is caught below to provide a simpler CSV-based fallback.
         from TraceLens.Reporting import generate_perf_report_pytorch
 
+        def _generate_xlsx_and_csv_reports(generate_xlsx: bool, generate_csv: bool) -> list:
+            """
+            Helper to generate XLSX and/or CSV TraceLens reports for a single trace file.
+
+            Args:
+                generate_xlsx: Whether to generate the XLSX multi-tab report.
+                generate_csv: Whether to generate CSV reports in a subdirectory.
+
+            Returns:
+                List of paths to generated report files.
+            """
+            local_generated_files = []
+
+            if generate_xlsx:
+                # XLSX: Single file with multiple tabs
+                xlsx_path = os.path.join(output_dir, f"{report_name}_analysis.xlsx")
+                dfs = generate_perf_report_pytorch(trace_file, output_xlsx_path=xlsx_path)
+                if os.path.exists(xlsx_path):
+                    log_rank_0(
+                        f"[TraceLens] Generated XLSX report with {len(dfs)} tabs: {os.path.basename(xlsx_path)}"
+                    )
+                    local_generated_files.append(xlsx_path)
+
+            if generate_csv:
+                # CSV: Multiple files in a subdirectory per rank
+                csv_subdir = os.path.join(output_dir, report_name)
+                os.makedirs(csv_subdir, exist_ok=True)
+                generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
+
+                # Collect all generated CSV files
+                csv_files = glob.glob(os.path.join(csv_subdir, "*.csv"))
+                if csv_files:
+                    log_rank_0(
+                        f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}"
+                    )
+                    local_generated_files.extend(csv_files)
+
+            return local_generated_files
+
         generated_files = []
 
         if output_format in ("all", "xlsx"):
-            # XLSX: Single file with multiple tabs
-            xlsx_path = _safe_join_path(output_dir, f"{report_name}_analysis.xlsx")
-            dfs = generate_perf_report_pytorch(trace_file, output_xlsx_path=xlsx_path)
-            if os.path.exists(xlsx_path):
-                log_rank_0(
-                    f"[TraceLens] Generated XLSX report with {len(dfs)} tabs: {os.path.basename(xlsx_path)}"
-                )
-                generated_files.append(xlsx_path)
+            # Generate XLSX report
+            generated_files.extend(_generate_xlsx_and_csv_reports(generate_xlsx=True, generate_csv=False))
 
         if output_format in ("all", "csv"):
-            # CSV: Multiple files in a subdirectory per rank
-            csv_subdir = _safe_join_path(output_dir, report_name)
-            os.makedirs(csv_subdir, exist_ok=True)
-            dfs = generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
-
-            # Collect all generated CSV files
-            # csv_subdir is already validated via _safe_join_path, safe to use os.path.join for wildcard
-            csv_files = glob.glob(os.path.join(csv_subdir, "*.csv"))
-            if csv_files:
-                log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
-                generated_files.extend(csv_files)
+            # Generate CSV reports
+            generated_files.extend(_generate_xlsx_and_csv_reports(generate_xlsx=False, generate_csv=True))
 
         if output_format == "html":
             warning_rank_0("[TraceLens] HTML format not yet supported, generating xlsx+csv instead")
-            # Generate both XLSX and CSV formats as fallback
-            # XLSX: Single file with multiple tabs
-            xlsx_path = _safe_join_path(output_dir, f"{report_name}_analysis.xlsx")
-            xlsx_dfs = generate_perf_report_pytorch(trace_file, output_xlsx_path=xlsx_path)
-            if os.path.exists(xlsx_path):
-                log_rank_0(
-                    f"[TraceLens] Generated XLSX report with {len(xlsx_dfs)} tabs: {os.path.basename(xlsx_path)}"
-                )
-                generated_files.append(xlsx_path)
-
-            # CSV: Multiple files in a subdirectory
-            csv_subdir = _safe_join_path(output_dir, report_name)
-            os.makedirs(csv_subdir, exist_ok=True)
-            generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
-
-            # Collect all generated CSV files
-            # csv_subdir is already validated via _safe_join_path, safe to use os.path.join for wildcard
-            csv_files = glob.glob(os.path.join(csv_subdir, "*.csv"))
-            if csv_files:
-                log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
-                generated_files.extend(csv_files)
+            # As a fallback, generate both XLSX and CSV reports using the common helper
+            generated_files.extend(_generate_xlsx_and_csv_reports(generate_xlsx=True, generate_csv=True))
 
         if generated_files:
             return generated_files
@@ -538,8 +584,8 @@ def generate_tracelens_report(
         warning_rank_0(f"[TraceLens] No output files generated for: {trace_file}")
         return []
 
-    except ImportError:
-        log_rank_0("[TraceLens] TraceLens not available, using fallback CSV summary")
+    except ImportError as e:
+        log_rank_0(f"[TraceLens] Failed to import TraceLens ({e}), using fallback CSV summary")
         # Fallback to simple CSV summary
         csv_path = _generate_trace_summary_csv(trace_file, output_dir, f"{report_name}_summary.csv")
         return [csv_path] if csv_path else []
@@ -788,8 +834,23 @@ def upload_tracelens_reports_to_mlflow(
             mlflow_writer.log_artifact(report_path, artifact_path=artifact_path)
             uploaded_count += 1
             log_rank_0(f"[MLflow] Uploaded TraceLens report: {os.path.basename(report_path)}")
+        except PermissionError as e:
+            # Authentication or file permission issues
+            warning_rank_0(
+                f"[MLflow] Permission denied uploading report {report_path}: {e}"
+            )
+        except (ConnectionError, TimeoutError, OSError) as e:
+            # Network or connection issues - log with type for debugging
+            warning_rank_0(
+                f"[MLflow] Failed to upload report {report_path} "
+                f"due to {type(e).__name__}: {e}"
+            )
         except Exception as e:
-            warning_rank_0(f"[MLflow] Failed to upload report {report_path}: {e}")
+            # Catch-all for unexpected errors - log with exception type
+            warning_rank_0(
+                f"[MLflow] Failed to upload report {report_path} "
+                f"due to unexpected {type(e).__name__}: {e}"
+            )
 
     log_rank_0(f"[TraceLens] Uploaded {uploaded_count} reports to '{artifact_path}'")
     return uploaded_count
