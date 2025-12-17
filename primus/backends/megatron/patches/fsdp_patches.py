@@ -16,6 +16,23 @@ from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
 
 
+def _patch_and_log(target_module, attribute_name: str, new_value, patch_name: str):
+    """
+    Patch a module attribute and log the operation.
+
+    Args:
+        target_module: The module to patch
+        attribute_name: The attribute name to replace
+        new_value: The new value to assign
+        patch_name: Patch identifier for logging
+    """
+    setattr(target_module, attribute_name, new_value)
+    log_rank_0(
+        f"[Patch:{patch_name}]   Patched {target_module.__name__}.{attribute_name} "
+        f"-> {new_value.__name__}"
+    )
+
+
 def _is_fsdp2_enabled(ctx: PatchContext) -> bool:
     """Check if FSDP2 is enabled in backend_args."""
     return getattr(get_args(ctx), "use_torch_fsdp2", False)
@@ -42,25 +59,25 @@ def patch_torch_fsdp(ctx: PatchContext):
     """
 
     # Import custom FSDP wrapper
-    # Patch Megatron's internal reference to FSDP2 class
     import megatron.core.distributed.torch_fully_sharded_data_parallel as torch_fsdp_module
+    from megatron.training import training
 
     from primus.backends.megatron.core.distributed.torch_fully_sharded_data_parallel import (
         PrimusTorchFullyShardedDataParallel,
     )
 
-    torch_fsdp_module.TorchTorchFullyShardedDataParallel = PrimusTorchFullyShardedDataParallel
-    log_rank_0(
-        "[Patch:megatron.fsdp.torch_fsdp2]   Patched "
-        "megatron.core.distributed.torch_fully_sharded_data_parallel.TorchTorchFullyShardedDataParallel "
-        f"-> {PrimusTorchFullyShardedDataParallel.__name__}"
+    # Patch Megatron's internal reference to FSDP2 class
+    _patch_and_log(
+        torch_fsdp_module,
+        "TorchTorchFullyShardedDataParallel",
+        PrimusTorchFullyShardedDataParallel,
+        "megatron.fsdp.torch_fsdp2",
     )
 
     # Patch training code reference
-    from megatron.training import training
-
-    training.torch_FSDP = PrimusTorchFullyShardedDataParallel
-    log_rank_0(
-        f"[Patch:megatron.fsdp.torch_fsdp2]   Patched megatron.training.training.torch_FSDP "
-        f"-> {PrimusTorchFullyShardedDataParallel.__name__}"
+    _patch_and_log(
+        training,
+        "torch_FSDP",
+        PrimusTorchFullyShardedDataParallel,
+        "megatron.fsdp.torch_fsdp2",
     )
