@@ -252,6 +252,12 @@ def _ensure_tracelens_installed() -> bool:
         except subprocess.CalledProcessError as e:
             warning_rank_0(f"[TraceLens] Failed to install TraceLens: {e}")
             return False
+        except (PermissionError, OSError) as e:
+            warning_rank_0(f"[TraceLens] Failed to install TraceLens due to system error: {e}")
+            return False
+        except Exception as e:
+            warning_rank_0(f"[TraceLens] Failed to install TraceLens due to unexpected error: {e}")
+            return False
 
 
 def _extract_rank_from_filename(filename: str) -> Optional[int]:
