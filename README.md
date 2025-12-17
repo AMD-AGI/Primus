@@ -24,7 +24,7 @@
 - **[2025/08/22]** Primus introduction [blog](https://rocm.blogs.amd.com/software-tools-optimization/primus/README.html)
 - **[2025/06/18]** Added TorchTitan backend support
 - **[2025/05/16]** Added benchmark suite for performance evaluation
-- **[2025/04/18]** Added [Preflight](./tools/preflight/README.md) cluster sanity checker
+- **[2025/04/18]** Added [Preflight](./primus/tools/preflight/README.md) cluster sanity checker
 - **[2025/04/14]** Integrated HipBLASLt autotuning for optimized GPU kernel performance
 - **[2025/04/09]** Extended support for LLaMA2, LLaMA3, DeepSeek-V2/V3 models
 - **[2025/03/04]** Released Megatron trainer module
@@ -63,7 +63,7 @@ Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-ru
     ```bash
     # Run training in container
     ./runner/primus-cli container --image rocm/primus:v25.10 \
-      -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml
+      -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
     ```
 
 For more detailed usage instructions, see the [CLI User Guide](./docs/cli/PRIMUS-CLI-GUIDE.md).
