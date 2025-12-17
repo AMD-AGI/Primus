@@ -46,9 +46,9 @@ def _get_all_trace_files(tensorboard_dir: str) -> list:
     """
     Find all profiler trace files in the tensorboard directory.
 
-    Trace files are typically named like:
-    - primus-megatron-exp[...]-rank[0].*.json
-    - primus-megatron-exp[...]-rank[0].*.json.gz
+    Trace files are typically named like (note: square brackets are literal characters):
+    - primus-megatron-exp[my-exp-name]-rank[0].1234567890.json
+    - primus-megatron-exp[my-exp-name]-rank[0].1234567890.json.gz
 
     Args:
         tensorboard_dir: Path to the tensorboard directory containing trace files
@@ -258,9 +258,9 @@ def _extract_rank_from_filename(filename: str) -> Optional[int]:
     """
     Extract rank number from trace filename.
 
-    Expected patterns:
+    Expected patterns (square brackets are literal characters where shown):
     - rank_0_step_2.json.gz
-    - primus-megatron-exp-rank[0].*.json
+    - primus-megatron-exp[my-exp-name]-rank[0].1234567890.json
 
     Args:
         filename: The trace filename
