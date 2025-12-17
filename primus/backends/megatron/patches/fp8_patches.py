@@ -11,17 +11,16 @@ This module contains patches that modify Megatron's FP8 context handling
 to use Primus-specific implementations for better ROCm compatibility.
 """
 
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
 def _is_fp8_enabled(ctx: PatchContext) -> bool:
     """Check if FP8 is enabled in module_config."""
-    module_config = ctx.extra.get("module_config")
-    params = getattr(module_config, "params", None)
-    if params is None:
+    args = get_args(ctx)
+    if args is None:
         return False
-    return getattr(params, "fp8", False)
+    return getattr(args, "fp8", False)
 
 
 @register_patch(

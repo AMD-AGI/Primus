@@ -67,3 +67,37 @@ class PatchContext:
     module_name: Optional[str] = None
     platform: Optional[str] = None
     extra: Dict[str, Any] = field(default_factory=dict)
+
+
+# -----------------------------------------------------------------------------
+# Helper Functions
+# -----------------------------------------------------------------------------
+
+
+def get_args(ctx: PatchContext) -> Optional[Any]:
+    """
+    Get module configuration parameters from patch context.
+
+    This is a convenience helper that extracts module_config.params from the
+    context's extra dict. Returns None if module_config or params is not available.
+
+    Args:
+        ctx: The patch context
+
+    Returns:
+        module_config.params (SimpleNamespace) if available, None otherwise
+
+    Example:
+        @register_patch(...)
+        def my_patch(ctx: PatchContext):
+            args = get_args(ctx)
+            if args is None:
+                return
+
+            if getattr(args, "my_flag", False):
+                # Apply patch...
+    """
+    module_config = ctx.extra.get("module_config")
+    if module_config is None:
+        return None
+    return getattr(module_config, "params", None)
