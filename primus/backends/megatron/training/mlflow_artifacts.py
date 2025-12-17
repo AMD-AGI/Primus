@@ -28,8 +28,9 @@ def _get_all_trace_files(tensorboard_dir: str) -> list:
     Find all profiler trace files in the tensorboard directory.
 
     Trace files are typically named like:
-    - primus-megatron-exp[...]-rank[0].*.json
-    - primus-megatron-exp[...]-rank[0].*.json.gz
+    - *.pt.trace.json
+    - *.pt.trace.json.gz
+    but we also fall back to generic JSON/JSON.GZ patterns.
 
     Args:
         tensorboard_dir: Path to the tensorboard directory containing trace files
