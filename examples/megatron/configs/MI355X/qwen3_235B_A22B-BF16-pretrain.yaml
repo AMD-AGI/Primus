@@ -22,10 +22,10 @@ modules:
       moe_router_force_load_balancing: true
 
       train_iters: 50
-      micro_batch_size: 4
-      global_batch_size: 32
+      micro_batch_size: 1
+      global_batch_size: 256
 
-      seq_length: ${PRIMUS_SEQ_LENGTH:2048}
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:131072}
 
       lr: 1.0e-4
@@ -42,8 +42,8 @@ modules:
 
       # parallel
       tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 1
-      expert_model_parallel_size: 1
+      pipeline_model_parallel_size: 4
+      expert_model_parallel_size: 8
       sequence_parallel: 1
       overlap_grad_reduce: true
 
@@ -71,10 +71,21 @@ modules:
       no_save_rng: null
       disable_last_saving: true
 
-      # recompute
-      # recompute_granularity: full # full, selective
-      # recompute_method: block # uniform, block
-      # recompute_num_layers: 80 # int
+      # PP4 VPP2
+      # 2 virtual stages per pipeline rank, so 8 total pipeline segments (PP4*VPP2)
+      # To balance 94 layers: 94/8 = approx 11-12 layers per stage
+      # This gives 11+12*6+11=94
+      # 1+6+1 = 8 chunks
+      pipeline_model_parallel_layout: 'Et*11|(t*12|)*6,t*11,L'
+
+      # Pipeline warmup
+      pp_warmup: true
+
+      # Load balance
+      moe_router_force_load_balancing: true
+
+      # Grouped GEMM
+      moe_use_legacy_grouped_gemm: true
 
       # Turbo
       enable_primus_turbo: true
@@ -82,5 +93,17 @@ modules:
       use_turbo_grouped_mlp: false
 
       # Cross entropy flags
-      # cross_entropy_fusion_impl: "te"
-      # cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # DeepEp
+      use_turbo_deepep: true
+      turbo_deepep_num_cu: 32
+      turbo_deepep_use_comm_stream: false
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      turbo_sync_free_moe_stage: 1
+
+      # Manual GC
+      manual_gc: true
+      manual_gc_interval: 1

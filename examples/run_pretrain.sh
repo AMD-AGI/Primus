@@ -289,10 +289,10 @@ fi
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 
 # Increase HSA kernarg pool size to 12MB for models with lot of kernels
-# export HSA_KERNARG_POOL_SIZE=${HSA_KERNARG_POOL_SIZE:-12582912}
+export HSA_KERNARG_POOL_SIZE=${HSA_KERNARG_POOL_SIZE:-12582912}
 
 # Enable NUMA binding for better memory locality (may increase stability for large models)
-export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-0}
+export ENABLE_NUMA_BINDING=${ENABLE_NUMA_BINDING:-1}
 
 # Limit max CUDA device connections to reduce PCIe traffic
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}

@@ -185,7 +185,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_file_system_writer()
         self.patch_te_tp_overlap()
         self.patch_mla_attention()
-        self.patch_fp8_context()
+        if self.module_config.fp8:
+            self.patch_fp8_context()
         self.patch_pp()
         self.patch_custom_recompute_layer_ids()
         self.patch_pipeline_parallel_layer_layout()
