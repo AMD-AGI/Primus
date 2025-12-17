@@ -126,7 +126,7 @@ def upload_trace_files_to_mlflow(
 
             mlflow_writer.log_artifact(trace_file, artifact_path=artifact_subpath)
             uploaded_count += 1
-            log_rank_0(f"[MLflow] Uploaded trace file: {os.path.basename(trace_file)}")
+            log_rank_0(f"[MLflow] Uploaded trace file: {rel_path}")
         except Exception as e:
             warning_rank_0(f"[MLflow] Failed to upload trace file {trace_file}: {e}")
 
