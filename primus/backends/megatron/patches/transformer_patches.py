@@ -11,9 +11,7 @@ This module contains patches that modify Megatron's transformer-related
 components (configs, blocks, etc.) to integrate Primus-specific behavior.
 """
 
-from typing import Any
-
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
@@ -39,28 +37,19 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
           PrimusTransformerBlock so that checkpoint_forward uses the
           recompute_layer_ids information.
     """
-    module_config: Any = ctx.extra.get("module_config")
+    args = get_args(ctx)
 
-    params = getattr(module_config, "params", None)
-    if params is None:
-        warning_rank_0(
-            "[Patch:megatron.transformer.custom_recompute_layer_ids][SKIP] No params in module_config"
-        )
-        return
-
-    if getattr(params, "recompute_layer_ids", None) is None:
-        warning_rank_0(
+    if getattr(args, "recompute_layer_ids", None) is None:
+        log_rank_0(
             "[Patch:megatron.transformer.custom_recompute_layer_ids][SKIP] No recompute_layer_ids in params"
         )
         return
 
     try:
-        log_rank_0("MegatronPatches: monkey patch TransformerConfig post_init...")
-
         import megatron.core.transformer.transformer_config as config_mod
 
         # 1) Attach Primus-provided recompute_layer_ids to TransformerConfig
-        config_mod.TransformerConfig.recompute_layer_ids = params.recompute_layer_ids
+        config_mod.TransformerConfig.recompute_layer_ids = args.recompute_layer_ids
 
         # 2) Wrap __post_init__ to temporarily clear recompute_granularity
         orig_post_init = config_mod.TransformerConfig.__post_init__
@@ -122,11 +111,11 @@ def patch_mla_attention(ctx: PatchContext):
           multi_latent_attention.MLASelfAttention and
           gpt_layer_specs.MLASelfAttention with PaddedMLASelfAttention.
     """
-    module_config: Any = ctx.extra.get("module_config")
-    params = getattr(module_config, "params", None)
-    if params is None or not getattr(params, "use_turbo_parallel_linear", False):
-        warning_rank_0(
-            "[Patch:megatron.transformer.fused_padded_mla_attention][SKIP] No use_turbo_parallel_linear in params"
+    args = get_args(ctx)
+
+    if not getattr(args, "use_turbo_parallel_linear", False):
+        log_rank_0(
+            "[Patch:megatron.transformer.fused_padded_mla_attention][SKIP] use_turbo_parallel_linear not enabled"
         )
         return
 
