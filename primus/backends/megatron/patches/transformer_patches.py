@@ -15,6 +15,11 @@ from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
+def _has_recompute_layer_ids(ctx: PatchContext) -> bool:
+    """Check if recompute_layer_ids is specified in module_config."""
+    return getattr(get_args(ctx), "recompute_layer_ids", None) is not None
+
+
 @register_patch(
     "megatron.transformer.custom_recompute_layer_ids",
     backend="megatron",
@@ -23,6 +28,7 @@ from primus.modules.module_utils import log_rank_0, warning_rank_0
         "Monkey patch TransformerConfig and TransformerBlock to support "
         "Primus-provided recompute_layer_ids."
     ),
+    condition=_has_recompute_layer_ids,
 )
 def patch_custom_recompute_layer_ids(ctx: PatchContext):
     """
@@ -38,12 +44,6 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
           recompute_layer_ids information.
     """
     args = get_args(ctx)
-
-    if getattr(args, "recompute_layer_ids", None) is None:
-        log_rank_0(
-            "[Patch:megatron.transformer.custom_recompute_layer_ids][SKIP] No recompute_layer_ids in params"
-        )
-        return
 
     try:
         import megatron.core.transformer.transformer_config as config_mod
@@ -93,6 +93,11 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
         )
 
 
+def _is_turbo_parallel_linear_enabled(ctx: PatchContext) -> bool:
+    """Check if use_turbo_parallel_linear is enabled in module_config."""
+    return getattr(get_args(ctx), "use_turbo_parallel_linear", False)
+
+
 @register_patch(
     "megatron.transformer.patch_mla_attention",
     backend="megatron",
@@ -101,6 +106,7 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
         "Monkey patch MLA attention to use Primus PaddedMLASelfAttention "
         "when use_turbo_parallel_linear is enabled."
     ),
+    condition=_is_turbo_parallel_linear_enabled,
 )
 def patch_mla_attention(ctx: PatchContext):
     """
@@ -111,14 +117,6 @@ def patch_mla_attention(ctx: PatchContext):
           multi_latent_attention.MLASelfAttention and
           gpt_layer_specs.MLASelfAttention with PaddedMLASelfAttention.
     """
-    args = get_args(ctx)
-
-    if not getattr(args, "use_turbo_parallel_linear", False):
-        log_rank_0(
-            "[Patch:megatron.transformer.fused_padded_mla_attention][SKIP] use_turbo_parallel_linear not enabled"
-        )
-        return
-
     try:
         log_rank_0("MegatronPatches: monkey patch MLA attention to support padded fusion...")
 
