@@ -336,7 +336,18 @@ def generate_tracelens_report(
 
     Returns:
         List of paths to generated report files
+
+    Raises:
+        ValueError: If output_format is not one of the supported values
     """
+    # Validate output_format parameter
+    valid_formats = {"all", "xlsx", "csv", "html"}
+    if output_format not in valid_formats:
+        raise ValueError(
+            f"Invalid output_format '{output_format}'. "
+            f"Must be one of: {', '.join(sorted(valid_formats))}"
+        )
+
     if not os.path.exists(trace_file):
         warning_rank_0(f"[TraceLens] Trace file not found: {trace_file}")
         return []
@@ -395,6 +406,8 @@ def generate_tracelens_report(
                     local_generated_files.extend(csv_files)
 
             return local_generated_files
+
+        generated_files = []
 
         if output_format in ("all", "xlsx"):
             # Generate XLSX report
