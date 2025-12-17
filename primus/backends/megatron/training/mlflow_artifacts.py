@@ -24,8 +24,13 @@ MLflow Artifact Structure:
     ├── logs/                # Training log files
     │   └── log_mp_pretrain.txt
     └── trace_analysis/      # TraceLens analysis reports
-        ├── rank_0_analysis.html
+        ├── rank_0_analysis.xlsx   # Multi-tab Excel (default)
         └── ...
+
+TraceLens Report Formats:
+    - xlsx: Multi-tab Excel with sections for kernels, memory, communication, etc.
+    - csv:  Single flat file with operation summary
+    - html: Interactive HTML report
 """
 
 import glob
@@ -216,23 +221,33 @@ def _ensure_tracelens_installed() -> bool:
     """
     Ensure TraceLens is installed. Install it if not present.
 
+    TraceLens is available from GitHub: https://github.com/AMD-AGI/TraceLens
+
     Returns:
         True if TraceLens is available, False otherwise
     """
     try:
-        import tracelens  # noqa: F401
+        import TraceLens  # noqa: F401
 
         log_rank_0("[TraceLens] TraceLens is already installed")
         return True
     except ImportError:
-        log_rank_0("[TraceLens] TraceLens not found, attempting to install...")
+        log_rank_0("[TraceLens] TraceLens not found, attempting to install from GitHub...")
         try:
+            # TraceLens is on GitHub, not PyPI
             subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "tracelens", "-q"],
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "git+https://github.com/AMD-AGI/TraceLens.git",
+                    "-q",
+                ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            log_rank_0("[TraceLens] Successfully installed TraceLens")
+            log_rank_0("[TraceLens] Successfully installed TraceLens from GitHub")
             return True
         except subprocess.CalledProcessError as e:
             warning_rank_0(f"[TraceLens] Failed to install TraceLens: {e}")
@@ -298,28 +313,31 @@ def generate_tracelens_report(
     trace_file: str,
     output_dir: str,
     report_name: Optional[str] = None,
-    output_format: str = "csv",
-) -> Optional[str]:
+    output_format: str = "all",
+) -> List[str]:
     """
     Generate a TraceLens analysis report for a single trace file.
 
     Args:
         trace_file: Path to the PyTorch profiler trace file (JSON/JSON.GZ)
         output_dir: Directory to save the report
-        report_name: Optional custom name for the report
-        output_format: Output format - "csv" (default) or "html"
+        report_name: Optional custom name for the report (base name for CSVs)
+        output_format: Output format:
+                      - "all" (default): Both XLSX and CSV files
+                      - "xlsx": Single multi-tab Excel file with detailed analysis
+                      - "csv": Multiple CSV files (kernels, memory, communication, etc.)
+                      - "html": Interactive HTML report
 
     Returns:
-        Path to the generated report, or None if generation failed
+        List of paths to generated report files
     """
     if not os.path.exists(trace_file):
         warning_rank_0(f"[TraceLens] Trace file not found: {trace_file}")
-        return None
+        return []
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Generate report name from trace filename if not provided
-    ext = ".csv" if output_format == "csv" else ".html"
+    # Generate base name from trace filename if not provided
     if report_name is None:
         base_name = os.path.basename(trace_file)
         # Remove extensions like .json.gz
@@ -327,65 +345,61 @@ def generate_tracelens_report(
             if base_name.endswith(trace_ext):
                 base_name = base_name[: -len(trace_ext)]
                 break
-        report_name = f"{base_name}_analysis{ext}"
-
-    output_path = os.path.join(output_dir, report_name)
+        report_name = base_name
 
     try:
-        # Try using tracelens CLI with format option
-        cmd = ["tracelens", "analyze", trace_file, "-o", output_path]
-        if output_format == "csv":
-            cmd.extend(["--format", "csv"])
+        # Try using TraceLens Python API directly
+        from TraceLens.Reporting import generate_perf_report_pytorch
 
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,  # 5 minute timeout per trace
-        )
+        generated_files = []
 
-        if result.returncode == 0 and os.path.exists(output_path):
-            log_rank_0(f"[TraceLens] Generated report: {report_name}")
-            return output_path
-        else:
-            # Try alternative: tracelens as Python module
-            cmd = [sys.executable, "-m", "tracelens", "analyze", trace_file, "-o", output_path]
-            if output_format == "csv":
-                cmd.extend(["--format", "csv"])
+        if output_format in ("all", "xlsx"):
+            # XLSX: Single file with multiple tabs
+            xlsx_path = os.path.join(output_dir, f"{report_name}_analysis.xlsx")
+            dfs = generate_perf_report_pytorch(trace_file, output_xlsx_path=xlsx_path)
+            if os.path.exists(xlsx_path):
+                log_rank_0(
+                    f"[TraceLens] Generated XLSX report with {len(dfs)} tabs: {os.path.basename(xlsx_path)}"
+                )
+                generated_files.append(xlsx_path)
 
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=300,
-            )
-            if result.returncode == 0 and os.path.exists(output_path):
-                log_rank_0(f"[TraceLens] Generated report: {report_name}")
-                return output_path
+        if output_format in ("all", "csv"):
+            # CSV: Multiple files in a subdirectory per rank
+            csv_subdir = os.path.join(output_dir, report_name)
+            os.makedirs(csv_subdir, exist_ok=True)
+            dfs = generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
 
-            # If tracelens doesn't support CSV, fall back to custom CSV generation
-            if output_format == "csv":
-                csv_path = _generate_trace_summary_csv(trace_file, output_dir, report_name)
-                if csv_path:
-                    return csv_path
+            # Collect all generated CSV files
+            csv_files = glob.glob(os.path.join(csv_subdir, "*.csv"))
+            if csv_files:
+                log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
+                generated_files.extend(csv_files)
 
-            warning_rank_0(f"[TraceLens] Failed to generate report: {result.stderr}")
-            return None
+        if output_format == "html":
+            warning_rank_0("[TraceLens] HTML format not yet supported, using xlsx+csv")
+            # Fall through to xlsx
+            xlsx_path = os.path.join(output_dir, f"{report_name}_analysis.xlsx")
+            dfs = generate_perf_report_pytorch(trace_file, output_xlsx_path=xlsx_path)
+            if os.path.exists(xlsx_path):
+                generated_files.append(xlsx_path)
 
-    except subprocess.TimeoutExpired:
-        warning_rank_0(f"[TraceLens] Report generation timed out for: {trace_file}")
-        return None
-    except FileNotFoundError:
-        # tracelens not found, use fallback CSV generation
-        if output_format == "csv":
-            csv_path = _generate_trace_summary_csv(trace_file, output_dir, report_name)
-            if csv_path:
-                return csv_path
-        warning_rank_0("[TraceLens] tracelens command not found")
-        return None
+        if generated_files:
+            return generated_files
+
+        warning_rank_0(f"[TraceLens] No output files generated for: {trace_file}")
+        return []
+
+    except ImportError:
+        log_rank_0("[TraceLens] TraceLens not available, using fallback CSV summary")
+        # Fallback to simple CSV summary
+        csv_path = _generate_trace_summary_csv(trace_file, output_dir, f"{report_name}_summary.csv")
+        return [csv_path] if csv_path else []
+
     except Exception as e:
         warning_rank_0(f"[TraceLens] Error generating report: {e}")
-        return None
+        # Fallback to simple CSV summary
+        csv_path = _generate_trace_summary_csv(trace_file, output_dir, f"{report_name}_summary.csv")
+        return [csv_path] if csv_path else []
 
 
 def _generate_trace_summary_csv(
@@ -496,7 +510,7 @@ def generate_tracelens_reports(
     output_dir: str,
     ranks: Optional[List[int]] = None,
     max_reports: Optional[int] = None,
-    output_format: str = "csv",
+    output_format: str = "all",
 ) -> List[str]:
     """
     Generate TraceLens analysis reports for trace files.
@@ -506,10 +520,13 @@ def generate_tracelens_reports(
         output_dir: Directory to save the generated reports
         ranks: List of ranks to generate reports for (None = all ranks)
         max_reports: Maximum number of reports to generate (None = unlimited)
-        output_format: Output format - "csv" (default, recommended for MLflow) or "html"
+        output_format: Output format:
+                      - "all" (default): Both XLSX and CSV files
+                      - "xlsx": Multi-tab Excel with detailed analysis
+                      - "csv": Multiple CSV files per rank (kernels, memory, comm, etc.)
 
     Returns:
-        List of paths to generated reports
+        List of paths to all generated report files
     """
     # Try to install tracelens, but continue with fallback if not available
     _ensure_tracelens_installed()
@@ -535,11 +552,11 @@ def generate_tracelens_reports(
 
     generated_reports = []
     for trace_file in trace_files:
-        report_path = generate_tracelens_report(trace_file, output_dir, output_format=output_format)
-        if report_path:
-            generated_reports.append(report_path)
+        # generate_tracelens_report now returns a list of files
+        report_paths = generate_tracelens_report(trace_file, output_dir, output_format=output_format)
+        generated_reports.extend(report_paths)
 
-    log_rank_0(f"[TraceLens] Generated {len(generated_reports)} reports")
+    log_rank_0(f"[TraceLens] Generated {len(generated_reports)} report files from {len(trace_files)} traces")
     return generated_reports
 
 
@@ -549,6 +566,7 @@ def upload_tracelens_reports_to_mlflow(
     exp_root_path: str,
     ranks: Optional[List[int]] = None,
     max_reports: Optional[int] = None,
+    output_format: str = "all",
     artifact_path: str = "trace_analysis",
 ) -> int:
     """
@@ -565,6 +583,7 @@ def upload_tracelens_reports_to_mlflow(
         exp_root_path: Root path of the experiment (for saving reports)
         ranks: List of ranks to analyze (None = all ranks, [0] = rank 0 only)
         max_reports: Maximum number of reports to generate
+        output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
         artifact_path: MLflow artifact subdirectory for reports
 
     Returns:
@@ -591,6 +610,7 @@ def upload_tracelens_reports_to_mlflow(
         output_dir=reports_dir,
         ranks=ranks,
         max_reports=max_reports,
+        output_format=output_format,
     )
 
     if not reports:
@@ -625,6 +645,7 @@ def upload_artifacts_to_mlflow(
     upload_tracelens_report: bool = False,
     tracelens_ranks: Optional[List[int]] = None,
     tracelens_max_reports: Optional[int] = None,
+    tracelens_output_format: str = "all",
 ) -> dict:
     """
     Upload all artifacts (trace files, log files, TraceLens reports) to MLflow.
@@ -651,6 +672,7 @@ def upload_artifacts_to_mlflow(
         tracelens_ranks: List of ranks to generate TraceLens reports for
                         (None = all ranks, [0] = rank 0 only)
         tracelens_max_reports: Maximum number of TraceLens reports to generate
+        tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
 
     Returns:
         Dictionary with counts of uploaded files:
@@ -690,6 +712,7 @@ def upload_artifacts_to_mlflow(
             exp_root_path=exp_root_path,
             ranks=tracelens_ranks,
             max_reports=tracelens_max_reports,
+            output_format=tracelens_output_format,
             artifact_path="trace_analysis",
         )
 

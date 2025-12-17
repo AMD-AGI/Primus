@@ -98,6 +98,7 @@ def upload_mlflow_artifacts(
     upload_tracelens_report: bool = False,
     tracelens_ranks: Optional[List[int]] = None,
     tracelens_max_reports: Optional[int] = None,
+    tracelens_output_format: str = "all",
 ) -> Optional[dict]:
     """
     Upload trace files, log files, and TraceLens reports to MLflow as artifacts.
@@ -121,6 +122,7 @@ def upload_mlflow_artifacts(
         tracelens_ranks: List of ranks to analyze with TraceLens
                         (None = all, [0] = rank 0 only)
         tracelens_max_reports: Maximum number of TraceLens reports to generate
+        tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
 
     Returns:
         Dictionary with counts of uploaded files, or None if MLflow is not enabled
@@ -138,4 +140,5 @@ def upload_mlflow_artifacts(
         upload_tracelens_report=upload_tracelens_report,
         tracelens_ranks=tracelens_ranks,
         tracelens_max_reports=tracelens_max_reports,
+        tracelens_output_format=tracelens_output_format,
     )
