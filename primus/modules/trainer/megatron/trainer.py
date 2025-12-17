@@ -2050,6 +2050,12 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if args.enable_ft_package and ft_integration.get_rank_monitor_client() is not None:
             ft_integration.get_rank_monitor_client().shutdown_workload_monitoring()
 
+        # In distributed training, synchronize all ranks before artifact upload
+        # to ensure all ranks have finished writing their log and trace files.
+        # This prevents the MLflow rank from collecting incomplete files.
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
         # Upload artifacts to MLflow before training completes
         mlflow_writer = get_mlflow_writer()
         if mlflow_writer:
@@ -2611,29 +2617,29 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                         )
                         wandb_writer.log({f"{mem_collector}_mem_usage(%)": mem_usage * 100.0}, iteration)
                     if mlflow_writer:
-                        mlflow_writer.log_metric("throughput_tflops_per_sec_per_gpu", throughput, iteration)
+                        mlflow_writer.log_metric("throughput(tflops/sec/gpu)", throughput, iteration)
                         mlflow_writer.log_metric(
-                            "token_throughput_tokens_per_sec_per_gpu",
+                            "token_throughput(tokens/sec/gpu)",
                             token_throughput,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_used_mem_GiB",
+                            f"{mem_collector}_used_mem(GiB)",
                             used_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_free_mem_GiB",
+                            f"{mem_collector}_free_mem(GiB)",
                             free_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_total_mem_GiB",
+                            f"{mem_collector}_total_mem(GiB)",
                             total_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_mem_usage_percent", mem_usage * 100.0, iteration
+                            f"{mem_collector}_mem_usage(%)", mem_usage * 100.0, iteration
                         )
             assert learning_rate is not None
             # Decoupled_learning_rate should be not None only on first and last pipeline stage.

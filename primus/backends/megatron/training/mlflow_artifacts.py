@@ -45,18 +45,9 @@ def _get_all_trace_files(tensorboard_dir: str) -> list:
     # Using specific patterns to avoid matching unrelated JSON files
     patterns = ["*.pt.trace.json", "*.pt.trace.json.gz"]
     for pattern in patterns:
-        trace_files.extend(glob.glob(os.path.join(tensorboard_dir, pattern)))
         trace_files.extend(glob.glob(os.path.join(tensorboard_dir, "**", pattern), recursive=True))
 
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_files = []
-    for f in trace_files:
-        if f not in seen:
-            seen.add(f)
-            unique_files.append(f)
-
-    return unique_files
+    return trace_files
 
 
 def _get_all_log_files(exp_root_path: str) -> list:
@@ -66,12 +57,15 @@ def _get_all_log_files(exp_root_path: str) -> list:
     Log files are organized as:
     - {exp_root_path}/logs/master/master-*.log
     - {exp_root_path}/logs/{module_name}/rank-{rank}/*.log
+    
+    The function uses the pattern '*.log' to match all log files with .log extension,
+    including master-debug.log, master-info.log, debug.log, info.log, etc.
 
     Args:
         exp_root_path: Root path of the experiment
 
     Returns:
-        List of paths to log files
+        List of paths to log files matching the *.log pattern
     """
     if not exp_root_path:
         return []
@@ -81,7 +75,8 @@ def _get_all_log_files(exp_root_path: str) -> list:
         return []
 
     log_files = []
-    # Find all .log files recursively
+    # Find all .log files recursively using '*.log' pattern
+    # This matches system-generated log files like master-{level}.log and {level}.log
     log_files.extend(glob.glob(os.path.join(logs_dir, "**", "*.log"), recursive=True))
 
     return log_files
@@ -135,7 +130,7 @@ def upload_trace_files_to_mlflow(
 
             mlflow_writer.log_artifact(trace_file, artifact_path=artifact_subpath)
             uploaded_count += 1
-            log_rank_0(f"[MLflow] Uploaded trace file: {os.path.basename(trace_file)}")
+            log_rank_0(f"[MLflow] Uploaded trace file: {rel_path}")
         except Exception as e:
             warning_rank_0(f"[MLflow] Failed to upload trace file {trace_file}: {e}")
 
@@ -206,6 +201,11 @@ def upload_artifacts_to_mlflow(
 
     This is the main entry point for uploading artifacts to MLflow.
     It handles both trace files from profiling and log files from training.
+
+    Important: In distributed training scenarios, all ranks should reach a
+    synchronization barrier BEFORE calling this function to ensure all ranks
+    have finished writing their log and trace files. Only the rank with the
+    MLflow writer should then call this function to perform the actual upload.
 
     Args:
         mlflow_writer: The MLflow module instance (from get_mlflow_writer())
