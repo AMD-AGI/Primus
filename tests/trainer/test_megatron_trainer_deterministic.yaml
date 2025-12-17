@@ -83,4 +83,3 @@ modules:
       deterministic_mode: true
       use_flash_attn: false
       cross_entropy_loss_fusion: false
-      moe_grouped_gemm: false
