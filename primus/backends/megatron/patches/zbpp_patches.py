@@ -116,8 +116,20 @@ def patch_zero_bubble_v_schedule(ctx: PatchContext):
     )
 
     ori_parallel_state.default_embedding_ranks = default_embedding_ranks
+    log_rank_0(
+        f"[Patch:megatron.zbpp.v_schedule]   Patched megatron.core.parallel_state.default_embedding_ranks "
+        f"-> {default_embedding_ranks.__name__}"
+    )
     ori_parallel_state.is_pipeline_last_stage = is_pipeline_last_stage
+    log_rank_0(
+        f"[Patch:megatron.zbpp.v_schedule]   Patched megatron.core.parallel_state.is_pipeline_last_stage "
+        f"-> {is_pipeline_last_stage.__name__}"
+    )
     ori_parallel_state.is_rank_in_embedding_group = is_rank_in_embedding_group
+    log_rank_0(
+        f"[Patch:megatron.zbpp.v_schedule]   Patched megatron.core.parallel_state.is_rank_in_embedding_group "
+        f"-> {is_rank_in_embedding_group.__name__}"
+    )
 
     import megatron.core.distributed.finalize_model_grads as ori_finalize_model_grads
 
@@ -126,6 +138,10 @@ def patch_zero_bubble_v_schedule(ctx: PatchContext):
     )
 
     ori_finalize_model_grads.finalize_model_grads = finalize_model_grads
+    log_rank_0(
+        f"[Patch:megatron.zbpp.v_schedule]   Patched megatron.core.distributed.finalize_model_grads.finalize_model_grads "
+        f"-> {finalize_model_grads.__name__}"
+    )
 
     import megatron.core.transformer.transformer_layer as ori_transformer_layer
 
@@ -134,6 +150,10 @@ def patch_zero_bubble_v_schedule(ctx: PatchContext):
     )
 
     ori_transformer_layer.get_transformer_layer_offset = get_transformer_layer_offset
+    log_rank_0(
+        f"[Patch:megatron.zbpp.v_schedule]   Patched megatron.core.transformer.transformer_layer.get_transformer_layer_offset "
+        f"-> {get_transformer_layer_offset.__name__}"
+    )
 
     # patch te_group_gemm & gemm
     import transformer_engine.pytorch.module.grouped_linear as ori_grouped_linear
@@ -143,6 +163,10 @@ def patch_zero_bubble_v_schedule(ctx: PatchContext):
     )
 
     ori_grouped_linear._GroupedLinear = _GroupedLinearWithWGradSplit
+    log_rank_0(
+        f"[Patch:megatron.zbpp.v_schedule]   Patched transformer_engine.pytorch.module.grouped_linear._GroupedLinear "
+        f"-> {_GroupedLinearWithWGradSplit.__name__}"
+    )
 
     import transformer_engine.pytorch.module.linear as ori_linear
 
@@ -151,5 +175,9 @@ def patch_zero_bubble_v_schedule(ctx: PatchContext):
     )
 
     ori_linear._Linear = _LinearWithWGradSplit
+    log_rank_0(
+        f"[Patch:megatron.zbpp.v_schedule]   Patched transformer_engine.pytorch.module.linear._Linear "
+        f"-> {_LinearWithWGradSplit.__name__}"
+    )
 
     log_rank_0("[Patch:megatron.zbpp.v_schedule] Zero-Bubble V-schedule patches applied successfully")
