@@ -66,12 +66,15 @@ def _get_all_log_files(exp_root_path: str) -> list:
     Log files are organized as:
     - {exp_root_path}/logs/master/master-*.log
     - {exp_root_path}/logs/{module_name}/rank-{rank}/*.log
+    
+    The function uses the pattern '*.log' to match all log files with .log extension,
+    including master-debug.log, master-info.log, debug.log, info.log, etc.
 
     Args:
         exp_root_path: Root path of the experiment
 
     Returns:
-        List of paths to log files
+        List of paths to log files matching the *.log pattern
     """
     if not exp_root_path:
         return []
@@ -81,7 +84,8 @@ def _get_all_log_files(exp_root_path: str) -> list:
         return []
 
     log_files = []
-    # Find all .log files recursively
+    # Find all .log files recursively using '*.log' pattern
+    # This matches system-generated log files like master-{level}.log and {level}.log
     log_files.extend(glob.glob(os.path.join(logs_dir, "**", "*.log"), recursive=True))
 
     return log_files
