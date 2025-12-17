@@ -2050,7 +2050,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if args.enable_ft_package and ft_integration.get_rank_monitor_client() is not None:
             ft_integration.get_rank_monitor_client().shutdown_workload_monitoring()
 
-        # Always upload artifacts and close MLflow run when training completes
+        # Upload artifacts to MLflow before training completes
         mlflow_writer = get_mlflow_writer()
         if mlflow_writer:
             # Upload trace files and log files to MLflow before ending the run
