@@ -122,8 +122,7 @@ def upload_mlflow_artifacts(
         tracelens_ranks: List of ranks to analyze with TraceLens
                         (None = all, [0] = rank 0 only)
         tracelens_max_reports: Maximum number of TraceLens reports to generate
-        tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", "csv", or "html"
-                                 (not yet supported, falls back to xlsx+csv)
+        tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
 
     Returns:
         Dictionary with counts of uploaded files, or None if MLflow is not enabled

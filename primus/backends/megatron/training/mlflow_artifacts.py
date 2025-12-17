@@ -30,7 +30,6 @@ MLflow Artifact Structure:
 TraceLens Report Formats:
     - xlsx: Multi-tab Excel with sections for kernels, memory, communication, etc.
     - csv:  Multiple CSV files (kernels, memory, communication, etc.)
-    - html: Interactive HTML report
 """
 
 import csv
@@ -471,7 +470,6 @@ def generate_tracelens_report(
                       - "all" (default): Both XLSX and CSV files
                       - "xlsx": Single multi-tab Excel file with detailed analysis
                       - "csv": Multiple CSV files (kernels, memory, communication, etc.)
-                      - "html": Interactive HTML report (not yet supported, falls back to xlsx+csv)
 
     Returns:
         List of paths to generated report files
@@ -480,7 +478,7 @@ def generate_tracelens_report(
         ValueError: If output_format is not one of the supported values
     """
     # Validate output_format parameter
-    valid_formats = {"all", "xlsx", "csv", "html"}
+    valid_formats = {"all", "xlsx", "csv"}
     if output_format not in valid_formats:
         raise ValueError(
             f"Invalid output_format '{output_format}'. "
@@ -572,11 +570,6 @@ def generate_tracelens_report(
         if output_format in ("all", "csv"):
             # Generate CSV reports
             generated_files.extend(_generate_xlsx_and_csv_reports(generate_xlsx=False, generate_csv=True))
-
-        if output_format == "html":
-            warning_rank_0("[TraceLens] HTML format not yet supported, generating xlsx+csv instead")
-            # As a fallback, generate both XLSX and CSV reports using the common helper
-            generated_files.extend(_generate_xlsx_and_csv_reports(generate_xlsx=True, generate_csv=True))
 
         if generated_files:
             return generated_files
@@ -727,7 +720,6 @@ def generate_tracelens_reports(
                       - "all" (default): Both XLSX and CSV files
                       - "xlsx": Multi-tab Excel with detailed analysis
                       - "csv": Multiple CSV files per rank (kernels, memory, comm, etc.)
-                      - "html": Interactive HTML report (not yet supported, falls back to xlsx+csv)
 
     Returns:
         List of paths to all generated report files
@@ -788,7 +780,7 @@ def upload_tracelens_reports_to_mlflow(
         exp_root_path: Root path of the experiment (for saving reports)
         ranks: List of ranks to analyze (None = all ranks, [0] = rank 0 only)
         max_reports: Maximum number of reports to generate
-        output_format: Report format - "all" (default, xlsx+csv), "xlsx", "csv", or "html" (falls back to xlsx+csv)
+        output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
         artifact_path: MLflow artifact subdirectory for reports
 
     Returns:
@@ -897,7 +889,7 @@ def upload_artifacts_to_mlflow(
         tracelens_ranks: List of ranks to generate TraceLens reports for
                         (None = all ranks, [0] = rank 0 only)
         tracelens_max_reports: Maximum number of TraceLens reports to generate
-        tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", "csv", or "html" (falls back to xlsx+csv)
+        tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
 
     Returns:
         Dictionary with counts of uploaded files:
