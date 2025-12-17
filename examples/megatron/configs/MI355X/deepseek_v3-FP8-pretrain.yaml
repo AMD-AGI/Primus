@@ -53,7 +53,7 @@ modules:
       test_data_path: null
 
       # MLA
-      multi_latent_attention: false
+      multi_latent_attention: true
 
 
       # ckpt
@@ -69,11 +69,6 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
       eval_iters: 0
-
-      # Turbo
-      enable_primus_turbo: false
-      use_turbo_attention: false
-      use_turbo_grouped_mlp: false
 
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"
