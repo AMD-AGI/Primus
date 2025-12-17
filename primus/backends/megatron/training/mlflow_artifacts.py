@@ -33,7 +33,10 @@ TraceLens Report Formats:
     - html: Interactive HTML report
 """
 
+import csv
 import glob
+import gzip
+import json
 import os
 import subprocess
 import sys
@@ -474,8 +477,10 @@ def generate_tracelens_report(
         return []
 
     try:
-        # Import TraceLens on-demand (optional dependency)
-        # Placed inside try block for graceful fallback if TraceLens is not available
+        # Import TraceLens on-demand (optional dependency pattern)
+        # This import is deliberately inside the try block to enable graceful fallback
+        # when TraceLens is not installed, avoiding ImportError at module load time.
+        # The ImportError is caught below to provide a simpler CSV-based fallback.
         from TraceLens.Reporting import generate_perf_report_pytorch
 
         generated_files = []
@@ -497,8 +502,8 @@ def generate_tracelens_report(
             dfs = generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
 
             # Collect all generated CSV files
-            # Note: csv_subdir is already validated, but we avoid os.path.join for consistency
-            csv_files = glob.glob(f"{csv_subdir}{os.sep}*.csv")
+            # csv_subdir is already validated via _safe_join_path, safe to use os.path.join for wildcard
+            csv_files = glob.glob(os.path.join(csv_subdir, "*.csv"))
             if csv_files:
                 log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
                 generated_files.extend(csv_files)
@@ -521,8 +526,8 @@ def generate_tracelens_report(
             generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
 
             # Collect all generated CSV files
-            # Note: csv_subdir is already validated, but we avoid os.path.join for consistency
-            csv_files = glob.glob(f"{csv_subdir}{os.sep}*.csv")
+            # csv_subdir is already validated via _safe_join_path, safe to use os.path.join for wildcard
+            csv_files = glob.glob(os.path.join(csv_subdir, "*.csv"))
             if csv_files:
                 log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
                 generated_files.extend(csv_files)
@@ -565,10 +570,6 @@ def _generate_trace_summary_csv(
     Returns:
         Path to generated CSV or None if failed
     """
-    import csv
-    import gzip
-    import json
-
     try:
         # Load trace file
         if trace_file.endswith(".gz"):
