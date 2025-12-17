@@ -90,6 +90,11 @@ def upload_mlflow_artifacts(
     any other rank, this function will return None without uploading artifacts.
     A warning will be logged if called from the wrong rank.
 
+    Important: In distributed training scenarios, all ranks should reach a
+    synchronization barrier BEFORE calling this function to ensure all ranks
+    have finished writing their log and trace files. This prevents incomplete
+    or missing log files in the artifacts.
+
     Args:
         upload_traces: Whether to upload profiler trace files
         upload_logs: Whether to upload training log files

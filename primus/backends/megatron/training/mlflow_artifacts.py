@@ -198,6 +198,11 @@ def upload_artifacts_to_mlflow(
     This is the main entry point for uploading artifacts to MLflow.
     It handles both trace files from profiling and log files from training.
 
+    Important: In distributed training scenarios, all ranks should reach a
+    synchronization barrier BEFORE calling this function to ensure all ranks
+    have finished writing their log and trace files. Only the rank with the
+    MLflow writer should then call this function to perform the actual upload.
+
     Args:
         mlflow_writer: The MLflow module instance (from get_mlflow_writer())
         tensorboard_dir: Path to the tensorboard directory containing trace files
