@@ -40,12 +40,12 @@ modules:
       lr: ${PRIMUS_LR:1.0e-5}
       min_lr: ${PRIMUS_MIN_LR:0.0}
       lr_warmup_iters: 2
-      lr_decay_iters: ${PRIMUS_LR_DECAY_ITERS:null}
-      lr_decay_style: ${PRIMUS_LR_DECAY_STYLE:cosine}
+      lr_decay_iters: null
+      lr_decay_style: cosine
       weight_decay: ${PRIMUS_WEIGHT_DECAY:0.1}
       adam_beta1: ${PRIMUS_ADAM_BETA1:0.9}
       adam_beta2: ${PRIMUS_ADAM_BETA2:0.95}
-      eod_mask_loss: ${PRIMUS_EOD_MASK_LOSS:true}
+      eod_mask_loss: true
       init_method_std: ${PRIMUS_INIT_METHOD_STD:0.008}
       norm_epsilon: ${PRIMUS_NORM_EPSILON:1.0e-6}
 
@@ -53,8 +53,8 @@ modules:
       tensor_model_parallel_size: ${PRIMUS_TP:1}
       pipeline_model_parallel_size: ${PRIMUS_PP:1}
       expert_model_parallel_size: ${PRIMUS_EP:8}
-      overlap_grad_reduce: ${PRIMUS_OVERLAP_GRAD_REDUCE:true}
-      overlap_param_gather: ${PRIMUS_OVERLAP_PARAM_GATHER:true}
+      overlap_grad_reduce: true
+      overlap_param_gather: true
 
       # data
       mock_data: false
@@ -64,51 +64,51 @@ modules:
 
       # fusion
       # 20250321: need latest megatron docker image
-      moe_permute_fusion: ${PRIMUS_MOE_PERMUTE_FUSION:false}
+      moe_permute_fusion: false
       # fused wgrad gemm and accumulation
-      gradient_accumulation_fusion: ${PRIMUS_GRADIENT_ACCUMULATION_FUSION:false}
+      gradient_accumulation_fusion: false
       # recommend set `false` in fp8
-      moe_use_legacy_grouped_gemm: ${PRIMUS_MOE_USE_LEGACY_GROUPED_GEMM:true}
+      moe_use_legacy_grouped_gemm: true
       # fused topk router with aux score
-      moe_use_fused_router_with_aux_score: ${PRIMUS_MOE_USE_FUSED_ROUTER_WITH_AUX_SCORE:false}
+      moe_use_fused_router_with_aux_score: false
       # MLA
-      multi_latent_attention: ${PRIMUS_MULTI_LATENT_ATTENTION:false}
+      multi_latent_attention: false
       # rope fusion
-      apply_rope_fusion: ${PRIMUS_APPLY_ROPE_FUSION:false}
+      apply_rope_fusion: false
 
       # DeepEP does not support moe_shared_expert_overlap
-      moe_shared_expert_overlap: ${PRIMUS_MOE_SHARED_EXPERT_OVERLAP:false}
+      moe_shared_expert_overlap: false
       # DeepEP only supports float32 probs
-      moe_router_dtype: ${PRIMUS_MOE_ROUTER_DTYPE:fp32}
+      moe_router_dtype: fp32
 
       # ckpt
-      finetune: ${PRIMUS_FINETUNE:false}
-      auto_continue_train: ${PRIMUS_AUTO_CONTINUE_TRAIN:false}
-      load: ${PRIMUS_LOAD:null}
-      no_load_optim: ${PRIMUS_NO_LOAD_OPTIM:null}
-      no_load_rng: ${PRIMUS_NO_LOAD_RNG:null}
-      save: ${PRIMUS_SAVE:null}
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
       save_interval: ${PRIMUS_SAVE_INTERVAL:20000}
-      no_save_optim: ${PRIMUS_NO_SAVE_OPTIM:null}
-      no_save_rng: ${PRIMUS_NO_SAVE_RNG:null}
+      no_save_optim: null
+      no_save_rng: null
       disable_last_saving: true
-      exit_on_missing_checkpoint: ${PRIMUS_EXIT_ON_MISSING_CHECKPOINT:false}
+      exit_on_missing_checkpoint: false
       ckpt_format: torch
       eval_iters: ${PRIMUS_EVAL_ITERS:32}
       eval_interval: ${PRIMUS_EVAL_INTERVAL:10}
       num_workers: ${PRIMUS_NUM_WORKERS:1}
 
       # Turbo (Primus)  
-      enable_primus_turbo: ${PRIMUS_ENABLE_PRIMUS_TURBO:true}
-      use_turbo_attention: ${PRIMUS_USE_TURBO_ATTENTION:true}
-      use_turbo_grouped_mlp: ${PRIMUS_USE_TURBO_GROUPED_MLP:true}
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: true
 
       # deepep
-      use_turbo_deepep: ${PRIMUS_USE_TURBO_DEEPPEP:true}
+      use_turbo_deepep: true
 
       # 64 or 80 for ep8, 32 for ep16-64 is best practice
       turbo_deepep_num_cu: ${PRIMUS_TURBO_DEEPPEP_NUM_CU:64}
-      turbo_deepep_use_comm_stream: ${PRIMUS_TURBO_DEEPPEP_USE_COMM_STREAM:false}
+      turbo_deepep_use_comm_stream: false
 
       # sync-free moe support stage 0-3, 0 means not use sync-free moe
       # stage 3 is completely no gpu-cpu sync in MoE, but cost more memory
