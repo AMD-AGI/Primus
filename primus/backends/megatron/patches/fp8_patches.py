@@ -48,13 +48,13 @@ def patch_fp8_context(ctx: PatchContext):
     log_rank_0("[Patch:megatron.fp8.get_fp8_context] Overriding get_fp8_context for fp8=True")
 
     # Patch get_fp8_context in all relevant modules
-    modules_to_patch = {
-        "transformer_block": transformer_block,
-        "mamba_block": mamba_block,
-        "multi_token_prediction": multi_token_prediction,
-        "fp8_utils": fp8_utils,
-    }
+    modules_to_patch = [
+        transformer_block,
+        mamba_block,
+        multi_token_prediction,
+        fp8_utils,
+    ]
 
-    for module_name, module in modules_to_patch.items():
+    for module in modules_to_patch:
         module.get_fp8_context = get_fp8_context
-        log_rank_0(f"[Patch:megatron.fp8.get_fp8_context]   Patched {module_name}.get_fp8_context")
+        log_rank_0(f"[Patch:megatron.fp8.get_fp8_context]   Patched {module.__name__}.get_fp8_context")
