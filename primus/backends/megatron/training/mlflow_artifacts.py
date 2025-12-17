@@ -35,8 +35,6 @@ TraceLens Report Formats:
 
 import glob
 import os
-import subprocess
-import sys
 from typing import List, Optional
 
 from primus.modules.module_utils import log_rank_0, warning_rank_0
@@ -223,9 +221,11 @@ def upload_log_files_to_mlflow(
 
 def _ensure_tracelens_installed() -> bool:
     """
-    Ensure TraceLens is installed. Install it if not present.
+    Check if TraceLens is installed.
 
-    TraceLens is available from GitHub: https://github.com/AMD-AGI/TraceLens
+    TraceLens is an optional dependency for trace analysis.
+    To install TraceLens, run:
+        pip install git+https://github.com/AMD-AGI/TraceLens.git
 
     Returns:
         True if TraceLens is available, False otherwise
@@ -233,7 +233,7 @@ def _ensure_tracelens_installed() -> bool:
     try:
         import TraceLens  # noqa: F401
 
-        log_rank_0("[TraceLens] TraceLens is already installed")
+        log_rank_0("[TraceLens] TraceLens is available")
         return True
     except ImportError:
         log_rank_0(
@@ -565,7 +565,8 @@ def generate_tracelens_reports(
     Returns:
         List of paths to all generated report files
     """
-    # Try to install tracelens, but continue with fallback if not available
+    # Check if TraceLens is available (will warn if not available)
+    # The generate_tracelens_report function will fall back to simple CSV summary
     _ensure_tracelens_installed()
 
     trace_files = _get_all_trace_files(tensorboard_dir)
