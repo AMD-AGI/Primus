@@ -200,7 +200,7 @@ class TestTorchTitanTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "deepseek_v3_16b",
-            "examples/torchtitan/configs/MI300X/deepseek_v3_16b-pretrain.yaml",
+            "examples/torchtitan/configs/MI300X/deepseek_v3_16b-BF16-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
