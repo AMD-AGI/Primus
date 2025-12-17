@@ -6,7 +6,7 @@
 ###############################################################################
 
 
-from primus.modules.module_utils import debug_rank_0
+from primus.modules.module_utils import debug_rank_0, debug_rank_all
 
 from .mlflow_artifacts import upload_artifacts_to_mlflow
 
@@ -98,19 +98,19 @@ def upload_mlflow_artifacts(
         Dictionary with counts of uploaded files, or None if MLflow is not enabled
     """
     mlflow_writer = get_mlflow_writer()
+    args = get_args()
+    
     if mlflow_writer is None:
         # Check if this is because we're on the wrong rank
-        args = get_args()
         expected_rank = args.world_size - 1
         if getattr(args, "mlflow_run_name", None) is not None and args.rank != expected_rank:
-            debug_rank_0(
+            debug_rank_all(
                 f"WARNING: upload_mlflow_artifacts called from rank {args.rank}, "
                 f"but MLflow is only initialized on rank {expected_rank}. "
                 "No artifacts will be uploaded."
             )
         return None
 
-    args = get_args()
     exp_root_path = get_exp_root_path()
     tensorboard_dir = getattr(args, "tensorboard_dir", None)
 
