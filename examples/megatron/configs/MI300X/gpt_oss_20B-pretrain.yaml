@@ -29,7 +29,7 @@ modules:
       # precision (mixed precision training)
       bf16: true
       fp16: false
-      fp8: null  # Set to "e4m3" or "hybrid" for FP8 training
+      fp8: ${PRIMUS_FP8_RECIPE:null}  # Set to "e4m3" or "hybrid" for FP8 training
 
       # hyper parameters
       train_iters: ${PRIMUS_TRAIN_ITERS:200}
@@ -74,7 +74,7 @@ modules:
       # MLA
       multi_latent_attention: false
       # rope fusion
-      apply_rope_fusion: false
+      apply_rope_fusion:  ${PRIMUS_APPLY_ROPE_FUSION: false}
 
       # DeepEP does not support moe_shared_expert_overlap
       moe_shared_expert_overlap: false
