@@ -45,6 +45,9 @@ from typing import List, Optional
 
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
+# TraceLens GitHub repository URL
+TRACELENS_GITHUB_URL = "git+https://github.com/AMD-AGI/TraceLens.git"
+
 
 def _validate_path_component(path_component: str, allow_separators: bool = False) -> str:
     """
@@ -382,7 +385,7 @@ def _ensure_tracelens_installed() -> bool:
                     "-m",
                     "pip",
                     "install",
-                    "git+https://github.com/AMD-AGI/TraceLens.git",
+                    TRACELENS_GITHUB_URL,
                     "-q",
                 ]
             )
