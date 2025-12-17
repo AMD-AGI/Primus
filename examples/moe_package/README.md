@@ -20,7 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 --->
 
-# MoE Training Best Practices on AMD GPUs
+# [MoE Training Best Practices on AMD GPU](https://rocm.blogs.amd.com/software-tools-optimization/primus-moe-package/README.html)
 
 This blog covers best practices for training Mixture-of-Experts (MoE) models on AMD Instinct™ MI300/MI355-series<sup>[a]</sup> GPUs with the ROCm ecosystem. Whether you're new to MoE distributed architectures or optimizing trillion-parameter models, this guide will help you identify bottlenecks and maximize efficiency on AMD hardware.
 

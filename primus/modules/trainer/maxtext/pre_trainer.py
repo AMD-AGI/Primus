@@ -48,11 +48,12 @@ class MaxTextPretrainTrainer(BaseModule):
         )
 
     def run(self, *args, **kwargs):
-        log_rank_0(f"run MaxText...")
+        log_rank_0(f"MaxText Pre-Trainer: begin training...")
 
         from primus.backends.maxtext.train import run
 
         run(self.train_config, self.recorder, self.diagnostic_config)
+        log_rank_0("MaxText Pre-Trainer: after training is done")
 
     def prepare_model_overrides(self, override_args: Dict[str, Any]):
         """
