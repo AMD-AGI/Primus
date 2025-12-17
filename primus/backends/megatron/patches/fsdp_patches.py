@@ -12,13 +12,13 @@ Primus-specific implementations when requested via module_config.
 """
 
 
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
 
 
 def _is_fsdp2_enabled(ctx: PatchContext) -> bool:
     """Check if FSDP2 is enabled in backend_args."""
-    return getattr(ctx.extra.get("backend_args"), "use_torch_fsdp2", False)
+    return getattr(get_args(ctx), "use_torch_fsdp2", False)
 
 
 @register_patch(
@@ -52,10 +52,15 @@ def patch_torch_fsdp(ctx: PatchContext):
     )
 
     torch_fsdp_module.TorchTorchFullyShardedDataParallel = PrimusTorchFullyShardedDataParallel
+    log_rank_0(
+        "[Patch:megatron.fsdp.torch_fsdp2]   Patched "
+        "megatron.core.distributed.torch_fully_sharded_data_parallel.TorchTorchFullyShardedDataParallel"
+    )
 
     # Patch training code reference
     from megatron.training import training
 
     training.torch_FSDP = PrimusTorchFullyShardedDataParallel
+    log_rank_0("[Patch:megatron.fsdp.torch_fsdp2]   Patched megatron.training.training.torch_FSDP")
 
     log_rank_0("[Patch:megatron.fsdp.torch_fsdp2] torch_FSDP2 patch applied successfully.")
