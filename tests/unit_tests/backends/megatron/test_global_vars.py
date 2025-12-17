@@ -188,15 +188,18 @@ class TestUploadMLflowArtifacts:
 
         # Test "xlsx" format
         upload_mlflow_artifacts(tracelens_output_format="xlsx")
-        assert mock_upload_artifacts.call_args[1]["tracelens_output_format"] == "xlsx"
+        call_args_xlsx = mock_upload_artifacts.call_args
+        assert call_args_xlsx[1]["tracelens_output_format"] == "xlsx"
 
         # Test "csv" format
         upload_mlflow_artifacts(tracelens_output_format="csv")
-        assert mock_upload_artifacts.call_args[1]["tracelens_output_format"] == "csv"
+        call_args_csv = mock_upload_artifacts.call_args
+        assert call_args_csv[1]["tracelens_output_format"] == "csv"
 
         # Test "all" format (default)
         upload_mlflow_artifacts(tracelens_output_format="all")
-        assert mock_upload_artifacts.call_args[1]["tracelens_output_format"] == "all"
+        call_args_all = mock_upload_artifacts.call_args
+        assert call_args_all[1]["tracelens_output_format"] == "all"
 
     @patch("primus.backends.megatron.training.global_vars.get_mlflow_writer")
     @patch("primus.backends.megatron.training.global_vars.upload_artifacts_to_mlflow")
