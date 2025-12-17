@@ -18,8 +18,7 @@ from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 def _is_zbpp_enabled(ctx: PatchContext) -> bool:
     """Check if Zero-Bubble PP is enabled in module_config."""
-    args = get_args(ctx)
-    return getattr(args, "patch_zero_bubble", False)
+    return getattr(get_args(ctx), "patch_zero_bubble", False)
 
 
 def _is_zbv_enabled(ctx: PatchContext) -> bool:
