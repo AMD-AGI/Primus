@@ -72,12 +72,13 @@ def _validate_path_component(path_component: str, allow_separators: bool = False
     if os.path.isabs(normalized):
         raise ValueError(f"Absolute paths are not allowed: {path_component}")
 
-    # Check for parent directory references
-    if normalized.startswith("..") or f"{os.sep}.." in normalized:
+    # Check for parent directory references (more comprehensive check)
+    # Check for '..' at start or after any separator (both / and \)
+    if normalized.startswith("..") or "/.." in normalized or "\\.." in normalized:
         raise ValueError(f"Parent directory references are not allowed: {path_component}")
 
-    # Check for path separators if not allowed
-    if not allow_separators and os.sep in normalized:
+    # Check for path separators if not allowed (check both / and \ on all platforms)
+    if not allow_separators and ("/" in normalized or "\\" in normalized):
         raise ValueError(f"Path separators are not allowed in component: {path_component}")
 
     return normalized
@@ -464,7 +465,8 @@ def generate_tracelens_report(
         return []
 
     try:
-        # Try using TraceLens Python API directly
+        # Import TraceLens on-demand (optional dependency)
+        # Placed inside try block for graceful fallback if TraceLens is not available
         from TraceLens.Reporting import generate_perf_report_pytorch
 
         generated_files = []
