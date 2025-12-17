@@ -15,11 +15,21 @@ from primus.core.patches import PatchContext, register_patch
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
+def _is_fp8_enabled(ctx: PatchContext) -> bool:
+    """Check if FP8 is enabled in module_config."""
+    module_config = ctx.extra.get("module_config")
+    params = getattr(module_config, "params", None)
+    if params is None:
+        return False
+    return getattr(params, "fp8", False)
+
+
 @register_patch(
     "megatron.patch.fp8_context",
     backend="megatron",
     phase="before_train",
     description="Override Megatron get_fp8_context to use Primus implementation when fp8 is enabled",
+    condition=_is_fp8_enabled,
 )
 def patch_fp8_context(ctx: PatchContext):
     """
@@ -33,13 +43,6 @@ def patch_fp8_context(ctx: PatchContext):
             * megatron.core.fp8_utils.get_fp8_context
           with Primus's ROCm-friendly get_fp8_context.
     """
-    module_config = ctx.extra.get("module_config")
-    params = getattr(module_config, "params", None)
-    if params is None or not getattr(params, "fp8", False):
-        warning_rank_0(
-            "[Patch:megatron.patch.fp8_context][SKIP] fp8 is not enabled in params or no params in module_config"
-        )
-        return
 
     try:
         from megatron.core import fp8_utils
