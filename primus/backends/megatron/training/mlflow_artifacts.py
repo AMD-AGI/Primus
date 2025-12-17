@@ -380,17 +380,17 @@ def generate_tracelens_report(
             # Generate both XLSX and CSV formats as fallback
             # XLSX: Single file with multiple tabs
             xlsx_path = os.path.join(output_dir, f"{report_name}_analysis.xlsx")
-            dfs = generate_perf_report_pytorch(trace_file, output_xlsx_path=xlsx_path)
+            xlsx_dfs = generate_perf_report_pytorch(trace_file, output_xlsx_path=xlsx_path)
             if os.path.exists(xlsx_path):
                 log_rank_0(
-                    f"[TraceLens] Generated XLSX report with {len(dfs)} tabs: {os.path.basename(xlsx_path)}"
+                    f"[TraceLens] Generated XLSX report with {len(xlsx_dfs)} tabs: {os.path.basename(xlsx_path)}"
                 )
                 generated_files.append(xlsx_path)
             
             # CSV: Multiple files in a subdirectory
             csv_subdir = os.path.join(output_dir, report_name)
             os.makedirs(csv_subdir, exist_ok=True)
-            dfs = generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
+            generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
             
             # Collect all generated CSV files
             csv_files = glob.glob(os.path.join(csv_subdir, "*.csv"))
