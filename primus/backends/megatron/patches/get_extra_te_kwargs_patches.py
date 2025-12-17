@@ -17,17 +17,12 @@ from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
 
 
-def _no_fp8_weight_transpose_cache_enabled(ctx: PatchContext) -> bool:
-    """Check if no_fp8_weight_transpose_cache is enabled in module_config."""
-    return getattr(get_args(ctx), "no_fp8_weight_transpose_cache", False)
-
-
 @register_patch(
     "megatron.patch.get_extra_te_kwargs",
     backend="megatron",
     phase="before_train",
     description="Override _get_extra_te_kwargs to customize TE layer initialization parameters",
-    condition=_no_fp8_weight_transpose_cache_enabled,
+    condition=lambda ctx: getattr(get_args(ctx), "no_fp8_weight_transpose_cache", False),
 )
 def patch_get_extra_te_kwargs(ctx: PatchContext):
     """
