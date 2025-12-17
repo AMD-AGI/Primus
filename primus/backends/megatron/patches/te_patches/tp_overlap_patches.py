@@ -13,26 +13,26 @@ Handles different TE versions (< 2.0 and >= 2.0) with appropriate APIs.
 
 import functools
 
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
 def _check_tp_overlap_conditions(ctx: PatchContext) -> bool:
     """Helper to check basic TP overlap conditions."""
-    module_config = ctx.extra.get("module_config")
-    params = getattr(module_config, "params", None)
-    if params is None:
+    try:
+        args = get_args(ctx)
+    except AssertionError:
         return False
 
-    if not getattr(params, "tp_comm_overlap", False):
+    if not getattr(args, "tp_comm_overlap", False):
         return False
 
     # Check FP8 incompatible settings
-    if getattr(params, "fp8", False):
+    if getattr(args, "fp8", False):
         if (
-            getattr(params, "tp_comm_overlap_rs", False)
-            or getattr(params, "tp_comm_bulk_dgrad", False)
-            or getattr(params, "tp_comm_bulk_wgrad", False)
+            getattr(args, "tp_comm_overlap_rs", False)
+            or getattr(args, "tp_comm_bulk_dgrad", False)
+            or getattr(args, "tp_comm_bulk_wgrad", False)
         ):
             return False
 
