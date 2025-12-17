@@ -13,6 +13,7 @@ from megatron.core.extensions.transformer_engine import (
     TEColumnParallelLinear,
     TEDotProductAttention,
     TELayerNormColumnParallelLinear,
+    TELinear,
     TENorm,
     TERowParallelGroupedLinear,
     TERowParallelLinear,
@@ -58,7 +59,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
 
     def linear(self) -> type:
         """Which linear module TE backend uses"""
-        return PrimusTurboLinear
+        return PrimusTurboLinear if self.cfg.use_turbo_parallel_linear else TELinear
 
     def column_parallel_linear(self) -> type:
         """Which column parallel linear module TE backend uses"""
