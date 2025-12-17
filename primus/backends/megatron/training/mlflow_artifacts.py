@@ -126,7 +126,7 @@ def upload_trace_files_to_mlflow(
     uploaded_count = 0
     consecutive_failures = 0
 
-    for trace_file in trace_files:
+    for idx, trace_file in enumerate(trace_files):
         try:
             # Get relative path from tensorboard_dir for artifact organization
             rel_path = os.path.relpath(trace_file, tensorboard_dir)
@@ -147,7 +147,7 @@ def upload_trace_files_to_mlflow(
 
             # Abort early if we hit too many consecutive failures
             if consecutive_failures >= max_consecutive_failures:
-                remaining = len(trace_files) - (uploaded_count + consecutive_failures)
+                remaining = len(trace_files) - (idx + 1)
                 warning_rank_0(
                     f"[MLflow] Aborting trace file upload after {consecutive_failures} "
                     f"consecutive failures. {remaining} files not attempted. "
@@ -194,7 +194,7 @@ def upload_log_files_to_mlflow(
     uploaded_count = 0
     consecutive_failures = 0
 
-    for log_file in log_files:
+    for idx, log_file in enumerate(log_files):
         try:
             # Preserve directory structure relative to logs base directory
             rel_path = os.path.relpath(log_file, logs_base_dir)
@@ -213,7 +213,7 @@ def upload_log_files_to_mlflow(
 
             # Abort early if we hit too many consecutive failures
             if consecutive_failures >= max_consecutive_failures:
-                remaining = len(log_files) - (uploaded_count + consecutive_failures)
+                remaining = len(log_files) - (idx + 1)
                 warning_rank_0(
                     f"[MLflow] Aborting log file upload after {consecutive_failures} "
                     f"consecutive failures. {remaining} files not attempted. "
@@ -231,6 +231,7 @@ def upload_artifacts_to_mlflow(
     exp_root_path: Optional[str] = None,
     upload_traces: bool = True,
     upload_logs: bool = True,
+    max_consecutive_failures: int = 3,
 ) -> dict:
     """
     Upload all artifacts (trace files and log files) to MLflow.
@@ -244,6 +245,7 @@ def upload_artifacts_to_mlflow(
         exp_root_path: Root path of the experiment for log files
         upload_traces: Whether to upload trace files
         upload_logs: Whether to upload log files
+        max_consecutive_failures: Maximum number of consecutive failures before aborting
 
     Returns:
         Dictionary with counts of uploaded files:
@@ -265,11 +267,19 @@ def upload_artifacts_to_mlflow(
 
     if upload_traces and tensorboard_dir:
         result["traces"] = upload_trace_files_to_mlflow(
-            mlflow_writer, tensorboard_dir, artifact_path="traces"
+            mlflow_writer,
+            tensorboard_dir,
+            artifact_path="traces",
+            max_consecutive_failures=max_consecutive_failures,
         )
 
     if upload_logs and exp_root_path:
-        result["logs"] = upload_log_files_to_mlflow(mlflow_writer, exp_root_path, artifact_path="logs")
+        result["logs"] = upload_log_files_to_mlflow(
+            mlflow_writer,
+            exp_root_path,
+            artifact_path="logs",
+            max_consecutive_failures=max_consecutive_failures,
+        )
 
     log_rank_0(
         f"[MLflow] Artifact upload complete: " f"{result['traces']} trace files, {result['logs']} log files"
