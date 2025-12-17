@@ -74,5 +74,5 @@ srun -N "${NNODES}" \
           export NNODES=\${SLURM_NNODES}
           export NODE_RANK=\${SLURM_PROCID}
           export GPUS_PER_NODE=\${SLURM_GPUS_ON_NODE}
-          bash ${SCRIPT_DIR}/run_local_pretrain.sh \"\$@\" 2>&1 | tee ${LOG_FILE}
+          bash '${SCRIPT_DIR}'/run_local_pretrain.sh \"\$@\" 2>&1 | tee '${LOG_FILE}'
      " bash "$@"
