@@ -93,10 +93,11 @@ class PrimusRoutedMoE(RoutedMoE):
         wo_kernel,
     ):
         """Perform sparse matrix multiplication with optional Primus Turbo backend."""
-        if not self.config.primus_turbo_grouped_gemm:
+        if not self.config.use_turbo_grouped_gemm:
             return super().sparse_matmul(
                 inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
             )
+        assert not (self.config.megablox and self.config.use_turbo_grouped_gemm), ("primus_turbo grouped_gemm cannot be enabled together with megablox")
 
         # Use primus_turbo grouped_gemm backend
         try:
@@ -108,7 +109,7 @@ class PrimusRoutedMoE(RoutedMoE):
                 inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
             )
 
-        # max_logging.log("Using primus_turbo grouped_gemm in MoE")
+        max_logging.log("Using primus_turbo grouped_gemm in MoE")
         _orig_ragged_dot = jax.lax.ragged_dot
 
         def _turbo_ragged_dot(*, lhs, rhs, group_sizes, preferred_element_type=None, **kwargs):
