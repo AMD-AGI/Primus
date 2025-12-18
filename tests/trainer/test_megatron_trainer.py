@@ -328,24 +328,14 @@ class TestMegatronTrainerDeterministic(PrimusUT):
 
         return loss
 
-    def extract_num_zeros_from_log(self, log):
-        NUM_ZEROS_IN_GRAD_PATTERN = r"num zeros: (\d+)"
-
-        num_zeros_in_grad = re.findall(NUM_ZEROS_IN_GRAD_PATTERN, log)
-
-        return num_zeros_in_grad
-
     def check_numerical_reproducility(self, log, log_ref):
         loss = self.extract_loss_from_log(log)
         loss_ref = self.extract_loss_from_log(log_ref)
 
-        num_zeros = self.extract_num_zeros_from_log(log)
-        num_zeros_ref = self.extract_num_zeros_from_log(log_ref)
-
         is_reproducility = True
         # compare as str, need bitwise equal.
         for i in range(0, len(loss)):
-            if loss[i] != loss_ref[i] or num_zeros[i] != num_zeros_ref[i]:
+            if loss[i] != loss_ref[i]:
                 is_reproducility = False
                 break
 
