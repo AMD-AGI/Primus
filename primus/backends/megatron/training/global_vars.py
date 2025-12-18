@@ -5,8 +5,11 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from typing import List, Optional
 
 from primus.modules.module_utils import debug_rank_0
+
+from .mlflow_artifacts import upload_artifacts_to_mlflow
 
 _GLOBAL_ARGS = None
 _GLOBAL_MLFLOW_WRITER = None
@@ -85,3 +88,57 @@ def _ensure_var_is_not_initialized(var, name):
 def destroy_global_vars():
     global _GLOBAL_ARGS
     _GLOBAL_ARGS = None
+
+
+def upload_mlflow_artifacts(
+    tensorboard_dir: Optional[str] = None,
+    exp_root_path: Optional[str] = None,
+    upload_traces: bool = True,
+    upload_logs: bool = True,
+    upload_tracelens_report: bool = False,
+    tracelens_ranks: Optional[List[int]] = None,
+    tracelens_max_reports: Optional[int] = None,
+    tracelens_output_format: str = "all",
+) -> Optional[dict]:
+    """
+    Upload trace files, log files, and TraceLens reports to MLflow as artifacts.
+
+    This function should be called at the end of training to upload all
+    artifacts to MLflow. Only the rank that initialized MLflow (last rank)
+    should call this to avoid duplicate uploads.
+
+    MLflow Artifact Structure:
+        artifacts/
+        ├── traces/              # PyTorch profiler trace files
+        ├── logs/                # Training log files
+        └── trace_analysis/      # TraceLens analysis reports
+
+    Args:
+        tensorboard_dir: Path to tensorboard directory with trace files
+        exp_root_path: Root experiment path for log files
+        upload_traces: Whether to upload trace files (default: True)
+        upload_logs: Whether to upload log files (default: True)
+        upload_tracelens_report: Whether to generate and upload TraceLens reports
+        tracelens_ranks: List of ranks to analyze with TraceLens
+                        (None = all, [0] = rank 0 only)
+        tracelens_max_reports: Maximum number of TraceLens reports to generate
+        tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
+
+    Returns:
+        Dictionary with counts of uploaded files, or None if MLflow is not enabled
+    """
+    mlflow_writer = get_mlflow_writer()
+    if mlflow_writer is None:
+        return None
+
+    return upload_artifacts_to_mlflow(
+        mlflow_writer=mlflow_writer,
+        tensorboard_dir=tensorboard_dir,
+        exp_root_path=exp_root_path,
+        upload_traces=upload_traces,
+        upload_logs=upload_logs,
+        upload_tracelens_report=upload_tracelens_report,
+        tracelens_ranks=tracelens_ranks,
+        tracelens_max_reports=tracelens_max_reports,
+        tracelens_output_format=tracelens_output_format,
+    )
