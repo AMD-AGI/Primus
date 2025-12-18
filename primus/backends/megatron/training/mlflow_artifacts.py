@@ -607,6 +607,7 @@ def upload_tracelens_reports_to_mlflow(
     1. Finds PyTorch profiler trace files
     2. Generates TraceLens analysis reports for specified ranks
     3. Uploads the reports to MLflow under the trace_analysis artifact path
+    4. Cleans up local report files after successful upload
 
     Args:
         mlflow_writer: The MLflow module instance (from get_mlflow_writer())
@@ -619,6 +620,10 @@ def upload_tracelens_reports_to_mlflow(
 
     Returns:
         Number of reports uploaded to MLflow
+
+    Note:
+        The local tracelens_reports directory is automatically cleaned up after
+        successful upload to save disk space. The reports remain accessible in MLflow.
     """
     if mlflow_writer is None:
         log_rank_0("[TraceLens] MLflow writer not available, skipping report upload")
@@ -674,6 +679,17 @@ def upload_tracelens_reports_to_mlflow(
             warning_rank_0(f"[MLflow] Failed to upload report {report_path}: {e}")
 
     log_rank_0(f"[TraceLens] Uploaded {uploaded_count} reports to '{artifact_path}'")
+
+    # Clean up local reports after successful upload to save disk space
+    # The reports are now safely stored in MLflow
+    try:
+        import shutil
+
+        shutil.rmtree(reports_dir)
+        log_rank_0(f"[TraceLens] Cleaned up local reports directory: {reports_dir}")
+    except Exception as e:
+        warning_rank_0(f"[TraceLens] Failed to cleanup reports directory: {e}")
+
     return uploaded_count
 
 
