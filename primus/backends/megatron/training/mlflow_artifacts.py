@@ -63,9 +63,11 @@ def _get_all_trace_files(tensorboard_dir: str) -> list:
     # Look for PyTorch profiler trace files (both compressed and uncompressed)
     # Using specific patterns to avoid matching unrelated JSON files
     patterns = ["*.pt.trace.json", "*.pt.trace.json.gz"]
+    # Escape directory path to handle special characters like [] in experiment names
+    escaped_dir = glob.escape(tensorboard_dir)
     for pattern in patterns:
-        trace_files.extend(glob.glob(os.path.join(tensorboard_dir, pattern)))
-        trace_files.extend(glob.glob(os.path.join(tensorboard_dir, "**", pattern), recursive=True))
+        trace_files.extend(glob.glob(os.path.join(escaped_dir, pattern)))
+        trace_files.extend(glob.glob(os.path.join(escaped_dir, "**", pattern), recursive=True))
 
     # Remove duplicates while preserving order
     seen = set()
@@ -100,8 +102,8 @@ def _get_all_log_files(exp_root_path: str) -> list:
         return []
 
     log_files = []
-    # Find all .log files recursively
-    log_files.extend(glob.glob(os.path.join(logs_dir, "**", "*.log"), recursive=True))
+    # Find all .log files recursively (escape path to handle special characters)
+    log_files.extend(glob.glob(os.path.join(glob.escape(logs_dir), "**", "*.log"), recursive=True))
 
     return log_files
 
@@ -371,8 +373,8 @@ def generate_tracelens_report(
                 )
                 generated_files.append(xlsx_path)
 
-            # Check CSV outputs
-            csv_files = glob.glob(os.path.join(csv_subdir, "*.csv"))
+            # Check CSV outputs (escape path to handle [] characters in filenames)
+            csv_files = glob.glob(os.path.join(glob.escape(csv_subdir), "*.csv"))
             if csv_files:
                 log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
                 generated_files.extend(csv_files)
@@ -393,8 +395,8 @@ def generate_tracelens_report(
             os.makedirs(csv_subdir, exist_ok=True)
             dfs = generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
 
-            # Collect all generated CSV files
-            csv_files = glob.glob(os.path.join(csv_subdir, "*.csv"))
+            # Collect all generated CSV files (escape path to handle [] characters in filenames)
+            csv_files = glob.glob(os.path.join(glob.escape(csv_subdir), "*.csv"))
             if csv_files:
                 log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
                 generated_files.extend(csv_files)
