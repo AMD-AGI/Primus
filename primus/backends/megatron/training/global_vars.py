@@ -6,10 +6,12 @@
 ###############################################################################
 
 
+import time
 from primus.modules.module_utils import debug_rank_0
 
 _GLOBAL_ARGS = None
 _GLOBAL_MLFLOW_WRITER = None
+_TRAIN_START_TIME = None
 
 
 def set_args(args):
@@ -27,6 +29,20 @@ def get_mlflow_writer():
     """Return mlflow writer. It can be None so no need
     to check if it is initialized."""
     return _GLOBAL_MLFLOW_WRITER
+
+
+def set_train_start_time(start_time=None):
+    """Set training start time. If not provided, use current time."""
+    global _TRAIN_START_TIME
+    if start_time is None:
+        start_time = time.time()
+    _TRAIN_START_TIME = start_time
+
+
+def get_train_start_time():
+    """Return training start time."""
+    _ensure_var_is_initialized(_TRAIN_START_TIME, "train start time")
+    return _TRAIN_START_TIME
 
 
 def set_primus_global_variables(args):
@@ -67,9 +83,11 @@ def unset_global_variables():
 
     global _GLOBAL_ARGS
     global _GLOBAL_MLFLOW_WRITER
+    global _TRAIN_START_TIME
 
     _GLOBAL_ARGS = None
     _GLOBAL_MLFLOW_WRITER = None
+    _TRAIN_START_TIME = None
 
 
 def _ensure_var_is_initialized(var, name):
@@ -84,4 +102,8 @@ def _ensure_var_is_not_initialized(var, name):
 
 def destroy_global_vars():
     global _GLOBAL_ARGS
+    global _GLOBAL_MLFLOW_WRITER
+    global _TRAIN_START_TIME
     _GLOBAL_ARGS = None
+    _GLOBAL_MLFLOW_WRITER = None
+    _TRAIN_START_TIME = None
