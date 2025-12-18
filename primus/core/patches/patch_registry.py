@@ -12,7 +12,8 @@ for registering patches.
 """
 
 import logging
-from typing import Callable, Iterable, List, Optional, Sequence
+from collections import defaultdict
+from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from primus.core.patches.context import PatchContext
 from primus.core.patches.patch import FunctionPatch
@@ -26,71 +27,155 @@ log = logging.getLogger(__name__)
 
 
 class PatchRegistry:
-    """Global registry for all patches."""
+    """
+    Global registry for all patches.
 
-    _patches: List[FunctionPatch] = []
+    Patches are organized by (backend, phase) for efficient lookup.
+    Uses a nested dict structure: {backend: {phase: [patches]}}
+
+    Special keys:
+    - None: represents patches that apply to all backends/phases
+    """
+
+    # Nested dict: {backend: {phase: [FunctionPatch]}}
+    _patches_by_backend_phase: Dict[Optional[str], Dict[Optional[str], List[FunctionPatch]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+
+    # Flat list for operations that need all patches (like get by id, list_ids)
+    _all_patches: List[FunctionPatch] = []
 
     @classmethod
     def register(cls, patch: FunctionPatch) -> FunctionPatch:
-        """Register or override a patch."""
-        # Check if patch with same id already exists
-        for i, existing_patch in enumerate(cls._patches):
+        """
+        Register a patch, organized by backend and phase.
+
+        A patch is stored in the appropriate bucket based on its backend/phase.
+        If backend or phase is None, it goes into the None bucket.
+        """
+        # Remove existing patch with same id if it exists
+        for i, existing_patch in enumerate(cls._all_patches):
             if existing_patch.id == patch.id:
                 log.warning("Patch '%s' already registered; overriding.", patch.id)
-                cls._patches[i] = patch
-                return patch
+                # Remove from old bucket
+                old_backend = existing_patch.backend
+                old_phase = existing_patch.phase
+                if old_backend in cls._patches_by_backend_phase:
+                    if old_phase in cls._patches_by_backend_phase[old_backend]:
+                        try:
+                            cls._patches_by_backend_phase[old_backend][old_phase].remove(existing_patch)
+                        except ValueError:
+                            pass
+                # Remove from all_patches
+                cls._all_patches[i] = patch
+                break
+        else:
+            # New patch
+            cls._all_patches.append(patch)
 
-        # Add new patch
-        cls._patches.append(patch)
+        # Add to bucket
+        backend_key = patch.backend
+        phase_key = patch.phase
+        cls._patches_by_backend_phase[backend_key][phase_key].append(patch)
+
         return patch
 
     @classmethod
     def get(cls, patch_id: str) -> Optional[FunctionPatch]:
         """Get patch by id, returns None if not found."""
-        for patch in cls._patches:
+        for patch in cls._all_patches:
             if patch.id == patch_id:
                 return patch
         return None
 
     @classmethod
     def list_ids(cls) -> List[str]:
-        return sorted([p.id for p in cls._patches])
+        """Get sorted list of all patch ids."""
+        return sorted([p.id for p in cls._all_patches])
 
     @classmethod
     def iter_patches(cls, backend: Optional[str] = None, phase: Optional[str] = None) -> List[FunctionPatch]:
         """
-        Get all patches, optionally pre-filtered by backend and/or phase.
+        Get patches filtered by backend and/or phase.
+
+        This method efficiently retrieves patches using the pre-classified structure.
 
         Args:
-            backend: If provided, only return patches matching this backend
-                    (or patches with backend=None)
-            phase: If provided, only return patches matching this phase
-                  (or patches with phase=None)
+            backend: If provided, only return patches for this backend (+ generic patches)
+            phase: If provided, only return patches for this phase (+ generic patches)
 
         Returns:
             List of FunctionPatch objects
+
+        Lookup strategy:
+            - If both backend and phase are specified:
+              Returns patches from: (backend, phase) + (None, phase) + (backend, None) + (None, None)
+            - If only backend is specified:
+              Returns patches from: (backend, *) + (None, *)
+            - If only phase is specified:
+              Returns patches from: (*, phase) + (*, None)
+            - If neither is specified:
+              Returns all patches
         """
-        patches = list(cls._patches)
+        if backend is None and phase is None:
+            # Return all patches
+            return list(cls._all_patches)
 
-        # Pre-filter by backend if specified
-        if backend is not None:
-            patches = [p for p in patches if p.backend is None or p.backend == backend]
+        result = []
+        seen_ids = set()
 
-        # Pre-filter by phase if specified
-        if phase is not None:
-            patches = [p for p in patches if p.phase is None or p.phase == phase]
+        if backend is not None and phase is not None:
+            # Most specific case: both backend and phase specified
+            # Order: (backend, phase), (None, phase), (backend, None), (None, None)
+            for b_key, p_key in [
+                (backend, phase),  # Exact match
+                (None, phase),  # Generic backend, specific phase
+                (backend, None),  # Specific backend, generic phase
+                (None, None),  # Generic backend and phase
+            ]:
+                if b_key in cls._patches_by_backend_phase:
+                    if p_key in cls._patches_by_backend_phase[b_key]:
+                        for patch in cls._patches_by_backend_phase[b_key][p_key]:
+                            if patch.id not in seen_ids:
+                                result.append(patch)
+                                seen_ids.add(patch.id)
 
-        return patches
+        elif backend is not None:
+            # Only backend specified, all phases
+            # Look in (backend, *) and (None, *)
+            for b_key in [backend, None]:
+                if b_key in cls._patches_by_backend_phase:
+                    for phase_dict in cls._patches_by_backend_phase[b_key].values():
+                        for patch in phase_dict:
+                            if patch.id not in seen_ids:
+                                result.append(patch)
+                                seen_ids.add(patch.id)
+
+        elif phase is not None:
+            # Only phase specified, all backends
+            # Look in (*, phase) and (*, None)
+            for p_key in [phase, None]:
+                for backend_dict in cls._patches_by_backend_phase.values():
+                    if p_key in backend_dict:
+                        for patch in backend_dict[p_key]:
+                            if patch.id not in seen_ids:
+                                result.append(patch)
+                                seen_ids.add(patch.id)
+
+        return result
 
     @classmethod
     def clear(cls) -> None:
-        cls._patches.clear()
+        """Clear all registered patches."""
+        cls._patches_by_backend_phase.clear()
+        cls._all_patches.clear()
 
     @classmethod
     def iter_by_tag(cls, tag: str) -> Iterable[FunctionPatch]:
-        for p in cls._patches:
-            if tag in p.tags:
-                yield p
+        """Iterate patches that have the specified tag."""
+        for patch in cls._all_patches:
+            if tag in patch.tags:
+                yield patch
 
 
 # -----------------------------------------------------------------------------
