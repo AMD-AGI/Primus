@@ -94,39 +94,34 @@ class PatchRegistry:
         return sorted([p.id for p in cls._all_patches])
 
     @classmethod
-    def iter_patches(cls, backend: Optional[str] = None, phase: Optional[str] = None) -> List[FunctionPatch]:
+    def iter_patches(cls, backend: str, phase: Optional[str] = None) -> List[FunctionPatch]:
         """
-        Get patches filtered by backend and/or phase.
+        Get patches filtered by backend and optionally by phase.
 
         This method efficiently retrieves patches using the pre-classified structure.
 
         Args:
-            backend: If provided, only return patches for this backend (+ generic patches)
-            phase: If provided, only return patches for this phase (+ generic patches)
+            backend: Backend name (required, e.g., "megatron", "pytorch")
+            phase: Optional phase name (e.g., "before_train", "after_train")
+                  If None, returns patches for all phases
 
         Returns:
             List of FunctionPatch objects
 
         Lookup strategy:
-            - If both backend and phase are specified:
-              Returns patches from: (backend, phase) + (None, phase) + (backend, None) + (None, None)
-            - If only backend is specified:
-              Returns patches from: (backend, *) + (None, *)
-            - If only phase is specified:
-              Returns patches from: (*, phase) + (*, None)
-            - If neither is specified:
-              Returns all patches
-        """
-        if backend is None and phase is None:
-            # Return all patches
-            return list(cls._all_patches)
+            - If phase is specified:
+              Returns patches from: (backend, phase) + (None, phase) +
+                                   (backend, None) + (None, None)
 
+            - If phase is None:
+              Returns patches from: (backend, *) + (None, *)
+        """
         result = []
         seen_ids = set()
 
-        if backend is not None and phase is not None:
-            # Most specific case: both backend and phase specified
-            # Order: (backend, phase), (None, phase), (backend, None), (None, None)
+        if phase is not None:
+            # Phase specified: look in (backend, phase), (None, phase),
+            # (backend, None), (None, None)
             for b_key, p_key in [
                 (backend, phase),  # Exact match
                 (None, phase),  # Generic backend, specific phase
@@ -140,24 +135,12 @@ class PatchRegistry:
                                 result.append(patch)
                                 seen_ids.add(patch.id)
 
-        elif backend is not None:
-            # Only backend specified, all phases
-            # Look in (backend, *) and (None, *)
+        else:
+            # Phase not specified: look in (backend, *) and (None, *)
             for b_key in [backend, None]:
                 if b_key in cls._patches_by_backend_phase:
                     for phase_dict in cls._patches_by_backend_phase[b_key].values():
                         for patch in phase_dict:
-                            if patch.id not in seen_ids:
-                                result.append(patch)
-                                seen_ids.add(patch.id)
-
-        elif phase is not None:
-            # Only phase specified, all backends
-            # Look in (*, phase) and (*, None)
-            for p_key in [phase, None]:
-                for backend_dict in cls._patches_by_backend_phase.values():
-                    if p_key in backend_dict:
-                        for patch in backend_dict[p_key]:
                             if patch.id not in seen_ids:
                                 result.append(patch)
                                 seen_ids.add(patch.id)
