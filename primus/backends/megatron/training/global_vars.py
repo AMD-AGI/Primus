@@ -95,10 +95,12 @@ def upload_mlflow_artifacts(
     exp_root_path: Optional[str] = None,
     upload_traces: bool = True,
     upload_logs: bool = True,
+    generate_tracelens_report: bool = False,
     upload_tracelens_report: bool = False,
     tracelens_ranks: Optional[List[int]] = None,
     tracelens_max_reports: Optional[int] = None,
     tracelens_output_format: str = "all",
+    tracelens_cleanup_after_upload: bool = False,
 ) -> Optional[dict]:
     """
     Upload trace files, log files, and TraceLens reports to MLflow as artifacts.
@@ -111,18 +113,25 @@ def upload_mlflow_artifacts(
         artifacts/
         ├── traces/              # PyTorch profiler trace files
         ├── logs/                # Training log files
-        └── trace_analysis/      # TraceLens analysis reports
+        └── trace_analysis/      # TraceLens analysis reports (if uploaded)
+
+    TraceLens Report Logic:
+        - upload_tracelens_report=True: Generate AND upload (auto-enables generation)
+        - generate_tracelens_report=True only: Generate locally without upload
+        - Both False: No report generation
 
     Args:
         tensorboard_dir: Path to tensorboard directory with trace files
         exp_root_path: Root experiment path for log files
         upload_traces: Whether to upload trace files (default: True)
         upload_logs: Whether to upload log files (default: True)
-        upload_tracelens_report: Whether to generate and upload TraceLens reports
+        generate_tracelens_report: Whether to generate TraceLens reports locally
+        upload_tracelens_report: Whether to upload TraceLens reports to MLflow (implies generation)
         tracelens_ranks: List of ranks to analyze with TraceLens
                         (None = all, [0] = rank 0 only)
         tracelens_max_reports: Maximum number of TraceLens reports to generate
         tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
+        tracelens_cleanup_after_upload: Remove local reports after upload (default: False)
 
     Returns:
         Dictionary with counts of uploaded files, or None if MLflow is not enabled
@@ -137,8 +146,10 @@ def upload_mlflow_artifacts(
         exp_root_path=exp_root_path,
         upload_traces=upload_traces,
         upload_logs=upload_logs,
+        generate_tracelens_report=generate_tracelens_report,
         upload_tracelens_report=upload_tracelens_report,
         tracelens_ranks=tracelens_ranks,
         tracelens_max_reports=tracelens_max_reports,
         tracelens_output_format=tracelens_output_format,
+        tracelens_cleanup_after_upload=tracelens_cleanup_after_upload,
     )
