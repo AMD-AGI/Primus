@@ -10,22 +10,11 @@ Transformer Engine Delayed Scaling Patches
 Patches for customizing TEDelayedScaling behavior.
 """
 
-from megatron.core.extensions import transformer_engine as te_ext
-from megatron.core.extensions.transformer_engine import TEDelayedScaling
-
+from primus.backends.megatron.patches.te_patches.utils import (
+    make_get_extra_te_kwargs_with_override,
+)
 from primus.core.patches import PatchContext, register_patch
 from primus.modules.module_utils import log_rank_0
-
-
-def _make_get_extra_te_kwargs_with_override(original_func, **overrides):
-    """Create a wrapped version of _get_extra_te_kwargs with custom overrides."""
-
-    def _wrapped(config):
-        kwargs = original_func(config)
-        kwargs.update(overrides)
-        return kwargs
-
-    return _wrapped
 
 
 @register_patch(
@@ -41,7 +30,8 @@ def patch_te_delayed_scaling_reduce_amax(ctx: PatchContext):
     This customizes the DelayedScaling recipe behavior by setting
     reduce_amax=False during initialization.
     """
-    log_rank_0("[Patch:megatron.te.delayed_scaling_reduce_amax] Patching TEDelayedScaling...")
+    from megatron.core.extensions import transformer_engine as te_ext
+    from megatron.core.extensions.transformer_engine import TEDelayedScaling
 
     # Save the original _get_extra_te_kwargs function
     original_get_extra_te_kwargs = te_ext._get_extra_te_kwargs
@@ -49,7 +39,7 @@ def patch_te_delayed_scaling_reduce_amax(ctx: PatchContext):
 
     def new_init(self, *args, **kwargs):
         # Temporarily override the TE kwargs with our custom flag
-        te_ext._get_extra_te_kwargs = _make_get_extra_te_kwargs_with_override(
+        te_ext._get_extra_te_kwargs = make_get_extra_te_kwargs_with_override(
             original_get_extra_te_kwargs, reduce_amax=False
         )
         try:

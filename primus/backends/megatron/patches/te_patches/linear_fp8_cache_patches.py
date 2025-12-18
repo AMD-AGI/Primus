@@ -10,22 +10,12 @@ Transformer Engine Linear FP8 Cache Patches
 Patches for disabling FP8 weight transpose cache in TELinear layers.
 """
 
-from megatron.core.extensions import transformer_engine as te_ext
-from megatron.core.extensions.transformer_engine import TELinear
 
+from primus.backends.megatron.patches.te_patches.utils import (
+    make_get_extra_te_kwargs_with_override,
+)
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
-
-
-def _make_get_extra_te_kwargs_with_override(original_func, **overrides):
-    """Create a wrapped version of _get_extra_te_kwargs with custom overrides."""
-
-    def _wrapped(config):
-        kwargs = original_func(config)
-        kwargs.update(overrides)
-        return kwargs
-
-    return _wrapped
 
 
 @register_patch(
@@ -45,7 +35,8 @@ def patch_te_linear_fp8_cache(ctx: PatchContext):
     Config:
         no_fp8_weight_transpose_cache: true  # Enable FP8 cache disabling
     """
-    log_rank_0("[Patch:megatron.te.linear_fp8_cache] Patching TELinear to disable FP8 cache...")
+    from megatron.core.extensions import transformer_engine as te_ext
+    from megatron.core.extensions.transformer_engine import TELinear
 
     # Save the original _get_extra_te_kwargs function
     original_get_extra_te_kwargs = te_ext._get_extra_te_kwargs
@@ -53,7 +44,7 @@ def patch_te_linear_fp8_cache(ctx: PatchContext):
 
     def new_init(self, *args, **kwargs):
         # Temporarily override the TE kwargs with our custom flag
-        te_ext._get_extra_te_kwargs = _make_get_extra_te_kwargs_with_override(
+        te_ext._get_extra_te_kwargs = make_get_extra_te_kwargs_with_override(
             original_get_extra_te_kwargs, keep_fp8_weight_transpose_cache=False
         )
         try:
