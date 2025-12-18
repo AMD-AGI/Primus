@@ -77,7 +77,16 @@ def run_patches(
     if enabled_ids is None:
         enabled_ids = _parse_enabled_patches_from_env()
 
-    patches = PatchRegistry.iter_patches()
+    # Get all patches and pre-filter by backend and phase before sorting
+    all_patches = list(PatchRegistry.iter_patches())
+
+    # Pre-filter: Only keep patches that match backend and phase
+    # This avoids sorting and checking patches that will never be applied
+    patches = [
+        p
+        for p in all_patches
+        if (p.backend is None or p.backend == backend) and (p.phase is None or p.phase == phase)
+    ]
 
     # Deterministic ordering: (priority ASC, id ASC)
     patches = sorted(patches, key=lambda p: (p.priority, p.id))
@@ -91,6 +100,9 @@ def run_patches(
         f"backend_version={backend_version}, primus_version={primus_version}, "
         f"model={model_name}, module={module_name}, platform={platform}, "
         f"dry_run={dry_run}, enabled_ids={enabled_ids}"
+    )
+    log_rank_0(
+        f"[Patch] Pre-filtered {len(patches)} patches (out of {len(all_patches)} total) for {backend}/{phase}"
     )
 
     for patch in patches:
