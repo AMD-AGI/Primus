@@ -215,7 +215,7 @@ export HSA_ENABLE_SDMA=1
 # Prevent scratch memory from being reclaimed to stabilize large memory usage patterns (e.g., KV cache, MoE experts)
 # NOTE: Must disable scratch reclaim to avoid MoE training crash on AMD GPUs
 # Setting this to 0 prevents core dumps when using Mixture-of-Experts (MoE) models
-export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-0}
+export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 
 # Disable MSCCL (RCCL multi-connection feature) for better stability
 export RCCL_MSCCL_ENABLE=0
