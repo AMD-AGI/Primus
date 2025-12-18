@@ -15,13 +15,21 @@ Each patch is organized in its own file for better maintainability.
 # NOTE: These imports are intentionally unused; they register patches with
 # the core patch registry when this package is imported.
 from primus.backends.megatron.patches.te_patches import (
-    get_extra_te_kwargs_patches as _get_extra_te_kwargs_patches,
+    delayed_scaling_patches as _delayed_scaling_patches,
+)
+from primus.backends.megatron.patches.te_patches import (
+    layernorm_linear_fp8_cache_patches as _layernorm_linear_fp8_cache_patches,
+)
+from primus.backends.megatron.patches.te_patches import (
+    linear_fp8_cache_patches as _linear_fp8_cache_patches,
 )
 from primus.backends.megatron.patches.te_patches import (
     tp_overlap_patches as _tp_overlap_patches,
 )
 
 __all__ = [
-    "_get_extra_te_kwargs_patches",
+    "_delayed_scaling_patches",
+    "_layernorm_linear_fp8_cache_patches",
+    "_linear_fp8_cache_patches",
     "_tp_overlap_patches",
 ]
