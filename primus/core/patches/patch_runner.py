@@ -11,11 +11,12 @@ This module selects and executes patches based on the given PatchContext.
 """
 
 import os
+import traceback
 from typing import Any, Dict, List, Optional
 
 from primus.core.patches.context import PatchContext
 from primus.core.patches.patch_registry import PatchRegistry
-from primus.modules.module_utils import log_rank_0
+from primus.modules.module_utils import error_rank_0, log_rank_0
 
 # -----------------------------------------------------------------------------
 # Parse PRIMUS_PATCHES Environment Variable
@@ -88,13 +89,6 @@ def run_patches(
     if enabled_ids is not None:
         patches = [p for p in patches if p.id in enabled_ids]
 
-    # Filter by applicability (version, condition, etc.)
-    # This avoids checking applies_to on every iteration
-    patches = [p for p in patches if p.applies_to(ctx)]
-
-    applied_count = 0
-    applied_ids: List[str] = []
-
     log_rank_0("--------------------------------------------------------------------------------")
     log_rank_0(
         f"[Patch] Executing patches: backend={backend}, phase={phase}, "
@@ -102,9 +96,17 @@ def run_patches(
         f"model={model_name}, module={module_name}, platform={platform}, "
         f"dry_run={dry_run}, enabled_ids={enabled_ids}"
     )
+
+    # Filter by applicability (version, condition, etc.)
+    # This avoids checking applies_to on every iteration
+    patches = [p for p in patches if p.applies_to(ctx)]
+
     log_rank_0(
         f"[Patch] Pre-filtered {len(patches)} patches (out of {all_patches_count} total) for {backend}/{phase}"
     )
+
+    applied_count = 0
+    applied_ids: List[str] = []
 
     for patch in patches:
         # log_rank_0(f"[Patch] Applying patch: {patch.id} (priority={patch.priority}) {patch}")
@@ -123,8 +125,14 @@ def run_patches(
             applied_count += 1
             applied_ids.append(patch.id)
             log_rank_0(f"[Patch] ✓ Applied: {patch.id} (priority={patch.priority})")
+        except ImportError as e:
+            error_rank_0(
+                f"[Patch] ✗ Patch '{patch.id}' failed due to missing dependency: {e}\n{traceback.format_exc()}"
+            )
+            if stop_on_error:
+                raise
         except Exception as e:
-            log_rank_0(f"[Patch] ✗ Patch '{patch.id}' failed: {e}")
+            error_rank_0(f"[Patch] ✗ Patch '{patch.id}' failed: {e}")
             if stop_on_error:
                 raise
 
