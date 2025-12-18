@@ -43,9 +43,11 @@ def _get_all_trace_files(tensorboard_dir: str) -> list:
     trace_files = []
     # Look for PyTorch profiler trace files (both compressed and uncompressed)
     patterns = ["*.pt.trace.json", "*.pt.trace.json.gz"]
+    # Escape directory path to handle special characters like [] in experiment names
+    escaped_dir = glob.escape(tensorboard_dir)
     for pattern in patterns:
-        trace_files.extend(glob.glob(os.path.join(tensorboard_dir, pattern)))
-        trace_files.extend(glob.glob(os.path.join(tensorboard_dir, "**", pattern), recursive=True))
+        trace_files.extend(glob.glob(os.path.join(escaped_dir, pattern)))
+        trace_files.extend(glob.glob(os.path.join(escaped_dir, "**", pattern), recursive=True))
 
     # Remove duplicates while preserving order
     seen = set()
@@ -80,8 +82,8 @@ def _get_all_log_files(exp_root_path: str) -> list:
         return []
 
     log_files = []
-    # Find all .log files recursively
-    log_files.extend(glob.glob(os.path.join(logs_dir, "**", "*.log"), recursive=True))
+    # Find all .log files recursively (escape path to handle special characters)
+    log_files.extend(glob.glob(os.path.join(glob.escape(logs_dir), "**", "*.log"), recursive=True))
 
     return log_files
 
