@@ -93,6 +93,11 @@ ENV_ARGS+=("--env" "HF_TOKEN")
 ENV_ARGS+=("--env" "WANDB_API_KEY")
 ENV_ARGS+=("--env" "ENABLE_NUMA_BINDING")
 ENV_ARGS+=("--env" "HSA_KERNARG_POOL_SIZE")
+# MLflow environment variables
+ENV_ARGS+=("--env" "DATABRICKS_TOKEN")
+ENV_ARGS+=("--env" "DATABRICKS_HOST")
+ENV_ARGS+=("--env" "MLFLOW_TRACKING_URI")
+ENV_ARGS+=("--env" "MLFLOW_REGISTRY_URI")
 echo "ENV_ARGS: ${ENV_ARGS[*]}"
 
 HOSTNAME=$(hostname)
@@ -158,6 +163,12 @@ docker_podman_proxy run --rm \
     --env GPUS_PER_NODE \
     --env DATA_PATH \
     --env TRAIN_LOG \
+    --env PRIMUS_WORKSPACE \
+    --env PRIMUS_EXP_NAME \
+    --env TIMESTAMP \
+    --env LOG_DIR \
+    --env PRIMUS_TEAM \
+    --env PRIMUS_USER \
     --env HSA_NO_SCRATCH_RECLAIM \
     --env NVTE_CK_USES_BWD_V3 \
     --env GPU_MAX_HW_QUEUES \

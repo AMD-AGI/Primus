@@ -144,7 +144,9 @@ from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_me
 from primus.backends.megatron.model_provider import primus_model_provider
 from primus.backends.megatron.training.global_vars import (
     get_mlflow_writer,
+    set_exp_root_path,
     set_primus_global_variables,
+    upload_mlflow_artifacts,
 )
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
@@ -1243,6 +1245,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         set_global_variables(args, build_tokenizer=False)
         log_rank_0(f"-set_primus_global_variables...")
         set_primus_global_variables(args)
+        # Set exp_root_path for MLflow artifact logging
+        set_exp_root_path(self.exp_root_path)
         args = get_args()
 
         # set tokenizer
@@ -1611,6 +1615,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         mlflow_writer = get_mlflow_writer()
         if mlflow_writer:
+            # Upload artifacts before ending the run
+            upload_mlflow_artifacts(
+                upload_traces=getattr(args, "mlflow_upload_traces", True),
+                upload_logs=getattr(args, "mlflow_upload_logs", True),
+            )
             mlflow_writer.end_run()
 
         one_logger and one_logger.log_metrics({"app_finish_time": one_logger_utils.get_timestamp_in_ms()})
@@ -2055,6 +2064,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 wandb_writer.finish()
             mlflow_writer = get_mlflow_writer()
             if mlflow_writer:
+                # Upload artifacts before ending the run
+                upload_mlflow_artifacts(
+                    upload_traces=getattr(args, "mlflow_upload_traces", True),
+                    upload_logs=getattr(args, "mlflow_upload_logs", True),
+                )
                 mlflow_writer.end_run()
             ft_integration.shutdown()
             sys.exit(exit_code)
