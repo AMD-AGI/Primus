@@ -81,6 +81,11 @@ class BaseTrainer(TrainerComponent):
                 f"[{self.__class__.__name__}] 'model' is required in module_config for training. "
                 f"Please specify model in your configuration (e.g., model: llama2_7B)"
             )
+        if not hasattr(self.module_config, "params") or self.module_config.params is None:
+            raise ValueError(
+                f"[{self.__class__.__name__}] 'params' is required in module_config for training. "
+                f"This should be automatically populated from the configuration file."
+            )
 
         self.backend_name = self.module_config.framework
         self.model_name = self.module_config.model
