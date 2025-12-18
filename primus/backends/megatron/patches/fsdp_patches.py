@@ -17,7 +17,7 @@ from primus.modules.module_utils import log_rank_0
 
 
 @register_patch(
-    "megatron.patch.torch_fsdp2",
+    "megatron.fsdp.torch_fsdp2",
     backend="megatron",
     phase="before_train",
     description=(
