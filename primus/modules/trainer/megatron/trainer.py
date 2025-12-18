@@ -1245,7 +1245,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         set_global_variables(args, build_tokenizer=False)
         log_rank_0(f"-set_primus_global_variables...")
         set_primus_global_variables(args)
-        # Set exp_root_path for MLflow artifact logging
+        # Set exp_root_path for MLflow artifact upload (needed before training starts)
         set_exp_root_path(self.exp_root_path)
         args = get_args()
 
