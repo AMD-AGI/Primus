@@ -84,6 +84,10 @@ def run_patches(
     # Get total count of patches for logging
     all_patches_count = len(patches)
 
+    # Filter by enabled_ids if specified
+    if enabled_ids is not None:
+        patches = [p for p in patches if p.id in enabled_ids]
+
     # Deterministic ordering: (priority ASC, id ASC)
     patches = sorted(patches, key=lambda p: (p.priority, p.id))
 
@@ -103,10 +107,7 @@ def run_patches(
 
     for patch in patches:
         # log_rank_0(f"[Patch] Applying patch: {patch.id} (priority={patch.priority}) {patch}")
-        # ID filter
-        if enabled_ids is not None and patch.id not in enabled_ids:
-            continue
-
+        log_rank_0("--------------------------------------------------------------------------------")
         # Applicability filter
         if not patch.applies_to(ctx):
             continue
@@ -120,7 +121,6 @@ def run_patches(
 
         # Execute patch
         try:
-            log_rank_0("--------------------------------------------------------------------------------")
             log_rank_0(f"[Patch] Applying {patch.id}: {patch.description}")
             patch.apply(ctx)
             applied_count += 1
