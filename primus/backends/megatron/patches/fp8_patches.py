@@ -15,17 +15,12 @@ from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
 
 
-def _is_fp8_enabled(ctx: PatchContext) -> bool:
-    """Check if FP8 is enabled in module_config."""
-    return getattr(get_args(ctx), "fp8", False)
-
-
 @register_patch(
     "megatron.fp8.context",
     backend="megatron",
     phase="before_train",
     description="Override Megatron get_fp8_context to use Primus implementation when fp8 is enabled",
-    condition=_is_fp8_enabled,
+    condition=lambda ctx: getattr(get_args(ctx), "fp8", False),
 )
 def patch_fp8_context(ctx: PatchContext):
     """
