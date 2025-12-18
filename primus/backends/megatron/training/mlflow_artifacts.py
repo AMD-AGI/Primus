@@ -240,7 +240,7 @@ def upload_artifacts_to_mlflow(
         result["logs"] = upload_log_files_to_mlflow(mlflow_writer, exp_root_path, artifact_path="logs")
 
     log_rank_0(
-        f"[MLflow] Artifact upload complete: " f"{result['traces']} trace files, {result['logs']} log files"
+        f"[MLflow] Artifact upload complete: {result['traces']} trace files, {result['logs']} log files"
     )
 
     return result
