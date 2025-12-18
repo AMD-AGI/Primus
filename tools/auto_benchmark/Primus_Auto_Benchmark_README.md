@@ -191,7 +191,7 @@ Selected models:
 
 The tool creates a temporary working copy in `/tmp` and opens it in your default editor (tries `nano`, `vim`, `vi`, `code`, or `$EDITOR`).
 
-**Important:** 
+**Important:**
 - Edits are applied to the original config location temporarily during benchmark execution
 - Original configs are backed up and restored after each benchmark completes
 - Edited configs are preserved in logs directory for reproducibility
@@ -592,4 +592,3 @@ For issues or questions:
 ---
 
 **Happy Benchmarking! 🚀**
-

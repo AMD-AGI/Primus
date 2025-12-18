@@ -60,7 +60,7 @@ echo -e "  ${DOT} 1) megatron"
 echo -e "  ${DOT} 2) torchtitan"
 
 echo -en " ${ARROW} Enter number or name: "
-read BACKEND_IN
+read -r BACKEND_IN
 
 case "$BACKEND_IN" in
     1|megatron|MegaTron|MEGATRON)
@@ -102,10 +102,10 @@ if [[ -z "$DEVICE" ]]; then
     echo -e "${STAR} ${BOLD}Please select Device manually:${RESET}"
     echo -e "  ${DOT} 1) MI300X"
     echo -e "  ${DOT} 2) MI355X"
-    
+
     echo -en " ${ARROW} Enter number or name: "
-    read DEV_IN
-    
+    read -r DEV_IN
+
     case "$DEV_IN" in
         1|MI300X|mi300x|Mi300x)
             DEVICE="MI300X"
@@ -136,7 +136,7 @@ sleep 0.2
 echo -e "${STAR} ${BOLD}Available Model Configs:${RESET} (${CYAN}$BACKEND${RESET} / ${CYAN}$DEVICE${RESET})"
 
 # Use find and sort -u to get unique files
-CONFIG_LIST=($(find "$CONFIG_DIR" -name "*.yaml" -type f | sort -u))
+mapfile -t CONFIG_LIST < <(find "$CONFIG_DIR" -name "*.yaml" -type f | sort -u)
 
 if [[ ${#CONFIG_LIST[@]} -eq 0 ]]; then
     echo -e "${RED}No configs found in $CONFIG_DIR${RESET}"
@@ -157,7 +157,7 @@ done
 
 i=1
 for cfg in "${UNIQUE_CONFIGS[@]}"; do
-    echo -e "  ${DOT} ${i}) $(basename $cfg)"
+    echo -e "  ${DOT} ${i}) $(basename "$cfg")"
     ((i++))
 done
 echo
@@ -167,7 +167,7 @@ CONFIG_LIST=("${UNIQUE_CONFIGS[@]}")
 echo -en " ${ARROW} Select config number(s) (comma-separated, range, or 'all'): "
 echo -e "${DIM}(Examples: 1,3,5 or 4-8 or all)${RESET}"
 echo -en " ${ARROW} "
-read CFG_NUM
+read -r CFG_NUM
 
 # Parse input into array
 SELECTED_CONFIGS=()
@@ -179,23 +179,23 @@ elif [[ "$CFG_NUM" =~ ^([0-9]+)-([0-9]+)$ ]]; then
     # Handle range input like 4-8
     START="${BASH_REMATCH[1]}"
     END="${BASH_REMATCH[2]}"
-    
+
     if [[ $START -lt 1 || $END -gt ${#CONFIG_LIST[@]} || $START -gt $END ]]; then
         echo -e "${RED}✗ Invalid range: $START-$END${RESET}"
         exit 1
     fi
-    
+
     for ((i=START; i<=END; i++)); do
         SELECTED_CONFIGS+=("${CONFIG_LIST[$i-1]}")
     done
 else
     # Handle comma-separated input
     IFS=',' read -ra CFG_NUMS <<< "$CFG_NUM"
-    
+
     for num in "${CFG_NUMS[@]}"; do
         # Trim whitespace
         num=$(echo "$num" | xargs)
-        
+
         if [[ $num -ge 1 && $num -le ${#CONFIG_LIST[@]} ]]; then
             SELECTED_CONFIGS+=("${CONFIG_LIST[$num-1]}")
         else
@@ -207,7 +207,7 @@ fi
 
 echo -e " ${CHECK} Selected ${GREEN}${#SELECTED_CONFIGS[@]}${RESET} config(s):"
 for cfg in "${SELECTED_CONFIGS[@]}"; do
-    echo -e "    ${DOT} $(basename $cfg)"
+    echo -e "    ${DOT} $(basename "$cfg")"
 done
 echo
 sleep 0.2
@@ -217,13 +217,13 @@ sleep 0.2
 # ------------------------------------------
 echo -e "${STAR} ${BOLD}View Configuration Parameters?${RESET}"
 echo -en " ${ARROW} (y/n): "
-read VIEW_PARAMS
+read -r VIEW_PARAMS
 
 if [[ "$VIEW_PARAMS" == "y" || "$VIEW_PARAMS" == "Y" ]]; then
     for cfg in "${SELECTED_CONFIGS[@]}"; do
-        echo -e "\n${CYAN}${BOLD}Parameters in $(basename $cfg):${RESET}"
+        echo -e "\n${CYAN}${BOLD}Parameters in $(basename "$cfg"):${RESET}"
         echo -e "${DIM}-----------------------------------${RESET}"
-        cat "$cfg" | grep -v "^#" | grep -v "^$"
+        grep -v "^#" "$cfg" | grep -v "^$"
         echo -e "${DIM}-----------------------------------${RESET}"
     done
     echo
@@ -237,21 +237,21 @@ declare -A EDITED_CONFIGS
 if [[ ${#SELECTED_CONFIGS[@]} -gt 1 ]]; then
     echo -e "${STAR} ${BOLD}Edit any configuration files before running?${RESET}"
     echo -en " ${ARROW} (y/n): "
-    read EDIT_CONFIGS
-    
+    read -r EDIT_CONFIGS
+
     if [[ "$EDIT_CONFIGS" == "y" || "$EDIT_CONFIGS" == "Y" ]]; then
         echo -e "\n${CYAN}${BOLD}Selected models:${RESET}"
         i=1
         for cfg in "${SELECTED_CONFIGS[@]}"; do
-            echo -e "  ${DOT} ${i}) $(basename $cfg)"
+            echo -e "  ${DOT} ${i}) $(basename "$cfg")"
             ((i++))
         done
         echo
-        
+
         echo -e " ${DOT} Enter model numbers to edit (comma-separated, or 'all'): "
         echo -en " ${ARROW} "
-        read EDIT_SELECTION
-        
+        read -r EDIT_SELECTION
+
         if [[ "$EDIT_SELECTION" == "all" ]]; then
             MODELS_TO_EDIT=("${!SELECTED_CONFIGS[@]}")
         else
@@ -264,19 +264,19 @@ if [[ ${#SELECTED_CONFIGS[@]} -gt 1 ]]; then
                 fi
             done
         fi
-        
+
         # Edit selected files one by one
         for idx in "${MODELS_TO_EDIT[@]}"; do
             cfg="${SELECTED_CONFIGS[$idx]}"
             model_name=$(basename "$cfg" .yaml)
-            
+
             echo -e "\n${STAR} ${BOLD}Opening config for editing: ${CYAN}$model_name${RESET}"
             echo -e "   ${DOT} Edit the file, save, and close the editor to continue\n"
-            
+
             # Create a temporary working copy
             TEMP_EDIT_CONFIG="/tmp/primus_edit_${model_name}_$$.yaml"
             cp "$cfg" "$TEMP_EDIT_CONFIG"
-            
+
             # Try to find an editor
             if command -v nano &> /dev/null; then
                 nano "$TEMP_EDIT_CONFIG"
@@ -289,7 +289,7 @@ if [[ ${#SELECTED_CONFIGS[@]} -gt 1 ]]; then
             else
                 ${EDITOR:-vi} "$TEMP_EDIT_CONFIG"
             fi
-            
+
             # Store the edited config
             EDITED_CONFIGS["$cfg"]="$TEMP_EDIT_CONFIG"
             echo -e " ${CHECK} ${GREEN}Config edited and saved${RESET}\n"
@@ -298,19 +298,19 @@ if [[ ${#SELECTED_CONFIGS[@]} -gt 1 ]]; then
 elif [[ ${#SELECTED_CONFIGS[@]} -eq 1 ]]; then
     echo -e "\n${STAR} ${BOLD}Edit configuration file before running?${RESET}"
     echo -en " ${ARROW} (y/n): "
-    read EDIT_SINGLE
-    
+    read -r EDIT_SINGLE
+
     if [[ "$EDIT_SINGLE" == "y" || "$EDIT_SINGLE" == "Y" ]]; then
         cfg="${SELECTED_CONFIGS[0]}"
         model_name=$(basename "$cfg" .yaml)
-        
+
         echo -e "\n${STAR} ${BOLD}Opening config for editing: ${CYAN}$model_name${RESET}"
         echo -e "   ${DOT} Edit the file, save, and close the editor to continue\n"
-        
+
         # Create a temporary working copy
         TEMP_EDIT_CONFIG="/tmp/primus_edit_${model_name}_$$.yaml"
         cp "$cfg" "$TEMP_EDIT_CONFIG"
-        
+
         # Try to find an editor
         if command -v nano &> /dev/null; then
             nano "$TEMP_EDIT_CONFIG"
@@ -323,7 +323,7 @@ elif [[ ${#SELECTED_CONFIGS[@]} -eq 1 ]]; then
         else
             ${EDITOR:-vi} "$TEMP_EDIT_CONFIG"
         fi
-        
+
         # Store the edited config
         EDITED_CONFIGS["$cfg"]="$TEMP_EDIT_CONFIG"
         echo -e " ${CHECK} ${GREEN}Config edited and saved${RESET}\n"
@@ -336,18 +336,18 @@ declare -A PARAM_OVERRIDES
 echo -e "\n${STAR} ${BOLD}Override any parameters?${RESET}"
 echo -e "  ${DIM}(Format: key=value, e.g., batch_size=32)${RESET}"
 echo -en " ${ARROW} (y/n): "
-read OVERRIDE_PARAMS
+read -r OVERRIDE_PARAMS
 
 if [[ "$OVERRIDE_PARAMS" == "y" || "$OVERRIDE_PARAMS" == "Y" ]]; then
     echo -e " ${DOT} Enter overrides one per line. Press Enter on empty line to finish."
     while true; do
         echo -en " ${ARROW} Override (or press Enter to finish): "
-        read OVERRIDE_LINE
-        
+        read -r OVERRIDE_LINE
+
         if [[ -z "$OVERRIDE_LINE" ]]; then
             break
         fi
-        
+
         # Parse key=value
         if [[ "$OVERRIDE_LINE" =~ ^([^=]+)=(.+)$ ]]; then
             KEY="${BASH_REMATCH[1]}"
@@ -358,7 +358,7 @@ if [[ "$OVERRIDE_PARAMS" == "y" || "$OVERRIDE_PARAMS" == "Y" ]]; then
             echo -e " ${RED}Invalid format. Use: key=value${RESET}"
         fi
     done
-    
+
     if [[ ${#PARAM_OVERRIDES[@]} -gt 0 ]]; then
         echo -e "\n ${CHECK} ${GREEN}${#PARAM_OVERRIDES[@]}${RESET} parameter(s) will be overridden\n"
     fi
@@ -374,18 +374,18 @@ declare -a DEVICE_ENV_VARS
 echo -e "${STAR} ${BOLD}Add device-specific environment variables for ${DEVICE}?${RESET}"
 echo -e "  ${DIM}(e.g., HSA_OVERRIDE_GFX_VERSION=11.0.0)${RESET}"
 echo -en " ${ARROW} (y/n): "
-read ADD_ENV_VARS
+read -r ADD_ENV_VARS
 
 if [[ "$ADD_ENV_VARS" == "y" || "$ADD_ENV_VARS" == "Y" ]]; then
     echo -e " ${DOT} Enter environment variables one per line. Press Enter on empty line to finish."
     while true; do
         echo -en " ${ARROW} Variable (or press Enter to finish): "
-        read ENV_LINE
-        
+        read -r ENV_LINE
+
         if [[ -z "$ENV_LINE" ]]; then
             break
         fi
-        
+
         # Parse VAR=value
         if [[ "$ENV_LINE" =~ ^([^=]+)=(.*)$ ]]; then
             VAR_NAME="${BASH_REMATCH[1]}"
@@ -396,7 +396,7 @@ if [[ "$ADD_ENV_VARS" == "y" || "$ADD_ENV_VARS" == "Y" ]]; then
             echo -e " ${RED}Invalid format. Use: VAR_NAME=value${RESET}"
         fi
     done
-    
+
     if [[ ${#DEVICE_ENV_VARS[@]} -gt 0 ]]; then
         echo -e "\n ${CHECK} ${GREEN}${#DEVICE_ENV_VARS[@]}${RESET} environment variable(s) will be set\n"
     fi
@@ -416,14 +416,14 @@ echo -e " ${CHECK} Set ${CYAN}HSA_NO_SCRATCH_RECLAIM=1${RESET}"
 # Apply device-specific environment variables
 if [[ ${#DEVICE_ENV_VARS[@]} -gt 0 ]]; then
     for ENV_VAR in "${DEVICE_ENV_VARS[@]}"; do
-        export "$ENV_VAR"
+        eval export "$ENV_VAR"
         echo -e " ${CHECK} Set ${CYAN}$ENV_VAR${RESET}"
     done
 fi
 
 # Prompt for HuggingFace token
 echo -en " ${ARROW} Enter HuggingFace Token: "
-read -s HF_TOKEN
+read -r -s HF_TOKEN
 echo
 export HF_TOKEN
 echo -e " ${CHECK} HuggingFace token set\n"
@@ -452,7 +452,7 @@ for CFG_FILE in "${SELECTED_CONFIGS[@]}"; do
     echo -e "${MAGENTA}${BOLD}║  LOOP ITERATION: ${CURRENT}/${TOTAL_CONFIGS}${RESET}"
     echo -e "${MAGENTA}${BOLD}║  CONFIG FILE: $(basename "$CFG_FILE")${RESET}"
     echo -e "${MAGENTA}${BOLD}╚════════════════════════════════════════════════════════════╝${RESET}\n"
-    
+
     # Extract full filename without extension to preserve all details
     CONFIG_FILENAME=$(basename "$CFG_FILE" .yaml)
     MODEL_NAME="$CONFIG_FILENAME"
@@ -468,12 +468,12 @@ for CFG_FILE in "${SELECTED_CONFIGS[@]}"; do
     else
         WORKING_CONFIG="$CFG_FILE"
     fi
-    
+
     # Apply parameter overrides if any
     if [[ ${#PARAM_OVERRIDES[@]} -gt 0 ]]; then
         OVERRIDE_CONFIG="$LOG_DIR/${MODEL_NAME}_${BACKEND}_${DEVICE}_${TIMESTAMP}_override.yaml"
         cp "$WORKING_CONFIG" "$OVERRIDE_CONFIG"
-        
+
         echo -e "${STAR} ${BOLD}Applying parameter overrides...${RESET}"
         for KEY in "${!PARAM_OVERRIDES[@]}"; do
             VALUE="${PARAM_OVERRIDES[$KEY]}"
@@ -506,7 +506,7 @@ for CFG_FILE in "${SELECTED_CONFIGS[@]}"; do
         cp "$WORKING_CONFIG" "$CFG_FILE"
         echo -e " ${CHECK} Copied edited/overridden config to: ${CYAN}$CFG_FILE${RESET}"
     fi
-    
+
     # Set EXP to the device-specific config path (now contains edited content if applicable)
     EXP_CONFIG_PATH="${BACKEND_BASE_DIR}/${DEVICE}/$(basename "$CFG_FILE")"
     export EXP="$EXP_CONFIG_PATH"
