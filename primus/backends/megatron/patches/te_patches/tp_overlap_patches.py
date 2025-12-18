@@ -40,22 +40,12 @@ def _check_tp_overlap_conditions(ctx: PatchContext) -> bool:
     return True
 
 
-def _should_patch_tp_overlap_v2(ctx: PatchContext) -> bool:
-    """Check if should patch TP overlap for TE >= 2.0."""
-    return _check_tp_overlap_conditions(ctx) and is_te_v2_or_above()
-
-
-def _should_patch_tp_overlap_v1(ctx: PatchContext) -> bool:
-    """Check if should patch TP overlap for TE < 2.0."""
-    return _check_tp_overlap_conditions(ctx) and is_te_below_v2()
-
-
 @register_patch(
     "megatron.te.tp_overlap_te2",
     backend="megatron",
     phase="before_train",
     description="Enable TE TP communication overlap for TE >= 2.0 (using general_gemm)",
-    condition=_should_patch_tp_overlap_v2,
+    condition=lambda ctx: _check_tp_overlap_conditions(ctx) and is_te_v2_or_above(),
 )
 def patch_tp_te_overlap_v2(ctx: PatchContext):
     """
@@ -103,7 +93,7 @@ def patch_tp_te_overlap_v2(ctx: PatchContext):
     backend="megatron",
     phase="before_train",
     description="Enable TE TP communication overlap for TE < 2.0 (using gemm/fp8_gemm)",
-    condition=_should_patch_tp_overlap_v1,
+    condition=lambda ctx: _check_tp_overlap_conditions(ctx) and is_te_below_v2(),
 )
 def patch_tp_te_overlap_v1(ctx: PatchContext):
     """
