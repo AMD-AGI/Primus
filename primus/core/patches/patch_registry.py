@@ -47,8 +47,30 @@ class PatchRegistry:
         return sorted(cls._patches.keys())
 
     @classmethod
-    def iter_patches(cls) -> List[FunctionPatch]:
-        return list(cls._patches.values())
+    def iter_patches(cls, backend: Optional[str] = None, phase: Optional[str] = None) -> List[FunctionPatch]:
+        """
+        Get all patches, optionally pre-filtered by backend and/or phase.
+
+        Args:
+            backend: If provided, only return patches matching this backend
+                    (or patches with backend=None)
+            phase: If provided, only return patches matching this phase
+                  (or patches with phase=None)
+
+        Returns:
+            List of FunctionPatch objects
+        """
+        patches = list(cls._patches.values())
+
+        # Pre-filter by backend if specified
+        if backend is not None:
+            patches = [p for p in patches if p.backend is None or p.backend == backend]
+
+        # Pre-filter by phase if specified
+        if phase is not None:
+            patches = [p for p in patches if p.phase is None or p.phase == phase]
+
+        return patches
 
     @classmethod
     def clear(cls) -> None:
