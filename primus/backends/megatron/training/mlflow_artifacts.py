@@ -599,6 +599,7 @@ def upload_tracelens_reports_to_mlflow(
     max_reports: Optional[int] = None,
     output_format: str = "all",
     artifact_path: str = "trace_analysis",
+    cleanup_after_upload: bool = True,
 ) -> int:
     """
     Generate TraceLens reports and upload them to MLflow.
@@ -607,7 +608,7 @@ def upload_tracelens_reports_to_mlflow(
     1. Finds PyTorch profiler trace files
     2. Generates TraceLens analysis reports for specified ranks
     3. Uploads the reports to MLflow under the trace_analysis artifact path
-    4. Cleans up local report files after successful upload
+    4. Optionally cleans up local report files after successful upload
 
     Args:
         mlflow_writer: The MLflow module instance (from get_mlflow_writer())
@@ -617,13 +618,15 @@ def upload_tracelens_reports_to_mlflow(
         max_reports: Maximum number of reports to generate
         output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
         artifact_path: MLflow artifact subdirectory for reports
+        cleanup_after_upload: If True, removes local reports after upload to save disk space.
+                             If False, keeps reports locally for inspection. Default: True.
 
     Returns:
         Number of reports uploaded to MLflow
 
     Note:
-        The local tracelens_reports directory is automatically cleaned up after
-        successful upload to save disk space. The reports remain accessible in MLflow.
+        Reports are saved to exp_root_path/tracelens_reports/. Set cleanup_after_upload=False
+        to keep them locally for debugging or additional processing.
     """
     if mlflow_writer is None:
         log_rank_0("[TraceLens] MLflow writer not available, skipping report upload")
@@ -680,15 +683,17 @@ def upload_tracelens_reports_to_mlflow(
 
     log_rank_0(f"[TraceLens] Uploaded {uploaded_count} reports to '{artifact_path}'")
 
-    # Clean up local reports after successful upload to save disk space
-    # The reports are now safely stored in MLflow
-    try:
-        import shutil
+    # Optionally clean up local reports after successful upload to save disk space
+    if cleanup_after_upload:
+        try:
+            import shutil
 
-        shutil.rmtree(reports_dir)
-        log_rank_0(f"[TraceLens] Cleaned up local reports directory: {reports_dir}")
-    except Exception as e:
-        warning_rank_0(f"[TraceLens] Failed to cleanup reports directory: {e}")
+            shutil.rmtree(reports_dir)
+            log_rank_0(f"[TraceLens] Cleaned up local reports directory: {reports_dir}")
+        except Exception as e:
+            warning_rank_0(f"[TraceLens] Failed to cleanup reports directory: {e}")
+    else:
+        log_rank_0(f"[TraceLens] Keeping local reports at: {reports_dir}")
 
     return uploaded_count
 
@@ -708,6 +713,7 @@ def upload_artifacts_to_mlflow(
     tracelens_ranks: Optional[List[int]] = None,
     tracelens_max_reports: Optional[int] = None,
     tracelens_output_format: str = "all",
+    tracelens_cleanup_after_upload: bool = True,
 ) -> dict:
     """
     Upload all artifacts (trace files, log files, TraceLens reports) to MLflow.
@@ -735,6 +741,8 @@ def upload_artifacts_to_mlflow(
                         (None = all ranks, [0] = rank 0 only)
         tracelens_max_reports: Maximum number of TraceLens reports to generate
         tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
+        tracelens_cleanup_after_upload: If True, removes local reports after upload (default).
+                                       If False, keeps reports locally for inspection.
 
     Returns:
         Dictionary with counts of uploaded files:
@@ -776,6 +784,7 @@ def upload_artifacts_to_mlflow(
             max_reports=tracelens_max_reports,
             output_format=tracelens_output_format,
             artifact_path="trace_analysis",
+            cleanup_after_upload=tracelens_cleanup_after_upload,
         )
 
     log_rank_0(

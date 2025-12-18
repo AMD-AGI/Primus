@@ -1622,6 +1622,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 tracelens_ranks=getattr(args, "mlflow_tracelens_ranks", None),
                 tracelens_max_reports=getattr(args, "mlflow_tracelens_max_reports", None),
                 tracelens_output_format=getattr(args, "mlflow_tracelens_output_format", "all"),
+                tracelens_cleanup_after_upload=getattr(args, "mlflow_tracelens_cleanup_after_upload", True),
             )
             mlflow_writer.end_run()
 
