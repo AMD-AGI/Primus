@@ -77,12 +77,12 @@ def run_patches(
     if enabled_ids is None:
         enabled_ids = _parse_enabled_patches_from_env()
 
-    # Get all patches for logging total count
-    all_patches_count = len(list(PatchRegistry.iter_patches()))
-
     # Get patches pre-filtered by backend and phase
     # This avoids sorting and checking patches that will never be applied
     patches = PatchRegistry.iter_patches(backend=backend, phase=phase)
+
+    # Get total count of patches for logging
+    all_patches_count = len(patches)
 
     # Deterministic ordering: (priority ASC, id ASC)
     patches = sorted(patches, key=lambda p: (p.priority, p.id))
