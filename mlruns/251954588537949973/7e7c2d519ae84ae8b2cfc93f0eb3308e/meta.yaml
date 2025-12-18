@@ -1,0 +1,14 @@
+artifact_uri: file:///home/guangphu%40amd.com/codespace/Primus/mlruns/251954588537949973/7e7c2d519ae84ae8b2cfc93f0eb3308e/artifacts
+end_time: null
+entry_point_name: ''
+experiment_id: '251954588537949973'
+lifecycle_stage: active
+run_id: 7e7c2d519ae84ae8b2cfc93f0eb3308e
+run_name: test-tracelens-2-nodes
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1765994396599
+status: 1
+tags: []
+user_id: root
