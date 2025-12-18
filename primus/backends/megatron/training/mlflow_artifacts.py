@@ -220,11 +220,38 @@ def upload_log_files_to_mlflow(
 # =============================================================================
 
 
+def _ensure_openpyxl_installed() -> bool:
+    """
+    Ensure openpyxl is installed for XLSX generation.
+
+    Returns:
+        True if openpyxl is available, False otherwise
+    """
+    try:
+        import openpyxl  # noqa: F401
+
+        return True
+    except ImportError:
+        log_rank_0("[TraceLens] openpyxl not found, installing for XLSX support...")
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "openpyxl", "-q"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            log_rank_0("[TraceLens] Successfully installed openpyxl")
+            return True
+        except subprocess.CalledProcessError as e:
+            warning_rank_0(f"[TraceLens] Failed to install openpyxl: {e}")
+            return False
+
+
 def _ensure_tracelens_installed() -> bool:
     """
-    Ensure TraceLens is installed. Install it if not present.
+    Ensure TraceLens and its dependencies are installed.
 
     TraceLens is available from GitHub: https://github.com/AMD-AGI/TraceLens
+    XLSX generation requires openpyxl which is installed separately.
 
     Returns:
         True if TraceLens is available, False otherwise
@@ -233,7 +260,6 @@ def _ensure_tracelens_installed() -> bool:
         import TraceLens  # noqa: F401
 
         log_rank_0("[TraceLens] TraceLens is already installed")
-        return True
     except ImportError:
         log_rank_0("[TraceLens] TraceLens not found, attempting to install from GitHub...")
         try:
@@ -251,10 +277,14 @@ def _ensure_tracelens_installed() -> bool:
                 stderr=subprocess.DEVNULL,
             )
             log_rank_0("[TraceLens] Successfully installed TraceLens from GitHub")
-            return True
         except subprocess.CalledProcessError as e:
             warning_rank_0(f"[TraceLens] Failed to install TraceLens: {e}")
             return False
+
+    # Ensure openpyxl is installed for XLSX generation
+    _ensure_openpyxl_installed()
+
+    return True
 
 
 def _extract_rank_from_filename(filename: str) -> Optional[int]:
@@ -355,16 +385,15 @@ def generate_tracelens_report(
 
         generated_files = []
 
-        # Optimize for "all" format: parse trace once and generate both outputs
+        # For "all" format: TraceLens uses either/or logic - if output_csvs_dir is set,
+        # it ONLY generates CSVs. So we need to call it twice for both formats.
         if output_format == "all":
             xlsx_path = os.path.join(output_dir, f"{report_name}_analysis.xlsx")
             csv_subdir = os.path.join(output_dir, report_name)
             os.makedirs(csv_subdir, exist_ok=True)
 
-            # Parse trace once and generate both formats
-            dfs = generate_perf_report_pytorch(
-                trace_file, output_xlsx_path=xlsx_path, output_csvs_dir=csv_subdir
-            )
+            # First call: Generate XLSX only
+            dfs = generate_perf_report_pytorch(trace_file, output_xlsx_path=xlsx_path)
 
             # Check XLSX output
             if os.path.exists(xlsx_path):
@@ -372,6 +401,9 @@ def generate_tracelens_report(
                     f"[TraceLens] Generated XLSX report with {len(dfs)} tabs: {os.path.basename(xlsx_path)}"
                 )
                 generated_files.append(xlsx_path)
+
+            # Second call: Generate CSVs only
+            generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
 
             # Check CSV outputs (escape path to handle [] characters in filenames)
             csv_files = glob.glob(os.path.join(glob.escape(csv_subdir), "*.csv"))
