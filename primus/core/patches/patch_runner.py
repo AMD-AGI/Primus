@@ -88,6 +88,10 @@ def run_patches(
     if enabled_ids is not None:
         patches = [p for p in patches if p.id in enabled_ids]
 
+    # Filter by applicability (version, condition, etc.)
+    # This avoids checking applies_to on every iteration
+    patches = [p for p in patches if p.applies_to(ctx)]
+
     applied_count = 0
     applied_ids: List[str] = []
 
@@ -105,10 +109,6 @@ def run_patches(
     for patch in patches:
         # log_rank_0(f"[Patch] Applying patch: {patch.id} (priority={patch.priority}) {patch}")
         log_rank_0("--------------------------------------------------------------------------------")
-        # Applicability filter
-        if not patch.applies_to(ctx):
-            continue
-
         # Dry-run mode
         if dry_run:
             log_rank_0(f"[Patch] (dry-run) Would apply: {patch.id} " f"(priority={patch.priority})")
