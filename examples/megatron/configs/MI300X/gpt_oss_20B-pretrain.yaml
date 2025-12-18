@@ -14,6 +14,7 @@ modules:
       # log
       wandb_project: "Primus_DeepSeek_Pretrain"
       stderr_sink_level: DEBUG
+      log_interval: 99999999  # Suppress console logs
 
       # debug
       moe_router_force_load_balancing: true
@@ -29,25 +30,25 @@ modules:
       # precision (mixed precision training)
       bf16: true
       fp16: false
-      fp8: ${PRIMUS_FP8_RECIPE:null}  # Set to "e4m3" or "hybrid" for FP8 training
+      fp8: null  # Set to "e4m3" or "hybrid" for FP8 training
 
       # hyper parameters
-      train_iters: ${PRIMUS_TRAIN_ITERS:200}
+      train_iters: ${PRIMUS_TRAIN_ITERS:20}
       micro_batch_size: ${PRIMUS_MICRO_BATCH_SIZE:4}
       global_batch_size: ${PRIMUS_GLOBAL_BATCH_SIZE:640}
       seq_length: ${PRIMUS_SEQ_LENGTH:8192}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:8192}
       lr: ${PRIMUS_LR:1.0e-5}
-      min_lr: ${PRIMUS_MIN_LR:0.0}
+      min_lr: 0.0
       lr_warmup_iters: 2
       lr_decay_iters: null
       lr_decay_style: cosine
-      weight_decay: ${PRIMUS_WEIGHT_DECAY:0.1}
-      adam_beta1: ${PRIMUS_ADAM_BETA1:0.9}
-      adam_beta2: ${PRIMUS_ADAM_BETA2:0.95}
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
       eod_mask_loss: true
-      init_method_std: ${PRIMUS_INIT_METHOD_STD:0.008}
-      norm_epsilon: ${PRIMUS_NORM_EPSILON:1.0e-6}
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
 
       # parallel
       tensor_model_parallel_size: ${PRIMUS_TP:1}
@@ -57,7 +58,7 @@ modules:
       overlap_param_gather: true
 
       # data
-      mock_data: false
+      mock_data: true
       train_data_path: "10 /data/c4-train.en_6_text_document"
       valid_data_path: "/data/c4-validation-91205-samples.en_text_document"
       test_data_path: "/data/c4-validation-91205-samples.en_text_document"
@@ -74,7 +75,7 @@ modules:
       # MLA
       multi_latent_attention: false
       # rope fusion
-      apply_rope_fusion:  ${PRIMUS_APPLY_ROPE_FUSION: false}
+      apply_rope_fusion: false
 
       # DeepEP does not support moe_shared_expert_overlap
       moe_shared_expert_overlap: false
@@ -88,17 +89,16 @@ modules:
       no_load_optim: null
       no_load_rng: null
       save: null
-      save_interval: ${PRIMUS_SAVE_INTERVAL:20000}
+      save_interval: 20000
       no_save_optim: null
       no_save_rng: null
       disable_last_saving: true
       exit_on_missing_checkpoint: false
       ckpt_format: torch
-      eval_iters: ${PRIMUS_EVAL_ITERS:32}
-      eval_interval: ${PRIMUS_EVAL_INTERVAL:10}
-      num_workers: ${PRIMUS_NUM_WORKERS:1}
+      eval_iters: 2
+      eval_interval: ${PRIMUS_EVAL_INTERVAL:5}
 
-      # Turbo (Primus)  
+      # Turbo
       enable_primus_turbo: true
       use_turbo_attention: true
       use_turbo_grouped_mlp: true
@@ -107,16 +107,15 @@ modules:
       use_turbo_deepep: true
 
       # 64 or 80 for ep8, 32 for ep16-64 is best practice
-      turbo_deepep_num_cu: ${PRIMUS_TURBO_DEEPPEP_NUM_CU:64}
+      turbo_deepep_num_cu: 64
       turbo_deepep_use_comm_stream: false
 
       # sync-free moe support stage 0-3, 0 means not use sync-free moe
       # stage 3 is completely no gpu-cpu sync in MoE, but cost more memory
       # stage 2 is recommended for better performance
-      turbo_sync_free_moe_stage: ${PRIMUS_TURBO_SYNC_FREE_MOE_STAGE:2}
+      turbo_sync_free_moe_stage: 2
 
       # Cross entropy flags
-      # cross_entropy_fusion_impl: ${PRIMUS_CROSS_ENTROPY_FUSION_IMPL:"te"}
-      # cross_entropy_loss_fusion: ${PRIMUS_CROSS_ENTROPY_LOSS_FUSION:true}
-
+      # cross_entropy_fusion_impl: "te"
+      # cross_entropy_loss_fusion: true
 

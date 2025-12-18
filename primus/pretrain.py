@@ -152,9 +152,17 @@ def launch_pretrain_trainer(primus_cfg: PrimusConfig, extra_args=None):
     # Get pre_trainer module configuration
     pre_trainer_cfg = primus_cfg.get_module_config("pre_trainer")
     framework = pre_trainer_cfg.framework
-
-    # Lazy import backend trainer
-    TrainerClass = load_backend_trainer(framework)
+    
+    enable_mllog = os.getenv("ENABLE_MLLOG", "0").lower() in ("1", "true", "yes")
+    
+    if enable_mllog and framework == "megatron":
+        print(f"[Primus] MLPERF logging enabled (via ENABLE_MLLOG env var) - using MLPerfMegatronPretrainTrainer")
+        sys.path.insert(0, '/workspace/code')
+        from mlperf_pre_trainer import MLPerfMegatronPretrainTrainer
+        TrainerClass = MLPerfMegatronPretrainTrainer
+    else:
+        # Lazy import backend trainer
+        TrainerClass = load_backend_trainer(framework)
 
     master_addr = os.getenv("MASTER_ADDR", "127.0.0.1")
     master_port = int(os.getenv("MASTER_PORT", "29500"))
