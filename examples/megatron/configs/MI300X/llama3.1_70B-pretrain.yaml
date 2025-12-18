@@ -71,10 +71,6 @@ modules:
       recompute_method: block # uniform, block
       recompute_num_layers: 80 # int
 
-      # Turbo
-      enable_primus_turbo: true
-      use_turbo_attention: true
-
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"
       # cross_entropy_loss_fusion: true
