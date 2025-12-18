@@ -13,6 +13,10 @@ Handles different TE versions (< 2.0 and >= 2.0) with appropriate APIs.
 
 import functools
 
+from primus.backends.megatron.patches.te_patches.utils import (
+    is_te_below_v2,
+    is_te_v2_or_above,
+)
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
 
@@ -36,28 +40,14 @@ def _check_tp_overlap_conditions(ctx: PatchContext) -> bool:
     return True
 
 
-def _is_te_v2_or_above(ctx: PatchContext) -> bool:
-    """Check if TE version is 2.0 or above."""
-    if not _check_tp_overlap_conditions(ctx):
-        return False
-    try:
-        from megatron.core.utils import is_te_min_version
-
-        return is_te_min_version("2.0")
-    except Exception:
-        return False
+def _should_patch_tp_overlap_v2(ctx: PatchContext) -> bool:
+    """Check if should patch TP overlap for TE >= 2.0."""
+    return _check_tp_overlap_conditions(ctx) and is_te_v2_or_above()
 
 
-def _is_te_below_v2(ctx: PatchContext) -> bool:
-    """Check if TE version is below 2.0."""
-    if not _check_tp_overlap_conditions(ctx):
-        return False
-    try:
-        from megatron.core.utils import is_te_min_version
-
-        return not is_te_min_version("2.0")
-    except Exception:
-        return False
+def _should_patch_tp_overlap_v1(ctx: PatchContext) -> bool:
+    """Check if should patch TP overlap for TE < 2.0."""
+    return _check_tp_overlap_conditions(ctx) and is_te_below_v2()
 
 
 @register_patch(
@@ -65,7 +55,7 @@ def _is_te_below_v2(ctx: PatchContext) -> bool:
     backend="megatron",
     phase="before_train",
     description="Enable TE TP communication overlap for TE >= 2.0 (using general_gemm)",
-    condition=_is_te_v2_or_above,
+    condition=_should_patch_tp_overlap_v2,
 )
 def patch_tp_te_overlap_v2(ctx: PatchContext):
     """
@@ -113,7 +103,7 @@ def patch_tp_te_overlap_v2(ctx: PatchContext):
     backend="megatron",
     phase="before_train",
     description="Enable TE TP communication overlap for TE < 2.0 (using gemm/fp8_gemm)",
-    condition=_is_te_below_v2,
+    condition=_should_patch_tp_overlap_v1,
 )
 def patch_tp_te_overlap_v1(ctx: PatchContext):
     """

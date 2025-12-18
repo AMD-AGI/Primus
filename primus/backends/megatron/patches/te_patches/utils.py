@@ -11,6 +11,34 @@ Common helper functions for TE patches.
 """
 
 
+def is_te_min_version(version: str) -> bool:
+    """
+    Check if Transformer Engine version meets minimum requirement.
+
+    Args:
+        version: Minimum version string (e.g., "2.0", "1.8")
+
+    Returns:
+        True if TE version >= specified version, False otherwise
+    """
+    try:
+        from megatron.core.utils import is_te_min_version as megatron_is_te_min_version
+
+        return megatron_is_te_min_version(version)
+    except Exception:
+        return False
+
+
+def is_te_v2_or_above() -> bool:
+    """Check if Transformer Engine version is 2.0 or above."""
+    return is_te_min_version("2.0")
+
+
+def is_te_below_v2() -> bool:
+    """Check if Transformer Engine version is below 2.0."""
+    return not is_te_min_version("2.0")
+
+
 def make_get_extra_te_kwargs_with_override(original_func, **overrides):
     """
     Create a wrapped version of _get_extra_te_kwargs with custom overrides.
