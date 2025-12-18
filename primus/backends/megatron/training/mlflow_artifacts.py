@@ -591,6 +591,66 @@ def generate_tracelens_reports(
     return generated_reports
 
 
+def generate_tracelens_reports_locally(
+    tensorboard_dir: str,
+    exp_root_path: str,
+    ranks: Optional[List[int]] = None,
+    max_reports: Optional[int] = None,
+    output_format: str = "all",
+) -> int:
+    """
+    Generate TraceLens analysis reports locally (without MLflow upload).
+
+    This function generates TraceLens reports and saves them to
+    exp_root_path/tracelens_reports/ for local inspection.
+
+    Args:
+        tensorboard_dir: Directory containing PyTorch profiler trace files
+        exp_root_path: Root path of the experiment (for saving reports)
+        ranks: List of ranks to analyze (None = all ranks, [0] = rank 0 only)
+        max_reports: Maximum number of reports to generate
+        output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
+
+    Returns:
+        Number of reports generated
+
+    Example:
+        >>> generate_tracelens_reports_locally(
+        ...     tensorboard_dir="/path/to/tensorboard",
+        ...     exp_root_path="/path/to/experiment",
+        ...     ranks=[0, 8],
+        ...     output_format="all"
+        ... )
+        26  # Generated 26 report files
+    """
+    # Create output directory for reports
+    reports_dir = os.path.join(exp_root_path, "tracelens_reports")
+    os.makedirs(reports_dir, exist_ok=True)
+
+    log_rank_0(f"[TraceLens] Generating reports from traces in: {tensorboard_dir}")
+    log_rank_0(f"[TraceLens] Reports will be saved to: {reports_dir}")
+    if ranks:
+        log_rank_0(f"[TraceLens] Analyzing ranks: {ranks}")
+    if max_reports:
+        log_rank_0(f"[TraceLens] Max reports: {max_reports}")
+
+    # Generate reports
+    reports = generate_tracelens_reports(
+        tensorboard_dir=tensorboard_dir,
+        output_dir=reports_dir,
+        ranks=ranks,
+        max_reports=max_reports,
+        output_format=output_format,
+    )
+
+    if not reports:
+        log_rank_0("[TraceLens] No reports generated")
+        return 0
+
+    log_rank_0(f"[TraceLens] Generated {len(reports)} report files locally")
+    return len(reports)
+
+
 def upload_tracelens_reports_to_mlflow(
     mlflow_writer,
     tensorboard_dir: str,
@@ -709,6 +769,7 @@ def upload_artifacts_to_mlflow(
     exp_root_path: Optional[str] = None,
     upload_traces: bool = True,
     upload_logs: bool = True,
+    generate_tracelens_report: bool = False,
     upload_tracelens_report: bool = False,
     tracelens_ranks: Optional[List[int]] = None,
     tracelens_max_reports: Optional[int] = None,
@@ -722,13 +783,24 @@ def upload_artifacts_to_mlflow(
     It handles:
     - Trace files from PyTorch profiler
     - Log files from training
-    - TraceLens analysis reports (optional)
+    - TraceLens analysis reports (optional - generate locally and/or upload to MLflow)
 
     MLflow Artifact Structure:
         artifacts/
         ├── traces/              # PyTorch profiler trace files
         ├── logs/                # Training log files
-        └── trace_analysis/      # TraceLens analysis reports
+        └── trace_analysis/      # TraceLens analysis reports (if uploaded)
+
+    TraceLens Report Generation Logic:
+        - If upload_tracelens_report=True:  Generate AND upload (auto-enables generation)
+        - If generate_tracelens_report=True and upload_tracelens_report=False: Generate locally only
+        - If both False: No report generation
+
+        Examples:
+            generate=False, upload=False  →  No reports
+            generate=True,  upload=False  →  Generate locally only
+            generate=False, upload=True   →  Generate AND upload (auto-enabled)
+            generate=True,  upload=True   →  Generate AND upload (explicit)
 
     Args:
         mlflow_writer: The MLflow module instance (from get_mlflow_writer())
@@ -736,7 +808,8 @@ def upload_artifacts_to_mlflow(
         exp_root_path: Root path of the experiment for log files
         upload_traces: Whether to upload trace files
         upload_logs: Whether to upload log files
-        upload_tracelens_report: Whether to generate and upload TraceLens reports
+        generate_tracelens_report: Whether to generate TraceLens reports locally
+        upload_tracelens_report: Whether to upload TraceLens reports to MLflow (implies generation)
         tracelens_ranks: List of ranks to generate TraceLens reports for
                         (None = all ranks, [0] = rank 0 only)
         tracelens_max_reports: Maximum number of TraceLens reports to generate
@@ -760,7 +833,10 @@ def upload_artifacts_to_mlflow(
     log_rank_0(f"[MLflow] tensorboard_dir: {tensorboard_dir}")
     log_rank_0(f"[MLflow] exp_root_path: {exp_root_path}")
     log_rank_0(f"[MLflow] upload_traces: {upload_traces}, upload_logs: {upload_logs}")
-    log_rank_0(f"[MLflow] upload_tracelens_report: {upload_tracelens_report}")
+    log_rank_0(
+        f"[MLflow] generate_tracelens_report: {generate_tracelens_report}, "
+        f"upload_tracelens_report: {upload_tracelens_report}"
+    )
 
     result = {"traces": 0, "logs": 0, "tracelens_reports": 0}
 
@@ -774,18 +850,36 @@ def upload_artifacts_to_mlflow(
     if upload_logs and exp_root_path:
         result["logs"] = upload_log_files_to_mlflow(mlflow_writer, exp_root_path, artifact_path="logs")
 
-    # Generate and upload TraceLens reports
-    if upload_tracelens_report and tensorboard_dir and exp_root_path:
-        result["tracelens_reports"] = upload_tracelens_reports_to_mlflow(
-            mlflow_writer=mlflow_writer,
-            tensorboard_dir=tensorboard_dir,
-            exp_root_path=exp_root_path,
-            ranks=tracelens_ranks,
-            max_reports=tracelens_max_reports,
-            output_format=tracelens_output_format,
-            artifact_path="trace_analysis",
-            cleanup_after_upload=tracelens_cleanup_after_upload,
-        )
+    # TraceLens report generation and upload logic
+    # If upload=True, auto-enable generation (even if generate=False)
+    should_generate = generate_tracelens_report or upload_tracelens_report
+
+    if should_generate and tensorboard_dir and exp_root_path:
+        if upload_tracelens_report:
+            # Generate AND upload to MLflow
+            log_rank_0("[TraceLens] Mode: Generate and upload to MLflow")
+            result["tracelens_reports"] = upload_tracelens_reports_to_mlflow(
+                mlflow_writer=mlflow_writer,
+                tensorboard_dir=tensorboard_dir,
+                exp_root_path=exp_root_path,
+                ranks=tracelens_ranks,
+                max_reports=tracelens_max_reports,
+                output_format=tracelens_output_format,
+                artifact_path="trace_analysis",
+                cleanup_after_upload=tracelens_cleanup_after_upload,
+            )
+        else:
+            # Generate locally only (no MLflow upload)
+            log_rank_0("[TraceLens] Mode: Generate locally only (no MLflow upload)")
+            num_generated = generate_tracelens_reports_locally(
+                tensorboard_dir=tensorboard_dir,
+                exp_root_path=exp_root_path,
+                ranks=tracelens_ranks,
+                max_reports=tracelens_max_reports,
+                output_format=tracelens_output_format,
+            )
+            # Don't count as "uploaded" since they're local-only
+            log_rank_0(f"[TraceLens] Generated {num_generated} report files (not uploaded to MLflow)")
 
     log_rank_0(
         f"[MLflow] Artifact upload complete: "

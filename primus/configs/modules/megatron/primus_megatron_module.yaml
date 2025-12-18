@@ -9,7 +9,20 @@ mlflow_experiment_name: null
 # Set these to false if you only want metrics/params logged to MLflow.
 mlflow_upload_traces: true           # Upload profiler trace files to MLflow
 mlflow_upload_logs: true             # Upload training log files to MLflow
-mlflow_upload_tracelens_report: false  # Generate and upload TraceLens analysis reports
+
+# TraceLens Report Generation & Upload
+# ----------------------------------------------------------------------------
+# generate_tracelens_report:          Generate TraceLens analysis reports locally
+# mlflow_upload_tracelens_report:     Upload reports to MLflow (auto-enables generation)
+#
+# Usage patterns:
+#   generate=false, upload=false  →  No reports generated
+#   generate=true,  upload=false  →  Generate reports locally only
+#   generate=false, upload=true   →  Generate AND upload (auto-enabled)
+#   generate=true,  upload=true   →  Generate AND upload (explicit)
+# ----------------------------------------------------------------------------
+generate_tracelens_report: false     # Generate TraceLens analysis reports locally
+mlflow_upload_tracelens_report: false  # Upload TraceLens reports to MLflow (implies generation)
 mlflow_tracelens_ranks: null         # List of ranks to analyze with TraceLens (null = all)
 mlflow_tracelens_max_reports: null   # Max number of TraceLens reports (null = unlimited)
 mlflow_tracelens_output_format: all  # TraceLens report format: all (xlsx+csv), xlsx, or csv

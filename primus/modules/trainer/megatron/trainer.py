@@ -1618,6 +1618,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 exp_root_path=self.exp_root_path,
                 upload_traces=getattr(args, "mlflow_upload_traces", True),
                 upload_logs=getattr(args, "mlflow_upload_logs", True),
+                generate_tracelens_report=getattr(args, "generate_tracelens_report", False),
                 upload_tracelens_report=getattr(args, "mlflow_upload_tracelens_report", False),
                 tracelens_ranks=getattr(args, "mlflow_tracelens_ranks", None),
                 tracelens_max_reports=getattr(args, "mlflow_tracelens_max_reports", None),
