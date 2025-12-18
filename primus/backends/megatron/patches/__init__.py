@@ -18,6 +18,7 @@ from primus.backends.megatron.patches import checkpoint_patches as _checkpoint_p
 from primus.backends.megatron.patches import env_patches as _env_patches
 from primus.backends.megatron.patches import flops_patches as _flops_patches
 from primus.backends.megatron.patches import fp8_patches as _fp8_patches
+from primus.backends.megatron.patches import moe_patches as _moe_patches
 from primus.backends.megatron.patches import pp_patches as _pp_patches
 from primus.backends.megatron.patches import te_patches as _te_patches
 from primus.backends.megatron.patches import torch_fsdp2_patches as _torch_fsdp2_patches
@@ -26,6 +27,7 @@ from primus.backends.megatron.patches import (
 )
 from primus.backends.megatron.patches import transformer_patches as _transformer_patches
 from primus.backends.megatron.patches import turbo as _turbo
+from primus.backends.megatron.patches import zbpp_patches as _zbpp_patches
 from primus.core.patches import run_patches
 
 
