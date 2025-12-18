@@ -21,7 +21,7 @@ def _is_fp8_enabled(ctx: PatchContext) -> bool:
 
 
 @register_patch(
-    "megatron.patch.fp8_context",
+    "megatron.fp8.context",
     backend="megatron",
     phase="before_train",
     description="Override Megatron get_fp8_context to use Primus implementation when fp8 is enabled",
@@ -43,9 +43,9 @@ def patch_fp8_context(ctx: PatchContext):
     from megatron.core.ssm import mamba_block
     from megatron.core.transformer import multi_token_prediction, transformer_block
 
-    from primus.backends.megatron.patches.core.fp8_utils import get_fp8_context
+    from primus.backends.megatron.core.fp8_utils import get_fp8_context
 
-    log_rank_0("[Patch:megatron.fp8.get_fp8_context] Overriding get_fp8_context for fp8=True")
+    log_rank_0("[Patch:megatron.fp8.context] Overriding get_fp8_context for fp8=True")
 
     # Patch get_fp8_context in all relevant modules
     modules_to_patch = [
@@ -57,4 +57,4 @@ def patch_fp8_context(ctx: PatchContext):
 
     for module in modules_to_patch:
         module.get_fp8_context = get_fp8_context
-        log_rank_0(f"[Patch:megatron.fp8.get_fp8_context]   Patched {module.__name__}.get_fp8_context")
+        log_rank_0(f"[Patch:megatron.fp8.context]   Patched {module.__name__}.get_fp8_context")
