@@ -20,11 +20,13 @@ mlflow_upload_logs: true             # Upload training log files to MLflow
 #   generate=true,  upload=false  →  Generate reports locally only
 #   generate=false, upload=true   →  Generate AND upload (auto-enabled)
 #   generate=true,  upload=true   →  Generate AND upload (explicit)
+#
+# To limit number of reports: Specify fewer ranks in mlflow_tracelens_ranks
+#   Example: mlflow_tracelens_ranks: [0, 8]  # Only 2 ranks = 2 reports
 # ----------------------------------------------------------------------------
 generate_tracelens_report: false     # Generate TraceLens analysis reports locally
 mlflow_upload_tracelens_report: false  # Upload TraceLens reports to MLflow (implies generation)
-mlflow_tracelens_ranks: null         # List of ranks to analyze with TraceLens (null = all)
-mlflow_tracelens_max_reports: null   # Max number of TraceLens reports (null = unlimited)
+mlflow_tracelens_ranks: null         # List of ranks to analyze (null = all, [0,8] = 2 ranks)
 mlflow_tracelens_output_format: all  # TraceLens report format: all (xlsx+csv), xlsx, or csv
 mlflow_tracelens_cleanup_after_upload: false  # Keep local reports (true to cleanup and save disk space)
 disable_compile_dependencies: true

@@ -98,7 +98,6 @@ def upload_mlflow_artifacts(
     generate_tracelens_report: bool = False,
     upload_tracelens_report: bool = False,
     tracelens_ranks: Optional[List[int]] = None,
-    tracelens_max_reports: Optional[int] = None,
     tracelens_output_format: str = "all",
     tracelens_cleanup_after_upload: bool = False,
 ) -> Optional[dict]:
@@ -128,8 +127,8 @@ def upload_mlflow_artifacts(
         generate_tracelens_report: Whether to generate TraceLens reports locally
         upload_tracelens_report: Whether to upload TraceLens reports to MLflow (implies generation)
         tracelens_ranks: List of ranks to analyze with TraceLens
-                        (None = all, [0] = rank 0 only)
-        tracelens_max_reports: Maximum number of TraceLens reports to generate
+                        (None = all, [0, 8] = ranks 0 and 8 only)
+                        Specify fewer ranks to limit number of reports
         tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
         tracelens_cleanup_after_upload: Remove local reports after upload (default: False)
 
@@ -149,7 +148,6 @@ def upload_mlflow_artifacts(
         generate_tracelens_report=generate_tracelens_report,
         upload_tracelens_report=upload_tracelens_report,
         tracelens_ranks=tracelens_ranks,
-        tracelens_max_reports=tracelens_max_reports,
         tracelens_output_format=tracelens_output_format,
         tracelens_cleanup_after_upload=tracelens_cleanup_after_upload,
     )

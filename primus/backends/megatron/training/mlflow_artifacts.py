@@ -525,7 +525,6 @@ def generate_tracelens_reports(
     tensorboard_dir: str,
     output_dir: str,
     ranks: Optional[List[int]] = None,
-    max_reports: Optional[int] = None,
     output_format: str = "all",
 ) -> List[str]:
     """
@@ -535,7 +534,7 @@ def generate_tracelens_reports(
         tensorboard_dir: Directory containing PyTorch profiler trace files
         output_dir: Directory to save the generated reports
         ranks: List of ranks to generate reports for (None = all ranks)
-        max_reports: Maximum number of reports to generate (None = unlimited)
+               To limit number of reports, specify fewer ranks in the list
         output_format: Output format:
                       - "all" (default): Both XLSX and CSV files
                       - "xlsx": Multi-tab Excel with detailed analysis
@@ -572,11 +571,6 @@ def generate_tracelens_reports(
         trace_files = _filter_traces_by_rank(trace_files, ranks)
         log_rank_0(f"[TraceLens] Filtered to {len(trace_files)} trace files for ranks: {ranks}")
 
-    # Limit number of reports if specified
-    if max_reports is not None and len(trace_files) > max_reports:
-        trace_files = trace_files[:max_reports]
-        log_rank_0(f"[TraceLens] Limited to {max_reports} reports")
-
     log_rank_0(
         f"[TraceLens] Generating {output_format.upper()} reports for {len(trace_files)} trace files..."
     )
@@ -595,7 +589,6 @@ def generate_tracelens_reports_locally(
     tensorboard_dir: str,
     exp_root_path: str,
     ranks: Optional[List[int]] = None,
-    max_reports: Optional[int] = None,
     output_format: str = "all",
 ) -> int:
     """
@@ -608,7 +601,7 @@ def generate_tracelens_reports_locally(
         tensorboard_dir: Directory containing PyTorch profiler trace files
         exp_root_path: Root path of the experiment (for saving reports)
         ranks: List of ranks to analyze (None = all ranks, [0] = rank 0 only)
-        max_reports: Maximum number of reports to generate
+               Specify fewer ranks to limit number of reports
         output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
 
     Returns:
@@ -618,10 +611,10 @@ def generate_tracelens_reports_locally(
         >>> generate_tracelens_reports_locally(
         ...     tensorboard_dir="/path/to/tensorboard",
         ...     exp_root_path="/path/to/experiment",
-        ...     ranks=[0, 8],
+        ...     ranks=[0, 8],  # Only 2 ranks = 2 reports
         ...     output_format="all"
         ... )
-        26  # Generated 26 report files
+        26  # Generated 26 report files (XLSX + CSVs for 2 ranks)
     """
     # Create output directory for reports
     reports_dir = os.path.join(exp_root_path, "tracelens_reports")
@@ -631,15 +624,12 @@ def generate_tracelens_reports_locally(
     log_rank_0(f"[TraceLens] Reports will be saved to: {reports_dir}")
     if ranks:
         log_rank_0(f"[TraceLens] Analyzing ranks: {ranks}")
-    if max_reports:
-        log_rank_0(f"[TraceLens] Max reports: {max_reports}")
 
     # Generate reports
     reports = generate_tracelens_reports(
         tensorboard_dir=tensorboard_dir,
         output_dir=reports_dir,
         ranks=ranks,
-        max_reports=max_reports,
         output_format=output_format,
     )
 
@@ -656,7 +646,6 @@ def upload_tracelens_reports_to_mlflow(
     tensorboard_dir: str,
     exp_root_path: str,
     ranks: Optional[List[int]] = None,
-    max_reports: Optional[int] = None,
     output_format: str = "all",
     artifact_path: str = "trace_analysis",
     cleanup_after_upload: bool = False,
@@ -675,7 +664,7 @@ def upload_tracelens_reports_to_mlflow(
         tensorboard_dir: Directory containing PyTorch profiler trace files
         exp_root_path: Root path of the experiment (for saving reports)
         ranks: List of ranks to analyze (None = all ranks, [0] = rank 0 only)
-        max_reports: Maximum number of reports to generate
+               Specify fewer ranks to limit number of reports
         output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
         artifact_path: MLflow artifact subdirectory for reports
         cleanup_after_upload: If True, removes local reports after upload to save disk space.
@@ -715,15 +704,12 @@ def upload_tracelens_reports_to_mlflow(
     log_rank_0(f"[TraceLens] Reports will be saved to: {reports_dir}")
     if ranks:
         log_rank_0(f"[TraceLens] Analyzing ranks: {ranks}")
-    if max_reports:
-        log_rank_0(f"[TraceLens] Max reports: {max_reports}")
 
     # Generate reports
     reports = generate_tracelens_reports(
         tensorboard_dir=tensorboard_dir,
         output_dir=reports_dir,
         ranks=ranks,
-        max_reports=max_reports,
         output_format=output_format,
     )
 
@@ -772,7 +758,6 @@ def upload_artifacts_to_mlflow(
     generate_tracelens_report: bool = False,
     upload_tracelens_report: bool = False,
     tracelens_ranks: Optional[List[int]] = None,
-    tracelens_max_reports: Optional[int] = None,
     tracelens_output_format: str = "all",
     tracelens_cleanup_after_upload: bool = False,
 ) -> dict:
@@ -811,8 +796,8 @@ def upload_artifacts_to_mlflow(
         generate_tracelens_report: Whether to generate TraceLens reports locally
         upload_tracelens_report: Whether to upload TraceLens reports to MLflow (implies generation)
         tracelens_ranks: List of ranks to generate TraceLens reports for
-                        (None = all ranks, [0] = rank 0 only)
-        tracelens_max_reports: Maximum number of TraceLens reports to generate
+                        (None = all ranks, [0, 8] = ranks 0 and 8 only)
+                        Specify fewer ranks to limit number of reports
         tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
         tracelens_cleanup_after_upload: If True, removes local reports after upload to save disk space.
                                        If False, keeps reports locally for inspection (default).
@@ -863,7 +848,6 @@ def upload_artifacts_to_mlflow(
                 tensorboard_dir=tensorboard_dir,
                 exp_root_path=exp_root_path,
                 ranks=tracelens_ranks,
-                max_reports=tracelens_max_reports,
                 output_format=tracelens_output_format,
                 artifact_path="trace_analysis",
                 cleanup_after_upload=tracelens_cleanup_after_upload,
@@ -875,7 +859,6 @@ def upload_artifacts_to_mlflow(
                 tensorboard_dir=tensorboard_dir,
                 exp_root_path=exp_root_path,
                 ranks=tracelens_ranks,
-                max_reports=tracelens_max_reports,
                 output_format=tracelens_output_format,
             )
             # Don't count as "uploaded" since they're local-only
