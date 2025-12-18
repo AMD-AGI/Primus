@@ -523,6 +523,21 @@ def generate_tracelens_reports(
     # Try to install tracelens, but continue with fallback if not available
     _ensure_tracelens_installed()
 
+    # Normalize ranks parameter: handle string input from config parser
+    if ranks is not None and isinstance(ranks, str):
+        import ast
+
+        try:
+            ranks = ast.literal_eval(ranks)
+            if not isinstance(ranks, list):
+                log_rank_0(
+                    f"[TraceLens] Warning: ranks evaluated to {type(ranks).__name__}, expected list. Using None."
+                )
+                ranks = None
+        except (ValueError, SyntaxError) as e:
+            log_rank_0(f"[TraceLens] Warning: Failed to parse ranks '{ranks}': {e}. Using None.")
+            ranks = None
+
     trace_files = _get_all_trace_files(tensorboard_dir)
     if not trace_files:
         log_rank_0("[TraceLens] No trace files found for analysis")
@@ -584,6 +599,21 @@ def upload_tracelens_reports_to_mlflow(
     if mlflow_writer is None:
         log_rank_0("[TraceLens] MLflow writer not available, skipping report upload")
         return 0
+
+    # Normalize ranks parameter: handle string input from config parser
+    if ranks is not None and isinstance(ranks, str):
+        import ast
+
+        try:
+            ranks = ast.literal_eval(ranks)
+            if not isinstance(ranks, list):
+                log_rank_0(
+                    f"[TraceLens] Warning: ranks evaluated to {type(ranks).__name__}, expected list. Using None."
+                )
+                ranks = None
+        except (ValueError, SyntaxError) as e:
+            log_rank_0(f"[TraceLens] Warning: Failed to parse ranks '{ranks}': {e}. Using None.")
+            ranks = None
 
     # Create output directory for reports
     reports_dir = os.path.join(exp_root_path, "tracelens_reports")
