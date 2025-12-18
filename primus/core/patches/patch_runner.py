@@ -88,9 +88,6 @@ def run_patches(
     if enabled_ids is not None:
         patches = [p for p in patches if p.id in enabled_ids]
 
-    # Deterministic ordering: (priority ASC, id ASC)
-    patches = sorted(patches, key=lambda p: (p.priority, p.id))
-
     applied_count = 0
     applied_ids: List[str] = []
 
