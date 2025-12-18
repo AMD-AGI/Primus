@@ -17,7 +17,7 @@ from primus.modules.module_utils import log_rank_0
 
 
 @register_patch(
-    "megatron.moe.deprecated_layer",
+    "megatron.moe.deprecated_20241209",
     backend="megatron",
     phase="before_train",
     description="Replace MoELayer/experts with deprecated 20241209 versions",
@@ -58,22 +58,22 @@ def patch_deprecated_moe_layer(ctx: PatchContext):
     moe_module_specs.TEGroupedMLP = DeprecatedTEGroupedMLP
 
     log_rank_0(
-        f"[Patch:megatron.moe.deprecated_layer]   Patched megatron.core.models.gpt.moe_module_specs.MoELayer "
+        f"[Patch:megatron.moe.deprecated_20241209]   Patched megatron.core.models.gpt.moe_module_specs.MoELayer "
         f"-> {DeprecatedMoELayer.__name__}"
     )
     log_rank_0(
-        f"[Patch:megatron.moe.deprecated_layer]   Patched megatron.core.models.gpt.moe_module_specs.MoESubmodules "
+        f"[Patch:megatron.moe.deprecated_20241209]   Patched megatron.core.models.gpt.moe_module_specs.MoESubmodules "
         f"-> {DeprecatedMoESubmodules.__name__}"
     )
     log_rank_0(
-        f"[Patch:megatron.moe.deprecated_layer]   Patched megatron.core.models.gpt.moe_module_specs.GroupedMLP "
+        f"[Patch:megatron.moe.deprecated_20241209]   Patched megatron.core.models.gpt.moe_module_specs.GroupedMLP "
         f"-> {DeprecatedGroupedMLP.__name__}"
     )
     log_rank_0(
-        f"[Patch:megatron.moe.deprecated_layer]   Patched megatron.core.models.gpt.moe_module_specs.SequentialMLP "
+        f"[Patch:megatron.moe.deprecated_20241209]   Patched megatron.core.models.gpt.moe_module_specs.SequentialMLP "
         f"-> {DeprecatedSequentialMLP.__name__}"
     )
     log_rank_0(
-        f"[Patch:megatron.moe.deprecated_layer]   Patched megatron.core.models.gpt.moe_module_specs.TEGroupedMLP "
+        f"[Patch:megatron.moe.deprecated_20241209]   Patched megatron.core.models.gpt.moe_module_specs.TEGroupedMLP "
         f"-> {DeprecatedTEGroupedMLP.__name__}"
     )
