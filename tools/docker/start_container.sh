@@ -6,7 +6,7 @@
 ###############################################################################
 
 PRIMUS_PATH=$(realpath "$(dirname "$0")/../..")
-DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10_gfx942"}
+DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10"}
 DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 SANITIZED_USER=$(echo "${USER:-unknown}" | tr -cd '[:alnum:]_-')
 if [ -z "$SANITIZED_USER" ]; then
