@@ -326,7 +326,6 @@ def generate_tracelens_report(
                       - "all" (default): Both XLSX and CSV files
                       - "xlsx": Single multi-tab Excel file with detailed analysis
                       - "csv": Multiple CSV files (kernels, memory, communication, etc.)
-                      - "html": Interactive HTML report
 
     Returns:
         List of paths to generated report files
@@ -374,14 +373,6 @@ def generate_tracelens_report(
             if csv_files:
                 log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
                 generated_files.extend(csv_files)
-
-        if output_format == "html":
-            warning_rank_0("[TraceLens] HTML format not yet supported, using xlsx+csv")
-            # Fall through to xlsx
-            xlsx_path = os.path.join(output_dir, f"{report_name}_analysis.xlsx")
-            dfs = generate_perf_report_pytorch(trace_file, output_xlsx_path=xlsx_path)
-            if os.path.exists(xlsx_path):
-                generated_files.append(xlsx_path)
 
         if generated_files:
             return generated_files
