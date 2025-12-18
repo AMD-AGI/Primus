@@ -28,6 +28,7 @@ from primus.backends.megatron.patches import (
     training_log_patches as _training_log_patches,
 )
 from primus.backends.megatron.patches import transformer_patches as _transformer_patches
+from primus.backends.megatron.patches import turbo as _turbo
 from primus.core.patches import run_patches
 
 
