@@ -10,32 +10,11 @@ Transformer Engine LayerNorm Linear FP8 Cache Patches
 Patches for disabling FP8 weight transpose cache in TELayerNormColumnParallelLinear layers.
 """
 
-import inspect
-
-import transformer_engine as te
 from megatron.core.extensions import transformer_engine as te_ext
 from megatron.core.extensions.transformer_engine import TELayerNormColumnParallelLinear
 
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
-
-
-def _has_fp8_cache_parameter() -> bool:
-    """Check if TE LayerNormLinear supports keep_fp8_weight_transpose_cache parameter."""
-    try:
-        return (
-            "keep_fp8_weight_transpose_cache"
-            in inspect.signature(te.pytorch.LayerNormLinear.__init__).parameters
-        )
-    except Exception:
-        return False
-
-
-def _should_disable_fp8_cache(ctx: PatchContext) -> bool:
-    """Check if FP8 cache should be disabled."""
-    if not getattr(get_args(ctx), "no_fp8_weight_transpose_cache", False):
-        return False
-    return _has_fp8_cache_parameter()
 
 
 def _make_get_extra_te_kwargs_with_override(original_func, **overrides):
@@ -54,7 +33,7 @@ def _make_get_extra_te_kwargs_with_override(original_func, **overrides):
     backend="megatron",
     phase="before_train",
     description="Disable FP8 weight transpose cache in TELayerNormColumnParallelLinear to reduce memory usage",
-    condition=_should_disable_fp8_cache,
+    condition=lambda ctx: getattr(get_args(ctx), "no_fp8_weight_transpose_cache", False),
 )
 def patch_te_layernorm_linear_fp8_cache(ctx: PatchContext):
     """

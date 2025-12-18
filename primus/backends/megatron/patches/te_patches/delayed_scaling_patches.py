@@ -10,22 +10,11 @@ Transformer Engine Delayed Scaling Patches
 Patches for customizing TEDelayedScaling behavior.
 """
 
-import inspect
-
-import transformer_engine as te
 from megatron.core.extensions import transformer_engine as te_ext
 from megatron.core.extensions.transformer_engine import TEDelayedScaling
 
 from primus.core.patches import PatchContext, register_patch
 from primus.modules.module_utils import log_rank_0
-
-
-def _has_reduce_amax_parameter(ctx: PatchContext) -> bool:
-    """Check if TE DelayedScaling supports reduce_amax parameter."""
-    try:
-        return "reduce_amax" in inspect.signature(te.common.recipe.DelayedScaling.__init__).parameters
-    except Exception:
-        return False
 
 
 def _make_get_extra_te_kwargs_with_override(original_func, **overrides):
@@ -44,7 +33,6 @@ def _make_get_extra_te_kwargs_with_override(original_func, **overrides):
     backend="megatron",
     phase="before_train",
     description="Disable reduce_amax in TEDelayedScaling for FP8 training",
-    condition=_has_reduce_amax_parameter,
 )
 def patch_te_delayed_scaling_reduce_amax(ctx: PatchContext):
     """
@@ -52,8 +40,6 @@ def patch_te_delayed_scaling_reduce_amax(ctx: PatchContext):
 
     This customizes the DelayedScaling recipe behavior by setting
     reduce_amax=False during initialization.
-
-    Note: This patch is applied only if the TE version supports reduce_amax parameter.
     """
     log_rank_0("[Patch:megatron.te.delayed_scaling_reduce_amax] Patching TEDelayedScaling...")
 
