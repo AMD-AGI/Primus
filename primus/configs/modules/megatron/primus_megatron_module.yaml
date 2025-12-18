@@ -5,6 +5,8 @@ disable_wandb: true
 disable_mlflow: true
 mlflow_run_name: null
 mlflow_experiment_name: null
+# NOTE: When disable_mlflow=false, traces and logs are uploaded by default.
+# Set these to false if you only want metrics/params logged to MLflow.
 mlflow_upload_traces: true           # Upload profiler trace files to MLflow
 mlflow_upload_logs: true             # Upload training log files to MLflow
 mlflow_upload_tracelens_report: false  # Generate and upload TraceLens analysis reports
