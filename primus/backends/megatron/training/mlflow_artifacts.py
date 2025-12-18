@@ -599,7 +599,7 @@ def upload_tracelens_reports_to_mlflow(
     max_reports: Optional[int] = None,
     output_format: str = "all",
     artifact_path: str = "trace_analysis",
-    cleanup_after_upload: bool = True,
+    cleanup_after_upload: bool = False,
 ) -> int:
     """
     Generate TraceLens reports and upload them to MLflow.
@@ -619,14 +619,14 @@ def upload_tracelens_reports_to_mlflow(
         output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
         artifact_path: MLflow artifact subdirectory for reports
         cleanup_after_upload: If True, removes local reports after upload to save disk space.
-                             If False, keeps reports locally for inspection. Default: True.
+                             If False, keeps reports locally for inspection. Default: False.
 
     Returns:
         Number of reports uploaded to MLflow
 
     Note:
-        Reports are saved to exp_root_path/tracelens_reports/. Set cleanup_after_upload=False
-        to keep them locally for debugging or additional processing.
+        Reports are saved to exp_root_path/tracelens_reports/ and kept locally by default.
+        Set cleanup_after_upload=True to remove them after upload and save disk space.
     """
     if mlflow_writer is None:
         log_rank_0("[TraceLens] MLflow writer not available, skipping report upload")
@@ -713,7 +713,7 @@ def upload_artifacts_to_mlflow(
     tracelens_ranks: Optional[List[int]] = None,
     tracelens_max_reports: Optional[int] = None,
     tracelens_output_format: str = "all",
-    tracelens_cleanup_after_upload: bool = True,
+    tracelens_cleanup_after_upload: bool = False,
 ) -> dict:
     """
     Upload all artifacts (trace files, log files, TraceLens reports) to MLflow.
@@ -741,8 +741,8 @@ def upload_artifacts_to_mlflow(
                         (None = all ranks, [0] = rank 0 only)
         tracelens_max_reports: Maximum number of TraceLens reports to generate
         tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
-        tracelens_cleanup_after_upload: If True, removes local reports after upload (default).
-                                       If False, keeps reports locally for inspection.
+        tracelens_cleanup_after_upload: If True, removes local reports after upload to save disk space.
+                                       If False, keeps reports locally for inspection (default).
 
     Returns:
         Dictionary with counts of uploaded files:
