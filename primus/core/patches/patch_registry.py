@@ -12,7 +12,7 @@ for registering patches.
 """
 
 import logging
-from typing import Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Iterable, List, Optional, Sequence
 
 from primus.core.patches.context import PatchContext
 from primus.core.patches.patch import FunctionPatch
@@ -28,23 +28,33 @@ log = logging.getLogger(__name__)
 class PatchRegistry:
     """Global registry for all patches."""
 
-    _patches: Dict[str, FunctionPatch] = {}
+    _patches: List[FunctionPatch] = []
 
     @classmethod
     def register(cls, patch: FunctionPatch) -> FunctionPatch:
         """Register or override a patch."""
-        if patch.id in cls._patches:
-            log.warning("Patch '%s' already registered; overriding.", patch.id)
-        cls._patches[patch.id] = patch
+        # Check if patch with same id already exists
+        for i, existing_patch in enumerate(cls._patches):
+            if existing_patch.id == patch.id:
+                log.warning("Patch '%s' already registered; overriding.", patch.id)
+                cls._patches[i] = patch
+                return patch
+
+        # Add new patch
+        cls._patches.append(patch)
         return patch
 
     @classmethod
-    def get(cls, patch_id: str) -> FunctionPatch:
-        return cls._patches[patch_id]
+    def get(cls, patch_id: str) -> Optional[FunctionPatch]:
+        """Get patch by id, returns None if not found."""
+        for patch in cls._patches:
+            if patch.id == patch_id:
+                return patch
+        return None
 
     @classmethod
     def list_ids(cls) -> List[str]:
-        return sorted(cls._patches.keys())
+        return sorted([p.id for p in cls._patches])
 
     @classmethod
     def iter_patches(cls, backend: Optional[str] = None, phase: Optional[str] = None) -> List[FunctionPatch]:
@@ -60,7 +70,7 @@ class PatchRegistry:
         Returns:
             List of FunctionPatch objects
         """
-        patches = list(cls._patches.values())
+        patches = list(cls._patches)
 
         # Pre-filter by backend if specified
         if backend is not None:
@@ -78,7 +88,7 @@ class PatchRegistry:
 
     @classmethod
     def iter_by_tag(cls, tag: str) -> Iterable[FunctionPatch]:
-        for p in cls._patches.values():
+        for p in cls._patches:
             if tag in p.tags:
                 yield p
 
