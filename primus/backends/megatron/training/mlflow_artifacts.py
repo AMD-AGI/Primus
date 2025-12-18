@@ -353,8 +353,32 @@ def generate_tracelens_report(
 
         generated_files = []
 
-        if output_format in ("all", "xlsx"):
-            # XLSX: Single file with multiple tabs
+        # Optimize for "all" format: parse trace once and generate both outputs
+        if output_format == "all":
+            xlsx_path = os.path.join(output_dir, f"{report_name}_analysis.xlsx")
+            csv_subdir = os.path.join(output_dir, report_name)
+            os.makedirs(csv_subdir, exist_ok=True)
+
+            # Parse trace once and generate both formats
+            dfs = generate_perf_report_pytorch(
+                trace_file, output_xlsx_path=xlsx_path, output_csvs_dir=csv_subdir
+            )
+
+            # Check XLSX output
+            if os.path.exists(xlsx_path):
+                log_rank_0(
+                    f"[TraceLens] Generated XLSX report with {len(dfs)} tabs: {os.path.basename(xlsx_path)}"
+                )
+                generated_files.append(xlsx_path)
+
+            # Check CSV outputs
+            csv_files = glob.glob(os.path.join(csv_subdir, "*.csv"))
+            if csv_files:
+                log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
+                generated_files.extend(csv_files)
+
+        elif output_format == "xlsx":
+            # XLSX only: Single file with multiple tabs
             xlsx_path = os.path.join(output_dir, f"{report_name}_analysis.xlsx")
             dfs = generate_perf_report_pytorch(trace_file, output_xlsx_path=xlsx_path)
             if os.path.exists(xlsx_path):
@@ -363,8 +387,8 @@ def generate_tracelens_report(
                 )
                 generated_files.append(xlsx_path)
 
-        if output_format in ("all", "csv"):
-            # CSV: Multiple files in a subdirectory per rank
+        elif output_format == "csv":
+            # CSV only: Multiple files in a subdirectory per rank
             csv_subdir = os.path.join(output_dir, report_name)
             os.makedirs(csv_subdir, exist_ok=True)
             dfs = generate_perf_report_pytorch(trace_file, output_csvs_dir=csv_subdir)
