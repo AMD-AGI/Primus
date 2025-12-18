@@ -22,8 +22,8 @@ modules:
 
       # hyper parameters
       train_iters: 50
-      micro_batch_size: 14
-      global_batch_size: 896
+      micro_batch_size: 12
+      global_batch_size: 768
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
       lr: 1.0e-5
