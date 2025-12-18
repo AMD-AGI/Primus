@@ -29,8 +29,8 @@ MLflow Artifact Structure:
 
 TraceLens Report Formats:
     - xlsx: Multi-tab Excel with sections for kernels, memory, communication, etc.
-    - csv:  Single flat file with operation summary
-    - html: Interactive HTML report
+    - csv:  Multiple CSV files per rank (kernels, memory, communication, etc.)
+    - all:  Both xlsx and csv files (default)
 """
 
 import glob
