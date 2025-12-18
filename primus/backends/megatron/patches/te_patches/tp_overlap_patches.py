@@ -61,7 +61,7 @@ def _is_te_below_v2(ctx: PatchContext) -> bool:
 
 
 @register_patch(
-    "megatron.patch.tp_te_overlap.v2",
+    "megatron.te.tp_overlap_te2",
     backend="megatron",
     phase="before_train",
     description="Enable TE TP communication overlap for TE >= 2.0 (using general_gemm)",
@@ -85,7 +85,7 @@ def patch_tp_te_overlap_v2(ctx: PatchContext):
         initialize_ub,
     )
 
-    log_rank_0("[Patch:megatron.patch.tp_te_overlap.v2] Patching TE TP overlap (TE >= 2.0)...")
+    log_rank_0("[Patch:megatron.te.tp_overlap_te2] Patching TE TP overlap (TE >= 2.0)...")
 
     # Patch CommOverlap types
     tex.CommOverlap = ptex.CommOverlap
@@ -105,11 +105,11 @@ def patch_tp_te_overlap_v2(ctx: PatchContext):
     te.pytorch.module.base.get_workspace = get_workspace
     te.pytorch.cpp_extensions.CommOverlapType = ptex.CommOverlapType
 
-    log_rank_0("[Patch:megatron.patch.tp_te_overlap.v2] Successfully patched TE TP overlap")
+    log_rank_0("[Patch:megatron.te.tp_overlap_te2] Successfully patched TE TP overlap")
 
 
 @register_patch(
-    "megatron.patch.tp_te_overlap.v1",
+    "megatron.te.tp_overlap_te1",
     backend="megatron",
     phase="before_train",
     description="Enable TE TP communication overlap for TE < 2.0 (using gemm/fp8_gemm)",
@@ -134,7 +134,7 @@ def patch_tp_te_overlap_v1(ctx: PatchContext):
         initialize_ub,
     )
 
-    log_rank_0("[Patch:megatron.patch.tp_te_overlap.v1] Patching TE TP overlap (TE < 2.0)...")
+    log_rank_0("[Patch:megatron.te.tp_overlap_te1] Patching TE TP overlap (TE < 2.0)...")
 
     # Patch CommOverlap types
     tex.CommOverlap = ptex.CommOverlap
@@ -157,4 +157,4 @@ def patch_tp_te_overlap_v1(ctx: PatchContext):
     te.pytorch.module.base.get_workspace = get_workspace
     te.pytorch.cpp_extensions.CommOverlapType = ptex.CommOverlapType
 
-    log_rank_0("[Patch:megatron.patch.tp_te_overlap.v1] Successfully patched TE TP overlap")
+    log_rank_0("[Patch:megatron.te.tp_overlap_te1] Successfully patched TE TP overlap")
