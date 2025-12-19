@@ -409,7 +409,7 @@ def generate_tracelens_report(
             csv_files = glob.glob(os.path.join(glob.escape(csv_subdir), "*.csv"))
             if csv_files:
                 log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
-                generated_files.extend(csv_files)
+                generated_files.append(csv_subdir)  # Upload directory to preserve structure
 
         elif output_format == "xlsx":
             # XLSX only: Single file with multiple tabs
@@ -431,7 +431,7 @@ def generate_tracelens_report(
             csv_files = glob.glob(os.path.join(glob.escape(csv_subdir), "*.csv"))
             if csv_files:
                 log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
-                generated_files.extend(csv_files)
+                generated_files.append(csv_subdir)  # Upload directory to preserve structure
 
         if generated_files:
             return generated_files
