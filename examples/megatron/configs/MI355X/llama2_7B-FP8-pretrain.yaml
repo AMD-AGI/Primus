@@ -23,8 +23,8 @@ modules:
       log_avg_reset_interval: 50
 
       train_iters: 50
-      micro_batch_size: 4
-      global_batch_size: 256
+      micro_batch_size: 13
+      global_batch_size: 416
 
       seq_length: 4096
       max_position_embeddings: 4096
