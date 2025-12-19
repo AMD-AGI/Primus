@@ -27,6 +27,7 @@ class PrimusTurboConfig:
     use_moe_fp8: bool = True
     enable_embedding_autocast: bool = True
     use_classic_attention: bool = False
+    enable_dma_allgather: bool = False
     # float8_config: PrimusTurboFloat8Config = field(default_factory=PrimusTurboFloat8Config)
 
 

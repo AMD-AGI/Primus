@@ -90,7 +90,10 @@ class TorchTitanPretrainTrainer(BaseModule):
     def run(self, *args, **kwargs):
         if self.trainer is None:
             raise RuntimeError("Trainer has not been initialized. Call init() first.")
-        self.trainer.train()
+        if self.titan_config.checkpoint.create_seed_checkpoint:
+            self.trainer.checkpointer.save(curr_step=0, last_step=True)
+        else:
+            self.trainer.train()
 
     def patch_torchtitan_logger(self):
         from primus.core.utils.logger import _logger as primus_logger
@@ -400,6 +403,9 @@ class TorchTitanPretrainTrainer(BaseModule):
             self.patch_classic_attention()
             logger.warning(f"TorchtitanPretrainTrainer: Patch Classic Attention")
 
+        if self.titan_config.primus_turbo.enable_dma_allgather:
+            self.patch_torch_allgather_into_tensor()
+
         from primus.core.utils.logger import _logger as primus_logger
 
         primus_logger.info("Enable primus turbo extension...")
@@ -496,6 +502,14 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         except ImportError as e:
             logger.warning(f"TorchtitanPretrainTrainer: Patch Async TP failed - {e}")
+
+    def patch_torch_allgather_into_tensor(self):
+        import torch.distributed as dist
+        from primus_turbo.pytorch.dist import dma_all_gather_into_tensor
+        from torchtitan.tools.logging import logger
+
+        dist.all_gather_into_tensor = dma_all_gather_into_tensor
+        logger.warning("Enable DMA allgather_into_tensor")
 
     def flatten_config(self, obj: Any, prefix: str = "") -> Dict[str, Any]:
         flat_dict = {}

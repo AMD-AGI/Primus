@@ -162,3 +162,4 @@ primus_turbo:
   use_turbo_grouped_mm: false
   use_moe_fp8: true
   enable_embedding_autocast: true
+  enable_dma_allgather: false
