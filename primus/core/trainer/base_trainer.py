@@ -19,6 +19,7 @@ Design Pattern: Template Method
 from abc import abstractmethod
 from typing import Any
 
+from primus.backends.megatron.training.global_vars import set_primus_global_variables
 from primus.core.patches import run_patches
 from primus.core.trainer.trainer_component import TrainerComponent
 from primus.modules import module_utils
@@ -86,6 +87,8 @@ class BaseTrainer(TrainerComponent):
                 f"[{self.__class__.__name__}] 'params' is required in module_config for training. "
                 f"This should be automatically populated from the configuration file."
             )
+
+        set_primus_global_variables(self.module_config.params)
 
         self.backend_name = self.module_config.framework
         self.model_name = self.module_config.model
