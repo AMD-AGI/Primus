@@ -88,17 +88,17 @@ def megatron_derive_default_args(args):
         args.data_parallel_size = world_size // (
             args.tensor_model_parallel_size * args.pipeline_model_parallel_size * args.context_parallel_size
         )
+    if not hasattr(args, "virtual_pipeline_model_parallel_size"):
+        args.virtual_pipeline_model_parallel_size = None
     if (
         args.num_layers_per_virtual_pipeline_stage is None
-        and args.num_virtual_stages_per_pipeline_rank is None
+        and args.virtual_pipeline_model_parallel_size is None
     ):
         args.virtual_pipeline_model_parallel_size = 1
     elif args.num_layers_per_virtual_pipeline_stage is not None:
         args.virtual_pipeline_model_parallel_size = args.num_layers // (
             args.num_layers_per_virtual_pipeline_stage * args.pipeline_model_parallel_size
         )
-    else:
-        args.virtual_pipeline_model_parallel_size = args.num_virtual_stages_per_pipeline_rank
 
     args.share_embeddings_and_output_weights = not args.untie_embeddings_and_output_weights
 
