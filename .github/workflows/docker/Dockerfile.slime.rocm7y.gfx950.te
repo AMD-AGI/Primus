@@ -44,7 +44,7 @@ WORKDIR /app
 RUN rm -rf TransformerEngine
 RUN git clone https://github.com/ROCm/TransformerEngine.git \
     && cd TransformerEngine \
-    && git checkout 90c04bcdc3c109505b318f40a39680263af55edf \
+    && git checkout 32e2d1d4d4af5976970dc3ca21bb17c97821a239 \
     && git submodule update --init --recursive
 
 ENV NVTE_FRAMEWORK=pytorch
