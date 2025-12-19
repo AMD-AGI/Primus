@@ -474,7 +474,13 @@ def _get_sync_free_moe_options(stage: int) -> dict:
 def validate_args_on_rocm(args):
     # Deterministic mode
     if args.deterministic_mode:
-        assert not args.moe_grouped_gemm, "MoE Grouped GEMM can't be used in deterministic mode."
+        # NOTE: Some version triton compile exist potential racing condition issue.
+        assert (
+            os.environ.get("TORCH_COMPILE_DISABLE", "0") == "1"
+        ), "TORCH_COMPILE_DISABLE must be set to 1 in deterministic mode."
+        assert (
+            os.environ.get("ROCBLAS_DEFAULT_ATOMICS_MODE", "1") == "0"
+        ), "ROCBLAS_DEFAULT_ATOMICS_MODE must be set to 0 in deterministic mode."
 
     # Turbo FP8 linear check
     if args.fp8 and args.use_turbo_parallel_linear:
