@@ -103,6 +103,9 @@ def prepare_dataset_if_needed(
 ):
     pre_trainer_cfg = primus_config.get_module_config("pre_trainer")
     if pre_trainer_cfg.train_data_path is not None:
+        log_info(
+            f"'Found existing train_data_path: {pre_trainer_cfg.train_data_path}', Skipping dataset preparation."
+        )
         return
 
     tokenizer_type = pre_trainer_cfg.tokenizer_type
@@ -221,6 +224,7 @@ def main():
     if mock_data:
         log_info(f"'mock_data: true', Skipping dataset preparation.")
     else:
+        log_info(f"'mock_data: false', Beginning dataset preparation.")
         prepare_dataset_if_needed(
             primus_config=primus_config,
             primus_path=primus_path,

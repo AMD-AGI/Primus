@@ -10,7 +10,7 @@ modules:
     model: llama3.1_70B.yaml
     overrides:
       # log
-      wandb_project: "Primus_DeepSeek_Pretrain"
+      wandb_project: "Primus_Llama3.1_70B_Pretrain"
       stderr_sink_level: DEBUG
 
       log_avg_skip_iterations: 2
@@ -43,7 +43,7 @@ modules:
 
       # data
       mock_data: true
-      train_data_path: null
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
 
