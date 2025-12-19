@@ -39,9 +39,9 @@ modules:
       seq_length: ${PRIMUS_SEQ_LENGTH:8192}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:8192}
       lr: ${PRIMUS_LR:1.0e-5}
-      min_lr: 0.0
-      lr_warmup_iters: 2
-      lr_decay_iters: null
+      min_lr: 1.0e-5  # Set to 10% of max LR like Llama 8B (8e-5 is 10% of 8e-4)
+      lr_warmup_iters: ${PRIMUS_LR_WARMUP_ITERS:128}  # Match Llama 8B warmup
+      lr_decay_iters: 1199872  # Match Llama 8B decay schedule (75M samples / 640 GBS = 117187 iters, but using their value)
       lr_decay_style: cosine
       weight_decay: 0.1
       adam_beta1: 0.9
@@ -95,7 +95,7 @@ modules:
       disable_last_saving: true
       exit_on_missing_checkpoint: false
       ckpt_format: torch
-      eval_iters: 32
+      eval_iters: 64  # 64 iters × 2 MBS × 8 GPUs = 1024 eval samples (matching Llama 8B)
       eval_interval: ${PRIMUS_EVAL_INTERVAL:5}
 
       # Turbo
