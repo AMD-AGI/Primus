@@ -130,6 +130,20 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-slime-rocm7-mi355-base
           docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
+          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-slime-rocm7-mi355-te"
+          start_time=$(date +%s)
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.slime.rocm7y.gfx950.te \
+               -t tasimage/primus:${{env.IMAGE_TAG}}-slime-rocm7-mi355-te \
+               $GITHUB_WORKSPACE/.github/workflows/docker
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build primus docker-slime-rocm7-mi355-te] Total elapsed time: ${elapsed} seconds"
+
+          docker tag tasimage/primus:${{env.IMAGE_TAG}}-slime-rocm7-mi355-te docker.io/tasimage/primus:${{env.IMAGE_TAG}}-slime-rocm7-mi355-te
+          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-slime-rocm7-mi355-te
+          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-v25.10-ainic"
           start_time=$(date +%s)
           mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
