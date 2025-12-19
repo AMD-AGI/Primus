@@ -55,6 +55,7 @@ def make_get_extra_te_kwargs_with_override(original_func, **overrides):
     """
 
     def _wrapped(config):
+        """Call the original function and apply the configured overrides to its kwargs."""
         kwargs = original_func(config)
         kwargs.update(overrides)
         return kwargs
