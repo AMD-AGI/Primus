@@ -43,6 +43,8 @@ def patch_te_linear_fp8_cache(ctx: PatchContext):
     orig_init = TELinear.__init__
 
     def new_init(self, *args, **kwargs):
+        """Wrapper around TELinear.__init__ that temporarily disables the FP8
+        weight transpose cache by overriding TE kwargs during initialization."""
         # Temporarily override the TE kwargs with our custom flag
         te_ext._get_extra_te_kwargs = make_get_extra_te_kwargs_with_override(
             original_get_extra_te_kwargs, keep_fp8_weight_transpose_cache=False
