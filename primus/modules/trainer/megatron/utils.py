@@ -474,14 +474,26 @@ def _get_sync_free_moe_options(stage: int) -> dict:
 def validate_args_on_rocm(args):
     # Deterministic mode
     if args.deterministic_mode:
-        assert not args.moe_grouped_gemm, "MoE Grouped GEMM can't be used in deterministic mode."
+        # NOTE: Some version triton compile exist potential racing condition issue.
+        assert (
+            os.environ.get("TORCH_COMPILE_DISABLE", "0") == "1"
+        ), "TORCH_COMPILE_DISABLE must be set to 1 in deterministic mode."
+        assert (
+            os.environ.get("ROCBLAS_DEFAULT_ATOMICS_MODE", "1") == "0"
+        ), "ROCBLAS_DEFAULT_ATOMICS_MODE must be set to 0 in deterministic mode."
 
     # Turbo FP8 linear check
     if args.fp8 and args.use_turbo_parallel_linear:
-        support_fp8_recipe = ["tensorwise", "blockwise"]
+        support_fp8_recipe = ["tensorwise", "blockwise", "mxfp8"]
         assert (
             args.fp8_recipe in support_fp8_recipe
         ), f"{args.fp8_recipe} recipe is not support when enable `use_turbo_parallel_linear`."
+
+    # NOTE: mxfp8 environment variable must be set to 1 to enable mxfp8 recipe on ROCm.
+    if args.fp8_recipe == "mxfp8":
+        assert (
+            os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") == "1"
+        ), "Please set `NVTE_ROCM_ENABLE_MXFP8=1` to enable `mxfp8` recipe."
 
     # dump pp data
     if args.dump_pp_data and args.pipeline_model_parallel_size == 1:

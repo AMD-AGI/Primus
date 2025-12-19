@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+from MaxText import max_logging
 from MaxText.layers import quantizations
 from MaxText.layers.moe import COMBINE, DISPATCH, RoutedMoE
 
@@ -82,3 +83,53 @@ class PrimusRoutedMoE(RoutedMoE):
             ############################################# end ####################################################
             ##########################################
         return super().dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
+
+    def sparse_matmul(
+        self,
+        inputs,
+        gate_logits,
+        pre_bias_logits,
+        w0_kernel,
+        w1_kernel,
+        wo_kernel,
+    ):
+        """Perform sparse matrix multiplication with optional Primus Turbo backend."""
+        if not self.config.use_turbo_grouped_gemm:
+            return super().sparse_matmul(
+                inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
+            )
+        assert not (
+            self.config.megablox and self.config.use_turbo_grouped_gemm
+        ), "primus_turbo grouped_gemm cannot be enabled together with megablox"
+
+        # Use primus_turbo grouped_gemm backend
+        try:
+            from primus_turbo.jax.lax.grouped_gemm import grouped_gemm
+        except ImportError:
+            # Fallback to original implementation if primus_turbo is not available
+            max_logging.log("WARNING: primus_turbo not available, using default ragged_dot in MoE")
+            return super().sparse_matmul(
+                inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
+            )
+
+        max_logging.log("Using primus_turbo grouped_gemm in MoE")
+        _orig_ragged_dot = jax.lax.ragged_dot
+
+        def _turbo_ragged_dot(*, lhs, rhs, group_sizes, preferred_element_type=None, **kwargs):
+            group_lens = group_sizes.astype(jnp.int64)
+            return grouped_gemm(
+                lhs,  # [total_tokens, emb_dim]
+                rhs,  # [num_experts, emb_dim, intermediate_dim]
+                group_lens,  # [num_experts] int64
+                transA=False,
+                transB=False,
+                num_cu=-1,  # Use all compute units
+            )
+
+        jax.lax.ragged_dot = _turbo_ragged_dot
+        try:
+            return super().sparse_matmul(
+                inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
+            )
+        finally:
+            jax.lax.ragged_dot = _orig_ragged_dot
