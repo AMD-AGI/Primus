@@ -19,6 +19,7 @@ Design Pattern: Template Method
 from abc import abstractmethod
 from typing import Any
 
+from primus.backends.megatron.training.global_vars import set_primus_global_variables
 from primus.core.patches import run_patches
 from primus.core.trainer.trainer_component import TrainerComponent
 from primus.modules import module_utils
@@ -81,6 +82,13 @@ class BaseTrainer(TrainerComponent):
                 f"[{self.__class__.__name__}] 'model' is required in module_config for training. "
                 f"Please specify model in your configuration (e.g., model: llama2_7B)"
             )
+        if not hasattr(self.module_config, "params") or self.module_config.params is None:
+            raise ValueError(
+                f"[{self.__class__.__name__}] 'params' is required in module_config for training. "
+                f"This should be automatically populated from the configuration file."
+            )
+
+        set_primus_global_variables(self.module_config.params)
 
         self.backend_name = self.module_config.framework
         self.model_name = self.module_config.model
@@ -106,18 +114,17 @@ class BaseTrainer(TrainerComponent):
 
         # 1) Apply before_train patches
         module_utils.log_rank_0("[1/3] Applying before_train patches...")
-        patch_count = run_patches(
+        run_patches(
             backend=self.backend_name,
             phase="before_train",
             backend_version=type(self).detect_version(),
             model_name=self.model_name,
             extra={
-                "args": self.backend_args,
+                "backend_args": self.backend_args,
                 "primus_config": self.primus_config,
                 "module_config": self.module_config,
             },
         )
-        module_utils.log_rank_0(f"Applied {patch_count} patches")
 
         # 2) Execute training (implemented by subclass)
         module_utils.log_rank_0("[2/3] Executing training...")
@@ -125,18 +132,17 @@ class BaseTrainer(TrainerComponent):
 
         # 3) Apply after_train patches (if any)
         module_utils.log_rank_0("[3/3] Applying after_train patches...")
-        patch_count = run_patches(
+        run_patches(
             backend=self.backend_name,
             phase="after_train",
             backend_version=type(self).detect_version(),
             model_name=self.model_name,
             extra={
-                "args": self.backend_args,
+                "backend_args": self.backend_args,
                 "primus_config": self.primus_config,
                 "module_config": self.module_config,
             },
         )
-        module_utils.log_rank_0(f"Applied {patch_count} patches")
 
         module_utils.log_rank_0("=" * 80)
         module_utils.log_rank_0("Training workflow completed successfully.")

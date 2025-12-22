@@ -92,7 +92,7 @@ class TestBaseTrainerPatchIntegration:
             assert call["model_name"] == "llama2_7B"
 
             extra = call["extra"]
-            assert extra["args"] is backend_args
+            assert extra["backend_args"] is backend_args
             assert extra["primus_config"] is primus_config
             assert extra["module_config"] is module_config
 
@@ -127,9 +127,9 @@ class TestBaseTrainerPatchIntegration:
         trainer = DummyTrainer(primus_config, module_config)
         trainer.run()
 
-        # Two patch invocations, both should carry args=None
+        # Two patch invocations, both should carry backend_args=None
         assert len(calls) == 2
         for call in calls:
-            assert call["extra"]["args"] is None
+            assert call["extra"]["backend_args"] is None
             assert call["extra"]["primus_config"] is primus_config
             assert call["extra"]["module_config"] is module_config
