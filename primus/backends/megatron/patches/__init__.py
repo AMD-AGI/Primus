@@ -44,4 +44,3 @@ def _auto_import_patch_modules() -> None:
 # Eagerly import all patch modules on package import so patches are registered
 # before any backend-specific logic runs.
 _auto_import_patch_modules()
-
