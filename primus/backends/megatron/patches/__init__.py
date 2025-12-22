@@ -25,6 +25,9 @@ from primus.backends.megatron.patches import (  # noqa: F401
     recompute_layer_patches as _recompute_layer_patches,
 )
 from primus.backends.megatron.patches import (  # noqa: F401
+    torch_fsdp2_patches as _torch_fsdp2_patches,
+)
+from primus.backends.megatron.patches import (  # noqa: F401
     training_log_patches as _training_log_patches,
 )
 from primus.core.patches import run_patches
