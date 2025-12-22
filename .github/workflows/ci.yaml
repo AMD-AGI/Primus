@@ -305,7 +305,7 @@ jobs:
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
             echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}-${ts}-${commit_id}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/latest" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/main-${ts}-${commit_id}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "release" ]]; then
             TAG_NAME="${{ github.ref }}"
             TAG="${TAG_NAME#refs/tags/}"
