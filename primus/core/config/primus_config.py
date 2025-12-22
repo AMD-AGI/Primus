@@ -24,6 +24,7 @@ from typing import Any
 
 from primus.core.launcher.parser import PrimusParser
 from primus.core.utils import constant_vars
+from primus.core.utils.yaml_utils import dict_to_nested_namespace
 
 
 def load_primus_config(config_path: Path, cli_args: Any | None = None) -> SimpleNamespace:
@@ -108,7 +109,8 @@ def load_primus_config(config_path: Path, cli_args: Any | None = None) -> Simple
             params[key] = value
             delattr(module_cfg, key)
 
-        module_cfg.params = params
+        # Convert params dict to a SimpleNamespace tree for attribute-style access
+        module_cfg.params = dict_to_nested_namespace(params)
 
         modules.append(module_cfg)
 
