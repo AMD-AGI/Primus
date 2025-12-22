@@ -63,7 +63,13 @@ class TestBaseTrainerPatchIntegration:
         monkeypatch.setattr("primus.core.trainer.base_trainer.run_patches", fake_run_patches)
 
         primus_config = SimpleNamespace(exp_root_path="/tmp/exp", exp_meta_info={})
-        module_config = SimpleNamespace(framework="megatron", model="llama2_7B", trainable=True)
+        module_params = SimpleNamespace()
+        module_config = SimpleNamespace(
+            framework="megatron",
+            model="llama2_7B",
+            trainable=True,
+            params=module_params,
+        )
         backend_args = {"lr": 1e-4}
 
         trainer = DummyTrainer(primus_config, module_config, backend_args=backend_args)
@@ -122,7 +128,19 @@ class TestBaseTrainerPatchIntegration:
         monkeypatch.setattr("primus.core.trainer.base_trainer.run_patches", fake_run_patches)
 
         primus_config = SimpleNamespace(exp_root_path="/tmp/exp", exp_meta_info={})
-        module_config = SimpleNamespace(framework="megatron", model="llama2_7B", trainable=True)
+        module_params = SimpleNamespace()
+        module_config = SimpleNamespace(
+            framework="megatron",
+            model="llama2_7B",
+            trainable=True,
+            params=module_params,
+        )
+
+        # Reset Megatron global vars between tests so set_primus_global_variables
+        # can be called multiple times in this test module without assertion.
+        from primus.backends.megatron.training.global_vars import destroy_global_vars
+
+        destroy_global_vars()
 
         trainer = DummyTrainer(primus_config, module_config)
         trainer.run()

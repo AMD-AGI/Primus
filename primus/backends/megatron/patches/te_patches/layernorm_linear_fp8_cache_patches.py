@@ -44,6 +44,8 @@ def patch_te_layernorm_linear_fp8_cache(ctx: PatchContext):
     orig_init = TELayerNormColumnParallelLinear.__init__
 
     def new_init(self, *args, **kwargs):
+        """Wrapper for TELayerNormColumnParallelLinear.__init__ that temporarily
+        overrides TE extra kwargs to disable the FP8 weight transpose cache."""
         # Temporarily override the TE kwargs with our custom flag
         te_ext._get_extra_te_kwargs = make_get_extra_te_kwargs_with_override(
             original_get_extra_te_kwargs, keep_fp8_weight_transpose_cache=False

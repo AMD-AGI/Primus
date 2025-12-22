@@ -247,7 +247,7 @@ jobs:
     env:
       PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/jax
     needs: [code-lint]
-    runs-on: [primus-jax-l85pj]
+    runs-on: [primus-llm-cicd-jax-7b4zw]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Set commit hash to env

@@ -38,6 +38,8 @@ def patch_te_delayed_scaling_reduce_amax(ctx: PatchContext):
     orig_init = TEDelayedScaling.__init__
 
     def new_init(self, *args, **kwargs):
+        """Wrapper around TEDelayedScaling.__init__ that temporarily overrides
+        Transformer Engine kwargs to set reduce_amax=False during initialization."""
         # Temporarily override the TE kwargs with our custom flag
         te_ext._get_extra_te_kwargs = make_get_extra_te_kwargs_with_override(
             original_get_extra_te_kwargs, reduce_amax=False
