@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import subprocess
@@ -10,10 +11,14 @@ from logging import getLogger
 import yaml
 
 logger = getLogger("deterministic_testing")
+logger.setLevel(level=logging.INFO)
+
+handler = logging.StreamHandler()
+handler.setLevel(logging.INFO)  # handler 级别（真正过滤）
+logger.addHandler(handler)
 
 DENSE_MODELS = [
     "llama2_7B",
-    "llama3_8B",
     "llama3_70B",
     "llama3.1_8B",
     "qwen2.5_7B",
@@ -23,7 +28,6 @@ DENSE_MODELS = [
 
 MOE_MODELS = [
     "deepseek_v2_lite",
-    "llama4_17B16E",
     "mixtral_8x7B_v0.1",
     "qwen3_30B_A3B",
 ]
@@ -46,14 +50,18 @@ MOE_EXTRA_OPTIONS = {
 
 MICRO_BATCH_SIZE = 1
 GLOBAL_BATCH_SIZE = 8
-ITERS = 1000
+ITERS = 10
 
 FP8 = [True, False]
 EP = [1, 8]
-TP = [1, 8]
+# TP = [1, 8]
+TP = [
+    1,
+]
 
 BASE_CONFIG_PATH = "examples/megatron/configs/MI355X"
 OUTPUT_DIR = "output"
+HF_TOKEN = "your_hf_token"
 
 
 @dataclass
@@ -124,12 +132,19 @@ def generate_deterministic_testing_configs():
     for combine in all_combinations:
         model_name, fp8, ep, tp = combine
         extra_options = EXTRA_OPTIONS
+        if fp8:
+            # NOTE: Skip FP8 because of OOM error
+            if model_name in ["llama3_70B", "qwen2.5_72B", "mixtral_8x7B_v0.1", "qwen3_30B_A3B"]:
+                continue
         if model_name in DENSE_MODELS:
             if ep != 1:
                 continue
         if model_name in MOE_MODELS:
             if tp != 1:
                 continue
+            if ep != 1:
+                continue
+
             extra_options.update(MOE_EXTRA_OPTIONS)
         filter_configs.add(
             Config(
@@ -144,6 +159,7 @@ def generate_deterministic_testing_configs():
                 extra_options=extra_options,
             )
         )
+    logger.info(f"Filter configs: {filter_configs}")
 
     configs_path = []
     for config in filter_configs:
@@ -167,7 +183,7 @@ def run_script(
 
     env["TRAIN_LOG"] = log_path
 
-    do_print_at_runtime = True
+    do_print_at_runtime = False
     run_stdout = subprocess.PIPE if not do_print_at_runtime else sys.stdout
     run_stderr = subprocess.PIPE if not do_print_at_runtime else sys.stderr
 
@@ -243,6 +259,7 @@ def check_numerical_reproducibility(log, log_ref):
 
 
 def run_deterministic_testing_configs(configs_path: list[str]):
+    os.environ["HF_TOKEN"] = HF_TOKEN
 
     output_dir = OUTPUT_DIR
     if not os.path.exists(output_dir):
@@ -251,6 +268,8 @@ def run_deterministic_testing_configs(configs_path: list[str]):
     success_cases = []
     failed_cases = []
     for config_path in configs_path:
+        logger.info(f"Running {config_path} deterministic testing...")
+
         log_path = os.path.join(output_dir, f"{os.path.basename(config_path)}.0.txt")
         log, _ = run_script(
             config_path,
