@@ -15,11 +15,6 @@ from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
 
 
-def _has_recompute_layer_ids(ctx: PatchContext) -> bool:
-    """Check if recompute_layer_ids is specified in module_config."""
-    return getattr(get_args(ctx), "recompute_layer_ids", None) is not None
-
-
 @register_patch(
     "megatron.transformer.custom_recompute_layer_ids",
     backend="megatron",
@@ -28,7 +23,7 @@ def _has_recompute_layer_ids(ctx: PatchContext) -> bool:
         "Monkey patch TransformerConfig and TransformerBlock to support "
         "Primus-provided recompute_layer_ids."
     ),
-    condition=_has_recompute_layer_ids,
+    condition=lambda ctx: getattr(get_args(ctx), "recompute_layer_ids", None) is not None,
 )
 def patch_custom_recompute_layer_ids(ctx: PatchContext):
     """
