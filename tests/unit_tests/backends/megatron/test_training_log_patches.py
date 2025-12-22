@@ -50,12 +50,25 @@ def _install_fake_megatron_training(monkeypatch: pytest.MonkeyPatch):
 def _make_ctx(args=None, config=None, module_config=None):
     """
     Build a minimal PatchContext-like object for direct calls to patch functions.
+
+    The current Megatron training_log patch expects:
+        - ctx.extra["backend_args"] for runtime args
+        - ctx.extra["module_config"] with a .params attribute for config
+
+    In real usage, `module_config.params` is a SimpleNamespace-like object, not a
+    raw dict, so we wrap dict configs into a SimpleNamespace for tests.
     """
+    # Normalize module_config to have a .params attribute, matching real usage.
+    if module_config is None and config is not None:
+        if isinstance(config, dict):
+            params = SimpleNamespace(**config)
+        else:
+            params = config
+        module_config = SimpleNamespace(params=params)
+
     extra = {}
     if args is not None:
-        extra["args"] = args
-    if config is not None:
-        extra["config"] = config
+        extra["backend_args"] = args
     if module_config is not None:
         extra["module_config"] = module_config
     return SimpleNamespace(extra=extra)

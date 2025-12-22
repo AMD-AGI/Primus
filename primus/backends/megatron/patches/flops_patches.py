@@ -271,20 +271,11 @@ def use_primus_flops_estimator(ctx: PatchContext):
         - Better performance profiling
         - Support for custom layer combinations
     """
-    try:
-        import megatron.training.training as megatron_training
+    import megatron.training.training as megatron_training
 
-        # Replace Megatron's FLOPs calculator with our implementation
-        megatron_training.num_floating_point_operations = num_floating_point_operations
+    # Replace Megatron's FLOPs calculator with our implementation
+    megatron_training.num_floating_point_operations = num_floating_point_operations
 
-        log_rank_0(
-            "[Patch:megatron.flops.use_primus_estimator] Replaced FLOPs calculator with Primus implementation"
-        )
-
-    except ImportError as e:
-        log_rank_0(f"[Patch:megatron.flops.use_primus_estimator][SKIP] Failed to import modules: {e}")
-    except AttributeError as e:
-        log_rank_0(
-            f"[Patch:megatron.flops.use_primus_estimator][WARN] "
-            f"Megatron version may not have num_floating_point_operations: {e}"
-        )
+    log_rank_0(
+        "[Patch:megatron.flops.use_primus_estimator] Replaced FLOPs calculator with Primus implementation"
+    )

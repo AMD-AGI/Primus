@@ -35,7 +35,7 @@ contribute logging features safely.
 """
 
 import contextlib
-from typing import Any, Dict, List, Protocol
+from typing import Any, List, Protocol
 
 import torch
 
@@ -74,15 +74,20 @@ class RocmMonitorExtension:
     during the execution of training_log.
     """
 
-    def __init__(self, args: Any, config: Dict[str, Any]):
+    def __init__(self, args: Any, config: Any):
         self.args = args
         self.config = config
         self.original_print = None
         self._megatron_training_module = None
         self.call_count = 0
-        # Cache Primus-specific ROCm config to avoid repeated dict lookups
-        self.use_rocm_mem: bool = bool(config.get("use_rocm_mem_info", False))
-        self.rocm_iters = config.get("use_rocm_mem_info_iters", [])
+        # Cache Primus-specific ROCm config to avoid repeated lookups.
+        # Support both dict-style and SimpleNamespace-style configs.
+        if isinstance(config, dict):
+            self.use_rocm_mem: bool = bool(config.get("use_rocm_mem_info", False))
+            self.rocm_iters = config.get("use_rocm_mem_info_iters", [])
+        else:
+            self.use_rocm_mem = bool(getattr(config, "use_rocm_mem_info", False))
+            self.rocm_iters = getattr(config, "use_rocm_mem_info_iters", [])
         # Cache last successful ROCm SMI stats string so we can reuse it on
         # iterations where we intentionally skip expensive SMI queries.
         self._last_rocm_mem_str: str = ""
@@ -279,28 +284,30 @@ def patch_training_log_unified(ctx: PatchContext):
     try:
         import megatron.training.training as megatron_training  # type: ignore
 
-        # 1. Get Configuration
-        args = ctx.extra.get("args")
-
-        # Try to get config dict from 'config' key (Adapter style)
-        config: Dict[str, Any] = ctx.extra.get("config", {}) or {}
-
-        # If not found, try to get from 'module_config' object (BaseTrainer style)
-        if not config and "module_config" in ctx.extra:
-            module_config = ctx.extra["module_config"]
-            if hasattr(module_config, "params"):
-                config = module_config.params  # type: ignore[assignment]
-
+        args = ctx.extra.get("backend_args", {})
         if not args:
-            log_rank_0("[Patch:megatron.training_log][SKIP] No args in context")
+            warning_rank_0("[Patch:megatron.training_log][SKIP] No args in context")
+            return
+
+        module_config = ctx.extra.get("module_config", {})
+        if not module_config:
+            warning_rank_0("[Patch:megatron.training_log][SKIP] No module_config in context")
+            return
+
+        # primus_config = ctx.extra.get("primus_config", {})
+
+        # Try to get config object from module_config.params (SimpleNamespace tree).
+        config = getattr(module_config, "params", None)
+        if config is None:
+            warning_rank_0("[Patch:megatron.training_log][SKIP] No params in module_config")
             return
 
         # 2. Decide which extensions to enable for this patch
         new_extensions: List[Any] = []
 
         # -> ROCm Memory Monitoring
-        use_rocm_mem = config.get("use_rocm_mem_info", False)
-        rocm_iters = config.get("use_rocm_mem_info_iters", [])
+        use_rocm_mem = bool(getattr(config, "use_rocm_mem_info", False))
+        rocm_iters = getattr(config, "use_rocm_mem_info_iters", [])
 
         enable_rocm_stats = (
             hasattr(args, "log_throughput")
