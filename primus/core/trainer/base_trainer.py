@@ -19,7 +19,6 @@ Design Pattern: Template Method
 from abc import abstractmethod
 from typing import Any
 
-from primus.backends.megatron.training.global_vars import set_primus_global_variables
 from primus.core.patches import run_patches
 from primus.core.trainer.trainer_component import TrainerComponent
 from primus.modules import module_utils
