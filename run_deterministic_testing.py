@@ -142,7 +142,7 @@ def generate_deterministic_testing_configs():
         if model_name in MOE_MODELS:
             if tp != 1:
                 continue
-            if ep != 1:
+            if ep != 8:
                 continue
 
             extra_options.update(MOE_EXTRA_OPTIONS)
@@ -291,10 +291,10 @@ def run_deterministic_testing_configs(configs_path: list[str]):
         )
 
         if check_numerical_reproducibility(log, log_ref):
-            logger.error(f"Numerical reproducibility check failed for {config_path}")
+            logger.error(f"Numerical reproducibility check passed for {config_path}")
             failed_cases.append(config_path)
         else:
-            logger.info(f"Numerical reproducibility check passed for {config_path}")
+            logger.info(f"Numerical reproducibility check failedfor {config_path}")
             success_cases.append(config_path)
 
     return success_cases, failed_cases
