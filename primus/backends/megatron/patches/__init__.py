@@ -18,16 +18,18 @@ from primus.backends.megatron.patches import checkpoint_patches as _checkpoint_p
 from primus.backends.megatron.patches import env_patches as _env_patches
 from primus.backends.megatron.patches import flops_patches as _flops_patches
 from primus.backends.megatron.patches import fp8_patches as _fp8_patches
+from primus.backends.megatron.patches import mla_patches as _mla_patches
 from primus.backends.megatron.patches import moe_patches as _moe_patches
-from primus.backends.megatron.patches import pp_patches as _pp_patches
+from primus.backends.megatron.patches import parallelism as _parallelism
+from primus.backends.megatron.patches import (
+    recompute_layer_patches as _recompute_layer_patches,
+)
 from primus.backends.megatron.patches import te_patches as _te_patches
 from primus.backends.megatron.patches import torch_fsdp2_patches as _torch_fsdp2_patches
 from primus.backends.megatron.patches import (
     training_log_patches as _training_log_patches,
 )
-from primus.backends.megatron.patches import transformer_patches as _transformer_patches
 from primus.backends.megatron.patches import turbo as _turbo
-from primus.backends.megatron.patches import zbpp_patches as _zbpp_patches
 from primus.core.patches import run_patches
 
 
