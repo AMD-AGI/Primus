@@ -10,66 +10,37 @@ Megatron Patch Collection
 This module defines the public entrypoint for applying Megatron-specific patches.
 """
 
-# Import patch modules for side-effect registration via @register_patch.
-# NOTE: These imports are intentionally unused; they register patches with
-# the core patch registry when this package is imported.
-from primus.backends.megatron.patches import args_patches as _args_patches  # noqa: F401
-from primus.backends.megatron.patches import checkpoint_patches as _checkpoint_patches
-from primus.backends.megatron.patches import env_patches as _env_patches
-from primus.backends.megatron.patches import flops_patches as _flops_patches
-from primus.backends.megatron.patches import fp8_patches as _fp8_patches
-from primus.backends.megatron.patches import mla_patches as _mla_patches
-from primus.backends.megatron.patches import moe_patches as _moe_patches
-from primus.backends.megatron.patches import parallelism as _parallelism
-from primus.backends.megatron.patches import (
-    recompute_layer_patches as _recompute_layer_patches,
-)
-from primus.backends.megatron.patches import te_patches as _te_patches
-from primus.backends.megatron.patches import torch_fsdp2_patches as _torch_fsdp2_patches
-from primus.backends.megatron.patches import (
-    training_log_patches as _training_log_patches,
-)
-from primus.backends.megatron.patches import turbo as _turbo
+import importlib
+import pkgutil
+
 from primus.core.patches import run_patches
 
 
-def apply_megatron_patches(
-    *,
-    backend_version: str = None,
-    primus_version: str = None,
-    model_name: str = None,
-    phase: str = "before_train",
-    extra: dict = None,
-) -> int:
+def _auto_import_patch_modules() -> None:
     """
-    Apply all applicable Megatron patches for the given context.
+    Automatically import all patch modules under this package.
 
-    Args:
-        backend_version: Megatron version (e.g., "0.8.0")
-        primus_version: Primus version
-        model_name: Model name (e.g., "llama3_70B", "deepseek_v3")
-        phase: Execution phase (default: "before_train")
-        extra: Additional context data (e.g., {"args": megatron_args})
+    Any module whose fully-qualified name ends with ``"_patches"`` will be
+    imported, which in turn triggers its ``@register_patch`` side effects.
 
-    Returns:
-        Number of patches applied
-
-    Example:
-        apply_megatron_patches(
-            backend_version="0.8.0",
-            model_name="deepseek_v3",
-            phase="before_train",
-            extra={"args": megatron_args},
-        )
+    This allows adding new ``*_patches.py`` files (including in subpackages
+    like ``moe_patches`` or ``parallelism``) without having to update this
+    ``__init__`` module.
     """
-    return run_patches(
-        backend="megatron",
-        phase=phase,
-        backend_version=backend_version,
-        primus_version=primus_version,
-        model_name=model_name,
-        extra=extra,
-    )
+    package_name = __name__
+
+    # Walk all submodules / subpackages under this package's filesystem path.
+    for module_info in pkgutil.walk_packages(__path__, prefix=package_name + "."):
+        mod_name = module_info.name
+
+        # Only import modules whose names clearly identify them as patch modules.
+        # Support both "*_patches.py" and "*_patch.py" naming conventions.
+        if not (mod_name.endswith("_patches") or mod_name.endswith("_patch")):
+            continue
+
+        importlib.import_module(mod_name)
 
 
-__all__ = ["apply_megatron_patches"]
+# Eagerly import all patch modules on package import so patches are registered
+# before any backend-specific logic runs.
+_auto_import_patch_modules()

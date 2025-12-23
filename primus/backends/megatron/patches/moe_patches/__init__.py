@@ -7,20 +7,11 @@
 """
 Megatron MoE Patches
 
-This module contains patches for Megatron's Mixture-of-Experts (MoE) components:
+This package groups patches for Megatron's Mixture-of-Experts (MoE) components:
     - Deprecated MoE layer implementations
     - Primus TopKRouter
     - MoE permutation fusion with Transformer Engine
+
+Patch modules are discovered and imported automatically by
+``primus.backends.megatron.patches``; no explicit imports are required here.
 """
-
-from primus.backends.megatron.patches.moe_patches import (
-    deprecated_layer_patches,
-    permute_fusion_patches,
-    topk_router_patches,
-)
-
-__all__ = [
-    "deprecated_layer_patches",
-    "topk_router_patches",
-    "permute_fusion_patches",
-]
