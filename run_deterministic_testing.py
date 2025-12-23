@@ -50,7 +50,7 @@ MOE_EXTRA_OPTIONS = {
 
 MICRO_BATCH_SIZE = 1
 GLOBAL_BATCH_SIZE = 8
-ITERS = 10
+ITERS = 1000
 
 FP8 = [True, False]
 EP = [1, 8]
@@ -292,10 +292,10 @@ def run_deterministic_testing_configs(configs_path: list[str]):
 
         if check_numerical_reproducibility(log, log_ref):
             logger.error(f"Numerical reproducibility check passed for {config_path}")
-            failed_cases.append(config_path)
+            success_cases.append(config_path)
         else:
             logger.info(f"Numerical reproducibility check failedfor {config_path}")
-            success_cases.append(config_path)
+            failed_cases.append(config_path)
 
     return success_cases, failed_cases
 
