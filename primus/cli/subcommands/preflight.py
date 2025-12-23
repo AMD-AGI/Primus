@@ -57,8 +57,6 @@ def register_subcommand(subparsers):
     )
     from primus.tools.preflight.preflight_args import add_preflight_parser
 
-    from primus.tools.preflight.preflight_args import add_preflight_parser
-
     # Reuse the shared preflight argument builder
     add_preflight_parser(parser)
 
