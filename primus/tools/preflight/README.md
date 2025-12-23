@@ -4,8 +4,20 @@
 **Preflight** is a diagnostic tool designed for large-scale cluster environments. Before starting distributed training, it benchmarks the **compute performance of all GPUs**, as well as **intra-node and inter-node communication bandwidth and latency**. Its primary goal is to help users identify **underperforming nodes** or **network bottlenecks** in the cluster, ensuring reliable and efficient training runs.
 
 ## Run preflight
+
+Torch / single node:
+
+```bash
+primus-cli preflight \
+  --dump-path output/preflight \
+  --report-file-name preflight_report
 ```
-NUM_NODES=8 ./tools/preflight/run_slurm_preflight.sh
+
+Slurm (multi-node example):
+
+```bash
+NUM_NODES=8 srun -N ${NUM_NODES} --ntasks-per-node=1 --cpus-per-task=256 \
+  primus-cli preflight --dump-path output/preflight --report-file-name preflight_report
 ```
 
 

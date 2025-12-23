@@ -1,8 +1,15 @@
 import torch
 import torch.distributed as dist
-from global_vars import ITERATION, LOCAL_WORLD_SIZE, RANK, WARMUP, WORLD_SIZE
 from torch.profiler import ProfilerActivity
-from utility import log
+
+from primus.tools.preflight.global_vars import (
+    ITERATION,
+    LOCAL_WORLD_SIZE,
+    RANK,
+    WARMUP,
+    WORLD_SIZE,
+)
+from primus.tools.preflight.utility import log
 
 # profile parameters
 _ENABLE_PROFILE = False

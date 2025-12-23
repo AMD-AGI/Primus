@@ -9,7 +9,8 @@ import time
 import matplotlib.pyplot as plt
 import torch
 import torch.distributed as dist
-from global_vars import (
+
+from primus.tools.preflight.global_vars import (
     ITERATION,
     LOCAL_RANK,
     LOCAL_WORLD_SIZE,
@@ -18,7 +19,7 @@ from global_vars import (
     WORLD_SIZE,
     get_hostnames,
 )
-from utility import create_dir, log
+from primus.tools.preflight.utility import create_dir, log
 
 
 def run_square_gemm(args):
