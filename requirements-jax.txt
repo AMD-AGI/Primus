@@ -1,0 +1,12 @@
+loguru
+wandb
+expecttest
+pre-commit
+nltk
+matplotlib
+markdown2
+weasyprint
+tyro
+blobfile
+mlflow
+pyrsmi

@@ -23,6 +23,7 @@ Optional Environment Variables:
 Example:
   export DATA_PATH=/mnt/data
   export EXP=examples/megatron/exp_pretrain.yaml
+  export BACKEND=MaxText
   NNODES=2 bash run_slurm_pretrain.sh
 EOF
 exit 0
@@ -39,8 +40,9 @@ mkdir -p "$LOG_DIR"
 
 srun -N "${NNODES}" \
      --exclusive \
+     --export ALL \
      --ntasks-per-node=1 \
-     --cpus-per-task="${CPUS_PER_TASK:-256}" \
+     --cpus-per-task="${CPUS_PER_TASK:-128}" \
      bash -c "
           readarray -t node_array < <(scontrol show hostnames \"\$SLURM_JOB_NODELIST\")
           if [ \"\$SLURM_NODEID\" = \"0\" ]; then
@@ -55,18 +57,6 @@ srun -N "${NNODES}" \
           export NNODES=\${SLURM_NNODES}
           export NODE_RANK=\${SLURM_PROCID}
           export GPUS_PER_NODE=\${SLURM_GPUS_ON_NODE}
-          export HSA_NO_SCRATCH_RECLAIM=\${HSA_NO_SCRATCH_RECLAIM}
-          export NVTE_CK_USES_BWD_V3=\${NVTE_CK_USES_BWD_V3}
-          export NCCL_IB_HCA=\${NCCL_IB_HCA}
-          export NCCL_PXN_DISABLE=\${NCCL_PXN_DISABLE}
-          export NCCL_P2P_NET_CHUNKSIZE=\${NCCL_P2P_NET_CHUNKSIZE}
-          export GPU_MAX_HW_QUEUES=\${GPU_MAX_HW_QUEUES}
-          export GLOO_SOCKET_IFNAME=\${GLOO_SOCKET_IFNAME}
-          export NCCL_SOCKET_IFNAME=\${NCCL_SOCKET_IFNAME}
-          export REBUILD_BNXT=\${REBUILD_BNXT}
-          export MEGATRON_PATH=\${MEGATRON_PATH}
-          export TORCHTITAN_PATH=\${TORCHTITAN_PATH}
-          export BACKEND_PATH=\${BACKEND_PATH}
-          export PATH_TO_BNXT_TAR_PACKAGE=\${PATH_TO_BNXT_TAR_PACKAGE}
+          export REBUILD_PRIMUS_TURBO=\${REBUILD_PRIMUS_TURBO}
           bash ${SCRIPT_DIR}/run_local_pretrain.sh \"\$@\" 2>&1 | tee ${LOG_FILE}
      " bash "$@"

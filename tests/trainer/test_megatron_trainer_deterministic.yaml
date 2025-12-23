@@ -1,5 +1,5 @@
-work_group: ${TEAM:amd}
-user_name: ${USER:root}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
 exp_name: &exp_name ${EXP:exp-deepseek-pretrain}
 workspace: ./output
 
@@ -24,7 +24,7 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 5
 
-      # hyber parameters
+      # hyper parameters
       train_iters: 20
       micro_batch_size: 1
       global_batch_size: ${PRIMUS_GLOBAL_BATCH_SIZE:8}
@@ -52,7 +52,7 @@ modules:
 
       # data
       num_workers: 1
-      train_data_path: ${TOKENIZED_DATA_PATH:null}
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
 
@@ -83,4 +83,3 @@ modules:
       deterministic_mode: true
       use_flash_attn: false
       cross_entropy_loss_fusion: false
-      moe_grouped_gemm: false

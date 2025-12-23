@@ -1,5 +1,5 @@
-work_group: ${TEAM:amd}
-user_name: ${USER:root}
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
 exp_name: &exp_name ${EXP:exp-deepseek-pretrain}
 workspace: ./output
 
@@ -24,7 +24,7 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 5
 
-      # hyber parameters
+      # hyper parameters
       train_iters: 3
       micro_batch_size: 1
       global_batch_size: ${PRIMUS_GLOBAL_BATCH_SIZE:8}

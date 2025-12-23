@@ -1,4 +1,4 @@
-bases:
+extends:
   - llama_base.yaml
 
 init_method_std: 0.01
@@ -12,6 +12,6 @@ num_query_groups: 8
 num_experts: 8
 moe_router_topk: 2
 moe_router_load_balancing_type: aux_loss
-moe_aux_loss_coeff: 1e-2
+moe_aux_loss_coeff: 1.0e-2
 moe_grouped_gemm: true
 moe_token_dispatcher_type: alltoall

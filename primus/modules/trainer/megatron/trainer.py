@@ -5,9 +5,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import argparse
 import dataclasses
+import functools
 import gc
 import importlib.util
+import inspect
 import os
 import statistics
 import sys
@@ -31,7 +34,12 @@ from megatron.training.checkpointing import (
     load_checkpoint,
     save_checkpoint,
 )
+from megatron.training.training import save_checkpoint_and_time
 
+from primus.backends.megatron.core.optimizer.moun import get_megatron_muon_optimizer
+from primus.backends.megatron.core.optimizer.moun_optimizer_config import (
+    MounOptimizerConfig,
+)
 from primus.backends.megatron.training.utils import is_pipeline_stage_containing_loss
 from primus.core.utils.import_utils import get_custom_fsdp, get_model_provider
 
@@ -122,6 +130,7 @@ from megatron.training.training import (
 from megatron.training.utils import (
     append_to_progress_log,
     calc_params_l2_norm,
+    is_first_or_last_pipeline_stage,
     logical_and_across_model_parallel_group,
     reduce_max_stat_across_model_parallel_group,
     report_memory,
@@ -130,7 +139,9 @@ from megatron.training.utils import (
 )
 from megatron.training.yaml_arguments import validate_yaml
 
+from primus.backends.megatron.argument_builder import _load_megatron_defaults
 from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_metrics
+from primus.backends.megatron.model_provider import primus_model_provider
 from primus.backends.megatron.training.global_vars import (
     get_mlflow_writer,
     set_primus_global_variables,
@@ -139,6 +150,7 @@ from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenize
 from primus.core.utils import checker, file_utils
 from primus.core.utils.flops_estimator import num_floating_point_operations
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
+from primus.core.utils.yaml_utils import nested_namespace_to_dict
 from primus.modules.base_module import BaseModule
 from primus.modules.module_utils import (
     debug_rank_0,
@@ -149,7 +161,12 @@ from primus.modules.module_utils import (
 )
 from primus.modules.trainer.base_trainer import BaseTrainer
 
-from .utils import set_wandb_writer_patch, validate_args_on_rocm
+from .utils import (
+    is_v_schedule_enabled,
+    schedule_wrapper,
+    set_wandb_writer_patch,
+    validate_args_on_rocm,
+)
 
 # The earliest we can measure the start time.
 _TRAIN_START_TIME = time.time()
@@ -159,15 +176,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        # monkey patch modules
-        self.patch_moe_layer()
-        self.patch_torch_fsdp()
-        self.patch_get_extra_te_kwargs()
-        self.patch_file_system_writer()
-        self.patch_te_tp_overlap()
-        self.patch_mla_attention()
-        self.patch_fp8_context()
-        # self.patch_zbpp()
+        self.is_v_schedule = is_v_schedule_enabled(self.module_config)
 
         self.app_metrics = {}
 
@@ -176,432 +185,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
-
-    def patch_pt_replace_te(self, args):
-
-        from megatron.core.models.gpt import (
-            gpt_layer_specs,
-            gpt_model,
-            moe_module_specs,
-        )
-
-        from primus.backends.megatron.core.extensions.primus_turbo import (
-            PrimusTurboAttention,
-            PrimusTurboColumnParallelLinear,
-            PrimusTurboColumnParallelLinearTorch,
-            PrimusTurboGroupedMLP,
-            PrimusTurboLayerNormColumnParallelLinear,
-            PrimusTurboRowParallelLinear,
-        )
-
-        if args.use_turbo_attention:
-            gpt_layer_specs.TEDotProductAttention = PrimusTurboAttention
-        if args.use_turbo_parallel_linear:
-            # TE row parallel linear
-            gpt_layer_specs.TERowParallelLinear = PrimusTurboRowParallelLinear
-            moe_module_specs.TERowParallelLinear = PrimusTurboRowParallelLinear
-            # TE layer norn column parallel linear
-            gpt_layer_specs.TELayerNormColumnParallelLinear = PrimusTurboLayerNormColumnParallelLinear
-            # TE column parallel linear
-            gpt_layer_specs.TEColumnParallelLinear = PrimusTurboColumnParallelLinear
-            moe_module_specs.TEColumnParallelLinear = PrimusTurboColumnParallelLinear
-            # column parallel linear
-            gpt_model.tensor_parallel.ColumnParallelLinear = PrimusTurboColumnParallelLinearTorch
-        if args.use_turbo_grouped_mlp:
-            moe_module_specs.GroupedMLP = PrimusTurboGroupedMLP
-
-    def patch_fp8_context(self):
-        from megatron.core import fp8_utils
-        from megatron.core.ssm import mamba_block
-        from megatron.core.transformer import multi_token_prediction, transformer_block
-
-        from primus.backends.megatron.core.fp8_utils import get_fp8_context
-
-        if self.module_config.fp8:
-            warning_rank_0(f"MegatronTrainer: Patch get_fp8_context...")
-            transformer_block.get_fp8_context = get_fp8_context
-            mamba_block.get_fp8_context = get_fp8_context
-            multi_token_prediction.get_fp8_context = get_fp8_context
-
-            fp8_utils.get_fp8_context = get_fp8_context
-
-    def patch_te_tp_overlap(self):
-        if not self.module_config.tp_comm_overlap:
-            return
-
-        def _check_tp_overlap_cfg():
-            if self.module_config.fp8:
-                if (
-                    self.module_config.tp_comm_overlap_rs
-                    or self.module_config.tp_comm_bulk_dgrad
-                    or self.module_config.tp_comm_bulk_wgrad
-                ):
-                    raise NotImplementedError(
-                        "FP8 Async-tp not support for rs, bulk overlap! Please set tp_comm_overlap_rs=False, tp_comm_bulk_dgrad=False, tp_comm_bulk_wgrad=False"
-                    )
-
-        _check_tp_overlap_cfg()
-
-        import functools
-
-        import transformer_engine as te
-        import transformer_engine_torch as tex
-        from megatron.core.utils import is_te_min_version
-
-        from primus.backends.transformer_engine import transformer_engine_torch as ptex
-        from primus.backends.transformer_engine.pytorch.module.base import (
-            get_workspace,
-            initialize_ub,
-        )
-
-        warning_rank_0(f"MegatronTrainer: Patch transformer_engine tp overlap...")
-
-        tex.CommOverlap = ptex.CommOverlap
-        tex.CommOverlapP2P = ptex.CommOverlapP2P
-        tex.CommOverlapType = ptex.CommOverlapType
-        if is_te_min_version("2.0"):
-            from primus.backends.transformer_engine.pytorch.cpp_extensions.gemm import (
-                general_gemm,
-            )
-
-            prev_general_gemm = te.pytorch.cpp_extensions.general_gemm
-            te.pytorch.cpp_extensions.general_gemm = functools.partial(
-                general_gemm, orig_func=prev_general_gemm
-            )
-            te.pytorch.module.linear.general_gemm = functools.partial(
-                general_gemm, orig_func=prev_general_gemm
-            )
-            te.pytorch.module.layernorm_linear.general_gemm = functools.partial(
-                general_gemm, orig_func=prev_general_gemm
-            )
-        else:
-            from primus.backends.transformer_engine.pytorch.cpp_extensions.gemm import (
-                fp8_gemm,
-                gemm,
-            )
-
-            prev_gemm = te.pytorch.cpp_extensions.gemm
-            prev_fp8_gemm = te.pytorch.cpp_extensions.fp8_gemm
-
-            tex.CommOverlapAlgo = ptex.CommOverlapAlgo
-            te.pytorch.cpp_extensions.CommOverlapAlgo = ptex.CommOverlapAlgo
-            te.pytorch.cpp_extensions.gemm = functools.partial(gemm, orig_func=prev_gemm)
-            te.pytorch.module.linear.gemm = functools.partial(gemm, orig_func=prev_gemm)
-            te.pytorch.cpp_extensions.fp8_gemm = functools.partial(fp8_gemm, orig_func=prev_fp8_gemm)
-            te.pytorch.module.linear.fp8_gemm = functools.partial(fp8_gemm, orig_func=prev_fp8_gemm)
-        te.pytorch.module.base.initialize_ub = initialize_ub
-        te.pytorch.module.base.get_workspace = get_workspace
-        te.pytorch.cpp_extensions.CommOverlapType = ptex.CommOverlapType
-
-    def patch_get_extra_te_kwargs(self):
-        warning_rank_0(f"MegatronTrainer: monkey patch get_extra_te_kwargs...")
-        import inspect
-
-        import transformer_engine as te
-        from megatron.core.extensions import transformer_engine as te_ext
-
-        # Save the original _get_extra_te_kwargs function
-        original_get_extra_te_kwargs = te_ext._get_extra_te_kwargs
-
-        # Create a wrapped version of _get_extra_te_kwargs with custom overrides
-        def make_get_extra_te_kwargs_with_override(**overrides):
-            def _wrapped(config):
-                kwargs = original_get_extra_te_kwargs(config)
-                kwargs.update(overrides)
-                return kwargs
-
-            return _wrapped
-
-        def has_parameter(cls, param):
-            try:
-                return param in inspect.signature(cls.__init__).parameters
-            except Exception:
-                return False
-
-        # Patch TELinear
-        def patch_TELinear():
-            from megatron.core.extensions.transformer_engine import TELinear
-
-            if not self.module_config.no_fp8_weight_transpose_cache:
-                return
-            assert has_parameter(
-                te.pytorch.Linear, "keep_fp8_weight_transpose_cache"
-            ), "Current Transformer-Engine not support this feature"
-
-            orig_init = TELinear.__init__
-
-            def new_init(self, *args, **kwargs):
-                # Temporarily override the TE kwargs with our custom flag
-                te_ext._get_extra_te_kwargs = make_get_extra_te_kwargs_with_override(
-                    keep_fp8_weight_transpose_cache=False
-                )
-                try:
-                    orig_init(self, *args, **kwargs)
-                finally:
-                    # Always restore the original function after init
-                    te_ext._get_extra_te_kwargs = original_get_extra_te_kwargs
-
-            TELinear.__init__ = new_init
-
-        # Patch TELayerNormColumnParallelLinear
-        def patch_TELayerNormColumnParallelLinear():
-            from megatron.core.extensions.transformer_engine import (
-                TELayerNormColumnParallelLinear,
-            )
-
-            if not self.module_config.no_fp8_weight_transpose_cache:
-                return
-            assert has_parameter(
-                te.pytorch.LayerNormLinear, "keep_fp8_weight_transpose_cache"
-            ), "Current Transformer-Engine not support this feature"
-
-            orig_init = TELayerNormColumnParallelLinear.__init__
-
-            def new_init(self, *args, **kwargs):
-                # Temporarily override the TE kwargs with our custom flag
-                te_ext._get_extra_te_kwargs = make_get_extra_te_kwargs_with_override(
-                    keep_fp8_weight_transpose_cache=False
-                )
-                try:
-                    orig_init(self, *args, **kwargs)
-                finally:
-                    # Always restore the original function after init
-                    te_ext._get_extra_te_kwargs = original_get_extra_te_kwargs
-
-            TELayerNormColumnParallelLinear.__init__ = new_init
-
-        # Patch TEDelayedScaling
-        def patch_TEDelayedScaling():
-            from megatron.core.extensions.transformer_engine import TEDelayedScaling
-
-            if not has_parameter(te.common.recipe.DelayedScaling, "reduce_amax"):
-                return
-
-            orig_init = TEDelayedScaling.__init__
-
-            def new_init(self, *args, **kwargs):
-                # Temporarily override the TE kwargs with our custom flag
-                te_ext._get_extra_te_kwargs = make_get_extra_te_kwargs_with_override(reduce_amax=False)
-                try:
-                    orig_init(self, *args, **kwargs)
-                finally:
-                    # Always restore the original function after init
-                    te_ext._get_extra_te_kwargs = original_get_extra_te_kwargs
-
-            TEDelayedScaling.__init__ = new_init
-
-        patch_TELinear()
-        patch_TELayerNormColumnParallelLinear()
-        patch_TEDelayedScaling()
-
-    def patch_moe_layer(self):
-        if self.module_config.use_deprecated_20241209_moe_layer:
-            warning_rank_0(f"MegatronTrainer: monkey patch MoELayer with DeprecatedMoELayer...")
-            # patch module class
-            from primus.backends.megatron.core.transformer.moe.deprecated_20251209.experts import (
-                DeprecatedGroupedMLP,
-                DeprecatedSequentialMLP,
-                DeprecatedTEGroupedMLP,
-            )
-            from primus.backends.megatron.core.transformer.moe.deprecated_20251209.moe_layer import (
-                DeprecatedMoELayer,
-                DeprecatedMoESubmodules,
-            )
-
-            sys.modules["megatron.core.transformer.moe.moe_layer"].MoELayer = DeprecatedMoELayer
-            sys.modules["megatron.core.transformer.moe.moe_layer"].MoESubmodules = DeprecatedMoESubmodules
-            sys.modules["megatron.core.transformer.moe.experts"].GroupedMLP = DeprecatedGroupedMLP
-            sys.modules["megatron.core.transformer.moe.experts"].SequentialMLP = DeprecatedSequentialMLP
-            sys.modules["megatron.core.transformer.moe.experts"].TEGroupedMLP = DeprecatedTEGroupedMLP
-
-            # patch imported module
-            from megatron.core.models.gpt import moe_module_specs
-
-            moe_module_specs.MoELayer = DeprecatedMoELayer
-            moe_module_specs.MoESubmodules = DeprecatedMoESubmodules
-            moe_module_specs.GroupedMLP = DeprecatedGroupedMLP
-            moe_module_specs.SequentialMLP = DeprecatedSequentialMLP
-            moe_module_specs.TEGroupedMLP = DeprecatedTEGroupedMLP
-
-        if not self.module_config.disable_primus_topk_router:
-            warning_rank_0(f"MegatronTrainer: monkey patch TopKRouter...")
-            if self.module_config.use_deprecated_20241209_moe_layer:
-                from primus.backends.megatron.core.transformer.moe.deprecated_20251209.router import (
-                    DeprecatedTopKRouter,
-                )
-
-                sys.modules["megatron.core.transformer.moe.router"].TopKRouter = DeprecatedTopKRouter
-
-            # patch module class
-            from primus.backends.megatron.core.transformer.moe.router import (
-                PrimusTopKRouter,
-            )
-
-            sys.modules["megatron.core.transformer.moe.router"].TopKRouter = PrimusTopKRouter
-
-            # patch imported module
-            from megatron.core.transformer.moe import moe_layer
-
-            moe_layer.TopKRouter = PrimusTopKRouter
-
-            if self.module_config.use_deprecated_20241209_moe_layer:
-                from primus.backends.megatron.core.transformer.moe import (
-                    deprecated_20251209,
-                )
-
-                deprecated_20251209.moe_layer.TopKRouter = PrimusTopKRouter
-
-        if self.module_config.moe_permute_fusion:
-            warning_rank_0(f"MegatronTrainer: monkey patch permutation with latest fusion version...")
-            from megatron.core.extensions import (
-                transformer_engine as ori_transformer_engine,
-            )
-            from megatron.core.transformer.moe import moe_utils as ori_moe_utils
-
-            from primus.backends.transformer_engine.pytorch.permutation import (
-                moe_permute,
-                moe_permute_with_probs,
-                moe_sort_chunks_by_index,
-                moe_sort_chunks_by_index_with_probs,
-                moe_unpermute,
-            )
-
-            ori_transformer_engine.fused_permute = moe_permute
-            ori_transformer_engine.fused_permute_with_probs = moe_permute_with_probs
-            ori_transformer_engine.fused_sort_chunks_by_index = moe_sort_chunks_by_index
-            ori_transformer_engine.fused_sort_chunks_by_index_with_probs = moe_sort_chunks_by_index_with_probs
-            ori_transformer_engine.fused_unpermute = moe_unpermute
-
-            ori_moe_utils.fused_permute = moe_permute
-            ori_moe_utils.fused_permute_with_probs = moe_permute_with_probs
-            ori_moe_utils.fused_sort_chunks_by_index = moe_sort_chunks_by_index
-            ori_moe_utils.fused_sort_chunks_by_index_with_probs = moe_sort_chunks_by_index_with_probs
-            ori_moe_utils.fused_unpermute = moe_unpermute
-            ori_moe_utils.HAVE_TE = True
-
-    def patch_mla_attention(self):
-        if not self.module_config.fused_padded_mla_attention:
-            return
-
-        warning_rank_0(f"MegatronTrainer: monkey patch MLA attention to support padded fusion...")
-        # pad module definition
-        from megatron.core.transformer import multi_latent_attention
-
-        from primus.backends.megatron.core.transformer.multi_latent_attention import (
-            PaddedMLASelfAttention,
-        )
-
-        multi_latent_attention.MLASelfAttention = PaddedMLASelfAttention
-        # pad imported module
-        from megatron.core.models.gpt import gpt_layer_specs
-
-        gpt_layer_specs.MLASelfAttention = PaddedMLASelfAttention
-
-    def patch_torch_fsdp(self):
-        if not self.module_config.use_torch_fsdp2:
-            return
-
-        warning_rank_0("MegatronTrainer: Patching torch_FSDP2 with Primus implementation...")
-
-        try:
-            # Import custom FSDP wrapper
-            # Patch Megatron's internal reference to FSDP2 class
-            import megatron.core.distributed.torch_fully_sharded_data_parallel as torch_fsdp_module
-
-            from primus.backends.megatron.core.distributed.torch_fully_sharded_data_parallel import (
-                PrimusTorchFullyShardedDataParallel,
-            )
-
-            torch_fsdp_module.TorchTorchFullyShardedDataParallel = PrimusTorchFullyShardedDataParallel
-
-            # Patch training code reference
-            from megatron.training import training
-
-            training.torch_FSDP = PrimusTorchFullyShardedDataParallel
-
-            warning_rank_0("MegatronTrainer: torch_FSDP2 patch applied successfully.")
-
-        except ImportError as e:
-            raise RuntimeError("Failed to patch torch_FSDP2: missing dependencies") from e
-        except Exception as e:
-            raise RuntimeError("Unexpected error occurred during FSDP patching") from e
-
-    def patch_file_system_writer(self):
-        warning_rank_0("MegatronTrainer: Patching FileSystemWriterAsync...")
-        try:
-            import megatron.core.dist_checkpointing.strategies.filesystem_async as filesystem_async_module
-
-            from primus.backends.megatron.core.dist_checkpointing.strategies.filesystem_async import (
-                PrimusFileSystemWriterAsync,
-            )
-
-            filesystem_async_module.FileSystemWriterAsync = PrimusFileSystemWriterAsync
-        except Exception:
-            warning_rank_0("MegatronTrainer: Patch FileSystemWriterAsync failed.")
-        else:
-            warning_rank_0("MegatronTrainer: Patch FileSystemWriterAsync successfully.")
-
-    def patch_zbpp(self):
-        # patch optimizer
-        if self.module_config.patch_zero_bubble:
-            warning_rank_0(f"MegatronTrainer: Patch ZeroBubble PP")
-            import megatron.core.optimizer as optimizer
-
-            from primus.backends.megatron.core.optimizer.zbpp_optimizer import (
-                ZeroBubblePPChainedOptimizer,
-            )
-
-            optimizer.ChainedOptimizer = ZeroBubblePPChainedOptimizer
-
-            # patch get_forward_backward_func
-            import megatron.core.pipeline_parallel as ori_pp
-
-            from primus.backends.megatron.core.pipeline_parallel.schedules import (
-                get_forward_backward_func_zbpp,
-            )
-
-            ori_pp.get_forward_backward_func = get_forward_backward_func_zbpp
-
-            # patch linear to split d_w and d_input
-            import megatron.core.tensor_parallel.layers as ori_layers
-
-            from primus.backends.megatron.core.tensor_parallel.layers import (
-                LinearWithGradAccumulationAndAsyncCommunication,
-            )
-
-            ori_layers.LinearWithGradAccumulationAndAsyncCommunication = (
-                LinearWithGradAccumulationAndAsyncCommunication
-            )
-
-            # patch zbv-related code
-            if self.module_config.zero_bubble_v_schedule or self.module_config.enable_1f1b_v:
-                import megatron.core.parallel_state as ori_parallel_state
-
-                from primus.backends.megatron.core.parallel_state import (
-                    default_embedding_ranks,
-                    is_pipeline_last_stage,
-                    is_rank_in_embedding_group,
-                )
-
-                ori_parallel_state.default_embedding_ranks = default_embedding_ranks
-                ori_parallel_state.is_pipeline_last_stage = is_pipeline_last_stage
-                ori_parallel_state.is_rank_in_embedding_group = is_rank_in_embedding_group
-
-                import megatron.core.distributed.finalize_model_grads as ori_finalize_model_grads
-
-                from primus.backends.megatron.core.distributed.finalize_model_grad import (
-                    finalize_model_grads,
-                )
-
-                ori_finalize_model_grads.finalize_model_grads = finalize_model_grads
-
-                import megatron.core.transformer.transformer_layer as ori_transformer_layer
-
-                from primus.backends.megatron.core.transformer.transformer_layer import (
-                    get_transformer_layer_offset,
-                )
-
-                ori_transformer_layer.get_transformer_layer_offset = get_transformer_layer_offset
 
     def init(self, *init_args, **kwargs):
         allowed_keys = {
@@ -637,14 +220,42 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # There are some extra limitation on ROCm need extra validate.
         validate_args_on_rocm(args)
 
+        # Apply patches during initialization
+        # These patches need to be applied before model setup
+        from types import SimpleNamespace
+
+        from primus.core.patches import run_patches
+
+        # Construct a temporary module_config for patch context
+        # This allows patches to access Megatron args via get_args(ctx)
+        temp_module_config = SimpleNamespace()
+        temp_module_config.params = get_args()
+
+        run_patches(
+            backend="megatron",
+            phase="before_train",
+            backend_version="0.15.0rc8",
+            extra={
+                "module_config": temp_module_config,
+            },
+        )
+
         # Enable manually split layers in (interleaved) 1f1b pipeline
         # parallelism by monkey patching
         if args.decoder_pipeline_manual_split_list is not None:
+            log_rank_0(
+                f"-decoder_pipeline_manual_split_list has been deprecated, please use pipeline_model_parallel_layout instead"
+            )
             from .utils import set_manual_pipeline_split_patch, validate_manual_split
 
             log_rank_0(f"-monkey patch to enable manual pipeline split...")
             if validate_manual_split(args):
                 set_manual_pipeline_split_patch(args)
+
+        if args.recompute_layer_ids is not None:
+            from .utils import validate_specified_recompute_layers
+
+            validate_specified_recompute_layers(args)
 
         if args.log_progress:
             append_to_progress_log("Starting job")
@@ -867,13 +478,26 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.iterations_to_skip = []
 
         # support moe_freq_type
-        # args.moe_layer_freq = moe_freq_type(args.moe_layer_freq)
+        if isinstance(args.moe_layer_freq, str):
+            try:
+                args.moe_layer_freq = eval(args.moe_layer_freq)
+            except Exception:
+                raise ValueError(f"Invalid moe_layer_freq format: {args.moe_layer_freq}")
 
         if args.mock_data:
             args.data_path = None
             args.train_data_path = None
             args.valid_data_path = None
             args.test_data_path = None
+
+        if args.final_logit_softcapping is not None and args.final_logit_softcapping > 0.0:
+            log_rank_0(f"-enable final_logit_softcapping: {args.final_logit_softcapping}")
+            self.model_provider = functools.partial(primus_model_provider, get_model_provider())
+        else:
+            self.model_provider = get_model_provider()
+
+        if args.router_logit_softcapping is not None and args.router_logit_softcapping > 0.0:
+            log_rank_0(f"-enable router_logit_softcapping: {args.router_logit_softcapping}")
 
     def vocab_size_with_padding(self, orig_vocab_size, args):
         """Pad vocab size so it is divisible by model parallel size and
@@ -897,7 +521,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.app_metrics["app_build_optimizer_start_time"] = one_logger_utils.get_timestamp_in_ms()
         log_rank_0(f"-setup_model_and_optimizer...")
         self.model, self.optimizer, self.opt_param_scheduler = self.setup_model_and_optimizer(
-            get_model_provider(),
+            self.model_provider,
             ModelType.encoder_or_decoder,
             checkpointing_context=self.checkpointing_context,
         )
@@ -911,8 +535,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.app_metrics["app_build_dataiters_start_time"] = one_logger_utils.get_timestamp_in_ms()
         timers("train/valid/test-data-iterators-setup", log_level=0).start(barrier=True)
 
-        def train_valid_test_datasets_provider_func(train_val_test_num_samples):
-            return self.train_valid_test_datasets_provider(train_val_test_num_samples)
+        def train_valid_test_datasets_provider_func(train_val_test_num_samples, vp_stage=None):
+            return self.train_valid_test_datasets_provider(train_val_test_num_samples, vp_stage=vp_stage)
 
         train_valid_test_datasets_provider_func.is_distributed = True
 
@@ -920,8 +544,19 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             self.train_data_iterator = []
             self.valid_data_iterator = []
             self.test_data_iterator = []
-            for i in range(len(self.model)):
-                iterators = build_train_valid_test_data_iterators(train_valid_test_datasets_provider_func)
+            for vp_stage in range(len(self.model)):
+                dataset_provider_parameters = inspect.signature(
+                    train_valid_test_datasets_provider_func
+                ).parameters
+                assert (
+                    "vp_stage" in dataset_provider_parameters
+                ), "vp_stage must be a kwarg in train_valid_test_dataset_provider when using virtual pipeline parallelism"
+                vp_stage_train_valid_test_dataset_provider = functools.partial(
+                    train_valid_test_datasets_provider_func, vp_stage=vp_stage
+                )
+                if getattr(train_valid_test_datasets_provider_func, "is_distributed", False):
+                    vp_stage_train_valid_test_dataset_provider.is_distributed = True
+                iterators = build_train_valid_test_data_iterators(vp_stage_train_valid_test_dataset_provider)
                 self.train_data_iterator.append(iterators[0])
                 self.valid_data_iterator.append(iterators[1])
                 self.test_data_iterator.append(iterators[2])
@@ -980,7 +615,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             create_attention_mask=args.create_attention_mask_in_dataloader,
         )
 
-    def train_valid_test_datasets_provider(self, train_val_test_num_samples):
+    def train_valid_test_datasets_provider(self, train_val_test_num_samples, vp_stage=None):
         """Build the train test and validation datasets.
 
         Args:
@@ -995,15 +630,18 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         else:
             dataset_type = GPTDataset
 
-        def is_dataset_built_on_rank():
+        def is_dataset_built_on_rank(vp_stage=None):
             return (
-                parallel_state.is_pipeline_first_stage(ignore_virtual=True)
-                or parallel_state.is_pipeline_last_stage(ignore_virtual=True)
-            ) and parallel_state.get_tensor_model_parallel_rank() == 0
+                is_first_or_last_pipeline_stage(vp_stage)
+                and parallel_state.get_tensor_model_parallel_rank() == 0
+            )
 
         log_rank_0("> building train, validation, and test datasets for GPT ...")
         train_ds, valid_ds, test_ds = BlendedMegatronDatasetBuilder(
-            dataset_type, train_val_test_num_samples, is_dataset_built_on_rank, config
+            dataset_type,
+            train_val_test_num_samples,
+            functools.partial(is_dataset_built_on_rank, vp_stage=vp_stage),
+            config,
         ).build()
 
         log_rank_0("> finished creating GPT datasets ...")
@@ -1037,7 +675,21 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # args = parse_args(extra_args_provider, ignore_unknown_args)
 
         # Use trainer args from primus
-        args = self.module_config
+        # args = self.module_config
+
+        # Build Megatron arguments by merging Primus config into Megatron defaults.
+        # 1) Load Megatron defaults (no Primus overrides)
+        megatron_defaults = _load_megatron_defaults()
+
+        # 2) Convert Primus module_config (nested namespace) to a plain dict
+        primus_args = nested_namespace_to_dict(self.module_config)
+
+        # 3) Merge: defaults < primus_args
+        merged_args = megatron_defaults.copy()
+        merged_args.update(primus_args)
+
+        # 4) Convert to Namespace for compatibility with downstream Megatron utilities
+        args = argparse.Namespace(**merged_args)
 
         # Prep for checkpoint conversion.
         if args.ckpt_convert_format is not None:
@@ -1181,11 +833,12 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         timers = get_timers()
         one_logger = get_one_logger()
 
+        # Primus Turbo patches are now applied automatically via the new patch system
+        # in BaseTrainer.run() with phase="before_train"
         if importlib.util.find_spec("primus_turbo") is not None:
             args = get_args()
             if args.tensor_model_parallel_size == 1:
                 if args.enable_primus_turbo:
-                    self.patch_pt_replace_te(args)
                     log_rank_0(f"use pt backend...")
                 else:
                     log_rank_0(f"use te backend...")
@@ -1205,20 +858,39 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         unwrapped_model = unwrap_model(model)
 
         kwargs = {}
-        for f in dataclasses.fields(OptimizerConfig):
-            if hasattr(args, f.name):
-                kwargs[f.name] = getattr(args, f.name)
-        config = OptimizerConfig(**kwargs)
-        config.timers = timers
-        log_rank_0(f"-run get_megatron_optimizer")
-        optimizer = get_megatron_optimizer(
-            config,
-            model,
-            no_wd_decay_cond,
-            scale_lr_cond,
-            lr_mult,
-            use_gloo_process_groups=args.enable_gloo_process_groups,
-        )
+
+        if "muon" not in args.optimizer:
+            for f in dataclasses.fields(OptimizerConfig):
+                if hasattr(args, f.name):
+                    kwargs[f.name] = getattr(args, f.name)
+            config = OptimizerConfig(**kwargs)
+            config.timers = timers
+
+            optimizer = get_megatron_optimizer(
+                config,
+                model,
+                no_wd_decay_cond,
+                scale_lr_cond,
+                lr_mult,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+            )
+        else:
+            for f in dataclasses.fields(MounOptimizerConfig):
+                if hasattr(args, f.name):
+                    kwargs[f.name] = getattr(args, f.name)
+
+            config = MounOptimizerConfig(**kwargs)
+            config.timers = timers
+            optimizer = get_megatron_muon_optimizer(
+                config,
+                model,
+                no_wd_decay_cond,
+                scale_lr_cond,
+                lr_mult,
+                use_gloo_process_groups=args.enable_gloo_process_groups,
+                layer_wise_distributed_optimizer="dist" in config.optimizer,
+            )
+
         opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
 
         if args.moe_use_upcycling:
@@ -1900,6 +1572,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             from megatron.core.pipeline_parallel import get_forward_backward_func
 
             forward_backward_func = get_forward_backward_func()
+            if optimizer is None and args.dump_pp_data:
+                forward_backward_func = schedule_wrapper(forward_backward_func)
             kwargs = {}
             if optimizer is not None:
                 kwargs["optimizer"] = optimizer
@@ -2317,18 +1991,31 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     hip_used_mem = hip_total_mem - hip_free_mem
                     hip_mem_usage = hip_used_mem / hip_total_mem
                     log_string += (
-                        f" hip mem usage/free/total/usage_ratio: {hip_used_mem/1024/1024/1024:.2f}GB/"
+                        f" hip mem usage/free/total/usage_ratio: {hip_used_mem/1024/1024/1024:.2f}GiB/"
                     )
-                    log_string += f"{hip_free_mem/1024/1024/1024:.2f}GB/"
-                    log_string += f"{hip_total_mem/1024/1024/1024:.2f}GB/{hip_mem_usage*100:.2f}% |"
+                    log_string += f"{hip_free_mem/1024/1024/1024:.2f}GiB/"
+                    log_string += f"{hip_total_mem/1024/1024/1024:.2f}GiB/{hip_mem_usage*100:.2f}% |"
 
                 if args.use_rocm_mem_info or iteration in args.use_rocm_mem_info_iters:
                     rocm_mem_usage = rocm_used_mem / rocm_total_mem
+
+                    # get the max rocm_mem_usage
+                    usage_tensor = torch.tensor([rocm_mem_usage], device="cuda", dtype=torch.float32)
+                    world_size = dist.get_world_size()
+                    gathered_usage = [torch.zeros_like(usage_tensor) for _ in range(world_size)]
+                    dist.all_gather(gathered_usage, usage_tensor)
+
+                    rocm_mem_usages = [t.item() for t in gathered_usage]
+                    max_usage = max(rocm_mem_usages)
+                    max_rank = rocm_mem_usages.index(max_usage)
+
                     log_string += (
-                        f" rocm mem usage/free/total/usage_ratio: {rocm_used_mem/1024/1024/1024:.2f}GB/"
+                        f" rocm mem usage/free/total/usage_ratio: {rocm_used_mem/1024/1024/1024:.2f}GiB/"
                     )
-                    log_string += f"{rocm_free_mem/1024/1024/1024:.2f}GB/"
-                    log_string += f"{rocm_total_mem/1024/1024/1024:.2f}GB/{rocm_mem_usage*100:.2f}% |"
+                    log_string += f"{rocm_free_mem/1024/1024/1024:.2f}GiB/"
+                    log_string += f"{rocm_total_mem/1024/1024/1024:.2f}GiB/{rocm_mem_usage*100:.2f}% |"
+                    log_string += f" rank-{max_rank} max mem usage/usage_ratio: "
+                    log_string += f"{rocm_total_mem*max_usage/1024/1024/1024:.2f}GiB/{max_usage*100:.2f}% |"
 
                 log_string += (
                     f" throughput per GPU (TFLOP/s/GPU): {throughput:.1f}/"
@@ -2370,17 +2057,17 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                             iteration,
                         )
                         writer.add_scalar(
-                            f"{mem_collector}_used_mem(GB)",
+                            f"{mem_collector}_used_mem(GiB)",
                             used_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         writer.add_scalar(
-                            f"{mem_collector}_free_mem(GB)",
+                            f"{mem_collector}_free_mem(GiB)",
                             free_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         writer.add_scalar(
-                            f"{mem_collector}_total_mem(GB)",
+                            f"{mem_collector}_total_mem(GiB)",
                             total_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
@@ -2392,15 +2079,15 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                             iteration,
                         )
                         wandb_writer.log(
-                            {f"{mem_collector}_used_mem(GB)": used_mem / 1024 / 1024 / 1024},
+                            {f"{mem_collector}_used_mem(GiB)": used_mem / 1024 / 1024 / 1024},
                             iteration,
                         )
                         wandb_writer.log(
-                            {f"{mem_collector}_free_mem(GB)": free_mem / 1024 / 1024 / 1024},
+                            {f"{mem_collector}_free_mem(GiB)": free_mem / 1024 / 1024 / 1024},
                             iteration,
                         )
                         wandb_writer.log(
-                            {f"{mem_collector}_total_mem(GB)": total_mem / 1024 / 1024 / 1024},
+                            {f"{mem_collector}_total_mem(GiB)": total_mem / 1024 / 1024 / 1024},
                             iteration,
                         )
                         wandb_writer.log({f"{mem_collector}_mem_usage(%)": mem_usage * 100.0}, iteration)
@@ -2412,17 +2099,17 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_used_mem(GB)",
+                            f"{mem_collector}_used_mem(GiB)",
                             used_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_free_mem(GB)",
+                            f"{mem_collector}_free_mem(GiB)",
                             free_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_total_mem(GB)",
+                            f"{mem_collector}_total_mem(GiB)",
                             total_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
@@ -2460,7 +2147,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             total_loss_dict[skipped_iters_key] = 0
             total_loss_dict[nan_iters_key] = 0
 
-            if get_args().patch_zero_bubble and get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v:
+            if self.is_v_schedule:
                 log_rank_0(log_string)
             else:
                 log_rank_last(log_string)

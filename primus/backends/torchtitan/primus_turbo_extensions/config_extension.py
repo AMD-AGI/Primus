@@ -6,7 +6,7 @@
 
 from dataclasses import dataclass, field
 
-from torchtitan.config_manager import JobConfig as TTJobConfig
+from torchtitan.config.job_config import JobConfig as TTJobConfig
 
 # TODO: float8 quant config
 # Tensorwise / Rowwise / Blockwise  etc.
@@ -22,6 +22,11 @@ class PrimusTurboConfig:
     use_turbo_attention: bool = False
     use_turbo_async_tp: bool = False
     use_turbo_mx_linear: bool = False
+    use_turbo_float8_linear: bool = False
+    use_turbo_grouped_mm: bool = False
+    use_moe_fp8: bool = True
+    enable_embedding_autocast: bool = True
+    use_classic_attention: bool = False
     # float8_config: PrimusTurboFloat8Config = field(default_factory=PrimusTurboFloat8Config)
 
 

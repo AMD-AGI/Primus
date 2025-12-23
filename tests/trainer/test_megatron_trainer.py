@@ -97,7 +97,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama2_7B",
-            exp_path="examples/megatron/configs/llama2_7B-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml",
             env_override={},
             extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
@@ -106,7 +106,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama3_8B",
-            exp_path="examples/megatron/configs/llama3_8B-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/llama3_8B-BF16-pretrain.yaml",
             env_override={},
             extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
@@ -115,7 +115,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama3_70B",
-            exp_path="examples/megatron/configs/llama3_70B-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/llama3_70B-BF16-pretrain.yaml",
             env_override={},
             extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
@@ -124,7 +124,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "qwen2.5_7B",
-            exp_path="examples/megatron/configs/qwen2.5_7B-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/qwen2.5_7B-BF16-pretrain.yaml",
             env_override={},
             extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
@@ -133,7 +133,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "qwen2.5_72B",
-            exp_path="examples/megatron/configs/qwen2.5_72B-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/qwen2.5_72B-BF16-pretrain.yaml",
             env_override={},
             extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
@@ -142,19 +142,15 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "deepseek_v2_lite",
-            exp_path="examples/megatron/configs/deepseek_v2_lite-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
-                "--num_layers",
-                "4",
                 "--train_iters",
                 "3",
                 "--micro_batch_size",
                 "1",
                 "--global_batch_size",
                 "8",
-                "--moe_layer_freq",
-                "[0]*1+[1]*3",
                 "--expert_model_parallel_size",
                 "8",
             ],
@@ -164,7 +160,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "mixtral_8x7B_v0.1",
-            exp_path="examples/megatron/configs/mixtral_8x7B_v0.1-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -186,7 +182,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "mixtral_8x22B_v0.1",
-            exp_path="examples/megatron/configs/mixtral_8x22B_v0.1-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/mixtral_8x22B_v0.1-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -206,11 +202,35 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def test_grok2(self):
+        run_script(
+            self.__class__.__name__,
+            "grok2",
+            exp_path="examples/megatron/configs/MI300X/grok2-BF16-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "2",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--expert_model_parallel_size",
+                "8",
+                "--pipeline_model_parallel_size",
+                "1",
+                "--num_virtual_stages_per_pipeline_rank",
+                "1",
+            ],
+        )
+
     def test_deepseek_v3(self):
         run_script(
             self.__class__.__name__,
             "deepseek_v3",
-            exp_path="examples/megatron/configs/deepseek_v3-pretrain.yaml",
+            exp_path="examples/megatron/configs/MI300X/deepseek_v3-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -256,6 +276,40 @@ class TestMegatronTrainer(PrimusUT):
     #         env_override={},
     #     )
 
+    def test_turbo_deepep(self):
+        run_script(
+            self.__class__.__name__,
+            "turbo_deepep",
+            exp_path="examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--moe_layer_freq",
+                "1",
+                "--expert_model_parallel_size",
+                "8",
+                "--use_turbo_deepep",
+                "1",
+                "--enable_primus_turbo",
+                "1",
+                "--moe_router_dtype",
+                "fp32",
+                "--moe_shared_expert_overlap",
+                "0",
+                "--moe_use_legacy_grouped_gemm",
+                "1",
+                "--turbo_sync_free_moe_stage",
+                "3",
+            ],
+        )
+
 
 class TestMegatronTrainerDeterministic(PrimusUT):
     def __init__(self, *args, **kwargs):
@@ -274,31 +328,19 @@ class TestMegatronTrainerDeterministic(PrimusUT):
 
         return loss
 
-    def extract_num_zeros_from_log(self, log):
-        NUM_ZEROS_IN_GRAD_PATTERN = r"num zeros: (\d+)"
-
-        num_zeros_in_grad = re.findall(NUM_ZEROS_IN_GRAD_PATTERN, log)
-
-        return num_zeros_in_grad
-
     def check_numerical_reproducility(self, log, log_ref):
         loss = self.extract_loss_from_log(log)
         loss_ref = self.extract_loss_from_log(log_ref)
 
-        num_zeros = self.extract_num_zeros_from_log(log)
-        num_zeros_ref = self.extract_num_zeros_from_log(log_ref)
-
         is_reproducility = True
         # compare as str, need bitwise equal.
         for i in range(0, len(loss)):
-            if loss[i] != loss_ref[i] or num_zeros[i] != num_zeros_ref[i]:
+            if loss[i] != loss_ref[i]:
                 is_reproducility = False
                 break
 
         return is_reproducility
 
-    # TODO(0928): disable due to non-deterministic behavior in Dense implementation
-    @unittest.skip("Skip non-deterministic Dense test")
     def test_llama3_8B(self):
         env_override = {
             "BACKEND": "megatron",
@@ -306,8 +348,7 @@ class TestMegatronTrainerDeterministic(PrimusUT):
             "PRIMUS_GLOBAL_BATCH_SIZE": "8",
             "PRIMUS_NUM_LAYERS": "4",
             # deterministic vars
-            "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
-            "NCCL_ALGO": "Ring",
+            "PRIMUS_DETERMINISTIC": "1",
         }
         stdout, _ = run_script(
             self.__class__.__name__,
@@ -325,8 +366,6 @@ class TestMegatronTrainerDeterministic(PrimusUT):
 
         assert self.check_numerical_reproducility(stdout, stdout_ref)
 
-    # TODO(0928): disable due to non-deterministic behavior in MoE implementation
-    @unittest.skip("Skip non-deterministic MoE test")
     def test_deepseek_v2_lite(self):
         env_override = {
             "BACKEND": "megatron",
@@ -336,8 +375,7 @@ class TestMegatronTrainerDeterministic(PrimusUT):
             "PRIMUS_EP": "8",
             "PRIMUS_NUM_LAYERS": "4",
             # deterministic vars
-            "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
-            "NCCL_ALGO": "Ring",
+            "PRIMUS_DETERMINISTIC": "1",
         }
         stdout, _ = run_script(
             self.__class__.__name__,

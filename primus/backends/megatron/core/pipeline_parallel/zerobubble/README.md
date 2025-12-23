@@ -7,12 +7,10 @@ Zero bubbles is a state-of-art technique aiming to reduce the bubble time and me
 
 ## 2. How to use
 
-- We use primus-turbo gemm to patch the original TE implementation, thus need to turn on the following flags
-```
-enable_primus_turbo: true
-use_turbo_parallel_linear: true
-```
+- Zero bubble patch the gemm OP and the grouped gemm OP for splitting the backward of the inputs and weights, support TE & Primus-turbo backend.
+
 - Some other flags need to be specified
+
 ```
 overlap_grad_reduce: false
 overlap_param_gather: false
@@ -21,9 +19,9 @@ create_attention_mask_in_dataloader: false
 gradient_accumulation_fusion: true
 ```
 
-- Most of the zero-bubble flags are writted in `zero_bubble.yaml`, others reuse megatron flags. Here are some examples for config your prefer PP stratages
+- Most of the zero-bubble flags are written in `zero_bubble.yaml`, others reuse megatron flags. Here are some examples for configuring your preferred PP strategies
 
-| pp stratages / flag | num_virtual_stages_per_pipeline_rank | patch_zero_bubble | zero_bubble_v_schedule | zero_bubble_v_schedule_mem_setup |
+| pp strategy / flag | num_virtual_stages_per_pipeline_rank | patch_zero_bubble | zero_bubble_v_schedule | zero_bubble_v_schedule_mem_setup |
 |---|---|---|---|---|
 | turbo-1f1b | 1 |  false | - | - |
 | turbo-1f1b-interleaved | >=2 |  false | - | - |

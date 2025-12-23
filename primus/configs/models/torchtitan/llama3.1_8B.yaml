@@ -1,9 +1,8 @@
 job:
   dump_folder: "./outputs"
-  description: "Llama 3 8B training"
+  description: "Llama 3.1 8B training"
 
 model:
   name: "llama3"
   flavor: "8B"
-  tokenizer_path: "meta-llama/Llama-3.1-8B"
-  converters: []
+  hf_assets_path: "meta-llama/Llama-3.1-8B"

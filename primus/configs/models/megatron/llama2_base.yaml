@@ -1,4 +1,4 @@
-bases:
+extends:
   - llama_base.yaml
 
 max_position_embeddings: 4096

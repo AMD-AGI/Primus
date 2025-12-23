@@ -3,11 +3,14 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+import functools
 from contextlib import contextmanager
 from typing import Callable, List, Optional, Tuple
 
 import primus_turbo.pytorch as pt
 import torch
+import torch.distributed as dist
+import torch.nn.functional as F
 import transformer_engine as te
 from megatron.core import tensor_parallel
 from megatron.core.extensions.transformer_engine import TELinear, condition_init_method
@@ -22,15 +25,18 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.moe.experts import GroupedMLP
+from megatron.core.transformer.moe.token_dispatcher import MoETokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_tensor_model_parallel_group_if_none
 from megatron.training.global_vars import get_args
-from primus_turbo.pytorch.core.float8 import (
+from primus_turbo.pytorch.core.low_precision import (
     Float8QuantConfig,
+    Format,
     ScalingGranularity,
     ScalingStrategy,
     check_fp8_support,
+    check_mxfp8_support,
 )
 from torch import Tensor
 from transformer_engine.pytorch.fp8 import (
@@ -41,13 +47,35 @@ from transformer_engine.pytorch.fp8 import (
 )
 
 
+def use_split_wgrad_op():
+    args = get_args()
+    if args.patch_primus_pipeline and args.pp_algorithm in [
+        "zero-bubble",
+        "zbv-formatted",
+        "v-half",
+        "v-min",
+    ]:
+        return True
+    elif args.patch_zero_bubble and args.enable_zero_bubble:
+        return True
+    return False
+
+
 class PrimusTurboFloat8QuantConfig(Float8QuantConfig):
 
     def block_scaling(self):
-        return self.granularity == ScalingGranularity.BLOCKWISE
+        return self.granularity == ScalingGranularity.BLOCKWISE and self.strategy == ScalingStrategy.DYNAMIC
 
     def current_scaling(self):
         return self.granularity == ScalingGranularity.TENSORWISE and self.strategy == ScalingStrategy.DYNAMIC
+
+    def mxfp8_scaling(self):
+        # NOTE: The mxfp8 recipe only support e4m3 format in megatron-lm backend.
+        return (
+            self.granularity == ScalingGranularity.MX_BLOCKWISE
+            and self.strategy == ScalingStrategy.DYNAMIC
+            and self.format == Format.E4M3
+        )
 
 
 class PrimusTurboFP8GlobalStateManager(FP8GlobalStateManager):
@@ -96,6 +124,9 @@ class PrimusTurboFP8GlobalStateManager(FP8GlobalStateManager):
         if enabled_turbo:
             fp8_available, reason_for_no_fp8 = check_fp8_support()
             assert fp8_available, reason_for_no_fp8
+            if turbo_fp8_quant_config.mxfp8_scaling():
+                mxfp8_available, reason_for_no_mxfp8 = check_mxfp8_support()
+                assert mxfp8_available, reason_for_no_mxfp8
 
     @classmethod
     def get_turbo_fp8_quant_config(cls) -> PrimusTurboFloat8QuantConfig:
@@ -194,11 +225,17 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
 
         args = get_args()
         if args.enable_turbo_attention_float8:
-            self.attn = pt.ops.attention_fp8_blockwise
-            self.attention_backend = "triton"
+            self.attn = (
+                pt.ops.flash_attn_fp8_usp_func
+                if self.config.context_parallel_size > 1
+                else pt.ops.flash_attn_fp8_func
+            )
         else:
-            self.attn = pt.ops.flash_attn_func
-            self.attention_backend = "ck"
+            self.attn = (
+                pt.ops.flash_attn_usp_func
+                if self.config.context_parallel_size > 1
+                else pt.ops.flash_attn_func
+            )
         if pg_collection is None:
             # For backward compatibility, remove in v0.14 and raise error
             # raise ValueError("TEDotProductAttention was called without ProcessGroupCollection")
@@ -214,9 +251,13 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                 assert hasattr(
                     pg_collection, "hcp"
                 ), "TEDotProductAttention pg_collection must have hierarchical cp pg"
-        self.cp_param_bundle = None
+
+        self.attn_kwargs = {}
         if self.config.context_parallel_size > 1:
-            self.cp_param_bundle = {"cp_group": pg_collection.cp, "cp_comm_type": cp_comm_type}
+            self.attn_kwargs["ulysses_group"] = pg_collection.cp
+            # TODO (limou)
+            # enable ring attention
+            self.attn_kwargs["ring_group"] = dist.new_group(ranks=[dist.get_rank()])
 
         assert config.window_size is None, "primus_turbo does not support sliding window attention"
         # Check version
@@ -289,14 +330,114 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             deterministic=False,
             return_lse=False,
             return_attn_probs=False,
-            backend_type=self.attention_backend,
-            cp_param_bundle=self.cp_param_bundle,
+            **self.attn_kwargs,
         )
 
         o = o.reshape(o.shape[0], o.shape[1], -1).transpose(0, 1)
         if not o.is_contiguous():
             o = o.contiguous()
         return o
+
+
+class PrimusTurboLinear(TELinear):
+    """
+    Wrapper for the Transformer-Engine's `Linear` layer
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        parallel_mode: Optional[str],
+        config: ModelParallelConfig,
+        init_method: Callable,
+        bias: bool,
+        skip_bias_add: bool,
+        skip_weight_param_allocation: bool,
+        tp_comm_buffer_name: Optional[str] = None,
+        is_expert: bool = False,
+        symmetric_ar_type: Optional[str] = None,
+        tp_group: Optional[torch.distributed.ProcessGroup] = None,
+    ):
+        if parallel_mode != "duplicated":
+            raise ValueError(f"{__class__.__name__} only support `parallel_mode=duplicated`. ")
+
+        tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
+
+        if use_split_wgrad_op():
+            from .zbpp_gemm import gemm_with_weight_gradient_store
+
+            self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+        else:
+            self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
+                a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
+            )
+
+        super().__init__(
+            input_size=input_size,
+            output_size=output_size,
+            parallel_mode="row",
+            config=config,
+            init_method=(
+                condition_init_method(config, init_method)
+                if not config.use_cpu_initialization
+                else lambda w: None
+            ),
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            skip_weight_param_allocation=False,
+            # We don't currently use this for row parallel layers # pylint: disable=line-too-long
+            is_expert=is_expert,
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            symmetric_ar_type=config.symmetric_ar_type,
+            tp_group=tp_group,
+        )
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """Sharding along axis 1, bias not sharded"""
+        state_dict = self.state_dict(prefix="", keep_vars=True)
+        return make_sharded_tensors_for_checkpoint(state_dict, prefix, {"weight": 1}, sharded_offsets)
+
+    def __repr__(self):
+        return (
+            f"{type(self).__name__}(in_features={self.in_features}, "
+            f"out_features={self.out_features}, bias={self.use_bias}, TP={self.tp_size})"
+        )
+
+    def forward(
+        self,
+        input_: torch.Tensor,
+    ):
+        # weights = [getattr(self, name) for name in self.weight_names]
+        # weights = torch.cat(weights, dim=0)  # or set weights = self._parameters['weight']
+        weights = self._parameters["weight"]
+        if self.use_bias:
+            bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
+        original_shape = input_.size()
+        if not input_.is_contiguous():
+            input_ = input_.contiguous()
+        input_ = input_.view(-1, original_shape[-1])
+
+        if PrimusTurboFP8GlobalStateManager.is_turbo_fp8_enabled():
+            quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
+            if quant_config.block_scaling():
+                fp8_gemm = pt.ops.gemm_fp8_blockwise
+            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
+                fp8_gemm = pt.ops.gemm_fp8
+            else:
+                raise ValueError("Not support quant config.")
+
+            out = fp8_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
+        else:
+            out = self.gemm(input_, weights)
+
+        out = out.view(original_shape[0], original_shape[1], -1)
+        if self.te_return_bias:
+            return out, bias_tensor
+        if self.use_bias:
+            return out + bias_tensor, None
+        return out, None
 
 
 class PrimusTurboRowParallelLinear(TELinear):
@@ -320,7 +461,7 @@ class PrimusTurboRowParallelLinear(TELinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         if not input_is_parallel:
-            raise ValueError("Transformer Engine linear layers do not support input_is_parallel = False")
+            raise ValueError(f"{__class__.__name__} layers do not support input_is_parallel = False")
 
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
@@ -383,7 +524,7 @@ class PrimusTurboRowParallelLinear(TELinear):
             quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
             if quant_config.block_scaling():
                 fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling():
+            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -417,12 +558,10 @@ class PrimusTurboColumnParallelLinear(TELinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         if gather_output:
-            raise ValueError("Transformer Engine linear layers do not support gather_output = True")
+            raise ValueError(f"{__class__.__name__} layers do not support gather_output = True")
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
-        args = get_args()
-
-        if args.patch_zero_bubble and args.enable_zero_bubble:
+        if use_split_wgrad_op():
             from .zbpp_gemm import gemm_with_weight_gradient_store
 
             self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
@@ -481,7 +620,7 @@ class PrimusTurboColumnParallelLinear(TELinear):
             quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
             if quant_config.block_scaling():
                 fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling():
+            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -525,8 +664,7 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
 
-        args = get_args()
-        if args.patch_zero_bubble and args.enable_zero_bubble:
+        if use_split_wgrad_op():
             from .zbpp_gemm import gemm_with_weight_gradient_store
 
             self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
@@ -573,7 +711,7 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
             quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
             if quant_config.block_scaling():
                 fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling():
+            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -628,8 +766,7 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         # and we don't have to deal with the zero length Tensor.
         self.te_return_bias = skip_bias_add and bias
 
-        args = get_args()
-        if args.patch_zero_bubble and args.enable_zero_bubble:
+        if use_split_wgrad_op():
 
             from .zbpp_gemm import gemm_with_weight_gradient_store
 
@@ -697,7 +834,7 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
             if quant_config.block_scaling():
                 fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling():
+            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -727,12 +864,34 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             pg_collection,
         )
         args = get_args()
-        if args.patch_zero_bubble and args.enable_zero_bubble:
+
+        if use_split_wgrad_op() or (args.patch_moe_overlap and args.overlap_moe_expert_parallel_comm):
             from .zbpp_gemm import grouped_gemm_with_weight_gradient_store
 
-            self.grouped_gemm = grouped_gemm_with_weight_gradient_store
+            self.grouped_gemm = functools.partial(
+                grouped_gemm_with_weight_gradient_store, gg_backend="turbo-gg"
+            )
         else:
             self.grouped_gemm = pt.ops.grouped_gemm
+
+        if args.use_turbo_fused_act_with_probs:
+            assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
+
+            if self.config.activation_func == F.silu:
+                turbo_fused_act_with_probs = pt.ops.swiglu_with_probs
+            elif self.config.activation_func == F.gelu:
+                turbo_fused_act_with_probs = pt.ops.geglu_with_probs
+            else:
+                raise ValueError("Activation function must be silu or gelu when using GroupedMLP.")
+
+            def _activation_func_with_probs(x, probs, tokens_per_experts):
+                assert x.ndim == 2
+                assert probs.ndim == 1
+                num_tokens = x.shape[0]
+                row_mask = pt.ops.tokens_per_expert_to_mask(tokens_per_experts, num_tokens)
+                return turbo_fused_act_with_probs(x, probs, row_mask)
+
+            self.activation_func_with_probs = _activation_func_with_probs
 
     def forward(
         self,
@@ -758,7 +917,8 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         gemm_kargs = [dict(), dict()]
         if permuted_local_hidden_states.nelement() != 0:
             # Reshape the weights for the grouped GEMMs.
-            if args.patch_zero_bubble and args.enable_zero_bubble:
+            if use_split_wgrad_op():
+
                 w1 = self.weight1
                 w2 = self.weight2
 
@@ -768,43 +928,302 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
                 w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
 
-            tokens_per_expert = tokens_per_expert.cuda()
+            tokens_per_expert = tokens_per_expert.to(w1.device)
             assert w1.is_contiguous(), "w1 must be contiguous"
             assert w2.is_contiguous(), "w2 must be contiguous"
-            fc1_output = self.grouped_gemm(
-                permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, **(gemm_kargs[0])
-            )
+            if PrimusTurboFP8GlobalStateManager.is_turbo_fp8_enabled():
+                quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
+                fc1_output = pt.ops.grouped_gemm_fp8(
+                    permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, config=quant_config
+                )
+            else:
+                fc1_output = self.grouped_gemm(
+                    permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, **(gemm_kargs[0])
+                )
             if self.activation_recompute:
-                intermediate_parallel = self.activation_checkpoint.checkpoint(
-                    self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
-                )
-                fc2_output = self.grouped_gemm(
-                    intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
-                )
+                if args.use_turbo_fused_act_with_probs:
+                    intermediate_parallel = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs,
+                        fc1_output,
+                        permuted_probs,
+                        tokens_per_expert,
+                    )
+                else:
+                    intermediate_parallel = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
+                    )
+                if PrimusTurboFP8GlobalStateManager.is_turbo_fp8_enabled():
+                    quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
+                    fc2_output = pt.ops.grouped_gemm_fp8(
+                        intermediate_parallel, w2, tokens_per_expert, trans_b=False, config=quant_config
+                    )
+                else:
+                    fc2_output = self.grouped_gemm(
+                        intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
+                    )
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
-                intermediate_parallel = self.activation_func_with_probs(
-                    fc1_output, permuted_probs.unsqueeze(-1)
-                )
-                fc2_output = self.grouped_gemm(
-                    intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
-                )
+                if args.use_turbo_fused_act_with_probs:
+                    intermediate_parallel = self.activation_func_with_probs(
+                        fc1_output, permuted_probs, tokens_per_expert
+                    )
+                else:
+                    intermediate_parallel = self.activation_func_with_probs(
+                        fc1_output, permuted_probs.unsqueeze(-1)
+                    )
+                if PrimusTurboFP8GlobalStateManager.is_turbo_fp8_enabled():
+                    quant_config = PrimusTurboFP8GlobalStateManager.get_turbo_fp8_quant_config()
+                    fc2_output = pt.ops.grouped_gemm_fp8(
+                        intermediate_parallel, w2, tokens_per_expert, trans_b=False, config=quant_config
+                    )
+                else:
+                    fc2_output = self.grouped_gemm(
+                        intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
+                    )
         else:
             # No token is allocated for local experts.
             assert torch.count_nonzero(tokens_per_expert) == 0
             # Make sure params of experts still have gradients even given zero tokens.
-            assert not args.patch_zero_bubble, "Zero bubble not support torch.matmul backend yet"
+            assert (
+                not args.patch_zero_bubble and not args.patch_primus_pipeline
+            ), "Zero bubble or primus pipeline not support torch.matmul backend yet"
             w1 = self.weight1.view(self.config.hidden_size, -1)
             w2 = self.weight2.view(-1, self.config.hidden_size)
             h = torch.matmul(permuted_local_hidden_states, w1)
             if self.activation_recompute:
-                h = self.activation_checkpoint.checkpoint(
-                    self.activation_func_with_probs, h, permuted_probs.unsqueeze(-1)
-                )
+                if args.use_turbo_fused_act_with_probs:
+                    h = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, h, permuted_probs, tokens_per_expert
+                    )
+                else:
+                    h = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, h, permuted_probs.unsqueeze(-1)
+                    )
                 fc2_output = torch.matmul(h, w2)
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
-                h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
+                if args.use_turbo_fused_act_with_probs:
+                    h = self.activation_func_with_probs(h, permuted_probs, tokens_per_expert)
+                else:
+                    h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
                 fc2_output = torch.matmul(h, w2)
 
         return fc2_output, None
+
+
+class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
+    """
+    PrimusTurbo token dispatcher using DeepEP.
+    """
+
+    def __init__(
+        self,
+        num_local_experts: int,
+        local_expert_indices: List[int],
+        config: TransformerConfig,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        """
+        Initialize the Flex token dispatcher.
+
+        Args:
+            num_local_experts (int): Number of local experts on the current device.
+            local_expert_indices (List[int]): Indices of local experts on the current device.
+            config (TransformerConfig): Configuration for the transformer model.
+            pg_collection (ProcessGroupCollection, optional): Process groups for MoE operations.
+        """
+        super().__init__(config=config, pg_collection=pg_collection)
+
+        assert self.tp_size * self.ep_size > 1, "Flex token dispatcher requires TPxEP > 1"
+        assert (
+            self.config.moe_enable_deepep
+        ), "DeepEP is not enabled. Please set --moe-enable-deepep to use DeepEP backend."
+        assert (
+            self.config.moe_pad_expert_input_to_capacity is False
+        ), "Flex token dispatcher does not support --moe-pad-expert-input-to-capacity"
+
+        args = get_args()
+
+        # enable sync-free moe to elimiate deepep cpu busy-wait
+        num_worst_tokens, permute_max_token_num = 0, 0
+        if args.turbo_sync_free_moe_stage > 1:
+            if args.sequence_parallel:
+                seq_length = args.seq_length // self.tp_size
+            else:
+                seq_length = args.seq_length
+            num_tokens = seq_length // args.context_parallel_size * args.micro_batch_size
+            num_worst_tokens = num_tokens * self.tp_ep_group.size()
+            if args.turbo_sync_free_moe_stage > 2:
+                # fully sync-free moe
+                permute_max_token_num = num_worst_tokens * config.moe_router_topk
+
+        self.deepep_dispatcher = pt.modules.DeepEPTokenDispatcher(
+            num_experts=config.num_moe_experts,
+            router_topk=config.moe_router_topk,
+            ep_group=self.ep_group,
+            tp_group=self.tp_group,
+            tp_ep_group=self.tp_ep_group,
+            expert_capacity_factor=config.moe_expert_capacity_factor,
+            permute_fusion=config.moe_permute_fusion,
+            permute_max_token_num=permute_max_token_num,
+            deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
+            deepep_num_use_cu=args.turbo_deepep_num_cu,
+            deepep_num_worst_tokens=num_worst_tokens,
+            deepep_use_cuda_num_tokens_per_expert=(
+                args.use_turbo_grouped_mlp and args.moe_use_legacy_grouped_gemm
+            ),
+            deepep_async_finish=True,
+            deepep_allocate_on_comm_stream=True,
+        )
+        # This is just a place holder.
+        # The communication manager class is not used in Primus Turbo's DeepEP dispatcher.
+        # But it may get referenced in some Megatron code paths.
+        self._comm_manager = self.deepep_dispatcher
+
+        self.moe_router_force_load_balancing = args.moe_router_force_load_balancing
+
+    def dispatch_preprocess(
+        self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
+    ):
+        """Initializes routing metadata and prepares tensors for fused dispatch.
+
+        This method reshapes input tensors and processes routing information into a
+        unified format, where the routing map is expanded to cover the TPxEP communication domain,
+        enabling the token dispatch logic to be agnostic to parallelism strategies.
+
+        Args:
+            hidden_states (torch.Tensor): Input hidden states to be processed
+            routing_map (torch.Tensor): Map indicating which expert each token should be routed to
+            probs (torch.Tensor): Routing probabilities for each token-expert pair
+
+        Returns:
+            A tuple of reshaped hidden states and token probabilities.
+        """
+        self.hidden_shape = hidden_states.shape
+        # view as [num_tokens, hidden_size]
+        hidden_states = hidden_states.view(-1, self.config.hidden_size)
+        num_tokens = hidden_states.shape[0]
+
+        # when force_load_balancing, we use even token_indices to make sure each expert get same number of tokens
+        token_indices = None
+        if self.moe_router_force_load_balancing:
+            token_indices = (
+                torch.arange(num_tokens * self.config.moe_router_topk, device=hidden_states.device).view(
+                    num_tokens, self.config.moe_router_topk
+                )
+                % self.config.num_moe_experts
+            )
+
+        hidden_states, probs = self.deepep_dispatcher._pre_dispatch(
+            hidden_states, probs, routing_map, token_indices
+        )
+        return hidden_states, probs
+
+    def token_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        probs: torch.Tensor = None,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
+    ):
+        """
+        Execute fused permutation and AlltoAll communication.
+
+        This method currently leverages DeepEP's fused dispatch kernel, which combines token
+        permutation and AlltoAll communication into a single optimized operation.
+        The fused approach reduces memory bandwidth requirements and enables better
+        overlap between computation and communication operations.
+
+        Args:
+            hidden_states (torch.Tensor): Preprocessed hidden states to be dispatched
+            probs (torch.Tensor): Routing probabilities (unused in current implementation)
+            async_finish (bool): Whether to use asynchronous communication completion
+            allocate_on_comm_stream (bool): Whether to allocate buffers on communication stream
+
+        Returns:
+            A tuple of dispatched tokens and probabilities.
+        """
+        dispatched_tokens, dispatched_probs = self.deepep_dispatcher._exec_dispatch(hidden_states, probs)
+        return dispatched_tokens, dispatched_probs
+
+    def dispatch_postprocess(self, hidden_states: torch.Tensor, probs: torch.Tensor):
+        """Converts dispatched tokens to a per-expert format for expert processing.
+
+        This method transforms the output of the fused dispatch into the tensor
+        organization required for the expert computation.
+
+        Args:
+            hidden_states (torch.Tensor): Hidden states after fused dispatch
+            probs (torch.Tensor): Routing probabilities after fused dispatch
+
+        Returns:
+            A tuple of permuted tokens, token counts per expert, and permuted probabilities.
+        """
+        permuted_input, tokens_per_expert, permuted_probs = self.deepep_dispatcher._post_dispatch(
+            hidden_states, probs
+        )
+        if self.config.moe_router_dtype == "fp64":
+            permuted_probs = permuted_probs.to(torch.float64)
+        return permuted_input, tokens_per_expert, permuted_probs
+
+    def combine_preprocess(self, hidden_states: torch.Tensor):
+        """Pre-processes hidden states before combining them after expert processing.
+
+        This method restores the hidden states to their original ordering before expert processing
+        by using the communication manager's restoration function.
+        """
+        hidden_states = self.deepep_dispatcher._pre_combine(hidden_states)
+        return hidden_states
+
+    def token_combine(
+        self,
+        hidden_states: torch.Tensor,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
+    ):
+        """Executes fused un-permutation and communication using DeepEP kernels.
+
+        This is the inverse of the `token_dispatch` operation.
+
+        Args:
+            hidden_states (torch.Tensor): Expert outputs ready for combination
+            async_finish (bool): Whether to use asynchronous communication completion
+            allocate_on_comm_stream (bool): Whether to allocate buffers on communication stream
+
+        Returns:
+            Combined tokens after fused un-permutation and communication.
+        """
+        combined_tokens = self.deepep_dispatcher._exec_combine(hidden_states)
+        return combined_tokens
+
+    def combine_postprocess(self, hidden_states: torch.Tensor):
+        """
+        Restores the original tensor shape and finalizes the MoE layer output.
+
+        This method performs the final step of the MoE token processing pipeline
+        by reshaping the combined tokens back to their original input dimensions.
+
+        Args:
+            hidden_states (torch.Tensor): Combined tokens.
+
+        Returns:
+            The final MoE layer output reshaped to its original dimensions.
+        """
+        hidden_states = self.deepep_dispatcher._post_combine(hidden_states)
+        return hidden_states.view(self.hidden_shape)
+
+
+class PrimusTurboRMSNorm(te.pytorch.RMSNorm):
+    def __init__(self, *args, **kwargs):
+        assert "device" in kwargs
+        assert "dtype" in kwargs or "params_dtype" in kwargs, "device and dtype must be provided"
+        super().__init__(*args, **kwargs)
+        self.rms_norm_func = pt.modules.RMSNorm(
+            normalized_shape=kwargs["hidden_size"],
+            eps=self.eps,
+            device=kwargs["device"],
+            dtype=kwargs["dtype"] if "dtype" in kwargs else kwargs["params_dtype"],
+        )
+
+    def forward(self, x):
+        return self.rms_norm_func(x)

@@ -10,21 +10,25 @@
 from typing import Optional
 
 from megatron.core import parallel_state
+from megatron.core.transformer.enums import LayerType
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.training.global_vars import get_args
+
+from primus.modules.trainer.megatron.utils import is_v_schedule_enabled
 
 
-def get_transformer_layer_offset(config: TransformerConfig, vp_stage: Optional[int] = None):
+def get_transformer_layer_offset(
+    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
-    pipeline_rank = parallel_state.get_pipeline_model_parallel_rank()
-    if not parallel_state.is_inside_encoder():
-        pp_decoder_start = parallel_state.get_pipeline_model_parallel_decoder_start()
-        if pp_decoder_start is not None:
-            pipeline_rank = pipeline_rank - pp_decoder_start
+    pipeline_rank = pp_rank if pp_rank is not None else parallel_state.get_pipeline_model_parallel_rank()
 
     if config.pipeline_model_parallel_size > 1:
+        if config.pipeline_model_parallel_layout:
+            offset = config.pipeline_model_parallel_layout.get_layer_offset(
+                layer_type=LayerType.decoder, vp_stage=vp_stage
+            )
 
-        if (
+        elif (
             config.num_layers_in_first_pipeline_stage is not None
             or config.num_layers_in_last_pipeline_stage is not None
         ):
@@ -90,21 +94,20 @@ def get_transformer_layer_offset(config: TransformerConfig, vp_stage: Optional[i
                     + num_layers_per_virtual_model_chunk_in_last_pipeline_stage
                 )
 
-                if get_args().patch_zero_bubble and (
-                    get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v
-                ):
+                if is_v_schedule_enabled():
                     assert config.virtual_pipeline_model_parallel_size == 2
                     parallel_state.get_pipeline_model_parallel_world_size()
-                    if pipeline_rank == 0:
-                        if vp_stage == 0:
-                            offset = pipeline_rank
-                        else:
-                            offset = (
-                                total_virtual_chunks
-                                - (num_layers_per_virtual_model_chunk_in_last_pipeline_stage)
-                                - pipeline_rank
-                                - 1
-                            )
+                    if vp_stage == 0:
+                        offset = (
+                            num_layers_per_virtual_model_chunk_in_first_pipeline_stage
+                            + pipeline_rank * num_layers_per_vritual_model_chunk_in_middle_pipeline_stage
+                        )
+                    else:
+                        offset = (
+                            config.num_layers
+                            - num_layers_per_virtual_model_chunk_in_last_pipeline_stage
+                            - (pipeline_rank * num_layers_per_vritual_model_chunk_in_middle_pipeline_stage)
+                        )
                 else:
                     # Calculate the layer offset with interleaved uneven pipeline parallelism
                     if pipeline_rank == 0:
@@ -157,15 +160,14 @@ def get_transformer_layer_offset(config: TransformerConfig, vp_stage: Optional[i
                 total_virtual_chunks = num_layers // vp_size
                 offset = vp_stage * total_virtual_chunks + (pipeline_rank * num_layers_per_virtual_rank)
 
-                if get_args().patch_zero_bubble and (
-                    get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v
-                ):
+                if is_v_schedule_enabled():
                     assert config.virtual_pipeline_model_parallel_size == 2
-                    if pipeline_rank == 0:
-                        if vp_stage == 0:
-                            offset = pipeline_rank
-                        else:
-                            offset = total_virtual_chunks - pipeline_rank - 1
+
+                    if vp_stage == 0:
+                        offset = pipeline_rank * num_layers_per_virtual_rank
+                    else:
+                        offset = num_layers - (num_layers_per_virtual_rank * (pipeline_rank + 1))
+                        # offset = total_virtual_chunks - pipeline_rank - 1
                 # Reduce the offset of embedding layer from the total layer number
                 if (
                     config.account_for_embedding_in_pipeline_split

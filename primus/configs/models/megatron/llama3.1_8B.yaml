@@ -1,7 +1,7 @@
-bases:
+extends:
   - llama3_8B.yaml
 
-tokenizer_type: Llama3Tokenizer
+tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: meta-llama/Llama-3.1-8B
 
 max_position_embeddings: 131072

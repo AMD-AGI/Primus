@@ -1,5 +1,11 @@
-bases:
-  - grok1_base.yaml
+extends:
+  - grok_base.yaml
+
+# https://github.com/xai-org/grok-1
+# 314B total params, 86B active params
+
+tokenizer_type: MixtralTokenizer
+tokenizer_model: mistralai/Mixtral-8x22B-v0.1
 
 # model parameters
 max_position_embeddings: 131072
@@ -12,6 +18,3 @@ init_method_std: 0.01
 
 rotary_base: 1000000
 masked_softmax_fusion: false
-
-tokenizer_type: MixtralTokenizer
-tokenizer_model: xai-org/grok-1

@@ -1,0 +1,11 @@
+job:
+  dump_folder: "./outputs"
+  description: "Llama 3 70B training"
+
+model:
+  name: "llama3"
+  flavor: "70B"
+  hf_assets_path: "meta-llama/Meta-Llama-3-70B"
+  converters:
+    - quantize.linear.float8
+    - quantize.grouped_mm.float8

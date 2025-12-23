@@ -5,3 +5,10 @@
 	path = third_party/Megatron-LM
 	url = https://github.com/NVIDIA/Megatron-LM.git
 	branch = main
+[submodule "third_party/maxtext"]
+	path = third_party/maxtext
+	url = https://github.com/AI-Hypercomputer/maxtext.git
+[submodule "third_party/Emerging-Optimizers"]
+	path = third_party/Emerging-Optimizers
+	url = https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git
+	branch = main

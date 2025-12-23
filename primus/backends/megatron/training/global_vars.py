@@ -29,6 +29,12 @@ def get_mlflow_writer():
     return _GLOBAL_MLFLOW_WRITER
 
 
+def get_primus_args():
+    """Return primus arguments."""
+    _ensure_var_is_initialized(_GLOBAL_ARGS, "args")
+    return _GLOBAL_ARGS
+
+
 def set_primus_global_variables(args):
     """Set args, mlflow."""
 
