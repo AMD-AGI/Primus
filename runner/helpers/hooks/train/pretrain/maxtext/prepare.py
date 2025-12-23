@@ -32,6 +32,7 @@ It is responsible for:
 """
 
 import argparse
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -87,10 +88,42 @@ def prepare_dataset_if_needed(
     """
     Placeholder for future MaxText dataset preparation logic.
 
-    For now this hook is a no-op; real data preparation for MaxText can be
-    implemented here following the patterns used by other backends.
+    For now this hook is a no-op placeholder for future MaxText dataset
+    preparation logic. Real data preparation for MaxText can be implemented
+    here following the patterns used by other backends.
     """
     return
+
+
+def install_maxtext_dependencies() -> None:
+    """
+    Install required system packages for MaxText/JAX on every node.
+
+    This mirrors the original examples/run_pretrain.sh `install_pkgs_for_maxtext`
+    function, but is now part of the pretrain hook pipeline so it runs
+    regardless of dataset_type.
+    """
+    log_info("========== Install required packages for Jax/MaxText ==========")
+
+    # Keep the original package list and behaviour; use a single shell command
+    # to preserve the existing `uname -r` expansion.
+    cmd = (
+        "apt install iproute2 -y && "
+        "apt install -y "
+        'linux-headers-"$(uname -r)" '
+        "libelf-dev "
+        "gcc make libtool autoconf "
+        "librdmacm-dev rdmacm-utils infiniband-diags ibverbs-utils perftest ethtool "
+        "libibverbs-dev rdma-core strace libibmad5 libibnetdisc5 ibverbs-providers "
+        "libibumad-dev libibumad3 libibverbs1 libnl-3-dev libnl-route-3-dev"
+    )
+
+    try:
+        subprocess.run(cmd, shell=True, check=True)
+    except subprocess.CalledProcessError as exc:
+        log_error_and_exit(f"Failed to install MaxText dependencies (exit code {exc.returncode})")
+
+    log_info("========== Install required packages for Jax/MaxText Done ==========")
 
 
 # ---------- Main ----------
@@ -126,6 +159,10 @@ def main():
         log_error_and_exit("Missing required field: pre_trainer.dataset_type")
 
     dataset_type = pre_trainer_cfg.dataset_type
+
+    # Always install required MaxText/JAX system packages on every node.
+    install_maxtext_dependencies()
+
     if dataset_type == "synthetic":
         log_info("'dataset_type: synthetic', Skipping dataset preparation.")
     else:
