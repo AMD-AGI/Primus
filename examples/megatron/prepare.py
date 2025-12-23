@@ -44,7 +44,8 @@ def prepare_dataset(
     data_path: Path,
     tokenizer_type: str,
     tokenizer_model: str,
-    tokenized_data_path: Path,
+    tokenized_train_data_path: Path,
+    tokenized_eval_data_path: Path,
     env=None,
 ):
     dataset = "bookcorpus"
@@ -53,49 +54,100 @@ def prepare_dataset(
     hf_home = Path(os.environ.get("HF_HOME", data_path / "huggingface"))
     os.environ["HF_HOME"] = str(hf_home)
 
-    tokenized_bin = tokenized_data_path.with_suffix(".bin")
-    tokenized_idx = tokenized_data_path.with_suffix(".idx")
+    train_tokenized_bin = tokenized_train_data_path.with_suffix(".bin")
+    train_tokenized_idx = tokenized_train_data_path.with_suffix(".idx")
+    train_files_exist = train_tokenized_bin.exists() and train_tokenized_idx.exists()
 
-    if tokenized_bin.exists() and tokenized_idx.exists():
-        log_info(f"Tokenized files {tokenized_bin} and {tokenized_idx} exist, " "Skipping preprocessing.")
-        return
+    eval_files_exist = False
+    if tokenized_eval_data_path is not None:
+        eval_tokenized_bin = tokenized_eval_data_path.with_suffix(".bin")
+        eval_tokenized_idx = tokenized_eval_data_path.with_suffix(".idx")
+        eval_files_exist = eval_tokenized_bin.exists() and eval_tokenized_idx.exists()
+
+    # check if all required files exist
+    if train_files_exist:
+        if tokenized_eval_data_path is None or eval_files_exist:
+            log_info(f"All required tokenized files exist. Skipping preprocessing.")
+            return
+        else:
+            log_info(f"Train files exist, but eval files missing. Will generate eval files only.")
 
     output_path.mkdir(parents=True, exist_ok=True)
-    dataset_json = dataset_path / "bookcorpus_megatron.json"
+    train_json = dataset_path / "bookcorpus_train.json"
+    valid_json = dataset_path / "bookcorpus_valid.json"
 
-    if dataset_json.exists():
-        log_info(f"Found dataset file: {dataset_json}, skipping download.")
+    if train_json.exists() and valid_json.exists():
+        log_info(f"Found train dataset file: {train_json} and valid dataset file: {valid_json}, skipping download.")
     else:
-        log_info(f"Downloading and saving BookCorpus dataset to {dataset_json} ...")
+        log_info(f"Downloading and saving BookCorpus train dataset to {train_json} and valid dataset to {valid_json} ...")
         nltk.download("punkt")
         dataset = load_dataset("bookcorpus", split="train", trust_remote_code=True)
-        dataset.to_json(str(dataset_json))
-        log_info("Download and save completed.")
+        # split train / valid
+        splits = dataset.train_test_split(test_size=0.005, seed=42)
+        train_ds = splits["train"]
+        valid_ds = splits["test"]
+
+        train_json = dataset_path / "bookcorpus_train.json"
+        valid_json = dataset_path / "bookcorpus_valid.json"
+
+        train_ds.to_json(str(train_json))
+        valid_ds.to_json(str(valid_json))
+        log_info("Download and save train and valid dataset completed.")
 
     log_info(f"Preprocessing dataset with tokenizer {tokenizer_type} / {tokenizer_model}")
     start = time.time()
-    subprocess.run(
-        [
-            "python3",
-            str(primus_path / "examples/megatron/preprocess_data.py"),
-            "--input",
-            str(dataset_json),
-            "--tokenizer-type",
-            tokenizer_type,
-            "--tokenizer-model",
-            tokenizer_model,
-            "--output-prefix",
-            str(output_path / "bookcorpus"),
-            "--workers",
-            str(os.cpu_count()),
-            "--split-sentences",
-            "--partitions",
-            "2",
-        ],
-        check=True,
-        env=env,
-    )
-    log_info(f"Preprocessing completed in {int(time.time() - start)} s")
+    
+    # process train dataset (only if not exists)
+    if not train_files_exist:
+        subprocess.run(
+            [
+                "python3",
+                str(primus_path / "examples/megatron/preprocess_data.py"),
+                "--input",
+                str(train_json),
+                "--tokenizer-type",
+                tokenizer_type,
+                "--tokenizer-model",
+                tokenizer_model,
+                "--output-prefix",
+                str(output_path / "bookcorpus_train"),
+                "--workers",
+                str(os.cpu_count()),
+                "--split-sentences",
+                "--partitions",
+                "2",
+            ],
+            check=True,
+            env=env,
+        )
+        log_info(f"Train dataset preprocessing completed in {int(time.time() - start)} s")
+    else:
+        log_info(f"Train dataset files already exist, skipping train preprocessing.")
+
+    if tokenized_eval_data_path is not None and not eval_files_exist:
+        # process valid data
+        subprocess.run(
+            [
+                "python3",
+                str(primus_path / "examples/megatron/preprocess_data.py"),
+                "--input",
+                str(valid_json),
+                "--tokenizer-type",
+                tokenizer_type,
+                "--tokenizer-model",
+                tokenizer_model,
+                "--output-prefix",
+                str(output_path / "bookcorpus_eval"),
+                "--workers",
+                str(os.cpu_count()),
+                "--split-sentences",
+                "--partitions",
+                "2",
+            ],
+            check=True,
+            env=env,
+        )
+        log_info(f"Valid dataset preprocessing completed in {int(time.time() - start)} s")
 
 
 def prepare_dataset_if_needed(
@@ -106,10 +158,20 @@ def prepare_dataset_if_needed(
         return
 
     tokenizer_type = pre_trainer_cfg.tokenizer_type
-    default_tokenized_path = Path(data_path) / f"bookcorpus/{tokenizer_type}/bookcorpus_text_sentence"
-    tokenized_data_path = Path(os.environ.get("TOKENIZED_DATA_PATH", str(default_tokenized_path)))
+    if pre_trainer_cfg.full_validation or pre_trainer_cfg.eval_iters > 0 and pre_trainer_cfg.eval_interval > 0:
+        default_eval_tokenized_path = Path(data_path) / f"bookcorpus/{tokenizer_type}/bookcorpus_eval_text_sentence"
+        tokenized_eval_data_path = Path(os.environ.get("TOKENIZED_EVAL_DATA_PATH", str(default_eval_tokenized_path)))
+    else:
+        tokenized_eval_data_path = None
+  
+    default_train_tokenized_path = Path(data_path) / f"bookcorpus/{tokenizer_type}/bookcorpus_train_text_sentence"
+    tokenized_train_data_path = Path(os.environ.get("TOKENIZED_TRAIN_DATA_PATH", str(default_train_tokenized_path)))
 
-    done_flag = tokenized_data_path.with_suffix(".done")
+    if tokenized_eval_data_path is not None:
+        done_flag = tokenized_eval_data_path.with_suffix(".done")
+    else:
+        done_flag = tokenized_train_data_path.with_suffix(".done")
+
     node_rank = get_node_rank()
 
     if node_rank == 0:
@@ -121,14 +183,15 @@ def prepare_dataset_if_needed(
             tokenizer_type = primus_config.get_module_config("pre_trainer").tokenizer_type
             tokenizer_model = primus_config.get_module_config("pre_trainer").tokenizer_model
 
-            log_info(f"TOKENIZER_DATA_PATH is {tokenized_data_path}")
+            log_info(f"TOKENIZED_TRAIN_DATA_PATH is {tokenized_train_data_path}, TOKENIZED_EVAL_DATA_PATH is {tokenized_eval_data_path}")
 
             prepare_dataset(
                 primus_path=primus_path,
                 data_path=data_path,
                 tokenizer_type=tokenizer_type,
                 tokenizer_model=tokenizer_model,
-                tokenized_data_path=tokenized_data_path,
+                tokenized_train_data_path=tokenized_train_data_path,
+                tokenized_eval_data_path=tokenized_eval_data_path,
                 env=env,
             )
             done_flag.touch()
@@ -138,7 +201,13 @@ def prepare_dataset_if_needed(
             log_info("Waiting for dataset...")
             sleep(30)
 
-    write_patch_args(Path(patch_args), "train_args", {"train_data_path": str(tokenized_data_path)})
+    train_args = {
+        "train_data_path": str(tokenized_train_data_path),
+    }
+    if tokenized_eval_data_path is not None:
+        train_args["valid_data_path"] = str(tokenized_eval_data_path)
+        train_args["test_data_path"] = str(tokenized_eval_data_path)
+    write_patch_args(Path(patch_args), "train_args", train_args)
 
 
 def build_megatron_helper(primus_path: Path, patch_args: Path, backend_path: str = None):
