@@ -234,7 +234,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         run_patches(
             backend="megatron",
             phase="before_train",
-            backend_version="0.8.0",
+            backend_version="0.15.0rc8",
             extra={
                 "module_config": temp_module_config,
             },
