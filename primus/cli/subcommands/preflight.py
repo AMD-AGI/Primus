@@ -18,9 +18,6 @@ from __future__ import annotations
 
 from typing import Any, List
 
-from primus.tools.preflight.preflight_args import add_preflight_parser
-from primus.tools.preflight.preflight_perf_test import run_preflight
-
 
 def run(args: Any, extra_args: List[str]) -> None:
     """
@@ -33,6 +30,8 @@ def run(args: Any, extra_args: List[str]) -> None:
     if extra_args:
         # For now we ignore unknown args; could be extended later if needed.
         print(f"[Primus:Preflight] Ignoring extra CLI args: {extra_args}")
+
+    from primus.tools.preflight.preflight_perf_test import run_preflight
 
     run_preflight(args)
 
@@ -56,6 +55,8 @@ def register_subcommand(subparsers):
             "via primus.tools.preflight.preflight_perf_test.run_preflight."
         ),
     )
+
+    from primus.tools.preflight.preflight_args import add_preflight_parser
 
     # Reuse the shared preflight argument builder
     add_preflight_parser(parser)

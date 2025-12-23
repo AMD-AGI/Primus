@@ -32,9 +32,11 @@ def test_allreduce(mbs, seq, hidden, dtype, rank, local_rank, world_size, dry_ru
     if local_rank == 0:
         size = mbs * seq * hidden * torch.tensor([], dtype=dtype).element_size()
         print("AllReduce with input size(Byte): ", size)
-        print(f"Rccl-test command: \n$ mpirun -np {world_size} -N $NNODES ./build/all_reduce_perf -b {size} -e {size} -g 1")
+        print(
+            f"Rccl-test command: \n$ mpirun -np {world_size} -N $NNODES ./build/all_reduce_perf -b {size} -e {size} -g 1"
+        )
     if dry_run:
-        return 0,0
+        return 0, 0
     shape = (mbs, seq, hidden)
     device = torch.device(f"cuda:{local_rank}")
     tensor = torch.ones(shape, dtype=dtype, device=device)
@@ -74,7 +76,7 @@ def test_allgather(mbs, seq, hidden, dtype, rank, local_rank, world_size, dry_ru
             world_size * nelement * element_size,
         )
     if dry_run:
-        return 0,0
+        return 0, 0
 
     shape = (mbs, local_seq, hidden)
     device = torch.device(f"cuda:{local_rank}")
@@ -113,10 +115,13 @@ def test_reducescatter(mbs, seq, hidden, dtype, rank, local_rank, world_size, dr
     chunk_shape = (mbs, chunk_seq, hidden)
 
     if local_rank == 0:
-        print("ReduceScatter with each output chunk size(Byte): ", mbs * chunk_seq * hidden * torch.tensor([], dtype=dtype).element_size())
-    
+        print(
+            "ReduceScatter with each output chunk size(Byte): ",
+            mbs * chunk_seq * hidden * torch.tensor([], dtype=dtype).element_size(),
+        )
+
     if dry_run:
-        return 0,0
+        return 0, 0
 
     device = torch.device(f"cuda:{local_rank}")
     tensor = torch.ones(full_shape, dtype=dtype, device=device)
@@ -141,14 +146,16 @@ def test_reducescatter(mbs, seq, hidden, dtype, rank, local_rank, world_size, dr
     return avg_time, bandwidth
 
 
-def benchmark(test_func, output_csv_path, rank, local_rank, world_size,dry_run=False):
+def benchmark(test_func, output_csv_path, rank, local_rank, world_size, dry_run=False):
     benchmark_results = []
 
     for model_name, (seq, hidden) in MODEL_PARAMS_TABLE.items():
         for mbs in MBS_LIST:
             print(f"\nModel Name {model_name}, mbs {mbs}")
             for dtype in [torch.float16]:
-                avg_time, bandwidth = test_func(mbs, seq, hidden, dtype, rank, local_rank, world_size,dry_run)
+                avg_time, bandwidth = test_func(
+                    mbs, seq, hidden, dtype, rank, local_rank, world_size, dry_run
+                )
                 if rank == 0:
                     result = {
                         "Model": model_name,
@@ -175,7 +182,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--allreduce-report-csv-path", type=str)
     parser.add_argument("--allgather-report-csv-path", type=str)
-    parser.add_argument('-dry', '--dry-run', action='store_true', help='Testing run to generate message size and rccl-test command.')
+    parser.add_argument(
+        "-dry",
+        "--dry-run",
+        action="store_true",
+        help="Testing run to generate message size and rccl-test command.",
+    )
     parser.add_argument("--reducescatter-report-csv-path", type=str)
     args = parser.parse_args()
 
