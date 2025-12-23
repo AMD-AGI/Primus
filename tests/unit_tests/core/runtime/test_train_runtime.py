@@ -47,11 +47,11 @@ class TestPrimusRuntime(PrimusUT):
         args = self._build_args()
         runtime = PrimusRuntime(args=args)
 
-        # Fake module config with params dict and required attributes.
+        # Fake module config with params as SimpleNamespace (matching actual runtime behavior).
         module_cfg = SimpleNamespace(
             name="pre_trainer",
             framework="megatron",
-            params={"a": 1, "nested": {"b": 2}},
+            params=SimpleNamespace(a=1, nested=SimpleNamespace(b=2)),
         )
 
         # Inject a minimal TrainContext.
@@ -67,9 +67,10 @@ class TestPrimusRuntime(PrimusUT):
         overrides = ["a=10", "nested.b=20", "new_key=30"]
         runtime._apply_overrides("pre_trainer", module_cfg, overrides)
 
-        self.assertEqual(module_cfg.params["a"], 10)
-        self.assertEqual(module_cfg.params["nested"]["b"], 20)
-        self.assertEqual(module_cfg.params["new_key"], 30)
+        # After _apply_overrides, params is converted back to SimpleNamespace tree
+        self.assertEqual(module_cfg.params.a, 10)
+        self.assertEqual(module_cfg.params.nested.b, 20)
+        self.assertEqual(module_cfg.params.new_key, 30)
 
     def test_initialize_backend_wraps_adapter_errors(self):
         """BackendRegistry.get_adapter errors should be wrapped with context."""
