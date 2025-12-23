@@ -320,6 +320,15 @@ export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
 # Note: Disable fp32 atomic due if you find any accuracy issue.
 export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:-0}
 
+# deterministic
+if [ "${PRIMUS_DETERMINISTIC:-}" == "1" ]; then
+    export NCCL_ALGO="Ring"
+    export NVTE_ALLOW_NONDETERMINISTIC_ALGO=0
+    export ROCBLAS_DEFAULT_ATOMICS_MODE=0
+    # Disable torch compile to avoid race condition issue in some version triton compiler.
+    export TORCH_COMPILE_DISABLE=1
+fi
+
 # install primus turbo from source
 export REBUILD_PRIMUS_TURBO=${REBUILD_PRIMUS_TURBO:-0}
 if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
@@ -459,7 +468,10 @@ handle_hipblaslt_tuning() {
     fi
 }
 
-handle_hipblaslt_tuning
+# Disable HipBLASLT tuning in deterministic mode
+if [ "${PRIMUS_DETERMINISTIC:-}" != "1" ]; then
+    handle_hipblaslt_tuning
+fi
 
 # -------------------- Python Path Setup --------------------
 setup_pythonpath() {

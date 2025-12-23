@@ -61,7 +61,7 @@ def init_worker_logger(primus_config: Any, module_name: str = "primus", module_c
 
     if module_config is not None:
         # Access logging config from params dict
-        sink_level = module_config.params.get("sink_level")
+        sink_level = getattr(module_config.params, "sink_level", None)
 
         # If sink_level is set, it overrides both file and stderr levels
         if sink_level is not None:
@@ -69,10 +69,8 @@ def init_worker_logger(primus_config: Any, module_name: str = "primus", module_c
             stderr_sink_level = sink_level
         else:
             # Otherwise, use individual levels if specified
-            if module_config.params.get("file_sink_level") is not None:
-                file_sink_level = module_config.params.get("file_sink_level")
-            if module_config.params.get("stderr_sink_level") is not None:
-                stderr_sink_level = module_config.params.get("stderr_sink_level")
+            file_sink_level = getattr(module_config.params, "file_sink_level", "DEBUG")
+            stderr_sink_level = getattr(module_config.params, "stderr_sink_level", "INFO")
 
     dist_env = get_torchrun_env()
 

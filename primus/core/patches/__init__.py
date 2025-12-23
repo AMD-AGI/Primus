@@ -48,7 +48,7 @@ Usage:
 """
 
 # Core components
-from primus.core.patches.context import PatchContext
+from primus.core.patches.context import PatchContext, get_args
 from primus.core.patches.patch import FunctionPatch
 from primus.core.patches.patch_registry import PatchRegistry, register_patch
 from primus.core.patches.patch_runner import run_patches
@@ -56,6 +56,7 @@ from primus.core.patches.utils import version_matches
 
 __all__ = [
     "PatchContext",
+    "get_args",
     "FunctionPatch",
     "PatchRegistry",
     "register_patch",
