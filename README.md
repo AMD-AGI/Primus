@@ -62,8 +62,11 @@ Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-ru
 
     ```bash
     # Run training in container
+    # NOTE: If your config downloads weights/tokenizer from Hugging Face Hub,
+    #       you typically need to pass HF_TOKEN into the container.
     ./runner/primus-cli container --image rocm/primus:v25.10 \
-      -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml
+      --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+      -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
     ```
 
 For more detailed usage instructions, see the [CLI User Guide](./docs/cli/PRIMUS-CLI-GUIDE.md).
