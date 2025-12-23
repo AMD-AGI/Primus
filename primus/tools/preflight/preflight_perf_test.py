@@ -9,13 +9,15 @@ import os
 
 import torch
 import torch.distributed as dist
-from global_vars import LOCAL_RANK, RANK, set_hostnames
-from inter_node_comm import run_inter_node_comm
-from inter_node_comm_p2p import run_inter_node_comm_p2p
-from inter_node_ring_p2p import run_inter_node_ring_p2p
-from intra_node_comm import run_intra_node_comm
-from square_gemm import run_square_gemm
-from utility import (
+
+from primus.tools.preflight.global_vars import LOCAL_RANK, RANK, set_hostnames
+from primus.tools.preflight.inter_node_comm import run_inter_node_comm
+from primus.tools.preflight.inter_node_comm_p2p import run_inter_node_comm_p2p
+from primus.tools.preflight.inter_node_ring_p2p import run_inter_node_ring_p2p
+from primus.tools.preflight.intra_node_comm import run_intra_node_comm
+from primus.tools.preflight.preflight_args import add_preflight_parser
+from primus.tools.preflight.square_gemm import run_square_gemm
+from primus.tools.preflight.utility import (
     gather_hostnames,
     get_first_ib_unidirectional_bandwidth,
     log,
@@ -34,7 +36,7 @@ def cleanup():
     dist.destroy_process_group()
 
 
-def main(args):
+def run_preflight(args):
     setup()
 
     if RANK == 0:
@@ -64,12 +66,13 @@ def main(args):
     cleanup()
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dump-path", type=str, default="output/preflight")
-    parser.add_argument("--report-file-name", type=str, default="preflight_report")
-    parser.add_argument("--disable-pdf", dest="save_pdf", action="store_false")
-    parser.add_argument("--disable-plot", dest="plot", action="store_false")
+    add_preflight_parser(parser)
     args = parser.parse_args()
 
-    main(args)
+    run_preflight(args)
+
+
+if __name__ == "__main__":
+    main()

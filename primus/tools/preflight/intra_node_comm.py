@@ -9,7 +9,8 @@ import time
 import matplotlib.pyplot as plt
 import torch
 import torch.distributed as dist
-from global_vars import (
+
+from primus.tools.preflight.global_vars import (
     ITERATION,
     LOCAL_RANK,
     LOCAL_WORLD_SIZE,
@@ -18,7 +19,12 @@ from global_vars import (
     WORLD_SIZE,
     get_hostnames,
 )
-from utility import create_dir, extract_first_middle_last, extract_number, log
+from primus.tools.preflight.utility import (
+    create_dir,
+    extract_first_middle_last,
+    extract_number,
+    log,
+)
 
 
 def run_intra_node_comm(args):
