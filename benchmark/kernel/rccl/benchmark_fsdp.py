@@ -9,20 +9,22 @@ import csv
 import os
 import time
 from datetime import timedelta
+
 import torch
 import torch.distributed as dist
 
 # [d_model, d_ff, n_heads, n_kv_heads, d_qkv]
 # parameter calculation reference: https://jax-ml.github.io/scaling-book/applied-training/#counting-parameters-and-flops
 MODEL_PARAMS_TABLE = {
-    "llama3-70B": (8192, 8192*3.5, 64, 8, 128),
+    "llama3-70B": (8192, 8192 * 3.5, 64, 8, 128),
     "llama3-405B": (16384, 53248, 128, 16, 128),
 }
 ITERS = 20
 
+
 def test_allgather(size, dtype, rank, local_rank, world_size, dry_run=False):
-    full_shape = (size)
-    chunk_shape = (size // world_size)
+    (size)
+    chunk_shape = size // world_size
 
     if local_rank == 0:
         element_size = torch.tensor([], dtype=dtype).element_size()
@@ -34,10 +36,26 @@ def test_allgather(size, dtype, rank, local_rank, world_size, dry_run=False):
             " Output size ",
             world_size * byte_size,
         )
-        print("HSA_NO_SCRATCH_RECLAIM=1 ./build/all_gather_perf -b ",byte_size," -e ",byte_size," -g ",world_size," -d half")
-        print("HSA_NO_SCRATCH_RECLAIM=1 mpirun --allow-run-as-root -np ",world_size," ./build/all_gather_perf -b ",byte_size," -e ",byte_size," -g 1 -d half")
+        print(
+            "HSA_NO_SCRATCH_RECLAIM=1 ./build/all_gather_perf -b ",
+            byte_size,
+            " -e ",
+            byte_size,
+            " -g ",
+            world_size,
+            " -d half",
+        )
+        print(
+            "HSA_NO_SCRATCH_RECLAIM=1 mpirun --allow-run-as-root -np ",
+            world_size,
+            " ./build/all_gather_perf -b ",
+            byte_size,
+            " -e ",
+            byte_size,
+            " -g 1 -d half",
+        )
     if dry_run:
-        return 0,0
+        return 0, 0
 
     device = torch.device(f"cuda:{local_rank}")
     tensor = torch.randn(chunk_shape, dtype=dtype, device=device)
@@ -64,16 +82,32 @@ def test_allgather(size, dtype, rank, local_rank, world_size, dry_run=False):
 
 
 def test_reducescatter(size, dtype, rank, local_rank, world_size, dry_run=False):
-    full_shape = (size)
-    chunk_shape = (size // world_size)
+    full_shape = size
+    chunk_shape = size // world_size
 
     if local_rank == 0:
         byte_size = size // world_size * torch.tensor([], dtype=dtype).element_size()
         print("ReduceScatter with total size(Byte): ", byte_size)
-        print("HSA_NO_SCRATCH_RECLAIM=1 ./build/reduce_scatter_perf -b ",byte_size," -e ",byte_size," -g ",world_size," -d half # assuming dtype float16")
-        print("HSA_NO_SCRATCH_RECLAIM=1 mpirun --allow-run-as-root -np ",world_size," ./build/reduce_scatter_perf -b ",byte_size," -e ",byte_size," -g 1 -d half")
+        print(
+            "HSA_NO_SCRATCH_RECLAIM=1 ./build/reduce_scatter_perf -b ",
+            byte_size,
+            " -e ",
+            byte_size,
+            " -g ",
+            world_size,
+            " -d half # assuming dtype float16",
+        )
+        print(
+            "HSA_NO_SCRATCH_RECLAIM=1 mpirun --allow-run-as-root -np ",
+            world_size,
+            " ./build/reduce_scatter_perf -b ",
+            byte_size,
+            " -e ",
+            byte_size,
+            " -g 1 -d half",
+        )
     if dry_run:
-        return 0,0
+        return 0, 0
 
     device = torch.device(f"cuda:{local_rank}")
     tensor = torch.ones(full_shape, dtype=dtype, device=device)
@@ -97,26 +131,26 @@ def test_reducescatter(size, dtype, rank, local_rank, world_size, dry_run=False)
     return avg_time, bandwidth
 
 
-def benchmark(test_func, output_csv_path, rank, local_rank, world_size,dry_run=False):
+def benchmark(test_func, output_csv_path, rank, local_rank, world_size, dry_run=False):
     benchmark_results = []
 
     for model_name, (d_model, d_ff, n_heads, n_kv_heads, d_qkv) in MODEL_PARAMS_TABLE.items():
-            size = d_model*d_ff*3 + 2*d_model*n_heads*d_qkv + 2*d_model*n_kv_heads*d_qkv
-            size = int(size)
+        size = d_model * d_ff * 3 + 2 * d_model * n_heads * d_qkv + 2 * d_model * n_kv_heads * d_qkv
+        size = int(size)
+        if rank == 0:
+            print(f"\nModel Name {model_name} with size {size}")
+        for dtype in [torch.float16]:
+            avg_time, bandwidth = test_func(size, dtype, rank, local_rank, world_size, dry_run)
             if rank == 0:
-                print(f"\nModel Name {model_name} with size {size}")
-            for dtype in [torch.float16]:
-                avg_time, bandwidth = test_func(size, dtype, rank, local_rank, world_size,dry_run)
-                if rank == 0:
-                    result = {
-                        "Model": model_name,
-                        "Layer Weight": size,
-                        "DataType": dtype,
-                        "WorldSize": world_size,
-                        "Time(s)": avg_time,
-                        "Bandwidth(GB/s)": bandwidth,
-                    }
-                    benchmark_results.append(result)
+                result = {
+                    "Model": model_name,
+                    "Layer Weight": size,
+                    "DataType": dtype,
+                    "WorldSize": world_size,
+                    "Time(s)": avg_time,
+                    "Bandwidth(GB/s)": bandwidth,
+                }
+                benchmark_results.append(result)
 
     if rank == 0 and not dry_run:
         fieldnames = list(benchmark_results[0].keys())
@@ -130,7 +164,12 @@ def benchmark(test_func, output_csv_path, rank, local_rank, world_size,dry_run=F
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--allgather-report-csv-path", type=str)
-    parser.add_argument('-dry', '--dry-run', action='store_true', help='Testing run to generate message size and rccl-test command.')
+    parser.add_argument(
+        "-dry",
+        "--dry-run",
+        action="store_true",
+        help="Testing run to generate message size and rccl-test command.",
+    )
     parser.add_argument("--reducescatter-report-csv-path", type=str)
     args = parser.parse_args()
 
@@ -158,4 +197,3 @@ if __name__ == "__main__":
 
     dist.barrier()
     dist.destroy_process_group()
-
