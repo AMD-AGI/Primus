@@ -77,9 +77,13 @@ def prepare_dataset(
     valid_json = dataset_path / "bookcorpus_valid.json"
 
     if train_json.exists() and valid_json.exists():
-        log_info(f"Found train dataset file: {train_json} and valid dataset file: {valid_json}, skipping download.")
+        log_info(
+            f"Found train dataset file: {train_json} and valid dataset file: {valid_json}, skipping download."
+        )
     else:
-        log_info(f"Downloading and saving BookCorpus train dataset to {train_json} and valid dataset to {valid_json} ...")
+        log_info(
+            f"Downloading and saving BookCorpus train dataset to {train_json} and valid dataset to {valid_json} ..."
+        )
         nltk.download("punkt")
         dataset = load_dataset("bookcorpus", split="train", trust_remote_code=True)
         # split train / valid
@@ -96,7 +100,7 @@ def prepare_dataset(
 
     log_info(f"Preprocessing dataset with tokenizer {tokenizer_type} / {tokenizer_model}")
     start = time.time()
-    
+
     # process train dataset (only if not exists)
     if not train_files_exist:
         subprocess.run(
@@ -158,14 +162,26 @@ def prepare_dataset_if_needed(
         return
 
     tokenizer_type = pre_trainer_cfg.tokenizer_type
-    if pre_trainer_cfg.full_validation or pre_trainer_cfg.eval_iters > 0 and pre_trainer_cfg.eval_interval > 0:
-        default_eval_tokenized_path = Path(data_path) / f"bookcorpus/{tokenizer_type}/bookcorpus_eval_text_sentence"
-        tokenized_eval_data_path = Path(os.environ.get("TOKENIZED_EVAL_DATA_PATH", str(default_eval_tokenized_path)))
+    if (
+        pre_trainer_cfg.full_validation
+        or pre_trainer_cfg.eval_iters > 0
+        and pre_trainer_cfg.eval_interval > 0
+    ):
+        default_eval_tokenized_path = (
+            Path(data_path) / f"bookcorpus/{tokenizer_type}/bookcorpus_eval_text_sentence"
+        )
+        tokenized_eval_data_path = Path(
+            os.environ.get("TOKENIZED_EVAL_DATA_PATH", str(default_eval_tokenized_path))
+        )
     else:
         tokenized_eval_data_path = None
-  
-    default_train_tokenized_path = Path(data_path) / f"bookcorpus/{tokenizer_type}/bookcorpus_train_text_sentence"
-    tokenized_train_data_path = Path(os.environ.get("TOKENIZED_TRAIN_DATA_PATH", str(default_train_tokenized_path)))
+
+    default_train_tokenized_path = (
+        Path(data_path) / f"bookcorpus/{tokenizer_type}/bookcorpus_train_text_sentence"
+    )
+    tokenized_train_data_path = Path(
+        os.environ.get("TOKENIZED_TRAIN_DATA_PATH", str(default_train_tokenized_path))
+    )
 
     if tokenized_eval_data_path is not None:
         done_flag = tokenized_eval_data_path.with_suffix(".done")
@@ -183,7 +199,9 @@ def prepare_dataset_if_needed(
             tokenizer_type = primus_config.get_module_config("pre_trainer").tokenizer_type
             tokenizer_model = primus_config.get_module_config("pre_trainer").tokenizer_model
 
-            log_info(f"TOKENIZED_TRAIN_DATA_PATH is {tokenized_train_data_path}, TOKENIZED_EVAL_DATA_PATH is {tokenized_eval_data_path}")
+            log_info(
+                f"TOKENIZED_TRAIN_DATA_PATH is {tokenized_train_data_path}, TOKENIZED_EVAL_DATA_PATH is {tokenized_eval_data_path}"
+            )
 
             prepare_dataset(
                 primus_path=primus_path,
