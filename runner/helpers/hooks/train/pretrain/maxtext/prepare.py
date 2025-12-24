@@ -88,9 +88,15 @@ def prepare_dataset_if_needed(
     """
     Placeholder for future MaxText dataset preparation logic.
 
-    Real data preparation for MaxText can be implemented here following the
-    patterns used by other backends.
-    """
+    This hook is intentionally a no-op because current MaxText pre-train
+    experiments in this integration either use synthetic data or datasets
+    that are prepared outside of Primus, so no additional preprocessing
+    is required here.
+
+    Dataset preparation logic should be implemented in this function when
+    non-synthetic or external datasets are introduced that require
+    on-the-fly preprocessing or conversion, following the patterns used
+    by other backends.
     return
 
 
