@@ -22,8 +22,6 @@
 - **Megatron-LM**: LLaMA2 / LLaMA3 / LLaMA4 families, DeepSeek-V2/V3, Mixtral-style MoE, and other GPT-style models
 - **TorchTitan**: LLaMA3 / LLaMA4, DeepSeek-V3, and related decoder-only architectures
 - **MaxText (JAX)**: LLaMA3.x and other MaxText-supported transformer models (subset; see MaxText docs for details)
-- **Hugging Face**: Generic HF models via `models/huggingface` configs (for experimentation and evaluation)
-- **MoE on AMD GPUs**: DeepSeek-style and Mixtral-style MoE configurations, tuned for ROCm and Primus-Turbo kernels
 
 For the full and up-to-date model matrix, see [Supported Models](./docs/backends/overview.md#supported-models).
 

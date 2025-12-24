@@ -15,24 +15,24 @@ For more details and configuration examples, refer to the backend-specific patch
 
 #### Megatron-LM
 
-- LLaMA2 / LLaMA3 / LLaMA4 families
-- DeepSeek-V2 / DeepSeek-V3
-- Mixtral-style and DeepSeek-style MoE (decoder-only)
-- Other GPT-style decoder-only language models
+- **LLaMA family**: LLaMA2, LLaMA3, LLaMA3.1, LLaMA3.3, LLaMA4 (various sizes from 7B up to 405B+)
+- **DeepSeek family**: DeepSeek-V2 (lite/base/full) and DeepSeek-V3
+- **MoE / Mixtral**: Mixtral-8x7B / 8x22B, large MoE configs (515B, 1T, 2T, 4T) and DeepSeek-style MoE
+- **Qwen family**: Qwen2.5 (7B/72B) and Qwen3 (8B/30B/235B variants)
+- **Other GPT-style models**: Grok1/2, GPT-OSS 20B and generic `language_model.yaml`
 
 #### TorchTitan
 
-- LLaMA3 / LLaMA4
-- DeepSeek-V3
-- Other TorchTitan-supported decoder-only transformer models
+- **LLaMA family**: LLaMA3, LLaMA3.1, LLaMA3.3 (including FP8 variants)
+- **DeepSeek family**: DeepSeek-V3 (16B and 671B, FP8 and BF16 configs)
+- **Qwen family**: Qwen3 small/medium models (0.6B, 1.7B, 32B)
 
 #### JAX MaxText
 
-- LLaMA3.x and other MaxText-supported transformer models (subset; see MaxText docs for full list)
-
-#### Hugging Face
-
-- Generic Hugging Face models via `models/huggingface` configs for experimentation and evaluation
+- **LLaMA family**: LLaMA2 (7B/70B), LLaMA3 (8B/70B), LLaMA3.3 (70B)
+- **DeepSeek family**: DeepSeek-V2 16B
+- **MoE / Mixtral**: Mixtral-8x7B
+- **Other models**: Grok1 and additional MaxText-supported transformers (see MaxText docs for the full list)
 
 ---
 
