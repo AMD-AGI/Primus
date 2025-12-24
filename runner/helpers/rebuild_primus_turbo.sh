@@ -35,6 +35,8 @@ if [[ -d "Primus-Turbo" ]]; then
     rm -rf "Primus-Turbo"
 fi
 
+: "${GIT_SSL_VERIFY:=true}"
+LOG_INFO "Cloning Primus-Turbo with GIT_SSL_VERIFY=${GIT_SSL_VERIFY}"
 git clone https://github.com/AMD-AGI/Primus-Turbo.git --recursive
 cd "Primus-Turbo" || exit 1
 
