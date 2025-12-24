@@ -49,4 +49,4 @@ All modules inherit the options defined in [`primus/configs/modules/module_base.
 ### Backend Index
 - [Megatron-LM Patch Notes](./megatron/patch-notes.md)
 - [TorchTitan Patch Notes](./torchtitan/patch-notes.md)
-- JAX MaxText – coming soon (tracked here to keep the structure ready)
+- [JAX MaxText Patch Notes](./maxtext/patch-notes.md)
