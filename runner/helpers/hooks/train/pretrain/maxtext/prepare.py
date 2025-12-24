@@ -97,6 +97,9 @@ def prepare_dataset_if_needed(
     non-synthetic or external datasets are introduced that require
     on-the-fly preprocessing or conversion, following the patterns used
     by other backends.
+    """
+
+    # No-op for now; datasets are prepared outside of Primus for MaxText.
     return
 
 
