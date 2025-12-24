@@ -364,8 +364,8 @@ fi
 while IFS= read -r line; do
     [[ -z "$line" ]] && continue
 
-    # Match lines like: extra.foo=1
-    if [[ "$line" =~ ^extra\.([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+    # Match lines like: extra.foo=1 or extra.model.hf_assets_path=...
+    if [[ "$line" =~ ^extra\.([A-Za-z_][A-Za-z0-9_.]*[A-Za-z0-9_])=(.*)$ ]]; then
         name="${BASH_REMATCH[1]}"
         value="${BASH_REMATCH[2]}"
 
