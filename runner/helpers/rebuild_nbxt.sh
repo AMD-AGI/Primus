@@ -6,7 +6,7 @@
 ###############################################################################
 #
 # Rebuild bnxt from a tar package, intended to be run via:
-#   runner/helpers/execute_patches.sh runner/helpers/rebuild_nbxt.sh
+#   runner/helpers/execute_patches.sh runner/helpers/rebuild_bnxt.sh
 #
 # Control via environment variables:
 #   PATH_TO_BNXT_TAR_PACKAGE=/path  # path to libbnxt_re-*.tar.gz
