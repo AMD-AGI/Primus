@@ -23,7 +23,7 @@ For more details and configuration examples, refer to the backend-specific patch
 
 #### TorchTitan
 
-- **LLaMA family**: LLaMA3, LLaMA3.1, LLaMA3.3 (including FP8 variants)
+- **LLaMA family**: LLaMA3, LLaMA3.1, LLaMA3.3 (various sizes, including FP8 variants)
 - **DeepSeek family**: DeepSeek-V3 (16B and 671B, FP8 and BF16 configs)
 - **Qwen family**: Qwen3 small/medium models (0.6B, 1.7B, 32B)
 
