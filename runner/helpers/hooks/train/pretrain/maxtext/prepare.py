@@ -88,9 +88,8 @@ def prepare_dataset_if_needed(
     """
     Placeholder for future MaxText dataset preparation logic.
 
-    For now this hook is a no-op placeholder for future MaxText dataset
-    preparation logic. Real data preparation for MaxText can be implemented
-    here following the patterns used by other backends.
+    Real data preparation for MaxText can be implemented here following the
+    patterns used by other backends.
     """
     return
 
