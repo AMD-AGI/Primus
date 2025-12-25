@@ -44,25 +44,51 @@ class Schedule1F1B(PipelineScheduleAlgo):
             # warmup
             warm_up_phases = self.pp_size - rank - 1
             for i in range(warm_up_phases):
+                recv_node, send_node = self.generate_send_recv_nodes(rank, i, 0, FuncType.F)
+                if recv_node is not None:
+                    schedule_table[rank].append(recv_node)
+
                 schedule_table[rank].append(
                     SchedulerNode(func_type=FuncType.F, mini_batch=i, chunk=0, args=None)
                 )
+
+                if send_node is not None:
+                    schedule_table[rank].append(send_node)
+
             # 1f1b steady
             for i in range(warm_up_phases, self.micro_batches):
+                recv_node, send_node = self.generate_send_recv_nodes(rank, i, 0, FuncType.F)
+                if recv_node is not None:
+                    schedule_table[rank].append(recv_node)
+
                 schedule_table[rank].append(
                     SchedulerNode(func_type=FuncType.F, mini_batch=i, chunk=0, args=None)
                 )
+
+                if send_node is not None:
+                    schedule_table[rank].append(send_node)
+
+                recv_node, send_node = self.generate_send_recv_nodes(rank, i - warm_up_phases, 0, FuncType.BW)
+                if recv_node is not None:
+                    schedule_table[rank].append(recv_node)
+
                 schedule_table[rank].append(
                     SchedulerNode(func_type=FuncType.BW, mini_batch=i - warm_up_phases, chunk=0, args=None)
                 )
+                if send_node is not None:
+                    schedule_table[rank].append(send_node)
 
             # cool down
             for i in range(self.micro_batches - warm_up_phases, self.micro_batches):
+                recv_node, send_node = self.generate_send_recv_nodes(rank, i, 0, FuncType.BW)
+                if recv_node is not None:
+                    schedule_table[rank].append(recv_node)
+
                 schedule_table[rank].append(
                     SchedulerNode(func_type=FuncType.BW, mini_batch=i, chunk=0, args=None)
                 )
-
-        schedule_table = self.add_communication_nodes(schedule_table)
+                if send_node is not None:
+                    schedule_table[rank].append(send_node)
 
         return schedule_table
 

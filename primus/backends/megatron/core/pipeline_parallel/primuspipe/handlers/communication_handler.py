@@ -10,11 +10,11 @@ import torch
 from megatron.core.pipeline_parallel.schedules import deallocate_output_tensor
 from megatron.training import get_args
 
-from primus.core.pipeline_parallel.handler.utils import find_prev_node_with_type
 from primus.core.pipeline_parallel.scheduler.scheduler_node import (
     FuncType,
     SchedulerNode,
 )
+from primus.core.pipeline_parallel.utils import find_prev_node_with_type
 
 COMMUNICATION_NODE_CACHE = []
 
@@ -45,7 +45,7 @@ def _async_send_recv_op(
             for node in send_next_nodes:
                 for send_buffer in node.args["send_buffers"]:
                     send_next_req = torch.distributed.isend(
-                        tensor=send_buffer, dst=node.args["to_pp_rank"], group=even_send_odd_recv_group
+                        tensor=send_buffer, group_dst=node.args["to_pp_rank"], group=even_send_odd_recv_group
                     )
                     node.args["req"] = send_next_req
 
@@ -53,7 +53,9 @@ def _async_send_recv_op(
             for node in recv_prev_nodes:
                 for recv_buffer in node.args["recv_buffers"]:
                     recv_prev_req = torch.distributed.irecv(
-                        tensor=recv_buffer, src=node.args["from_pp_rank"], group=even_recv_odd_send_group
+                        tensor=recv_buffer,
+                        group_src=node.args["from_pp_rank"],
+                        group=even_recv_odd_send_group,
                     )
                     node.args["req"] = recv_prev_req
 
@@ -61,7 +63,7 @@ def _async_send_recv_op(
             for node in send_prev_nodes:
                 for send_buffer in node.args["send_buffers"]:
                     send_prev_req = torch.distributed.isend(
-                        tensor=send_buffer, dst=node.args["to_pp_rank"], group=even_send_odd_recv_group
+                        tensor=send_buffer, group_dst=node.args["to_pp_rank"], group=even_send_odd_recv_group
                     )
                     node.args["req"] = send_prev_req
 
@@ -69,7 +71,9 @@ def _async_send_recv_op(
             for node in recv_next_nodes:
                 for recv_buffer in node.args["recv_buffers"]:
                     recv_next_req = torch.distributed.irecv(
-                        tensor=recv_buffer, src=node.args["from_pp_rank"], group=even_recv_odd_send_group
+                        tensor=recv_buffer,
+                        group_src=node.args["from_pp_rank"],
+                        group=even_recv_odd_send_group,
                     )
                     node.args["req"] = recv_next_req
 
@@ -78,7 +82,9 @@ def _async_send_recv_op(
             for node in recv_prev_nodes:
                 for recv_buffer in node.args["recv_buffers"]:
                     recv_prev_req = torch.distributed.irecv(
-                        tensor=recv_buffer, src=node.args["from_pp_rank"], group=even_send_odd_recv_group
+                        tensor=recv_buffer,
+                        group_src=node.args["from_pp_rank"],
+                        group=even_send_odd_recv_group,
                     )
                     node.args["req"] = recv_prev_req
 
@@ -86,7 +92,7 @@ def _async_send_recv_op(
             for node in send_next_nodes:
                 for send_buffer in node.args["send_buffers"]:
                     send_next_req = torch.distributed.isend(
-                        tensor=send_buffer, dst=node.args["to_pp_rank"], group=even_recv_odd_send_group
+                        tensor=send_buffer, group_dst=node.args["to_pp_rank"], group=even_recv_odd_send_group
                     )
                     node.args["req"] = send_next_req
 
@@ -94,7 +100,9 @@ def _async_send_recv_op(
             for node in recv_next_nodes:
                 for recv_buffer in node.args["recv_buffers"]:
                     recv_next_req = torch.distributed.irecv(
-                        tensor=recv_buffer, src=node.args["from_pp_rank"], group=even_send_odd_recv_group
+                        tensor=recv_buffer,
+                        group_src=node.args["from_pp_rank"],
+                        group=even_send_odd_recv_group,
                     )
                     node.args["req"] = recv_next_req
 
@@ -102,7 +110,7 @@ def _async_send_recv_op(
             for node in send_prev_nodes:
                 for send_buffer in node.args["send_buffers"]:
                     send_prev_req = torch.distributed.isend(
-                        tensor=send_buffer, dst=node.args["to_pp_rank"], group=even_recv_odd_send_group
+                        tensor=send_buffer, group_dst=node.args["to_pp_rank"], group=even_recv_odd_send_group
                     )
                     node.args["req"] = send_prev_req
 
@@ -116,6 +124,7 @@ def _init_send_recv_buffers(node: SchedulerNode, idx: int, scheduler_table: list
         }
         prev_node = find_prev_node_with_type(scheduler_table, idx, prev_nodes_indicate_map[node.func_type])
         assert prev_node is not None, f"prev_node not found {node.__str__()}"
+
         node.args["send_buffers"] = scheduler_table[prev_node].args["outputs"]
         node.args["prev_node_idx"] = prev_node
 
@@ -125,13 +134,11 @@ def _init_send_recv_buffers(node: SchedulerNode, idx: int, scheduler_table: list
         # check send buffer shape and size
         assert len(node.args["send_buffers"]) == len(
             node.args["send_tensor_shapes"]
-        ), "send_buffer_shape and send_buffer_size must have the same number of dimensions"
+        ), f"send_buffer_shape and send_buffer_size must have the same number of dimensions {node.args['send_tensor_shapes']} {node.args['send_buffers']}"
         for i in range(len(node.args["send_tensor_shapes"])):
             assert (
                 node.args["send_tensor_shapes"][i] == node.args["send_buffers"][i].shape
             ), f"send_buffer_shape and send_buffer_size must have the same size {node.args['send_tensor_shapes'][i]} {node.args['send_buffers'][i].shape} node.func_type: {node.func_type} node.mini_batch: {node.mini_batch} node.chunk: {node.chunk}"
-
-        # print(f"node {node} send_buffers: {len(node.args['send_buffers'])} | {node.args['send_buffers'][0].shape}")
 
     elif node.func_type in [FuncType.RF, FuncType.RB]:
         node.args["recv_buffers"] = []
@@ -144,7 +151,6 @@ def _init_send_recv_buffers(node: SchedulerNode, idx: int, scheduler_table: list
                     dtype=node.args["dtype"],
                 )
             )
-        # print(f"node {node} recv_buffers: {len(node.args['recv_buffers'])} | {node.args['recv_buffers'][0].shape}")
 
 
 def _batch_send_recv(p2p_nodes: list[SchedulerNode], mode="batch_p2p"):
