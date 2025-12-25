@@ -5,10 +5,11 @@
 ###############################################################################
 
 """
-Megatron Transformer Patches
+Megatron Evaluate Patches
 
-This module contains patches that modify Megatron's transformer-related
-components (configs, blocks, etc.) to integrate Primus-specific behavior.
+This module contains patches that modify Megatron's evaluation routine
+to integrate Primus-specific behavior (e.g., monkey-patching the
+training.evaluate function to use Primus-provided evaluation).
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
