@@ -91,9 +91,6 @@ def prepare_dataset(
         train_ds = splits["train"]
         valid_ds = splits["test"]
 
-        train_json = dataset_path / "bookcorpus_train.json"
-        valid_json = dataset_path / "bookcorpus_valid.json"
-
         train_ds.to_json(str(train_json))
         valid_ds.to_json(str(valid_json))
         log_info("Download and save train and valid dataset completed.")
@@ -163,10 +160,8 @@ def prepare_dataset_if_needed(
 
     tokenizer_type = pre_trainer_cfg.tokenizer_type
     if (
-        pre_trainer_cfg.full_validation
-        or pre_trainer_cfg.eval_iters > 0
-        and pre_trainer_cfg.eval_interval > 0
-    ):
+        pre_trainer_cfg.full_validation or pre_trainer_cfg.eval_iters > 0
+    ) and pre_trainer_cfg.eval_interval > 0:
         default_eval_tokenized_path = (
             Path(data_path) / f"bookcorpus/{tokenizer_type}/bookcorpus_eval_text_sentence"
         )
