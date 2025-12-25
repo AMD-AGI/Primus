@@ -24,7 +24,6 @@ from runner.helpers.hooks.train.pretrain.utils import (
     get_node_rank,
     log_error_and_exit,
     log_info,
-    write_patch_args,
 )
 
 
@@ -220,11 +219,15 @@ def main():
         # Local path case — skip download
         log_info(f"HF assets already available locally at {local_dir}")
 
-    # Pass resolved path to training phase
-    log_info(f"Writing patch args to {patch_args_file} ...")
-    write_patch_args(patch_args_file, "train_args", {"model.hf_assets_path": str(local_dir)})
-    write_patch_args(patch_args_file, "train_args", {"backend_path": str(torchtitan_path)})
-    write_patch_args(patch_args_file, "torchrun_args", {"local-ranks-filter": "1"})
+    # Pass resolved paths to the caller (e.g., primus-cli direct) via generic
+    # extra.* lines on stdout. These will be converted into CLI args:
+    #   --model.hf_assets_path <local_dir>
+    #   --backend_path <torchtitan_path>
+    log_info(f"Exposing resolved HF assets path via extra.model.hf_assets_path={local_dir}")
+    print(f"extra.model.hf_assets_path={local_dir}")
+
+    log_info(f"Exposing resolved backend path via extra.backend_path={torchtitan_path}")
+    print(f"extra.backend_path={torchtitan_path}")
 
 
 if __name__ == "__main__":
