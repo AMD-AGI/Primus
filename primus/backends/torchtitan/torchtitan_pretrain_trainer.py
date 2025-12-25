@@ -1,0 +1,91 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""
+TorchTitanPretrainTrainer: Primus wrapper for TorchTitan pre-training.
+
+This trainer bridges Primus's configuration system with TorchTitan's training
+loop, following the same pattern as ``MegatronPretrainTrainer`` does for
+Megatron-LM.
+
+The trainer inherits from ``TorchTitanBaseTrainer`` which handles:
+    - Integration with the unified BaseTrainer workflow (run_patches)
+    - Version detection and common logging
+
+This class only needs to implement:
+    - setup(): optional pre-initialization
+    - init(): construct the underlying TorchTitan Trainer
+    - run_train(): call into TorchTitan's training loop
+"""
+
+from typing import Any, Optional
+
+from primus.backends.torchtitan.torchtitan_base_trainer import TorchTitanBaseTrainer
+from primus.modules.module_utils import log_rank_0
+
+
+class TorchTitanPretrainTrainer(TorchTitanBaseTrainer):
+    """
+    Trainer class for TorchTitan pre-training.
+    """
+
+    def __init__(self, primus_config: Any, module_config: Any, backend_args: Any):
+        """
+        Initialize TorchTitan pretrain trainer.
+
+        Args:
+            primus_config: Full Primus configuration
+            module_config: Module-specific configuration
+            backend_args: TorchTitan JobConfig (from TorchTitanJobConfigBuilder)
+        """
+        super().__init__(
+            primus_config=primus_config,
+            module_config=module_config,
+            backend_args=backend_args,
+        )
+
+        self._trainer: Optional["Trainer"] = None  # type: ignore[name-defined]
+
+        log_rank_0(f"Initialized TorchTitanPretrainTrainer for model: {module_config.model or 'custom'}")
+
+    # --------------------------------------------------------------------- #
+    # Lifecycle hooks
+    # --------------------------------------------------------------------- #
+
+    def setup(self):
+        """
+        Optional setup phase (kept for API symmetry with other trainers).
+        """
+        log_rank_0("TorchTitanPretrainTrainer.setup()")
+
+    def init(self):
+        """
+        Construct the underlying TorchTitan Trainer using the JobConfig.
+        """
+        log_rank_0("TorchTitanPretrainTrainer.init() - building TorchTitan Trainer")
+
+        from torchtitan.train import Trainer  # type: ignore[import]
+
+        # backend_args is the JobConfig produced by TorchTitanJobConfigBuilder
+        job_config = self.backend_args
+        self._trainer = Trainer(job_config)
+
+    # --------------------------------------------------------------------- #
+    # Training entrypoint
+    # --------------------------------------------------------------------- #
+
+    def run_train(self):
+        """
+        Execute TorchTitan pre-training using its Trainer.train() loop.
+
+        This method is called by BaseTrainer.run() after applying patches.
+        """
+        if self._trainer is None:
+            raise RuntimeError("TorchTitanPretrainTrainer.init() must be called before run_train().")
+
+        log_rank_0("Executing TorchTitan pretrain...")
+        self._trainer.train()
+        log_rank_0("TorchTitan pretrain execution completed.")
