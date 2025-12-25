@@ -16,6 +16,7 @@ from megatron.core.pipeline_parallel.schedules import (
     finish_embedding_wgrad_compute,
     get_tensor_shapes,
 )
+from megatron.core.pipeline_parallel.utils import set_streams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.utils import get_model_config, get_model_type
 from megatron.training import get_args
@@ -63,6 +64,8 @@ class PrimusPipelineParallelLauncher:
         self.schedule_runner = ScheduleRunner(self.handler_dict)
 
         self.forward_data_store = []
+
+        set_streams()
 
     def _init_check_pg_collection(self, model_type, pg_collection: Optional[ProcessGroupCollection] = None):
 
@@ -148,8 +151,11 @@ class PrimusPipelineParallelLauncher:
         p2p_communicator: Optional[P2PCommunicator] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
+        kwargs = {}
+        if self.pp_algorithm == "zbv-formatted":
+            kwargs["combined_forward_backward"] = get_args().overlap_moe_expert_parallel_comm
         self.schedule_instance = produce_schedule_instance(
-            self.pp_algorithm, self.pp_size, self.vpp_size, num_microbatches
+            self.pp_algorithm, self.pp_size, self.vpp_size, num_microbatches, **kwargs
         )
 
         if not hasattr(self.schedule_instance, "schedule_table"):
@@ -159,6 +165,9 @@ class PrimusPipelineParallelLauncher:
             self.schedule_table = getattr(self.schedule_instance, "schedule_table")
 
         self.last_pp_stage_rank = self.schedule_instance.last_pp_stage_rank()
+
+        if parallel_state.get_pipeline_model_parallel_rank() == 0 and get_args().debug_scheduler_table:
+            self.schedule_instance.print_schedule_table(self.schedule_table)
 
         assert not forward_only, "forward_only is not supported yet"
         assert adjust_tensor_shapes_fn is None, "adjust_tensor_shapes_fn is not supported yet"
@@ -246,6 +255,7 @@ class PrimusPipelineParallelLauncher:
                 node.args["models"] = model
                 node.args["num_microbatches"] = num_microbatches
                 node.args["forward_data_store"] = self.forward_data_store
+                node.args["cp_group_size"] = pg_collection.cp.size()
                 node.args["collect_non_loss_data"] = collect_non_loss_data
                 node.args["is_last_stage"] = parallel_state.is_pipeline_last_stage()
                 node.args["total_num_tokens"] = total_num_tokens

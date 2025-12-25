@@ -188,6 +188,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
 
+        if "aiter" in logging.root.manager.loggerDict:
+            logging.getLogger("aiter").setLevel(logging.ERROR)
+
     def init(self, *init_args, **kwargs):
         allowed_keys = {
             "extra_args_provider",

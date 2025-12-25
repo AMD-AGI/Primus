@@ -14,8 +14,8 @@ def find_prev_node_with_type(
     scheduler_table: list[SchedulerNode],
     cur_idx: int,
     func_types: list[FuncType],
-    mini_batch: int = None,
-    chunk: int = None,
+    mini_batch=None,
+    chunk=None,
 ):
 
     if mini_batch is None:
