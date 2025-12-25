@@ -46,6 +46,8 @@ def prepare_dataset(
     tokenizer_model: str,
     tokenized_train_data_path: Path,
     tokenized_eval_data_path: Path,
+    test_size: float = 0.005,
+    seed: int = 42,
     env=None,
 ):
     dataset = "bookcorpus"
@@ -70,7 +72,9 @@ def prepare_dataset(
             log_info(f"All required tokenized files exist. Skipping preprocessing.")
             return
         else:
-            log_info(f"Train files exist, but eval files missing. Will generate eval files only.")
+            log_info(
+                f"Train files exist, but evaluation files are missing. Will generate evaluation files only."
+            )
 
     output_path.mkdir(parents=True, exist_ok=True)
     train_json = dataset_path / "bookcorpus_train.json"
@@ -87,7 +91,7 @@ def prepare_dataset(
         nltk.download("punkt")
         dataset = load_dataset("bookcorpus", split="train", trust_remote_code=True)
         # split train / valid
-        splits = dataset.train_test_split(test_size=0.005, seed=42)
+        splits = dataset.train_test_split(test_size=test_size, seed=seed)
         train_ds = splits["train"]
         valid_ds = splits["test"]
 
@@ -152,7 +156,13 @@ def prepare_dataset(
 
 
 def prepare_dataset_if_needed(
-    primus_config: PrimusConfig, primus_path: Path, data_path: Path, patch_args: Path, env=None
+    primus_config: PrimusConfig,
+    primus_path: Path,
+    data_path: Path,
+    patch_args: Path,
+    test_size: float = 0.005,
+    seed: int = 42,
+    env=None,
 ):
     pre_trainer_cfg = primus_config.get_module_config("pre_trainer")
     if pre_trainer_cfg.train_data_path is not None:
@@ -205,6 +215,8 @@ def prepare_dataset_if_needed(
                 tokenizer_model=tokenizer_model,
                 tokenized_train_data_path=tokenized_train_data_path,
                 tokenized_eval_data_path=tokenized_eval_data_path,
+                test_size=test_size,
+                seed=seed,
                 env=env,
             )
             done_flag.touch()
@@ -263,6 +275,8 @@ def main():
     parser.add_argument("--primus_path", type=str, required=True, help="Root path to the Primus project")
     parser.add_argument("--data_path", type=str, required=True, help="Path to data directory")
     parser.add_argument("--config", type=str, required=True, help="Path to experiment YAML config")
+    parser.add_argument("--test_size", type=float, default=0.005, help="Test size for dataset split")
+    parser.add_argument("--seed", type=int, default=42, help="Seed for dataset split")
     parser.add_argument(
         "--patch_args",
         type=str,
@@ -308,6 +322,8 @@ def main():
             primus_path=primus_path,
             data_path=data_path,
             patch_args=patch_args_file,
+            test_size=args.test_size,
+            seed=args.seed,
             env=env,
         )
 
