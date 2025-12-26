@@ -10,7 +10,7 @@ FLOPs Calculation Patches
 Patches for FLOPs estimation and performance profiling in Megatron.
 """
 
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext
 from primus.modules.module_utils import log_rank_0
 
 # ============================================================================
@@ -246,12 +246,12 @@ def num_floating_point_operations(args, batch_size):
 # ============================================================================
 
 
-@register_patch(
-    "megatron.flops.use_primus_estimator",
-    backend="megatron",
-    phase="before_train",
-    description="Replace Megatron FLOPs calculator with Primus implementation",
-)
+# @register_patch(
+#     "megatron.flops.use_primus_estimator",
+#     backend="megatron",
+#     phase="before_train",
+#     description="Replace Megatron FLOPs calculator with Primus implementation",
+# )
 def use_primus_flops_estimator(ctx: PatchContext):
     """
     Replace Megatron's FLOPs calculator with Primus implementation.
