@@ -18,6 +18,8 @@ from primus.core.pipeline_parallel.utils import find_prev_node_with_type
 
 COMMUNICATION_NODE_CACHE = []
 
+SEND_NODE_CACHE = [[], []]  # send_fwd_nodes, send_bwd_nodes
+
 
 def _async_send_recv_op(
     *,
@@ -230,8 +232,7 @@ def batch_p2p_communication_handler(node: SchedulerNode, idx: int, scheduler_tab
             )
             assert send_idx is not None, "send_idx not found"
             node.args["recv_buffers"] = [
-                x.clone().detach().requires_grad_(True)
-                for x in scheduler_table[send_idx].args["send_buffers"]
+                x.detach().requires_grad_(True) for x in scheduler_table[send_idx].args["send_buffers"]
             ]
             if node.func_type == FuncType.RF:
                 deallocate_output_tensor(
@@ -240,6 +241,7 @@ def batch_p2p_communication_handler(node: SchedulerNode, idx: int, scheduler_tab
                 )
 
             scheduler_table[send_idx].args["send_buffers"] = None
+            return
     else:
         COMMUNICATION_NODE_CACHE.append(node)
 
@@ -254,11 +256,9 @@ def batch_p2p_communication_handler(node: SchedulerNode, idx: int, scheduler_tab
             or scheduler_table[idx + 1].args["time_step"] == scheduler_table[idx].args["time_step"]
         ):
             return
-    mode = get_args().communication_method
-    _batch_send_recv(COMMUNICATION_NODE_CACHE, mode=mode)
 
-    send_fwd_nodes = [node for node in COMMUNICATION_NODE_CACHE if node.func_type == FuncType.SF]
-    send_bwd_nodes = [node for node in COMMUNICATION_NODE_CACHE if node.func_type == FuncType.SB]
+    send_fwd_nodes, send_bwd_nodes = SEND_NODE_CACHE[0], SEND_NODE_CACHE[1]
+
     # deallocate the send buffers' data
     for node in send_fwd_nodes:
         if "req" in node.args:
@@ -277,6 +277,12 @@ def batch_p2p_communication_handler(node: SchedulerNode, idx: int, scheduler_tab
         node.args["send_buffers"] = None
         if node.args["prev_node_idx"] is not None:
             scheduler_table[node.args["prev_node_idx"]].args["outputs"] = None
+
+    SEND_NODE_CACHE[0] = [node for node in COMMUNICATION_NODE_CACHE if node.func_type == FuncType.SF]
+    SEND_NODE_CACHE[1] = [node for node in COMMUNICATION_NODE_CACHE if node.func_type == FuncType.SB]
+
+    mode = get_args().communication_method
+    _batch_send_recv(COMMUNICATION_NODE_CACHE, mode=mode)
 
     COMMUNICATION_NODE_CACHE.clear()
 
