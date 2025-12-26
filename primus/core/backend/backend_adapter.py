@@ -5,9 +5,10 @@
 ###############################################################################
 
 from abc import ABC, abstractmethod
+from types import SimpleNamespace
 from typing import Any, Dict
 
-from primus.core.utils.yaml_utils import nested_namespace_to_dict
+from primus.core.utils.yaml_utils import merge_namespace, nested_namespace_to_dict
 from primus.modules.module_utils import log_dict_aligned, log_rank_0
 
 
@@ -183,6 +184,23 @@ class BackendAdapter(ABC):
         # 3) config translation
         log_rank_0("[Step 3/5] Converting Primus config to backend args...")
         backend_args = self.convert_config(module_config)
+
+        # Merge module_config.params into backend_args so that:
+        #   - backend_args contains both converted backend arguments and original
+        #     Primus module parameters;
+        #   - module_config.params is updated to the merged view, allowing
+        #     before_train patches (which only see module_config.params via
+        #     get_args(ctx)) to access backend-derived fields such as
+        #     seq_length/world_size.
+        params = getattr(module_config, "params", None)
+        if isinstance(backend_args, SimpleNamespace) and isinstance(params, SimpleNamespace):
+            backend_keys = set(vars(backend_args).keys())
+            params_keys = set(vars(params).keys())
+            # Avoid overriding or raising on keys that already exist in backend_args.
+            excepts = list(backend_keys & params_keys)
+            merge_namespace(backend_args, params, allow_override=False, excepts=excepts)
+            module_config.params = backend_args
+
         log_rank_0("Config conversion completed successfully")
 
         # 4) apply build_args patches (automatic for all backends)
