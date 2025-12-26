@@ -144,7 +144,9 @@ from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_me
 from primus.backends.megatron.model_provider import primus_model_provider
 from primus.backends.megatron.training.global_vars import (
     get_mlflow_writer,
+    get_train_start_time,
     set_primus_global_variables,
+    set_train_start_time,
 )
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
@@ -169,7 +171,7 @@ from .utils import (
 )
 
 # The earliest we can measure the start time.
-_TRAIN_START_TIME = time.time()
+set_train_start_time()
 
 
 class MegatronTrainer(BaseTrainer, BaseModule):
@@ -185,6 +187,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
+
+        if "aiter" in logging.root.manager.loggerDict:
+            logging.getLogger("aiter").setLevel(logging.ERROR)
 
     def init(self, *init_args, **kwargs):
         allowed_keys = {
@@ -278,15 +283,16 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # Adjust the startup time so it reflects the largest value.
         # This will be closer to what scheduler will see (outside of
         # image ... launches.
-        global _TRAIN_START_TIME
-        start_time_tensor = torch.tensor([_TRAIN_START_TIME], dtype=torch.double, device="cuda")
+        start_time_tensor = torch.tensor([get_train_start_time()], dtype=torch.double, device="cuda")
         torch.distributed.all_reduce(start_time_tensor, op=torch.distributed.ReduceOp.MIN)
-        _TRAIN_START_TIME = start_time_tensor.item()
+        set_train_start_time(start_time_tensor.item())
 
-        self.app_metrics["app_start_time"] = round(_TRAIN_START_TIME * 1000.0)
-        self.app_metrics["app_model_init_start_time"] = round(_TRAIN_START_TIME * 1000.0)
+        self.app_metrics["app_start_time"] = round(get_train_start_time() * 1000.0)
+        self.app_metrics["app_model_init_start_time"] = round(get_train_start_time() * 1000.0)
 
-        log_rank_0("time to initialize megatron (seconds): {:.3f}".format(time.time() - _TRAIN_START_TIME))
+        log_rank_0(
+            "time to initialize megatron (seconds): {:.3f}".format(time.time() - get_train_start_time())
+        )
         print_datetime("after megatron is initialized")
         self.app_metrics["app_model_init_finish_time"] = one_logger_utils.get_timestamp_in_ms()
 

@@ -333,11 +333,53 @@ if [[ -n "${direct_config[env]:-}" ]]; then
 fi
 
 ###############################################################################
-# STEP 8: Execute hooks
+# STEP 8: Execute hooks and capture generic extra arguments
 ###############################################################################
-if ! bash "${RUNNER_DIR}/helpers/execute_hooks.sh" "$1" "$2" "$@"; then
+# Hooks can return additional CLI arguments by printing lines in the form:
+#     extra.<name>=<value>
+# to stdout, for example:
+#     echo "extra.foo=1"
+#     echo "extra.bar=--some-flag"
+#
+# Each such line is converted into CLI arguments of the form:
+#     --<name> <value>
+# and these arguments are *prepended* to the Primus arguments ($@) so that
+# they appear immediately after the script name in the final command.
+HOOK_EXTRA_PRIMUS_ARGS=()
+
+hook_output="$(bash "${RUNNER_DIR}/helpers/execute_hooks.sh" "$1" "$2" "$@" 2>&1)"
+hook_rc=$?
+
+# Always echo hook output so users can see logs as usual.
+if [[ -n "$hook_output" ]]; then
+    printf '%s\n' "$hook_output"
+fi
+
+if [[ $hook_rc -ne 0 ]]; then
     LOG_ERROR "[direct] Hooks execution failed"
-    exit 1
+    exit "$hook_rc"
+fi
+
+# Parse hook output for extra.* key=value pairs.
+while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+
+    # Match lines like: extra.foo=1 or extra.model.hf_assets_path=...
+    if [[ "$line" =~ ^extra\.([A-Za-z_][A-Za-z0-9_.]*[A-Za-z0-9_])=(.*)$ ]]; then
+        name="${BASH_REMATCH[1]}"
+        value="${BASH_REMATCH[2]}"
+
+        # Append as: --<name> <value>
+        HOOK_EXTRA_PRIMUS_ARGS+=("--${name}" "${value}")
+
+        LOG_INFO_RANK0 "[direct] Hook provided extra arg: --${name} ${value}"
+    fi
+done <<< "$hook_output"
+
+# Prepend collected extra args to the current Primus arguments ($@) so that
+# they are automatically picked up when building the final CMD below.
+if [[ ${#HOOK_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
+    set -- "$@" "${HOOK_EXTRA_PRIMUS_ARGS[@]}"
 fi
 
 ###############################################################################
