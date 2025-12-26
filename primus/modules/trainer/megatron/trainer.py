@@ -122,6 +122,7 @@ from megatron.training.training import (
     evaluate_and_print_results,
     get_model,
     get_optimizer_param_scheduler,
+    num_floating_point_operations,
     post_training_step_callbacks,
     preprocess_common_state_dict,
     print_datetime,
@@ -150,7 +151,6 @@ from primus.backends.megatron.training.global_vars import (
 )
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
-from primus.core.utils.flops_estimator import num_floating_point_operations
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
 from primus.core.utils.yaml_utils import nested_namespace_to_dict
 from primus.modules.base_module import BaseModule
