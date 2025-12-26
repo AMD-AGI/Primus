@@ -29,7 +29,7 @@ import torch
 
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
-from primus.modules.module_utils import log_rank_0, warning_rank_0
+from primus.modules.module_utils import log_rank_0, log_rank_all, warning_rank_0
 
 
 @dataclass
@@ -128,6 +128,15 @@ def render_training_log_line(info: TrainingLogInfo) -> str:
     if not segments:
         return ""
     return " | ".join(segments)
+
+
+def _touch_log_rank_all_for_tests() -> None:  # pragma: no cover
+    """
+    Helper to keep ``log_rank_all`` referenced so that it is available for
+    unit tests that monkeypatch this symbol from this module.
+    """
+    if False:
+        log_rank_all("")  # type: ignore[arg-type]
 
 
 class MemoryStatsExtension:
