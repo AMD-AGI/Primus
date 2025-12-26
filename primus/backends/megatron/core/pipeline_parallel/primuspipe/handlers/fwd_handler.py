@@ -39,17 +39,6 @@ def megatron_fwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[Sc
     # prepare input, if not found, input is None(fwd_func will handle it)
     idx = find_prev_node_with_type(scheduler_table, idx, [FuncType.RF])
 
-    if idx is not None and "req" in scheduler_table[idx].args:
-        scheduler_table[idx].args["req"].wait()
-        scheduler_table[idx].args["req"] = None
-        del scheduler_table[idx].args["req"]
-
-    input_tensors = (
-        [None] * len(node.args["recv_tensor_shapes"])
-        if idx is None
-        else scheduler_table[idx].args["recv_buffers"]
-    )
-
     is_last_stage = (
         node.meta["last_pp_stage_rank"] == node.meta["pp_rank"] and node.chunk == node.meta["vpp_size"] - 1
     )
@@ -68,6 +57,12 @@ def megatron_fwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[Sc
         "is_first_microbatch": (node.mini_batch == 0),
         "current_microbatch": node.mini_batch,
     }
+
+    input_tensors = (
+        [None] * len(node.args["recv_tensor_shapes"])
+        if idx is None
+        else scheduler_table[idx].args["recv_buffers"]
+    )
 
     if not get_args().overlap_moe_expert_parallel_comm:
         forward_step_func = forward_step
@@ -90,6 +85,11 @@ def megatron_fwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[Sc
         forward_step_func = fwd_bwd_wrapper(
             forward_step_func, "fwd", minibatch=node.mini_batch, chunk=node.chunk
         )
+
+    if idx is not None and "req" in scheduler_table[idx].args:
+        scheduler_table[idx].args["req"].wait()
+        scheduler_table[idx].args["req"] = None
+        del scheduler_table[idx].args["req"]
 
     fwd_outputs = forward_step_func(**kwargs)
 
