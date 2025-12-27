@@ -13,7 +13,8 @@ This module defines the public entrypoint for applying Megatron-specific patches
 import importlib
 import pkgutil
 
-from primus.core.patches import run_patches
+# from primus.core.patches import run_patches
+# from primus.modules.module_utils import log_rank_0
 
 
 def _auto_import_patch_modules() -> None:
@@ -38,6 +39,7 @@ def _auto_import_patch_modules() -> None:
         if not (mod_name.endswith("_patches") or mod_name.endswith("_patch")):
             continue
 
+        # log_rank_0(f"[MegatronPatches] auto-import patch module: {mod_name}")
         importlib.import_module(mod_name)
 
 
