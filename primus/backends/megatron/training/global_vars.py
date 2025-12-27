@@ -6,10 +6,13 @@
 ###############################################################################
 
 
+import time
+
 from primus.modules.module_utils import debug_rank_0
 
 _GLOBAL_ARGS = None
 _GLOBAL_MLFLOW_WRITER = None
+_TRAIN_START_TIME = None
 
 
 def set_args(args):
@@ -21,6 +24,20 @@ def get_args():
     """Return arguments."""
     _ensure_var_is_initialized(_GLOBAL_ARGS, "args")
     return _GLOBAL_ARGS
+
+
+def set_train_start_time(start_time=None):
+    """Set training start time. If not provided, use current time."""
+    global _TRAIN_START_TIME
+    if start_time is None:
+        start_time = time.time()
+    _TRAIN_START_TIME = start_time
+
+
+def get_train_start_time():
+    """Return training start time."""
+    _ensure_var_is_initialized(_TRAIN_START_TIME, "train start time")
+    return _TRAIN_START_TIME
 
 
 def get_mlflow_writer():

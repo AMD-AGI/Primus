@@ -46,4 +46,20 @@ class SchedulerNode:
     meta: dict[str, Any] = None
 
     def __str__(self):
-        return f"({self.func_type.name}|{self.mini_batch}|{self.chunk})"
+
+        node_str = f"({self.func_type.name}|{self.mini_batch}|{self.chunk})"
+
+        return node_str
+
+    def __detailed_str__(self):
+        prefix = ""
+        postfix = ""
+
+        node_str = f"({self.func_type.name}|{self.mini_batch}|{self.chunk})"
+        if self.args is not None and "combined_group" in self.args:
+            if node_str == self.args["combined_group"][0]:
+                prefix = "\033[32m["
+            elif node_str == self.args["combined_group"][-1]:
+                postfix = "]\033[33m"
+
+        return f"{prefix}{node_str}{postfix}"

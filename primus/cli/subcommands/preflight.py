@@ -55,7 +55,6 @@ def register_subcommand(subparsers):
             "via primus.tools.preflight.preflight_perf_test.run_preflight."
         ),
     )
-
     from primus.tools.preflight.preflight_args import add_preflight_parser
 
     # Reuse the shared preflight argument builder

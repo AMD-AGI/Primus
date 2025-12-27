@@ -465,8 +465,7 @@ class PrimusTurboRowParallelLinear(TELinear):
 
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
-        args = get_args()
-        if args.patch_zero_bubble and args.enable_zero_bubble:
+        if use_split_wgrad_op():
             from .zbpp_gemm import gemm_with_weight_gradient_store
 
             self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
