@@ -5,9 +5,10 @@
 ###############################################################################
 
 from abc import ABC, abstractmethod
+from types import SimpleNamespace
 from typing import Any, Dict
 
-from primus.core.utils.yaml_utils import nested_namespace_to_dict
+from primus.core.utils.yaml_utils import merge_namespace, nested_namespace_to_dict
 from primus.modules.module_utils import log_dict_aligned, log_rank_0
 
 
@@ -203,6 +204,22 @@ class BackendAdapter(ABC):
         if primus_only_keys:
             primus_only_params = {key: params_dict[key] for key in sorted(primus_only_keys)}
             log_dict_aligned("Primus-specific parameters", primus_only_params)
+
+        # After logging the difference between module_config.params and backend_args,
+        # merge module_config.params into backend_args so that:
+        #   - backend_args contains both converted backend arguments and original
+        #     Primus module parameters;
+        #   - module_config.params is updated to the merged view, allowing
+        #     later patches (e.g., before_train) that call get_args(ctx) to
+        #     see backend-derived fields such as seq_length/world_size.
+        params = getattr(module_config, "params", None)
+        if isinstance(backend_args, SimpleNamespace) and isinstance(params, SimpleNamespace):
+            backend_keys = set(vars(backend_args).keys())
+            params_keys = set(vars(params).keys())
+            # Avoid overriding or raising on keys that already exist in backend_args.
+            excepts = list(backend_keys & params_keys)
+            merge_namespace(backend_args, params, allow_override=False, excepts=excepts)
+            module_config.params = backend_args
 
         # 5) load trainer class from backend
         log_rank_0("[Step 5/5] Loading trainer class...")
