@@ -111,6 +111,8 @@ def load_primus_config(config_path: Path, cli_args: Any | None = None) -> Simple
 
         # Convert params dict to a SimpleNamespace tree for attribute-style access
         module_cfg.params = dict_to_nested_namespace(params)
+        # Duplicate `model` under `params.model` because some downstream components
+        # expect the model configuration to be available via `params.model`.
         module_cfg.params.model = module_cfg.model
 
         modules.append(module_cfg)
