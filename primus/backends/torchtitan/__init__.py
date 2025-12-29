@@ -17,16 +17,9 @@ that they can be managed via the unified Primus patch system.
 # IMPORTANT: Patch TorchTitan's logger BEFORE importing any TorchTitan modules
 # This ensures TorchTitan uses a named logger instead of root logger,
 # which allows proper source file/line tracking in Primus logs.
-import logging
+from primus.backends.torchtitan.patches.logger_patch import patch_torchtitan_logger
 
-import torchtitan.tools.logging as titan_logging
-
-# Replace TorchTitan's root logger with a properly-named logger
-# This allows InterceptHandler to extract correct module names
-titan_logging.logger = logging.getLogger("torchtitan")
-
-# Disable TorchTitan's logger initialization (Primus manages logging)
-titan_logging.init_logger = lambda: None
+patch_torchtitan_logger()
 
 from primus.backends.torchtitan.torchtitan_adapter import TorchTitanAdapter
 from primus.backends.torchtitan.torchtitan_pretrain_trainer import (
