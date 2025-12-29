@@ -125,14 +125,12 @@ class PrimusRuntime:
         assert cfg_path.exists(), f"[Primus:TrainRuntime] Config file not found: {cfg_path}"
 
         primus_cfg = load_primus_config(cfg_path, self.args)
-        # print(f"[Primus:TrainRuntime] Module config: {primus_cfg.modules[0]}")
 
         # For platform detection in distributed init.
         # set_global_variables(primus_cfg)
 
         # Resolve module configuration via core helper.
         module_cfg = get_module_config(primus_cfg, module_name)
-        # print(f"[Primus:TrainRuntime] Module config: {module_cfg}")
         available_modules = get_module_names(primus_cfg) or ["none"]
         assert module_cfg is not None, (
             f"Missing required module '{module_name}' in config file '{cfg_path}'.\n"
