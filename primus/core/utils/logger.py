@@ -222,10 +222,7 @@ def setup_logger(
 
         This handler adds module location formatting ([module.py:line])
         to all intercepted logs, ensuring consistent format across both
-        Primus code and third-party libraries (like Megatron, TorchTitan).
-
-        For TorchTitan logs (which use a shared logger), we extract the actual
-        source file and line number from the stack frame.
+        Primus code and third-party libraries (like Megatron).
         """
 
         def emit(self, record):
@@ -234,19 +231,9 @@ def setup_logger(
             except Exception:
                 level = record.levelno
 
-            # Extract module name and line number
-            # For TorchTitan logs (record.name == "torchtitan"), extract from pathname
-            if record.name == "torchtitan" and record.pathname:
-                # Extract just the filename without extension
-                # e.g., "/path/to/parallel_dims.py" -> "parallel_dims"
-                import os
-
-                module_name = os.path.splitext(os.path.basename(record.pathname))[0]
-                line = record.lineno
-            else:
-                # For other logs, use the logger name
-                module_name = record.name.split(".")[-1] if record.name else "unknown"
-                line = record.lineno
+            # Extract module name and line number from the log record
+            module_name = record.name.split(".")[-1] if record.name else "unknown"
+            line = record.lineno
 
             # Format message with module location prefix (consistent with log_rank_0 format)
             formatted_message = f"{module_format(module_name, line)}: {record.getMessage()}"
