@@ -90,7 +90,7 @@ class TorchTitanBaseTrainer(BaseTrainer):
     def patch_torchtitan_logger(self):
         from primus.core.utils.logger import _logger as primus_logger
 
-        primus_logger.info("Mokey patch torchtitan logger...")
+        primus_logger.info("Monkey patch torchtitan logger...")
 
         import torchtitan.tools.logging as titan_logging
 
