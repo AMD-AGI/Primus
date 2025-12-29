@@ -153,7 +153,7 @@ def num_floating_point_operations(args, batch_size):
                         1
                         + (args.num_query_groups / args.num_attention_heads)
                         # Only half of the attention matrix is non-zero and needs to be multiplied with V.
-                        + (args.seq_length / args.hidden_size)
+                        + (args.seq_length / args.hidden_size / 2)
                     )
                     * query_projection_to_hidden_size_ratio
                 )
