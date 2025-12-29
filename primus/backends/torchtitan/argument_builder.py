@@ -18,11 +18,14 @@ It provides a small helper to:
 
 from __future__ import annotations
 
-from dataclasses import fields, is_dataclass
 from types import SimpleNamespace
 from typing import Any, Dict
 
-from torchtitan.config.job_config import JobConfig
+from primus.core.config.merge_utils import deep_merge
+from primus.core.utils.yaml_utils import (
+    dict_to_nested_namespace,
+    nested_namespace_to_dict,
+)
 
 # -----------------------------------------------------------------------------
 # Load TorchTitan's default JobConfig as a nested dict
@@ -36,83 +39,9 @@ def _load_torchtitan_defaults() -> Dict[str, Any]:
     This is analogous to Megatron's ``_load_megatron_defaults`` helper, but
     for TorchTitan's dataclass-based configuration.
     """
+    from torchtitan.config.job_config import JobConfig
+
     return JobConfig().to_dict()
-
-
-# -----------------------------------------------------------------------------
-# Helper: deep-merge nested dictionaries
-# -----------------------------------------------------------------------------
-
-
-def _namespace_to_dict(obj: Any) -> Any:
-    """
-    Recursively convert SimpleNamespace to dict.
-
-    This is needed because TorchTitan configs can have nested SimpleNamespace objects.
-    """
-    if isinstance(obj, SimpleNamespace):
-        return {k: _namespace_to_dict(v) for k, v in vars(obj).items()}
-    elif isinstance(obj, dict):
-        return {k: _namespace_to_dict(v) for k, v in obj.items()}
-    elif isinstance(obj, (list, tuple)):
-        return type(obj)(_namespace_to_dict(item) for item in obj)
-    else:
-        return obj
-
-
-def _deep_merge(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Recursively merge ``overrides`` into ``base`` and return a new dict.
-
-    - Nested dicts are merged recursively.
-    - Non-dict values in overrides replace base values.
-    """
-    result: Dict[str, Any] = dict(base)
-    for key, value in overrides.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            result[key] = _deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
-
-
-# -----------------------------------------------------------------------------
-# Helper: convert nested dict → nested JobConfig dataclasses
-# -----------------------------------------------------------------------------
-
-
-def _dict_to_dataclass(cls: type, data: Dict[str, Any]) -> Any:
-    """
-    Recursively convert a nested dictionary into a dataclass instance.
-
-    This mirrors the logic used in ``TorchTitanPretrainTrainer._dict_to_dataclass``,
-    but is implemented here as a standalone helper for reuse.
-    """
-    if not is_dataclass(cls):
-        return data
-
-    dataclass_fields = fields(cls)
-    field_names = {f.name for f in dataclass_fields}
-    init_values: Dict[str, Any] = {}
-
-    # Use only known fields for constructor
-    for f in dataclass_fields:
-        if f.name in data:
-            val = data[f.name]
-            if is_dataclass(f.type) and isinstance(val, dict):
-                init_values[f.name] = _dict_to_dataclass(f.type, val)
-            else:
-                init_values[f.name] = val
-
-    # Instantiate dataclass
-    obj = cls(**init_values)
-
-    # Attach unknown fields dynamically (if any)
-    for k, v in data.items():
-        if k not in field_names:
-            setattr(obj, k, v)
-
-    return obj
 
 
 # -----------------------------------------------------------------------------
@@ -136,9 +65,9 @@ class TorchTitanJobConfigBuilder:
         builder = TorchTitanJobConfigBuilder()
         builder.update(cli_args)
         builder.update(config_args)
-        job_cfg = builder.to_job_config()  # or builder.finalize()
+        namespace = builder.finalize()
 
-    'job_cfg' is a JobConfig dataclass containing all fields TorchTitan expects.
+    'namespace' is a SimpleNamespace containing all fields TorchTitan expects.
     """
 
     def __init__(self) -> None:
@@ -167,10 +96,10 @@ class TorchTitanJobConfigBuilder:
             )
         """
         # Convert SimpleNamespace to dict
-        values_dict = _namespace_to_dict(values)
+        values_dict = nested_namespace_to_dict(values)
 
         # Directly merge into the working configuration
-        self.config = _deep_merge(self.config, values_dict)
+        self.config = deep_merge(self.config, values_dict)
         return self
 
     # ------------------------------------------------------------------
@@ -207,38 +136,8 @@ class TorchTitanJobConfigBuilder:
             to convert back to JobConfig when needed
         """
         merged = self.to_dict()
-        return self._dict_to_namespace(merged)
-
-    def to_job_config(self) -> JobConfig:
-        """
-        Materialize the final TorchTitan ``JobConfig`` dataclass instance.
-
-        Fields not provided by Primus are automatically filled with TorchTitan's defaults.
-
-        Returns:
-            JobConfig dataclass ready to be passed to TorchTitan's Trainer
-        """
-        merged = self.to_dict()
-        return _dict_to_dataclass(JobConfig, merged)
+        return dict_to_nested_namespace(merged)
 
     # Alias for usage style consistency with MegatronArgBuilder:
     # builder.finalize()
     finalize = to_namespace
-
-    # ------------------------------------------------------------------
-    # Helper: convert nested dict to nested SimpleNamespace
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _dict_to_namespace(data: Dict[str, Any]) -> SimpleNamespace:
-        """
-        Recursively convert a nested dictionary to a nested SimpleNamespace.
-
-        This is used to provide a consistent interface with MegatronArgBuilder.
-        """
-        namespace_dict = {}
-        for key, value in data.items():
-            if isinstance(value, dict):
-                namespace_dict[key] = TorchTitanJobConfigBuilder._dict_to_namespace(value)
-            else:
-                namespace_dict[key] = value
-        return SimpleNamespace(**namespace_dict)

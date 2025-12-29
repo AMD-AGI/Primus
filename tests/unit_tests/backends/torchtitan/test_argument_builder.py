@@ -25,11 +25,11 @@ import pytest
 sys.modules["torchtitan"] = MagicMock()
 sys.modules["torchtitan.config"] = MagicMock()
 sys.modules["torchtitan.config.job_config"] = MagicMock()
+sys.modules["torchtitan.tools"] = MagicMock()
+sys.modules["torchtitan.tools.logging"] = MagicMock()
 
-from primus.backends.torchtitan.argument_builder import (
-    TorchTitanJobConfigBuilder,
-    _deep_merge,
-)
+from primus.backends.torchtitan.argument_builder import TorchTitanJobConfigBuilder
+from primus.core.config.merge_utils import deep_merge
 
 
 class TestDeepMerge:
@@ -40,7 +40,7 @@ class TestDeepMerge:
         base = {"a": 1, "b": 2}
         overrides = {"b": 3, "c": 4}
 
-        result = _deep_merge(base, overrides)
+        result = deep_merge(base, overrides)
 
         assert result == {"a": 1, "b": 3, "c": 4}
 
@@ -52,7 +52,7 @@ class TestDeepMerge:
             "training": {"steps": 5000, "batch_size": 8},  # Override + add
         }
 
-        result = _deep_merge(base, overrides)
+        result = deep_merge(base, overrides)
 
         assert result == {
             "model": {"name": "llama3", "size": "70B"},
@@ -64,7 +64,7 @@ class TestDeepMerge:
         base = {"level1": {"level2": {"level3": {"a": 1, "b": 2}}}}
         overrides = {"level1": {"level2": {"level3": {"b": 3, "c": 4}}}}
 
-        result = _deep_merge(base, overrides)
+        result = deep_merge(base, overrides)
 
         assert result["level1"]["level2"]["level3"] == {"a": 1, "b": 3, "c": 4}
 
@@ -73,7 +73,7 @@ class TestDeepMerge:
         base = {"model": {"name": "llama3", "size": "8B"}}
         overrides = {"model": "simple_string"}
 
-        result = _deep_merge(base, overrides)
+        result = deep_merge(base, overrides)
 
         assert result == {"model": "simple_string"}
 
@@ -82,7 +82,7 @@ class TestDeepMerge:
         base = {"a": 1, "b": 2}
         overrides = {}
 
-        result = _deep_merge(base, overrides)
+        result = deep_merge(base, overrides)
 
         assert result == {"a": 1, "b": 2}
 
@@ -282,25 +282,6 @@ class TestTorchTitanJobConfigBuilderToNamespace:
         assert result.model.name == "llama3"  # Overridden
         assert result.model.size == "8B"  # From defaults
         assert result.training.steps == 1000  # Overridden
-
-
-class TestTorchTitanJobConfigBuilderToJobConfig:
-    """Test the to_job_config() method."""
-
-    @patch("primus.backends.torchtitan.argument_builder._load_torchtitan_defaults")
-    @patch("primus.backends.torchtitan.argument_builder._dict_to_dataclass")
-    def test_to_job_config_calls_dict_to_dataclass(self, mock_dict_to_dataclass, mock_load_defaults):
-        """Test that to_job_config() calls _dict_to_dataclass."""
-        mock_load_defaults.return_value = {"model": {"name": "llama3"}}
-        mock_job_config = MagicMock()
-        mock_dict_to_dataclass.return_value = mock_job_config
-
-        builder = TorchTitanJobConfigBuilder()
-        result = builder.to_job_config()
-
-        # Should have called _dict_to_dataclass
-        mock_dict_to_dataclass.assert_called_once()
-        assert result == mock_job_config
 
 
 class TestTorchTitanJobConfigBuilderFinalize:
