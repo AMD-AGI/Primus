@@ -43,7 +43,7 @@ class TorchTitanBaseTrainer(BaseTrainer):
         Args:
             primus_config: Full Primus configuration
             module_config: Module-specific configuration
-            backend_args: TorchTitan JobConfig (from TorchTitanJobConfigBuilder)
+            backend_args: TorchTitan configuration as SimpleNamespace (from TorchTitanAdapter)
         """
         log_rank_0("=" * 80)
         log_rank_0("Initializing TorchTitanBaseTrainer...")

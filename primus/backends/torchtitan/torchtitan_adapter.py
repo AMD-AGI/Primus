@@ -22,7 +22,6 @@ from typing import Any
 from primus.backends.torchtitan.argument_builder import TorchTitanJobConfigBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
-from primus.core.utils.yaml_utils import nested_namespace_to_dict
 from primus.modules.module_utils import log_rank_0
 
 
@@ -59,28 +58,34 @@ class TorchTitanAdapter(BackendAdapter):
     # 2. Config → TorchTitan JobConfig
     def convert_config(self, module_config: Any):
         """
-        Convert Primus ModuleConfig → TorchTitan JobConfig.
+        Convert Primus ModuleConfig → TorchTitan configuration Namespace.
 
         This layer:
             - Takes module_config.params (which already includes CLI overrides)
             - Merges them into TorchTitan's default JobConfig
-            - Produces a fully-populated JobConfig dataclass for Titan
+            - Produces a SimpleNamespace (consistent with MegatronAdapter)
 
         Note: build_args patches are applied automatically by the base class
         after this method returns.
+
+        Args:
+            module_config: ModuleConfig instance with params dict
+
+        Returns:
+            SimpleNamespace with TorchTitan configuration
         """
-        # Convert Primus module params into a nested dict
-        params_ns = getattr(module_config, "params", None)
-        cfg_dict = nested_namespace_to_dict(params_ns) if params_ns is not None else {}
-
-        # Build final TorchTitan JobConfig
+        # 1. Instantiate the builder
         builder = TorchTitanJobConfigBuilder()
-        builder.update(cfg_dict)
-        job_cfg = builder.to_job_config()
 
-        log_rank_0("[Primus:TorchTitanAdapter] Converted Primus module params → TorchTitan JobConfig")
+        # 2. Feed in config params (already merged with CLI overrides in train_launcher)
+        #    module_config.params is a flat dict of TorchTitan-recognized fields.
+        builder.update(module_config.params)
 
-        return job_cfg
+        # 3. Produce the final TorchTitan Namespace (with distributed env injected)
+        titan_args = builder.finalize()
+
+        log_rank_0(f"[Primus:TorchTitanAdapter] Converted Primus module params → TorchTitan args")
+        return titan_args
 
     # 3. Load Trainer Class
     def load_trainer_class(self):
