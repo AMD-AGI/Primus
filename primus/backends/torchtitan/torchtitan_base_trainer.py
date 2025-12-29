@@ -45,6 +45,13 @@ class TorchTitanBaseTrainer(BaseTrainer):
             module_config: Module-specific configuration
             backend_args: TorchTitan configuration as SimpleNamespace (from TorchTitanAdapter)
         """
+        # Patch TorchTitan logger before any other initialization
+        from primus.backends.torchtitan.patches.logger_patch import (
+            patch_torchtitan_logger,
+        )
+
+        patch_torchtitan_logger()
+
         log_rank_0("=" * 80)
         log_rank_0("Initializing TorchTitanBaseTrainer...")
         log_rank_0("=" * 80)
