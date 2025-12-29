@@ -46,11 +46,7 @@ class TorchTitanBaseTrainer(BaseTrainer):
             backend_args: TorchTitan configuration as SimpleNamespace (from TorchTitanAdapter)
         """
         # Patch TorchTitan logger before any other initialization
-        from primus.backends.torchtitan.patches.logger_patch import (
-            patch_torchtitan_logger,
-        )
-
-        patch_torchtitan_logger()
+        self.patch_torchtitan_logger()
 
         log_rank_0("=" * 80)
         log_rank_0("Initializing TorchTitanBaseTrainer...")
@@ -90,3 +86,13 @@ class TorchTitanBaseTrainer(BaseTrainer):
             return importlib_metadata.version("torchtitan")
         except Exception:
             return "unknown"
+
+    def patch_torchtitan_logger(self):
+        from primus.core.utils.logger import _logger as primus_logger
+
+        primus_logger.info("Mokey patch torchtitan logger...")
+
+        import torchtitan.tools.logging as titan_logging
+
+        titan_logging.logger = primus_logger
+        titan_logging.init_logger = lambda: None
