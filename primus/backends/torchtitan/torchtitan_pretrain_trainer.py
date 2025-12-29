@@ -131,8 +131,8 @@ class TorchTitanPretrainTrainer(TorchTitanBaseTrainer):
         if experimental and getattr(experimental, "custom_args_module", None):
             try:
                 module = importlib.import_module(experimental.custom_args_module)
-                ExtendedJobConfig = getattr(module, "JobConfig")
-                custom_job_config_cls = self._merge_configs(JobConfig, ExtendedJobConfig)
+                extended_job_config_cls = getattr(module, "JobConfig")
+                custom_job_config_cls = self._merge_configs(JobConfig, extended_job_config_cls)
                 log_rank_0(f"Loaded and merged custom JobConfig from {experimental.custom_args_module}")
             except Exception as e:
                 log_rank_0(
