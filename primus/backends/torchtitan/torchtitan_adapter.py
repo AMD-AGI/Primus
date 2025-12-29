@@ -44,12 +44,16 @@ class TorchTitanAdapter(BackendAdapter):
         TorchTitan-specific environment preparation.
 
         Steps:
+            - Load TorchTitan patches
             - Run Primus setup hooks
             - (Future) add any TorchTitan-specific env setup if needed
 
         Note: setup patches are applied automatically by the base class
         before this method is called.
         """
+        # Load TorchTitan patches (classic attention, etc.)
+        import primus.backends.torchtitan.patches  # noqa: F401
+
         # Run setup hooks from BackendRegistry
         BackendRegistry.run_setup("torchtitan")
 

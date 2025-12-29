@@ -35,6 +35,3 @@ BackendRegistry.register_adapter("torchtitan", TorchTitanAdapter)
 
 # Register trainer
 BackendRegistry.register_trainer_class("torchtitan", TorchTitanPretrainTrainer)
-
-# Trigger registration of all TorchTitan patches (classic attention, etc.)
-import primus.backends.torchtitan.patches  # noqa: F401
