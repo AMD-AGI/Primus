@@ -429,7 +429,7 @@ else
         FILTERS+=(0)
     fi
 
-    Add the last local rank on the last node
+    # Add the last local rank on the last node
     if [ "$NODE_RANK" -eq "$LAST_NODE" ]; then
         FILTERS+=($((GPUS_PER_NODE - 1)))
     fi
