@@ -38,7 +38,7 @@ class TorchTitanAdapter(BackendAdapter):
     def __init__(self, framework: str = "torchtitan"):
         super().__init__(framework)
 
-    # 1. Backend Setup & Patches
+    # Backend Setup & Patches
     def prepare_backend(self, config: Any):
         """
         TorchTitan-specific environment preparation.
@@ -55,7 +55,7 @@ class TorchTitanAdapter(BackendAdapter):
 
         log_rank_0("[Primus:TorchTitanAdapter] Backend prepared")
 
-    # 2. Config → TorchTitan JobConfig
+    # Config → TorchTitan JobConfig
     def convert_config(self, module_config: Any):
         """
         Convert Primus ModuleConfig → TorchTitan configuration Namespace.
@@ -74,20 +74,20 @@ class TorchTitanAdapter(BackendAdapter):
         Returns:
             SimpleNamespace with TorchTitan configuration
         """
-        # 1. Instantiate the builder
+        # Instantiate the builder
         builder = TorchTitanJobConfigBuilder()
 
-        # 2. Feed in config params (already merged with CLI overrides in train_launcher)
-        #    module_config.params is a flat dict of TorchTitan-recognized fields.
+        # Feed in config params (already merged with CLI overrides in train_launcher)
+        # module_config.params is a flat dict of TorchTitan-recognized fields.
         builder.update(module_config.params)
 
-        # 3. Produce the final TorchTitan Namespace (with distributed env injected)
+        # Produce the final TorchTitan Namespace (with distributed env injected)
         titan_args = builder.finalize()
 
         log_rank_0(f"[Primus:TorchTitanAdapter] Converted Primus module params → TorchTitan args")
         return titan_args
 
-    # 3. Load Trainer Class
+    # Load Trainer Class
     def load_trainer_class(self):
         """
         Load TorchTitan trainer class registered via BackendRegistry.
@@ -104,7 +104,7 @@ class TorchTitanAdapter(BackendAdapter):
                 "the trainer class via BackendRegistry."
             ) from exc
 
-    # 4. Version Detection
+    # Version Detection
     def detect_backend_version(self) -> str:
         """
         Detect TorchTitan version for logging and patching.
