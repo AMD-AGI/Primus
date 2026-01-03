@@ -178,14 +178,14 @@ if [ "$USING_AINIC" == "1" ]; then
 
     # v25.09
     export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
-    if [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
-        export LD_PRELOAD="${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0"
-    elif [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
-        export LD_PRELOAD="${ANP_HOME_DIR}/build/librccl-anp.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0"
-    else
-        echo "ERROR: Neither librccl-net.so nor librccl-anp.so was found in ${ANP_HOME_DIR}/build"
-        exit 1
-    fi
+    # if [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
+    #     export LD_PRELOAD="${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0"
+    # elif [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
+    #     export LD_PRELOAD="${ANP_HOME_DIR}/build/librccl-anp.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0"
+    # else
+    #     echo "ERROR: Neither librccl-net.so nor librccl-anp.so was found in ${ANP_HOME_DIR}/build"
+    #     exit 1
+    # fi
 else
     export NCCL_IB_GID_INDEX=3
 fi
