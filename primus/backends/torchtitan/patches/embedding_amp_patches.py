@@ -20,7 +20,7 @@ Behavior:
         * Otherwise, leaves outputs unchanged.
 """
 
-from primus.core.patches import PatchContext, get_args, register_patch
+from primus.core.patches import PatchContext, get_param, register_patch
 
 
 @register_patch(
@@ -28,13 +28,7 @@ from primus.core.patches import PatchContext, get_args, register_patch
     backend="torchtitan",
     phase="setup",
     description="Align nn.Embedding outputs with AMP/autocast dtype",
-    condition=lambda ctx: bool(
-        getattr(
-            getattr(get_args(ctx), "primus_turbo", None),
-            "enable_embedding_autocast",
-            False,
-        )
-    ),
+    condition=lambda ctx: get_param(ctx, "primus_turbo.enable_embedding_autocast", False),
 )
 def patch_torchtitan_embedding_amp(ctx: PatchContext) -> None:  # noqa: ARG001
     """

@@ -21,7 +21,6 @@ This class only needs to implement:
     - run_train(): call into TorchTitan's training loop
 """
 
-from types import SimpleNamespace
 from typing import Any, Optional
 
 from primus.backends.torchtitan.config_utils import build_job_config_from_namespace
@@ -75,7 +74,7 @@ class TorchTitanPretrainTrainer(TorchTitanBaseTrainer):
         # to use a named logger instead of root logger for proper source tracking.
         # backend_args is a SimpleNamespace produced by TorchTitanJobConfigBuilder
         # Convert it to JobConfig for TorchTitan's Trainer (handles custom extensions)
-        job_config = self._build_job_config_from_namespace(self.backend_args)
+        job_config = build_job_config_from_namespace(self.backend_args)
         self._trainer = Trainer(job_config)
 
     # --------------------------------------------------------------------- #
@@ -94,22 +93,3 @@ class TorchTitanPretrainTrainer(TorchTitanBaseTrainer):
         log_rank_0("Executing TorchTitan pretrain...")
         self._trainer.train()
         log_rank_0("TorchTitan pretrain execution completed.")
-
-    # --------------------------------------------------------------------- #
-    # Helper methods
-    # --------------------------------------------------------------------- #
-
-    def _build_job_config_from_namespace(self, ns: SimpleNamespace) -> "JobConfig":  # type: ignore[name-defined]
-        """
-        Convert a nested SimpleNamespace back to TorchTitan's JobConfig.
-
-        This is a thin wrapper around the utility function from config_utils.
-        Kept as a method for backward compatibility and API consistency.
-
-        Args:
-            ns: Nested SimpleNamespace with TorchTitan configuration
-
-        Returns:
-            JobConfig dataclass instance (potentially extended with custom and Primus fields)
-        """
-        return build_job_config_from_namespace(ns)
