@@ -106,6 +106,7 @@ class TorchTitanPretrainTrainer(TorchTitanBaseTrainer):
             1. TorchTitan's experimental.custom_args_module extension mechanism
             2. Merging custom JobConfig extensions with the base JobConfig
             3. Recursive dataclass construction with dynamic field attachment
+            4. Preserving Primus-specific configurations under `primus` attribute
 
         This mirrors the logic from primus.modules.trainer.torchtitan.pre_trainer.build_job_config
 
@@ -113,20 +114,25 @@ class TorchTitanPretrainTrainer(TorchTitanBaseTrainer):
             ns: Nested SimpleNamespace with TorchTitan configuration
 
         Returns:
-            JobConfig dataclass instance (potentially extended with custom fields)
+            JobConfig dataclass instance (potentially extended with custom and Primus fields)
         """
         import importlib
 
         from torchtitan.config.job_config import Experimental, JobConfig
 
+        from primus.core.utils.yaml_utils import dict_to_nested_namespace
+
         # Step 1: Convert namespace to dict
         cfg_dict = self._namespace_to_dict(ns)
 
-        # Step 2: Parse the experimental section to check for a custom JobConfig extension
+        # Step 2: Extract and preserve Primus-specific configuration
+        primus_config = cfg_dict.pop("primus", None)
+
+        # Step 3: Parse the experimental section to check for a custom JobConfig extension
         experimental_cfg = cfg_dict.get("experimental", {})
         experimental = Experimental(**experimental_cfg)
 
-        # Step 3: If a custom_args_module is defined, import and merge with JobConfig
+        # Step 4: If a custom_args_module is defined, import and merge with JobConfig
         custom_job_config_cls = JobConfig
         if experimental and getattr(experimental, "custom_args_module", None):
             try:
@@ -139,8 +145,15 @@ class TorchTitanPretrainTrainer(TorchTitanBaseTrainer):
                     f"Warning: Failed to load custom_args_module '{experimental.custom_args_module}': {e}"
                 )
 
-        # Step 4: Parse config dict (including custom fields) into dataclass recursively
-        return self._dict_to_dataclass(custom_job_config_cls, cfg_dict)
+        # Step 5: Parse config dict (including custom fields) into dataclass recursively
+        job_config = self._dict_to_dataclass(custom_job_config_cls, cfg_dict)
+
+        # Step 6: Attach Primus configuration as a dynamic attribute if present
+        if primus_config:
+            job_config.primus = dict_to_nested_namespace(primus_config)
+            log_rank_0(f"Attached Primus configuration to JobConfig ({len(primus_config)} top-level keys)")
+
+        return job_config
 
     @staticmethod
     def _namespace_to_dict(obj: Any) -> Any:
