@@ -27,7 +27,7 @@ class MegatronAdapter(BackendAdapter):
     def __init__(self, framework="megatron"):
         super().__init__(framework)
 
-    # 1. Backend Setup & Patches
+    # Backend Setup & Patches
     def prepare_backend(self, config):
         """
         Megatron-specific environment preparation.
@@ -62,7 +62,7 @@ class MegatronAdapter(BackendAdapter):
         TrainerClass = self.load_trainer_class()
         return TrainerClass.detect_version()
 
-    # 2. Config → Megatron Args
+    # Config → Megatron Args
     def convert_config(self, module_config):
         """
         Convert Primus ModuleConfig → final Megatron-LM argument Namespace.
@@ -82,21 +82,21 @@ class MegatronAdapter(BackendAdapter):
         Returns:
             SimpleNamespace with Megatron args
         """
-        # 1. Instantiate the builder
+        # Instantiate the builder
         builder = MegatronArgBuilder()
 
-        # 2. Feed in config params (already merged with CLI overrides in train_launcher)
-        #    module_config.params is a flat dict of Megatron-recognized fields.
+        # Feed in config params (already merged with CLI overrides in train_launcher)
+        # module_config.params is a flat dict of Megatron-recognized fields.
         builder.update(module_config.params)
 
-        # 3. Produce the final Megatron Namespace (with distributed env injected)
+        # Produce the final Megatron Namespace (with distributed env injected)
         megatron_args = builder.finalize()
 
         log_rank_0(f"[Primus:MegatronAdapter] Converted config → {len(vars(megatron_args))} Megatron args")
 
         return megatron_args
 
-    # 3. Load Trainer Class (Version Adaptive)
+    # Load Trainer Class (Version Adaptive)
     def load_trainer_class(self):
         """Load Megatron trainer class registered via BackendRegistry."""
         try:

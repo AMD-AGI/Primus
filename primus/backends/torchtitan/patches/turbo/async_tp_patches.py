@@ -17,8 +17,7 @@ Primus patch system.
 
 from typing import Any, Optional
 
-from primus.backends.torchtitan.patches.turbo.utils import get_primus_turbo_config
-from primus.core.patches import PatchContext, get_args, register_patch
+from primus.core.patches import PatchContext, get_param, register_patch
 from primus.modules.module_utils import log_rank_0
 
 
@@ -28,11 +27,9 @@ from primus.modules.module_utils import log_rank_0
     phase="before_train",
     description="Use Primus-Turbo async tensor-parallel collectives",
     condition=lambda ctx: (
-        (cfg := get_primus_turbo_config(ctx)) is not None
-        and getattr(cfg, "enable_primus_turbo", False)
-        and getattr(cfg, "use_turbo_async_tp", False)
-        and (args := get_args(ctx)) is not None
-        and getattr(getattr(args, "parallelism", None), "enable_async_tensor_parallel", False)
+        get_param(ctx, "primus_turbo.enable_primus_turbo", False)
+        and get_param(ctx, "primus_turbo.use_turbo_async_tp", False)
+        and get_param(ctx, "parallelism.enable_async_tensor_parallel", False)
     ),
 )
 def patch_turbo_async_tp(ctx: PatchContext) -> None:

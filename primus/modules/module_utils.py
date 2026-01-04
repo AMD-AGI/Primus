@@ -137,6 +137,8 @@ def log_dict_aligned(
     Values are aligned vertically at the same column position. The title line
     includes the total number of parameters.
 
+    Nested SimpleNamespace objects are flattened using dot notation (e.g., 'model.name').
+
     Args:
         title: Title to display before the data
         data: Dictionary or SimpleNamespace to log
@@ -147,8 +149,8 @@ def log_dict_aligned(
         Backend args: (300 parameters)
           account_for_embedding_in_pipeline_split : False
           adam_beta1                              : 0.9
-          adam_eps                                : 1e-08
-          add_bias_linear                         : False
+          model.name                              : llama3
+          model.flavor                            : debugmodel
 
     Usage:
         # Log from rank 0 only (default)
@@ -170,16 +172,44 @@ def log_dict_aligned(
     else:
         log_func = log_rank_0  # Default to rank 0
 
+    # Helper function to flatten nested SimpleNamespace to dot notation
+    def _flatten_namespace(obj: Any, prefix: str = "") -> Dict[str, Any]:
+        """Recursively flatten nested SimpleNamespace objects using dot notation."""
+        result = {}
+
+        if isinstance(obj, SimpleNamespace):
+            obj_dict = vars(obj)
+        elif isinstance(obj, dict):
+            obj_dict = obj
+        else:
+            # Leaf value
+            return {prefix: obj} if prefix else {}
+
+        for key, value in obj_dict.items():
+            full_key = f"{prefix}.{key}" if prefix else key
+
+            if isinstance(value, (SimpleNamespace, dict)):
+                # Recursively flatten nested structure
+                result.update(_flatten_namespace(value, full_key))
+            else:
+                # Leaf value
+                result[full_key] = value
+
+        return result
+
     # Convert SimpleNamespace to dict if needed
     if isinstance(data, SimpleNamespace):
-        data_dict = vars(data)
+        vars(data)
     else:
-        data_dict = data
+        pass
+
+    # Flatten nested structures
+    flattened = _flatten_namespace(data)
 
     # Log separator before content
     log_func("-" * 80)
 
-    if not data_dict:
+    if not flattened:
         # Empty dictionary or namespace: log a short message and return early
         log_func(f"{title}: (empty)")
         log_func("-" * 80)  # Log separator after content
@@ -187,13 +217,13 @@ def log_dict_aligned(
 
     # Non-empty dictionary or namespace
     # Log title with parameter count
-    log_func(f"{title}: ({len(data_dict)} parameters)")
+    log_func(f"{title}: ({len(flattened)} parameters)")
 
-    # Find the longest key for alignment (safe because data_dict is non-empty)
-    max_key_length = max(len(str(key)) for key in data_dict)
+    # Find the longest key for alignment (safe because flattened is non-empty)
+    max_key_length = max(len(str(key)) for key in flattened)
 
     # Log each key-value pair with alignment, including value type
-    for key, value in sorted(data_dict.items()):
+    for key, value in sorted(flattened.items()):
         log_func(f"{indent}{str(key):<{max_key_length}} : {value} ({type(value).__name__})")
 
     # Log separator after content

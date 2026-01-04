@@ -13,7 +13,7 @@ patch system, so that HF dataset mocking can be enabled via config without
 tightly coupling it to the trainer implementation.
 """
 
-from primus.core.patches import PatchContext, get_args, register_patch
+from primus.core.patches import PatchContext, get_param, register_patch
 from primus.modules.trainer.torchtitan.patch_utils import patch_mock_hf_dataset
 
 
@@ -22,7 +22,7 @@ from primus.modules.trainer.torchtitan.patch_utils import patch_mock_hf_dataset
     backend="torchtitan",
     phase="setup",
     description="Enable mock HuggingFace dataset mode for TorchTitan",
-    condition=lambda ctx: bool(getattr(getattr(get_args(ctx), "training", None), "mock_data", False)),
+    condition=lambda ctx: get_param(ctx, "training.mock_data", False),
 )
 def patch_torchtitan_mock_hf_dataset(ctx: PatchContext) -> None:  # noqa: ARG001
     """
