@@ -158,12 +158,12 @@ if [ "$USING_AINIC" == "1" ]; then
     LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
     LOG_INFO_RANK0 "MPI_HOME_DIR: $MPI_HOME_DIR"
 
-    # unset NCCL_IB_GID_INDEX
+    export NCCL_IB_TC=${NCCL_IB_TC:-104}
+    export NCCL_IB_FIFO_TC=${NCCL_IB_FIFO_TC:-184} # 192
+
     export NCCL_IB_GID_INDEX=1
-    # export NCCL_IB_ROCE_VERSION_NUM=2
+    export NCCL_IB_ROCE_VERSION_NUM=2
     export NCCL_MAX_P2P_CHANNELS=56
-    export NCCL_IB_TC=104
-    export NCCL_IB_FIFO_TC=192
     export NET_OPTIONAL_RECV_COMPLETION=1
     export NCCL_IB_USE_INLINE=1
     export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
@@ -178,7 +178,14 @@ if [ "$USING_AINIC" == "1" ]; then
 
     # v25.09
     export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
-    export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
+    # if [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
+    #     export LD_PRELOAD="${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0"
+    # elif [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
+    #     export LD_PRELOAD="${ANP_HOME_DIR}/build/librccl-anp.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0"
+    # else
+    #     echo "ERROR: Neither librccl-net.so nor librccl-anp.so was found in ${ANP_HOME_DIR}/build"
+    #     exit 1
+    # fi
 else
     export NCCL_IB_GID_INDEX=3
 fi
