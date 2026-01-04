@@ -211,6 +211,26 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             exp_meta_info=self.exp_meta_info,
         )
 
+        # Apply patches during initialization
+        # These patches need to be applied before model setup
+        from types import SimpleNamespace
+
+        from primus.core.patches import run_patches
+
+        # Construct a temporary module_config for patch context
+        # This allows patches to access Megatron args via get_args(ctx)
+        temp_module_config = SimpleNamespace()
+        temp_module_config.params = self.module_config
+
+        run_patches(
+            backend="megatron",
+            phase="before_train",
+            backend_version="0.15.0rc8",
+            extra={
+                "module_config": temp_module_config,
+            },
+        )
+
         # Initalize and get arguments, timers, and Tensorboard writer.
         log_rank_0(f"-run initialize_megatron...")
         self.initialize_megatron(
@@ -224,26 +244,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         args = get_args()
         # There are some extra limitation on ROCm need extra validate.
         validate_args_on_rocm(args)
-
-        # Apply patches during initialization
-        # These patches need to be applied before model setup
-        from types import SimpleNamespace
-
-        from primus.core.patches import run_patches
-
-        # Construct a temporary module_config for patch context
-        # This allows patches to access Megatron args via get_args(ctx)
-        temp_module_config = SimpleNamespace()
-        temp_module_config.params = get_args()
-
-        run_patches(
-            backend="megatron",
-            phase="before_train",
-            backend_version="0.15.0rc8",
-            extra={
-                "module_config": temp_module_config,
-            },
-        )
 
         # Enable manually split layers in (interleaved) 1f1b pipeline
         # parallelism by monkey patching
