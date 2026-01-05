@@ -8,23 +8,10 @@ import argparse
 import math
 from datetime import datetime
 
-# Allow importing this module (e.g., docs/tests) without torch installed. We
-# raise a clear error only when the benchmark actually runs.
-torch = None  # type: ignore[assignment]
-TORCH_AVAILABLE = False
-
-try:
-    import torch as _torch  # type: ignore[no-redef]
-except ModuleNotFoundError:
-    print("[WARNING] gemm benchmark depends on torch, which is missing in the current environment!")
-else:
-    TORCH_AVAILABLE = True
-    torch = _torch
+import torch
 
 from primus.tools.report import write_table_simple
 from primus.tools.utils import gather_records, get_current_device, is_rank_0
-
-from .gemm_bench_args import add_gemm_parser
 
 CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
 
@@ -72,57 +59,31 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
         end.record()
         torch.cuda.synchronize()
 
-        # Timed run (duration-based)
-        target_ms = max(100.0, duration_s * 1000.0)
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
+        total_calls += num_rotations
 
-        total_calls = 0
-        start.record()
+        elapsed = start.elapsed_time(end)  # ms
+        if elapsed >= target_ms:
+            avg_time_ms = elapsed / total_calls
+            break
 
-        while True:
-            for _ in range(num_rotations):
-                a = maybe_transpose(a_list[i], trans_a)
-                b = maybe_transpose(b_list[i], trans_b)
-                torch.matmul(a, b, out=c_list[i])
-            end.record()
-            torch.cuda.synchronize()
+    tflop = 2.0 * m * n * k / 1e12
+    tflops = tflop / (avg_time_ms / 1000.0)
+    bandwidth = mem_size_bytes / 1e9 / (avg_time_ms / 1000.0)
+    arith_intensity = (2.0 * m * n * k) / mem_size_bytes
 
-            total_calls += num_rotations
-
-            elapsed = start.elapsed_time(end)  # ms
-            if elapsed >= target_ms:
-                avg_time_ms = elapsed / total_calls
-                break
-
-        tflop = 2.0 * m * n * k / 1e12
-        tflops = tflop / (avg_time_ms / 1000.0)
-        bandwidth = mem_size_bytes / 1e9 / (avg_time_ms / 1000.0)
-        arith_intensity = (2.0 * m * n * k) / mem_size_bytes
-
-        return {
-            "m": m,
-            "n": n,
-            "k": k,
-            "trans_a": trans_a,
-            "trans_b": trans_b,
-            "dtype": str(dtype),
-            "avg_time_ms": avg_time_ms,
-            "tflop": tflop,
-            "tflops": tflops,
-            "bandwidth_gbps": bandwidth,
-            "arith_intensity": arith_intensity,
-        }
-
-else:
-
-    def _profile_gemm_impl(*args, **kwargs):  # type: ignore[unused-arg]
-        raise RuntimeError("profile_gemm requires torch. Please install torch and retry.")
-
-
-def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
-    _require_torch()
-    return _profile_gemm_impl(m, n, k, dtype, trans_a, trans_b, duration_s)
+    return {
+        "m": m,
+        "n": n,
+        "k": k,
+        "trans_a": trans_a,
+        "trans_b": trans_b,
+        "dtype": str(dtype),
+        "avg_time_ms": avg_time_ms,
+        "tflop": tflop,
+        "tflops": tflops,
+        "bandwidth_gbps": bandwidth,
+        "arith_intensity": arith_intensity,
+    }
 
 
 def build_gemm_base_preamble(args) -> str:
@@ -157,9 +118,6 @@ def build_gemm_base_preamble(args) -> str:
 
 
 def run_gemm_benchmark(args):
-    _require_torch()
-    assert torch is not None
-
     if args.M <= 0 or args.N <= 0 or args.K <= 0:
         raise ValueError("M, N, K must be positive integers.")
 
@@ -239,6 +197,4 @@ def build_gemm_parser() -> argparse.ArgumentParser:
 if __name__ == "__main__":
     parser = build_gemm_parser()
     args = parser.parse_args()
-    if not TORCH_AVAILABLE:
-        parser.error("GEMM benchmark requires torch. Please install torch and retry.")
     run_gemm_benchmark(args)
