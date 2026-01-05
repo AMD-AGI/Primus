@@ -113,14 +113,20 @@ source "$RUNNER_DIR/lib/config.sh" || {
     exit 1
 }
 
+
 ###############################################################################
 # STEP 1: Pre-parse global options (--config, --debug, --dry-run, --help)
 ###############################################################################
 CONFIG_FILE=""
 DEBUG_MODE=0
 DRY_RUN_MODE=0
-PRE_PARSE_ARGS=("--")
+PRE_PARSE_ARGS=()
 PRIMUS_ARGS=()
+
+# If the first argument is the subcommand "direct", skip it
+if [[ "${1:-}" == "direct" ]]; then
+    shift
+fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -142,13 +148,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --env)
             if [[ "$2" == *=* ]]; then
+                # Inline KEY=VALUE form: export immediately and keep for later so that
+                # direct.env / --env can be re-applied with highest priority.
                 export "${2%%=*}"="${2#*=}"
-                # Keep --env arguments for later processing/display
                 PRE_PARSE_ARGS+=("$1" "$2")
                 shift 2
             else
-                echo "[primus-entry][ERROR] --env requires KEY=VALUE"
-                exit 2
+                # Non KEY=VALUE form: treat as env file path and defer sourcing until
+                # after hooks and patches (STEP 9). Use a synthetic --env_file option
+                # so that it is tracked via direct_config[env_file].
+                PRE_PARSE_ARGS+=("--env_file" "$2")
+                LOG_INFO_RANK0 "[direct] CLI: --env_file $2"
+                shift 2
             fi
             ;;
         --)
@@ -161,8 +172,10 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-# Restore arguments for second pass
-set "${PRE_PARSE_ARGS[@]}" "${PRIMUS_ARGS[@]}"
+# Restore arguments for second pass. Use `set --` so that options parsing stops
+# and all following tokens (including those starting with '-') become positional
+# parameters for the next parsing stage.
+set -- "${PRE_PARSE_ARGS[@]}" "${PRIMUS_ARGS[@]}"
 
 # Enable debug mode early if set via CLI
 if [[ "$DEBUG_MODE" == "1" ]]; then
@@ -312,10 +325,79 @@ fi
 source "${RUNNER_DIR}/helpers/envs/primus-env.sh"
 
 ###############################################################################
-# STEP 7: Build and export environment variables
+# STEP 7: Execute hooks and capture extra arguments / env
+###############################################################################
+# Hooks can return:
+#   - Extra Primus CLI arguments by printing lines:  extra.<name>=<value>
+#   - Environment variables by printing lines:       env.VAR_NAME=VALUE
+# The detailed parsing logic lives in execute_hooks.sh, which fills the
+# global HOOK_EXTRA_PRIMUS_ARGS array and exports env.* entries.
+# shellcheck disable=SC1091
+source "${RUNNER_DIR}/helpers/execute_hooks.sh"
+HOOK_EXTRA_PRIMUS_ARGS=()
+if ! execute_hooks "$1" "$2" "$@"; then
+    LOG_ERROR "[direct] Hooks execution failed"
+    exit 1
+fi
+
+# Prepend collected extra args to the current Primus arguments ($@) so that
+# they are automatically picked up when building the final CMD below.
+if [[ ${#HOOK_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
+    set -- "$@" "${HOOK_EXTRA_PRIMUS_ARGS[@]}"
+fi
+
+###############################################################################
+# STEP 8: Execute patch scripts
+###############################################################################
+# Build and execute patch scripts array from config + CLI
+if [[ -n "${direct_config[patch]:-}" ]]; then
+    patch_scripts=()
+    while IFS= read -r patch_entry; do
+        patch_scripts+=("$patch_entry")
+    done <<< "${direct_config[patch]}"
+
+    # Source execute_patches.sh so that any environment changes or extra arguments
+    # produced by patches (via PATCH_ENV / extra.* lines) can be applied in the
+    # current shell.
+    # shellcheck disable=SC1091
+    source "${RUNNER_DIR}/helpers/execute_patches.sh"
+    # Reset collected extra args from patches for this run
+    PATCH_EXTRA_PRIMUS_ARGS=()
+    if ! execute_patches "${patch_scripts[@]}"; then
+        LOG_ERROR "[direct] Patch execution failed"
+        exit 1
+    fi
+fi
+
+###############################################################################
+# STEP 8.5: Apply extra Primus args from patches (extra.* protocol)
+###############################################################################
+if [[ ${#PATCH_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
+    set -- "$@" "${PATCH_EXTRA_PRIMUS_ARGS[@]}"
+    LOG_INFO_RANK0 "[direct] Applied extra args from patches: ${PATCH_EXTRA_PRIMUS_ARGS[*]}"
+fi
+
+###############################################################################
+# STEP 9: Build and export environment variables (highest priority)
 ###############################################################################
 
-# Build primus_env_kv array and export environment variables
+# First, source any env files specified via --env <file> (tracked as env_file).
+if [[ -n "${direct_config[env_file]:-}" ]]; then
+    while IFS= read -r env_file; do
+        [[ -n "$env_file" ]] || continue
+        if [[ ! -f "$env_file" || ! -r "$env_file" ]]; then
+            LOG_ERROR "[direct] Env file not found or not readable: $env_file"
+            exit 1
+        fi
+        # shellcheck disable=SC1090
+        source "$env_file"
+        LOG_INFO_RANK0 "[direct] Sourced env file (final): $env_file"
+    done <<< "${direct_config[env_file]}"
+fi
+
+# Then, build primus_env_kv array and export inline KEY=VALUE envs. This happens
+# after hooks, patches, and env files so that CLI/config-provided envs
+# (direct.env / --env KEY=VALUE) take final precedence for the actual Primus run.
 primus_env_kv=()
 if [[ -n "${direct_config[env]:-}" ]]; then
     while IFS= read -r env_entry; do
@@ -328,74 +410,8 @@ if [[ -n "${direct_config[env]:-}" ]]; then
         fi
         primus_env_kv+=("$env_entry")
         export "${env_entry%%=*}"="${env_entry#*=}"
-        LOG_INFO_RANK0 "[direct] Exported env: ${env_entry%%=*}=${env_entry#*=}"
+        LOG_INFO_RANK0 "[direct] Exported env (final): ${env_entry%%=*}=${env_entry#*=}"
     done <<< "${direct_config[env]}"
-fi
-
-###############################################################################
-# STEP 8: Execute hooks and capture generic extra arguments
-###############################################################################
-# Hooks can return additional CLI arguments by printing lines in the form:
-#     extra.<name>=<value>
-# to stdout, for example:
-#     echo "extra.foo=1"
-#     echo "extra.bar=--some-flag"
-#
-# Each such line is converted into CLI arguments of the form:
-#     --<name> <value>
-# and these arguments are *prepended* to the Primus arguments ($@) so that
-# they appear immediately after the script name in the final command.
-HOOK_EXTRA_PRIMUS_ARGS=()
-
-hook_output="$(bash "${RUNNER_DIR}/helpers/execute_hooks.sh" "$1" "$2" "$@" 2>&1)"
-hook_rc=$?
-
-# Always echo hook output so users can see logs as usual.
-if [[ -n "$hook_output" ]]; then
-    printf '%s\n' "$hook_output"
-fi
-
-if [[ $hook_rc -ne 0 ]]; then
-    LOG_ERROR "[direct] Hooks execution failed"
-    exit "$hook_rc"
-fi
-
-# Parse hook output for extra.* key=value pairs.
-while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-
-    # Match lines like: extra.foo=1 or extra.model.hf_assets_path=...
-    if [[ "$line" =~ ^extra\.([A-Za-z_][A-Za-z0-9_.]*[A-Za-z0-9_])=(.*)$ ]]; then
-        name="${BASH_REMATCH[1]}"
-        value="${BASH_REMATCH[2]}"
-
-        # Append as: --<name> <value>
-        HOOK_EXTRA_PRIMUS_ARGS+=("--${name}" "${value}")
-
-        LOG_INFO_RANK0 "[direct] Hook provided extra arg: --${name} ${value}"
-    fi
-done <<< "$hook_output"
-
-# Prepend collected extra args to the current Primus arguments ($@) so that
-# they are automatically picked up when building the final CMD below.
-if [[ ${#HOOK_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
-    set -- "$@" "${HOOK_EXTRA_PRIMUS_ARGS[@]}"
-fi
-
-###############################################################################
-# STEP 9: Execute patch scripts
-###############################################################################
-# Build and execute patch scripts array from config + CLI
-if [[ -n "${direct_config[patch]:-}" ]]; then
-    patch_scripts=()
-    while IFS= read -r patch_entry; do
-        patch_scripts+=("$patch_entry")
-    done <<< "${direct_config[patch]}"
-
-    if ! bash "${RUNNER_DIR}/helpers/execute_patches.sh" "${patch_scripts[@]}"; then
-        LOG_ERROR "[direct] Patch execution failed"
-        exit 1
-    fi
 fi
 
 ###############################################################################
