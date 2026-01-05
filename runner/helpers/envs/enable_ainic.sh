@@ -1,3 +1,9 @@
+#!/bin/bash
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
 export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
