@@ -13,15 +13,14 @@ from tqdm import tqdm
 
 try:
     import torch
-except ModuleNotFoundError:
-    TORCH_AVAILABLE = False
-    print(
-        "[WARNING] deepseek dense gemm benchmark depends on torch, which is missing in the current environment!"
-    )
-else:
-    TORCH_AVAILABLE = True
+
     from primus.tools.benchmark.gemm_bench import profile_gemm
     from primus.tools.utils import gather_records, is_rank_0
+
+    TORCH_AVAILABLE = True
+except ImportError:
+    print("[WARNING] dense gemm benchmark depends on torch, which does not exist in current environment!")
+    TORCH_AVAILABLE = False
 
 from primus.tools.report import write_table_simple
 
@@ -241,6 +240,4 @@ def build_gemm_dense_parser() -> argparse.ArgumentParser:
 if __name__ == "__main__":
     parser = build_gemm_dense_parser()
     args = parser.parse_args()
-    if not TORCH_AVAILABLE:
-        parser.error("DeepSeek GEMM benchmark requires torch. Please install torch and retry.")
     run_gemm_benchmark(args)
