@@ -10,9 +10,29 @@ def run(args, overrides):
     Entry point for the 'train' subcommand.
     """
     if args.suite == "pretrain":
-        from primus.pretrain import launch_pretrain_from_cli
+        # Select which training entry to use.
+        #
+        # To avoid changing the existing CLI surface, the choice between the
+        # legacy and core runtime is controlled via an environment variable:
+        #
+        #   PRIMUS_TRAIN_RUNTIME = "legacy" | "core"
+        #
+        # Default is "legacy" to keep current training workflows unchanged.
+        from os import getenv
 
-        launch_pretrain_from_cli(args, overrides)
+        runtime_entry = getenv("PRIMUS_TRAIN_RUNTIME", "legacy").strip().lower()
+
+        if runtime_entry == "core":
+            # New core runtime path: mirror `train_launcher.launch_train`.
+            from primus.core.runtime.train_runtime import PrimusRuntime
+
+            runtime = PrimusRuntime(args=args)
+            runtime.run_train_module(module_name="pre_trainer", overrides=overrides or [])
+        else:
+            # Legacy pretrain flow.
+            from primus.pretrain import launch_pretrain_from_cli
+
+            launch_pretrain_from_cli(args, overrides)
     else:
         raise NotImplementedError(f"Unsupported train suite: {args.suite}")
 

@@ -4,6 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import os
+from typing import Any, Dict
+
 from primus.core.utils import checker
 from primus.modules.base_module import BaseModule
 from primus.modules.module_utils import error_rank_0, log_rank_0, warning_rank_0
@@ -11,7 +14,7 @@ from primus.modules.module_utils import error_rank_0, log_rank_0, warning_rank_0
 
 class MaxTextPretrainTrainer(BaseModule):
     def __init__(self, *args, **kwargs):
-        kwargs.pop("extra_args", None)
+        extra_args = kwargs.pop("extra_args", None)
         super().__init__(*args, **kwargs)
 
         # important: make sure patch maxtext logger first
@@ -28,6 +31,9 @@ class MaxTextPretrainTrainer(BaseModule):
         self.primus_cfg.export_module_config("pre_trainer")
         self.pre_trainer_cfg_path = self.primus_cfg.module_config_path("pre_trainer")
 
+        self.patch_wandb()
+        self.override_model_args = self.prepare_model_overrides(extra_args)
+
     def setup(self):
         log_rank_0(f"setup MaxText")
 
@@ -37,14 +43,49 @@ class MaxTextPretrainTrainer(BaseModule):
 
         from primus.backends.maxtext.train import initialize
 
-        self.train_config, self.recorder, self.diagnostic_config = initialize(argv)
+        self.train_config, self.recorder, self.diagnostic_config = initialize(
+            argv, **self.override_model_args
+        )
 
     def run(self, *args, **kwargs):
-        log_rank_0(f"run MaxText...")
+        log_rank_0(f"MaxText Pre-Trainer: begin training...")
 
         from primus.backends.maxtext.train import run
 
         run(self.train_config, self.recorder, self.diagnostic_config)
+        log_rank_0("MaxText Pre-Trainer: after training is done")
+
+    def prepare_model_overrides(self, override_args: Dict[str, Any]):
+        """
+        Monkey patch maxtext cli args to override model args dynamically.
+        Supports nested overrides like:
+            {"model": {"num_experts": 16, "base_num_decoder_layers": 4}}
+
+        All override keys MUST be under the "model" key.
+        """
+
+        if not override_args:
+            warning_rank_0("MaxText Pre-Trainer: No override_args provided, skip patch.")
+            return {}
+
+        warning_rank_0(f"MaxText Pre-Trainer: Applying override_args: {override_args}")
+
+        # --- Step 1. Flatten any nested dict under 'model'
+        flat_overrides = {}
+        for k, v in override_args.items():
+            if k != "model":
+                raise ValueError(f"Only the 'model' key is supported for overrides, found: {k}")
+            if not isinstance(v, dict):
+                raise ValueError(
+                    f"MaxText Pre-Trainer: The value for 'model' must be a dict, got {type(v).__name__}."
+                )
+            for subk, subv in v.items():
+                if isinstance(subv, dict):
+                    raise ValueError(
+                        f"MaxText Pre-Trainer: Invalid override key-value detected: {k}.{subk}-{subv}"
+                    )
+                flat_overrides[subk] = subv
+        return flat_overrides
 
     def patch_maxtext_logger(self):
         import logging
@@ -97,6 +138,25 @@ class MaxTextPretrainTrainer(BaseModule):
 
         orig_checkpointing.create_orbax_checkpoint_manager = create_orbax_checkpoint_manager
         warning_rank_0("MaxText Pre-Trainer: patch checkpointing successfully.")
+
+    def patch_wandb(self):
+        def set_default_wandb_project(exp_meta_info):
+            work_group = exp_meta_info["work_group"]
+            user_name = exp_meta_info["user_name"]
+            os.environ["WANDB_PROJECT"] = f"Primus-MaxText-Pretrain-{work_group}_{user_name}"
+
+        set_default_wandb_project(self.primus_cfg.exp_meta_info)
+
+        import MaxText.metric_logger as orig_metric_logger
+        import MaxText.train as orig_train
+
+        import primus.backends.maxtext.train as primus_train
+        from primus.backends.maxtext.metric_logger import PrimusMetricLogger
+
+        orig_metric_logger.MetricLogger = PrimusMetricLogger
+        orig_train.MetricLogger = PrimusMetricLogger
+        primus_train.MetricLogger = PrimusMetricLogger
+        warning_rank_0("MaxText Pre-Trainer: patch wandb successfully.")
 
     def patch_input_pipeline(self):
         import MaxText.input_pipeline._hf_data_processing as orig_hf_data_processing

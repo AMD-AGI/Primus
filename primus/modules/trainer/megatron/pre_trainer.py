@@ -31,6 +31,7 @@ def get_batch_func(data_iterator, vp_stage=None):
     if not is_first_or_last_pipeline_stage(vp_stage):
         return None, None, None, None, None
 
+    assert data_iterator is not None, f"data_iterator is None vp_stage: {vp_stage}"
     # get batches based on the TP rank you are on
     batch = get_batch_on_this_tp_rank(data_iterator)
 
@@ -86,7 +87,7 @@ class DataLoaderStore:
     cache = collections.deque()
 
     @classmethod
-    def push(cls, data_iterator, h2d_stream=False):
+    def push(cls, data_iterator, h2d_stream=False, vp_stage=None):
         timers = get_timers()
         # Get the batch.
         timers("batch-generator", log_level=2).start()
@@ -101,14 +102,14 @@ class DataLoaderStore:
                 load_event = torch.cuda.Event()
                 original_stream = torch.cuda.current_stream()
                 with torch.cuda.stream(get_offload_h2d_stream()):
-                    data = get_batch_func(data_iterator)
+                    data = get_batch_func(data_iterator, vp_stage)
                     for x in data:
                         if x is not None:
                             x.record_stream(original_stream)
                     load_event.record()
                     cls.cache.append((data, load_event))
             else:
-                cls.cache.append((get_batch_func(data_iterator), None))
+                cls.cache.append((get_batch_func(data_iterator, vp_stage), None))
         timers("batch-generator").stop()
 
     @classmethod
@@ -227,12 +228,13 @@ class MegatronPretrainTrainer(MegatronTrainer):
         else:
             from collections.abc import Iterable
 
+            vp_stage = get_attr_wrapped_model(model, "vp_stage")
             if (
                 not isinstance(data_iterator, Iterable) and not data_iterator is None
             ):  # isinstance(data_iterator, DataLoaderStore):
                 tokens, labels, loss_mask, attention_mask, position_ids = data_iterator.pop()
             else:
-                DataLoaderStore.push(data_iterator, h2d_stream=False)
+                DataLoaderStore.push(data_iterator, h2d_stream=False, vp_stage=vp_stage)
                 tokens, labels, loss_mask, attention_mask, position_ids = DataLoaderStore.pop()
 
         with stimer:
@@ -249,6 +251,9 @@ class MegatronPretrainTrainer(MegatronTrainer):
                     )
 
                     WeightGradStore.enable_split_bw()
+                    assert (
+                        WeightGradStore.split_bw()
+                    ), "WeightGradStore.split_bw is not supported, please make sure overlap_grad_reduce is disabled and gradient_accumulation_fusion is enabled"
                     from primus.backends.megatron.core.models.common.model_chunk_schedule_plan import (
                         TransformerModelChunkSchedulePlan,
                     )

@@ -1,4 +1,4 @@
-includes:
+extends:
   - primus_megatron_model.yaml
 
 
@@ -73,7 +73,7 @@ attention_softmax_in_fp32: false
 
 # fusion
 bias_gelu_fusion: true
-cross_entropy_loss_fusion: False
+cross_entropy_loss_fusion: false
 cross_entropy_fusion_impl: "native" # "native", "te"
 bias_swiglu_fusion: true
 masked_softmax_fusion: true
@@ -161,6 +161,7 @@ encoder_pipeline_model_parallel_size: 0
 pipeline_model_parallel_split_rank: null
 decoder_first_pipeline_num_layers: null # int
 decoder_last_pipeline_num_layers: null # int
+virtual_pipeline_model_parallel_size: null # int
 num_layers_per_virtual_pipeline_stage: null # int
 num_virtual_stages_per_pipeline_rank: null # int
 microbatch_group_size_per_vp_stage: null # int
@@ -184,7 +185,7 @@ tp_comm_overlap_cfg: null
 # Debug Options
 tp_comm_overlap_ag: true
 tp_comm_overlap_rs: true
-tp_comm_overlap_rs_dgrad: False
+tp_comm_overlap_rs_dgrad: false
 tp_comm_split_ag: true
 tp_comm_split_rs: true
 tp_comm_bulk_wgrad: true

@@ -1,10 +1,10 @@
-bases:
+extends:
   - deepseek_v2_base.yaml
 
 # https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite
 # 16B total params, 2.4B active params
 
-tokenizer_type: DeepSeekV2Tokenizer
+tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: deepseek-ai/DeepSeek-V2-Lite
 
 # model

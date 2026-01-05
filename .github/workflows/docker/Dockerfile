@@ -1,6 +1,5 @@
 # Base image
-# FROM docker.io/rocm/megatron-lm:v25.9_gfx942
-FROM docker.io/rocm/primus:v25.9_gfx942
+FROM docker.io/rocm/primus:v25.10
 
 # Specify the commit of Primus-Turbo when building: docker build --build-arg PRIMUS_TURBO_COMMIT=xxx .)
 ARG PRIMUS_TURBO_COMMIT
@@ -17,6 +16,9 @@ RUN mkdir -p /opt && cd /opt && \
     git submodule update --init --recursive && \
     pip3 install -r requirements.txt && \
     GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
+
+RUN apt-get install --reinstall binutils -y && apt-get install numactl -y
+
 
 # Set the default working directory
 WORKDIR /opt

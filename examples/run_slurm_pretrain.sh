@@ -42,7 +42,7 @@ srun -N "${NNODES}" \
      --exclusive \
      --export ALL \
      --ntasks-per-node=1 \
-     --cpus-per-task="${CPUS_PER_TASK:-256}" \
+     --cpus-per-task="${CPUS_PER_TASK:-128}" \
      bash -c "
           readarray -t node_array < <(scontrol show hostnames \"\$SLURM_JOB_NODELIST\")
           if [ \"\$SLURM_NODEID\" = \"0\" ]; then
@@ -57,5 +57,6 @@ srun -N "${NNODES}" \
           export NNODES=\${SLURM_NNODES}
           export NODE_RANK=\${SLURM_PROCID}
           export GPUS_PER_NODE=\${SLURM_GPUS_ON_NODE}
+          export REBUILD_PRIMUS_TURBO=\${REBUILD_PRIMUS_TURBO}
           bash ${SCRIPT_DIR}/run_local_pretrain.sh \"\$@\" 2>&1 | tee ${LOG_FILE}
      " bash "$@"

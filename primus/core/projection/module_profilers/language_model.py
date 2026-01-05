@@ -197,3 +197,189 @@ class LanguageModelProfiler(BaseModuleProfiler):
         gs_saving = 1 if ga > pp_size else ga / pp_size
         total_act *= gs_saving * interleaved_schedule_memory_penalty
         return total_act
+
+    def run_layer_benchmark(self, model, batch_size: int, seq_len: int) -> dict:
+        """Benchmark transformer layers plus embedding/output layers on this rank."""
+
+        def unwrap_module(module):
+            """Recursively unwrap DistributedDataParallel / pipeline wrappers."""
+            return unwrap_module(module.module) if hasattr(module, "module") else module
+
+        model_chunks = model if isinstance(model, list) else [model]
+
+        embedding_module = None
+        output_module = None
+        all_layers = []
+
+        for chunk in model_chunks:
+            unwrapped = unwrap_module(chunk)
+
+            language_model = getattr(unwrapped, "language_model", None)
+            if language_model is not None:
+                if hasattr(language_model, "embedding"):
+                    embedding_module = language_model.embedding
+                if hasattr(language_model, "output_layer"):
+                    output_module = language_model.output_layer
+
+                if hasattr(language_model, "encoder") and hasattr(language_model.encoder, "layers"):
+                    all_layers.extend(language_model.encoder.layers)
+                elif hasattr(language_model, "decoder") and hasattr(language_model.decoder, "layers"):
+                    all_layers.extend(language_model.decoder.layers)
+                elif hasattr(language_model, "layers"):
+                    all_layers.extend(language_model.layers)
+                continue
+
+            if hasattr(unwrapped, "decoder") and hasattr(unwrapped.decoder, "layers"):
+                all_layers.extend(unwrapped.decoder.layers)
+            elif hasattr(unwrapped, "layers"):
+                all_layers.extend(unwrapped.layers)
+            else:
+                raise ValueError(f"Cannot find transformer layers in model chunk: {type(unwrapped)}")
+            if hasattr(unwrapped, "embedding"):
+                embedding_module = unwrapped.embedding
+            if hasattr(unwrapped, "output_layer"):
+                output_module = unwrapped.output_layer
+
+        print(f"\n[Primus:Performance Projection] Found {len(all_layers)} transformer layers")
+        print(f"[Primus:Performance Projection] This rank is responsible for layers: {self.layers}")
+
+        embedding_stats = None
+        output_stats = None
+
+        # Benchmark embedding if this rank hosts it.
+        if 0 in self.layers:
+            if embedding_module is None:
+                print("[Primus:Performance Projection] WARNING: Embedding module not found on this rank.")
+            else:
+                print("[Primus:Performance Projection] Benchmarking embedding layer...")
+                profiler = self.sub_profilers["embedding"]
+                module = (
+                    embedding_module.word_embeddings
+                    if hasattr(embedding_module, "word_embeddings")
+                    else embedding_module
+                )
+                profiler.set_module(module)
+                emb_forward = profiler.measured_forward_time(batch_size, seq_len)
+                emb_backward = profiler.measured_backward_time(batch_size, seq_len)
+                emb_mem = profiler.measured_activation_memory(batch_size, seq_len)
+                print(
+                    f"  Embedding -> fwd: {emb_forward:.2f} ms, "
+                    f"bwd: {emb_backward:.2f} ms, "
+                    f"act: {emb_mem / (1024**2):.2f} MB"
+                )
+                embedding_stats = {
+                    "type": "embedding",
+                    "forward_time_ms": emb_forward,
+                    "backward_time_ms": emb_backward,
+                    "activation_memory_bytes": emb_mem,
+                }
+
+        # Benchmark output layer if this rank hosts the final layer.
+        last_layer_id = self.config.model_config.num_layers - 1
+        if last_layer_id in self.layers:
+            if output_module is None:
+                print("[Primus:Performance Projection] WARNING: Output layer module not found on this rank.")
+            else:
+                print("[Primus:Performance Projection] Benchmarking output layer...")
+                profiler = self.sub_profilers["output_layer"]
+                profiler.set_module(output_module)
+                out_forward = profiler.measured_forward_time(batch_size, seq_len)
+                out_backward = profiler.measured_backward_time(batch_size, seq_len)
+                out_mem = profiler.measured_activation_memory(batch_size, seq_len)
+                print(
+                    f"  Output Layer -> fwd: {out_forward:.2f} ms, "
+                    f"bwd: {out_backward:.2f} ms, "
+                    f"act: {out_mem / (1024**2):.2f} MB"
+                )
+                output_stats = {
+                    "type": "output",
+                    "forward_time_ms": out_forward,
+                    "backward_time_ms": out_backward,
+                    "activation_memory_bytes": out_mem,
+                }
+
+        # Benchmark each layer type (dense/MoE) once
+        results = {}
+        profiled_types = set()
+
+        for layer_idx in self.layers:
+            if layer_idx >= len(all_layers):
+                print(f"[WARNING] Layer index {layer_idx} exceeds available layers ({len(all_layers)})")
+                continue
+
+            is_moe = self.config.model_config.moe_pattern[layer_idx]
+            layer_type = "moe" if is_moe else "dense"
+
+            if layer_type in profiled_types:
+                continue
+
+            layer_module = all_layers[layer_idx]
+
+            print(f"\n[Primus:Performance Projection] Benchmarking Layer {layer_idx} ({layer_type})...")
+
+            # Get the appropriate profiler
+            if is_moe:
+                layer_profiler = self.sub_profilers["moe_transformer_layer"]
+            else:
+                layer_profiler = self.sub_profilers["dense_transformer_layer"]
+
+            # Set the layer module
+            layer_profiler.set_layer_module(layer_module)
+
+            forward_time = layer_profiler.measured_forward_time(batch_size, seq_len)
+            backward_time = layer_profiler.measured_backward_time(batch_size, seq_len)
+            activation_memory = layer_profiler.measured_activation_memory(batch_size, seq_len)
+
+            # Benchmark Attention
+            attn_profiler = layer_profiler.get_sub_profiler("self_attention")
+            attn_forward = attn_profiler.measured_forward_time(batch_size, seq_len)
+            attn_backward = attn_profiler.measured_backward_time(batch_size, seq_len)
+            attn_mem = attn_profiler.measured_activation_memory(batch_size, seq_len)
+
+            # Benchmark MLP
+            mlp_profiler = layer_profiler.get_sub_profiler("mlp")
+            mlp_forward = mlp_profiler.measured_forward_time(batch_size, seq_len)
+            mlp_backward = mlp_profiler.measured_backward_time(batch_size, seq_len)
+            mlp_mem = mlp_profiler.measured_activation_memory(batch_size, seq_len)
+
+            results[layer_type] = {
+                "type": layer_type,
+                "forward_time_ms": forward_time,
+                "backward_time_ms": backward_time,
+                "activation_memory_bytes": activation_memory,
+                "attention": {
+                    "forward_time_ms": attn_forward,
+                    "backward_time_ms": attn_backward,
+                    "activation_memory_bytes": attn_mem,
+                },
+                "mlp": {
+                    "forward_time_ms": mlp_forward,
+                    "backward_time_ms": mlp_backward,
+                    "activation_memory_bytes": mlp_mem,
+                },
+            }
+
+            profiled_types.add(layer_type)
+
+            print(f"  Forward time:  {forward_time:.2f} ms")
+            print(f"  Backward time: {backward_time:.2f} ms")
+            print(f"  Activation memory: {activation_memory / (1024**2):.2f} MB")
+            print(f"  Attention Forward: {attn_forward:.2f} ms, Backward: {attn_backward:.2f} ms")
+            print(f"  Attention Activation memory: {attn_mem / (1024**2):.2f} MB")
+            print(f"  MLP Forward: {mlp_forward:.2f} ms, Backward: {mlp_backward:.2f} ms")
+            print(f"  MLP Activation memory: {mlp_mem / (1024**2):.2f} MB")
+
+        # Expand results to all layers
+        final_results = {}
+        for layer_idx in self.layers:
+            is_moe = self.config.model_config.moe_pattern[layer_idx]
+            layer_type = "moe" if is_moe else "dense"
+            if layer_type in results:
+                final_results[layer_idx] = results[layer_type]
+
+        if embedding_stats is not None:
+            final_results["embedding"] = embedding_stats
+        if output_stats is not None:
+            final_results["output"] = output_stats
+
+        return final_results

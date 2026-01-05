@@ -1,4 +1,4 @@
-bases:
+extends:
   - llama_base.yaml
 
 init_method_std: 0.01
