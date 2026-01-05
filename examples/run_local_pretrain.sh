@@ -143,6 +143,20 @@ if [[ "${CLEAN_DOCKER_CONTAINER:-0}" == "1" ]]; then
     fi
 fi
 
+if [[ -n "${DOCKER_LOGIN_KEY}" ]]; then
+    if [[ -z "${DOCKER_LOGIN_USER}" ]]; then
+        echo "DOCKER_LOGIN_KEY is set but DOCKER_LOGIN_USER is empty. Exiting."
+        exit 1
+    fi
+    echo "Logging in to Docker registry as ${DOCKER_LOGIN_USER}..."
+    docker login -u "${DOCKER_LOGIN_USER}" -p "${DOCKER_LOGIN_KEY}"
+    if [[ $? -ne 0 ]]; then
+        echo "Docker login failed! Exiting."
+        exit 1
+    fi
+fi
+
+
 if [[ "${SKIP_TRAIN:-0}" == "1" ]]; then
     echo "Node-${NODE_RANK}: Skipping training container launch."
     exit 0
