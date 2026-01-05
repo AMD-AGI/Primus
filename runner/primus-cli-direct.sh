@@ -113,7 +113,6 @@ source "$RUNNER_DIR/lib/config.sh" || {
     exit 1
 }
 
-echo "[DEBUG] direct.sh: $*"
 
 ###############################################################################
 # STEP 1: Pre-parse global options (--config, --debug, --dry-run, --help)
@@ -123,6 +122,11 @@ DEBUG_MODE=0
 DRY_RUN_MODE=0
 PRE_PARSE_ARGS=()
 PRIMUS_ARGS=()
+
+# If the first argument is the subcommand "direct", skip it
+if [[ "${1:-}" == "direct" ]]; then
+    shift
+fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -154,6 +158,7 @@ while [[ $# -gt 0 ]]; do
                 # after hooks and patches (STEP 9). Use a synthetic --env_file option
                 # so that it is tracked via direct_config[env_file].
                 PRE_PARSE_ARGS+=("--env_file" "$2")
+                LOG_INFO_RANK0 "[direct] CLI: --env_file $2"
                 shift 2
             fi
             ;;
@@ -167,7 +172,6 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-echo "[DEBUG] direct.sh (pre-parse): ${PRE_PARSE_ARGS[@]} ${PRIMUS_ARGS[@]}"
 # Restore arguments for second pass. Use `set --` so that options parsing stops
 # and all following tokens (including those starting with '-') become positional
 # parameters for the next parsing stage.
