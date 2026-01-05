@@ -60,6 +60,23 @@ LOG_ERROR() {
     echo "[NODE-$NODE_RANK($HOSTNAME)] [ERROR] $*";
 }
 
+EXAMPLE_FAULT_TOLERANCE() {
+    for arg in "$@"; do
+        case "$arg" in
+            --fault_tolerance.enable)
+                echo "true"
+                return
+                ;;
+            --fault_tolerance.enable=*)
+                local value="${arg#*=}"
+                echo "$value"
+                return
+                ;;
+        esac
+    done
+    echo "false"
+}
+
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 export MASTER_PORT=${MASTER_PORT:-1234}
 export NNODES=${NNODES:-1}
@@ -90,6 +107,15 @@ if [ "${BACKEND:-}" != "MaxText" ]; then
 else
     pip install -r "$PRIMUS_PATH/requirements-jax.txt"  --quiet
 fi
+
+
+FAULT_TOLERANCE_VALUE=$(EXAMPLE_FAULT_TOLERANCE "$@")
+LOG_INFO_RANK0 "FAULT_TOLERANCE_VALUE: $FAULT_TOLERANCE_VALUE"
+if [[ "$FAULT_TOLERANCE_VALUE" == "true" ]] || [[ "$FAULT_TOLERANCE_VALUE" == "True" ]] || [[ "$FAULT_TOLERANCE_VALUE" == "1" ]]; then
+    LOG_INFO_RANK0 "Installing requirements-torchft.txt ..."
+    pip install -r "$PRIMUS_PATH/requirements-torchft.txt"  --quiet
+fi
+
 
 # -------------------- EXP Check --------------------
 if [ -z "${EXP:-}" ]; then
