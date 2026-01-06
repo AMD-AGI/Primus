@@ -10,7 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 935a6314b1e6f57894c198a0b8def3053a8e903f # feat(mxfp4): Add mxfp4 gemm and fix scale calculate of mxfp8 (#179)
+  PRIMUS_TURBO_COMMIT: 5233748e9c5c5795a6484ab31ece47c442d29ec2 # feat(mxfp4): refactor gemm mxfp4 and mxfp8. fuse transpose, hadamard transform and quantization. (#195)
 
 jobs:
   code-lint:
@@ -103,24 +103,24 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
           docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
-          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-v25.10-ainic"
-          start_time=$(date +%s)
-          mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
-          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-38.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
-          cp /apps/tas/0_public/primus_docker_ci/ainic/amd-anp-v1.3.0.patch $GITHUB_WORKSPACE/.github/workflows/docker/ainic/
-          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_v25.10_ainic \
-               -t tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic \
-               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
-               --build-arg AINIC_BUNDLE_PATH=ainic \
-               $GITHUB_WORKSPACE/.github/workflows/docker
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "⏱️ [build primus docker-v25.10-ainic] Total elapsed time: ${elapsed} seconds"
+          # echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-v25.10-ainic"
+          # start_time=$(date +%s)
+          # mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
+          # cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-38.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          # cp /apps/tas/0_public/primus_docker_ci/ainic/amd-anp-v1.3.0.patch $GITHUB_WORKSPACE/.github/workflows/docker/ainic/
+          # docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_v25.10_ainic \
+          #      -t tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic \
+          #      --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+          #      --build-arg AINIC_BUNDLE_PATH=ainic \
+          #      $GITHUB_WORKSPACE/.github/workflows/docker
+          # end_time=$(date +%s)
+          # elapsed=$((end_time - start_time))
+          # echo "⏱️ [build primus docker-v25.10-ainic] Total elapsed time: ${elapsed} seconds"
 
-          docker tag tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic
-          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
-          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic
-          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # docker tag tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic
+          # docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          # docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax"
           start_time=$(date +%s)
@@ -199,16 +199,18 @@ jobs:
           pip install -r requirements.txt
       - name: Set UT_LOG_PATH
         run: |
+          ts="$(date +%Y%m%d-%H%M%S)"
+          commit_id="${GITHUB_SHA::7}"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}-${ts}-${commit_id}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/latest" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/main-${ts}-${commit_id}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "release" ]]; then
             TAG_NAME="${{ github.ref }}"
             TAG="${TAG_NAME#refs/tags/}"
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/$TAG" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/${TAG}-${ts}-${commit_id}" >> $GITHUB_ENV
           else
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others-${ts}-${commit_id}" >> $GITHUB_ENV
           fi
       - name: Run CLI Shell Tests
         run: |
@@ -245,7 +247,7 @@ jobs:
     env:
       PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/jax
     needs: [code-lint]
-    runs-on: [primus-jax-l85pj]
+    runs-on: [primus-llm-cicd-jax-7b4zw]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Set commit hash to env
@@ -298,18 +300,18 @@ jobs:
           pip install -r requirements-jax.txt
       - name: Set UT_LOG_PATH
         run: |
+          ts="$(date +%Y%m%d-%H%M%S)"
+          commit_id="${GITHUB_SHA::7}"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}-${ts}-${commit_id}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            ts="$(date +%Y%m%d-%H%M%S)"
-            commit_id="${GITHUB_SHA::7}"
             echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/main-${ts}-${commit_id}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "release" ]]; then
             TAG_NAME="${{ github.ref }}"
             TAG="${TAG_NAME#refs/tags/}"
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/$TAG" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/${TAG}-${ts}-${commit_id}" >> $GITHUB_ENV
           else
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others-${ts}-${commit_id}" >> $GITHUB_ENV
           fi
       - name: Run Shell Tests
         run: |

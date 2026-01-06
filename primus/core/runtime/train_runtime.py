@@ -24,6 +24,10 @@ from primus.core.config.primus_config import (
 from primus.core.runtime.logging import init_worker_logger
 from primus.core.utils.arg_utils import parse_cli_overrides
 from primus.core.utils.env_setup import setup_training_env
+from primus.core.utils.yaml_utils import (
+    dict_to_nested_namespace,
+    nested_namespace_to_dict,
+)
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 # ---------------------------------------------------------------------------
@@ -156,11 +160,15 @@ class PrimusRuntime:
             return
 
         override_dict: Dict[str, Any] = parse_cli_overrides(overrides)
-        log_rank_0(
+        print(
             f"[Primus:TrainRuntime] Applying CLI overrides for module "
             f"'{self.ctx.module_name}': {override_dict}"
         )
-        module_cfg.params = deep_merge(module_cfg.params, override_dict)
+        # module_cfg.params is a nested SimpleNamespace tree; convert to dict for merging,
+        # apply deep_merge, then convert back to SimpleNamespace.
+        base_params_dict = nested_namespace_to_dict(module_cfg.params)
+        merged_params_dict = deep_merge(base_params_dict, override_dict)
+        module_cfg.params = dict_to_nested_namespace(merged_params_dict)
 
     def _initialize_distributed_context(self) -> None:
         assert self.ctx is not None, "TrainContext must be initialized before distributed init."

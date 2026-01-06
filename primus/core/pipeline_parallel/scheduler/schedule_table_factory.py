@@ -29,7 +29,6 @@ def produce_schedule_instance(
 ) -> PipelineScheduleAlgo:
     if algorithm not in pp_algorithm_map:
         raise ValueError(f"Invalid algorithm: {algorithm}")
-    kwargs = {}
     if algorithm == "v-half":
         kwargs["memory_config"] = "half"
     elif algorithm == "v-min":
