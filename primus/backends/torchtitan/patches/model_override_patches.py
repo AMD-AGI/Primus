@@ -49,7 +49,7 @@ import sys
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
-from primus.core.patches import PatchContext, get_args, get_param, register_patch
+from primus.core.patches import PatchContext, get_param, register_patch
 from primus.modules.module_utils import log_rank_0
 
 
@@ -166,12 +166,8 @@ def patch_torchtitan_model_override(ctx: PatchContext) -> None:
     Monkey patch torchtitan.train_spec.get_train_spec to override model args dynamically.
     All override keys MUST start with "model." (e.g., {"model.n_layers": 8}).
     """
-    get_args(ctx)
-
     # Get params.model which contains both model config (name, flavor) and overrides
     model_params_raw = get_param(ctx, "model", None)
-
-    log_rank_0(f"[DEBUG] model_params_raw type: {type(model_params_raw)}, value: {model_params_raw}")
 
     if not model_params_raw:
         log_rank_0("[PrimusPatch][ModelOverride] No model params provided, skip patch.")
