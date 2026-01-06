@@ -106,13 +106,13 @@ class PrimusTurboQuantConfig:
     def block_scaling(self):
         return (
             self._quant_config.granularity == ScalingGranularity.BLOCKWISE
-            and self.strategy == ScalingStrategy.DYNAMIC
+            and self._quant_config.strategy == ScalingStrategy.DYNAMIC
         )
 
     def current_scaling(self):
         return (
             self._quant_config.granularity == ScalingGranularity.TENSORWISE
-            and self.strategy == ScalingStrategy.DYNAMIC
+            and self._quant_config.strategy == ScalingStrategy.DYNAMIC
         )
 
     def mxfp8_scaling(self):
