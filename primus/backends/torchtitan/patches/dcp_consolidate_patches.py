@@ -20,7 +20,7 @@ from primus.core.patches import PatchContext, register_patch
 @register_patch(
     "torchtitan.torch.dcp_consolidate_fallback",
     backend="torchtitan",
-    phase="setup",
+    phase="before_train",
     description=(
         "Provide a fallback consolidate_safetensors_files_on_every_rank "
         "to avoid ImportError in older torch builds"

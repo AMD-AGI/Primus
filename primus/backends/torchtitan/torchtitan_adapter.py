@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import Any
 
+# Trigger registration of all TorchTitan patches (logger, turbo, model_override, etc.)
+import primus.backends.torchtitan.patches  # noqa: F401
 from primus.backends.torchtitan.argument_builder import TorchTitanJobConfigBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
@@ -44,16 +46,12 @@ class TorchTitanAdapter(BackendAdapter):
         TorchTitan-specific environment preparation.
 
         Steps:
-            - Load TorchTitan patches
             - Run Primus setup hooks
             - (Future) add any TorchTitan-specific env setup if needed
 
-        Note: setup patches are applied automatically by the base class
-        before this method is called.
+        Note: Patches are already registered at module import time (top of this file).
+        Setup patches are applied automatically by the base class before this method is called.
         """
-        # Load TorchTitan patches (classic attention, etc.)
-        import primus.backends.torchtitan.patches  # noqa: F401
-
         # Run setup hooks from BackendRegistry
         BackendRegistry.run_setup("torchtitan")
 

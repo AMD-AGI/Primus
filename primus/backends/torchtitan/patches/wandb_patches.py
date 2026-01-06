@@ -21,7 +21,6 @@ Behavior:
 """
 
 import os
-from typing import Any
 
 from primus.core.patches import PatchContext, get_param, register_patch
 
@@ -29,7 +28,7 @@ from primus.core.patches import PatchContext, get_param, register_patch
 @register_patch(
     "torchtitan.metrics.wandb_env",
     backend="torchtitan",
-    phase="setup",
+    phase="before_train",
     description="Initialize WANDB_* env vars from Primus/TorchTitan config",
     condition=lambda ctx: get_param(ctx, "metrics.enable_wandb", False),
 )
@@ -40,9 +39,8 @@ def patch_torchtitan_wandb_env(ctx: PatchContext) -> None:
     from primus.core.utils.logger import _logger as primus_logger
 
     # Module/TorchTitan-side config (metrics/job section)
-    params: Any = get_args(ctx)
-    metrics_cfg = getattr(params, "metrics", None)
-    job_cfg = getattr(params, "job", None)
+    metrics_cfg = get_param(ctx, "metrics", None)
+    job_cfg = get_param(ctx, "job", None)
 
     # Primus-side experiment metadata
     primus_cfg = ctx.extra.get("primus_config")

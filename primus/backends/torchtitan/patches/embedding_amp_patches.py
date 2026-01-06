@@ -26,11 +26,11 @@ from primus.core.patches import PatchContext, get_param, register_patch
 @register_patch(
     "torchtitan.primus_turbo.embedding_amp",
     backend="torchtitan",
-    phase="setup",
+    phase="before_train",
     description="Align nn.Embedding outputs with AMP/autocast dtype",
     condition=lambda ctx: get_param(ctx, "primus_turbo.enable_embedding_autocast", False),
 )
-def patch_torchtitan_embedding_amp(ctx: PatchContext) -> None:  # noqa: ARG001
+def patch_torchtitan_embedding_amp(ctx: PatchContext) -> None:
     """
     Monkey patch for AMP precision mismatch in nn.Embedding.
     """
@@ -53,7 +53,7 @@ def patch_torchtitan_embedding_amp(ctx: PatchContext) -> None:  # noqa: ARG001
 
     orig_init = nn.Embedding.__init__
 
-    def new_init(self, *args, **kwargs):  # noqa: ANN001
+    def new_init(self, *args, **kwargs):
         orig_init(self, *args, **kwargs)
         self.register_forward_hook(_hook)
 
