@@ -200,7 +200,7 @@ def main():
     # Pass resolved path to training phase
     write_patch_args(patch_args_file, "train_args", {"model.hf_assets_path": str(local_dir)})
     write_patch_args(patch_args_file, "train_args", {"backend_path": str(torchtitan_path)})
-    write_patch_args(patch_args_file, "torchrun_args", {"local-ranks-filter": "1"})
+    write_patch_args(patch_args_file, "torchrun_args", {"local-ranks-filter": "0"})
 
 
 def detect_rocm_version() -> Optional[str]:
