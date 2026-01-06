@@ -144,7 +144,7 @@ class PrimusTurboLowPrecisionGlobalStateManager(FP8GlobalStateManager):
 
     @classmethod
     def is_turbo_fp4_enabled(cls) -> bool:
-        """Is FP8 enabled"""
+        """Is FP4 enabled"""
         return cls.PRIMUS_TURBO_FP4_ENABLED
 
     @classmethod
