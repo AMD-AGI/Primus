@@ -725,7 +725,20 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             if args.decoder_pipeline_manual_split_list is not None:
                 from .utils import validate_args_modified
 
-                validate_args_modified(args, args_defaults)
+                ori_code = "if args.decoder_first_pipeline_num_layers is None and args.decoder_last_pipeline_num_layers is None:"
+                new_code = (
+                    "if args.decoder_pipeline_manual_split_list is None and " + ori_code.split("if ")[-1]
+                )
+
+                validate_args_modified(args, args_defaults, ori_code=ori_code, new_code=new_code)
+            elif args.fp4 is not None:
+                # TODO(ruibin): Remove it when ROCm TE upgrade to 2.7.0.dev0
+                from .utils import validate_args_modified
+
+                ori_code = """raise ValueError("--fp4-format requires Transformer Engine >= 2.7.0.dev0 for NVFP4BlockScaling support.")"""
+                new_code = """pass"""
+
+                validate_args_modified(args, args_defaults, ori_code=ori_code, new_code=new_code)
             else:
                 validate_args(args, args_defaults)
 
