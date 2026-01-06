@@ -487,6 +487,7 @@ setup_pythonpath() {
     export PYTHONPATH="${PRIMUS_PATH}:${site_packages}:${PYTHONPATH}"
 }
 
+setup_pythonpath
 
 run_prepare_experiment() {
     PRIMUS_PATCH_ARGS_FILE=$(mktemp /tmp/primus_patch_args.XXXXXX.yaml)
