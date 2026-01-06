@@ -26,7 +26,7 @@ from primus.modules.module_utils import log_rank_0
     description="Use Primus-Turbo Attention kernels for supported models",
     condition=lambda ctx: (
         get_param(ctx, "primus_turbo.enable_primus_turbo", False)
-        and get_param(ctx, "primus_turbo.use_turbo_attention", False)
+        and get_param(ctx, "primus_turbo.use_classic_attention", False)
     ),
 )
 def patch_turbo_attention(ctx: PatchContext) -> None:
