@@ -1957,7 +1957,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             # Note(wenx): If we want to collect rocm-smi memory information for the first two iterations,
             # place the collection before the timer to minimize its impact on latency measurements for iterations ≥ 3.
             if args.log_throughput:
-                if args.use_rocm_mem_info or iteration in args.use_rocm_mem_info_iters:
+                if args.use_rocm_mem_info or (
+                    args.use_rocm_mem_info_iters is not None and iteration in args.use_rocm_mem_info_iters
+                ):
                     rocm_total_mem, rocm_used_mem, rocm_free_mem = get_rocm_smi_mem_info(
                         self.module_local_rank
                     )
@@ -2015,7 +2017,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     log_string += f"{hip_free_mem/1024/1024/1024:.2f}GiB/"
                     log_string += f"{hip_total_mem/1024/1024/1024:.2f}GiB/{hip_mem_usage*100:.2f}% |"
 
-                if args.use_rocm_mem_info or iteration in args.use_rocm_mem_info_iters:
+                if args.use_rocm_mem_info or (
+                    args.use_rocm_mem_info_iters is not None and iteration in args.use_rocm_mem_info_iters
+                ):
                     rocm_mem_usage = rocm_used_mem / rocm_total_mem
 
                     # get the max rocm_mem_usage
@@ -2052,7 +2056,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     f"{statistics.mean(self.recent_token_throughputs):.1f} |"
                 )
                 if args.log_timers_to_tensorboard:
-                    if args.use_rocm_mem_info or iteration in args.use_rocm_mem_info_iters:
+                    if args.use_rocm_mem_info or (
+                        args.use_rocm_mem_info_iters is not None and iteration in args.use_rocm_mem_info_iters
+                    ):
                         mem_collector = "rocm"
                         used_mem, free_mem, total_mem, mem_usage = (
                             rocm_used_mem,
