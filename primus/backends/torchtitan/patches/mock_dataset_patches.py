@@ -14,6 +14,7 @@ tightly coupling it to the trainer implementation.
 """
 
 from datasets import Dataset
+from datasets.search import np
 
 from primus.core.patches import PatchContext, get_param, register_patch
 

@@ -17,7 +17,7 @@ from primus.modules.base_module import BaseModule
 
 class TorchTitanPretrainTrainer(BaseModule):
     def __init__(self, *args, **kwargs):
-        kwargs.pop("extra_args", None)
+        extra_args = kwargs.pop("extra_args", None)
         super().__init__(*args, **kwargs)
 
         self.primus_cfg = kwargs.pop("primus_config", None)
@@ -26,6 +26,29 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         pre_trainer_cfg = self.primus_cfg.get_module_config("pre_trainer")
         cfg_dict = nested_namespace_to_dict(pre_trainer_cfg)
+
+        # Run before_train phase patches (e.g., Primus-Turbo patches)
+        # Construct a temporary module_config for patch context
+        temp_module_config = SimpleNamespace()
+        temp_module_config.params = pre_trainer_cfg
+        temp_module_config.name = "pre_trainer"
+        temp_module_config.framework = "torchtitan"
+        temp_module_config.model = getattr(pre_trainer_cfg, "model.name", None)
+
+        # Merge extra_args into temp_module_config.params if provided
+        if extra_args:
+            temp_module_config.params = self._merge_extra_args_into_params(
+                temp_module_config.params, extra_args
+            )
+
+        run_patches(
+            backend="torchtitan",
+            phase="before_train",
+            backend_version="unknown",
+            extra={
+                "module_config": temp_module_config,
+            },
+        )
 
         from torchtitan.config.job_config import JobConfig
         from torchtitan.train import Trainer
@@ -38,24 +61,110 @@ class TorchTitanPretrainTrainer(BaseModule):
         self.log_config(self.titan_config)
         self.trainer = None
 
-        # Run before_train phase patches (e.g., Primus-Turbo patches)
-        # Construct a temporary module_config for patch context
-        temp_module_config = SimpleNamespace()
-        temp_module_config.params = (
-            pre_trainer_cfg.params if hasattr(pre_trainer_cfg, "params") else SimpleNamespace()
-        )
-        temp_module_config.name = "pre_trainer"
-        temp_module_config.framework = "torchtitan"
-        temp_module_config.model = getattr(pre_trainer_cfg, "model", None)
+    def _merge_extra_args_into_params(
+        self, params: SimpleNamespace, extra_args: Dict[str, Any]
+    ) -> SimpleNamespace:
+        """
+        Merge extra_args into params with specific rules:
 
-        run_patches(
-            backend="torchtitan",
-            phase="before_train",
-            backend_version="unknown",
-            extra={
-                "module_config": temp_module_config,
-            },
-        )
+        1. Non-model.* parameters: Only merge if they already exist in params
+        2. model.* parameters: Extract and merge (can add new fields)
+
+        Args:
+            params: Original params namespace
+            extra_args: Additional arguments to merge
+
+        Returns:
+            Updated params with merged extra_args
+        """
+        from primus.modules.module_utils import log_rank_0
+
+        # First, flatten extra_args if it contains nested dicts
+        flattened_extra_args = self._flatten_dict(extra_args)
+
+        # Separate model.* and non-model.* parameters
+        model_params = {}
+        non_model_params = {}
+
+        for key, value in flattened_extra_args.items():
+            if key.startswith("model."):
+                # Extract model parameter (remove "model." prefix)
+                model_key = key[6:]  # Remove "model." prefix
+                model_params[model_key] = value
+            else:
+                non_model_params[key] = value
+
+        # Convert params to dict for easier manipulation
+        params_dict = nested_namespace_to_dict(params)
+
+        # Merge non-model.* parameters (only if they already exist)
+        for key, value in non_model_params.items():
+            if self._key_exists_in_dict(params_dict, key):
+                self._set_nested_dict_value(params_dict, key, value)
+                log_rank_0(f"[ExtraArgs] Merged non-model param: {key} = {value}")
+            else:
+                log_rank_0(f"[ExtraArgs] Skipped non-model param (not in params): {key} = {value}")
+
+        # Merge model.* parameters (can add new fields)
+        if model_params:
+            if "model" not in params_dict:
+                params_dict["model"] = {}
+
+            for key, value in model_params.items():
+                self._set_nested_dict_value(params_dict, f"model.{key}", value)
+                log_rank_0(f"[ExtraArgs] Merged model param: model.{key} = {value}")
+
+        # Convert back to SimpleNamespace
+        return self._dict_to_namespace(params_dict)
+
+    def _flatten_dict(self, d: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
+        """Flatten nested dictionary using dot notation."""
+        result = {}
+
+        for key, value in d.items():
+            full_key = f"{prefix}.{key}" if prefix else key
+
+            if isinstance(value, dict):
+                # Recursively flatten nested dict
+                result.update(self._flatten_dict(value, full_key))
+            else:
+                # Leaf value
+                result[full_key] = value
+
+        return result
+
+    def _key_exists_in_dict(self, d: Dict[str, Any], key: str) -> bool:
+        """Check if a nested key exists in dictionary (supports dot notation)."""
+        parts = key.split(".")
+        current = d
+
+        for part in parts:
+            if not isinstance(current, dict) or part not in current:
+                return False
+            current = current[part]
+
+        return True
+
+    def _set_nested_dict_value(self, d: Dict[str, Any], key: str, value: Any) -> None:
+        """Set a nested dictionary value using dot notation."""
+        parts = key.split(".")
+        current = d
+
+        for part in parts[:-1]:
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+
+        current[parts[-1]] = value
+
+    def _dict_to_namespace(self, d: Dict[str, Any]) -> SimpleNamespace:
+        """Recursively convert dictionary to SimpleNamespace."""
+        if isinstance(d, dict):
+            return SimpleNamespace(**{k: self._dict_to_namespace(v) for k, v in d.items()})
+        elif isinstance(d, list):
+            return [self._dict_to_namespace(item) for item in d]
+        else:
+            return d
 
     def setup(self):
         pass

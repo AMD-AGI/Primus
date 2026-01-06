@@ -24,7 +24,7 @@ from primus.core.patches import PatchContext, get_param, register_patch
 
 
 @register_patch(
-    "torchtitan.primus_turbo.embedding_amp",
+    "torchtitan.embedding.amp_alignment",
     backend="torchtitan",
     phase="before_train",
     description="Align nn.Embedding outputs with AMP/autocast dtype",
