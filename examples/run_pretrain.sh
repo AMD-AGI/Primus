@@ -484,10 +484,9 @@ fi
 setup_pythonpath() {
     local site_packages
     site_packages=$(python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-    export PYTHONPATH="${site_packages}:${PRIMUS_PATH}:$:${PYTHONPATH}"
+    export PYTHONPATH="${PRIMUS_PATH}:${site_packages}:${PYTHONPATH}"
 }
 
-setup_pythonpath
 
 run_prepare_experiment() {
     PRIMUS_PATCH_ARGS_FILE=$(mktemp /tmp/primus_patch_args.XXXXXX.yaml)
