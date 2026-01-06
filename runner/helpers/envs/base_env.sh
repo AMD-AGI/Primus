@@ -125,7 +125,7 @@ export NCCL_DEBUG=${NCCL_DEBUG:-}
 export NCCL_CHECKS_DISABLE=1
 
 # Set InfiniBand GID index for NCCL communication
-export NCCL_IB_GID_INDEX=3
+export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
 
 # Disable cross NIC communication for NCCL
 export NCCL_CROSS_NIC=0

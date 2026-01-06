@@ -60,6 +60,23 @@ LOG_ERROR() {
     echo "[NODE-$NODE_RANK($HOSTNAME)] [ERROR] $*";
 }
 
+EXAMPLE_FAULT_TOLERANCE() {
+    for arg in "$@"; do
+        case "$arg" in
+            --fault_tolerance.enable)
+                echo "true"
+                return
+                ;;
+            --fault_tolerance.enable=*)
+                local value="${arg#*=}"
+                echo "$value"
+                return
+                ;;
+        esac
+    done
+    echo "false"
+}
+
 export MASTER_ADDR=${MASTER_ADDR:-localhost}
 export MASTER_PORT=${MASTER_PORT:-1234}
 export NNODES=${NNODES:-1}
@@ -90,6 +107,15 @@ if [ "${BACKEND:-}" != "MaxText" ]; then
 else
     pip install -r "$PRIMUS_PATH/requirements-jax.txt"  --quiet
 fi
+
+
+FAULT_TOLERANCE_VALUE=$(EXAMPLE_FAULT_TOLERANCE "$@")
+LOG_INFO_RANK0 "FAULT_TOLERANCE_VALUE: $FAULT_TOLERANCE_VALUE"
+if [[ "$FAULT_TOLERANCE_VALUE" == "true" ]] || [[ "$FAULT_TOLERANCE_VALUE" == "True" ]] || [[ "$FAULT_TOLERANCE_VALUE" == "1" ]]; then
+    LOG_INFO_RANK0 "Installing requirements-torchft.txt ..."
+    pip install -r "$PRIMUS_PATH/requirements-torchft.txt"  --quiet
+fi
+
 
 # -------------------- EXP Check --------------------
 if [ -z "${EXP:-}" ]; then
@@ -172,13 +198,16 @@ if [ "$USING_AINIC" == "1" ]; then
     export NCCL_IGNORE_CPU_AFFINITY=1
     export NCCL_IB_QPS_PER_CONNECTION=1
 
-    # v25.10
-    # export LD_LIBRARY_PATH=/etc/libibverbs.d:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
-    # export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-anp.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
-
-    # v25.09
     export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
-    export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
+    # export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
+    # if [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
+    #     export LD_PRELOAD="${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0"
+    # elif [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
+    #     export LD_PRELOAD="${ANP_HOME_DIR}/build/librccl-anp.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0"
+    # else
+    #     echo "ERROR: Neither librccl-net.so nor librccl-anp.so was found in ${ANP_HOME_DIR}/build"
+    #     exit 1
+    # fi
 else
     export NCCL_IB_GID_INDEX=3
 fi

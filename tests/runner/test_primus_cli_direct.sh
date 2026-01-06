@@ -257,10 +257,10 @@ EOF
 }
 
 # ============================================================================
-# Test 7: Invalid environment variable format
+# Test 7: Env file handling via --env <file>
 # ============================================================================
-test_invalid_env_format() {
-    print_section "Test 7: Invalid Environment Variable Format"
+test_env_file_handling() {
+    print_section "Test 7: Env File Handling via --env <file>"
 
     local test_config="/tmp/test_direct_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -271,7 +271,7 @@ EOF
     local output
     output=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run --config "$test_config" --env INVALID_ENV -- test 2>&1 || true)
 
-    assert_contains "$output" "--env requires KEY=VALUE" "Invalid env format detected with correct message"
+    assert_contains "$output" "Env file not found or not readable: INVALID_ENV" "Non KEY=VALUE --env treated as env file and validated"
 
     rm -f "$test_config"
 }
@@ -354,7 +354,7 @@ main() {
     test_numa_binding
     test_run_modes
     test_patch_scripts
-    test_invalid_env_format
+    test_env_file_handling
     test_debug_mode
     test_config_priority
     test_help_output

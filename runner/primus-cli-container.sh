@@ -402,7 +402,7 @@ if [[ "$DEBUG_MODE" == "true" ]]; then
     ARGS+=(--debug)
 fi
 # Add positional arguments
-ARGS+=("--" "${POSITIONAL_ARGS[@]}")
+ARGS+=( "${POSITIONAL_ARGS[@]}")
 
 OPTION_ARGS=("${CONTAINER_OPTS[@]}")
 
