@@ -10,7 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 935a6314b1e6f57894c198a0b8def3053a8e903f # feat(mxfp4): Add mxfp4 gemm and fix scale calculate of mxfp8 (#179)
+  PRIMUS_TURBO_COMMIT: 5233748e9c5c5795a6484ab31ece47c442d29ec2 # feat(mxfp4): refactor gemm mxfp4 and mxfp8. fuse transpose, hadamard transform and quantization. (#195)
 
 jobs:
   code-lint:
