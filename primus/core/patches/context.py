@@ -104,3 +104,45 @@ def get_args(ctx: PatchContext) -> Any:
     params = getattr(module_config, "params", None)
     assert params is not None, "module_config.params is required in patch context"
     return params
+
+
+def get_param(ctx: PatchContext, path: str, default: Any = None) -> Any:
+    """
+    Get a nested parameter from patch context using dot-separated path.
+
+    This helper simplifies accessing nested parameters from module_config.params,
+    making patch code more readable and maintainable.
+
+    Args:
+        ctx: The patch context
+        path: Dot-separated attribute path (e.g., "primus_turbo.enable_fp8")
+        default: Default value to return if the path doesn't exist
+
+    Returns:
+        The value at the specified path, or default if not found
+
+    Example:
+        @register_patch(...)
+        def my_patch(ctx: PatchContext):
+            # Instead of: getattr(getattr(get_args(ctx), "primus_turbo", None), "enable_fp8", False)
+            # Use:
+            enable_fp8 = get_param(ctx, "primus_turbo.enable_fp8", False)
+
+            if enable_fp8:
+                # Apply patch...
+    """
+    try:
+        args = get_args(ctx)
+    except AssertionError:
+        return default
+
+    # Split the path and traverse
+    parts = path.split(".")
+    current = args
+
+    for part in parts:
+        current = getattr(current, part, None)
+        if current is None:
+            return default
+
+    return current if current is not None else default
