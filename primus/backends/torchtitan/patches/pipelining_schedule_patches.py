@@ -19,7 +19,7 @@ from primus.core.patches import PatchContext, register_patch
 @register_patch(
     "torchtitan.torch.pipelining_schedules_dualpipev",
     backend="torchtitan",
-    phase="setup",
+    phase="before_train",
     description=(
         "Ensure torch.distributed.pipelining.schedules.ScheduleDualPipeV exists, "
         "installing a fallback alias if necessary"

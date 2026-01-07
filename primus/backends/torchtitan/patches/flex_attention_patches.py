@@ -24,7 +24,7 @@ from primus.core.patches import PatchContext, register_patch
 @register_patch(
     "torchtitan.torch.flex_attention_auxoutput",
     backend="torchtitan",
-    phase="setup",
+    phase="before_train",
     description="Ensure torch.nn.attention.flex_attention has an AuxOutput symbol",
 )
 def patch_torch_flex_attention_auxoutput(ctx: PatchContext) -> None:  # noqa: ARG001
