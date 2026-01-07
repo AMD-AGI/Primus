@@ -211,16 +211,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             exp_meta_info=self.exp_meta_info,
         )
 
-        # Initalize and get arguments, timers, and Tensorboard writer.
-        log_rank_0(f"-run initialize_megatron...")
-        self.initialize_megatron(
-            extra_args_provider=kwargs.get("extra_args_provider", None),
-            args_defaults=kwargs.get("args_defaults", {}),
-            ignore_unknown_args=kwargs.get("ignore_unknown_args", False),
-            allow_no_cuda=kwargs.get("allow_no_cuda", False),
-            skip_mpu_initialization=kwargs.get("skip_mpu_initialization", False),
-        )
-
         args = get_args()
         # There are some extra limitation on ROCm need extra validate.
         validate_args_on_rocm(args)
@@ -243,6 +233,16 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             extra={
                 "module_config": temp_module_config,
             },
+        )
+
+        # Initalize and get arguments, timers, and Tensorboard writer.
+        log_rank_0(f"-run initialize_megatron...")
+        self.initialize_megatron(
+            extra_args_provider=kwargs.get("extra_args_provider", None),
+            args_defaults=kwargs.get("args_defaults", {}),
+            ignore_unknown_args=kwargs.get("ignore_unknown_args", False),
+            allow_no_cuda=kwargs.get("allow_no_cuda", False),
+            skip_mpu_initialization=kwargs.get("skip_mpu_initialization", False),
         )
 
         # Enable manually split layers in (interleaved) 1f1b pipeline
