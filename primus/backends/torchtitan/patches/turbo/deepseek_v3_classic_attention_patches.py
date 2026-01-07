@@ -16,8 +16,7 @@ It is now expressed as a backend patch so it can be managed via the Primus
 patch system.
 """
 
-from primus.backends.torchtitan.patches.turbo.utils import get_primus_turbo_config
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_param, register_patch
 from primus.modules.module_utils import log_rank_0
 
 
@@ -27,9 +26,8 @@ from primus.modules.module_utils import log_rank_0
     phase="before_train",
     description="Use classic DeepSeek-V3 attention and args when requested",
     condition=lambda ctx: (
-        (cfg := get_primus_turbo_config(ctx)) is not None
-        and cfg.enable_primus_turbo
-        and cfg.use_classic_attention
+        get_param(ctx, "primus_turbo.enable_primus_turbo", False)
+        and get_param(ctx, "primus_turbo.use_classic_attention", False)
     ),
 )
 def patch_deepseek_v3_classic_attention(ctx: PatchContext) -> None:

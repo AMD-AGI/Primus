@@ -20,7 +20,7 @@ from primus.core.patches import PatchContext, register_patch
 @register_patch(
     "torchtitan.torch.dcp_consolidate_fallback",
     backend="torchtitan",
-    phase="setup",
+    phase="before_train",
     description=(
         "Provide a fallback consolidate_safetensors_files_on_every_rank "
         "to avoid ImportError in older torch builds"
@@ -44,12 +44,21 @@ def patch_torch_dcp_consolidate(ctx: PatchContext) -> None:  # noqa: ARG001
 
     try:
         mod = __import__(mod_name, fromlist=["*"])
+        primus_logger.info(
+            f"[DEBUG][PrimusPatch][DCP] Successfully imported {mod_name}, checking for {func_name}"
+        )
         if hasattr(mod, func_name):
-            primus_logger.info("[PrimusPatch][DCP] consolidate available, no patch needed.")
+            primus_logger.info(f"[PrimusPatch][DCP] {func_name} available in {mod_name}, no patch needed.")
             return  # OK, torch build supports it
-    except Exception:
+        else:
+            primus_logger.info(
+                f"[DEBUG][PrimusPatch][DCP] {func_name} NOT found in {mod_name}, will install fallback"
+            )
+    except Exception as e:
+        primus_logger.info(
+            f"[DEBUG][PrimusPatch][DCP] Failed to import {mod_name}: {e}, will install fallback"
+        )
         # Fall through to install dummy module/function
-        pass
 
     # Patch missing module/function
     dummy_mod = types.ModuleType(mod_name)
