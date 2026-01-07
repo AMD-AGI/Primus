@@ -211,10 +211,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             exp_meta_info=self.exp_meta_info,
         )
 
-        args = get_args()
-        # There are some extra limitation on ROCm need extra validate.
-        validate_args_on_rocm(args)
-
         # Apply patches during initialization
         # These patches need to be applied before model setup
         from types import SimpleNamespace
@@ -224,7 +220,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # Construct a temporary module_config for patch context
         # This allows patches to access Megatron args via get_args(ctx)
         temp_module_config = SimpleNamespace()
-        temp_module_config.params = get_args()
+        temp_module_config.params = self.module_config
 
         run_patches(
             backend="megatron",
@@ -244,6 +240,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             allow_no_cuda=kwargs.get("allow_no_cuda", False),
             skip_mpu_initialization=kwargs.get("skip_mpu_initialization", False),
         )
+
+        args = get_args()
+        # There are some extra limitation on ROCm need extra validate.
+        validate_args_on_rocm(args)
 
         # Enable manually split layers in (interleaved) 1f1b pipeline
         # parallelism by monkey patching
