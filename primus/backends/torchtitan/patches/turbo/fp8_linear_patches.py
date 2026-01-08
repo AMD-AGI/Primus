@@ -22,7 +22,7 @@ from primus.modules.module_utils import log_rank_0
 @register_patch(
     "torchtitan.primus_turbo.turbo_float8_linear",
     backend="torchtitan",
-    phase="before_train",
+    phase="setup",
     description="Use Primus-Turbo FP8Linear and model converter",
     condition=lambda ctx: (
         get_param(ctx, "primus_turbo.enable_primus_turbo", False)
@@ -33,9 +33,7 @@ def patch_turbo_fp8_linear(ctx: PatchContext) -> None:
     """
     Monkey patch FP8Linear and its converter to use Primus-Turbo implementations.
     """
-    from primus.core.utils.logger import _logger as primus_logger
-
-    primus_logger.info(
+    log_rank_0(
         "[Patch:torchtitan.primus_turbo.turbo_float8_linear] "
         "Enabling Primus-Turbo FP8Linear and model converter...",
     )

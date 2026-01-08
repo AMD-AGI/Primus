@@ -24,7 +24,7 @@ from primus.modules.module_utils import log_rank_0
 @register_patch(
     "torchtitan.primus_turbo.turbo_async_tp",
     backend="torchtitan",
-    phase="before_train",
+    phase="setup",
     description="Use Primus-Turbo async tensor-parallel collectives",
     condition=lambda ctx: (
         get_param(ctx, "primus_turbo.enable_primus_turbo", False)

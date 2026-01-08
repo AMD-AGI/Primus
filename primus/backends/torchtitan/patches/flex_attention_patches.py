@@ -19,35 +19,39 @@ Behavior:
 """
 
 from primus.core.patches import PatchContext, register_patch
+from primus.modules.module_utils import log_rank_0
 
 
 @register_patch(
     "torchtitan.torch.flex_attention_auxoutput",
     backend="torchtitan",
-    phase="before_train",
+    phase="setup",
     description="Ensure torch.nn.attention.flex_attention has an AuxOutput symbol",
 )
 def patch_torch_flex_attention_auxoutput(ctx: PatchContext) -> None:  # noqa: ARG001
     """
     Ensure torch.nn.attention.flex_attention has an AuxOutput symbol.
     """
-    from primus.core.utils.logger import _logger as primus_logger
-
     try:
         import torch.nn.attention.flex_attention as flex_mod
     except Exception as e:  # pragma: no cover - defensive
-        primus_logger.warning(f"[PrimusPatch][FlexAttn] flex_attention import failed: {e}")
+        log_rank_0(
+            "[Patch:torchtitan.torch.flex_attention_auxoutput] " f"flex_attention import failed: {e}",
+        )
         return
 
     # If AuxOutput already exists, nothing to do.
     if hasattr(flex_mod, "AuxOutput"):
-        primus_logger.info("[PrimusPatch][FlexAttn] AuxOutput available, no patch needed.")
+        log_rank_0(
+            "[Patch:torchtitan.torch.flex_attention_auxoutput] " "AuxOutput available, no patch needed.",
+        )
         return
 
-    primus_logger.warning(
-        "[PrimusPatch][FlexAttn] AuxOutput not found. "
-        "This torch build predates the new debug/profiling return type. "
-        "Injecting a lightweight stub so Titan model imports can succeed."
+    log_rank_0(
+        "[Patch:torchtitan.torch.flex_attention_auxoutput] "
+        "AuxOutput not found. This torch build predates the new debug/profiling "
+        "return type. Injecting a lightweight stub so Titan model imports can "
+        "succeed.",
     )
 
     from dataclasses import dataclass
@@ -66,6 +70,7 @@ def patch_torch_flex_attention_auxoutput(ctx: PatchContext) -> None:  # noqa: AR
                 setattr(self, k, v)
 
     setattr(flex_mod, "AuxOutput", _AuxOutput)
-    primus_logger.info(
-        "[PrimusPatch][FlexAttn] Injected fallback AuxOutput stub " "(Titan does not rely on this)."
+    log_rank_0(
+        "[Patch:torchtitan.torch.flex_attention_auxoutput] "
+        "Injected fallback AuxOutput stub (Titan does not rely on this).",
     )

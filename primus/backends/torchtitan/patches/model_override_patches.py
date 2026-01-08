@@ -87,7 +87,9 @@ def get_standard_model_config_fields() -> set:
 
     except Exception as e:
         # Fallback: if we can't inspect JobConfig, use minimal standard fields
-        log_rank_0(f"[PrimusPatch][ModelOverride] Warning: Could not inspect JobConfig.model fields: {e}")
+        log_rank_0(
+            "[Patch:torchtitan.model_override] " f"Warning: Could not inspect JobConfig.model fields: {e}",
+        )
         return {"name", "flavor"}
 
 
@@ -152,13 +154,16 @@ def convert_dict_to_dataclass_recursive(data: Any, target_type: type) -> Any:
     try:
         return target_type(**converted_data)
     except Exception as e:
-        raise ValueError(f"Failed to convert dict to {target_type.__name__}: {e}. " f"Data: {converted_data}")
+        raise ValueError(
+            f"[Patch:torchtitan.model_override] Failed to convert dict to {target_type.__name__}: {e}. "
+            f"Data: {converted_data}",
+        )
 
 
 @register_patch(
     patch_id="torchtitan.model_override",
     backend="torchtitan",
-    phase="before_train",
+    phase="setup",
     description="Override TorchTitan model args dynamically via config",
 )
 def patch_torchtitan_model_override(ctx: PatchContext) -> None:
@@ -187,16 +192,18 @@ def patch_torchtitan_model_override(ctx: PatchContext) -> None:
 
     if not model_name:
         raise ValueError(
-            "[PrimusPatch][ModelOverride] params.model.name is required for model override patch"
+            "[Patch:torchtitan.model_override] " "params.model.name is required for model override patch",
         )
     if not flavor:
         raise ValueError(
-            "[PrimusPatch][ModelOverride] params.model.flavor is required for model override patch"
+            "[Patch:torchtitan.model_override] " "params.model.flavor is required for model override patch",
         )
 
     # Get standard config fields dynamically from JobConfig.model definition
     standard_fields = get_standard_model_config_fields()
-    log_rank_0(f"[PrimusPatch][ModelOverride] Standard model config fields: {standard_fields}")
+    log_rank_0(
+        "[Patch:torchtitan.model_override] " f"Standard model config fields: {standard_fields}",
+    )
 
     # Extract override parameters (exclude standard config fields)
     # Only parameters NOT in standard_fields are treated as overrides
@@ -204,8 +211,9 @@ def patch_torchtitan_model_override(ctx: PatchContext) -> None:
 
     if not override_params:
         log_rank_0(
-            f"[PrimusPatch][ModelOverride] No model override params provided "
-            f"(only standard config fields: {list(standard_fields)}), skip patch."
+            "[Patch:torchtitan.model_override] "
+            "No model override params provided "
+            f"(only standard config fields: {list(standard_fields)}), skip patch.",
         )
         return
 
@@ -213,8 +221,9 @@ def patch_torchtitan_model_override(ctx: PatchContext) -> None:
     model_overrides = {f"model.{k}": v for k, v in override_params.items()}
 
     log_rank_0(
-        f"[PrimusPatch][ModelOverride] model_overrides provided for '{model_name}' "
-        f"(flavor={flavor}): {model_overrides}"
+        "[Patch:torchtitan.model_override] "
+        f"model_overrides provided for '{model_name}' "
+        f"(flavor={flavor}): {model_overrides}",
     )
 
     # Import dynamically to allow mocking in tests
@@ -230,23 +239,33 @@ def patch_torchtitan_model_override(ctx: PatchContext) -> None:
             return spec  # only patch targeted model
 
         assert hasattr(
-            spec, "model_args"
-        ), f"[PrimusPatch][ModelOverride] train_spec for '{name}' missing model_args"
+            spec,
+            "model_args",
+        ), (
+            "[Patch:torchtitan.model_override] " f"train_spec for '{name}' missing model_args"
+        )
         model_args_root = spec.model_args
         assert isinstance(
-            model_args_root, dict
-        ), f"[PrimusPatch][ModelOverride] train_spec.model_args must be dict, got {type(model_args_root)}"
+            model_args_root,
+            dict,
+        ), (
+            "[Patch:torchtitan.model_override] "
+            f"train_spec.model_args must be dict, got {type(model_args_root)}"
+        )
 
         if flavor not in model_args_root:
             raise KeyError(
-                f"[PrimusPatch][ModelOverride] flavor '{flavor}' not found in model_args for '{name}'. "
+                "[Patch:torchtitan.model_override] "
+                f"flavor '{flavor}' not found in model_args for '{name}'. "
                 f"Available flavors: {list(model_args_root.keys())}"
             )
 
         target_args = model_args_root[flavor]
         assert is_dataclass(
-            target_args
-        ), f"[PrimusPatch][ModelOverride] Expected dataclass model_args, got {type(target_args)}"
+            target_args,
+        ), (
+            "[Patch:torchtitan.model_override] " f"Expected dataclass model_args, got {type(target_args)}"
+        )
 
         before = asdict(target_args)
         for k, v in model_overrides.items():
@@ -265,25 +284,31 @@ def patch_torchtitan_model_override(ctx: PatchContext) -> None:
                     # Recursively convert dict to dataclass (handles nested dataclasses)
                     v = convert_dict_to_dataclass_recursive(v, dataclass_type)
                     log_rank_0(
-                        f"[PrimusPatch][ModelOverride] Converted dict to {dataclass_type.__name__} for field '{field_name}'"
+                        "[Patch:torchtitan.model_override] "
+                        f"Converted dict to {dataclass_type.__name__} for field '{field_name}'",
                     )
                 except Exception as e:
                     raise ValueError(
-                        f"[PrimusPatch][ModelOverride] Failed to convert dict to {dataclass_type.__name__} "
-                        f"for field '{field_name}': {e}"
+                        "[Patch:torchtitan.model_override] "
+                        f"Failed to convert dict to {dataclass_type.__name__} "
+                        f"for field '{field_name}': {e}",
                     )
 
             setattr(target_args, field_name, v)
-            log_rank_0(f"[PrimusPatch][ModelOverride] Override {field_name}: {old_value} -> {v}")
+            log_rank_0(
+                "[Patch:torchtitan.model_override] " f"Override {field_name}: {old_value} -> {v}",
+            )
 
         log_rank_0(
-            f"[PrimusPatch][ModelOverride] Patched dataclass model_args['{flavor}'] "
-            f"for '{name}' with {model_overrides} (before={before})"
+            "[Patch:torchtitan.model_override] "
+            f"Patched dataclass model_args['{flavor}'] "
+            f"for '{name}' with {model_overrides} (before={before})",
         )
         return spec
 
     # Apply the patch globally
     train_spec_module.get_train_spec = patched_get_train_spec
     log_rank_0(
-        f"[PrimusPatch][ModelOverride] get_train_spec for '{model_name}' successfully monkey patched (flavor={flavor})."
+        "[Patch:torchtitan.model_override] "
+        f"get_train_spec for '{model_name}' successfully monkey patched (flavor={flavor}).",
     )

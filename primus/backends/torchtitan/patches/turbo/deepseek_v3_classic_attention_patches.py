@@ -23,7 +23,7 @@ from primus.modules.module_utils import log_rank_0
 @register_patch(
     "torchtitan.primus_turbo.deepseek_v3_classic_attention",
     backend="torchtitan",
-    phase="before_train",
+    phase="setup",
     description="Use classic DeepSeek-V3 attention and args when requested",
     condition=lambda ctx: (
         get_param(ctx, "primus_turbo.enable_primus_turbo", False)
@@ -34,11 +34,9 @@ def patch_deepseek_v3_classic_attention(ctx: PatchContext) -> None:
     """
     Monkey patch DeepSeek-V3 to use the classic attention implementation.
     """
-    from primus.core.utils.logger import _logger as primus_logger
-
-    primus_logger.info(
+    log_rank_0(
         "[Patch:torchtitan.primus_turbo.deepseek_v3_classic_attention] "
-        "Enabling classic DeepSeek-V3 attention..."
+        "Enabling classic DeepSeek-V3 attention...",
     )
 
     import torchtitan.models.deepseek_v3
