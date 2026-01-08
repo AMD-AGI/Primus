@@ -88,8 +88,7 @@ def get_standard_model_config_fields() -> set:
     except Exception as e:
         # Fallback: if we can't inspect JobConfig, use minimal standard fields
         log_rank_0(
-            "[Patch:torchtitan.model_override] "
-            f"Warning: Could not inspect JobConfig.model fields: {e}",
+            "[Patch:torchtitan.model_override] " f"Warning: Could not inspect JobConfig.model fields: {e}",
         )
         return {"name", "flavor"}
 
@@ -193,20 +192,17 @@ def patch_torchtitan_model_override(ctx: PatchContext) -> None:
 
     if not model_name:
         raise ValueError(
-            "[Patch:torchtitan.model_override] "
-            "params.model.name is required for model override patch",
+            "[Patch:torchtitan.model_override] " "params.model.name is required for model override patch",
         )
     if not flavor:
         raise ValueError(
-            "[Patch:torchtitan.model_override] "
-            "params.model.flavor is required for model override patch",
+            "[Patch:torchtitan.model_override] " "params.model.flavor is required for model override patch",
         )
 
     # Get standard config fields dynamically from JobConfig.model definition
     standard_fields = get_standard_model_config_fields()
     log_rank_0(
-        "[Patch:torchtitan.model_override] "
-        f"Standard model config fields: {standard_fields}",
+        "[Patch:torchtitan.model_override] " f"Standard model config fields: {standard_fields}",
     )
 
     # Extract override parameters (exclude standard config fields)
@@ -246,8 +242,7 @@ def patch_torchtitan_model_override(ctx: PatchContext) -> None:
             spec,
             "model_args",
         ), (
-            "[Patch:torchtitan.model_override] "
-            f"train_spec for '{name}' missing model_args"
+            "[Patch:torchtitan.model_override] " f"train_spec for '{name}' missing model_args"
         )
         model_args_root = spec.model_args
         assert isinstance(
@@ -269,8 +264,7 @@ def patch_torchtitan_model_override(ctx: PatchContext) -> None:
         assert is_dataclass(
             target_args,
         ), (
-            "[Patch:torchtitan.model_override] "
-            f"Expected dataclass model_args, got {type(target_args)}"
+            "[Patch:torchtitan.model_override] " f"Expected dataclass model_args, got {type(target_args)}"
         )
 
         before = asdict(target_args)
@@ -302,8 +296,7 @@ def patch_torchtitan_model_override(ctx: PatchContext) -> None:
 
             setattr(target_args, field_name, v)
             log_rank_0(
-                "[Patch:torchtitan.model_override] "
-                f"Override {field_name}: {old_value} -> {v}",
+                "[Patch:torchtitan.model_override] " f"Override {field_name}: {old_value} -> {v}",
             )
 
         log_rank_0(

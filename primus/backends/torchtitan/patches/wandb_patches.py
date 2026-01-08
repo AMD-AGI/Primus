@@ -51,8 +51,7 @@ def patch_torchtitan_wandb_env(ctx: PatchContext) -> None:
     exp_name = exp_meta.get("exp_name")
 
     log_rank_0(
-        "[Patch:torchtitan.metrics.wandb_env] "
-        "Monkey patching TorchTitan WANDB_* environment variables...",
+        "[Patch:torchtitan.metrics.wandb_env] " "Monkey patching TorchTitan WANDB_* environment variables...",
     )
 
     # Derive WANDB_PROJECT if not explicitly set
@@ -72,19 +71,15 @@ def patch_torchtitan_wandb_env(ctx: PatchContext) -> None:
             wandb_save_dir = os.path.join(dump_folder, save_tb_folder)
 
     log_rank_0(
-        "[Patch:torchtitan.metrics.wandb_env] "
-        f"torchtitan wandb_project: {os.getenv('WANDB_PROJECT')}",
+        "[Patch:torchtitan.metrics.wandb_env] " f"torchtitan wandb_project: {os.getenv('WANDB_PROJECT')}",
     )
     log_rank_0(
-        "[Patch:torchtitan.metrics.wandb_env] "
-        f"torchtitan wandb_exp_name: {os.getenv('WANDB_RUN_NAME')}",
+        "[Patch:torchtitan.metrics.wandb_env] " f"torchtitan wandb_exp_name: {os.getenv('WANDB_RUN_NAME')}",
     )
     log_rank_0(
-        "[Patch:torchtitan.metrics.wandb_env] "
-        f"torchtitan wandb_entity: {os.getenv('WANDB_TEAM')}",
+        "[Patch:torchtitan.metrics.wandb_env] " f"torchtitan wandb_entity: {os.getenv('WANDB_TEAM')}",
     )
     if wandb_save_dir is not None:
         log_rank_0(
-            "[Patch:torchtitan.metrics.wandb_env] "
-            f"torchtitan wandb_save_dir under: {wandb_save_dir}",
+            "[Patch:torchtitan.metrics.wandb_env] " f"torchtitan wandb_save_dir under: {wandb_save_dir}",
         )

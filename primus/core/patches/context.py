@@ -23,10 +23,10 @@ from typing import Any, Dict, Optional
 #     - BackendAdapter._apply_setup_patches() / _apply_build_args_patches()
 #     - BaseTrainer.run() (before_train / after_train)
 PHASES = [
-    "setup",         # Before building args or trainer construction
-    "build_args",    # During backend argument construction
+    "setup",  # Before building args or trainer construction
+    "build_args",  # During backend argument construction
     "before_train",  # Right before training starts
-    "after_train",   # Right after training completes
+    "after_train",  # Right after training completes
     # Additional phases could be added in the future:
     # "before_eval",
     # "after_eval",

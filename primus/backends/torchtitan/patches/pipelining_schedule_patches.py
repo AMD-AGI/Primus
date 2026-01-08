@@ -38,8 +38,7 @@ def patch_torch_pipelining_schedules(ctx: PatchContext) -> None:  # noqa: ARG001
         import torch.distributed.pipelining.schedules as sched
     except Exception as e:  # pragma: no cover - defensive
         log_rank_0(
-            "[Patch:torchtitan.torch.pipelining_schedules_dualpipev] "
-            f"failed to import schedules: {e}",
+            "[Patch:torchtitan.torch.pipelining_schedules_dualpipev] " f"failed to import schedules: {e}",
         )
         return
 

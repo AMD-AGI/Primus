@@ -35,8 +35,12 @@ def run(args, overrides):
 
                 exp_cfg = yaml_utils.parse_yaml_to_namespace(args.config)
                 modules_cfg = getattr(exp_cfg, "modules", None)
-                pre_trainer_cfg = getattr(modules_cfg, "pre_trainer", None) if modules_cfg is not None else None
-                framework = getattr(pre_trainer_cfg, "framework", None) if pre_trainer_cfg is not None else None
+                pre_trainer_cfg = (
+                    getattr(modules_cfg, "pre_trainer", None) if modules_cfg is not None else None
+                )
+                framework = (
+                    getattr(pre_trainer_cfg, "framework", None) if pre_trainer_cfg is not None else None
+                )
             except Exception:
                 framework = None
 

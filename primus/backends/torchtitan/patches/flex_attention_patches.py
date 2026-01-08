@@ -36,16 +36,14 @@ def patch_torch_flex_attention_auxoutput(ctx: PatchContext) -> None:  # noqa: AR
         import torch.nn.attention.flex_attention as flex_mod
     except Exception as e:  # pragma: no cover - defensive
         log_rank_0(
-            "[Patch:torchtitan.torch.flex_attention_auxoutput] "
-            f"flex_attention import failed: {e}",
+            "[Patch:torchtitan.torch.flex_attention_auxoutput] " f"flex_attention import failed: {e}",
         )
         return
 
     # If AuxOutput already exists, nothing to do.
     if hasattr(flex_mod, "AuxOutput"):
         log_rank_0(
-            "[Patch:torchtitan.torch.flex_attention_auxoutput] "
-            "AuxOutput available, no patch needed.",
+            "[Patch:torchtitan.torch.flex_attention_auxoutput] " "AuxOutput available, no patch needed.",
         )
         return
 

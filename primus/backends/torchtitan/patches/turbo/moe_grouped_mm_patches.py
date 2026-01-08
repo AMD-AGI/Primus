@@ -46,8 +46,7 @@ def patch_torchtitan_moe(ctx: PatchContext) -> None:
     # Get MoE FP8 configuration and create a partial function
     use_moe_fp8 = get_param(ctx, "primus_turbo.use_moe_fp8", False)
     log_rank_0(
-        "[Patch:torchtitan.primus_turbo.moe_grouped_mm] "
-        f"Set MoE FP8 mode: {use_moe_fp8}",
+        "[Patch:torchtitan.primus_turbo.moe_grouped_mm] " f"Set MoE FP8 mode: {use_moe_fp8}",
     )
 
     # Patch the grouped_mm function with use_fp8 parameter pre-set

@@ -42,8 +42,7 @@ def patch_torch_dcp_consolidate(ctx: PatchContext) -> None:  # noqa: ARG001
     func_name = "consolidate_safetensors_files_on_every_rank"
 
     log_rank_0(
-        "[Patch:torchtitan.torch.dcp_consolidate_fallback] "
-        f"Checking for {func_name} in {mod_name}...",
+        "[Patch:torchtitan.torch.dcp_consolidate_fallback] " f"Checking for {func_name} in {mod_name}...",
     )
 
     try:
