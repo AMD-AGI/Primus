@@ -17,6 +17,7 @@ from datasets import Dataset
 from datasets.search import np
 
 from primus.core.patches import PatchContext, get_param, register_patch
+from primus.modules.module_utils import log_rank_0
 
 
 def _create_mock_text_dataset(num_samples: int = 128) -> Dataset:
@@ -52,12 +53,13 @@ def _create_mock_token_dataset(
 
 
 def patch_mock_hf_dataset() -> None:
-    from primus.core.utils import logger
-
     try:
         import datasets
 
-        logger.warning("[Primus Mock] Enabling mock HuggingFace dataset mode.")
+        log_rank_0(
+            "[Patch:torchtitan.training.mock_hf_dataset] "
+            "Enabling mock HuggingFace dataset mode.",
+        )
 
         def mock_load_dataset(path: str, *args, **kwargs) -> Dataset:
             """
@@ -65,7 +67,10 @@ def patch_mock_hf_dataset() -> None:
             Intercepts Titan calls like load_dataset('allenai/c4', ...).
             Returns a fake Dataset of text samples.
             """
-            logger.warning(f"[Primus Mock] load_dataset('{path}') is mocked.")
+            log_rank_0(
+                "[Patch:torchtitan.training.mock_hf_dataset] "
+                f"load_dataset('{path}') is mocked.",
+            )
             # Shorter dataset for validation split
             if "validation" in path.lower():
                 return _create_mock_text_dataset(num_samples=32)
@@ -73,16 +78,22 @@ def patch_mock_hf_dataset() -> None:
                 return _create_mock_token_dataset(seq_len=8192, vocab_size=32000, num_samples=256)
 
         datasets.load_dataset = mock_load_dataset
-        logger.warning("[PrimusPath][Dataset] Patched datasets.load_dataset successfully.")
+        log_rank_0(
+            "[Patch:torchtitan.training.mock_hf_dataset] "
+            "Patched datasets.load_dataset successfully.",
+        )
 
     except Exception as e:
-        logger.error(f"[PrimusPath][Dataset] Failed to patch datasets.load_dataset: {e}")
+        log_rank_0(
+            "[Patch:torchtitan.training.mock_hf_dataset][ERROR] "
+            f"Failed to patch datasets.load_dataset: {e}",
+        )
 
 
 @register_patch(
     "torchtitan.training.mock_hf_dataset",
     backend="torchtitan",
-    phase="before_train",
+    phase="setup",
     description="Enable mock HuggingFace dataset mode for TorchTitan",
     condition=lambda ctx: get_param(ctx, "training.mock_data", False),
 )

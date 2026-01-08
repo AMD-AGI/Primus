@@ -23,12 +23,13 @@ Behavior:
 import os
 
 from primus.core.patches import PatchContext, get_param, register_patch
+from primus.modules.module_utils import log_rank_0
 
 
 @register_patch(
     "torchtitan.metrics.wandb_env",
     backend="torchtitan",
-    phase="before_train",
+    phase="setup",
     description="Initialize WANDB_* env vars from Primus/TorchTitan config",
     condition=lambda ctx: get_param(ctx, "metrics.enable_wandb", False),
 )
@@ -36,7 +37,6 @@ def patch_torchtitan_wandb_env(ctx: PatchContext) -> None:
     """
     Initialize WANDB_* environment variables for TorchTitan runs.
     """
-    from primus.core.utils.logger import _logger as primus_logger
 
     # Module/TorchTitan-side config (metrics/job section)
     metrics_cfg = get_param(ctx, "metrics", None)
@@ -50,7 +50,10 @@ def patch_torchtitan_wandb_env(ctx: PatchContext) -> None:
     user_name = exp_meta.get("user_name")
     exp_name = exp_meta.get("exp_name")
 
-    primus_logger.warning("Monkey patch torchtitan wandb...")
+    log_rank_0(
+        "[Patch:torchtitan.metrics.wandb_env] "
+        "Monkey patching TorchTitan WANDB_* environment variables...",
+    )
 
     # Derive WANDB_PROJECT if not explicitly set
     if os.getenv("WANDB_PROJECT") is None and work_group and user_name:
@@ -68,8 +71,20 @@ def patch_torchtitan_wandb_env(ctx: PatchContext) -> None:
         if dump_folder is not None and save_tb_folder is not None:
             wandb_save_dir = os.path.join(dump_folder, save_tb_folder)
 
-    primus_logger.info(f"torchtitan wandb_project: {os.getenv('WANDB_PROJECT')}")
-    primus_logger.info(f"torchtitan wandb_exp_name: {os.getenv('WANDB_RUN_NAME')}")
-    primus_logger.info(f"torchtitan wandb_entity: {os.getenv('WANDB_TEAM')}")
+    log_rank_0(
+        "[Patch:torchtitan.metrics.wandb_env] "
+        f"torchtitan wandb_project: {os.getenv('WANDB_PROJECT')}",
+    )
+    log_rank_0(
+        "[Patch:torchtitan.metrics.wandb_env] "
+        f"torchtitan wandb_exp_name: {os.getenv('WANDB_RUN_NAME')}",
+    )
+    log_rank_0(
+        "[Patch:torchtitan.metrics.wandb_env] "
+        f"torchtitan wandb_entity: {os.getenv('WANDB_TEAM')}",
+    )
     if wandb_save_dir is not None:
-        primus_logger.info(f"torchtitan wandb_save_dir under: {wandb_save_dir}")
+        log_rank_0(
+            "[Patch:torchtitan.metrics.wandb_env] "
+            f"torchtitan wandb_save_dir under: {wandb_save_dir}",
+        )

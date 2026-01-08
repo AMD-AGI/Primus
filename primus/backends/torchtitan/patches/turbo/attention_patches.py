@@ -22,7 +22,7 @@ from primus.modules.module_utils import log_rank_0
 @register_patch(
     "torchtitan.primus_turbo.turbo_attention",
     backend="torchtitan",
-    phase="before_train",
+    phase="setup",
     description="Use Primus-Turbo Attention kernels for supported models",
     condition=lambda ctx: (
         get_param(ctx, "primus_turbo.enable_primus_turbo", False)
@@ -33,11 +33,9 @@ def patch_turbo_attention(ctx: PatchContext) -> None:
     """
     Monkey patch LLaMA3, LLaMA4 and DeepSeek-V3 to use Primus-Turbo Attention.
     """
-    from primus.core.utils.logger import _logger as primus_logger
-
-    primus_logger.info(
+    log_rank_0(
         "[Patch:torchtitan.primus_turbo.turbo_attention] "
-        "Enabling Primus-Turbo Attention for LLaMA3/LLaMA4/DeepSeek-V3..."
+        "Enabling Primus-Turbo Attention for LLaMA3/LLaMA4/DeepSeek-V3...",
     )
 
     # ******* LLaMA3 Attention Model *******

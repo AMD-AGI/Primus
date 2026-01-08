@@ -28,7 +28,7 @@ from primus.modules.module_utils import log_rank_0
 @register_patch(
     "torchtitan.primus_turbo.moe_grouped_mm",
     backend="torchtitan",
-    phase="before_train",
+    phase="setup",
     description="Use Primus-Turbo grouped_mm for TorchTitan MoE experts",
     condition=lambda ctx: (
         get_param(ctx, "primus_turbo.enable_primus_turbo", False)
@@ -42,11 +42,13 @@ def patch_torchtitan_moe(ctx: PatchContext) -> None:
     import torchtitan.models.moe.moe
 
     from primus.backends.torchtitan.models.moe.moe import _run_experts_grouped_mm
-    from primus.core.utils.logger import _logger as primus_logger
 
     # Get MoE FP8 configuration and create a partial function
     use_moe_fp8 = get_param(ctx, "primus_turbo.use_moe_fp8", False)
-    primus_logger.info(f"Set MoE FP8 mode: {use_moe_fp8}")
+    log_rank_0(
+        "[Patch:torchtitan.primus_turbo.moe_grouped_mm] "
+        f"Set MoE FP8 mode: {use_moe_fp8}",
+    )
 
     # Patch the grouped_mm function with use_fp8 parameter pre-set
     torchtitan.models.moe.moe._run_experts_grouped_mm = functools.partial(

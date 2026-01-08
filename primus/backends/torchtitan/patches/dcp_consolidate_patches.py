@@ -15,12 +15,13 @@ in a backend-agnostic way.
 """
 
 from primus.core.patches import PatchContext, register_patch
+from primus.modules.module_utils import log_rank_0
 
 
 @register_patch(
     "torchtitan.torch.dcp_consolidate_fallback",
     backend="torchtitan",
-    phase="before_train",
+    phase="setup",
     description=(
         "Provide a fallback consolidate_safetensors_files_on_every_rank "
         "to avoid ImportError in older torch builds"
@@ -37,26 +38,31 @@ def patch_torch_dcp_consolidate(ctx: PatchContext) -> None:  # noqa: ARG001
     import types
     import warnings
 
-    from primus.core.utils.logger import _logger as primus_logger
-
     mod_name = "torch.distributed.checkpoint._consolidate_hf_safetensors"
     func_name = "consolidate_safetensors_files_on_every_rank"
 
+    log_rank_0(
+        "[Patch:torchtitan.torch.dcp_consolidate_fallback] "
+        f"Checking for {func_name} in {mod_name}...",
+    )
+
     try:
         mod = __import__(mod_name, fromlist=["*"])
-        primus_logger.info(
-            f"[DEBUG][PrimusPatch][DCP] Successfully imported {mod_name}, checking for {func_name}"
-        )
         if hasattr(mod, func_name):
-            primus_logger.info(f"[PrimusPatch][DCP] {func_name} available in {mod_name}, no patch needed.")
+            log_rank_0(
+                "[Patch:torchtitan.torch.dcp_consolidate_fallback] "
+                f"{func_name} available in {mod_name}, no patch needed.",
+            )
             return  # OK, torch build supports it
         else:
-            primus_logger.info(
-                f"[DEBUG][PrimusPatch][DCP] {func_name} NOT found in {mod_name}, will install fallback"
+            log_rank_0(
+                "[Patch:torchtitan.torch.dcp_consolidate_fallback] "
+                f"{func_name} NOT found in {mod_name}, will install fallback.",
             )
     except Exception as e:
-        primus_logger.info(
-            f"[DEBUG][PrimusPatch][DCP] Failed to import {mod_name}: {e}, will install fallback"
+        log_rank_0(
+            "[Patch:torchtitan.torch.dcp_consolidate_fallback] "
+            f"Failed to import {mod_name}: {e}, will install fallback.",
         )
         # Fall through to install dummy module/function
 
@@ -74,7 +80,8 @@ def patch_torch_dcp_consolidate(ctx: PatchContext) -> None:  # noqa: ARG001
     setattr(dummy_mod, func_name, _warn_and_skip)
     sys.modules[mod_name] = dummy_mod
 
-    primus_logger.warning(
-        f"[PrimusPatch][DCP] Installed fallback for missing {mod_name}.{func_name}, "
-        "HuggingFace safetensors export will be disabled."
+    log_rank_0(
+        "[Patch:torchtitan.torch.dcp_consolidate_fallback][WARN] "
+        f"Installed fallback for missing {mod_name}.{func_name}, "
+        "HuggingFace safetensors export will be disabled.",
     )
