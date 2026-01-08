@@ -52,13 +52,26 @@ def _create_mock_token_dataset(
     return Dataset.from_list(samples)
 
 
-def patch_mock_hf_dataset() -> None:
+@register_patch(
+    "torchtitan.training.mock_hf_dataset",
+    backend="torchtitan",
+    phase="setup",
+    description="Enable mock HuggingFace dataset mode for TorchTitan",
+    condition=lambda ctx: get_param(ctx, "training.mock_data", False),
+)
+def patch_mock_hf_dataset(ctx: PatchContext) -> None:  # noqa: ARG001
+    """
+    Patch HF datasets.load_dataset with a lightweight mock implementation.
+
+    This patch replaces ``datasets.load_dataset`` with a mock that returns
+    fake tokenized datasets, avoiding the need to download real HuggingFace
+    datasets during testing or validation runs.
+    """
     try:
         import datasets
 
         log_rank_0(
-            "[Patch:torchtitan.training.mock_hf_dataset] "
-            "Enabling mock HuggingFace dataset mode.",
+            "[Patch:torchtitan.training.mock_hf_dataset] " "Enabling mock HuggingFace dataset mode.",
         )
 
         def mock_load_dataset(path: str, *args, **kwargs) -> Dataset:
@@ -68,8 +81,7 @@ def patch_mock_hf_dataset() -> None:
             Returns a fake Dataset of text samples.
             """
             log_rank_0(
-                "[Patch:torchtitan.training.mock_hf_dataset] "
-                f"load_dataset('{path}') is mocked.",
+                "[Patch:torchtitan.training.mock_hf_dataset] " f"load_dataset('{path}') is mocked.",
             )
             # Shorter dataset for validation split
             if "validation" in path.lower():
@@ -79,8 +91,7 @@ def patch_mock_hf_dataset() -> None:
 
         datasets.load_dataset = mock_load_dataset
         log_rank_0(
-            "[Patch:torchtitan.training.mock_hf_dataset] "
-            "Patched datasets.load_dataset successfully.",
+            "[Patch:torchtitan.training.mock_hf_dataset] " "Patched datasets.load_dataset successfully.",
         )
 
     except Exception as e:
@@ -88,20 +99,3 @@ def patch_mock_hf_dataset() -> None:
             "[Patch:torchtitan.training.mock_hf_dataset][ERROR] "
             f"Failed to patch datasets.load_dataset: {e}",
         )
-
-
-@register_patch(
-    "torchtitan.training.mock_hf_dataset",
-    backend="torchtitan",
-    phase="setup",
-    description="Enable mock HuggingFace dataset mode for TorchTitan",
-    condition=lambda ctx: get_param(ctx, "training.mock_data", False),
-)
-def patch_torchtitan_mock_hf_dataset(ctx: PatchContext) -> None:  # noqa: ARG001
-    """
-    Patch HF datasets.load_dataset with a lightweight mock implementation.
-
-    Delegates to ``patch_mock_hf_dataset`` to keep behavior identical to
-    the trainer-side implementation.
-    """
-    patch_mock_hf_dataset()
