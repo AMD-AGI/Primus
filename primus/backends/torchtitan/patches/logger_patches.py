@@ -36,13 +36,13 @@ from primus.core.patches import PatchContext, register_patch
 from primus.modules.module_utils import log_rank_0
 
 
-# @register_patch(
-#     patch_id="torchtitan.logger",
-#     backend="torchtitan",
-#     phase="setup",
-#     description="Redirect TorchTitan logger to Primus unified logger",
-#     condition=lambda ctx: True,  # Always enabled
-# )
+@register_patch(
+    patch_id="torchtitan.logger",
+    backend="torchtitan",
+    phase="setup",
+    description="Redirect TorchTitan logger to Primus unified logger",
+    condition=lambda ctx: True,  # Always enabled
+)
 def patch_torchtitan_logger(ctx: PatchContext) -> None:
     """
     Replace TorchTitan's logger with Primus's unified logger.
@@ -50,8 +50,7 @@ def patch_torchtitan_logger(ctx: PatchContext) -> None:
     from primus.core.utils.logger import _logger as primus_logger
 
     log_rank_0(
-        "[Patch:torchtitan.logger] "
-        "Monkey patching TorchTitan logger to use Primus unified logger...",
+        "[Patch:torchtitan.logger] " "Monkey patching TorchTitan logger to use Primus unified logger...",
     )
     import torchtitan.tools.logging as titan_logging
 
@@ -62,6 +61,5 @@ def patch_torchtitan_logger(ctx: PatchContext) -> None:
     titan_logging.init_logger = lambda: None
 
     log_rank_0(
-        "[Patch:torchtitan.logger] "
-        "TorchTitan logger successfully redirected to Primus logger.",
+        "[Patch:torchtitan.logger] " "TorchTitan logger successfully redirected to Primus logger.",
     )
