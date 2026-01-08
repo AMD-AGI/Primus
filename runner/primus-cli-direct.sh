@@ -356,9 +356,6 @@ if [[ -n "${direct_config[patch]:-}" ]]; then
         patch_scripts+=("$patch_entry")
     done <<< "${direct_config[patch]}"
 
-    # Source execute_patches.sh so that any environment changes or extra arguments
-    # produced by patches (via PATCH_ENV / extra.* lines) can be applied in the
-    # current shell.
     # shellcheck disable=SC1091
     source "${RUNNER_DIR}/helpers/execute_patches.sh"
     # Reset collected extra args from patches for this run
@@ -417,17 +414,23 @@ fi
 ###############################################################################
 # STEP 10: Build launch command
 ###############################################################################
-if [[ "${direct_config[run_mode]}" == "single" ]]; then
+
+# Allow RUN_MODE to be overridden by environment variable
+RUN_MODE="${RUN_MODE:-${direct_config[run_mode]}}"
+
+CMD="${direct_config[script]} $* 2>&1 | tee ${direct_config[log_file]}"
+if [[ "$RUN_MODE" == "single" ]]; then
+    CMD="python3 ${CMD}"
+    LOG_INFO_RANK0 "[direct] Using python launcher (single mode)"
+elif [[ "$RUN_MODE" == "torchrun" ]]; then
+    # Step 2: Add NUMA binding prefix if enabled
     if [[ "${direct_config[numa]}" == "true" ]]; then
-        CMD="bash ${RUNNER_DIR}/helpers/numa_bind.sh python3 ${direct_config[script]} $*"
-        LOG_INFO "[direct] Launching single-process script with NUMA binding:"
+        CMD="--no-python ${RUNNER_DIR}/helpers/numa_bind.sh ${CMD}"
+        LOG_INFO_RANK0 "[direct] NUMA binding: ENABLED (forced by CLI)"
     else
-        CMD="python3 ${direct_config[script]} $*"
-        LOG_INFO "[direct] Launching single-process script:"
+        LOG_INFO_RANK0 "[direct] NUMA binding: AUTO (default OFF)"
     fi
-else
-    # NOTE: These variables use environment variables from config file (via primus-cli --config)
-    # Priority: Environment (from config/export) > Script defaults
+
     DISTRIBUTED_ARGS=(
         --nproc_per_node "${GPUS_PER_NODE:-8}"
         --nnodes "${NNODES:-1}"
@@ -436,8 +439,6 @@ else
         --master_port "${MASTER_PORT:-1234}"
     )
 
-    # Build local rank filter argument.
-    # Only local rank 0 on first node and last local rank on last node are filtered for special logging.
     LAST_NODE=$((NNODES - 1))
     FILTERS=()
     # Add local rank 0 on the first node
@@ -458,17 +459,7 @@ else
         FILTER_ARG=()
     fi
 
-    NUMA_LAUNCHER_ARGS=()
-    if [[ "${direct_config[numa]}" == "true" ]]; then
-        NUMA_LAUNCHER_ARGS=(--no-python "${RUNNER_DIR}/helpers/numa_bind.sh" python3)
-        LOG_INFO_RANK0 "[direct] NUMA binding: ENABLED (forced by CLI)"
-    elif [[ "${direct_config[numa]}" == "false" ]]; then
-        LOG_INFO_RANK0 "[direct] NUMA binding: DISABLED (forced by CLI)"
-    else
-        LOG_INFO_RANK0 "[direct] NUMA binding: AUTO (default OFF)"
-    fi
-
-    CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS} ${NUMA_LAUNCHER_ARGS[*]}  ${direct_config[script]} $* "
+    CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS} ${CMD}"
 fi
 
 ###############################################################################
@@ -515,9 +506,9 @@ print_system_info
 
 PRINT_INFO_RANK0 "  Full Command:"
 if [[ "$DRY_RUN_MODE" == "1" ]]; then
-    PRINT_INFO_RANK0 "    Would Execute: $CMD 2>&1 | tee ${direct_config[log_file]}"
+    PRINT_INFO_RANK0 "    Would Execute: $CMD"
 else
-    PRINT_INFO_RANK0 "    Executing: $CMD 2>&1 | tee ${direct_config[log_file]}"
+    PRINT_INFO_RANK0 "    Executing: $CMD"
 fi
 
 # In dry-run mode, exit after displaying the command
@@ -532,7 +523,7 @@ print_section ""
 ###############################################################################
 # STEP 12: Execute command
 ###############################################################################
-eval "$CMD" 2>&1 | tee "${direct_config[log_file]}"
+eval "$CMD"
 exit_code=${PIPESTATUS[0]}
 
 # Print result based on exit code
