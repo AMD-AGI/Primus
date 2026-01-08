@@ -103,6 +103,29 @@ def prepare_dataset_if_needed(
     return
 
 
+def install_jax_python_dependencies(primus_path: Path) -> None:
+    """
+    Install JAX Python dependencies from requirements-jax.txt.
+
+    This mirrors the original examples/run_pretrain.sh pip install logic
+    for MaxText backend.
+    """
+    log_info("========== Installing JAX Python dependencies ==========")
+
+    requirements_file = primus_path / "requirements-jax.txt"
+    if not requirements_file.exists():
+        log_error_and_exit(f"Requirements file not found: {requirements_file}")
+
+    cmd = ["pip", "install", "-r", str(requirements_file), "--quiet"]
+
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        log_error_and_exit(f"Failed to install JAX Python dependencies (exit code {exc.returncode})")
+
+    log_info("========== Installing JAX Python dependencies Done ==========")
+
+
 def install_maxtext_dependencies() -> None:
     """
     Install required system packages for MaxText/JAX on every node.
@@ -168,7 +191,10 @@ def main():
 
     dataset_type = pre_trainer_cfg.dataset_type
 
-    # Always install required MaxText/JAX system packages on every node.
+    # Install JAX Python dependencies first (requirements-jax.txt)
+    install_jax_python_dependencies(primus_path)
+
+    # Then install required MaxText/JAX system packages on every node.
     install_maxtext_dependencies()
 
     if dataset_type == "synthetic":
@@ -187,6 +213,56 @@ def main():
     #   --backend_path <maxtext_path>
     log_info(f"Exposing resolved backend path via extra.backend_path={maxtext_path}")
     print(f"extra.backend_path={maxtext_path}")
+
+    # Expose JAX coordinator environment variables for distributed training
+    # These will be exported by execute_hooks.sh
+    import os
+
+    master_addr = os.getenv("MASTER_ADDR", "localhost")
+    master_port = os.getenv("MASTER_PORT", "1234")
+
+    log_info(
+        f"Exposing JAX coordinator: JAX_COORDINATOR_IP={master_addr}, JAX_COORDINATOR_PORT={master_port}"
+    )
+    print(f"env.JAX_COORDINATOR_IP={master_addr}")
+    print(f"env.JAX_COORDINATOR_PORT={master_port}")
+
+    # Expose MaxText/JAX performance tuning environment variables
+    # These mirror the settings from examples/run_pretrain.sh
+    log_info("Exposing MaxText performance tuning environment variables")
+
+    # XLA/JAX settings
+    dump_hlo_dir = os.getenv("DUMP_HLO_DIR", f"{primus_path}/output/xla_dump_hlo")
+    dump_hlo = os.getenv("DUMP_HLO", "0")
+    print(f"env.DUMP_HLO_DIR={dump_hlo_dir}")
+    print(f"env.DUMP_HLO={dump_hlo}")
+    print("env.NVTE_ALLOW_NONDETERMINISTIC_ALGO=1")
+    print("env.XLA_PYTHON_CLIENT_MEM_FRACTION=.97")
+    print("env.NVTE_USE_HIPBLASLT=1")
+
+    xla_flags = "--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_graph_level=0 --xla_gpu_enable_latency_hiding_scheduler=True --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=False --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=FALSE"
+    if dump_hlo == "1":
+        xla_flags += f" --xla_dump_to={dump_hlo_dir}"
+        log_info(f"XLA HLO dumping enabled, output directory: {dump_hlo_dir}")
+    print(f"env.XLA_FLAGS={xla_flags}")
+
+    # AMD GPU optimizations
+    print("env.HIP_FORCE_DEV_KERNARG=1")
+    print("env.HSA_FORCE_FINE_GRAIN_PCIE=1")
+
+    # Transformer Engine settings for MaxText
+    print("env.NVTE_FUSED_ATTN=1")
+    print("env.NVTE_CK_USES_BWD_V3=1")
+    print("env.NVTE_CK_USES_FWD_V3=1")
+    print("env.NVTE_CK_IS_V3_ATOMIC_FP32=0")
+    print("env.NVTE_CK_HOW_V3_BF16_CVT=2")
+    print("env.NVTE_FUSED_ATTN_CK=1")
+    print("env.NVTE_FUSED_ATTN_AOTRITON=0")
+
+    # Expose run mode: MaxText uses single mode (plain python instead of torchrun)
+    # This will be exported as RUN_MODE env var by execute_hooks.sh
+    log_info("Exposing run mode via env.RUN_MODE=single")
+    print("env.RUN_MODE=single")
 
 
 if __name__ == "__main__":
