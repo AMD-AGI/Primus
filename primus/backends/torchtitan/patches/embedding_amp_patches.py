@@ -21,12 +21,13 @@ Behavior:
 """
 
 from primus.core.patches import PatchContext, get_param, register_patch
+from primus.modules.module_utils import log_rank_0
 
 
 @register_patch(
     "torchtitan.embedding.amp_alignment",
     backend="torchtitan",
-    phase="before_train",
+    phase="setup",
     description="Align nn.Embedding outputs with AMP/autocast dtype",
     condition=lambda ctx: get_param(ctx, "primus_turbo.enable_embedding_autocast", False),
 )
@@ -37,9 +38,10 @@ def patch_torchtitan_embedding_amp(ctx: PatchContext) -> None:
     import torch
     import torch.nn as nn
 
-    from primus.core.utils.logger import _logger as primus_logger
-
-    primus_logger.info("[PrimusPatch][AMP] Installing nn.Embedding AMP/mixed precision alignment patch...")
+    log_rank_0(
+        "[Patch:torchtitan.embedding.amp_alignment] "
+        "Installing nn.Embedding AMP/mixed precision alignment patch...",
+    )
 
     def _hook(module, inp, out):
         if not isinstance(out, torch.Tensor) or not out.is_floating_point():
@@ -58,4 +60,7 @@ def patch_torchtitan_embedding_amp(ctx: PatchContext) -> None:
         self.register_forward_hook(_hook)
 
     nn.Embedding.__init__ = new_init
-    primus_logger.info("[PrimusPatch][AMP] nn.Embedding.__init__ patched for AMP/mixed precision alignment.")
+    log_rank_0(
+        "[Patch:torchtitan.embedding.amp_alignment] "
+        "nn.Embedding.__init__ patched for AMP/mixed precision alignment.",
+    )

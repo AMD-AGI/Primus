@@ -43,7 +43,7 @@ class TorchTitanPretrainTrainer(BaseModule):
 
         run_patches(
             backend="torchtitan",
-            phase="before_train",
+            phase="setup",
             backend_version="unknown",
             extra={
                 "module_config": temp_module_config,
