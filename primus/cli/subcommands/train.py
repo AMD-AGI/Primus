@@ -20,8 +20,8 @@ def run(args, overrides):
         # Priority:
         #   1) Explicit env override via PRIMUS_TRAIN_RUNTIME
         #   2) If not set, auto-select default by backend framework:
-        #        - TorchTitan  -> "core" (new runtime)
-        #        - others      -> "legacy" (keep existing behavior)
+        #        - TorchTitan / MaxText -> "core" (new runtime)
+        #        - others                -> "legacy" (keep existing behavior)
         from os import getenv
 
         # 1) Explicit env override (highest priority)
@@ -44,7 +44,7 @@ def run(args, overrides):
             except Exception:
                 framework = None
 
-            if framework == "torchtitan":
+            if framework in ("torchtitan", "maxtext"):
                 runtime_entry = "core"
             else:
                 runtime_entry = "legacy"
@@ -69,13 +69,13 @@ def register_subcommand(subparsers):
     Register the 'train' subcommand to the main CLI parser.
 
     Supported suites (training workflows):
-        - pretrain: Pre-training workflow (Megatron, TorchTitan, etc.)
+        - pretrain: Pre-training workflow (Megatron, TorchTitan, MaxText, etc.)
 
     Future extensions:
         - posttrain: Post-training workflow (alignment, preference tuning, etc.)
 
     Example:
-        primus train pretrain --config exp.yaml --backend-path /path/to/megatron
+        primus train pretrain --config exp.yaml --backend-path /path/to/backend
 
     Args:
         subparsers: argparse subparsers object from main.py
@@ -86,7 +86,7 @@ def register_subcommand(subparsers):
 
     parser = subparsers.add_parser(
         "train",
-        help="Launch Primus pretrain with Megatron or TorchTitan",
+        help="Launch Primus pretrain with Megatron, TorchTitan, or MaxText",
         description="Primus training entry. Supports pretrain now; posttrain/finetune/evaluate reserved for future use.",
     )
     suite_parsers = parser.add_subparsers(dest="suite", required=True)
