@@ -4,19 +4,19 @@
 
 ## 📚 概述
 
-Primus 提供了三种训练模式的示例脚本：
+Primus 提供了三种训练模式的示例脚本，**重点推荐使用 Direct 和 Slurm 模式**：
 
-| 脚本 | 模式 | 适用场景 |
-|------|------|----------|
-| `run_pretrain_cli.sh` | Direct | 直接在主机上运行，无容器开销 |
-| `run_local_pretrain_cli.sh` | Container | 使用 Docker/Podman 容器，环境隔离 |
-| `run_slurm_pretrain_cli.sh` | Slurm | 集群环境，多节点训练 |
+| 脚本 | 模式 | 适用场景 | 推荐度 |
+|------|------|----------|--------|
+| `run_pretrain_cli.sh` | Direct | 直接在主机上运行，无容器开销 | ⭐⭐⭐ |
+| `run_slurm_pretrain_cli.sh` | Slurm | 集群环境，多节点训练 | ⭐⭐⭐ |
+| `run_local_pretrain_cli.sh` | Container | 使用 Docker/Podman 容器，环境隔离 | ⭐ |
 
 ---
 
 ## 1️⃣ Direct Mode - 直接模式
 
-**适用场景**: 在已配置好的环境中快速测试和训练
+**适用场景**: 在已配置好的环境中快速测试和训练 ⭐⭐⭐ **推荐**
 
 ### 使用方法
 
@@ -78,149 +78,9 @@ bash $PRIMUS_PATH/runner/primus-cli-direct.sh \
 
 ---
 
-## 2️⃣ Container Mode - 容器模式
+## 2️⃣ Slurm Mode - 集群模式
 
-**适用场景**: 需要环境隔离，或使用特定的 Docker 镜像
-
-### 使用方法
-
-```bash
-# 基本使用 (PyTorch)
-bash examples/run_local_pretrain_cli.sh
-
-# MaxText/JAX 训练
-BACKEND=MaxText bash examples/run_local_pretrain_cli.sh
-```
-
-### 环境变量
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `EXP` | `examples/megatron/exp_pretrain.yaml` | 实验配置文件 |
-| `BACKEND` | (空，使用 PyTorch) | 设置为 `MaxText` 使用 JAX 镜像 |
-| `DOCKER_IMAGE` | PyTorch: `docker.io/rocm/primus:v25.10`<br>MaxText: `docker.io/rocm/jax-training:maxtext-v25.9` | Docker 镜像 |
-| `DATA_PATH` | `$(pwd)/data` | 数据目录（自动挂载到容器） |
-| `MASTER_ADDR` | `localhost` | 主节点地址 |
-| `MASTER_PORT` | `1234` | 主节点端口 |
-| `NNODES` | `1` | 节点数量 |
-| `NODE_RANK` | `0` | 当前节点编号 |
-| `GPUS_PER_NODE` | `8` | 每节点 GPU 数量 |
-
-### 示例
-
-#### 场景 1: 基本使用（默认配置）
-
-```bash
-# PyTorch 训练，使用默认镜像和配置
-bash examples/run_local_pretrain_cli.sh
-
-# 指定配置文件
-EXP=examples/megatron/exp_pretrain.yaml \
-bash examples/run_local_pretrain_cli.sh
-```
-
-#### 场景 2: 使用自定义镜像
-
-```bash
-# 使用自定义 Docker 镜像
-DOCKER_IMAGE=my-registry.com/custom-image:v1.0 \
-DATA_PATH=/mnt/shared/datasets \
-bash examples/run_local_pretrain_cli.sh
-```
-
-#### 场景 3: 添加环境变量（性能调优）
-
-```bash
-# 添加 NCCL 和 PyTorch 性能相关环境变量
-bash $PRIMUS_PATH/runner/primus-cli container \
-  --image docker.io/rocm/primus:v25.10 \
-  --volume $(pwd)/data:/data \
-  --env HSA_NO_SCRATCH_RECLAIM=1 \
-  --env NVTE_CK_USES_BWD_V3=1 \
-  --env GPU_MAX_HW_QUEUES=2 \
-  --env NCCL_SOCKET_IFNAME=eth0 \
-  --env TORCH_DISTRIBUTED_DEBUG=OFF \
--- train pretrain --config examples/megatron/exp_pretrain.yaml
-```
-
-**说明**:
-- `HSA_NO_SCRATCH_RECLAIM=1`: ROCm 性能优化
-- `NVTE_CK_USES_BWD_V3=1`: TransformerEngine 后向传播优化
-- `GPU_MAX_HW_QUEUES=2`: GPU 硬件队列配置
-- `NCCL_SOCKET_IFNAME=eth0`: 指定 NCCL 使用的网络接口
-
-#### 场景 4: MaxText/JAX 训练 + 自定义配置
-
-```bash
-# MaxText 后端 + 自定义镜像 + 环境变量
-bash $PRIMUS_PATH/runner/primus-cli container \
-  --image my-registry.com/jax-maxtext:custom \
-  --volume /data/tokenized:/workspace/data \
-  --env JAX_PLATFORMS=rocm \
-  --env XLA_FLAGS="--xla_gpu_enable_async_all_gather=true --xla_gpu_all_reduce_combine_threshold_bytes=134217728" \
-  --env NVTE_FUSED_ATTN=1 \
--- train pretrain --config examples/maxtext/config.yaml
-```
-
-#### 场景 5: 多节点训练（本地多容器协同）
-
-在多台物理机上分别运行：
-
-```bash
-# 主节点 (Node 0)
-NNODES=2 \
-NODE_RANK=0 \
-MASTER_ADDR=192.168.1.100 \
-MASTER_PORT=29500 \
-GPUS_PER_NODE=8 \
-bash examples/run_local_pretrain_cli.sh
-
-# 从节点 (Node 1)
-NNODES=2 \
-NODE_RANK=1 \
-MASTER_ADDR=192.168.1.100 \
-MASTER_PORT=29500 \
-GPUS_PER_NODE=8 \
-bash examples/run_local_pretrain_cli.sh
-```
-
-#### 场景 6: 完整的镜像 + 卷挂载 + 环境变量示例
-
-```bash
-#!/bin/bash
-# advanced_container_training.sh
-
-export DOCKER_IMAGE=docker.io/rocm/primus:v25.10
-export DATA_PATH=/shared/datasets/llama
-export EXP=experiments/llama3_70b.yaml
-
-bash $PRIMUS_PATH/runner/primus-cli container \
-  --image $DOCKER_IMAGE \
-  --volume $DATA_PATH:/data:ro \
-  --volume $(pwd)/checkpoints:/checkpoints \
-  --volume $(pwd)/output:/workspace/output \
-  --env NCCL_DEBUG=WARN \
-  --env TORCH_DISTRIBUTED_DEBUG=OFF \
-  --env CUDA_DEVICE_MAX_CONNECTIONS=1 \
-  --env HF_TOKEN \
-  --env WANDB_API_KEY \
-  --gpus all \
-  --shm-size 16g \
--- train pretrain --config $EXP --checkpoint-dir /checkpoints
-```
-
-**配置说明**:
-- `/data` 只读挂载 (`:ro`)
-- `/checkpoints` 可读写挂载
-- `HF_TOKEN` 和 `WANDB_API_KEY` 从主机环境传递
-- `--gpus all`: 使用所有可用 GPU
-- `--shm-size 16g`: 增加共享内存（大模型训练必需）
-
----
-
-## 3️⃣ Slurm Mode - 集群模式
-
-**适用场景**: 使用 Slurm 管理的集群环境，多节点分布式训练
+**适用场景**: 使用 Slurm 管理的集群环境，多节点分布式训练 ⭐⭐⭐ **推荐**
 
 ### 使用方法
 
@@ -395,29 +255,56 @@ bash examples/run_slurm_pretrain_cli.sh
 # Direct mode
 bash examples/run_pretrain_cli.sh --extra-param value
 
-# Container mode
-bash examples/run_local_pretrain_cli.sh --debug --dry-run
-
 # Slurm mode
 bash examples/run_slurm_pretrain_cli.sh --checkpoint-interval 100
 ```
 
-### 环境变量传递（Container Mode）
-
-`run_local_pretrain_cli.sh` 支持传递环境变量到容器：
+### 使用 NUMA 绑定优化性能（Direct Mode）
 
 ```bash
-# 脚本中已包含的环境变量示例：
-# --env HSA_NO_SCRATCH_RECLAIM     # 从主机传递
-# --env NVTE_CK_USES_BWD_V3        # 从主机传递
-# --env GPU_MAX_HW_QUEUES          # 从主机传递
-# --env GLOO_SOCKET_IFNAME         # 从主机传递
+# 启用 NUMA 绑定
+bash $PRIMUS_PATH/runner/primus-cli-direct.sh \
+  --numa \
+  -- train pretrain --config $EXP
+```
 
-# 在主机设置环境变量，容器会自动获取
-export HSA_NO_SCRATCH_RECLAIM=1
-export GPU_MAX_HW_QUEUES=2
+### Slurm 高级选项
+
+```bash
+# 指定 GPU 类型和资源
+bash $PRIMUS_PATH/runner/primus-cli slurm srun \
+  -N 8 \
+  --nodelist "gpu[01-08]" \
+  --gpus-per-node=8 \
+  --ntasks-per-node=8 \
+  --constraint="mi300x" \
+  --exclusive \
+-- train pretrain --config $EXP
+```
+
+---
+
+## 🐳 Container Mode (可选)
+
+**注意**: 如果您已经有配置好的环境，推荐使用 Direct 或 Slurm 模式。Container Mode 主要用于环境隔离或特殊镜像需求。
+
+### 基本使用
+
+```bash
+# PyTorch 训练
+bash examples/run_local_pretrain_cli.sh
+
+# MaxText/JAX 训练
+BACKEND=MaxText bash examples/run_local_pretrain_cli.sh
+
+# 自定义镜像
+DOCKER_IMAGE=my-registry.com/custom:v1.0 \
 bash examples/run_local_pretrain_cli.sh
 ```
+
+### 详细配置
+
+详细的容器配置选项请参考：`bash $PRIMUS_PATH/runner/primus-cli container --help`
 
 ---
 
@@ -426,16 +313,21 @@ bash examples/run_local_pretrain_cli.sh
 ### Q: 如何选择使用哪个脚本？
 
 **A**:
-- 🏃 **快速测试**: 使用 `run_pretrain_cli.sh`（直接模式）
-- 🐳 **环境隔离**: 使用 `run_local_pretrain_cli.sh`（容器模式）
-- 🖥️ **多节点训练**: 使用 `run_slurm_pretrain_cli.sh`（Slurm 模式）
+- 🏃 **单机测试/开发**: 使用 `run_pretrain_cli.sh` (Direct Mode) - **推荐**
+- 🖥️ **多节点训练**: 使用 `run_slurm_pretrain_cli.sh` (Slurm Mode) - **推荐**
+- 🐳 **环境隔离/特殊镜像**: 使用 `run_local_pretrain_cli.sh` (Container Mode) - 可选
 
-### Q: 容器模式的数据路径如何设置？
+### Q: Direct Mode 如何设置实验配置？
 
-**A**: 使用 `DATA_PATH` 环境变量，该路径会自动挂载到容器内：
+**A**: 必须通过 `EXP` 环境变量指定配置文件：
 
 ```bash
-DATA_PATH=/mnt/shared/datasets bash examples/run_local_pretrain_cli.sh
+# 方式 1: 导出环境变量
+export EXP=examples/megatron/exp_pretrain.yaml
+bash examples/run_pretrain_cli.sh
+
+# 方式 2: 内联设置
+EXP=config.yaml bash examples/run_pretrain_cli.sh
 ```
 
 ### Q: Slurm 模式如何查看日志？
@@ -451,14 +343,42 @@ LOG_DIR=/tmp/my_logs bash examples/run_slurm_pretrain_cli.sh
 tail -f /tmp/my_logs/log_slurm_pretrain.txt
 ```
 
-### Q: 如何验证脚本配置是否正确？
+### Q: 如何在 Slurm 上使用特定的 GPU 节点？
 
-**A**: 使用 `--dry-run` 参数（Direct 和 Container 模式支持）：
+**A**: 使用 `NODES_LIST` 环境变量或 `--nodelist` 选项：
 
 ```bash
-# 验证配置但不实际执行
+# 方式 1: 使用环境变量
+NNODES=4 NODES_LIST="mi300x[01-04]" bash examples/run_slurm_pretrain_cli.sh
+
+# 方式 2: 直接调用 CLI
+bash $PRIMUS_PATH/runner/primus-cli slurm srun \
+  -N 4 --nodelist "mi300x[01-04]" --constraint="mi300x" \
+-- train pretrain --config $EXP
+```
+
+### Q: 如何传递额外的训练参数？
+
+**A**: 在脚本后面直接添加参数即可：
+
+```bash
+# Direct mode
+bash examples/run_pretrain_cli.sh --checkpoint-interval 500 --log-level DEBUG
+
+# Slurm mode
+bash examples/run_slurm_pretrain_cli.sh --enable-profiling --dry-run
+```
+
+### Q: 如何验证配置是否正确？
+
+**A**: 使用 `--dry-run` 参数：
+
+```bash
+# Direct mode
 bash examples/run_pretrain_cli.sh --dry-run
-bash examples/run_local_pretrain_cli.sh --dry-run
+
+# Slurm mode
+bash examples/run_slurm_pretrain_cli.sh --dry-run
 ```
 
 ---
@@ -474,17 +394,14 @@ bash examples/run_local_pretrain_cli.sh --dry-run
 ## 🎯 快速参考
 
 ```bash
-# ===== Direct Mode =====
+# ===== Direct Mode (推荐用于单机测试) =====
 EXP=config.yaml bash examples/run_pretrain_cli.sh
 
-# ===== Container Mode (PyTorch) =====
-bash examples/run_local_pretrain_cli.sh
-
-# ===== Container Mode (MaxText) =====
-BACKEND=MaxText bash examples/run_local_pretrain_cli.sh
-
-# ===== Slurm Mode =====
+# ===== Slurm Mode (推荐用于多节点训练) =====
 NNODES=4 NODES_LIST="node[01-04]" bash examples/run_slurm_pretrain_cli.sh
+
+# ===== Container Mode (可选) =====
+bash examples/run_local_pretrain_cli.sh
 ```
 
 ---
