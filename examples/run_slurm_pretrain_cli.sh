@@ -4,36 +4,6 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-# Primus Slurm Mode Training Script
-#
-# Usage Examples:
-#
-# Scenario 1: Single node test with default config
-#   bash $PRIMUS_PATH/runner/primus-cli slurm srun \
-#     -N 1 --nodelist "node01" \
-#   -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-#
-# Scenario 2: Multi-node training (4 nodes)
-#   bash $PRIMUS_PATH/runner/primus-cli slurm srun \
-#     -N 4 --nodelist "node[01-04]" \
-#   -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-#
-# Scenario 3: Use custom Docker image
-#   bash $PRIMUS_PATH/runner/primus-cli slurm srun \
-#     -N 2 --nodelist "node[01-02]" \
-#   -- \
-#     --image docker.io/rocm/primus:v25.10 \
-#   -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-#
-# Scenario 4: Add environment variables for debugging
-#   bash $PRIMUS_PATH/runner/primus-cli slurm srun \
-#     -N 4 --nodelist "node[01-04]" \
-#   -- \
-#     --env NCCL_DEBUG=INFO \
-#     --env TORCH_DISTRIBUTED_DEBUG=DETAIL \
-#   -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-#
-###############################################################################
 
 # shellcheck disable=SC2086,SC2048,SC2034
 
@@ -54,19 +24,31 @@ bash $PRIMUS_PATH/runner/primus-cli slurm srun \
   -N $NNODES \
 -- train pretrain --config $EXP $* 2>&1 | tee $LOG_FILE
 
-# Scenario 2: Multi-node training (4 nodes)
-#   bash $PRIMUS_PATH/runner/primus-cli slurm srun -N 4 --nodelist "node[01-04]" \
-#   -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+# Scenario 2: Pass extra arguments
+# bash $PRIMUS_PATH/runner/primus-cli slurm srun -N $NNODES \
+# -- train pretrain \
+#   --config $EXP \
+#   --micro_batch_size 4 \
+#   --global_batch_size 128 \
+#   --train_iters 10 \
+#   $* 2>&1 | tee $LOG_FILE
+
+# Scenario 3: Multi-node training (2 nodes)
+#   bash $PRIMUS_PATH/runner/primus-cli slurm -N 2 \
+#   -- train pretrain --config $EXP $* 2>&1 | tee $LOG_FILE
 
 # Scenario 3: Use custom Docker image
-#   bash $PRIMUS_PATH/runner/primus-cli slurm srun -N 2 --nodelist "node[01-02]" \
-#   -- \
+#   bash $PRIMUS_PATH/runner/primus-cli slurm -N 2 --nodelist "node[01-02]" \
+#   -- container \
 #     --image docker.io/rocm/primus:v25.10 \
-#   -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+#     --clean \
+#   -- train pretrain --config $EXP $* 2>&1 | tee $LOG_FILE
 
-# Scenario 4: Add environment variables for debugging
-#   bash $PRIMUS_PATH/runner/primus-cli slurm srun -N 4 --nodelist "node[01-04]" \
+# Scenario 4: Add environment variables
+#   bash $PRIMUS_PATH/runner/primus-cli slurm -N 4 --nodelist "node[01-04]" \
+#   -- container \
+#     --image docker.io/rocm/primus:v25.10 \
 #   -- \
 #     --env NCCL_DEBUG=INFO \
 #     --env TORCH_DISTRIBUTED_DEBUG=DETAIL \
-#   -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+#   -- train pretrain --config $EXP $* 2>&1 | tee $LOG_FILE
