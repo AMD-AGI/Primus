@@ -11,6 +11,7 @@ EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
 
 export MASTER_PORT=${MASTER_PORT:-12345}
 export NNODES=${NNODES:-1}
+export NODES_LIST=${NODES_LIST:-"node[02,03,10,14,15,34,38]"}
 
 SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 
@@ -22,4 +23,5 @@ PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
 echo "PRIMUS_PATH: $PRIMUS_PATH"
 
 bash $PRIMUS_PATH/runner/primus-cli slurm -N $NNODES \
+--nodelist "$NODES_LIST" \
 -- train pretrain --config $EXP $* 2>&1 | tee $LOG_FILE

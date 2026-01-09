@@ -317,14 +317,14 @@ load_config_auto() {
 
     if [[ -n "$config_file" ]]; then
         # Load specified config file (must succeed)
-        LOG_DEBUG_RANK0 "[$log_prefix] Loading config: $config_file"
+        LOG_INFO_RANK0 "[$log_prefix] Loading config: $config_file"
         load_yaml_config "$config_file" || {
             LOG_ERROR "[$log_prefix] Failed to load config: $config_file"
             return 1
         }
     else
         # Load default configuration files (global and project)
-        LOG_DEBUG_RANK0 "[$log_prefix] Loading default configuration files"
+        LOG_INFO_RANK0 "[$log_prefix] Loading default configuration files"
         load_config
     fi
 

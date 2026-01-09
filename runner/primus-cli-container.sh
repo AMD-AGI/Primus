@@ -238,7 +238,7 @@ while [[ $# -gt 0 ]]; do
             if [[ -z "$opt_value" ]] || [[ "$opt_value" == --* ]]; then
                 # Boolean flag (next arg is empty or starts with --)
                 container_config[$config_key]="true"
-                LOG_DEBUG_RANK0 "[container] CLI: $config_key = true"
+                LOG_INFO_RANK0 "[container] CLI: $config_key = true"
                 shift
             else
                 # Key-value option: append with newline (all stored as multi-value)
@@ -248,7 +248,7 @@ while [[ $# -gt 0 ]]; do
                 else
                     container_config[$config_key]+=$'\n'"$opt_value"
                 fi
-                LOG_DEBUG_RANK0 "[container] CLI: $config_key += $opt_value"
+                LOG_INFO_RANK0 "[container] CLI: $config_key += $opt_value"
                 shift 2
             fi
             ;;
@@ -263,7 +263,7 @@ done
 # STEP 4.5: Validate required parameters
 ###############################################################################
 set -- "${POSITIONAL_ARGS[@]}"
-LOG_DEBUG_RANK0 "[container] Validating configuration..."
+LOG_INFO_RANK0 "[container] Validating configuration..."
 
 # Validate required parameters
 validate_config_param \
@@ -304,26 +304,26 @@ validate_env_format "${container_config[options.env]:-}" "[container]"
 # Validate volume format
 validate_volume_format "${container_config[options.volume]:-}" "[container]"
 
-LOG_DEBUG_RANK0 "[container] Parameter validation passed"
+LOG_INFO_RANK0 "[container] Parameter validation passed"
 
 ###############################################################################
 # STEP 5: Convert container_config to Docker/Podman options
 # Now we have a complete container_config with CLI overrides applied
 ###############################################################################
 
-LOG_DEBUG_RANK0 "[container] Converting configuration to container options..."
+LOG_INFO_RANK0 "[container] Converting configuration to container options..."
 
 # 1. Image (required, validated above)
 # For single-value options like image, take the last value (CLI overrides config)
 DOCKER_IMAGE=$(echo "${container_config[options.image]}" | tail -n1)
-LOG_DEBUG_RANK0 "[container] Final image: $DOCKER_IMAGE"
+LOG_INFO_RANK0 "[container] Final image: $DOCKER_IMAGE"
 
 # 2. Build CONTAINER_OPTS from configuration
 CONTAINER_OPTS=()
 
 # Always mount project root directory first
 CONTAINER_OPTS+=("-v" "$PRIMUS_PATH:$PRIMUS_PATH")
-LOG_DEBUG_RANK0 "[container] Added project root volume: $PRIMUS_PATH"
+LOG_INFO_RANK0 "[container] Added project root volume: $PRIMUS_PATH"
 
 # Cumulative options (all values used, config + CLI merge)
 CUMULATIVE_OPTIONS=("device" "cap-add" "volume" "env")
@@ -354,22 +354,22 @@ for key in "${!container_config[@]}"; do
             while IFS= read -r val; do
                 [[ -n "$val" ]] || continue
                 CONTAINER_OPTS+=("--${opt_name}" "$val")
-                LOG_DEBUG_RANK0 "[container] Added cumulative: --${opt_name} $val"
+                LOG_INFO_RANK0 "[container] Added cumulative: --${opt_name} $val"
             done <<< "$opt_value"
         else
             # Non-cumulative: only use last value (CLI overrides config)
             last_value=$(echo "$opt_value" | tail -1)
             CONTAINER_OPTS+=("--${opt_name}" "$last_value")
-            LOG_DEBUG_RANK0 "[container] Added option (last): --${opt_name} $last_value"
+            LOG_INFO_RANK0 "[container] Added option (last): --${opt_name} $last_value"
         fi
     elif [[ "$opt_value" == "true" || "$opt_value" == "1" ]]; then
         # Boolean flag: only add flag name (no value)
         CONTAINER_OPTS+=("--${opt_name}")
-        LOG_DEBUG_RANK0 "[container] Added boolean flag: --${opt_name}"
+        LOG_INFO_RANK0 "[container] Added boolean flag: --${opt_name}"
     else
         # Single value option
         CONTAINER_OPTS+=("--${opt_name}" "$opt_value")
-        LOG_DEBUG_RANK0 "[container] Added option: --${opt_name} $opt_value"
+        LOG_INFO_RANK0 "[container] Added option: --${opt_name} $opt_value"
     fi
 done
 
