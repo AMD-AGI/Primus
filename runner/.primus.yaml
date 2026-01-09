@@ -66,12 +66,10 @@ container:
     #   - "/model_weights:/model_weights:ro"
 
     # Environment variables (each passed as --env KEY=VALUE)
-    env: []
-    # env:
-    #   - "NCCL_DEBUG=INFO"
-    #   - "TORCH_DISTRIBUTED_DEBUG=DETAIL"
-    #   - "CUDA_VISIBLE_DEVICES=0,1,2,3"
-    #   - "WANDB_API_KEY=your-api-key"
+    env:
+      - "HF_TOKEN"
+      - "WANDB_API_KEY"
+      - "ENABLE_NUMA_BINDING"
 
 
 # Direct mode settings

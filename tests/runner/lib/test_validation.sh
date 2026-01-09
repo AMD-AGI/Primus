@@ -407,19 +407,33 @@ KEY2=VALUE2"
         assert_fail "Multiple env variables accepted"
     fi
 
-    # Invalid formats
-    if ! (validate_env_format "INVALID" "[test]" 2>/dev/null); then
-        assert_pass "Env without = rejected"
+    # Test pass-through format (KEY without =)
+    if validate_env_format "HF_TOKEN" "[test]" 2>/dev/null; then
+        assert_pass "Pass-through env format KEY accepted"
     else
-        assert_fail "Env without = rejected"
+        assert_fail "Pass-through env format KEY accepted"
     fi
 
     local mixed_env="KEY1=VALUE1
-INVALID"
-    if ! (validate_env_format "$mixed_env" "[test]" 2>/dev/null); then
-        assert_pass "Mixed valid/invalid env rejected"
+HF_TOKEN
+KEY2=VALUE2"
+    if validate_env_format "$mixed_env" "[test]" 2>/dev/null; then
+        assert_pass "Mixed KEY=VALUE and KEY formats accepted"
     else
-        assert_fail "Mixed valid/invalid env rejected"
+        assert_fail "Mixed KEY=VALUE and KEY formats accepted"
+    fi
+
+    # Invalid formats
+    if ! (validate_env_format "123INVALID" "[test]" 2>/dev/null); then
+        assert_pass "Env starting with number rejected"
+    else
+        assert_fail "Env starting with number rejected"
+    fi
+
+    if ! (validate_env_format "INVALID-KEY" "[test]" 2>/dev/null); then
+        assert_pass "Env with invalid character (dash) rejected"
+    else
+        assert_fail "Env with invalid character (dash) rejected"
     fi
 }
 

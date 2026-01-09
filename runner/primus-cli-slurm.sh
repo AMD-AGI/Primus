@@ -76,6 +76,10 @@ source "$RUNNER_DIR/lib/config.sh" || {
     exit 1
 }
 
+LOG_INFO "-----------------------------------------------"
+LOG_INFO "primus-cli-slurm.sh"
+LOG_INFO "-----------------------------------------------"
+
 
 # 0. Parse --config, --debug, --dry-run first if present (before first --)
 CONFIG_FILE=""
