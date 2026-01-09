@@ -176,10 +176,6 @@ while [[ $# -gt 0 ]]; do
 done
 # Restore arguments
 set -- "${PRE_PARSE_ARGS[@]}" -- "${POST_PARSE_ARGS[@]}"
-echo "--- PRE_PARSE_ARGS: ${PRE_PARSE_ARGS[*]}"
-echo "--- POST_PARSE_ARGS: ${POST_PARSE_ARGS[*]}"
-echo "---: $*"
-# exit
 
 
 ###############################################################################
