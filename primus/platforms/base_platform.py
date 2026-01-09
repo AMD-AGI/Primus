@@ -48,6 +48,7 @@ class BasePlatform(ABC):
                     s.connect(("8.8.8.8", 80))
                     ip_addr = s.getsockname()[0]
             except Exception:
+                # Best-effort IP detection; fallback to original ip_addr if fails
                 pass
 
         return ip_addr
