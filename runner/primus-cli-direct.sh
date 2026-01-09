@@ -167,6 +167,16 @@ while [[ $# -gt 0 ]]; do
                 shift 2
             fi
             ;;
+        --script|--log_file|--patch)
+            # Runner options that take a value
+            PRE_PARSE_ARGS+=("$1" "$2")
+            shift 2
+            ;;
+        --numa|--no-numa|--single)
+            # Runner boolean flags (no value)
+            PRE_PARSE_ARGS+=("$1")
+            shift
+            ;;
         --)
             # Explicit separator: remaining args are for primus Python module
             shift  # skip the '--'
@@ -296,7 +306,7 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-set "${primus_args[@]}"
+set -- "${primus_args[@]}"
 
 ###############################################################################
 # STEP 4.5: Process non-cumulative parameters (use last value only)
