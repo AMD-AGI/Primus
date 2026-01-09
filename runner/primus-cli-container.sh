@@ -112,6 +112,11 @@ source "$RUNNER_DIR/lib/validation.sh" || {
 
 HOSTNAME=$(hostname)
 
+LOG_INFO_RANK0 "-----------------------------------------------"
+LOG_INFO_RANK0 "primus-cli-container.sh"
+LOG_INFO_RANK0 "-----------------------------------------------"
+
+
 ###############################################################################
 # STEP 1: Pre-parse global options (--config, --debug, --dry-run, --clean, --help)
 ###############################################################################
@@ -121,6 +126,7 @@ DRY_RUN_MODE=false
 CLEAN_DOCKER_CONTAINER=false
 PRE_PARSE_ARGS=()
 POST_PARSE_ARGS=()
+echo "cmd: $*"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --)
@@ -149,15 +155,32 @@ while [[ $# -gt 0 ]]; do
             print_usage
             exit 0
             ;;
-        *)
-            # Collect unrecognized arguments for later processing
+        --*)
+            # Unrecognized container-level option: keep in PRE_PARSE_ARGS.
+            # If it has a non-option value (e.g., '--shm-size 8g'), grab both.
             PRE_PARSE_ARGS+=("$1")
-            shift
+            if [[ "$#" -ge 2 && "$2" != --* ]]; then
+                PRE_PARSE_ARGS+=("$2")
+                shift 2
+            else
+                shift
+            fi
             ;;
+        *)
+            # Collect this and all remaining arguments as post-parse args so
+            # they are forwarded after '--' (to Primus CLI) without being
+            # treated as container-global options.
+            POST_PARSE_ARGS+=("$@")
+            break
     esac
 done
 # Restore arguments
 set -- "${PRE_PARSE_ARGS[@]}" -- "${POST_PARSE_ARGS[@]}"
+echo "--- PRE_PARSE_ARGS: ${PRE_PARSE_ARGS[*]}"
+echo "--- POST_PARSE_ARGS: ${POST_PARSE_ARGS[*]}"
+echo "---: $*"
+# exit
+
 
 ###############################################################################
 # STEP 2: Load configuration files
@@ -436,7 +459,7 @@ CMD=(
 LOG_INFO_RANK0 "[container] Launching container with the following configuration:"
 LOG_INFO_RANK0 "    Runtime: ${CONTAINER_RUNTIME}"
 LOG_INFO_RANK0 "    Image: ${DOCKER_IMAGE}"
-LOG_INFO_RANK0 "    Container options (${#OPTION_ARGS[@]} items):"
+LOG_INFO_RANK0 "    Container options:"
 # Display container options in pairs
 opt_i=0
 while [[ $opt_i -lt ${#OPTION_ARGS[@]} ]]; do

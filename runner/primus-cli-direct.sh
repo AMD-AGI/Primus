@@ -113,6 +113,11 @@ source "$RUNNER_DIR/lib/config.sh" || {
     exit 1
 }
 
+LOG_INFO_RANK0 "-----------------------------------------------"
+LOG_INFO_RANK0 "primus-cli-direct.sh"
+LOG_INFO_RANK0 "-----------------------------------------------"
+
+
 
 ###############################################################################
 # STEP 1: Pre-parse global options (--config, --debug, --dry-run, --help)

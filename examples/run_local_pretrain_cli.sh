@@ -25,19 +25,23 @@ NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-0}
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
+# Project root
+PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
+echo "PRIMUS_PATH: $PRIMUS_PATH"
+
 # Dataset directory
-# DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 DATA_PATH=${DATA_PATH:-"$(pwd)/data"}
 echo "DATA_PATH: $DATA_PATH"
 mkdir -p "$DATA_PATH"
 
-# Project root
-PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
-echo "PRIMUS_PATH: $PRIMUS_PATH"
 
 bash $PRIMUS_PATH/runner/primus-cli \
 container \
     --image $DOCKER_IMAGE \
     --volume $DATA_PATH:$DATA_PATH \
 -- \
-    train pretrain --config $EXP $*
+    --env HSA_NO_SCRATCH_RECLAIM \
+    --env NVTE_CK_USES_BWD_V3 \
+    --env GPU_MAX_HW_QUEUES \
+    --env GLOO_SOCKET_IFNAME \
+    -- train pretrain --config $EXP $*

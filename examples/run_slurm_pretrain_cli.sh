@@ -22,6 +22,7 @@ mkdir -p "$LOG_DIR"
 PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
 echo "PRIMUS_PATH: $PRIMUS_PATH"
 
-bash $PRIMUS_PATH/runner/primus-cli slurm -N $NNODES \
---nodelist "$NODES_LIST" \
--- train pretrain --config $EXP $* 2>&1 | tee $LOG_FILE
+bash $PRIMUS_PATH/runner/primus-cli slurm srun -N $NNODES --nodelist "$NODES_LIST" \
+-- \
+   --env test=a \
+    -- train pretrain --config $EXP $* 2>&1 | tee $LOG_FILE
