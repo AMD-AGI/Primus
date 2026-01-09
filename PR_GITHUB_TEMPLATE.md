@@ -1,88 +1,91 @@
 ## 🎯 Summary
 
-Comprehensive enhancement to Primus CLI runner system with critical bug fixes, improved validation, complete test coverage (347+ tests), and better documentation.
+Add CLI-based example scripts for Primus training workflows. These new examples use the `primus-cli` command-line interface, making it easier to launch training jobs across different environments.
 
-## ✅ Test Results
+## 📚 New Example Scripts
 
-**Status**: 🎉 **ALL 10 TEST SUITES PASSING** (347+ individual tests)
-
-- ✅ `test_common.sh`: 15/15
-- ✅ `test_validation.sh`: 47/47
-- ✅ `test_config.sh`: 51/51
-- ✅ `test_execute_hooks.sh`: 41/41
-- ✅ `test_execute_patches.sh`: 36/36
-- ✅ `test_primus_env.sh`: PASSED
-- ✅ `test_primus_cli.sh`: 27/27
-- ✅ `test_primus_cli_slurm.sh`: 70/70
-- ✅ `test_primus_cli_container.sh`: 28/28
-- ✅ `test_primus_cli_direct.sh`: 32/32
-
-## 🔧 Key Changes
-
-### 1. Critical Bug Fixes 🐛
-
-**`primus-cli-direct.sh` - Fixed 2 Critical Bugs**:
-1. **Missing `--` in `set` command** (line 299) - Would crash when args contain `--`
-2. **Incomplete argument parsing** - CLI options couldn't override config (missing: `--script`, `--numa`, `--single`, etc.)
-
-### 2. New Feature: Environment Pass-through 🔐
-
-```yaml
-# Now supports secure pass-through:
-env:
-  - "KEY=VALUE"      # Set specific value
-  - "HF_TOKEN"       # Pass through from host (secure!)
+### 1. **Local Training with Container** - `examples/run_local_pretrain_cli.sh`
+```bash
+# Run training in Docker/Podman container
+bash examples/run_local_pretrain_cli.sh
 ```
 
-**Benefits**: No need to expose sensitive tokens in config files!
+**Features**:
+- ✅ Automatic container setup with ROCm image
+- ✅ Volume mounting for data access
+- ✅ Environment variable configuration
+- ✅ Support for both PyTorch and JAX/MaxText backends
 
-### 3. Comprehensive Test Coverage 🧪
+**Usage**:
+```bash
+# Set backend (optional, default is PyTorch)
+export BACKEND=MaxText  # or leave unset for PyTorch
 
-**New Test Suites**:
-- ✅ `test_primus_cli_direct.sh` (32 tests)
-- ✅ `test_primus_cli_container.sh` (28 tests)
+# Set experiment config
+export EXP=examples/megatron/exp_pretrain.yaml
 
-**Updated Test Suites**:
-- ✅ Fixed `test_config.sh` (function rename)
-- ✅ Enhanced `test_validation.sh` (pass-through support)
+# Run
+bash examples/run_local_pretrain_cli.sh
+```
 
-### 4. New Example Scripts 📚
+### 2. **Direct Mode Training** - `examples/run_pretrain_cli.sh`
+```bash
+# Run training directly without container
+bash examples/run_pretrain_cli.sh
+```
 
-- ✅ `examples/run_local_pretrain_cli.sh` - Container mode
-- ✅ `examples/run_pretrain_cli.sh` - Direct mode
-- ✅ `examples/run_slurm_pretrain_cli.sh` - Slurm cluster
+**Features**:
+- ✅ Simple, minimal example
+- ✅ Direct execution on host
+- ✅ No container overhead
 
-### 5. Documentation 📖
+**Usage**:
+```bash
+export EXP=examples/megatron/exp_pretrain.yaml
+bash examples/run_pretrain_cli.sh
+```
 
-- ✅ `RUNNER_TEST_REPORT.md` - Comprehensive test documentation
-- ✅ `PR_DESCRIPTION.md` - Detailed PR documentation
+### 3. **Slurm Cluster Training** - `examples/run_slurm_pretrain_cli.sh`
+```bash
+# Submit training job to Slurm cluster
+bash examples/run_slurm_pretrain_cli.sh
+```
 
-## 📊 Impact
+**Features**:
+- ✅ Slurm job submission
+- ✅ Multi-node training support
+- ✅ Automatic resource allocation
 
-**Modified**: 15 files
-**Additions**: +548 lines
-**Deletions**: -656 lines
-**Net**: -108 lines (more efficient!)
+**Usage**:
+```bash
+export NNODES=4
+export NODES_LIST="node[01-04]"
+export EXP=examples/megatron/exp_pretrain.yaml
+bash examples/run_slurm_pretrain_cli.sh
+```
 
-## ✅ Quality Assurance
+## 🎯 Benefits
 
-- [x] All 347+ tests passing
+1. **Easier to Use**: Simple bash scripts instead of complex command lines
+2. **Consistent Interface**: All examples use `primus-cli` for unified experience
+3. **Environment Aware**: Automatic backend detection (PyTorch/MaxText)
+4. **Production Ready**: Support for container, direct, and cluster modes
+5. **Well Documented**: Clear examples with comments and usage instructions
+
+## ✅ Testing
+
+- [x] All scripts tested with dry-run mode
+- [x] Shellcheck compliant
 - [x] Pre-commit hooks passing
-- [x] CI/CD integration tested
-- [x] No breaking changes
-- [x] 100% backward compatible
-- [x] Comprehensive documentation
+- [x] No breaking changes to existing examples
 
-## 🚀 Ready to Merge
+## 📝 Migration Notes
 
-This PR is production-ready with:
-- ✅ 2 critical bugs fixed
-- ✅ 347+ tests passing
-- ✅ 1 new security feature
-- ✅ 3 example scripts
-- ✅ Complete documentation
-- ✅ Zero breaking changes
+**Existing scripts (`examples/run_pretrain.sh`) remain unchanged and fully functional.**
 
----
+These new CLI-based scripts are alternatives that provide:
+- Simpler syntax
+- Better integration with `primus-cli`
+- More consistent experience across environments
 
-**See `PR_DESCRIPTION.md` for full technical details.**
+Users can choose to use either the original scripts or these new CLI-based versions.
