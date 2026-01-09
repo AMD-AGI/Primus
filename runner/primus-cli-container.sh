@@ -126,7 +126,7 @@ DRY_RUN_MODE=false
 CLEAN_DOCKER_CONTAINER=false
 PRE_PARSE_ARGS=()
 POST_PARSE_ARGS=()
-echo "cmd: $*"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --)
