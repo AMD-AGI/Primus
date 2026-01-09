@@ -8,27 +8,31 @@
 #
 # Usage Examples:
 #
-# Scenario 1: Single node test with default config (Llama3.1 8B BF16)
-#   bash examples/run_slurm_pretrain_cli.sh
+# Scenario 1: Single node test with default config
+#   bash $PRIMUS_PATH/runner/primus-cli slurm srun \
+#     -N 1 --nodelist "node01" \
+#   -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 #
-# Scenario 2: Multi-node training
-#   export NNODES=4
-#   export NODES_LIST="node[01-04]"
-#   bash examples/run_slurm_pretrain_cli.sh
+# Scenario 2: Multi-node training (4 nodes)
+#   bash $PRIMUS_PATH/runner/primus-cli slurm srun \
+#     -N 4 --nodelist "node[01-04]" \
+#   -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 #
-# Scenario 3: Pass extra arguments
-#   bash examples/run_slurm_pretrain_cli.sh \
+# Scenario 3: Pass extra training arguments
+#   bash $PRIMUS_PATH/runner/primus-cli slurm srun \
+#     -N 2 --nodelist "node[01-02]" \
+#   -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml \
 #     --train_iters 10 \
 #     --micro_batch_size 4 \
 #     --global_batch_size 128
 #
 # Scenario 4: Add environment variables for debugging
 #   bash $PRIMUS_PATH/runner/primus-cli slurm srun \
-#     -N $NNODES --nodelist "$NODES_LIST" \
+#     -N 4 --nodelist "node[01-04]" \
 #   -- \
 #     --env NCCL_DEBUG=INFO \
 #     --env TORCH_DISTRIBUTED_DEBUG=DETAIL \
-#   -- train pretrain --config $EXP
+#   -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 #
 ###############################################################################
 
