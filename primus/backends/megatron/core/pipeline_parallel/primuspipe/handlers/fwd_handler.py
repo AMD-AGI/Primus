@@ -11,6 +11,7 @@ from megatron.core.pipeline_parallel.schedules import (
 )
 from megatron.training.global_vars import get_args
 
+from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
 from primus.core.pipeline_parallel.scheduler.scheduler_node import (
     FuncType,
     SchedulerNode,
@@ -108,3 +109,9 @@ def megatron_fwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[Sc
 
     if idx is not None:
         scheduler_table[idx].args["recv_buffers"] = None
+
+    if "should_offload" in node.args and node.args["should_offload"]:
+        if node.args["inputs"][0] is not None:
+            OFFLOAD_BUFFER.async_offload(
+                node.args["inputs"][0], f"{node.mini_batch}-{node.chunk}-input_tensor", "input"
+            )
