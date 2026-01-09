@@ -5,3 +5,5 @@ pp_algorithm: "1f1b-interleaved" # "1f1b", "1f1b-interleaved", "zero-bubble", "z
 communication_method: "async_p2p" # "async_p2p", "batch_p2p"
 
 debug_scheduler_table: false
+
+offload: false
