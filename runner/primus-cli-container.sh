@@ -298,7 +298,7 @@ validate_cpus_format \
     "container.options.cpus" \
     "[container] Invalid cpus format: ${container_config[options.cpus]:-}. Use format <number>[.<decimal>] (e.g., --cpus 32 or config: cpus: 16.5)"
 
-# Validate env format (KEY=VALUE)
+# Validate env format (KEY=VALUE or KEY for pass-through)
 validate_env_format "${container_config[options.env]:-}" "[container]"
 
 # Validate volume format
