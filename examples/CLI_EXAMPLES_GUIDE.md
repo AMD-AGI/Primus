@@ -21,60 +21,23 @@ Primus 提供了三种训练模式的示例脚本，**重点推荐使用 Direct 
 ### 使用方法
 
 ```bash
-# 基本使用
-EXP=examples/megatron/exp_pretrain.yaml bash examples/run_pretrain_cli.sh
-
-# 或者先导出环境变量
-export EXP=examples/megatron/exp_pretrain.yaml
+# 使用默认配置（Llama3.1 8B FP8）
 bash examples/run_pretrain_cli.sh
-```
 
-### 必需参数
-
-- `EXP`: 实验配置文件路径（必须存在）
-
-### 示例
-
-#### 场景 1: 快速测试（默认配置）
-
-```bash
-# Megatron 训练，使用默认配置
-export EXP=examples/megatron/exp_pretrain.yaml
-bash examples/run_pretrain_cli.sh
-```
-
-#### 场景 2: 使用自定义配置
-
-```bash
-# 自定义实验配置
+# 使用自定义配置
 export EXP=my_experiments/custom_config.yaml
 bash examples/run_pretrain_cli.sh
+
+# 传递额外参数
+bash examples/run_pretrain_cli.sh --checkpoint-interval 500 --log-level DEBUG
 ```
 
-#### 场景 3: 传递额外参数
+> 💡 **提示**: `run_pretrain_cli.sh` 脚本中包含完整的使用示例和说明，查看脚本头部注释获取更多场景。
 
-```bash
-# 传递自定义参数到训练命令
-export EXP=examples/megatron/exp_pretrain.yaml
-bash examples/run_pretrain_cli.sh \
-  --checkpoint-interval 500 \
-  --log-level DEBUG \
-  --enable-profiling
-```
+### 默认配置
 
-#### 场景 4: 完整命令行调用（绕过脚本）
-
-如果需要更多控制，可以直接调用 `primus-cli-direct.sh`:
-
-```bash
-# 直接模式 + NUMA 绑定 + 自定义日志
-bash $PRIMUS_PATH/runner/primus-cli-direct.sh \
-  --numa \
-  --log_file /tmp/training.log \
-  -- train pretrain \
-  --config examples/megatron/exp_pretrain.yaml \
-  --checkpoint-interval 1000
-```
+- 默认使用 `examples/megatron/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml`
+- 可通过 `EXP` 环境变量覆盖
 
 ---
 
