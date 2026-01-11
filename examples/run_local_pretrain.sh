@@ -73,7 +73,7 @@ if [ "$NODE_RANK" = "0" ]; then
     echo ""
 fi
 
-# Pass all PRIMUS_ and NCCL_ environment variables into the container
+# Pass all PRIMUS_, NCCL_, RCCL_, and IONIC_ environment variables into the container
 ENV_ARGS=()
 
 while IFS='=' read -r name _; do
@@ -82,6 +82,12 @@ done < <(env | grep "^PRIMUS_")
 while IFS='=' read -r name _; do
     ENV_ARGS+=("--env" "$name")
 done < <(env | grep "^NCCL_")
+while IFS='=' read -r name _; do
+    ENV_ARGS+=("--env" "$name")
+done < <(env | grep "^RCCL_")
+while IFS='=' read -r name _; do
+    ENV_ARGS+=("--env" "$name")
+done < <(env | grep "^IONIC_")
 while IFS='=' read -r name _; do
     ENV_ARGS+=("--env" "$name")
 done < <(env | grep "^PRIMUS_TURBO_")
