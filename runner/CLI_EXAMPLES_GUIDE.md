@@ -95,16 +95,8 @@ bash runner/primus-cli direct \
 Patch scripts are executed in order before launching the Python entrypoint.
 
 ```bash
-# Create a minimal "hello world" patch script
-cat > /tmp/primus_hello_patch.sh << 'EOF'
-#!/bin/bash
-echo "[primus patch] hello world"
-exit 0
-EOF
-chmod +x /tmp/primus_hello_patch.sh
-
 bash runner/primus-cli direct \
-  --patch /tmp/primus_hello_patch.sh \
+  --patch runner/helpers/patches/00_hello_world.sh \
   -- train pretrain \
   --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
@@ -117,7 +109,7 @@ Useful for debugging or for backends that require a non-`torchrun` launcher.
 # Single process (python3), custom script, plus script args after '--'
 bash runner/primus-cli direct \
   --single \
-  --script examples/debug_run.py \
+  --script runner/helpers/examples/hello_world.py \
   -- --arg1 val1
 ```
 
