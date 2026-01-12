@@ -11,19 +11,27 @@ PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
 
 EXP=${EXP:-"examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml"}
 
+ENV_ARGS=()
+PATCH_ARGS=()
+
+USING_AINIC=${USING_AINIC:-0}
+if [ "$USING_AINIC" == "1" ]; then
+    ENV_ARGS=("--env ./runner/helpers/env/env_ainic.sh")
+fi
+
+REBUILD_PRIMUS_TURBO=${REBUILD_PRIMUS_TURBO:-0}
+if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
+    PATCH_ARGS+=("--patch ./runner/helpers/rebuild_primus_turbo.sh")
+fi
+
+PATCH_TE_FLASH_ATTN=${PATCH_TE_FLASH_ATTN:-0}
+if [[ "$PATCH_TE_FLASH_ATTN" == "1" ]]; then
+    PATCH_ARGS+=("--patch ./runner/helpers/patch_te_flash_attn_max_version.sh")
+fi
+
+
 # Scenario 1: Use default config (Llama3.1 8B BF16)
-bash $PRIMUS_PATH/runner/primus-cli direct -- train pretrain --config $EXP $*
-
-# Scenario 2: Pass extra arguments
-# bash $PRIMUS_PATH/runner/primus-cli direct -- train pretrain --config $EXP \
-#     --train_iters 10 \
-#     --micro_batch_size 4 \
-#     --global_batch_size 128 $* 
-
-# Scenario 2: Pass extra arguments
-# bash $PRIMUS_PATH/runner/primus-cli direct \
-# --env "MASTER_PORT=12345" \
-# -- train pretrain --config $EXP \
-#     --train_iters 10 \
-#     --micro_batch_size 4 \
-#     --global_batch_size 128 $* 
+bash "$PRIMUS_PATH/runner/primus-cli" direct \
+    "${ENV_ARGS[@]}" \
+    "${PATCH_ARGS[@]}" \
+    -- train pretrain --config "$EXP" "$@"
