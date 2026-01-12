@@ -1,397 +1,416 @@
 # Primus CLI Examples - Quick Start Guide
 
-This document explains how to use Primus CLI example scripts for model training.
+This document provides a quick start guide for using Primus CLI to run model training on single-node (Direct Mode) and multi-node (Slurm Mode) environments.
 
 ## 📚 Overview
 
-Primus provides three training mode example scripts, **we highly recommend using Direct and Slurm modes**:
+Primus CLI provides two primary training modes:
 
 | Script | Mode | Use Case | Rating |
 |--------|------|----------|--------|
-| `run_pretrain_cli.sh` | Direct | Run directly on host, no container overhead | ⭐⭐⭐ |
-| `run_slurm_pretrain_cli.sh` | Slurm | Cluster environment, multi-node training | ⭐⭐⭐ |
-| `run_local_pretrain_cli.sh` | Container | Use Docker/Podman container, environment isolation | ⭐ |
+| `run_pretrain_cli.sh` | Direct | Single-node training on local host | ⭐⭐⭐ |
+| `run_slurm_pretrain_cli.sh` | Slurm | Multi-node distributed training on cluster | ⭐⭐⭐ |
+
+> **Note**: For containerized environments, see `run_local_pretrain_cli.sh` or use `primus-cli container` subcommand.
 
 ---
 
-## 1️⃣ Direct Mode
+## 1️⃣ Direct Mode - Single Node Training
 
-**Use Case**: Quick testing and training in pre-configured environments ⭐⭐⭐ **Recommended**
+**Best for**: Development, testing, single-GPU/multi-GPU training on a single machine.
 
-### Usage
+### Basic Usage
 
 ```bash
 # Use default config (Llama3.1 8B BF16)
 bash examples/run_pretrain_cli.sh
 
 # Use custom config
-export EXP=my_experiments/custom_config.yaml
-bash examples/run_pretrain_cli.sh
+EXP=my_experiments/custom_config.yaml bash examples/run_pretrain_cli.sh
 
-# Pass additional arguments
+# Pass training arguments
 bash examples/run_pretrain_cli.sh \
-  --train_iters 10 \
-  --micro_batch_size 4 \
-  --global_batch_size 128
+  --train_iters 100 \
+  --micro_batch_size 2 \
+  --global_batch_size 32
 ```
-
-> 💡 **Tip**: The `run_pretrain_cli.sh` script contains complete usage examples and instructions. Check the script header comments for more scenarios.
 
 ### Default Configuration
 
-- Default: `examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml`
-- Override with `EXP` environment variable
+- **Config**: `examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml`
+- **Override**: Set `EXP` environment variable
+
+### Use Case Scenarios
+
+#### Scenario 1: Quick Model Validation
+
+Test a new model configuration before launching expensive multi-node training:
+
+```bash
+# Run 10 iterations to validate setup
+bash examples/run_pretrain_cli.sh \
+  --train_iters 10 \
+  --eval_iters 5 \
+  --log-level DEBUG
+```
+
+#### Scenario 2: Hyperparameter Tuning
+
+Experiment with different batch sizes and learning rates:
+
+```bash
+# Test different batch size
+EXP=configs/llama3_8B.yaml bash examples/run_pretrain_cli.sh \
+  --micro_batch_size 4 \
+  --global_batch_size 64 \
+  --lr 3e-4
+
+# Test with gradient accumulation
+bash examples/run_pretrain_cli.sh \
+  --micro_batch_size 2 \
+  --global_batch_size 128 \
+  --gradient_accumulation_steps 32
+```
+
+#### Scenario 3: Small-Scale Pre-training
+
+Train smaller models (< 10B parameters) on single node with 8 GPUs:
+
+```bash
+# Llama3 8B on 8x MI300X GPUs
+EXP=configs/llama3_8B-BF16.yaml bash examples/run_pretrain_cli.sh \
+  --train_iters 10000 \
+  --save_interval 1000 \
+  --eval_interval 500
+```
+
+#### Scenario 4: Fine-tuning and Continued Pre-training
+
+Resume from checkpoint for fine-tuning:
+
+```bash
+# Resume from checkpoint
+bash examples/run_pretrain_cli.sh \
+  --load_checkpoint /path/to/checkpoint \
+  --train_iters 5000 \
+  --lr 1e-5
+```
+
+#### Scenario 5: Performance Profiling
+
+Profile training performance with NUMA binding:
+
+```bash
+# Enable NUMA binding for optimal memory access
+bash $PRIMUS_PATH/runner/primus-cli direct \
+  --numa \
+  -- train pretrain \
+  --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml \
+  --profile \
+  --train_iters 50
+```
+
+#### Scenario 6: Dataset Preprocessing Validation
+
+Verify dataset loading and preprocessing:
+
+```bash
+# Dry run to check data pipeline
+bash examples/run_pretrain_cli.sh \
+  --train_iters 1 \
+  --dry-run \
+  --log-level DEBUG
+```
 
 ---
 
-## 2️⃣ Slurm Mode
+## 2️⃣ Slurm Mode - Multi-Node Training
 
-**Use Case**: Slurm-managed cluster environments, multi-node distributed training ⭐⭐⭐ **Recommended**
+**Best for**: Large-scale distributed training across multiple nodes in a cluster environment.
 
-### Usage
+### Basic Usage
 
 ```bash
-# Basic usage (single node, default config)
+# Single node quick test
 bash examples/run_slurm_pretrain_cli.sh
 
-# Specify number of nodes
+# Multi-node training
 NNODES=4 bash examples/run_slurm_pretrain_cli.sh
 
-# Custom config file
-EXP=my_experiments/custom_config.yaml bash examples/run_slurm_pretrain_cli.sh
+# Specify nodes and config
+bash $PRIMUS_PATH/runner/primus-cli slurm srun \
+  -N 4 --nodelist "node[01-04]" \
+-- train pretrain --config $EXP
 ```
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EXP` | `examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml` | Experiment config file |
-| `NNODES` | `1` | Number of nodes to use |
+| `EXP` | `examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml` | Training config file |
+| `NNODES` | `1` | Number of nodes |
 | `MASTER_PORT` | `12345` | Master node port |
-| `LOG_DIR` | `./output` | Log output directory |
+| `LOG_DIR` | `./output` | Log directory |
 
-### Examples
+### Use Case Scenarios
 
-#### Scenario 1: Single Node Quick Test
+#### Scenario 1: Large Language Model Pre-training
 
-```bash
-# Use default config, single node training
-bash examples/run_slurm_pretrain_cli.sh
-```
-
-#### Scenario 2: Standard Multi-Node Training
-
-```bash
-# 4-node training with node list
-bash $PRIMUS_PATH/runner/primus-cli slurm srun \
-  -N 4 \
-  --nodelist "node[01-04]" \
--- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-
-# Or use environment variables
-NNODES=4 EXP=my_config.yaml bash examples/run_slurm_pretrain_cli.sh
-```
-
-#### Scenario 3: Pass Additional Training Parameters
-
-```bash
-# Override batch sizes and iterations
-bash examples/run_slurm_pretrain_cli.sh \
-  --micro_batch_size 4 \
-  --global_batch_size 128 \
-  --train_iters 10
-```
-
-#### Scenario 4: Use Container Image + Clean Up
-
-```bash
-# Use custom Docker image in Slurm mode
-bash $PRIMUS_PATH/runner/primus-cli slurm srun \
-  -N 2 \
-  --nodelist "node[01-02]" \
--- container \
-  --image docker.io/rocm/primus:v25.10 \
-  --clean \
--- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-```
-
-**Explanation**:
-- `container` subcommand is used to specify container-related options
-- `--image`: Specify Docker image
-- `--clean`: Clean up container after training
-- First `--` separates Slurm options
-- Second `--` separates container options from training command
-
-#### Scenario 5: Environment Variables + Container Mode
-
-```bash
-# Set debugging environment variables
-bash $PRIMUS_PATH/runner/primus-cli slurm srun \
-  -N 4 \
-  --nodelist "node[01-04]" \
--- container \
-  --image docker.io/rocm/primus:v25.10 \
--- \
-  --env NCCL_DEBUG=INFO \
-  --env TORCH_DISTRIBUTED_DEBUG=DETAIL \
--- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-```
-
-**Explanation**:
-- After first `--`: `container` subcommand and image options
-- After second `--`: environment variables (`--env` can be used multiple times)
-- After third `--`: training command
-
-#### Scenario 6: Large-Scale Training + Full Configuration
+Train 70B+ parameter models across multiple nodes:
 
 ```bash
 #!/bin/bash
-# large_scale_training.sh - Large-scale Llama3 70B training
+# llama3_70b_pretrain.sh - Llama3 70B pre-training
 
-# Experiment configuration
-export EXP=experiments/llama3_70b.yaml
-export LOG_DIR=/shared/experiments/llama3_70b_$(date +%Y%m%d_%H%M%S)
-mkdir -p "$LOG_DIR"
+export EXP=configs/llama3_70B-BF16.yaml
+export NNODES=16
+export LOG_DIR=/shared/logs/llama3_70b_$(date +%Y%m%d_%H%M%S)
 
-# Cluster configuration
+# 16 nodes x 8 GPUs = 128 GPUs
+bash $PRIMUS_PATH/runner/primus-cli slurm srun \
+  -N $NNODES \
+  --nodelist "gpu[01-16]" \
+  --gpus-per-node=8 \
+  --constraint="mi300x" \
+-- train pretrain \
+  --config $EXP \
+  --train_iters 50000 \
+  --global_batch_size 2048 \
+  --tensor_model_parallel 8 \
+  --pipeline_model_parallel 4 \
+  2>&1 | tee $LOG_DIR/training.log
+```
+
+#### Scenario 2: Fault-Tolerant Training with Checkpointing
+
+Long-running training with frequent checkpointing:
+
+```bash
+# Configure checkpoint intervals for fault recovery
+NNODES=8 bash examples/run_slurm_pretrain_cli.sh \
+  --save_interval 500 \
+  --checkpoint_dir /shared/checkpoints/exp_001 \
+  --train_iters 100000 \
+  --load_checkpoint /shared/checkpoints/exp_001/latest
+```
+
+#### Scenario 3: Mixed Precision Training at Scale
+
+FP8 training for improved throughput:
+
+```bash
+export EXP=configs/llama3_405B-FP8.yaml
 export NNODES=32
-export MASTER_PORT=29500
 
-# Slurm + Container + Environment variables complete example
+# 32 nodes for 405B model with FP8
 bash $PRIMUS_PATH/runner/primus-cli slurm srun \
   -N $NNODES \
   --nodelist "gpu[001-032]" \
-  --gpus-per-node=8 \
-  --ntasks-per-node=8 \
--- container \
-  --image docker.io/rocm/primus:v25.10 \
-  --volume /shared/datasets:/data \
-  --volume /shared/checkpoints:/checkpoints \
--- \
-  --env NCCL_DEBUG=INFO \
-  --env NCCL_IB_HCA=mlx5_0,mlx5_1,mlx5_2,mlx5_3 \
-  --env TORCH_DISTRIBUTED_DEBUG=OFF \
-  --env CUDA_DEVICE_MAX_CONNECTIONS=1 \
-  --env HF_TOKEN \
--- train pretrain --config $EXP 2>&1 | tee "$LOG_DIR/training.log"
+-- train pretrain \
+  --config $EXP \
+  --fp8 \
+  --global_batch_size 4096
 ```
 
-**Configuration Details**:
-- 32 nodes, 8 GPUs per node (256 GPUs total)
-- Mount shared dataset and checkpoint directories
-- Configure NCCL communication parameters
-- `HF_TOKEN` passed from host environment (for model downloading)
-- Logs output to both file and terminal
+#### Scenario 4: Multi-Node Performance Benchmarking
 
-#### Scenario 7: MaxText/JAX Training
+Compare scaling efficiency across different node counts:
 
 ```bash
-# MaxText backend training (using JAX image)
-export EXP=examples/maxtext/config.yaml
-export NNODES=8
-
-bash $PRIMUS_PATH/runner/primus-cli slurm srun \
-  -N $NNODES \
-  --nodelist "gpu[01-08]" \
--- container \
-  --image docker.io/rocm/jax-training:maxtext-v25.9 \
--- \
-  --env JAX_COORDINATOR_IP \
-  --env JAX_COORDINATOR_PORT \
-  --env XLA_FLAGS="--xla_gpu_enable_async_all_gather=true" \
-  --env NVTE_FUSED_ATTN=1 \
--- train pretrain --config $EXP
+# Benchmark scaling: 1, 2, 4, 8 nodes
+for N in 1 2 4 8; do
+  echo "Testing with $N nodes..."
+  NNODES=$N bash examples/run_slurm_pretrain_cli.sh \
+    --train_iters 100 \
+    --profile \
+    --log_dir /tmp/benchmark_${N}nodes
+done
 ```
 
-#### Scenario 8: Specific GPU Nodes + Debug Mode
+#### Scenario 5: Containerized Multi-Node Training
+
+Use custom Docker images with specific dependencies:
 
 ```bash
-# Specify high-performance GPU nodes + enable debugging
-LOG_DIR=/tmp/debug_run \
+# Train with custom ROCm image
 bash $PRIMUS_PATH/runner/primus-cli slurm srun \
-  -N 2 \
-  --nodelist "mi300x[01-02]" \
-  --constraint="mi300x" \
+  -N 4 --nodelist "node[01-04]" \
+-- container \
+  --image docker.io/rocm/primus:custom-v25.10 \
+  --clean \
+-- train pretrain \
+  --config configs/custom_model.yaml \
+  --train_iters 50000
+```
+
+#### Scenario 6: Debug Mode with Environment Variables
+
+Debug distributed training issues:
+
+```bash
+# Enable verbose debugging
+bash $PRIMUS_PATH/runner/primus-cli slurm srun \
+  -N 2 --nodelist "node[01-02]" \
 -- \
   --env NCCL_DEBUG=INFO \
   --env TORCH_DISTRIBUTED_DEBUG=DETAIL \
   --env PRIMUS_LOG_LEVEL=DEBUG \
 -- train pretrain \
-  --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml \
+  --config $EXP \
+  --train_iters 10 \
   --dry-run
 ```
 
-#### Scenario 9: Simplified Version (Using Script Defaults)
+#### Scenario 7: Heterogeneous GPU Allocation
 
-If your needs are simple, you can edit the `run_slurm_pretrain_cli.sh` script:
-
-```bash
-# 1. Edit the script to modify defaults
-nano examples/run_slurm_pretrain_cli.sh
-
-# 2. Modify these lines:
-# export NNODES=${NNODES:-4}              # Default 4 nodes
-# export EXP=${EXP:-"your_default_config.yaml"}
-
-# 3. For container mode, change Scenario 1 to:
-# bash $PRIMUS_PATH/runner/primus-cli slurm srun -N $NNODES \
-# -- container \
-#   --image docker.io/rocm/primus:v25.10 \
-# -- \
-#   --env NCCL_DEBUG=INFO \
-# -- train pretrain --config $EXP $* 2>&1 | tee $LOG_FILE
-
-# 4. Run directly
-bash examples/run_slurm_pretrain_cli.sh
-```
-
----
-
-## 🔧 Advanced Usage
-
-### Passing Additional Arguments
-
-All scripts support passing additional arguments to the `primus train` command:
+Target specific GPU types in a mixed cluster:
 
 ```bash
-# Direct mode - Override batch sizes and iterations
-bash examples/run_pretrain_cli.sh \
-  --train_iters 10 \
-  --micro_batch_size 4 \
-  --global_batch_size 128
-
-# Slurm mode - Add checkpoint interval
-bash examples/run_slurm_pretrain_cli.sh \
-  --checkpoint-interval 100 \
-  --log-level DEBUG
-```
-
-### Using NUMA Binding for Performance (Direct Mode)
-
-```bash
-# Enable NUMA binding
-bash $PRIMUS_PATH/runner/primus-cli direct \
-  --numa \
-  -- train pretrain --config $EXP
-```
-
-### Slurm Advanced Options
-
-```bash
-# Specify GPU type and resources
+# Use only MI300X nodes
 bash $PRIMUS_PATH/runner/primus-cli slurm srun \
   -N 8 \
-  --nodelist "gpu[01-08]" \
-  --gpus-per-node=8 \
-  --ntasks-per-node=8 \
   --constraint="mi300x" \
+  --exclusive \
+-- train pretrain --config $EXP
+
+# Use A100 nodes for comparison
+bash $PRIMUS_PATH/runner/primus-cli slurm srun \
+  -N 8 \
+  --constraint="a100" \
   --exclusive \
 -- train pretrain --config $EXP
 ```
 
----
+#### Scenario 8: Long-Running Production Training
 
-## 🐳 Container Mode (Optional)
-
-**Note**: If you already have a pre-configured environment, we recommend using Direct or Slurm mode. Container Mode is primarily for environment isolation or special image requirements.
-
-### Basic Usage
+Production training with logging and monitoring:
 
 ```bash
-# PyTorch training
-bash examples/run_local_pretrain_cli.sh
+#!/bin/bash
+# production_training.sh - Production training workflow
 
-# MaxText/JAX training
-BACKEND=MaxText bash examples/run_local_pretrain_cli.sh
+export EXP=configs/production/llama3_70b.yaml
+export NNODES=16
+export LOG_DIR=/shared/production/runs/$(date +%Y%m%d_%H%M%S)
+export CHECKPOINT_DIR=/shared/production/checkpoints/llama3_70b
 
-# Custom image
-DOCKER_IMAGE=my-registry.com/custom:v1.0 \
-bash examples/run_local_pretrain_cli.sh
+mkdir -p "$LOG_DIR" "$CHECKPOINT_DIR"
+
+bash $PRIMUS_PATH/runner/primus-cli slurm srun \
+  -N $NNODES \
+  --nodelist "gpu[001-016]" \
+  --gpus-per-node=8 \
+  --exclusive \
+-- train pretrain \
+  --config $EXP \
+  --train_iters 200000 \
+  --save_interval 1000 \
+  --eval_interval 500 \
+  --checkpoint_dir $CHECKPOINT_DIR \
+  --log_dir $LOG_DIR \
+  --tensorboard \
+  2>&1 | tee $LOG_DIR/training.log
 ```
 
-### Detailed Configuration
+#### Scenario 9: Multi-Stage Training Pipeline
 
-For detailed container configuration options, see: `bash $PRIMUS_PATH/runner/primus-cli container --help`
+Progressively increase model size or training complexity:
+
+```bash
+# Stage 1: Warm-up with smaller batch
+NNODES=4 bash examples/run_slurm_pretrain_cli.sh \
+  --train_iters 1000 \
+  --global_batch_size 512 \
+  --lr 1e-4
+
+# Stage 2: Main training with larger batch
+NNODES=8 bash examples/run_slurm_pretrain_cli.sh \
+  --load_checkpoint /path/to/stage1_checkpoint \
+  --train_iters 50000 \
+  --global_batch_size 2048 \
+  --lr 3e-4
+
+# Stage 3: Fine-tuning with smaller learning rate
+NNODES=8 bash examples/run_slurm_pretrain_cli.sh \
+  --load_checkpoint /path/to/stage2_checkpoint \
+  --train_iters 10000 \
+  --global_batch_size 2048 \
+  --lr 1e-5
+```
+
+---
+
+## 🔧 Advanced Tips
+
+### Performance Optimization
+
+```bash
+# Direct Mode: Enable NUMA binding
+bash $PRIMUS_PATH/runner/primus-cli direct --numa -- train pretrain --config $EXP
+
+# Slurm Mode: Optimize NCCL settings
+bash $PRIMUS_PATH/runner/primus-cli slurm srun -N 8 \
+-- \
+  --env NCCL_IB_HCA=mlx5_0,mlx5_1 \
+  --env NCCL_SOCKET_IFNAME=ib0 \
+-- train pretrain --config $EXP
+```
+
+### Quick Validation
+
+```bash
+# Dry run to validate configuration
+bash examples/run_pretrain_cli.sh --dry-run
+bash examples/run_slurm_pretrain_cli.sh --dry-run
+
+# Short training run for smoke testing
+bash examples/run_pretrain_cli.sh --train_iters 5
+NNODES=2 bash examples/run_slurm_pretrain_cli.sh --train_iters 5
+```
 
 ---
 
 ## 📝 FAQ
 
-### Q: How do I choose which script to use?
+### Q: When should I use Direct Mode vs Slurm Mode?
 
 **A**:
-- 🏃 **Single machine testing/development**: Use `run_pretrain_cli.sh` (Direct Mode) - **Recommended**
-- 🖥️ **Multi-node training**: Use `run_slurm_pretrain_cli.sh` (Slurm Mode) - **Recommended**
-- 🐳 **Environment isolation/special images**: Use `run_local_pretrain_cli.sh` (Container Mode) - Optional
+- **Direct Mode**: Single-node training, models < 13B parameters, development/testing, quick experiments
+- **Slurm Mode**: Multi-node training, models > 13B parameters, production training, large-scale pre-training
 
-### Q: How do I set the experiment config in Direct Mode?
+### Q: How do I monitor training progress?
 
-**A**: Specify the config file via the `EXP` environment variable:
-
-```bash
-# Method 1: Export environment variable
-export EXP=examples/megatron/exp_pretrain.yaml
-bash examples/run_pretrain_cli.sh
-
-# Method 2: Inline setting
-EXP=config.yaml bash examples/run_pretrain_cli.sh
-```
-
-### Q: How do I view logs in Slurm mode?
-
-**A**: Logs are saved to `LOG_DIR/log_slurm_pretrain.txt`:
-
+**A**:
 ```bash
 # View logs in real-time
 tail -f ./output/log_slurm_pretrain.txt
 
-# Or specify log directory
-LOG_DIR=/tmp/my_logs bash examples/run_slurm_pretrain_cli.sh
-tail -f /tmp/my_logs/log_slurm_pretrain.txt
+# Monitor GPU utilization
+watch -n 1 rocm-smi
 ```
 
-### Q: How do I use specific GPU nodes on Slurm?
+### Q: How do I resume from a checkpoint?
 
-**A**: Use the `--nodelist` option:
-
+**A**:
 ```bash
-# Method 1: Use environment variable (recommended for simple scenarios)
-NNODES=4 bash examples/run_slurm_pretrain_cli.sh
-
-# Method 2: Call CLI directly with node list
-bash $PRIMUS_PATH/runner/primus-cli slurm srun \
-  -N 4 \
-  --nodelist "mi300x[01-04]" \
-  --constraint="mi300x" \
--- train pretrain --config $EXP
-```
-
-### Q: How do I pass additional training parameters?
-
-**A**: Add parameters after the script:
-
-```bash
-# Direct mode - Pass batch size parameters
+# Direct Mode
 bash examples/run_pretrain_cli.sh \
-  --train_iters 10 \
-  --micro_batch_size 4
+  --load_checkpoint /path/to/checkpoint
 
-# Slurm mode - Pass checkpoint parameters
-bash examples/run_slurm_pretrain_cli.sh \
-  --checkpoint-interval 500 \
-  --enable-profiling
+# Slurm Mode
+NNODES=4 bash examples/run_slurm_pretrain_cli.sh \
+  --load_checkpoint /path/to/checkpoint
 ```
 
-### Q: How do I validate the configuration is correct?
+### Q: How do I adjust parallelism settings?
 
-**A**: Use the `--dry-run` parameter:
-
+**A**:
 ```bash
-# Direct mode
-bash examples/run_pretrain_cli.sh --dry-run
-
-# Slurm mode
-bash examples/run_slurm_pretrain_cli.sh --dry-run
+# Tensor parallel + Pipeline parallel
+bash examples/run_slurm_pretrain_cli.sh \
+  --tensor_model_parallel 4 \
+  --pipeline_model_parallel 2 \
+  --data_parallel 8
 ```
 
 ---
@@ -399,41 +418,10 @@ bash examples/run_slurm_pretrain_cli.sh --dry-run
 ## 📚 References
 
 - [Primus CLI Full Documentation](../runner/README.md)
-- [Configuration File Examples](../examples/)
+- [Configuration Examples](../examples/)
 - [Troubleshooting Guide](../docs/troubleshooting.md)
 
 ---
 
-## 🎯 Quick Reference
-
-```bash
-# ===== Direct Mode (Recommended for single machine testing) =====
-# Use default config
-bash examples/run_pretrain_cli.sh
-
-# Use custom config
-EXP=config.yaml bash examples/run_pretrain_cli.sh
-
-# Pass additional arguments
-bash examples/run_pretrain_cli.sh --train_iters 10 --micro_batch_size 4
-
-# ===== Slurm Mode (Recommended for multi-node training) =====
-# Single node
-bash examples/run_slurm_pretrain_cli.sh
-
-# Multi-node
-NNODES=4 bash examples/run_slurm_pretrain_cli.sh
-
-# Specify node list
-bash $PRIMUS_PATH/runner/primus-cli slurm srun \
-  -N 4 --nodelist "node[01-04]" \
--- train pretrain --config $EXP
-
-# ===== Container Mode (Optional) =====
-bash examples/run_local_pretrain_cli.sh
-```
-
----
-
 **Last Updated**: 2026-01-12
-**Version**: v1.1
+**Version**: v1.2
