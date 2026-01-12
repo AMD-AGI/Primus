@@ -30,7 +30,7 @@ def run_benchmark(config_path, log_dir: Path, nnodes: int):
 
     with open(log_file, "w") as f:
         subprocess.run(
-            ["bash", "examples/run_slurm_pretrain.sh"],
+            ["bash", "examples/run_pretrain.sh"],
             env=env,
             stdout=f,
             stderr=subprocess.STDOUT,
