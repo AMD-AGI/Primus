@@ -12,7 +12,7 @@
 #   export PATCH_TE_FLASH_ATTN=1
 #
 # Implementation:
-#   Calls runner/helpers/patch_te_flash_attn_max_version.sh
+#   Inline patch (same as examples/run_pretrain.sh).
 ###############################################################################
 
 set -euo pipefail
@@ -28,15 +28,16 @@ if [[ -z "${PRIMUS_PATH:-}" ]]; then
 fi
 
 if declare -F LOG_INFO_RANK0 >/dev/null 2>&1; then
-    LOG_INFO_RANK0 "[hook system] PATCH_TE_FLASH_ATTN=1 → patching Transformer Engine flash-attn max version"
+    LOG_INFO_RANK0 "[hook system] PATCH_TE_FLASH_ATTN=1 → patching _flash_attn_max_version in attention.py"
 else
-    echo "[INFO] [hook system] PATCH_TE_FLASH_ATTN=1 → patching Transformer Engine flash-attn max version" >&2
+    echo "[INFO] [hook system] PATCH_TE_FLASH_ATTN=1 → patching _flash_attn_max_version in attention.py" >&2
 fi
 
-PATCH_SCRIPT="${PRIMUS_PATH}/runner/helpers/patch_te_flash_attn_max_version.sh"
-if [[ ! -f "$PATCH_SCRIPT" ]]; then
-    echo "[ERROR] [hook system] Patch script not found: $PATCH_SCRIPT" >&2
+ATTENTION_PY="/opt/conda/envs/py_3.10/lib/python3.10/site-packages/transformer_engine/pytorch/attention.py"
+if [[ ! -f "$ATTENTION_PY" ]]; then
+    echo "[ERROR] [hook system] attention.py not found: $ATTENTION_PY" >&2
     exit 1
 fi
 
-bash "$PATCH_SCRIPT"
+sed -i 's/_flash_attn_max_version = PkgVersion(\".*\")/_flash_attn_max_version = PkgVersion(\"3.0.0.post1\")/' \
+    "$ATTENTION_PY"
