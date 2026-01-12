@@ -374,15 +374,15 @@ fi
 ###############################################################################
 # Execute patch scripts from config + CLI.
 # Note: direct_config[patch] is stored as a newline-separated list.
-# Always call execute_patches so that env-driven auto patches (e.g.,
-# REBUILD_PRIMUS_TURBO=1) can run even when no --patch entries are configured.
-# shellcheck disable=SC1091
-source "${RUNNER_DIR}/helpers/execute_patches.sh"
-# Reset collected extra args from patches for this run
-PATCH_EXTRA_PRIMUS_ARGS=()
-if ! execute_patches "${direct_config[patch]:-}"; then
-    LOG_ERROR "[direct] Patch execution failed"
-    exit 1
+if [[ -n "${direct_config[patch]:-}" ]]; then
+    # shellcheck disable=SC1091
+    source "${RUNNER_DIR}/helpers/execute_patches.sh"
+    # Reset collected extra args from patches for this run
+    PATCH_EXTRA_PRIMUS_ARGS=()
+    if ! execute_patches "${direct_config[patch]}"; then
+        LOG_ERROR "[direct] Patch execution failed"
+        exit 1
+    fi
 fi
 
 ###############################################################################
