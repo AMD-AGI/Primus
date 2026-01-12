@@ -19,12 +19,6 @@ if [ "$USING_AINIC" == "1" ]; then
     ENV_ARGS=("--env ./runner/helpers/env/env_ainic.sh")
 fi
 
-PATCH_TE_FLASH_ATTN=${PATCH_TE_FLASH_ATTN:-0}
-if [[ "$PATCH_TE_FLASH_ATTN" == "1" ]]; then
-    PATCH_ARGS+=("--patch ./runner/helpers/patch_te_flash_attn_max_version.sh")
-fi
-
-
 # Scenario 1: Use default config (Llama3.1 8B BF16)
 bash "$PRIMUS_PATH/runner/primus-cli" direct \
     "${ENV_ARGS[@]}" \
