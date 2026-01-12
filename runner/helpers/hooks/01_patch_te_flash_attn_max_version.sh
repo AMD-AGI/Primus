@@ -27,15 +27,11 @@ if [[ -z "${PRIMUS_PATH:-}" ]]; then
     export PRIMUS_PATH
 fi
 
-if declare -F LOG_INFO_RANK0 >/dev/null 2>&1; then
-    LOG_INFO_RANK0 "[hook system] PATCH_TE_FLASH_ATTN=1 → patching _flash_attn_max_version in attention.py"
-else
-    echo "[INFO] [hook system] PATCH_TE_FLASH_ATTN=1 → patching _flash_attn_max_version in attention.py" >&2
-fi
+LOG_INFO_RANK0 "[hook system] PATCH_TE_FLASH_ATTN=1 → patching _flash_attn_max_version in attention.py"
 
 ATTENTION_PY="/opt/conda/envs/py_3.10/lib/python3.10/site-packages/transformer_engine/pytorch/attention.py"
 if [[ ! -f "$ATTENTION_PY" ]]; then
-    echo "[ERROR] [hook system] attention.py not found: $ATTENTION_PY" >&2
+    LOG_ERROR_RANK0 "[hook system] attention.py not found: $ATTENTION_PY"
     exit 1
 fi
 

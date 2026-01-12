@@ -24,7 +24,7 @@ in `examples/run_pretrain.sh` (`PATH_TO_BNXT_TAR_PACKAGE`).
   - If the tarball is missing, the hook logs a skip message and continues.
 
 
-## Primus-Turbo rebuild patch (`runner/helpers/rebuild_primus_turbo.sh`)
+## Primus-Turbo rebuild hook (`runner/helpers/hooks/00_rebuild_primus_turbo.sh`)
 
 Rebuilds Primus-Turbo from source, mirroring the logic that used to live in
 `examples/run_pretrain.sh` (`REBUILD_PRIMUS_TURBO`).
@@ -42,11 +42,11 @@ Rebuilds Primus-Turbo from source, mirroring the logic that used to live in
   # export GPU_ARCHS="gfx942;gfx90a"
   # export PRIMUS_TURBO_REF="v0.3.0"   # or a commit SHA / branch name
 
+  export REBUILD_PRIMUS_TURBO=1
   primus-cli direct \
-    --patch runner/helpers/rebuild_primus_turbo.sh \
     -- train pretrain --config examples/megatron/exp_pretrain.yaml
   ```
 
-- **Exit codes (for `execute_patches.sh`)**
-  - `0` — rebuild succeeded
-  - `other` — error, stops the patch pipeline
+- **Behavior**
+  - If `REBUILD_PRIMUS_TURBO=1`, the system hook rebuilds Primus-Turbo.
+  - The build workspace defaults to `/tmp/primus_turbo_$HOSTNAME` (override via `PRIMUS_TURBO_BUILD_DIR`).
