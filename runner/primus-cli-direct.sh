@@ -372,18 +372,14 @@ fi
 ###############################################################################
 # STEP 8: Execute patch scripts
 ###############################################################################
-# Build and execute patch scripts array from config + CLI
+# Execute patch scripts from config + CLI.
+# Note: direct_config[patch] is stored as a newline-separated list.
 if [[ -n "${direct_config[patch]:-}" ]]; then
-    patch_scripts=()
-    while IFS= read -r patch_entry; do
-        patch_scripts+=("$patch_entry")
-    done <<< "${direct_config[patch]}"
-
     # shellcheck disable=SC1091
     source "${RUNNER_DIR}/helpers/execute_patches.sh"
     # Reset collected extra args from patches for this run
     PATCH_EXTRA_PRIMUS_ARGS=()
-    if ! execute_patches "${patch_scripts[@]}"; then
+    if ! execute_patches "${direct_config[patch]}"; then
         LOG_ERROR "[direct] Patch execution failed"
         exit 1
     fi
