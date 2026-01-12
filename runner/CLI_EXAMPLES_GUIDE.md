@@ -115,17 +115,17 @@ bash runner/primus-cli direct \
 
 The Slurm wrapper uses a **two-level `--` separator**:
 - **Before the first `--`**: passed to Slurm (`srun|sbatch` and all Slurm flags).
-- **After the first `--`**: Primus slurm entry (`container | direct | preflight`).
+- **After the first `--`**: Primus slurm entry (`container | direct`).
 - **After the second `--`** (optional): arguments to the Primus CLI entry (for example, `primus-cli container ...` arguments).
 
 ```bash
 cd /path/to/Primus
 
-# Run a preflight check across 4 nodes (no training)
+# Minimal multi-node training launch (example: 4 nodes)
 bash runner/primus-cli slurm srun \
   -N 4 \
   --nodelist "node[01-04]" \
--- preflight
+-- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
 ### CLI Feature Scenarios
@@ -138,7 +138,7 @@ The examples below focus on **primus-cli slurm launcher features** (not training
 bash runner/primus-cli --dry-run slurm srun \
   -N 2 \
   --nodelist "node[01-02]" \
--- preflight
+-- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
 #### Scenario 2: Common Slurm flags (partition/reservation/account/qos/constraint)
@@ -152,7 +152,7 @@ bash runner/primus-cli slurm srun \
   --qos my_qos \
   --constraint "mi300x" \
   --exclusive \
--- preflight
+-- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
 #### Scenario 3: Run inside a container on Slurm (`-- container`)
@@ -171,7 +171,7 @@ bash runner/primus-cli slurm srun \
   --env NCCL_DEBUG=INFO \
 -- \
   # (primus-cli command inside container)
-  preflight
+  train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
 #### Scenario 4: Slurm logging (srun/sbatch native logs)
@@ -181,7 +181,7 @@ bash runner/primus-cli slurm srun \
 bash runner/primus-cli slurm sbatch \
   --output="primus-%j.out" \
   -N 2 \
--- preflight
+-- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
 ---
@@ -190,7 +190,7 @@ bash runner/primus-cli slurm sbatch \
 
 ```bash
 # Dry-run is your best friend for validating quoting and the final Slurm command:
-bash runner/primus-cli --dry-run slurm srun -N 2 --nodelist "node[01-02]" -- preflight
+bash runner/primus-cli --dry-run slurm srun -N 2 --nodelist "node[01-02]" -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
 ---
