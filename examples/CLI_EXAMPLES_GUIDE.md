@@ -12,7 +12,7 @@ Primus CLI provides two primary training modes:
 | Mode | Command | Use Case | Rating |
 |------|---------|----------|--------|
 | Direct | `primus-cli direct` | Single-node training on local host | ⭐⭐⭐ |
-| Slurm | `primus-cli slurm srun` | Multi-node distributed training on a cluster | ⭐⭐⭐ |
+| Slurm | `primus-cli slurm` | Multi-node distributed training on a cluster | ⭐⭐⭐ |
 
 > **Note**: For containerized environments, use `primus-cli container` (or `slurm ... -- container ...` in Slurm mode).
 
@@ -32,12 +32,6 @@ export PRIMUS_PATH="$(pwd)"
 bash "$PRIMUS_PATH/runner/primus-cli" direct \
   -- train pretrain \
   --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-
-# Use custom config
-EXP=my_experiments/custom_config.yaml \
-bash "$PRIMUS_PATH/runner/primus-cli" direct \
-  -- train pretrain \
-  --config "$EXP"
 
 # Pass training arguments
 bash "$PRIMUS_PATH/runner/primus-cli" direct \
