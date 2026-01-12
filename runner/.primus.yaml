@@ -72,6 +72,7 @@ container:
       - "NNODES"
       - "NODE_RANK"
       - "GPUS_PER_NODE"
+      - "DOCKER_IMAGE"
       - "HF_TOKEN"
       - "WANDB_API_KEY"
       - "ENABLE_NUMA_BINDING"
@@ -79,8 +80,14 @@ container:
       - "USING_AINIC"
       - "PATCH_TE_FLASH_ATTN"
       - "REBUILD_BNXT"
-
-
+      - "HSA_NO_SCRATCH_RECLAIM"
+      - "NVTE_CK_USES_BWD_V3"
+      - "NCCL_IB_HCA"
+      - "NCCL_SOCKET_IFNAME"
+      - "GLOO_SOCKET_IFNAME"
+      - "NCCL_IB_GID_INDEX"
+      - "PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32"
+      - "NVTE_CK_IS_V3_ATOMIC_FP32"
 # Direct mode settings
 direct:
   debug: false
