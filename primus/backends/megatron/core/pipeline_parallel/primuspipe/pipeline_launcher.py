@@ -61,7 +61,13 @@ class PrimusPipelineParallelLauncher:
             assert self.vpp_size == 2, "zbv-formatted, v-half, and v-min require vpp_size to be 2"
 
         self.handler_dict = megatron_primuspipe_handler_dict
-        self.schedule_runner = ScheduleRunner(self.handler_dict)
+
+        pre_process_func = None
+        self.offload = args.offload
+        if self.offload:
+            from primus.core.pipeline_parallel.handler.offload_handler import offload_preprocess
+            pre_process_func = offload_preprocess
+        self.schedule_runner = ScheduleRunner(self.handler_dict, pre_process_func=pre_process_func)
 
         self.forward_data_store = []
 
@@ -154,6 +160,12 @@ class PrimusPipelineParallelLauncher:
         kwargs = {}
         if self.pp_algorithm == "zbv-formatted":
             kwargs["combined_forward_backward"] = get_args().overlap_moe_expert_parallel_comm
+
+        if self.pp_algorithm in ("zbv-formatted", "v-half", "v-min"):
+            kwargs["offload"] = self.offload
+        else:
+            assert not offload, f"offload is not supported for {self.pp_algorithm} pp algorithm"
+
         self.schedule_instance = produce_schedule_instance(
             self.pp_algorithm, self.pp_size, self.vpp_size, num_microbatches, **kwargs
         )
