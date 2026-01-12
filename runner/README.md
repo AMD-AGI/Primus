@@ -219,7 +219,6 @@ watch -n 1 rocm-smi
 ## 📚 References
 
 - [CLI User Guide](../docs/cli/PRIMUS-CLI-GUIDE.md)
-- [Runner hooks (system hooks)](./HOOKS.md)
 - [Configuration Examples](../examples/)
 - [Troubleshooting Guide](../docs/troubleshooting.md)
 
