@@ -95,9 +95,16 @@ bash runner/primus-cli direct \
 Patch scripts are executed in order before launching the Python entrypoint.
 
 ```bash
+# Create a minimal "hello world" patch script
+cat > /tmp/primus_hello_patch.sh << 'EOF'
+#!/bin/bash
+echo "[primus patch] hello world"
+exit 0
+EOF
+chmod +x /tmp/primus_hello_patch.sh
+
 bash runner/primus-cli direct \
-  # Optional system hooks controlled by env vars:
-  # REBUILD_PRIMUS_TURBO=1 \
+  --patch /tmp/primus_hello_patch.sh \
   -- train pretrain \
   --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
