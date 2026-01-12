@@ -47,100 +47,71 @@ bash "$PRIMUS_PATH/runner/primus-cli" direct \
 - **Config**: `examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml`
 - **Override**: Set `EXP` environment variable
 
-### Use Case Scenarios
+### CLI Feature Scenarios
 
-#### Scenario 1: Quick Model Validation
+The examples below focus on **Primus CLI features and runner behavior** (not training/hyperparameter tuning).
 
-Test a new model configuration before launching expensive multi-node training:
+#### Scenario 1: Print the command without running (`--dry-run`)
+
+Use this to validate parsing, config loading, and the final launcher command.
 
 ```bash
-# Run 10 iterations to validate setup
 bash "$PRIMUS_PATH/runner/primus-cli" direct \
+  --dry-run \
   -- train pretrain \
-  --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml \
-  --train_iters 10 \
-  --eval_iters 5 \
-  --log-level DEBUG
+  --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
-#### Scenario 2: Hyperparameter Tuning
-
-Experiment with different batch sizes and learning rates:
+#### Scenario 2: Pass environment variables via runner (`--env`)
 
 ```bash
-# Test different batch size
-EXP=configs/llama3_8B.yaml \
 bash "$PRIMUS_PATH/runner/primus-cli" direct \
+  --env NCCL_DEBUG=INFO \
+  --env PRIMUS_LOG_LEVEL=DEBUG \
   -- train pretrain \
-  --config "$EXP" \
-  --micro_batch_size 4 \
-  --global_batch_size 64 \
-  --lr 3e-4
-
-# Test with gradient accumulation
-bash "$PRIMUS_PATH/runner/primus-cli" direct \
-  -- train pretrain \
-  --config "$EXP" \
-  --micro_batch_size 2 \
-  --global_batch_size 128 \
-  --gradient_accumulation_steps 32
+  --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
-#### Scenario 3: Small-Scale Pre-training
-
-Train smaller models (< 10B parameters) on single node with 8 GPUs:
+#### Scenario 3: Save logs to a file (`--log_file`)
 
 ```bash
-# Llama3 8B on 8x MI300X GPUs
-EXP=configs/llama3_8B-BF16.yaml \
 bash "$PRIMUS_PATH/runner/primus-cli" direct \
+  --log_file /tmp/primus_direct.log \
   -- train pretrain \
-  --config "$EXP" \
-  --train_iters 10000 \
-  --save_interval 1000 \
-  --eval_interval 500
+  --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
-#### Scenario 4: Fine-tuning and Continued Pre-training
-
-Resume from checkpoint for fine-tuning:
+#### Scenario 4: Enable NUMA binding (`--numa`)
 
 ```bash
-# Resume from checkpoint
-bash "$PRIMUS_PATH/runner/primus-cli" direct \
-  -- train pretrain \
-  --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml \
-  --load_checkpoint /path/to/checkpoint \
-  --train_iters 5000 \
-  --lr 1e-5
-```
-
-#### Scenario 5: Performance Profiling
-
-Profile training performance with NUMA binding:
-
-```bash
-# Enable NUMA binding for optimal memory access
 bash "$PRIMUS_PATH/runner/primus-cli" direct \
   --numa \
   -- train pretrain \
-  --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml \
-  --profile \
-  --train_iters 50
+  --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
-#### Scenario 6: Dataset Preprocessing Validation
+#### Scenario 5: Apply patch scripts before running (`--patch`)
 
-Verify dataset loading and preprocessing:
+Patch scripts are executed in order before launching the Python entrypoint.
 
 ```bash
-# Dry run to check data pipeline
 bash "$PRIMUS_PATH/runner/primus-cli" direct \
+  --patch runner/helpers/rebuild_bnxt.sh \
+  --patch runner/helpers/rebuild_primus_turbo.sh \
   -- train pretrain \
-  --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml \
-  --train_iters 1 \
-  --dry-run \
-  --log-level DEBUG
+  --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+```
+
+#### Scenario 6: Run a custom Python entrypoint (`--script`) / single-process mode (`--single`)
+
+Useful for debugging or for backends that require a non-`torchrun` launcher.
+
+```bash
+# Single process (python3), custom script, plus script args after '--'
+bash "$PRIMUS_PATH/runner/primus-cli" direct \
+  --single \
+  --script examples/debug_run.py \
+  -- --arg1 val1
 ```
 
 ---
