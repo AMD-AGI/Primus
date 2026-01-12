@@ -1,4 +1,4 @@
-## bnxt rebuild patch (`runner/helpers/rebuild_bnxt.sh`)
+## bnxt rebuild hook (`runner/helpers/hooks/02_rebuild_bnxt.sh`)
 
 Rebuilds the `bnxt` lib from a tarball, mirroring the logic that used to live
 in `examples/run_pretrain.sh` (`PATH_TO_BNXT_TAR_PACKAGE`).
@@ -11,15 +11,17 @@ in `examples/run_pretrain.sh` (`PATH_TO_BNXT_TAR_PACKAGE`).
   ```bash
   export PATH_TO_BNXT_TAR_PACKAGE=/path/to/libbnxt_re-xxx.tar.gz
 
+  # The system hook will run automatically before command-specific hooks:
+  export REBUILD_BNXT=1
+  export PATH_TO_BNXT_TAR_PACKAGE=/path/to/libbnxt_re-xxx.tar.gz
+
   primus-cli direct \
-    --patch runner/helpers/rebuild_bnxt.sh \
     -- train pretrain --config examples/megatron/exp_pretrain.yaml
   ```
 
-- **Exit codes (for `execute_patches.sh`)**
-  - `0` — rebuild succeeded
-  - `2` — skipped (no tarball found)
-  - `other` — error, stops the patch pipeline
+- **Behavior**
+  - If `REBUILD_BNXT=1` and the tarball exists, the hook rebuilds bnxt.
+  - If the tarball is missing, the hook logs a skip message and continues.
 
 
 ## Primus-Turbo rebuild patch (`runner/helpers/rebuild_primus_turbo.sh`)

@@ -96,7 +96,6 @@ Patch scripts are executed in order before launching the Python entrypoint.
 
 ```bash
 bash "$PRIMUS_PATH/runner/primus-cli" direct \
-  --patch runner/helpers/rebuild_bnxt.sh \
   --patch runner/helpers/rebuild_primus_turbo.sh \
   -- train pretrain \
   --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
