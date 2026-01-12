@@ -32,7 +32,6 @@ export LOG_DIR=${LOG_DIR:-"./output"}
 LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
 
-# Scenario 1: Single node test with default config
 # NOTE: The --env entries below are passed into the container and will be visible
 # to the Primus training process (and system hooks) inside the container.
 bash "$PRIMUS_PATH/runner/primus-cli" slurm srun "${SLURM_ARGS[@]}" \

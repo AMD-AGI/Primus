@@ -11,16 +11,11 @@ PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
 
 EXP=${EXP:-"examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml"}
 
-ENV_ARGS=()
-PATCH_ARGS=()
-
-USING_AINIC=${USING_AINIC:-0}
-if [ "$USING_AINIC" == "1" ]; then
-    ENV_ARGS=("--env ./runner/helpers/env/env_ainic.sh")
-fi
+export PATCH_TE_FLASH_ATTN=${PATCH_TE_FLASH_ATTN:-0}
+export REBUILD_PRIMUS_TURBO=${REBUILD_PRIMUS_TURBO:-0}
+export REBUILD_BNXT=${REBUILD_BNXT:-0}
+export USING_AINIC=${USING_AINIC:-0}
 
 # Scenario 1: Use default config (Llama3.1 8B BF16)
 bash "$PRIMUS_PATH/runner/primus-cli" direct \
-    "${ENV_ARGS[@]}" \
-    "${PATCH_ARGS[@]}" \
     -- train pretrain --config "$EXP" "$@"
