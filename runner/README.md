@@ -122,8 +122,7 @@ The Slurm wrapper uses a **two-level `--` separator**:
 cd /path/to/Primus
 
 # Minimal multi-node training launch (example: 4 nodes)
-bash runner/primus-cli slurm srun \
-  -N 4 \
+bash runner/primus-cli slurm -N 2 \
   --nodelist "node[01-04]" \
 -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
@@ -135,7 +134,7 @@ The examples below focus on **primus-cli slurm launcher features** (not training
 #### Scenario 1: Dry-run the Slurm launch (global `--dry-run`)
 
 ```bash
-bash runner/primus-cli --dry-run slurm srun \
+bash runner/primus-cli --dry-run slurm \
   -N 2 \
   --nodelist "node[01-02]" \
 -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
@@ -144,7 +143,7 @@ bash runner/primus-cli --dry-run slurm srun \
 #### Scenario 2: Common Slurm flags (partition/reservation/account/qos/constraint)
 
 ```bash
-bash runner/primus-cli slurm srun \
+bash runner/primus-cli slurm \
   -N 4 \
   -p AIG_Model \
   --reservation my_reservation \
@@ -160,27 +159,11 @@ bash runner/primus-cli slurm srun \
 This is the most common pattern when you need a fixed software stack.
 
 ```bash
-bash runner/primus-cli slurm srun \
+bash runner/primus-cli slurm \
   -N 4 \
   --nodelist "node[01-04]" \
--- container \
-  --image "rocm/primus:v25.10" \
-  --clean \
--- \
-  # (primus-cli container args)
-  --env NCCL_DEBUG=INFO \
--- \
-  # (primus-cli command inside container)
-  train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-```
-
-#### Scenario 4: Slurm logging (srun/sbatch native logs)
-
-```bash
-# sbatch: let Slurm write stdout/stderr to a file
-bash runner/primus-cli slurm sbatch \
-  --output="primus-%j.out" \
-  -N 2 \
+-- --image "rocm/primus:v25.10" \
+-- --env NCCL_DEBUG=INFO \
 -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
@@ -190,31 +173,11 @@ bash runner/primus-cli slurm sbatch \
 
 ```bash
 # Dry-run is your best friend for validating quoting and the final Slurm command:
-bash runner/primus-cli --dry-run slurm srun -N 2 --nodelist "node[01-02]" -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+bash runner/primus-cli slurm -N 2 --nodelist "node[01-02]" --dry-run -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
 ---
 
-## 📝 FAQ
-
-### Q: When should I use Direct Mode vs Slurm Mode?
-
-**A**:
-- **Direct Mode**: You’re launching on a single machine (no scheduler).
-- **Slurm Mode**: You’re launching on a Slurm cluster and need Slurm allocation (`srun/sbatch`, nodelist, reservation, etc.).
-
-### Q: How do I monitor training progress?
-
-**A**:
-```bash
-# View logs in real-time
-tail -f ./output/log_slurm_pretrain.txt
-
-# Monitor GPU utilization
-watch -n 1 rocm-smi
-```
-
----
 
 ## 📚 References
 

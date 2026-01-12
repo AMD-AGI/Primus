@@ -34,9 +34,8 @@ mkdir -p "$LOG_DIR"
 
 # NOTE: The --env entries below are passed into the container and will be visible
 # to the Primus training process (and system hooks) inside the container.
-bash "$PRIMUS_PATH/runner/primus-cli" slurm srun "${SLURM_ARGS[@]}" \
--- container \
-  --image "${DOCKER_IMAGE:-rocm/primus:v25.10}" \
+bash "$PRIMUS_PATH/runner/primus-cli" slurm "${SLURM_ARGS[@]}" \
+-- --image "${DOCKER_IMAGE:-rocm/primus:v25.10}" \
 -- \
   --env "USING_AINIC=${USING_AINIC:-0}" \
   --env "PATCH_TE_FLASH_ATTN=${PATCH_TE_FLASH_ATTN:-0}" \
