@@ -444,7 +444,7 @@ bash "$PRIMUS_PATH/runner/primus-cli" slurm srun \
 
 ## 📚 References
 
-- [Primus CLI Full Documentation](../runner/README.md)
+- [Primus CLI Full Documentation](./README.md)
 - [Configuration Examples](../examples/)
 - [Troubleshooting Guide](../docs/troubleshooting.md)
 
