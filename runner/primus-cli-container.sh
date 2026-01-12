@@ -323,8 +323,10 @@ validate_cpus_format \
 #   - "KEY=VALUE"  → --env KEY=VALUE
 #   - "KEY"        → if KEY is set in current env, expand to KEY=$VALUE;
 #                    otherwise pass through as bare KEY.
+env_positional_args=()
+declare -A env_keys_seen=()
+
 if [[ -n "${container_config[options.env]:-}" ]]; then
-    env_positional_args=()
     while IFS= read -r env_entry; do
         [[ -n "$env_entry" ]] || continue
 
@@ -344,9 +346,27 @@ if [[ -n "${container_config[options.env]:-}" ]]; then
             fi
         fi
 
+        env_key="${env_kv%%=*}"
+        env_keys_seen["$env_key"]=1
         env_positional_args+=(--env "$env_kv")
     done <<< "${container_config[options.env]}"
+fi
 
+# Auto-pass through common runtime/perf/network env vars into container when present.
+# This keeps container runs closer to direct-mode behavior without requiring users
+# to manually list every env var in config/CLI.
+while IFS= read -r env_key; do
+    [[ "$env_key" =~ ^(PRIMUS_|NCCL_|GLOO_) ]] || continue
+    [[ -n "${env_keys_seen[$env_key]:-}" ]] && continue
+
+    env_val="${!env_key-}"
+    [[ -n "$env_val" ]] || continue
+
+    env_keys_seen["$env_key"]=1
+    env_positional_args+=(--env "${env_key}=${env_val}")
+done < <(compgen -e)
+
+if [[ ${#env_positional_args[@]} -gt 0 ]]; then
     # Prepend env-derived args so they appear before other POSITIONAL_ARGS
     POSITIONAL_ARGS=( "${env_positional_args[@]}" "${POSITIONAL_ARGS[@]}" )
 fi
