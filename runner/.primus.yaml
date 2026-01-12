@@ -67,6 +67,11 @@ container:
 
     # Environment variables (each passed as --env KEY=VALUE)
     env:
+      - "MASTER_ADDR"
+      - "MASTER_PORT"
+      - "NNODES"
+      - "NODE_RANK"
+      - "GPUS_PER_NODE"
       - "HF_TOKEN"
       - "WANDB_API_KEY"
       - "ENABLE_NUMA_BINDING"

@@ -317,8 +317,39 @@ validate_cpus_format \
     "container.options.cpus" \
     "[container] Invalid cpus format: ${container_config[options.cpus]:-}. Use format <number>[.<decimal>] (e.g., --cpus 32 or config: cpus: 16.5)"
 
-# Validate env format (KEY=VALUE or KEY for pass-through)
-validate_env_format "${container_config[options.env]:-}" "[container]"
+# Convert container.options.env into inner Primus --env arguments instead of
+# treating them as container-level KEY=VALUE pairs. This allows config-driven
+# env propagation to work uniformly with primus-cli-direct semantics:
+#   - "KEY=VALUE"  → --env KEY=VALUE
+#   - "KEY"        → if KEY is set in current env, expand to KEY=$VALUE;
+#                    otherwise pass through as bare KEY.
+if [[ -n "${container_config[options.env]:-}" ]]; then
+    env_positional_args=()
+    while IFS= read -r env_entry; do
+        [[ -n "$env_entry" ]] || continue
+
+        env_kv="$env_entry"
+        # Only expand KEY→KEY=VALUE when:
+        #   - there is no '=' present, and
+        #   - the entry looks like a shell identifier (avoids paths like ./foo.sh)
+        if [[ "$env_entry" != *"="* && "$env_entry" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            env_key="$env_entry"
+            env_val="${!env_key-}"
+            if [[ -n "$env_val" ]]; then
+                env_kv="${env_key}=${env_val}"
+            else
+                # If KEY is not set in the current environment, ignore this entry
+                # instead of passing a bare KEY through.
+                continue
+            fi
+        fi
+
+        env_positional_args+=(--env "$env_kv")
+    done <<< "${container_config[options.env]}"
+
+    # Prepend env-derived args so they appear before other POSITIONAL_ARGS
+    POSITIONAL_ARGS=( "${env_positional_args[@]}" "${POSITIONAL_ARGS[@]}" )
+fi
 
 # Validate volume format
 validate_volume_format "${container_config[options.volume]:-}" "[container]"
@@ -345,7 +376,9 @@ CONTAINER_OPTS+=("-v" "$PRIMUS_PATH:$PRIMUS_PATH")
 LOG_INFO_RANK0 "[container] Added project root volume: $PRIMUS_PATH"
 
 # Cumulative options (all values used, config + CLI merge)
-CUMULATIVE_OPTIONS=("device" "cap-add" "volume" "env")
+# Note: options.env is handled separately above and is NOT treated as a
+# container-level --env; it becomes inner primus-cli --env arguments instead.
+CUMULATIVE_OPTIONS=("device" "cap-add" "volume")
 
 for key in "${!container_config[@]}"; do
     [[ "$key" =~ ^options\. ]] || continue

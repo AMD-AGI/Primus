@@ -20,8 +20,8 @@ LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
 
 # Scenario 1: Single node test with default config
-bash $PRIMUS_PATH/runner/primus-cli slurm srun \
-  -N $NNODES \
+bash $PRIMUS_PATH/runner/primus-cli slurm srun -N $NNODES --nodelist "node[02,03,10,14,15,34,38]" \
+-- --env "./runner/helpers/envs/enable_ainic.sh" \
 -- train pretrain --config $EXP $* 2>&1 | tee $LOG_FILE
 
 # Scenario 2: Pass extra arguments
@@ -39,9 +39,7 @@ bash $PRIMUS_PATH/runner/primus-cli slurm srun \
 
 # Scenario 3: Use custom Docker image
 #   bash $PRIMUS_PATH/runner/primus-cli slurm -N 2 --nodelist "node[01-02]" \
-#   -- container \
-#     --image docker.io/rocm/primus:v25.10 \
-#     --clean \
+#   -- --image docker.io/rocm/primus:v25.10 --clean \
 #   -- train pretrain --config $EXP $* 2>&1 | tee $LOG_FILE
 
 # Scenario 4: Add environment variables

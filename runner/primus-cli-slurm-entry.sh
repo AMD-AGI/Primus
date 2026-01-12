@@ -55,10 +55,6 @@ while [[ $# -gt 0 ]]; do
             PRE_PARSE_ARGS+=("$@")
             break
             ;;
-        container|direct|native|host)
-            PRE_PARSE_ARGS+=("$@")
-            break
-            ;;
         --config)
             CONFIG_FILE="$2"
             shift 2
@@ -80,6 +76,7 @@ while [[ $# -gt 0 ]]; do
 done
 # Restore arguments
 set -- "${PRE_PARSE_ARGS[@]}"
+echo "PRE_PARSE_ARGS: ${PRE_PARSE_ARGS[*]}"
 
 # Load configuration (specified or defaults)
 load_config_auto "$CONFIG_FILE" "slurm-entry" || {
