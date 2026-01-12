@@ -19,8 +19,8 @@ Design Goals:
 Module Structure:
     - context: PatchContext and phase management
     - patch: FunctionPatch implementation
-    - registry: PatchRegistry and @register_patch decorator
-    - runner: Patch execution logic (run_patches)
+    - patch_registry: PatchRegistry and @register_patch decorator
+    - patch_runner: Patch execution logic (run_patches)
     - utils: Utility functions (version_matches)
 
 Usage:
@@ -48,14 +48,16 @@ Usage:
 """
 
 # Core components
-from primus.core.patches.context import PatchContext
+from primus.core.patches.context import PatchContext, get_args, get_param
 from primus.core.patches.patch import FunctionPatch
-from primus.core.patches.registry import PatchRegistry, register_patch
-from primus.core.patches.runner import run_patches
+from primus.core.patches.patch_registry import PatchRegistry, register_patch
+from primus.core.patches.patch_runner import run_patches
 from primus.core.patches.utils import version_matches
 
 __all__ = [
     "PatchContext",
+    "get_args",
+    "get_param",
     "FunctionPatch",
     "PatchRegistry",
     "register_patch",

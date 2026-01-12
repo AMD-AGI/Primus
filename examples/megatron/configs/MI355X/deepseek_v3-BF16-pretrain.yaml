@@ -1,0 +1,76 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v3-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: ${PRIMUS_MODEL:deepseek_v3}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_DeepSeek_Pretrain"
+      stderr_sink_level: DEBUG
+
+      # debug
+      moe_router_force_load_balancing: true
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # hyper parameters
+      train_iters: 50
+      micro_batch_size: 4
+      global_batch_size: 256
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # data
+      mock_data: true
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
+      valid_data_path: null
+      test_data_path: null
+
+      moe_use_legacy_grouped_gemm: true
+      # MLA
+      multi_latent_attention: true
+
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # Cross entropy flags
+      # cross_entropy_fusion_impl: "te"
+      # cross_entropy_loss_fusion: true

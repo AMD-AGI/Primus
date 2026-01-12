@@ -47,6 +47,11 @@ if [[ -z "${__PRIMUS_COMMON_SOURCED:-}" ]]; then
     }
 fi
 
+# Global array to collect extra Primus CLI arguments emitted by patches via
+# the "extra.*=value" protocol (same as hooks). Each match is converted to
+# a pair: --<name> <value>.
+PATCH_EXTRA_PRIMUS_ARGS=()
+
 # Execute multiple patch scripts
 # Args:
 #   $@: Patch script paths
@@ -73,8 +78,42 @@ execute_patches() {
 
         LOG_INFO_RANK0 "[Execute Patches] Running patch: bash $patch"
 
-        bash "$patch"
+        # Run the patch script in a child shell and capture its output so that we can
+        # process special lines (e.g., PATCH_ENV KEY=VALUE) while still preserving
+        # the original logs.
+        local patch_output
+        patch_output="$(bash "$patch" 2>&1)"
         local exit_code=$?
+
+        # Re-echo patch output so users see the same logs as before.
+        if [[ -n "$patch_output" ]]; then
+            printf '%s\n' "$patch_output"
+        fi
+
+        # Allow patches to:
+        #   1) Export environment variables back to the caller by printing lines:
+        #        env.VAR_NAME=VALUE
+        #      These will be exported into the current shell (e.g., primus-cli-direct.sh).
+        #   2) Provide extra Primus CLI arguments using the same "extra.*" protocol
+        #      as hooks, for example:
+        #        extra.model.hf_assets_path=/path
+        #      which becomes:
+        #        --model.hf_assets_path /path
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+
+            if [[ "$line" =~ ^env\.([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+                local env_key="${BASH_REMATCH[1]}"
+                local env_value="${BASH_REMATCH[2]}"
+                export "$env_key"="$env_value"
+                LOG_INFO_RANK0 "[Execute Patches] Exported from patch (env.*): $env_key=$env_value"
+            elif [[ "$line" =~ ^extra\.([A-Za-z_][A-Za-z0-9_.]*[A-Za-z0-9_])=(.*)$ ]]; then
+                local name="${BASH_REMATCH[1]}"
+                local value="${BASH_REMATCH[2]}"
+                PATCH_EXTRA_PRIMUS_ARGS+=("--${name}" "${value}")
+                LOG_INFO_RANK0 "[Execute Patches] extra arg from patch: --${name} ${value}"
+            fi
+        done <<< "$patch_output"
 
         if [[ $exit_code -eq 0 ]]; then
             LOG_INFO_RANK0 "[Execute Patches] Patch completed successfully: $patch"

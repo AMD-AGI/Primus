@@ -7,8 +7,8 @@
 
 from typing import Optional
 
-import torch.nn.functional as F
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.tensor_parallel.layers import ColumnParallelLinear
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.multi_latent_attention import (
     MLASelfAttention,
@@ -16,25 +16,38 @@ from megatron.core.transformer.multi_latent_attention import (
 )
 from megatron.core.transformer.spec_utils import build_module
 from megatron.core.transformer.transformer_config import MLATransformerConfig
-from megatron.core.utils import deprecate_inference_params
+
+# Import Transformer Engine
+try:
+    from megatron.core.extensions.transformer_engine import (
+        TEColumnParallelLinear,
+        TELinear,
+    )
+    from megatron.core.post_training.modelopt.layers import Linear
+
+    HAVE_TE = True
+except ImportError:
+    TEColumnParallelLinear, TELinear, Linear = None, None, None
+    HAVE_TE = False
+
+# Import Primus-Turbo
+try:
+    from primus.backends.megatron.core.extensions.primus_turbo import (
+        PrimusTurboColumnParallelLinear,
+        PrimusTurboLinear,
+    )
+
+    HAVE_TE = True
+except ImportError:
+    PrimusTurboColumnParallelLinear, PrimusTurboLinear = None, None
+    HAVE_TE = False
 
 
-class PaddedMLASelfAttention(MLASelfAttention):
-    """
-    PaddedMLASelfAttention class
+class PrimusMLASelfAttention(MLASelfAttention):
+    """MLA Self-attention layer class wrapper for Primus
 
-    This custom attention module is designed to address a compatibility issue observed in DeepSeek models,
-    where the head dimension of QK is 192 and that of V is 128. This asymmetry prevents the use of AMD
-    TransformerEngine's fused attention kernel, which requires Q, K, and V to have matching head dimensions.
-
-    To enable fused attention and reduce memory usage, this module pads the V tensor so that all Q, K, and V
-    have a uniform head dimension of 192. After padding, AMD TE's fused attention can be invoked, resulting
-    in more efficient memory usage and improved performance.
-
-    Note:
-    - Padding is only applied to the V tensor when head dimension mismatch is detected.
-    - This optimization is particularly important for large models like DeepSeek variants where memory savings
-    have a meaningful impact on batch size and throughput.
+    Self-attention layer takes input with size [s, b, h]
+    and returns output of the same size.
     """
 
     def __init__(
@@ -51,143 +64,120 @@ class PaddedMLASelfAttention(MLASelfAttention):
             submodules=submodules,
             layer_number=layer_number,
             attn_mask_type=attn_mask_type,
+            attention_type="self",
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
         )
 
-        if self.q_head_dim > self.config.v_head_dim:
-            self.core_attention = build_module(
-                submodules.core_attention,
+        if self.config.q_lora_rank is None:
+            # Not projecting query
+            self.linear_q_proj = build_module(
+                submodules.linear_q_proj,
+                self.config.hidden_size,
+                self.config.num_attention_heads * self.q_head_dim,
                 config=self.config,
-                layer_number=self.layer_number,
-                attn_mask_type=self.attn_mask_type,
-                attention_type=self.attention_type,
-                softmax_scale=self.softmax_scale,
-                k_channels=self.q_head_dim,
-                v_channels=self.q_head_dim,  # pad self.config.v_head_dim,
-                cp_comm_type=cp_comm_type,
-                pg_collection=self.pg_collection,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=False,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name="q_proj",
             )
 
-    def forward(
-        self,
-        hidden_states,
-        attention_mask,
-        key_value_states=None,
-        inference_context=None,
-        rotary_pos_emb=None,
-        rotary_pos_cos=None,
-        rotary_pos_sin=None,
-        attention_bias=None,
-        packed_seq_params=None,
-        position_ids=None,
-        sequence_len_offset=None,
-        *,
-        inference_params=None,
-    ):
-        """Forward pass for multi-latent attention"""
-        if self.q_head_dim <= self.config.v_head_dim:
-            super().forward(
-                hidden_states,
-                attention_mask,
-                key_value_states=key_value_states,
-                inference_context=inference_context,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                attention_bias=attention_bias,
-                packed_seq_params=packed_seq_params,
-                position_ids=position_ids,
-                sequence_len_offset=sequence_len_offset,
-                inference_params=inference_params,
-            )
-
-        assert rotary_pos_emb is None, "Rotary position embeddings should not be passed into MLA."
-        assert attention_bias is None, "Attention bias should not be passed into MLA."
-        assert rotary_pos_cos is None and rotary_pos_sin is None, "MLA does not support Flash Decoding"
-
-        # hidden_states: [sq, b, h]
-
-        inference_context = deprecate_inference_params(inference_context, inference_params)
-
-        # =====================
-        # Query, Key, and Value
-        # =====================
-        # Get the query, key and value tensors based on the type of attention -
-        # self or cross attn.
-        # query: [96, 1, 16, 128], key:[96, 1, 16, 128], value:[96, 1, 16, 128]
-        query, key, value = self.get_query_key_value_tensors(
-            hidden_states,
-            key_value_states,
-            position_ids,
-            packed_seq_params,
-            inference_context=inference_context,
-        )
-
-        # ===================================================
-        # Adjust key, value for inference
-        # ===================================================
-        # rotary_pos_emb = None
-        query, key, value, _, attn_mask_type, _ = self._adjust_key_value_for_inference(
-            inference_context, query, key, value, rotary_pos_emb=None
-        )
-
-        seq_length = query.shape[0]
-        batch_size = query.shape[1]
-        num_heads = query.shape[2]
-
-        # Pad value head dim
-        assert self.q_head_dim > self.config.v_head_dim
-        padded_dim = self.q_head_dim - self.config.v_head_dim
-        # pad value to q_head_dim
-        value = F.pad(value, (0, padded_dim))
-
-        # TODO: Currently, TE can only accept contiguous tensors for MLA
-        query = query.contiguous()
-        key = key.contiguous()
-        value = value.contiguous()
-
-        # ==================================
-        # core attention computation
-        # ==================================
-        # Need corresponding TE change
-        if self.checkpoint_core_attention and self.training:
-            core_attn_out = self._checkpointed_attention_forward(
-                query, key, value, attention_mask, packed_seq_params=packed_seq_params
-            )
         else:
-            core_attn_out = self.core_attention(
-                query,
-                key,
-                value,
-                attention_mask,
-                packed_seq_params=packed_seq_params,
-                attn_mask_type=attn_mask_type,
+            q_down_proj_kwargs = {}
+            # NOTE: Add support for Primus-Turbo
+            if submodules.linear_q_down_proj in [TELinear, PrimusTurboLinear]:
+                q_down_proj_kwargs["parallel_mode"] = "duplicated"
+            elif submodules.linear_q_down_proj in [
+                Linear,
+                TEColumnParallelLinear,
+                ColumnParallelLinear,
+                PrimusTurboColumnParallelLinear,
+            ]:
+                q_down_proj_kwargs["gather_output"] = False
+            else:
+                raise ValueError(f"Unsupported linear_q_down_proj: {submodules.linear_q_down_proj}")
+
+            self.linear_q_down_proj = build_module(
+                submodules.linear_q_down_proj,
+                self.config.hidden_size,
+                self.config.q_lora_rank,
+                config=self.config,
+                init_method=self.config.init_method,
+                bias=False,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name="q_down_proj",
+                skip_weight_param_allocation=False,
+                **q_down_proj_kwargs,
             )
 
-        # unpad value head dim
-        assert packed_seq_params is None
-        # [s, b, n * dim] -> [s, b, n, dim=192] -> [s, b, n, dim=128] -> [s, b, n*dim]
-        core_attn_out = core_attn_out.reshape(seq_length, batch_size, num_heads, self.q_head_dim)[
-            ..., : self.config.v_head_dim
-        ]
-        core_attn_out = core_attn_out.reshape(seq_length, batch_size, num_heads * self.config.v_head_dim)
+            self.linear_q_up_proj = build_module(
+                submodules.linear_q_up_proj,
+                self.config.q_lora_rank,
+                self.config.num_attention_heads * self.q_head_dim,
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=False,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name="q_up_proj",
+            )
 
-        if packed_seq_params is not None and packed_seq_params.qkv_format == "thd":
-            # reshape to same output shape as unpacked case
-            # (t, np, hn) -> (t, b=1, h=np*hn)
-            # t is the pack size = sum (sq_i)
-            # note that batch is a dummy dimension in the packed case
-            core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
+        kv_down_proj_kwargs = {}
+        # NOTE: Add support for Primus-Turbo
+        if submodules.linear_kv_down_proj in [TELinear, PrimusTurboLinear]:
+            kv_down_proj_kwargs["parallel_mode"] = "duplicated"
+        elif submodules.linear_kv_down_proj in [
+            Linear,
+            TEColumnParallelLinear,
+            ColumnParallelLinear,
+            PrimusTurboColumnParallelLinear,
+        ]:
+            kv_down_proj_kwargs["gather_output"] = False
+        else:
+            raise ValueError(f"Unsupported linear_kv_down_proj: {submodules.linear_kv_down_proj}")
 
-        if self.recompute_up_proj:
-            assert self.qkv_up_checkpoint is not None
-            self.qkv_up_checkpoint.discard_output_and_register_recompute(core_attn_out)
-            self.qkv_up_checkpoint = None
+        self.linear_kv_down_proj = build_module(
+            submodules.linear_kv_down_proj,
+            self.config.hidden_size,
+            self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim,
+            config=self.config,
+            init_method=self.config.init_method,
+            bias=False,
+            skip_bias_add=False,
+            is_expert=False,
+            tp_comm_buffer_name="kv_down_proj",
+            skip_weight_param_allocation=False,
+            **kv_down_proj_kwargs,
+        )
 
-        # =================
-        # Output. [sq, b, h]
-        # =================
-        output, bias = self.linear_proj(core_attn_out)
+        self.linear_kv_up_proj = build_module(
+            submodules.linear_kv_up_proj,
+            self.config.kv_lora_rank,
+            self.config.num_attention_heads * (self.config.qk_head_dim + self.config.v_head_dim),
+            config=self.config,
+            init_method=self.config.init_method,
+            gather_output=False,
+            bias=False,
+            skip_bias_add=False,
+            is_expert=False,
+            tp_comm_buffer_name="kv_up_proj",
+        )
 
-        return output, bias
+        if self.config.q_lora_rank is not None:
+            self.q_layernorm = build_module(
+                submodules.q_layernorm,
+                hidden_size=self.config.q_lora_rank,
+                config=self.config,
+                eps=self.config.layernorm_epsilon,
+            )
+
+        self.kv_layernorm = build_module(
+            submodules.kv_layernorm,
+            hidden_size=self.config.kv_lora_rank,
+            config=self.config,
+            eps=self.config.layernorm_epsilon,
+        )

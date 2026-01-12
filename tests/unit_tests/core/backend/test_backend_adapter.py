@@ -100,7 +100,7 @@ def primus_config():
     return SimpleNamespace(exp_name="unit-test-exp")
 
 
-def test_apply_setup_patches_invokes_run_patches(monkeypatch, module_config):
+def test_apply_setup_patches_invokes_run_patches(monkeypatch, module_config, primus_config):
     from primus.core import patches as patches_module
 
     calls = []
@@ -112,7 +112,7 @@ def test_apply_setup_patches_invokes_run_patches(monkeypatch, module_config):
 
     adapter = DummyBackendAdapter(framework="megatron")
 
-    adapter._apply_setup_patches(module_config)
+    adapter._apply_setup_patches(primus_config, module_config)
 
     assert len(calls) == 1
     call = calls[0]
@@ -120,11 +120,11 @@ def test_apply_setup_patches_invokes_run_patches(monkeypatch, module_config):
     assert call["phase"] == "setup"
     assert call["backend_version"] is None
     assert call["model_name"] == "test-model"
-    assert call["extra"]["config"] == module_config.params
     assert call["extra"]["module_config"] is module_config
+    assert call["extra"]["primus_config"] is primus_config
 
 
-def test_apply_build_args_patches_uses_detected_version(monkeypatch, module_config):
+def test_apply_build_args_patches_uses_detected_version(monkeypatch, module_config, primus_config):
     from primus.core import patches as patches_module
 
     calls = []
@@ -137,7 +137,7 @@ def test_apply_build_args_patches_uses_detected_version(monkeypatch, module_conf
     adapter = DummyBackendAdapter(framework="megatron", version="0.9.0")
     backend_args = SimpleNamespace(dummy_arg=True)
 
-    adapter._apply_build_args_patches(module_config, backend_args)
+    adapter._apply_build_args_patches(primus_config, module_config, backend_args)
 
     assert len(calls) == 1
     call = calls[0]
@@ -145,12 +145,9 @@ def test_apply_build_args_patches_uses_detected_version(monkeypatch, module_conf
     assert call["phase"] == "build_args"
     assert call["backend_version"] == "0.9.0"
     assert call["model_name"] == "test-model"
-    assert call["extra"]["args"] is backend_args
-    assert call["extra"]["config"] == module_config.params
+    assert call["extra"]["backend_args"] is backend_args
     assert call["extra"]["module_config"] is module_config
-    # primus_config is set by create_trainer, so _apply_build_args_patches
-    # should leave it as None
-    assert call["extra"]["primus_config"] is None
+    assert call["extra"]["primus_config"] is primus_config
 
 
 def test_create_trainer_orchestrates_flow(monkeypatch, primus_config, module_config):

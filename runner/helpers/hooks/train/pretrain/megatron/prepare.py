@@ -22,7 +22,6 @@ from runner.helpers.hooks.train.pretrain.utils import (
     get_node_rank,
     log_error_and_exit,
     log_info,
-    write_patch_args,
 )
 
 
@@ -142,7 +141,10 @@ def prepare_dataset_if_needed(
             log_info("Waiting for dataset...")
             sleep(30)
 
-    write_patch_args(Path(patch_args), "train_args", {"train_data_path": str(tokenized_data_path)})
+    # Expose resolved train_data_path to the caller (e.g., primus-cli direct)
+    # via a generic extra.* line on stdout, which will be converted to:
+    #   --train_data_path <tokenized_data_path>
+    print(f"extra.train_data_path={tokenized_data_path}")
 
 
 def build_megatron_helper(primus_path: Path, patch_args: Path, backend_path: str = None):
@@ -160,7 +162,11 @@ def build_megatron_helper(primus_path: Path, patch_args: Path, backend_path: str
         else:
             megatron_path = primus_path / "third_party/Megatron-LM"
             log_info(f"No backend_path provided, falling back to: {megatron_path}")
-    write_patch_args(Path(patch_args), "train_args", {"backend_path": str(megatron_path)})
+
+    # Expose resolved backend_path to the caller (e.g., primus-cli direct)
+    # via a generic extra.* line on stdout, which will be converted to:
+    #   --backend_path <megatron_path>
+    print(f"extra.backend_path={megatron_path}")
 
     check_dir_nonempty(megatron_path, "megatron")
 

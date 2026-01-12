@@ -29,6 +29,11 @@ if [[ -z "${__PRIMUS_COMMON_SOURCED:-}" ]]; then
     }
 fi
 
+# Global array to collect extra Primus CLI arguments emitted by hooks via
+# the "extra.*=value" protocol. Each match is converted to a pair:
+#   --<name> <value>
+HOOK_EXTRA_PRIMUS_ARGS=()
+
 # Execute hooks for a given command
 # Args:
 #   $1: hook_group (e.g., "train", "benchmark")
@@ -73,18 +78,47 @@ execute_hooks() {
 
         start_time=$(date +%s)
 
+        local hook_output
+        local exit_code
+
         if [[ "$hook_file" == *.sh ]]; then
-            if ! bash "$hook_file" "${hook_args[@]}"; then
-                LOG_ERROR_RANK0 "[Hooks] Hook failed: $hook_file (exit code: $?)"
-                return 1
-            fi
+            hook_output="$(bash "$hook_file" "${hook_args[@]}" 2>&1)"
+            exit_code=$?
         elif [[ "$hook_file" == *.py ]]; then
-            if ! python3 "$hook_file" "${hook_args[@]}"; then
-                LOG_ERROR_RANK0 "[Hooks] Hook failed: $hook_file (exit code: $?)"
-                return 1
-            fi
+            hook_output="$(python3 "$hook_file" "${hook_args[@]}" 2>&1)"
+            exit_code=$?
         else
             LOG_WARN "[Hooks] Skipping unknown hook type: $hook_file"
+            continue
+        fi
+
+        # Re-echo hook output so users see logs as usual.
+        if [[ -n "$hook_output" ]]; then
+            printf '%s\n' "$hook_output"
+        fi
+
+        # Parse hook output for extra.* and env.* key=value pairs, e.g.:
+        #   extra.foo=1                -> HOOK_EXTRA_PRIMUS_ARGS+=("--foo" "1")
+        #   env.MY_VAR=value           -> export MY_VAR=value
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+
+            if [[ "$line" =~ ^extra\.([A-Za-z_][A-Za-z0-9_.]*[A-Za-z0-9_])=(.*)$ ]]; then
+                local name="${BASH_REMATCH[1]}"
+                local value="${BASH_REMATCH[2]}"
+                HOOK_EXTRA_PRIMUS_ARGS+=("--${name}" "${value}")
+                LOG_INFO_RANK0 "[Hooks] extra arg from hook: --${name} ${value}"
+            elif [[ "$line" =~ ^env\.([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+                local env_name="${BASH_REMATCH[1]}"
+                local env_value="${BASH_REMATCH[2]}"
+                export "${env_name}"="${env_value}"
+                LOG_INFO_RANK0 "[Hooks] exported env from hook: ${env_name}=${env_value}"
+            fi
+        done <<< "$hook_output"
+
+        if [[ $exit_code -ne 0 ]]; then
+            LOG_ERROR_RANK0 "[Hooks] Hook failed: $hook_file (exit code: $exit_code)"
+            return 1
         fi
 
         duration=$(( $(date +%s) - start_time ))

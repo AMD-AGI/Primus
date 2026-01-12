@@ -106,7 +106,7 @@ test_basic_dry_run() {
     cat > "$test_config" << EOF
 container:
   options:
-    image: "rocm/primus:v25.10_gfx942"
+    image: "rocm/primus:v25.10"
     ipc: "host"
     device:
       - "/dev/null"
@@ -119,9 +119,9 @@ EOF
         -- train 2>&1)
 
     assert_contains "$output" "Launching container" "Should contain launching message"
-    assert_contains "$output" "rocm/primus:v25.10_gfx942" "Should use default image"
+    assert_contains "$output" "rocm/primus:v25.10" "Should use default image"
     assert_contains "$output" "Runtime: docker" "Should show runtime"
-    assert_contains "$output" "Image: rocm/primus:v25.10_gfx942" "Should show image"
+    assert_contains "$output" "Image: rocm/primus:v25.10" "Should show image"
 
     rm -f "$test_config"
 }
@@ -137,7 +137,7 @@ test_cli_options() {
     cat > "$test_config" << EOF
 container:
   options:
-    image: "rocm/primus:v25.10_gfx942"
+    image: "rocm/primus:v25.10"
 
     device:
       - "/dev/null"
@@ -249,7 +249,7 @@ test_volume_handling() {
     cat > "$test_config" << EOF
 container:
   options:
-    image: "rocm/primus:v25.10_gfx942"
+    image: "rocm/primus:v25.10"
 
     device:
       - "/dev/null"
@@ -283,7 +283,7 @@ test_image_specification() {
     cat > "$test_config" << EOF
 container:
   options:
-    image: "rocm/primus:v25.10_gfx942"
+    image: "rocm/primus:v25.10"
 
     device:
       - "/dev/null"
@@ -313,7 +313,7 @@ test_multiple_generic_options() {
     cat > "$test_config" << EOF
 container:
   options:
-    image: "rocm/primus:v25.10_gfx942"
+    image: "rocm/primus:v25.10"
 
     device:
       - "/dev/null"

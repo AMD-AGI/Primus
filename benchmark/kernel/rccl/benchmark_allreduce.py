@@ -28,7 +28,15 @@ MBS_LIST = [1, 2, 3, 4, 5, 6, 7, 8]
 ITERS = 100
 
 
-def test_allreduce(mbs, seq, hidden, dtype, rank, local_rank, world_size):
+def test_allreduce(mbs, seq, hidden, dtype, rank, local_rank, world_size, dry_run=False):
+    if local_rank == 0:
+        size = mbs * seq * hidden * torch.tensor([], dtype=dtype).element_size()
+        print("AllReduce with input size(Byte): ", size)
+        print(
+            f"Rccl-test command: \n$ mpirun -np {world_size} -N $NNODES ./build/all_reduce_perf -b {size} -e {size} -g 1"
+        )
+    if dry_run:
+        return 0, 0
     shape = (mbs, seq, hidden)
     device = torch.device(f"cuda:{local_rank}")
     tensor = torch.ones(shape, dtype=dtype, device=device)
@@ -55,8 +63,21 @@ def test_allreduce(mbs, seq, hidden, dtype, rank, local_rank, world_size):
     return avg_time, bandwidth
 
 
-def test_allgather(mbs, seq, hidden, dtype, rank, local_rank, world_size):
+def test_allgather(mbs, seq, hidden, dtype, rank, local_rank, world_size, dry_run=False):
     local_seq = seq // world_size
+
+    if local_rank == 0:
+        element_size = torch.tensor([], dtype=dtype).element_size()
+        nelement = mbs * local_seq * hidden
+        print(
+            "AllGather with input size(Byte): ",
+            nelement * element_size,
+            " Output size ",
+            world_size * nelement * element_size,
+        )
+    if dry_run:
+        return 0, 0
+
     shape = (mbs, local_seq, hidden)
     device = torch.device(f"cuda:{local_rank}")
     tensor = torch.randn(shape, dtype=dtype, device=device)
@@ -88,10 +109,19 @@ def test_allgather(mbs, seq, hidden, dtype, rank, local_rank, world_size):
     return avg_time, bandwidth
 
 
-def test_reducescatter(mbs, seq, hidden, dtype, rank, local_rank, world_size):
+def test_reducescatter(mbs, seq, hidden, dtype, rank, local_rank, world_size, dry_run=False):
     full_shape = (mbs, seq, hidden)
     chunk_seq = seq // world_size
     chunk_shape = (mbs, chunk_seq, hidden)
+
+    if local_rank == 0:
+        print(
+            "ReduceScatter with each output chunk size(Byte): ",
+            mbs * chunk_seq * hidden * torch.tensor([], dtype=dtype).element_size(),
+        )
+
+    if dry_run:
+        return 0, 0
 
     device = torch.device(f"cuda:{local_rank}")
     tensor = torch.ones(full_shape, dtype=dtype, device=device)
@@ -116,13 +146,16 @@ def test_reducescatter(mbs, seq, hidden, dtype, rank, local_rank, world_size):
     return avg_time, bandwidth
 
 
-def benchmark(test_func, output_csv_path, rank, local_rank, world_size):
+def benchmark(test_func, output_csv_path, rank, local_rank, world_size, dry_run=False):
     benchmark_results = []
 
     for model_name, (seq, hidden) in MODEL_PARAMS_TABLE.items():
         for mbs in MBS_LIST:
+            print(f"\nModel Name {model_name}, mbs {mbs}")
             for dtype in [torch.float16]:
-                avg_time, bandwidth = test_func(mbs, seq, hidden, dtype, rank, local_rank, world_size)
+                avg_time, bandwidth = test_func(
+                    mbs, seq, hidden, dtype, rank, local_rank, world_size, dry_run
+                )
                 if rank == 0:
                     result = {
                         "Model": model_name,
@@ -136,7 +169,7 @@ def benchmark(test_func, output_csv_path, rank, local_rank, world_size):
                     }
                     benchmark_results.append(result)
 
-    if rank == 0:
+    if rank == 0 and not dry_run:
         fieldnames = list(benchmark_results[0].keys())
         with open(output_csv_path, mode="w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -149,6 +182,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--allreduce-report-csv-path", type=str)
     parser.add_argument("--allgather-report-csv-path", type=str)
+    parser.add_argument(
+        "-dry",
+        "--dry-run",
+        action="store_true",
+        help="Testing run to generate message size and rccl-test command.",
+    )
     parser.add_argument("--reducescatter-report-csv-path", type=str)
     args = parser.parse_args()
 
@@ -156,6 +195,12 @@ if __name__ == "__main__":
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     assert world_size >= 2, "This script requires at least 2 processes."
+
+    if args.dry_run:
+        benchmark(test_allreduce, args.allreduce_report_csv_path, 0, 0, world_size, True)
+        # benchmark(test_allgather, args.allgather_report_csv_path, 0, 0, world_size, True)
+        # benchmark(test_reducescatter, args.reducescatter_report_csv_path, 0, 0, world_size, True)
+        exit(0)
 
     dist.init_process_group(
         backend="nccl",

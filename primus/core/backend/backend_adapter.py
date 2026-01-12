@@ -5,8 +5,10 @@
 ###############################################################################
 
 from abc import ABC, abstractmethod
+from types import SimpleNamespace
 from typing import Any, Dict
 
+from primus.core.utils.yaml_utils import merge_namespace, nested_namespace_to_dict
 from primus.modules.module_utils import log_dict_aligned, log_rank_0
 
 
@@ -85,7 +87,7 @@ class BackendAdapter(ABC):
     # Internal Methods (Do NOT override)
     # ============================================================================
 
-    def _apply_setup_patches(self, module_config):
+    def _apply_setup_patches(self, primus_config, module_config):
         """
         Apply setup phase patches before backend preparation.
 
@@ -109,12 +111,12 @@ class BackendAdapter(ABC):
             backend_version=None,  # No version yet - setup runs before import
             model_name=model_name,
             extra={
-                "config": module_config.params,
                 "module_config": module_config,
+                "primus_config": primus_config,
             },
         )
 
-    def _apply_build_args_patches(self, module_config, backend_args):
+    def _apply_build_args_patches(self, primus_config, module_config, backend_args):
         """
         Apply build_args phase patches after config conversion.
 
@@ -136,10 +138,9 @@ class BackendAdapter(ABC):
             backend_version=backend_version,
             model_name=model_name,
             extra={
-                "args": backend_args,
-                "config": module_config.params,
-                "primus_config": None,  # Will be set in create_trainer
+                "primus_config": primus_config,
                 "module_config": module_config,
+                "backend_args": backend_args,
             },
         )
 
@@ -172,7 +173,7 @@ class BackendAdapter(ABC):
 
         # 1) apply setup patches (automatic for all backends)
         log_rank_0("[Step 1/5] Applying setup patches...")
-        self._apply_setup_patches(module_config)
+        self._apply_setup_patches(primus_config, module_config)
         log_rank_0("Setup patches applied successfully")
 
         # 2) backend env/patch/detect
@@ -187,21 +188,38 @@ class BackendAdapter(ABC):
 
         # 4) apply build_args patches (automatic for all backends)
         log_rank_0("[Step 4/5] Applying build_args patches...")
-        self._apply_build_args_patches(module_config, backend_args)
+        self._apply_build_args_patches(primus_config, module_config, backend_args)
         log_rank_0("Build_args patches applied successfully")
 
         # Log the final backend args in aligned format (after patches)
         log_dict_aligned("Final backend args (after patches)", backend_args)
 
-        # Log parameters that were in module_config but not converted to backend_args
-        # These are likely Primus-specific parameters
-        config_keys = set(module_config.params.keys())
+        # Log parameters that were in module_config but not converted to backend_args.
+        # These are likely Primus-specific parameters.
+        params_dict = nested_namespace_to_dict(module_config.params)
+        config_keys = set(params_dict.keys())
         backend_keys = set(vars(backend_args))
         primus_only_keys = config_keys - backend_keys
 
         if primus_only_keys:
-            primus_only_params = {key: module_config.params[key] for key in sorted(primus_only_keys)}
+            primus_only_params = {key: params_dict[key] for key in sorted(primus_only_keys)}
             log_dict_aligned("Primus-specific parameters", primus_only_params)
+
+        # After logging the difference between module_config.params and backend_args,
+        # merge module_config.params into backend_args so that:
+        #   - backend_args contains both converted backend arguments and original
+        #     Primus module parameters;
+        #   - module_config.params is updated to the merged view, allowing
+        #     later patches (e.g., before_train) that call get_args(ctx) to
+        #     see backend-derived fields such as seq_length/world_size.
+        params = getattr(module_config, "params", None)
+        if isinstance(backend_args, SimpleNamespace) and isinstance(params, SimpleNamespace):
+            backend_keys = set(vars(backend_args).keys())
+            params_keys = set(vars(params).keys())
+            # Avoid overriding or raising on keys that already exist in backend_args.
+            excepts = list(backend_keys & params_keys)
+            merge_namespace(backend_args, params, allow_override=False, excepts=excepts)
+            module_config.params = backend_args
 
         # 5) load trainer class from backend
         log_rank_0("[Step 5/5] Loading trainer class...")

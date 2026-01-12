@@ -25,7 +25,7 @@ Guides for common workflows and features:
 In-depth technical documentation:
 
 - **[Benchmark Suite](./benchmark.md)** - GEMM, RCCL, end-to-end benchmarks and profiling
-- **[Supported Models](./models.md)** - Supported LLM architectures and feature compatibility matrix
+- **[Supported Models](./backends/overview.md#supported-models)** - Supported LLM architectures and feature compatibility matrix
 - **[Advanced Features](./advanced.md)** - Mixed precision, parallelism strategies, optimization techniques
 - **[Backend Patch Notes](./backends/overview.md)** - Primus-specific arguments for Megatron, TorchTitan, etc.
 
@@ -35,7 +35,7 @@ Get help and find answers:
 
 - **[FAQ](./faq.md)** - Frequently asked questions and troubleshooting
 - **[Examples](../examples/README.md)** - Real-world training examples and templates
-- **[Preflight Tool](../tools/preflight/README.md)** - Cluster sanity checker to verify environment readiness
+- **[Preflight Tool](../primus/tools/preflight/README.md)** - Cluster sanity checker to verify environment readiness
 
 ## 🎯 Quick Navigation by Use Case
 

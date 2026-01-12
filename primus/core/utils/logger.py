@@ -373,7 +373,7 @@ def warning(__message: str, *args: Any, **kwargs: Any) -> None:
 
 def warning_with_caller(__message: str, module_name: str, function_name: str, line: int) -> None:
     global _logger
-    __message = f"[{module_name}.py:{line}]: {__message}"
+    __message = f"{module_format(module_name, line)}: {__message}"
     _logger.warning(__message)
 
 

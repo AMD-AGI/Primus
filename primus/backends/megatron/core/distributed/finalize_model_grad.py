@@ -17,6 +17,8 @@ from megatron.core.distributed.finalize_model_grads import (
 )
 from megatron.core.utils import get_model_config
 
+from primus.modules.trainer.megatron.utils import is_v_schedule_enabled
+
 
 def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torch.Tensor] = None):
     """
@@ -55,10 +57,9 @@ def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torc
     if num_tokens is not None:
         # the number of tokens is only present on the last stage, so broadcast it
         # to the other ranks in the pipeline parallel group.
-        from megatron.training import get_args
 
         last_layer_rank = parallel_state.get_pipeline_model_parallel_last_rank()
-        if get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v:
+        if is_v_schedule_enabled():
             last_layer_rank = parallel_state.get_pipeline_model_parallel_first_rank()
         torch.distributed.broadcast(
             num_tokens,

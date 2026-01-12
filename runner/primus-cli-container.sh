@@ -45,7 +45,7 @@ Docker/Podman Options:
         --cap-add <CAPABILITY>       Add Linux capabilities (e.g., SYS_PTRACE)
 
     Container Configuration:
-        --image <DOCKER_IMAGE>       Docker image [default: rocm/primus:v25.10_gfx942]
+        --image <DOCKER_IMAGE>       Docker image [default: rocm/primus:v25.10]
         --name <NAME>                Container name
         --user <UID:GID>             Run as specific user (e.g., 1000:1000)
         --network <NET>              Network mode (e.g., host, bridge)
@@ -402,7 +402,7 @@ if [[ "$DEBUG_MODE" == "true" ]]; then
     ARGS+=(--debug)
 fi
 # Add positional arguments
-ARGS+=("--" "${POSITIONAL_ARGS[@]}")
+ARGS+=( "${POSITIONAL_ARGS[@]}")
 
 OPTION_ARGS=("${CONTAINER_OPTS[@]}")
 

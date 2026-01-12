@@ -6,6 +6,7 @@
 
 import json
 from types import SimpleNamespace
+from typing import Any, Mapping
 
 import yaml
 
@@ -16,11 +17,19 @@ def parse_yaml(yaml_file: str):
     return _parse_yaml_core(yaml_file)
 
 
-def dict_to_nested_namespace(d: dict):
-    """Recursively convert dictionary to a nested SimpleNamespace."""
-    return SimpleNamespace(
-        **{k: dict_to_nested_namespace(v) if isinstance(v, dict) else v for k, v in d.items()}
-    )
+def dict_to_nested_namespace(obj: Any) -> Any:
+    """
+    Recursively convert a mapping (and nested mappings) into SimpleNamespace.
+
+    This also walks lists/tuples and converts any nested mappings they contain.
+    """
+    if isinstance(obj, Mapping):
+        return SimpleNamespace(**{k: dict_to_nested_namespace(v) for k, v in obj.items()})
+    if isinstance(obj, list):
+        return [dict_to_nested_namespace(v) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(dict_to_nested_namespace(v) for v in obj)
+    return obj
 
 
 def nested_namespace_to_dict(obj):
