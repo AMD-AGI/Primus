@@ -57,13 +57,30 @@ fi
 # a pair: --<name> <value>.
 PATCH_EXTRA_PRIMUS_ARGS=()
 
+# Resolve helper directory (this file lives in runner/helpers/)
+_PATCH_HELPERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Best-effort: log only in DEBUG when there is nothing to do (avoid noise)
+_log_patches_debug_rank0() {
+    if declare -F LOG_DEBUG_RANK0 >/dev/null 2>&1; then
+        LOG_DEBUG_RANK0 "$@"
+    else
+        # Fallback: keep quiet unless we have LOG_DEBUG_RANK0
+        :
+    fi
+}
+
 # Execute multiple patch scripts
 # Args:
 #   $@: Patch script paths
 execute_patches() {
-    if [[ $# -eq 0 ]]; then
-        LOG_INFO_RANK0 "[Execute Patches] No patch scripts specified"
-        return 0
+    # Auto-enable built-in patches via environment variables, so callers don't
+    # need to manually assemble --patch lists.
+    #
+    # - REBUILD_PRIMUS_TURBO=1: rebuild Primus-Turbo before launching
+    local auto_patch_scripts=()
+    if [[ "${REBUILD_PRIMUS_TURBO:-0}" == "1" ]]; then
+        auto_patch_scripts+=("${_PATCH_HELPERS_DIR}/rebuild_primus_turbo.sh")
     fi
 
     # Support both:
@@ -78,8 +95,22 @@ execute_patches() {
         done <<< "$arg"
     done
 
+    # Merge auto patches first, then caller-provided patches; de-dupe to avoid
+    # running the same patch twice.
+    local merged=()
+    declare -A seen=()
+    local p
+    for p in "${auto_patch_scripts[@]}" "${patch_scripts[@]}"; do
+        [[ -n "$p" ]] || continue
+        if [[ -z "${seen[$p]:-}" ]]; then
+            seen["$p"]=1
+            merged+=("$p")
+        fi
+    done
+    patch_scripts=("${merged[@]}")
+
     if [[ ${#patch_scripts[@]} -eq 0 ]]; then
-        LOG_INFO_RANK0 "[Execute Patches] No patch scripts specified"
+        _log_patches_debug_rank0 "[Execute Patches] No patch scripts specified"
         return 0
     fi
 

@@ -19,11 +19,6 @@ if [ "$USING_AINIC" == "1" ]; then
     ENV_ARGS=("--env ./runner/helpers/env/env_ainic.sh")
 fi
 
-REBUILD_PRIMUS_TURBO=${REBUILD_PRIMUS_TURBO:-0}
-if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
-    PATCH_ARGS+=("--patch ./runner/helpers/rebuild_primus_turbo.sh")
-fi
-
 PATCH_TE_FLASH_ATTN=${PATCH_TE_FLASH_ATTN:-0}
 if [[ "$PATCH_TE_FLASH_ATTN" == "1" ]]; then
     PATCH_ARGS+=("--patch ./runner/helpers/patch_te_flash_attn_max_version.sh")
