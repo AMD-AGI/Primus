@@ -1,111 +1,111 @@
 # Primus CLI Examples - Quick Start Guide
 
-本文档介绍如何使用 Primus CLI 示例脚本进行模型训练。
+This document explains how to use Primus CLI example scripts for model training.
 
-## 📚 概述
+## 📚 Overview
 
-Primus 提供了三种训练模式的示例脚本，**重点推荐使用 Direct 和 Slurm 模式**：
+Primus provides three training mode example scripts, **we highly recommend using Direct and Slurm modes**:
 
-| 脚本 | 模式 | 适用场景 | 推荐度 |
-|------|------|----------|--------|
-| `run_pretrain_cli.sh` | Direct | 直接在主机上运行，无容器开销 | ⭐⭐⭐ |
-| `run_slurm_pretrain_cli.sh` | Slurm | 集群环境，多节点训练 | ⭐⭐⭐ |
-| `run_local_pretrain_cli.sh` | Container | 使用 Docker/Podman 容器，环境隔离 | ⭐ |
+| Script | Mode | Use Case | Rating |
+|--------|------|----------|--------|
+| `run_pretrain_cli.sh` | Direct | Run directly on host, no container overhead | ⭐⭐⭐ |
+| `run_slurm_pretrain_cli.sh` | Slurm | Cluster environment, multi-node training | ⭐⭐⭐ |
+| `run_local_pretrain_cli.sh` | Container | Use Docker/Podman container, environment isolation | ⭐ |
 
 ---
 
-## 1️⃣ Direct Mode - 直接模式
+## 1️⃣ Direct Mode
 
-**适用场景**: 在已配置好的环境中快速测试和训练 ⭐⭐⭐ **推荐**
+**Use Case**: Quick testing and training in pre-configured environments ⭐⭐⭐ **Recommended**
 
-### 使用方法
+### Usage
 
 ```bash
-# 使用默认配置（Llama3.1 8B BF16）
+# Use default config (Llama3.1 8B BF16)
 bash examples/run_pretrain_cli.sh
 
-# 使用自定义配置
+# Use custom config
 export EXP=my_experiments/custom_config.yaml
 bash examples/run_pretrain_cli.sh
 
-# 传递额外参数
+# Pass additional arguments
 bash examples/run_pretrain_cli.sh \
   --train_iters 10 \
   --micro_batch_size 4 \
   --global_batch_size 128
 ```
 
-> 💡 **提示**: `run_pretrain_cli.sh` 脚本中包含完整的使用示例和说明，查看脚本头部注释获取更多场景。
+> 💡 **Tip**: The `run_pretrain_cli.sh` script contains complete usage examples and instructions. Check the script header comments for more scenarios.
 
-### 默认配置
+### Default Configuration
 
-- 默认使用 `examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml`
-- 可通过 `EXP` 环境变量覆盖
+- Default: `examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml`
+- Override with `EXP` environment variable
 
 ---
 
-## 2️⃣ Slurm Mode - 集群模式
+## 2️⃣ Slurm Mode
 
-**适用场景**: 使用 Slurm 管理的集群环境，多节点分布式训练 ⭐⭐⭐ **推荐**
+**Use Case**: Slurm-managed cluster environments, multi-node distributed training ⭐⭐⭐ **Recommended**
 
-### 使用方法
+### Usage
 
 ```bash
-# 基本使用（单节点，默认配置）
+# Basic usage (single node, default config)
 bash examples/run_slurm_pretrain_cli.sh
 
-# 指定节点数
+# Specify number of nodes
 NNODES=4 bash examples/run_slurm_pretrain_cli.sh
 
-# 自定义配置文件
+# Custom config file
 EXP=my_experiments/custom_config.yaml bash examples/run_slurm_pretrain_cli.sh
 ```
 
-### 环境变量
+### Environment Variables
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `EXP` | `examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml` | 实验配置文件 |
-| `NNODES` | `1` | 使用的节点数量 |
-| `MASTER_PORT` | `12345` | 主节点端口 |
-| `LOG_DIR` | `./output` | 日志输出目录 |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EXP` | `examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml` | Experiment config file |
+| `NNODES` | `1` | Number of nodes to use |
+| `MASTER_PORT` | `12345` | Master node port |
+| `LOG_DIR` | `./output` | Log output directory |
 
-### 示例
+### Examples
 
-#### 场景 1: 单节点快速测试
+#### Scenario 1: Single Node Quick Test
 
 ```bash
-# 使用默认配置，单节点训练
+# Use default config, single node training
 bash examples/run_slurm_pretrain_cli.sh
 ```
 
-#### 场景 2: 标准多节点训练
+#### Scenario 2: Standard Multi-Node Training
 
 ```bash
-# 4 节点训练，指定节点列表
+# 4-node training with node list
 bash $PRIMUS_PATH/runner/primus-cli slurm srun \
   -N 4 \
   --nodelist "node[01-04]" \
 -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 
-# 或使用环境变量
+# Or use environment variables
 NNODES=4 EXP=my_config.yaml bash examples/run_slurm_pretrain_cli.sh
 ```
 
-#### 场景 3: 传递额外训练参数
+#### Scenario 3: Pass Additional Training Parameters
 
 ```bash
-# 覆盖批次大小和迭代次数
+# Override batch sizes and iterations
 bash examples/run_slurm_pretrain_cli.sh \
   --micro_batch_size 4 \
   --global_batch_size 128 \
   --train_iters 10
 ```
 
-#### 场景 4: 使用容器镜像 + 清理旧容器
+#### Scenario 4: Use Container Image + Clean Up
 
 ```bash
-# Slurm 模式下使用自定义 Docker 镜像
+# Use custom Docker image in Slurm mode
 bash $PRIMUS_PATH/runner/primus-cli slurm srun \
   -N 2 \
   --nodelist "node[01-02]" \
@@ -115,17 +115,17 @@ bash $PRIMUS_PATH/runner/primus-cli slurm srun \
 -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
-**说明**:
-- `container` 子命令用于指定容器相关选项
-- `--image`: 指定 Docker 镜像
-- `--clean`: 训练结束后清理容器
-- 第一个 `--` 分隔 Slurm 选项
-- 第二个 `--` 分隔容器选项和训练命令
+**Explanation**:
+- `container` subcommand is used to specify container-related options
+- `--image`: Specify Docker image
+- `--clean`: Clean up container after training
+- First `--` separates Slurm options
+- Second `--` separates container options from training command
 
-#### 场景 5: 环境变量 + 容器模式
+#### Scenario 5: Environment Variables + Container Mode
 
 ```bash
-# 设置调试环境变量
+# Set debugging environment variables
 bash $PRIMUS_PATH/runner/primus-cli slurm srun \
   -N 4 \
   --nodelist "node[01-04]" \
@@ -137,27 +137,27 @@ bash $PRIMUS_PATH/runner/primus-cli slurm srun \
 -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```
 
-**说明**:
-- 第一个 `--` 后是 `container` 子命令和镜像选项
-- 第二个 `--` 后是环境变量（`--env` 可多次使用）
-- 第三个 `--` 后是训练命令
+**Explanation**:
+- After first `--`: `container` subcommand and image options
+- After second `--`: environment variables (`--env` can be used multiple times)
+- After third `--`: training command
 
-#### 场景 6: 大规模训练 + 完整配置
+#### Scenario 6: Large-Scale Training + Full Configuration
 
 ```bash
 #!/bin/bash
-# large_scale_training.sh - 大规模 Llama3 70B 训练
+# large_scale_training.sh - Large-scale Llama3 70B training
 
-# 实验配置
+# Experiment configuration
 export EXP=experiments/llama3_70b.yaml
 export LOG_DIR=/shared/experiments/llama3_70b_$(date +%Y%m%d_%H%M%S)
 mkdir -p "$LOG_DIR"
 
-# 集群配置
+# Cluster configuration
 export NNODES=32
 export MASTER_PORT=29500
 
-# Slurm + 容器 + 环境变量 完整示例
+# Slurm + Container + Environment variables complete example
 bash $PRIMUS_PATH/runner/primus-cli slurm srun \
   -N $NNODES \
   --nodelist "gpu[001-032]" \
@@ -176,17 +176,17 @@ bash $PRIMUS_PATH/runner/primus-cli slurm srun \
 -- train pretrain --config $EXP 2>&1 | tee "$LOG_DIR/training.log"
 ```
 
-**配置说明**:
-- 32 节点，每节点 8 GPU (256 GPUs 总计)
-- 挂载共享数据集和 checkpoint 目录
-- 配置 NCCL 通信参数
-- `HF_TOKEN` 从主机环境传递（用于下载模型）
-- 日志同时输出到文件和终端
+**Configuration Details**:
+- 32 nodes, 8 GPUs per node (256 GPUs total)
+- Mount shared dataset and checkpoint directories
+- Configure NCCL communication parameters
+- `HF_TOKEN` passed from host environment (for model downloading)
+- Logs output to both file and terminal
 
-#### 场景 7: MaxText/JAX 训练
+#### Scenario 7: MaxText/JAX Training
 
 ```bash
-# MaxText 后端训练（使用 JAX 镜像）
+# MaxText backend training (using JAX image)
 export EXP=examples/maxtext/config.yaml
 export NNODES=8
 
@@ -203,10 +203,10 @@ bash $PRIMUS_PATH/runner/primus-cli slurm srun \
 -- train pretrain --config $EXP
 ```
 
-#### 场景 8: 使用特定 GPU 节点 + 调试模式
+#### Scenario 8: Specific GPU Nodes + Debug Mode
 
 ```bash
-# 指定高性能 GPU 节点 + 开启调试
+# Specify high-performance GPU nodes + enable debugging
 LOG_DIR=/tmp/debug_run \
 bash $PRIMUS_PATH/runner/primus-cli slurm srun \
   -N 2 \
@@ -221,19 +221,19 @@ bash $PRIMUS_PATH/runner/primus-cli slurm srun \
   --dry-run
 ```
 
-#### 场景 9: 简化版本（使用脚本的默认行为）
+#### Scenario 9: Simplified Version (Using Script Defaults)
 
-如果你的需求简单，可以编辑 `run_slurm_pretrain_cli.sh` 脚本：
+If your needs are simple, you can edit the `run_slurm_pretrain_cli.sh` script:
 
 ```bash
-# 1. 编辑脚本，修改默认值
+# 1. Edit the script to modify defaults
 nano examples/run_slurm_pretrain_cli.sh
 
-# 2. 修改这些行：
-# export NNODES=${NNODES:-4}              # 默认 4 节点
+# 2. Modify these lines:
+# export NNODES=${NNODES:-4}              # Default 4 nodes
 # export EXP=${EXP:-"your_default_config.yaml"}
 
-# 3. 如需容器模式，将 Scenario 1 改为：
+# 3. For container mode, change Scenario 1 to:
 # bash $PRIMUS_PATH/runner/primus-cli slurm srun -N $NNODES \
 # -- container \
 #   --image docker.io/rocm/primus:v25.10 \
@@ -241,44 +241,44 @@ nano examples/run_slurm_pretrain_cli.sh
 #   --env NCCL_DEBUG=INFO \
 # -- train pretrain --config $EXP $* 2>&1 | tee $LOG_FILE
 
-# 4. 直接运行
+# 4. Run directly
 bash examples/run_slurm_pretrain_cli.sh
 ```
 
 ---
 
-## 🔧 高级用法
+## 🔧 Advanced Usage
 
-### 传递额外参数
+### Passing Additional Arguments
 
-所有脚本都支持传递额外参数到 `primus train` 命令：
+All scripts support passing additional arguments to the `primus train` command:
 
 ```bash
-# Direct mode - 覆盖批次大小和迭代次数
+# Direct mode - Override batch sizes and iterations
 bash examples/run_pretrain_cli.sh \
   --train_iters 10 \
   --micro_batch_size 4 \
   --global_batch_size 128
 
-# Slurm mode - 添加 checkpoint 间隔
+# Slurm mode - Add checkpoint interval
 bash examples/run_slurm_pretrain_cli.sh \
   --checkpoint-interval 100 \
   --log-level DEBUG
 ```
 
-### 使用 NUMA 绑定优化性能（Direct Mode）
+### Using NUMA Binding for Performance (Direct Mode)
 
 ```bash
-# 启用 NUMA 绑定
+# Enable NUMA binding
 bash $PRIMUS_PATH/runner/primus-cli direct \
   --numa \
   -- train pretrain --config $EXP
 ```
 
-### Slurm 高级选项
+### Slurm Advanced Options
 
 ```bash
-# 指定 GPU 类型和资源
+# Specify GPU type and resources
 bash $PRIMUS_PATH/runner/primus-cli slurm srun \
   -N 8 \
   --nodelist "gpu[01-08]" \
@@ -291,74 +291,74 @@ bash $PRIMUS_PATH/runner/primus-cli slurm srun \
 
 ---
 
-## 🐳 Container Mode (可选)
+## 🐳 Container Mode (Optional)
 
-**注意**: 如果您已经有配置好的环境，推荐使用 Direct 或 Slurm 模式。Container Mode 主要用于环境隔离或特殊镜像需求。
+**Note**: If you already have a pre-configured environment, we recommend using Direct or Slurm mode. Container Mode is primarily for environment isolation or special image requirements.
 
-### 基本使用
+### Basic Usage
 
 ```bash
-# PyTorch 训练
+# PyTorch training
 bash examples/run_local_pretrain_cli.sh
 
-# MaxText/JAX 训练
+# MaxText/JAX training
 BACKEND=MaxText bash examples/run_local_pretrain_cli.sh
 
-# 自定义镜像
+# Custom image
 DOCKER_IMAGE=my-registry.com/custom:v1.0 \
 bash examples/run_local_pretrain_cli.sh
 ```
 
-### 详细配置
+### Detailed Configuration
 
-详细的容器配置选项请参考：`bash $PRIMUS_PATH/runner/primus-cli container --help`
+For detailed container configuration options, see: `bash $PRIMUS_PATH/runner/primus-cli container --help`
 
 ---
 
-## 📝 常见问题
+## 📝 FAQ
 
-### Q: 如何选择使用哪个脚本？
+### Q: How do I choose which script to use?
 
 **A**:
-- 🏃 **单机测试/开发**: 使用 `run_pretrain_cli.sh` (Direct Mode) - **推荐**
-- 🖥️ **多节点训练**: 使用 `run_slurm_pretrain_cli.sh` (Slurm Mode) - **推荐**
-- 🐳 **环境隔离/特殊镜像**: 使用 `run_local_pretrain_cli.sh` (Container Mode) - 可选
+- 🏃 **Single machine testing/development**: Use `run_pretrain_cli.sh` (Direct Mode) - **Recommended**
+- 🖥️ **Multi-node training**: Use `run_slurm_pretrain_cli.sh` (Slurm Mode) - **Recommended**
+- 🐳 **Environment isolation/special images**: Use `run_local_pretrain_cli.sh` (Container Mode) - Optional
 
-### Q: Direct Mode 如何设置实验配置？
+### Q: How do I set the experiment config in Direct Mode?
 
-**A**: 必须通过 `EXP` 环境变量指定配置文件：
+**A**: Specify the config file via the `EXP` environment variable:
 
 ```bash
-# 方式 1: 导出环境变量
+# Method 1: Export environment variable
 export EXP=examples/megatron/exp_pretrain.yaml
 bash examples/run_pretrain_cli.sh
 
-# 方式 2: 内联设置
+# Method 2: Inline setting
 EXP=config.yaml bash examples/run_pretrain_cli.sh
 ```
 
-### Q: Slurm 模式如何查看日志？
+### Q: How do I view logs in Slurm mode?
 
-**A**: 日志会保存到 `LOG_DIR/log_slurm_pretrain.txt`：
+**A**: Logs are saved to `LOG_DIR/log_slurm_pretrain.txt`:
 
 ```bash
-# 实时查看日志
+# View logs in real-time
 tail -f ./output/log_slurm_pretrain.txt
 
-# 或指定日志目录
+# Or specify log directory
 LOG_DIR=/tmp/my_logs bash examples/run_slurm_pretrain_cli.sh
 tail -f /tmp/my_logs/log_slurm_pretrain.txt
 ```
 
-### Q: 如何在 Slurm 上使用特定的 GPU 节点？
+### Q: How do I use specific GPU nodes on Slurm?
 
-**A**: 使用 `--nodelist` 选项：
+**A**: Use the `--nodelist` option:
 
 ```bash
-# 方式 1: 使用环境变量（推荐简单场景）
+# Method 1: Use environment variable (recommended for simple scenarios)
 NNODES=4 bash examples/run_slurm_pretrain_cli.sh
 
-# 方式 2: 直接调用 CLI 指定节点列表
+# Method 2: Call CLI directly with node list
 bash $PRIMUS_PATH/runner/primus-cli slurm srun \
   -N 4 \
   --nodelist "mi300x[01-04]" \
@@ -366,25 +366,25 @@ bash $PRIMUS_PATH/runner/primus-cli slurm srun \
 -- train pretrain --config $EXP
 ```
 
-### Q: 如何传递额外的训练参数？
+### Q: How do I pass additional training parameters?
 
-**A**: 在脚本后面直接添加参数即可：
+**A**: Add parameters after the script:
 
 ```bash
-# Direct mode - 传递批次大小参数
+# Direct mode - Pass batch size parameters
 bash examples/run_pretrain_cli.sh \
   --train_iters 10 \
   --micro_batch_size 4
 
-# Slurm mode - 传递 checkpoint 参数
+# Slurm mode - Pass checkpoint parameters
 bash examples/run_slurm_pretrain_cli.sh \
   --checkpoint-interval 500 \
   --enable-profiling
 ```
 
-### Q: 如何验证配置是否正确？
+### Q: How do I validate the configuration is correct?
 
-**A**: 使用 `--dry-run` 参数：
+**A**: Use the `--dry-run` parameter:
 
 ```bash
 # Direct mode
@@ -396,44 +396,44 @@ bash examples/run_slurm_pretrain_cli.sh --dry-run
 
 ---
 
-## 📚 参考资料
+## 📚 References
 
-- [Primus CLI 完整文档](../runner/README.md)
-- [配置文件示例](../examples/)
-- [故障排查指南](../docs/troubleshooting.md)
+- [Primus CLI Full Documentation](../runner/README.md)
+- [Configuration File Examples](../examples/)
+- [Troubleshooting Guide](../docs/troubleshooting.md)
 
 ---
 
-## 🎯 快速参考
+## 🎯 Quick Reference
 
 ```bash
-# ===== Direct Mode (推荐用于单机测试) =====
-# 使用默认配置
+# ===== Direct Mode (Recommended for single machine testing) =====
+# Use default config
 bash examples/run_pretrain_cli.sh
 
-# 使用自定义配置
+# Use custom config
 EXP=config.yaml bash examples/run_pretrain_cli.sh
 
-# 传递额外参数
+# Pass additional arguments
 bash examples/run_pretrain_cli.sh --train_iters 10 --micro_batch_size 4
 
-# ===== Slurm Mode (推荐用于多节点训练) =====
-# 单节点
+# ===== Slurm Mode (Recommended for multi-node training) =====
+# Single node
 bash examples/run_slurm_pretrain_cli.sh
 
-# 多节点
+# Multi-node
 NNODES=4 bash examples/run_slurm_pretrain_cli.sh
 
-# 指定节点列表
+# Specify node list
 bash $PRIMUS_PATH/runner/primus-cli slurm srun \
   -N 4 --nodelist "node[01-04]" \
 -- train pretrain --config $EXP
 
-# ===== Container Mode (可选) =====
+# ===== Container Mode (Optional) =====
 bash examples/run_local_pretrain_cli.sh
 ```
 
 ---
 
-**更新时间**: 2026-01-12
-**版本**: v1.1
+**Last Updated**: 2026-01-12
+**Version**: v1.1
