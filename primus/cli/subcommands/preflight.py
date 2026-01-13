@@ -8,37 +8,15 @@
 Preflight CLI subcommand.
 
 Simplified interface:
-    primus-cli preflight                    # Run all checks (GPU + Network)
-    primus-cli preflight check --gpu        # Run GPU checks only
-    primus-cli preflight check --network    # Run network checks only
+    primus-cli preflight                        # Run all checks (GPU + Network)
+    primus-cli preflight check --gpu            # Run GPU checks only
+    primus-cli preflight check --network        # Run network checks only
     primus-cli preflight check --gpu --network  # Run both
 """
 
 from __future__ import annotations
 
 from typing import Any, List
-
-
-def _add_common_args(parser) -> None:
-    """Add common reporting arguments to a parser."""
-    parser.add_argument(
-        "--dump-path",
-        type=str,
-        default="output/preflight",
-        help="Directory to store preflight reports (default: output/preflight).",
-    )
-    parser.add_argument(
-        "--report-file-name",
-        type=str,
-        default="preflight_report",
-        help="Base name for report files (default: preflight_report).",
-    )
-    parser.add_argument(
-        "--disable-pdf",
-        dest="save_pdf",
-        action="store_false",
-        help="Disable PDF report generation.",
-    )
 
 
 def run(args: Any, extra_args: List[str]) -> None:
@@ -99,18 +77,21 @@ def register_subcommand(subparsers):
         primus-cli preflight check --gpu        # GPU only
         primus-cli preflight check --network    # Network only
     """
+    from primus.tools.preflight.preflight_args import (
+        add_preflight_check_parser,
+        add_preflight_parser,
+    )
+
     parser = subparsers.add_parser(
         "preflight",
         help="Run cluster preflight checks (GPU + Network by default).",
     )
-    _add_common_args(parser)
+    add_preflight_parser(parser)
 
     # Add 'check' subcommand for selective checks
     sub = parser.add_subparsers(dest="subcmd")
     check = sub.add_parser("check", help="Run specific preflight checks")
-    check.add_argument("--gpu", action="store_true", help="Run GPU checks")
-    check.add_argument("--network", action="store_true", help="Run network checks")
-    _add_common_args(check)
+    add_preflight_check_parser(check)
 
     parser.set_defaults(func=run)
     return parser
