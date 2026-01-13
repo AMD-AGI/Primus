@@ -113,6 +113,11 @@ source "$RUNNER_DIR/lib/config.sh" || {
     exit 1
 }
 
+LOG_INFO_RANK0 "-----------------------------------------------"
+LOG_INFO_RANK0 "primus-cli-direct.sh"
+LOG_INFO_RANK0 "-----------------------------------------------"
+
+
 
 ###############################################################################
 # STEP 1: Pre-parse global options (--config, --debug, --dry-run, --help)
@@ -162,20 +167,38 @@ while [[ $# -gt 0 ]]; do
                 shift 2
             fi
             ;;
+        --script|--log_file|--patch)
+            # Runner options that take a value
+            PRE_PARSE_ARGS+=("$1" "$2")
+            shift 2
+            ;;
+        --numa|--no-numa|--single)
+            # Runner boolean flags (no value)
+            PRE_PARSE_ARGS+=("$1")
+            shift
+            ;;
         --)
+            # Explicit separator: remaining args are for primus Python module
+            shift  # skip the '--'
             PRIMUS_ARGS+=("$@")
             break
             ;;
         *)
-            PRE_PARSE_ARGS+=("$1")
-            shift
+            # First unrecognized argument (typically a subcommand like 'train'):
+            # Stop parsing runner options, pass everything from here to primus Python module.
+            # This prevents runner from intercepting options meant for Python (e.g., --config).
+            PRIMUS_ARGS+=("$@")
+            break
             ;;
     esac
 done
 # Restore arguments for second pass. Use `set --` so that options parsing stops
 # and all following tokens (including those starting with '-') become positional
 # parameters for the next parsing stage.
-set -- "${PRE_PARSE_ARGS[@]}" "${PRIMUS_ARGS[@]}"
+set -- "${PRE_PARSE_ARGS[@]}" -- "${PRIMUS_ARGS[@]}"
+LOG_INFO_RANK0 "[direct] PRE_PARSE_ARGS (runner options): ${PRE_PARSE_ARGS[*]}"
+LOG_INFO_RANK0 "[direct] PRIMUS_ARGS (python module args): ${PRIMUS_ARGS[*]}"
+LOG_INFO_RANK0 "[direct] Combined args for second pass: $*"
 
 # Enable debug mode early if set via CLI
 if [[ "$DEBUG_MODE" == "1" ]]; then
@@ -283,7 +306,7 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-set "${primus_args[@]}"
+set -- "${primus_args[@]}"
 
 ###############################################################################
 # STEP 4.5: Process non-cumulative parameters (use last value only)
@@ -349,18 +372,14 @@ fi
 ###############################################################################
 # STEP 8: Execute patch scripts
 ###############################################################################
-# Build and execute patch scripts array from config + CLI
+# Execute patch scripts from config + CLI.
+# Note: direct_config[patch] is stored as a newline-separated list.
 if [[ -n "${direct_config[patch]:-}" ]]; then
-    patch_scripts=()
-    while IFS= read -r patch_entry; do
-        patch_scripts+=("$patch_entry")
-    done <<< "${direct_config[patch]}"
-
     # shellcheck disable=SC1091
     source "${RUNNER_DIR}/helpers/execute_patches.sh"
     # Reset collected extra args from patches for this run
     PATCH_EXTRA_PRIMUS_ARGS=()
-    if ! execute_patches "${patch_scripts[@]}"; then
+    if ! execute_patches "${direct_config[patch]}"; then
         LOG_ERROR "[direct] Patch execution failed"
         exit 1
     fi

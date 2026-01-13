@@ -28,4 +28,11 @@ LOG_INFO_RANK0 "BUS_IDs: ${BUS_ID[*]}"
 NODE=$(cat /sys/bus/pci/devices/"${BUS_ID[$LOCAL_RANK]}"/numa_node)
 
 LOG_INFO_NODE_RANK0 "Starting binding local rank ${LOCAL_RANK} to numa_node ${NODE}..."
+
+# If the first argument is a Python entrypoint (e.g. primus/cli/main.py),
+# it may not be executable. In that case, run it via python3.
+if [[ $# -gt 0 && "${1}" == *.py ]]; then
+    set -- python3 "$@"
+fi
+
 numactl --cpunodebind="$NODE" --membind="$NODE" "$@"
