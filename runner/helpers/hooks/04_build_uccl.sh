@@ -31,6 +31,9 @@ fi
 cd uccl
 pushd ep
 
+# install dependencies
+apt update && apt install -y rdma-core libibverbs-dev libnuma-dev libgoogle-glog-dev
+
 LOG_INFO_RANK0 "[hook system] Building uccl ep"
 python3 setup.py build
 
