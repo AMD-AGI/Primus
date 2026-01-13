@@ -13,12 +13,21 @@ This mirrors the pattern used by `primus.tools.benchmark.*_bench_args`.
 import argparse
 
 
-def add_preflight_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """
-    Add common reporting arguments shared by preflight and preflight check.
+    Register arguments for `primus-cli preflight`.
 
-    These flags control output directory, report file name, and PDF generation.
+    Usage:
+        primus-cli preflight                          # Run all checks (GPU + Network)
+        primus-cli preflight --check-gpu              # GPU only
+        primus-cli preflight --check-network          # Network only
+        primus-cli preflight --check-gpu --check-network  # Both
     """
+    # Check selection flags
+    parser.add_argument("--check-gpu", action="store_true", help="Run GPU checks only")
+    parser.add_argument("--check-network", action="store_true", help="Run network checks only")
+
+    # Report output options
     parser.add_argument(
         "--dump-path",
         type=str,
@@ -37,30 +46,4 @@ def add_preflight_common_args(parser: argparse.ArgumentParser) -> argparse.Argum
         action="store_false",
         help="Disable PDF report generation.",
     )
-    return parser
-
-
-def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """
-    Register arguments for the top-level `primus-cli preflight` command.
-
-    Usage:
-        primus-cli preflight [--dump-path ...] [--report-file-name ...]
-    """
-    add_preflight_common_args(parser)
-    return parser
-
-
-def add_preflight_check_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-    """
-    Register arguments for `primus-cli preflight check`.
-
-    Usage:
-        primus-cli preflight check --gpu
-        primus-cli preflight check --network
-        primus-cli preflight check --gpu --network
-    """
-    parser.add_argument("--gpu", action="store_true", help="Run GPU checks")
-    parser.add_argument("--network", action="store_true", help="Run network checks")
-    add_preflight_common_args(parser)
     return parser
