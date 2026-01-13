@@ -22,12 +22,12 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from primus.preflight.gpu.gpu_basic import run_gpu_basic_checks
-from primus.preflight.gpu.gpu_perf import run_gpu_full_checks
-from primus.preflight.gpu.gpu_topology import run_gpu_standard_checks
-from primus.preflight.network.network_basic import run_network_basic_checks
-from primus.preflight.network.network_full import run_network_full_checks
-from primus.preflight.network.network_standard import run_network_standard_checks
+from primus.tools.preflight.gpu.gpu_basic import run_gpu_basic_checks
+from primus.tools.preflight.gpu.gpu_perf import run_gpu_full_checks
+from primus.tools.preflight.gpu.gpu_topology import run_gpu_standard_checks
+from primus.tools.preflight.network.network_basic import run_network_basic_checks
+from primus.tools.preflight.network.network_full import run_network_full_checks
+from primus.tools.preflight.network.network_standard import run_network_standard_checks
 from primus.tools.utils import gather_records, get_rank_world
 
 
@@ -76,7 +76,7 @@ def _gpu_findings(level: str) -> List[Finding]:
 
 
 def _network_findings() -> List[Finding]:
-    # Deprecated: network checks are now implemented in primus.preflight.network.*
+    # Deprecated: network checks are now implemented in primus.tools.preflight.network.*
     return [Finding("warn", "Legacy network checks invoked", {"note": "Use level-aware network checks."})]
 
 

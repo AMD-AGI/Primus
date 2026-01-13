@@ -113,8 +113,7 @@ def _memory_alloc_sanity() -> List[Finding]:
 
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         torch.cuda.set_device(local_rank)
-        # Allocate ~1GB (fp16): 512M elements * 2 bytes ~ 1GB (but too big for some envs).
-        # Use a smaller, safer allocation by default (~256MB).
+        # Use a smaller, safer allocation by default (~128MB).
         n = 64 * 1024 * 1024  # elements (~128MB)
         x = torch.empty((n,), device="cuda", dtype=torch.float16)
         del x
