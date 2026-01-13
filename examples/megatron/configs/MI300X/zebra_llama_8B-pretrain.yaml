@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:mamba_370M-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:zebra_llama_8B-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
@@ -9,12 +9,10 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: mamba_370M.yaml
+    model: zebra_llama_8B.yaml
     overrides:
       # log
-      wandb_project: "Primus_Mamba_Pretrain"
-      # disable_wandb: false
-      # disable_tensorboard: false
+      wandb_project: "Primus_Zebra_Llama_8B_Pretrain"
       stderr_sink_level: DEBUG
 
       eval_iters: 0
@@ -22,39 +20,38 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 50
-      micro_batch_size: 4
-      global_batch_size: 256
+      train_iters: 100
+      micro_batch_size: 2
+      global_batch_size: 128
 
-      seq_length: 2048
-      max_position_embeddings: 2048
+      seq_length: 4096
+      max_position_embeddings: 4096
 
-      lr: 3.0e-4
-      min_lr: 0.0
-      lr_warmup_iters: 50000
-      lr_decay_iters: 73192188
+      lr: 2.0e-4
+      min_lr: 2.0e-5
+      lr_warmup_iters: 200
+      lr_decay_iters: 10000
       lr_decay_style: cosine
       weight_decay: 0.1
       adam_beta1: 0.9
       adam_beta2: 0.95
       eod_mask_loss: true
-      init_method_std: 0.02
-      norm_epsilon: 1.0e-5
 
       # Mamba-specific: must provide spec
-      spec: ['megatron.core.models.mamba.mamba_layer_specs', 'mamba_stack_spec']
+      # Use custom hybrid Mamba+MLA spec
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'hybrid_stack_spec']
       
       # Tokenizer
       tokenizer_type: HuggingFaceTokenizer
-      tokenizer_model: EleutherAI/gpt-neox-20b
-
+      tokenizer_model: meta-llama/Llama-3.2-1B
+      
       # parallel
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
       overlap_grad_reduce: true
       overlap_param_gather: true
-      gradient_accumulation_fusion: false
+      gradient_accumulation_fusion: true
 
       # data
       mock_data: true
@@ -66,21 +63,8 @@ modules:
       finetune: false
       auto_continue_train: false
       load: null
-      no_load_optim: null
-      no_load_rng: null
       save: null
-      save_interval: 20000
-      no_save_optim: null
-      no_save_rng: null
+      save_interval: 10000
       disable_last_saving: true
       ckpt_format: torch
-
-      # Turbo - may need to disable for Mamba if not supported
-      enable_primus_turbo: false
-      use_turbo_attention: false
-      use_turbo_grouped_mlp: false
-
-      # Cross entropy flags
-      # cross_entropy_fusion_impl: "native"
-      # cross_entropy_loss_fusion: false
 
