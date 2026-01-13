@@ -23,7 +23,7 @@ LOG_INFO_RANK0 "[hook system] USING_UCCL=1 → Building uccl in /tmp "
 pushd /tmp
 
 if [ -d uccl ]; then
-    LOG_INFO_RANK0 "[hook system] Found existed uccl in /tmp, delete it"
+    LOG_INFO_RANK0 "[hook system] Found existed uccl in /tmp"
 else
 	git clone https://github.com/uccl-project/uccl.git
 fi
