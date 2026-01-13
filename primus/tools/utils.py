@@ -37,10 +37,28 @@ try:
         """Destroy process group if initialized."""
         if dist.is_initialized():
             try:
-                dist.barrier()  # optional: ensure all ranks reach this point
+                # Ensure all ranks reach this point before teardown.
+                # Important: NCCL barrier must use the correct per-rank CUDA device,
+                # otherwise some ranks may try to barrier on cuda:0 and error with:
+                #   "Tensor found on device cuda:0 but backend constrained to cuda:<local_rank>"
+                if torch.cuda.is_available():
+                    # Be explicit about per-rank device selection for teardown.
+                    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+                    try:
+                        torch.cuda.set_device(local_rank)
+                    except Exception:
+                        pass
+                    dist.barrier(device_ids=[local_rank])
+                else:
+                    dist.barrier()
             except Exception:
                 pass  # ignore barrier errors on exit
-            dist.destroy_process_group()
+            try:
+                dist.destroy_process_group()
+            except Exception:
+                # If NCCL has entered an error state (or ranks are filtered),
+                # teardown can throw; treat as best-effort.
+                pass
 
     def gather_all_results(obj):
         """

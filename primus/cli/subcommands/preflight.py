@@ -27,6 +27,21 @@ def run(args: Any, extra_args: List[str]) -> None:
     `run_preflight`. Any extra_args (unknown CLI tokens) are currently ignored.
     """
 
+    suite = getattr(args, "suite", None)
+
+    # Lightweight checks (benchmark-like suites):
+    #   primus-cli preflight gpu|network|all ...
+    if suite in ("gpu", "network", "all"):
+        from primus.tools.preflight.preflight_check import run_preflight_check
+        from primus.tools.utils import finalize_distributed, init_distributed
+
+        init_distributed()
+        try:
+            rc = run_preflight_check(args)
+        finally:
+            finalize_distributed()
+        raise SystemExit(rc)
+
     if extra_args:
         # For now we ignore unknown args; could be extended later if needed.
         print(f"[Primus:Preflight] Ignoring extra CLI args: {extra_args}")
@@ -55,10 +70,27 @@ def register_subcommand(subparsers):
             "via primus.tools.preflight.preflight_perf_test.run_preflight."
         ),
     )
-    from primus.tools.preflight.preflight_args import add_preflight_parser
+    # Legacy perf flags on the parent parser (keeps `primus-cli preflight --dump-path ...` working).
+    from primus.tools.preflight.preflight_args import (
+        add_preflight_all_check_parser,
+        add_preflight_gpu_check_parser,
+        add_preflight_network_check_parser,
+        add_preflight_perf_parser,
+    )
 
-    # Reuse the shared preflight argument builder
-    add_preflight_parser(parser)
+    add_preflight_perf_parser(parser)
+
+    # Benchmark-like suites:
+    suite_parsers = parser.add_subparsers(dest="suite", required=False)
+
+    gpu = suite_parsers.add_parser("gpu", help="Run GPU preflight checks")
+    add_preflight_gpu_check_parser(gpu)
+
+    network = suite_parsers.add_parser("network", help="Run network preflight checks")
+    add_preflight_network_check_parser(network)
+
+    all_ = suite_parsers.add_parser("all", help="Run all preflight checks (GPU + network)")
+    add_preflight_all_check_parser(all_)
 
     parser.set_defaults(func=run)
 

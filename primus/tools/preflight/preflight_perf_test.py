@@ -15,7 +15,6 @@ from primus.tools.preflight.inter_node_comm import run_inter_node_comm
 from primus.tools.preflight.inter_node_comm_p2p import run_inter_node_comm_p2p
 from primus.tools.preflight.inter_node_ring_p2p import run_inter_node_ring_p2p
 from primus.tools.preflight.intra_node_comm import run_intra_node_comm
-from primus.tools.preflight.preflight_args import add_preflight_parser
 from primus.tools.preflight.square_gemm import run_square_gemm
 from primus.tools.preflight.utility import (
     gather_hostnames,
@@ -68,7 +67,10 @@ def run_preflight(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    add_preflight_parser(parser)
+    # Perf preflight only (no lightweight suites here).
+    from primus.tools.preflight.preflight_args import add_preflight_perf_parser
+
+    add_preflight_perf_parser(parser)
     args = parser.parse_args()
 
     run_preflight(args)

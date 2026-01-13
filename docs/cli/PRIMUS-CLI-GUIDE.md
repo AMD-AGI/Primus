@@ -68,8 +68,12 @@ primus-cli direct -- train pretrain --config config.yaml
 primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
 
 # Environment check
-primus-cli direct -- preflight check --gpu
+primus-cli direct -- preflight gpu
 ```
+
+> Note: `preflight check` is a **lightweight sanity check** (fast). For a full
+> performance-oriented diagnostic (compute + intra/inter-node comm benchmarks),
+> use `primus-cli preflight` without `check`.
 
 **Suitable for**:
 - ✅ Local development and debugging
@@ -167,7 +171,7 @@ primus-cli slurm sbatch -N 8 -p AIG_Model -t 8:00:00 -o train.log \
 primus-cli slurm srun -N 2 -- benchmark gemm -M 16384 -N 16384 -K 16384
 
 # Multi-node environment check
-primus-cli slurm srun -N 4 -- preflight check --network
+primus-cli slurm srun -N 4 -- preflight network
 ```
 
 **Suitable for**:
@@ -328,14 +332,18 @@ primus-cli slurm srun -N 8 -- benchmark e2e --model llama2-7b
 
 ```bash
 # GPU check
-primus-cli direct -- preflight check --gpu
+primus-cli direct -- preflight gpu
 
 # Network check
-primus-cli slurm srun -N 4 -- preflight check --network
+primus-cli slurm srun -N 4 -- preflight network
 
 # Complete environment check
-primus-cli slurm srun -N 4 -- preflight check --all
+primus-cli slurm srun -N 4 -- preflight all
 ```
+
+> Tip: `preflight check` is intended to be fast. If you want a full cluster
+> diagnostic (compute + intra/inter-node comm benchmarks and report generation),
+> run `primus-cli preflight` (without `check`).
 
 ### Combined Usage
 
