@@ -7,11 +7,11 @@
 """
 Preflight CLI subcommand.
 
-This subcommand is a thin wrapper around
-`primus.tools.preflight.preflight_perf_test.run_preflight`.
-
-Example:
-    primus-cli preflight --dump-path output/preflight --report-file-name my_report
+Simplified interface:
+    primus-cli preflight                    # Run all checks (GPU + Network)
+    primus-cli preflight check --gpu        # Run GPU checks only
+    primus-cli preflight check --network    # Run network checks only
+    primus-cli preflight check --gpu --network  # Run both
 """
 
 from __future__ import annotations
@@ -19,79 +19,98 @@ from __future__ import annotations
 from typing import Any, List
 
 
+def _add_common_args(parser) -> None:
+    """Add common reporting arguments to a parser."""
+    parser.add_argument(
+        "--dump-path",
+        type=str,
+        default="output/preflight",
+        help="Directory to store preflight reports (default: output/preflight).",
+    )
+    parser.add_argument(
+        "--report-file-name",
+        type=str,
+        default="preflight_report",
+        help="Base name for report files (default: preflight_report).",
+    )
+    parser.add_argument(
+        "--disable-pdf",
+        dest="save_pdf",
+        action="store_false",
+        help="Disable PDF report generation.",
+    )
+
+
 def run(args: Any, extra_args: List[str]) -> None:
     """
     Entry point for the 'preflight' subcommand.
 
-    The subcommand parses arguments via the main CLI and then calls
-    `run_preflight`. Any extra_args (unknown CLI tokens) are currently ignored.
+    - `preflight` alone → run all checks (GPU + Network)
+    - `preflight check --gpu` → GPU only
+    - `preflight check --network` → network only
     """
+    from primus.tools.preflight.preflight_check import run_preflight_check
+    from primus.tools.utils import finalize_distributed, init_distributed
 
-    suite = getattr(args, "suite", None)
+    subcmd = getattr(args, "subcmd", None)
 
-    # Lightweight checks (benchmark-like suites):
-    #   primus-cli preflight gpu|network|all ...
-    if suite in ("gpu", "network", "all"):
-        from primus.tools.preflight.preflight_check import run_preflight_check
-        from primus.tools.utils import finalize_distributed, init_distributed
+    if subcmd == "check":
+        do_gpu = getattr(args, "gpu", False)
+        do_network = getattr(args, "network", False)
+        # If neither specified, do both
+        if not do_gpu and not do_network:
+            do_gpu = do_network = True
+    else:
+        # Just 'preflight' → do everything
+        do_gpu = do_network = True
 
-        init_distributed()
-        try:
-            rc = run_preflight_check(args)
-        finally:
-            finalize_distributed()
-        raise SystemExit(rc)
+    # Determine suite
+    if do_gpu and do_network:
+        suite = "all"
+    elif do_gpu:
+        suite = "gpu"
+    else:
+        suite = "network"
+
+    # Set args for run_preflight_check
+    args.suite = suite
+    args.level = "full"  # Always run full checks
+    args.fail_on_warn = False
+    args.expect_ib = False
+    args.comm_sanity = False
 
     if extra_args:
-        # For now we ignore unknown args; could be extended later if needed.
         print(f"[Primus:Preflight] Ignoring extra CLI args: {extra_args}")
 
-    from primus.tools.preflight.preflight_perf_test import run_preflight
-
-    run_preflight(args)
+    init_distributed()
+    try:
+        rc = run_preflight_check(args)
+    finally:
+        finalize_distributed()
+    raise SystemExit(rc)
 
 
 def register_subcommand(subparsers):
     """
-    Register the 'preflight' subcommand to the main CLI parser.
+    Register the 'preflight' subcommand.
 
-    Example:
-        primus preflight --dump-path output/preflight --report-file-name preflight_report
-
-    Args:
-        subparsers: argparse subparsers object from main.py
+    Usage:
+        primus-cli preflight                    # Run all checks
+        primus-cli preflight check --gpu        # GPU only
+        primus-cli preflight check --network    # Network only
     """
-
     parser = subparsers.add_parser(
         "preflight",
-        help="Run cluster preflight checks (GPU compute & interconnect sanity).",
-        description=(
-            "Run Primus preflight diagnostics (compute, intra-node and inter-node communication) "
-            "via primus.tools.preflight.preflight_perf_test.run_preflight."
-        ),
+        help="Run cluster preflight checks (GPU + Network by default).",
     )
-    # Legacy perf flags on the parent parser (keeps `primus-cli preflight --dump-path ...` working).
-    from primus.tools.preflight.preflight_args import (
-        add_preflight_all_check_parser,
-        add_preflight_gpu_check_parser,
-        add_preflight_network_check_parser,
-        add_preflight_perf_parser,
-    )
+    _add_common_args(parser)
 
-    add_preflight_perf_parser(parser)
-
-    # Benchmark-like suites:
-    suite_parsers = parser.add_subparsers(dest="suite", required=False)
-
-    gpu = suite_parsers.add_parser("gpu", help="Run GPU preflight checks")
-    add_preflight_gpu_check_parser(gpu)
-
-    network = suite_parsers.add_parser("network", help="Run network preflight checks")
-    add_preflight_network_check_parser(network)
-
-    all_ = suite_parsers.add_parser("all", help="Run all preflight checks (GPU + network)")
-    add_preflight_all_check_parser(all_)
+    # Add 'check' subcommand for selective checks
+    sub = parser.add_subparsers(dest="subcmd")
+    check = sub.add_parser("check", help="Run specific preflight checks")
+    check.add_argument("--gpu", action="store_true", help="Run GPU checks")
+    check.add_argument("--network", action="store_true", help="Run network checks")
+    _add_common_args(check)
 
     parser.set_defaults(func=run)
-
     return parser
