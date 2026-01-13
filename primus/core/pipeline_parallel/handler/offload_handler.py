@@ -5,7 +5,7 @@
 ###############################################################################
 
 import torch
-
+import os
 from primus.core.pipeline_parallel.scheduler.scheduler_node import SchedulerNode
 
 
@@ -39,6 +39,8 @@ class OffloadBuffer:
 
         self.offload_stream = torch.cuda.Stream()
 
+        self.use_pinned = os.environ.get("USE_PINNED_OFFLOAD", "0") != "0"
+
     def async_offload(self, tensor: torch.Tensor, key: str, catogary: str):
 
         if not tensor.is_contiguous():
@@ -51,12 +53,12 @@ class OffloadBuffer:
                 self.cpu_buffer_pool[catogary] = []
             if len(self.cpu_buffer_pool[catogary]) == 0:
                 cpu_tensor = torch.empty_like(
-                    tensor.data, device="cpu", layout=tensor.data.layout, requires_grad=False
+                    tensor.data, device="cpu", layout=tensor.data.layout, requires_grad=False, pin_memory=self.use_pinned
                 )
             else:
                 cpu_tensor = self.cpu_buffer_pool[catogary].pop(0)
 
-            cpu_tensor.copy_(tensor.data, non_blocking=False)
+            cpu_tensor.copy_(tensor.data, non_blocking=self.use_pinned)
             self.cpu_buffers[key] = cpu_tensor
 
             event = torch.cuda.Event()
@@ -80,7 +82,7 @@ class OffloadBuffer:
             self.gpu_tensors[key].data = torch.empty(
                 self.cpu_buffers[key].shape, device="cuda", dtype=self.cpu_buffers[key].dtype
             )
-            self.gpu_tensors[key].data.copy_(self.cpu_buffers[key], non_blocking=False)
+            self.gpu_tensors[key].data.copy_(self.cpu_buffers[key], non_blocking=self.use_pinned)
 
             event = torch.cuda.Event()
             event.record(self.offload_stream)
