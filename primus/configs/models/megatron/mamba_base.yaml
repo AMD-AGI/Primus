@@ -16,18 +16,13 @@ use_rotary_position_embeddings: false
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: null
 
-# Model architecture
-num_layers: 24
-hidden_size: 1024
-ffn_hidden_size: null
-
 # Standard transformer settings that may be used by hybrid models
-num_attention_heads: 16
+is_hybrid_model: false
 attention_dropout: 0.0
 hidden_dropout: 0.0
 
 # Embeddings
-untie_embeddings_and_output_weights: true
+untie_embeddings_and_output_weights: false
 
 # Other settings
 apply_residual_connection_post_layernorm: false
