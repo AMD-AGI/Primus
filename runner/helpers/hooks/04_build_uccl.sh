@@ -5,15 +5,11 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# System hook: enable AINIC environment settings.
+# System hook: enable build uccl settings..
 #
 # Trigger:
-#   export USING_AINIC=1
+#   export USING_UCCL=1
 #
-# This replaces the old env file:
-#   runner/helpers/envs/enable_ainic.sh
-#
-# Note: hooks must print "env.VAR=VALUE" to persist changes back to the caller.
 ###############################################################################
 
 set -euo pipefail
@@ -28,10 +24,10 @@ pushd /tmp
 
 if [ -d uccl ]; then
     LOG_INFO_RANK0 "[hook system] Found existed uccl in /tmp, delete it"
-	rm -rf uccl
+else
+	git clone https://github.com/uccl-project/uccl.git
 fi
 
-git clone https://github.com/uccl-project/uccl.git
 cd uccl
 pushd ep
 
@@ -49,9 +45,6 @@ pushd ep/deep_ep_wrapper
 python3 setup.py install
 LOG_INFO_RANK0 "[hook system] Install deep_ep done"
 popd
-
-LOG_INFO_RANK0 "[hook system] Cleaning build files"
-rm -rf uccl
 popd
 
 LOG_INFO_RANK0 "[hook system] Building uccl done."
