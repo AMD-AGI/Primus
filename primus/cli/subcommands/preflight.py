@@ -22,35 +22,9 @@ from typing import Any, List
 def run(args: Any, extra_args: List[str]) -> None:
     """
     Entry point for the 'preflight' subcommand.
-
-    - `preflight` alone → run all checks (GPU + Network)
-    - `preflight --check-gpu` → GPU only
-    - `preflight --check-network` → network only
     """
     from primus.tools.preflight.preflight_check import run_preflight_check
     from primus.tools.utils import finalize_distributed, init_distributed
-
-    do_gpu = getattr(args, "check_gpu", False)
-    do_network = getattr(args, "check_network", False)
-
-    # If neither specified, do both
-    if not do_gpu and not do_network:
-        do_gpu = do_network = True
-
-    # Determine suite
-    if do_gpu and do_network:
-        suite = "all"
-    elif do_gpu:
-        suite = "gpu"
-    else:
-        suite = "network"
-
-    # Set args for run_preflight_check
-    args.suite = suite
-    args.level = "full"  # Always run full checks
-    args.fail_on_warn = False
-    args.expect_ib = False
-    args.comm_sanity = False
 
     if extra_args:
         print(f"[Primus:Preflight] Ignoring extra CLI args: {extra_args}")

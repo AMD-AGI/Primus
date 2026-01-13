@@ -370,20 +370,45 @@ def _host_network_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
 
 def run_preflight_check(args: Any) -> int:
     """
+    Run preflight checks based on args.
+
+    Args:
+        args: Namespace with optional fields:
+            - check_gpu (bool): Run GPU checks
+            - check_network (bool): Run network checks
+            - dump_path (str): Output directory
+            - report_file_name (str): Report base name
+            - save_pdf (bool): Generate PDF report
+
     Return codes:
-      0: success
-      1: warnings (only if --fail-on-warn is NOT set)
+      0: success (or warnings without --fail-on-warn)
       2: failures
     """
     hostname = os.environ.get("HOSTNAME") or socket.gethostname()
-    suite = getattr(args, "suite", "gpu")
-    level = getattr(args, "level", "basic")
-    fail_on_warn = bool(getattr(args, "fail_on_warn", False))
+
+    # Determine suite from --check-gpu / --check-network flags
+    check_gpu = getattr(args, "check_gpu", False)
+    check_network = getattr(args, "check_network", False)
+    if not check_gpu and not check_network:
+        # Neither specified → do both
+        check_gpu = check_network = True
+
+    if check_gpu and check_network:
+        suite = "all"
+    elif check_gpu:
+        suite = "gpu"
+    else:
+        suite = "network"
+
+    # Fixed defaults for simplified CLI
+    level = "full"
+    fail_on_warn = False
+    expect_ib = False
+    comm_sanity = False
+
     dump_path = getattr(args, "dump_path", "output/preflight")
     report_file_name = getattr(args, "report_file_name", "preflight_report")
     save_pdf = bool(getattr(args, "save_pdf", True))
-    expect_ib = bool(getattr(args, "expect_ib", False))
-    comm_sanity = bool(getattr(args, "comm_sanity", False))
 
     findings: List[Finding] = []
     if suite in ("gpu", "all"):
