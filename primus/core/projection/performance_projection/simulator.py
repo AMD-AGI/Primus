@@ -1,3 +1,4 @@
+from typing import Optional
 import importlib
 import json
 import os
@@ -37,7 +38,7 @@ class SchedulerSimulationRunner:
         }
 
     def _chunk_duration(
-        self, rank: int, chunk: int | None, func_type: FuncType, scheduler_config: dict
+        self, rank: int, chunk: Optional[int], func_type: FuncType, scheduler_config: dict
     ) -> float:
         chunk_idx = chunk or 0
         assert self.chunk_time_ms is not None
@@ -60,7 +61,7 @@ class SchedulerSimulationRunner:
         else:
             raise ValueError(f"Duration is not found.")
 
-    def _chunk_activation(self, rank: int, chunk: int | None) -> float:
+    def _chunk_activation(self, rank: int, chunk: Optional[int]) -> float:
         if self.chunk_time_ms is None:
             return 0.0
         chunk_idx = chunk or 0
