@@ -1,3 +1,4 @@
+from typing import List, Dict, Optional, Tuple
 ###############################################################################
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -26,7 +27,7 @@ class DenseMLPProfiler(BaseModuleProfiler):
         self._cached_results = None
         self._cache_key = None
 
-    def estimated_num_params(self, rank: int | None = None) -> int:
+    def estimated_num_params(self, rank: Optional[int] = None) -> int:
         # For SwiGLU: 3 projections (gate, up, down)
         # For standard FFN: 2 projections (up, down)
         num_ffn_projections = 3 if self.config.model_config.swiglu else 2
@@ -57,7 +58,7 @@ class DenseMLPProfiler(BaseModuleProfiler):
         # Peak memory is input + intermediate (both needed for backward)
         return intermediate_memory + activation_memory + output_memory
 
-    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> Tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
