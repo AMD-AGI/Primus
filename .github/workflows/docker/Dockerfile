@@ -6,7 +6,7 @@ ARG ROCSHMEM_COMMIT
 ARG PRIMUS_TURBO_COMMIT
 
 # Install basic dependencies
-RUN apt-get update
+RUN apt-get update && apt-get install -y rdma-core libibverbs-dev libnuma-dev
 
 WORKDIR /opt
 # Clone and install rocSHMEM
