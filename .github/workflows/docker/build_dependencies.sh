@@ -19,7 +19,9 @@ build_rocshmem() {
 
 	mkdir build && cd build
 
-	MPI_ROOT=/opt/ompi UCX_ROOT=/opt/ucx INSTALL_PREFIX=/io/rocshmem ../scripts/build_configs/gda \
+	ls -alh /workspace
+
+	MPI_ROOT=/opt/ompi UCX_ROOT=/opt/ucx INSTALL_PREFIX=/workspace/rocshmem ../scripts/build_configs/gda \
 		-DGDA_IONIC=ON \
 		-DGDA_MLX5=ON \
 		-DGDA_BNXT=ON \
@@ -39,7 +41,7 @@ docker run --rm \
 	--security-opt seccomp=unconfined \
 	--group-add video \
 	--privileged \
-	-v "$PWD":/io \
+	-v "$PWD":/workspace \
 	-e ROCSHMEM_COMMIT="${ROCSHMEM_COMMIT}" \
 	-e FUNCTION_DEF="$(declare -f build_rocshmem)" \
 	"$BASE_IMAGE" /bin/bash -c '
