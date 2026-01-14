@@ -43,7 +43,7 @@ def _expected_ib(env: Dict[str, Any], available_nics: List[str], override: Optio
     return False
 
 
-def run_network_standard_checks(*, expect_ib: Optional[bool] = None) -> Dict[str, Any]:
+def run_network_standard_checks() -> Dict[str, Any]:
     """
     Level: standard
 
@@ -98,7 +98,7 @@ def run_network_standard_checks(*, expect_ib: Optional[bool] = None) -> Dict[str
     }
     findings.append(Finding("info", "NIC and network path", {"nics": nics_metrics}))
 
-    expected = _expected_ib(env, available_nics, expect_ib)
+    expected = _expected_ib(env, available_nics, None)
     ib_devices = probe.ib_devices
     has_ib = len(ib_devices) > 0
 

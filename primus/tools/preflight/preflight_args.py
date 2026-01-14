@@ -18,14 +18,47 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     Register arguments for `primus-cli preflight`.
 
     Usage:
-        primus-cli preflight                          # Run all checks (GPU + Network)
-        primus-cli preflight --check-gpu              # GPU only
-        primus-cli preflight --check-network          # Network only
-        primus-cli preflight --check-gpu --check-network  # Both
+        primus-cli preflight                          # Show all info (Host + GPU + Network)
+        primus-cli preflight --host                   # Host only
+        primus-cli preflight --gpu                    # GPU only
+        primus-cli preflight --network                # Network only
+        primus-cli preflight --gpu --network          # GPU + Network
+        primus-cli preflight --perf-test              # Run perf tests ONLY (skip info)
     """
     # Check selection flags
-    parser.add_argument("--check-gpu", action="store_true", help="Run GPU checks only")
-    parser.add_argument("--check-network", action="store_true", help="Run network checks only")
+    # Keep --check-* as compatibility aliases.
+    parser.add_argument(
+        "--host",
+        "--check-host",
+        dest="check_host",
+        action="store_true",
+        help="Show host info (CPU, memory, PCIe)",
+    )
+    parser.add_argument(
+        "--gpu",
+        "--check-gpu",
+        dest="check_gpu",
+        action="store_true",
+        help="Show GPU info",
+    )
+    parser.add_argument(
+        "--network",
+        "--check-network",
+        dest="check_network",
+        action="store_true",
+        help="Show network info",
+    )
+
+    # Performance test mode (full GEMM, intra/inter node comm tests)
+    parser.add_argument(
+        "--perf-test",
+        action="store_true",
+        help="Run perf tests ONLY (GEMM, intra/inter node communication). "
+        "This is slower and skips the host/gpu/network info report.",
+    )
+
+    # Performance test specific options (only used with --perf-test)
+    parser.add_argument("--plot", action="store_true", help="Generate plots (only with --perf-test)")
 
     # Report output options
     parser.add_argument(

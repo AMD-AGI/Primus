@@ -8,10 +8,10 @@
 GPU preflight checks.
 """
 
-from .check import host_gpu_summary, run_gpu_checks, write_gpu_report
 from .gpu_basic import run_gpu_basic_checks
 from .gpu_perf import run_gpu_full_checks
 from .gpu_topology import run_gpu_standard_checks
+from .info import collect_gpu_info, host_gpu_summary, write_gpu_report
 from .utils import Finding, ProbeResult
 
 __all__ = [
@@ -20,7 +20,7 @@ __all__ = [
     "run_gpu_basic_checks",
     "run_gpu_standard_checks",
     "run_gpu_full_checks",
-    "run_gpu_checks",
+    "collect_gpu_info",
     "host_gpu_summary",
     "write_gpu_report",
 ]

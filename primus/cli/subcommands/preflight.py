@@ -7,11 +7,12 @@
 """
 Preflight CLI subcommand.
 
-Simplified interface:
-    primus-cli preflight                              # Run all checks (GPU + Network)
-    primus-cli preflight --check-gpu                  # Run GPU checks only
-    primus-cli preflight --check-network              # Run network checks only
-    primus-cli preflight --check-gpu --check-network  # Run both
+Usage:
+    primus-cli preflight                              # Run ALL: info report + perf tests
+    primus-cli preflight --host                       # Host info only
+    primus-cli preflight --gpu                        # GPU info only
+    primus-cli preflight --network                    # Network info only
+    primus-cli preflight --perf-test                  # Perf tests only (skip info)
 """
 
 from __future__ import annotations
@@ -23,17 +24,12 @@ def run(args: Any, extra_args: List[str]) -> None:
     """
     Entry point for the 'preflight' subcommand.
     """
-    from primus.tools.preflight.preflight_check import run_preflight_check
-    from primus.tools.utils import finalize_distributed, init_distributed
+    from primus.tools.preflight.preflight_perf_test import run_preflight
 
     if extra_args:
         print(f"[Primus:Preflight] Ignoring extra CLI args: {extra_args}")
 
-    init_distributed()
-    try:
-        rc = run_preflight_check(args)
-    finally:
-        finalize_distributed()
+    rc = run_preflight(args)
     raise SystemExit(rc)
 
 
@@ -42,17 +38,15 @@ def register_subcommand(subparsers):
     Register the 'preflight' subcommand.
 
     Usage:
-        primus-cli preflight                              # Run all checks
-        primus-cli preflight --check-gpu                  # GPU only
-        primus-cli preflight --check-network              # Network only
-        primus-cli preflight --check-gpu --check-network  # Both
+        primus-cli preflight                              # Info + perf tests
+        primus-cli preflight --host                       # Host info only
+        primus-cli preflight --gpu                        # GPU info only
+        primus-cli preflight --network                    # Network info only
+        primus-cli preflight --perf-test                  # Perf only
     """
     from primus.tools.preflight.preflight_args import add_preflight_parser
 
-    parser = subparsers.add_parser(
-        "preflight",
-        help="Run cluster preflight checks (GPU + Network by default).",
-    )
+    parser = subparsers.add_parser("preflight", help="Run cluster preflight (info + perf).")
     add_preflight_parser(parser)
 
     parser.set_defaults(func=run)

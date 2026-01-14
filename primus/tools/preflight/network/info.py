@@ -5,7 +5,7 @@
 ###############################################################################
 
 """
-Network check orchestration and summary functions.
+Network info collection + report writing.
 """
 
 from __future__ import annotations
@@ -25,22 +25,19 @@ class Finding:
     details: Dict[str, Any]
 
 
-def run_network_checks(expect_ib: bool = False, comm_sanity: bool = False) -> List[Finding]:
-    """Run all network checks (basic + standard + full)."""
+def collect_network_info() -> List[Finding]:
+    """Collect all network info (basic + standard + runtime)."""
     out: List[Finding] = []
 
-    # basic
     nb = run_network_basic_checks()
     for f in nb["findings"]:
         out.append(Finding(level=f.level, message=f.message, details=f.details))
 
-    # standard
-    ns = run_network_standard_checks(expect_ib=True if expect_ib else None)
+    ns = run_network_standard_checks()
     for f in ns["findings"]:
         out.append(Finding(level=f.level, message=f.message, details=f.details))
 
-    # full
-    nf = run_network_full_checks(comm_sanity=comm_sanity)
+    nf = run_network_full_checks()
     for f in nf["findings"]:
         out.append(Finding(level=f.level, message=f.message, details=f.details))
 
@@ -64,9 +61,7 @@ def _find_first_finding_details(findings: List[Dict[str, Any]], message: str) ->
 
 
 def host_network_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Summarize network-related fields for a host from per-rank records.
-    """
+    """Summarize network-related fields for a host from per-rank records."""
     host_fail = 0
     host_warn = 0
     ranks: List[int] = []
@@ -77,7 +72,7 @@ def host_network_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     ib: Dict[str, Any] = {}
     rccl: Dict[str, Any] = {}
     runtime: Dict[str, Any] = {}
-    runtime_comm: Dict[str, Any] = {}
+
     for r in records:
         host_fail += int(r.get("fail_count", 0) or 0)
         host_warn += int(r.get("warn_count", 0) or 0)
@@ -116,10 +111,7 @@ def host_network_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                 d = _find_first_finding_details(rf, "Runtime process group sanity")
                 if d and isinstance(d.get("runtime"), dict):
                     runtime = d["runtime"]
-            if not runtime_comm:
-                d = _find_first_finding_details(rf, "Minimal communication sanity")
-                if d and isinstance(d.get("runtime_comm"), dict):
-                    runtime_comm = d["runtime_comm"]
+
     return {
         "ranks": sorted(set(ranks)),
         "status": _status_from_counts(host_fail, host_warn),
@@ -130,12 +122,15 @@ def host_network_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "ib": ib,
         "rccl": rccl,
         "runtime": runtime,
-        "runtime_comm": runtime_comm,
     }
 
 
 def write_network_report(f: Any, by_host: Dict[str, List[Dict[str, Any]]]) -> None:
     """Write network report sections to file handle."""
+    # Section header
+    f.write("---\n\n")
+    f.write("# Network Info\n\n")
+
     # Network Status table
     f.write("## Network Status\n\n")
     f.write("| host | ranks | status | is_distributed | network_mode | has_fail | has_warn |\n")
@@ -214,17 +209,7 @@ def write_network_report(f: Any, by_host: Dict[str, List[Dict[str, Any]]]) -> No
     for h in sorted(by_host.keys()):
         s = host_network_summary(by_host[h])
         rt = s.get("runtime", {}) or {}
-        f.write(f"| {h} | {rt.get('pg_backend','')} | {rt.get('pg_init_ok','')} | {rt.get('pg_error','')} |\n")
-    f.write("\n")
-
-    # (Optional) Minimal Communication Sanity table
-    f.write("## (Optional) Minimal Communication Sanity\n\n")
-    f.write("| host | allreduce_tested | allreduce_ok | allreduce_error |\n")
-    f.write("|---|---|---|---|\n")
-    for h in sorted(by_host.keys()):
-        s = host_network_summary(by_host[h])
-        runtime_comm_row = s.get("runtime_comm", {}) or {}
         f.write(
-            f"| {h} | {runtime_comm_row.get('allreduce_tested','')} | {runtime_comm_row.get('allreduce_ok','')} | {runtime_comm_row.get('allreduce_error','')} |\n"
+            f"| {h} | {rt.get('pg_backend','')} | {rt.get('pg_init_ok','')} | {rt.get('pg_error','')} |\n"
         )
     f.write("\n")
