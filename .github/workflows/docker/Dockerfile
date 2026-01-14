@@ -52,13 +52,10 @@ RUN cd /tmp && \
     git checkout ${PRIMUS_TURBO_COMMIT} && \
     git submodule update --init --recursive && \
     pip3 install -r requirements.txt && \
-    GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
+    GPU_ARCHS="gfx942;gfx950" python3 setup.py develop
 
 
 # Set the default working directory
 WORKDIR /opt
-
-RUN ldd /opt/venv/lib/python3.10/site-packages/primus_turbo/lib/libprimus_turbo_kernels.so
-
 # check the installed Primus-Turbo package
 RUN python3 -m pip show primus-turbo || true
