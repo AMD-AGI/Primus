@@ -6,13 +6,9 @@
 
 """
 GPU preflight checks.
-
-Levels:
-  - basic: availability/identity/safety checks (may FAIL)
-  - standard: consistency/topology checks (WARN by default)
-  - full: perf sanity checks (WARN only)
 """
 
+from .check import host_gpu_summary, run_gpu_checks
 from .gpu_basic import run_gpu_basic_checks
 from .gpu_perf import run_gpu_full_checks
 from .gpu_topology import run_gpu_standard_checks
@@ -24,4 +20,6 @@ __all__ = [
     "run_gpu_basic_checks",
     "run_gpu_standard_checks",
     "run_gpu_full_checks",
+    "run_gpu_checks",
+    "host_gpu_summary",
 ]

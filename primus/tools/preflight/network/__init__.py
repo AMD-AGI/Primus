@@ -5,12 +5,10 @@
 ###############################################################################
 
 """
-Network preflight checks (basic/standard/full).
-
-This package focuses on *network intent* and *configuration sanity* rather than
-performance benchmarking.
+Network preflight checks.
 """
 
+from .check import host_network_summary, run_network_checks
 from .network_basic import run_network_basic_checks
 from .network_full import run_network_full_checks
 from .network_standard import run_network_standard_checks
@@ -22,4 +20,6 @@ __all__ = [
     "run_network_basic_checks",
     "run_network_standard_checks",
     "run_network_full_checks",
+    "run_network_checks",
+    "host_network_summary",
 ]

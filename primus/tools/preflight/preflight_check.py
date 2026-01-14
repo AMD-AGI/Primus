@@ -22,12 +22,16 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from primus.tools.preflight.gpu.gpu_basic import run_gpu_basic_checks
-from primus.tools.preflight.gpu.gpu_perf import run_gpu_full_checks
-from primus.tools.preflight.gpu.gpu_topology import run_gpu_standard_checks
-from primus.tools.preflight.network.network_basic import run_network_basic_checks
-from primus.tools.preflight.network.network_full import run_network_full_checks
-from primus.tools.preflight.network.network_standard import run_network_standard_checks
+from primus.tools.preflight.gpu.check import (
+    Finding as GpuFinding,
+    host_gpu_summary,
+    run_gpu_checks,
+)
+from primus.tools.preflight.network.check import (
+    Finding as NetworkFinding,
+    host_network_summary,
+    run_network_checks,
+)
 from primus.tools.utils import gather_records, get_rank_world
 
 
@@ -36,46 +40,6 @@ class Finding:
     level: str  # "info" | "warn" | "fail"
     message: str
     details: Dict[str, Any]
-
-
-def _split_ifnames(value: str) -> List[str]:
-    # NCCL_SOCKET_IFNAME often supports comma-separated list and "^" exclusions.
-    if not value:
-        return []
-    out: List[str] = []
-    for raw in value.split(","):
-        raw = raw.strip()
-        if not raw or raw.startswith("^"):
-            continue
-        out.append(raw)
-    return out
-
-
-def _gpu_findings() -> List[Finding]:
-    """Run all GPU checks (basic + standard + full)."""
-    out: List[Finding] = []
-
-    # basic (may FAIL)
-    basic = run_gpu_basic_checks()
-    for f in basic["findings"]:
-        out.append(Finding(level=f.level, message=f.message, details=f.details))
-
-    # standard (WARN by default)
-    std = run_gpu_standard_checks()
-    for f in std["findings"]:
-        out.append(Finding(level=f.level, message=f.message, details=f.details))
-
-    # full (WARN only)
-    full = run_gpu_full_checks()
-    for f in full["findings"]:
-        out.append(Finding(level=f.level, message=f.message, details=f.details))
-
-    return out
-
-
-def _network_findings() -> List[Finding]:
-    # Deprecated: network checks are now implemented in primus.tools.preflight.network.*
-    return [Finding("warn", "Legacy network checks invoked", {"note": "Deprecated function."})]
 
 
 def _apply_expectations(args: Any, findings: List[Finding]) -> List[Finding]:
@@ -142,241 +106,6 @@ def _status_from_counts(fail_count: int, warn_count: int) -> str:
     return "OK"
 
 
-def _find_first_finding_details(findings: List[Dict[str, Any]], message: str) -> Optional[Dict[str, Any]]:
-    for x in findings:
-        if x.get("message") == message:
-            d = x.get("details")
-            return d if isinstance(d, dict) else None
-    return None
-
-
-def _find_first_finding(findings: List[Dict[str, Any]], message: str) -> Optional[Dict[str, Any]]:
-    for x in findings:
-        if x.get("message") == message:
-            return x if isinstance(x, dict) else None
-    return None
-
-
-def _host_gpu_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Summarize GPU-related fields for a host from per-rank records.
-    """
-    # Prefer any record that includes the "GPU identity" payload.
-    identity_details: Optional[Dict[str, Any]] = None
-    enum_details: Optional[Dict[str, Any]] = None
-    occupied = False
-    host_fail = 0
-    host_warn = 0
-    ranks: List[int] = []
-    warn_msgs: set[str] = set()
-    std_warn_msgs: set[str] = set()
-    numa_imbalance: Optional[bool] = None
-    topo_pcie_hint: Optional[bool] = None
-    nccl_ib_hca_set: Optional[bool] = None
-    gemm_results: List[Dict[str, Any]] = []  # Collect from all ranks
-    mem_alloc: Optional[Dict[str, Any]] = None
-
-    for r in records:
-        host_fail += int(r.get("fail_count", 0) or 0)
-        host_warn += int(r.get("warn_count", 0) or 0)
-        if r.get("rank") is not None:
-            try:
-                ranks.append(int(r["rank"]))
-            except Exception:
-                pass
-
-        rf = r.get("findings", [])
-        if isinstance(rf, list):
-            if identity_details is None:
-                identity_details = _find_first_finding_details(rf, "GPU identity")
-            if enum_details is None:
-                enum_details = _find_first_finding_details(rf, "GPU enumeration")
-            # Occupancy fail (best-effort)
-            for x in rf:
-                if "occupied by other processes" in str(x.get("message", "")).lower():
-                    occupied = True
-                if x.get("level") == "warn" and x.get("message"):
-                    msg = str(x.get("message"))
-                    warn_msgs.add(msg)
-                    # Heuristic classification: "standard" warnings (topology/NUMA/env)
-                    if (
-                        "NUMA" in msg
-                        or "topology" in msg.lower()
-                        or msg.startswith("NCCL_IB_HCA")
-                        or msg.startswith("NCCL_SOCKET_IFNAME")
-                        or msg.startswith("NCCL_IB_GID_INDEX")
-                    ):
-                        std_warn_msgs.add(msg)
-
-                # Standard-level signals (best-effort parsing)
-                if x.get("message") == "GPU↔NUMA mapping":
-                    d = x.get("details", {})
-                    if isinstance(d, dict) and isinstance(d.get("imbalance"), bool):
-                        numa_imbalance = d.get("imbalance")
-                if x.get("message") == "GPU topology (amd-smi topo)":
-                    d = x.get("details", {})
-                    if isinstance(d, dict):
-                        out = str(d.get("out", ""))
-                        if out:
-                            # Heuristic: presence of PCIE hints potential fallback.
-                            topo_pcie_hint = ("PCIE" in out.upper()) or ("PCIe" in out)
-                msg = str(x.get("message", ""))
-                if "Topology indicates PCIe paths" in msg:
-                    topo_pcie_hint = True
-                if msg.startswith("NCCL_IB_HCA"):
-                    d = x.get("details", {})
-                    if isinstance(d, dict):
-                        v = d.get("NCCL_IB_HCA", "")
-                        if v is not None:
-                            nccl_ib_hca_set = bool(str(v))
-
-                # Full-level signals (best-effort parsing)
-                if x.get("message") == "Single-GPU GEMM sanity":
-                    d = x.get("details", {})
-                    if isinstance(d, dict) and "tflops" in d:
-                        gemm_results.append(d)
-                if mem_alloc is None and x.get("message") == "Memory alloc/free sanity":
-                    d = x.get("details", {})
-                    if isinstance(d, dict):
-                        mem_alloc = d
-
-    devices = []
-    if identity_details and isinstance(identity_details.get("devices"), list):
-        devices = identity_details["devices"]
-
-    gpu_count = len(devices)
-    gpu_types = sorted({str(d.get("name")) for d in devices if d.get("name")})
-    archs = sorted({str(d.get("arch")) for d in devices if d.get("arch")})
-    totals = [d.get("total_memory_gb") for d in devices if d.get("total_memory_gb") is not None]
-    frees = [d.get("free_memory_gb") for d in devices if d.get("free_memory_gb") is not None]
-
-    # Version info (best-effort, may be None)
-    amdgpu_version = ""
-    rocm_version = ""
-    if enum_details:
-        av = enum_details.get("amdgpu_version")
-        rv = enum_details.get("rocm_version")
-        amdgpu_version = "" if av in (None, "") else str(av)
-        rocm_version = "" if rv in (None, "") else str(rv)
-
-    gpu_type_arch = ""
-    if gpu_types or archs:
-        gpu_type_arch = f"{','.join(gpu_types)}/{','.join(archs)}" if gpu_types else f"/{','.join(archs)}"
-
-    warn_summary = "; ".join(sorted(warn_msgs))
-    std_warn_summary = "; ".join(sorted(std_warn_msgs))
-
-    # Aggregate GEMM results: min/max/avg TFLOPS
-    gemm_agg: Dict[str, Any] = {}
-    if gemm_results:
-        tflops_list = [g["tflops"] for g in gemm_results if "tflops" in g]
-        ms_list = [g["ms"] for g in gemm_results if "ms" in g]
-        if tflops_list:
-            gemm_agg["tflops_min"] = round(min(tflops_list), 2)
-            gemm_agg["tflops_max"] = round(max(tflops_list), 2)
-            gemm_agg["tflops_avg"] = round(sum(tflops_list) / len(tflops_list), 2)
-            gemm_agg["num_ranks"] = len(tflops_list)
-        if ms_list:
-            gemm_agg["ms_min"] = round(min(ms_list), 3)
-            gemm_agg["ms_max"] = round(max(ms_list), 3)
-            gemm_agg["ms_avg"] = round(sum(ms_list) / len(ms_list), 3)
-        # Keep shape from first result
-        first = gemm_results[0]
-        gemm_agg["m"] = first.get("m")
-        gemm_agg["n"] = first.get("n")
-        gemm_agg["k"] = first.get("k")
-
-    return {
-        "ranks": sorted(set(ranks)),
-        "status": _status_from_counts(host_fail, host_warn),
-        "gpu_count": gpu_count,
-        "gpu_type_arch": gpu_type_arch,
-        "total_memory_gb": (min(totals), max(totals)) if totals else None,
-        "min_free_gb": min(frees) if frees else None,
-        "occupied": occupied,
-        "amdgpu_version": amdgpu_version,
-        "rocm_version": rocm_version,
-        "numa_imbalance": numa_imbalance,
-        "topo_pcie_hint": topo_pcie_hint,
-        "nccl_ib_hca_set": nccl_ib_hca_set,
-        "warn_summary": warn_summary,
-        "std_warn_summary": std_warn_summary,
-        "gemm": gemm_agg,
-        "mem_alloc": mem_alloc,
-    }
-
-
-def _host_network_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Summarize network-related fields for a host from per-rank records.
-    """
-    host_fail = 0
-    host_warn = 0
-    ranks: List[int] = []
-    env: Dict[str, Any] = {}
-    summary: Dict[str, Any] = {}
-    intent: Dict[str, Any] = {}
-    nics: Dict[str, Any] = {}
-    ib: Dict[str, Any] = {}
-    rccl: Dict[str, Any] = {}
-    runtime: Dict[str, Any] = {}
-    runtime_comm: Dict[str, Any] = {}
-    for r in records:
-        host_fail += int(r.get("fail_count", 0) or 0)
-        host_warn += int(r.get("warn_count", 0) or 0)
-        if r.get("rank") is not None:
-            try:
-                ranks.append(int(r["rank"]))
-            except Exception:
-                pass
-        rf = r.get("findings", [])
-        if isinstance(rf, list):
-            if not summary:
-                d = _find_first_finding_details(rf, "Network summary")
-                if d and isinstance(d.get("summary"), dict):
-                    summary = d["summary"]
-            if not intent:
-                d = _find_first_finding_details(rf, "Distributed intent")
-                if d and isinstance(d.get("intent"), dict):
-                    intent = d["intent"]
-            if not env:
-                d = _find_first_finding_details(rf, "Distributed env presence")
-                if d and isinstance(d.get("env"), dict):
-                    env = d["env"]
-            if not nics:
-                d = _find_first_finding_details(rf, "NIC and network path")
-                if d and isinstance(d.get("nics"), dict):
-                    nics = d["nics"]
-            if not ib:
-                d = _find_first_finding_details(rf, "InfiniBand / RDMA")
-                if d and isinstance(d.get("ib"), dict):
-                    ib = d["ib"]
-            if not rccl:
-                d = _find_first_finding_details(rf, "RCCL/NCCL snapshot")
-                if d and isinstance(d.get("rccl"), dict):
-                    rccl = d["rccl"]
-            if not runtime:
-                d = _find_first_finding_details(rf, "Runtime process group sanity")
-                if d and isinstance(d.get("runtime"), dict):
-                    runtime = d["runtime"]
-            if not runtime_comm:
-                d = _find_first_finding_details(rf, "Minimal communication sanity")
-                if d and isinstance(d.get("runtime_comm"), dict):
-                    runtime_comm = d["runtime_comm"]
-    return {
-        "ranks": sorted(set(ranks)),
-        "status": _status_from_counts(host_fail, host_warn),
-        "summary": summary,
-        "intent": intent,
-        "env": env,
-        "nics": nics,
-        "ib": ib,
-        "rccl": rccl,
-        "runtime": runtime,
-        "runtime_comm": runtime_comm,
-    }
-
-
 def run_preflight_check(args: Any) -> int:
     """
     Run preflight checks based on args.
@@ -413,18 +142,11 @@ def run_preflight_check(args: Any) -> int:
 
     findings: List[Finding] = []
     if check_gpu:
-        findings.extend(_gpu_findings())
+        for f in run_gpu_checks():
+            findings.append(Finding(level=f.level, message=f.message, details=f.details))
         findings = _apply_expectations(args, findings)
     if check_network:
-        # Run all network checks (basic + standard + full)
-        nb = run_network_basic_checks()
-        for f in nb["findings"]:
-            findings.append(Finding(level=f.level, message=f.message, details=f.details))
-        ns = run_network_standard_checks(expect_ib=True if expect_ib else None)
-        for f in ns["findings"]:
-            findings.append(Finding(level=f.level, message=f.message, details=f.details))
-        nf = run_network_full_checks(comm_sanity=comm_sanity)
-        for f in nf["findings"]:
+        for f in run_network_checks(expect_ib=expect_ib, comm_sanity=comm_sanity):
             findings.append(Finding(level=f.level, message=f.message, details=f.details))
 
     fail_count = sum(1 for x in findings if x.level == "fail")
@@ -503,7 +225,7 @@ def run_preflight_check(args: Any) -> int:
                 )
                 f.write("|---|---|---|---|---:|---|---:|---|---|---|\n")
                 for h in sorted(by_host.keys()):
-                    s = _host_gpu_summary(by_host[h])
+                    s = host_gpu_summary(by_host[h])
                     total_mem = ""
                     if s["total_memory_gb"] is not None:
                         mn, mx = s["total_memory_gb"]
@@ -523,7 +245,7 @@ def run_preflight_check(args: Any) -> int:
                 )
                 f.write("|---|---|---|---|---|---|---|\n")
                 for h in sorted(by_host.keys()):
-                    s = _host_gpu_summary(by_host[h])
+                    s = host_gpu_summary(by_host[h])
                     ranks_str = ",".join(str(x) for x in s["ranks"]) if s["ranks"] else ""
                     numa = "" if s["numa_imbalance"] is None else ("yes" if s["numa_imbalance"] else "no")
                     topo = "" if s["topo_pcie_hint"] is None else ("yes" if s["topo_pcie_hint"] else "no")
@@ -538,7 +260,7 @@ def run_preflight_check(args: Any) -> int:
                 # Extract gemm shape from first host for description
                 gemm_shape_desc = ""
                 for h in sorted(by_host.keys()):
-                    s = _host_gpu_summary(by_host[h])
+                    s = host_gpu_summary(by_host[h])
                     if isinstance(s.get("gemm"), dict):
                         gd = s["gemm"]
                         m, n, k = gd.get("m", ""), gd.get("n", ""), gd.get("k", "")
@@ -552,7 +274,7 @@ def run_preflight_check(args: Any) -> int:
                 )
                 f.write("|---|---:|---|---|---|---:|\n")
                 for h in sorted(by_host.keys()):
-                    s = _host_gpu_summary(by_host[h])
+                    s = host_gpu_summary(by_host[h])
                     num_ranks = ""
                     tflops_str = ""
                     ms_str = ""
@@ -580,7 +302,7 @@ def run_preflight_check(args: Any) -> int:
                 f.write("| host | ranks | status | is_distributed | network_mode | has_fail | has_warn |\n")
                 f.write("|---|---|---|---|---|---|---|\n")
                 for h in sorted(by_host.keys()):
-                    s = _host_network_summary(by_host[h])
+                    s = host_network_summary(by_host[h])
                     ranks_str = ",".join(str(x) for x in s["ranks"]) if s["ranks"] else ""
                     summ = s.get("summary", {}) or {}
                     f.write(
@@ -595,7 +317,7 @@ def run_preflight_check(args: Any) -> int:
                 )
                 f.write("|---|---:|---:|---:|---|---|---:|---:|\n")
                 for h in sorted(by_host.keys()):
-                    s = _host_network_summary(by_host[h])
+                    s = host_network_summary(by_host[h])
                     intent = s.get("intent", {}) or {}
                     envp = s.get("env", {}) or {}
                     f.write(
@@ -611,7 +333,7 @@ def run_preflight_check(args: Any) -> int:
                 )
                 f.write("|---|---|---|---|---|\n")
                 for h in sorted(by_host.keys()):
-                    s = _host_network_summary(by_host[h])
+                    s = host_network_summary(by_host[h])
                     nics = s.get("nics", {}) or {}
                     f.write(
                         f"| {h} | {nics.get('NCCL_SOCKET_IFNAME','')} | {nics.get('GLOO_SOCKET_IFNAME','')} | "
@@ -623,7 +345,7 @@ def run_preflight_check(args: Any) -> int:
                 f.write("| host | expected_ib | has_ib | ib_status | NCCL_IB_DISABLE | ib_devices |\n")
                 f.write("|---|---|---|---|---|---|\n")
                 for h in sorted(by_host.keys()):
-                    s = _host_network_summary(by_host[h])
+                    s = host_network_summary(by_host[h])
                     ib = s.get("ib", {}) or {}
                     devs = ib.get("ib_devices", [])
                     devs_s = ",".join(devs) if isinstance(devs, list) else str(devs)
@@ -637,7 +359,7 @@ def run_preflight_check(args: Any) -> int:
                 f.write("| host | NCCL_IB_HCA | NCCL_NET_GDR_LEVEL | NCCL_DEBUG |\n")
                 f.write("|---|---|---|---|\n")
                 for h in sorted(by_host.keys()):
-                    s = _host_network_summary(by_host[h])
+                    s = host_network_summary(by_host[h])
                     rccl = s.get("rccl", {}) or {}
                     f.write(
                         f"| {h} | {rccl.get('NCCL_IB_HCA','')} | {rccl.get('NCCL_NET_GDR_LEVEL','')} | {rccl.get('NCCL_DEBUG','')} |\n"
@@ -648,7 +370,7 @@ def run_preflight_check(args: Any) -> int:
                 f.write("| host | pg_backend | pg_init_ok | pg_error |\n")
                 f.write("|---|---|---|---|\n")
                 for h in sorted(by_host.keys()):
-                    s = _host_network_summary(by_host[h])
+                    s = host_network_summary(by_host[h])
                     rt = s.get("runtime", {}) or {}
                     f.write(
                         f"| {h} | {rt.get('pg_backend','')} | {rt.get('pg_init_ok','')} | {rt.get('pg_error','')} |\n"
@@ -659,7 +381,7 @@ def run_preflight_check(args: Any) -> int:
                 f.write("| host | allreduce_tested | allreduce_ok | allreduce_error |\n")
                 f.write("|---|---|---|---|\n")
                 for h in sorted(by_host.keys()):
-                    s = _host_network_summary(by_host[h])
+                    s = host_network_summary(by_host[h])
                     runtime_comm_row = s.get("runtime_comm", {}) or {}
                     f.write(
                         f"| {h} | {runtime_comm_row.get('allreduce_tested','')} | {runtime_comm_row.get('allreduce_ok','')} | {runtime_comm_row.get('allreduce_error','')} |\n"
