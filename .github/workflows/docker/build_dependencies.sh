@@ -9,7 +9,6 @@ set -x
 
 BASE_IMAGE=${BASE_IMAGE:-docker.io/rocm/primus:v25.10}
 ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT:-release/rocm-rel-7.2}
-HOST_WORKSPACE=${HOST_WORKSPACE:-""}
 
 build_rocshmem() {
 	# build rocSHMEM
@@ -40,7 +39,7 @@ docker run --rm \
 	--security-opt seccomp=unconfined \
 	--group-add video \
 	--privileged \
-	-v "${HOST_WORKSPACE}":/io \
+	-v "$PWD":/io \
 	-e ROCSHMEM_COMMIT="${ROCSHMEM_COMMIT}" \
 	-e FUNCTION_DEF="$(declare -f build_rocshmem)" \
 	"$BASE_IMAGE" /bin/bash -c '

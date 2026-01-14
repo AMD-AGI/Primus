@@ -93,7 +93,9 @@ jobs:
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}"
           BASE_IMAGE_TAG="${BASE_IMAGE##*:}"
           echo "> Build dependencies"
-          BASE_IMAGE=${BASE_IMAGE} ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} HOST_WORKSPACE=${GITHUB_WORKSPACE}/.github/workflows/docker bash $GITHUB_WORKSPACE/.github/workflows/docker/build_dependencies.sh
+          pushd ${GITHUB_WORKSPACE}/.github/workflows/docker
+          BASE_IMAGE=${BASE_IMAGE} ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} bash build_dependencies.sh
+          popd
           start_time=$(date +%s)
           ls -al $GITHUB_WORKSPACE/.github/workflows/docker
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
