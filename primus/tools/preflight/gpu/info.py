@@ -60,24 +60,22 @@ def _find_first_finding_details(findings: List[Dict[str, Any]], message: str) ->
     return None
 
 
-def _min_max_int(vals: List[int]) -> Optional[Tuple[int, int]]:
+def _min_max_int(vals: List[float]) -> Optional[Tuple[float, float]]:
     if not vals:
         return None
-    return min(vals), max(vals)
+    return round(min(vals), 2), round(max(vals), 2)
 
 
 def host_gpu_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Build a host-level GPU summary from per-rank records.
     """
-    host_fail = 0
-    host_warn = 0
     ranks: List[int] = []
 
     gpu_type_arch: str = ""
     gpu_count: int = 0
-    totals: List[int] = []
-    frees: List[int] = []
+    totals: List[float] = []
+    frees: List[float] = []
     occupied = False
     amdgpu_version: str = ""
     rocm_version: str = ""
@@ -86,8 +84,7 @@ def host_gpu_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     topo_pcie_hint: Optional[bool] = None
     nccl_ib_hca_set: Optional[bool] = None
 
-    warn_summary = ""
-    std_warn_summary = ""
+    warn_msgs: List[str] = []
 
     gemm_agg: Optional[Dict[str, Any]] = None
     mem_alloc: Optional[Dict[str, Any]] = None
@@ -98,8 +95,6 @@ def host_gpu_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     gemm_shape: Optional[Tuple[Any, Any, Any]] = None
 
     for r in records:
-        host_fail += int(r.get("fail_count", 0) or 0)
-        host_warn += int(r.get("warn_count", 0) or 0)
         if r.get("rank") is not None:
             try:
                 ranks.append(int(r["rank"]))
@@ -110,64 +105,105 @@ def host_gpu_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         if not isinstance(rf, list):
             continue
 
-        # Basic GPU metrics
-        d = _find_first_finding_details(rf, "GPU inventory")
-        if d and isinstance(d.get("gpu"), dict):
-            g = d["gpu"]
-            if not gpu_type_arch:
-                gpu_type_arch = str(g.get("gpu_type_arch") or "")
-            gpu_count = int(g.get("gpu_count") or gpu_count or 0)
-            if g.get("total_memory_gb") is not None:
-                totals.append(int(g["total_memory_gb"]))
-            if g.get("free_memory_gb") is not None:
-                frees.append(int(g["free_memory_gb"]))
-            if bool(g.get("occupied")):
-                occupied = True
+        # GPU enumeration (versions + count)
+        d = _find_first_finding_details(rf, "GPU enumeration")
+        if d:
             if not amdgpu_version:
-                amdgpu_version = str(g.get("amdgpu_version") or "")
+                amdgpu_version = str(d.get("amdgpu_version") or "")
             if not rocm_version:
-                rocm_version = str(g.get("rocm_version") or "")
+                rocm_version = str(d.get("rocm_version") or "")
+            if gpu_count <= 0 and d.get("device_count") is not None:
+                try:
+                    gpu_count = int(d.get("device_count") or 0)
+                except Exception:
+                    pass
+
+        # Per-device identity & memory
+        d = _find_first_finding_details(rf, "GPU identity")
+        if d and isinstance(d.get("devices"), list):
+            devs = [x for x in d["devices"] if isinstance(x, dict)]
+            if devs:
+                if gpu_count <= 0:
+                    gpu_count = len(devs)
+                # Prefer consistent name/arch display from first device.
+                if not gpu_type_arch:
+                    name = str(devs[0].get("name") or "")
+                    arch = devs[0].get("arch")
+                    gpu_type_arch = f"{name}/{arch}" if arch else name
+                for x in devs:
+                    tm = x.get("total_memory_gb")
+                    fm = x.get("free_memory_gb")
+                    if tm is not None:
+                        try:
+                            totals.append(float(tm))
+                        except Exception:
+                            pass
+                    if fm is not None:
+                        try:
+                            frees.append(float(fm))
+                        except Exception:
+                            pass
+
+        # Occupancy: treat any foreign processes as occupied.
+        d = _find_first_finding_details(rf, "GPU occupied by other processes (amd-smi)")
+        if d and isinstance(d.get("processes"), list) and len(d.get("processes", [])) > 0:
+            occupied = True
+        d = _find_first_finding_details(rf, "GPU occupancy (amd-smi)")
+        if d and isinstance(d.get("processes"), list) and len(d.get("processes", [])) > 0:
+            occupied = True
 
         # Standard topology/config signals
-        d = _find_first_finding_details(rf, "GPU topology hints")
-        if d and isinstance(d.get("topology"), dict):
-            topo = d["topology"]
-            if numa_imbalance is None and topo.get("numa_imbalance") is not None:
-                numa_imbalance = bool(topo.get("numa_imbalance"))
-            if topo_pcie_hint is None and topo.get("topo_pcie_hint") is not None:
-                topo_pcie_hint = bool(topo.get("topo_pcie_hint"))
-            if nccl_ib_hca_set is None and topo.get("nccl_ib_hca_set") is not None:
-                nccl_ib_hca_set = bool(topo.get("nccl_ib_hca_set"))
+        d = _find_first_finding_details(rf, "GPU↔NUMA mapping")
+        if d and numa_imbalance is None and d.get("imbalance") is not None:
+            numa_imbalance = bool(d.get("imbalance"))
 
-        # Warnings summary strings (best-effort)
-        d = _find_first_finding_details(rf, "GPU warning summary")
-        if d and isinstance(d.get("warn_summary"), str):
-            warn_summary = d["warn_summary"]
-        d = _find_first_finding_details(rf, "GPU standard warning summary")
-        if d and isinstance(d.get("std_warn_summary"), str):
-            std_warn_summary = d["std_warn_summary"]
+        # Heuristic: if we saw the PCIe topology warning, set the hint.
+        for fx in rf:
+            if (
+                isinstance(fx, dict)
+                and fx.get("level") == "warn"
+                and fx.get("message") == "Topology indicates PCIe paths; XGMI may be absent"
+            ):
+                topo_pcie_hint = True
+
+        # NCCL_IB_HCA env (best-effort)
+        for fx in rf:
+            if not isinstance(fx, dict):
+                continue
+            msg = str(fx.get("message") or "")
+            if "NCCL_IB_HCA" in msg:
+                details = fx.get("details", {})
+                if isinstance(details, dict):
+                    val = str(details.get("NCCL_IB_HCA") or "")
+                    nccl_ib_hca_set = bool(val)
+
+        # Warnings summary (GPU-related) for the row
+        for fx in rf:
+            if isinstance(fx, dict) and fx.get("level") == "warn":
+                m = str(fx.get("message") or "")
+                if m:
+                    warn_msgs.append(m)
 
         # Perf sanity: GEMM per-rank numbers (aggregate)
-        d = _find_first_finding_details(rf, "GEMM perf sanity")
-        if d and isinstance(d.get("gemm"), dict):
-            gd = d["gemm"]
-            m, n, k = gd.get("m"), gd.get("n"), gd.get("k")
+        d = _find_first_finding_details(rf, "Single-GPU GEMM sanity")
+        if d:
+            m, n, k = d.get("m"), d.get("n"), d.get("k")
             if gemm_shape is None and m and n and k:
                 gemm_shape = (m, n, k)
-            if gd.get("tflops") is not None:
+            if d.get("tflops") is not None:
                 try:
-                    gemm_tflops.append(float(gd["tflops"]))
+                    gemm_tflops.append(float(d["tflops"]))
                 except Exception:
                     pass
-            if gd.get("ms") is not None:
+            if d.get("ms") is not None:
                 try:
-                    gemm_ms.append(float(gd["ms"]))
+                    gemm_ms.append(float(d["ms"]))
                 except Exception:
                     pass
 
-        d = _find_first_finding_details(rf, "Memory alloc sanity")
-        if d and isinstance(d.get("mem_alloc"), dict):
-            mem_alloc = d["mem_alloc"]
+        d = _find_first_finding_details(rf, "Memory alloc/free sanity")
+        if d and d.get("bytes_approx") is not None:
+            mem_alloc = {"bytes_approx": d.get("bytes_approx")}
 
     # Build GEMM aggregate summary for reporting
     if gemm_tflops or gemm_ms:
@@ -194,9 +230,15 @@ def host_gpu_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                 }
             )
 
+    warn_summary = "; ".join(sorted(set(warn_msgs)))
+    status = "OK"
+    if any("fail" == str(f.get("level")) for r in records for f in (r.get("findings", []) if isinstance(r.get("findings", []), list) else [])):  # type: ignore
+        status = "FAIL"
+    elif warn_summary:
+        status = "WARN"
     return {
         "ranks": sorted(set(ranks)),
-        "status": _status_from_counts(host_fail, host_warn),
+        "status": status,
         "gpu_type_arch": gpu_type_arch,
         "gpu_count": gpu_count,
         "total_memory_gb": _min_max_int(totals),
@@ -208,7 +250,7 @@ def host_gpu_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "topo_pcie_hint": topo_pcie_hint,
         "nccl_ib_hca_set": nccl_ib_hca_set,
         "warn_summary": warn_summary,
-        "std_warn_summary": std_warn_summary,
+        "std_warn_summary": "",
         "gemm": gemm_agg,
         "mem_alloc": mem_alloc,
     }
