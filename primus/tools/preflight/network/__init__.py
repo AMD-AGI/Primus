@@ -8,7 +8,7 @@
 Network preflight checks.
 """
 
-from .check import host_network_summary, run_network_checks
+from .check import host_network_summary, run_network_checks, write_network_report
 from .network_basic import run_network_basic_checks
 from .network_full import run_network_full_checks
 from .network_standard import run_network_standard_checks
@@ -22,4 +22,5 @@ __all__ = [
     "run_network_full_checks",
     "run_network_checks",
     "host_network_summary",
+    "write_network_report",
 ]

@@ -36,11 +36,32 @@ def cleanup():
 
 
 def run_preflight(args):
+    """
+    Preflight entry point with dispatch logic.
+
+    - If --check-gpu or --check-network is set → run lightweight checks only
+    - Otherwise → run full performance tests (GEMM, intra/inter node comm)
+    """
+    check_gpu = getattr(args, "check_gpu", False)
+    check_network = getattr(args, "check_network", False)
+
+    # Dispatch to lightweight checks if any --check-* flag is set
+    if check_gpu or check_network:
+        from primus.tools.preflight.preflight_check import run_preflight_check
+        from primus.tools.utils import finalize_distributed, init_distributed
+
+        init_distributed()
+        try:
+            return run_preflight_check(args)
+        finally:
+            finalize_distributed()
+
+    # Otherwise run full performance tests
     setup()
 
     if RANK == 0:
         bw = get_first_ib_unidirectional_bandwidth()
-        log(f"=======IB Bandwidth roofline (GB/s)=======")
+        log("=======IB Bandwidth roofline (GB/s)=======")
         log(f"Bandwidth of first IB device of Node 0 : {bw:.2f} GB/s")
         args.ib_bw = bw
 
@@ -63,14 +84,14 @@ def run_preflight(args):
         md_to_pdf(args.markdown_file, args.pdf_file)
 
     cleanup()
+    return 0
 
 
 def main():
     parser = argparse.ArgumentParser()
-    # Perf preflight only (no lightweight suites here).
-    from primus.tools.preflight.preflight_args import add_preflight_perf_parser
+    from primus.tools.preflight.preflight_args import add_preflight_parser
 
-    add_preflight_perf_parser(parser)
+    add_preflight_parser(parser)
     args = parser.parse_args()
 
     run_preflight(args)

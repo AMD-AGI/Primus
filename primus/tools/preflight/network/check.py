@@ -132,3 +132,99 @@ def host_network_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "runtime": runtime,
         "runtime_comm": runtime_comm,
     }
+
+
+def write_network_report(f: Any, by_host: Dict[str, List[Dict[str, Any]]]) -> None:
+    """Write network report sections to file handle."""
+    # Network Status table
+    f.write("## Network Status\n\n")
+    f.write("| host | ranks | status | is_distributed | network_mode | has_fail | has_warn |\n")
+    f.write("|---|---|---|---|---|---|---|\n")
+    for h in sorted(by_host.keys()):
+        s = host_network_summary(by_host[h])
+        ranks_str = ",".join(str(x) for x in s["ranks"]) if s["ranks"] else ""
+        summ = s.get("summary", {}) or {}
+        f.write(
+            f"| {h} | {ranks_str} | {s['status']} | {summ.get('is_distributed','')} | "
+            f"{summ.get('network_mode','')} | {summ.get('has_fail','')} | {summ.get('has_warn','')} |\n"
+        )
+    f.write("\n")
+
+    # Distributed Environment table
+    f.write("## Distributed Environment\n\n")
+    f.write(
+        "| host | WORLD_SIZE | SLURM_NTASKS | OMPI_COMM_WORLD_SIZE | MASTER_ADDR | MASTER_PORT | RANK | LOCAL_RANK |\n"
+    )
+    f.write("|---|---:|---:|---:|---|---|---:|---:|\n")
+    for h in sorted(by_host.keys()):
+        s = host_network_summary(by_host[h])
+        intent = s.get("intent", {}) or {}
+        envp = s.get("env", {}) or {}
+        f.write(
+            f"| {h} | {intent.get('WORLD_SIZE','')} | {intent.get('SLURM_NTASKS','')} | "
+            f"{intent.get('OMPI_COMM_WORLD_SIZE','')} | {envp.get('MASTER_ADDR','')} | {envp.get('MASTER_PORT','')} | "
+            f"{envp.get('RANK','')} | {envp.get('LOCAL_RANK','')} |\n"
+        )
+    f.write("\n")
+
+    # Network Path table
+    f.write("## Network Path\n\n")
+    f.write("| host | NCCL_SOCKET_IFNAME | GLOO_SOCKET_IFNAME | ifname_valid | ifname_suspect |\n")
+    f.write("|---|---|---|---|---|\n")
+    for h in sorted(by_host.keys()):
+        s = host_network_summary(by_host[h])
+        nics = s.get("nics", {}) or {}
+        f.write(
+            f"| {h} | {nics.get('NCCL_SOCKET_IFNAME','')} | {nics.get('GLOO_SOCKET_IFNAME','')} | "
+            f"{nics.get('ifname_valid','')} | {nics.get('ifname_suspect','')} |\n"
+        )
+    f.write("\n")
+
+    # InfiniBand / RDMA table
+    f.write("## InfiniBand / RDMA\n\n")
+    f.write("| host | expected_ib | has_ib | ib_status | NCCL_IB_DISABLE | ib_devices |\n")
+    f.write("|---|---|---|---|---|---|\n")
+    for h in sorted(by_host.keys()):
+        s = host_network_summary(by_host[h])
+        ib = s.get("ib", {}) or {}
+        devs = ib.get("ib_devices", [])
+        devs_s = ",".join(devs) if isinstance(devs, list) else str(devs)
+        f.write(
+            f"| {h} | {ib.get('expected_ib','')} | {ib.get('has_ib','')} | {ib.get('ib_status','')} | "
+            f"{ib.get('NCCL_IB_DISABLE','')} | {devs_s} |\n"
+        )
+    f.write("\n")
+
+    # RCCL / NCCL Configuration table
+    f.write("## RCCL / NCCL Configuration\n\n")
+    f.write("| host | NCCL_IB_HCA | NCCL_NET_GDR_LEVEL | NCCL_DEBUG |\n")
+    f.write("|---|---|---|---|\n")
+    for h in sorted(by_host.keys()):
+        s = host_network_summary(by_host[h])
+        rccl = s.get("rccl", {}) or {}
+        f.write(
+            f"| {h} | {rccl.get('NCCL_IB_HCA','')} | {rccl.get('NCCL_NET_GDR_LEVEL','')} | {rccl.get('NCCL_DEBUG','')} |\n"
+        )
+    f.write("\n")
+
+    # Runtime Process Group table
+    f.write("## Runtime Process Group\n\n")
+    f.write("| host | pg_backend | pg_init_ok | pg_error |\n")
+    f.write("|---|---|---|---|\n")
+    for h in sorted(by_host.keys()):
+        s = host_network_summary(by_host[h])
+        rt = s.get("runtime", {}) or {}
+        f.write(f"| {h} | {rt.get('pg_backend','')} | {rt.get('pg_init_ok','')} | {rt.get('pg_error','')} |\n")
+    f.write("\n")
+
+    # (Optional) Minimal Communication Sanity table
+    f.write("## (Optional) Minimal Communication Sanity\n\n")
+    f.write("| host | allreduce_tested | allreduce_ok | allreduce_error |\n")
+    f.write("|---|---|---|---|\n")
+    for h in sorted(by_host.keys()):
+        s = host_network_summary(by_host[h])
+        runtime_comm_row = s.get("runtime_comm", {}) or {}
+        f.write(
+            f"| {h} | {runtime_comm_row.get('allreduce_tested','')} | {runtime_comm_row.get('allreduce_ok','')} | {runtime_comm_row.get('allreduce_error','')} |\n"
+        )
+    f.write("\n")

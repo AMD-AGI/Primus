@@ -210,3 +210,83 @@ def host_gpu_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "gemm": gemm_agg,
         "mem_alloc": mem_alloc,
     }
+
+
+def write_gpu_report(f: Any, by_host: Dict[str, List[Dict[str, Any]]]) -> None:
+    """Write GPU report sections to file handle."""
+    # GPU Devices table
+    f.write("## GPU Devices\n\n")
+    f.write(
+        "| host | ranks | status | gpu_type/arch | gpu_count | total_mem_gb (min-max) | min_free_gb | occupied | amdgpu_version | rocm_version |\n"
+    )
+    f.write("|---|---|---|---|---:|---|---:|---|---|---|\n")
+    for h in sorted(by_host.keys()):
+        s = host_gpu_summary(by_host[h])
+        total_mem = ""
+        if s["total_memory_gb"] is not None:
+            mn, mx = s["total_memory_gb"]
+            total_mem = f"{mn}-{mx}"
+        min_free = "" if s["min_free_gb"] is None else str(s["min_free_gb"])
+        occ = "yes" if s["occupied"] else "no"
+        ranks_str = ",".join(str(x) for x in s["ranks"]) if s["ranks"] else ""
+        f.write(
+            f"| {h} | {ranks_str} | {s['status']} | {s['gpu_type_arch']} | {s['gpu_count']} | "
+            f"{total_mem} | {min_free} | {occ} | {s['amdgpu_version']} | {s['rocm_version']} |\n"
+        )
+    f.write("\n")
+
+    # GPU Topology & Configuration table
+    f.write("## GPU Topology & Configuration\n\n")
+    f.write(
+        "| host | ranks | status | numa_imbalance | topo_pcie_hint | NCCL_IB_HCA_set | warn_summary |\n"
+    )
+    f.write("|---|---|---|---|---|---|---|\n")
+    for h in sorted(by_host.keys()):
+        s = host_gpu_summary(by_host[h])
+        ranks_str = ",".join(str(x) for x in s["ranks"]) if s["ranks"] else ""
+        numa = "" if s["numa_imbalance"] is None else ("yes" if s["numa_imbalance"] else "no")
+        topo = "" if s["topo_pcie_hint"] is None else ("yes" if s["topo_pcie_hint"] else "no")
+        ib = "" if s["nccl_ib_hca_set"] is None else ("yes" if s["nccl_ib_hca_set"] else "no")
+        warn_summary = s["std_warn_summary"] or s["warn_summary"]
+        f.write(f"| {h} | {ranks_str} | {s['status']} | {numa} | {topo} | {ib} | {warn_summary} |\n")
+    f.write("\n")
+
+    # GPU Performance Sanity table
+    f.write("## GPU Performance Sanity\n\n")
+    # Extract gemm shape from first host for description
+    gemm_shape_desc = ""
+    for h in sorted(by_host.keys()):
+        s = host_gpu_summary(by_host[h])
+        if isinstance(s.get("gemm"), dict):
+            gd = s["gemm"]
+            m, n, k = gd.get("m", ""), gd.get("n", ""), gd.get("k", "")
+            if m and n and k:
+                gemm_shape_desc = f"GEMM shape: {m}×{n}×{k}"
+                break
+    if gemm_shape_desc:
+        f.write(f"{gemm_shape_desc}\n\n")
+    f.write("| host | num_ranks | status | tflops (min/max/avg) | ms (min/max/avg) | alloc_bytes |\n")
+    f.write("|---|---:|---|---|---|---:|\n")
+    for h in sorted(by_host.keys()):
+        s = host_gpu_summary(by_host[h])
+        num_ranks = ""
+        tflops_str = ""
+        ms_str = ""
+        if isinstance(s.get("gemm"), dict):
+            gd = s["gemm"]
+            num_ranks = str(gd.get("num_ranks", ""))
+            tmin = gd.get("tflops_min", "")
+            tmax = gd.get("tflops_max", "")
+            tavg = gd.get("tflops_avg", "")
+            if tmin != "" and tmax != "" and tavg != "":
+                tflops_str = f"{tmin}/{tmax}/{tavg}"
+            mmin = gd.get("ms_min", "")
+            mmax = gd.get("ms_max", "")
+            mavg = gd.get("ms_avg", "")
+            if mmin != "" and mmax != "" and mavg != "":
+                ms_str = f"{mmin}/{mmax}/{mavg}"
+        alloc_b = ""
+        if isinstance(s.get("mem_alloc"), dict):
+            alloc_b = str(s["mem_alloc"].get("bytes_approx", ""))
+        f.write(f"| {h} | {num_ranks} | {s['status']} | {tflops_str} | {ms_str} | {alloc_b} |\n")
+    f.write("\n")

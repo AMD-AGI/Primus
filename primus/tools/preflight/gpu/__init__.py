@@ -8,7 +8,7 @@
 GPU preflight checks.
 """
 
-from .check import host_gpu_summary, run_gpu_checks
+from .check import host_gpu_summary, run_gpu_checks, write_gpu_report
 from .gpu_basic import run_gpu_basic_checks
 from .gpu_perf import run_gpu_full_checks
 from .gpu_topology import run_gpu_standard_checks
@@ -22,4 +22,5 @@ __all__ = [
     "run_gpu_full_checks",
     "run_gpu_checks",
     "host_gpu_summary",
+    "write_gpu_report",
 ]
