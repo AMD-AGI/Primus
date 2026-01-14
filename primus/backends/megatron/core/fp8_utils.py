@@ -209,7 +209,7 @@ if HAVE_TE and HAVE_TURBO:
                     fp8_recipe=fp8_recipe,
                     fp8_group=fp8_group,
                     enabled_turbo=True if fp8_quant_config is not None else False,
-                    turbo_fp8_quant_config=fp8_quant_config,
+                    turbo_quant_config=fp8_quant_config,
                 )
             else:
                 import inspect
