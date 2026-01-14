@@ -51,8 +51,8 @@ def _split_ifnames(value: str) -> List[str]:
     return out
 
 
-def _gpu_findings(level: str) -> List[Finding]:
-    # Map new module findings into this module's Finding dataclass for output.
+def _gpu_findings() -> List[Finding]:
+    """Run all GPU checks (basic + standard + full)."""
     out: List[Finding] = []
 
     # basic (may FAIL)
@@ -61,23 +61,21 @@ def _gpu_findings(level: str) -> List[Finding]:
         out.append(Finding(level=f.level, message=f.message, details=f.details))
 
     # standard (WARN by default)
-    if level in ("standard", "full"):
-        std = run_gpu_standard_checks()
-        for f in std["findings"]:
-            out.append(Finding(level=f.level, message=f.message, details=f.details))
+    std = run_gpu_standard_checks()
+    for f in std["findings"]:
+        out.append(Finding(level=f.level, message=f.message, details=f.details))
 
     # full (WARN only)
-    if level == "full":
-        full = run_gpu_full_checks()
-        for f in full["findings"]:
-            out.append(Finding(level=f.level, message=f.message, details=f.details))
+    full = run_gpu_full_checks()
+    for f in full["findings"]:
+        out.append(Finding(level=f.level, message=f.message, details=f.details))
 
     return out
 
 
 def _network_findings() -> List[Finding]:
     # Deprecated: network checks are now implemented in primus.tools.preflight.network.*
-    return [Finding("warn", "Legacy network checks invoked", {"note": "Use level-aware network checks."})]
+    return [Finding("warn", "Legacy network checks invoked", {"note": "Deprecated function."})]
 
 
 def _apply_expectations(args: Any, findings: List[Finding]) -> List[Finding]:
@@ -175,9 +173,8 @@ def _host_gpu_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     numa_imbalance: Optional[bool] = None
     topo_pcie_hint: Optional[bool] = None
     nccl_ib_hca_set: Optional[bool] = None
-    gemm: Optional[Dict[str, Any]] = None
+    gemm_results: List[Dict[str, Any]] = []  # Collect from all ranks
     mem_alloc: Optional[Dict[str, Any]] = None
-    perf_skipped_ranks: set[int] = set()
 
     for r in records:
         host_fail += int(r.get("fail_count", 0) or 0)
@@ -234,21 +231,14 @@ def _host_gpu_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
                             nccl_ib_hca_set = bool(str(v))
 
                 # Full-level signals (best-effort parsing)
-                if gemm is None and x.get("message") == "Single-GPU GEMM sanity":
+                if x.get("message") == "Single-GPU GEMM sanity":
                     d = x.get("details", {})
-                    if isinstance(d, dict):
-                        gemm = d
+                    if isinstance(d, dict) and "tflops" in d:
+                        gemm_results.append(d)
                 if mem_alloc is None and x.get("message") == "Memory alloc/free sanity":
                     d = x.get("details", {})
                     if isinstance(d, dict):
                         mem_alloc = d
-                if x.get("message") == "Perf sanity skipped on non-rank0":
-                    d = x.get("details", {})
-                    if isinstance(d, dict) and "rank" in d:
-                        try:
-                            perf_skipped_ranks.add(int(d["rank"]))
-                        except Exception:
-                            pass
 
     devices = []
     if identity_details and isinstance(identity_details.get("devices"), list):
@@ -276,6 +266,26 @@ def _host_gpu_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
     warn_summary = "; ".join(sorted(warn_msgs))
     std_warn_summary = "; ".join(sorted(std_warn_msgs))
 
+    # Aggregate GEMM results: min/max/avg TFLOPS
+    gemm_agg: Dict[str, Any] = {}
+    if gemm_results:
+        tflops_list = [g["tflops"] for g in gemm_results if "tflops" in g]
+        ms_list = [g["ms"] for g in gemm_results if "ms" in g]
+        if tflops_list:
+            gemm_agg["tflops_min"] = round(min(tflops_list), 2)
+            gemm_agg["tflops_max"] = round(max(tflops_list), 2)
+            gemm_agg["tflops_avg"] = round(sum(tflops_list) / len(tflops_list), 2)
+            gemm_agg["num_ranks"] = len(tflops_list)
+        if ms_list:
+            gemm_agg["ms_min"] = round(min(ms_list), 3)
+            gemm_agg["ms_max"] = round(max(ms_list), 3)
+            gemm_agg["ms_avg"] = round(sum(ms_list) / len(ms_list), 3)
+        # Keep shape from first result
+        first = gemm_results[0]
+        gemm_agg["m"] = first.get("m")
+        gemm_agg["n"] = first.get("n")
+        gemm_agg["k"] = first.get("k")
+
     return {
         "ranks": sorted(set(ranks)),
         "status": _status_from_counts(host_fail, host_warn),
@@ -291,9 +301,8 @@ def _host_gpu_summary(records: List[Dict[str, Any]]) -> Dict[str, Any]:
         "nccl_ib_hca_set": nccl_ib_hca_set,
         "warn_summary": warn_summary,
         "std_warn_summary": std_warn_summary,
-        "gemm": gemm,
+        "gemm": gemm_agg,
         "mem_alloc": mem_alloc,
-        "perf_skipped_ranks": sorted(perf_skipped_ranks),
     }
 
 
@@ -401,7 +410,6 @@ def run_preflight_check(args: Any) -> int:
         suite = "network"
 
     # Fixed defaults for simplified CLI
-    level = "full"
     fail_on_warn = False
     expect_ib = False
     comm_sanity = False
@@ -412,21 +420,19 @@ def run_preflight_check(args: Any) -> int:
 
     findings: List[Finding] = []
     if suite in ("gpu", "all"):
-        findings.extend(_gpu_findings(level=level))
+        findings.extend(_gpu_findings())
         findings = _apply_expectations(args, findings)
     if suite in ("network", "all"):
-        # Level-aware network checks per spec.
+        # Run all network checks (basic + standard + full)
         nb = run_network_basic_checks()
         for f in nb["findings"]:
             findings.append(Finding(level=f.level, message=f.message, details=f.details))
-        if level in ("standard", "full"):
-            ns = run_network_standard_checks(expect_ib=True if expect_ib else None)
-            for f in ns["findings"]:
-                findings.append(Finding(level=f.level, message=f.message, details=f.details))
-        if level == "full":
-            nf = run_network_full_checks(comm_sanity=comm_sanity)
-            for f in nf["findings"]:
-                findings.append(Finding(level=f.level, message=f.message, details=f.details))
+        ns = run_network_standard_checks(expect_ib=True if expect_ib else None)
+        for f in ns["findings"]:
+            findings.append(Finding(level=f.level, message=f.message, details=f.details))
+        nf = run_network_full_checks(comm_sanity=comm_sanity)
+        for f in nf["findings"]:
+            findings.append(Finding(level=f.level, message=f.message, details=f.details))
 
     fail_count = sum(1 for x in findings if x.level == "fail")
     warn_count = sum(1 for x in findings if x.level == "warn")
@@ -446,7 +452,7 @@ def run_preflight_check(args: Any) -> int:
         rc = 2
     elif warn_count > 0 and fail_on_warn:
         rc = 2
-    print(f"[Primus:Preflight] suite={suite} host={hostname} level={level} status={status}", file=sys.stderr)
+    print(f"[Primus:Preflight] suite={suite} host={hostname} status={status}", file=sys.stderr)
     for f in findings:
         if f.level in ("warn", "fail"):
             print(f"[Primus:Preflight] {f.level.upper()}: {f.message}", file=sys.stderr)
@@ -455,7 +461,6 @@ def run_preflight_check(args: Any) -> int:
     rank, world = get_rank_world()
     local_record: Dict[str, Any] = {
         "suite": suite,
-        "level": level,
         "status": status,
         "return_code": rc,
         "fail_count": fail_count,
@@ -479,9 +484,8 @@ def run_preflight_check(args: Any) -> int:
         # Write markdown report
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(markdown_file, "w", encoding="utf-8") as f:
-            f.write(f"# Primus Preflight Report (lightweight)\n\n")
+            f.write(f"# Primus Preflight Report\n\n")
             f.write(f"- **Suite**: `{suite}`\n")
-            f.write(f"- **Level**: `{level}`\n")
             f.write(f"- **World Size**: `{world}`\n")
             f.write(f"- **Generated**: `{now}`\n")
             f.write(f"- **Overall Status**: **{overall_status}**\n\n")
@@ -493,7 +497,7 @@ def run_preflight_check(args: Any) -> int:
                 by_host.setdefault(h, []).append(r)
 
             if suite in ("gpu", "all"):
-                f.write("## GPU Summary (basic)\n\n")
+                f.write("## GPU Devices\n\n")
                 f.write(
                     "| host | ranks | status | gpu_type/arch | gpu_count | total_mem_gb (min-max) | min_free_gb | occupied | amdgpu_version | rocm_version |\n"
                 )
@@ -513,50 +517,66 @@ def run_preflight_check(args: Any) -> int:
                     )
                 f.write("\n")
 
-                # Standard-level table (only when standard/full)
-                if level in ("standard", "full"):
-                    f.write("## GPU Summary (standard checks)\n\n")
+                f.write("## GPU Topology & Configuration\n\n")
+                f.write(
+                    "| host | ranks | status | numa_imbalance | topo_pcie_hint | NCCL_IB_HCA_set | warn_summary |\n"
+                )
+                f.write("|---|---|---|---|---|---|---|\n")
+                for h in sorted(by_host.keys()):
+                    s = _host_gpu_summary(by_host[h])
+                    ranks_str = ",".join(str(x) for x in s["ranks"]) if s["ranks"] else ""
+                    numa = "" if s["numa_imbalance"] is None else ("yes" if s["numa_imbalance"] else "no")
+                    topo = "" if s["topo_pcie_hint"] is None else ("yes" if s["topo_pcie_hint"] else "no")
+                    ib = "" if s["nccl_ib_hca_set"] is None else ("yes" if s["nccl_ib_hca_set"] else "no")
+                    warn_summary = s["std_warn_summary"] or s["warn_summary"]
                     f.write(
-                        "| host | ranks | status | numa_imbalance | topo_pcie_hint | NCCL_IB_HCA_set | warn_summary |\n"
+                        f"| {h} | {ranks_str} | {s['status']} | {numa} | {topo} | {ib} | {warn_summary} |\n"
                     )
-                    f.write("|---|---|---|---|---|---|---|\n")
-                    for h in sorted(by_host.keys()):
-                        s = _host_gpu_summary(by_host[h])
-                        ranks_str = ",".join(str(x) for x in s["ranks"]) if s["ranks"] else ""
-                        numa = "" if s["numa_imbalance"] is None else ("yes" if s["numa_imbalance"] else "no")
-                        topo = "" if s["topo_pcie_hint"] is None else ("yes" if s["topo_pcie_hint"] else "no")
-                        ib = "" if s["nccl_ib_hca_set"] is None else ("yes" if s["nccl_ib_hca_set"] else "no")
-                        warn_summary = s["std_warn_summary"] or s["warn_summary"]
-                        f.write(
-                            f"| {h} | {ranks_str} | {s['status']} | {numa} | {topo} | {ib} | {warn_summary} |\n"
-                        )
-                    f.write("\n")
+                f.write("\n")
 
-                if level == "full":
-                    f.write("## GPU Summary (full checks)\n\n")
-                    f.write(
-                        "| host | ranks | status | gemm_ms | gemm_tflops | alloc_bytes | perf_ranks_skipped |\n"
-                    )
-                    f.write("|---|---|---|---:|---:|---:|---|\n")
-                    for h in sorted(by_host.keys()):
-                        s = _host_gpu_summary(by_host[h])
-                        ranks_str = ",".join(str(x) for x in s["ranks"]) if s["ranks"] else ""
-                        gemm_ms = ""
-                        gemm_tf = ""
-                        if isinstance(s.get("gemm"), dict):
-                            gemm_ms = str(s["gemm"].get("ms", ""))
-                            gemm_tf = str(s["gemm"].get("tflops", ""))
-                        alloc_b = ""
-                        if isinstance(s.get("mem_alloc"), dict):
-                            alloc_b = str(s["mem_alloc"].get("bytes_approx", ""))
-                        skipped = ",".join(str(x) for x in s.get("perf_skipped_ranks", []))
-                        f.write(
-                            f"| {h} | {ranks_str} | {s['status']} | {gemm_ms} | {gemm_tf} | {alloc_b} | {skipped} |\n"
-                        )
-                    f.write("\n")
+                f.write("## GPU Performance Sanity\n\n")
+                # Extract gemm shape from first host for description
+                gemm_shape_desc = ""
+                for h in sorted(by_host.keys()):
+                    s = _host_gpu_summary(by_host[h])
+                    if isinstance(s.get("gemm"), dict):
+                        gd = s["gemm"]
+                        m, n, k = gd.get("m", ""), gd.get("n", ""), gd.get("k", "")
+                        if m and n and k:
+                            gemm_shape_desc = f"GEMM shape: {m}×{n}×{k}"
+                            break
+                if gemm_shape_desc:
+                    f.write(f"{gemm_shape_desc}\n\n")
+                f.write(
+                    "| host | num_ranks | status | tflops (min/max/avg) | ms (min/max/avg) | alloc_bytes |\n"
+                )
+                f.write("|---|---:|---|---|---|---:|\n")
+                for h in sorted(by_host.keys()):
+                    s = _host_gpu_summary(by_host[h])
+                    num_ranks = ""
+                    tflops_str = ""
+                    ms_str = ""
+                    if isinstance(s.get("gemm"), dict):
+                        gd = s["gemm"]
+                        num_ranks = str(gd.get("num_ranks", ""))
+                        tmin = gd.get("tflops_min", "")
+                        tmax = gd.get("tflops_max", "")
+                        tavg = gd.get("tflops_avg", "")
+                        if tmin != "" and tmax != "" and tavg != "":
+                            tflops_str = f"{tmin}/{tmax}/{tavg}"
+                        mmin = gd.get("ms_min", "")
+                        mmax = gd.get("ms_max", "")
+                        mavg = gd.get("ms_avg", "")
+                        if mmin != "" and mmax != "" and mavg != "":
+                            ms_str = f"{mmin}/{mmax}/{mavg}"
+                    alloc_b = ""
+                    if isinstance(s.get("mem_alloc"), dict):
+                        alloc_b = str(s["mem_alloc"].get("bytes_approx", ""))
+                    f.write(f"| {h} | {num_ranks} | {s['status']} | {tflops_str} | {ms_str} | {alloc_b} |\n")
+                f.write("\n")
             elif suite == "network":
                 # Level-aware network reporting (basic/standard/full)
-                f.write("## Network Summary (basic)\n\n")
+                f.write("## Network Status\n\n")
                 f.write("| host | ranks | status | is_distributed | network_mode | has_fail | has_warn |\n")
                 f.write("|---|---|---|---|---|---|---|\n")
                 for h in sorted(by_host.keys()):
@@ -569,7 +589,7 @@ def run_preflight_check(args: Any) -> int:
                     )
                 f.write("\n")
 
-                f.write("## Distributed Intent & Env Presence (basic)\n\n")
+                f.write("## Distributed Environment\n\n")
                 f.write(
                     "| host | WORLD_SIZE | SLURM_NTASKS | OMPI_COMM_WORLD_SIZE | MASTER_ADDR | MASTER_PORT | RANK | LOCAL_RANK |\n"
                 )
@@ -585,68 +605,66 @@ def run_preflight_check(args: Any) -> int:
                     )
                 f.write("\n")
 
-                if level in ("standard", "full"):
-                    f.write("## Network Path (standard)\n\n")
+                f.write("## Network Path\n\n")
+                f.write(
+                    "| host | NCCL_SOCKET_IFNAME | GLOO_SOCKET_IFNAME | ifname_valid | ifname_suspect |\n"
+                )
+                f.write("|---|---|---|---|---|\n")
+                for h in sorted(by_host.keys()):
+                    s = _host_network_summary(by_host[h])
+                    nics = s.get("nics", {}) or {}
                     f.write(
-                        "| host | NCCL_SOCKET_IFNAME | GLOO_SOCKET_IFNAME | ifname_valid | ifname_suspect |\n"
+                        f"| {h} | {nics.get('NCCL_SOCKET_IFNAME','')} | {nics.get('GLOO_SOCKET_IFNAME','')} | "
+                        f"{nics.get('ifname_valid','')} | {nics.get('ifname_suspect','')} |\n"
                     )
-                    f.write("|---|---|---|---|---|\n")
-                    for h in sorted(by_host.keys()):
-                        s = _host_network_summary(by_host[h])
-                        nics = s.get("nics", {}) or {}
-                        f.write(
-                            f"| {h} | {nics.get('NCCL_SOCKET_IFNAME','')} | {nics.get('GLOO_SOCKET_IFNAME','')} | "
-                            f"{nics.get('ifname_valid','')} | {nics.get('ifname_suspect','')} |\n"
-                        )
-                    f.write("\n")
+                f.write("\n")
 
-                    f.write("## InfiniBand / RDMA (standard)\n\n")
-                    f.write("| host | expected_ib | has_ib | ib_status | NCCL_IB_DISABLE | ib_devices |\n")
-                    f.write("|---|---|---|---|---|---|\n")
-                    for h in sorted(by_host.keys()):
-                        s = _host_network_summary(by_host[h])
-                        ib = s.get("ib", {}) or {}
-                        devs = ib.get("ib_devices", [])
-                        devs_s = ",".join(devs) if isinstance(devs, list) else str(devs)
-                        f.write(
-                            f"| {h} | {ib.get('expected_ib','')} | {ib.get('has_ib','')} | {ib.get('ib_status','')} | "
-                            f"{ib.get('NCCL_IB_DISABLE','')} | {devs_s} |\n"
-                        )
-                    f.write("\n")
+                f.write("## InfiniBand / RDMA\n\n")
+                f.write("| host | expected_ib | has_ib | ib_status | NCCL_IB_DISABLE | ib_devices |\n")
+                f.write("|---|---|---|---|---|---|\n")
+                for h in sorted(by_host.keys()):
+                    s = _host_network_summary(by_host[h])
+                    ib = s.get("ib", {}) or {}
+                    devs = ib.get("ib_devices", [])
+                    devs_s = ",".join(devs) if isinstance(devs, list) else str(devs)
+                    f.write(
+                        f"| {h} | {ib.get('expected_ib','')} | {ib.get('has_ib','')} | {ib.get('ib_status','')} | "
+                        f"{ib.get('NCCL_IB_DISABLE','')} | {devs_s} |\n"
+                    )
+                f.write("\n")
 
-                    f.write("## RCCL / NCCL Snapshot (standard)\n\n")
-                    f.write("| host | NCCL_IB_HCA | NCCL_NET_GDR_LEVEL | NCCL_DEBUG |\n")
-                    f.write("|---|---|---|---|\n")
-                    for h in sorted(by_host.keys()):
-                        s = _host_network_summary(by_host[h])
-                        rccl = s.get("rccl", {}) or {}
-                        f.write(
-                            f"| {h} | {rccl.get('NCCL_IB_HCA','')} | {rccl.get('NCCL_NET_GDR_LEVEL','')} | {rccl.get('NCCL_DEBUG','')} |\n"
-                        )
-                    f.write("\n")
+                f.write("## RCCL / NCCL Configuration\n\n")
+                f.write("| host | NCCL_IB_HCA | NCCL_NET_GDR_LEVEL | NCCL_DEBUG |\n")
+                f.write("|---|---|---|---|\n")
+                for h in sorted(by_host.keys()):
+                    s = _host_network_summary(by_host[h])
+                    rccl = s.get("rccl", {}) or {}
+                    f.write(
+                        f"| {h} | {rccl.get('NCCL_IB_HCA','')} | {rccl.get('NCCL_NET_GDR_LEVEL','')} | {rccl.get('NCCL_DEBUG','')} |\n"
+                    )
+                f.write("\n")
 
-                if level == "full":
-                    f.write("## Runtime Process Group (full)\n\n")
-                    f.write("| host | pg_backend | pg_init_ok | pg_error |\n")
-                    f.write("|---|---|---|---|\n")
-                    for h in sorted(by_host.keys()):
-                        s = _host_network_summary(by_host[h])
-                        rt = s.get("runtime", {}) or {}
-                        f.write(
-                            f"| {h} | {rt.get('pg_backend','')} | {rt.get('pg_init_ok','')} | {rt.get('pg_error','')} |\n"
-                        )
-                    f.write("\n")
+                f.write("## Runtime Process Group\n\n")
+                f.write("| host | pg_backend | pg_init_ok | pg_error |\n")
+                f.write("|---|---|---|---|\n")
+                for h in sorted(by_host.keys()):
+                    s = _host_network_summary(by_host[h])
+                    rt = s.get("runtime", {}) or {}
+                    f.write(
+                        f"| {h} | {rt.get('pg_backend','')} | {rt.get('pg_init_ok','')} | {rt.get('pg_error','')} |\n"
+                    )
+                f.write("\n")
 
-                    f.write("## (Optional) Minimal Communication Sanity (full)\n\n")
-                    f.write("| host | allreduce_tested | allreduce_ok | allreduce_error |\n")
-                    f.write("|---|---|---|---|\n")
-                    for h in sorted(by_host.keys()):
-                        s = _host_network_summary(by_host[h])
-                        runtime_comm_row = s.get("runtime_comm", {}) or {}
-                        f.write(
-                            f"| {h} | {runtime_comm_row.get('allreduce_tested','')} | {runtime_comm_row.get('allreduce_ok','')} | {runtime_comm_row.get('allreduce_error','')} |\n"
-                        )
-                    f.write("\n")
+                f.write("## (Optional) Minimal Communication Sanity\n\n")
+                f.write("| host | allreduce_tested | allreduce_ok | allreduce_error |\n")
+                f.write("|---|---|---|---|\n")
+                for h in sorted(by_host.keys()):
+                    s = _host_network_summary(by_host[h])
+                    runtime_comm_row = s.get("runtime_comm", {}) or {}
+                    f.write(
+                        f"| {h} | {runtime_comm_row.get('allreduce_tested','')} | {runtime_comm_row.get('allreduce_ok','')} | {runtime_comm_row.get('allreduce_error','')} |\n"
+                    )
+                f.write("\n")
 
         # Optional PDF (rank0 only, best-effort)
         if save_pdf:

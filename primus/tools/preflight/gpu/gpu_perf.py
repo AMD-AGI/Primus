@@ -21,6 +21,10 @@ def _gemm_tflops_ms(m: int, n: int, k: int, ms: float) -> float:
 
 
 def _single_gpu_gemm_sanity(dtype: str = "fp16") -> List[Finding]:
+    """
+    Run GEMM sanity on each rank's GPU and report individual results.
+    Results are aggregated (min/max/avg) in preflight_check.py.
+    """
     findings: List[Finding] = []
     try:
         import torch  # type: ignore
@@ -30,13 +34,8 @@ def _single_gpu_gemm_sanity(dtype: str = "fp16") -> List[Finding]:
     if not torch.cuda.is_available() or torch.cuda.device_count() <= 0:
         return [Finding("warn", "No GPUs detected; skip perf sanity", {})]
 
-    # Only run heavy perf sanity on rank0 by default. In torchrun mode, any
-    # non-zero exit from any rank is treated as failure; we keep this WARN-only,
-    # but also avoid N-way duplication and GPU contention.
     rank = int(os.environ.get("RANK", "0"))
-    world = int(os.environ.get("WORLD_SIZE", "1"))
-    if world > 1 and rank != 0:
-        return [Finding("info", "Perf sanity skipped on non-rank0", {"rank": rank, "world": world})]
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
 
     # Small-ish GEMM; keep it quick.
     m = n = k = 1024
@@ -45,7 +44,6 @@ def _single_gpu_gemm_sanity(dtype: str = "fp16") -> List[Finding]:
         torch_dtype = torch.bfloat16
 
     try:
-        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         torch.cuda.set_device(local_rank)
         a = torch.randn((m, k), device="cuda", dtype=torch_dtype)
         b = torch.randn((k, n), device="cuda", dtype=torch_dtype)
@@ -76,6 +74,8 @@ def _single_gpu_gemm_sanity(dtype: str = "fp16") -> List[Finding]:
                     "k": k,
                     "ms": round(ms, 3),
                     "tflops": round(tflops, 2),
+                    "rank": rank,
+                    "local_rank": local_rank,
                 },
             )
         )
@@ -86,16 +86,19 @@ def _single_gpu_gemm_sanity(dtype: str = "fp16") -> List[Finding]:
                 Finding(
                     "warn",
                     "GEMM TFLOPS below threshold (possible perf regression)",
-                    {"measured_tflops": round(tflops, 2), "min_tflops": min_tflops},
+                    {"measured_tflops": round(tflops, 2), "min_tflops": min_tflops, "rank": rank},
                 )
             )
     except Exception as e:
-        findings.append(Finding("warn", "GEMM sanity failed (warn-only)", {"error": str(e)}))
+        findings.append(Finding("warn", "GEMM sanity failed (warn-only)", {"error": str(e), "rank": rank}))
 
     return findings
 
 
 def _memory_alloc_sanity() -> List[Finding]:
+    """
+    Run memory allocation sanity on each rank's GPU.
+    """
     findings: List[Finding] = []
     try:
         import torch  # type: ignore
@@ -107,10 +110,6 @@ def _memory_alloc_sanity() -> List[Finding]:
 
     try:
         rank = int(os.environ.get("RANK", "0"))
-        world = int(os.environ.get("WORLD_SIZE", "1"))
-        if world > 1 and rank != 0:
-            return [Finding("info", "Memory sanity skipped on non-rank0", {"rank": rank, "world": world})]
-
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         torch.cuda.set_device(local_rank)
         # Use a smaller, safer allocation by default (~128MB).
@@ -118,7 +117,9 @@ def _memory_alloc_sanity() -> List[Finding]:
         x = torch.empty((n,), device="cuda", dtype=torch.float16)
         del x
         torch.cuda.empty_cache()
-        findings.append(Finding("info", "Memory alloc/free sanity", {"bytes_approx": int(n) * 2}))
+        findings.append(
+            Finding("info", "Memory alloc/free sanity", {"bytes_approx": int(n) * 2, "rank": rank})
+        )
     except Exception as e:
         findings.append(Finding("warn", "Memory alloc/free sanity failed (warn-only)", {"error": str(e)}))
 
@@ -139,7 +140,7 @@ def run_gpu_full_checks(*, perf_sanity: bool = False) -> Dict[str, Any]:
         findings.append(Finding("warn", "No GPUs detected; skipping full checks", {}))
         return {"ok": True, "probe": probe, "findings": findings}
 
-    # Single-GPU compute sanity
+    # Single-GPU compute sanity - runs on every rank
     findings.extend(_single_gpu_gemm_sanity(dtype="fp16"))
     findings.extend(_memory_alloc_sanity())
 
