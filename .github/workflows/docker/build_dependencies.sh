@@ -15,10 +15,10 @@ build_rocshmem() {
 	# build rocSHMEM
 	apt update && apt install rdma-core libibverbs-dev ibverbs-utils -y
 	cd /tmp && git clone https://github.com/ROCm/rocSHMEM.git
+	cd rocSHMEM
 	git checkout "${ROCSHMEM_COMMIT}"
 
-	mkdir build
-	cd build
+	mkdir build && cd build
 
 	MPI_ROOT=/opt/ompi UCX_ROOT=/opt/ucx INSTALL_PREFIX=/io/rocshmem ../scripts/build_configs/gda \
 		-DGDA_IONIC=ON \
