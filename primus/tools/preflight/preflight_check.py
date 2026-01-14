@@ -180,6 +180,8 @@ def run_preflight_check(args: Any) -> int:
     # Build per-rank record and gather to rank0.
     rank, world = get_rank_world()
     local_record: Dict[str, Any] = {
+        "host": hostname,
+        "rank": rank,
         "check_gpu": check_gpu,
         "check_network": check_network,
         "status": status,
