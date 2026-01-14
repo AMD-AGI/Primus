@@ -111,7 +111,16 @@ def launch_pretrain_trainer(primus_cfg: PrimusConfig):
     framework = pre_trainer_cfg.framework
 
     # Lazy import backend trainer
-    TrainerClass = load_backend_trainer(framework)
+    enable_mllog = os.getenv("ENABLE_MLLOG", "0").lower() in ("1", "true", "yes")
+    
+    if enable_mllog and framework == "megatron":
+        print(f"[Primus] MLPERF logging enabled (via ENABLE_MLLOG env var) - using MLPerfMegatronPretrainTrainer")
+        sys.path.insert(0, '/workspace/code')
+        from mlperf_pre_trainer import MLPerfMegatronPretrainTrainer
+        TrainerClass = MLPerfMegatronPretrainTrainer
+    else:
+        # Lazy import backend trainer
+        TrainerClass = load_backend_trainer(framework)
 
     # envs set by torchrun
     rank = int(os.getenv("RANK", "0"))
