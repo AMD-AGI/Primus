@@ -16,8 +16,8 @@ RUN mkdir -p /opt && cd /opt && \
     git checkout ${ROCSHMEM_COMMIT} && \
     mkdir build && \
     cd build && \
-    MPI_ROOT=/opt/ompi UCX_ROOT=/opt/ucx INSTALL_PREFIX=/opt/rocshmem ../scripts/build_configs/all_backends
-    
+    MPI_ROOT=/opt/ompi UCX_ROOT=/opt/ucx INSTALL_PREFIX=/opt/rocshmem ../scripts/build_configs/gda -DGDA_IONIC=ON -DGDA_MLX5=ON -DGDA_BNXT=ON -DUSE_IPC=ON
+
 ENV ROCSHMEM_HOME=/opt/rocshmem
 ENV UCX_HOME=/opt/ucx
 ENV MPI_HOME=/opt/ompi
