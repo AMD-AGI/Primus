@@ -30,18 +30,19 @@ ENV PATH=${ROCM_HOME}/bin:${PATH}:${MPI_HOME}/bin:${UCX_HOME}/bin:${PATH}
 # ---------------------------------------------------------------------------
 # Install rocSHMEM
 # ---------------------------------------------------------------------------
-RUN mkdir -p /opt && cd /opt && \
-    git clone https://github.com/ROCm/rocSHMEM.git && \
-    cd rocSHMEM && \
-    git checkout ${ROCSHMEM_COMMIT} && \
-    mkdir build && \
-    cd build && \
-    MPI_ROOT=${MPI_HOME} UCX_ROOT=${UCX_HOME} ../scripts/build_configs/gda \
-                                                            -DGDA_IONIC=ON \
-                                                            -DGDA_MLX5=ON  \
-                                                            -DGDA_BNXT=ON  \
-                                                            -DUSE_IPC=ON
-RUN rm -rf /opt/rocSHMEM                                                                                            
+# RUN mkdir -p /opt && cd /opt && \
+#     git clone https://github.com/ROCm/rocSHMEM.git && \
+#     cd rocSHMEM && \
+#     git checkout ${ROCSHMEM_COMMIT} && \
+#     mkdir build && \
+#     cd build && \
+#     MPI_ROOT=${MPI_HOME} UCX_ROOT=${UCX_HOME} ../scripts/build_configs/gda \
+#                                                             -DGDA_IONIC=ON \
+#                                                             -DGDA_MLX5=ON  \
+#                                                             -DGDA_BNXT=ON  \
+#                                                             -DUSE_IPC=ON
+# RUN rm -rf /opt/rocSHMEM    
+COPY rocshmem /opt/rocshmem                                                                                        
 
 # ---------------------------------------------------------------------------
 # Install Primus-Turbo

@@ -92,11 +92,13 @@ jobs:
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}"
           BASE_IMAGE_TAG="${BASE_IMAGE##*:}"
+          echo "> Build dependencies"
+          BASE_IMAGE=${BASE_IMAGE} ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} HOST_WORKSPACE=${GITHUB_WORKSPACE}/.github/workflows/docker bash $GITHUB_WORKSPACE/.github/workflows/docker/build_dependencies.sh
           start_time=$(date +%s)
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
                --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}} \
-              --build-arg BASE_IMAGE=${BASE_IMAGE} \
+               --build-arg BASE_IMAGE=${BASE_IMAGE} \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=PYTORCH \
