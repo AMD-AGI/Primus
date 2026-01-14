@@ -209,10 +209,11 @@ def validate_args_modified(*args, **kwargs):
         exec(modified_source, func.__globals__, namespace)
         return namespace[func.__name__]
 
-    ori_code = (
-        "if args.decoder_first_pipeline_num_layers is None and args.decoder_last_pipeline_num_layers is None:"
-    )
-    new_code = "if args.decoder_pipeline_manual_split_list is None and " + ori_code.split("if ")[-1]
+    ori_code = kwargs.pop("ori_code", None)
+    new_code = kwargs.pop("new_code", None)
+
+    assert ori_code is not None and new_code is not None, "ori_code and new_code must be provided."
+
     megatron.training.arguments.validate_args = validate_args_modifier(
         megatron.training.arguments.validate_args, lambda s: s.replace(ori_code, new_code)
     )
@@ -488,6 +489,13 @@ def validate_args_on_rocm(args):
         assert (
             args.fp8_recipe in support_fp8_recipe
         ), f"{args.fp8_recipe} recipe is not support when enable `use_turbo_parallel_linear`."
+
+    # Turbo FP4 linear check
+    if args.fp4 and args.use_turbo_parallel_linear:
+        support_fp4_recipe = ["mxfp4"]
+        assert (
+            args.fp4_recipe in support_fp4_recipe
+        ), f"{args.fp4_recipe} recipe is not support when enable `use_turbo_parallel_linear`."
 
     # NOTE: mxfp8 environment variable must be set to 1 to enable mxfp8 recipe on ROCm.
     if args.fp8_recipe == "mxfp8":

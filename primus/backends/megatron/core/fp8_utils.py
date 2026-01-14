@@ -7,6 +7,8 @@
 """Utility functions related to FP8 that are used throughout Megatron core"""
 from contextlib import nullcontext
 
+import torch
+from megatron.core.fp8_utils import is_first_last_bf16_layer
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version
 
@@ -46,7 +48,7 @@ if HAVE_TE and HAVE_TURBO:
     from primus_turbo.pytorch.core.low_precision import ScaleDtype, ScalingGranularity
 
     from primus.backends.megatron.core.extensions.primus_turbo import (
-        PrimusTurboFloat8QuantConfig,
+        PrimusTurboQuantConfig,
     )
 
     def te_fp8_format_mapping(te_format):
@@ -60,6 +62,98 @@ if HAVE_TE and HAVE_TURBO:
         }
 
         return format_mapping[te_format]
+
+    def get_fp8_recipe(config: TransformerConfig):
+        """Return fp8 recipe.
+
+        Arguments:
+            config (TransformerConfig): Configuration object.
+
+        Returns:
+            FP8 recipe: Transformer Engine FP8 recipe.
+            FP8 None reason: reason why the fp8 recipe is None.
+        """
+        if config.fp8 == "e4m3":
+            fp8_format = transformer_engine.common.recipe.Format.E4M3
+        elif config.fp8 == "hybrid":
+            fp8_format = transformer_engine.common.recipe.Format.HYBRID
+        else:
+            raise ValueError("E4M3 and HYBRID are the only supported FP8 formats.")
+
+        # Select fp8 recipe (TE version >= 2.1.0).
+        fp8_recipe = None
+        fp8_recipe_none_reason = ""
+        if is_te_min_version("2.1.0"):
+            if config.fp8_recipe == Fp8Recipe.delayed:
+                fp8_recipe = TEDelayedScaling(
+                    config=config,
+                    fp8_format=fp8_format,
+                    override_linear_precision=(False, False, not config.fp8_wgrad),
+                )
+            elif config.fp8_recipe == Fp8Recipe.tensorwise and is_te_min_version("2.2.0.dev0"):
+                fp8_recipe = transformer_engine.common.recipe.Float8CurrentScaling(
+                    fp8_format=fp8_format, fp8_dpa=config.fp8_dot_product_attention
+                )
+            elif config.fp8_recipe == Fp8Recipe.blockwise and is_te_min_version("2.3.0.dev0"):
+                fp8_recipe = transformer_engine.common.recipe.Float8BlockScaling(fp8_format=fp8_format)
+            elif config.fp8_recipe == Fp8Recipe.mxfp8:
+                fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(fp8_format=fp8_format)
+            else:
+                fp8_recipe_none_reason = "Float8CurrentScaling, MXFP8BlockScaling, Float8BlockwiseScaling and DelayedScaling are the only supported FP8 recipes. Please also make sure you are using a compatible TE version."
+        else:
+            # Assert that the user is using delayed scaling.
+            if config.fp8_recipe == Fp8Recipe.delayed:
+                fp8_recipe = TEDelayedScaling(
+                    config=config,
+                    fp8_format=fp8_format,
+                    override_linear_precision=(False, False, not config.fp8_wgrad),
+                )
+            else:
+                fp8_recipe_none_reason = "Please make sure to use TransformerEngine version >= 2.2.0.dev0 for Float8CurrentScaling, >= 2.1.0 for MXFP8BlockScaling, and >= 2.3.0.dev0 for Float8BlockScaling."
+
+        return fp8_recipe, fp8_recipe_none_reason
+
+    def get_fp8_quant_config(config: TransformerConfig):
+        """Return fp8 quant config.
+
+        Arguments:
+            config (TransformerConfig): Configuration object.
+
+        Returns:
+            FP8 quant config: Primus-Turbo FP8 quant config.
+            FP8 quant config none reason: reason why the fp8 quant config is None.
+        """
+        if config.fp8 == "e4m3":
+            fp8_format = transformer_engine.common.recipe.Format.E4M3
+        elif config.fp8 == "hybrid":
+            fp8_format = transformer_engine.common.recipe.Format.HYBRID
+        else:
+            raise ValueError("E4M3 and HYBRID are the only supported FP8 formats.")
+
+        fp8_quant_config = None
+        fp8_quant_config_none_reason = ""
+        if config.fp8_recipe == Fp8Recipe.delayed:
+            # NOTE: Primus-Turbo not support delayed scaling.
+            fp8_quant_config_none_reason = "Primus-Turbo not support delayed scaling."
+        elif config.fp8_recipe == Fp8Recipe.tensorwise:
+            fp8_quant_config = PrimusTurboQuantConfig(
+                granularity=ScalingGranularity.TENSORWISE, format=te_fp8_format_mapping(fp8_format)
+            )
+        elif config.fp8_recipe == Fp8Recipe.blockwise:
+            fp8_quant_config = PrimusTurboQuantConfig(
+                granularity=ScalingGranularity.BLOCKWISE,
+                format=te_fp8_format_mapping(fp8_format),
+                block_size=SCALING_BLOCK_SIZE,
+            )
+        elif config.fp8_recipe == Fp8Recipe.mxfp8:
+            fp8_quant_config = PrimusTurboQuantConfig(
+                granularity=ScalingGranularity.MX_BLOCKWISE,
+                format=te_fp8_format_mapping(fp8_format),
+                block_size=MX_SCALING_BLOCK_SIZE,
+                scale_dtype=ScaleDtype.E8M0,
+            )
+
+        return fp8_quant_config, fp8_quant_config_none_reason
 
     def get_fp8_context(config: TransformerConfig, layer_no: int = -1, is_init: bool = False):
         """Return fp8 context manager.
@@ -76,83 +170,26 @@ if HAVE_TE and HAVE_TURBO:
             We return nullcontext() when: a) not using fp8 to train, b) layer_no is a layer
             that needs to be trained in bf16.
         """
-        num_bf16_layers_at_start = config.num_layers_at_start_in_bf16 if config.first_last_layers_bf16 else 0
-        num_bf16_layers_at_end = config.num_layers_at_end_in_bf16 if config.first_last_layers_bf16 else 0
-        # Since layer_no is a global layer index, additional checks on whether
-        # we are in the first or last pipeline-parallel rank are not needed.
-        is_first_layer = layer_no < num_bf16_layers_at_start
-        is_last_layer = layer_no >= config.num_layers - num_bf16_layers_at_end
 
         need_fp8_context = config.fp8 if not is_init else config.fp8_param
 
-        if not need_fp8_context:
-            # bf16 training
-            fp8_context = nullcontext()
-        elif layer_no >= 0 and config.first_last_layers_bf16 and (is_first_layer or is_last_layer):
-            # fp8 training but this layer_no should be bf16
+        if not need_fp8_context or is_first_last_bf16_layer(config, layer_no):
+            # bf16 training or bf16 layer in fp8 training
             fp8_context = nullcontext()
         else:
             # fp8 training and this layer_no is in fp8
-            import transformer_engine  # To keep out TE dependency when not training in fp8
-
-            if config.fp8 == "e4m3":
-                fp8_format = transformer_engine.common.recipe.Format.E4M3
-            elif config.fp8 == "hybrid":
-                fp8_format = transformer_engine.common.recipe.Format.HYBRID
-            else:
-                raise ValueError("E4M3 and HYBRID are the only supported FP8 formats.")
-
-            # Select TE fp8 recipe and turbo fp8 quant config
-            fp8_recipe, fp8_recipe_none_reason = None, ""
-            fp8_quant_config, fp8_quant_config_none_reason = None, ""
-            if config.fp8_recipe == Fp8Recipe.delayed:
-                fp8_recipe = TEDelayedScaling(
-                    config=config,
-                    fp8_format=fp8_format,
-                    override_linear_precision=(False, False, not config.fp8_wgrad),
-                )
-                # NOTE: Primus-Turbo not support delayed scaling.
-                fp8_quant_config_none_reason = "Primus-Turbo not support delayed scaling."
-            elif config.fp8_recipe == Fp8Recipe.tensorwise:
-                if is_te_min_version("2.2.0.dev0"):
-                    fp8_recipe = transformer_engine.common.recipe.Float8CurrentScaling(fp8_format=fp8_format)
-                else:
-                    fp8_recipe_none_reason = "Transformer Engine version < 2.2.0.dev0."
-                fp8_quant_config = PrimusTurboFloat8QuantConfig(
-                    granularity=ScalingGranularity.TENSORWISE, format=te_fp8_format_mapping(fp8_format)
-                )
-            elif config.fp8_recipe == Fp8Recipe.blockwise:
-                if is_te_min_version("2.3.0.dev0"):
-                    fp8_recipe = transformer_engine.common.recipe.Float8BlockScaling(fp8_format=fp8_format)
-                else:
-                    fp8_recipe_none_reason = "Transformer Engine version < 2.3.0.dev0."
-                fp8_quant_config = PrimusTurboFloat8QuantConfig(
-                    granularity=ScalingGranularity.BLOCKWISE,
-                    format=te_fp8_format_mapping(fp8_format),
-                    block_size=SCALING_BLOCK_SIZE,
-                )
-            elif config.fp8_recipe == Fp8Recipe.mxfp8:
-                if is_te_min_version("2.1.0.dev0"):
-                    fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(fp8_format=fp8_format)
-                else:
-                    fp8_recipe_none_reason = "Transformer Engine version < 2.1.0.dev0"
-                fp8_quant_config = PrimusTurboFloat8QuantConfig(
-                    granularity=ScalingGranularity.MX_BLOCKWISE,
-                    format=te_fp8_format_mapping(fp8_format),
-                    block_size=MX_SCALING_BLOCK_SIZE,
-                    scale_dtype=ScaleDtype.E8M0,
-                )
+            fp8_recipe, fp8_recipe_none_reason = get_fp8_recipe(config)
+            fp8_quant_config, fp8_quant_config_none_reason = get_fp8_quant_config(config)
 
             global WARN_ONCE
             if WARN_ONCE:
                 if fp8_recipe is None:
                     warning_rank_0(
-                        f"WARNING: TransformerEngine FP8 {config.fp8_recipe} not work since {fp8_recipe_none_reason}."
+                        f"TransformerEngine FP8 {config.fp8_recipe} not work since {fp8_recipe_none_reason}"
                     )
-
                 if fp8_quant_config is None:
                     warning_rank_0(
-                        f"WARNING: Primus-Turbo FP8 {config.fp8_recipe} not work since {fp8_quant_config_none_reason}."
+                        f"Primus-Turbo FP8 {config.fp8_recipe} not work since {fp8_quant_config_none_reason}"
                     )
                 WARN_ONCE = False
 
@@ -172,7 +209,7 @@ if HAVE_TE and HAVE_TURBO:
                     fp8_recipe=fp8_recipe,
                     fp8_group=fp8_group,
                     enabled_turbo=True if fp8_quant_config is not None else False,
-                    turbo_fp8_quant_config=fp8_quant_config,
+                    turbo_quant_config=fp8_quant_config,
                 )
             else:
                 import inspect
@@ -185,7 +222,7 @@ if HAVE_TE and HAVE_TURBO:
                 if "preserve_high_precision_init_val" in (
                     inspect.signature(transformer_engine.pytorch.fp8_model_init).parameters
                 ):
-                    context_args["preserve_high_precision_init_val"] = True
+                    context_args["preserve_high_precision_init_val"] = torch.is_grad_enabled()
                 fp8_context = transformer_engine.pytorch.fp8_model_init(**context_args)
 
             # First / last layer in bf16 isn't supported with delayed scaling since it
@@ -202,6 +239,59 @@ elif HAVE_TE:
     from megatron.core.enums import Fp8Recipe
     from megatron.core.extensions.transformer_engine import TEDelayedScaling
 
+    def get_fp8_recipe(config: TransformerConfig):
+        """Return fp8 recipe.
+
+        Arguments:
+            config (TransformerConfig): Configuration object.
+
+        Returns:
+            FP8 recipe.
+        """
+        if config.fp8 == "e4m3":
+            fp8_format = transformer_engine.common.recipe.Format.E4M3
+        elif config.fp8 == "hybrid":
+            fp8_format = transformer_engine.common.recipe.Format.HYBRID
+        else:
+            raise ValueError("E4M3 and HYBRID are the only supported FP8 formats.")
+
+        # Select fp8 recipe (TE version >= 2.1.0).
+        fp8_recipe = None
+        if is_te_min_version("2.1.0"):
+            if config.fp8_recipe == Fp8Recipe.delayed:
+                fp8_recipe = TEDelayedScaling(
+                    config=config,
+                    fp8_format=fp8_format,
+                    override_linear_precision=(False, False, not config.fp8_wgrad),
+                )
+            elif config.fp8_recipe == Fp8Recipe.tensorwise and is_te_min_version("2.2.0.dev0"):
+                fp8_recipe = transformer_engine.common.recipe.Float8CurrentScaling(
+                    fp8_format=fp8_format, fp8_dpa=config.fp8_dot_product_attention
+                )
+            elif config.fp8_recipe == Fp8Recipe.blockwise and is_te_min_version("2.3.0.dev0"):
+                fp8_recipe = transformer_engine.common.recipe.Float8BlockScaling(fp8_format=fp8_format)
+            elif config.fp8_recipe == Fp8Recipe.mxfp8:
+                fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(fp8_format=fp8_format)
+            else:
+                raise ValueError(
+                    "Float8CurrentScaling, MXFP8BlockScaling, Float8BlockwiseScaling and "
+                    "DelayedScaling are the only supported FP8 recipes. Please also make sure "
+                    "you are using a compatible TE version."
+                )
+        else:
+            # Assert that the user is using delayed scaling.
+            assert config.fp8_recipe == Fp8Recipe.delayed, (
+                "Please make sure to use TransformerEngine version >= 2.2.0.dev0 for "
+                "Float8CurrentScaling, >= 2.1.0 for MXFP8BlockScaling, and >= 2.3.0.dev0 for "
+                "Float8BlockScaling."
+            )
+            fp8_recipe = TEDelayedScaling(
+                config=config,
+                fp8_format=fp8_format,
+                override_linear_precision=(False, False, not config.fp8_wgrad),
+            )
+        return fp8_recipe
+
     def get_fp8_context(config: TransformerConfig, layer_no: int = -1, is_init: bool = False):
         """Return fp8 context manager.
 
@@ -217,65 +307,15 @@ elif HAVE_TE:
             We return nullcontext() when: a) not using fp8 to train, b) layer_no is a layer
             that needs to be trained in bf16.
         """
-        num_bf16_layers_at_start = config.num_layers_at_start_in_bf16 if config.first_last_layers_bf16 else 0
-        num_bf16_layers_at_end = config.num_layers_at_end_in_bf16 if config.first_last_layers_bf16 else 0
-        # Since layer_no is a global layer index, additional checks on whether
-        # we are in the first or last pipeline-parallel rank are not needed.
-        is_first_layer = layer_no < num_bf16_layers_at_start
-        is_last_layer = layer_no >= config.num_layers - num_bf16_layers_at_end
 
         need_fp8_context = config.fp8 if not is_init else config.fp8_param
 
-        if not need_fp8_context:
-            # bf16 training
-            fp8_context = nullcontext()
-        elif layer_no >= 0 and config.first_last_layers_bf16 and (is_first_layer or is_last_layer):
-            # fp8 training but this layer_no should be bf16
+        if not need_fp8_context or is_first_last_bf16_layer(config, layer_no):
+            # bf16 training or bf16 layer in fp8 training
             fp8_context = nullcontext()
         else:
             # fp8 training and this layer_no is in fp8
-            import transformer_engine  # To keep out TE dependency when not training in fp8
-
-            if config.fp8 == "e4m3":
-                fp8_format = transformer_engine.common.recipe.Format.E4M3
-            elif config.fp8 == "hybrid":
-                fp8_format = transformer_engine.common.recipe.Format.HYBRID
-            else:
-                raise ValueError("E4M3 and HYBRID are the only supported FP8 formats.")
-
-            # Select fp8 recipe (TE version >= 2.1.0).
-            fp8_recipe = None
-            if is_te_min_version("2.1.0"):
-                if config.fp8_recipe == Fp8Recipe.delayed:
-                    fp8_recipe = TEDelayedScaling(
-                        config=config,
-                        fp8_format=fp8_format,
-                        override_linear_precision=(False, False, not config.fp8_wgrad),
-                    )
-                elif config.fp8_recipe == Fp8Recipe.tensorwise and is_te_min_version("2.2.0.dev0"):
-                    fp8_recipe = transformer_engine.common.recipe.Float8CurrentScaling(fp8_format=fp8_format)
-                elif config.fp8_recipe == Fp8Recipe.blockwise and is_te_min_version("2.3.0.dev0"):
-                    fp8_recipe = transformer_engine.common.recipe.Float8BlockScaling(fp8_format=fp8_format)
-                elif config.fp8_recipe == Fp8Recipe.mxfp8:
-                    fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(fp8_format=fp8_format)
-                else:
-                    raise ValueError(
-                        "Float8CurrentScaling, MXFP8BlockScaling, Float8BlockwiseScaling and "
-                        "DelayedScaling are the only supported FP8 recipes. Please also make sure "
-                        "you are using a compatible TE version."
-                    )
-            else:
-                # Assert that the user is using delayed scaling.
-                assert config.fp8_recipe == Fp8Recipe.delayed, (
-                    "Please make sure to use TransformerEngine version >= 2.2.0.dev0 for "
-                    "Float8CurrentScaling, >= 2.1.0 for MXFP8BlockScaling, and >= 2.3.0.dev0 for "
-                    "Float8BlockScaling."
-                )
-                fp8_recipe = TEDelayedScaling(
-                    config=config,
-                    fp8_format=fp8_format,
-                    override_linear_precision=(False, False, not config.fp8_wgrad),
-                )
+            fp8_recipe = get_fp8_recipe(config)
 
             fp8_group = None
             if parallel_state.model_parallel_is_initialized():
@@ -298,7 +338,7 @@ elif HAVE_TE:
                 if "preserve_high_precision_init_val" in (
                     inspect.signature(transformer_engine.pytorch.fp8_model_init).parameters
                 ):
-                    context_args["preserve_high_precision_init_val"] = True
+                    context_args["preserve_high_precision_init_val"] = torch.is_grad_enabled()
                 fp8_context = transformer_engine.pytorch.fp8_model_init(**context_args)
 
             # First / last layer in bf16 isn't supported with delayed scaling since it
@@ -311,6 +351,10 @@ elif HAVE_TE:
         return fp8_context
 
 else:
+
+    def get_fp8_recipe(config: TransformerConfig):
+        """Returns None since TE is not available."""
+        return None
 
     def get_fp8_context(config: TransformerConfig, layer_no: int = -1, is_init: bool = False):
         """Returns dummy fp8 context manager since TE is not available."""

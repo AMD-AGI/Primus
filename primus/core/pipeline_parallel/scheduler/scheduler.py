@@ -21,11 +21,14 @@ class ScheduleRunner:
         self.post_process_func = post_process_func
 
     def run(self, scheduler_table, rank: int):
-
         for idx, node in enumerate(scheduler_table[rank]):
-            if self.pre_process_func is not None:
-                self.pre_process_func(node, idx, scheduler_table[rank])
-            func = self.handle_func_dict[node.func_type]
-            func(node, idx, scheduler_table[rank])
-            if self.post_process_func is not None:
-                self.post_process_func(node, idx, scheduler_table[rank])
+            if node.args is not None and "combined_group" in node.args:
+                func = self.handle_func_dict[FuncType.FB]
+                func(node, idx, scheduler_table[rank])
+            else:
+                if self.pre_process_func is not None:
+                    self.pre_process_func(node, idx, scheduler_table[rank])
+                func = self.handle_func_dict[node.func_type]
+                func(node, idx, scheduler_table[rank])
+                if self.post_process_func is not None:
+                    self.post_process_func(node, idx, scheduler_table[rank])
