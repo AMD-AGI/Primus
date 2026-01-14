@@ -9,11 +9,21 @@
 ## ✨ Key Features
 
 - **🔄 Multi-Backend Support**: Seamlessly switch between Megatron-LM, TorchTitan, and other training frameworks
-- **🚀 Unified CLI**: One command interface for local development, containers, and Slurm clusters
+- **🚀 Unified CLI**: One command interface for local development, containers, and Slurm clusters ([Docs](./docs/README.md))
 - **⚡ ROCm Optimized**: Deep integration with AMD ROCm stack and optimized kernels from Primus-Turbo
 - **📦 Production Ready**: Battle-tested on large-scale training with hundreds of GPUs
 - **🔌 Extensible Architecture**: Plugin-based design for easy integration of custom models and workflows
 - **🛡️ Enterprise Features**: Built-in fault tolerance, checkpoint management, and monitoring
+
+---
+
+## ✅ Supported Models (high level)
+
+- **Megatron-LM**: LLaMA2 / LLaMA3 / LLaMA4 families, DeepSeek-V2/V3, Mixtral-style MoE, and other GPT-style models
+- **TorchTitan**: LLaMA3 / LLaMA4, DeepSeek-V3, and related decoder-only architectures
+- **MaxText (JAX)**: LLaMA3.x and other MaxText-supported transformer models (subset; see MaxText docs for details)
+
+For the full and up-to-date model matrix, see [Supported Models](./docs/backends/overview.md#supported-models).
 
 ---
 
@@ -24,7 +34,7 @@
 - **[2025/08/22]** Primus introduction [blog](https://rocm.blogs.amd.com/software-tools-optimization/primus/README.html)
 - **[2025/06/18]** Added TorchTitan backend support
 - **[2025/05/16]** Added benchmark suite for performance evaluation
-- **[2025/04/18]** Added [Preflight](./tools/preflight/README.md) cluster sanity checker
+- **[2025/04/18]** Added [Preflight](./primus/tools/preflight/README.md) cluster sanity checker
 - **[2025/04/14]** Integrated HipBLASLt autotuning for optimized GPU kernel performance
 - **[2025/04/09]** Extended support for LLaMA2, LLaMA3, DeepSeek-V2/V3 models
 - **[2025/03/04]** Released Megatron trainer module
@@ -62,8 +72,11 @@ Primus leverages AMD’s ROCm Docker images to provide a consistent, ready-to-ru
 
     ```bash
     # Run training in container
+    # NOTE: If your config downloads weights/tokenizer from Hugging Face Hub,
+    #       you typically need to pass HF_TOKEN into the container.
     ./runner/primus-cli container --image rocm/primus:v25.10 \
-      -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml
+      --env HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+      -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
     ```
 
 For more detailed usage instructions, see the [CLI User Guide](./docs/cli/PRIMUS-CLI-GUIDE.md).

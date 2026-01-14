@@ -29,6 +29,11 @@ if [[ -z "${__PRIMUS_COMMON_SOURCED:-}" ]]; then
     }
 fi
 
+# Global array to collect extra Primus CLI arguments emitted by hooks via
+# the "extra.*=value" protocol. Each match is converted to a pair:
+#   --<name> <value>
+HOOK_EXTRA_PRIMUS_ARGS=()
+
 # Execute hooks for a given command
 # Args:
 #   $1: hook_group (e.g., "train", "benchmark")
@@ -49,47 +54,96 @@ execute_hooks() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+    local global_hook_dir="${script_dir}/hooks"
     local hook_dir="${script_dir}/hooks/${hook_group}/${hook_name}"
 
-    if [[ ! -d "$hook_dir" ]]; then
-        LOG_INFO_RANK0 "[Hooks] No hook directory for [$hook_group/$hook_name]"
-        return 0
-    fi
+    _run_hook_dir() {
+        local dir="$1"
+        shift
+        local args=("$@")
 
-    LOG_INFO_RANK0 "[Hooks] Detected hooks directory: $hook_dir"
-
-    # Find all hook files (*.sh and *.py)
-    local hook_files=()
-    mapfile -t hook_files < <(find "$hook_dir" -maxdepth 1 -type f \( -name "*.sh" -o -name "*.py" \) | sort)
-
-    if [[ ${#hook_files[@]} -eq 0 ]]; then
-        LOG_INFO_RANK0 "[Hooks] No hook files found in $hook_dir"
-        return 0
-    fi
-
-    # Execute each hook file
-    for hook_file in "${hook_files[@]}"; do
-        LOG_INFO_RANK0 "[Hooks] Executing hook: $hook_file ${hook_args[*]}"
-
-        start_time=$(date +%s)
-
-        if [[ "$hook_file" == *.sh ]]; then
-            if ! bash "$hook_file" "${hook_args[@]}"; then
-                LOG_ERROR_RANK0 "[Hooks] Hook failed: $hook_file (exit code: $?)"
-                return 1
-            fi
-        elif [[ "$hook_file" == *.py ]]; then
-            if ! python3 "$hook_file" "${hook_args[@]}"; then
-                LOG_ERROR_RANK0 "[Hooks] Hook failed: $hook_file (exit code: $?)"
-                return 1
-            fi
-        else
-            LOG_WARN "[Hooks] Skipping unknown hook type: $hook_file"
+        if [[ ! -d "$dir" ]]; then
+            return 0
         fi
 
-        duration=$(( $(date +%s) - start_time ))
-        LOG_INFO_RANK0 "[Hooks] Hook $hook_file finished in ${duration}s"
-    done
+        LOG_INFO_RANK0 "[Hooks] Detected hooks directory: $dir"
+
+        # Find all hook files (*.sh and *.py) in this directory only.
+        local hook_files=()
+        mapfile -t hook_files < <(find "$dir" -maxdepth 1 -type f \( -name "*.sh" -o -name "*.py" \) | sort)
+
+        if [[ ${#hook_files[@]} -eq 0 ]]; then
+            LOG_INFO_RANK0 "[Hooks] No hook files found in $dir"
+            return 0
+        fi
+
+        # Execute each hook file
+        for hook_file in "${hook_files[@]}"; do
+            LOG_INFO_RANK0 "[Hooks] Executing hook: $hook_file ${args[*]}"
+
+            start_time=$(date +%s)
+
+            local hook_output
+            local exit_code
+
+            if [[ "$hook_file" == *.sh ]]; then
+                hook_output="$(bash "$hook_file" "${args[@]}" 2>&1)"
+                exit_code=$?
+            elif [[ "$hook_file" == *.py ]]; then
+                hook_output="$(python3 "$hook_file" "${args[@]}" 2>&1)"
+                exit_code=$?
+            else
+                LOG_WARN "[Hooks] Skipping unknown hook type: $hook_file"
+                continue
+            fi
+
+            # Re-echo hook output so users see logs as usual.
+            if [[ -n "$hook_output" ]]; then
+                printf '%s\n' "$hook_output"
+            fi
+
+            # Parse hook output for extra.* and env.* key=value pairs.
+            while IFS= read -r line; do
+                [[ -z "$line" ]] && continue
+
+                if [[ "$line" =~ ^extra\.([A-Za-z_][A-Za-z0-9_.]*[A-Za-z0-9_])=(.*)$ ]]; then
+                    local name="${BASH_REMATCH[1]}"
+                    local value="${BASH_REMATCH[2]}"
+                    HOOK_EXTRA_PRIMUS_ARGS+=("--${name}" "${value}")
+                    LOG_INFO_RANK0 "[Hooks] extra arg from hook: --${name} ${value}"
+                elif [[ "$line" =~ ^env\.([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+                    local env_name="${BASH_REMATCH[1]}"
+                    local env_value="${BASH_REMATCH[2]}"
+                    export "${env_name}"="${env_value}"
+                    LOG_INFO_RANK0 "[Hooks] exported env from hook: ${env_name}=${env_value}"
+                fi
+            done <<< "$hook_output"
+
+            if [[ $exit_code -ne 0 ]]; then
+                LOG_ERROR_RANK0 "[Hooks] Hook failed: $hook_file (exit code: $exit_code)"
+                return 1
+            fi
+
+            duration=$(( $(date +%s) - start_time ))
+            LOG_INFO_RANK0 "[Hooks] Hook $hook_file finished in ${duration}s"
+        done
+        return 0
+    }
+
+    # 1) Run system/global hooks (runner/helpers/hooks/*.sh|*.py)
+    if ! _run_hook_dir "$global_hook_dir" "${hook_args[@]}"; then
+        return 1
+    fi
+
+    # 2) Run command-specific hooks (runner/helpers/hooks/<group>/<name>/*.sh|*.py)
+    if [[ ! -d "$hook_dir" ]]; then
+        LOG_INFO_RANK0 "[Hooks] No hook directory for [$hook_group/$hook_name]"
+        LOG_INFO_RANK0 "[Hooks] All hooks executed successfully"
+        return 0
+    fi
+    if ! _run_hook_dir "$hook_dir" "${hook_args[@]}"; then
+        return 1
+    fi
 
     LOG_INFO_RANK0 "[Hooks] All hooks executed successfully"
     return 0

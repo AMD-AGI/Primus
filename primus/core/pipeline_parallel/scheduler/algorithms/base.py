@@ -11,6 +11,7 @@ from primus.core.pipeline_parallel.scheduler.scheduler_node import (
     FuncType,
     SchedulerNode,
 )
+from primus.modules.module_utils import log_rank_0
 
 
 class PipelineScheduleAlgo(ABC):
@@ -20,71 +21,23 @@ class PipelineScheduleAlgo(ABC):
         self.pp_size = pp_size
         self.vpp_size = vpp_size
         self.micro_batches = micro_batches
+        self.printed = False
 
     @abstractmethod
     def generate_schedule_table(self) -> list[list[SchedulerNode]]:
         raise NotImplementedError
 
     @abstractmethod
-    def direction_map(self, rank: int, chunk: int, func_type: FuncType) -> dict[str, int]:
+    def direction_map(self, rank: int, chunk: int, func_type: FuncType) -> dict[str, Any]:
         raise NotImplementedError
 
-    def print_schedule_table(
-        self, schedule_table: list[list[SchedulerNode]], filter: list[FuncType] = None, file=None
-    ):
-        for rank in range(len(schedule_table)):
-            print(
-                f"Rank {rank}: {','.join([node.__str__() for node in schedule_table[rank] if filter is None or node.func_type in filter])}",
-                file=file,
-            )
-
-    def add_communication_nodes(self, schedule_table: list[list[SchedulerNode]], mode="batch_p2p"):
-        new_schedule_table = [[] for _ in range(self.pp_size)]
-        if mode == "batch_p2p":
-            for rank in range(self.pp_size):
-                for i in range(len(schedule_table[rank])):
-                    if schedule_table[rank][i].func_type == FuncType.W:
-                        new_schedule_table[rank].append(schedule_table[rank][i])
-                        continue
-                    direction_info = self.direction_map(
-                        rank, schedule_table[rank][i].chunk, schedule_table[rank][i].func_type
-                    )
-
-                    prev_node, prev_node_type = direction_info["prev"]
-                    next_node, next_node_type = direction_info["next"]
-                    recv_from_chunk = direction_info["recv_from_chunk"]
-                    send_to_chunk = direction_info["send_to_chunk"]
-                    if prev_node is not None:
-                        new_schedule_table[rank].append(
-                            SchedulerNode(
-                                func_type=prev_node_type,
-                                mini_batch=schedule_table[rank][i].mini_batch,
-                                chunk=schedule_table[rank][i].chunk,
-                                args={
-                                    "from_pp_rank": prev_node,
-                                    "to_pp_rank": rank,
-                                    "recv_from_chunk": recv_from_chunk,
-                                },
-                            )
-                        )
-                    new_schedule_table[rank].append(schedule_table[rank][i])
-                    if next_node is not None:
-                        new_schedule_table[rank].append(
-                            SchedulerNode(
-                                func_type=next_node_type,
-                                mini_batch=schedule_table[rank][i].mini_batch,
-                                chunk=schedule_table[rank][i].chunk,
-                                args={
-                                    "from_pp_rank": rank,
-                                    "to_pp_rank": next_node,
-                                    "send_to_chunk": send_to_chunk,
-                                },
-                            )
-                        )
-        else:
-            raise ValueError(f"Invalid mode: {mode}")
-
-        return new_schedule_table
+    def print_schedule_table(self, schedule_table: list[list[SchedulerNode]], filter: list[FuncType] = None):
+        if not self.printed:
+            for rank in range(len(schedule_table)):
+                log_rank_0(
+                    f"]\033[33mRank {rank}: {','.join([node.__detailed_str__() for node in schedule_table[rank] if filter is None or node.func_type in filter])}",
+                )
+            self.printed = True
 
     def first_pp_stage_rank(self) -> int:
         return 0
@@ -156,6 +109,53 @@ class PipelineScheduleAlgo(ABC):
             return (rank, send_node), (next_node, recv_node)
         else:
             return None, None
+
+    def add_combine_1f1b_info_for_schedule_table(
+        self, schedule_table: list[list[SchedulerNode]]
+    ) -> list[list[SchedulerNode]]:
+
+        def get_next_compute_node_idx(rank, idx):
+            for i in range(idx + 1, len(schedule_table[rank])):
+                if schedule_table[rank][i].func_type in [FuncType.F, FuncType.B, FuncType.W, FuncType.BW]:
+                    return i
+            return None
+
+        for rank in range(self.pp_size):
+            idx = 0
+
+            while idx < len(schedule_table[rank]):
+                node = schedule_table[rank][idx]
+
+                if node.func_type == FuncType.F:
+                    next_compute_node_idx = get_next_compute_node_idx(rank, idx)
+                    if next_compute_node_idx is not None and schedule_table[rank][
+                        next_compute_node_idx
+                    ].func_type in [FuncType.B, FuncType.BW]:
+                        backward_node = schedule_table[rank][next_compute_node_idx]
+                        if node.mini_batch != backward_node.mini_batch or node.chunk != backward_node.chunk:
+
+                            combined_nodes = schedule_table[rank][idx : next_compute_node_idx + 1]
+
+                            check_combine_passed = True
+                            for node in combined_nodes:  # no pre_recv node can not be combined
+                                if (
+                                    node.func_type == FuncType.RB
+                                    and node.mini_batch == backward_node.mini_batch
+                                    and node.chunk == backward_node.chunk
+                                ):
+                                    check_combine_passed = False
+                                    break
+
+                            if check_combine_passed:
+                                for node in combined_nodes:
+                                    node.args["combined_node"] = True
+                                    node.args["combined_group"] = [node.__str__() for node in combined_nodes]
+
+                            idx = next_compute_node_idx
+
+                idx += 1
+
+        return schedule_table
 
 
 class VFoldScheduleAlgo(PipelineScheduleAlgo):

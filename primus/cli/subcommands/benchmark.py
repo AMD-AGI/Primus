@@ -36,6 +36,10 @@ def run(args, extra_args):
         )
 
         run_strided_allgather_benchmark(args)
+    elif suite == "rccl":
+        from primus.tools.benchmark.rccl_bench import run_rccl_benchmark
+
+        run_rccl_benchmark(args)
     else:
         raise ValueError(f"Unknown benchmark suite: {suite}")
 
@@ -79,6 +83,12 @@ def register_subcommand(subparsers):
     from primus.tools.benchmark.strided_allgather_bench_args import add_arguments
 
     add_arguments(strided_allgather_parser)
+
+    # ---------- RCCL ----------
+    rccl = suite_parsers.add_parser("rccl", help="RCCL microbench.")
+    from primus.tools.benchmark.rccl_bench_args import add_rccl_parser
+
+    add_rccl_parser(rccl)
 
     parser.set_defaults(func=run)
 

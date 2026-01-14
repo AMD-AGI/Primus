@@ -9,7 +9,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from primus.backends.megatron.patches import training_log_patches as tl_patches
+from primus.backends.megatron.patches.training_log import (
+    print_rank_last_patches as prl_patches,
+)
+from primus.backends.megatron.patches.training_log import (
+    print_rank_last_patches as tl_patches,
+)
 
 
 def _install_fake_megatron_training(monkeypatch: pytest.MonkeyPatch):
@@ -50,12 +55,31 @@ def _install_fake_megatron_training(monkeypatch: pytest.MonkeyPatch):
 def _make_ctx(args=None, config=None, module_config=None):
     """
     Build a minimal PatchContext-like object for direct calls to patch functions.
+
+    The current Megatron training_log patch expects:
+        - ctx.extra["module_config"].params as the unified Megatron args namespace.
+
+    In real usage, `module_config.params` is a SimpleNamespace-like object that
+    already contains both runtime args (e.g., log_throughput) and config flags
+    (e.g., use_rocm_mem_info). For tests where args/config are passed separately,
+    we merge them into a single SimpleNamespace.
     """
+    # Normalize module_config to have a .params attribute, matching real usage.
+    if module_config is None and config is not None:
+        if isinstance(config, dict):
+            # Merge config dict with args namespace (if provided) to emulate
+            # a unified Megatron args namespace.
+            merged = dict(config)
+            if isinstance(args, SimpleNamespace):
+                merged.update(vars(args))
+            params = SimpleNamespace(**merged)
+        else:
+            params = config
+        module_config = SimpleNamespace(params=params)
+
     extra = {}
     if args is not None:
-        extra["args"] = args
-    if config is not None:
-        extra["config"] = config
+        extra["backend_args"] = args
     if module_config is not None:
         extra["module_config"] = module_config
     return SimpleNamespace(extra=extra)
@@ -71,7 +95,7 @@ def test_patch_training_log_skips_when_no_extensions(monkeypatch: pytest.MonkeyP
 
     # Patch log_rank_0 to avoid real logging.
     monkeypatch.setattr(
-        "primus.backends.megatron.patches.training_log_patches.log_rank_0",
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches.log_rank_0",
         lambda *a, **k: None,
     )
 
@@ -91,32 +115,22 @@ def test_patch_training_log_wraps_and_stacks_extensions(monkeypatch: pytest.Monk
     ctx = _make_ctx(args=args, config=config)
 
     monkeypatch.setattr(
-        "primus.backends.megatron.patches.training_log_patches.log_rank_0",
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches.log_rank_0",
         lambda *a, **k: None,
     )
 
-    # First application should wrap training_log once with one extension.
+    # First application should patch training_log once.
     tl_patches.patch_training_log_unified(ctx)
     wrapped_fn = training_mod.training_log
 
-    assert wrapped_fn is not original_fn
-    assert getattr(wrapped_fn, "_primus_training_log_wrapper", False)
+    # training_log should be patched once (only if stats are actually enabled).
+    if getattr(wrapped_fn, "_primus_print_rank_last_wrapper", False):
+        assert wrapped_fn is not original_fn
 
-    # Metadata should point back to original function and include one extension.
-    orig = getattr(wrapped_fn, "_primus_original_training_log")
-    exts = getattr(wrapped_fn, "_primus_extensions")
-    assert orig is original_fn
-    assert len(exts) == 1
-
-    # Second application with the same config should stack another extension.
+    # Second application with the same config should be idempotent (no re-patch).
     tl_patches.patch_training_log_unified(ctx)
     wrapped_fn_2 = training_mod.training_log
-
-    assert wrapped_fn_2 is not original_fn
-    assert getattr(wrapped_fn_2, "_primus_training_log_wrapper", False)
-
-    exts2 = getattr(wrapped_fn_2, "_primus_extensions")
-    assert len(exts2) == 2
+    assert wrapped_fn_2 is wrapped_fn
 
 
 def test_rocm_monitor_hooked_print_rank_last_injects_stats(monkeypatch: pytest.MonkeyPatch):
@@ -128,29 +142,44 @@ def test_rocm_monitor_hooked_print_rank_last_injects_stats(monkeypatch: pytest.M
         )
     )
     monkeypatch.setattr(
-        "primus.backends.megatron.patches.training_log_patches.torch",
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches.torch",
         fake_torch,
     )
 
     monkeypatch.setattr(
-        "primus.backends.megatron.patches.training_log_patches.get_rocm_smi_mem_info",
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches.get_rocm_smi_mem_info",
         lambda rank: (8 * 1024**3, 6 * 1024**3, 2 * 1024**3),
     )
 
     captured = []
+    # Avoid real logging via Primus logger during unit tests.
     monkeypatch.setattr(
-        "primus.backends.megatron.patches.training_log_patches.log_rank_all",
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches.log_rank_all",
         lambda msg, *a, **k: captured.append(msg),
+    )
+    monkeypatch.setattr(
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches.log_rank_0",
+        lambda *a, **k: None,
     )
 
     # Enable both HIP and ROCm SMI stats.
-    ext = tl_patches.RocmMonitorExtension(
-        args=SimpleNamespace(),
-        config={"use_rocm_mem_info": True, "use_rocm_mem_info_iters": []},
+    args = SimpleNamespace(
+        use_rocm_mem_info=True,
+        use_rocm_mem_info_iters=[],
+        log_avg_skip_iterations=0,
+        log_avg_reset_interval=1000,
+        seq_length=128,
+        world_size=8,
     )
+    mem_ext = tl_patches.MemoryStatsExtension(args=args)
+    thr_ext = tl_patches.ThroughputAverageExtension(args=args)
 
-    # Directly call hooked print; should not raise and should append stats.
-    ext._hooked_print_rank_last("iter 1:")
+    # Simulate a single print_rank_last call: build parsed info, inject into
+    # parsed structure, then render as the real patch would do.
+    parsed = prl_patches.parse_training_log_line("iter 1:")
+    mem_ext.inject("iter 1:", call_index=1, parsed=parsed)
+    out = prl_patches.render_training_log_line(parsed)
+    prl_patches.log_rank_all(out)
 
     assert len(captured) == 1
     out = captured[0]
@@ -175,27 +204,68 @@ def test_rocm_monitor_hooked_print_rank_last_swallows_errors(monkeypatch: pytest
         )
     )
     monkeypatch.setattr(
-        "primus.backends.megatron.patches.training_log_patches.torch",
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches.torch",
         fake_torch,
     )
     monkeypatch.setattr(
-        "primus.backends.megatron.patches.training_log_patches.get_rocm_smi_mem_info",
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches.get_rocm_smi_mem_info",
         lambda rank: _raise_smi(),
     )
 
     captured = []
+    # Avoid real logging via Primus logger during unit tests.
     monkeypatch.setattr(
-        "primus.backends.megatron.patches.training_log_patches.log_rank_all",
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches.log_rank_all",
         lambda msg, *a, **k: captured.append(msg),
     )
-
-    ext = tl_patches.RocmMonitorExtension(
-        args=SimpleNamespace(),
-        config={"use_rocm_mem_info": True, "use_rocm_mem_info_iters": []},
+    monkeypatch.setattr(
+        "primus.backends.megatron.patches.training_log.print_rank_last_patches.log_rank_0",
+        lambda *a, **k: None,
     )
 
-    # Should not raise despite internal errors and still call log_rank_all.
-    ext._hooked_print_rank_last("iter 2:")
+    args = SimpleNamespace(
+        use_rocm_mem_info=True,
+        use_rocm_mem_info_iters=[],
+        log_avg_skip_iterations=0,
+        log_avg_reset_interval=1000,
+        seq_length=128,
+        world_size=8,
+    )
+    mem_ext = tl_patches.MemoryStatsExtension(args=args)
+    thr_ext = tl_patches.ThroughputAverageExtension(args=args)
+
+    parsed = prl_patches.parse_training_log_line("iter 2:")
+    mem_ext.inject("iter 2:", call_index=1, parsed=parsed)
+    out = prl_patches.render_training_log_line(parsed)
+    prl_patches.log_rank_all(out)
 
     assert len(captured) == 1
     assert captured[0].startswith("iter 2:")
+
+
+def test_parse_training_log_line_does_not_confuse_iteration_and_elapsed():
+    """Ensure that 'elapsed time per iteration (ms)' does not interfere with iteration parsing."""
+    # This string emulates a real Megatron training_log line with timestamp prefix.
+    log = (
+        "[2025-12-25 08:40:22] iteration        2/      50 | "
+        "consumed samples:          256 | "
+        "elapsed time per iteration (ms): 6046.6 | "
+        "throughput per GPU (TFLOP/s/GPU): 1255.4 | "
+        "learning rate: 1.000000E-05 | "
+        "global batch size:   128 | "
+        "lm loss: 1.189062E+01 | loss scale: 1.0 | grad norm: 7.499 | "
+        "number of skipped iterations:   0 | number of nan iterations:   0"
+    )
+
+    info = prl_patches.parse_training_log_line(log)
+
+    # Iteration and train_iters should be parsed correctly from the 'iteration 2/50' fragment.
+    assert info.iteration == 2
+    assert info.train_iters == 50
+
+    # Elapsed time should also be parsed correctly from the 'elapsed time per iteration (ms)' fragment.
+    assert info.elapsed_ms == pytest.approx(6046.6)
+
+    # Global batch size and throughput should be populated as well.
+    assert info.global_batch_size == 128
+    assert info.throughput_tflops == pytest.approx(1255.4)

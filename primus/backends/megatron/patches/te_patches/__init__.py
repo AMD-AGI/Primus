@@ -7,29 +7,9 @@
 """
 Transformer Engine Patches Module
 
-This module contains all Transformer Engine related patches for Megatron.
+This package contains all Transformer Engine related patches for Megatron.
 Each patch is organized in its own file for better maintainability.
+
+Patch modules are discovered and imported automatically by
+``primus.backends.megatron.patches``; no explicit imports are required here.
 """
-
-# Import all patch modules to trigger registration
-# NOTE: These imports are intentionally unused; they register patches with
-# the core patch registry when this package is imported.
-from primus.backends.megatron.patches.te_patches import (
-    delayed_scaling_patches as _delayed_scaling_patches,
-)
-from primus.backends.megatron.patches.te_patches import (
-    layernorm_linear_fp8_cache_patches as _layernorm_linear_fp8_cache_patches,
-)
-from primus.backends.megatron.patches.te_patches import (
-    linear_fp8_cache_patches as _linear_fp8_cache_patches,
-)
-from primus.backends.megatron.patches.te_patches import (
-    tp_overlap_patches as _tp_overlap_patches,
-)
-
-__all__ = [
-    "_delayed_scaling_patches",
-    "_layernorm_linear_fp8_cache_patches",
-    "_linear_fp8_cache_patches",
-    "_tp_overlap_patches",
-]
