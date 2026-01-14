@@ -1,3 +1,4 @@
+from typing import List, Dict,  Optional
 ###############################################################################
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -89,8 +90,8 @@ class LanguageModelProfiler(BaseModuleProfiler):
         tp_size: int,
         cp_size: int,
         ep_size: int,
-        num_virtual_pipeline_stages: int | None = None,
-    ) -> list[int]:
+        num_virtual_pipeline_stages: Optional[int] = None,
+    ) -> List[int]:
         total_stages = pp_size
         if num_virtual_pipeline_stages is not None:
             total_stages = total_stages * num_virtual_pipeline_stages
@@ -122,6 +123,91 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
         return assigned_layers
 
+    def _estimate_layer_communication(self, layer_idx: int, layer_type: str):
+        """
+        Estimate communication overhead for a single layer.
+        
+        Args:
+            layer_idx: Index of the layer
+            layer_type: Type of layer ('dense' or 'moe')
+        
+        Returns:
+            List of communication operations with time and message size
+        """
+        import os
+        from primus.core.projection.module_profilers import collective_model as cm
+        
+        mp_config = self.config.model_parallel_config
+        model_config = self.config.model_config
+        runtime_config = self.config.runtime_config
+        
+        tp = mp_config.tensor_model_parallel_size
+        pp = mp_config.pipeline_model_parallel_size
+        ep = getattr(mp_config, 'expert_model_parallel_size', 1)
+        cp = getattr(mp_config, 'context_model_parallel_size', 1)
+        
+        # Only show communication if there's actual parallelism
+        if tp == 1 and ep == 1 and pp == 1:
+            return []
+        
+        # Get configuration
+        hidden_size = model_config.hidden_size
+        batch_size = runtime_config.micro_batch_size
+        seq_len = runtime_config.sequence_length
+        moe_router_topk = model_config.moe_router_topk
+        
+        # Setup collective model
+        num_nodes = int(os.getenv("NNODES", "1"))
+        gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
+        
+        from primus.core.projection.multinode_projection.projection import get_default_args
+        coll_args = get_default_args(
+            num_nodes=num_nodes,
+            gpus_per_node=gpus_per_node,
+            tp=tp,
+            pp=pp,
+            ep=ep,
+            cp=cp,
+            hardware_config=None,
+        )
+        
+        comm_ops = []
+        
+        # 1. Tensor Parallel AllReduce (if TP > 1)
+        if tp > 1:
+            tp_ar_size = batch_size * seq_len * hidden_size * 2  # BF16
+            tp_ar_time_single = cm.allreduce(coll_args, tp_ar_size, tp, groups=['tp']) / 1000  # Convert to ms
+            # 2 allreduces per layer (one in attention, one in MLP) - same for fwd and bwd
+            comm_ops.append({
+                'type': 'TP AllReduce',
+                'time_fwd_ms': tp_ar_time_single * 2,  # 2 per forward pass
+                'time_bwd_ms': tp_ar_time_single * 2,  # 2 per backward pass
+                'message_size_mb': tp_ar_size / (1024 * 1024),
+                'group_size': tp,
+            })
+        
+        # 2. MoE All-to-All (if EP > 1 and this is a MoE layer)
+        if ep > 1 and layer_type == 'moe':
+            tokens_per_batch = seq_len * batch_size
+            dispatch_size = tokens_per_batch * hidden_size * moe_router_topk * 2  # BF16
+            
+            a2a_dispatch = cm.alltoall(coll_args, dispatch_size, ep, groups=['ep'])
+            a2a_combine = cm.alltoall(coll_args, dispatch_size, ep, groups=['ep'])
+            
+            # Forward: dispatch + combine, Backward: same
+            fwd_time = (a2a_dispatch + a2a_combine) / 1000  # Convert to ms
+            bwd_time = (a2a_dispatch + a2a_combine) / 1000  # Convert to ms
+            
+            comm_ops.append({
+                'type': 'MoE All-to-All',
+                'time_fwd_ms': fwd_time,
+                'time_bwd_ms': bwd_time,
+                'message_size_mb': dispatch_size / (1024 * 1024),
+                'group_size': ep,
+            })
+        
+        return comm_ops
+
     def get_dp_size(self) -> int:
         num_nodes = int(os.getenv("NNODES", "1"))
         if num_nodes == 1:
@@ -148,7 +234,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
         optimizer_state_multiplier = 10 / dp_size  # DP sharding
         return multiplier + optimizer_state_multiplier
 
-    def estimated_num_params(self, rank: int | None = None) -> int:
+    def estimated_num_params(self, rank: Optional[int] = None) -> int:
         total_params = 0
         if rank is None:
             layers = range(self.config.model_config.num_layers)
@@ -361,13 +447,37 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
             profiled_types.add(layer_type)
 
-            print(f"  Forward time:  {forward_time:.2f} ms")
-            print(f"  Backward time: {backward_time:.2f} ms")
+            print(f"  Forward time (compute only):  {forward_time:.2f} ms")
+            print(f"  Backward time (compute only): {backward_time:.2f} ms")
             print(f"  Activation memory: {activation_memory / (1024**2):.2f} MB")
             print(f"  Attention Forward: {attn_forward:.2f} ms, Backward: {attn_backward:.2f} ms")
             print(f"  Attention Activation memory: {attn_mem / (1024**2):.2f} MB")
             print(f"  MLP Forward: {mlp_forward:.2f} ms, Backward: {mlp_backward:.2f} ms")
             print(f"  MLP Activation memory: {mlp_mem / (1024**2):.2f} MB")
+            
+            # Add per-layer communication estimation and add to timings
+            total_comm_fwd = 0.0
+            total_comm_bwd = 0.0
+            try:
+                comm_info = self._estimate_layer_communication(layer_idx, layer_type)
+                if comm_info:
+                    print(f"  Communication:")
+                    for comm in comm_info:
+                        print(f"    {comm['type']} Forward: {comm['time_fwd_ms']:.3f} ms (message: {comm['message_size_mb']:.2f} MB, group={comm['group_size']})")
+                        print(f"    {comm['type']} Backward: {comm['time_bwd_ms']:.3f} ms (message: {comm['message_size_mb']:.2f} MB, group={comm['group_size']})")
+                        total_comm_fwd += comm['time_fwd_ms']
+                        total_comm_bwd += comm['time_bwd_ms']
+                    
+                    # Update the results to include communication time
+                    results[layer_type]["forward_time_ms"] += total_comm_fwd
+                    results[layer_type]["backward_time_ms"] += total_comm_bwd
+                    
+                    print(f"  Forward time (with comm):  {results[layer_type]['forward_time_ms']:.2f} ms")
+                    print(f"  Backward time (with comm): {results[layer_type]['backward_time_ms']:.2f} ms")
+                else:
+                    print(f"  Communication: None (TP=1, EP=1 or not applicable)")
+            except Exception as e:
+                print(f"  Communication estimation failed: {e}")
 
         # Expand results to all layers
         final_results = {}
