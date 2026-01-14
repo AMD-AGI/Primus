@@ -92,6 +92,7 @@ jobs:
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}"
           start_time=$(date +%s)
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
+               --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}} \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
@@ -111,6 +112,7 @@ jobs:
           # cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-38.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
           # cp /apps/tas/0_public/primus_docker_ci/ainic/amd-anp-v1.3.0.patch $GITHUB_WORKSPACE/.github/workflows/docker/ainic/
           # docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_v25.10_ainic \
+          #      --network=host \
           #      -t tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic \
           #      --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
           #      --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
@@ -128,6 +130,7 @@ jobs:
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax"
           start_time=$(date +%s)
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_jax \
+               --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}}-jax \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} .
