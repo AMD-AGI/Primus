@@ -7,10 +7,10 @@
 """
 Lightweight preflight checks (fast sanity checks).
 
-CLI (benchmark-like suites):
-  primus-cli preflight gpu [options]
-  primus-cli preflight network [options]
-  primus-cli preflight all [options]
+CLI:
+  primus-cli preflight                  # Run all checks (GPU + Network)
+  primus-cli preflight --check-gpu      # Run GPU checks only
+  primus-cli preflight --check-network  # Run network checks only
 """
 
 from __future__ import annotations
@@ -395,19 +395,12 @@ def run_preflight_check(args: Any) -> int:
     """
     hostname = os.environ.get("HOSTNAME") or socket.gethostname()
 
-    # Determine suite from --check-gpu / --check-network flags
+    # Determine checks from --check-gpu / --check-network flags
     check_gpu = getattr(args, "check_gpu", False)
     check_network = getattr(args, "check_network", False)
     if not check_gpu and not check_network:
         # Neither specified → do both
         check_gpu = check_network = True
-
-    if check_gpu and check_network:
-        suite = "all"
-    elif check_gpu:
-        suite = "gpu"
-    else:
-        suite = "network"
 
     # Fixed defaults for simplified CLI
     fail_on_warn = False
@@ -419,10 +412,10 @@ def run_preflight_check(args: Any) -> int:
     save_pdf = bool(getattr(args, "save_pdf", True))
 
     findings: List[Finding] = []
-    if suite in ("gpu", "all"):
+    if check_gpu:
         findings.extend(_gpu_findings())
         findings = _apply_expectations(args, findings)
-    if suite in ("network", "all"):
+    if check_network:
         # Run all network checks (basic + standard + full)
         nb = run_network_basic_checks()
         for f in nb["findings"]:
@@ -452,7 +445,12 @@ def run_preflight_check(args: Any) -> int:
         rc = 2
     elif warn_count > 0 and fail_on_warn:
         rc = 2
-    print(f"[Primus:Preflight] suite={suite} host={hostname} status={status}", file=sys.stderr)
+    checks = []
+    if check_gpu:
+        checks.append("gpu")
+    if check_network:
+        checks.append("network")
+    print(f"[Primus:Preflight] checks={','.join(checks)} host={hostname} status={status}", file=sys.stderr)
     for f in findings:
         if f.level in ("warn", "fail"):
             print(f"[Primus:Preflight] {f.level.upper()}: {f.message}", file=sys.stderr)
@@ -460,7 +458,8 @@ def run_preflight_check(args: Any) -> int:
     # Build per-rank record and gather to rank0.
     rank, world = get_rank_world()
     local_record: Dict[str, Any] = {
-        "suite": suite,
+        "check_gpu": check_gpu,
+        "check_network": check_network,
         "status": status,
         "return_code": rc,
         "fail_count": fail_count,
@@ -483,9 +482,10 @@ def run_preflight_check(args: Any) -> int:
 
         # Write markdown report
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        checks_str = ", ".join(checks) if checks else "none"
         with open(markdown_file, "w", encoding="utf-8") as f:
             f.write(f"# Primus Preflight Report\n\n")
-            f.write(f"- **Suite**: `{suite}`\n")
+            f.write(f"- **Checks**: `{checks_str}`\n")
             f.write(f"- **World Size**: `{world}`\n")
             f.write(f"- **Generated**: `{now}`\n")
             f.write(f"- **Overall Status**: **{overall_status}**\n\n")
@@ -496,7 +496,7 @@ def run_preflight_check(args: Any) -> int:
                 h = str(r.get("host", "unknown"))
                 by_host.setdefault(h, []).append(r)
 
-            if suite in ("gpu", "all"):
+            if check_gpu:
                 f.write("## GPU Devices\n\n")
                 f.write(
                     "| host | ranks | status | gpu_type/arch | gpu_count | total_mem_gb (min-max) | min_free_gb | occupied | amdgpu_version | rocm_version |\n"
@@ -574,7 +574,7 @@ def run_preflight_check(args: Any) -> int:
                         alloc_b = str(s["mem_alloc"].get("bytes_approx", ""))
                     f.write(f"| {h} | {num_ranks} | {s['status']} | {tflops_str} | {ms_str} | {alloc_b} |\n")
                 f.write("\n")
-            elif suite == "network":
+            if check_network:
                 # Level-aware network reporting (basic/standard/full)
                 f.write("## Network Status\n\n")
                 f.write("| host | ranks | status | is_distributed | network_mode | has_fail | has_warn |\n")
