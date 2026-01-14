@@ -1,0 +1,68 @@
+# Base image
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG AINIC_BUNDLE_PATH
+
+# Non-interactive APT
+ENV DEBIAN_FRONTEND=noninteractive
+
+
+# ---------------------------------------------------------------------------
+# Install build dependencies
+# ---------------------------------------------------------------------------
+RUN apt-get update && \
+    apt-get install jq dpkg-dev kmod xz-utils \
+    libfmt-dev libboost-all-dev \
+    libibverbs-dev ibverbs-utils infiniband-diags -y
+
+# ---------------------------------------------------------------------------
+# Enviroment variables
+# ---------------------------------------------------------------------------
+ENV WORKDIR=/opt
+ENV ROCM_PATH=/opt/rocm
+ENV MPI_PATH=/opt/ompi
+
+# =============================== Build AINIC Driver ===============================
+# WARNING: Please ensure the following environment variables are correctly set:
+# WARNING:     1. PATH: /usr/sbin must be included.
+# WARNING:     2. LD_LIBRARY_PATH: /usr/lib must be included.
+# WARNING: If these paths are missing, tools and libraries may not function correctly.
+# INFO: Installation completed successfully
+
+COPY ${AINIC_BUNDLE_PATH}/ainic_bundle_1.117.5-a-38.tar.gz ${WORKDIR}
+RUN cd ${WORKDIR} && \
+    echo "Building ainic bundle... current directory: ${WORKDIR}" && \
+    tar zxf ainic_bundle_1.117.5-a-38.tar.gz && \
+    cd ainic_bundle_1.117.5-a-38 && \
+    tar zxf host_sw_pkg.tar.gz && \
+    cd host_sw_pkg && \
+    ./install.sh --domain=user -y 2>&1 | tee log_install.txt 
+
+# ---------------------------------------------------------------------------
+# Build rccl
+# ---------------------------------------------------------------------------
+RUN cd ${WORKDIR} && \
+    git clone https://github.com/ROCm/rccl.git && \
+    cd rccl && git checkout rocm-7.1.0 && \
+    ./install.sh -l --prefix build/ --disable-msccl-kernel \
+        --amdgpu_targets="gfx950" 2>&1 | tee log_rccl_install.txt
+
+ENV RCCL_HOME=${WORKDIR}/rccl
+
+# ---------------------------------------------------------------------------
+# Build AMD ANP
+# ---------------------------------------------------------------------------
+
+COPY ${AINIC_BUNDLE_PATH}/amd-anp-v1.3.0.patch /opt/
+RUN cd ${WORKDIR} && git clone https://github.com/rocm/amd-anp.git && \
+    cd amd-anp && git checkout tags/v1.3.0 && \
+    git apply /opt/amd-anp-v1.3.0.patch && \
+    make -j 16 RCCL_HOME=${RCCL_HOME} \
+                MPI_INCLUDE=${MPI_PATH}/include/ \
+                MPI_LIB_PATH=${MPI_PATH}/lib/ \
+                ROCM_PATH=${ROCM_PATH} && \
+    make RCCL_HOME=$RCCL_HOME ROCM_PATH=${ROCM_PATH} install \
+        2>&1 | tee log_amd_anp_build.txt
+
+
