@@ -22,9 +22,10 @@ RUN apt-get update && \
 ENV ROCSHMEM_HOME=/opt/rocshmem
 ENV UCX_HOME=/opt/ucx
 ENV MPI_HOME=/opt/ompi
+ENV ROCM_HOME=/opt/rocm
 ENV PRIMUS_TURBO_FRAMEWORK=${PRIMUS_TURBO_FRAMEWORK}
-ENV LD_LIBRARY_PATH=/opt/rocm/lib:/opt/ucx/lib:/opt/ompi/lib:${LD_LIBRARY_PATH}
-ENV PATH=/opt/rocm/bin:${PATH}:/opt/ompi/bin:/opt/ucx/bin:${PATH}
+ENV LD_LIBRARY_PATH=${ROCM_HOME}/lib:${UCX_HOME}/lib:${MPI_HOME}/lib:${LD_LIBRARY_PATH}
+ENV PATH=${ROCM_HOME}/bin:${PATH}:${MPI_HOME}/bin:${UCX_HOME}/bin:${PATH}
 
 # ---------------------------------------------------------------------------
 # Install rocSHMEM
