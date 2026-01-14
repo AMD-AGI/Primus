@@ -15,11 +15,11 @@ RUN apt-get update && \
     apt-get install -y rdma-core libibverbs-dev libnuma-dev numactl&& \
     apt-get install -y --reinstall binutils
 
-
+RUN rm -rf /var/lib/apt/lists/*
 # ---------------------------------------------------------------------------
 # Enviroment variables
 # ---------------------------------------------------------------------------
-ENV ROCSHMEM_HOME=/opt/rocshmem
+ENV ROCSHMEM_HOME=/root/rocshmem
 ENV UCX_HOME=/opt/ucx
 ENV MPI_HOME=/opt/ompi
 ENV ROCM_HOME=/opt/rocm
@@ -30,32 +30,34 @@ ENV PATH=${ROCM_HOME}/bin:${PATH}:${MPI_HOME}/bin:${UCX_HOME}/bin:${PATH}
 # ---------------------------------------------------------------------------
 # Install rocSHMEM
 # ---------------------------------------------------------------------------
-RUN mkdir -p /tmp && cd /tmp && \
+RUN mkdir -p /opt && cd /opt && \
     git clone https://github.com/ROCm/rocSHMEM.git && \
     cd rocSHMEM && \
     git checkout ${ROCSHMEM_COMMIT} && \
     mkdir build && \
     cd build && \
-    MPI_ROOT=${MPI_HOME} UCX_ROOT=${UCX_HOME} INSTALL_PREFIX=${ROCSHMEM_HOME} ../scripts/build_configs/gda \
-                                                                                            -DGDA_IONIC=ON \
-                                                                                            -DGDA_MLX5=ON  \
-                                                                                            -DGDA_BNXT=ON  \
-                                                                                            -DUSE_IPC=ON
-
+    MPI_ROOT=${MPI_HOME} UCX_ROOT=${UCX_HOME} ../scripts/build_configs/gda \
+                                                            -DGDA_IONIC=ON \
+                                                            -DGDA_MLX5=ON  \
+                                                            -DGDA_BNXT=ON  \
+                                                            -DUSE_IPC=ON
+RUN rm -rf /opt/rocSHMEM                                                                                            
 
 # ---------------------------------------------------------------------------
 # Install Primus-Turbo
 # ---------------------------------------------------------------------------
-RUN cd /tmp && \
+RUN cd /opt && \
     git clone https://github.com/AMD-AGI/Primus-Turbo.git && \
     cd Primus-Turbo && \
     git checkout ${PRIMUS_TURBO_COMMIT} && \
     git submodule update --init --recursive && \
     pip3 install -r requirements.txt && \
-    GPU_ARCHS="gfx942;gfx950" python3 setup.py develop
+    GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
 
+RUN rm -rf /opt/Primus-Turbo
 
 # Set the default working directory
 WORKDIR /opt
+
 # check the installed Primus-Turbo package
 RUN python3 -m pip show primus-turbo || true
