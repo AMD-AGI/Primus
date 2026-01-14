@@ -1,3 +1,4 @@
+from typing import List, Dict,  Optional
 ###############################################################################
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -128,10 +129,178 @@ def _rescale_expert_parallelism(module_config):
     }
 
 
-def _extract_layer_type_timings(layer_results: dict) -> dict[str, dict[str, float]]:
+def _calculate_single_node_config(original_config, gpus_per_node=8):
+    """
+    Calculate a reduced parallelism configuration that fits on a single node.
+    
+    Strategy:
+    1. Reduce PP to 1 (easiest to add back communication overhead)
+    2. If still doesn't fit, rescale EP to fit on single node
+    3. Keep TP, CP unchanged
+    4. Return the adjustment info for later baseline correction
+    
+    Args:
+        original_config: Original module config
+        gpus_per_node: Number of GPUs per node (default 8)
+        
+    Returns:
+        dict with keys:
+            'adjusted': bool - whether adjustment was needed
+            'original_pp': int - original PP value
+            'benchmark_pp': int - PP for benchmarking
+            'original_nodes_required': int - original minimum nodes
+            'original_ep': int - original EP value
+            'benchmark_ep': int - EP for benchmarking
+    """
+    tp = getattr(original_config, "tensor_model_parallel_size", 1) or 1
+    pp = getattr(original_config, "pipeline_model_parallel_size", 1) or 1
+    ep = getattr(original_config, "expert_model_parallel_size", 1) or 1
+    cp = getattr(original_config, "context_parallel_size", 1) or 1
+    
+    gpus_required = tp * pp * ep * cp
+    nodes_required = (gpus_required + gpus_per_node - 1) // gpus_per_node
+    
+    # If already fits on 1 node, no adjustment needed
+    if nodes_required <= 1:
+        return {
+            'adjusted': False,
+            'original_pp': pp,
+            'benchmark_pp': pp,
+            'original_nodes_required': nodes_required,
+            'original_tp': tp,
+            'original_ep': ep,
+            'benchmark_ep': ep,
+            'original_cp': cp,
+        }
+    
+    # Step 1: Reduce PP to 1
+    benchmark_pp = 1
+    benchmark_gpus_required = tp * benchmark_pp * ep * cp
+    
+    # Step 2: If still doesn't fit, rescale EP
+    benchmark_ep = ep
+    if benchmark_gpus_required > gpus_per_node:
+        print(
+            f"\n[Primus:Performance Projection] After reducing PP to 1, "
+            f"config still requires {benchmark_gpus_required} GPUs (TP={tp}, EP={ep}, CP={cp})."
+        )
+        print(f"[Primus:Performance Projection] Rescaling EP to fit on {gpus_per_node} GPUs...")
+        
+        # Rescale EP to fit
+        rescale_info = _rescale_expert_parallelism(original_config)
+        if rescale_info:
+            benchmark_ep = rescale_info['ep_after']
+            benchmark_gpus_required = tp * benchmark_pp * benchmark_ep * cp
+            
+            if benchmark_gpus_required > gpus_per_node:
+                raise ValueError(
+                    f"[Primus:Performance Projection] Cannot reduce to single node.\n"
+                    f"Even with PP=1 and EP={benchmark_ep}, configuration requires {benchmark_gpus_required} GPUs "
+                    f"(TP={tp}, EP={benchmark_ep}, CP={cp}).\n"
+                    f"Single node has only {gpus_per_node} GPUs.\n"
+                    f"Please reduce TP or CP in your configuration."
+                )
+        else:
+            # Rescaling didn't help or wasn't needed
+            raise ValueError(
+                f"[Primus:Performance Projection] Cannot reduce to single node.\n"
+                f"Even with PP=1, configuration requires {benchmark_gpus_required} GPUs "
+                f"(TP={tp}, EP={ep}, CP={cp}).\n"
+                f"Single node has only {gpus_per_node} GPUs.\n"
+                f"Please reduce TP, EP, or CP in your configuration."
+            )
+    
+    # Modify the config
+    original_config.pipeline_model_parallel_size = benchmark_pp
+    
+    # Also disable virtual pipeline stages (already done in _limit_layers_for_projection)
+    for attr in ("num_layers_per_virtual_pipeline_stage", "num_virtual_stages_per_pipeline_rank"):
+        if hasattr(original_config, attr):
+            setattr(original_config, attr, None)
+    
+    return {
+        'adjusted': True,
+        'original_pp': pp,
+        'benchmark_pp': benchmark_pp,
+        'original_nodes_required': nodes_required,
+        'original_tp': tp,
+        'original_ep': ep,
+        'benchmark_ep': benchmark_ep,
+        'original_cp': cp,
+    }
+
+
+def _estimate_pp_communication_overhead(training_config, pp_size, hardware_config_dict=None):
+    """
+    Estimate the PP P2P communication overhead for a given PP size.
+    
+    Args:
+        training_config: Training configuration
+        pp_size: Pipeline parallelism size
+        hardware_config_dict: Optional hardware config
+        
+    Returns:
+        float: Estimated PP communication time in ms per iteration
+    """
+    from primus.core.projection.multinode_projection.projection import get_default_args
+    from primus.core.projection.module_profilers import collective_model as cm
+    
+    if pp_size <= 1:
+        return 0.0
+    
+    mp_config = training_config.model_parallel_config
+    model_config = training_config.model_config
+    runtime_config = training_config.runtime_config
+    
+    tp = mp_config.tensor_model_parallel_size
+    ep = getattr(mp_config, 'expert_model_parallel_size', 1)
+    cp = getattr(mp_config, 'context_model_parallel_size', 1)
+    
+    # Get hardware setup
+    gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
+    gpus_required = tp * pp_size * ep * cp
+    num_nodes = (gpus_required + gpus_per_node - 1) // gpus_per_node
+    
+    # Get collective model args
+    coll_args = get_default_args(
+        num_nodes=num_nodes,
+        gpus_per_node=gpus_per_node,
+        tp=tp,
+        pp=pp_size,
+        ep=ep,
+        cp=cp,
+        hardware_config=hardware_config_dict,
+    )
+    
+    # Calculate PP P2P communication
+    hidden_size = model_config.hidden_size
+    batch_size = runtime_config.micro_batch_size
+    seq_len = runtime_config.sequence_length
+    
+    # Activation size for P2P
+    p2p_size = batch_size * seq_len * hidden_size * 2  # BF16
+    
+    # Number of microbatches
+    global_batch_size = runtime_config.global_batch_size
+    data_parallel_size = (num_nodes * gpus_per_node) // (tp * pp_size * ep * cp)
+    num_microbatches = global_batch_size // (batch_size * data_parallel_size)
+    
+    # P2P time: 2 * (PP-1) sends per microbatch (forward + backward)
+    # Using sendrecv as approximation (no groups parameter for sendrecv)
+    p2p_time_per_transfer = cm.sendrecv(coll_args, p2p_size)
+    
+    # Total P2P time per iteration
+    # Forward: (PP-1) sends, Backward: (PP-1) sends
+    # Times number of microbatches
+    total_p2p_time_ms = 2 * (pp_size - 1) * num_microbatches * p2p_time_per_transfer / 1000
+    
+    return total_p2p_time_ms
+
+
+def _extract_layer_type_timings(layer_results: dict) -> Dict[str, dict[str, float]]:
     if not layer_results:
         return {}
-    type_timings: dict[str, dict[str, float]] = {}
+    type_timings: Dict[str, dict[str, float]] = {}
     for result in layer_results.values():
         layer_type = result.get("type")
         if layer_type not in ("dense", "moe"):
@@ -151,7 +320,7 @@ def _extract_layer_type_timings(layer_results: dict) -> dict[str, dict[str, floa
     return type_timings
 
 
-def _add_io_layer_timings(chunk_timings: list[list[dict]], profiling_results: dict):
+def _add_io_layer_timings(chunk_timings: List[list[dict]], profiling_results: dict):
     if not chunk_timings:
         return
 
@@ -174,7 +343,7 @@ def _add_io_layer_timings(chunk_timings: list[list[dict]], profiling_results: di
         last_chunk["activation"] += (output.get("activation_memory_bytes", 0.0) or 0.0) / _BYTES_PER_GB
 
 
-def _build_chunk_time_matrix(training_config, layer_results: dict) -> list[list[dict]] | None:
+def _build_chunk_time_matrix(training_config, layer_results: dict) -> Optional[List[List[dict]]]:
     model_cfg = getattr(training_config, "model_config", None)
     mp_cfg = getattr(training_config, "model_parallel_config", None)
     if model_cfg is None or mp_cfg is None:
@@ -198,7 +367,7 @@ def _build_chunk_time_matrix(training_config, layer_results: dict) -> list[list[
     ep_size = getattr(mp_cfg, "expert_model_parallel_size", 1) or 1
 
     mp_group = tp_size * cp_size * ep_size
-    chunk_timings: list[list[dict]] = []
+    chunk_timings: List[list[dict]] = []
     for pp_rank in range(pp_size):
         layers = LanguageModelProfiler.get_layers_for_rank(
             None,
@@ -304,13 +473,20 @@ def _build_scheduler_sim_config(training_config, profiling_results):
 
 
 def _report_simulation_results(sim_results, training_config):
+    """
+    Report simulation results and return the step time.
+    
+    Returns:
+        float: Step time in ms, or None if no results
+    """
     if not sim_results:
-        return
+        return None
 
     runtime_config = training_config.runtime_config
     seq_len = getattr(runtime_config, "sequence_length", None)
     micro_batch_size = getattr(runtime_config, "micro_batch_size", None)
-
+    
+    step_time_ms = None
     for sim in sim_results:
         summary = (sim or {}).get("summary") or {}
         step_time_ms = summary.get("step_time_ms")
@@ -320,7 +496,7 @@ def _report_simulation_results(sim_results, training_config):
 
         per_rank = sim.get("per_rank") or []
         mp_cfg = training_config.model_parallel_config
-        param_mem_cache: dict[int, float] = {}
+        param_mem_cache: Dict[int, float] = {}
         rank_stats = []
         for rank_idx, scheduled_layers in enumerate(per_rank):
             fwd_time = sum(
@@ -378,6 +554,8 @@ def _report_simulation_results(sim_results, training_config):
                 f"param_memory={param_mem_gb:.2f} GB, "
                 f"total_peak={total_peak_gb:.2f} GB"
             )
+    
+    return step_time_ms
 
 
 def _run_layer_benchmark(primus_config, unknown_overrides):
@@ -447,13 +625,20 @@ def _run_layer_benchmark(primus_config, unknown_overrides):
 
 
 def _run_pipeline_simulation(training_config, profiling_results):
+    """
+    Run pipeline simulation and return the step time.
+    
+    Returns:
+        float: Step time in ms from pipeline simulation, or None if simulation failed
+    """
     sim_config = _build_scheduler_sim_config(training_config, profiling_results)
     if sim_config is None:
-        return
+        return None
     print("\n[Primus:Performance Projection] Running pipeline schedule simulator...")
     runner = SchedulerSimulationRunner(sim_config)
     simulation_runs = runner.run()
-    _report_simulation_results(simulation_runs, training_config)
+    step_time_ms = _report_simulation_results(simulation_runs, training_config)
+    return step_time_ms
 
 
 def _get_parameter_memory(training_config, pp_rank: int) -> float:
@@ -491,11 +676,200 @@ def _get_parameter_memory(training_config, pp_rank: int) -> float:
     return num_params * bytes_per_param / _BYTES_PER_GB
 
 
+def _run_multinode_projection(training_config, single_node_time_ms, profiling_results, args):
+    """
+    Run multinode projection using PROJECTION_NNODES as the target.
+    
+    Args:
+        training_config: Configuration object
+        single_node_time_ms: Measured single-node time in ms
+        profiling_results: Layer profiling results
+        args: CLI arguments
+    """
+    from primus.core.projection.multinode_projection.projection import (
+        load_hardware_config,
+        calculate_collective_communication_time,
+    )
+    
+    runtime_config = training_config.runtime_config
+    mp_config = training_config.model_parallel_config
+    
+    # Get baseline calculation
+    tp = mp_config.tensor_model_parallel_size
+    pp = mp_config.pipeline_model_parallel_size
+    ep = getattr(mp_config, 'expert_model_parallel_size', 1)
+    cp = getattr(mp_config, 'context_model_parallel_size', 1)
+    gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
+    
+    # Calculate minimum nodes required by parallelism config
+    gpus_required = tp * pp * ep * cp
+    min_nodes_required = (gpus_required + gpus_per_node - 1) // gpus_per_node
+    
+    # Baseline is always the minimum required by the original parallelism config
+    # (even if we benchmarked on 1 node with reduced PP)
+    baseline_nodes = min_nodes_required
+    
+    # Get target nodes from PROJECTION_NNODES
+    projection_nnodes_str = os.getenv("PROJECTION_NNODES")
+    if not projection_nnodes_str:
+        print("\n[Primus:Multinode] ERROR: PROJECTION_NNODES not set")
+        return
+    
+    num_nodes_target = int(projection_nnodes_str)
+    
+    # Validate target >= baseline
+    if num_nodes_target < baseline_nodes:
+        raise ValueError(
+            f"\n[Primus:Multinode] ERROR: Cannot project to {num_nodes_target} nodes.\n"
+            f"Baseline is {baseline_nodes} nodes (minimum required by parallelism config).\n"
+            f"PROJECTION_NNODES must be >= {baseline_nodes}."
+        )
+    
+    # Calculate target DP
+    total_gpus_target = num_nodes_target * gpus_per_node
+    dp_target = total_gpus_target // gpus_required
+    
+    print("\n" + "=" * 100)
+    print("Parallelism Configuration Analysis")
+    print("=" * 100)
+    print(f"  TP: {tp}, PP: {pp}, EP: {ep}, CP: {cp}")
+    print(f"  GPUs per Node: {gpus_per_node}")
+    print(f"  Minimum GPUs Required: {gpus_required}")
+    print(f"  Minimum Nodes Required: {min_nodes_required}")
+    print(f"  Baseline Nodes: {baseline_nodes}")
+    print(f"  Target Nodes (PROJECTION_NNODES): {num_nodes_target}")
+    
+    # Load hardware config if provided
+    hardware_config_dict = None
+    if hasattr(args, 'hardware_config') and args.hardware_config:
+        hardware_config_dict = load_hardware_config(args.hardware_config)
+    
+    # Calculate communication times
+    total_comm_time_ms, breakdown, message_info, per_layer_info = calculate_collective_communication_time(
+        training_config,
+        num_nodes_target,
+        gpus_per_node,
+        tp,
+        pp,
+        ep,
+        cp,
+        dp_target,
+        hardware_config_dict,
+    )
+    
+    # Calculate baseline DP (for minimum nodes required)
+    baseline_gpus = baseline_nodes * gpus_per_node
+    baseline_dp = baseline_gpus // gpus_required
+    
+    # Baseline time from benchmarking includes:
+    # - Compute (forward + backward)
+    # - TP AllReduce (if TP > 1) - this is in the critical path during compute
+    # - MoE All-to-All (if EP > 1) - this is in the critical path during compute
+    # But does NOT include:
+    # - Gradient AllReduce across DP (because overlap_grad_reduce was disabled during benchmark)
+    baseline_time_ms = single_node_time_ms
+    
+    # When scaling DP, we need to account for gradient all-reduce
+    # Check if gradient all-reduce is overlapped
+    overlap_grad_reduce = getattr(mp_config, 'overlap_grad_reduce', True)
+    
+    # Calculate projected time
+    # 1. Scale compute time with DP
+    if dp_target > baseline_dp:
+        projected_compute_time_ms = baseline_time_ms * (baseline_dp / dp_target)
+    else:
+        projected_compute_time_ms = baseline_time_ms
+    
+    # 2. Add gradient all-reduce if NOT overlapped
+    if not overlap_grad_reduce and dp_target > 1:
+        # Calculate gradient all-reduce for target
+        _, target_breakdown, _, _ = calculate_collective_communication_time(
+            training_config, num_nodes_target, gpus_per_node, tp, pp, ep, cp, dp_target, hardware_config_dict
+        )
+        target_grad_ar = target_breakdown.get('gradient_allreduce', 0)
+        projected_time_ms = projected_compute_time_ms + target_grad_ar
+        grad_ar_msg = f"{target_grad_ar:.3f} ms (not overlapped)"
+    else:
+        # Gradient all-reduce is overlapped, so not in critical path
+        projected_time_ms = projected_compute_time_ms
+        if dp_target > 1:
+            # Still calculate for reporting
+            _, target_breakdown, _, _ = calculate_collective_communication_time(
+                training_config, num_nodes_target, gpus_per_node, tp, pp, ep, cp, dp_target, hardware_config_dict
+            )
+            target_grad_ar = target_breakdown.get('gradient_allreduce', 0)
+            grad_ar_msg = f"{target_grad_ar:.3f} ms (overlapped - not in critical path)"
+        else:
+            target_grad_ar = 0
+            grad_ar_msg = "N/A (DP=1)"
+    
+    # For reporting, get full breakdown for target
+    total_comm_time_ms, breakdown, message_info, per_layer_info = calculate_collective_communication_time(
+        training_config, num_nodes_target, gpus_per_node, tp, pp, ep, cp, dp_target, hardware_config_dict
+    )
+    
+    # Calculate speedup vs baseline
+    speedup = baseline_time_ms / projected_time_ms if projected_time_ms > 0 else 0
+    ideal_speedup = dp_target / baseline_dp if baseline_dp > 0 else dp_target
+    
+    # Print results
+    print("\n" + "=" * 100)
+    print("Multinode Scaling Projection Results")
+    print("=" * 100)
+    print(f"\n📊 Parallelism: TP={tp}, PP={pp}, EP={ep}, CP={cp}")
+    
+    print(f"\n📦 Baseline Configuration ({baseline_nodes} node{'s' if baseline_nodes > 1 else ''}):")
+    print(f"   Nodes: {baseline_nodes}")
+    print(f"   Data Parallelism (DP): {baseline_dp}")
+    print(f"   Iteration Time: {baseline_time_ms:.3f} ms")
+    
+    print(f"\n🎯 Target Configuration ({num_nodes_target} nodes):")
+    print(f"   Nodes: {num_nodes_target}")
+    print(f"   Data Parallelism (DP): {dp_target}")
+    print(f"   DP Scaling Factor: {dp_target/baseline_dp if baseline_dp > 0 else dp_target:.1f}x")
+    
+    print(f"\n📡 Communication Breakdown:")
+    
+    # Show individual comm operations with message sizes
+    for op_name, op_time in breakdown.items():
+        if op_time > 0:
+            # Print operation time
+            print(f"   {op_name}: {op_time:.3f} ms", end="")
+            
+            # Add message size if available
+            if op_name == 'gradient_allreduce' and 'gradient_allreduce_size_mb' in message_info:
+                overlapped_str = " [OVERLAPPED]" if message_info.get('gradient_allreduce_overlapped', False) else ""
+                print(f" (message: {message_info['gradient_allreduce_size_mb']:.2f} MB){overlapped_str}")
+            elif op_name == 'moe_a2a_fwd' and 'moe_a2a_size_mb' in message_info:
+                print(f" (message: {message_info['moe_a2a_size_mb']:.2f} MB, {message_info['num_moe_layers']} layers × {message_info['moe_a2a_per_layer_fwd']:.3f} ms/layer)")
+            elif op_name == 'moe_a2a_bwd' and 'moe_a2a_size_mb' in message_info:
+                print(f" (message: {message_info['moe_a2a_size_mb']:.2f} MB, {message_info['num_moe_layers']} layers × {message_info['moe_a2a_per_layer_fwd']:.3f} ms/layer)")
+            elif op_name == 'tp_allreduce' and 'tp_allreduce_size_mb' in message_info:
+                print(f" (message: {message_info['tp_allreduce_size_mb']:.2f} MB, {message_info['num_layers']} layers × {message_info['tp_allreduce_per_layer']:.3f} ms/layer)")
+            elif op_name == 'pp_p2p' and 'pp_p2p_size_mb' in message_info:
+                print(f" (message: {message_info['pp_p2p_size_mb']:.2f} MB, {message_info.get('num_microbatches', 'N/A')} microbatches × {message_info.get('pp_p2p_per_microbatch', 0):.3f} ms/microbatch)")
+            else:
+                print()
+    
+    print(f"\n   Total Communication (critical path): {total_comm_time_ms:.3f} ms")
+    
+    print(f"\n📊 Performance Summary:")
+    print(f"   Baseline:       {baseline_time_ms:.3f} ms ({baseline_nodes} node{'s' if baseline_nodes > 1 else ''}, DP={baseline_dp})")
+    print(f"   Projected:      {projected_time_ms:.3f} ms ({num_nodes_target} nodes, DP={dp_target})")
+    print(f"   Gradient AllReduce: {grad_ar_msg}")
+    
+    print("\n" + "=" * 100)
+
+
 def launch_projection_from_cli(args, overrides):
     """
     Entry point for the 'performance_projection' subcommand.
 
     Benchmarks Megatron transformer layers and aggregates performance metrics.
+    
+    If PROJECTION_NNODES is set, also runs multinode scaling projection.
+    If the baseline configuration requires multiple nodes, automatically reduces
+    to single-node for benchmarking and estimates the baseline with PP overhead.
 
     Args:
         args: Command-line arguments
@@ -508,8 +882,104 @@ def launch_projection_from_cli(args, overrides):
     # Load Primus configuration
     primus_config, unknown_overrides = load_primus_config(args, overrides)
     primus_config_original = copy.deepcopy(primus_config)
+    
+    # Check if we need to reduce config for single-node benchmarking
+    gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
+    projection_nnodes = os.getenv("PROJECTION_NNODES")
+    
+    # Store original parallelism before any modifications
+    module_config = primus_config.get_module_config("pre_trainer")
+    reduction_info = _calculate_single_node_config(
+        copy.deepcopy(module_config), 
+        gpus_per_node
+    )
+    
+    if reduction_info['adjusted']:
+        print("\n" + "=" * 100)
+        print("[Primus:Performance Projection] Multi-node baseline detected")
+        print("=" * 100)
+        print(f"  Original configuration requires {reduction_info['original_nodes_required']} nodes minimum:")
+        print(f"    TP={reduction_info['original_tp']}, PP={reduction_info['original_pp']}, "
+              f"EP={reduction_info['original_ep']}, CP={reduction_info['original_cp']}")
+        print(f"\n  Reducing to single-node configuration for benchmarking:")
+        print(f"    TP={reduction_info['original_tp']}, PP={reduction_info['benchmark_pp']}, "
+              f"EP={reduction_info['benchmark_ep']}, CP={reduction_info['original_cp']}")
+        
+        # Show what was changed
+        changes = []
+        if reduction_info['original_pp'] != reduction_info['benchmark_pp']:
+            changes.append(f"PP {reduction_info['original_pp']} → {reduction_info['benchmark_pp']}")
+        if reduction_info['original_ep'] != reduction_info['benchmark_ep']:
+            changes.append(f"EP {reduction_info['original_ep']} → {reduction_info['benchmark_ep']}")
+        
+        if changes:
+            print(f"    ({', '.join(changes)})")
+        
+        print(f"\n  Will estimate baseline by adding PP communication overhead back.")
+        print("=" * 100)
+        
+        # Apply the reduction to the config used for benchmarking
+        primus_config.get_module_config("pre_trainer").pipeline_model_parallel_size = reduction_info['benchmark_pp']
+        primus_config.get_module_config("pre_trainer").expert_model_parallel_size = reduction_info['benchmark_ep']
 
     profiling_results = _run_layer_benchmark(primus_config, unknown_overrides)
 
+    # Use original config for projection calculations
     training_config = convert_primus_config_to_projection_config(primus_config_original)
-    _run_pipeline_simulation(training_config, profiling_results)
+    pipeline_simulation_time_ms = _run_pipeline_simulation(training_config, profiling_results)
+    
+    # If PROJECTION_NNODES is set, also run multinode projection
+    if projection_nnodes:
+        print("\n" + "=" * 100)
+        print("[Primus:Performance] PROJECTION_NNODES detected - running multinode scaling projection")
+        print("=" * 100)
+        
+        # Import multinode projection functions
+        from primus.core.projection.multinode_projection.projection import (
+            extract_single_node_time_from_profiling,
+        )
+        
+        # Use pipeline simulation time if available, otherwise extract from profiling
+        if pipeline_simulation_time_ms is not None:
+            print(f"\n[Primus:Performance Projection] Using pipeline simulation time: {pipeline_simulation_time_ms:.2f} ms")
+            # Pipeline simulation already accounts for PP communication and bubbles
+            # No need to add additional PP overhead
+            baseline_time_ms = pipeline_simulation_time_ms
+            print(f"  (Pipeline simulation already includes PP={reduction_info['original_pp']} effects)")
+        else:
+            print(f"\n[Primus:Performance Projection] Pipeline simulation not available, using extrapolated time from profiling")
+            measured_time_ms = extract_single_node_time_from_profiling(profiling_results, training_config)
+            
+            # If we reduced PP for benchmarking, estimate the baseline with PP overhead
+            if reduction_info['adjusted']:
+                # Load hardware config if provided
+                hardware_config_dict = None
+                if hasattr(args, 'hardware_config') and args.hardware_config:
+                    from primus.core.projection.multinode_projection.projection import load_hardware_config
+                    hardware_config_dict = load_hardware_config(args.hardware_config)
+                
+                # Estimate PP overhead for original configuration
+                pp_overhead_ms = _estimate_pp_communication_overhead(
+                    training_config, 
+                    reduction_info['original_pp'],
+                    hardware_config_dict
+                )
+                
+                baseline_time_ms = measured_time_ms + pp_overhead_ms
+                
+                print(f"\n[Primus:Performance Projection] Baseline Time Adjustment:")
+                print(f"  Measured time (PP={reduction_info['benchmark_pp']}): {measured_time_ms:.2f} ms")
+                print(f"  Estimated PP overhead (PP={reduction_info['original_pp']}): {pp_overhead_ms:.2f} ms")
+                print(f"  Estimated baseline time: {baseline_time_ms:.2f} ms")
+                print(f"  (Baseline = {reduction_info['original_nodes_required']} nodes with full parallelism config)")
+            else:
+                baseline_time_ms = measured_time_ms
+        
+        # Run multinode projection with the adjusted baseline
+        _run_multinode_projection(
+            training_config, 
+            baseline_time_ms,
+            profiling_results,
+            args
+        )
+
