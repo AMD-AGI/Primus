@@ -95,6 +95,7 @@ jobs:
           echo "> Build dependencies"
           BASE_IMAGE=${BASE_IMAGE} ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} HOST_WORKSPACE=${GITHUB_WORKSPACE}/.github/workflows/docker bash $GITHUB_WORKSPACE/.github/workflows/docker/build_dependencies.sh
           start_time=$(date +%s)
+          ls -al $GITHUB_WORKSPACE/.github/workflows/docker
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
                --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}} \
