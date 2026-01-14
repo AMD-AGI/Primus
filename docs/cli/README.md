@@ -6,14 +6,14 @@ The Primus CLI provides a unified command-line interface for training, benchmark
 
 ### User Guides
 
-- **[User Guide](./PRIMUS-CLI-GUIDE.md)** ([中文版](./PRIMUS-CLI-GUIDE_CN.md))
+- **[User Guide](./PRIMUS-CLI-GUIDE.md)**
   - Complete user manual with examples
   - Quick start guide
   - Execution modes (Direct / Container / Slurm)
   - Configuration files and options
   - Best practices and troubleshooting
 
-- **[Architecture Deep Dive](./CLI-ARCHITECTURE.md)** ([中文版](./CLI-ARCHITECTURE_CN.md))
+- **[Architecture Deep Dive](./CLI-ARCHITECTURE.md)**
   - Design philosophy and principles
   - Three-layer architecture explained
   - Plugin system and extensibility

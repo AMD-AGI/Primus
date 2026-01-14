@@ -9,7 +9,7 @@
 ## ✨ Key Features
 
 - **🔄 Multi-Backend Support**: Seamlessly switch between Megatron-LM, TorchTitan, and other training frameworks
-- **🚀 Unified CLI**: One command interface for local development, containers, and Slurm clusters
+- **🚀 Unified CLI**: One command interface for local development, containers, and Slurm clusters ([Docs](./docs/README.md))
 - **⚡ ROCm Optimized**: Deep integration with AMD ROCm stack and optimized kernels from Primus-Turbo
 - **📦 Production Ready**: Battle-tested on large-scale training with hundreds of GPUs
 - **🔌 Extensible Architecture**: Plugin-based design for easy integration of custom models and workflows
