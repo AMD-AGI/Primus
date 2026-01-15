@@ -18,11 +18,10 @@ primus-cli direct -- benchmark gemm-deepseek --model Deepseek_V3 --dtype bf16
 ```
 
 ### Attention
-Run the following command to generate benchmark data for Attention operators:
-```
-python3 benchmark_attention.py                         \
-    --shapes-json-path /PATH/TO/attention_shapes.json  \
-    --report-csv-path  /PATH/TO/attention_benchmark.csv
+Attention benchmarks are now provided via the **Primus CLI benchmark suite**:
+
+```bash
+primus-cli direct -- benchmark attention --backend flash --dtype bf16 --report-csv-path ./attention_benchmark.csv
 ```
 
 
