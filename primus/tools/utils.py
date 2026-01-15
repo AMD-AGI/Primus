@@ -15,8 +15,13 @@ try:
     import torch
     import torch.distributed as dist
 
-    def init_distributed():
-        """Init only when launched with >1 processes via torchrun."""
+    def init_distributed(timeout: Optional[timedelta] = None):
+        """Init only when launched with >1 processes via torchrun.
+
+        Args:
+            timeout: Optional override for process group initialization timeout.
+                     If None, uses a conservative default (5 minutes).
+        """
         if dist.is_initialized():
             return
         rank = int(os.environ.get("RANK", "0"))
@@ -24,23 +29,42 @@ try:
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         if world_size > 1:
             torch.cuda.set_device(local_rank)
+            pg_timeout = timeout if timeout is not None else timedelta(minutes=5)
             dist.init_process_group(
                 backend="nccl",
                 rank=rank,
                 world_size=world_size,
                 device_id=torch.device(f"cuda:{local_rank}"),
                 init_method="env://",
-                timeout=timedelta(minutes=5),
+                timeout=pg_timeout,
             )
 
     def finalize_distributed():
         """Destroy process group if initialized."""
         if dist.is_initialized():
             try:
-                dist.barrier()  # optional: ensure all ranks reach this point
+                # Ensure all ranks reach this point before teardown.
+                # Important: NCCL barrier must use the correct per-rank CUDA device,
+                # otherwise some ranks may try to barrier on cuda:0 and error with:
+                #   "Tensor found on device cuda:0 but backend constrained to cuda:<local_rank>"
+                if torch.cuda.is_available():
+                    # Be explicit about per-rank device selection for teardown.
+                    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+                    try:
+                        torch.cuda.set_device(local_rank)
+                    except Exception:
+                        pass
+                    dist.barrier(device_ids=[local_rank])
+                else:
+                    dist.barrier()
             except Exception:
                 pass  # ignore barrier errors on exit
-            dist.destroy_process_group()
+            try:
+                dist.destroy_process_group()
+            except Exception:
+                # If NCCL has entered an error state (or ranks are filtered),
+                # teardown can throw; treat as best-effort.
+                pass
 
     def gather_all_results(obj):
         """
