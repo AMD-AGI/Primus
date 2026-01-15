@@ -5,9 +5,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from typing import List, Optional
-
 import time
+from typing import List, Optional
 
 from primus.modules.module_utils import debug_rank_0
 
