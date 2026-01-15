@@ -164,14 +164,17 @@ def write_network_report(f: Any, by_host: Dict[str, List[Dict[str, Any]]]) -> No
 
     # Network Path table
     f.write("## Network Path\n\n")
-    f.write("| host | NCCL_SOCKET_IFNAME | GLOO_SOCKET_IFNAME | ifname_valid | ifname_suspect |\n")
-    f.write("|---|---|---|---|---|\n")
+    f.write(
+        "| host | NCCL_SOCKET_IFNAME | GLOO_SOCKET_IFNAME | ifname_valid | ifname_suspect | route_dev | route_src_ip |\n"
+    )
+    f.write("|---|---|---|---|---|---|---|\n")
     for h in sorted(by_host.keys()):
         s = host_network_summary(by_host[h])
         nics = s.get("nics", {}) or {}
         f.write(
             f"| {h} | {nics.get('NCCL_SOCKET_IFNAME','')} | {nics.get('GLOO_SOCKET_IFNAME','')} | "
-            f"{nics.get('ifname_valid','')} | {nics.get('ifname_suspect','')} |\n"
+            f"{nics.get('ifname_valid','')} | {nics.get('ifname_suspect','')} | "
+            f"{nics.get('route_to_master_dev','')} | {nics.get('route_to_master_src_ip','')} |\n"
         )
     f.write("\n")
 

@@ -58,6 +58,7 @@ def run_network_standard_checks() -> Dict[str, Any]:
 
     nccl_if = env.get("NCCL_SOCKET_IFNAME")
     gloo_if = env.get("GLOO_SOCKET_IFNAME")
+    route = env.get("ROUTE_TO_MASTER") if isinstance(env.get("ROUTE_TO_MASTER"), dict) else {}
 
     ifname_valid = True
     if nccl_if and nccl_if not in available_nics:
@@ -95,8 +96,33 @@ def run_network_standard_checks() -> Dict[str, Any]:
         "GLOO_SOCKET_IFNAME": gloo_if,
         "ifname_valid": ifname_valid,
         "ifname_suspect": ifname_suspect,
+        # Suggested interface to reach MASTER_ADDR (best-effort)
+        "route_to_master_ok": bool(route.get("ok")) if isinstance(route, dict) else False,
+        "route_to_master_dev": route.get("dev") if isinstance(route, dict) else None,
+        "route_to_master_src_ip": route.get("src_ip") if isinstance(route, dict) else None,
     }
     findings.append(Finding("info", "NIC and network path", {"nics": nics_metrics}))
+
+    # If we have a suggested dev (via route) and user set IFNAME differently, warn.
+    if isinstance(route, dict) and route.get("ok") and route.get("dev"):
+        suggested = str(route.get("dev"))
+        mismatch = False
+        if nccl_if and str(nccl_if) != suggested:
+            mismatch = True
+        if gloo_if and str(gloo_if) != suggested:
+            mismatch = True
+        if mismatch:
+            findings.append(
+                Finding(
+                    "warn",
+                    "Socket IFNAME does not match route-to-master interface (may hang init_process_group)",
+                    {
+                        "suggested_dev": suggested,
+                        "NCCL_SOCKET_IFNAME": nccl_if,
+                        "GLOO_SOCKET_IFNAME": gloo_if,
+                    },
+                )
+            )
 
     expected = _expected_ib(env, available_nics, None)
     ib_devices = probe.ib_devices

@@ -178,6 +178,49 @@ def run_preflight(args):
     """
     perf_test = getattr(args, "perf_test", False)
 
+    def _maybe_autoset_socket_ifname() -> None:
+        """
+        Best-effort: auto-select NCCL/GLOO socket interface based on routing to MASTER_ADDR.
+        This reduces init_process_group hangs caused by choosing the wrong NIC.
+        Only sets env vars if user didn't explicitly set them.
+        """
+        # If user already set either, respect it.
+        if os.environ.get("NCCL_SOCKET_IFNAME") or os.environ.get("GLOO_SOCKET_IFNAME"):
+            return
+        try:
+            from primus.tools.preflight.network.network_probe import route_to_master
+
+            r = route_to_master()
+            if not isinstance(r, dict) or not r.get("ok"):
+                return
+            dev = r.get("dev")
+            if not dev or dev in {"lo", "docker0"} or str(dev).startswith("veth"):
+                return
+            os.environ.setdefault("NCCL_SOCKET_IFNAME", str(dev))
+            os.environ.setdefault("GLOO_SOCKET_IFNAME", str(dev))
+        except Exception:
+            return
+
+    def _append_dist_init_failure(markdown_file: str, timeout_sec: int, err: Exception) -> None:
+        try:
+            with open(markdown_file, "a", encoding="utf-8") as f:
+                f.write("---\n\n")
+                f.write("# Distributed Init\n\n")
+                f.write(
+                    "Failed to initialize `torch.distributed` process group within the timeout. "
+                    "This usually indicates a network / rendezvous configuration problem.\n\n"
+                )
+                f.write(f"- **timeout_sec**: `{timeout_sec}`\n")
+                f.write(f"- **MASTER_ADDR**: `{os.environ.get('MASTER_ADDR', '')}`\n")
+                f.write(f"- **MASTER_PORT**: `{os.environ.get('MASTER_PORT', '')}`\n")
+                f.write(f"- **WORLD_SIZE**: `{os.environ.get('WORLD_SIZE', '')}`\n")
+                f.write(f"- **error**: `{str(err)}`\n\n")
+        except Exception as ee:
+            print(
+                f"[Primus:Preflight] [rank0] WARN: failed to append dist init failure to report: {ee}",
+                file=sys.stderr,
+            )
+
     # If any selection flags are set, only run info collection/report.
     # IMPORTANT: do NOT initialize torch.distributed for info-only mode; preflight must not hang
     # when networking/rendezvous is misconfigured.
@@ -188,7 +231,36 @@ def run_preflight(args):
 
     # 1) Info-only mode: run without distributed init.
     if not perf_test and any_selection:
-        return run_preflight_info(args)
+        # First, emit a local-only report immediately (so user gets output even if PG init hangs).
+        local_rc = run_preflight_info(args)
+
+        # Then attempt to initialize distributed with a timeout, and if successful, re-run info
+        # to produce an aggregated multi-node report.
+        from datetime import timedelta
+
+        from primus.tools.utils import finalize_distributed, init_distributed
+
+        dist_timeout_sec = int(getattr(args, "dist_timeout_sec", 120) or 120)
+        rank, world = get_rank_world()
+        try:
+            if world > 1:
+                init_distributed(timeout=timedelta(seconds=dist_timeout_sec))
+                try:
+                    return run_preflight_info(args)
+                finally:
+                    finalize_distributed()
+        except Exception as e:
+            if rank == 0:
+                dump_path = getattr(args, "dump_path", "output/preflight")
+                report_file_name = getattr(args, "report_file_name", "preflight_report")
+                os.makedirs(dump_path, exist_ok=True)
+                markdown_file = f"{dump_path}/{report_file_name}.md"
+                _append_dist_init_failure(markdown_file, dist_timeout_sec, e)
+            print(f"[Primus:Preflight] ERROR: distributed init failed: {e}", file=sys.stderr)
+            return 2
+
+        # world==1 fallback
+        return local_rc
 
     # 2) Plain `preflight` (no flags): run info FIRST (no dist init) so we always get a report.
     info_rc = 0
@@ -203,6 +275,7 @@ def run_preflight(args):
 
     dist_timeout_sec = int(getattr(args, "dist_timeout_sec", 120) or 120)
     try:
+        _maybe_autoset_socket_ifname()
         init_distributed(timeout=timedelta(seconds=dist_timeout_sec))
     except Exception as e:
         # We already wrote the info report in plain preflight mode; append a clear failure note.
@@ -213,23 +286,9 @@ def run_preflight(args):
             try:
                 os.makedirs(dump_path, exist_ok=True)
                 markdown_file = f"{dump_path}/{report_file_name}.md"
-                with open(markdown_file, "a", encoding="utf-8") as f:
-                    f.write("---\n\n")
-                    f.write("# Distributed Init\n\n")
-                    f.write(
-                        "Failed to initialize `torch.distributed` process group within the timeout. "
-                        "This usually indicates a network / rendezvous configuration problem.\n\n"
-                    )
-                    f.write(f"- **timeout_sec**: `{dist_timeout_sec}`\n")
-                    f.write(f"- **MASTER_ADDR**: `{os.environ.get('MASTER_ADDR', '')}`\n")
-                    f.write(f"- **MASTER_PORT**: `{os.environ.get('MASTER_PORT', '')}`\n")
-                    f.write(f"- **WORLD_SIZE**: `{os.environ.get('WORLD_SIZE', '')}`\n")
-                    f.write(f"- **error**: `{str(e)}`\n\n")
+                _append_dist_init_failure(markdown_file, dist_timeout_sec, e)
             except Exception as ee:
-                print(
-                    f"[Primus:Preflight] [rank0] WARN: failed to append dist init failure to report: {ee}",
-                    file=sys.stderr,
-                )
+                print(f"[Primus:Preflight] [rank0] WARN: failed to write report: {ee}", file=sys.stderr)
 
         print(f"[Primus:Preflight] ERROR: distributed init failed: {e}", file=sys.stderr)
         return 2
