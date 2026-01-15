@@ -25,14 +25,8 @@ ENV MPI_HOME=/opt/ompi
 ENV ROCM_HOME=/opt/rocm
 ENV PRIMUS_TURBO_FRAMEWORK=${PRIMUS_TURBO_FRAMEWORK}
 
-ENV PATH="/opt/ompi/bin:/opt/ompi/sbin:${PATH}" \
-    LD_LIBRARY_PATH="/opt/ompi/lib:${LD_LIBRARY_PATH}" \
-    C_INCLUDE_PATH="/opt/ompi/include:${C_INCLUDE_PATH}" \
-    CPLUS_INCLUDE_PATH="/opt/ompi/include:${CPLUS_INCLUDE_PATH}" \
-    PKG_CONFIG_PATH="/opt/ompi/lib/pkgconfig:${PKG_CONFIG_PATH}" \
-    MANPATH="/opt/ompi/share/man:${MANPATH}" \
-    CMAKE_C_COMPILER="/opt/ompi/bin/mpicc" \
-    CMAKE_CXX_COMPILER="/opt/ompi/bin/mpicxx"
+ENV PATH="/opt/ompi/bin:/opt/ompi/sbin:${PATH}" 
+ENV LD_LIBRARY_PATH="/opt/ompi/lib:${LD_LIBRARY_PATH}" 
 # ---------------------------------------------------------------------------
 # Install rocSHMEM
 # ---------------------------------------------------------------------------
@@ -52,13 +46,18 @@ RUN rm -rf /opt/rocSHMEM
 # ---------------------------------------------------------------------------
 # Install Primus-Turbo
 # ---------------------------------------------------------------------------
+ENV GPU_ARCHS="gfx942;gfx950"
+ENV PYTORCH_ROCM_ARCH="gfx942;gfx950"
+ENV HCC_AMDGPU_TARGET="gfx942,gfx950"
+    
+
 RUN cd /opt && \
     git clone https://github.com/AMD-AGI/Primus-Turbo.git && \
     cd Primus-Turbo && \
     git checkout ${PRIMUS_TURBO_COMMIT} && \
     git submodule update --init --recursive && \
     pip3 install -r requirements.txt && \
-    GPU_ARCHS="gfx942;gfx950" pip3 install --no-build-isolation .
+    pip3 install --no-build-isolation . -v
 
 RUN rm -rf /opt/Primus-Turbo
 

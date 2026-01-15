@@ -30,14 +30,21 @@ LOG_INFO_RANK0 "  GPU_ARCHS       : ${GPU_ARCHS}"
 if [ -d "$UCCL_DIR" ]; then
 	LOG_INFO_RANK0 "[hook system] Found existed uccl in /tmp, remove it"
 	rm -rf $UCCL_DIR
-else
-	cd /tmp && git clone https://github.com/uccl-project/uccl.git
 fi
+
+cd /tmp && git clone https://github.com/uccl-project/uccl.git
+
 
 pushd $UCCL_DIR
 
 # install dependencies
 apt update && apt install -y rdma-core libibverbs-dev libnuma-dev libgoogle-glog-dev
+
+if [[ -n "$UCCL_REF" ]]; then
+	LOG_INFO_RANK0 "Checking out UCCL ref: ${UCCL_REF}"
+    git fetch --all --tags
+    git checkout "${UCCL_REF}"
+fi
 
 LOG_INFO_RANK0 "[hook system] Building uccl ep"
 cd ep && PYTORCH_ROCM_ARCH="${GPU_ARCHS}" python3 setup.py build && cd ..
