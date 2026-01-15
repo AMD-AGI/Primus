@@ -5,7 +5,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-
 import time
 
 from primus.modules.module_utils import debug_rank_0
@@ -38,6 +37,8 @@ def set_exp_root_path(exp_root_path):
 def get_exp_root_path():
     """Return experiment root path. Can be None."""
     return _GLOBAL_EXP_ROOT_PATH
+
+
 def set_train_start_time(start_time=None):
     """Set training start time. If not provided, use current time."""
     global _TRAIN_START_TIME
