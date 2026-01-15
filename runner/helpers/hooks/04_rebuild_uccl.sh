@@ -8,23 +8,28 @@
 # System hook: enable build uccl settings.
 #
 # Trigger:
-#   export USING_UCCL=1
+#   export REBUILD_UCCL=1
 #
 ###############################################################################
 
 set -euo pipefail
 
-if [[ "${USING_UCCL:-0}" != "1" ]]; then
+if [[ "${REBUILD_UCCL:-0}" != "1" ]]; then
     exit 0
 fi
 
 UCCL_DIR="/tmp/uccl"
+UCCL_BUILD_DIR="${UCCL_BUILD_DIR:-/tmp/uccl_${HOSTNAME:-$(hostname)}}"
+UCCL_REF="${UCCL_REF:-}"
+GPU_ARCHS="${GPU_ARCHS:-gfx942;gfx950}"
 
-LOG_INFO_RANK0 "[hook system] USING_UCCL=1 → Building uccl in /tmp "
-
+LOG_INFO_RANK0 "[hook system] REBUILD_UCCL=1 → Building uccl in /tmp "
+LOG_INFO_RANK0 "  Build directory : ${UCCL_BUILD_DIR}"
+LOG_INFO_RANK0 "  GPU_ARCHS       : ${GPU_ARCHS}"
 
 if [ -d "$UCCL_DIR" ]; then
-	LOG_INFO_RANK0 "[hook system] Found existed uccl in /tmp"
+	LOG_INFO_RANK0 "[hook system] Found existed uccl in /tmp, remove it"
+	rm -rf $UCCL_DIR
 else
 	cd /tmp && git clone https://github.com/uccl-project/uccl.git
 fi
@@ -35,17 +40,17 @@ pushd $UCCL_DIR
 apt update && apt install -y rdma-core libibverbs-dev libnuma-dev libgoogle-glog-dev
 
 LOG_INFO_RANK0 "[hook system] Building uccl ep"
-cd ep && python3 setup.py build && cd ..
+cd ep && PYTORCH_ROCM_ARCH="${GPU_ARCHS}" python3 setup.py build && cd ..
 
 LOG_INFO_RANK0 "[hook system] Building uccl ep done"
 
 cp ep/build/**/*.so uccl
 
-python3 setup.py install
+pip3 install --no-build-isolation .
 LOG_INFO_RANK0 "[hook system] Install uccl done"
 # install deep_ep_wrapper
 cd $UCCL_DIR/ep/deep_ep_wrapper
-python3 setup.py install
+pip3 install --no-build-isolation .
 LOG_INFO_RANK0 "[hook system] Install deep_ep done"
 
 LOG_INFO_RANK0 "[hook system] Building uccl done."
