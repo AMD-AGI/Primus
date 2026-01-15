@@ -178,29 +178,6 @@ def run_preflight(args):
     """
     perf_test = getattr(args, "perf_test", False)
 
-    def _maybe_autoset_socket_ifname() -> None:
-        """
-        Best-effort: auto-select NCCL/GLOO socket interface based on routing to MASTER_ADDR.
-        This reduces init_process_group hangs caused by choosing the wrong NIC.
-        Only sets env vars if user didn't explicitly set them.
-        """
-        # If user already set either, respect it.
-        if os.environ.get("NCCL_SOCKET_IFNAME") or os.environ.get("GLOO_SOCKET_IFNAME"):
-            return
-        try:
-            from primus.tools.preflight.network.network_probe import route_to_master
-
-            r = route_to_master()
-            if not isinstance(r, dict) or not r.get("ok"):
-                return
-            dev = r.get("dev")
-            if not dev or dev in {"lo", "docker0"} or str(dev).startswith("veth"):
-                return
-            os.environ.setdefault("NCCL_SOCKET_IFNAME", str(dev))
-            os.environ.setdefault("GLOO_SOCKET_IFNAME", str(dev))
-        except Exception:
-            return
-
     def _append_dist_init_failure(markdown_file: str, timeout_sec: int, err: Exception) -> None:
         try:
             with open(markdown_file, "a", encoding="utf-8") as f:
@@ -275,7 +252,6 @@ def run_preflight(args):
 
     dist_timeout_sec = int(getattr(args, "dist_timeout_sec", 120) or 120)
     try:
-        _maybe_autoset_socket_ifname()
         init_distributed(timeout=timedelta(seconds=dist_timeout_sec))
     except Exception as e:
         # We already wrote the info report in plain preflight mode; append a clear failure note.
