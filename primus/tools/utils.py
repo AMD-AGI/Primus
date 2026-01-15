@@ -15,8 +15,13 @@ try:
     import torch
     import torch.distributed as dist
 
-    def init_distributed():
-        """Init only when launched with >1 processes via torchrun."""
+    def init_distributed(timeout: Optional[timedelta] = None):
+        """Init only when launched with >1 processes via torchrun.
+
+        Args:
+            timeout: Optional override for process group initialization timeout.
+                     If None, uses a conservative default (5 minutes).
+        """
         if dist.is_initialized():
             return
         rank = int(os.environ.get("RANK", "0"))
@@ -24,13 +29,14 @@ try:
         local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         if world_size > 1:
             torch.cuda.set_device(local_rank)
+            pg_timeout = timeout if timeout is not None else timedelta(minutes=5)
             dist.init_process_group(
                 backend="nccl",
                 rank=rank,
                 world_size=world_size,
                 device_id=torch.device(f"cuda:{local_rank}"),
                 init_method="env://",
-                timeout=timedelta(minutes=5),
+                timeout=pg_timeout,
             )
 
     def finalize_distributed():

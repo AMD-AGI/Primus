@@ -60,6 +60,15 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
     # Performance test specific options (only used with --perf-test)
     parser.add_argument("--plot", action="store_true", help="Generate plots (only with --perf-test)")
 
+    # Distributed init timeout (prevents hangs when network/rendezvous is misconfigured)
+    parser.add_argument(
+        "--dist-timeout-sec",
+        type=int,
+        default=120,
+        help="Timeout (seconds) for torch.distributed process group init. "
+        "If init times out, preflight will write the info report and exit with failure.",
+    )
+
     # Report output options
     parser.add_argument(
         "--dump-path",

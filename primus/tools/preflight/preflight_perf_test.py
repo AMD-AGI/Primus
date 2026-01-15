@@ -178,32 +178,68 @@ def run_preflight(args):
     """
     perf_test = getattr(args, "perf_test", False)
 
-    # Unified distributed setup/teardown for both modes.
-    # - Lightweight checks need it to aggregate multi-rank results and exit cleanly.
-    # - Perf tests need it for NCCL collectives.
+    # If any selection flags are set, only run info collection/report.
+    # IMPORTANT: do NOT initialize torch.distributed for info-only mode; preflight must not hang
+    # when networking/rendezvous is misconfigured.
+    check_host = getattr(args, "check_host", False)
+    check_gpu = getattr(args, "check_gpu", False)
+    check_network = getattr(args, "check_network", False)
+    any_selection = bool(check_host or check_gpu or check_network)
+
+    # 1) Info-only mode: run without distributed init.
+    if not perf_test and any_selection:
+        return run_preflight_info(args)
+
+    # 2) Plain `preflight` (no flags): run info FIRST (no dist init) so we always get a report.
+    info_rc = 0
+    if not perf_test and not any_selection:
+        info_rc = run_preflight_info(args)
+
+    # 3) Perf tests (perf-only OR plain preflight after info): now attempt distributed init
+    # with a timeout so we fail fast instead of hanging.
+    from datetime import timedelta
+
     from primus.tools.utils import finalize_distributed, init_distributed
 
-    init_distributed()
+    dist_timeout_sec = int(getattr(args, "dist_timeout_sec", 120) or 120)
     try:
-        # If any selection flags are set, only run info collection/report.
-        check_host = getattr(args, "check_host", False)
-        check_gpu = getattr(args, "check_gpu", False)
-        check_network = getattr(args, "check_network", False)
-        any_selection = bool(check_host or check_gpu or check_network)
+        init_distributed(timeout=timedelta(seconds=dist_timeout_sec))
+    except Exception as e:
+        # We already wrote the info report in plain preflight mode; append a clear failure note.
+        rank, _world = get_rank_world()
+        dump_path = getattr(args, "dump_path", "output/preflight")
+        report_file_name = getattr(args, "report_file_name", "preflight_report")
+        if rank == 0:
+            try:
+                os.makedirs(dump_path, exist_ok=True)
+                markdown_file = f"{dump_path}/{report_file_name}.md"
+                with open(markdown_file, "a", encoding="utf-8") as f:
+                    f.write("---\n\n")
+                    f.write("# Distributed Init\n\n")
+                    f.write(
+                        "Failed to initialize `torch.distributed` process group within the timeout. "
+                        "This usually indicates a network / rendezvous configuration problem.\n\n"
+                    )
+                    f.write(f"- **timeout_sec**: `{dist_timeout_sec}`\n")
+                    f.write(f"- **MASTER_ADDR**: `{os.environ.get('MASTER_ADDR', '')}`\n")
+                    f.write(f"- **MASTER_PORT**: `{os.environ.get('MASTER_PORT', '')}`\n")
+                    f.write(f"- **WORLD_SIZE**: `{os.environ.get('WORLD_SIZE', '')}`\n")
+                    f.write(f"- **error**: `{str(e)}`\n\n")
+            except Exception as ee:
+                print(
+                    f"[Primus:Preflight] [rank0] WARN: failed to append dist init failure to report: {ee}",
+                    file=sys.stderr,
+                )
 
-        # Perf-only mode
-        if perf_test:
-            any_selection = False  # ignore selection flags if perf-only is requested
-        else:
-            if any_selection:
-                return run_preflight_info(args)
+        print(f"[Primus:Preflight] ERROR: distributed init failed: {e}", file=sys.stderr)
+        return 2
 
-        # Plain `preflight` (no flags): run info first, then perf tests.
-        info_rc = 0
+    try:
+        # Optional: if we are in plain preflight mode and dist init succeeded, re-run info
+        # to produce an aggregated report (overwriting the earlier local-only one).
         if not perf_test and not any_selection:
-            info_rc = run_preflight_info(args)
+            run_preflight_info(args)
 
-        # Perf test mode (either perf-only, or plain preflight after info)
         try:
             import torch  # type: ignore
 
