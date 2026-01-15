@@ -145,11 +145,11 @@ from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_me
 from primus.backends.megatron.model_provider import primus_model_provider
 from primus.backends.megatron.training.global_vars import (
     get_mlflow_writer,
-    set_exp_root_path,
-    upload_mlflow_artifacts,
     get_train_start_time,
+    set_exp_root_path,
     set_primus_global_variables,
     set_train_start_time,
+    upload_mlflow_artifacts,
 )
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
