@@ -19,30 +19,35 @@ RUN rm -rf /var/lib/apt/lists/*
 # ---------------------------------------------------------------------------
 # Enviroment variables
 # ---------------------------------------------------------------------------
-ENV ROCSHMEM_HOME=/root/rocshmem
+ENV ROCSHMEM_HOME=/opt/rocshmem
 ENV UCX_HOME=/opt/ucx
 ENV MPI_HOME=/opt/ompi
 ENV ROCM_HOME=/opt/rocm
 ENV PRIMUS_TURBO_FRAMEWORK=${PRIMUS_TURBO_FRAMEWORK}
-ENV LD_LIBRARY_PATH=${ROCM_HOME}/lib:${UCX_HOME}/lib:${MPI_HOME}/lib:${LD_LIBRARY_PATH}
-ENV PATH=${ROCM_HOME}/bin:${PATH}:${MPI_HOME}/bin:${UCX_HOME}/bin:${PATH}
 
+ENV PATH="/opt/ompi/bin:/opt/ompi/sbin:${PATH}" \
+    LD_LIBRARY_PATH="/opt/ompi/lib:${LD_LIBRARY_PATH}" \
+    C_INCLUDE_PATH="/opt/ompi/include:${C_INCLUDE_PATH}" \
+    CPLUS_INCLUDE_PATH="/opt/ompi/include:${CPLUS_INCLUDE_PATH}" \
+    PKG_CONFIG_PATH="/opt/ompi/lib/pkgconfig:${PKG_CONFIG_PATH}" \
+    MANPATH="/opt/ompi/share/man:${MANPATH}" \
+    CMAKE_C_COMPILER="/opt/ompi/bin/mpicc" \
+    CMAKE_CXX_COMPILER="/opt/ompi/bin/mpicxx"
 # ---------------------------------------------------------------------------
 # Install rocSHMEM
 # ---------------------------------------------------------------------------
-# RUN mkdir -p /opt && cd /opt && \
-#     git clone https://github.com/ROCm/rocSHMEM.git && \
-#     cd rocSHMEM && \
-#     git checkout ${ROCSHMEM_COMMIT} && \
-#     mkdir build && \
-#     cd build && \
-#     MPI_ROOT=${MPI_HOME} UCX_ROOT=${UCX_HOME} ../scripts/build_configs/gda \
-#                                                             -DGDA_IONIC=ON \
-#                                                             -DGDA_MLX5=ON  \
-#                                                             -DGDA_BNXT=ON  \
-#                                                             -DUSE_IPC=ON
-# RUN rm -rf /opt/rocSHMEM    
-COPY rocshmem /opt/rocshmem                                                                                        
+RUN mkdir -p /opt && cd /opt && \
+    git clone https://github.com/ROCm/rocSHMEM.git && \
+    cd rocSHMEM && \
+    git checkout ${ROCSHMEM_COMMIT} && \
+    mkdir build && \
+    cd build && \
+    MPI_ROOT=${MPI_HOME} UCX_ROOT=${UCX_HOME} INSTALL_PREFIX=${ROCSHMEM_HOME} ../scripts/build_configs/gda \
+                                                                                            -DGDA_IONIC=ON \
+                                                                                            -DGDA_MLX5=ON  \
+                                                                                            -DGDA_BNXT=ON  \
+                                                                                            -DUSE_IPC=ON
+RUN rm -rf /opt/rocSHMEM    
 
 # ---------------------------------------------------------------------------
 # Install Primus-Turbo
