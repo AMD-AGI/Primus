@@ -1,0 +1,24 @@
+# Primus Post-Training Configuration for Megatron-Bridge
+# Example: Qwen3 8B Fine-tuning
+
+# Post-training specific configuration
+post_train:
+  # Backend framework (currently only 'megatron-bridge' is supported)
+  backend: megatron-bridge
+
+  # Path to the recipe/finetune script relative to Megatron-Bridge root
+  # Example: examples/recipes/qwen/finetune_qwen3_next_80b_a3b.py
+  recipe_script: /workspace/Primus/third_party/megatron-bridge/examples/recipes/qwen3/finetune_qwen3_8b.py
+
+  # Path to pretrained checkpoint (Megatron format)
+  pretrained_checkpoint: /workspace/post_training/qwen3-8b_megatron #/path/to/megatron_ckpt
+
+  # Path to backend-specific config file relative to Megatron-Bridge root
+  # Example: conf/qwen3_next_80b_a3b_pretrain_override_example.yaml
+  config_file: /workspace/Primus/third_party/megatron-bridge/examples/recipes/qwen3/conf/qwen3_8b_finetune.yaml
+
+  # Number of processes per node (default: 8)
+  nproc_per_node: 8
+
+# Optional: You can still include other Primus configs here for compatibility
+# but they won't be used during post_train execution

@@ -60,10 +60,58 @@ def run(args, overrides):
             from primus.pretrain import launch_pretrain_from_cli
 
             launch_pretrain_from_cli(args, overrides)
+    elif args.suite == "post_train":
+        # Post-training workflow (fine-tuning, alignment, etc.)
+        # Routes to backend based on YAML config (e.g., megatron-bridge)
+        from primus.post_train import launch_posttrain_from_cli
+
+        launch_posttrain_from_cli(args, overrides)
     else:
         raise NotImplementedError(f"Unsupported train suite: {args.suite}")
 
 
+
+def register_subcommand(subparsers):
+    """
+    Register the 'train' subcommand to the main CLI parser.
+
+    Supported suites (training workflows):
+        - pretrain: Pre-training workflow (Megatron, TorchTitan, etc.)
+        - post_train: Post-training workflow (fine-tuning, alignment via megatron-bridge, etc.)
+
+    Example:
+        primus train pretrain --config exp.yaml --backend-path /path/to/megatron
+        primus train post_train --config exp.yaml --backend-path /path/to/megatron-bridge
+
+    Args:
+        subparsers: argparse subparsers object from main.py
+
+    Returns:
+        parser: The parser for this subcommand
+    """
+
+    parser = subparsers.add_parser(
+        "train",
+        help="Launch Primus training (pretrain/post_train)",
+        description="Primus training entry. Supports pretrain and post_train workflows.",
+    )
+    suite_parsers = parser.add_subparsers(dest="suite", required=True)
+
+    # ---------- pretrain ----------
+    pretrain = suite_parsers.add_parser("pretrain", help="Pre-training workflow.")
+    from primus.core.launcher.parser import add_pretrain_parser
+
+    add_pretrain_parser(pretrain)
+
+    # ---------- post_train ----------
+    post_train = suite_parsers.add_parser("post_train", help="Post-training workflow (fine-tuning, alignment).")
+    add_pretrain_parser(post_train)  # Reuse same parser for config/backend_path args
+
+    parser.set_defaults(func=run)
+
+    return parser
+
+'''
 def register_subcommand(subparsers):
     """
     Register the 'train' subcommand to the main CLI parser.
@@ -100,3 +148,4 @@ def register_subcommand(subparsers):
     parser.set_defaults(func=run)
 
     return parser
+'''
