@@ -442,30 +442,8 @@ class LanguageModelProfiler(BaseModuleProfiler):
             print(f"  Attention Activation memory: {attn_mem / (1024**2):.2f} MB")
             print(f"  MLP Forward: {mlp_forward:.2f} ms, Backward: {mlp_backward:.2f} ms")
             print(f"  MLP Activation memory: {mlp_mem / (1024**2):.2f} MB")
-            
-            # Add per-layer communication estimation and add to timings
-            total_comm_fwd = 0.0
-            total_comm_bwd = 0.0
-            try:
-                comm_info = self._estimate_layer_communication(layer_idx, layer_type)
-                if comm_info:
-                    print(f"  Communication:")
-                    for comm in comm_info:
-                        print(f"    {comm['type']} Forward: {comm['time_fwd_ms']:.3f} ms (message: {comm['message_size_mb']:.2f} MB, group={comm['group_size']})")
-                        print(f"    {comm['type']} Backward: {comm['time_bwd_ms']:.3f} ms (message: {comm['message_size_mb']:.2f} MB, group={comm['group_size']})")
-                        total_comm_fwd += comm['time_fwd_ms']
-                        total_comm_bwd += comm['time_bwd_ms']
-                    
-                    # Update the results to include communication time
-                    results[layer_type]["forward_time_ms"] += total_comm_fwd
-                    results[layer_type]["backward_time_ms"] += total_comm_bwd
-                    
-                    print(f"  Forward time (with comm):  {results[layer_type]['forward_time_ms']:.2f} ms")
-                    print(f"  Backward time (with comm): {results[layer_type]['backward_time_ms']:.2f} ms")
-                else:
-                    print(f"  Communication: None (TP=1, EP=1 or not applicable)")
-            except Exception as e:
-                print(f"  Communication estimation failed: {e}")
+            # Note: Communication time (All-to-All) is already included in the benchmarked kernel timing
+            # EP scaling overhead is handled separately in performance_projection when EP is rescaled
 
         # Expand results to all layers
         final_results = {}
