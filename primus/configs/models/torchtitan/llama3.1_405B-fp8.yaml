@@ -9,3 +9,4 @@ model:
   n_layers: 126  # Default: 126, can be overridden for debugging
   converters:
     - primus_turbo
+    - quantize.linear.float8

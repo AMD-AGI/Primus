@@ -9,7 +9,7 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: llama3.1_405B.yaml
+    model: llama3.1_405B-fp8.yaml
     overrides:
       sink_level: null
       file_sink_level: DEBUG
@@ -17,6 +17,18 @@ modules:
 
       training:
         local_batch_size: 2
+        steps: 10
+
+      # profiling:
+      #   enable_profiling: true
+      #   save_traces_folder: "profile_trace_405B_fp8"
+      #   profile_freq: 6
+
+      metrics:
+        log_freq: 1
+
+      # model:
+      #   n_layers: 20
 
       optimizer:
         lr: 8.0e-5
@@ -27,6 +39,13 @@ modules:
       activation_checkpoint:
         mode: full
 
+      quantize:
+        linear:
+          float8:
+            enable_fsdp_float8_all_gather: true
+            precompute_float8_dynamic_scale_for_fsdp: true
+            filter_fqns: ["output"]
+
       primus_turbo:
-        enable_primus_turbo: false
+        enable_primus_turbo: true
         enable_attention_float8: false
