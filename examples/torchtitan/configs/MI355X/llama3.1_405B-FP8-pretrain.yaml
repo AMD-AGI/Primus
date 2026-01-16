@@ -20,7 +20,7 @@ modules:
         steps: 10
 
       # profiling:
-      #   enable_profiling: true
+      #   enable_profiling: false
       #   save_traces_folder: "profile_trace_405B_fp8"
       #   profile_freq: 6
 

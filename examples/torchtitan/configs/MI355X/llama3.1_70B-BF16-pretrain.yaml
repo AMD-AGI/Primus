@@ -29,7 +29,7 @@ modules:
         steps: 10
 
       profiling:
-        enable_profiling: true
+        enable_profiling: false
         save_traces_folder: "profile_trace_70B_bf16"
         profile_freq: 6
 
