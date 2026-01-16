@@ -1,0 +1,29 @@
+ARG BASE_IMAGE=docker.io/rocm/megatron-lm:v25.9_gfx950
+FROM ${BASE_IMAGE}
+
+ARG LLVM_REPO=https://github.com/ROCm/llvm-project.git
+ARG LLVM_BRANCH=release/rocm-rel-7.0
+
+# Non-interactive APT
+ENV DEBIAN_FRONTEND=noninteractive
+
+COPY 7.0-deepep-swdev-540592.patch /workspace/7.0-deepep-swdev-540592.patch
+RUN git config --global user.email "you@example.com"
+RUN git config --global user.name "Your Name"
+RUN git clone ${LLVM_REPO} \
+    && cd llvm-project \
+    && git checkout ${LLVM_BRANCH} \
+    && git am /workspace/7.0-deepep-swdev-540592.patch \
+    && mkdir build; cd build \
+    && cmake -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/rocm/llvm/ \
+        -DLLVM_ENABLE_PROJECTS="clang;lld" \
+        -DLLVM_ENABLE_RUNTIMES=compiler-rt \
+        -DLLVM_TARGETS_TO_BUILD="AMDGPU;X86" \
+        -DCLANG_DEFAULT_LINKER=lld \
+        -DLLVM_PARALLEL_LINK_JOBS=4 \
+        ../llvm \
+    && ninja; ninja install \
+    && cd ../.. \
+    && rm -rf llvm-project
