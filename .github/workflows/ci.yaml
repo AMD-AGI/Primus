@@ -91,7 +91,6 @@ jobs:
           docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}"
-          BASE_IMAGE_TAG="${BASE_IMAGE##*:}"
           echo "> Build dependencies"
           start_time=$(date +%s)
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
@@ -111,24 +110,24 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
           docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
-          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-${BASE_IMAGE_TAG}-ainic"
+          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
           start_time=$(date +%s)
           mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
           cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-38.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
           cp /apps/tas/0_public/primus_docker_ci/ainic/amd-anp-v1.3.0.patch $GITHUB_WORKSPACE/.github/workflows/docker/ainic/
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.ainic \
                --network=host \
-               -t tasimage/primus:${{env.IMAGE_TAG}}-${BASE_IMAGE_TAG}-ainic \
+               -t tasimage/primus:${{env.IMAGE_TAG}}-ainic \
                --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{env.IMAGE_TAG}} \
                --build-arg AINIC_BUNDLE_PATH=ainic \
                $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
-          echo "⏱️ [build primus docker-${BASE_IMAGE_TAG}-ainic] Total elapsed time: ${elapsed} seconds"
+          echo "⏱️ [build primus docker-ainic] Total elapsed time: ${elapsed} seconds"
 
-          docker tag tasimage/primus:${{env.IMAGE_TAG}}-${BASE_IMAGE_TAG}-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-${BASE_IMAGE_TAG}-ainic
+          docker tag tasimage/primus:${{env.IMAGE_TAG}}-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
-          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-${BASE_IMAGE_TAG}-ainic
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
           docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax"
@@ -136,7 +135,9 @@ jobs:
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_jax \
                --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}}-jax \
+               --build-arg BASE_IMAGE=${BASE_IMAGE} \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+               --build-arg PRIMUS_TURBO_FRAMEWORK=JAX \
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} .
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
