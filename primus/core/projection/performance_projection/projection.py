@@ -1,4 +1,4 @@
-from typing import List, Dict,  Optional
+from typing import List, Dict, Optional, Any, Tuple
 ###############################################################################
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -10,12 +10,16 @@ import math
 import os
 from pathlib import Path
 
+import yaml
+
 from primus.core.launcher.parser import load_primus_config
 from primus.core.projection.module_profilers.language_model import (
     LanguageModelProfiler,
     build_profiler,
     get_language_model_profiler_spec,
 )
+from primus.core.projection.module_profilers.collective_args import get_default_args
+from primus.core.projection.module_profilers import collective_model as cm
 from primus.core.projection.performance_projection.simulator import (
     SchedulerSimulationRunner,
 )
@@ -27,6 +31,253 @@ from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
 _MAX_EXPERT_PARALLEL_SIZE = 8
 _BYTES_PER_GB = 1024**3
 
+
+# =============================================================================
+# Hardware and Communication Functions (moved from multinode_projection)
+# =============================================================================
+
+def load_hardware_config(config_path: str) -> Dict[str, Any]:
+    """Load hardware configuration from YAML file."""
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    return config.get('hardware_config', {})
+
+
+def calculate_collective_communication_time(
+    training_config,
+    num_nodes: int,
+    gpus_per_node: int,
+    tp: int,
+    pp: int,
+    ep: int,
+    cp: int,
+    dp: int,
+    hardware_config: Dict[str, Any] = None,
+) -> Tuple[float, Dict[str, float], Dict[str, Any], list]:
+    """
+    Calculate collective communication time for given configuration.
+    
+    Returns:
+        (total_comm_time_ms, breakdown_dict, message_info_dict, per_layer_info_list)
+    """
+    model_config = training_config.model_config
+    runtime_config = training_config.runtime_config
+    
+    # Setup collective args
+    coll_args = get_default_args(
+        num_nodes=num_nodes,
+        gpus_per_node=gpus_per_node,
+        tp=tp,
+        pp=pp,
+        ep=ep,
+        cp=cp,
+        hardware_config=hardware_config,
+    )
+    
+    # Model parameters
+    hidden_size = model_config.hidden_size
+    num_layers = model_config.num_layers
+    num_experts = model_config.num_experts
+    moe_router_topk = model_config.moe_router_topk
+    moe_pattern = model_config.moe_pattern
+    batch_size = runtime_config.micro_batch_size
+    seq_len = runtime_config.sequence_length
+    
+    # Count MoE layers
+    num_moe_layers = sum(1 for p in moe_pattern if p == 1)
+    
+    # Calculate per-rank parameters (simplified - should match memory projection)
+    total_params = model_config.num_layers * hidden_size * hidden_size * 12  # Rough estimate
+    num_params_per_rank = total_params // (tp * pp * ep)
+    
+    breakdown = {}
+    message_info = {}
+    per_layer_info = []  # Store per-layer communication details
+    
+    # 1. Gradient AllReduce (DP group)
+    if dp > 1:
+        grad_size = num_params_per_rank * 4  # FP32 gradients
+        ar_time_dp = cm.allreduce(coll_args, grad_size, dp, groups=['dp'])
+        breakdown['gradient_allreduce'] = ar_time_dp / 1000  # Convert to ms
+        message_info['gradient_allreduce_size'] = grad_size
+        message_info['gradient_allreduce_size_mb'] = grad_size / (1024 * 1024)
+    else:
+        breakdown['gradient_allreduce'] = 0.0
+        message_info['gradient_allreduce_size'] = 0
+        message_info['gradient_allreduce_size_mb'] = 0.0
+    
+    # 2. MoE All-to-All (EP group)
+    if ep > 1 and num_moe_layers > 0:
+        tokens_per_batch = seq_len * batch_size
+        dispatch_size = tokens_per_batch * hidden_size * moe_router_topk * 2  # BF16
+        
+        a2a_dispatch = cm.alltoall(coll_args, dispatch_size, ep, groups=['ep'])
+        a2a_combine = cm.alltoall(coll_args, dispatch_size, ep, groups=['ep'])
+        
+        total_a2a_fwd = (a2a_dispatch + a2a_combine) * num_moe_layers / 1000  # ms
+        total_a2a_bwd = total_a2a_fwd
+        
+        breakdown['moe_a2a_fwd'] = total_a2a_fwd
+        breakdown['moe_a2a_bwd'] = total_a2a_bwd
+        message_info['moe_a2a_size'] = dispatch_size
+        message_info['moe_a2a_size_mb'] = dispatch_size / (1024 * 1024)
+        message_info['moe_a2a_per_layer_fwd'] = (a2a_dispatch + a2a_combine) / 1000
+        message_info['num_moe_layers'] = num_moe_layers
+    else:
+        breakdown['moe_a2a_fwd'] = 0.0
+        breakdown['moe_a2a_bwd'] = 0.0
+        message_info['moe_a2a_size'] = 0
+        message_info['moe_a2a_size_mb'] = 0.0
+        message_info['moe_a2a_per_layer_fwd'] = 0.0
+        message_info['num_moe_layers'] = 0
+    
+    # Note: TP AllReduce is already included in the benchmarked run, so we don't add it here
+    message_info['num_layers'] = num_layers
+    
+    # 3. Pipeline Parallel P2P (PP group)
+    if pp > 1:
+        p2p_size = batch_size * seq_len * hidden_size * 2  # BF16
+        p2p_time = cm.sendrecv(coll_args, p2p_size)
+        num_microbatches = runtime_config.global_batch_size // (batch_size * dp)
+        total_pp_time = p2p_time * num_microbatches * 2 / 1000  # fwd + bwd, convert to ms
+        breakdown['pp_p2p'] = total_pp_time
+        message_info['pp_p2p_size'] = p2p_size
+        message_info['pp_p2p_size_mb'] = p2p_size / (1024 * 1024)
+        message_info['num_microbatches'] = num_microbatches
+        message_info['pp_p2p_per_microbatch'] = p2p_time * 2 / 1000
+    else:
+        breakdown['pp_p2p'] = 0.0
+        message_info['pp_p2p_size'] = 0
+        message_info['pp_p2p_size_mb'] = 0.0
+    
+    # Build per-layer communication information
+    for layer_idx in range(num_layers):
+        layer_comm = {
+            'layer_idx': layer_idx,
+            'layer_type': 'MoE' if moe_pattern[layer_idx] == 1 else 'Dense',
+            'communications': []
+        }
+        
+        # MoE All-to-All (if EP > 1 and this is a MoE layer)
+        # Note: TP AllReduce is already included in benchmarked run, so not added here
+        if ep > 1 and moe_pattern[layer_idx] == 1:
+            layer_comm['communications'].append({
+                'type': 'MoE All-to-All (fwd+bwd)',
+                'time_ms': (a2a_dispatch + a2a_combine) * 2 / 1000,  # fwd + bwd
+                'message_size_mb': dispatch_size / (1024 * 1024),
+                'group_size': ep,
+            })
+        
+        per_layer_info.append(layer_comm)
+    
+    total_comm_time = sum(breakdown.values())
+    
+    # Check if gradient all-reduce should be overlapped
+    mp_config = training_config.model_parallel_config
+    overlap_grad_reduce = getattr(mp_config, 'overlap_grad_reduce', True)  # Default to True
+    
+    # If overlapped, don't add to critical path
+    if overlap_grad_reduce and 'gradient_allreduce' in breakdown:
+        total_comm_time -= breakdown['gradient_allreduce']
+        message_info['gradient_allreduce_overlapped'] = True
+    else:
+        message_info['gradient_allreduce_overlapped'] = False
+    
+    return total_comm_time, breakdown, message_info, per_layer_info
+
+
+def extract_single_node_time_from_profiling(profiling_results: dict, training_config) -> float:
+    """
+    Extract total single-node time from profiling results.
+    
+    The profiling phase only benchmarks a few representative layers (1 dense + 1 MoE) to save time.
+    This function extrapolates those results to the full model by calculating averages and scaling.
+    
+    Args:
+        profiling_results: Dict with integer keys for layers (0, 1, ...) and "embedding", "output"
+        training_config: Training configuration containing model config
+    
+    Returns:
+        Total single-node time in milliseconds for the full model
+    """
+    print("\n[Primus:Performance Projection] Extracting timing from benchmark results...")
+    print("-" * 100)
+    
+    model_config = training_config.model_config
+    moe_pattern = model_config.moe_pattern  # Full model pattern (e.g., 27 layers)
+    
+    # Get profiled layer indices
+    profiled_layer_indices = sorted([k for k in profiling_results.keys() if isinstance(k, int)])
+    print(f"  Profiled layers: {profiled_layer_indices}")
+    print(f"  Full model has {len(moe_pattern)} transformer layers")
+    
+    total_time_ms = 0.0
+    
+    # Embedding layer
+    if "embedding" in profiling_results:
+        emb = profiling_results["embedding"]
+        emb_time = emb.get("forward_time_ms", 0) + emb.get("backward_time_ms", 0)
+        total_time_ms += emb_time
+        print(f"  Embedding: {emb_time:.2f} ms")
+    
+    # Analyze profiled transformer layers
+    profiled_dense_times = []
+    profiled_moe_times = []
+    
+    for layer_idx in profiled_layer_indices:
+        if layer_idx < len(moe_pattern):
+            layer_data = profiling_results[layer_idx]
+            layer_time = layer_data.get("forward_time_ms", 0) + layer_data.get("backward_time_ms", 0)
+            
+            if moe_pattern[layer_idx] == 0:
+                profiled_dense_times.append(layer_time)
+            else:
+                profiled_moe_times.append(layer_time)
+    
+    # Calculate averages from profiled layers
+    avg_dense_time = sum(profiled_dense_times) / len(profiled_dense_times) if profiled_dense_times else 0
+    avg_moe_time = sum(profiled_moe_times) / len(profiled_moe_times) if profiled_moe_times else 0
+    
+    # Count total dense and MoE layers in full model
+    num_dense_layers = sum(1 for x in moe_pattern if x == 0)
+    num_moe_layers = sum(1 for x in moe_pattern if x == 1)
+    
+    # Extrapolate to full model
+    total_dense_time = avg_dense_time * num_dense_layers
+    total_moe_time = avg_moe_time * num_moe_layers
+    total_transformer_time = total_dense_time + total_moe_time
+    
+    total_time_ms += total_transformer_time
+    
+    # Print detailed breakdown
+    if profiled_dense_times:
+        print(f"  Dense Layers: {len(profiled_dense_times)} profiled → {num_dense_layers} total")
+        print(f"    Avg per layer: {avg_dense_time:.2f} ms")
+        print(f"    Total time: {total_dense_time:.2f} ms")
+    
+    if profiled_moe_times:
+        print(f"  MoE Layers: {len(profiled_moe_times)} profiled → {num_moe_layers} total")
+        print(f"    Avg per layer: {avg_moe_time:.2f} ms")
+        print(f"    Total time: {total_moe_time:.2f} ms")
+    
+    # Output layer
+    if "output" in profiling_results:
+        out = profiling_results["output"]
+        out_time = out.get("forward_time_ms", 0) + out.get("backward_time_ms", 0)
+        total_time_ms += out_time
+        print(f"  Output Layer: {out_time:.2f} ms")
+    
+    print("-" * 100)
+    print(f"[Primus:Performance Projection] Extrapolated Baseline Time: {total_time_ms:.2f} ms/iteration")
+    print(f"  (Based on {len(profiled_layer_indices)} profiled layers → {len(moe_pattern)} total layers)")
+    print("=" * 100)
+    
+    return total_time_ms
+
+
+# =============================================================================
+# Layer Configuration Functions
+# =============================================================================
 
 def _has_dense_layers(moe_layer_freq):
     """Best-effort detection of whether the original config contains dense layers."""
@@ -242,9 +493,6 @@ def _estimate_pp_communication_overhead(training_config, pp_size, hardware_confi
     Returns:
         float: Estimated PP communication time in ms per iteration
     """
-    from primus.core.projection.multinode_projection.projection import get_default_args
-    from primus.core.projection.module_profilers import collective_model as cm
-    
     if pp_size <= 1:
         return 0.0
     
@@ -295,6 +543,92 @@ def _estimate_pp_communication_overhead(training_config, pp_size, hardware_confi
     total_p2p_time_ms = 2 * (pp_size - 1) * num_microbatches * p2p_time_per_transfer / 1000
     
     return total_p2p_time_ms
+
+
+def _estimate_ep_communication_overhead(
+    training_config, original_ep, benchmark_ep, hardware_config_dict=None
+):
+    """
+    Estimate the additional EP All-to-All communication overhead when scaling
+    from benchmark_ep to original_ep.
+
+    Args:
+        training_config: Training configuration
+        original_ep: Original expert parallelism size (e.g., 16)
+        benchmark_ep: Benchmark expert parallelism size (e.g., 8)
+        hardware_config_dict: Optional hardware config
+
+    Returns:
+        tuple: (forward_overhead_ms, backward_overhead_ms) - additional time per MoE layer
+    """
+    if original_ep <= benchmark_ep:
+        return 0.0, 0.0
+
+    mp_config = training_config.model_parallel_config
+    model_config = training_config.model_config
+    runtime_config = training_config.runtime_config
+
+    tp = mp_config.tensor_model_parallel_size
+    pp = mp_config.pipeline_model_parallel_size
+    cp = getattr(mp_config, "context_model_parallel_size", 1)
+
+    # Get hardware setup
+    gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
+
+    # Calculate nodes required for original EP
+    gpus_required_original = tp * pp * original_ep * cp
+    num_nodes_original = (gpus_required_original + gpus_per_node - 1) // gpus_per_node
+
+    # Calculate nodes for benchmark EP (should be 1)
+    gpus_required_benchmark = tp * pp * benchmark_ep * cp
+    num_nodes_benchmark = (gpus_required_benchmark + gpus_per_node - 1) // gpus_per_node
+
+    # Get collective model args for original EP configuration
+    coll_args_original = get_default_args(
+        num_nodes=num_nodes_original,
+        gpus_per_node=gpus_per_node,
+        tp=tp,
+        pp=pp,
+        ep=original_ep,
+        cp=cp,
+        hardware_config=hardware_config_dict,
+    )
+
+    # Get collective model args for benchmark EP configuration
+    coll_args_benchmark = get_default_args(
+        num_nodes=num_nodes_benchmark,
+        gpus_per_node=gpus_per_node,
+        tp=tp,
+        pp=pp,
+        ep=benchmark_ep,
+        cp=cp,
+        hardware_config=hardware_config_dict,
+    )
+
+    # Calculate All-to-All message size for MoE layers
+    hidden_size = model_config.hidden_size
+    batch_size = runtime_config.micro_batch_size
+    seq_len = runtime_config.sequence_length
+    moe_router_topk = getattr(model_config, "moe_router_topk", 2)
+
+    tokens_per_batch = seq_len * batch_size
+    dispatch_size = tokens_per_batch * hidden_size * moe_router_topk * 2  # BF16
+
+    # Calculate All-to-All time for original EP (dispatch + combine)
+    a2a_dispatch_original = cm.alltoall(coll_args_original, dispatch_size, original_ep, groups=["ep"])
+    a2a_combine_original = cm.alltoall(coll_args_original, dispatch_size, original_ep, groups=["ep"])
+    a2a_time_original_fwd = (a2a_dispatch_original + a2a_combine_original) / 1000  # ms
+
+    # Calculate All-to-All time for benchmark EP (dispatch + combine)
+    a2a_dispatch_benchmark = cm.alltoall(coll_args_benchmark, dispatch_size, benchmark_ep, groups=["ep"])
+    a2a_combine_benchmark = cm.alltoall(coll_args_benchmark, dispatch_size, benchmark_ep, groups=["ep"])
+    a2a_time_benchmark_fwd = (a2a_dispatch_benchmark + a2a_combine_benchmark) / 1000  # ms
+
+    # The overhead is the difference (original is larger due to inter-node communication)
+    fwd_overhead_per_layer = a2a_time_original_fwd - a2a_time_benchmark_fwd
+    bwd_overhead_per_layer = fwd_overhead_per_layer  # Same for backward
+
+    return fwd_overhead_per_layer, bwd_overhead_per_layer
 
 
 def _extract_layer_type_timings(layer_results: dict) -> Dict[str, dict[str, float]]:
@@ -686,10 +1020,6 @@ def _run_multinode_projection(training_config, single_node_time_ms, profiling_re
         profiling_results: Layer profiling results
         args: CLI arguments
     """
-    from primus.core.projection.multinode_projection.projection import (
-        load_hardware_config,
-        calculate_collective_communication_time,
-    )
     
     runtime_config = training_config.runtime_config
     mp_config = training_config.model_parallel_config
@@ -763,8 +1093,8 @@ def _run_multinode_projection(training_config, single_node_time_ms, profiling_re
     
     # Baseline time from benchmarking includes:
     # - Compute (forward + backward)
-    # - TP AllReduce (if TP > 1) - this is in the critical path during compute
-    # - MoE All-to-All (if EP > 1) - this is in the critical path during compute
+    # - TP AllReduce (already included in kernel timing)
+    # - MoE All-to-All (if EP > 1, added separately for scaling)
     # But does NOT include:
     # - Gradient AllReduce across DP (because overlap_grad_reduce was disabled during benchmark)
     baseline_time_ms = single_node_time_ms
@@ -844,8 +1174,6 @@ def _run_multinode_projection(training_config, single_node_time_ms, profiling_re
                 print(f" (message: {message_info['moe_a2a_size_mb']:.2f} MB, {message_info['num_moe_layers']} layers × {message_info['moe_a2a_per_layer_fwd']:.3f} ms/layer)")
             elif op_name == 'moe_a2a_bwd' and 'moe_a2a_size_mb' in message_info:
                 print(f" (message: {message_info['moe_a2a_size_mb']:.2f} MB, {message_info['num_moe_layers']} layers × {message_info['moe_a2a_per_layer_fwd']:.3f} ms/layer)")
-            elif op_name == 'tp_allreduce' and 'tp_allreduce_size_mb' in message_info:
-                print(f" (message: {message_info['tp_allreduce_size_mb']:.2f} MB, {message_info['num_layers']} layers × {message_info['tp_allreduce_per_layer']:.3f} ms/layer)")
             elif op_name == 'pp_p2p' and 'pp_p2p_size_mb' in message_info:
                 print(f" (message: {message_info['pp_p2p_size_mb']:.2f} MB, {message_info.get('num_microbatches', 'N/A')} microbatches × {message_info.get('pp_p2p_per_microbatch', 0):.3f} ms/microbatch)")
             else:
@@ -926,6 +1254,41 @@ def launch_projection_from_cli(args, overrides):
 
     # Use original config for projection calculations
     training_config = convert_primus_config_to_projection_config(primus_config_original)
+
+    # If EP was rescaled, adjust profiling_results to add EP overhead BEFORE pipeline simulation
+    ep_overhead_applied = False
+    if reduction_info["adjusted"] and reduction_info["original_ep"] != reduction_info["benchmark_ep"]:
+        # Load hardware config if provided
+        hardware_config_dict = None
+        if hasattr(args, "hardware_config") and args.hardware_config:
+            hardware_config_dict = load_hardware_config(args.hardware_config)
+
+        # Calculate EP communication overhead per layer
+        fwd_overhead_per_layer, bwd_overhead_per_layer = _estimate_ep_communication_overhead(
+            training_config,
+            reduction_info["original_ep"],
+            reduction_info["benchmark_ep"],
+            hardware_config_dict,
+        )
+
+        if fwd_overhead_per_layer > 0 or bwd_overhead_per_layer > 0:
+            print(f"\n[Primus:Performance Projection] Adjusting profiling results for EP scaling:")
+            print(f"  EP rescaled: {reduction_info['benchmark_ep']} → {reduction_info['original_ep']}")
+            print(f"  Adding per-layer All-to-All overhead to MoE layers:")
+            print(f"    Forward:  +{fwd_overhead_per_layer:.3f} ms/layer")
+            print(f"    Backward: +{bwd_overhead_per_layer:.3f} ms/layer")
+
+            # Adjust MoE layer times in profiling_results
+            moe_layers_adjusted = 0
+            for layer_idx, layer_data in profiling_results.items():
+                if isinstance(layer_data, dict) and layer_data.get("type") == "moe":
+                    layer_data["forward_time_ms"] = layer_data.get("forward_time_ms", 0) + fwd_overhead_per_layer
+                    layer_data["backward_time_ms"] = layer_data.get("backward_time_ms", 0) + bwd_overhead_per_layer
+                    moe_layers_adjusted += 1
+
+            print(f"  Adjusted {moe_layers_adjusted} MoE layer(s) in profiling results")
+            ep_overhead_applied = True
+
     pipeline_simulation_time_ms = _run_pipeline_simulation(training_config, profiling_results)
     
     # If PROJECTION_NNODES is set, also run multinode projection
@@ -933,11 +1296,6 @@ def launch_projection_from_cli(args, overrides):
         print("\n" + "=" * 100)
         print("[Primus:Performance] PROJECTION_NNODES detected - running multinode scaling projection")
         print("=" * 100)
-        
-        # Import multinode projection functions
-        from primus.core.projection.multinode_projection.projection import (
-            extract_single_node_time_from_profiling,
-        )
         
         # Use pipeline simulation time if available, otherwise extract from profiling
         if pipeline_simulation_time_ms is not None:
@@ -955,7 +1313,6 @@ def launch_projection_from_cli(args, overrides):
                 # Load hardware config if provided
                 hardware_config_dict = None
                 if hasattr(args, 'hardware_config') and args.hardware_config:
-                    from primus.core.projection.multinode_projection.projection import load_hardware_config
                     hardware_config_dict = load_hardware_config(args.hardware_config)
                 
                 # Estimate PP overhead for original configuration
@@ -974,7 +1331,41 @@ def launch_projection_from_cli(args, overrides):
                 print(f"  (Baseline = {reduction_info['original_nodes_required']} nodes with full parallelism config)")
             else:
                 baseline_time_ms = measured_time_ms
-        
+
+            # If EP was rescaled and pipeline simulation wasn't used, add EP overhead here
+            # (If pipeline simulation was used, EP overhead was already applied to profiling_results)
+            if not ep_overhead_applied and reduction_info["adjusted"] and reduction_info["original_ep"] != reduction_info["benchmark_ep"]:
+                # Get the number of MoE layers
+                moe_pattern = getattr(training_config.model_config, "moe_layer_pattern", [])
+                if not moe_pattern:
+                    # If no pattern, check if model has MoE layers
+                    num_moe_layers = getattr(training_config.model_config, "num_moe_layers", 0)
+                else:
+                    num_moe_layers = sum(1 for x in moe_pattern if x == 1)
+
+                if num_moe_layers > 0:
+                    # Calculate EP communication overhead per layer
+                    fwd_overhead_per_layer, bwd_overhead_per_layer = _estimate_ep_communication_overhead(
+                        training_config,
+                        reduction_info["original_ep"],
+                        reduction_info["benchmark_ep"],
+                        hardware_config_dict,
+                    )
+
+                    # Total EP overhead = per-layer overhead * number of MoE layers
+                    total_ep_overhead_ms = (fwd_overhead_per_layer + bwd_overhead_per_layer) * num_moe_layers
+
+                    print(f"\n[Primus:Performance Projection] EP Communication Adjustment:")
+                    print(f"  EP rescaled: {reduction_info['benchmark_ep']} → {reduction_info['original_ep']}")
+                    print(f"  Number of MoE layers: {num_moe_layers}")
+                    print(f"  Additional All-to-All overhead per MoE layer:")
+                    print(f"    Forward:  {fwd_overhead_per_layer:.3f} ms")
+                    print(f"    Backward: {bwd_overhead_per_layer:.3f} ms")
+                    print(f"  Total EP overhead: {total_ep_overhead_ms:.3f} ms")
+
+                    baseline_time_ms += total_ep_overhead_ms
+                    print(f"  Adjusted baseline time: {baseline_time_ms:.3f} ms")
+
         # Run multinode projection with the adjusted baseline
         _run_multinode_projection(
             training_config, 
