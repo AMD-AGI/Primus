@@ -146,8 +146,9 @@ class LanguageModelProfiler(BaseModuleProfiler):
         ep = getattr(mp_config, 'expert_model_parallel_size', 1)
         cp = getattr(mp_config, 'context_model_parallel_size', 1)
         
-        # Only show communication if there's actual parallelism
-        if tp == 1 and ep == 1 and pp == 1:
+        # Only estimate communication for EP (TP AllReduce is already in the benchmarked run)
+        # PP communication is handled separately in pipeline simulation
+        if ep == 1:
             return []
         
         # Get configuration
@@ -160,7 +161,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
         num_nodes = int(os.getenv("NNODES", "1"))
         gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
         
-        from primus.core.projection.multinode_projection.projection import get_default_args
+        from primus.core.projection.module_profilers.collective_args import get_default_args
         coll_args = get_default_args(
             num_nodes=num_nodes,
             gpus_per_node=gpus_per_node,
@@ -173,20 +174,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
         
         comm_ops = []
         
-        # 1. Tensor Parallel AllReduce (if TP > 1)
-        if tp > 1:
-            tp_ar_size = batch_size * seq_len * hidden_size * 2  # BF16
-            tp_ar_time_single = cm.allreduce(coll_args, tp_ar_size, tp, groups=['tp']) / 1000  # Convert to ms
-            # 2 allreduces per layer (one in attention, one in MLP) - same for fwd and bwd
-            comm_ops.append({
-                'type': 'TP AllReduce',
-                'time_fwd_ms': tp_ar_time_single * 2,  # 2 per forward pass
-                'time_bwd_ms': tp_ar_time_single * 2,  # 2 per backward pass
-                'message_size_mb': tp_ar_size / (1024 * 1024),
-                'group_size': tp,
-            })
-        
-        # 2. MoE All-to-All (if EP > 1 and this is a MoE layer)
+        # MoE All-to-All (if EP > 1 and this is a MoE layer)
         if ep > 1 and layer_type == 'moe':
             tokens_per_batch = seq_len * batch_size
             dispatch_size = tokens_per_batch * hidden_size * moe_router_topk * 2  # BF16
