@@ -132,7 +132,7 @@ jobs:
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax"
           start_time=$(date +%s)
-          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_jax \
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
                --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}}-jax \
                --build-arg BASE_IMAGE=${BASE_IMAGE} \
