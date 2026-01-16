@@ -206,8 +206,6 @@ class ScheduleInterleaved1F1B(PipelineScheduleAlgo):
                 if bwd_send_node is not None:
                     rank_schedule.append(bwd_send_node)
 
-        # schedule_table = self.add_communication_nodes(schedule_table, mode="async_p2p")
-
         return schedule_table
 
 

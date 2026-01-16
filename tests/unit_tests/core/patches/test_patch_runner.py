@@ -43,7 +43,7 @@ class TestPatchRunner:
         def my_patch(ctx):
             mock_handler(ctx)
 
-        extra = {"args": {"lr": 1e-4}}
+        extra = {"backend_args": {"lr": 1e-4}}
         count = run_patches(
             backend="megatron",
             phase="setup",
@@ -86,8 +86,9 @@ class TestPatchRunner:
             order.append("p3")
 
         run_patches(backend="x", phase="y")
-        # p3 (priority 5) first, then p1/p2 sorted by id
-        assert order == ["p3", "p1", "p2"]
+        # Patches execute in registration order (no sorting by priority)
+        # Registration order: p2, p1, p3
+        assert order == ["p2", "p1", "p3"]
 
     def test_run_patches_filtering_by_backend_and_enabled_ids(self, monkeypatch):
         called = []

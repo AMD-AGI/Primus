@@ -7,11 +7,15 @@
 
 PRIMUS_PATH=$(realpath "$(dirname "$0")/../..")
 DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10"}
-DATA_PATH=${DATA_PATH:-"/data/mlperf_llama31_8b/data"}
-HF_TOKEN=${HF_TOKEN:-""}
+DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
+SANITIZED_USER=$(echo "${USER:-unknown}" | tr -cd '[:alnum:]_-')
+if [ -z "$SANITIZED_USER" ]; then
+    SANITIZED_USER="unknown"
+fi
+CONTAINER_NAME=${CONTAINER_NAME:-"dev_primus_${SANITIZED_USER}"}
 
 bash "${PRIMUS_PATH}"/tools/docker/docker_podman_proxy.sh run -d \
-    --name dev_primus-$USER \
+    --name "${CONTAINER_NAME}" \
     --ipc=host \
     --network=host \
     --device=/dev/kfd \

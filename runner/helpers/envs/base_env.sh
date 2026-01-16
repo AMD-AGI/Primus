@@ -125,7 +125,7 @@ export NCCL_DEBUG=${NCCL_DEBUG:-}
 export NCCL_CHECKS_DISABLE=1
 
 # Set InfiniBand GID index for NCCL communication
-export NCCL_IB_GID_INDEX=3
+export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
 
 # Disable cross NIC communication for NCCL
 export NCCL_CROSS_NIC=0
@@ -215,6 +215,9 @@ log_exported_vars "General Performance Tuning" \
 # Optimize NVTE fp8 cast transpose
 export NVTE_USE_CAST_TRANSPOSE_TRITON=${NVTE_USE_CAST_TRANSPOSE_TRITON:-1}
 export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE:-0}
+
+# enable mxfp8 on ROCm Transformer Engine
+export NVTE_ROCM_ENABLE_MXFP8=1
 
 # Note: Disable v3 due to accuracy issues. Will fix after TE version 2.1.
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}

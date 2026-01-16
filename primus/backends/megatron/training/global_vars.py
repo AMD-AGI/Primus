@@ -25,12 +25,6 @@ def get_args():
     return _GLOBAL_ARGS
 
 
-def get_mlflow_writer():
-    """Return mlflow writer. It can be None so no need
-    to check if it is initialized."""
-    return _GLOBAL_MLFLOW_WRITER
-
-
 def set_train_start_time(start_time=None):
     """Set training start time. If not provided, use current time."""
     global _TRAIN_START_TIME
@@ -43,6 +37,18 @@ def get_train_start_time():
     """Return training start time."""
     _ensure_var_is_initialized(_TRAIN_START_TIME, "train start time")
     return _TRAIN_START_TIME
+
+
+def get_mlflow_writer():
+    """Return mlflow writer. It can be None so no need
+    to check if it is initialized."""
+    return _GLOBAL_MLFLOW_WRITER
+
+
+def get_primus_args():
+    """Return primus arguments."""
+    _ensure_var_is_initialized(_GLOBAL_ARGS, "args")
+    return _GLOBAL_ARGS
 
 
 def set_primus_global_variables(args):

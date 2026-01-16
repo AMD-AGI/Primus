@@ -5,19 +5,13 @@
 ###############################################################################
 
 import time
-import torch
 
+import torch
 from megatron.core.full_cuda_graph import FullCudaGraphWrapper
+from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.pipeline_parallel import get_forward_backward_func
-from megatron.core.rerun_state_machine import get_rerun_state_machine, RerunMode
-from megatron.core.num_microbatches_calculator import (
-    get_num_microbatches,
-)
-from megatron.training import (
-    ft_integration,
-    get_args,
-    get_timers,
-)
+from megatron.core.rerun_state_machine import RerunMode, get_rerun_state_machine
+from megatron.training import ft_integration, get_args, get_timers
 from megatron.training.utils import is_last_rank
 
 from primus.backends.megatron.training.global_vars import get_train_start_time
@@ -39,7 +33,7 @@ def primus_evaluate(
     args = get_args()
     timers = get_timers()
 
-    timers('evaluate', log_level=0).start(barrier=True)
+    timers("evaluate", log_level=0).start(barrier=True)
 
     if args.vision_pretraining and args.vision_pretraining_type == "dino":
         from megatron.legacy.model.vision.knn_monitor import compute_feature_bank
@@ -61,8 +55,10 @@ def primus_evaluate(
     eval_batch_size = args.global_batch_size
     eval_num_microbatches = eval_batch_size // (args.micro_batch_size * args.data_parallel_size)
     forward_backward_func = get_forward_backward_func()
-    if args.enable_cuda_graph and args.cuda_graph_scope=="full_iteration":
-        forward_backward_func = FullCudaGraphWrapper(forward_backward_func, cuda_graph_warmup_steps=args.cuda_graph_warmup_steps)
+    if args.enable_cuda_graph and args.cuda_graph_scope == "full_iteration":
+        forward_backward_func = FullCudaGraphWrapper(
+            forward_backward_func, cuda_graph_warmup_steps=args.cuda_graph_warmup_steps
+        )
 
     if eval_iters is None:
         eval_iters = args.eval_iters
@@ -70,11 +66,11 @@ def primus_evaluate(
     with torch.no_grad():
         iteration = 0
         if verbose:
-            log_rank_0(f'Evaluating on {eval_iters * eval_batch_size} samples')
+            log_rank_0(f"Evaluating on {eval_iters * eval_batch_size} samples")
         while iteration < eval_iters:
             iteration += 1
             if verbose:
-                log_rank_0(f'Evaluating iter {iteration}/{eval_iters}')
+                log_rank_0(f"Evaluating iter {iteration}/{eval_iters}")
 
             # Don't care about timing during evaluation
             config.timers = None
@@ -120,13 +116,13 @@ def primus_evaluate(
             if args.exit_duration_in_mins:
                 train_time = (time.time() - get_train_start_time()) / 60.0
                 done_cuda = torch.tensor(
-                    [train_time > args.exit_duration_in_mins], dtype=torch.int, device='cuda'
+                    [train_time > args.exit_duration_in_mins], dtype=torch.int, device="cuda"
                 )
                 torch.distributed.all_reduce(done_cuda, op=torch.distributed.ReduceOp.MAX)
                 done = done_cuda.item()
                 if done:
                     rerun_state_machine.set_mode(rerun_mode)
-                    log_rank_0('Exiting during evaluation, timelimit reached')
+                    log_rank_0("Exiting during evaluation, timelimit reached")
                     return None, None, True
 
         collected_non_loss_data = None
@@ -149,10 +145,8 @@ def primus_evaluate(
     for model_module in model:
         model_module.train()
 
-    timers('evaluate').stop()
-    timers.log(['evaluate'])
-
-    rerun_state_machine.set_mode(rerun_mode)
+    timers("evaluate").stop()
+    timers.log(["evaluate"])
 
     rerun_state_machine.set_mode(rerun_mode)
 

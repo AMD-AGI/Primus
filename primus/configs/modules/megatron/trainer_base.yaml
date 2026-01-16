@@ -97,6 +97,17 @@ use_checkpoint_opt_param_scheduler: false
 warmup: null
 decoupled_lr: null
 decoupled_min_lr: null
+# muon
+muon_extra_scale_factor: 1.0
+muon_scale_mode: "spectral"
+muon_fp32_matmul_prec: "medium"
+muon_num_ns_steps: 5
+muon_tp_mode: "blockwise"
+muon_use_nesterov: false
+muon_split_qkv: true
+muon_momentum: 0.95
+muon_weight_decay: 0.01
+muon_weight_decay_method: "decoupled"
 
 optimizer_cpu_offload: false
 optimizer_offload_fraction: 1.0 # float

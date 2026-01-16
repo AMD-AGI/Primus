@@ -161,6 +161,7 @@ encoder_pipeline_model_parallel_size: 0
 pipeline_model_parallel_split_rank: null
 decoder_first_pipeline_num_layers: null # int
 decoder_last_pipeline_num_layers: null # int
+virtual_pipeline_model_parallel_size: null # int
 num_layers_per_virtual_pipeline_stage: null # int
 num_virtual_stages_per_pipeline_rank: null # int
 microbatch_group_size_per_vp_stage: null # int
