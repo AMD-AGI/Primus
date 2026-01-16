@@ -13,6 +13,7 @@ env:
   PRIMUS_TURBO_COMMIT: 5233748e9c5c5795a6484ab31ece47c442d29ec2 # feat(mxfp4): refactor gemm mxfp4 and mxfp8. fuse transpose, hadamard transform and quantization. (#195)
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   BASE_IMAGE: docker.io/rocm/primus:v25.10
+  MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v25.9
 
 jobs:
   code-lint:
@@ -135,7 +136,7 @@ jobs:
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
                --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}}-jax \
-               --build-arg BASE_IMAGE=${BASE_IMAGE} \
+               --build-arg BASE_IMAGE=${MAXTEXT_BASE_IMAGE} \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=JAX \
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} .
