@@ -67,8 +67,8 @@ primus-cli direct -- train pretrain --config config.yaml
 # GEMM benchmark
 primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
 
-# Environment check
-primus-cli direct -- preflight check --gpu
+# Environment check (info only)
+primus-cli direct -- preflight --host --gpu --network
 ```
 
 **Suitable for**:
@@ -166,8 +166,8 @@ primus-cli slurm sbatch -N 8 -p AIG_Model -t 8:00:00 -o train.log \
 # Run distributed GEMM benchmark
 primus-cli slurm srun -N 2 -- benchmark gemm -M 16384 -N 16384 -K 16384
 
-# Multi-node environment check
-primus-cli slurm srun -N 4 -- preflight check --network
+# Multi-node environment check (info only)
+primus-cli slurm srun -N 4 -- preflight --host --gpu --network
 ```
 
 **Suitable for**:
@@ -327,15 +327,25 @@ primus-cli slurm srun -N 8 -- benchmark e2e --model llama2-7b
 ### Environment Check (Preflight)
 
 ```bash
-# GPU check
-primus-cli direct -- preflight check --gpu
+# GPU info only
+primus-cli direct -- preflight --gpu
 
-# Network check
-primus-cli slurm srun -N 4 -- preflight check --network
+# Network info only
+primus-cli slurm srun -N 4 -- preflight --network
 
-# Complete environment check
-primus-cli slurm srun -N 4 -- preflight check --all
+# Info only (host + GPU + network)
+primus-cli slurm srun -N 4 -- preflight --host --gpu --network
+
+# Full preflight (all info + perf tests)
+primus-cli slurm srun -N 4 -- preflight
+
+# Perf tests only
+primus-cli slurm srun -N 4 -- preflight --perf-test
 ```
+
+> Tip: `preflight --host --gpu --network` is intended to be fast (info collection only).
+> For full diagnostics (info + compute + intra/inter-node comm benchmarks), run `primus-cli preflight`
+> or use `--perf-test` for benchmarks only.
 
 ### Combined Usage
 
@@ -407,7 +417,7 @@ primus-cli --debug slurm srun -N 2 -- train pretrain --config config.yaml
 primus-cli --debug container --image rocm/primus:dev -- benchmark gemm
 
 # Debug config loading
-primus-cli --debug --config test.yaml direct -- preflight check
+primus-cli --debug --config test.yaml direct -- preflight --gpu
 ```
 
 **Environment Variable**: `--debug` sets `PRIMUS_LOG_LEVEL=DEBUG`
