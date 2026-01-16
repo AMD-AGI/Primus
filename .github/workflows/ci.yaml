@@ -116,24 +116,10 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
           cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-38.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
           cp /apps/tas/0_public/primus_docker_ci/ainic/amd-anp-v1.3.0.patch $GITHUB_WORKSPACE/.github/workflows/docker/ainic/
-          # NOTE(zhuang12): build ainic anp based on rocm/primus:v25.10 will cause illegal memory access error, so we build ainic image on rocm/megatron-lm:v25.9_gfx950
-          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.patch \
-               --network=host \
-               -t docker.io/rocm/megatron-lm:v25.9_gfx950-patch \
-               --build-arg BASE_IMAGE=docker.io/rocm/megatron-lm:v25.9_gfx950 \
-               $GITHUB_WORKSPACE/.github/workflows/docker
-          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
-               --network=host \
-               -t tasimage/primus:${{env.IMAGE_TAG}}-v25.9_gfx950 \
-               --build-arg BASE_IMAGE=docker.io/rocm/megatron-lm:v25.9_gfx950-patch \
-               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
-               --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
-               --build-arg PRIMUS_TURBO_FRAMEWORK=PYTORCH \
-               $GITHUB_WORKSPACE/.github/workflows/docker
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.ainic \
                --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}}-ainic \
-               --build-arg BASE_IMAGE=tasimage/primus:${{env.IMAGE_TAG}}-v25.9_gfx950 \
+               --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{env.IMAGE_TAG}} \
                --build-arg AINIC_BUNDLE_PATH=ainic \
                $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
