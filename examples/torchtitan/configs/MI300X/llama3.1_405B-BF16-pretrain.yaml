@@ -25,11 +25,11 @@ modules:
         lr: 8.0e-5
 
       parallelism:
-        tensor_parallel_degree: 8
+        tensor_parallel_degree: 1
 
       activation_checkpoint:
         mode: full
 
       primus_turbo:
-        enable_primus_turbo: false
+        enable_primus_turbo: true
         enable_attention_float8: false
