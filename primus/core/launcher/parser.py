@@ -39,6 +39,16 @@ def add_pretrain_parser(parser: argparse.ArgumentParser):
     return parser
 
 
+def add_posttrain_parser(parser: argparse.ArgumentParser):
+    """
+    Post-training (SFT / alignment) workflow parser.
+
+    For now, posttrain shares the same top-level CLI arguments as pretrain
+    (config path, data path, optional backend path, export config).
+    """
+    return add_pretrain_parser(parser)
+
+
 def _parse_args(extra_args_provider=None, ignore_unknown_args=False) -> tuple[argparse.Namespace, List[str]]:
     parser = argparse.ArgumentParser(description="Primus Arguments", allow_abbrev=False)
 
