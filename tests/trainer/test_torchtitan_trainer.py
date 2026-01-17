@@ -208,8 +208,23 @@ class TestTorchTitanTrainer(PrimusUT):
                 "1",
                 "--training.steps",
                 "3",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
+                "--training.mock_data",
+                "True",
+            ],
+        )
+
+    def test_deepseek_v3_16b_fp8(self):
+        run_script(
+            self.__class__.__name__,
+            "deepseek_v3_16b_fp8",
+            "examples/torchtitan/configs/MI300X/deepseek_v3_16b-FP8-pretrain.yaml",
+            extra_args=[
+                "--model.n_layers",
+                "4",
+                "--model.n_dense_layers",
+                "1",
+                "--training.steps",
+                "3",
                 "--training.mock_data",
                 "True",
             ],
@@ -227,8 +242,6 @@ class TestTorchTitanTrainer(PrimusUT):
                 "1",
                 "--training.steps",
                 "3",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
                 "--training.mock_data",
                 "True",
             ],
