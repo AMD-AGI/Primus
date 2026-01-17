@@ -13,7 +13,7 @@ modules:
     model: deepseek_v3_671b.yaml
     overrides:
       profiling:
-        enable_profiling: true
+        enable_profiling: false
         save_traces_folder: "profile_trace"
         profile_freq: 10
         enable_memory_snapshot: false
