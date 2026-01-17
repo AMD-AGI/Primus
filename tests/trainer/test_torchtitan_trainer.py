@@ -109,8 +109,8 @@ class TestTorchTitanTrainer(PrimusUT):
     def test_llama3_1_405B(self):
         run_script(
             self.__class__.__name__,
-            "llama3.1_405B",
-            "examples/torchtitan/configs/MI300X/llama3.1_405B-pretrain.yaml",
+            "llama3.1_405B_bf16",
+            "examples/torchtitan/configs/MI300X/llama3.1_405B-BF16-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
