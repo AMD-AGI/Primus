@@ -519,7 +519,10 @@ validate_config_param() {
     LOG_DEBUG "Validated config param: $param_name"
 }
 
-# Validate environment variable format (KEY=VALUE, supports newline-separated list)
+# Validate environment variable format (supports newline-separated list)
+# Supports two formats:
+#   1. KEY=VALUE - Set environment variable to specific value
+#   2. KEY       - Pass through host environment variable (for containers)
 validate_env_format() {
     local env_vars="$1"
     local error_prefix="${2:-[validation]}"
@@ -530,9 +533,19 @@ validate_env_format() {
     local validation_failed=0
     while IFS= read -r env_entry; do
         [[ -n "$env_entry" ]] || continue
-        if ! [[ "$env_entry" == *=* ]]; then
+
+        # Accept two formats:
+        # 1. KEY=VALUE (set value)
+        # 2. KEY (pass through from host)
+        # Valid environment variable names: start with letter or underscore, followed by letters, digits, or underscores
+        if [[ "$env_entry" =~ ^[A-Za-z_][A-Za-z0-9_]*=.*$ ]] || [[ "$env_entry" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            # Valid format
+            continue
+        else
             LOG_ERROR "$error_prefix Invalid env format: $env_entry"
-            LOG_ERROR "$error_prefix Expected format: KEY=VALUE (e.g., NCCL_DEBUG=INFO)"
+            LOG_ERROR "$error_prefix Expected format:"
+            LOG_ERROR "$error_prefix   - KEY=VALUE (e.g., NCCL_DEBUG=INFO)"
+            LOG_ERROR "$error_prefix   - KEY (pass through from host, e.g., CUDA_VISIBLE_DEVICES)"
             validation_failed=1
         fi
     done <<< "$env_vars"

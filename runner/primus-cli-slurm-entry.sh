@@ -37,6 +37,12 @@ export GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 export MASTER_ADDR
 export MASTER_PORT
 
+LOG_INFO_RANK0 "-----------------------------------------------"
+LOG_INFO_RANK0 "primus-cli-slurm-entry.sh"
+LOG_INFO_RANK0 "-----------------------------------------------"
+
+
+
 # Parse --config, --debug, --dry-run first if present
 CONFIG_FILE=""
 DEBUG_MODE=false
@@ -46,10 +52,6 @@ PRE_PARSE_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --)
-            PRE_PARSE_ARGS+=("$@")
-            break
-            ;;
-        container|direct|native|host)
             PRE_PARSE_ARGS+=("$@")
             break
             ;;
@@ -74,6 +76,7 @@ while [[ $# -gt 0 ]]; do
 done
 # Restore arguments
 set -- "${PRE_PARSE_ARGS[@]}"
+echo "PRE_PARSE_ARGS: ${PRE_PARSE_ARGS[*]}"
 
 # Load configuration (specified or defaults)
 load_config_auto "$CONFIG_FILE" "slurm-entry" || {
@@ -148,11 +151,6 @@ validate_distributed_params || LOG_WARN "[slurm-entry] Failed to validate distri
 
 # Parse mode (default: container)
 [[ "${1:-}" == "--" ]] && shift
-MODE="container"
-if [[ "${1:-}" =~ ^(container|direct)$ ]]; then
-    MODE="$1"
-    shift
-fi
 
 # Build arguments based on mode
 SCRIPT_ARGS=()
@@ -170,8 +168,8 @@ SCRIPT_ARGS+=(
     --env "GPUS_PER_NODE=$GPUS_PER_NODE"
 )
 
-# Build script path based on mode
-script_path="$RUNNER_DIR/primus-cli-${MODE}.sh"
+# Build script path (container mode only)
+script_path="$RUNNER_DIR/primus-cli-container.sh"
 require_file "$script_path" "[slurm-entry] Script not found: $script_path"
 
 # Build full command

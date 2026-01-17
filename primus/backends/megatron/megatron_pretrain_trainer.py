@@ -93,24 +93,52 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         """
         log_rank_0("Executing Megatron pretrain...")
 
+        import inspect
+
         # Import Megatron components
         from megatron.core.enums import ModelType
-        from megatron.training import inprocess_restart, pretrain
-        from pretrain_gpt import forward_step, train_valid_test_datasets_provider
+        from megatron.training import pretrain  # type: ignore
+        from pretrain_gpt import (  # type: ignore
+            forward_step,
+            train_valid_test_datasets_provider,
+        )
 
         from primus.core.utils.import_utils import get_model_provider
 
         # Configure training components
-        train_valid_test_datasets_provider.is_distributed = True
-        wrapped_pretrain, store = inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
+        if hasattr(train_valid_test_datasets_provider, "is_distributed"):
+            train_valid_test_datasets_provider.is_distributed = True
+
+        # Megatron versions differ:
+        # - v0.12.0: calls `pretrain(...)` directly (no inprocess_restart wrapper).
+        # - newer: wraps pretrain via inprocess_restart and may pass `store=...`.
+        wrapped_pretrain = pretrain
+        store = None
+        try:
+            from megatron.training import inprocess_restart  # type: ignore
+
+            if hasattr(inprocess_restart, "maybe_wrap_for_inprocess_restart"):
+                wrapped_pretrain, store = inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
+        except Exception:
+            pass
 
         # Execute training
+        sig = inspect.signature(wrapped_pretrain)
+        kwargs = {}
+        if "args_defaults" in sig.parameters:
+            # Matches upstream pretrain_gpt entrypoints; harmless if already defaulted.
+            kwargs["args_defaults"] = {"tokenizer_type": "GPT2BPETokenizer"}
+        if "extra_args_provider" in sig.parameters:
+            kwargs["extra_args_provider"] = None
+        if "store" in sig.parameters:
+            kwargs["store"] = store
+
         wrapped_pretrain(
             train_valid_test_datasets_provider,
             get_model_provider(),
             ModelType.encoder_or_decoder,
             forward_step,
-            store=store,
+            **kwargs,
         )
 
         log_rank_0("Megatron pretrain execution completed.")

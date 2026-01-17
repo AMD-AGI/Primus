@@ -87,8 +87,10 @@ class TestMegatronPretrainTrainer:
             # This should not be called directly; wrapped_pretrain is used instead.
             raise AssertionError("fake_pretrain was called directly; expected wrapped_pretrain to be used")
 
-        def wrapped_pretrain(*args, **kwargs):
-            calls.append((args, kwargs))
+        def wrapped_pretrain(*args, store=None, **kwargs):
+            # In newer Megatron versions, the inprocess_restart wrapper can accept `store=...`.
+            # Our trainer only forwards `store` when the wrapped callable explicitly supports it.
+            calls.append((args, {"store": store, **kwargs}))
 
         class DummyInprocessRestart:
             @staticmethod

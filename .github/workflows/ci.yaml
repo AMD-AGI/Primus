@@ -148,7 +148,7 @@ jobs:
     env:
       PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
     needs: [code-lint]
-    runs-on: [primus-lm-cicd-rx2s6]
+    runs-on: [primus-lm-cicd-tl8m5]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Set commit hash to env
@@ -247,7 +247,7 @@ jobs:
     env:
       PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/jax
     needs: [code-lint]
-    runs-on: [primus-llm-cicd-jax-7b4zw]
+    runs-on: [primus-llm-cicd-jax-2pqnb]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Set commit hash to env
