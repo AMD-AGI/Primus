@@ -37,6 +37,5 @@ class Attention(TTAttention):
 
         output = self.inner_attention(xq, xk, xv)
 
-        output = output.view(bs, seqlen, -1)
-        # output = output.contiguous().view(bs, seqlen, -1)
+        output = output.contiguous().view(bs, seqlen, -1)
         return self.wo(output)
