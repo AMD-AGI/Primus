@@ -240,7 +240,7 @@ jobs:
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
           MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
-          pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py -k test_deepseek_v3_16b
+          pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py
       - name: Clean
         run: |
           rm -rf ${PRIMUS_WORKDIR}/Primus-Turbo
