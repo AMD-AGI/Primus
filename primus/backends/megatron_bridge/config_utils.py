@@ -233,8 +233,47 @@ def load_recipe_config(ns: SimpleNamespace) -> Any:
     # Convert ns to dict
     ns_dict = namespace_to_dict(ns)
 
+    # First filter: Remove metadata and complex ConfigContainer fields
+    # Recipe metadata that should never be passed to recipe function
+    recipe_metadata = ["recipe", "flavor", "recipe_kwargs", "primus"]
+
+    # ConfigContainer fields that should not be passed to recipe (they're for merging later)
+    # These are complex objects that recipe functions don't accept as input
+    container_fields = [
+        "_target_",
+        "rng",
+        "rerun_state_machine",
+        "train",
+        "model",
+        "optimizer",
+        "ddp",
+        "scheduler",
+        "dataset",
+        "logger",
+        "tokenizer",
+        "checkpoint",
+        "dist",
+        "ft",
+        "straggler",
+        "nvrx_straggler",
+        "profiling",
+        "comm_overlap",
+        "mixed_precision",
+        "tensor_inspect",
+        "inprocess_restart",
+        "trainable",
+        "sink_level",
+        "file_sink_level",
+        "stderr_sink_level",
+    ]
+
+    filtered_dict = {
+        k: v for k, v in ns_dict.items() 
+        if k not in recipe_metadata and k not in container_fields
+    }
+
     # Second filter: only keep parameters accepted by function signature
-    recipe_kwargs = filter_kwargs_by_signature(recipe_func, ns_dict)
+    recipe_kwargs = filter_kwargs_by_signature(recipe_func, filtered_dict)
 
     if recipe_kwargs:
         log_rank_0(f"Recipe kwargs ({len(recipe_kwargs)}): {list(recipe_kwargs.keys())}")
