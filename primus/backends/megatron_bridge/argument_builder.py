@@ -136,9 +136,10 @@ class MegatronBridgeArgBuilder:
     """
 
     def __init__(self, module_config: SimpleNamespace):
-        # Load Megatron-Bridge defaults once during initialization
-        config_container = load_recipe_config(module_config.params)
-        self.config = config_container.to_dict()
+        # Load Megatron-Bridge recipe configuration
+        # Store both ConfigContainer and its dict representation
+        self.config_container = load_recipe_config(module_config.params)
+        self.config = self.config_container.to_dict()
 
     # ------------------------------------------------------------------
     # Add values to the configuration
@@ -181,6 +182,58 @@ class MegatronBridgeArgBuilder:
         import copy
 
         return copy.deepcopy(self.config)
+
+    def to_config_container(self) -> Any:
+        """
+        Produce the final Megatron-Bridge ConfigContainer with user overrides applied.
+
+        This method:
+        1. Starts with the recipe ConfigContainer
+        2. Applies user overrides from self.config (merged via update())
+        3. Returns updated ConfigContainer
+
+        Returns:
+            ConfigContainer with recipe defaults + user overrides
+        """
+        from megatron.bridge.training.config import ConfigContainer
+        from megatron.bridge.training.utils.config_utils import InstantiationMode
+
+        # Get the merged config dict
+        merged_dict = self.to_dict()
+
+        # Add _target_ field for from_dict()
+        merged_dict["_target_"] = "megatron.bridge.training.config.ConfigContainer"
+
+        # Reconstruct ConfigContainer from merged dict
+        try:
+            config_container = ConfigContainer.from_dict(merged_dict, mode=InstantiationMode.LENIENT)
+        except Exception as e:
+            logger.warning(f"Failed to create ConfigContainer with LENIENT mode: {e}")
+            logger.warning("Falling back to direct dict merge on original ConfigContainer")
+            
+            # Fallback: use OmegaConf to merge
+            try:
+                from omegaconf import OmegaConf
+                from megatron.bridge.training.utils.omegaconf_utils import (
+                    apply_overrides,
+                    create_omegaconf_dict_config,
+                )
+
+                # Start with the original recipe ConfigContainer
+                config_container = self.config_container
+                
+                # Convert to OmegaConf
+                omega_cfg, excluded = create_omegaconf_dict_config(config_container)
+                
+                # Apply overrides
+                apply_overrides(config_container, merged_dict, excluded)
+            except Exception as e2:
+                logger.error(f"Failed to merge config with OmegaConf: {e2}")
+                # Last resort: return original recipe config
+                logger.warning("Returning original recipe ConfigContainer without user overrides")
+                config_container = self.config_container
+
+        return config_container
 
     def to_namespace(self) -> SimpleNamespace:
         """

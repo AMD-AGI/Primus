@@ -86,7 +86,15 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
         """
         log_rank_0("Initializing Megatron-Bridge post-training components...")
 
-        self.cfg_container = build_job_config_from_namespace(self.backend_args) 
+        # Get ConfigContainer from backend_args (attached by adapter)
+        # This avoids complex namespace→dict→ConfigContainer conversion
+        if hasattr(self.backend_args, '_config_container'):
+            self.cfg_container = self.backend_args._config_container
+            log_rank_0("Using ConfigContainer from adapter (recipe + user overrides)")
+        else:
+            # Fallback: convert from namespace (should not happen with current implementation)
+            log_rank_0("Warning: ConfigContainer not found in backend_args, using fallback conversion")
+            self.cfg_container = build_job_config_from_namespace(self.module_config, self.backend_args)
 
         log_rank_0("Post-training initialization completed")
 
