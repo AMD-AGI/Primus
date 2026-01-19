@@ -198,52 +198,45 @@ def load_recipe_config(ns: SimpleNamespace) -> Any:
     assert recipe, "Recipe must be specified for Megatron-Bridge backend"
     assert flavor, "Flavor must be specified for Megatron-Bridge backend"
 
+    # Construct full module path and function name
+    full_module_path = f"megatron.bridge.recipes.{recipe}"
+    function_name = flavor
+
+    log_rank_0(f"Loading recipe: {full_module_path}.{function_name}()")
+
+    # Import module and get function
     try:
-        # Construct full module path and function name
-        full_module_path = f"megatron.bridge.recipes.{recipe}"
-        function_name = flavor
-
-        log_rank_0(f"Loading recipe: {full_module_path}.{function_name}()")
-
-        # Import module and get function
         module = importlib.import_module(full_module_path)
-        recipe_func = getattr(module, function_name)
-
-        # Convert ns to dict
-        ns_dict = namespace_to_dict(ns)
-
-        # Second filter: only keep parameters accepted by function signature
-        recipe_kwargs = filter_kwargs_by_signature(recipe_func, ns_dict)
-
-        if recipe_kwargs:
-            log_rank_0(f"Recipe kwargs: {list(recipe_kwargs.keys())}")
-
-        # Call recipe function with filtered kwargs
-        config_container = recipe_func(**recipe_kwargs)
-        log_rank_0(f"Successfully loaded recipe: {full_module_path}.{function_name}()")
-
-        # Validate return type
-        from megatron.bridge.training.config import ConfigContainer
-
-        if not isinstance(config_container, ConfigContainer):
-            raise TypeError(
-                f"Recipe function '{full_module_path}.{function_name}()' must return "
-                f"ConfigContainer, but returned {type(config_container).__name__}"
-            )
-
-        return config_container
-
     except ImportError as e:
-        log_rank_0(f"Error: Failed to import recipe module: {e}")
-        raise RuntimeError(f"Recipe loading failed: Cannot import '{full_module_path}'") from e
-    except AttributeError as e:
-        log_rank_0(f"Error: Recipe function not found: {e}")
-        raise RuntimeError(
-            f"Recipe loading failed: Function '{function_name}' not found in '{full_module_path}'"
-        ) from e
-    except Exception as e:
-        log_rank_0(f"Error: Failed to load recipe: {e}")
-        raise RuntimeError(f"Recipe loading failed: {full_module_path}.{function_name}()") from e
+        assert False, f"Recipe loading failed: Cannot import '{full_module_path}': {e}"
+
+    assert hasattr(module, function_name), (
+        f"Recipe loading failed: Function '{function_name}' not found in '{full_module_path}'"
+    )
+    recipe_func = getattr(module, function_name)
+
+    # Convert ns to dict
+    ns_dict = namespace_to_dict(ns)
+
+    # Second filter: only keep parameters accepted by function signature
+    recipe_kwargs = filter_kwargs_by_signature(recipe_func, ns_dict)
+
+    if recipe_kwargs:
+        log_rank_0(f"Recipe kwargs: {list(recipe_kwargs.keys())}")
+
+    # Call recipe function with filtered kwargs
+    config_container = recipe_func(**recipe_kwargs)
+    log_rank_0(f"Successfully loaded recipe: {full_module_path}.{function_name}()")
+
+    # Validate return type
+    from megatron.bridge.training.config import ConfigContainer
+
+    assert isinstance(config_container, ConfigContainer), (
+        f"Recipe function '{full_module_path}.{function_name}()' must return "
+        f"ConfigContainer, but returned {type(config_container).__name__}"
+    )
+
+    return config_container
 
 
 def namespace_to_dict(obj: Any) -> Any:
