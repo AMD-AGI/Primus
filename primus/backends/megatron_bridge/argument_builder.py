@@ -15,16 +15,15 @@ compatible arguments while supporting both traditional args and recipe configs.
 from __future__ import annotations
 
 import logging
-from functools import lru_cache
 from types import SimpleNamespace
 from typing import Any, Dict, Mapping, Union
 
+from primus.backends.megatron_bridge.config_utils import load_recipe_config
 from primus.core.config.merge_utils import deep_merge
 from primus.core.utils.yaml_utils import (
     dict_to_nested_namespace,
     nested_namespace_to_dict,
 )
-from primus.modules.module_utils import log_dict_aligned
 
 logger = logging.getLogger(__name__)
 
@@ -115,85 +114,6 @@ def _filter_existing_keys(base: Dict[str, Any], updates: Dict[str, Any], path: s
 
 
 # ------------------------------------------------------------
-# Load Megatron-Bridge default configuration
-# ------------------------------------------------------------
-@lru_cache(maxsize=1)
-def _load_megatron_bridge_defaults() -> Dict[str, Any]:
-    """
-    Load Megatron-Bridge's default configuration values as a dictionary.
-
-    This function automatically instantiates all required config classes with
-    default values using reflection, making it maintainable and extensible.
-
-    Returns:
-        Dictionary of default configuration values from Megatron-Bridge
-    """
-    try:
-        from dataclasses import MISSING, fields as dataclass_fields
-
-        from megatron.bridge.training.config import ConfigContainer
-
-        # Special cases: configs that need specific default arguments
-        special_defaults = {
-            "dataset": ("FinetuningDatasetConfig", {"seq_length": 2048}),
-            "model": ("GPTModelProvider", {}),
-        }
-
-        # Auto-instantiate all required fields
-        kwargs = {}
-        for field in dataclass_fields(ConfigContainer):
-            # Skip optional fields (those with default or default_factory)
-            if field.default is not MISSING or field.default_factory is not MISSING:
-                continue
-
-            field_name = field.name
-
-            # Check if this field needs special handling
-            if field_name in special_defaults:
-                class_name, init_kwargs = special_defaults[field_name]
-                # Import the class dynamically
-                if class_name == "GPTModelProvider":
-                    from megatron.bridge.models import GPTModelProvider
-
-                    kwargs[field_name] = GPTModelProvider(**init_kwargs)
-                elif class_name == "FinetuningDatasetConfig":
-                    from megatron.bridge.training.config import FinetuningDatasetConfig
-
-                    kwargs[field_name] = FinetuningDatasetConfig(**init_kwargs)
-            else:
-                # Auto-instantiate using field type annotation
-                field_type = field.type
-                # Handle Union types by extracting the first non-None type
-                if hasattr(field_type, "__origin__") and field_type.__origin__ is Union:
-                    field_type = next(
-                        t for t in field_type.__args__ if t is not type(None)
-                    )
-
-                # Try to instantiate with no arguments
-                try:
-                    kwargs[field_name] = field_type()
-                except Exception as e:
-                    logger.warning(
-                        f"Failed to auto-instantiate {field_name} ({field_type}): {e}. "
-                        f"Skipping this field."
-                    )
-                    continue
-
-        # Create ConfigContainer with all required fields
-        config_container = ConfigContainer(**kwargs)
-
-        log_dict_aligned("Megatron-Bridge defaults", config_container.to_dict())
-        return config_container.to_dict()
-
-    except ImportError as e:
-        logger.warning(
-            f"Failed to import Megatron-Bridge config classes: {e}. "
-            "Returning empty dict. Make sure Megatron-Bridge is installed."
-        )
-        return {}
-
-
-# ------------------------------------------------------------
 # MegatronBridgeArgBuilder: merge Primus → Megatron-Bridge
 # ------------------------------------------------------------
 class MegatronBridgeArgBuilder:
@@ -215,9 +135,10 @@ class MegatronBridgeArgBuilder:
     'bridge_ns' is a SimpleNamespace containing all fields Megatron-Bridge expects.
     """
 
-    def __init__(self):
+    def __init__(self, module_config: SimpleNamespace):
         # Load Megatron-Bridge defaults once during initialization
-        self.config: Dict[str, Any] = _load_megatron_bridge_defaults()
+        config_container = load_recipe_config(module_config.params)
+        self.config = config_container.to_dict()
 
     # ------------------------------------------------------------------
     # Add values to the configuration
