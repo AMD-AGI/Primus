@@ -63,7 +63,7 @@ def _load_megatron_bridge_defaults() -> Dict[str, Any]:
             model=GPTModelProvider(),
             optimizer=OptimizerConfig(),
             scheduler=SchedulerConfig(),
-            dataset=FinetuningDatasetConfig(),
+            dataset=FinetuningDatasetConfig(seq_length=2048),  # seq_length is required
             logger=LoggerConfig(),
             tokenizer=TokenizerConfig(),
             checkpoint=CheckpointConfig(),
