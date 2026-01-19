@@ -29,6 +29,44 @@ logger = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------
+def _filter_existing_keys(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Filter updates dict to only include keys that exist in base dict.
+    
+    Recursively filters nested dictionaries to ensure only existing keys are updated.
+    This prevents adding new keys that don't exist in the base configuration.
+    
+    Args:
+        base: Base dictionary (defines which keys are allowed)
+        updates: Updates dictionary (may contain keys not in base)
+    
+    Returns:
+        Filtered updates dict with only keys that exist in base
+    """
+    filtered = {}
+    
+    for key, value in updates.items():
+        if key not in base:
+            # Skip keys that don't exist in base
+            logger.debug(f"Ignoring unknown config key: {key}")
+            continue
+        
+        # Key exists in base
+        if isinstance(value, dict) and isinstance(base[key], dict):
+            # Recursively filter nested dicts
+            filtered_nested = _filter_existing_keys(base[key], value)
+            if filtered_nested:  # Only include if there are valid nested keys
+                filtered[key] = filtered_nested
+        else:
+            # Include the value (even if None)
+            filtered[key] = value
+    
+    return filtered
+
+
+# ------------------------------------------------------------
 # Load Megatron-Bridge default configuration
 # ------------------------------------------------------------
 @lru_cache(maxsize=1)
@@ -141,12 +179,16 @@ class MegatronBridgeArgBuilder:
 
         - Supports both Mapping (e.g., dict) and SimpleNamespace inputs.
         - None values are allowed and will override defaults.
+        - Only keys that exist in self.config will be merged (unknown keys are ignored).
         """
         # Convert SimpleNamespace to dict
         values_dict = nested_namespace_to_dict(values)
 
-        # Directly merge into the working configuration
-        self.config = deep_merge(self.config, values_dict)
+        # Filter: only keep keys that exist in self.config
+        filtered_values = _filter_existing_keys(self.config, values_dict)
+
+        # Merge filtered values into the working configuration
+        self.config = deep_merge(self.config, filtered_values)
         return self
 
     # ------------------------------------------------------------------
