@@ -17,6 +17,7 @@ configuration representations used in Megatron-Bridge integration:
 from __future__ import annotations
 
 import importlib
+import inspect
 from types import SimpleNamespace
 from typing import Any, Optional
 
@@ -108,33 +109,43 @@ def _load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
     Recipe format:
         ns.recipe: Module path (e.g., "qwen.qwen3")
         ns.flavor: Function name (e.g., "qwen3_32b_finetune_config")
-        ns.<other_params>: All other ns attributes are passed to recipe function
-        Full function: megatron.bridge.recipes.{recipe}.{flavor}(**user_config)
+        ns.<recipe_params>: Simple parameters passed to recipe function
+        ns.<container_fields>: Complex fields merged with recipe result later
+        Full function: megatron.bridge.recipes.{recipe}.{flavor}(**recipe_params)
 
-    The function passes all ns attributes to the recipe function, except:
-        - recipe: Recipe module path (metadata)
-        - flavor: Function name (metadata)
-        - recipe_kwargs: Legacy field (metadata)
-        - primus: Primus-specific config (handled separately)
+    Parameter Filtering:
+        The function intelligently filters which ns attributes to pass to recipe:
+        
+        NOT passed to recipe (metadata):
+            - recipe, flavor, recipe_kwargs, primus
+        
+        NOT passed to recipe (ConfigContainer fields for later merging):
+            - train, model, optimizer, scheduler, dataset, logger, tokenizer, checkpoint
+            - ddp, dist, ft, profiling, comm_overlap, mixed_precision, etc.
+        
+        PASSED to recipe (simple recipe parameters):
+            - hf_path, peft, tensor_model_parallel_size, pipeline_model_parallel_size
+            - train_iters, global_batch_size, micro_batch_size, seq_length
+            - lr, min_lr, data_paths, pretrained_checkpoint, etc.
 
     Example 1 (basic - no parameters):
         ns.recipe = "qwen.qwen3"
         ns.flavor = "qwen3_32b_finetune_config"
         → Calls megatron.bridge.recipes.qwen.qwen3.qwen3_32b_finetune_config()
 
-    Example 2 (with parameters):
+    Example 2 (with recipe parameters):
         ns.recipe = "qwen.qwen3"
         ns.flavor = "qwen3_32b_finetune_config"
         ns.hf_path = "Qwen/Qwen3-32B"
-        ns.tensor_model_parallel_size = 8
-        ns.pipeline_model_parallel_size = 2
         ns.peft = "lora"
-        → Calls megatron.bridge.recipes.qwen.qwen3.qwen3_32b_finetune_config(
-            hf_path="Qwen/Qwen3-32B",
-            tensor_model_parallel_size=8,
-            pipeline_model_parallel_size=2,
-            peft="lora"
-        )
+        ns.tensor_model_parallel_size = 8
+        → Passes to recipe: hf_path, peft, tensor_model_parallel_size
+
+    Example 3 (with container field overrides - merged later):
+        ns.recipe = "qwen.qwen3"
+        ns.flavor = "qwen3_32b_finetune_config"
+        ns.train = TrainingConfig(...)  # Complex object
+        → train is NOT passed to recipe, merged with result later
 
     Args:
         ns: SimpleNamespace containing recipe specification and user configuration
@@ -162,18 +173,53 @@ def _load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
         module = importlib.import_module(full_module_path)
         recipe_func = getattr(module, function_name)
 
-        # Convert ns to dict and extract recipe kwargs
-        # Pass all user configuration to recipe function (except recipe metadata)
+        # Get function signature to determine accepted parameters
+        sig = inspect.signature(recipe_func)
+        # Recipe functions use **kwargs, so we need to check if it accepts **kwargs
+        accepts_var_keyword = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD 
+            for param in sig.parameters.values()
+        )
+        
+        # Get explicit parameter names (excluding **kwargs)
+        explicit_params = {
+            name for name, param in sig.parameters.items()
+            if param.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
+        }
+        
+        # Convert ns to dict
         ns_dict = namespace_to_dict(ns)
         
-        # Remove recipe metadata fields that shouldn't be passed to recipe function
+        # Recipe metadata that should never be passed to recipe function
         recipe_metadata = ["recipe", "flavor", "recipe_kwargs", "primus"]
-        recipe_kwargs = {k: v for k, v in ns_dict.items() if k not in recipe_metadata}
+        
+        # ConfigContainer fields that should not be passed to recipe (they're for merging later)
+        # These are complex objects that recipe functions don't accept as input
+        container_fields = [
+            "_target_", "rng", "rerun_state_machine", "train", "model", 
+            "optimizer", "ddp", "scheduler", "dataset", "logger", "tokenizer", 
+            "checkpoint", "dist", "ft", "straggler", "nvrx_straggler", 
+            "profiling", "comm_overlap", "mixed_precision", "tensor_inspect", 
+            "inprocess_restart", "trainable", "sink_level", "file_sink_level", 
+            "stderr_sink_level"
+        ]
+        
+        # Only pass parameters that:
+        # 1. Are not in recipe_metadata
+        # 2. Are not in container_fields (these are for merging)
+        # 3. Either explicitly in function signature OR function accepts **kwargs
+        recipe_kwargs = {}
+        for k, v in ns_dict.items():
+            if k in recipe_metadata or k in container_fields:
+                continue
+            # Pass if explicitly in signature or function accepts **kwargs
+            if k in explicit_params or accepts_var_keyword:
+                recipe_kwargs[k] = v
         
         if recipe_kwargs:
             log_rank_0(f"Recipe kwargs: {list(recipe_kwargs.keys())}")
 
-        # Call recipe function with all user configuration as kwargs
+        # Call recipe function with filtered kwargs
         config_container = recipe_func(**recipe_kwargs)
         log_rank_0(f"Successfully loaded recipe: {full_module_path}.{function_name}()")
 
