@@ -123,15 +123,23 @@ def build_job_config_from_namespace(backend_args: SimpleNamespace) -> Any:
     # Step 4: Use ConfigContainer.from_dict() with LENIENT mode
     # LENIENT mode allows extra keys and is more flexible during development
     try:
+        # Debug: check top-level _target_
+        log_rank_0(f"DEBUG: cfg_dict top-level _target_: {cfg_dict.get('_target_')}")
+        log_rank_0(f"DEBUG: cfg_dict top-level keys: {list(cfg_dict.keys())[:20]}")  # First 20 keys
+        
         # Debug: check critical nested fields
         if "scheduler" in cfg_dict:
             log_rank_0(f"DEBUG: scheduler in cfg_dict: {type(cfg_dict['scheduler'])}")
             if isinstance(cfg_dict["scheduler"], dict):
-                log_rank_0(f"DEBUG: scheduler has _target_: {cfg_dict['scheduler'].get('_target_')}")
+                log_rank_0(f"DEBUG: scheduler dict keys: {list(cfg_dict['scheduler'].keys())}")
+                log_rank_0(f"DEBUG: scheduler _target_: {cfg_dict['scheduler'].get('_target_')}")
+                log_rank_0(f"DEBUG: scheduler full dict: {cfg_dict['scheduler']}")
         if "peft" in cfg_dict:
             log_rank_0(f"DEBUG: peft in cfg_dict: {type(cfg_dict['peft'])}")
             if isinstance(cfg_dict["peft"], dict):
-                log_rank_0(f"DEBUG: peft has _target_: {cfg_dict['peft'].get('_target_')}")
+                log_rank_0(f"DEBUG: peft dict keys: {list(cfg_dict['peft'].keys())}")
+                log_rank_0(f"DEBUG: peft _target_: {cfg_dict['peft'].get('_target_')}")
+                log_rank_0(f"DEBUG: peft full dict: {cfg_dict['peft']}")
         
         config_container = ConfigContainer.from_dict(cfg_dict, mode=InstantiationMode.LENIENT)
         log_rank_0("ConfigContainer created successfully from namespace")
