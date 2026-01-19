@@ -1,0 +1,234 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_30B_A3B_lora_posttrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  post_trainer:
+    framework: megatron_bridge
+    config: post_trainer.yaml
+
+    # Model to run
+    model: ${PRIMUS_MODEL:qwen3_30B_A3B}.yaml
+
+    overrides:
+      # ============================================================================
+      # Logging Configuration
+      # ============================================================================
+      wandb_project: "Primus_Qwen3_30B_A3B_LoRA_Posttrain"
+      stderr_sink_level: INFO
+      log_interval: 10
+      log_throughput: true
+      tensorboard_dir: ${PRIMUS_TENSORBOARD_DIR:/path/to/tensorboard/qwen3_30B_A3B_lora}
+
+      # ============================================================================
+      # Model Loading Configuration
+      # ============================================================================
+      # Load from HuggingFace (easier setup)
+      convert_from_hf: true
+      hf_model_name_or_path: "Qwen/Qwen3-30B-A3B"
+
+      # Or load from pretrained Megatron checkpoint
+      # load: ${PRIMUS_LOAD_CKPT:/path/to/pretrained/qwen3_30B_A3B/checkpoint}
+
+      # ============================================================================
+      # LoRA Configuration (Parameter-Efficient Fine-tuning)
+      # ============================================================================
+      use_lora: true
+      lora_rank: 32           # Higher rank for better capacity
+      lora_alpha: 64          # Alpha = 2 * rank
+      lora_dropout: 0.1       # Higher dropout to prevent overfitting
+
+      # Target modules - only attention for minimal memory
+      lora_target_modules:
+        - q_proj
+        - k_proj
+        - v_proj
+        - o_proj
+
+      # Optional: Add MLP layers for more capacity (increases memory slightly)
+      # lora_target_modules:
+      #   - q_proj
+      #   - k_proj
+      #   - v_proj
+      #   - o_proj
+      #   - gate_proj
+      #   - up_proj
+      #   - down_proj
+
+      # ============================================================================
+      # Training Hyperparameters (LoRA-optimized)
+      # ============================================================================
+      # Batch sizes
+      micro_batch_size: 1
+      global_batch_size: 32
+
+      # Training iterations
+      train_iters: 3000
+
+      # Sequence length
+      seq_length: ${PRIMUS_SEQ_LENGTH:2048}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:2048}
+
+      # Learning rate (higher for LoRA)
+      lr: 2.0e-4              # LoRA can use higher LR than full fine-tuning
+      min_lr: 2.0e-5
+      lr_decay_style: cosine
+      lr_warmup_iters: 100
+      lr_decay_iters: null
+
+      # Optimization (LoRA-specific)
+      weight_decay: 0.0       # No weight decay for LoRA
+      clip_grad: 1.0
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+
+      # Initialization
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # MoE specific
+      moe_router_force_load_balancing: true
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # EOD mask loss
+      eod_mask_loss: true
+
+      # Seed
+      seed: 1234
+
+      # ============================================================================
+      # Parallelism Strategy (Minimal for LoRA)
+      # ============================================================================
+      # LoRA significantly reduces memory requirements
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+
+      # Expert parallelism (still needed for 128 experts)
+      expert_model_parallel_size: ${PRIMUS_EP:4}  # Can use fewer GPUs with LoRA
+      expert_tensor_parallel_size: 1
+
+      # Context and sequence parallelism
+      context_parallel_size: 1
+      sequence_parallel: false
+
+      # Communication overlap
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+
+      # ============================================================================
+      # Data Configuration
+      # ============================================================================
+      # Mock data for testing
+      mock_data: false
+
+      # Real data paths
+      train_data_path: ${PRIMUS_TRAIN_DATA_PATH:/path/to/instruction/data}
+      valid_data_path: ${PRIMUS_VALID_DATA_PATH:null}
+      test_data_path: ${PRIMUS_TEST_DATA_PATH:null}
+
+      # Dataset format and prompt template
+      dataset_format: "alpaca"    # or "sharegpt", "oasst", "dolly"
+      prompt_template: "qwen"
+      chat_format: "chatml"
+
+      # Data split
+      split: "95,5,0"
+
+      # ============================================================================
+      # Mixed Precision
+      # ============================================================================
+      bf16: true
+      fp16: false
+
+      # ============================================================================
+      # Checkpointing Configuration
+      # ============================================================================
+      # Checkpoint paths
+      save: ${PRIMUS_SAVE_CKPT:/path/to/lora/qwen3_30B_A3B/checkpoints}
+      save_interval: 500
+
+      # Only save LoRA adapters (tiny checkpoint size!)
+      save_lora_only: true
+
+      # Checkpoint format
+      ckpt_format: torch
+
+      # Checkpoint options
+      finetune: true
+      auto_continue_train: false
+      no_save_optim: true     # Don't save optimizer state for LoRA
+      no_save_rng: true
+      no_load_optim: null
+      no_load_rng: null
+      disable_last_saving: false
+
+      # Evaluation
+      eval_iters: 10
+      eval_interval: 200
+
+      # ============================================================================
+      # Optimization Features
+      # ============================================================================
+      # Gradient accumulation fusion
+      gradient_accumulation_fusion: true
+
+      # MoE optimization
+      moe_use_legacy_grouped_gemm: false
+
+      # Activation checkpointing (optional, for even lower memory)
+      recompute_activations: false
+      # Enable if still OOM:
+      # recompute_activations: true
+      # recompute_granularity: "selective"
+      # recompute_method: "uniform"
+
+      # ============================================================================
+      # Primus Turbo Extensions (if available)
+      # ============================================================================
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
+
+      # ============================================================================
+      # HuggingFace Export Configuration
+      # ============================================================================
+      # Convert to HuggingFace format after training (will merge LoRA with base model)
+      convert_to_hf: true
+      hf_save_path: ${PRIMUS_HF_SAVE_PATH:/path/to/output/qwen3_30B_A3B_lora_merged_hf}
+
+# ==============================================================================
+# Performance Notes
+# ==============================================================================
+# With this LoRA configuration:
+# - Can run on 4 GPUs (with expert_model_parallel_size=4)
+# - Checkpoint size: ~500MB (LoRA adapters only)
+# - Training speed: ~2-3x faster than full fine-tuning
+# - Memory usage: ~40-50% of full fine-tuning
+#
+# GPU Recommendations:
+# - 4x A100 80GB: Comfortable
+# - 4x A100 40GB: Possible with activation checkpointing
+# - 8x A100 40GB: Very comfortable
+#
+# For even lower resources:
+# - Reduce lora_rank to 16
+# - Reduce micro_batch_size to 1
+# - Enable activation checkpointing: recompute_activations=true
+# - Use expert_model_parallel_size=8
+#
+# Environment Variables:
+# - PRIMUS_TEAM: Team name (default: amd)
+# - PRIMUS_USER: User name (default: root)
+# - PRIMUS_EXP_NAME: Experiment name
+# - PRIMUS_WORKSPACE: Workspace directory (default: ./output)
+# - PRIMUS_MODEL: Model config name (default: qwen3_30B_A3B)
+# - PRIMUS_SEQ_LENGTH: Sequence length (default: 2048)
+# - PRIMUS_TP: Tensor parallelism (default: 1)
+# - PRIMUS_PP: Pipeline parallelism (default: 1)
+# - PRIMUS_EP: Expert parallelism (default: 4)
+# - PRIMUS_TRAIN_DATA_PATH: Training data path
+# - PRIMUS_SAVE_CKPT: Checkpoint save path
+# - PRIMUS_HF_SAVE_PATH: HuggingFace export path

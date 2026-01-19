@@ -1,0 +1,74 @@
+# Megatron-Bridge LoRA Fine-tuning Configuration
+# This example shows parameter-efficient fine-tuning with LoRA
+# using significantly fewer resources than full fine-tuning
+
+# Framework Configuration
+framework: megatron_bridge
+task: posttrain
+
+# Model - Load from HuggingFace
+convert_from_hf: true
+hf_model_name_or_path: "meta-llama/Llama-3-8B"
+
+# LoRA Configuration (Parameter-Efficient Fine-Tuning)
+lora:
+  use_lora: true
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules:
+    - q_proj
+    - v_proj
+    - k_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+# Training Hyperparameters
+training:
+  micro_batch_size: 2
+  global_batch_size: 64
+  train_iters: 3000
+
+  # Higher LR for LoRA training
+  lr: 2.0e-4
+  min_lr: 2.0e-5
+  lr_decay_style: cosine
+  lr_warmup_iters: 100
+
+  weight_decay: 0.0
+  clip_grad: 1.0
+
+# Mixed Precision
+precision:
+  bf16: true
+
+# Minimal Parallelism (LoRA can fit on fewer GPUs)
+parallelism:
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+
+# Data
+data:
+  data_path: /path/to/instruction/data
+  dataset_format: "alpaca"
+  split: "95,5,0"
+  seq_length: 2048
+  prompt_template: "alpaca"
+
+# Checkpointing
+checkpointing:
+  save: /path/to/lora/checkpoints
+  save_interval: 500
+  # Save only LoRA adapters (much smaller)
+  save_lora_only: true
+
+# Logging
+logging:
+  log_interval: 10
+  eval_interval: 100
+
+# Convert to HuggingFace format (will merge LoRA with base model)
+convert_to_hf: true
+hf_save_path: /path/to/output/hf_model_with_lora
