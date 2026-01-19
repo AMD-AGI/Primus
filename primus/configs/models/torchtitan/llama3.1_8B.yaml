@@ -6,5 +6,6 @@ model:
   name: "llama3"
   flavor: "8B"
   hf_assets_path: "meta-llama/Llama-3.1-8B"
-  converters:
-    - primus_turbo
+  n_layers: 32
+  # converters:
+  #   - primus_turbo
