@@ -16,7 +16,7 @@ optimized for post-training workflows with smaller datasets and specialized
 training objectives.
 """
 
-from typing import Any, Optional
+from typing import Any 
 
 from primus.backends.megatron_bridge.config_utils import build_job_config_from_namespace
 from primus.backends.megatron_bridge.megatron_bridge_base_trainer import (
@@ -63,9 +63,6 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
             backend_args=backend_args,
         )
 
-        # Post-training specific state
-        self._trainer: Optional["Trainer"] = None  # type: ignore[name-defined]
-
 
     def setup(self):
         """
@@ -110,32 +107,10 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
         log_rank_0("Executing Megatron-Bridge post-train...")
 
         try:
-            # Import Megatron-Bridge training components
-            # TODO: Update these imports based on actual Megatron-Bridge structure
-            # from megatron.bridge.training import posttrain
-            # from megatron.bridge.training.utils import (
-            #     get_model_provider,
-            #     get_forward_step_func,
-            #     get_posttrain_data_provider,
-            # )
-
             # Execute post-training based on configuration
-            if self.recipe_config:
-                # Use recipe-based post-training
-                log_rank_0("Using recipe-based post-training configuration")
-                # TODO: Implement recipe-based post-training execution
-            else:
-                # Use manual configuration
-                log_rank_0("Using manual post-training configuration")
-                # TODO: Implement manual post-training execution
-
-            # Placeholder for actual post-training execution
-            log_rank_0("Post-training loop would execute here")
-            log_rank_0("Fine-tuning on instruction/SFT dataset...")
-
-            # Handle HuggingFace conversion after training if requested
-            if hasattr(self.backend_args, "convert_to_hf") and self.backend_args.convert_to_hf:
-                self._convert_to_huggingface()
+            from megatron.bridge.training.finetune import finetune
+            from megatron.bridge.training.vlm_step import forward_step
+            finetune(self.cfg_container, forward_step_func=forward_step)
 
         except Exception as e:
             log_rank_0(f"Error during post-training: {e}")
