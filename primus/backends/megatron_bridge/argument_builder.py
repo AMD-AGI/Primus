@@ -24,6 +24,7 @@ from primus.core.utils.yaml_utils import (
     dict_to_nested_namespace,
     nested_namespace_to_dict,
 )
+from primus.modules.module_utils import log_dict_aligned
 
 logger = logging.getLogger(__name__)
 
@@ -31,37 +32,84 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------
 # Helper functions
 # ------------------------------------------------------------
-def _filter_existing_keys(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+def _filter_existing_keys(base: Dict[str, Any], updates: Dict[str, Any], path: str = "") -> Dict[str, Any]:
     """
-    Filter updates dict to only include keys that exist in base dict.
+    Filter updates dict to only include keys that exist in base dict with type checking.
     
-    Recursively filters nested dictionaries to ensure only existing keys are updated.
-    This prevents adding new keys that don't exist in the base configuration.
+    Recursively filters nested dictionaries to ensure:
+    1. Only existing keys are updated
+    2. Type compatibility is maintained (warns on mismatch)
     
     Args:
-        base: Base dictionary (defines which keys are allowed)
-        updates: Updates dictionary (may contain keys not in base)
+        base: Base dictionary (defines which keys are allowed and their types)
+        updates: Updates dictionary (may contain keys not in base or wrong types)
+        path: Current path in nested structure (for logging)
     
     Returns:
-        Filtered updates dict with only keys that exist in base
+        Filtered updates dict with only keys that exist in base and have matching types
     """
     filtered = {}
     
     for key, value in updates.items():
+        current_path = f"{path}.{key}" if path else key
+        
         if key not in base:
             # Skip keys that don't exist in base
-            logger.debug(f"Ignoring unknown config key: {key}")
+            logger.debug(f"Ignoring unknown config key: {current_path}")
             continue
         
-        # Key exists in base
-        if isinstance(value, dict) and isinstance(base[key], dict):
-            # Recursively filter nested dicts
-            filtered_nested = _filter_existing_keys(base[key], value)
+        base_value = base[key]
+        
+        # Type checking
+        base_is_dict = isinstance(base_value, dict)
+        value_is_dict = isinstance(value, dict)
+        
+        if base_is_dict and value_is_dict:
+            # Both are dicts, recursively filter
+            filtered_nested = _filter_existing_keys(base_value, value, current_path)
             if filtered_nested:  # Only include if there are valid nested keys
                 filtered[key] = filtered_nested
+        elif base_is_dict and not value_is_dict:
+            # Type mismatch: base is dict but value is not
+            logger.warning(
+                f"Type mismatch for '{current_path}': "
+                f"expected dict (base type), got {type(value).__name__}. "
+                f"Skipping update."
+            )
+            continue
+        elif not base_is_dict and value_is_dict:
+            # Type mismatch: base is not dict but value is
+            logger.warning(
+                f"Type mismatch for '{current_path}': "
+                f"expected {type(base_value).__name__} (base type), got dict. "
+                f"Skipping update."
+            )
+            continue
         else:
-            # Include the value (even if None)
-            filtered[key] = value
+            # Both are non-dict values
+            # Check basic type compatibility (allow None)
+            if value is not None and base_value is not None:
+                base_type = type(base_value)
+                value_type = type(value)
+                
+                # Allow numeric type conversions (int <-> float)
+                if (base_type in (int, float) and value_type in (int, float)):
+                    filtered[key] = value
+                elif base_type == value_type:
+                    # Same type, allow update
+                    filtered[key] = value
+                else:
+                    # Type mismatch
+                    logger.warning(
+                        f"Type mismatch for '{current_path}': "
+                        f"expected {base_type.__name__} (base: {base_value}), "
+                        f"got {value_type.__name__} (update: {value}). "
+                        f"Skipping update."
+                    )
+                    continue
+            else:
+                # Allow None values to override
+                filtered[key] = value
     
     return filtered
 
@@ -133,6 +181,8 @@ def _load_megatron_bridge_defaults() -> Dict[str, Any]:
 
         # Create ConfigContainer with all required fields
         config_container = ConfigContainer(**kwargs)
+
+        log_dict_aligned("Megatron-Bridge defaults", config_container.to_dict())
         return config_container.to_dict()
 
     except ImportError as e:
