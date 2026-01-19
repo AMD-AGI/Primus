@@ -36,15 +36,22 @@ def _load_megatron_bridge_defaults() -> Dict[str, Any]:
     """
     Load Megatron-Bridge's default configuration values as a dictionary.
 
-    This is analogous to TorchTitan's _load_torchtitan_defaults helper.
-    Megatron-Bridge uses a ConfigContainer-based configuration system.
+    Note: Unlike TorchTitan's JobConfig which has default values for all fields,
+    Megatron-Bridge's ConfigContainer requires 8 mandatory arguments (train, model,
+    optimizer, scheduler, dataset, logger, tokenizer, checkpoint).
+
+    Therefore, we return an empty dict here. The actual configuration should be
+    provided by:
+    1. User's YAML configuration file
+    2. Megatron-Bridge recipe files (if specified)
+    3. Primus CLI arguments
 
     Returns:
-        Dictionary of default configuration values from Megatron-Bridge
+        Empty dictionary (configuration comes from user YAML/recipe)
     """
-    from megatron.bridge.training.config import ConfigContainer
-
-    return ConfigContainer().to_dict()
+    # ConfigContainer requires all fields, cannot instantiate without args
+    # User configuration from YAML will provide all necessary values
+    return {}
 
 
 # ------------------------------------------------------------
