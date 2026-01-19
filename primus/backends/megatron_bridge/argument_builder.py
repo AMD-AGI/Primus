@@ -86,29 +86,36 @@ def _filter_existing_keys(base: Dict[str, Any], updates: Dict[str, Any], path: s
             continue
         else:
             # Both are non-dict values
-            # Check basic type compatibility (allow None)
-            if value is not None and base_value is not None:
-                base_type = type(base_value)
-                value_type = type(value)
-
-                # Allow numeric type conversions (int <-> float)
-                if base_type in (int, float) and value_type in (int, float):
-                    filtered[key] = value
-                elif base_type == value_type:
-                    # Same type, allow update
-                    filtered[key] = value
-                else:
-                    # Type mismatch
-                    logger.warning(
-                        f"Type mismatch for '{current_path}': "
-                        f"expected {base_type.__name__} (base: {base_value}), "
-                        f"got {value_type.__name__} (update: {value}). "
-                        f"Skipping update."
-                    )
-                    continue
-            else:
-                # Allow None values to override
+            # Skip None values to preserve recipe defaults
+            if value is None:
+                logger.debug(f"Skipping None value for '{current_path}', keeping recipe default")
+                continue
+            
+            # Skip if base is None (no default to compare against)
+            if base_value is None:
+                # User provided a value but base has None - allow it
                 filtered[key] = value
+                continue
+            
+            # Type compatibility check (both non-None)
+            base_type = type(base_value)
+            value_type = type(value)
+
+            # Allow numeric type conversions (int <-> float)
+            if base_type in (int, float) and value_type in (int, float):
+                filtered[key] = value
+            elif base_type == value_type:
+                # Same type, allow update
+                filtered[key] = value
+            else:
+                # Type mismatch
+                logger.warning(
+                    f"Type mismatch for '{current_path}': "
+                    f"expected {base_type.__name__} (base: {base_value}), "
+                    f"got {value_type.__name__} (update: {value}). "
+                    f"Skipping update."
+                )
+                continue
 
     return filtered
 
