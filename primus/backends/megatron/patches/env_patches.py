@@ -13,7 +13,7 @@ Sets environment variables for optimal Megatron performance and compatibility.
 import os
 
 from primus.core.patches import PatchContext, register_patch
-from primus.modules.module_utils import log_rank_0
+from primus.modules.module_utils import log_kv_rank_0
 
 # ============================================================================
 # CUDA Device Configuration
@@ -39,16 +39,23 @@ def set_cuda_device_max_connections(ctx: PatchContext):
     The value is determined by checking the config for FSDP usage.
     """
     # Get config from context
-    config = ctx.extra.get("config", {})
+    module_config = ctx.extra.get("module_config", {})
 
     # Determine CUDA_DEVICE_MAX_CONNECTIONS based on FSDP usage
-    use_fsdp = config.get("use_torch_fsdp2", False) or config.get("use_custom_fsdp", False)
+    use_fsdp = getattr(module_config.params, "use_torch_fsdp2", False) or getattr(
+        module_config.params, "use_custom_fsdp", False
+    )
 
     if use_fsdp:
         cuda_connections = "8"
+        log_kv_rank_0(f"[Patch:megatron.env.cuda_device_max_connections]   -use_fsdp", f"True")
     else:
         cuda_connections = "1"
+        log_kv_rank_0(f"[Patch:megatron.env.cuda_device_max_connections]   -use_fsdp", f"False")
 
     # Set environment variable
     os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = cuda_connections
-    log_rank_0(f"[Patch] Set CUDA_DEVICE_MAX_CONNECTIONS={cuda_connections} (FSDP={use_fsdp})")
+    log_kv_rank_0(
+        "[Patch:megatron.env.cuda_device_max_connections]   -env[CUDA_DEVICE_MAX_CONNECTIONS]",
+        f"{cuda_connections}",
+    )

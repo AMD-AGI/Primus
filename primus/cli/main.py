@@ -8,6 +8,7 @@ import argparse
 import importlib
 import pkgutil
 import sys
+import traceback
 from typing import Callable, Iterable
 
 SUBCOMMAND_PACKAGE = "primus.cli.subcommands"
@@ -76,7 +77,15 @@ def main():
     args, unknown_args = parser.parse_known_args()
 
     if hasattr(args, "func"):
-        args.func(args, unknown_args)
+        try:
+            args.func(args, unknown_args)
+        except SystemExit:
+            raise
+        except Exception:
+            # Torchrun/elastic can sometimes suppress worker tracebacks.
+            # Print here so users can see the real root cause.
+            traceback.print_exc()
+            raise
     else:
         parser.print_help()
 

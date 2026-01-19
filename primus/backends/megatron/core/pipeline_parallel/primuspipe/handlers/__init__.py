@@ -8,10 +8,12 @@ __all__ = [
     "megatron_primuspipe_handler_dict",
 ]
 
+
 from primus.core.pipeline_parallel.handler.wgrad_handler import default_wgrad_handler
 from primus.core.pipeline_parallel.scheduler.scheduler_node import FuncType
 
 from .bwd_handler import megatron_bwd_handler
+from .combined_fwd_bkwd_handler import megatron_combined_fwd_bkwd_handler
 from .communication_handler import batch_p2p_communication_handler
 from .fwd_handler import megatron_fwd_handler
 
@@ -24,4 +26,5 @@ megatron_primuspipe_handler_dict = {
     FuncType.SB: batch_p2p_communication_handler,
     FuncType.RF: batch_p2p_communication_handler,
     FuncType.RB: batch_p2p_communication_handler,
+    FuncType.FB: megatron_combined_fwd_bkwd_handler,
 }

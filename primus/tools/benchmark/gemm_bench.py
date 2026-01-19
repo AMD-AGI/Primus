@@ -43,12 +43,28 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
         torch.matmul(a, b, out=c_list[i])
     torch.cuda.synchronize()
 
-    total_calls += num_rotations
+    # Timed run (duration-based)
+    target_ms = max(100.0, duration_s * 1000.0)
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
 
-    elapsed = start.elapsed_time(end)  # ms
-    if elapsed >= target_ms:
-        elapsed / total_calls
-        break
+    total_calls = 0
+    start.record()
+
+    while True:
+        for _ in range(num_rotations):
+            a = maybe_transpose(a_list[i], trans_a)
+            b = maybe_transpose(b_list[i], trans_b)
+            torch.matmul(a, b, out=c_list[i])
+        end.record()
+        torch.cuda.synchronize()
+
+        total_calls += num_rotations
+
+        elapsed = start.elapsed_time(end)  # ms
+        if elapsed >= target_ms:
+            avg_time_ms = elapsed / total_calls
+            break
 
     tflop = 2.0 * m * n * k / 1e12
     tflops = tflop / (avg_time_ms / 1000.0)
