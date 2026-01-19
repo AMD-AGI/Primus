@@ -108,27 +108,36 @@ def _load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
     Recipe format:
         ns.recipe: Module path (e.g., "qwen.qwen3")
         ns.flavor: Function name (e.g., "qwen3_32b_finetune_config")
-        ns.recipe_kwargs: Optional dict/namespace with recipe-specific parameters
-        Full function: megatron.bridge.recipes.{recipe}.{flavor}(**recipe_kwargs)
+        ns.<other_params>: All other ns attributes are passed to recipe function
+        Full function: megatron.bridge.recipes.{recipe}.{flavor}(**user_config)
 
-    Example 1 (basic):
+    The function passes all ns attributes to the recipe function, except:
+        - recipe: Recipe module path (metadata)
+        - flavor: Function name (metadata)
+        - recipe_kwargs: Legacy field (metadata)
+        - primus: Primus-specific config (handled separately)
+
+    Example 1 (basic - no parameters):
         ns.recipe = "qwen.qwen3"
         ns.flavor = "qwen3_32b_finetune_config"
         → Calls megatron.bridge.recipes.qwen.qwen3.qwen3_32b_finetune_config()
 
-    Example 2 (with kwargs):
+    Example 2 (with parameters):
         ns.recipe = "qwen.qwen3"
         ns.flavor = "qwen3_32b_finetune_config"
-        ns.recipe_kwargs = {
-            "hf_path": "Qwen/Qwen3-32B",
-            "tensor_model_parallel_size": 8,
-            "pipeline_model_parallel_size": 2,
-            "peft": "lora",
-        }
-        → Calls megatron.bridge.recipes.qwen.qwen3.qwen3_32b_finetune_config(**kwargs)
+        ns.hf_path = "Qwen/Qwen3-32B"
+        ns.tensor_model_parallel_size = 8
+        ns.pipeline_model_parallel_size = 2
+        ns.peft = "lora"
+        → Calls megatron.bridge.recipes.qwen.qwen3.qwen3_32b_finetune_config(
+            hf_path="Qwen/Qwen3-32B",
+            tensor_model_parallel_size=8,
+            pipeline_model_parallel_size=2,
+            peft="lora"
+        )
 
     Args:
-        ns: SimpleNamespace that may contain 'recipe', 'flavor', and 'recipe_kwargs'
+        ns: SimpleNamespace containing recipe specification and user configuration
 
     Returns:
         ConfigContainer from recipe, or None if recipe not specified
@@ -153,16 +162,18 @@ def _load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
         module = importlib.import_module(full_module_path)
         recipe_func = getattr(module, function_name)
 
-        # Extract recipe kwargs if provided
-        # User can provide recipe-specific arguments via ns.recipe_kwargs
-        recipe_kwargs = getattr(ns, "recipe_kwargs", {})
-        if isinstance(recipe_kwargs, SimpleNamespace):
-            recipe_kwargs = namespace_to_dict(recipe_kwargs)
+        # Convert ns to dict and extract recipe kwargs
+        # Pass all user configuration to recipe function (except recipe metadata)
+        ns_dict = namespace_to_dict(ns)
+        
+        # Remove recipe metadata fields that shouldn't be passed to recipe function
+        recipe_metadata = ["recipe", "flavor", "recipe_kwargs", "primus"]
+        recipe_kwargs = {k: v for k, v in ns_dict.items() if k not in recipe_metadata}
         
         if recipe_kwargs:
             log_rank_0(f"Recipe kwargs: {list(recipe_kwargs.keys())}")
 
-        # Call recipe function to get ConfigContainer with kwargs
+        # Call recipe function with all user configuration as kwargs
         config_container = recipe_func(**recipe_kwargs)
         log_rank_0(f"Successfully loaded recipe: {full_module_path}.{function_name}()")
 
