@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:llama3.1_70B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:llama3.1_405B-pretrain}
 workspace: ./output
 
 modules:
@@ -9,31 +9,27 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: llama3.1_70B.yaml
+    model: llama3.1_405B-fp8.yaml
     overrides:
       sink_level: null
       file_sink_level: DEBUG
       stderr_sink_level: INFO
 
-      lr_scheduler:
-        # lr scheduler warm up
-        warmup_steps: 10
+      training:
+        local_batch_size: 2
 
       metrics:
         log_freq: 1
 
-      training:
-        local_batch_size: 4
-        seq_len: 8192
-        mock_data: false
-        steps: 50
-
       optimizer:
-        lr: 1.5e-4
+        lr: 8.0e-5
+
+      parallelism:
+        tensor_parallel_degree: 1
 
       activation_checkpoint:
         mode: full
 
       primus_turbo:
-        enable_primus_turbo : true
-        enable_attention_float8 : false
+        enable_primus_turbo: true
+        enable_attention_float8: false
