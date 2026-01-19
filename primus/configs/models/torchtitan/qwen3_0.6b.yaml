@@ -6,5 +6,5 @@ model:
   name: "qwen3"
   flavor: "0.6B"
   hf_assets_path: "Qwen/Qwen3-0.6B"
-  # converters:
-  #   - "float8"
+  converters:
+    - primus_turbo
