@@ -101,6 +101,12 @@ def build_job_config_from_namespace(backend_args: SimpleNamespace) -> Any:
 
     # Step 1: Convert namespace to dict (recipe already loaded and merged in ArgBuilder)
     cfg_dict = namespace_to_dict(backend_args)
+    
+    # Debug: check what we got from backend_args
+    log_rank_0(f"DEBUG: backend_args.scheduler type before conversion: {type(getattr(backend_args, 'scheduler', None))}")
+    log_rank_0(f"DEBUG: backend_args.peft type before conversion: {type(getattr(backend_args, 'peft', None))}")
+    log_rank_0(f"DEBUG: cfg_dict.scheduler type after namespace_to_dict: {type(cfg_dict.get('scheduler'))}")
+    log_rank_0(f"DEBUG: cfg_dict.peft type after namespace_to_dict: {type(cfg_dict.get('peft'))}")
 
     # Step 2: Extract and preserve Primus-specific configuration
     primus_config = cfg_dict.pop("primus", None)
@@ -231,11 +237,17 @@ def load_recipe_config(ns: SimpleNamespace) -> Any:
     recipe_kwargs = filter_kwargs_by_signature(recipe_func, ns_dict)
 
     if recipe_kwargs:
-        log_rank_0(f"Recipe kwargs: {list(recipe_kwargs.keys())}")
+        log_rank_0(f"Recipe kwargs ({len(recipe_kwargs)}): {list(recipe_kwargs.keys())}")
+    else:
+        log_rank_0("Warning: No recipe_kwargs to pass to recipe function")
 
     # Call recipe function with filtered kwargs
     config_container = recipe_func(**recipe_kwargs)
     log_rank_0(f"Successfully loaded recipe: {full_module_path}.{function_name}()")
+    
+    # Debug: check what recipe returned
+    log_rank_0(f"DEBUG: Recipe returned scheduler type: {type(config_container.scheduler)}")
+    log_rank_0(f"DEBUG: Recipe returned peft type: {type(config_container.peft)}")
 
     # Validate return type
     from megatron.bridge.training.config import ConfigContainer
