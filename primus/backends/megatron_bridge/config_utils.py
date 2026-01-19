@@ -105,9 +105,14 @@ def _load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
     Load Megatron-Bridge recipe configuration if specified.
 
     Recipe format:
-        ns.recipe: Model recipe path (e.g., "llama.llama3.llama3_8b")
-        ns.flavor: Config flavor (e.g., "pretrain", "finetune")
-        Full function: src.megatron.bridge.recipes.{recipe}_{flavor}_config()
+        ns.recipe: Module path (e.g., "qwen.qwen3")
+        ns.flavor: Function name (e.g., "qwen3_32b_finetune_config")
+        Full function: megatron.bridge.recipes.{recipe}.{flavor}()
+
+    Example:
+        ns.recipe = "qwen.qwen3"
+        ns.flavor = "qwen3_32b_finetune_config"
+        → Calls megatron.bridge.recipes.qwen.qwen3.qwen3_32b_finetune_config()
 
     Args:
         ns: SimpleNamespace that may contain 'recipe' and 'flavor' attributes
@@ -125,24 +130,11 @@ def _load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
         return None
 
     try:
-        # Parse recipe path: e.g., "llama.llama3.llama3_8b"
-        # Function name: e.g., "llama3_8b_pretrain_config"
-        parts = recipe.split(".")
-        if len(parts) < 2:
-            log_rank_0(f"Warning: Invalid recipe format '{recipe}'. Expected format: 'family.module.function_prefix'")
-            return None
+        # Construct full module path and function name
+        full_module_path = f"megatron.bridge.recipes.{recipe}"
+        function_name = flavor
 
-        model_family = parts[0]  # e.g., "llama"
-        module_path = ".".join(parts[:-1])  # e.g., "llama.llama3"
-        function_prefix = parts[-1]  # e.g., "llama3_8b"
-
-        # Construct full module path
-        full_module_path = f"src.megatron.bridge.recipes.{module_path}"
-        
-        # Construct function name: {function_prefix}_{flavor}_config
-        function_name = f"{function_prefix}_{flavor}_config"
-
-        log_rank_0(f"Loading recipe: {full_module_path}.{function_name}")
+        log_rank_0(f"Loading recipe: {full_module_path}.{function_name}()")
 
         # Import module and get function
         module = importlib.import_module(full_module_path)
@@ -150,19 +142,19 @@ def _load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
 
         # Call recipe function to get ConfigContainer
         config_container = recipe_func()
-        log_rank_0(f"Successfully loaded recipe configuration: {recipe} ({flavor})")
+        log_rank_0(f"Successfully loaded recipe: {full_module_path}.{function_name}()")
 
         return config_container
 
     except ImportError as e:
-        log_rank_0(f"Error: Failed to import recipe module '{recipe}': {e}")
+        log_rank_0(f"Error: Failed to import recipe module: {e}")
         raise RuntimeError(f"Recipe loading failed: Cannot import '{full_module_path}'") from e
     except AttributeError as e:
-        log_rank_0(f"Error: Recipe function '{function_name}' not found in '{full_module_path}': {e}")
+        log_rank_0(f"Error: Recipe function not found: {e}")
         raise RuntimeError(f"Recipe loading failed: Function '{function_name}' not found in '{full_module_path}'") from e
     except Exception as e:
-        log_rank_0(f"Error: Failed to load recipe configuration: {e}")
-        raise RuntimeError(f"Recipe loading failed for '{recipe}' with flavor '{flavor}'") from e
+        log_rank_0(f"Error: Failed to load recipe: {e}")
+        raise RuntimeError(f"Recipe loading failed: {full_module_path}.{function_name}()") from e
 
 
 def _deep_merge_dicts(base: dict, override: dict) -> dict:
