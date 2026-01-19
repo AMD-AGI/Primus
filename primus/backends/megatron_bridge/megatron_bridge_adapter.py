@@ -86,18 +86,8 @@ class MegatronBridgeAdapter(BackendAdapter):
         # module_config.params is a flat dict of Megatron-Bridge-recognized fields.
         builder.update(module_config.params)
 
-        # Store builder for later access to ConfigContainer
-        self._builder = builder
-
-        # Get the final ConfigContainer
-        config_container = builder.to_config_container()
-
         # Produce the final Megatron-Bridge Namespace
         bridge_args = builder.finalize()
-
-        # Attach ConfigContainer to bridge_args for trainer access
-        # This avoids complex namespace→dict→ConfigContainer conversion issues
-        bridge_args._config_container = config_container
 
         log_rank_0(
             f"[Primus:MegatronBridgeAdapter] Converted config → {len(vars(bridge_args))} Megatron-Bridge args"
@@ -106,21 +96,21 @@ class MegatronBridgeAdapter(BackendAdapter):
         log_dict_aligned("Megatron-Bridge args", bridge_args)
 
         return bridge_args
-    
-    def get_config_container(self) -> Any:
-        """
-        Get the final ConfigContainer with user overrides applied.
-        
-        This method should be called after convert_config() to get the
-        properly merged ConfigContainer for Megatron-Bridge training.
-        
-        Returns:
-            ConfigContainer with recipe defaults + user overrides
-        """
-        if not hasattr(self, '_builder'):
-            raise RuntimeError("convert_config() must be called before get_config_container()")
-        
-        return self._builder.to_config_container()
+
+    # def get_config_container(self) -> Any:
+    #     """
+    #     Get the final ConfigContainer with user overrides applied.
+
+    #     This method should be called after convert_config() to get the
+    #     properly merged ConfigContainer for Megatron-Bridge training.
+
+    #     Returns:
+    #         ConfigContainer with recipe defaults + user overrides
+    #     """
+    #     if not hasattr(self, '_builder'):
+    #         raise RuntimeError("convert_config() must be called before get_config_container()")
+
+    #     return self._builder.to_config_container()
 
     # Load Trainer Class
     def load_trainer_class(self):
@@ -152,6 +142,7 @@ class MegatronBridgeAdapter(BackendAdapter):
         """
         try:
             from megatron.bridge.package_info import __version__
+
             return __version__
         except ImportError as e:
             raise RuntimeError(f"Failed to detect Megatron-Bridge version: {e}")

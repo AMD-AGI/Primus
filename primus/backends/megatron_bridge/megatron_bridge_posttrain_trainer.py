@@ -16,7 +16,7 @@ optimized for post-training workflows with smaller datasets and specialized
 training objectives.
 """
 
-from typing import Any 
+from typing import Any
 
 from primus.backends.megatron_bridge.config_utils import build_job_config_from_namespace
 from primus.backends.megatron_bridge.megatron_bridge_base_trainer import (
@@ -63,14 +63,11 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
             backend_args=backend_args,
         )
 
-
     def setup(self):
         """
         Setup phase for Megatron-Bridge post-training.
         """
         log_rank_0("MegatronBridgePosttrainTrainer.setup()")
-
-
 
     def init(self):
         """
@@ -86,15 +83,7 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
         """
         log_rank_0("Initializing Megatron-Bridge post-training components...")
 
-        # Get ConfigContainer from backend_args (attached by adapter)
-        # This avoids complex namespace→dict→ConfigContainer conversion
-        if hasattr(self.backend_args, '_config_container'):
-            self.cfg_container = self.backend_args._config_container
-            log_rank_0("Using ConfigContainer from adapter (recipe + user overrides)")
-        else:
-            # Fallback: convert from namespace (should not happen with current implementation)
-            log_rank_0("Warning: ConfigContainer not found in backend_args, using fallback conversion")
-            self.cfg_container = build_job_config_from_namespace(self.module_config, self.backend_args)
+        self.cfg_container = build_job_config_from_namespace(self.backend_args)
 
         log_rank_0("Post-training initialization completed")
 
@@ -118,6 +107,8 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
             # Execute post-training based on configuration
             from megatron.bridge.training.finetune import finetune
             from megatron.bridge.training.vlm_step import forward_step
+
+            log_rank_0(f"ConfigContainer: {self.cfg_container}")
             finetune(self.cfg_container, forward_step_func=forward_step)
 
         except Exception as e:

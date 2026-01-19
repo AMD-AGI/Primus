@@ -22,10 +22,10 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 from primus.core.utils.yaml_utils import dict_to_nested_namespace
-from primus.modules.module_utils import log_rank_0
+from primus.modules.module_utils import log_dict_aligned, log_rank_0
 
 
-def build_job_config_from_namespace(module_config: SimpleNamespace, backend_args: SimpleNamespace) -> Any:
+def build_job_config_from_namespace(backend_args: SimpleNamespace) -> Any:
     """
     Convert a nested SimpleNamespace to Megatron-Bridge's ConfigContainer.
 
@@ -47,6 +47,8 @@ def build_job_config_from_namespace(module_config: SimpleNamespace, backend_args
     """
     from megatron.bridge.training.config import ConfigContainer
     from megatron.bridge.training.utils.config_utils import InstantiationMode
+
+    log_dict_aligned("Backend args", backend_args)
 
     # Step 1: Convert namespace to dict (recipe already loaded and merged in ArgBuilder)
     cfg_dict = namespace_to_dict(backend_args)
@@ -71,7 +73,7 @@ def build_job_config_from_namespace(module_config: SimpleNamespace, backend_args
     except Exception as e:
         log_rank_0(f"Warning: Failed to create ConfigContainer with LENIENT mode: {e}")
         log_rank_0("Falling back to direct instantiation...")
-        
+
         # Fallback: remove _target_ and try direct instantiation
         cfg_dict.pop("_target_", None)
         config_container = _dict_to_dataclass(ConfigContainer, cfg_dict)
@@ -97,14 +99,14 @@ def load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
 
     Parameter Filtering:
         The function intelligently filters which ns attributes to pass to recipe:
-        
+
         NOT passed to recipe (metadata):
             - recipe, flavor, recipe_kwargs, primus
-        
+
         NOT passed to recipe (ConfigContainer fields for later merging):
             - train, model, optimizer, scheduler, dataset, logger, tokenizer, checkpoint
             - ddp, dist, ft, profiling, comm_overlap, mixed_precision, etc.
-        
+
         PASSED to recipe (simple recipe parameters):
             - hf_path, peft, tensor_model_parallel_size, pipeline_model_parallel_size
             - train_iters, global_batch_size, micro_batch_size, seq_length
@@ -159,33 +161,52 @@ def load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
         sig = inspect.signature(recipe_func)
         # Recipe functions use **kwargs, so we need to check if it accepts **kwargs
         accepts_var_keyword = any(
-            param.kind == inspect.Parameter.VAR_KEYWORD 
-            for param in sig.parameters.values()
+            param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()
         )
-        
+
         # Get explicit parameter names (excluding **kwargs)
         explicit_params = {
-            name for name, param in sig.parameters.items()
+            name
+            for name, param in sig.parameters.items()
             if param.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
         }
-        
+
         # Convert ns to dict
         ns_dict = namespace_to_dict(ns)
-        
+
         # Recipe metadata that should never be passed to recipe function
         recipe_metadata = ["recipe", "flavor", "recipe_kwargs", "primus"]
-        
+
         # ConfigContainer fields that should not be passed to recipe (they're for merging later)
         # These are complex objects that recipe functions don't accept as input
         container_fields = [
-            "_target_", "rng", "rerun_state_machine", "train", "model", 
-            "optimizer", "ddp", "scheduler", "dataset", "logger", "tokenizer", 
-            "checkpoint", "dist", "ft", "straggler", "nvrx_straggler", 
-            "profiling", "comm_overlap", "mixed_precision", "tensor_inspect", 
-            "inprocess_restart", "trainable", "sink_level", "file_sink_level", 
-            "stderr_sink_level"
+            "_target_",
+            "rng",
+            "rerun_state_machine",
+            "train",
+            "model",
+            "optimizer",
+            "ddp",
+            "scheduler",
+            "dataset",
+            "logger",
+            "tokenizer",
+            "checkpoint",
+            "dist",
+            "ft",
+            "straggler",
+            "nvrx_straggler",
+            "profiling",
+            "comm_overlap",
+            "mixed_precision",
+            "tensor_inspect",
+            "inprocess_restart",
+            "trainable",
+            "sink_level",
+            "file_sink_level",
+            "stderr_sink_level",
         ]
-        
+
         # Only pass parameters that:
         # 1. Are not in recipe_metadata
         # 2. Are not in container_fields (these are for merging)
@@ -197,7 +218,7 @@ def load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
             # Pass if explicitly in signature or function accepts **kwargs
             if k in explicit_params or accepts_var_keyword:
                 recipe_kwargs[k] = v
-        
+
         if recipe_kwargs:
             log_rank_0(f"Recipe kwargs: {list(recipe_kwargs.keys())}")
 
@@ -212,7 +233,9 @@ def load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
         raise RuntimeError(f"Recipe loading failed: Cannot import '{full_module_path}'") from e
     except AttributeError as e:
         log_rank_0(f"Error: Recipe function not found: {e}")
-        raise RuntimeError(f"Recipe loading failed: Function '{function_name}' not found in '{full_module_path}'") from e
+        raise RuntimeError(
+            f"Recipe loading failed: Function '{function_name}' not found in '{full_module_path}'"
+        ) from e
     except Exception as e:
         log_rank_0(f"Error: Failed to load recipe: {e}")
         raise RuntimeError(f"Recipe loading failed: {full_module_path}.{function_name}()") from e

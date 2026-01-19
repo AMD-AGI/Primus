@@ -64,10 +64,11 @@ def run(args, overrides):
         # Post-training (SFT/alignment) currently runs via the new core runtime.
         # It expects a training module named "sft_trainer" in the experiment config.
         from primus.core.runtime.train_runtime import PrimusRuntime
-        from primus.core.utils.constant_vars import SFT_TRAINER
+
+        # from primus.core.utils.constant_vars import SFT_TRAINER
 
         runtime = PrimusRuntime(args=args)
-        runtime.run_train_module(module_name=SFT_TRAINER, overrides=overrides or [])
+        runtime.run_train_module(module_name="post_trainer", overrides=overrides or [])
     else:
         raise NotImplementedError(f"Unsupported train suite: {args.suite}")
 

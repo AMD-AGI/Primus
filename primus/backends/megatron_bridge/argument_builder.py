@@ -34,35 +34,35 @@ logger = logging.getLogger(__name__)
 def _filter_existing_keys(base: Dict[str, Any], updates: Dict[str, Any], path: str = "") -> Dict[str, Any]:
     """
     Filter updates dict to only include keys that exist in base dict with type checking.
-    
+
     Recursively filters nested dictionaries to ensure:
     1. Only existing keys are updated
     2. Type compatibility is maintained (warns on mismatch)
-    
+
     Args:
         base: Base dictionary (defines which keys are allowed and their types)
         updates: Updates dictionary (may contain keys not in base or wrong types)
         path: Current path in nested structure (for logging)
-    
+
     Returns:
         Filtered updates dict with only keys that exist in base and have matching types
     """
     filtered = {}
-    
+
     for key, value in updates.items():
         current_path = f"{path}.{key}" if path else key
-        
+
         if key not in base:
             # Skip keys that don't exist in base
             logger.debug(f"Ignoring unknown config key: {current_path}")
             continue
-        
+
         base_value = base[key]
-        
+
         # Type checking
         base_is_dict = isinstance(base_value, dict)
         value_is_dict = isinstance(value, dict)
-        
+
         if base_is_dict and value_is_dict:
             # Both are dicts, recursively filter
             filtered_nested = _filter_existing_keys(base_value, value, current_path)
@@ -90,9 +90,9 @@ def _filter_existing_keys(base: Dict[str, Any], updates: Dict[str, Any], path: s
             if value is not None and base_value is not None:
                 base_type = type(base_value)
                 value_type = type(value)
-                
+
                 # Allow numeric type conversions (int <-> float)
-                if (base_type in (int, float) and value_type in (int, float)):
+                if base_type in (int, float) and value_type in (int, float):
                     filtered[key] = value
                 elif base_type == value_type:
                     # Same type, allow update
@@ -109,7 +109,7 @@ def _filter_existing_keys(base: Dict[str, Any], updates: Dict[str, Any], path: s
             else:
                 # Allow None values to override
                 filtered[key] = value
-    
+
     return filtered
 
 
@@ -137,9 +137,7 @@ class MegatronBridgeArgBuilder:
 
     def __init__(self, module_config: SimpleNamespace):
         # Load Megatron-Bridge recipe configuration
-        # Store both ConfigContainer and its dict representation
-        self.config_container = load_recipe_config(module_config.params)
-        self.config = self.config_container.to_dict()
+        self.config = load_recipe_config(module_config.params).to_dict()
 
     # ------------------------------------------------------------------
     # Add values to the configuration
@@ -183,57 +181,57 @@ class MegatronBridgeArgBuilder:
 
         return copy.deepcopy(self.config)
 
-    def to_config_container(self) -> Any:
-        """
-        Produce the final Megatron-Bridge ConfigContainer with user overrides applied.
+    # def to_config_container(self) -> Any:
+    #     """
+    #     Produce the final Megatron-Bridge ConfigContainer with user overrides applied.
 
-        This method:
-        1. Starts with the recipe ConfigContainer
-        2. Applies user overrides from self.config (merged via update())
-        3. Returns updated ConfigContainer
+    #     This method:
+    #     1. Starts with the recipe ConfigContainer
+    #     2. Applies user overrides from self.config (merged via update())
+    #     3. Returns updated ConfigContainer
 
-        Returns:
-            ConfigContainer with recipe defaults + user overrides
-        """
-        from megatron.bridge.training.config import ConfigContainer
-        from megatron.bridge.training.utils.config_utils import InstantiationMode
+    #     Returns:
+    #         ConfigContainer with recipe defaults + user overrides
+    #     """
+    #     from megatron.bridge.training.config import ConfigContainer
+    #     from megatron.bridge.training.utils.config_utils import InstantiationMode
 
-        # Get the merged config dict
-        merged_dict = self.to_dict()
+    #     # Get the merged config dict
+    #     merged_dict = self.to_dict()
 
-        # Add _target_ field for from_dict()
-        merged_dict["_target_"] = "megatron.bridge.training.config.ConfigContainer"
+    #     # Add _target_ field for from_dict()
+    #     merged_dict["_target_"] = "megatron.bridge.training.config.ConfigContainer"
 
-        # Reconstruct ConfigContainer from merged dict
-        try:
-            config_container = ConfigContainer.from_dict(merged_dict, mode=InstantiationMode.LENIENT)
-        except Exception as e:
-            logger.warning(f"Failed to create ConfigContainer with LENIENT mode: {e}")
-            logger.warning("Falling back to direct dict merge on original ConfigContainer")
-            
-            # Fallback: use OmegaConf to merge
-            try:
-                from omegaconf import OmegaConf
-                from megatron.bridge.training.utils.omegaconf_utils import (
-                    apply_overrides,
-                    create_omegaconf_dict_config,
-                )
+    #     # Reconstruct ConfigContainer from merged dict
+    #     try:
+    #         config_container = ConfigContainer.from_dict(merged_dict, mode=InstantiationMode.LENIENT)
+    #     except Exception as e:
+    #         logger.warning(f"Failed to create ConfigContainer with LENIENT mode: {e}")
+    #         logger.warning("Falling back to direct dict merge on original ConfigContainer")
 
-                # Start with the original recipe ConfigContainer
-                config_container = self.config_container
-                
-                # Convert to OmegaConf
-                omega_cfg, excluded = create_omegaconf_dict_config(config_container)
-                
-                # Apply overrides
-                apply_overrides(config_container, merged_dict, excluded)
-            except Exception as e2:
-                logger.error(f"Failed to merge config with OmegaConf: {e2}")
-                # Last resort: return original recipe config
-                logger.warning("Returning original recipe ConfigContainer without user overrides")
-                config_container = self.config_container
+    #         # Fallback: use OmegaConf to merge
+    #         try:
+    #             from omegaconf import OmegaConf
+    #             from megatron.bridge.training.utils.omegaconf_utils import (
+    #                 apply_overrides,
+    #                 create_omegaconf_dict_config,
+    #             )
 
-        return config_container
+    #             # Start with the original recipe ConfigContainer
+    #             config_container = self.config_container
+
+    #             # Convert to OmegaConf
+    #             omega_cfg, excluded = create_omegaconf_dict_config(config_container)
+
+    #             # Apply overrides
+    #             apply_overrides(config_container, merged_dict, excluded)
+    #         except Exception as e2:
+    #             logger.error(f"Failed to merge config with OmegaConf: {e2}")
+    #             # Last resort: return original recipe config
+    #             logger.warning("Returning original recipe ConfigContainer without user overrides")
+    #             config_container = self.config_container
+
+    #     return config_container
 
     def to_namespace(self) -> SimpleNamespace:
         """
