@@ -58,52 +58,6 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
             backend_args=backend_args,
         )
 
-        # Log version and basic metadata
-        log_rank_0(f"Megatron-Bridge version: {type(self).detect_version()}")
-        log_rank_0(f"Model: {module_config.model or 'custom'}")
-        log_rank_0(f"Framework: {module_config.framework}")
-
-        # Log task type if available
-        task_type = getattr(self, "TASK_TYPE", "unknown")
-        if task_type != "unknown":
-            log_rank_0(f"Task: {task_type}")
-
-        # Check for recipe-based configuration
-        if hasattr(backend_args, "recipe") and backend_args.recipe:
-            log_rank_0(f"Using recipe: {backend_args.recipe}")
-
-        # Check for LoRA configuration
-        if hasattr(backend_args, "use_lora") and backend_args.use_lora:
-            log_rank_0("LoRA fine-tuning enabled")
-            if hasattr(backend_args, "lora_rank"):
-                log_rank_0(f"  LoRA rank: {backend_args.lora_rank}")
-            if hasattr(backend_args, "lora_alpha"):
-                log_rank_0(f"  LoRA alpha: {backend_args.lora_alpha}")
-
-        # Check for HuggingFace conversion
-        if hasattr(backend_args, "convert_from_hf") and backend_args.convert_from_hf:
-            log_rank_0("HuggingFace model conversion: enabled")
-            if hasattr(backend_args, "hf_model_name_or_path"):
-                log_rank_0(f"  Model: {backend_args.hf_model_name_or_path}")
-
         log_rank_0("=" * 80)
         log_rank_0("MegatronBridgeBaseTrainer initialized successfully")
         log_rank_0("=" * 80)
-
-    @classmethod
-    def detect_version(cls) -> str:
-        """
-        Detect Megatron-Bridge version.
-
-        Returns:
-            Version string (e.g., "0.3.0rc0") or "unknown" if detection fails
-        """
-        try:
-            from megatron.bridge.package_info import __version__
-
-            return __version__
-        except ImportError:
-            log_rank_0(
-                "Warning: Could not detect Megatron-Bridge version from package_info"
-            )
-            return "unknown"

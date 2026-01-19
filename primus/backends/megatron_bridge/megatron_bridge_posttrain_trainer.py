@@ -18,6 +18,7 @@ training objectives.
 
 from typing import Any, Optional
 
+from primus.backends.megatron_bridge.config_utils import build_job_config_from_namespace
 from primus.backends.megatron_bridge.megatron_bridge_base_trainer import (
     MegatronBridgeBaseTrainer,
 )
@@ -73,6 +74,7 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
         log_rank_0("MegatronBridgePosttrainTrainer.setup()")
 
 
+
     def init(self):
         """
         Initialize Megatron-Bridge post-training components.
@@ -86,6 +88,8 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
             - Distributed training setup
         """
         log_rank_0("Initializing Megatron-Bridge post-training components...")
+
+        self.cfg_container = build_job_config_from_namespace(self.backend_args) 
 
         log_rank_0("Post-training initialization completed")
 
