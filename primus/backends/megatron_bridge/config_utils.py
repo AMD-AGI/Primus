@@ -117,7 +117,16 @@ def build_job_config_from_namespace(backend_args: SimpleNamespace) -> Any:
     # Step 4: Use ConfigContainer.from_dict() with LENIENT mode
     # LENIENT mode allows extra keys and is more flexible during development
     try:
-        log_dict_aligned("Config dict", cfg_dict)
+        # Debug: check critical nested fields
+        if "scheduler" in cfg_dict:
+            log_rank_0(f"DEBUG: scheduler in cfg_dict: {type(cfg_dict['scheduler'])}")
+            if isinstance(cfg_dict["scheduler"], dict):
+                log_rank_0(f"DEBUG: scheduler has _target_: {cfg_dict['scheduler'].get('_target_')}")
+        if "peft" in cfg_dict:
+            log_rank_0(f"DEBUG: peft in cfg_dict: {type(cfg_dict['peft'])}")
+            if isinstance(cfg_dict["peft"], dict):
+                log_rank_0(f"DEBUG: peft has _target_: {cfg_dict['peft'].get('_target_')}")
+        
         config_container = ConfigContainer.from_dict(cfg_dict, mode=InstantiationMode.LENIENT)
         log_rank_0("ConfigContainer created successfully from namespace")
     except Exception as e:
