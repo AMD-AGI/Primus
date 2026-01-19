@@ -52,7 +52,7 @@ def build_job_config_from_namespace(ns: SimpleNamespace) -> Any:
 
     # Step 3: Merge recipe config with user config (user config has priority)
     if recipe_config is not None:
-        # Convert recipe ConfigContainer to dict
+        # Convert recipe ConfigContainer to dict and merge
         try:
             from omegaconf import OmegaConf
             from megatron.bridge.training.utils.omegaconf_utils import create_omegaconf_dict_config
@@ -65,7 +65,8 @@ def build_job_config_from_namespace(ns: SimpleNamespace) -> Any:
             cfg_dict = _deep_merge_dicts(recipe_dict, cfg_dict)
             log_rank_0("Merged recipe configuration with user overrides (user config has priority)")
         except Exception as e:
-            log_rank_0(f"Warning: Failed to merge recipe config: {e}. Using user config only.")
+            log_rank_0(f"Error: Failed to merge recipe config: {e}")
+            raise RuntimeError(f"Recipe merging failed: Cannot convert or merge recipe configuration") from e
 
     # Step 4: Extract and preserve Primus-specific configuration
     primus_config = cfg_dict.pop("primus", None)
@@ -106,13 +107,16 @@ def _load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
     Recipe format:
         ns.recipe: Model recipe path (e.g., "llama.llama3.llama3_8b")
         ns.flavor: Config flavor (e.g., "pretrain", "finetune")
-        Full function: megatron.bridge.recipes.{recipe}_{flavor}_config()
+        Full function: src.megatron.bridge.recipes.{recipe}_{flavor}_config()
 
     Args:
         ns: SimpleNamespace that may contain 'recipe' and 'flavor' attributes
 
     Returns:
-        ConfigContainer from recipe, or None if recipe not specified or loading fails
+        ConfigContainer from recipe, or None if recipe not specified
+
+    Raises:
+        RuntimeError: If recipe is specified but loading fails (import error, function not found, etc.)
     """
     recipe = getattr(ns, "recipe", None)
     flavor = getattr(ns, "flavor", None)
@@ -133,7 +137,7 @@ def _load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
         function_prefix = parts[-1]  # e.g., "llama3_8b"
 
         # Construct full module path
-        full_module_path = f"megatron.bridge.recipes.{module_path}"
+        full_module_path = f"src.megatron.bridge.recipes.{module_path}"
         
         # Construct function name: {function_prefix}_{flavor}_config
         function_name = f"{function_prefix}_{flavor}_config"
@@ -151,14 +155,14 @@ def _load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
         return config_container
 
     except ImportError as e:
-        log_rank_0(f"Warning: Failed to import recipe module '{recipe}': {e}")
-        return None
+        log_rank_0(f"Error: Failed to import recipe module '{recipe}': {e}")
+        raise RuntimeError(f"Recipe loading failed: Cannot import '{full_module_path}'") from e
     except AttributeError as e:
-        log_rank_0(f"Warning: Recipe function '{function_name}' not found in '{full_module_path}': {e}")
-        return None
+        log_rank_0(f"Error: Recipe function '{function_name}' not found in '{full_module_path}': {e}")
+        raise RuntimeError(f"Recipe loading failed: Function '{function_name}' not found in '{full_module_path}'") from e
     except Exception as e:
-        log_rank_0(f"Warning: Failed to load recipe configuration: {e}")
-        return None
+        log_rank_0(f"Error: Failed to load recipe configuration: {e}")
+        raise RuntimeError(f"Recipe loading failed for '{recipe}' with flavor '{flavor}'") from e
 
 
 def _deep_merge_dicts(base: dict, override: dict) -> dict:
