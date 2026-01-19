@@ -25,6 +25,55 @@ from primus.core.utils.yaml_utils import dict_to_nested_namespace
 from primus.modules.module_utils import log_dict_aligned, log_rank_0
 
 
+def filter_kwargs_by_signature(func: Any, kwargs_dict: dict[str, Any]) -> dict[str, Any]:
+    """
+    Filter kwargs dictionary to only include parameters accepted by the function.
+
+    This function inspects the target function's signature and returns a filtered
+    dictionary containing only the keyword arguments that the function can accept.
+
+    Args:
+        func: The function whose signature to check
+        kwargs_dict: Dictionary of potential keyword arguments to filter
+
+    Returns:
+        Filtered dictionary containing only parameters that:
+        - Match explicit parameter names in the function signature, OR
+        - Can be accepted if function has **kwargs
+
+    Example:
+        >>> def my_func(a: int, b: str, **kwargs): pass
+        >>> filter_kwargs_by_signature(my_func, {'a': 1, 'b': 'x', 'c': 3, 'd': 4})
+        {'a': 1, 'b': 'x', 'c': 3, 'd': 4}  # All accepted due to **kwargs
+
+        >>> def strict_func(a: int, b: str): pass
+        >>> filter_kwargs_by_signature(strict_func, {'a': 1, 'b': 'x', 'c': 3})
+        {'a': 1, 'b': 'x'}  # Only 'a' and 'b' accepted
+    """
+    # Get function signature
+    sig = inspect.signature(func)
+
+    # Check if function accepts **kwargs (VAR_KEYWORD)
+    accepts_var_keyword = any(
+        param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()
+    )
+
+    # Get explicit parameter names (excluding *args and **kwargs)
+    explicit_params = {
+        name
+        for name, param in sig.parameters.items()
+        if param.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
+    }
+
+    # Filter kwargs: include if explicitly in signature OR function accepts **kwargs
+    filtered = {}
+    for k, v in kwargs_dict.items():
+        if k in explicit_params or accepts_var_keyword:
+            filtered[k] = v
+
+    return filtered
+
+
 def build_job_config_from_namespace(backend_args: SimpleNamespace) -> Any:
     """
     Convert a nested SimpleNamespace to Megatron-Bridge's ConfigContainer.
@@ -160,20 +209,6 @@ def load_recipe_config(ns: SimpleNamespace) -> Any:
         module = importlib.import_module(full_module_path)
         recipe_func = getattr(module, function_name)
 
-        # Get function signature to determine accepted parameters
-        sig = inspect.signature(recipe_func)
-        # Recipe functions use **kwargs, so we need to check if it accepts **kwargs
-        accepts_var_keyword = any(
-            param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values()
-        )
-
-        # Get explicit parameter names (excluding **kwargs)
-        explicit_params = {
-            name
-            for name, param in sig.parameters.items()
-            if param.kind not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
-        }
-
         # Convert ns to dict
         ns_dict = namespace_to_dict(ns)
 
@@ -210,17 +245,13 @@ def load_recipe_config(ns: SimpleNamespace) -> Any:
             "stderr_sink_level",
         ]
 
-        # Only pass parameters that:
-        # 1. Are not in recipe_metadata
-        # 2. Are not in container_fields (these are for merging)
-        # 3. Either explicitly in function signature OR function accepts **kwargs
-        recipe_kwargs = {}
-        for k, v in ns_dict.items():
-            if k in recipe_metadata or k in container_fields:
-                continue
-            # Pass if explicitly in signature or function accepts **kwargs
-            if k in explicit_params or accepts_var_keyword:
-                recipe_kwargs[k] = v
+        # First filter: remove metadata and complex container fields
+        filtered_dict = {
+            k: v for k, v in ns_dict.items() if k not in recipe_metadata and k not in container_fields
+        }
+
+        # Second filter: only keep parameters accepted by function signature
+        recipe_kwargs = filter_kwargs_by_signature(recipe_func, filtered_dict)
 
         if recipe_kwargs:
             log_rank_0(f"Recipe kwargs: {list(recipe_kwargs.keys())}")
