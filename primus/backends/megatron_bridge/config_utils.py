@@ -69,13 +69,6 @@ def build_job_config_from_namespace(backend_args: SimpleNamespace) -> Any:
     # LENIENT mode allows extra keys and is more flexible during development
     try:
         log_dict_aligned("Config dict", cfg_dict)
-        
-        # Debug: Check critical fields before instantiation
-        log_rank_0(f"DEBUG: scheduler type = {type(cfg_dict.get('scheduler'))}")
-        log_rank_0(f"DEBUG: scheduler value = {cfg_dict.get('scheduler')}")
-        if cfg_dict.get('scheduler') is not None:
-            log_rank_0(f"DEBUG: scheduler._target_ = {cfg_dict['scheduler'].get('_target_')}")
-        
         config_container = ConfigContainer.from_dict(cfg_dict, mode=InstantiationMode.LENIENT)
         log_rank_0("ConfigContainer created successfully from namespace")
     except Exception as e:
@@ -94,7 +87,7 @@ def build_job_config_from_namespace(backend_args: SimpleNamespace) -> Any:
     return config_container
 
 
-def load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
+def load_recipe_config(ns: SimpleNamespace) -> Any:
     """
     Load Megatron-Bridge recipe configuration if specified.
 
@@ -143,16 +136,18 @@ def load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
         ns: SimpleNamespace containing recipe specification and user configuration
 
     Returns:
-        ConfigContainer from recipe, or None if recipe not specified
+        ConfigContainer from recipe (guaranteed non-None)
 
     Raises:
-        RuntimeError: If recipe is specified but loading fails (import error, function not found, etc.)
+        AssertionError: If recipe or flavor is not specified (both are mandatory)
+        RuntimeError: If recipe loading fails (import error, function not found, etc.)
     """
     recipe = getattr(ns, "recipe", None)
     flavor = getattr(ns, "flavor", None)
 
-    if not recipe or not flavor:
-        return None
+    # Recipe and flavor are mandatory for Megatron-Bridge
+    assert recipe, "Recipe must be specified for Megatron-Bridge backend"
+    assert flavor, "Flavor must be specified for Megatron-Bridge backend"
 
     try:
         # Construct full module path and function name
