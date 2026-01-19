@@ -27,6 +27,9 @@ ENV PRIMUS_TURBO_FRAMEWORK=${PRIMUS_TURBO_FRAMEWORK}
 
 ENV PATH="/opt/ompi/bin:/opt/ompi/sbin:${PATH}" 
 ENV LD_LIBRARY_PATH="/opt/ompi/lib:${LD_LIBRARY_PATH}" 
+ENV GPU_ARCHS="gfx942;gfx950"
+ENV PYTORCH_ROCM_ARCH="gfx942;gfx950"
+ENV HCC_AMDGPU_TARGET="gfx942,gfx950"
 # ---------------------------------------------------------------------------
 # Install rocSHMEM
 # ---------------------------------------------------------------------------
@@ -46,11 +49,6 @@ RUN rm -rf /opt/rocSHMEM
 # ---------------------------------------------------------------------------
 # Install Primus-Turbo
 # ---------------------------------------------------------------------------
-ENV GPU_ARCHS="gfx942;gfx950"
-ENV PYTORCH_ROCM_ARCH="gfx942;gfx950"
-ENV HCC_AMDGPU_TARGET="gfx942,gfx950"
-    
-
 RUN cd /opt && \
     git clone https://github.com/AMD-AGI/Primus-Turbo.git && \
     cd Primus-Turbo && \
