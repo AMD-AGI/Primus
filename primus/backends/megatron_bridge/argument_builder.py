@@ -36,22 +36,46 @@ def _load_megatron_bridge_defaults() -> Dict[str, Any]:
     """
     Load Megatron-Bridge's default configuration values as a dictionary.
 
-    Note: Unlike TorchTitan's JobConfig which has default values for all fields,
-    Megatron-Bridge's ConfigContainer requires 8 mandatory arguments (train, model,
-    optimizer, scheduler, dataset, logger, tokenizer, checkpoint).
-
-    Therefore, we return an empty dict here. The actual configuration should be
-    provided by:
-    1. User's YAML configuration file
-    2. Megatron-Bridge recipe files (if specified)
-    3. Primus CLI arguments
+    Note: ConfigContainer requires 8 mandatory keyword-only arguments, but each
+    of these config classes can be instantiated with default values using **{}.
+    We create minimal default instances for each required field.
 
     Returns:
-        Empty dictionary (configuration comes from user YAML/recipe)
+        Dictionary of default configuration values from Megatron-Bridge
     """
-    # ConfigContainer requires all fields, cannot instantiate without args
-    # User configuration from YAML will provide all necessary values
-    return {}
+    try:
+        from megatron.bridge.training.config import (
+            CheckpointConfig,
+            ConfigContainer,
+            FinetuningDatasetConfig,
+            LoggerConfig,
+            OptimizerConfig,
+            SchedulerConfig,
+            TokenizerConfig,
+            TrainingConfig,
+        )
+        from megatron.bridge.models import GPTModelProvider
+
+        # Create minimal default instances for all required fields
+        # Each config class has default values for its fields
+        config_container = ConfigContainer(
+            train=TrainingConfig(),
+            model=GPTModelProvider(),
+            optimizer=OptimizerConfig(),
+            scheduler=SchedulerConfig(),
+            dataset=FinetuningDatasetConfig(),
+            logger=LoggerConfig(),
+            tokenizer=TokenizerConfig(),
+            checkpoint=CheckpointConfig(),
+        )
+
+        return config_container.to_dict()
+    except ImportError as e:
+        logger.warning(
+            f"Failed to import Megatron-Bridge config classes: {e}. "
+            "Returning empty dict. Make sure Megatron-Bridge is installed."
+        )
+        return {}
 
 
 # ------------------------------------------------------------
