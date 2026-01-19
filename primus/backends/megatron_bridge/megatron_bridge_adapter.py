@@ -118,11 +118,13 @@ class MegatronBridgeAdapter(BackendAdapter):
         Detect Megatron-Bridge version for logging and patching.
 
         Returns:
-            Version string (e.g., "0.2.2")
+            Version string (e.g., "0.3.0rc0")
 
         Raises:
             RuntimeError: If version cannot be detected
         """
-        # Get trainer class and call its detect_version classmethod
-        TrainerClass = self.load_trainer_class()
-        return TrainerClass.detect_version()
+        try:
+            from megatron.bridge.package_info import __version__
+            return __version__
+        except ImportError as e:
+            raise RuntimeError(f"Failed to detect Megatron-Bridge version: {e}")

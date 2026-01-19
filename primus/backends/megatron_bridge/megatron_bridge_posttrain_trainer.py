@@ -85,35 +85,14 @@ class MegatronBridgePosttrainTrainer(BaseTrainer):
         Detect Megatron-Bridge version.
 
         Returns:
-            Version string (e.g., "0.2.2")
-
-        Raises:
-            RuntimeError: If version cannot be detected
+            Version string (e.g., "0.3.0rc0") or "unknown" if detection fails
         """
         try:
-            # Try to get version from megatron.bridge package
-            import importlib.metadata as importlib_metadata
+            from megatron.bridge.package_info import __version__
 
-            try:
-                version = importlib_metadata.version("megatron-bridge")
-                return version
-            except importlib_metadata.PackageNotFoundError:
-                # Package not installed, try to read from source
-                pass
-
-            # Fallback: try to read from package info in source
-            try:
-                from megatron.bridge import __version__
-
-                return __version__
-            except (ImportError, AttributeError):
-                pass
-
-            # If all else fails, return unknown
-            return "unknown"
-
-        except Exception as e:
-            log_rank_0(f"Warning: Could not detect Megatron-Bridge version: {e}")
+            return __version__
+        except ImportError:
+            log_rank_0("Warning: Could not detect Megatron-Bridge version from package_info")
             return "unknown"
 
     def setup(self):
