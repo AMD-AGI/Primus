@@ -71,9 +71,10 @@ def build_job_config_from_namespace(ns: SimpleNamespace) -> Any:
     # Step 4: Extract and preserve Primus-specific configuration
     primus_config = cfg_dict.pop("primus", None)
 
-    # Remove recipe/flavor from cfg_dict as they are not part of ConfigContainer
+    # Remove recipe-related fields from cfg_dict as they are not part of ConfigContainer
     cfg_dict.pop("recipe", None)
     cfg_dict.pop("flavor", None)
+    cfg_dict.pop("recipe_kwargs", None)
 
     # Step 5: Add _target_ field required by Megatron-Bridge's from_dict
     # This tells the instantiate() function which class to create
@@ -107,15 +108,27 @@ def _load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
     Recipe format:
         ns.recipe: Module path (e.g., "qwen.qwen3")
         ns.flavor: Function name (e.g., "qwen3_32b_finetune_config")
-        Full function: megatron.bridge.recipes.{recipe}.{flavor}()
+        ns.recipe_kwargs: Optional dict/namespace with recipe-specific parameters
+        Full function: megatron.bridge.recipes.{recipe}.{flavor}(**recipe_kwargs)
 
-    Example:
+    Example 1 (basic):
         ns.recipe = "qwen.qwen3"
         ns.flavor = "qwen3_32b_finetune_config"
         → Calls megatron.bridge.recipes.qwen.qwen3.qwen3_32b_finetune_config()
 
+    Example 2 (with kwargs):
+        ns.recipe = "qwen.qwen3"
+        ns.flavor = "qwen3_32b_finetune_config"
+        ns.recipe_kwargs = {
+            "hf_path": "Qwen/Qwen3-32B",
+            "tensor_model_parallel_size": 8,
+            "pipeline_model_parallel_size": 2,
+            "peft": "lora",
+        }
+        → Calls megatron.bridge.recipes.qwen.qwen3.qwen3_32b_finetune_config(**kwargs)
+
     Args:
-        ns: SimpleNamespace that may contain 'recipe' and 'flavor' attributes
+        ns: SimpleNamespace that may contain 'recipe', 'flavor', and 'recipe_kwargs'
 
     Returns:
         ConfigContainer from recipe, or None if recipe not specified
@@ -140,8 +153,17 @@ def _load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
         module = importlib.import_module(full_module_path)
         recipe_func = getattr(module, function_name)
 
-        # Call recipe function to get ConfigContainer
-        config_container = recipe_func()
+        # Extract recipe kwargs if provided
+        # User can provide recipe-specific arguments via ns.recipe_kwargs
+        recipe_kwargs = getattr(ns, "recipe_kwargs", {})
+        if isinstance(recipe_kwargs, SimpleNamespace):
+            recipe_kwargs = namespace_to_dict(recipe_kwargs)
+        
+        if recipe_kwargs:
+            log_rank_0(f"Recipe kwargs: {list(recipe_kwargs.keys())}")
+
+        # Call recipe function to get ConfigContainer with kwargs
+        config_container = recipe_func(**recipe_kwargs)
         log_rank_0(f"Successfully loaded recipe: {full_module_path}.{function_name}()")
 
         return config_container
