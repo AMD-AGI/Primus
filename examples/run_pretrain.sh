@@ -177,7 +177,8 @@ export NCCL_CHECKS_DISABLE=1
 if [ "$USING_AINIC" == "1" ]; then
     export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
     export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
-    export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi-4.1.6"}
+    export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi"}
+    export NCCL_NET_PLUGIN=librccl-anp.so
 
     LOG_INFO_RANK0 "Using AINIC"
     LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
@@ -198,16 +199,8 @@ if [ "$USING_AINIC" == "1" ]; then
     export NCCL_IGNORE_CPU_AFFINITY=1
     export NCCL_IB_QPS_PER_CONNECTION=1
 
-    export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
-    # export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
-    # if [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
-    #     export LD_PRELOAD="${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0"
-    # elif [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
-    #     export LD_PRELOAD="${ANP_HOME_DIR}/build/librccl-anp.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0"
-    # else
-    #     echo "ERROR: Neither librccl-net.so nor librccl-anp.so was found in ${ANP_HOME_DIR}/build"
-    #     exit 1
-    # fi
+    export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib:$LD_LIBRARY_PATH
+
 else
     export NCCL_IB_GID_INDEX=3
 fi
