@@ -293,12 +293,13 @@ class PrimusParser(object):
     def get_model_format(self, framework: str):
         map = {
             "megatron": "megatron",
+            "megatron_bridge": "megatron_bridge",
             "light-megatron": "megatron",
             "torchtitan": "torchtitan",
             "maxtext": "maxtext",
         }
-        assert framework in map, f"Invalid module framework: {framework}."
-        return map[framework]
+        # If framework not in map, return framework itself as fallback
+        return map.get(framework, framework)
 
     def parse_trainer_module(self, module_name: str):
         module = yaml_utils.get_value_by_key(self.exp.modules, module_name)
