@@ -25,19 +25,22 @@ from primus.core.utils.yaml_utils import dict_to_nested_namespace
 from primus.modules.module_utils import log_rank_0
 
 
-def build_job_config_from_namespace(ns: SimpleNamespace) -> Any:
+def build_job_config_from_namespace(module_config: SimpleNamespace, backend_args: SimpleNamespace) -> Any:
     """
     Convert a nested SimpleNamespace to Megatron-Bridge's ConfigContainer.
 
-    This function properly handles:
-        1. Loading recipe configuration if specified (ns.recipe + ns.flavor)
-        2. Merging recipe config with user overrides (user config has higher priority)
-        3. Converting SimpleNamespace to dict recursively
-        4. Using ConfigContainer.from_dict() with proper InstantiationMode
-        5. Preserving Primus-specific configurations under `primus` attribute
+    Note: Recipe loading and merging is already done in MegatronBridgeArgBuilder,
+    so backend_args already contains the merged configuration (recipe + user overrides).
+
+    This function handles:
+        1. Converting SimpleNamespace to dict recursively
+        2. Using ConfigContainer.from_dict() with proper InstantiationMode
+        3. Preserving Primus-specific configurations under `primus` attribute
 
     Args:
-        ns: Nested SimpleNamespace with Megatron-Bridge configuration
+        module_config: Module configuration (for reference, not used currently)
+        backend_args: Nested SimpleNamespace with Megatron-Bridge configuration
+                      (already merged with recipe if specified)
 
     Returns:
         ConfigContainer dataclass instance (potentially extended with Primus fields)
@@ -45,31 +48,10 @@ def build_job_config_from_namespace(ns: SimpleNamespace) -> Any:
     from megatron.bridge.training.config import ConfigContainer
     from megatron.bridge.training.utils.config_utils import InstantiationMode
 
-    # Step 1: Load recipe configuration if specified
-    recipe_config = _load_recipe_config(ns)
+    # Step 1: Convert namespace to dict (recipe already loaded and merged in ArgBuilder)
+    cfg_dict = namespace_to_dict(backend_args)
 
-    # Step 2: Convert namespace to dict
-    cfg_dict = namespace_to_dict(ns)
-
-    # Step 3: Merge recipe config with user config (user config has priority)
-    if recipe_config is not None:
-        # Convert recipe ConfigContainer to dict and merge
-        try:
-            from omegaconf import OmegaConf
-            from megatron.bridge.training.utils.omegaconf_utils import create_omegaconf_dict_config
-
-            # Convert recipe ConfigContainer to OmegaConf DictConfig
-            recipe_omega, excluded_fields = create_omegaconf_dict_config(recipe_config)
-            recipe_dict = OmegaConf.to_container(recipe_omega, resolve=True)
-
-            # Merge: recipe as base, user overrides on top
-            cfg_dict = _deep_merge_dicts(recipe_dict, cfg_dict)
-            log_rank_0("Merged recipe configuration with user overrides (user config has priority)")
-        except Exception as e:
-            log_rank_0(f"Error: Failed to merge recipe config: {e}")
-            raise RuntimeError(f"Recipe merging failed: Cannot convert or merge recipe configuration") from e
-
-    # Step 4: Extract and preserve Primus-specific configuration
+    # Step 2: Extract and preserve Primus-specific configuration
     primus_config = cfg_dict.pop("primus", None)
 
     # Remove recipe-related fields from cfg_dict as they are not part of ConfigContainer
@@ -77,11 +59,11 @@ def build_job_config_from_namespace(ns: SimpleNamespace) -> Any:
     cfg_dict.pop("flavor", None)
     cfg_dict.pop("recipe_kwargs", None)
 
-    # Step 5: Add _target_ field required by Megatron-Bridge's from_dict
+    # Step 3: Add _target_ field required by Megatron-Bridge's from_dict
     # This tells the instantiate() function which class to create
     cfg_dict["_target_"] = "megatron.bridge.training.config.ConfigContainer"
 
-    # Step 6: Use ConfigContainer.from_dict() with LENIENT mode
+    # Step 4: Use ConfigContainer.from_dict() with LENIENT mode
     # LENIENT mode allows extra keys and is more flexible during development
     try:
         config_container = ConfigContainer.from_dict(cfg_dict, mode=InstantiationMode.LENIENT)
@@ -94,7 +76,7 @@ def build_job_config_from_namespace(ns: SimpleNamespace) -> Any:
         cfg_dict.pop("_target_", None)
         config_container = _dict_to_dataclass(ConfigContainer, cfg_dict)
 
-    # Step 7: Attach Primus configuration as a dynamic attribute if present
+    # Step 5: Attach Primus configuration as a dynamic attribute if present
     if primus_config:
         config_container.primus = dict_to_nested_namespace(primus_config)
         log_rank_0(f"Attached Primus configuration to ConfigContainer ({len(primus_config)} top-level keys)")
@@ -102,7 +84,7 @@ def build_job_config_from_namespace(ns: SimpleNamespace) -> Any:
     return config_container
 
 
-def _load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
+def load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
     """
     Load Megatron-Bridge recipe configuration if specified.
 
@@ -234,30 +216,6 @@ def _load_recipe_config(ns: SimpleNamespace) -> Optional[Any]:
     except Exception as e:
         log_rank_0(f"Error: Failed to load recipe: {e}")
         raise RuntimeError(f"Recipe loading failed: {full_module_path}.{function_name}()") from e
-
-
-def _deep_merge_dicts(base: dict, override: dict) -> dict:
-    """
-    Deep merge two dictionaries, with override taking priority.
-
-    Args:
-        base: Base dictionary (lower priority)
-        override: Override dictionary (higher priority)
-
-    Returns:
-        Merged dictionary with override values taking precedence
-    """
-    result = base.copy()
-
-    for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
-            # Recursively merge nested dicts
-            result[key] = _deep_merge_dicts(result[key], value)
-        else:
-            # Override takes priority
-            result[key] = value
-
-    return result
 
 
 def namespace_to_dict(obj: Any) -> Any:
