@@ -6,13 +6,13 @@
 ###############################################################################
 
 
+import time
 import json
 
 from primus.backends.megatron.training.git_metadata import (
     collect_git_metadata,
     get_env_variables,
 )
-import time
 
 from primus.modules.module_utils import debug_rank_0
 
