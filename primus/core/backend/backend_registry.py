@@ -174,12 +174,27 @@ class BackendRegistry:
             """
             Normalize, validate existence, insert into sys.path (if needed),
             and return the normalized path. On failure, raises via assert.
+            
+            If the path contains a 'src' subdirectory, also add it to sys.path.
+            This is common for packages like Megatron-Bridge that have:
+                megatron-bridge/
+                └── src/
+                    └── megatron/
+                        └── bridge/
             """
             norm_path = os.path.abspath(os.path.normpath(str(path)))
             if os.path.exists(norm_path):
+                # Add the main path to sys.path
                 if norm_path not in sys.path:
                     sys.path.insert(0, norm_path)
                     log_rank_0(f"sys.path.insert → {norm_path}")
+                
+                # Check if there's a 'src' subdirectory and add it too
+                src_path = os.path.join(norm_path, "src")
+                if os.path.isdir(src_path) and src_path not in sys.path:
+                    sys.path.insert(0, src_path)
+                    log_rank_0(f"sys.path.insert → {src_path} (src subdirectory)")
+                
                 return norm_path
 
             assert False, error_msg
