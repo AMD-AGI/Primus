@@ -1,0 +1,116 @@
+work_group: ${PRIMUS_TEAM:tas}
+user_name: ${PRIMUS_USER:qyy}
+exp_name: ${PRIMUS_EXP_NAME:gpt_oss_20B-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # model to run
+    model: ${PRIMUS_MODEL:gpt_oss_20B}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_GPT_OSS_20B_Pretrain"
+      stderr_sink_level: DEBUG
+
+      # debug
+      moe_router_force_load_balancing: true
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # mla false
+      # multi_latent_attention: false
+      # # attn uses "bshd" layout, enabling AMD optimized kernel.
+      # apply_rope_fusion: true
+
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: false
+
+      # Sink attention (PR 208) - GPT-OSS style learned sinks
+      # Reference: gpt-oss/gpt_oss/triton/attention.py
+      use_sink_attention: true
+      # Note: sliding window not yet supported by aiter Triton backend
+      # Set to 0 to disable, or wait for backend support
+      sink_sliding_window: 0  # gpt-oss default is 128, but disabled for now
+      sink_window_even_layers_only: true  # apply sliding window only to even layers
+
+      apply_rope_fusion: true
+
+      # profile
+      profile: true
+      use_pytorch_profiler: true
+      profile_step_end: 7
+      profile_step_start: 6
+
+      # hyber parameters
+      train_iters: 10
+      micro_batch_size: 8
+      global_batch_size: 512
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+
+      # data
+      mock_data: true
+      # train_data_path: data
+      train_data_path: ${TOKENIZED_DATA_PATH:null}
+      valid_data_path: null
+      test_data_path: null
+
+      # fusion
+      # 20250321: need latest megatron docker image
+      moe_permute_fusion: false
+      # fused wgrad gemm and accumulation
+      gradient_accumulation_fusion: false
+      # recommend set `false` in fp8
+      moe_use_legacy_grouped_gemm: false
+      # fused topk router with aux score
+      moe_use_fused_router_with_aux_score: false
+      # pad 192/128 for deepseek attention
+      # fused_padded_mla_attention: false
+
+      multi_latent_attention: false
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      cross_entropy_loss_fusion: true
+
+      fp8: hybrid
+      # enable_primus_turbo: true
+      # use_turbo_attention: true
+      # use_turbo_grouped_mlp: false
+      # enable_primus_turbo: false
+      # enable_turbo_attention_float8 : false
+      # enable_turbo_gemm_float8 : false

@@ -7,6 +7,14 @@ use_turbo_parallel_linear: false
 use_turbo_grouped_mlp: false
 moe_use_fused_router_with_aux_score: false
 
+# Sink attention settings (PR 208) - GPT-OSS style learned sinks
+# Reference: gpt-oss/gpt_oss/triton/attention.py
+use_sink_attention: false
+# Sliding window size for sink attention (gpt-oss uses 128)
+sink_sliding_window: 0
+# Whether to apply sliding window only to even layers (gpt-oss pattern)
+sink_window_even_layers_only: true
+
 # inner features flags
 enable_turbo_attention_float8 : false
 
