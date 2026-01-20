@@ -37,8 +37,10 @@ gemm_fp8_compiled = None
 
 
 def _gemm_fp8_impl(a, b):
-    """FP8 GEMM implementation using torchao."""
-    return matmul_with_hp_or_float8_args.apply(a, b.t(), DEFAULT_MM_CONFIG, DEFAULT_CONFIG)
+    """FP8 GEMM implementation using torchao (assumes b is already transposed if needed)."""
+    # Note: Unlike turbo, we handle transpose outside this function
+    # so we just do a @ b directly without .t()
+    return matmul_with_hp_or_float8_args.apply(a, b, DEFAULT_MM_CONFIG, DEFAULT_CONFIG)
 
 
 def get_compiled_gemm_fp8():
