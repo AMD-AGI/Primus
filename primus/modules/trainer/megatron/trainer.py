@@ -1153,6 +1153,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 if args.rank == (args.world_size - 1) and mlflow_status is not None:
                     end_mlflow_run(status=mlflow_status, termination_reason=termination_reason)
             except Exception:
+                # Best-effort: MLflow finalization must never mask the original training error.
                 pass
 
             try:
@@ -1160,6 +1161,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 if dist.is_initialized():
                     dist.destroy_process_group()
             except Exception:
+                # Best-effort cleanup: ignore teardown errors to avoid masking the original failure.
                 pass
 
     def train(
