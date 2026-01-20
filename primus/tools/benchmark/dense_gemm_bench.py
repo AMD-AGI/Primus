@@ -207,21 +207,28 @@ def run_gemm_benchmark(args):
 
     # Check FP8 matmul support early (before running expensive benchmarks)
     if args.dtype.startswith("fp8"):
-        from primus.tools.benchmark.gemm_bench import check_fp8_matmul_support
+        from primus.tools.benchmark.gemm_bench import (
+            TORCHAO_AVAILABLE,
+            check_fp8_matmul_support,
+        )
 
-        if not check_fp8_matmul_support(dtype):
+        fp8_supported, fp8_method = check_fp8_matmul_support(dtype)
+
+        if not fp8_supported:
             print(f"\n{'='*70}")
             print(f"⚠️  FP8 MATMUL NOT SUPPORTED")
             print(f"{'='*70}")
             print(f"PyTorch defines FP8 types but matmul kernels are not implemented.")
             print(f"")
             print(f"Possible reasons:")
-            print(f"  • Your PyTorch build lacks FP8 kernel support")
+            print(f"  • torchao not installed (recommended for FP8)")
+            print(f"  • Your PyTorch build lacks native FP8 kernel support")
             print(f"  • Your GPU/driver doesn't support FP8 (requires MI300X or H100+)")
             print(f"  • ROCm/CUDA version is too old")
             print(f"")
-            print(f"Recommendation:")
-            print(f"  Use --dtype bf16 or --dtype fp16 instead")
+            print(f"Recommendations:")
+            print(f"  1. Install torchao: pip install torchao")
+            print(f"  2. Or use --dtype bf16 / --dtype fp16 instead")
             print(f"")
             print(f"Environment info:")
             print(f"  PyTorch version: {torch_mod.__version__}")
@@ -229,9 +236,15 @@ def run_gemm_benchmark(args):
                 f"  Device: {torch_mod.cuda.get_device_name(0) if torch_mod.cuda.is_available() else 'N/A'}"
             )
             print(f"  Has FP8 types: {hasattr(torch_mod, 'float8_e4m3fn')}")
+            print(f"  torchao available: {TORCHAO_AVAILABLE}")
             print(f"  FP8 matmul works: False")
             print(f"{'='*70}\n")
             raise RuntimeError(f"FP8 dtype '{args.dtype}' is not supported in current environment")
+        else:
+            method_name = {"torchao": "torchao (recommended)", "native": "native PyTorch"}.get(
+                fp8_method, fp8_method
+            )
+            print(f"[INFO] FP8 support detected: using {method_name}")
 
     shape_defs = [
         (

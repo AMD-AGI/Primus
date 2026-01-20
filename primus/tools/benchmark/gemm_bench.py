@@ -15,30 +15,72 @@ from primus.tools.utils import gather_records, get_current_device, is_rank_0
 
 CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
 
+# Try to import torchao for FP8 support
+try:
+    from torchao.float8 import Float8LinearConfig
+    from torchao.float8.float8_linear import matmul_with_hp_or_float8_args
+    from torchao.float8.float8_training_tensor import LinearMMConfig, ScaledMMConfig
+
+    TORCHAO_AVAILABLE = True
+
+    # Default config for FP8 GEMM (use_fast_accum=False for fp32 accumulation)
+    DEFAULT_MM_CONFIG = LinearMMConfig(
+        ScaledMMConfig(emulate=False, use_fast_accum=False, fp8_output=False, pad_inner_dim=False),
+        ScaledMMConfig(emulate=False, use_fast_accum=False, fp8_output=False, pad_inner_dim=False),
+        ScaledMMConfig(emulate=False, use_fast_accum=False, fp8_output=False, pad_inner_dim=False),
+    )
+    DEFAULT_CONFIG = Float8LinearConfig()
+except ImportError:
+    TORCHAO_AVAILABLE = False
+
 
 def check_fp8_matmul_support(dtype):
     """
     Check if FP8 matmul is actually supported in the current PyTorch/backend.
 
+    Checks two paths:
+    1. torchao FP8 support (recommended, more robust)
+    2. Native PyTorch FP8 matmul (fallback)
+
     Returns:
-        bool: True if FP8 matmul works, False otherwise
+        tuple: (supported: bool, method: str) where method is 'torchao', 'native', or 'none'
     """
     if not hasattr(torch, "float8_e4m3fn"):
-        return False
+        return False, "none"
 
     if dtype not in [torch.float8_e4m3fn, torch.float8_e5m2]:
-        return True  # Not FP8, always supported
+        return True, "native"  # Not FP8, always supported
 
+    # Try torchao first (recommended)
+    if TORCHAO_AVAILABLE:
+        try:
+            device = get_current_device()
+            a = torch.randn(2, 2, device=device, dtype=torch.bfloat16, requires_grad=False)
+            b = torch.randn(2, 2, device=device, dtype=torch.bfloat16, requires_grad=False)
+            with torch.inference_mode():
+                _ = matmul_with_hp_or_float8_args.apply(a, b.t(), DEFAULT_MM_CONFIG, DEFAULT_CONFIG)
+            return True, "torchao"
+        except (NotImplementedError, RuntimeError, Exception):
+            pass  # Fall through to native check
+
+    # Try native PyTorch FP8 matmul (fallback)
     try:
         device = get_current_device()
-        # Try a small FP8 matmul
         a = torch.randn(2, 2, device=device, dtype=torch.bfloat16).to(dtype)
         b = torch.randn(2, 2, device=device, dtype=torch.bfloat16).to(dtype)
         c = torch.empty(2, 2, device=device, dtype=torch.bfloat16).to(dtype)
         torch.matmul(a, b, out=c)
-        return True
+        return True, "native"
     except (NotImplementedError, RuntimeError):
-        return False
+        return False, "none"
+
+
+def _gemm_fp8_torchao(a, b, trans_b=True):
+    """FP8 GEMM implementation using torchao."""
+    if trans_b:
+        return matmul_with_hp_or_float8_args.apply(a, b.t(), DEFAULT_MM_CONFIG, DEFAULT_CONFIG)
+    else:
+        return matmul_with_hp_or_float8_args.apply(a, b, DEFAULT_MM_CONFIG, DEFAULT_CONFIG)
 
 
 def maybe_transpose(tensor, transpose):
@@ -59,15 +101,31 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
     assert dtype in supported_dtypes, f"Unsupported dtype: {dtype}. Supported: {supported_dtypes}"
 
     # Check if FP8 matmul is actually supported (not just the type exists)
-    if not check_fp8_matmul_support(dtype):
-        raise RuntimeError(
-            f"FP8 dtype {dtype} is defined in PyTorch but matmul operations are not implemented "
-            f"in the current backend (ROCm/CUDA). This usually means:\n"
+    fp8_supported, fp8_method = check_fp8_matmul_support(dtype)
+    is_fp8 = hasattr(torch, "float8_e4m3fn") and dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
+
+    if is_fp8 and not fp8_supported:
+        error_msg = (
+            f"FP8 dtype {dtype} is defined in PyTorch but matmul operations are not implemented.\n"
+            f"This usually means:\n"
             f"  1. Your PyTorch version supports FP8 types but not FP8 kernels\n"
             f"  2. Your GPU/driver doesn't support FP8 operations\n"
             f"  3. You need a newer PyTorch build with FP8 kernel support\n"
-            f"Recommendation: Use --dtype bf16 or --dtype fp16 instead for now."
+            f"\n"
+            f"Recommendations:\n"
+            f"  • Install torchao: pip install torchao (recommended for FP8)\n"
+            f"  • Or use --dtype bf16 / --dtype fp16 instead\n"
+            f"\n"
+            f"torchao available: {TORCHAO_AVAILABLE}"
         )
+        raise RuntimeError(error_msg)
+
+    # Log which FP8 method is being used
+    if is_fp8 and fp8_supported:
+        method_name = {"torchao": "torchao (recommended)", "native": "native PyTorch"}.get(
+            fp8_method, fp8_method
+        )
+        print(f"[INFO] Using FP8 method: {method_name}")
 
     device = get_current_device()
     dtype_size = torch.tensor([], dtype=dtype).element_size()
@@ -78,11 +136,17 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
     a_shape = (k, m) if trans_a else (m, k)
     b_shape = (n, k) if trans_b else (k, n)
 
-    # Check if dtype is FP8 (requires conversion from BF16/FP32)
-    is_fp8 = hasattr(torch, "float8_e4m3fn") and dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
+    # Create tensors based on FP8 method
+    use_torchao = is_fp8 and fp8_method == "torchao"
 
-    if is_fp8:
-        # FP8 requires conversion from higher precision types
+    if use_torchao:
+        # torchao: use BF16 tensors, conversion handled internally
+        init_dtype = torch.bfloat16
+        a_list = [torch.randn(a_shape, device=device, dtype=init_dtype) for _ in range(num_rotations)]
+        b_list = [torch.randn(b_shape, device=device, dtype=init_dtype) for _ in range(num_rotations)]
+        c_list = None  # torchao allocates output
+    elif is_fp8:
+        # Native FP8: requires explicit conversion from BF16
         init_dtype = torch.bfloat16
         a_list = [
             torch.randn(a_shape, device=device, dtype=init_dtype).to(dtype) for _ in range(num_rotations)
@@ -95,6 +159,7 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
             torch.empty((m, n), device=device, dtype=init_dtype).to(dtype) for _ in range(num_rotations)
         ]
     else:
+        # Standard dtypes (FP16/BF16/FP32)
         a_list = [torch.randn(a_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
         b_list = [torch.randn(b_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
         c_list = [torch.empty((m, n), device=device, dtype=dtype) for _ in range(num_rotations)]
@@ -103,7 +168,10 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
     for i in range(num_rotations):
         a = maybe_transpose(a_list[i], trans_a)
         b = maybe_transpose(b_list[i], trans_b)
-        torch.matmul(a, b, out=c_list[i])
+        if use_torchao:
+            _ = _gemm_fp8_torchao(a, b, trans_b=trans_b)
+        else:
+            torch.matmul(a, b, out=c_list[i])
     torch.cuda.synchronize()
 
     # Timed run (duration-based)
@@ -115,10 +183,13 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
     start.record()
 
     while True:
-        for _ in range(num_rotations):
+        for i in range(num_rotations):
             a = maybe_transpose(a_list[i], trans_a)
             b = maybe_transpose(b_list[i], trans_b)
-            torch.matmul(a, b, out=c_list[i])
+            if use_torchao:
+                _ = _gemm_fp8_torchao(a, b, trans_b=trans_b)
+            else:
+                torch.matmul(a, b, out=c_list[i])
         end.record()
         torch.cuda.synchronize()
 
