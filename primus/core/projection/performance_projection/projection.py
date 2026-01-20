@@ -134,21 +134,9 @@ def calculate_collective_communication_time(
     # Note: TP AllReduce is already included in the benchmarked run, so we don't add it here
     message_info['num_layers'] = num_layers
     
-    # 3. Pipeline Parallel P2P (PP group)
-    if pp > 1:
-        p2p_size = batch_size * seq_len * hidden_size * 2  # BF16
-        p2p_time = cm.sendrecv(coll_args, p2p_size)
-        num_microbatches = runtime_config.global_batch_size // (batch_size * dp)
-        total_pp_time = p2p_time * num_microbatches * 2 / 1000  # fwd + bwd, convert to ms
-        breakdown['pp_p2p'] = total_pp_time
-        message_info['pp_p2p_size'] = p2p_size
-        message_info['pp_p2p_size_mb'] = p2p_size / (1024 * 1024)
-        message_info['num_microbatches'] = num_microbatches
-        message_info['pp_p2p_per_microbatch'] = p2p_time * 2 / 1000
-    else:
-        breakdown['pp_p2p'] = 0.0
-        message_info['pp_p2p_size'] = 0
-        message_info['pp_p2p_size_mb'] = 0.0
+    # Note: PP P2P communication is NOT calculated here because it's already
+    # accounted for in the pipeline scheduler simulator (simulator.py).
+    # The simulator handles send/receive synchronization and bubble time.
     
     # Build per-layer communication information
     for layer_idx in range(num_layers):
@@ -1174,8 +1162,6 @@ def _run_multinode_projection(training_config, single_node_time_ms, profiling_re
                 print(f" (message: {message_info['moe_a2a_size_mb']:.2f} MB, {message_info['num_moe_layers']} layers × {message_info['moe_a2a_per_layer_fwd']:.3f} ms/layer)")
             elif op_name == 'moe_a2a_bwd' and 'moe_a2a_size_mb' in message_info:
                 print(f" (message: {message_info['moe_a2a_size_mb']:.2f} MB, {message_info['num_moe_layers']} layers × {message_info['moe_a2a_per_layer_fwd']:.3f} ms/layer)")
-            elif op_name == 'pp_p2p' and 'pp_p2p_size_mb' in message_info:
-                print(f" (message: {message_info['pp_p2p_size_mb']:.2f} MB, {message_info.get('num_microbatches', 'N/A')} microbatches × {message_info.get('pp_p2p_per_microbatch', 0):.3f} ms/microbatch)")
             else:
                 print()
     
