@@ -17,7 +17,10 @@ def add_gemm_parser(parser: argparse.ArgumentParser):
     parser.add_argument("--trans_a", action="store_true", help="Transpose A matrix")
     parser.add_argument("--trans_b", action="store_true", help="Transpose B matrix")
     parser.add_argument(
-        "--dtype", choices=["bf16", "fp16", "fp32"], default="bf16", help="Data type for GEMM computation."
+        "--dtype",
+        choices=["bf16", "fp16", "fp32", "fp8"],
+        default="bf16",
+        help="Data type for GEMM computation (fp8 requires torchao)",
     )
     parser.add_argument("--duration", type=int, default=10, help="Benchmark duration in seconds.")
     parser.add_argument(
