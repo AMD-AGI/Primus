@@ -66,14 +66,14 @@ class MegatronBridgeAdapter(BackendAdapter):
         src_path = os.path.join(backend_path, "src")
         if os.path.isdir(src_path) and src_path not in sys.path:
             sys.path.insert(0, src_path)
-            log_rank_0(f"[MegatronBridge] sys.path.insert → {src_path}")
+            log_rank_0(f"sys.path.insert → {src_path}")
         
         # 2. Add Megatron-LM directory (sibling to megatron-bridge in third_party/)
         backend_parent = os.path.dirname(backend_path)  # third_party/
         megatron_lm_path = os.path.join(backend_parent, "Megatron-LM")
         if os.path.isdir(megatron_lm_path) and megatron_lm_path not in sys.path:
             sys.path.insert(0, megatron_lm_path)
-            log_rank_0(f"[MegatronBridge] sys.path.insert → {megatron_lm_path}")
+            log_rank_0(f"sys.path.insert → {megatron_lm_path}")
 
     # Backend Setup & Patches
     def prepare_backend(self, config: Any):
@@ -114,7 +114,7 @@ class MegatronBridgeAdapter(BackendAdapter):
             SimpleNamespace with Megatron-Bridge configuration
         """
         # Instantiate the builder
-        builder = MegatronBridgeArgBuilder(module_config)
+        builder = MegatronBridgeArgBuilder()
 
         # Feed in config params (already merged with CLI overrides in train_launcher)
         # module_config.params is a flat dict of Megatron-Bridge-recognized fields.
@@ -167,6 +167,10 @@ class MegatronBridgeAdapter(BackendAdapter):
     def detect_backend_version(self) -> str:
         """
         Detect Megatron-Bridge version for logging and patching.
+        
+        Note: We read the version file directly instead of importing to avoid
+        triggering __init__.py, which imports all model classes (some may not
+        be available in the current transformers version).
 
         Returns:
             Version string (e.g., "0.3.0rc0")
@@ -174,9 +178,36 @@ class MegatronBridgeAdapter(BackendAdapter):
         Raises:
             RuntimeError: If version cannot be detected
         """
+        import os
+        import re
+        import sys
+        
+        # Strategy 1: Read package_info.py directly (avoids __init__.py imports)
+        for path in sys.path:
+            package_info_file = os.path.join(path, "megatron", "bridge", "package_info.py")
+            if os.path.exists(package_info_file):
+                try:
+                    with open(package_info_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # Match: __version__ = "x.y.z" or __version__ = 'x.y.z'
+                    match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
+                    if match:
+                        version = match.group(1)
+                        log_rank_0(f"Detected Megatron-Bridge version: {version}")
+                        return version
+                        
+                except Exception as e:
+                    log_rank_0(f"Warning: Failed to read {package_info_file}: {e}")
+                    continue
+        
+        # Strategy 2: Try importing (may fail due to __init__.py model imports)
         try:
             from megatron.bridge.package_info import __version__
-
+            log_rank_0(f"Detected Megatron-Bridge version: {__version__}")
             return __version__
         except ImportError as e:
-            raise RuntimeError(f"Failed to detect Megatron-Bridge version: {e}")
+            raise RuntimeError(
+                f"Failed to detect Megatron-Bridge version. "
+                f"package_info.py not found and import failed: {e}"
+            )
