@@ -299,6 +299,18 @@ def run_gemm_benchmark(args):
         raise ValueError("M, N, K must be positive integers.")
 
     dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+
+    # Add FP8 type if available (PyTorch >= 2.1.0)
+    # Default to E4M3 format (better for training, widely used)
+    if hasattr(torch, "float8_e4m3fn"):
+        dtype_map["fp8"] = torch.float8_e4m3fn
+
+    if args.dtype not in dtype_map:
+        available = ", ".join(dtype_map.keys())
+        raise ValueError(
+            f"dtype '{args.dtype}' not available in current PyTorch version. " f"Available types: {available}"
+        )
+
     dtype = dtype_map[args.dtype]
     res = profile_gemm(args.M, args.N, args.K, dtype, args.trans_a, args.trans_b, args.duration)
 

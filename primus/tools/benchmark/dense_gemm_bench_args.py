@@ -21,9 +21,9 @@ def add_gemm_parser(parser: argparse.ArgumentParser):
     parser.add_argument("--vocab-size", type=int, default=32000)
     parser.add_argument(
         "--dtype",
-        choices=["bf16", "fp16", "fp32", "fp8_e4m3", "fp8_e5m2"],
+        choices=["bf16", "fp16", "fp32", "fp8"],
         default="bf16",
-        help="Data type for GEMM operations. fp8_e4m3 (E4M3) for training, fp8_e5m2 (E5M2) for inference",
+        help="Data type for GEMM operations. fp8 uses E4M3 format (default for training/inference)",
     )
     parser.add_argument("--mbs", type=int, default=1, help="Microbatch size")
     parser.add_argument("--output-file", default="./gemm-dense_report.md")

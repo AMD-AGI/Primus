@@ -189,11 +189,10 @@ def run_gemm_benchmark(args):
         "fp32": torch_mod.float32,
     }
 
-    # Add FP8 types if available (PyTorch >= 2.1.0)
+    # Add FP8 type if available (PyTorch >= 2.1.0)
+    # Default to E4M3 format (better for training, widely used)
     if hasattr(torch_mod, "float8_e4m3fn"):
-        dtype_map["fp8_e4m3"] = torch_mod.float8_e4m3fn
-    if hasattr(torch_mod, "float8_e5m2"):
-        dtype_map["fp8_e5m2"] = torch_mod.float8_e5m2
+        dtype_map["fp8"] = torch_mod.float8_e4m3fn
 
     # Validate dtype availability
     if args.dtype not in dtype_map:
@@ -206,7 +205,7 @@ def run_gemm_benchmark(args):
     dtype = dtype_map[args.dtype]
 
     # Check FP8 matmul support early (before running expensive benchmarks)
-    if args.dtype.startswith("fp8"):
+    if args.dtype == "fp8":
         from primus.tools.benchmark.gemm_bench import (
             TORCHAO_AVAILABLE,
             check_fp8_matmul_support,
