@@ -15,6 +15,42 @@ from primus.tools.utils import gather_records, get_current_device, is_rank_0
 
 CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
 
+# FP8 imports (optional, only needed for fp8 mode)
+try:
+    from torchao.float8 import Float8LinearConfig
+    from torchao.float8.float8_linear import matmul_with_hp_or_float8_args
+    from torchao.float8.float8_training_tensor import LinearMMConfig, ScaledMMConfig
+
+    FP8_AVAILABLE = True
+
+    # Default config for FP8 GEMM (use_fast_accum=False for fp32 accumulation)
+    DEFAULT_MM_CONFIG = LinearMMConfig(
+        ScaledMMConfig(emulate=False, use_fast_accum=False, fp8_output=False, pad_inner_dim=False),
+        ScaledMMConfig(emulate=False, use_fast_accum=False, fp8_output=False, pad_inner_dim=False),
+        ScaledMMConfig(emulate=False, use_fast_accum=False, fp8_output=False, pad_inner_dim=False),
+    )
+    DEFAULT_CONFIG = Float8LinearConfig()
+except ImportError:
+    FP8_AVAILABLE = False
+
+gemm_fp8_compiled = None
+
+
+def _gemm_fp8_impl(a, b):
+    """FP8 GEMM implementation using torchao (assumes b is already transposed if needed)."""
+    # Note: Unlike turbo, we handle transpose outside this function
+    # so we just do a @ b directly without .t()
+    return matmul_with_hp_or_float8_args.apply(a, b, DEFAULT_MM_CONFIG, DEFAULT_CONFIG)
+
+
+def get_compiled_gemm_fp8():
+    """Get a compiled FP8 GEMM function."""
+    global gemm_fp8_compiled
+    torch._dynamo.reset()
+    torch._functorch.config.donated_buffer = False
+    gemm_fp8_compiled = torch.compile(_gemm_fp8_impl)
+    return gemm_fp8_compiled
+
 
 def maybe_transpose(tensor, transpose):
     return tensor.t() if transpose else tensor
@@ -86,6 +122,73 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
     }
 
 
+def profile_gemm_fp8(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
+    """Profile FP8 GEMM using torchao."""
+    device = get_current_device()
+    # For FP8, we use BF16 input tensors, torchao handles conversion
+    init_dtype = torch.bfloat16
+    dtype_size = torch.tensor([], dtype=init_dtype).element_size()
+    mem_size_bytes = (m * k + k * n + m * n) * dtype_size
+    num_rotations = max(2, math.ceil(CACHE_ROTATING_BUFFER_BYTES / max(1, mem_size_bytes)) + 1)
+
+    a_shape = (k, m) if trans_a else (m, k)
+    b_shape = (n, k) if trans_b else (k, n)
+
+    a_list = [torch.randn(a_shape, device=device, dtype=init_dtype) for _ in range(num_rotations)]
+    b_list = [torch.randn(b_shape, device=device, dtype=init_dtype) for _ in range(num_rotations)]
+
+    compiled_fn = get_compiled_gemm_fp8()
+
+    # Warm-up
+    for i in range(num_rotations):
+        a = maybe_transpose(a_list[i], trans_a)
+        b = maybe_transpose(b_list[i], trans_b)
+        _ = compiled_fn(a, b)
+    torch.cuda.synchronize()
+
+    # Timed run (duration-based)
+    target_ms = max(100.0, duration_s * 1000.0)
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+
+    total_calls = 0
+    start.record()
+
+    while True:
+        for i in range(num_rotations):
+            a = maybe_transpose(a_list[i], trans_a)
+            b = maybe_transpose(b_list[i], trans_b)
+            _ = compiled_fn(a, b)
+        end.record()
+        torch.cuda.synchronize()
+
+        total_calls += num_rotations
+
+        elapsed = start.elapsed_time(end)  # ms
+        if elapsed >= target_ms:
+            avg_time_ms = elapsed / total_calls
+            break
+
+    tflop = 2.0 * m * n * k / 1e12
+    tflops = tflop / (avg_time_ms / 1000.0)
+    bandwidth = mem_size_bytes / 1e9 / (avg_time_ms / 1000.0)
+    arith_intensity = (2.0 * m * n * k) / mem_size_bytes
+
+    return {
+        "m": m,
+        "n": n,
+        "k": k,
+        "trans_a": trans_a,
+        "trans_b": trans_b,
+        "dtype": "fp8",
+        "avg_time_ms": avg_time_ms,
+        "tflop": tflop,
+        "tflops": tflops,
+        "bandwidth_gbps": bandwidth,
+        "arith_intensity": arith_intensity,
+    }
+
+
 def build_gemm_base_preamble(args) -> str:
     lines = [
         "# Base GEMM Benchmark Report",
@@ -121,9 +224,18 @@ def run_gemm_benchmark(args):
     if args.M <= 0 or args.N <= 0 or args.K <= 0:
         raise ValueError("M, N, K must be positive integers.")
 
-    dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
-    dtype = dtype_map[args.dtype]
-    res = profile_gemm(args.M, args.N, args.K, dtype, args.trans_a, args.trans_b, args.duration)
+    is_fp8 = args.dtype == "fp8"
+    if is_fp8 and not FP8_AVAILABLE:
+        raise RuntimeError(
+            "FP8 dtype requested but torchao is not available. " "Install it with: pip install torchao"
+        )
+
+    if is_fp8:
+        res = profile_gemm_fp8(args.M, args.N, args.K, None, args.trans_a, args.trans_b, args.duration)
+    else:
+        dtype_map = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+        dtype = dtype_map[args.dtype]
+        res = profile_gemm(args.M, args.N, args.K, dtype, args.trans_a, args.trans_b, args.duration)
 
     # Build record with GEMM-specific metrics
     record = {
