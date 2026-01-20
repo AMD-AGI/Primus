@@ -16,6 +16,31 @@ from primus.tools.utils import gather_records, get_current_device, is_rank_0
 CACHE_ROTATING_BUFFER_BYTES = 2 * 1024 * 1024 * 1024  # 2GB rotating buffer
 
 
+def check_fp8_matmul_support(dtype):
+    """
+    Check if FP8 matmul is actually supported in the current PyTorch/backend.
+
+    Returns:
+        bool: True if FP8 matmul works, False otherwise
+    """
+    if not hasattr(torch, "float8_e4m3fn"):
+        return False
+
+    if dtype not in [torch.float8_e4m3fn, torch.float8_e5m2]:
+        return True  # Not FP8, always supported
+
+    try:
+        device = get_current_device()
+        # Try a small FP8 matmul
+        a = torch.randn(2, 2, device=device, dtype=torch.bfloat16).to(dtype)
+        b = torch.randn(2, 2, device=device, dtype=torch.bfloat16).to(dtype)
+        c = torch.empty(2, 2, device=device, dtype=torch.bfloat16).to(dtype)
+        torch.matmul(a, b, out=c)
+        return True
+    except (NotImplementedError, RuntimeError):
+        return False
+
+
 def maybe_transpose(tensor, transpose):
     return tensor.t() if transpose else tensor
 
@@ -32,6 +57,17 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
         supported_dtypes.append(torch.float8_e5m2)
 
     assert dtype in supported_dtypes, f"Unsupported dtype: {dtype}. Supported: {supported_dtypes}"
+
+    # Check if FP8 matmul is actually supported (not just the type exists)
+    if not check_fp8_matmul_support(dtype):
+        raise RuntimeError(
+            f"FP8 dtype {dtype} is defined in PyTorch but matmul operations are not implemented "
+            f"in the current backend (ROCm/CUDA). This usually means:\n"
+            f"  1. Your PyTorch version supports FP8 types but not FP8 kernels\n"
+            f"  2. Your GPU/driver doesn't support FP8 operations\n"
+            f"  3. You need a newer PyTorch build with FP8 kernel support\n"
+            f"Recommendation: Use --dtype bf16 or --dtype fp16 instead for now."
+        )
 
     device = get_current_device()
     dtype_size = torch.tensor([], dtype=dtype).element_size()
