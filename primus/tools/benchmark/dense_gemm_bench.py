@@ -146,19 +146,34 @@ def _load_helpers():
     return profile_gemm, gather_records, is_rank_0
 
 
-def _profile_fwd(m, n, k, dtype, duration):
-    profile_gemm, _, _ = _load_helpers()
-    return profile_gemm(m, n, k, dtype, False, True, duration)
+def _profile_fwd(m, n, k, dtype, duration, is_fp8=False):
+    if is_fp8:
+        from primus.tools.benchmark.gemm_bench import profile_gemm_fp8
+
+        return profile_gemm_fp8(m, n, k, dtype, False, True, duration)
+    else:
+        profile_gemm, _, _ = _load_helpers()
+        return profile_gemm(m, n, k, dtype, False, True, duration)
 
 
-def _profile_wgrad(m, n, k, dtype, duration):
-    profile_gemm, _, _ = _load_helpers()
-    return profile_gemm(n, k, m, dtype, True, False, duration)
+def _profile_wgrad(m, n, k, dtype, duration, is_fp8=False):
+    if is_fp8:
+        from primus.tools.benchmark.gemm_bench import profile_gemm_fp8
+
+        return profile_gemm_fp8(n, k, m, dtype, True, False, duration)
+    else:
+        profile_gemm, _, _ = _load_helpers()
+        return profile_gemm(n, k, m, dtype, True, False, duration)
 
 
-def _profile_dgrad(m, n, k, dtype, duration):
-    profile_gemm, _, _ = _load_helpers()
-    return profile_gemm(m, k, n, dtype, False, False, duration)
+def _profile_dgrad(m, n, k, dtype, duration, is_fp8=False):
+    if is_fp8:
+        from primus.tools.benchmark.gemm_bench import profile_gemm_fp8
+
+        return profile_gemm_fp8(m, k, n, dtype, False, False, duration)
+    else:
+        profile_gemm, _, _ = _load_helpers()
+        return profile_gemm(m, k, n, dtype, False, False, duration)
 
 
 def run_gemm_benchmark(args):
@@ -182,68 +197,19 @@ def run_gemm_benchmark(args):
     else:
         print("[INFO] No model specified. Using CLI-provided parameters.")
 
-    # Map dtype strings to torch types
-    dtype_map = {
-        "bf16": torch_mod.bfloat16,
-        "fp16": torch_mod.float16,
-        "fp32": torch_mod.float32,
-    }
+    # Check FP8 availability
+    is_fp8 = args.dtype == "fp8"
+    if is_fp8:
+        from primus.tools.benchmark.gemm_bench import FP8_AVAILABLE
 
-    # Add FP8 type if available (PyTorch >= 2.1.0)
-    # Default to E4M3 format (better for training, widely used)
-    if hasattr(torch_mod, "float8_e4m3fn"):
-        dtype_map["fp8"] = torch_mod.float8_e4m3fn
-
-    # Validate dtype availability
-    if args.dtype not in dtype_map:
-        available = ", ".join(dtype_map.keys())
-        raise ValueError(
-            f"[ERROR] dtype '{args.dtype}' not available in current PyTorch version. "
-            f"Available types: {available}"
-        )
-
-    dtype = dtype_map[args.dtype]
-
-    # Check FP8 matmul support early (before running expensive benchmarks)
-    if args.dtype == "fp8":
-        from primus.tools.benchmark.gemm_bench import (
-            TORCHAO_AVAILABLE,
-            check_fp8_matmul_support,
-        )
-
-        fp8_supported, fp8_method = check_fp8_matmul_support(dtype)
-
-        if not fp8_supported:
-            print(f"\n{'='*70}")
-            print(f"⚠️  FP8 MATMUL NOT SUPPORTED")
-            print(f"{'='*70}")
-            print(f"PyTorch defines FP8 types but matmul kernels are not implemented.")
-            print(f"")
-            print(f"Possible reasons:")
-            print(f"  • torchao not installed (recommended for FP8)")
-            print(f"  • Your PyTorch build lacks native FP8 kernel support")
-            print(f"  • Your GPU/driver doesn't support FP8 (requires MI300X or H100+)")
-            print(f"  • ROCm/CUDA version is too old")
-            print(f"")
-            print(f"Recommendations:")
-            print(f"  1. Install torchao: pip install torchao")
-            print(f"  2. Or use --dtype bf16 / --dtype fp16 instead")
-            print(f"")
-            print(f"Environment info:")
-            print(f"  PyTorch version: {torch_mod.__version__}")
-            print(
-                f"  Device: {torch_mod.cuda.get_device_name(0) if torch_mod.cuda.is_available() else 'N/A'}"
+        if not FP8_AVAILABLE:
+            raise RuntimeError(
+                "FP8 dtype requested but torchao is not available. " "Install it with: pip install torchao"
             )
-            print(f"  Has FP8 types: {hasattr(torch_mod, 'float8_e4m3fn')}")
-            print(f"  torchao available: {TORCHAO_AVAILABLE}")
-            print(f"  FP8 matmul works: False")
-            print(f"{'='*70}\n")
-            raise RuntimeError(f"FP8 dtype '{args.dtype}' is not supported in current environment")
-        else:
-            method_name = {"torchao": "torchao (recommended)", "native": "native PyTorch"}.get(
-                fp8_method, fp8_method
-            )
-            print(f"[INFO] FP8 support detected: using {method_name}")
+        dtype = None  # FP8 doesn't use torch dtype directly
+    else:
+        dtype_map = {"bf16": torch_mod.bfloat16, "fp16": torch_mod.float16, "fp32": torch_mod.float32}
+        dtype = dtype_map[args.dtype]
 
     shape_defs = [
         (
@@ -276,7 +242,7 @@ def run_gemm_benchmark(args):
         n = shape[1]
         k = shape[2]
 
-        res = func(m, n, k, dtype, args.duration)
+        res = func(m, n, k, dtype, args.duration, is_fp8=is_fp8)
         summary = (
             f"{res['avg_time_ms']:.6f}s / "
             f"{res['tflops']:.2f}TF/s / "

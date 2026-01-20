@@ -23,7 +23,7 @@ def add_gemm_parser(parser: argparse.ArgumentParser):
         "--dtype",
         choices=["bf16", "fp16", "fp32", "fp8"],
         default="bf16",
-        help="Data type for GEMM operations. fp8 uses E4M3 format (default for training/inference)",
+        help="Data type for GEMM operations (fp8 requires torchao)",
     )
     parser.add_argument("--mbs", type=int, default=1, help="Microbatch size")
     parser.add_argument("--output-file", default="./gemm-dense_report.md")

@@ -20,7 +20,7 @@ def add_gemm_parser(parser: argparse.ArgumentParser):
         "--dtype",
         choices=["bf16", "fp16", "fp32", "fp8"],
         default="bf16",
-        help="Data type for GEMM computation.",
+        help="Data type for GEMM computation (fp8 requires torchao)",
     )
     parser.add_argument("--duration", type=int, default=10, help="Benchmark duration in seconds.")
     parser.add_argument(
