@@ -1,0 +1,92 @@
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v3_16b-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: torchtitan
+    config: pre_trainer.yaml
+
+    # model to run
+    model: deepseek_v3_16b.yaml
+    overrides:
+      profiling:
+        enable_profiling: false
+        save_traces_folder: "profile_trace"
+        profile_freq: 10
+        enable_memory_snapshot: false
+        save_memory_snapshot_folder: "memory_snapshot"
+
+      metrics:
+        log_freq: 1
+        disable_color_printing: false
+        enable_tensorboard: false
+        save_tb_folder: "tb"
+        enable_wandb: false
+
+      optimizer:
+        name: "AdamW"
+        lr: 2.2e-4
+        eps: 1.0e-8
+
+      lr_scheduler:
+        warmup_steps: 200        # lr scheduler warm up, normally 20% of the train steps
+        decay_ratio: 0.8         # lr scheduler decay ratio, 80% of the train steps
+        decay_type: "cosine"
+        min_lr_factor: 0.1
+
+      training:
+        debug_moe_force_load_balance: true
+        local_batch_size: 13
+        seq_len: 4096
+        max_norm: 1.0            # grad norm clipping
+        steps: 15
+        dataset: "c4_test"            # supported datasets: c4_test (2K), c4 (177M)
+
+      parallelism:
+        data_parallel_replicate_degree: 1
+        data_parallel_shard_degree: -1
+        fsdp_reshard_after_forward: "default" # default / never / always
+        tensor_parallel_degree: 1
+        enable_async_tensor_parallel: false
+        pipeline_parallel_degree: 1
+        pipeline_parallel_schedule: "Interleaved1F1B"
+        expert_parallel_degree: 8
+        expert_tensor_parallel_degree: 1
+
+      checkpoint:
+        enable: false
+        folder: "checkpoint"
+        interval: 10
+        last_save_model_only: true
+        export_dtype: "float32"
+        async_mode: "disabled"   # ["disabled", "async", "async_with_pinned_mem"]
+
+      activation_checkpoint:
+        mode: "none"        # ["none", "selective", "full"]
+        selective_ac_option: "op" # 'int' = ac every positive int layer or 'op', ac based on ops policy
+
+      compile:
+        enable: true
+        components: ["model", "loss"]     # ["model", "loss"]
+
+      primus_turbo:
+        enable_primus_turbo: true
+        use_turbo_mx_linear: false
+        use_turbo_float8_linear: false
+        enable_attention_float8: false
+        use_turbo_grouped_mm: true
+        use_moe_fp8: false
+        use_classic_attention: false
+
+      # quantize:
+      #   linear:
+      #     float8:
+      #     enable_fsdp_float8_all_gather: false
+      #     precompute_float8_dynamic_scale_for_fsdp: false
+      #     filter_fqns: ["output", "router.gate"]
+      #   grouped_mm:
+      #     float8:
+      #     fqns: ["experts"]

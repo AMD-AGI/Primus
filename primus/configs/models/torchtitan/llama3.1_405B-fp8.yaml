@@ -1,0 +1,12 @@
+job:
+  dump_folder: "./outputs"
+  description: "Llama 3 405B training"
+
+model:
+  name: "llama3"
+  flavor: "405B"
+  hf_assets_path: "meta-llama/Llama-3.1-405B"
+  n_layers: 126  # Default: 126, can be overridden for debugging
+  converters:
+    - primus_turbo
+    - quantize.linear.float8

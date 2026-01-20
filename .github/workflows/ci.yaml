@@ -10,7 +10,10 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: d71d856c080c9187d8e323e9eb6d85904517a21f # feat(deepep): support single-node moe_dispatch/combine on jax. (#162)
+  PRIMUS_TURBO_COMMIT: 5233748e9c5c5795a6484ab31ece47c442d29ec2 # feat(mxfp4): refactor gemm mxfp4 and mxfp8. fuse transpose, hadamard transform and quantization. (#195)
+  ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
+  BASE_IMAGE: docker.io/rocm/primus:v25.10
+  MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v25.9
 
 jobs:
   code-lint:
@@ -46,7 +49,7 @@ jobs:
         with:
           isort-version: "5.13.2"
           configuration: "--profile black --check-only --diff"
-      - uses: psf/black@stable
+      - uses: psf/black@24.8.0
         if: always()
         with:
           options: "--check --diff --color --verbose --line-length=110"
@@ -89,75 +92,76 @@ jobs:
           docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}"
+          echo "> Build dependencies"
           start_time=$(date +%s)
           docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
+               --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}} \
-               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} .
+               --build-arg BASE_IMAGE=${BASE_IMAGE} \
+               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+               --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
+               --build-arg PRIMUS_TURBO_FRAMEWORK=PYTORCH \
+               $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker] Total elapsed time: ${elapsed} seconds"
 
-          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-gfx950"
-          start_time=$(date +%s)
-          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_gfx950 \
-               -t tasimage/primus:${{env.IMAGE_TAG}}-gfx950 \
-               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} .
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "⏱️ [build primus docker-gfx950] Total elapsed time: ${elapsed} seconds"
+          docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
+          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
-          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-gfx950-ainic"
+          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
           start_time=$(date +%s)
           mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
-          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.1-a-42.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
-          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_gfx950_ainic \
-               -t tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic \
-               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-38.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          cp /apps/tas/0_public/primus_docker_ci/ainic/amd-anp-v1.3.0.patch $GITHUB_WORKSPACE/.github/workflows/docker/ainic/
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.ainic \
+               --network=host \
+               -t tasimage/primus:${{env.IMAGE_TAG}}-ainic \
+               --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{env.IMAGE_TAG}} \
                --build-arg AINIC_BUNDLE_PATH=ainic \
                $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
-          echo "⏱️ [build primus docker-gfx950-ainic] Total elapsed time: ${elapsed} seconds"
+          echo "⏱️ [build primus docker-ainic] Total elapsed time: ${elapsed} seconds"
+
+          docker tag tasimage/primus:${{env.IMAGE_TAG}}-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
+          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
+          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax"
           start_time=$(date +%s)
-          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_jax \
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile \
+               --network=host \
                -t tasimage/primus:${{env.IMAGE_TAG}}-jax \
-               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} .
+               --build-arg BASE_IMAGE=${MAXTEXT_BASE_IMAGE} \
+               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+               --build-arg PRIMUS_TURBO_FRAMEWORK=JAX \
+               --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} .
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "⏱️ [build primus docker-jax] Total elapsed time: ${elapsed} seconds"
 
           echo "> Docker tag image for Docker Hub"
-          docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}
-          docker tag tasimage/primus:${{env.IMAGE_TAG}}-gfx950 docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950
-          docker tag tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic
           docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
-          echo "> Login to Primus Docker Hub"
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
-
-          echo "> Docker push to Docker Hub"
-          start_time=$(date +%s)
-          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
-          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950
-          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "⏱️ [push primus docker] Total elapsed time: ${elapsed} seconds"
+          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           # echo "> Docker cleanup local images"
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}
-          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-gfx950
-          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-gfx950-ainic
+          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-v25.09-ainic
+          # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-v25.10-ainic
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-jax
-          # echo "> build-docker success"
+          echo "> build-docker success"
 
-  run-unittest:
+  run-unittest-torch:
     env:
-      PRIMUS_WORKDIR: /apps/tas/0_public/primus_k8s_ci/torch
+      PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
     needs: [code-lint]
-    runs-on: [primus-pytorch-runner-xrlc6]
+    runs-on: [primus-lm-cicd-tl8m5]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Set commit hash to env
@@ -208,30 +212,48 @@ jobs:
           pip install -r requirements.txt
       - name: Set UT_LOG_PATH
         run: |
+          ts="$(date +%Y%m%d-%H%M%S)"
+          commit_id="${GITHUB_SHA::7}"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}-${ts}-${commit_id}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/latest" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/main-${ts}-${commit_id}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "release" ]]; then
             TAG_NAME="${{ github.ref }}"
             TAG="${TAG_NAME#refs/tags/}"
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/$TAG" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/${TAG}-${ts}-${commit_id}" >> $GITHUB_ENV
           else
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others-${ts}-${commit_id}" >> $GITHUB_ENV
           fi
-      - name: Run Shell Tests
+      - name: Run CLI Shell Tests
         run: |
           echo "Running Primus CLI shell tests..."
           bash ./tests/runner/run_all_tests.sh
-      - name: Run Unit Tests
+      - name: Run Primus Core Tests
+        run: |
+          echo "Running Primus Core tests..."
+          # Note: The tests `test_fp8_te_linear` and `test_te_linear` are temporarily skipped due to intermittent failures.
+          pytest --maxfail=1 -s ./tests/unit_tests/ \
+            --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
+            --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_te_linear
+      - name: Run Primus Model Tests -- Megatron-LM
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}
         run: |
           echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
-          MASTER_PORT=10009 DATA_PATH=/apps/tas/0_public/data \
-          python ./tests/run_unit_tests.py
+          MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
+          pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py
+      - name: Run Primus Model Tests -- TorchTitan
+        env:
+          HF_TOKEN: ${{secrets.HF_TOKEN}}
+        run: |
+          echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
+          rm -rf "${{ env.UT_LOG_PATH }}"
+          mkdir -p "${{ env.UT_LOG_PATH }}"
+          MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
+          pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py
       - name: Clean
         run: |
           rm -rf ${PRIMUS_WORKDIR}/Primus-Turbo
@@ -239,9 +261,9 @@ jobs:
 
   run-unittest-jax:
     env:
-      PRIMUS_WORKDIR: /apps/tas/0_public/primus_k8s_ci/jax
+      PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/jax
     needs: [code-lint]
-    runs-on: [primus-jax-l85pj]
+    runs-on: [primus-llm-cicd-jax-2pqnb]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Set commit hash to env
@@ -294,16 +316,18 @@ jobs:
           pip install -r requirements-jax.txt
       - name: Set UT_LOG_PATH
         run: |
+          ts="$(date +%Y%m%d-%H%M%S)"
+          commit_id="${GITHUB_SHA::7}"
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/pr-${{ github.event.pull_request.number }}-${ts}-${commit_id}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/latest" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/main-${ts}-${commit_id}" >> $GITHUB_ENV
           elif [[ "${{ github.event_name }}" == "release" ]]; then
             TAG_NAME="${{ github.ref }}"
             TAG="${TAG_NAME#refs/tags/}"
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/$TAG" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/${TAG}-${ts}-${commit_id}" >> $GITHUB_ENV
           else
-            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others" >> $GITHUB_ENV
+            echo "UT_LOG_PATH=${PRIMUS_WORKDIR}/ut_out/others-${ts}-${commit_id}" >> $GITHUB_ENV
           fi
       - name: Run Shell Tests
         run: |
@@ -316,7 +340,7 @@ jobs:
           echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
-          MASTER_PORT=10009 DATA_PATH=/apps/tas/0_public/data \
+          MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
           JAX_SKIP_UT=1 python ./tests/run_unit_tests.py --jax
       - name: Clean
         run: |

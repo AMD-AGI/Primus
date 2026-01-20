@@ -39,6 +39,17 @@ class BasePlatform(ABC):
         """
         hostname = socket.gethostname()
         ip_addr = socket.gethostbyname(hostname)
+        # If IP starts with 127.*, try to get real IP via socket
+        if ip_addr.startswith("127."):
+            try:
+                # UDP socket connect doesn't send data, just determines routing
+                # Works without actual network connectivity
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                    s.connect(("8.8.8.8", 80))
+                    ip_addr = s.getsockname()[0]
+            except Exception:
+                # Best-effort IP detection; fallback to original ip_addr if fails
+                pass
 
         return ip_addr
 

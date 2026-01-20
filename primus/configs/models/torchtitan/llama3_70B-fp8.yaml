@@ -7,4 +7,5 @@ model:
   flavor: "70B"
   hf_assets_path: "meta-llama/Meta-Llama-3-70B"
   converters:
-    - "float8"
+    - primus_turbo
+    - quantize.linear.float8

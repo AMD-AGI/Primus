@@ -31,6 +31,18 @@ source "$RUNNER_DIR/lib/config.sh" || {
     exit 1
 }
 
+export NNODES="${SLURM_NNODES:-${SLURM_JOB_NUM_NODES:-${NNODES:-1}}}"
+export NODE_RANK="${SLURM_NODEID:-${SLURM_PROCID:-${NODE_RANK:-0}}}"
+export GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
+export MASTER_ADDR
+export MASTER_PORT
+
+LOG_INFO_RANK0 "-----------------------------------------------"
+LOG_INFO_RANK0 "primus-cli-slurm-entry.sh"
+LOG_INFO_RANK0 "-----------------------------------------------"
+
+
+
 # Parse --config, --debug, --dry-run first if present
 CONFIG_FILE=""
 DEBUG_MODE=false
@@ -40,10 +52,6 @@ PRE_PARSE_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --)
-            PRE_PARSE_ARGS+=("$@")
-            break
-            ;;
-        container|direct|native|host)
             PRE_PARSE_ARGS+=("$@")
             break
             ;;
@@ -68,6 +76,7 @@ while [[ $# -gt 0 ]]; do
 done
 # Restore arguments
 set -- "${PRE_PARSE_ARGS[@]}"
+echo "PRE_PARSE_ARGS: ${PRE_PARSE_ARGS[*]}"
 
 # Load configuration (specified or defaults)
 load_config_auto "$CONFIG_FILE" "slurm-entry" || {
@@ -126,19 +135,14 @@ readarray -t NODE_ARRAY < <(scontrol show hostnames "$SLURM_NODELIST")
 #     done | sort -k1,1n | awk '{print $2}'
 # )
 
-export NNODES="${SLURM_NNODES:-${SLURM_JOB_NUM_NODES:-${NNODES:-1}}}"
-export NODE_RANK="${SLURM_NODEID:-${SLURM_PROCID:-${NODE_RANK:-0}}}"
-export GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
-export MASTER_ADDR
-export MASTER_PORT
 
 # Log configuration
-LOG_DEBUG_RANK0 "[slurm-entry] MASTER_ADDR=$MASTER_ADDR"
-LOG_DEBUG_RANK0 "[slurm-entry] MASTER_PORT=$MASTER_PORT"
-LOG_DEBUG_RANK0 "[slurm-entry] NNODES=$NNODES"
-LOG_DEBUG_RANK0 "[slurm-entry] NODE_RANK=$NODE_RANK"
-LOG_DEBUG_RANK0 "[slurm-entry] GPUS_PER_NODE=$GPUS_PER_NODE"
-LOG_DEBUG_RANK0 "[slurm-entry] NODE_LIST: ${NODE_ARRAY[*]}"
+LOG_INFO_RANK0 "[slurm-entry] MASTER_ADDR=$MASTER_ADDR"
+LOG_INFO_RANK0 "[slurm-entry] MASTER_PORT=$MASTER_PORT"
+LOG_INFO_RANK0 "[slurm-entry] NNODES=$NNODES"
+LOG_INFO_RANK0 "[slurm-entry] NODE_RANK=$NODE_RANK"
+LOG_INFO_RANK0 "[slurm-entry] GPUS_PER_NODE=$GPUS_PER_NODE"
+LOG_INFO_RANK0 "[slurm-entry] NODE_LIST: ${NODE_ARRAY[*]}"
 
 # Validate distributed parameters
 validate_distributed_params || LOG_WARN "[slurm-entry] Failed to validate distributed parameters"
@@ -147,11 +151,6 @@ validate_distributed_params || LOG_WARN "[slurm-entry] Failed to validate distri
 
 # Parse mode (default: container)
 [[ "${1:-}" == "--" ]] && shift
-MODE="container"
-if [[ "${1:-}" =~ ^(container|direct)$ ]]; then
-    MODE="$1"
-    shift
-fi
 
 # Build arguments based on mode
 SCRIPT_ARGS=()
@@ -169,18 +168,18 @@ SCRIPT_ARGS+=(
     --env "GPUS_PER_NODE=$GPUS_PER_NODE"
 )
 
-# Build script path based on mode
-script_path="$RUNNER_DIR/primus-cli-${MODE}.sh"
+# Build script path (container mode only)
+script_path="$RUNNER_DIR/primus-cli-container.sh"
 require_file "$script_path" "[slurm-entry] Script not found: $script_path"
 
 # Build full command
 CMD=(bash "$script_path" "${SCRIPT_ARGS[@]}" "$@")
-LOG_INFO "[slurm-entry] Would execute: ${CMD[*]}"
+LOG_INFO_RANK0 "[slurm-entry] Would execute: ${CMD[*]}"
 
 if [[ "$DRY_RUN_MODE" == "true" ]]; then
-    LOG_INFO "[slurm-entry] Dry-run mode: command not executed"
+    LOG_INFO_RANK0 "[slurm-entry] Dry-run mode: command not executed"
     exit 0
 fi
 
-LOG_INFO "[slurm-entry] Executing command..."
+LOG_INFO_RANK0 "[slurm-entry] Executing command..."
 exec "${CMD[@]}"

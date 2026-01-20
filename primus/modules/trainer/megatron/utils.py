@@ -13,6 +13,7 @@ import os
 import megatron
 import torch
 from megatron.core import parallel_state
+from megatron.training.global_vars import get_args
 
 from primus.core.utils import logger
 
@@ -21,6 +22,18 @@ _GLOBAL_PP_VIS_EVENTS_PER_ITER = None
 
 
 ######################################################log after torch distributed initialized
+
+
+def is_v_schedule_enabled(args=None):
+    if args is None:
+        args = get_args()
+    return (
+        args.patch_zero_bubble
+        and args.enable_zero_bubble
+        and (args.zero_bubble_v_schedule or args.enable_1f1b_v)
+    ) or (args.pp_algorithm in ("zbv-formatted", "v-half", "v-min") and args.patch_primus_pipeline)
+
+
 def is_last_rank():
     return torch.distributed.get_rank() == (torch.distributed.get_world_size() - 1)
 
@@ -120,6 +133,16 @@ def validate_manual_split(args):
     in layer16-pp4-vpp2 config, where the vpp split of
     pp_rank0/pp_rank1/pp_rank2/pp_rank3 is [2,3]/[2,2]/[2,2]/[2,1].
 
+    if chosen pipeline is v_schedule like zbv/v-half,
+    the split list will be the actual layer sequence.
+    For example, layer16-pp4-vpp2 config, the vpp split of
+    pp_rank0/pp_rank1/pp_rank2/pp_rank3 is [3,2,2,2,2,2,2,1]
+    indicate the pipeline as follows:
+    pp_rank0: 3       1
+    pp_rank1:  2     2
+    pp_rank2:   2   2
+    pp_rank3:    2 2
+
     """
 
     if (
@@ -186,10 +209,11 @@ def validate_args_modified(*args, **kwargs):
         exec(modified_source, func.__globals__, namespace)
         return namespace[func.__name__]
 
-    ori_code = (
-        "if args.decoder_first_pipeline_num_layers is None and args.decoder_last_pipeline_num_layers is None:"
-    )
-    new_code = "if args.decoder_pipeline_manual_split_list is None and " + ori_code.split("if ")[-1]
+    ori_code = kwargs.pop("ori_code", None)
+    new_code = kwargs.pop("new_code", None)
+
+    assert ori_code is not None and new_code is not None, "ori_code and new_code must be provided."
+
     megatron.training.arguments.validate_args = validate_args_modifier(
         megatron.training.arguments.validate_args, lambda s: s.replace(ori_code, new_code)
     )
@@ -208,36 +232,47 @@ def set_manual_pipeline_split_patch(args):
     )
 
     # patch get_num_layers_to_build
-    def get_num_layers_to_build_patch(config, vp_stage):
-        pp_rank = parallel_state.get_pipeline_model_parallel_rank()
+    def get_num_layers_to_build_patch(config, vp_stage, pp_rank=None):
+        if pp_rank is None:
+            pp_rank = parallel_state.get_pipeline_model_parallel_rank()
         vp_size = config.virtual_pipeline_model_parallel_size
-        pp_idx = pp_rank if vp_size is None else pp_rank * vp_size + vp_stage
-        num_layers_to_build = config.decoder_pipeline_manual_split_list[pp_idx]
-        return num_layers_to_build
+
+        if not is_v_schedule_enabled():
+            pp_idx = pp_rank if vp_size is None else pp_rank * vp_size + vp_stage
+            num_layers_to_build = config.decoder_pipeline_manual_split_list[pp_idx]
+            return num_layers_to_build
+        else:
+            assert vp_stage is not None and vp_stage in (0, 1)
+            pp_size = config.pipeline_model_parallel_size
+            chunk_id = pp_rank if vp_stage == 0 else 2 * pp_size - pp_rank - 1
+            num_layers_to_build = config.decoder_pipeline_manual_split_list[chunk_id]
+            return num_layers_to_build
 
     megatron.core.transformer.transformer_block.get_num_layers_to_build = get_num_layers_to_build_patch
     megatron.core.models.gpt.gpt_layer_specs.get_num_layers_to_build = get_num_layers_to_build_patch
 
     # patch get_transformer_layer_offset
-    def get_transformer_layer_offset_patch(config, vp_stage):
-        pp_rank = parallel_state.get_pipeline_model_parallel_rank()
+    def get_transformer_layer_offset_patch(config, vp_stage, pp_rank=None):
+        if pp_rank is None:
+            pp_rank = parallel_state.get_pipeline_model_parallel_rank()
         pp_size = config.pipeline_model_parallel_size
         vp_size = config.virtual_pipeline_model_parallel_size
 
-        if not parallel_state.is_inside_encoder():
-            pp_decoder_start = parallel_state.get_pipeline_model_parallel_decoder_start()
-            if pp_decoder_start is not None:
-                pp_rank = pp_rank - pp_decoder_start
-
         offset = 0
-        if vp_stage is not None:
-            for vp_idx in range(vp_stage):
-                for pp_idx in range(pp_size):
-                    offset += config.decoder_pipeline_manual_split_list[pp_idx * vp_size + vp_idx]
-            for pp_idx in range(pp_rank):
-                offset += config.decoder_pipeline_manual_split_list[pp_idx * vp_size + vp_stage]
+
+        if not is_v_schedule_enabled():
+            if vp_stage is not None:
+                for vp_idx in range(vp_stage):
+                    for pp_idx in range(pp_size):
+                        offset += config.decoder_pipeline_manual_split_list[pp_idx * vp_size + vp_idx]
+                for pp_idx in range(pp_rank):
+                    offset += config.decoder_pipeline_manual_split_list[pp_idx * vp_size + vp_stage]
+            else:
+                offset = sum(config.decoder_pipeline_manual_split_list[:pp_rank])
         else:
-            offset = sum(config.decoder_pipeline_manual_split_list[:pp_rank])
+            assert vp_stage is not None and vp_stage in (0, 1)
+            chunk_id = pp_rank if vp_stage == 0 else 2 * pp_size - pp_rank - 1
+            offset = sum(config.decoder_pipeline_manual_split_list[:chunk_id])
         return offset
 
     megatron.core.transformer.transformer_layer.get_transformer_layer_offset = (
@@ -440,14 +475,33 @@ def _get_sync_free_moe_options(stage: int) -> dict:
 def validate_args_on_rocm(args):
     # Deterministic mode
     if args.deterministic_mode:
-        assert not args.moe_grouped_gemm, "MoE Grouped GEMM can't be used in deterministic mode."
+        # NOTE: Some version triton compile exist potential racing condition issue.
+        assert (
+            os.environ.get("TORCH_COMPILE_DISABLE", "0") == "1"
+        ), "TORCH_COMPILE_DISABLE must be set to 1 in deterministic mode."
+        assert (
+            os.environ.get("ROCBLAS_DEFAULT_ATOMICS_MODE", "1") == "0"
+        ), "ROCBLAS_DEFAULT_ATOMICS_MODE must be set to 0 in deterministic mode."
 
     # Turbo FP8 linear check
     if args.fp8 and args.use_turbo_parallel_linear:
-        support_fp8_recipe = ["tensorwise", "blockwise"]
+        support_fp8_recipe = ["tensorwise", "blockwise", "mxfp8"]
         assert (
             args.fp8_recipe in support_fp8_recipe
         ), f"{args.fp8_recipe} recipe is not support when enable `use_turbo_parallel_linear`."
+
+    # Turbo FP4 linear check
+    if args.fp4 and args.use_turbo_parallel_linear:
+        support_fp4_recipe = ["mxfp4"]
+        assert (
+            args.fp4_recipe in support_fp4_recipe
+        ), f"{args.fp4_recipe} recipe is not support when enable `use_turbo_parallel_linear`."
+
+    # NOTE: mxfp8 environment variable must be set to 1 to enable mxfp8 recipe on ROCm.
+    if args.fp8_recipe == "mxfp8":
+        assert (
+            os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") == "1"
+        ), "Please set `NVTE_ROCM_ENABLE_MXFP8=1` to enable `mxfp8` recipe."
 
     # dump pp data
     if args.dump_pp_data and args.pipeline_model_parallel_size == 1:

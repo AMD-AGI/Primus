@@ -24,7 +24,9 @@ modules:
         warmup_steps: 10
 
       training:
-        local_batch_size: 3
+        local_batch_size: 4
+        seq_len: 8192
+        mock_data: false
         steps: 50
 
       activation_checkpoint:

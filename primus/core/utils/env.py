@@ -17,4 +17,5 @@ def get_torchrun_env():
         "master_addr": os.getenv("MASTER_ADDR", const.LOCAL_MASTER_ADDR),
         "master_port": int(os.getenv("MASTER_PORT", const.LOCAL_MASTER_PORT)),
         "local_rank": int(os.getenv("LOCAL_RANK", const.LOCAL_NODE_RANK)),
+        "local_world_size": int(os.getenv("LOCAL_WORLD_SIZE", const.LOCAL_WORLD_SIZE)),
     }

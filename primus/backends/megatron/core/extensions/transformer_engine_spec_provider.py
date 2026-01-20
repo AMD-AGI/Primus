@@ -28,37 +28,27 @@ from megatron.core.transformer.moe.experts import (
     TEGroupedMLP,
 )
 from megatron.core.utils import get_te_version, is_te_min_version
-from megatron.training.global_vars import get_args
 
-try:
-    from primus.backends.megatron.core.extensions.primus_turbo import (
-        PrimusTurboAttention,
-        PrimusTurboColumnParallelLinear,
-        PrimusTurboGroupedMLP,
-        PrimusTurboLayerNormColumnParallelLinear,
-        PrimusTurboRowParallelLinear,
-    )
-
-    HAVE_PRIMUS_TURBO = True
-except ImportError:
-
-    HAVE_PRIMUS_TURBO = False
+from primus.backends.megatron.core.extensions.primus_turbo import (
+    PrimusTurboAttention,
+    PrimusTurboColumnParallelLinear,
+    PrimusTurboGroupedMLP,
+    PrimusTurboLayerNormColumnParallelLinear,
+    PrimusTurboLinear,
+    PrimusTurboRowParallelLinear,
+)
+from primus.backends.megatron.training.global_vars import get_primus_args
 
 
 class PrimusTurboSpecProvider(BackendSpecProvider):
     """A protocol for providing the submodules used in Spec building."""
 
     def __init__(self):
-        if not HAVE_PRIMUS_TURBO:
-            raise ImportError(
-                "PrimusTurbo extension requires the primus_Turbo package. " "Please install it."
-            )
-
-        self.cfg = get_args()
+        self.cfg = get_primus_args()
 
     def linear(self) -> type:
         """Which linear module TE backend uses"""
-        return TELinear
+        return PrimusTurboLinear if self.cfg.use_turbo_parallel_linear else TELinear
 
     def column_parallel_linear(self) -> type:
         """Which column parallel linear module TE backend uses"""

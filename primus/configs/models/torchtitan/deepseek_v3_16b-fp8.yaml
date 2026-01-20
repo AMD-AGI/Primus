@@ -1,0 +1,13 @@
+job:
+  dump_folder: "./outputs"
+  description: "DeepSeek-V3 16B model training"
+  print_config: false
+
+
+model:
+  name: "deepseek_v3"
+  flavor: "16B"
+  hf_assets_path: "deepseek-ai/deepseek-moe-16b-base"
+  converters:
+    - primus_turbo
+    - quantize.linear.float8

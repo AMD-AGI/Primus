@@ -36,9 +36,13 @@ class DummyTrainer(BaseTrainer):
     def run_train(self):
         self.run_calls += 1
 
-    def detect_version(self) -> str:
+    @classmethod
+    def detect_version(cls) -> str:
         # Increment per-call counter to validate BaseTrainer.run usage
-        self.detect_calls += 1
+        # NOTE: For classmethod, we use a simple class attribute counter.
+        if not hasattr(cls, "detect_calls_counter"):
+            cls.detect_calls_counter = 0  # type: ignore[attr-defined]
+        cls.detect_calls_counter += 1  # type: ignore[attr-defined]
         return "test-version"
 
 
@@ -59,10 +63,19 @@ class TestBaseTrainerPatchIntegration:
         monkeypatch.setattr("primus.core.trainer.base_trainer.run_patches", fake_run_patches)
 
         primus_config = SimpleNamespace(exp_root_path="/tmp/exp", exp_meta_info={})
-        module_config = SimpleNamespace(framework="megatron", model="llama2_7B", trainable=True)
+        module_params = SimpleNamespace()
+        module_config = SimpleNamespace(
+            framework="megatron",
+            model="llama2_7B",
+            trainable=True,
+            params=module_params,
+        )
         backend_args = {"lr": 1e-4}
 
         trainer = DummyTrainer(primus_config, module_config, backend_args=backend_args)
+
+        # Reset class-level detect counter before run
+        DummyTrainer.detect_calls_counter = 0  # type: ignore[attr-defined]
 
         trainer.run()
 
@@ -70,7 +83,7 @@ class TestBaseTrainerPatchIntegration:
         assert trainer.run_calls == 1
 
         # detect_version is called once per phase (before_train and after_train)
-        assert trainer.detect_calls == 2
+        assert DummyTrainer.detect_calls_counter == 2  # type: ignore[attr-defined]
 
         # Patches were invoked twice: before_train and after_train
         assert len(calls) == 2
@@ -85,7 +98,7 @@ class TestBaseTrainerPatchIntegration:
             assert call["model_name"] == "llama2_7B"
 
             extra = call["extra"]
-            assert extra["args"] is backend_args
+            assert extra["backend_args"] is backend_args
             assert extra["primus_config"] is primus_config
             assert extra["module_config"] is module_config
 
@@ -115,14 +128,26 @@ class TestBaseTrainerPatchIntegration:
         monkeypatch.setattr("primus.core.trainer.base_trainer.run_patches", fake_run_patches)
 
         primus_config = SimpleNamespace(exp_root_path="/tmp/exp", exp_meta_info={})
-        module_config = SimpleNamespace(framework="megatron", model="llama2_7B", trainable=True)
+        module_params = SimpleNamespace()
+        module_config = SimpleNamespace(
+            framework="megatron",
+            model="llama2_7B",
+            trainable=True,
+            params=module_params,
+        )
+
+        # Reset Megatron global vars between tests so set_primus_global_variables
+        # can be called multiple times in this test module without assertion.
+        from primus.backends.megatron.training.global_vars import destroy_global_vars
+
+        destroy_global_vars()
 
         trainer = DummyTrainer(primus_config, module_config)
         trainer.run()
 
-        # Two patch invocations, both should carry args=None
+        # Two patch invocations, both should carry backend_args=None
         assert len(calls) == 2
         for call in calls:
-            assert call["extra"]["args"] is None
+            assert call["extra"]["backend_args"] is None
             assert call["extra"]["primus_config"] is primus_config
             assert call["extra"]["module_config"] is module_config

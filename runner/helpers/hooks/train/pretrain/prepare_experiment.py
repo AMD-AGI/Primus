@@ -82,6 +82,7 @@ def main():
         "megatron": "megatron",
         "light-megatron": "megatron",
         "torchtitan": "torchtitan",
+        "maxtext": "maxtext",
         # Add more aliases here if needed
     }
     framework_dir = framework_map.get(framework, framework)

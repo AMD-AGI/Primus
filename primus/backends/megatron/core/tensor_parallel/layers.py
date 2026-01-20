@@ -124,9 +124,16 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             grad_output_, total_input_ = prepare_for_wgrad_compute(_grad_output, _total_input, _handle)
             wgrad_gemm_accum_func(total_input_, grad_output_, _weight.main_grad)
 
+        from primus.core.pipeline_parallel.handler.wgrad_handler import (
+            WGradRunningCache,
+        )
+
+        from ..pipeline_parallel.wgrad_adapter import insert_wgrad_func_into_cache
         from ..pipeline_parallel.zerobubble.zbpp_utils import WeightGradStore
 
-        wgrad_compute = not WeightGradStore.split_bw()
+        wgrad_compute = not WeightGradStore.split_bw() and (
+            WGradRunningCache.cur_minibatch is None and WGradRunningCache.cur_chunk is None
+        )
         if grad_output_buffer is not None and wgrad_compute:
             # save to grad_output_buffer only when split_bw is False
             if wgrad_deferral_limit == 0 or len(grad_output_buffer) < wgrad_deferral_limit:
@@ -174,28 +181,22 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                 else:
                     raise RuntimeError("Unsupported gradient type for gradient accumulation fusion")
             else:
+                wgrad_gemm_accum_func = None
                 if weight.main_grad.dtype == torch.float32:
-                    WeightGradStore.put(
-                        weight,
-                        functools.partial(pre_process, grad_output, input),
-                        functools.partial(
-                            process_wgrad,
-                            weight,
-                            wgrad_gemm_accum_func=fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32,
-                        ),
-                    )
+                    wgrad_gemm_accum_func = fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32
                 elif weight.main_grad.dtype in (torch.float16, torch.bfloat16):
-                    WeightGradStore.put(
-                        weight,
-                        functools.partial(pre_process, grad_output, input),
-                        functools.partial(
-                            process_wgrad,
-                            weight,
-                            wgrad_gemm_accum_func=fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16,
-                        ),
-                    )
+                    wgrad_gemm_accum_func = fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16
                 else:
                     raise RuntimeError("Unsupported gradient type for gradient accumulation fusion")
+                insert_wgrad_func_into_cache(
+                    weight,
+                    functools.partial(pre_process, grad_output, input),
+                    functools.partial(
+                        process_wgrad,
+                        weight,
+                        wgrad_gemm_accum_func=wgrad_gemm_accum_func,
+                    ),
+                )
 
             if hasattr(weight, "grad_added_to_main_grad"):
                 # When overlap_grad_reduce is True, need to ensure that backward hooks
