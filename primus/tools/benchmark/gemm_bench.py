@@ -22,7 +22,16 @@ def maybe_transpose(tensor, transpose):
 
 @torch.inference_mode()
 def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
-    assert dtype in [torch.float16, torch.bfloat16, torch.float32], f"Unsupported dtype: {dtype}"
+    # Supported dtypes: FP32, FP16, BF16, and FP8 (if available)
+    supported_dtypes = [torch.float16, torch.bfloat16, torch.float32]
+
+    # Add FP8 types if available (PyTorch >= 2.1.0)
+    if hasattr(torch, "float8_e4m3fn"):
+        supported_dtypes.append(torch.float8_e4m3fn)
+    if hasattr(torch, "float8_e5m2"):
+        supported_dtypes.append(torch.float8_e5m2)
+
+    assert dtype in supported_dtypes, f"Unsupported dtype: {dtype}. Supported: {supported_dtypes}"
 
     device = get_current_device()
     dtype_size = torch.tensor([], dtype=dtype).element_size()
@@ -32,9 +41,24 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
 
     a_shape = (k, m) if trans_a else (m, k)
     b_shape = (n, k) if trans_b else (k, n)
-    a_list = [torch.randn(a_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
-    b_list = [torch.randn(b_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
-    c_list = [torch.empty((m, n), device=device, dtype=dtype) for _ in range(num_rotations)]
+
+    # Check if dtype is FP8 (requires conversion from BF16/FP32)
+    is_fp8 = hasattr(torch, "float8_e4m3fn") and dtype in [torch.float8_e4m3fn, torch.float8_e5m2]
+
+    if is_fp8:
+        # FP8 requires conversion from higher precision types
+        init_dtype = torch.bfloat16
+        a_list = [
+            torch.randn(a_shape, device=device, dtype=init_dtype).to(dtype) for _ in range(num_rotations)
+        ]
+        b_list = [
+            torch.randn(b_shape, device=device, dtype=init_dtype).to(dtype) for _ in range(num_rotations)
+        ]
+        c_list = [torch.empty((m, n), device=device, dtype=init_dtype) for _ in range(num_rotations)]
+    else:
+        a_list = [torch.randn(a_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
+        b_list = [torch.randn(b_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
+        c_list = [torch.empty((m, n), device=device, dtype=dtype) for _ in range(num_rotations)]
 
     # Warm-up
     for i in range(num_rotations):
