@@ -19,7 +19,7 @@ from __future__ import annotations
 import importlib
 import inspect
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, Callable, Dict, Optional
 
 from primus.core.utils.yaml_utils import dict_to_nested_namespace
 from primus.modules.module_utils import log_dict_aligned, log_rank_0
@@ -74,6 +74,109 @@ def filter_kwargs_by_signature(func: Any, kwargs_dict: dict[str, Any]) -> dict[s
     return filtered
 
 
+def auto_filter_and_call(func: Callable, kwargs: Dict[str, Any], max_retries: int = 50) -> Any:
+    """
+    Automatically filter kwargs and call function with retry mechanism.
+    
+    This function tries to call the target function with given kwargs.
+    If it fails due to unexpected keyword arguments, it automatically removes
+    the problematic parameters and retries until success or max_retries reached.
+    
+    Strategy:
+        1. First try: Use signature-based filtering (fast, works for most cases)
+        2. If TypeError occurs: Parse error message to find invalid parameter
+        3. Remove invalid parameter and retry
+        4. Repeat until success or max_retries reached
+    
+    Args:
+        func: Target function to call
+        kwargs: Dictionary of keyword arguments
+        max_retries: Maximum number of retry attempts (default: 50)
+        
+    Returns:
+        The return value of the function call
+        
+    Raises:
+        TypeError: If the function call fails after all retries
+        
+    Example:
+        >>> def my_func(a, b): return a + b
+        >>> result = auto_filter_and_call(my_func, {'a': 1, 'b': 2, 'c': 3, 'd': 4})
+        # Automatically removes 'c' and 'd', returns 3
+    """
+    import re
+    
+    # First try: use signature-based filtering (most efficient)
+    filtered_kwargs = filter_kwargs_by_signature(func, kwargs)
+    
+    log_rank_0(f"Attempting to call {func.__name__}() with {len(filtered_kwargs)} parameters...")
+    
+    # Try calling with filtered kwargs
+    attempt = 0
+    current_kwargs = filtered_kwargs.copy()
+    removed_params = []
+    
+    while attempt < max_retries:
+        try:
+            result = func(**current_kwargs)
+            
+            if removed_params:
+                log_rank_0(
+                    f"✅ Successfully called {func.__name__}() after removing "
+                    f"{len(removed_params)} invalid parameters: {removed_params}"
+                )
+            else:
+                log_rank_0(f"✅ Successfully called {func.__name__}() with all filtered parameters")
+            
+            return result
+            
+        except TypeError as e:
+            error_msg = str(e)
+            
+            # Pattern 1: "got an unexpected keyword argument 'param_name'"
+            match = re.search(r"unexpected keyword argument[s]? ['\"]([^'\"]+)['\"]", error_msg)
+            
+            if match:
+                invalid_param = match.group(1)
+                
+                if invalid_param in current_kwargs:
+                    removed_params.append(invalid_param)
+                    del current_kwargs[invalid_param]
+                    log_rank_0(
+                        f"⚠️  Retry {attempt + 1}: Removing invalid parameter '{invalid_param}' "
+                        f"({len(current_kwargs)} params remaining)"
+                    )
+                    attempt += 1
+                    continue
+                else:
+                    # Parameter already removed, but still getting error
+                    raise TypeError(
+                        f"Failed to call {func.__name__}(): {error_msg}. "
+                        f"Parameter '{invalid_param}' was already removed."
+                    ) from e
+            
+            # Pattern 2: "missing required argument 'param_name'"
+            if "missing" in error_msg.lower() and "required" in error_msg.lower():
+                # This is a different error - missing required parameters
+                raise TypeError(
+                    f"Failed to call {func.__name__}(): {error_msg}. "
+                    f"Current parameters: {list(current_kwargs.keys())}"
+                ) from e
+            
+            # Unknown TypeError pattern
+            raise TypeError(
+                f"Failed to call {func.__name__}(): {error_msg}. "
+                f"Could not parse error message to extract invalid parameter name."
+            ) from e
+    
+    # Max retries exceeded
+    raise TypeError(
+        f"Failed to call {func.__name__}() after {max_retries} retries. "
+        f"Removed parameters: {removed_params}. "
+        f"Remaining parameters: {list(current_kwargs.keys())}"
+    )
+
+
 def build_job_config_from_namespace(backend_args: SimpleNamespace) -> Any:
     """
     Convert a nested SimpleNamespace to Megatron-Bridge's ConfigContainer.
@@ -101,65 +204,67 @@ def build_job_config_from_namespace(backend_args: SimpleNamespace) -> Any:
 
     # Step 1: Convert namespace to dict (recipe already loaded and merged in ArgBuilder)
     cfg_dict = namespace_to_dict(backend_args)
+
+    return load_recipe_config(backend_args)
     
     # Debug: check what we got from backend_args
-    log_rank_0(f"DEBUG: backend_args.scheduler type before conversion: {type(getattr(backend_args, 'scheduler', None))}")
-    log_rank_0(f"DEBUG: backend_args.peft type before conversion: {type(getattr(backend_args, 'peft', None))}")
-    log_rank_0(f"DEBUG: cfg_dict.scheduler type after namespace_to_dict: {type(cfg_dict.get('scheduler'))}")
-    log_rank_0(f"DEBUG: cfg_dict.peft type after namespace_to_dict: {type(cfg_dict.get('peft'))}")
+    # log_rank_0(f"DEBUG: backend_args.scheduler type before conversion: {type(getattr(backend_args, 'scheduler', None))}")
+    # log_rank_0(f"DEBUG: backend_args.peft type before conversion: {type(getattr(backend_args, 'peft', None))}")
+    # log_rank_0(f"DEBUG: cfg_dict.scheduler type after namespace_to_dict: {type(cfg_dict.get('scheduler'))}")
+    # log_rank_0(f"DEBUG: cfg_dict.peft type after namespace_to_dict: {type(cfg_dict.get('peft'))}")
 
-    # Step 2: Extract and preserve Primus-specific configuration
-    primus_config = cfg_dict.pop("primus", None)
+    # # Step 2: Extract and preserve Primus-specific configuration
+    # primus_config = cfg_dict.pop("primus", None)
 
-    # Remove recipe-related fields from cfg_dict as they are not part of ConfigContainer
-    cfg_dict.pop("recipe", None)
-    cfg_dict.pop("flavor", None)
-    cfg_dict.pop("recipe_kwargs", None)
+    # # Remove recipe-related fields from cfg_dict as they are not part of ConfigContainer
+    # cfg_dict.pop("recipe", None)
+    # cfg_dict.pop("flavor", None)
+    # cfg_dict.pop("recipe_kwargs", None)
 
-    # Step 3: Add _target_ field required by Megatron-Bridge's from_dict
-    # This tells the instantiate() function which class to create
-    cfg_dict["_target_"] = "megatron.bridge.training.config.ConfigContainer"
+    # # Step 3: Add _target_ field required by Megatron-Bridge's from_dict
+    # # This tells the instantiate() function which class to create
+    # cfg_dict["_target_"] = "megatron.bridge.training.config.ConfigContainer"
 
-    # Step 4: Use ConfigContainer.from_dict() with LENIENT mode
-    # LENIENT mode allows extra keys and is more flexible during development
-    try:
-        # Debug: check top-level _target_
-        log_rank_0(f"DEBUG: cfg_dict top-level _target_: {cfg_dict.get('_target_')}")
-        log_rank_0(f"DEBUG: cfg_dict top-level keys: {list(cfg_dict.keys())[:20]}")  # First 20 keys
+    # # Step 4: Use ConfigContainer.from_dict() with LENIENT mode
+    # # LENIENT mode allows extra keys and is more flexible during development
+    # try:
+    #     # Debug: check top-level _target_
+    #     log_rank_0(f"DEBUG: cfg_dict top-level _target_: {cfg_dict.get('_target_')}")
+    #     log_rank_0(f"DEBUG: cfg_dict top-level keys: {list(cfg_dict.keys())[:20]}")  # First 20 keys
         
-        # Debug: check critical nested fields
-        if "scheduler" in cfg_dict:
-            log_rank_0(f"DEBUG: scheduler in cfg_dict: {type(cfg_dict['scheduler'])}")
-            if isinstance(cfg_dict["scheduler"], dict):
-                log_rank_0(f"DEBUG: scheduler dict keys: {list(cfg_dict['scheduler'].keys())}")
-                log_rank_0(f"DEBUG: scheduler _target_: {cfg_dict['scheduler'].get('_target_')}")
-                log_rank_0(f"DEBUG: scheduler full dict: {cfg_dict['scheduler']}")
-        if "peft" in cfg_dict:
-            log_rank_0(f"DEBUG: peft in cfg_dict: {type(cfg_dict['peft'])}")
-            if isinstance(cfg_dict["peft"], dict):
-                log_rank_0(f"DEBUG: peft dict keys: {list(cfg_dict['peft'].keys())}")
-                log_rank_0(f"DEBUG: peft _target_: {cfg_dict['peft'].get('_target_')}")
-                log_rank_0(f"DEBUG: peft full dict: {cfg_dict['peft']}")
+    #     # Debug: check critical nested fields
+    #     if "scheduler" in cfg_dict:
+    #         log_rank_0(f"DEBUG: scheduler in cfg_dict: {type(cfg_dict['scheduler'])}")
+    #         if isinstance(cfg_dict["scheduler"], dict):
+    #             log_rank_0(f"DEBUG: scheduler dict keys: {list(cfg_dict['scheduler'].keys())}")
+    #             log_rank_0(f"DEBUG: scheduler _target_: {cfg_dict['scheduler'].get('_target_')}")
+    #             log_rank_0(f"DEBUG: scheduler full dict: {cfg_dict['scheduler']}")
+    #     if "peft" in cfg_dict:
+    #         log_rank_0(f"DEBUG: peft in cfg_dict: {type(cfg_dict['peft'])}")
+    #         if isinstance(cfg_dict["peft"], dict):
+    #             log_rank_0(f"DEBUG: peft dict keys: {list(cfg_dict['peft'].keys())}")
+    #             log_rank_0(f"DEBUG: peft _target_: {cfg_dict['peft'].get('_target_')}")
+    #             log_rank_0(f"DEBUG: peft full dict: {cfg_dict['peft']}")
         
-        config_container = ConfigContainer.from_dict(cfg_dict, mode=InstantiationMode.LENIENT)
-        log_rank_0("ConfigContainer created successfully from namespace")
-    except Exception as e:
-        log_rank_0(f"Warning: Failed to create ConfigContainer with LENIENT mode: {e}")
-        log_rank_0("Falling back to direct instantiation...")
+    #     # config_container = ConfigContainer.from_dict(cfg_dict, mode=InstantiationMode.LENIENT)
+    #     log_rank_0("ConfigContainer created successfully from namespace")
+    # except Exception as e:
+    #     log_rank_0(f"Warning: Failed to create ConfigContainer with LENIENT mode: {e}")
+    #     log_rank_0("Falling back to direct instantiation...")
 
-        # Fallback: remove _target_ and try direct instantiation
-        cfg_dict.pop("_target_", None)
-        config_container = _dict_to_dataclass(ConfigContainer, cfg_dict)
+    #     # Fallback: remove _target_ and try direct instantiation
+    #     cfg_dict.pop("_target_", None)
+    #     config_container = _dict_to_dataclass(ConfigContainer, cfg_dict)
 
-    # Step 5: Attach Primus configuration as a dynamic attribute if present
-    if primus_config:
-        config_container.primus = dict_to_nested_namespace(primus_config)
-        log_rank_0(f"Attached Primus configuration to ConfigContainer ({len(primus_config)} top-level keys)")
+    # # Step 5: Attach Primus configuration as a dynamic attribute if present
+    # if primus_config:
+    #     config_container.primus = dict_to_nested_namespace(primus_config)
+    #     log_rank_0(f"Attached Primus configuration to ConfigContainer ({len(primus_config)} top-level keys)")
 
-    return config_container
+    # return config_container
 
 
-def load_recipe_config(ns: SimpleNamespace) -> Any:
+def load_recipe_config(backend_args: SimpleNamespace) -> Any:
     """
     Load Megatron-Bridge recipe configuration if specified.
 
@@ -214,8 +319,8 @@ def load_recipe_config(ns: SimpleNamespace) -> Any:
         AssertionError: If recipe or flavor is not specified (both are mandatory)
         RuntimeError: If recipe loading fails (import error, function not found, etc.)
     """
-    recipe = getattr(ns, "recipe", None)
-    flavor = getattr(ns, "flavor", None)
+    recipe = backend_args.recipe
+    flavor = backend_args.flavor
 
     # Recipe and flavor are mandatory for Megatron-Bridge
     assert recipe, "Recipe must be specified for Megatron-Bridge backend"
@@ -238,58 +343,56 @@ def load_recipe_config(ns: SimpleNamespace) -> Any:
     )
     recipe_func = getattr(module, function_name)
 
-    # Convert ns to dict
-    ns_dict = namespace_to_dict(ns)
-
     # First filter: Remove metadata and complex ConfigContainer fields
     # Recipe metadata that should never be passed to recipe function
     recipe_metadata = ["recipe", "flavor", "recipe_kwargs", "primus"]
 
     # ConfigContainer fields that should not be passed to recipe (they're for merging later)
     # These are complex objects that recipe functions don't accept as input
-    container_fields = [
-        "_target_",
-        "rng",
-        "rerun_state_machine",
-        "train",
-        "model",
-        "optimizer",
-        "ddp",
-        "scheduler",
-        "dataset",
-        "logger",
-        "tokenizer",
-        "checkpoint",
-        "dist",
-        "ft",
-        "straggler",
-        "nvrx_straggler",
-        "profiling",
-        "comm_overlap",
-        "mixed_precision",
-        "tensor_inspect",
-        "inprocess_restart",
-        "trainable",
-        "sink_level",
-        "file_sink_level",
-        "stderr_sink_level",
-    ]
+    # container_fields = [
+    #     "_target_",
+    #     "rng",
+    #     "rerun_state_machine",
+    #     "train",
+    #     "model",
+    #     "optimizer",
+    #     "ddp",
+    #     "scheduler",
+    #     "dataset",
+    #     "logger",
+    #     "tokenizer",
+    #     "checkpoint",
+    #     "dist",
+    #     "ft",
+    #     "straggler",
+    #     "nvrx_straggler",
+    #     "profiling",
+    #     "comm_overlap",
+    #     "mixed_precision",
+    #     "tensor_inspect",
+    #     "inprocess_restart",
+    #     "trainable",
+    #     "sink_level",
+    #     "file_sink_level",
+    #     "stderr_sink_level",
+    # ]
 
-    filtered_dict = {
-        k: v for k, v in ns_dict.items() 
-        if k not in recipe_metadata and k not in container_fields
-    }
+    # filtered_dict = {
+    #     k: v for k, v in ns_dict.items() 
+    #     if k not in recipe_metadata and k not in container_fields
+    # }
 
-    # Second filter: only keep parameters accepted by function signature
-    recipe_kwargs = filter_kwargs_by_signature(recipe_func, filtered_dict)
+    # # Second filter: only keep parameters accepted by function signature
+    # recipe_kwargs = filter_kwargs_by_signature(recipe_func, filtered_dict)
 
-    if recipe_kwargs:
-        log_rank_0(f"Recipe kwargs ({len(recipe_kwargs)}): {list(recipe_kwargs.keys())}")
-    else:
-        log_rank_0("Warning: No recipe_kwargs to pass to recipe function")
+    # if recipe_kwargs:
+    #     log_rank_0(f"Recipe kwargs ({len(recipe_kwargs)}): {list(recipe_kwargs.keys())}")
+    # else:
+    #     log_rank_0("Warning: No recipe_kwargs to pass to recipe function")
 
-    # Call recipe function with filtered kwargs
-    config_container = recipe_func(**recipe_kwargs)
+    # Call recipe function with automatic parameter filtering and retry
+    backend_dict = namespace_to_dict(backend_args)
+    config_container = auto_filter_and_call(recipe_func, backend_dict)
     log_rank_0(f"Successfully loaded recipe: {full_module_path}.{function_name}()")
     
     # Debug: check what recipe returned
