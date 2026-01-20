@@ -54,7 +54,10 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
         b_list = [
             torch.randn(b_shape, device=device, dtype=init_dtype).to(dtype) for _ in range(num_rotations)
         ]
-        c_list = [torch.empty((m, n), device=device, dtype=init_dtype) for _ in range(num_rotations)]
+        # Output tensor must also be FP8 when using out= parameter with FP8 inputs
+        c_list = [
+            torch.empty((m, n), device=device, dtype=init_dtype).to(dtype) for _ in range(num_rotations)
+        ]
     else:
         a_list = [torch.randn(a_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
         b_list = [torch.randn(b_shape, device=device, dtype=dtype) for _ in range(num_rotations)]
