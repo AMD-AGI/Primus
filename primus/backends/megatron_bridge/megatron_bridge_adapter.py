@@ -44,23 +44,36 @@ class MegatronBridgeAdapter(BackendAdapter):
     # Backend-specific sys.path setup
     def setup_sys_path(self, backend_path: str):
         """
-        Add Megatron-Bridge's src directory to sys.path.
+        Add Megatron-Bridge and Megatron-LM paths to sys.path.
         
         Megatron-Bridge uses a src-layout structure:
-            megatron-bridge/
-            └── src/
+            third_party/
+            ├── megatron-bridge/
+            │   └── src/
+            │       └── megatron/
+            │           └── bridge/
+            └── Megatron-LM/
                 └── megatron/
-                    └── bridge/
         
-        We need to add the src/ directory so that 'import megatron.bridge' works.
+        We need to add:
+        1. megatron-bridge/src/ for 'import megatron.bridge'
+        2. Megatron-LM/ for base Megatron functionality
         """
         import os
         import sys
         
+        # 1. Add Megatron-Bridge src directory
         src_path = os.path.join(backend_path, "src")
         if os.path.isdir(src_path) and src_path not in sys.path:
             sys.path.insert(0, src_path)
             log_rank_0(f"[MegatronBridge] sys.path.insert → {src_path}")
+        
+        # 2. Add Megatron-LM directory (sibling to megatron-bridge in third_party/)
+        backend_parent = os.path.dirname(backend_path)  # third_party/
+        megatron_lm_path = os.path.join(backend_parent, "Megatron-LM")
+        if os.path.isdir(megatron_lm_path) and megatron_lm_path not in sys.path:
+            sys.path.insert(0, megatron_lm_path)
+            log_rank_0(f"[MegatronBridge] sys.path.insert → {megatron_lm_path}")
 
     # Backend Setup & Patches
     def prepare_backend(self, config: Any):
