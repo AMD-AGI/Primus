@@ -1476,6 +1476,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         one_logger = get_one_logger()
         args = get_args()
 
+        mlflow_status = None
+        termination_reason = None
+
         try:
             if args.pp_warmup:
                 from .utils import pp_warmup
@@ -1581,31 +1584,43 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             maybe_finalize_async_save(blocking=True, terminate=True)
             ft_integration.on_checkpointing_end(is_async_finalization=True)
 
-            # End MLflow run with clean "FINISHED" status
-            if args.rank == (args.world_size - 1):
-                end_mlflow_run(status="FINISHED", termination_reason="clean_finish")
+            mlflow_status = "FINISHED"
+            termination_reason = "clean_finish"
 
             one_logger and one_logger.log_metrics({"app_finish_time": one_logger_utils.get_timestamp_in_ms()})
 
             ft_integration.shutdown()
             one_logger_utils.finish()
 
-            # clean up torch pg resources on exit
-            if dist.is_initialized():
-                dist.destroy_process_group()
-        
         except KeyboardInterrupt:
-            # User interrupted the run (e.g., Ctrl+C). Mark as FAILED on MLflow host rank,
-            # with a specific termination_reason indicating it was user-killed.
-            if args.rank == (args.world_size - 1):
-                end_mlflow_run(status="FAILED", termination_reason="keyboard_interrupt")
+            mlflow_status = "KILLED"
+            termination_reason = "keyboard_interrupt"
+            raise
+        except SystemExit as e:
+            # sys.exit() raises SystemExit (not an Exception). Preserve behavior, but
+            # still mark MLflow run with a meaningful terminal status in `finally`.
+            exit_code = e.code if isinstance(e.code, int) else 0
+            mlflow_status = "FINISHED" if exit_code == 0 else "FAILED"
+            termination_reason = f"system_exit_{exit_code}"
             raise
         except Exception as e:
-            # Any other unhandled error: mark run as FAILED on the MLflow host rank.
-            if args.rank == (args.world_size - 1):
-                end_mlflow_run(status="FAILED", termination_reason=reason)
+            mlflow_status = "FAILED"
+            termination_reason = type(e).__name__ or "unknown_exception"
             raise
+        finally:
+            # Best-effort finalization. Never mask the original exception.
+            try:
+                if args.rank == (args.world_size - 1) and mlflow_status is not None:
+                    end_mlflow_run(status=mlflow_status, termination_reason=termination_reason)
+            except Exception:
+                pass
 
+            try:
+                # clean up torch pg resources on exit
+                if dist.is_initialized():
+                    dist.destroy_process_group()
+            except Exception:
+                pass
 
     def train(
         self,
@@ -2038,9 +2053,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             wandb_writer = get_wandb_writer()
             if wandb_writer:
                 wandb_writer.finish()
-            mlflow_writer = get_mlflow_writer()
-            if mlflow_writer:
-                mlflow_writer.end_run()
+            # Mark run as finished if exit code is 0; otherwise failed.
+            mlflow_status = "FINISHED" if exit_code == 0 else "FAILED"
+            end_mlflow_run(status=mlflow_status, termination_reason=f"exit_condition")
             ft_integration.shutdown()
             sys.exit(exit_code)
 
