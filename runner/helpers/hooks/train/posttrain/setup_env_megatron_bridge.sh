@@ -41,35 +41,8 @@ git checkout "$TRANSFORMERS_BRANCH"
 ########################################
 # 2) Patch transformers modeling_utils.py (idempotent)
 ########################################
-python - <<'PY'
-from pathlib import Path
-
-file = Path("src/transformers/modeling_utils.py")
-text = file.read_text(encoding="utf-8")
-
-block = """from .pytorch_utils import (  # noqa: F401
-    Conv1D,
-    apply_chunking_to_forward,
-    find_pruneable_heads_and_indices,
-    id_tensor_storage,
-    prune_conv1d_layer,
-    prune_layer,
-    prune_linear_layer,
-)
-"""
-
-if block in text:
-    print("[=] modeling_utils.py already patched")
-else:
-    lines = text.splitlines(True)
-    insert_at = 0
-    for i, ln in enumerate(lines[:350]):
-        if ln.startswith("import ") or ln.startswith("from "):
-            insert_at = i + 1
-    lines.insert(insert_at, "\n" + block + "\n")
-    file.write_text("".join(lines), encoding="utf-8")
-    print("[+] Patched modeling_utils.py")
-PY
+echo "[+] Patching transformers modeling_utils.py..."
+python "${PRIMUS_ROOT}/primus/backends/megatron_bridge/patches/transformers_modeling_utils.py" "$TRANSFORMERS_DIR"
 
 ########################################
 # 3) Install Transformers from source (editable)
