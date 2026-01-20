@@ -55,10 +55,15 @@ def check_fp8_matmul_support(dtype):
     if TORCHAO_AVAILABLE:
         try:
             device = get_current_device()
-            a = torch.randn(2, 2, device=device, dtype=torch.bfloat16, requires_grad=False)
-            b = torch.randn(2, 2, device=device, dtype=torch.bfloat16, requires_grad=False)
-            with torch.inference_mode():
-                _ = matmul_with_hp_or_float8_args.apply(a, b.t(), DEFAULT_MM_CONFIG, DEFAULT_CONFIG)
+            # Test using the same pattern as turbo: compile and run
+            torch._dynamo.reset()
+            torch._functorch.config.donated_buffer = False
+            test_fn = torch.compile(
+                lambda a, b: matmul_with_hp_or_float8_args.apply(a, b.t(), DEFAULT_MM_CONFIG, DEFAULT_CONFIG)
+            )
+            a = torch.randn(2, 2, device=device, dtype=torch.bfloat16)
+            b = torch.randn(2, 2, device=device, dtype=torch.bfloat16)
+            _ = test_fn(a, b)
             return True, "torchao"
         except (NotImplementedError, RuntimeError, Exception):
             pass  # Fall through to native check
@@ -75,19 +80,32 @@ def check_fp8_matmul_support(dtype):
         return False, "none"
 
 
-def _gemm_fp8_torchao(a, b, trans_b=True):
-    """FP8 GEMM implementation using torchao."""
+def _gemm_fp8_impl(a, b, trans_b=True):
+    """FP8 GEMM implementation using torchao (raw function for compilation)."""
     if trans_b:
         return matmul_with_hp_or_float8_args.apply(a, b.t(), DEFAULT_MM_CONFIG, DEFAULT_CONFIG)
     else:
         return matmul_with_hp_or_float8_args.apply(a, b, DEFAULT_MM_CONFIG, DEFAULT_CONFIG)
 
 
+# Compiled FP8 GEMM function (initialized on first use)
+_compiled_gemm_fp8 = None
+
+
+def get_compiled_gemm_fp8():
+    """Get a compiled FP8 GEMM function (following turbo's pattern)."""
+    global _compiled_gemm_fp8
+    if _compiled_gemm_fp8 is None:
+        torch._dynamo.reset()
+        torch._functorch.config.donated_buffer = False
+        _compiled_gemm_fp8 = torch.compile(_gemm_fp8_impl)
+    return _compiled_gemm_fp8
+
+
 def maybe_transpose(tensor, transpose):
     return tensor.t() if transpose else tensor
 
 
-@torch.inference_mode()
 def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
     # Supported dtypes: FP32, FP16, BF16, and FP8 (if available)
     supported_dtypes = [torch.float16, torch.bfloat16, torch.float32]
@@ -141,6 +159,8 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
 
     if use_torchao:
         # torchao: use BF16 tensors, conversion handled internally
+        # Get compiled FP8 function
+        compiled_fp8_fn = get_compiled_gemm_fp8()
         init_dtype = torch.bfloat16
         a_list = [torch.randn(a_shape, device=device, dtype=init_dtype) for _ in range(num_rotations)]
         b_list = [torch.randn(b_shape, device=device, dtype=init_dtype) for _ in range(num_rotations)]
@@ -165,14 +185,21 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
         c_list = [torch.empty((m, n), device=device, dtype=dtype) for _ in range(num_rotations)]
 
     # Warm-up
-    for i in range(num_rotations):
-        a = maybe_transpose(a_list[i], trans_a)
-        b = maybe_transpose(b_list[i], trans_b)
-        if use_torchao:
-            _ = _gemm_fp8_torchao(a, b, trans_b=trans_b)
-        else:
-            torch.matmul(a, b, out=c_list[i])
-    torch.cuda.synchronize()
+    if use_torchao:
+        # torchao path: use compiled function
+        for i in range(num_rotations):
+            a = maybe_transpose(a_list[i], trans_a)
+            b = maybe_transpose(b_list[i], trans_b)
+            _ = compiled_fp8_fn(a, b, trans_b=trans_b)
+        torch.cuda.synchronize()
+    else:
+        # Native path: standard matmul with inference_mode for performance
+        with torch.inference_mode():
+            for i in range(num_rotations):
+                a = maybe_transpose(a_list[i], trans_a)
+                b = maybe_transpose(b_list[i], trans_b)
+                torch.matmul(a, b, out=c_list[i])
+            torch.cuda.synchronize()
 
     # Timed run (duration-based)
     target_ms = max(100.0, duration_s * 1000.0)
@@ -182,23 +209,39 @@ def profile_gemm(m, n, k, dtype, trans_a, trans_b, duration_s=10.0):
     total_calls = 0
     start.record()
 
-    while True:
-        for i in range(num_rotations):
-            a = maybe_transpose(a_list[i], trans_a)
-            b = maybe_transpose(b_list[i], trans_b)
-            if use_torchao:
-                _ = _gemm_fp8_torchao(a, b, trans_b=trans_b)
-            else:
-                torch.matmul(a, b, out=c_list[i])
-        end.record()
-        torch.cuda.synchronize()
+    if use_torchao:
+        # torchao path
+        while True:
+            for i in range(num_rotations):
+                a = maybe_transpose(a_list[i], trans_a)
+                b = maybe_transpose(b_list[i], trans_b)
+                _ = compiled_fp8_fn(a, b, trans_b=trans_b)
+            end.record()
+            torch.cuda.synchronize()
 
-        total_calls += num_rotations
+            total_calls += num_rotations
 
-        elapsed = start.elapsed_time(end)  # ms
-        if elapsed >= target_ms:
-            avg_time_ms = elapsed / total_calls
-            break
+            elapsed = start.elapsed_time(end)  # ms
+            if elapsed >= target_ms:
+                avg_time_ms = elapsed / total_calls
+                break
+    else:
+        # Native path
+        with torch.inference_mode():
+            while True:
+                for i in range(num_rotations):
+                    a = maybe_transpose(a_list[i], trans_a)
+                    b = maybe_transpose(b_list[i], trans_b)
+                    torch.matmul(a, b, out=c_list[i])
+                end.record()
+                torch.cuda.synchronize()
+
+                total_calls += num_rotations
+
+                elapsed = start.elapsed_time(end)  # ms
+                if elapsed >= target_ms:
+                    avg_time_ms = elapsed / total_calls
+                    break
 
     tflop = 2.0 * m * n * k / 1e12
     tflops = tflop / (avg_time_ms / 1000.0)
