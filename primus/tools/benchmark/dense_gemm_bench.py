@@ -182,7 +182,27 @@ def run_gemm_benchmark(args):
     else:
         print("[INFO] No model specified. Using CLI-provided parameters.")
 
-    dtype_map = {"bf16": torch_mod.bfloat16, "fp16": torch_mod.float16, "fp32": torch_mod.float32}
+    # Map dtype strings to torch types
+    dtype_map = {
+        "bf16": torch_mod.bfloat16,
+        "fp16": torch_mod.float16,
+        "fp32": torch_mod.float32,
+    }
+
+    # Add FP8 types if available (PyTorch >= 2.1.0)
+    if hasattr(torch_mod, "float8_e4m3fn"):
+        dtype_map["fp8_e4m3"] = torch_mod.float8_e4m3fn
+    if hasattr(torch_mod, "float8_e5m2"):
+        dtype_map["fp8_e5m2"] = torch_mod.float8_e5m2
+
+    # Validate dtype availability
+    if args.dtype not in dtype_map:
+        available = ", ".join(dtype_map.keys())
+        raise ValueError(
+            f"[ERROR] dtype '{args.dtype}' not available in current PyTorch version. "
+            f"Available types: {available}"
+        )
+
     dtype = dtype_map[args.dtype]
 
     shape_defs = [

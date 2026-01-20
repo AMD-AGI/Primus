@@ -19,7 +19,12 @@ def add_gemm_parser(parser: argparse.ArgumentParser):
     parser.add_argument("--num-key-value-heads", type=int, default=32)
     parser.add_argument("--head-dim", type=int, default=128)
     parser.add_argument("--vocab-size", type=int, default=32000)
-    parser.add_argument("--dtype", choices=["bf16", "fp16", "fp32"], default="bf16")
+    parser.add_argument(
+        "--dtype",
+        choices=["bf16", "fp16", "fp32", "fp8_e4m3", "fp8_e5m2"],
+        default="bf16",
+        help="Data type for GEMM operations. fp8_e4m3 (E4M3) for training, fp8_e5m2 (E5M2) for inference",
+    )
     parser.add_argument("--mbs", type=int, default=1, help="Microbatch size")
     parser.add_argument("--output-file", default="./gemm-dense_report.md")
     parser.add_argument("--duration", type=int, default=3, help="Benchmark duration per shape (sec)")
