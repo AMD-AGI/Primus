@@ -87,20 +87,19 @@ execute_hooks() {
             local exit_code
 
             if [[ "$hook_file" == *.sh ]]; then
-                hook_output="$(bash "$hook_file" "${args[@]}" 2>&1)"
-                exit_code=$?
+                # Use process substitution to capture output while printing in real-time
+                hook_output="$(bash "$hook_file" "${args[@]}" 2>&1 | tee /dev/tty)"
+                exit_code=${PIPESTATUS[0]}
             elif [[ "$hook_file" == *.py ]]; then
-                hook_output="$(python3 "$hook_file" "${args[@]}" 2>&1)"
-                exit_code=$?
+                hook_output="$(python3 "$hook_file" "${args[@]}" 2>&1 | tee /dev/tty)"
+                exit_code=${PIPESTATUS[0]}
             else
                 LOG_WARN "[Hooks] Skipping unknown hook type: $hook_file"
                 continue
             fi
 
-            # Re-echo hook output so users see logs as usual.
-            if [[ -n "$hook_output" ]]; then
-                printf '%s\n' "$hook_output"
-            fi
+            # Note: hook_output is still captured for parsing extra.* and env.* variables
+            # The tee command ensures logs are printed in real-time to the terminal
 
             # Parse hook output for extra.* and env.* key=value pairs.
             while IFS= read -r line; do
