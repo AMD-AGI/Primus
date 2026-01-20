@@ -73,9 +73,14 @@ set -euo pipefail
 # ########################################
 # cd "$HOME" || cd /
 
+# Note: nvidia-modelopt has compatibility issues with newer PyTorch versions
+# Specifically: ImportError: cannot import name '_type_utils' from 'torch.onnx'
+# Only install if you need quantization/optimization features
 # pip install "onnx==1.20.0rc1"
 # pip install -U nvidia-modelopt
-# pip install -U nvidia_resiliency_ext
+pip install -U nvidia_resiliency_ext
+
+echo "[OK] Packages installed (nvidia-modelopt skipped due to PyTorch compatibility)"
 
 # ########################################
 # # 6) Export required env var (current shell + persist)
