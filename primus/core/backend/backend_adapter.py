@@ -27,6 +27,31 @@ class BackendAdapter(ABC):
         self.framework = framework
 
     # ============================================================================
+    # Optional Methods (Can be overridden by subclasses)
+    # ============================================================================
+
+    def setup_sys_path(self, backend_path: str):
+        """
+        Customize sys.path for backend-specific requirements.
+        
+        This method is called after the backend path is added to sys.path.
+        Subclasses can override this to add additional paths (e.g., src subdirectory).
+        
+        Args:
+            backend_path: Resolved absolute path to the backend installation
+            
+        Example:
+            # MegatronBridgeAdapter can override to add src directory:
+            def setup_sys_path(self, backend_path: str):
+                import os, sys
+                src_path = os.path.join(backend_path, "src")
+                if os.path.isdir(src_path) and src_path not in sys.path:
+                    sys.path.insert(0, src_path)
+        """
+        # Default: do nothing
+        pass
+
+    # ============================================================================
     # Abstract Methods (Must be implemented by subclasses)
     # ============================================================================
 

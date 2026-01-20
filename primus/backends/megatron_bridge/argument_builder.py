@@ -24,100 +24,101 @@ from primus.core.utils.yaml_utils import (
     dict_to_nested_namespace,
     nested_namespace_to_dict,
 )
+from primus.modules.module_utils import log_dict_aligned
 
 logger = logging.getLogger(__name__)
 
 
-# ------------------------------------------------------------
-# Helper functions
-# ------------------------------------------------------------
-def _filter_existing_keys(base: Dict[str, Any], updates: Dict[str, Any], path: str = "") -> Dict[str, Any]:
-    """
-    Filter updates dict to only include keys that exist in base dict with type checking.
+# # ------------------------------------------------------------
+# # Helper functions
+# # ------------------------------------------------------------
+# def _filter_existing_keys(base: Dict[str, Any], updates: Dict[str, Any], path: str = "") -> Dict[str, Any]:
+#     """
+#     Filter updates dict to only include keys that exist in base dict with type checking.
 
-    Recursively filters nested dictionaries to ensure:
-    1. Only existing keys are updated
-    2. Type compatibility is maintained (warns on mismatch)
+#     Recursively filters nested dictionaries to ensure:
+#     1. Only existing keys are updated
+#     2. Type compatibility is maintained (warns on mismatch)
 
-    Args:
-        base: Base dictionary (defines which keys are allowed and their types)
-        updates: Updates dictionary (may contain keys not in base or wrong types)
-        path: Current path in nested structure (for logging)
+#     Args:
+#         base: Base dictionary (defines which keys are allowed and their types)
+#         updates: Updates dictionary (may contain keys not in base or wrong types)
+#         path: Current path in nested structure (for logging)
 
-    Returns:
-        Filtered updates dict with only keys that exist in base and have matching types
-    """
-    filtered = {}
+#     Returns:
+#         Filtered updates dict with only keys that exist in base and have matching types
+#     """
+#     filtered = {}
 
-    for key, value in updates.items():
-        current_path = f"{path}.{key}" if path else key
+#     for key, value in updates.items():
+#         current_path = f"{path}.{key}" if path else key
 
-        if key not in base:
-            # Skip keys that don't exist in base
-            logger.debug(f"Ignoring unknown config key: {current_path}")
-            continue
+#         if key not in base:
+#             # Skip keys that don't exist in base
+#             logger.debug(f"Ignoring unknown config key: {current_path}")
+#             continue
 
-        base_value = base[key]
+#         base_value = base[key]
 
-        # Type checking
-        base_is_dict = isinstance(base_value, dict)
-        value_is_dict = isinstance(value, dict)
+#         # Type checking
+#         base_is_dict = isinstance(base_value, dict)
+#         value_is_dict = isinstance(value, dict)
 
-        if base_is_dict and value_is_dict:
-            # Both are dicts, recursively filter
-            filtered_nested = _filter_existing_keys(base_value, value, current_path)
-            if filtered_nested:  # Only include if there are valid nested keys
-                filtered[key] = filtered_nested
-        elif base_is_dict and not value_is_dict:
-            # Type mismatch: base is dict but value is not
-            logger.warning(
-                f"Type mismatch for '{current_path}': "
-                f"expected dict (base type), got {type(value).__name__}. "
-                f"Skipping update."
-            )
-            continue
-        elif not base_is_dict and value_is_dict:
-            # Type mismatch: base is not dict but value is
-            logger.warning(
-                f"Type mismatch for '{current_path}': "
-                f"expected {type(base_value).__name__} (base type), got dict. "
-                f"Skipping update."
-            )
-            continue
-        else:
-            # Both are non-dict values
-            # Skip None values to preserve recipe defaults
-            if value is None:
-                logger.debug(f"Skipping None value for '{current_path}', keeping recipe default")
-                continue
+#         if base_is_dict and value_is_dict:
+#             # Both are dicts, recursively filter
+#             filtered_nested = _filter_existing_keys(base_value, value, current_path)
+#             if filtered_nested:  # Only include if there are valid nested keys
+#                 filtered[key] = filtered_nested
+#         elif base_is_dict and not value_is_dict:
+#             # Type mismatch: base is dict but value is not
+#             logger.warning(
+#                 f"Type mismatch for '{current_path}': "
+#                 f"expected dict (base type), got {type(value).__name__}. "
+#                 f"Skipping update."
+#             )
+#             continue
+#         elif not base_is_dict and value_is_dict:
+#             # Type mismatch: base is not dict but value is
+#             logger.warning(
+#                 f"Type mismatch for '{current_path}': "
+#                 f"expected {type(base_value).__name__} (base type), got dict. "
+#                 f"Skipping update."
+#             )
+#             continue
+#         else:
+#             # Both are non-dict values
+#             # Skip None values to preserve recipe defaults
+#             if value is None:
+#                 logger.debug(f"Skipping None value for '{current_path}', keeping recipe default")
+#                 continue
             
-            # Skip if base is None (no default to compare against)
-            if base_value is None:
-                # User provided a value but base has None - allow it
-                filtered[key] = value
-                continue
+#             # Skip if base is None (no default to compare against)
+#             if base_value is None:
+#                 # User provided a value but base has None - allow it
+#                 filtered[key] = value
+#                 continue
             
-            # Type compatibility check (both non-None)
-            base_type = type(base_value)
-            value_type = type(value)
+#             # Type compatibility check (both non-None)
+#             base_type = type(base_value)
+#             value_type = type(value)
 
-            # Allow numeric type conversions (int <-> float)
-            if base_type in (int, float) and value_type in (int, float):
-                filtered[key] = value
-            elif base_type == value_type:
-                # Same type, allow update
-                filtered[key] = value
-            else:
-                # Type mismatch
-                logger.warning(
-                    f"Type mismatch for '{current_path}': "
-                    f"expected {base_type.__name__} (base: {base_value}), "
-                    f"got {value_type.__name__} (update: {value}). "
-                    f"Skipping update."
-                )
-                continue
+#             # Allow numeric type conversions (int <-> float)
+#             if base_type in (int, float) and value_type in (int, float):
+#                 filtered[key] = value
+#             elif base_type == value_type:
+#                 # Same type, allow update
+#                 filtered[key] = value
+#             else:
+#                 # Type mismatch
+#                 logger.warning(
+#                     f"Type mismatch for '{current_path}': "
+#                     f"expected {base_type.__name__} (base: {base_value}), "
+#                     f"got {value_type.__name__} (update: {value}). "
+#                     f"Skipping update."
+#                 )
+#                 continue
 
-    return filtered
+#     return filtered
 
 
 # ------------------------------------------------------------
@@ -142,9 +143,10 @@ class MegatronBridgeArgBuilder:
     'bridge_ns' is a SimpleNamespace containing all fields Megatron-Bridge expects.
     """
 
-    def __init__(self, module_config: SimpleNamespace):
+    def __init__(self):
         # Load Megatron-Bridge recipe configuration
-        self.config = load_recipe_config(module_config.params).to_dict()
+        # self.config = load_recipe_config(module_config.params).to_dict()
+        self.config: Dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Add values to the configuration
@@ -158,14 +160,22 @@ class MegatronBridgeArgBuilder:
         - None values are allowed and will override defaults.
         - Only keys that exist in self.config will be merged (unknown keys are ignored).
         """
+        # # Convert SimpleNamespace to dict
+        # values_dict = nested_namespace_to_dict(values)
+
+        # # Filter: only keep keys that exist in self.config
+        # filtered_values = _filter_existing_keys(self.config, values_dict)
+
+        # log_dict_aligned("Filtered values", filtered_values)
+
+        # # Merge filtered values into the working configuration
+        # self.config = deep_merge(self.config, filtered_values)
+        # return self
         # Convert SimpleNamespace to dict
         values_dict = nested_namespace_to_dict(values)
 
-        # Filter: only keep keys that exist in self.config
-        filtered_values = _filter_existing_keys(self.config, values_dict)
-
-        # Merge filtered values into the working configuration
-        self.config = deep_merge(self.config, filtered_values)
+        # Directly merge into the working configuration
+        self.config = deep_merge(self.config, values_dict)
         return self
 
     # ------------------------------------------------------------------

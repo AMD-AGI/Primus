@@ -109,6 +109,7 @@ class BackendRegistry:
         2. Otherwise sets up backend path in sys.path
         3. Lazily loads the backend module (which is expected to register the adapter)
         4. Creates and returns the adapter instance
+        5. Calls adapter's setup_sys_path for backend-specific path customization
 
         Args:
             backend: Backend name (e.g., "megatron", "torchtitan")
@@ -124,10 +125,13 @@ class BackendRegistry:
         # Fast path: adapter already registered
         if backend not in cls._adapters:
             # Step 1: Setup backend path (idempotent - won't duplicate if already in sys.path)
-            cls.setup_backend_path(backend, backend_path=backend_path, verbose=True)
+            resolved_path = cls.setup_backend_path(backend, backend_path=backend_path, verbose=True)
 
             # Step 2: Lazily load backend (expected to register adapter)
             cls._load_backend(backend)
+        else:
+            # Adapter already registered, still need to resolve path for setup_sys_path
+            resolved_path = cls.setup_backend_path(backend, backend_path=backend_path, verbose=False)
 
         # Step 3: Ensure adapter is available, then create instance
         assert backend in cls._adapters, (
@@ -135,7 +139,14 @@ class BackendRegistry:
             f"Available backends: {', '.join(cls._adapters.keys()) if cls._adapters else 'none'}\n"
             f"Hint: Make sure '{backend}' is installed and properly configured."
         )
-        return cls._adapters[backend](backend)
+        
+        # Step 4: Create adapter instance
+        adapter_instance = cls._adapters[backend](backend)
+        
+        # Step 5: Let adapter customize sys.path if needed
+        adapter_instance.setup_sys_path(resolved_path)
+        
+        return adapter_instance
 
     @classmethod
     def has_adapter(cls, backend: str) -> bool:
@@ -174,27 +185,12 @@ class BackendRegistry:
             """
             Normalize, validate existence, insert into sys.path (if needed),
             and return the normalized path. On failure, raises via assert.
-            
-            If the path contains a 'src' subdirectory, also add it to sys.path.
-            This is common for packages like Megatron-Bridge that have:
-                megatron-bridge/
-                └── src/
-                    └── megatron/
-                        └── bridge/
             """
             norm_path = os.path.abspath(os.path.normpath(str(path)))
             if os.path.exists(norm_path):
-                # Add the main path to sys.path
                 if norm_path not in sys.path:
                     sys.path.insert(0, norm_path)
                     log_rank_0(f"sys.path.insert → {norm_path}")
-                
-                # Check if there's a 'src' subdirectory and add it too
-                src_path = os.path.join(norm_path, "src")
-                if os.path.isdir(src_path) and src_path not in sys.path:
-                    sys.path.insert(0, src_path)
-                    log_rank_0(f"sys.path.insert → {src_path} (src subdirectory)")
-                
                 return norm_path
 
             assert False, error_msg

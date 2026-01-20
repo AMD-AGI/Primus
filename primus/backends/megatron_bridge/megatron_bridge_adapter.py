@@ -41,6 +41,27 @@ class MegatronBridgeAdapter(BackendAdapter):
     def __init__(self, framework: str = "megatron_bridge"):
         super().__init__(framework)
 
+    # Backend-specific sys.path setup
+    def setup_sys_path(self, backend_path: str):
+        """
+        Add Megatron-Bridge's src directory to sys.path.
+        
+        Megatron-Bridge uses a src-layout structure:
+            megatron-bridge/
+            └── src/
+                └── megatron/
+                    └── bridge/
+        
+        We need to add the src/ directory so that 'import megatron.bridge' works.
+        """
+        import os
+        import sys
+        
+        src_path = os.path.join(backend_path, "src")
+        if os.path.isdir(src_path) and src_path not in sys.path:
+            sys.path.insert(0, src_path)
+            log_rank_0(f"[MegatronBridge] sys.path.insert → {src_path}")
+
     # Backend Setup & Patches
     def prepare_backend(self, config: Any):
         """
