@@ -79,14 +79,20 @@ def auto_filter_and_call(func: Callable, kwargs: Dict[str, Any], max_retries: in
     Automatically filter kwargs and call function with retry mechanism.
     
     This function tries to call the target function with given kwargs.
-    If it fails due to unexpected keyword arguments, it automatically removes
-    the problematic parameters and retries until success or max_retries reached.
+    If it fails due to unexpected keyword arguments (from func itself or
+    any nested function calls), it automatically removes the problematic
+    parameters and retries until success or max_retries reached.
     
     Strategy:
-        1. First try: Use signature-based filtering (fast, works for most cases)
+        1. Directly try calling func(**kwargs)
         2. If TypeError occurs: Parse error message to find invalid parameter
         3. Remove invalid parameter and retry
         4. Repeat until success or max_retries reached
+    
+    Note: We don't pre-filter by signature because:
+        - func may call other functions internally
+        - Those nested functions may have different parameter requirements
+        - Only runtime errors reveal the true invalid parameters
     
     Args:
         func: Target function to call
@@ -106,14 +112,11 @@ def auto_filter_and_call(func: Callable, kwargs: Dict[str, Any], max_retries: in
     """
     import re
     
-    # First try: use signature-based filtering (most efficient)
-    filtered_kwargs = filter_kwargs_by_signature(func, kwargs)
+    log_rank_0(f"Attempting to call {func.__name__}() with {len(kwargs)} parameters...")
     
-    log_rank_0(f"Attempting to call {func.__name__}() with {len(filtered_kwargs)} parameters...")
-    
-    # Try calling with filtered kwargs
+    # Try calling directly without pre-filtering
     attempt = 0
-    current_kwargs = filtered_kwargs.copy()
+    current_kwargs = kwargs.copy()
     removed_params = []
     
     while attempt < max_retries:
@@ -126,7 +129,7 @@ def auto_filter_and_call(func: Callable, kwargs: Dict[str, Any], max_retries: in
                     f"{len(removed_params)} invalid parameters: {removed_params}"
                 )
             else:
-                log_rank_0(f"✅ Successfully called {func.__name__}() with all filtered parameters")
+                log_rank_0(f"✅ Successfully called {func.__name__}() with all parameters")
             
             return result
             
