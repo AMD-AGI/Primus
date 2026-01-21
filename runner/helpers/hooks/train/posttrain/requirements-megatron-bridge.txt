@@ -1,6 +1,9 @@
 # Megatron-Bridge Core Dependencies
 # Extracted from third_party/Megatron-Bridge/pyproject.toml
 
+# Transformers (pinned version for compatibility)
+transformers==4.57.6
+
 # Core dependencies from [project.dependencies]
 qwen-vl-utils
 timm
