@@ -9,7 +9,7 @@
 Install the third-party Megatron-LM package in editable mode:
 
 ```bash
-cd /workspace/Primus/third_party/megatron-lm
+cd /workspace/Primus/third_party/Megatron-LM
 pip install -e .
 ```
 
