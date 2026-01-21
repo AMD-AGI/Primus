@@ -82,6 +82,7 @@ set -euo pipefail
 # Install required packages for multimodal support
 pip install -U nvidia_resiliency_ext
 pip install megatron-energon
+pip install bitstring  # Required for AV (audio/video) processing in megatron-energon
 
 echo "[OK] Packages installed (nvidia-modelopt skipped due to PyTorch compatibility)"
 
