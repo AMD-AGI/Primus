@@ -33,10 +33,10 @@ cd "$PRIMUS_ROOT"
 
 # Extract model config file from main config
 MODEL_CONFIG=$(python3 -c "
-import yaml
 import sys
-with open('${CONFIG_FILE}', 'r') as f:
-    config = yaml.safe_load(f)
+sys.path.insert(0, '${PRIMUS_ROOT}')
+from primus.core.utils.yaml_utils import parse_yaml
+config = parse_yaml('${CONFIG_FILE}')
 model_file = config.get('modules', {}).get('post_trainer', {}).get('model', '')
 if model_file:
     print(model_file)
@@ -58,9 +58,10 @@ fi
 
 # Extract hf_path from model config
 HF_PATH=$(python3 -c "
-import yaml
-with open('${MODEL_CONFIG_PATH}', 'r') as f:
-    config = yaml.safe_load(f)
+import sys
+sys.path.insert(0, '${PRIMUS_ROOT}')
+from primus.core.utils.yaml_utils import parse_yaml
+config = parse_yaml('${MODEL_CONFIG_PATH}')
 print(config.get('hf_path', ''))
 " 2>/dev/null || echo "")
 
