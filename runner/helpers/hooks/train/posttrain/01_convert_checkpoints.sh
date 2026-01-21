@@ -27,12 +27,19 @@ cd "$PRIMUS_ROOT"
 HF_PATH=$(python3 -c "
 import sys
 sys.path.insert(0, '${PRIMUS_ROOT}')
-from primus.core.utils.yaml_utils import parse_yaml_to_namespace
-exp = parse_yaml_to_namespace('${CONFIG_FILE}')
-# Access post_trainer config
-post_trainer = getattr(exp.modules, 'post_trainer', None)
-if post_trainer and hasattr(post_trainer, 'hf_path'):
-    print(post_trainer.hf_path)
+from pathlib import Path
+from primus.core.config.primus_config import load_primus_config, get_module_config
+
+# Load config using the same method as train_runtime.py
+cfg = load_primus_config(Path('${CONFIG_FILE}'), None)
+
+# Get post_trainer module config
+post_trainer = get_module_config(cfg, 'post_trainer')
+
+if post_trainer and hasattr(post_trainer, 'model') and hasattr(post_trainer.model, 'hf_path'):
+    print(post_trainer.model.hf_path)
+elif post_trainer and hasattr(post_trainer.params, 'model') and hasattr(post_trainer.params.model, 'hf_path'):
+    print(post_trainer.params.model.hf_path)
 else:
     sys.exit(1)
 " 2>/dev/null || echo "")
