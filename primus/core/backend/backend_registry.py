@@ -129,22 +129,23 @@ class BackendRegistry:
 
             # Step 2: Lazily load backend (expected to register adapter)
             cls._load_backend(backend)
+
+            # Step 3: Ensure adapter is available, then create instance
+            assert backend in cls._adapters, (
+                f"[Primus] Backend '{backend}' not found.\n"
+                f"Available backends: {', '.join(cls._adapters.keys()) if cls._adapters else 'none'}\n"
+                f"Hint: Make sure '{backend}' is installed and properly configured."
+            )
+
+            # Step 4: Create adapter instance
+            adapter_instance = cls._adapters[backend](backend)
+
+            # Step 5: Let adapter customize sys.path if needed
+            adapter_instance.setup_sys_path(resolved_path)
         else:
-            # Adapter already registered, still need to resolve path for setup_sys_path
-            resolved_path = cls.setup_backend_path(backend, backend_path=backend_path, verbose=False)
-
-        # Step 3: Ensure adapter is available, then create instance
-        assert backend in cls._adapters, (
-            f"[Primus] Backend '{backend}' not found.\n"
-            f"Available backends: {', '.join(cls._adapters.keys()) if cls._adapters else 'none'}\n"
-            f"Hint: Make sure '{backend}' is installed and properly configured."
-        )
-
-        # Step 4: Create adapter instance
-        adapter_instance = cls._adapters[backend](backend)
-
-        # Step 5: Let adapter customize sys.path if needed
-        adapter_instance.setup_sys_path(resolved_path)
+            # Adapter already registered - skip path setup as it was done during registration
+            # Directly create adapter instance
+            adapter_instance = cls._adapters[backend](backend)
 
         return adapter_instance
 
