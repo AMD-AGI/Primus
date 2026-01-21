@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import re
 import subprocess
 
 
@@ -26,3 +27,15 @@ def get_rocm_smi_mem_info(device_id: int):
     free_mem = total_mem - used_mem
 
     return total_mem, used_mem, free_mem
+
+
+def get_rocm_smi_gpu_util(device_id: int) -> float:
+    try:
+        out = subprocess.check_output(["rocm-smi", "--showuse", f"-d={device_id}"], text=True)
+    except FileNotFoundError:
+        raise RuntimeError("rocm-smi not found, please ensure ROCm is installed and in PATH")
+
+    match = re.search(r"GPU\s*use.*?:\s*([0-9]+)", out, re.IGNORECASE)
+    if not match:
+        raise RuntimeError("Unable to parse GPU utilization from rocm-smi output")
+    return float(match.group(1))
