@@ -21,7 +21,7 @@ model:
 train:
   train_iters: 600
   global_batch_size: 64
-  micro_batch_size: 1
+  micro_batch_size: 8
   eval_iters: 5
 
 optimizer:
@@ -45,4 +45,5 @@ rng:
   seed: 42
 
 ddp:
+
   grad_reduce_in_fp32: true
