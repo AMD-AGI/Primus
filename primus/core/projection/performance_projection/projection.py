@@ -635,8 +635,9 @@ def _extract_layer_type_timings(layer_results: dict) -> Dict[str, dict[str, floa
         type_timings[layer_type] = {
             "forward": forward,
             "backward": backward,
-            # weight grad measured together with backward in our approximation
-            "wgrad": backward,
+            # wgrad is already included in the benchmarked backward time,
+            # so set to 0 to avoid double-counting in the simulator
+            "wgrad": 0.0,
             "activation": activation,
         }
     return type_timings
@@ -652,7 +653,7 @@ def _add_io_layer_timings(chunk_timings: List[list[dict]], profiling_results: di
         first_chunk["fwd"] += embedding.get("forward_time_ms", 0.0) or 0.0
         emb_bwd = embedding.get("backward_time_ms", 0.0) or 0.0
         first_chunk["bwd"] += emb_bwd
-        first_chunk["wgrad"] += emb_bwd
+        # wgrad already included in backward, don't add again
         first_chunk["activation"] += (embedding.get("activation_memory_bytes", 0.0) or 0.0) / _BYTES_PER_GB
 
     output = profiling_results.get("output")
@@ -661,7 +662,7 @@ def _add_io_layer_timings(chunk_timings: List[list[dict]], profiling_results: di
         last_chunk["fwd"] += output.get("forward_time_ms", 0.0) or 0.0
         out_bwd = output.get("backward_time_ms", 0.0) or 0.0
         last_chunk["bwd"] += out_bwd
-        last_chunk["wgrad"] += out_bwd
+        # wgrad already included in backward, don't add again
         last_chunk["activation"] += (output.get("activation_memory_bytes", 0.0) or 0.0) / _BYTES_PER_GB
 
 
@@ -739,17 +740,29 @@ def _compute_micro_batches(runtime_cfg, model_parallel_config) -> int:
     global_batch = getattr(runtime_cfg, "global_batch_size", None) or 1
     micro_batch = getattr(runtime_cfg, "micro_batch_size", None) or 1
     data_parallel_size = getattr(runtime_cfg, "data_parallel_size", None) or 1
-    expert_model_parallel_size = getattr(model_parallel_config, "expert_model_parallel_size", None) or 1
 
-    denominator = micro_batch * data_parallel_size * expert_model_parallel_size
+    denominator = micro_batch * data_parallel_size
     if denominator <= 0:
         return 1
     return max(1, math.ceil(global_batch / denominator))
 
 
-def _build_scheduler_sim_config(training_config, profiling_results):
+def _build_scheduler_sim_config(training_config, profiling_results, enable_zero_bubble=False):
     chunk_time_matrix = _build_chunk_time_matrix(training_config, profiling_results)
     assert chunk_time_matrix is not None
+
+    # For zero-bubble scheduling, we need to split backward into B (input grad) and W (weight grad)
+    # The zero-bubble scheduler schedules these separately to minimize pipeline bubbles.
+    # Typically B and W are roughly equal in duration (each ~50% of total backward).
+    if enable_zero_bubble:
+        print("\n[Primus:Performance Projection] Splitting backward time for zero-bubble scheduling:")
+        print("  B (input grad) = 50% of backward, W (weight grad) = 50% of backward")
+        for rank_chunks in chunk_time_matrix:
+            for chunk in rank_chunks:
+                total_bwd = chunk.get("bwd", 0.0)
+                # Split: bwd becomes input gradient only, wgrad becomes weight gradient
+                chunk["bwd"] = total_bwd * 0.5
+                chunk["wgrad"] = total_bwd * 0.5
 
     if chunk_time_matrix:
         print("\n[Primus:Performance Projection] Per-chunk timings (ms):")
@@ -757,11 +770,18 @@ def _build_scheduler_sim_config(training_config, profiling_results):
             for chunk_idx, chunk in enumerate(rank_chunks):
                 fwd = chunk.get("fwd", 0.0)
                 bwd = chunk.get("bwd", 0.0)
+                wgrad = chunk.get("wgrad", 0.0)
                 activation = chunk.get("activation", 0.0)
-                print(
-                    f"  Rank {rank_idx:02d} Chunk {chunk_idx:02d} -> "
-                    f"fwd={fwd:.2f} ms, bwd={bwd:.2f} ms, activation={activation:.2f} GB"
-                )
+                if enable_zero_bubble:
+                    print(
+                        f"  Rank {rank_idx:02d} Chunk {chunk_idx:02d} -> "
+                        f"fwd={fwd:.2f} ms, bwd(B)={bwd:.2f} ms, wgrad(W)={wgrad:.2f} ms, activation={activation:.2f} GB"
+                    )
+                else:
+                    print(
+                        f"  Rank {rank_idx:02d} Chunk {chunk_idx:02d} -> "
+                        f"fwd={fwd:.2f} ms, bwd={bwd:.2f} ms, activation={activation:.2f} GB"
+                    )
 
     mp_cfg = training_config.model_parallel_config
     pp_size = getattr(mp_cfg, "pipeline_model_parallel_size", 1) or 1
@@ -770,7 +790,18 @@ def _build_scheduler_sim_config(training_config, profiling_results):
 
     micro_batches = _compute_micro_batches(training_config.runtime_config, mp_cfg)
 
-    if vpp_size > 1:
+    # Select scheduler based on configuration
+    if enable_zero_bubble and vpp_size == 1:
+        # Zero-bubble schedule minimizes pipeline bubbles by separating B and W
+        scheduler = {
+            "name": "zerobubble",
+            "class": "primus.core.pipeline_parallel.scheduler.algorithms.zerobubble.ScheduleZeroBubble",
+            "pp_size": pp_size,
+            "vpp_size": 1,
+            "micro_batches": micro_batches,
+        }
+        print(f"[Primus:Performance Projection] Using zero-bubble scheduler (enable_zero_bubble=True)")
+    elif vpp_size > 1:
         scheduler = {
             "name": "interleaved_1f1b",
             "class": "primus.core.pipeline_parallel.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
@@ -946,14 +977,19 @@ def _run_layer_benchmark(primus_config, unknown_overrides):
     return profiling_results
 
 
-def _run_pipeline_simulation(training_config, profiling_results):
+def _run_pipeline_simulation(training_config, profiling_results, enable_zero_bubble=False):
     """
     Run pipeline simulation and return the step time.
+    
+    Args:
+        training_config: Training configuration
+        profiling_results: Layer profiling results
+        enable_zero_bubble: Whether to use zero-bubble scheduling (reduces pipeline bubbles)
     
     Returns:
         float: Step time in ms from pipeline simulation, or None if simulation failed
     """
-    sim_config = _build_scheduler_sim_config(training_config, profiling_results)
+    sim_config = _build_scheduler_sim_config(training_config, profiling_results, enable_zero_bubble)
     if sim_config is None:
         return None
     print("\n[Primus:Performance Projection] Running pipeline schedule simulator...")
@@ -1241,6 +1277,27 @@ def launch_projection_from_cli(args, overrides):
     # Use original config for projection calculations
     training_config = convert_primus_config_to_projection_config(primus_config_original)
 
+    # Fix data_parallel_size to use PROJECTION_NNODES instead of NNODES (benchmark node)
+    # This ensures the pipeline simulation calculates the correct number of microbatches
+    if projection_nnodes:
+        target_nodes = int(projection_nnodes)
+        mp_config = training_config.model_parallel_config
+        tp = mp_config.tensor_model_parallel_size
+        pp = mp_config.pipeline_model_parallel_size
+        cp = getattr(mp_config, 'context_parallel_size', 1) or 1
+        ep = getattr(mp_config, 'expert_model_parallel_size', 1) or 1
+        
+        target_world_size = target_nodes * gpus_per_node
+        target_dp = target_world_size // (tp * pp * cp)
+        
+        print(f"\n[Primus:Performance Projection] Updating data_parallel_size for target configuration:")
+        print(f"  NNODES (benchmark): {os.getenv('NNODES', '1')}")
+        print(f"  PROJECTION_NNODES (target): {target_nodes}")
+        print(f"  Original data_parallel_size: {training_config.runtime_config.data_parallel_size}")
+        print(f"  Updated data_parallel_size: {target_dp}")
+        
+        training_config.runtime_config.data_parallel_size = target_dp
+
     # If EP was rescaled, adjust profiling_results to add EP overhead BEFORE pipeline simulation
     ep_overhead_applied = False
     if reduction_info["adjusted"] and reduction_info["original_ep"] != reduction_info["benchmark_ep"]:
@@ -1275,7 +1332,11 @@ def launch_projection_from_cli(args, overrides):
             print(f"  Adjusted {moe_layers_adjusted} MoE layer(s) in profiling results")
             ep_overhead_applied = True
 
-    pipeline_simulation_time_ms = _run_pipeline_simulation(training_config, profiling_results)
+    # Check if zero-bubble scheduling is enabled in the original config
+    original_module_config = primus_config_original.get_module_config("pre_trainer")
+    enable_zero_bubble = getattr(original_module_config, "enable_zero_bubble", False)
+    
+    pipeline_simulation_time_ms = _run_pipeline_simulation(training_config, profiling_results, enable_zero_bubble)
     
     # If PROJECTION_NNODES is set, also run multinode projection
     if projection_nnodes:
