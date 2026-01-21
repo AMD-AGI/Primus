@@ -29,6 +29,7 @@ import sys
 sys.path.insert(0, '${PRIMUS_ROOT}')
 from pathlib import Path
 from primus.core.config.primus_config import load_primus_config, get_module_config
+from primus.core.utils.yaml_utils import parse_yaml
 
 # Load config using the same method as train_runtime.py
 cfg = load_primus_config(Path('${CONFIG_FILE}'), None)
@@ -36,12 +37,29 @@ cfg = load_primus_config(Path('${CONFIG_FILE}'), None)
 # Get post_trainer module config
 post_trainer = get_module_config(cfg, 'post_trainer')
 
-if post_trainer and hasattr(post_trainer, 'model') and hasattr(post_trainer.model, 'hf_path'):
-    print(post_trainer.model.hf_path)
-elif post_trainer and hasattr(post_trainer.params, 'model') and hasattr(post_trainer.params.model, 'hf_path'):
-    print(post_trainer.params.model.hf_path)
-else:
-    sys.exit(1)
+if post_trainer and hasattr(post_trainer, 'model'):
+    model_file = post_trainer.model
+    # If model is a string (file path), load it
+    if isinstance(model_file, str):
+        model_path = Path('primus/configs/models/megatron_bridge') / model_file
+        if model_path.exists():
+            model_cfg = parse_yaml(str(model_path))
+            if 'hf_path' in model_cfg:
+                print(model_cfg['hf_path'])
+                sys.exit(0)
+    # If model is already parsed
+    elif hasattr(model_file, 'hf_path'):
+        print(model_file.hf_path)
+        sys.exit(0)
+
+# Also check params.model
+if post_trainer and hasattr(post_trainer.params, 'model'):
+    model = post_trainer.params.model
+    if hasattr(model, 'hf_path'):
+        print(model.hf_path)
+        sys.exit(0)
+
+sys.exit(1)
 " 2>/dev/null || echo "")
 
 if [[ -z "$HF_PATH" ]]; then
