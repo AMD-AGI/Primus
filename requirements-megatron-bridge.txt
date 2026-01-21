@@ -1,0 +1,25 @@
+# Megatron-Bridge Core Dependencies
+# Extracted from third_party/Megatron-Bridge/pyproject.toml
+
+# Core dependencies from [project.dependencies]
+qwen-vl-utils
+timm
+open-clip-torch>=3.2.0
+flash-linear-attention
+
+# Multimodal support (for VLM models like Gemma3-VL)
+megatron-energon
+bitstring
+
+# Optional: NeMo Run for recipe management
+# nemo-run>=0.5.0a0,<0.6.0
+
+# Note: The following packages require special installation from Git/source:
+# - transformer-engine: git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.9
+# - mamba-ssm: git+https://github.com/state-spaces/mamba.git@6b32be06d026e170b3fdaf3ae6282c5a6ff57b06
+# - nvidia-resiliency-ext: git+https://github.com/NVIDIA/nvidia-resiliency-ext.git@54f85fe422d296cf04ea524130014bd3a2c3add1
+# - causal-conv1d: git+https://github.com/Dao-AILab/causal-conv1d.git@9d700d167c4ad299b0a5265ed1bdb4ee4a0ca111
+# - megatron-core: install from 3rdparty/Megatron-LM/ (pip install -e third_party/Megatron-Bridge/3rdparty/Megatron-LM/)
+
+# Note: nvidia-modelopt has compatibility issues with newer PyTorch versions
+# nvidia-modelopt[torch]>=0.37.0  # Skip due to ImportError: cannot import name '_type_utils' from 'torch.onnx'
