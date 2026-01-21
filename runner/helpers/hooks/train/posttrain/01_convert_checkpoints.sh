@@ -62,6 +62,7 @@ fi
 # Check if Megatron checkpoint already exists
 if [[ -d "$MEGATRON_PATH" ]]; then
     echo "[INFO] Megatron checkpoint already exists at ${MEGATRON_PATH}, skipping conversion"
+    echo "extra.checkpoint.pretrained_checkpoint=${MEGATRON_PATH}"
     exit 0
 fi
 
@@ -73,4 +74,5 @@ python3 third_party/Megatron-Bridge/examples/conversion/convert_checkpoints.py i
   --hf-model "${HF_PATH}" \
   --megatron-path "${MEGATRON_PATH}"
 
+echo "extra.checkpoint.pretrained_checkpoint=${MEGATRON_PATH}"
 echo "[OK] Checkpoint prepared at ${MEGATRON_PATH}"
