@@ -42,14 +42,24 @@ if [[ -z "$HF_PATH" ]]; then
     exit 0
 fi
 
-# Set megatron checkpoint path
-WORKSPACE="${PRIMUS_WORKSPACE:-./output}"
-MEGATRON_PATH="${WORKSPACE}/megatron_checkpoints/$(basename "${HF_PATH}")"
+# Set paths
+DATA_PATH="${DATA_PATH:-${PRIMUS_ROOT}/data}"
+HF_CACHE="${HF_HOME:-${DATA_PATH}/huggingface}/hub"
+MEGATRON_PATH="${DATA_PATH}/megatron_checkpoints/$(basename "${HF_PATH}")"
 
 echo "[INFO] HF Model: ${HF_PATH}"
+echo "[INFO] HF Cache: ${HF_CACHE}"
 echo "[INFO] Megatron Path: ${MEGATRON_PATH}"
 
-# Check if checkpoint already exists
+# Check if HF checkpoint already downloaded
+HF_MODEL_CACHE="${HF_CACHE}/models--$(echo "${HF_PATH}" | tr '/' '--')"
+if [[ -d "$HF_MODEL_CACHE" ]]; then
+    echo "[INFO] HF checkpoint already cached at ${HF_MODEL_CACHE}"
+else
+    echo "[INFO] HF checkpoint will be downloaded from ${HF_PATH}"
+fi
+
+# Check if Megatron checkpoint already exists
 if [[ -d "$MEGATRON_PATH" ]]; then
     echo "[INFO] Megatron checkpoint already exists at ${MEGATRON_PATH}, skipping conversion"
     exit 0
