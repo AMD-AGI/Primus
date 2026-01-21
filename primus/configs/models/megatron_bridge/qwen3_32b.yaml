@@ -1,2 +1,3 @@
 recipe: qwen.qwen3
 flavor: qwen3_32b_finetune_config
+hf_path: Qwen/Qwen3-32B

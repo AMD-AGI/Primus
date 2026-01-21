@@ -13,12 +13,6 @@ PIP_CACHE_DIR="${PIP_CACHE_DIR:-${DATA_PATH}/pip_cache}"
 echo "[INFO] Using pip cache: ${PIP_CACHE_DIR}"
 mkdir -p "${PIP_CACHE_DIR}"
 
-# Uninstall nvidia-modelopt if present (incompatible with PyTorch 2.x)
-# if pip show nvidia-modelopt &>/dev/null; then
-#     echo "[INFO] Uninstalling incompatible nvidia-modelopt..."
-#     pip uninstall -y nvidia-modelopt onnx 2>/dev/null || true
-# fi
-
 pip install --cache-dir="${PIP_CACHE_DIR}" "onnx==1.20.0rc1"
 pip install --cache-dir="${PIP_CACHE_DIR}" -U nvidia-modelopt
 pip install --cache-dir="${PIP_CACHE_DIR}" -U nvidia_resiliency_ext

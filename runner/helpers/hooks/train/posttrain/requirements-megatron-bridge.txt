@@ -16,7 +16,7 @@ bitstring
 filetype
 
 # NVIDIA packages
-nvidia_resiliency_ext
+# nvidia_resiliency_ext
 # onnx==1.20.0rc1  # Commented: required only for nvidia-modelopt
 # nvidia-modelopt  # Commented: PyTorch compatibility issue (ImportError: cannot import name '_type_utils')
 

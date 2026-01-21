@@ -20,12 +20,21 @@ if [[ -z "$CONFIG_FILE" ]]; then
 fi
 
 # Parse the complete config with all extends and nested configs
-PRIMUS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+PRIMUS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." && pwd)"
 cd "$PRIMUS_ROOT"
+
+# Convert CONFIG_FILE to absolute path
+if [[ ! "$CONFIG_FILE" = /* ]]; then
+    CONFIG_FILE="${PRIMUS_ROOT}/${CONFIG_FILE#./}"
+fi
 
 # Extract hf_path from fully parsed config
 HF_PATH=$(python3 -c "
 import sys
+
+# Debug output to stderr so it doesn't interfere with stdout capture
+print(f'[DEBUG] CONFIG_FILE: ${CONFIG_FILE}', file=sys.stderr)
+
 sys.path.insert(0, '${PRIMUS_ROOT}')
 from pathlib import Path
 from primus.core.config.primus_config import load_primus_config, get_module_config
@@ -33,34 +42,30 @@ from primus.core.utils.yaml_utils import parse_yaml
 
 # Load config using the same method as train_runtime.py
 cfg = load_primus_config(Path('${CONFIG_FILE}'), None)
+print(f'[DEBUG] cfg type: {type(cfg)}', file=sys.stderr)
 
 # Get post_trainer module config
 post_trainer = get_module_config(cfg, 'post_trainer')
+print(f'[DEBUG] post_trainer type: {type(post_trainer)}', file=sys.stderr)
 
-if post_trainer and hasattr(post_trainer, 'model'):
-    model_file = post_trainer.model
-    # If model is a string (file path), load it
-    if isinstance(model_file, str):
-        model_path = Path('primus/configs/models/megatron_bridge') / model_file
-        if model_path.exists():
-            model_cfg = parse_yaml(str(model_path))
-            if 'hf_path' in model_cfg:
-                print(model_cfg['hf_path'])
-                sys.exit(0)
-    # If model is already parsed
-    elif hasattr(model_file, 'hf_path'):
-        print(model_file.hf_path)
-        sys.exit(0)
+if post_trainer is None:
+    print('[DEBUG] post_trainer is None', file=sys.stderr)
+    sys.exit(1)
 
-# Also check params.model
-if post_trainer and hasattr(post_trainer.params, 'model'):
-    model = post_trainer.params.model
-    if hasattr(model, 'hf_path'):
-        print(model.hf_path)
-        sys.exit(0)
+if not hasattr(post_trainer, 'params'):
+    print('[DEBUG] post_trainer has no params', file=sys.stderr)
+    sys.exit(1)
 
-sys.exit(1)
-" 2>/dev/null || echo "")
+print(f'[DEBUG] post_trainer.params type: {type(post_trainer.params)}', file=sys.stderr)
+
+if not hasattr(post_trainer.params, 'hf_path'):
+    print('[DEBUG] post_trainer.params has no hf_path', file=sys.stderr)
+    sys.exit(1)
+
+print(post_trainer.params.hf_path)
+" || echo "")
+
+echo "[DEBUG] HF_PATH captured: ${HF_PATH}"
 
 if [[ -z "$HF_PATH" ]]; then
     # ANSI color codes
@@ -91,7 +96,7 @@ fi
 # Check if Megatron checkpoint already exists
 if [[ -d "$MEGATRON_PATH" ]]; then
     echo "[INFO] Megatron checkpoint already exists at ${MEGATRON_PATH}, skipping conversion"
-    echo "extra.checkpoint.pretrained_checkpoint=${MEGATRON_PATH}"
+    echo "extra.pretrained_checkpoint=${MEGATRON_PATH}"
     exit 0
 fi
 
@@ -99,9 +104,12 @@ fi
 echo "[+] Converting HF checkpoint to Megatron format..."
 mkdir -p "$(dirname "${MEGATRON_PATH}")"
 
+# Set up Python path for Megatron-Bridge
+export PYTHONPATH="${PRIMUS_ROOT}/third_party/Megatron-Bridge/src:${PRIMUS_ROOT}/third_party/Megatron-Bridge/3rdparty/Megatron-LM:${PYTHONPATH:-}"
+
 python3 third_party/Megatron-Bridge/examples/conversion/convert_checkpoints.py import \
   --hf-model "${HF_PATH}" \
   --megatron-path "${MEGATRON_PATH}"
 
-echo "extra.checkpoint.pretrained_checkpoint=${MEGATRON_PATH}"
+echo "extra.pretrained_checkpoint=${MEGATRON_PATH}"
 echo "[OK] Checkpoint prepared at ${MEGATRON_PATH}"
