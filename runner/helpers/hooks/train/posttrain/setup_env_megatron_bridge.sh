@@ -81,13 +81,13 @@ set -euo pipefail
 
 # Install Megatron-Bridge dependencies
 echo "[+] Installing Megatron-Bridge core dependencies..."
-PRIMUS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../.." && pwd)"
-if [ -f "${PRIMUS_ROOT}/requirements-megatron-bridge.txt" ]; then
-    pip install -r "${PRIMUS_ROOT}/requirements-megatron-bridge.txt"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${SCRIPT_DIR}/requirements-megatron-bridge.txt" ]; then
+    pip install -r "${SCRIPT_DIR}/requirements-megatron-bridge.txt"
 else
     # Fallback: Install core packages individually
     pip install qwen-vl-utils timm "open-clip-torch>=3.2.0" flash-linear-attention
-    pip install megatron-energon bitstring
+    pip install megatron-energon bitstring filetype
 fi
 
 echo "[OK] Packages installed (nvidia-modelopt skipped due to PyTorch compatibility)"

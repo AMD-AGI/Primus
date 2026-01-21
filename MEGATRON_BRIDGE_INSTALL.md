@@ -7,7 +7,7 @@ This guide covers the installation of Megatron-Bridge dependencies for the Primu
 ### 1. Install Core Dependencies
 
 ```bash
-pip install -r requirements-megatron-bridge.txt
+pip install -r runner/helpers/hooks/train/posttrain/requirements-megatron-bridge.txt
 ```
 
 This installs:
@@ -24,7 +24,7 @@ Some packages need to be installed from specific Git commits:
 
 ```bash
 # Install most packages from Git
-pip install -r requirements-megatron-bridge-git.txt
+pip install -r runner/helpers/hooks/train/posttrain/requirements-megatron-bridge-git.txt
 
 # Note: causal-conv1d requires special handling
 pip install --no-build-isolation git+https://github.com/Dao-AILab/causal-conv1d.git@9d700d167c4ad299b0a5265ed1bdb4ee4a0ca111
