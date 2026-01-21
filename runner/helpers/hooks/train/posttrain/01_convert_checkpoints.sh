@@ -38,7 +38,11 @@ else:
 " 2>/dev/null || echo "")
 
 if [[ -z "$HF_PATH" ]]; then
-    echo "[WARNING] No hf_path found in config"
+    # ANSI color codes
+    YELLOW='\033[1;33m'
+    RESET='\033[0m'
+    echo -e "${YELLOW}[WARNING] No hf_path found in config${RESET}"
+    echo -e "${YELLOW}[WARNING] Assuming checkpoint already exists and conversion is not needed${RESET}"
     exit 0
 fi
 
