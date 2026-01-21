@@ -18,6 +18,15 @@ filetype
 # Optional: NeMo Run for recipe management
 # nemo-run>=0.5.0a0,<0.6.0
 
+# Optional: nvidia-modelopt (has compatibility issues with newer PyTorch)
+# To install nvidia-modelopt despite compatibility warnings:
+#   export INSTALL_MODELOPT=1
+#   bash runner/helpers/hooks/train/posttrain/00_setup_env_megatron_bridge.sh
+# Or manually:
+#   pip install "onnx==1.20.0rc1"
+#   pip install -U nvidia-modelopt
+# Note: ImportError: cannot import name '_type_utils' from 'torch.onnx' may occur
+
 # Note: The following packages require special installation from Git/source:
 # - transformer-engine: git+https://github.com/NVIDIA/TransformerEngine.git@release_v2.9
 # - mamba-ssm: git+https://github.com/state-spaces/mamba.git@6b32be06d026e170b3fdaf3ae6282c5a6ff57b06
