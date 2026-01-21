@@ -19,46 +19,26 @@ if [[ -z "$CONFIG_FILE" ]]; then
     exit 0
 fi
 
-# Parse the model config to get hf_path
+# Parse the complete config with all extends and nested configs
 PRIMUS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 cd "$PRIMUS_ROOT"
 
-# Extract model config file from main config
-MODEL_CONFIG=$(python3 -c "
+# Extract hf_path from fully parsed config
+HF_PATH=$(python3 -c "
 import sys
 sys.path.insert(0, '${PRIMUS_ROOT}')
-from primus.core.utils.yaml_utils import parse_yaml
-config = parse_yaml('${CONFIG_FILE}')
-model_file = config.get('modules', {}).get('post_trainer', {}).get('model', '')
-if model_file:
-    print(model_file)
+from primus.core.utils.yaml_utils import parse_yaml_to_namespace
+exp = parse_yaml_to_namespace('${CONFIG_FILE}')
+# Access post_trainer config
+post_trainer = getattr(exp.modules, 'post_trainer', None)
+if post_trainer and hasattr(post_trainer, 'hf_path'):
+    print(post_trainer.hf_path)
 else:
     sys.exit(1)
 " 2>/dev/null || echo "")
 
-if [[ -z "$MODEL_CONFIG" ]]; then
-    echo "[WARNING] Could not extract model config from ${CONFIG_FILE}"
-    exit 0
-fi
-
-# Resolve model config path
-MODEL_CONFIG_PATH="primus/configs/models/megatron_bridge/${MODEL_CONFIG}"
-if [[ ! -f "$MODEL_CONFIG_PATH" ]]; then
-    echo "[WARNING] Model config not found: ${MODEL_CONFIG_PATH}"
-    exit 0
-fi
-
-# Extract hf_path from model config
-HF_PATH=$(python3 -c "
-import sys
-sys.path.insert(0, '${PRIMUS_ROOT}')
-from primus.core.utils.yaml_utils import parse_yaml
-config = parse_yaml('${MODEL_CONFIG_PATH}')
-print(config.get('hf_path', ''))
-" 2>/dev/null || echo "")
-
 if [[ -z "$HF_PATH" ]]; then
-    echo "[WARNING] No hf_path found in ${MODEL_CONFIG_PATH}"
+    echo "[WARNING] No hf_path found in config"
     exit 0
 fi
 
