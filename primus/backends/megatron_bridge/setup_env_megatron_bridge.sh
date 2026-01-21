@@ -193,3 +193,22 @@ echo "========================================"
 echo "Setup complete."
 echo "========================================"
 
+########################################
+# 11) Copy Qwen3 recipe into megatron-bridge
+########################################
+SRC_QWEN3="/workspace/Primus/examples/megatron_bridge/qwen3"
+DST_RECIPES="/workspace/Primus/third_party/megatron-bridge/examples/recipes"
+
+if [ ! -d "$SRC_QWEN3" ]; then
+  echo "[ERROR] Source qwen3 recipe not found: $SRC_QWEN3"
+  exit 1
+fi
+
+mkdir -p "$DST_RECIPES"
+
+echo "[+] Copying qwen3 recipe into megatron-bridge examples"
+rm -rf "$DST_RECIPES/qwen3"
+cp -r "$SRC_QWEN3" "$DST_RECIPES/"
+echo "[OK] qwen3 recipe copied to megatron-bridge"
+
+
