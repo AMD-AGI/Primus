@@ -87,12 +87,23 @@ execute_hooks() {
             local exit_code
 
             if [[ "$hook_file" == *.sh ]]; then
-                # Use process substitution to capture output while printing in real-time
-                hook_output="$(bash "$hook_file" "${args[@]}" 2>&1 | tee /dev/tty)"
-                exit_code=${PIPESTATUS[0]}
+                # Capture output and display in real-time (if TTY available)
+                if [[ -t 1 ]] && [[ -w /dev/tty ]]; then
+                    hook_output="$(bash "$hook_file" "${args[@]}" 2>&1 | tee /dev/tty)"
+                    exit_code=${PIPESTATUS[0]}
+                else
+                    hook_output="$(bash "$hook_file" "${args[@]}" 2>&1 | tee /dev/stderr)"
+                    exit_code=${PIPESTATUS[0]}
+                fi
             elif [[ "$hook_file" == *.py ]]; then
-                hook_output="$(python3 "$hook_file" "${args[@]}" 2>&1 | tee /dev/tty)"
-                exit_code=${PIPESTATUS[0]}
+                # Capture output and display in real-time (if TTY available)
+                if [[ -t 1 ]] && [[ -w /dev/tty ]]; then
+                    hook_output="$(python3 "$hook_file" "${args[@]}" 2>&1 | tee /dev/tty)"
+                    exit_code=${PIPESTATUS[0]}
+                else
+                    hook_output="$(python3 "$hook_file" "${args[@]}" 2>&1 | tee /dev/stderr)"
+                    exit_code=${PIPESTATUS[0]}
+                fi
             else
                 LOG_WARN "[Hooks] Skipping unknown hook type: $hook_file"
                 continue
