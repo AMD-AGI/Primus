@@ -151,7 +151,7 @@ from primus.backends.megatron.training.global_vars import (
 )
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
-from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
+from primus.core.utils.rocm_mem_info import get_rocm_smi_gpu_util, get_rocm_smi_mem_info
 from primus.core.utils.yaml_utils import nested_namespace_to_dict
 from primus.modules.base_module import BaseModule
 from primus.modules.module_utils import (
@@ -1963,6 +1963,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     rocm_total_mem, rocm_used_mem, rocm_free_mem = get_rocm_smi_mem_info(
                         self.module_local_rank
                     )
+                    try:
+                        rocm_gpu_util = get_rocm_smi_gpu_util(self.module_local_rank)
+                    except Exception:
+                        rocm_gpu_util = None
 
             elapsed_time = timers("interval-time").elapsed(barrier=True)
             elapsed_time_per_iteration = elapsed_time / total_iterations
@@ -2039,6 +2043,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     log_string += f"{rocm_total_mem/1024/1024/1024:.2f}GiB/{rocm_mem_usage*100:.2f}% |"
                     log_string += f" rank-{max_rank} max mem usage/usage_ratio: "
                     log_string += f"{rocm_total_mem*max_usage/1024/1024/1024:.2f}GiB/{max_usage*100:.2f}% |"
+                    if rocm_gpu_util is not None:
+                        log_string += f" gpu util(%): {rocm_gpu_util:.1f} |"
 
                 log_string += (
                     f" throughput per GPU (TFLOP/s/GPU): {throughput:.1f}/"
@@ -2141,6 +2147,21 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                         mlflow_writer.log_metric(
                             f"{mem_collector}_mem_usage(%)", mem_usage * 100.0, iteration
                         )
+                        if rocm_gpu_util is not None:
+                            util_tensor = torch.tensor([rocm_gpu_util], device="cuda", dtype=torch.float32)
+                            world_size = dist.get_world_size()
+                            gathered_utils = [torch.zeros_like(util_tensor) for _ in range(world_size)]
+                            dist.all_gather(gathered_utils, util_tensor)
+                            if dist.get_rank() == 0:
+                                for rank, util_val in enumerate(gathered_utils):
+                                    util = util_val.item()
+                                    if util < 0:
+                                        continue
+                                    mlflow_writer.log_metric(
+                                        f"gpu_utilization_pct.rank{rank}",
+                                        util,
+                                        iteration,
+                                    )
             assert learning_rate is not None
             # Decoupled_learning_rate should be not None only on first and last pipeline stage.
             log_string += " learning rate: {:.6E} |".format(learning_rate)

@@ -16,12 +16,12 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 50
-      micro_batch_size: 3
-      global_batch_size: 24
+      train_iters: 20
+      micro_batch_size: 1
+      global_batch_size: 8
 
-      seq_length: 8192
-      max_position_embeddings: 8192
+      seq_length: 1024
+      max_position_embeddings: 1024
 
       lr: 1.0e-5
       min_lr: 0.0
@@ -82,4 +82,4 @@ modules:
 
       # enable fp8 training
       fp8: hybrid
-      moe_use_legacy_grouped_gemm: false
+      moe_use_legacy_grouped_gemm: true
