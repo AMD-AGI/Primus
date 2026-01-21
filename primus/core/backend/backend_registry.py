@@ -139,13 +139,13 @@ class BackendRegistry:
             f"Available backends: {', '.join(cls._adapters.keys()) if cls._adapters else 'none'}\n"
             f"Hint: Make sure '{backend}' is installed and properly configured."
         )
-        
+
         # Step 4: Create adapter instance
         adapter_instance = cls._adapters[backend](backend)
-        
+
         # Step 5: Let adapter customize sys.path if needed
         adapter_instance.setup_sys_path(resolved_path)
-        
+
         return adapter_instance
 
     @classmethod

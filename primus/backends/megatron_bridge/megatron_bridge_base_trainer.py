@@ -79,6 +79,5 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
             return __version__
         except ImportError as e:
             raise RuntimeError(
-                "Failed to detect Megatron-Bridge version. "
-                "Make sure Megatron-Bridge is installed."
+                "Failed to detect Megatron-Bridge version. " "Make sure Megatron-Bridge is installed."
             ) from e
