@@ -62,25 +62,23 @@ class MegatronBridgeArgBuilder:
         Merge a collection of values (e.g., CLI args or config) into the
         current configuration set.
 
-        - Supports both Mapping (e.g., dict) and SimpleNamespace inputs.
-        - None values are allowed and will override defaults.
-        - Only keys that exist in self.config will be merged (unknown keys are ignored).
+        Uses deep merge strategy to recursively combine nested configurations:
+        - Converts input to dict via nested_namespace_to_dict (handles SimpleNamespace, dict, etc.)
+        - Performs deep_merge: recursively merges nested dicts, preserves non-dict values
+        - New keys are added, existing keys are updated (not ignored)
+        - None values are preserved and will override existing values
+        - Returns self for method chaining
+
+        Args:
+            values: Configuration to merge (dict, SimpleNamespace, or other Mapping)
+
+        Returns:
+            Self for method chaining
         """
-        # # Convert SimpleNamespace to dict
-        # values_dict = nested_namespace_to_dict(values)
-
-        # # Filter: only keep keys that exist in self.config
-        # filtered_values = _filter_existing_keys(self.config, values_dict)
-
-        # log_dict_aligned("Filtered values", filtered_values)
-
-        # # Merge filtered values into the working configuration
-        # self.config = deep_merge(self.config, filtered_values)
-        # return self
-        # Convert SimpleNamespace to dict
+        # Convert SimpleNamespace to dict (recursive, handles nested structures)
         values_dict = nested_namespace_to_dict(values)
 
-        # Directly merge into the working configuration
+        # Deep merge: recursively combine nested dicts, add new keys, preserve None values
         self.config = deep_merge(self.config, values_dict)
         return self
 

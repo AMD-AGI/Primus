@@ -88,12 +88,14 @@ execute_hooks() {
 
             if [[ "$hook_file" == *.sh ]]; then
                 # Capture output and display in real-time
-                hook_output="$(bash "$hook_file" "${args[@]}" 2>&1 | tee /dev/stderr)"
-                exit_code=${PIPESTATUS[0]}
+                # Use set -o pipefail to propagate exit code through pipe
+                hook_output="$(set -o pipefail; bash "$hook_file" "${args[@]}" 2>&1 | tee /dev/stderr)"
+                exit_code=$?
             elif [[ "$hook_file" == *.py ]]; then
                 # Capture output and display in real-time
-                hook_output="$(python3 "$hook_file" "${args[@]}" 2>&1 | tee /dev/stderr)"
-                exit_code=${PIPESTATUS[0]}
+                # Use set -o pipefail to propagate exit code through pipe
+                hook_output="$(set -o pipefail; python3 "$hook_file" "${args[@]}" 2>&1 | tee /dev/stderr)"
+                exit_code=$?
             else
                 LOG_WARN "[Hooks] Skipping unknown hook type: $hook_file"
                 continue

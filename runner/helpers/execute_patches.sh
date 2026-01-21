@@ -101,9 +101,10 @@ execute_patches() {
         # Run the patch script in a child shell and capture its output so that we can
         # process special lines (e.g., env.* and extra.*) while still displaying
         # the output in real-time.
+        # Use set -o pipefail to propagate exit code through pipe
         local patch_output
-        patch_output="$(bash "$patch" 2>&1 | tee /dev/stderr)"
-        local exit_code=${PIPESTATUS[0]}
+        patch_output="$(set -o pipefail; bash "$patch" 2>&1 | tee /dev/stderr)"
+        local exit_code=$?
 
         # Allow patches to:
         #   1) Export environment variables back to the caller by printing lines:
