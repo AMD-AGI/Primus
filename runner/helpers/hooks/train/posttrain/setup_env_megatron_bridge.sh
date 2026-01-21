@@ -78,7 +78,10 @@ set -euo pipefail
 # Only install if you need quantization/optimization features
 # pip install "onnx==1.20.0rc1"
 # pip install -U nvidia-modelopt
+
+# Install required packages for multimodal support
 pip install -U nvidia_resiliency_ext
+pip install megatron-energon
 
 echo "[OK] Packages installed (nvidia-modelopt skipped due to PyTorch compatibility)"
 
@@ -173,4 +176,3 @@ echo "[OK] Packages installed (nvidia-modelopt skipped due to PyTorch compatibil
 # echo "========================================"
 # echo "Setup complete."
 # echo "========================================"
-
