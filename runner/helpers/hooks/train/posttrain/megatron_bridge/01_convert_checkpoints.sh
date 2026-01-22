@@ -1,4 +1,9 @@
-#!/usr/bin/env bash
+#!/bin/bash
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 set -euo pipefail
 
 # Parse config to get HF model path and prepare checkpoint

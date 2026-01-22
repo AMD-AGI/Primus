@@ -318,26 +318,29 @@ class TestBackendRegistryGetAdapterIntegration:
         backend_dir = tmp_path / "test_backend_dir"
         backend_dir.mkdir()
 
-        # Register adapter
-        registry_module.BackendRegistry.register_adapter("test_backend", MockAdapter)
+        # Force the lazy-load path (backend not registered yet) so that
+        # setup_backend_path() runs and provides a resolved_path used by
+        # adapter.setup_sys_path().
+        #
+        # We patch _load_backend to avoid importing a real primus.backends.test_backend
+        # module; instead we simulate the backend registering its adapter class.
+        from unittest.mock import patch
 
-        # get_adapter should return a working adapter; when adapter is already
-        # registered, the path is not modified in the new simplified logic.
-        adapter = registry_module.BackendRegistry.get_adapter("test_backend", backend_path=str(backend_dir))
+        def _fake_load_backend(_backend: str) -> None:
+            registry_module.BackendRegistry.register_adapter("test_backend", MockAdapter)
+
+        with patch.object(registry_module.BackendRegistry, "_load_backend", side_effect=_fake_load_backend):
+            adapter = registry_module.BackendRegistry.get_adapter("test_backend", backend_path=str(backend_dir))
 
         assert adapter is not None
+        assert str(backend_dir) in sys.path
 
     def test_get_adapter_path_not_found_error(self):
         """Test get_adapter provides helpful error when path not found."""
-        # Register adapter but no valid path
-        registry_module.BackendRegistry.register_adapter("test_backend", MockAdapter)
-
-        # In the new logic, if the adapter is already registered, backend_path
-        # is ignored and get_adapter succeeds.
-        adapter = registry_module.BackendRegistry.get_adapter(
-            "test_backend", backend_path="/non/existent/path"
-        )
-        assert isinstance(adapter, MockAdapter)
+        # Force the lazy-load path (backend not registered yet) so that
+        # setup_backend_path() validates the provided backend_path and fails fast.
+        with pytest.raises(AssertionError, match="Backend path not found"):
+            registry_module.BackendRegistry.get_adapter("test_backend", backend_path="/non/existent/path")
 
 
 class TestBackendRegistryHasAdapter:
