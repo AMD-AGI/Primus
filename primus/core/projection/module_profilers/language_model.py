@@ -180,11 +180,12 @@ class LanguageModelProfiler(BaseModuleProfiler):
             dispatch_size = tokens_per_batch * hidden_size * moe_router_topk * 2  # BF16
             
             a2a_dispatch = cm.alltoall(coll_args, dispatch_size, ep, groups=['ep'])
-            a2a_combine = cm.alltoall(coll_args, dispatch_size, ep, groups=['ep'])
+            # dispatch time is same as combine time
+            a2a_combine = a2a_dispatch
             
             # Forward: dispatch + combine, Backward: same
             fwd_time = (a2a_dispatch + a2a_combine) / 1000  # Convert to ms
-            bwd_time = (a2a_dispatch + a2a_combine) / 1000  # Convert to ms
+            bwd_time = fwd_time  # Same as forward
             
             comm_ops.append({
                 'type': 'MoE All-to-All',
@@ -435,8 +436,8 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
             profiled_types.add(layer_type)
 
-            print(f"  Forward time (compute only):  {forward_time:.2f} ms")
-            print(f"  Backward time (compute only): {backward_time:.2f} ms")
+            print(f"  Forward time :  {forward_time:.2f} ms")
+            print(f"  Backward time : {backward_time:.2f} ms")
             print(f"  Activation memory: {activation_memory / (1024**2):.2f} MB")
             print(f"  Attention Forward: {attn_forward:.2f} ms, Backward: {attn_backward:.2f} ms")
             print(f"  Attention Activation memory: {attn_mem / (1024**2):.2f} MB")

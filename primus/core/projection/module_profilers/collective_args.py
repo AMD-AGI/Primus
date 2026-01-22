@@ -18,7 +18,6 @@ class CollectiveArgs:
     """
     Hardware and topology configuration for collective communication modeling.
     
-    Default values are representative of modern GPU clusters.
     All parameters can be overridden via configuration file.
     """
     # Topology
@@ -28,30 +27,30 @@ class CollectiveArgs:
     cp: int = 1                 # Context parallelism
     ep: int = 1                 # Expert parallelism
     
-    # Bandwidth in GB/s (bidirectional)
-    node_bw: float = 896.0      # Intra-node bandwidth per GPU
+    # Bandwidth in GB/s (bidirectional) 
+    node_bw: float = 1024.0     # Intra-node bandwidth per GPU
     pod_bw: float = 50.0        # Inter-node bandwidth per NIC
     cluster_bw: float = 25.0    # Cluster-level bandwidth
-    bw_eff: float = 0.9         # Bandwidth efficiency factor
+    bw_eff: float = 0.91        # Bandwidth efficiency factor
     
-    # Latency in microseconds
-    node_lat: float = 0.5       # Intra-node latency
+    # Latency in microseconds 
+    node_lat: float = 0.45      # Intra-node latency
     pod_lat: float = 2.0        # Inter-node latency
     cluster_lat: float = 10.0   # Cluster-level latency
-    hbm_latency: float = 0.1    # HBM access latency
-    write_latency: float = 0.3  # Write operation latency
-    write_resp: float = 0.1     # Write response latency
+    hbm_latency: float = 0.09   # HBM access latency
+    write_latency: float = 0.28 # Write operation latency
+    write_resp: float = 0.09    # Write response latency
     
-    # Compute
-    kernel_launch_latency: float = 3.0  # Kernel launch overhead (us)
-    vector_flops: float = 2.615e12       # Vector FLOPS (for reduction compute)
+    # Compute 
+    kernel_launch_latency: float = 2.8   # Kernel launch overhead (us)
+    vector_flops: float = 3.2e12         # Vector FLOPS (for reduction compute)
     
     # Network topology
     switch_topology: bool = True  # Whether using switch-based topology
     nics_per_node: Optional[int] = 8  # NICs per node (None = gpus_per_node)
     
-    # All-to-all specific
-    a2a_peer_lat: float = 0.5   # Per-peer latency overhead for a2a
+    # All-to-all specific 
+    a2a_peer_lat: float = 0.45  # Per-peer latency overhead for a2a
 
 
 def get_default_args(

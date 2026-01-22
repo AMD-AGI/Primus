@@ -35,15 +35,15 @@ def register_subcommand(subparsers):
         # Memory projection
         primus projection memory --config exp.yaml
         
-        # Performance projection (benchmarking on baseline nodes)
+        # Performance projection (single-node benchmarking only)
         primus projection performance --config exp.yaml
         
-        # Performance projection with multinode scaling (set PROJECTION_NNODES)
-        PROJECTION_NNODES=4 primus projection performance --config exp.yaml
+        # Performance projection with multinode scaling to 4 nodes
+        primus projection performance --config exp.yaml --target-nodes 4
         
-        # Skip GPU benchmarking and provide baseline time manually
-        primus projection performance --config exp.yaml --baseline-time 1234.56 --baseline-nodes 1
-        PROJECTION_NNODES=4 primus projection performance --config exp.yaml --baseline-time 1234.56 --baseline-nodes 1
+        # Performance projection with custom hardware config
+        primus projection performance --config exp.yaml --target-nodes 8 \\
+            --hardware-config hardware_mi300x.yaml
         
     Args:
         subparsers: argparse subparsers object from main.py
@@ -68,29 +68,30 @@ def register_subcommand(subparsers):
     # ---------- performance ----------
     performance = suite_parsers.add_parser(
         "performance", 
-        help="Performance projection. Set PROJECTION_NNODES env var for multinode scaling projection."
+        help="Performance projection with optional multinode scaling."
     )
     add_pretrain_parser(performance)
     performance.add_argument(
-        "--baseline-time",
-        type=float,
-        required=False,
-        default=None,
-        help="Optional: Measured baseline iteration time in milliseconds. If not provided, will automatically run GPU benchmarking. Use with --baseline-nodes to specify the number of nodes this time was measured on.",
-    )
-    performance.add_argument(
-        "--baseline-nodes",
+        "--target-nodes",
         type=int,
         required=False,
         default=None,
-        help="Optional: Number of nodes used for the baseline time measurement. If not provided, defaults to minimum nodes required by parallelism config.",
+        help=(
+            "Target number of nodes for multinode scaling projection. "
+            "If not specified, defaults to minimum nodes required by the parallelism config "
+            "(TP × PP × EP × CP / GPUs_per_node). When specified, projects performance from "
+            "the minimum required nodes to the target node count by scaling data parallelism."
+        ),
     )
     performance.add_argument(
         "--hardware-config",
         type=str,
         required=False,
         default=None,
-        help="Path to YAML file with hardware configuration (optional)",
+        help=(
+            "Path to YAML file with hardware configuration for collective communication modeling. "
+            "If not provided, uses default cluster parameters.\n\n"
+        ),
     )
 
     parser.set_defaults(func=run)
