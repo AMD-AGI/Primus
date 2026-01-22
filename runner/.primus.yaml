@@ -31,8 +31,8 @@ container:
     # Single-value options
     ipc: "host"
     network: "host"
-    cpus: "32"
-    memory: "256G"
+    # cpus: "96"
+    # memory: "256G"
     name: "primus-training"
     privileged: "true"
     security-opt: "seccomp=unconfined"
@@ -47,7 +47,7 @@ container:
     device:
       - "/dev/kfd"
       - "/dev/dri"
-      - "/dev/infiniband"
+      # - "/dev/infiniband"
 
     # Linux capabilities (each passed as --cap-add)
     # NOTE: Do not modify these capabilities - they are required for proper container operation
