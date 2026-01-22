@@ -12,3 +12,6 @@
 	path = third_party/Emerging-Optimizers
 	url = https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git
 	branch = main
+[submodule "third_party/Megatron-Bridge"]
+	path = third_party/Megatron-Bridge
+	url = https://github.com/NVIDIA-NeMo/Megatron-Bridge.git

@@ -37,7 +37,7 @@ RUN cd ${WORKDIR} && \
     cd ainic_bundle_1.117.5-a-38 && \
     tar zxf host_sw_pkg.tar.gz && \
     cd host_sw_pkg && \
-    ./install.sh --domain=user -y 2>&1 | tee log_install.txt 
+    ./install.sh --domain=user -y 2>&1 | tee log_install.txt
 
 # ---------------------------------------------------------------------------
 # Build rccl
@@ -62,5 +62,3 @@ RUN cd ${WORKDIR} && git clone https://github.com/rocm/amd-anp.git && \
                 ROCM_PATH=${ROCM_PATH} && \
     make RCCL_HOME=$RCCL_HOME ROCM_PATH=${ROCM_PATH} install \
         2>&1 | tee log_amd_anp_build.txt
-
-
