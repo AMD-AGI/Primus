@@ -14,6 +14,9 @@ jobs:
     env:
       PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
       GPU_NAME: MI325  # Change this to your GPU model
+      DATA_PATH: /wekafs/primus-data
+      HSA_NO_SCRATCH_RECLAIM: 1
+      HF_TOKEN: ${{secrets.HF_TOKEN}}
     runs-on: [primus-lm-bench-torch-wkhbx]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
@@ -71,125 +74,18 @@ jobs:
           mkdir -p "${BENCHMARK_LOG_DIR}"
           echo "BENCHMARK_DATE_DIR=${BENCHMARK_DATE_DIR}" >> $GITHUB_ENV
           echo "BENCHMARK_LOG_DIR=${BENCHMARK_LOG_DIR}" >> $GITHUB_ENV
-      - name: Run Primus Model Benchmark -- Megatron-LM
-        env:
-          DATA_PATH: /wekafs/primus-data
-          HSA_NO_SCRATCH_RECLAIM: 1
-          HF_TOKEN: ${{secrets.HF_TOKEN}}
-        timeout-minutes: 240
+      # Multi-node Training via SaFE Protocol
+      # Example: llama2_7B-BF16 with 2 nodes, 8 GPUs per node
+      - name: "[SaFE] llama2_7B-BF16 (2 nodes x 8 GPUs)"
+        timeout-minutes: 300  # 5 hours for multi-node training
         continue-on-error: true
         run: |
-          echo "run llama3.3_70B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.3_70B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama3.3_70B-BF16-pretrain.yaml
-          echo "run llama3.3_70B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.3_70B-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama3.3_70B-FP8-pretrain.yaml
-          echo "run llama2_7B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama2_7B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
-          echo "run llama2_7B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama2_7B-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-FP8-pretrain.yaml
-          echo "run llama2_70B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama2_70B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama2_70B-BF16-pretrain.yaml
-          echo "run llama2_70B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama2_70B-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama2_70B-FP8-pretrain.yaml
-          echo "run llama3.1_8B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.1_8B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-          echo "run llama3.1_8B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.1_8B-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml
-          echo "run qwen2.5_7B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/qwen2.5_7B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/qwen2.5_7B-BF16-pretrain.yaml
-          echo "run qwen2.5_7B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/qwen2.5_7B-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/qwen2.5_7B-FP8-pretrain.yaml
-          echo "run mixtral_8x7B_v0.1-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/mixtral_8x7B_v0.1-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
-          echo "run mixtral_8x7B_v0.1-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/mixtral_8x7B_v0.1-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-FP8-pretrain.yaml
-          echo "run llama3.1_70B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.1_70B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml
-          echo "run llama3.1_70B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.1_70B-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml
-          echo "run qwen2.5_72B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/qwen2.5_72B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/qwen2.5_72B-BF16-pretrain.yaml
-          echo "run qwen2.5_72B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/qwen2.5_72B-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/qwen2.5_72B-FP8-pretrain.yaml
-          echo "run deepseek_v2_lite-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/deepseek_v2_lite-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
-          echo "run deepseek_v2_lite-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/deepseek_v2_lite-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/deepseek_v2_lite-FP8-pretrain.yaml
-          echo "run gpt_oss_20B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/gpt_oss_20B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/gpt_oss_20B-BF16-pretrain.yaml
-          echo "run gpt_oss_20B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/gpt_oss_20B-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/gpt_oss_20B-FP8-pretrain.yaml
-          echo "run llama3_70B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3_70B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama3_70B-BF16-pretrain.yaml
-          echo "run llama3_70B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3_70B-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama3_70B-FP8-pretrain.yaml
-          echo "run llama3_8B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3_8B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama3_8B-BF16-pretrain.yaml
-          echo "run llama3_8B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3_8B-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama3_8B-FP8-pretrain.yaml
-      - name: Run Primus Model Benchmark -- TorchTitan
-        env:
-          DATA_PATH: /wekafs/primus-data
-          HSA_NO_SCRATCH_RECLAIM: 1
-          HF_TOKEN: ${{secrets.HF_TOKEN}}
-        timeout-minutes: 240
-        continue-on-error: true
-        run: |
-          echo "run llama3.1_8B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/llama3.1_8B-BF16.log" \
-          -- train pretrain --config examples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-          echo "run llama3.1_8B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/llama3.1_8B-FP8.log" \
-          -- train pretrain --config examples/torchtitan/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml
-          echo "run deepseek_v3_16b-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/deepseek_v3_16b-BF16.log" \
-          -- train pretrain --config examples/torchtitan/configs/MI300X/deepseek_v3_16b-BF16-pretrain.yaml
-          echo "run deepseek_v3_16b-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/deepseek_v3_16b-BF16.log" \
-          -- train pretrain --config examples/torchtitan/configs/MI300X/deepseek_v3_16b-BF16-pretrain.yaml
-          echo "run qwen3_1.7B"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/qwen3_1.7B-pretrain.log" \
-          -- train pretrain --config examples/torchtitan/configs/MI300X/qwen3_1.7B-pretrain.yaml
-          echo "run llama3.1_70B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/llama3.1_70B-BF16.log" \
-          -- train pretrain --config examples/torchtitan/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml
-          echo "run llama3.1_70B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/llama3.1_70B-FP8.log" \
-          -- train pretrain --config examples/torchtitan/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml
-          echo "run qwen3_0.6B.log"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/qwen3_0.6B.log" \
-          -- train pretrain --config examples/torchtitan/configs/MI300X/qwen3_0.6B-pretrain.yaml
-          echo "run qwen3_32B.log"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/qwen3_32B.log" \
-          -- train pretrain --config examples/torchtitan/configs/MI300X/qwen3_32B-pretrain.yaml
-      - name: Generate Summary Report
-        run: |
-          echo "Generate Summary Report"
-          python3 tools/daily/daily_report.py --report-csv-path "${BENCHMARK_DATE_DIR}/summary.csv" --benchmark-log-dir "${BENCHMARK_LOG_DIR}"
+          python3 tools/daily/safe_wrapper.py \
+            --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml \
+            --log_file "${BENCHMARK_LOG_DIR}/megatron/llama2_7B-BF16-multinode.log" \
+            --gpus 8 \
+            --num-nodes 2 \
+            --timeout 18000
       - name: Clean
         run: |
           rm -rf ${PRIMUS_WORKDIR}/Primus-Turbo
