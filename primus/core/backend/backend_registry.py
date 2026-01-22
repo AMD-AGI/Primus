@@ -139,14 +139,12 @@ class BackendRegistry:
 
             # Step 4: Create adapter instance
             adapter_instance = cls._adapters[backend](backend)
-
-            # Step 5: Let adapter customize sys.path if needed
-            adapter_instance.setup_sys_path(resolved_path)
         else:
             # Adapter already registered - skip path setup as it was done during registration
             # Directly create adapter instance
             adapter_instance = cls._adapters[backend](backend)
 
+        adapter_instance.setup_sys_path(resolved_path)
         return adapter_instance
 
     @classmethod

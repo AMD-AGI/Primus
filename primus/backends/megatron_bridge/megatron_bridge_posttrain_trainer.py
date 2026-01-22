@@ -22,7 +22,7 @@ from primus.backends.megatron_bridge.config_utils import load_recipe_config
 from primus.backends.megatron_bridge.megatron_bridge_base_trainer import (
     MegatronBridgeBaseTrainer,
 )
-from primus.modules.module_utils import log_rank_0
+from primus.modules.module_utils import log_dict_aligned, log_rank_0
 
 
 class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
@@ -108,7 +108,8 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
             from megatron.bridge.training.finetune import finetune
             from megatron.bridge.training.vlm_step import forward_step
 
-            log_rank_0(f"ConfigContainer: {self.cfg_container}")
+            # log_rank_0(f"ConfigContainer: {self.cfg_container}")
+            log_dict_aligned("ConfigContainer", self.cfg_container.to_dict())
             finetune(self.cfg_container, forward_step_func=forward_step)
 
         except Exception as e:

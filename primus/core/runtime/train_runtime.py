@@ -131,7 +131,6 @@ class PrimusRuntime:
 
         # Resolve module configuration via core helper.
         module_cfg = get_module_config(primus_cfg, module_name)
-        print(f"[Primus:TrainRuntime] Module configuration: {primus_cfg}")
         available_modules = get_module_names(primus_cfg) or ["none"]
         assert module_cfg is not None, (
             f"Missing required module '{module_name}' in config file '{cfg_path}'.\n"

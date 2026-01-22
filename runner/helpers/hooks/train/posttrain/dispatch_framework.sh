@@ -113,11 +113,11 @@ for hook_file in "${HOOK_FILES[@]}"; do
 
     if [[ "$hook_file" == *.sh ]]; then
         # Execute bash script and capture output
-        hook_output="$(bash "$hook_file" "$@" 2>&1)"
+        hook_output="$(bash "$hook_file" "$@" 2>&1 | tee /dev/stderr)"
         exit_code=${PIPESTATUS[0]}
     elif [[ "$hook_file" == *.py ]]; then
         # Execute python script and capture output
-        hook_output="$(python3 "$hook_file" "$@" 2>&1)"
+        hook_output="$(python3 "$hook_file" "$@" 2>&1 | tee /dev/stderr)"
         exit_code=${PIPESTATUS[0]}
     else
         LOG_ERROR_RANK0 "[WARNING] Skipping unknown hook type: $hook_file"

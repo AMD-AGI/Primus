@@ -123,6 +123,13 @@ execute_hooks() {
 
             if [[ $exit_code -ne 0 ]]; then
                 LOG_ERROR_RANK0 "[Hooks] Hook failed: $hook_file (exit code: $exit_code)"
+                # Re-print captured output on failure to make it visible in log aggregators
+                # that may not capture streaming stderr from `tee /dev/stderr`.
+                if [ "${NODE_RANK:-0}" -eq 0 ]; then
+                    echo "[ERROR] [Hooks] --- hook output begin: $hook_file ---" >&2
+                    printf '%s\n' "$hook_output" >&2
+                    echo "[ERROR] [Hooks] --- hook output end: $hook_file ---" >&2
+                fi
                 return 1
             fi
 

@@ -1,0 +1,41 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_8b_lora_posttrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  post_trainer:
+    framework: megatron_bridge
+    config: post_trainer.yaml
+
+    # Model to run
+    model: qwen3_8b.yaml
+
+    overrides:
+      # Parallelism configuration
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+      
+      # Training configuration
+      train_iters: 1000
+      global_batch_size: 128
+      micro_batch_size: 1
+      seq_length: 2048
+      eval_interval: 30
+      save_interval: 50
+      
+      # PEFT configuration
+      peft: lora
+      packed_sequence: false
+      
+      # Optimizer configuration
+      finetune_lr: 1.0e-4
+      min_lr: 0.0
+      lr_warmup_iters: 50
+      
+      # Precision
+      precision_config: bf16_mixed
+      
+      
