@@ -330,7 +330,9 @@ class TestBackendRegistryGetAdapterIntegration:
             registry_module.BackendRegistry.register_adapter("test_backend", MockAdapter)
 
         with patch.object(registry_module.BackendRegistry, "_load_backend", side_effect=_fake_load_backend):
-            adapter = registry_module.BackendRegistry.get_adapter("test_backend", backend_path=str(backend_dir))
+            adapter = registry_module.BackendRegistry.get_adapter(
+                "test_backend", backend_path=str(backend_dir)
+            )
 
         assert adapter is not None
         assert str(backend_dir) in sys.path
