@@ -512,7 +512,7 @@ class DeprecatedMoEAlltoAllTokenDispatcher(DeprecatedMoETokenDispatcher):
                         self.tp_size * self.ep_size,
                         self.num_local_experts,
                         self.capacity,
-                        *global_input_tokens.size()[1:]
+                        *global_input_tokens.size()[1:],
                     )
                     .transpose(0, 1)
                     .contiguous()
@@ -561,7 +561,7 @@ class DeprecatedMoEAlltoAllTokenDispatcher(DeprecatedMoETokenDispatcher):
                         self.num_local_experts,
                         self.tp_size * self.ep_size,
                         self.capacity,
-                        *hidden_states.size()[1:]
+                        *hidden_states.size()[1:],
                     )
                     .transpose(0, 1)
                     .contiguous()
