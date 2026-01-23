@@ -1,0 +1,55 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_32b_sft_posttrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  post_trainer:
+    framework: megatron_bridge
+    config: post_trainer.yaml
+
+    # Model to run
+    model: qwen3_32b.yaml
+
+    overrides:
+      # Parallelism configuration
+      tensor_model_parallel_size: 4
+      pipeline_model_parallel_size: 1
+      pipeline_dtype: null
+      virtual_pipeline_model_parallel_size: null
+      context_parallel_size: 1
+      sequence_parallel: false
+      use_megatron_fsdp: false
+      
+      # Finetuning-specific params
+      #pretrained_checkpoint: null
+      peft: "none"
+      packed_sequence: false
+      
+      # Training configuration
+      train_iters: 200
+      global_batch_size: 128
+      micro_batch_size: 1
+      seq_length: 2048
+      eval_interval: 30
+      save_interval: 50
+      
+      # Optimizer configuration
+      finetune_lr: 5.0e-6
+      min_lr: 0.0
+      lr_warmup_iters: 50
+      lr_decay_iters: null
+      
+      # W&B logging
+      wandb_project: null
+      wandb_entity: null
+      wandb_exp_name: null
+      
+      # Precision
+      precision_config: bf16_mixed
+      comm_overlap_config: null
+      
+      # Recompute configuration (enabled for 32B model)
+      recompute_granularity: full
+      recompute_method: uniform
+      recompute_num_layers: 1

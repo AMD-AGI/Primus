@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:qwen3_8b_lora_posttrain}
+exp_name: ${PRIMUS_EXP_NAME:llama31_70b_sft_posttrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
@@ -9,32 +9,42 @@ modules:
     config: post_trainer.yaml
 
     # Model to run
-    model: qwen3_8b.yaml
+    model: llama31_70b.yaml
 
     overrides:
-      # Parallelism configuration
-      tensor_model_parallel_size: 1
+      # Parallelism configuration (adjusted for 8 GPUs)
+      tensor_model_parallel_size: 8
       pipeline_model_parallel_size: 1
+      pipeline_dtype: null
+      virtual_pipeline_model_parallel_size: null
       context_parallel_size: 1
       sequence_parallel: false
+      use_megatron_fsdp: false
+      
+      # Finetuning-specific params
+      #pretrained_checkpoint: null
+      peft: "none"
+      packed_sequence: false
       
       # Training configuration
-      train_iters: 1000
+      train_iters: 200
       global_batch_size: 128
       micro_batch_size: 1
       seq_length: 2048
       eval_interval: 30
       save_interval: 50
       
-      # PEFT configuration
-      peft: "none"
-            
       # Optimizer configuration
-      finetune_lr: 1.0e-4
+      finetune_lr: 5.0e-6
       min_lr: 0.0
       lr_warmup_iters: 50
+      lr_decay_iters: null
+      
+      # W&B logging
+      wandb_project: null
+      wandb_entity: null
+      wandb_exp_name: null
       
       # Precision
       precision_config: bf16_mixed
-      
-      
+      comm_overlap_config: null
