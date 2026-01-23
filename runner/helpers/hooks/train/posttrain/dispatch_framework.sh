@@ -49,7 +49,7 @@ fi
 LOG_INFO_RANK0 "CONFIG_FILE: ${CONFIG_FILE}"
 
 # Extract framework from config
-FRAMEWORK=$(python3 -c "
+FRAMEWORK="$(python3 -c "
 import sys
 
 # Debug output to stderr so it doesn't interfere with stdout capture
@@ -75,8 +75,10 @@ if not hasattr(post_trainer, 'framework'):
     print('[DEBUG] post_trainer has no framework attribute', file=sys.stderr)
     sys.exit(1)
 
+print(f'[DEBUG] post_trainer.framework: {post_trainer.framework}', file=sys.stderr)
+
 print(post_trainer.framework)
-" || echo "")
+" 2> >(tee /dev/stderr >&2) | tail -n 1 | tr -d '\r' || true)"
 
 if [[ -z "$FRAMEWORK" ]]; then
     LOG_ERROR_RANK0 "[WARNING] No framework found in config"
