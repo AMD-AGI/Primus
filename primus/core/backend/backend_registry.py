@@ -109,6 +109,7 @@ class BackendRegistry:
         2. Otherwise sets up backend path in sys.path
         3. Lazily loads the backend module (which is expected to register the adapter)
         4. Creates and returns the adapter instance
+        5. Calls adapter's setup_sys_path for backend-specific path customization
 
         Args:
             backend: Backend name (e.g., "megatron", "torchtitan")
@@ -124,18 +125,27 @@ class BackendRegistry:
         # Fast path: adapter already registered
         if backend not in cls._adapters:
             # Step 1: Setup backend path (idempotent - won't duplicate if already in sys.path)
-            cls.setup_backend_path(backend, backend_path=backend_path, verbose=True)
+            resolved_path = cls.setup_backend_path(backend, backend_path=backend_path, verbose=True)
 
             # Step 2: Lazily load backend (expected to register adapter)
             cls._load_backend(backend)
 
-        # Step 3: Ensure adapter is available, then create instance
-        assert backend in cls._adapters, (
-            f"[Primus] Backend '{backend}' not found.\n"
-            f"Available backends: {', '.join(cls._adapters.keys()) if cls._adapters else 'none'}\n"
-            f"Hint: Make sure '{backend}' is installed and properly configured."
-        )
-        return cls._adapters[backend](backend)
+            # Step 3: Ensure adapter is available, then create instance
+            assert backend in cls._adapters, (
+                f"[Primus] Backend '{backend}' not found.\n"
+                f"Available backends: {', '.join(cls._adapters.keys()) if cls._adapters else 'none'}\n"
+                f"Hint: Make sure '{backend}' is installed and properly configured."
+            )
+
+            # Step 4: Create adapter instance
+            adapter_instance = cls._adapters[backend](backend)
+        else:
+            # Adapter already registered - skip path setup as it was done during registration
+            # Directly create adapter instance
+            adapter_instance = cls._adapters[backend](backend)
+
+        adapter_instance.setup_sys_path(resolved_path)
+        return adapter_instance
 
     @classmethod
     def has_adapter(cls, backend: str) -> bool:

@@ -25,8 +25,8 @@ ENV MPI_HOME=/opt/ompi
 ENV ROCM_HOME=/opt/rocm
 ENV PRIMUS_TURBO_FRAMEWORK=${PRIMUS_TURBO_FRAMEWORK}
 
-ENV PATH="/opt/ompi/bin:/opt/ompi/sbin:${PATH}" 
-ENV LD_LIBRARY_PATH="/opt/ompi/lib:${LD_LIBRARY_PATH}" 
+ENV PATH="/opt/ompi/bin:/opt/ompi/sbin:${PATH}"
+ENV LD_LIBRARY_PATH="/opt/ompi/lib:${LD_LIBRARY_PATH}"
 ENV GPU_ARCHS="gfx942;gfx950"
 ENV PYTORCH_ROCM_ARCH="gfx942;gfx950"
 ENV HCC_AMDGPU_TARGET="gfx942,gfx950"
@@ -44,7 +44,7 @@ RUN mkdir -p /opt && cd /opt && \
                                                                                             -DGDA_MLX5=ON  \
                                                                                             -DGDA_BNXT=ON  \
                                                                                             -DUSE_IPC=ON
-RUN rm -rf /opt/rocSHMEM    
+RUN rm -rf /opt/rocSHMEM
 
 # ---------------------------------------------------------------------------
 # Install Primus-Turbo

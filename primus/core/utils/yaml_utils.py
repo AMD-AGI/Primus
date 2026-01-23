@@ -81,8 +81,8 @@ def override_namespace(original_ns: SimpleNamespace, overrides_ns: SimpleNamespa
         return
 
     for key in vars(overrides_ns):
-        if not has_key_in_namespace(original_ns, key):
-            raise Exception(f"Override namespace failed: can't find key({key}) in namespace {original_ns}")
+        # if not has_key_in_namespace(original_ns, key):
+        #     raise Exception(f"Override namespace failed: can't find key({key}) in namespace {original_ns}")
         new_value = get_value_by_key(overrides_ns, key)
         if isinstance(new_value, SimpleNamespace):
             override_namespace(get_value_by_key(original_ns, key), new_value)
