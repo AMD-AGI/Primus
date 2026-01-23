@@ -19,38 +19,38 @@ jobs:
       HF_TOKEN: ${{secrets.HF_TOKEN}}
     runs-on: [primus-lm-bench-torch-wkhbx]
     steps:
-      - run: echo "🎉 Begin Primus-Turbo Checkout."
-      - name: Set commit hash to env
-        run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
-      - name: Checkout Repo Primus-Turbo
-        uses: actions/checkout@v4
-        with:
-          repository: AMD-AIG-AIMA/Primus-Turbo
-          submodules: "recursive"
-          path: Primus-Turbo
-          ref: ${{ env.PRIMUS_TURBO_COMMIT }}
-      - run: echo "Begin Primus-Turbo Install."
-      - name: Install Primus-Turbo
-        run: |
-          mv Primus-Turbo /tmp/
-          echo "Primus-Turbo dir: /tmp/Primus-Turbo"
-          git config --global --add safe.directory /tmp/Primus-Turbo
-          cd /tmp/Primus-Turbo
-          start_time=$(date +%s)
-          echo "✅ [Pip install requirements] started at: $(date)"
-          mkdir -p ${PRIMUS_WORKDIR}/primus-cache
-          MAX_JOBS=128 pip install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --no-build-isolation --no-clean -r requirements.txt
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "✅ [Pip install requirements] ended at: $(date)"
-          echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
-          start_time=$(date +%s)
-          echo "✅ [build primus-turbo] started at: $(date)"
-          pip3 install --no-build-isolation -e . -v
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "✅ [build primus-turbo] ended at: $(date)"
-          echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
+      # - run: echo "🎉 Begin Primus-Turbo Checkout."
+      # - name: Set commit hash to env
+      #   run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
+      # - name: Checkout Repo Primus-Turbo
+      #   uses: actions/checkout@v4
+      #   with:
+      #     repository: AMD-AIG-AIMA/Primus-Turbo
+      #     submodules: "recursive"
+      #     path: Primus-Turbo
+      #     ref: ${{ env.PRIMUS_TURBO_COMMIT }}
+      # - run: echo "Begin Primus-Turbo Install."
+      # - name: Install Primus-Turbo
+      #   run: |
+      #     mv Primus-Turbo /tmp/
+      #     echo "Primus-Turbo dir: /tmp/Primus-Turbo"
+      #     git config --global --add safe.directory /tmp/Primus-Turbo
+      #     cd /tmp/Primus-Turbo
+      #     start_time=$(date +%s)
+      #     echo "✅ [Pip install requirements] started at: $(date)"
+      #     mkdir -p ${PRIMUS_WORKDIR}/primus-cache
+      #     MAX_JOBS=128 pip install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --no-build-isolation --no-clean -r requirements.txt
+      #     end_time=$(date +%s)
+      #     elapsed=$((end_time - start_time))
+      #     echo "✅ [Pip install requirements] ended at: $(date)"
+      #     echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
+      #     start_time=$(date +%s)
+      #     echo "✅ [build primus-turbo] started at: $(date)"
+      #     pip3 install --no-build-isolation -e . -v
+      #     end_time=$(date +%s)
+      #     elapsed=$((end_time - start_time))
+      #     echo "✅ [build primus-turbo] ended at: $(date)"
+      #     echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
       - run: echo "🎉 Begin Primus Benchmark."
       - uses: actions/checkout@v4
         with:
