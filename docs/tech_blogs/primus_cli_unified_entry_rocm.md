@@ -1,3 +1,9 @@
+---
+title: "Primus CLI: A Unified Entry Point for Training on ROCm"
+date: "2026-01-23"
+tags: ["ROCm", "LLM Training", "HPC", "Slurm", "Developer Tools"]
+---
+
 <!---
 Copyright (c) 2025 Advanced Micro Devices, Inc. (AMD)
 
