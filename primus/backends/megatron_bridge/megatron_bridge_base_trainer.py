@@ -18,6 +18,7 @@ This mirrors the role of TorchTitanBaseTrainer for TorchTitan:
 
 from typing import Any
 
+from primus.core.patches import run_patches
 from primus.core.trainer.base_trainer import BaseTrainer
 from primus.modules.module_utils import log_rank_0
 
@@ -58,6 +59,19 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
             backend_args=backend_args,
         )
 
+        import primus.backends.megatron.patches # noqa: F401
+        run_patches(
+            backend="megatron",
+            phase="before_train",
+            backend_version=type(self).detect_megatron_version(),
+            model_name=self.model_name,
+            extra={
+                "backend_args": self.backend_args,
+                "primus_config": self.primus_config,
+                "module_config": self.module_config,
+            },
+        )
+
         log_rank_0("=" * 80)
         log_rank_0("MegatronBridgeBaseTrainer initialized successfully")
         log_rank_0("=" * 80)
@@ -81,3 +95,27 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
             raise RuntimeError(
                 "Failed to detect Megatron-Bridge version. " "Make sure Megatron-Bridge is installed."
             ) from e
+
+    @classmethod
+    def detect_megatron_version(cls) -> str:
+        """
+        Detect Megatron-LM version using the official method.
+
+        Returns:
+            Megatron version string (e.g., "0.15.0rc8")
+
+        Raises:
+            RuntimeError: If version cannot be detected (critical requirement)
+        """
+        try:
+            from megatron.core import package_info
+
+            return package_info.__version__
+        except Exception as e:
+            raise RuntimeError(
+                "Failed to detect Megatron-LM version. "
+                "Please ensure Megatron-LM is properly installed and "
+                "megatron.core.package_info is available."
+            ) from e
+
+    

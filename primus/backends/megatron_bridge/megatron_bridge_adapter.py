@@ -24,6 +24,7 @@ import primus.backends.megatron_bridge.patches  # noqa: F401
 from primus.backends.megatron_bridge.argument_builder import MegatronBridgeArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
+from primus.core.patches import run_patches
 from primus.modules.module_utils import log_dict_aligned, log_rank_0
 
 
