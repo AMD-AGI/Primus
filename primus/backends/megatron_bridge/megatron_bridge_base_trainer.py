@@ -59,7 +59,8 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
             backend_args=backend_args,
         )
 
-        import primus.backends.megatron.patches # noqa: F401
+        import primus.backends.megatron.patches  # noqa: F401
+
         run_patches(
             backend="megatron",
             phase="before_train",
@@ -117,5 +118,3 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
                 "Please ensure Megatron-LM is properly installed and "
                 "megatron.core.package_info is available."
             ) from e
-
-    

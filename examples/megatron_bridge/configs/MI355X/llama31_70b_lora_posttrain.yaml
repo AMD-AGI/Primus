@@ -20,14 +20,14 @@ modules:
       context_parallel_size: 1
       sequence_parallel: false
       use_megatron_fsdp: false
-      
+
       # Finetuning-specific params
       #pretrained_checkpoint: null
       peft: lora
       peft_dim: 16
       peft_alpha: 32
       packed_sequence: false
-      
+
       # Training configuration
       train_iters: 200
       global_batch_size: 128
@@ -35,22 +35,22 @@ modules:
       seq_length: 2048
       eval_interval: 30
       save_interval: 50
-      
+
       # Optimizer configuration
       finetune_lr: 1.0e-4
       min_lr: 0.0
       lr_warmup_iters: 50
       lr_decay_iters: null
       use_distributed_optimizer: false
-      
+
       # Model configuration
       cross_entropy_loss_fusion: false
-      
+
       # W&B logging
       wandb_project: null
       wandb_entity: null
       wandb_exp_name: null
-      
+
       # Precision
       precision_config: bf16_mixed
       comm_overlap_config: null
