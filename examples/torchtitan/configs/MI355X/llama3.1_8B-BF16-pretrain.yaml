@@ -8,8 +8,8 @@ modules:
     framework: torchtitan
     config: pre_trainer.yaml
 
-    # model to run
-    model: llama3.1_8B.yaml
+    # model to run - 使用 debugmodel 进行快速测试
+    model: llama3_debug.yaml
     overrides:
       sink_level: null
       file_sink_level: DEBUG
@@ -22,17 +22,12 @@ modules:
       lr_scheduler:
         # lr scheduler warm up
         warmup_steps: 1
-
-      # profiling:
-      #   enable_profiling: true
-      #   save_traces_folder: "profile_trace_8B_bf16"
-      #   profile_freq: 4
         
       training:
         local_batch_size: 1
-        seq_len: 8192
+        seq_len: 128  # 减小序列长度加速测试
         mock_data: true
-        steps: 1
+        steps: 2
 
       model:
         n_layers: 1

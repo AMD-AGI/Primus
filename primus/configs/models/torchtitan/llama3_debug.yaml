@@ -1,0 +1,9 @@
+job:
+  dump_folder: "./outputs"
+  description: "Llama 3 Debug Model with Manual Attention (tiny for testing)"
+
+model:
+  name: "llama3"
+  flavor: "debugmodel"  # 使用 debugmodel + 手动 attention 实现
+  hf_assets_path: "meta-llama/Llama-3.1-8B"  # 使用 Llama3 tokenizer
+  n_layers: 1  # 进一步减少到1层
