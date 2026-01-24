@@ -1198,7 +1198,6 @@ def _run_multinode_projection(training_config, single_node_time_ms, profiling_re
         print(f"  Minimum GPUs Required: {gpus_required}")
         print(f"  Minimum Nodes Required: {min_nodes_required}")
         print(f"  Target Nodes: {target_nodes}")
-        print(f"  Target DP: {dp_target}")
     
     # Load hardware config if provided
     hardware_config_dict = None
@@ -1258,7 +1257,7 @@ def _run_multinode_projection(training_config, single_node_time_ms, profiling_re
             grad_ar_msg = f"{target_grad_ar:.3f} ms (overlapped - not in critical path)"
         else:
             target_grad_ar = 0
-            grad_ar_msg = "N/A (DP=1)"
+            grad_ar_msg = "N/A"
     
     # For reporting, get full breakdown for target
     total_comm_time_ms, breakdown, message_info, per_layer_info = calculate_collective_communication_time(
@@ -1276,15 +1275,21 @@ def _run_multinode_projection(training_config, single_node_time_ms, profiling_re
         print("=" * 100)
         print(f"\n📊 Parallelism: TP={tp}, PP={pp}, EP={ep}, CP={cp}")
         
+        # Calculate DP for microbatch calculation (excludes EP)
+        min_world_size = min_nodes_required * gpus_per_node
+        target_world_size = target_nodes * gpus_per_node
+        min_dp_for_microbatch = min_world_size // (tp * pp * cp)
+        target_dp_for_microbatch = target_world_size // (tp * pp * cp)
+        
         print(f"\n📦 Minimum Configuration ({min_nodes_required} node{'s' if min_nodes_required > 1 else ''}):")
-        print(f"   Nodes: {min_nodes_required}")
-        print(f"   Data Parallelism (DP): {min_dp}")
+        print(f"   Nodes: {min_nodes_required}, GPUs: {min_world_size}")
+        print(f"   TP={tp}, PP={pp}, EP={ep}, CP={cp}, DP={min_dp_for_microbatch}")
         print(f"   Iteration Time: {benchmarked_time_ms:.3f} ms")
         
         print(f"\n🎯 Target Configuration ({target_nodes} nodes):")
-        print(f"   Nodes: {target_nodes}")
-        print(f"   Data Parallelism (DP): {dp_target}")
-        print(f"   DP Scaling Factor: {dp_target/min_dp if min_dp > 0 else dp_target:.1f}x")
+        print(f"   Nodes: {target_nodes}, GPUs: {target_world_size}")
+        print(f"   TP={tp}, PP={pp}, EP={ep}, CP={cp}, DP={target_dp_for_microbatch}")
+        print(f"   DP Scaling Factor: {target_dp_for_microbatch/min_dp_for_microbatch if min_dp_for_microbatch > 0 else target_dp_for_microbatch:.1f}x")
         
         print(f"\n📡 Communication Breakdown:")
         
@@ -1308,8 +1313,8 @@ def _run_multinode_projection(training_config, single_node_time_ms, profiling_re
         print(f"\n   Total Communication (critical path): {total_comm_time_ms:.3f} ms")
         
         print(f"\n📊 Performance Summary:")
-        print(f"   Base Projection:   {benchmarked_time_ms:.3f} ms ({min_nodes_required} node{'s' if min_nodes_required > 1 else ''}, DP={min_dp}) [from single-node profiling]")
-        print(f"   Target Projection: {projected_time_ms:.3f} ms ({target_nodes} nodes, DP={dp_target})")
+        print(f"   Base Projection:   {benchmarked_time_ms:.3f} ms ({min_nodes_required} node{'s' if min_nodes_required > 1 else ''}, DP={min_dp_for_microbatch}) [from single-node profiling]")
+        print(f"   Target Projection: {projected_time_ms:.3f} ms ({target_nodes} nodes, DP={target_dp_for_microbatch})")
         print(f"   Gradient AllReduce: {grad_ar_msg}")
         
         print("\n" + "=" * 100)
@@ -1392,20 +1397,37 @@ def launch_projection_from_cli(args, overrides):
 
     # Update data_parallel_size based on target_nodes
     # This ensures the pipeline simulation calculates the correct number of microbatches
+    # NOTE: For MoE models, EP does NOT reduce DP (experts are distributed but tokens are replicated)
+    # DP = world_size / (TP × PP × CP)  [EP is excluded]
     mp_config = training_config.model_parallel_config
     tp = mp_config.tensor_model_parallel_size
     pp = mp_config.pipeline_model_parallel_size
     cp = getattr(mp_config, 'context_parallel_size', 1) or 1
     ep = getattr(mp_config, 'expert_model_parallel_size', 1) or 1
     
+    # Calculate DP for the TARGET configuration (what we're projecting to)
+    # The pipeline simulator simulates the target config, so it needs target DP for microbatch calculation
     target_world_size = target_nodes * gpus_per_node
+    
+    # For MoE models: DP calculation excludes EP since experts are distributed but data is replicated
     target_dp = target_world_size // (tp * pp * cp)
     
+    # Also show benchmark config for reference
+    benchmark_world_size = gpus_per_node  # Benchmarking always happens on 1 node
+    benchmark_pp = reduction_info.get('benchmark_pp', pp)
+    benchmark_ep = reduction_info.get('benchmark_ep', ep)
+    benchmark_dp = benchmark_world_size // (tp * benchmark_pp * cp)
+    
     print(f"\n[Primus:Performance Projection] Configuration Summary:")
-    print(f"  Target Nodes: {target_nodes}")
-    print(f"  GPUs per Node: {gpus_per_node}")
-    print(f"  Total GPUs: {target_world_size}")
-    print(f"  Data Parallelism (DP): {target_dp}")
+    print(f"  Benchmark Config: PP={benchmark_pp}, EP={benchmark_ep}, TP={tp}, CP={cp}, DP={benchmark_dp} (1 node)")
+    print(f"  Target Config: PP={pp}, EP={ep}, TP={tp}, CP={cp}, DP={target_dp} ({target_nodes} nodes)")
+    print(f"    Note: EP does not reduce DP for microbatch calculation")
+    
+    # Use TARGET DP for microbatch calculation (simulator needs to know target's microbatch count)
+    global_batch = training_config.runtime_config.global_batch_size
+    micro_batch = training_config.runtime_config.micro_batch_size
+    num_microbatches = global_batch // (micro_batch * target_dp)
+    print(f"  Microbatches: {num_microbatches} (global_batch={global_batch}, micro_batch={micro_batch}, target_dp={target_dp})")
     
     training_config.runtime_config.data_parallel_size = target_dp
 
@@ -1533,3 +1555,4 @@ def launch_projection_from_cli(args, overrides):
             args,
             target_nodes
         )
+
