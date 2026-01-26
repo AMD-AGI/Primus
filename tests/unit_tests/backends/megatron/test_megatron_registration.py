@@ -82,8 +82,31 @@ class TestMegatronBackendRegistration:
         # Note: We skip path setup since Megatron may not be installed in test env
         from unittest.mock import patch
 
-        with patch.object(BackendRegistry, "setup_backend_path"):
-            adapter = BackendRegistry.get_adapter("megatron")
+        # get_adapter() has two paths:
+        # - lazy-load path (backend not registered yet): defines resolved_path
+        # - already-registered path: may not define resolved_path
+        #
+        # Force the lazy-load path here, and mock the backend "import" to re-register
+        # megatron without relying on Python module reload side-effects.
+        original_path_names = BackendRegistry._path_names.copy()
+        original_adapters = BackendRegistry._adapters.copy()
+        original_trainers = BackendRegistry._trainer_classes.copy()
+        try:
+            BackendRegistry._adapters.pop("megatron", None)
+            BackendRegistry._trainer_classes.pop("megatron", None)
+
+            def _fake_load_backend(_backend: str) -> None:
+                BackendRegistry.register_path_name("megatron", "Megatron-LM")
+                BackendRegistry.register_adapter("megatron", MegatronAdapter)
+                BackendRegistry.register_trainer_class("megatron", MegatronPretrainTrainer)
+
+            with patch.object(BackendRegistry, "setup_backend_path", return_value="/tmp"):
+                with patch.object(BackendRegistry, "_load_backend", side_effect=_fake_load_backend):
+                    adapter = BackendRegistry.get_adapter("megatron")
+        finally:
+            BackendRegistry._path_names = original_path_names
+            BackendRegistry._adapters = original_adapters
+            BackendRegistry._trainer_classes = original_trainers
 
         # Verify instance type
         assert isinstance(
@@ -97,8 +120,26 @@ class TestMegatronBackendRegistration:
         """Verify trainer class retrieval through adapter."""
         from unittest.mock import patch
 
-        with patch.object(BackendRegistry, "setup_backend_path"):
-            adapter = BackendRegistry.get_adapter("megatron")
+        # Force lazy-load path; see rationale in test_adapter_can_be_instantiated_via_registry.
+        original_path_names = BackendRegistry._path_names.copy()
+        original_adapters = BackendRegistry._adapters.copy()
+        original_trainers = BackendRegistry._trainer_classes.copy()
+        try:
+            BackendRegistry._adapters.pop("megatron", None)
+            BackendRegistry._trainer_classes.pop("megatron", None)
+
+            def _fake_load_backend(_backend: str) -> None:
+                BackendRegistry.register_path_name("megatron", "Megatron-LM")
+                BackendRegistry.register_adapter("megatron", MegatronAdapter)
+                BackendRegistry.register_trainer_class("megatron", MegatronPretrainTrainer)
+
+            with patch.object(BackendRegistry, "setup_backend_path", return_value="/tmp"):
+                with patch.object(BackendRegistry, "_load_backend", side_effect=_fake_load_backend):
+                    adapter = BackendRegistry.get_adapter("megatron")
+        finally:
+            BackendRegistry._path_names = original_path_names
+            BackendRegistry._adapters = original_adapters
+            BackendRegistry._trainer_classes = original_trainers
 
         # Adapter should be able to load the registered trainer class
         trainer_cls = adapter.load_trainer_class()

@@ -1,0 +1,9 @@
+# Megatron-Bridge Post-training Base Configuration
+# This configuration file defines the base settings for post-training tasks
+# (SFT, instruction tuning, LoRA fine-tuning) using Megatron-Bridge
+
+extends:
+  - ../module_base.yaml
+
+# # Mark as trainable module
+trainable: true

@@ -20,7 +20,7 @@ def run_script(
     env_override: dict = None,
     extra_args: list[str] = None,
 ):
-    shell_entry = "examples/run_pretrain.sh"
+    shell_entry = "./runner/primus-cli"
     env = os.environ.copy()
     if env_override:
         env.update(env_override)
@@ -34,7 +34,7 @@ def run_script(
     run_stdout = subprocess.PIPE if not do_print_at_runtime else sys.stdout
     run_stderr = subprocess.PIPE if not do_print_at_runtime else sys.stderr
 
-    cmd = ["bash", shell_entry]
+    cmd = ["bash", shell_entry, "direct", "--", "train", "pretrain", "--config", exp_path]
     if extra_args:
         cmd.extend(extra_args)
 
@@ -51,8 +51,10 @@ def run_script(
         )
         logger.info(f"[{tag}] End run, time={time.time() - start:.3f} s")
 
-        with open(train_log_path, "r") as f:
-            stdout_output = f.read()
+        stdout_output = ""
+        if os.path.exists(train_log_path):
+            with open(train_log_path, "r") as f:
+                stdout_output = f.read()
 
         return stdout_output, ""
 

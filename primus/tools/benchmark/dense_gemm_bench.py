@@ -146,19 +146,34 @@ def _load_helpers():
     return profile_gemm, gather_records, is_rank_0
 
 
-def _profile_fwd(m, n, k, dtype, duration):
-    profile_gemm, _, _ = _load_helpers()
-    return profile_gemm(m, n, k, dtype, False, True, duration)
+def _profile_fwd(m, n, k, dtype, duration, is_fp8=False):
+    if is_fp8:
+        from primus.tools.benchmark.gemm_bench import profile_gemm_fp8
+
+        return profile_gemm_fp8(m, n, k, dtype, False, True, duration)
+    else:
+        profile_gemm, _, _ = _load_helpers()
+        return profile_gemm(m, n, k, dtype, False, True, duration)
 
 
-def _profile_wgrad(m, n, k, dtype, duration):
-    profile_gemm, _, _ = _load_helpers()
-    return profile_gemm(n, k, m, dtype, True, False, duration)
+def _profile_wgrad(m, n, k, dtype, duration, is_fp8=False):
+    if is_fp8:
+        from primus.tools.benchmark.gemm_bench import profile_gemm_fp8
+
+        return profile_gemm_fp8(n, k, m, dtype, True, False, duration)
+    else:
+        profile_gemm, _, _ = _load_helpers()
+        return profile_gemm(n, k, m, dtype, True, False, duration)
 
 
-def _profile_dgrad(m, n, k, dtype, duration):
-    profile_gemm, _, _ = _load_helpers()
-    return profile_gemm(m, k, n, dtype, False, False, duration)
+def _profile_dgrad(m, n, k, dtype, duration, is_fp8=False):
+    if is_fp8:
+        from primus.tools.benchmark.gemm_bench import profile_gemm_fp8
+
+        return profile_gemm_fp8(m, k, n, dtype, False, False, duration)
+    else:
+        profile_gemm, _, _ = _load_helpers()
+        return profile_gemm(m, k, n, dtype, False, False, duration)
 
 
 def run_gemm_benchmark(args):
@@ -182,8 +197,19 @@ def run_gemm_benchmark(args):
     else:
         print("[INFO] No model specified. Using CLI-provided parameters.")
 
-    dtype_map = {"bf16": torch_mod.bfloat16, "fp16": torch_mod.float16, "fp32": torch_mod.float32}
-    dtype = dtype_map[args.dtype]
+    # Check FP8 availability
+    is_fp8 = args.dtype == "fp8"
+    if is_fp8:
+        from primus.tools.benchmark.gemm_bench import FP8_AVAILABLE
+
+        if not FP8_AVAILABLE:
+            raise RuntimeError(
+                "FP8 dtype requested but torchao is not available. " "Install it with: pip install torchao"
+            )
+        dtype = None  # FP8 doesn't use torch dtype directly
+    else:
+        dtype_map = {"bf16": torch_mod.bfloat16, "fp16": torch_mod.float16, "fp32": torch_mod.float32}
+        dtype = dtype_map[args.dtype]
 
     shape_defs = [
         (
@@ -216,7 +242,7 @@ def run_gemm_benchmark(args):
         n = shape[1]
         k = shape[2]
 
-        res = func(m, n, k, dtype, args.duration)
+        res = func(m, n, k, dtype, args.duration, is_fp8=is_fp8)
         summary = (
             f"{res['avg_time_ms']:.6f}s / "
             f"{res['tflops']:.2f}TF/s / "
