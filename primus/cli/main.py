@@ -44,17 +44,14 @@ def _load_subcommands(subparsers: argparse._SubParsersAction) -> None:
         register: Callable[[argparse._SubParsersAction], argparse.ArgumentParser] = getattr(
             module, "register_subcommand", None
         )
-        if register is None:
-            raise AttributeError(f"Module '{module_path}' must expose register_subcommand()")
+        assert register is not None, f"Module '{module_path}' must expose register_subcommand()"
         parser = register(subparsers)
-        if parser is None:
-            raise RuntimeError(
-                f"register_subcommand() in '{module_path}' must return the parser it configured"
-            )
-        if not hasattr(parser, "get_default") or parser.get_default("func") is None:
-            raise RuntimeError(
-                f"Subcommand registered by '{module_path}' must call parser.set_defaults(func=...)"
-            )
+        assert (
+            parser is not None
+        ), f"register_subcommand() in '{module_path}' must return the parser it configured"
+        assert hasattr(parser, "get_default") and parser.get_default("func") is not None, (
+            f"Subcommand registered by '{module_path}' must call parser.set_defaults(func=...)"
+        )
 
 
 def main():
@@ -62,12 +59,10 @@ def main():
     Primus Unified CLI Entry
 
     Currently supported:
-    - train: Launch Megatron / TorchTitan / Jax training.
-
-    Reserved for future expansion:
-    - benchmark: Run benchmarking tools for performance evaluation.
-    - preflight: Environment and configuration checks.
-      ...
+    - train: Launch training workflows (e.g., Megatron / TorchTitan / MaxText).
+    - benchmark: Run performance benchmarks.
+    - preflight: Run environment and configuration checks.
+    - projection: Performance projection utilities.
     """
     parser = argparse.ArgumentParser(prog="primus", description="Primus Unified CLI for Training & Utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)

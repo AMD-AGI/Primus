@@ -70,5 +70,5 @@ def test_load_subcommands_requires_func(monkeypatch):
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="cmd")
 
-    with pytest.raises(RuntimeError, match="set_defaults"):
+    with pytest.raises(AssertionError, match="set_defaults"):
         cli_main._load_subcommands(subparsers)
