@@ -45,11 +45,7 @@ class BackendRegistry:
     """
 
     # Backend → third_party folder name
-    _path_names: Dict[str, str] = {
-        # Pre-register known path names to avoid chicken-egg problem
-        "megatron": "Megatron-LM",
-        "torchtitan": "torchtitan",
-    }
+    _path_names: Dict[str, str] = {}
 
     # Backend → AdapterClass (class, not instance)
     _adapters: Dict[str, Type] = {}
@@ -74,19 +70,13 @@ class BackendRegistry:
     @classmethod
     def get_path_name(cls, backend: str) -> str:
         """
-        Get path name for backend, with lazy loading support.
+        Get third_party folder name for a backend.
 
-        If backend not registered, try to load it first.
+        Default behavior:
+        - If no mapping is registered, return `backend` itself.
+        - If a mapping is registered via `register_path_name()`, return the mapped name.
         """
-        # Lazily load backend if not registered
-        if backend not in cls._path_names:
-            cls._load_backend(backend)
-
-        assert backend in cls._path_names, (
-            f"No path name registered for backend '{backend}'.\n"
-            f"Available backends: {', '.join(cls._path_names.keys())}"
-        )
-        return cls._path_names[backend]
+        return cls._path_names.get(backend, backend)
 
     # ----------------------------------------------------------------------
     #  Backend Adapter Registration

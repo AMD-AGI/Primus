@@ -58,15 +58,15 @@ class TestBackendRegistryErrorHandling:
         # Register one backend
         registry_module.BackendRegistry.register_adapter("test_backend", MockAdapter)
 
-        # Try to get non-existent backend
-        # In the new core runtime, this fails at import time for the backend module.
-        with pytest.raises(ImportError):
+        # Try to get non-existent backend: setup_backend_path falls back to
+        # primus/third_party/<backend> and fails if it doesn't exist.
+        with pytest.raises(AssertionError, match="No valid backend path"):
             registry_module.BackendRegistry.get_adapter("non_existent")
 
     def test_get_adapter_empty_registry_error(self):
         """Test error message when no backends are registered."""
-        # In the new core runtime, this also fails at import time for the backend module.
-        with pytest.raises(ImportError):
+        # setup_backend_path falls back to primus/third_party/<backend> and fails if it doesn't exist.
+        with pytest.raises(AssertionError, match="No valid backend path"):
             registry_module.BackendRegistry.get_adapter("any_backend")
 
     def test_get_adapter_creation_failure(self):
@@ -140,9 +140,9 @@ class TestBackendRegistryLazyLoading:
 
     def test_get_adapter_with_lazy_loading(self):
         """Test that get_adapter triggers lazy loading."""
-        # Don't pre-register, let it lazy load
-        # This will try to load megatron backend
-        # Note: get_adapter now also tries setup_backend_path
+        # Don't pre-register adapter; let it lazy-load the backend module.
+        # However, setup_backend_path needs a valid third_party folder name mapping.
+        registry_module.BackendRegistry.register_path_name("megatron", "Megatron-LM")
         adapter = registry_module.BackendRegistry.get_adapter("megatron", backend_path=None)
         # If megatron is installed and registered correctly, this should not raise
         # and must return a non-None adapter instance.
@@ -204,9 +204,8 @@ class TestBackendRegistryPathNames:
 
     def test_get_path_name_not_found(self):
         """Test error when path name not registered and can't be loaded."""
-        # In the new lazy-loading logic, an unknown backend triggers a ModuleNotFoundError.
-        with pytest.raises(ModuleNotFoundError):
-            registry_module.BackendRegistry.get_path_name("non_existent_backend")
+        # Default behavior: if not registered, return backend itself.
+        assert registry_module.BackendRegistry.get_path_name("non_existent_backend") == "non_existent_backend"
 
 
 class TestBackendRegistrySetupPath:
@@ -265,8 +264,8 @@ class TestBackendRegistrySetupPath:
 
     def test_setup_backend_path_not_found(self):
         """Test setup_backend_path raises error when backend not registered."""
-        # Missing backend now fails during lazy loading with ModuleNotFoundError.
-        with pytest.raises(ModuleNotFoundError):
+        # setup_backend_path falls back to primus/third_party/<backend> and fails if it doesn't exist.
+        with pytest.raises(AssertionError, match="No valid backend path"):
             registry_module.BackendRegistry.setup_backend_path("non_existent_backend", verbose=False)
 
     def test_setup_backend_path_already_in_sys_path(self, tmp_path):
