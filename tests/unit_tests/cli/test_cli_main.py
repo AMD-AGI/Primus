@@ -16,6 +16,7 @@ def test_iter_subcommand_modules_includes_builtin():
 
     assert "primus.cli.subcommands.train" in modules
     assert "primus.cli.subcommands.benchmark" in modules
+    assert "primus.cli.subcommands.preflight" in modules
     assert "primus.cli.subcommands.projection" in modules
 
 
