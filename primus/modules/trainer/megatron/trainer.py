@@ -148,6 +148,7 @@ from primus.backends.megatron.training.global_vars import (
     get_train_start_time,
     set_primus_global_variables,
     set_train_start_time,
+    upload_mlflow_artifacts,
 )
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
@@ -1121,6 +1122,18 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         mlflow_writer = get_mlflow_writer()
         if mlflow_writer:
+            # Upload artifacts to MLflow before ending the run
+            upload_mlflow_artifacts(
+                tensorboard_dir=args.tensorboard_dir,
+                exp_root_path=self.exp_root_path,
+                upload_traces=getattr(args, "mlflow_upload_traces", True),
+                upload_logs=getattr(args, "mlflow_upload_logs", True),
+                generate_tracelens_report=getattr(args, "generate_tracelens_report", False),
+                upload_tracelens_report=getattr(args, "mlflow_upload_tracelens_report", False),
+                tracelens_ranks=getattr(args, "mlflow_tracelens_ranks", None),
+                tracelens_output_format=getattr(args, "mlflow_tracelens_output_format", "all"),
+                tracelens_cleanup_after_upload=getattr(args, "mlflow_tracelens_cleanup_after_upload", False),
+            )
             mlflow_writer.end_run()
 
         one_logger and one_logger.log_metrics({"app_finish_time": one_logger_utils.get_timestamp_in_ms()})
