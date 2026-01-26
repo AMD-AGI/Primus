@@ -1699,6 +1699,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     if isinstance(val, tuple) or isinstance(val, list):
                         numerator += val[0]
                         denominator += val[1]
+                    elif isinstance(val, torch.Tensor) and val.numel() == 2:
+                        # Handle 2-element tensor [loss, num_tokens] format
+                        # (upstream Megatron compatibility)
+                        numerator += val[0]
+                        denominator += val[1]
                     else:
                         # legacy behavior. we average over the number of microbatches,
                         # and so the denominator is 1.
