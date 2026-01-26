@@ -1699,6 +1699,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     if isinstance(val, tuple) or isinstance(val, list):
                         numerator += val[0]
                         denominator += val[1]
+                    elif isinstance(val, torch.Tensor) and val.numel() == 2:
+                        # Handle 2-element tensor [loss, num_tokens] format
+                        # (upstream Megatron compatibility)
+                        numerator += val[0]
+                        denominator += val[1]
                     else:
                         # legacy behavior. we average over the number of microbatches,
                         # and so the denominator is 1.
@@ -2117,29 +2122,29 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                         )
                         wandb_writer.log({f"{mem_collector}_mem_usage(%)": mem_usage * 100.0}, iteration)
                     if mlflow_writer:
-                        mlflow_writer.log_metric("throughput(tflops/sec/gpu)", throughput, iteration)
+                        mlflow_writer.log_metric("throughput_tflops_per_sec_per_gpu", throughput, iteration)
                         mlflow_writer.log_metric(
-                            "token_throughput(tokens/sec/gpu)",
+                            "token_throughput_tokens_per_sec_per_gpu",
                             token_throughput,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_used_mem(GiB)",
+                            f"{mem_collector}_used_mem_GiB",
                             used_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_free_mem(GiB)",
+                            f"{mem_collector}_free_mem_GiB",
                             free_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_total_mem(GiB)",
+                            f"{mem_collector}_total_mem_GiB",
                             total_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
                         mlflow_writer.log_metric(
-                            f"{mem_collector}_mem_usage(%)", mem_usage * 100.0, iteration
+                            f"{mem_collector}_mem_usage_percent", mem_usage * 100.0, iteration
                         )
             assert learning_rate is not None
             # Decoupled_learning_rate should be not None only on first and last pipeline stage.
