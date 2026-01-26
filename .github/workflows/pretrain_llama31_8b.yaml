@@ -1,0 +1,156 @@
+name: Primus Llama3.1 8B
+run-name: Primus Llama3.1 8B | ${{ inputs.runner_label | "m13-21" }}
+on:
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: "Runner label"
+        required: true
+        default: "smci355-ccs-aus-m13-21"
+        type: choice
+        options:
+          - smci355-ccs-aus-m13-21
+          - smci355-ccs-aus-m03-21
+          - smci355-ccs-aus-m11-29
+          - smci355-ccs-aus-n13-09
+
+env:
+  LOGDIR: /logs
+  MODEL: /mnt/shared/mlperf/models/llama3.1_8B
+  DATADIR: /mnt/shared/mlperf/data
+  MODEL_NAME: llama3.1_8B
+
+jobs:
+  build:
+    runs-on:
+      - gpu
+      - ${{ inputs.runner_label || 'm13-21' }}
+    timeout-minutes: 60 # 1 hour
+    outputs:
+      image_tag: ${{ steps.base_docker_build.outputs.image_tag }}
+    if: ${{ inputs.image_tag == '' || inputs.image_tag == null }}
+
+    steps:
+      - name: Setup Permissions
+        run: |
+          sudo chown -R $USER:$USER /home/$USER/action-runner/_work/mlperf-training
+          echo "$DOCKER_CREDENTIALS"
+          docker login --username ${{ secrets.DOCKER_USER_NAME }} --password ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create image tag
+        id: image_tag
+        run: |
+          BASE_IMAGE_TAG=${{ env.MODEL_NAME }}_training_5.1_$(date +'%Y-%m-%d-%H-%M-%S')
+          echo "BASE_IMAGE_TAG=${BASE_IMAGE_TAG}" >> $GITHUB_ENV
+          echo "DEV_IMAGE_TAG=${BASE_IMAGE_TAG}_dev" >> $GITHUB_ENV
+
+      - name: Build & Push Base Docker Image
+        id: base_docker_build
+        uses: ./.github/actions/docker-build-push
+        with:
+          model-name: ${{ env.MODEL_NAME }}
+          registry-pwd: ${{ secrets.REGISTRY_PWD }}
+          docker-user-name: ${{ secrets.DOCKER_USER_NAME }}
+          docker-pass-key: ${{ secrets.DOCKER_PASS_KEY }}
+          dockerfile: Dockerfile
+          custom-image-tag: ${{ env.BASE_IMAGE_TAG }}    
+
+  train:
+    timeout-minutes: 60 # 1 hour
+    needs: build
+    if: ${{ always() && (needs.build.result == 'success' || inputs.skip_build) }}
+    runs-on:
+      - gpu
+      - ${{ github.event.inputs.runner_label || 'm13-21' }}
+
+    steps:
+      - name: Setup Permissions
+        run: |
+          sudo chown -R $USER:$USER /home/${USER}/actions-runner/_work/mlperf-training/
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup
+        id: setup
+        run: |
+          docker login -u ${{ secrets.DOCKER_USER_NAME }} -p ${{ secrets.DOCKER_PASS_KEY }}
+
+      - name: Folder checks
+        run: |
+          echo "LOGDIR: $LOGDIR"
+          echo "MODEL: $MODEL"
+          echo "DATADIR: $DATADIR"
+          echo "MODEL_NAME: $MODEL_NAME"
+           
+          # Check model and data folders exist
+          if [ ! -d "$MODEL" ]; then
+            echo "Model folder does not exist: $MODEL"
+            exit 1
+          fi
+          if [ ! -d "$DATADIR" ]; then
+            echo "Data folder does not exist: $DATADIR"
+            exit 1
+          fi
+
+      - name: Configure AWS Credentials
+        run: |
+          aws configure set aws_access_key_id ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws configure set aws_secret_access_key ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws configure set region ${{ secrets.AWS_REGION }}
+          aws configure set default.s3.endpoint_url ${{ secrets.AWS_ENDPOINT_URL }}     
+
+
+      - name: Setup Primus
+        run: |
+          UUID=$(uuidgen)
+          echo "UUID: $UUID"
+          echo "UUID: $UUID" >> $GITHUB_ENV
+          echo "Launching Batch Run with ID: $UUID"
+
+          cd /workspace
+          git submodule update --init --recursive
+
+          cd Primus
+          pip install -r requirements.txt
+          
+          # Precommit hooks
+          pre-commit install
+
+          # Trigger Training
+          bash tools/docker/start_container.sh
+          docker exec -it dev_primus bash
+
+          cd Primus && pip install -r requirements.txt
+
+          # Run Training
+          EXP=examples/megatron/configs/llama3.1_8B-pretrain-mlperf.yaml bash ./examples/run_pretrain_mlperf.sh
+          
+        env:
+          UUID: ${{ env.UUID }}
+
+
+      - name: GitStore Batch Training Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: Batch Training Logs
+          path: |
+            ${{ env.LOGDIR }}/${{ env.UUID }}
+
+      - name: Upload Batch Training Logs
+        if: ${{ !inputs.skip_batch_training }}
+        uses: ./.github/actions/s3-upload
+        with:
+          bucket: ${{ secrets.AWS_S3_BUCKET }}
+          model-name: ${{ env.MODEL_NAME }}
+          log-dir: ${{ env.LOGDIR }}
+          uuid: ${{ env.UUID }}
+          aws-access-key: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          endpoint-url: ${{ secrets.AWS_ENDPOINT_URL }}
+        env:
+          UUID: ${{ env.UUID }}            
