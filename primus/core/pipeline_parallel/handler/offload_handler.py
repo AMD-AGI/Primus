@@ -197,8 +197,10 @@ class OffloadBuffer:
                     self.gpu_tensors[mini_batch][chunk][key]
                 ), f"cpu_buffer_list and gpu_tensors_list must have the same length. {mini_batch}-{chunk}-{key} {len(cpu_buffer_list)} != {len(self.gpu_tensors[mini_batch][chunk][key])}"
                 for i, cpu_buffer in enumerate(cpu_buffer_list):
+
+                    device = self.gpu_tensors[mini_batch][chunk][key][i].device
                     self.gpu_tensors[mini_batch][chunk][key][i].data = torch.empty(
-                        cpu_buffer.shape, device="cuda", dtype=cpu_buffer.dtype
+                        cpu_buffer.shape, device=device, dtype=cpu_buffer.dtype
                     )
                     self.gpu_tensors[mini_batch][chunk][key][i].data.copy_(
                         cpu_buffer, non_blocking=self.use_pinned
@@ -210,7 +212,6 @@ class OffloadBuffer:
 
     def wait_reload_done(self, mini_batch: int, chunk: int):
         if f"{mini_batch}-{chunk}" not in self.reload_events:
-            print("reload_events not found for {mini_batch}-{chunk}")
             return
         torch.cuda.current_stream().wait_event(self.reload_events[f"{mini_batch}-{chunk}"])
         del self.reload_events[f"{mini_batch}-{chunk}"]
