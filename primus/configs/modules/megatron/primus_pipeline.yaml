@@ -7,3 +7,5 @@ communication_method: "async_p2p" # "async_p2p", "batch_p2p"
 debug_scheduler_table: false
 
 offload: false
+
+offload_ops: "" # attn |(Not support yet) basic_gemm, row_parallel_gemm, column_parallel_gemm, grouped_linear

@@ -36,8 +36,8 @@ def megatron_bwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[Sc
     assert fwd_node_idx is not None
     outputs = scheduler_table[fwd_node_idx].args["outputs"]
 
-    if "offload" in fwd_node.args and fwd_node.args["offload"] and fwd_node.args["inputs"][0] is not None:
-        OFFLOAD_BUFFER.wait_reload_done(f"{fwd_node.mini_batch}-{fwd_node.chunk}-input_tensor")
+    if "should_offload" in fwd_node.args and fwd_node.args["should_offload"]:
+        OFFLOAD_BUFFER.wait_reload_done(fwd_node.mini_batch, fwd_node.chunk)
 
     input_tensors = scheduler_table[fwd_node_idx].args["inputs"]
 

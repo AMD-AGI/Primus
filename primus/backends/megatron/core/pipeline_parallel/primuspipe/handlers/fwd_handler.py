@@ -37,6 +37,10 @@ def megatron_check_fwd_node_valid(node: SchedulerNode):
 
 def megatron_fwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[SchedulerNode]):
     megatron_check_fwd_node_valid(node)
+    if "should_offload" in node.args and node.args["should_offload"]:
+        OFFLOAD_BUFFER.set_current_mini_batch_and_chunk(node.mini_batch, node.chunk)
+    else:
+        OFFLOAD_BUFFER.set_current_mini_batch_and_chunk(None, None)
     # prepare input, if not found, input is None(fwd_func will handle it)
     idx = find_prev_node_with_type(scheduler_table, idx, [FuncType.RF])
 
@@ -112,6 +116,5 @@ def megatron_fwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[Sc
 
     if "should_offload" in node.args and node.args["should_offload"]:
         if node.args["inputs"][0] is not None:
-            OFFLOAD_BUFFER.async_offload(
-                node.args["inputs"][0], f"{node.mini_batch}-{node.chunk}-input_tensor", "input"
-            )
+            OFFLOAD_BUFFER.add_offload_tensor("input_tensor", node.args["inputs"][0])
+        OFFLOAD_BUFFER.async_offload(node.mini_batch, node.chunk)
