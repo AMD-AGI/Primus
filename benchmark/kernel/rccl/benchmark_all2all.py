@@ -46,7 +46,7 @@ class A2ATest:
         self.local_rank = int(os.environ.get("LOCAL_RANK", 0))
         self.inited = False
         self.ep_size = self.world_size
-        self.ep_group = torch.distributed.group.WORLD
+        self.ep_group = None
         self.num_warmup = 5
         self.num_iters = 10
 
@@ -62,6 +62,8 @@ class A2ATest:
             )
             torch.distributed.barrier()
             self.inited = True
+        if self.ep_group is None:
+            self.ep_group = torch.distributed.group.WORLD
         torch.manual_seed(42 + self.rank)
 
     def teardown(self):
