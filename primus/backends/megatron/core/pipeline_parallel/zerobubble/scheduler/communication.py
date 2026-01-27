@@ -285,7 +285,10 @@ def add_communication_nodes_without_sorting(
     if post_validation:
         local_order = tag_rollback_communication(config, local_order)
 
-    if get_args().num_virtual_stages_per_pipeline_rank is None:
+    if (
+        get_args().num_virtual_stages_per_pipeline_rank is None
+        and get_args().pipeline_model_parallel_layout is None
+    ):
         local_order = reorder_communication_nodes(local_order)
 
     return local_order
