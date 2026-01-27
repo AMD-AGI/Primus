@@ -354,6 +354,7 @@ fi
 # install primus turbo from source
 export REBUILD_PRIMUS_TURBO=${REBUILD_PRIMUS_TURBO:-0}
 if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
+    # pip3 install  --extra-index-url https://test.pypi.org/simple primus_turbo-0.2.0+69d2386-cp310-cp310-linux_x86_64.whl
     LOG_INFO "Rebuilding Primus Turbo from source..."
     mkdir -p "/workspace/turbo"
     cd "/workspace/turbo" || exit
