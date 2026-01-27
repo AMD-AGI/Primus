@@ -134,6 +134,10 @@ Primus-pipeline provides a flexible interface for future investigation and resea
 3. Fine-grained overlap: In technical reports like DeepSeek-V3, PP schedules combine forward and backward passes of different minibatches and overlap computation and communication. We plan to explore similar fine-grained overlap strategies.
 
 
+## Acknowledgments
+
+We would like to express our sincere gratitude to the [SeaAI lab](https://sail.sea.com/) team and individuals for their invaluable contributions and collaboration, their expertise and support have been instrumental in advancing the progress of this project.
+
 ## Disclaimers
 
 Third-party content is licensed to you directly by the third party that owns the
