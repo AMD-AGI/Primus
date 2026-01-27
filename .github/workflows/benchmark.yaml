@@ -82,7 +82,7 @@ jobs:
         run: |
           python3 tools/daily/safe_wrapper.py \
             --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml \
-            --log_file "${BENCHMARK_LOG_DIR}/megatron/llama2_7B-BF16-multinode.log" \
+            --log_file /wekafs/primus/llama2_7B-BF16-multinode.log" \
             --gpus 4 \
             --num-nodes 1 \
             --timeout 18000
