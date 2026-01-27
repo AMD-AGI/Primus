@@ -61,8 +61,8 @@ class SafeWrapper:
             "resources": {
                 "replica": args.num_nodes,  # Number of nodes
                 "gpu": str(args.gpus),  # GPUs per node
-                "cpu": "96",
-                "memory": "1024Gi",
+                "cpu": "64",
+                "memory": "512Gi",
                 "ephemeralStorage": "512Gi",
                 "sharedMemory": "512Gi",
             },
