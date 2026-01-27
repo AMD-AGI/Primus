@@ -49,6 +49,8 @@ from transformer_engine.pytorch.fp8 import (
     dist_group_type,
 )
 
+from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
+
 
 def use_split_wgrad_op():
     args = get_args()
@@ -288,6 +290,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         self.softmax_scale = softmax_scale
 
         args = get_args()
+        self.offload = args.offload and "attn" in args.offload_ops
         if args.enable_turbo_attention_float8:
             self.attn = (
                 pt.ops.flash_attn_fp8_usp_func
@@ -381,6 +384,11 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         else:
             raise ValueError(f"Unsupported mask type: {mask_type}")
 
+        if self.offload:
+            OFFLOAD_BUFFER.add_offload_tensor(f"attn_q", query)
+            OFFLOAD_BUFFER.add_offload_tensor(f"attn_k", key)
+            OFFLOAD_BUFFER.add_offload_tensor(f"attn_v", value)
+
         o = self.attn(
             query,
             key,
@@ -438,6 +446,10 @@ class PrimusTurboLinear(TELinear):
                 a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
             )
 
+        args = get_args()
+        self.offload = args.offload and "basic_gemm" in args.offload_ops
+        assert not self.offload, "gemm offload still have some problems"
+
         super().__init__(
             input_size=input_size,
             output_size=output_size,
@@ -482,6 +494,9 @@ class PrimusTurboLinear(TELinear):
         if not input_.is_contiguous():
             input_ = input_.contiguous()
         input_ = input_.view(-1, original_shape[-1])
+
+        if self.offload:
+            OFFLOAD_BUFFER.add_offload_tensor(f"linear_input", input_)
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
@@ -534,6 +549,10 @@ class PrimusTurboRowParallelLinear(TELinear):
     ):
         if not input_is_parallel:
             raise ValueError(f"{__class__.__name__} layers do not support input_is_parallel = False")
+
+        args = get_args()
+        self.offload = args.offload and "row_parallel_gemm" in args.offload_ops
+        assert not self.offload, "gemm offload still have some problems"
 
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
@@ -589,7 +608,14 @@ class PrimusTurboRowParallelLinear(TELinear):
         original_shape = input_.size()
         if not input_.is_contiguous():
             input_ = input_.contiguous()
+
+        if self.offload:
+            OFFLOAD_BUFFER.add_offload_tensor(f"row_parallel_linear_input", input_)
+
         input_ = input_.view(-1, original_shape[-1])
+
+        if self.offload:
+            OFFLOAD_BUFFER.add_offload_tensor(f"row_parallel_linear_input", input_)
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
@@ -639,6 +665,9 @@ class PrimusTurboColumnParallelLinear(TELinear):
         if gather_output:
             raise ValueError(f"{__class__.__name__} layers do not support gather_output = True")
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
+
+        self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
+        assert not self.offload, "gemm offload still have some problems"
 
         if use_split_wgrad_op():
             from .zbpp_gemm import gemm_with_weight_gradient_store
@@ -695,6 +724,9 @@ class PrimusTurboColumnParallelLinear(TELinear):
             input_ = input_.contiguous()
         input_ = input_.view(-1, original_shape[-1])
 
+        if self.offload:
+            OFFLOAD_BUFFER.add_offload_tensor(f"column_parallel_linear_input", input_)
+
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
             if quant_config.block_scaling():
@@ -750,6 +782,9 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
         disable_grad_reduce: bool = False,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
+        args = get_args()
+        self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
+        assert not self.offload, "gemm offload still have some problems"
 
         if use_split_wgrad_op():
             from .zbpp_gemm import gemm_with_weight_gradient_store
@@ -793,6 +828,9 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
         if not input_.is_contiguous():
             input_ = input_.contiguous()
         input_ = input_.view(-1, original_shape[-1])
+
+        if self.offload:
+            OFFLOAD_BUFFER.add_offload_tensor(f"column_parallel_linear_torch_input", input_)
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
@@ -840,7 +878,10 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
+        args = get_args()
         self.config = config
+        self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
+        assert not self.offload, "gemm offload still have some problems"
 
         if gather_output:
             raise ValueError("Primus Turbo linear layers do not support gather_output = True")
@@ -961,6 +1002,10 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         config: TransformerConfig,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
+        args = get_args()
+        self.offload = args.offload and "grouped_linear" in args.offload_ops
+        assert not self.offload, "gemm offload still have some problems"
+
         super().__init__(
             num_local_experts,
             config,
@@ -1019,6 +1064,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         args = get_args()
         gemm_kargs = [dict(), dict()]
         if permuted_local_hidden_states.nelement() != 0:
+
             # Reshape the weights for the grouped GEMMs.
             if use_split_wgrad_op():
 
