@@ -164,6 +164,11 @@ def _merge_dict_to_dataclass(target: Any, source_dict: dict, path: str = "") -> 
         current_path = f"{path}.{field_name}" if path else field_name
         target_value = getattr(target, field_name)
 
+        # Debug logging
+        log_rank_0(f"  [DEBUG] Processing {current_path}:")
+        log_rank_0(f"    target_value type: {type(target_value)}, is_dataclass: {is_dataclass(target_value)}")
+        log_rank_0(f"    source_value type: {type(source_value)}, is dict: {isinstance(source_value, dict)}")
+
         # If target field is dataclass and source value is dict, recursively merge
         if is_dataclass(target_value) and isinstance(source_value, dict):
             _merge_dict_to_dataclass(target_value, source_value, current_path)
