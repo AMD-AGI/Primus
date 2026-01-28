@@ -157,6 +157,15 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
             - train_iters, global_batch_size, micro_batch_size, seq_length
             - lr, min_lr, data_paths, pretrained_checkpoint, etc.
 
+    Configuration Override:
+        After the recipe returns a ConfigContainer, any ConfigContainer fields
+        present in backend_args will override the recipe's default values.
+        This ensures user overrides in YAML take precedence:
+
+        Recipe returns: ConfigContainer(train=TrainingConfig(train_iters=1000), ...)
+        backend_args has: train_iters=2000
+        Final result: ConfigContainer(train=TrainingConfig(train_iters=2000), ...)
+
     Example 1 (basic - no parameters):
         ns.recipe = "qwen.qwen3"
         ns.flavor = "qwen3_32b_finetune_config"
@@ -177,10 +186,10 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
         → train is NOT passed to recipe, merged with result later
 
     Args:
-        ns: SimpleNamespace containing recipe specification and user configuration
+        backend_args: SimpleNamespace containing recipe specification and user configuration
 
     Returns:
-        ConfigContainer from recipe (guaranteed non-None)
+        ConfigContainer from recipe with user overrides applied (guaranteed non-None)
 
     Raises:
         AssertionError: If recipe or flavor is not specified (both are mandatory)
@@ -221,6 +230,39 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
         f"Recipe function '{full_module_path}.{function_name}()' must return "
         f"ConfigContainer, but returned {type(config_container).__name__}"
     )
+
+    # Override config_container fields with values from backend_args
+    # This ensures user overrides in YAML take precedence over recipe defaults
+    container_fields = [
+        "rng",
+        "rerun_state_machine",
+        "train",
+        "model",
+        "optimizer",
+        "ddp",
+        "scheduler",
+        "dataset",
+        "logger",
+        "tokenizer",
+        "checkpoint",
+        "dist",
+        "ft",
+        "straggler",
+        "nvrx_straggler",
+        "profiling",
+        "peft",
+        "comm_overlap",
+        "mixed_precision",
+        "tensor_inspect",
+        "inprocess_restart",
+    ]
+
+    for field_name in container_fields:
+        if hasattr(backend_args, field_name):
+            field_value = getattr(backend_args, field_name)
+            if field_value is not None:  # Only override if explicitly set
+                setattr(config_container, field_name, field_value)
+                log_rank_0(f"  ↳ Overriding config_container.{field_name} with backend_args value")
 
     return config_container
 
