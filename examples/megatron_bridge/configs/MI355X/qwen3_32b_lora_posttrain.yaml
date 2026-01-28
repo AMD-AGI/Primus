@@ -34,9 +34,6 @@ modules:
       eval_interval: 30
       save_interval: 50
 
-      dataset:
-        dataset_name: "rajpurkar/squad"
-
       # Optimizer configuration
       finetune_lr: 1.0e-4
       min_lr: 0.0
