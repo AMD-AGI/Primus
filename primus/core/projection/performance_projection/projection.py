@@ -79,7 +79,6 @@ def calculate_collective_communication_time(
     # Model parameters
     hidden_size = model_config.hidden_size
     num_layers = model_config.num_layers
-    num_experts = model_config.num_experts
     moe_router_topk = model_config.moe_router_topk
     moe_pattern = model_config.moe_pattern
     batch_size = runtime_config.micro_batch_size
@@ -1166,7 +1165,6 @@ def _run_multinode_projection(
     # Only print from rank 0 to avoid duplicate output
     is_rank_0 = not dist.is_initialized() or dist.get_rank() == 0
 
-    runtime_config = training_config.runtime_config
     mp_config = training_config.model_parallel_config
 
     # Get parallelism config

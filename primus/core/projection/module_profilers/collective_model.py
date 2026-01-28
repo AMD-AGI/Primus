@@ -35,23 +35,19 @@ def node_latency_and_volume_protocol(args, msg_size, protocol):
     if protocol == "simple":
         # Simple protocol: one packet, add header
         node_lat = args.write_latency + args.write_resp + args.write_latency
-        num_packets = 1
         msg_size = msg_size + 8
     elif protocol == "ll":
         # Low-latency protocol: 4-byte packets
         node_lat = args.write_latency
-        num_packets = ceil(msg_size / 4)
-        msg_size = num_packets * 8
+        msg_size = ceil(msg_size / 4) * 8
     elif protocol == "ll64":
         # 64-byte packets
         node_lat = args.write_latency
-        num_packets = ceil(msg_size / 56)
-        msg_size = num_packets * 64
+        msg_size = ceil(msg_size / 56) * 64
     elif protocol == "ll128":
         # 128-byte packets
         node_lat = args.write_latency
-        num_packets = ceil(msg_size / 120)
-        msg_size = num_packets * 128
+        msg_size = ceil(msg_size / 120) * 128
     else:
         raise ValueError(f"Unknown Protocol {protocol}")
     node_lat += args.hbm_latency  # Add HBM latency
@@ -65,20 +61,16 @@ def pod_latency_and_volume_protocol(args, msg_size, protocol):
     """
     if protocol == "simple":
         pod_lat = args.pod_lat * 3
-        num_packets = 1
         msg_size = max(8, msg_size + 8)
     elif protocol == "ll":
         pod_lat = args.pod_lat
-        num_packets = ceil(msg_size / 4)
-        msg_size = num_packets * 8
+        msg_size = ceil(msg_size / 4) * 8
     elif protocol == "ll64":
         pod_lat = args.pod_lat
-        num_packets = ceil(msg_size / 56)
-        msg_size = num_packets * 64
+        msg_size = ceil(msg_size / 56) * 64
     elif protocol == "ll128":
         pod_lat = args.pod_lat
-        num_packets = ceil(msg_size / 120)
-        msg_size = num_packets * 128
+        msg_size = ceil(msg_size / 120) * 128
     else:
         raise ValueError(f"Unknown Protocol {protocol}")
     pod_lat += args.hbm_latency
@@ -446,7 +438,6 @@ def single_shot_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     intra_node_fanout, inter_node_fanout = get_max_fanout(args)
     msg_size_per_peer = ceil(msg_size / gpus)
     gpus_per_node = min(gpus, args.node_size)
-    num_nodes = ceil(gpus / gpus_per_node)
     nics_per_node = args.nics_per_node if args.nics_per_node else gpus_per_node
     intra_node_gpus = gpus_per_node - 1
     inter_node_gpus = max(0, gpus - gpus_per_node)
