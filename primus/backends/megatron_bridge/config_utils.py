@@ -233,31 +233,10 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
 
     # Override config_container fields with values from backend_args
     # This ensures user overrides in YAML take precedence over recipe defaults
-    container_fields = [
-        "rng",
-        "rerun_state_machine",
-        "train",
-        "model",
-        "optimizer",
-        "ddp",
-        "scheduler",
-        "dataset",
-        "logger",
-        "tokenizer",
-        "checkpoint",
-        "dist",
-        "ft",
-        "straggler",
-        "nvrx_straggler",
-        "profiling",
-        "peft",
-        "comm_overlap",
-        "mixed_precision",
-        "tensor_inspect",
-        "inprocess_restart",
-    ]
+    from dataclasses import fields
 
-    for field_name in container_fields:
+    for field in fields(config_container):
+        field_name = field.name
         if hasattr(backend_args, field_name):
             field_value = getattr(backend_args, field_name)
             if field_value is not None:  # Only override if explicitly set
