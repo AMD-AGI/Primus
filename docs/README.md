@@ -24,7 +24,7 @@ Guides for common workflows and features:
 
 In-depth technical documentation:
 
-- **[Preflight](./preflight.md)** - Cluster diagnostics (host/GPU/network info + perf tests)
+- **[Performance Projection](./projection.md)** - Project training performance to multi-node configurations
 - **[Benchmark Suite](./benchmark.md)** - GEMM, RCCL, end-to-end benchmarks and profiling
 - **[Supported Models](./backends/overview.md#supported-models)** - Supported LLM architectures and feature compatibility matrix
 - **[Advanced Features](./advanced.md)** - Mixed precision, parallelism strategies, optimization techniques
@@ -48,6 +48,7 @@ Get help and find answers:
 - **Train a model locally** → [Quick Start](./quickstart.md) + [CLI User Guide](./cli/PRIMUS-CLI-GUIDE.md)
 - **Run distributed training on Slurm** → [Slurm & Container Usage](./slurm-container.md)
 - **Configure my training run** → [Configuration Guide](./configuration.md)
+- **Project performance to multi-node** → [Performance Projection](./projection.md)
 - **Benchmark performance** → [Benchmark Suite](./benchmark.md)
 - **Understand the CLI design** → [CLI Architecture](./cli/CLI-ARCHITECTURE.md)
 - **Troubleshoot issues** → [FAQ](./faq.md)

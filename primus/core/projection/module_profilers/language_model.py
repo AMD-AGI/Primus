@@ -1,4 +1,4 @@
-from typing import List, Dict,  Optional
+from typing import List, Optional
 ###############################################################################
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -126,41 +126,41 @@ class LanguageModelProfiler(BaseModuleProfiler):
     def _estimate_layer_communication(self, layer_idx: int, layer_type: str):
         """
         Estimate communication overhead for a single layer.
-        
+
         Args:
             layer_idx: Index of the layer
             layer_type: Type of layer ('dense' or 'moe')
-        
+
         Returns:
             List of communication operations with time and message size
         """
         import os
         from primus.core.projection.module_profilers import collective_model as cm
-        
+
         mp_config = self.config.model_parallel_config
         model_config = self.config.model_config
         runtime_config = self.config.runtime_config
-        
+
         tp = mp_config.tensor_model_parallel_size
         pp = mp_config.pipeline_model_parallel_size
         ep = getattr(mp_config, 'expert_model_parallel_size', 1)
         cp = getattr(mp_config, 'context_model_parallel_size', 1)
-        
+
         # Only estimate communication for EP (TP AllReduce is already in the benchmarked run)
         # PP communication is handled separately in pipeline simulation
         if ep == 1:
             return []
-        
+
         # Get configuration
         hidden_size = model_config.hidden_size
         batch_size = runtime_config.micro_batch_size
         seq_len = runtime_config.sequence_length
         moe_router_topk = model_config.moe_router_topk
-        
+
         # Setup collective model
         num_nodes = int(os.getenv("NNODES", "1"))
         gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
-        
+
         from primus.core.projection.module_profilers.collective_args import get_default_args
         coll_args = get_default_args(
             num_nodes=num_nodes,
@@ -171,22 +171,22 @@ class LanguageModelProfiler(BaseModuleProfiler):
             cp=cp,
             hardware_config=None,
         )
-        
+
         comm_ops = []
-        
+
         # MoE All-to-All (if EP > 1 and this is a MoE layer)
         if ep > 1 and layer_type == 'moe':
             tokens_per_batch = seq_len * batch_size
             dispatch_size = tokens_per_batch * hidden_size * moe_router_topk * 2  # BF16
-            
+
             a2a_dispatch = cm.alltoall(coll_args, dispatch_size, ep, groups=['ep'])
             # dispatch time is same as combine time
             a2a_combine = a2a_dispatch
-            
+
             # Forward: dispatch + combine, Backward: same
             fwd_time = (a2a_dispatch + a2a_combine) / 1000  # Convert to ms
             bwd_time = fwd_time  # Same as forward
-            
+
             comm_ops.append({
                 'type': 'MoE All-to-All',
                 'time_fwd_ms': fwd_time,
@@ -194,7 +194,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 'message_size_mb': dispatch_size / (1024 * 1024),
                 'group_size': ep,
             })
-        
+
         return comm_ops
 
     def get_dp_size(self) -> int:
