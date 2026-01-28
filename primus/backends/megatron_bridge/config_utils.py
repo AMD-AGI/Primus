@@ -85,8 +85,6 @@ def auto_filter_and_call(func: Callable, kwargs: Dict[str, Any], max_retries: in
         except TypeError as e:
             error_msg = str(e)
 
-            log_rank_0(f"error_msg: {error_msg} {func.__name__}")
-
             # Pattern 1: "got an unexpected keyword argument 'param_name'"
             match = re.search(r"unexpected keyword argument[s]? ['\"]([^'\"]+)['\"]", error_msg)
 
@@ -98,7 +96,7 @@ def auto_filter_and_call(func: Callable, kwargs: Dict[str, Any], max_retries: in
                     del current_kwargs[invalid_param]
                     log_rank_0(
                         f"⚠️  Retry {attempt + 1}: Removing invalid parameter '{invalid_param}' "
-                        f"({len(current_kwargs)} params remaining)"
+                        f"({len(current_kwargs)} params remaining) error_msg: {error_msg}"
                     )
                     attempt += 1
                     continue
@@ -187,69 +185,6 @@ def _merge_dict_to_dataclass(target: Any, source_dict: dict, path: str = "") -> 
 
 
 def load_recipe_config(backend_args: SimpleNamespace) -> Any:
-    """
-    Load Megatron-Bridge recipe configuration if specified.
-
-    Recipe format:
-        ns.recipe: Module path (e.g., "qwen.qwen3")
-        ns.flavor: Function name (e.g., "qwen3_32b_finetune_config")
-        ns.<recipe_params>: Simple parameters passed to recipe function
-        ns.<container_fields>: Complex fields merged with recipe result later
-        Full function: megatron.bridge.recipes.{recipe}.{flavor}(**recipe_params)
-
-    Parameter Filtering:
-        The function intelligently filters which ns attributes to pass to recipe:
-
-        NOT passed to recipe (metadata):
-            - recipe, flavor, recipe_kwargs, primus
-
-        NOT passed to recipe (ConfigContainer fields for later merging):
-            - train, model, optimizer, scheduler, dataset, logger, tokenizer, checkpoint
-            - ddp, dist, ft, profiling, comm_overlap, mixed_precision, etc.
-
-        PASSED to recipe (simple recipe parameters):
-            - hf_path, peft, tensor_model_parallel_size, pipeline_model_parallel_size
-            - train_iters, global_batch_size, micro_batch_size, seq_length
-            - lr, min_lr, data_paths, pretrained_checkpoint, etc.
-
-    Configuration Override:
-        After the recipe returns a ConfigContainer, any ConfigContainer fields
-        present in backend_args will override the recipe's default values.
-        This ensures user overrides in YAML take precedence:
-
-        Recipe returns: ConfigContainer(train=TrainingConfig(train_iters=1000), ...)
-        backend_args has: train_iters=2000
-        Final result: ConfigContainer(train=TrainingConfig(train_iters=2000), ...)
-
-    Example 1 (basic - no parameters):
-        ns.recipe = "qwen.qwen3"
-        ns.flavor = "qwen3_32b_finetune_config"
-        → Calls megatron.bridge.recipes.qwen.qwen3.qwen3_32b_finetune_config()
-
-    Example 2 (with recipe parameters):
-        ns.recipe = "qwen.qwen3"
-        ns.flavor = "qwen3_32b_finetune_config"
-        ns.hf_path = "Qwen/Qwen3-32B"
-        ns.peft = "lora"
-        ns.tensor_model_parallel_size = 8
-        → Passes to recipe: hf_path, peft, tensor_model_parallel_size
-
-    Example 3 (with container field overrides - merged later):
-        ns.recipe = "qwen.qwen3"
-        ns.flavor = "qwen3_32b_finetune_config"
-        ns.train = TrainingConfig(...)  # Complex object
-        → train is NOT passed to recipe, merged with result later
-
-    Args:
-        backend_args: SimpleNamespace containing recipe specification and user configuration
-
-    Returns:
-        ConfigContainer from recipe with user overrides applied (guaranteed non-None)
-
-    Raises:
-        AssertionError: If recipe or flavor is not specified (both are mandatory)
-        RuntimeError: If recipe loading fails (import error, function not found, etc.)
-    """
     recipe = backend_args.recipe
     flavor = backend_args.flavor
 
@@ -277,43 +212,10 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
     # Convert backend_args to dict once (used for both recipe call and config override)
     backend_dict = namespace_to_dict(backend_args)
 
-    # Fields that should NOT be passed to recipe function (ConfigContainer fields)
-    # These will be merged later to override recipe's default values
-    container_fields = {
-        "rng",
-        "rerun_state_machine",
-        "train",
-        "model",
-        "optimizer",
-        "ddp",
-        "scheduler",
-        "dataset",
-        "logger",
-        "tokenizer",
-        "checkpoint",
-        "dist",
-        "ft",
-        "straggler",
-        "nvrx_straggler",
-        "profiling",
-        "peft",
-        "comm_overlap",
-        "mixed_precision",
-        "tensor_inspect",
-        "inprocess_restart",
-    }
-
-    # Metadata fields (also should not be passed to recipe)
-    metadata_fields = {"recipe", "flavor", "primus"}
-
-    # Create a copy for recipe call, excluding container and metadata fields
-    recipe_dict = {
-        k: v for k, v in backend_dict.items() if k not in container_fields and k not in metadata_fields
-    }
-
     # Call recipe function with filtered dict
-    config_container = auto_filter_and_call(recipe_func, recipe_dict)
+    config_container = auto_filter_and_call(recipe_func, backend_dict)
     log_rank_0(f"Successfully loaded recipe: {full_module_path}.{function_name}()")
+    # log_dict_aligned("[debug]ConfigContainer", config_container.to_dict())
 
     # Validate return type
     from megatron.bridge.training.config import ConfigContainer
@@ -323,15 +225,7 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
         f"ConfigContainer, but returned {type(config_container).__name__}"
     )
 
-    # Override config_container fields with values from backend_args
-    # This ensures user overrides in YAML take precedence over recipe defaults
     log_rank_0("Applying backend_args overrides to config_container...")
-
-    # Remove metadata fields from backend_dict (they don't exist in ConfigContainer)
-    for field in metadata_fields:
-        backend_dict.pop(field, None)
-
-    # Recursively merge backend_dict into config_container
     _merge_dict_to_dataclass(config_container, backend_dict, "config_container")
 
     return config_container
