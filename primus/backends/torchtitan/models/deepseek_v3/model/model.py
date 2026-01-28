@@ -72,7 +72,7 @@ class Attention(TTAttention):
 
         output = self.inner_attention(q, k, v)
 
-        output = output.view(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
+        output = output.contiguous().view(bsz, seqlen, -1)  # (bsz, seqlen, n_heads * v_head_dim)
         return self.wo(output)  # (bsz, seqlen, dim)
 
 

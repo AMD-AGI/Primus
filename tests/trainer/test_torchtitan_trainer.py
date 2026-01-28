@@ -20,7 +20,7 @@ def run_script(
     env_override: dict = None,
     extra_args: list[str] = None,
 ):
-    shell_entry = "examples/run_pretrain.sh"
+    shell_entry = "./runner/primus-cli"
     env = os.environ.copy()
     if env_override:
         env.update(env_override)
@@ -34,7 +34,7 @@ def run_script(
     run_stdout = subprocess.PIPE if not do_print_at_runtime else sys.stdout
     run_stderr = subprocess.PIPE if not do_print_at_runtime else sys.stderr
 
-    cmd = ["bash", shell_entry]
+    cmd = ["bash", shell_entry, "direct", "--", "train", "pretrain", "--config", exp_path]
     if extra_args:
         cmd.extend(extra_args)
 
@@ -51,8 +51,10 @@ def run_script(
         )
         logger.info(f"[{tag}] End run, time={time.time() - start:.3f} s")
 
-        with open(train_log_path, "r") as f:
-            stdout_output = f.read()
+        stdout_output = ""
+        if os.path.exists(train_log_path):
+            with open(train_log_path, "r") as f:
+                stdout_output = f.read()
 
         return stdout_output, ""
 
@@ -106,11 +108,26 @@ class TestTorchTitanTrainer(PrimusUT):
             ],
         )
 
-    def test_llama3_1_405B(self):
+    def test_llama3_1_405B_bf16(self):
         run_script(
             self.__class__.__name__,
-            "llama3.1_405B",
-            "examples/torchtitan/configs/MI300X/llama3.1_405B-pretrain.yaml",
+            "llama3.1_405B_bf16",
+            "examples/torchtitan/configs/MI300X/llama3.1_405B-BF16-pretrain.yaml",
+            extra_args=[
+                "--model.n_layers",
+                "4",
+                "--training.steps",
+                "3",
+                "--training.mock_data",
+                "True",
+            ],
+        )
+
+    def test_llama3_1_405B_fp8(self):
+        run_script(
+            self.__class__.__name__,
+            "llama3.1_405B_fp8",
+            "examples/torchtitan/configs/MI300X/llama3.1_405B-FP8-pretrain.yaml",
             extra_args=[
                 "--model.n_layers",
                 "4",
@@ -208,8 +225,23 @@ class TestTorchTitanTrainer(PrimusUT):
                 "1",
                 "--training.steps",
                 "3",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
+                "--training.mock_data",
+                "True",
+            ],
+        )
+
+    def test_deepseek_v3_16b_fp8(self):
+        run_script(
+            self.__class__.__name__,
+            "deepseek_v3_16b_fp8",
+            "examples/torchtitan/configs/MI300X/deepseek_v3_16b-FP8-pretrain.yaml",
+            extra_args=[
+                "--model.n_layers",
+                "4",
+                "--model.n_dense_layers",
+                "1",
+                "--training.steps",
+                "3",
                 "--training.mock_data",
                 "True",
             ],
@@ -227,8 +259,6 @@ class TestTorchTitanTrainer(PrimusUT):
                 "1",
                 "--training.steps",
                 "3",
-                "--primus_turbo.enable_primus_turbo",
-                "False",
                 "--training.mock_data",
                 "True",
             ],

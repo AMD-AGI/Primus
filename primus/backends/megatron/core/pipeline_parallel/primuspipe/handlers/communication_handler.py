@@ -241,7 +241,8 @@ def batch_p2p_communication_handler(node: SchedulerNode, idx: int, scheduler_tab
                 )
 
             scheduler_table[send_idx].args["send_buffers"] = None
-            return
+            if len(COMMUNICATION_NODE_CACHE) == 0:
+                return
     else:
         COMMUNICATION_NODE_CACHE.append(node)
 

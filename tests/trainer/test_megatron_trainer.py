@@ -23,7 +23,7 @@ def run_script(
     env_override: dict = None,
     extra_args: list[str] = None,
 ):
-    shell_entry = "examples/run_pretrain.sh"
+    shell_entry = "./runner/primus-cli"
     env = os.environ.copy()
     if env_override:
         env.update(env_override)
@@ -33,18 +33,21 @@ def run_script(
     train_log_path = os.path.join(ut_log_path, f"log.test_megatron_trainer-{tag}.txt")
     env["TRAIN_LOG"] = train_log_path
 
+    # Follow the same UT pattern as TorchTitan trainer tests:
+    # - print logs at runtime to the console
+    # - read final output from TRAIN_LOG if present
     do_print_at_runtime = True
     run_stdout = subprocess.PIPE if not do_print_at_runtime else sys.stdout
     run_stderr = subprocess.PIPE if not do_print_at_runtime else sys.stderr
 
-    cmd = ["bash", shell_entry]
+    cmd = ["bash", shell_entry, "direct", "--", "train", "pretrain", "--config", exp_path]
     if extra_args:
         cmd.extend(extra_args)
 
     try:
         logger.info(f"Begin run {tag}...")
         start = time.time()
-        result = subprocess.run(
+        subprocess.run(
             cmd,
             check=True,
             stdout=run_stdout,
@@ -56,12 +59,12 @@ def run_script(
 
         logger.info(f"Training log path: {ut_log_path}/logs/UT-{ut_name}")
 
-        with open(train_log_path, "r") as f:
-            stdout_output = f.read()
+        stdout_output = ""
+        if os.path.exists(train_log_path):
+            with open(train_log_path, "r") as f:
+                stdout_output = f.read()
 
-        stderr_output = ""
-
-        return stdout_output, stderr_output
+        return stdout_output, ""
 
     except subprocess.CalledProcessError as e:
         stderr_output = e.stderr or ""

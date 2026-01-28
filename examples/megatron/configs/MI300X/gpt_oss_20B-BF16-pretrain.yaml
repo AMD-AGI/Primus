@@ -64,7 +64,7 @@ modules:
       valid_data_path: "/data/c4-validation-91205-samples.en_text_document"
       test_data_path: "/data/c4-validation-91205-samples.en_text_document"
 
-      moe_use_legacy_grouped_gemm: false
+      moe_use_legacy_grouped_gemm: true
       # MLA
       multi_latent_attention: false
       # rope fusion
@@ -111,4 +111,7 @@ modules:
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"
       # cross_entropy_loss_fusion: true
+
+      moe_shared_expert_overlap: false
+      moe_router_dtype: "fp32"
 

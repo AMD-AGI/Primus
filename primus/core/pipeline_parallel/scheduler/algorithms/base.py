@@ -157,6 +157,11 @@ class PipelineScheduleAlgo(ABC):
 
         return schedule_table
 
+    def add_offload_nodes_to_schedule_table(
+        self, schedule_table: list[list[SchedulerNode]]
+    ) -> list[list[SchedulerNode]]:
+        raise NotImplementedError
+
 
 class VFoldScheduleAlgo(PipelineScheduleAlgo):
     def __init__(self, pp_size, vpp_size, micro_batches):
@@ -245,3 +250,53 @@ class VFoldScheduleAlgo(PipelineScheduleAlgo):
                 schedule_table[rank].extend(compute_nodes)
 
         return schedule_table
+
+    def add_offload_nodes_to_schedule_table(
+        self, schedule_table: list[list[SchedulerNode]]
+    ) -> list[list[SchedulerNode]]:
+
+        new_schedule_table = [[] for _ in range(self.pp_size)]
+
+        offload_node = None
+
+        for rank in range(self.pp_size):
+            # add offload/reload nodes
+            for node in schedule_table[rank]:
+                assert node is not None
+                current_offload_node = None
+                if node.func_type == FuncType.F and node.chunk == 0:  # only offload left vfold stage
+                    node.args["should_offload"] = True
+                    current_offload_node = SchedulerNode(
+                        func_type=FuncType.O, mini_batch=node.mini_batch, chunk=node.chunk, args=None
+                    )
+                new_schedule_table[rank].append(node)
+
+                if node.func_type not in [FuncType.SF, FuncType.SB, FuncType.RF, FuncType.RB]:
+                    if offload_node is not None:
+                        new_schedule_table[rank].append(offload_node)
+                        offload_node = None
+
+                if current_offload_node is not None:
+                    offload_node = current_offload_node
+
+                if node.func_type in (FuncType.B, FuncType.BW) and node.chunk == 0:
+                    prev_node_idx = len(new_schedule_table[rank]) - 1
+
+                    for i in range(prev_node_idx - 1, -1, -1):
+                        if new_schedule_table[rank][i].func_type in [
+                            FuncType.F,
+                            FuncType.B,
+                            FuncType.W,
+                            FuncType.BW,
+                        ]:
+                            prev_node_idx = i
+                            break
+
+                    new_schedule_table[rank].insert(
+                        prev_node_idx,
+                        SchedulerNode(
+                            func_type=FuncType.R, mini_batch=node.mini_batch, chunk=node.chunk, args=None
+                        ),
+                    )
+
+        return new_schedule_table
