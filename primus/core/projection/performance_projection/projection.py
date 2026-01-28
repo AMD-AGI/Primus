@@ -1419,7 +1419,6 @@ def launch_projection_from_cli(args, overrides):
     print(f"\n[Primus:Performance Projection] Configuration Summary:")
     print(f"  Benchmark Config: PP={benchmark_pp}, EP={benchmark_ep}, TP={tp}, CP={cp}, DP={benchmark_dp} (1 node)")
     print(f"  Target Config: PP={pp}, EP={ep}, TP={tp}, CP={cp}, DP={target_dp} ({target_nodes} nodes)")
-    print(f"    Note: EP does not reduce DP for microbatch calculation")
     
     # Use BENCHMARK DP for pipeline simulation to get consistent baseline
     # The multinode projection will then scale from this baseline to target
