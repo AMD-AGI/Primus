@@ -17,39 +17,40 @@ from typing import Optional, Dict, Any
 class CollectiveArgs:
     """
     Hardware and topology configuration for collective communication modeling.
-    
+
     All parameters can be overridden via configuration file.
     """
+
     # Topology
-    node_size: int = 8          # GPUs per node
-    pod_size: int = 64          # GPUs per pod (cluster)
-    hp: int = 1                 # Horizontal parallelism groups
-    cp: int = 1                 # Context parallelism
-    ep: int = 1                 # Expert parallelism
-    
-    # Bandwidth in GB/s (bidirectional) 
-    node_bw: float = 1024.0     # Intra-node bandwidth per GPU
-    pod_bw: float = 50.0        # Inter-node bandwidth per NIC
-    cluster_bw: float = 25.0    # Cluster-level bandwidth
-    bw_eff: float = 0.91        # Bandwidth efficiency factor
-    
-    # Latency in microseconds 
-    node_lat: float = 0.45      # Intra-node latency
-    pod_lat: float = 2.0        # Inter-node latency
-    cluster_lat: float = 10.0   # Cluster-level latency
-    hbm_latency: float = 0.09   # HBM access latency
-    write_latency: float = 0.28 # Write operation latency
-    write_resp: float = 0.09    # Write response latency
-    
-    # Compute 
-    kernel_launch_latency: float = 2.8   # Kernel launch overhead (us)
-    vector_flops: float = 3.2e12         # Vector FLOPS (for reduction compute)
-    
+    node_size: int = 8  # GPUs per node
+    pod_size: int = 64  # GPUs per pod (cluster)
+    hp: int = 1  # Horizontal parallelism groups
+    cp: int = 1  # Context parallelism
+    ep: int = 1  # Expert parallelism
+
+    # Bandwidth in GB/s (bidirectional)
+    node_bw: float = 1024.0  # Intra-node bandwidth per GPU
+    pod_bw: float = 50.0  # Inter-node bandwidth per NIC
+    cluster_bw: float = 25.0  # Cluster-level bandwidth
+    bw_eff: float = 0.91  # Bandwidth efficiency factor
+
+    # Latency in microseconds
+    node_lat: float = 0.45  # Intra-node latency
+    pod_lat: float = 2.0  # Inter-node latency
+    cluster_lat: float = 10.0  # Cluster-level latency
+    hbm_latency: float = 0.09  # HBM access latency
+    write_latency: float = 0.28  # Write operation latency
+    write_resp: float = 0.09  # Write response latency
+
+    # Compute
+    kernel_launch_latency: float = 2.8  # Kernel launch overhead (us)
+    vector_flops: float = 3.2e12  # Vector FLOPS (for reduction compute)
+
     # Network topology
     switch_topology: bool = True  # Whether using switch-based topology
     nics_per_node: Optional[int] = 8  # NICs per node (None = gpus_per_node)
-    
-    # All-to-all specific 
+
+    # All-to-all specific
     a2a_peer_lat: float = 0.45  # Per-peer latency overhead for a2a
 
 
@@ -65,11 +66,11 @@ def get_default_args(
 ) -> CollectiveArgs:
     """
     Get CollectiveArgs with customizable hardware configuration.
-    
+
     This function creates a CollectiveArgs instance with default values that can be
     overridden via the hardware_config dictionary. This allows customers to specify
     their own hardware characteristics through config files.
-    
+
     Args:
         num_nodes: Number of nodes in the cluster
         gpus_per_node: GPUs per node
@@ -95,28 +96,28 @@ def get_default_args(
                         - switch_topology: Whether using switch-based topology (bool)
                         - nics_per_node: Number of NICs per node (int)
                         - a2a_peer_lat: Per-peer latency for all-to-all (us)
-    
+
     Returns:
         CollectiveArgs configured with specified parameters
-        
+
     Example:
         >>> # Use default configuration
         >>> args = get_default_args(num_nodes=4, gpus_per_node=8)
-        
+
         >>> # Override hardware parameters
         >>> hw_config = {
         >>>     'node_bw': 1024.0,  # Higher intra-node bandwidth
         >>>     'bw_eff': 0.92,     # Better efficiency
         >>>     'node_lat': 0.45,   # Lower latency
         >>> }
-        >>> args = get_default_args(num_nodes=4, gpus_per_node=8, 
+        >>> args = get_default_args(num_nodes=4, gpus_per_node=8,
         >>>                         hardware_config=hw_config)
     """
     total_gpus = num_nodes * gpus_per_node
-    
+
     if dp == -1:
         dp = total_gpus // (tp * pp * ep * cp)
-    
+
     # Start with default CollectiveArgs
     args = CollectiveArgs(
         node_size=gpus_per_node,
@@ -125,7 +126,7 @@ def get_default_args(
         cp=cp,
         ep=ep,
     )
-    
+
     # Override with hardware_config if provided
     if hardware_config:
         for key, value in hardware_config.items():
@@ -133,10 +134,9 @@ def get_default_args(
                 setattr(args, key, value)
             else:
                 raise ValueError(f"Unknown hardware parameter: {key}")
-    
+
     # Set nics_per_node to gpus_per_node if not explicitly set
     if args.nics_per_node is None:
         args.nics_per_node = gpus_per_node
-    
-    return args
 
+    return args

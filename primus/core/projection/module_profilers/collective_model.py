@@ -6,6 +6,7 @@ from typing import Tuple
 # Utility Functions
 # ---------------------------
 
+
 def get_bandwidth_and_latency(args, domain_size):
     """
     Determine bandwidth and latency for a given communication domain size.
@@ -24,6 +25,7 @@ def get_bandwidth_and_latency(args, domain_size):
         bw = args.bw_eff * args.cluster_bw
         lat = args.cluster_lat
     return bw, lat
+
 
 def node_latency_and_volume_protocol(args, msg_size, protocol):
     """
@@ -55,6 +57,7 @@ def node_latency_and_volume_protocol(args, msg_size, protocol):
     node_lat += args.hbm_latency  # Add HBM latency
     return node_lat, msg_size
 
+
 def pod_latency_and_volume_protocol(args, msg_size, protocol):
     """
     Calculate pod latency and message size for a given protocol.
@@ -81,6 +84,7 @@ def pod_latency_and_volume_protocol(args, msg_size, protocol):
     pod_lat += args.hbm_latency
     return pod_lat, msg_size
 
+
 def get_max_fanout(args):
     """
     Return intra-node and inter-node fanout.
@@ -90,9 +94,11 @@ def get_max_fanout(args):
     inter_node_fan_out = args.pod_size - 1
     return intra_node_fan_out, inter_node_fan_out
 
+
 # ---------------------------
 # Collective Algorithms
 # ---------------------------
+
 
 def sendrecv(args, msg_size):
     """
@@ -105,41 +111,42 @@ def sendrecv(args, msg_size):
     t = (msg_size / bw) * 1.0e-3 + lat + args.kernel_launch_latency
     return t
 
+
 def direct_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None, original_msg_size=None):
     """
     Direct alltoall for HP=1, hierarchical with parallel NIC utilization.
-    
+
     In all-to-all:
     - Total data = msg_size (scaled by (gpus-1)/gpus before this function)
     - This volume is what each GPU sends to all its peers
-    
+
     For inter-node with switch topology:
     - All NICs are used in parallel for inter-node traffic
     - Per-peer latency overhead accounts for QP setup, work request posting, etc.
     """
     assert args.hp == 1
     assert (args.hp * gpus > args.node_size) and (args.hp * gpus) <= args.pod_size
-    
+
     gpus_per_node = args.node_size
     num_nodes = int(np.ceil(gpus / gpus_per_node))
     nics_per_node = args.nics_per_node if args.nics_per_node else gpus_per_node
-    
+
     # Calculate number of inter-node peers (GPUs on remote nodes)
     inter_node_peers = gpus - gpus_per_node
-    
+
     # Split volume between intra-node and inter-node
     intra_fraction = (gpus_per_node - 1) / (gpus - 1)
     inter_fraction = 1 - intra_fraction
-    
+
     intra_node_volume = msg_size * intra_fraction
     inter_node_volume_per_gpu = msg_size * inter_fraction
-    
+
     node_lat, intra_vol_adj = node_latency_and_volume_protocol(args, intra_node_volume, protocol)
     pod_lat = args.pod_lat
-    
+
     # Intra-node time
     t_intra = intra_vol_adj / (args.bw_eff * args.node_bw) * 1.0e-3 + node_lat
-    
+
     # Inter-node time with all NICs
     if args.switch_topology:
         # Total inter-node volume from the node
@@ -150,24 +157,25 @@ def direct_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None, original
     else:
         remote_nodes = num_nodes - 1
         t_inter = inter_node_volume_per_gpu / (args.bw_eff * args.pod_bw) * 1.0e-3 + pod_lat * remote_nodes
-    
+
     # Overlap intra and inter
     t_a2a = max(t_intra, t_inter)
-    
+
     # Add synchronization overhead for multi-node all-to-all
     # This accounts for barrier synchronization and RCCL setup
     sync_overhead = (num_nodes - 1) * args.pod_lat * 0.5
     t_a2a += sync_overhead
-    
+
     # Add per-peer latency overhead for inter-node communication
     # This accounts for RDMA QP setup, work request posting, completion polling, etc.
-    if hasattr(args, 'a2a_peer_lat') and args.a2a_peer_lat > 0:
+    if hasattr(args, "a2a_peer_lat") and args.a2a_peer_lat > 0:
         peer_overhead = args.a2a_peer_lat * inter_node_peers
         t_a2a += peer_overhead
-    
+
     t_a2a += args.kernel_launch_latency
-    
+
     return t_a2a
+
 
 def run_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None):
     """
@@ -199,6 +207,7 @@ def run_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None):
     t = msg_size / bw * 1.0e-3 + lat + args.kernel_launch_latency
     return t
 
+
 def cp_allgather(args, msg_size, gpus, protocol=None):
     """
     Allgather for CP domain.
@@ -226,6 +235,7 @@ def cp_allgather(args, msg_size, gpus, protocol=None):
     # Logarithmic steps for tree allgather
     t = msg_size / bw * 1.0e-3 + lat * np.ceil(np.log2(gpus)) + args.kernel_launch_latency
     return t
+
 
 def run_allgather(args, msg_size, gpus, groups=["hp"], protocol=None):
     """
@@ -260,6 +270,7 @@ def run_allgather(args, msg_size, gpus, groups=["hp"], protocol=None):
         lat += node_lat * np.ceil(np.log2(gpus))
     t += lat + args.kernel_launch_latency
     return t
+
 
 def run_reduce_scatter(args, msg_size, gpus, groups=["hp"], protocol=None):
     """
@@ -296,6 +307,7 @@ def run_reduce_scatter(args, msg_size, gpus, groups=["hp"], protocol=None):
     t += args.kernel_launch_latency
     return t
 
+
 def RingAllreduce(args, msg_size, gpus, groups=["dp"], protocol=None):
     """
     Ring Allreduce algorithm.
@@ -328,6 +340,7 @@ def RingAllreduce(args, msg_size, gpus, groups=["dp"], protocol=None):
     t += args.kernel_launch_latency
     return t
 
+
 def RingAllgather(args, msg_size, gpus, groups=["dp"], protocol=None):
     """
     Ring Allgather algorithm.
@@ -353,6 +366,7 @@ def RingAllgather(args, msg_size, gpus, groups=["dp"], protocol=None):
         t += msg_size / bw * 1.0e-3
     t += args.kernel_launch_latency
     return t
+
 
 def RingRS(args, msg_size, gpus, groups=["hp"], protocol=None):
     """
@@ -381,6 +395,7 @@ def RingRS(args, msg_size, gpus, groups=["hp"], protocol=None):
     t += tensor_elems / (args.vector_flops) * 1.0e6
     t += args.kernel_launch_latency
     return t
+
 
 def oneshotHCallreduce(args, msg_size, gpus, groups=["dp"], protocol=None):
     """
@@ -415,9 +430,11 @@ def oneshotHCallreduce(args, msg_size, gpus, groups=["dp"], protocol=None):
     t += args.kernel_launch_latency
     return t
 
+
 # ---------------------------
 # Single-Shot Collectives
 # ---------------------------
+
 
 def single_shot_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     """
@@ -433,7 +450,7 @@ def single_shot_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     nics_per_node = args.nics_per_node if args.nics_per_node else gpus_per_node
     intra_node_gpus = gpus_per_node - 1
     inter_node_gpus = max(0, gpus - gpus_per_node)
-    
+
     t_intra_node = 0
     t_inter_node = 0
     if intra_node_gpus > 0:
@@ -462,32 +479,33 @@ def single_shot_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     t_a2a += args.kernel_launch_latency
     return t_a2a
 
+
 def hierarchical_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     """
     Hierarchical alltoall with parallel NIC utilization.
-    
+
     For inter-node traffic with switch topology:
     - All NICs are used in parallel
     """
     if gpus == 1 or msg_size == 0:
         return 0
-    
+
     gpus_per_node = min(gpus, args.node_size)
     num_nodes = ceil(gpus / args.node_size)
     nics_per_node = args.nics_per_node if args.nics_per_node else gpus_per_node
-    
+
     if num_nodes == 1:
         return single_shot_alltoall(args, msg_size, gpus, groups, protocol)
-    
+
     # Volume breakdown per GPU
     intra_node_volume = msg_size * (gpus_per_node - 1) / gpus
     inter_node_volume_per_gpu = msg_size * (gpus - gpus_per_node) / gpus
-    
+
     # Intra-node time
     node_lat, intra_vol_adj = node_latency_and_volume_protocol(args, intra_node_volume, protocol)
     node_bw = args.bw_eff * args.node_bw
     t_intra = node_lat + intra_vol_adj / node_bw * 1.0e-3
-    
+
     # Inter-node time with all NICs
     if args.switch_topology:
         total_inter_volume = inter_node_volume_per_gpu * gpus_per_node
@@ -496,11 +514,12 @@ def hierarchical_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     else:
         effective_pod_bw = args.bw_eff * args.pod_bw
         t_inter = args.pod_lat * num_nodes + inter_node_volume_per_gpu / effective_pod_bw * 1.0e-3
-    
+
     t_total = max(t_intra, t_inter)
     t_total += args.kernel_launch_latency
-    
+
     return t_total
+
 
 def single_shot_allgather(args, msg_size, gpus, groups=None, protocol=None):
     """
@@ -533,6 +552,7 @@ def single_shot_allgather(args, msg_size, gpus, groups=None, protocol=None):
     t_ag = max(t_intra_node, t_inter_node)
     t_ag += args.kernel_launch_latency
     return t_ag
+
 
 def single_shot_reduce_scatter(args, msg_size, gpus, groups=["hp"], protocol=None):
     """
@@ -569,6 +589,7 @@ def single_shot_reduce_scatter(args, msg_size, gpus, groups=["hp"], protocol=Non
     t_rs += args.kernel_launch_latency
     return t_rs
 
+
 def single_shot_allreduce(args, msg_size, gpus, groups=["hp"], protocol=None):
     """
     Single shot allreduce = reduce scatter + allgather.
@@ -581,16 +602,18 @@ def single_shot_allreduce(args, msg_size, gpus, groups=["hp"], protocol=None):
     t_ar = t_rs + t_ag - args.kernel_launch_latency  # Remove duplicate kernel launch latency
     return t_ar
 
+
 # ---------------------------
 # Algorithm Selection Wrappers
 # ---------------------------
+
 
 def allreduce(args, msg_size, gpus, groups=["dp"]):
     """
     Select best allreduce algorithm among several options.
     Tries multiple protocols and algorithms, returns fastest.
     """
-    min_ar_time = float('inf')
+    min_ar_time = float("inf")
     for p in ["simple", "ll", "ll64", "ll128"]:
         rs_time = run_reduce_scatter(args, msg_size, gpus, protocol=p)
         ag_time = run_allgather(args, msg_size, gpus, protocol=p)
@@ -603,13 +626,14 @@ def allreduce(args, msg_size, gpus, groups=["dp"]):
             min_ar_time = min_ar_alg_time
     return min_ar_time
 
+
 def alltoall(args, msg_size, gpus, groups=["ep"]):
     """
     Select best alltoall algorithm among several options.
     Tries multiple protocols and algorithms, returns fastest.
     Applies per-peer latency overhead and minimum latency floor.
     """
-    min_a2a_time = float('inf')
+    min_a2a_time = float("inf")
     for p in ["simple", "ll", "ll64", "ll128"]:
         direct_a2a_time = run_alltoall(args, msg_size, gpus, protocol=p)
         single_shot_a2a_time = single_shot_alltoall(args, msg_size, gpus, protocol=p)
@@ -617,23 +641,24 @@ def alltoall(args, msg_size, gpus, groups=["ep"]):
         a2a_time = min(direct_a2a_time, single_shot_a2a_time, hierarchical_a2a_time)
         if a2a_time < min_a2a_time:
             min_a2a_time = a2a_time
-    
+
     # Add per-peer latency overhead for inter-node communication
     # This accounts for RDMA QP setup, work request posting, completion polling, etc.
-    if hasattr(args, 'a2a_peer_lat') and args.a2a_peer_lat > 0:
+    if hasattr(args, "a2a_peer_lat") and args.a2a_peer_lat > 0:
         gpus_per_node = args.node_size
         inter_node_peers = max(0, gpus - gpus_per_node)
         peer_overhead = args.a2a_peer_lat * inter_node_peers
         min_a2a_time += peer_overhead
-    
+
     return min_a2a_time
+
 
 def allgather(args, msg_size, gpus, groups=["hp"]):
     """
     Select best allgather algorithm among several options.
     Tries multiple protocols and algorithms, returns fastest.
     """
-    min_ag_time = float('inf')
+    min_ag_time = float("inf")
     for p in ["simple", "ll", "ll64", "ll128"]:
         bruck_ag_time = run_allgather(args, msg_size, gpus, protocol=p)
         single_shot_ag_time = single_shot_allgather(args, msg_size, gpus, protocol=p)
@@ -643,12 +668,13 @@ def allgather(args, msg_size, gpus, groups=["hp"]):
             min_ag_time = best_ag_time
     return min_ag_time
 
+
 def reduce_scatter(args, msg_size, gpus, groups=["hp"]):
     """
     Select best reduce_scatter algorithm among several options.
     Tries multiple protocols and algorithms, returns fastest.
     """
-    min_rs_time = float('inf')
+    min_rs_time = float("inf")
     for p in ["simple", "ll", "ll64", "ll128"]:
         rs_bruck = run_reduce_scatter(args, msg_size, gpus, protocol=p)
         rs_ring = RingRS(args, msg_size, gpus, protocol=p)
