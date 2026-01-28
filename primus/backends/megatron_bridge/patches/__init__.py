@@ -13,6 +13,8 @@ including setup patches, build_args patches, and runtime patches.
 Patches are automatically registered when this module is imported.
 """
 
+# Import patch modules to trigger @register_patch decorators
+from primus.backends.megatron_bridge.patches import dataset_patches  # noqa: F401
 from primus.core.backend.backend_registry import BackendRegistry
 
 

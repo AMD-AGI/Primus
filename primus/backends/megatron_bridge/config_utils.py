@@ -85,6 +85,8 @@ def auto_filter_and_call(func: Callable, kwargs: Dict[str, Any], max_retries: in
         except TypeError as e:
             error_msg = str(e)
 
+            log_rank_0(f"error_msg: {error_msg} {func.__name__}")
+
             # Pattern 1: "got an unexpected keyword argument 'param_name'"
             match = re.search(r"unexpected keyword argument[s]? ['\"]([^'\"]+)['\"]", error_msg)
 
