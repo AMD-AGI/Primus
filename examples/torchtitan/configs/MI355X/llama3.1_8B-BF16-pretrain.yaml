@@ -9,7 +9,8 @@ modules:
     config: pre_trainer.yaml
 
     # model to run - 使用 debugmodel 进行快速测试
-    model: llama3_debug.yaml
+    #model: llama3_debug.yaml
+    model: llama3.1_8B.yaml
     overrides:
       sink_level: null
       file_sink_level: DEBUG

@@ -1,0 +1,330 @@
+diff --git a/torchtitan/models/attention.py b/torchtitan/models/attention.py
+index bf963a5b..07f64f59 100644
+--- a/torchtitan/models/attention.py
++++ b/torchtitan/models/attention.py
+@@ -63,6 +63,7 @@ class FlexAttentionWrapper(torch.nn.Module):
+         # 2. `self._compiled_flex_attn` is not correct, `self` will be passed in
+         #    as the first argument, which will cause an error.
+         #    `FlexAttentionWrapper._compiled_flex_attn` is correct.
++        # return flex_attention(q, k, v, block_mask=block_mask, scale=scale) # 使用原始的 flex_attention 实现
+         return FlexAttentionWrapper._compiled_flex_attn(
+             q, k, v, block_mask=block_mask, scale=scale
+         )
+@@ -82,14 +83,17 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
+ 
+     # TODO: remove sdpa_backends after PyTorch 2.9 is released.
+     sdpa_backends: ClassVar[list[SDPBackend]] = []
++    use_manual_fallback: ClassVar[bool] = False
+ 
+     def __init__(self) -> None:
+         super().__init__()
+         if not self.sdpa_backends:
++            # Add MATH backend as last resort before manual fallback
+             self.sdpa_backends = [
+-                SDPBackend.CUDNN_ATTENTION,
+-                SDPBackend.FLASH_ATTENTION,
+-                SDPBackend.EFFICIENT_ATTENTION,
++                # SDPBackend.CUDNN_ATTENTION,
++                # SDPBackend.FLASH_ATTENTION,
++                # SDPBackend.EFFICIENT_ATTENTION,
++                SDPBackend.MATH,  # Fallback to math implementation
+             ]
+ 
+     def forward(
+@@ -100,8 +104,9 @@ class ScaledDotProductAttentionWrapper(torch.nn.Module):
+         *,
+         scale: float | None = None,
+     ) -> torch.Tensor:
+-        with sdpa_kernel(self.sdpa_backends, set_priority=True):
+-            return F.scaled_dot_product_attention(q, k, v, scale=scale, is_causal=True)
++        with sdpa_kernel(self.sdpa_backends):
++        # with sdpa_kernel(self.sdpa_backends) is used to specify all available backends
++            return F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=scale)
+ 
+ 
+ # We cannot do inner function/closure because we won't be able to cache it --
+@@ -179,9 +184,12 @@ _compiled_create_block_mask = torch.compile(create_block_mask)
+ 
+ @functools.lru_cache(4)
+ def create_attention_mask(*args, **kwargs):
+-    """Create an attention mask using compiled create_block_mask.
++    """Create an attention mask using create_block_mask.
+ 
+     This function is cached to avoid recreating BlockMasks for the same
+-    argumens.
++    arguments.
+     """
++    # Use uncompiled version to avoid InductorError on AMD/ROCm:
++    # "NameError: name 'disable_pointwise_autotuning' is not defined"
++    # return create_block_mask(*args, **kwargs)
+     return _compiled_create_block_mask(*args, **kwargs)
+diff --git a/torchtitan/models/llama3/__init__.py b/torchtitan/models/llama3/__init__.py
+index f9e78044..b953e67d 100644
+--- a/torchtitan/models/llama3/__init__.py
++++ b/torchtitan/models/llama3/__init__.py
+@@ -28,24 +28,33 @@ __all__ = [
+ 
+ llama3_args = {
+     "debugmodel": TransformerModelArgs(
+-        dim=256, n_layers=6, n_heads=16, vocab_size=2048, rope_theta=500000
++        dim=256, 
++        n_layers=1, 
++        n_heads=32, 
++        n_kv_heads=8,
++        ffn_dim_multiplier=1.3,
++        multiple_of=1024,
++        vocab_size=128256, 
++        rope_theta=500000, 
++        use_flex_attn=False,
+     ),
+     "debugmodel_flex_attn": TransformerModelArgs(
+         dim=256,
+-        n_layers=6,
++        n_layers=1,
+         n_heads=16,
+-        vocab_size=2048,
++        vocab_size=128256,
+         rope_theta=500000,
+         use_flex_attn=True,
+         attn_mask_type="block_causal",
+     ),
+     "8B": TransformerModelArgs(
+-        dim=4096,
+-        n_layers=32,
++        dim=2048,
++        n_layers=1,
+         n_heads=32,
+         n_kv_heads=8,
+         ffn_dim_multiplier=1.3,
+         multiple_of=1024,
++        use_flex_attn=True,
+         rope_theta=500000,
+     ),
+     "70B": TransformerModelArgs(
+diff --git a/torchtitan/models/llama3/model/model.py b/torchtitan/models/llama3/model/model.py
+index 6f10719d..8bbb929e 100644
+--- a/torchtitan/models/llama3/model/model.py
++++ b/torchtitan/models/llama3/model/model.py
+@@ -193,8 +193,10 @@ class Attention(nn.Module):
+ 
+         self.use_flex_attn = model_args.use_flex_attn
+         if self.use_flex_attn:
++            print("Using flex attention")
+             self.inner_attention = FlexAttentionWrapper()
+         else:
++            print("Using scaled dot product attention")
+             self.inner_attention = ScaledDotProductAttentionWrapper()
+ 
+     def init_weights(self, init_std: float):
+diff --git a/torchtitan/train.py b/torchtitan/train.py
+index 1d5e0e50..0f0e74de 100644
+--- a/torchtitan/train.py
++++ b/torchtitan/train.py
+@@ -112,7 +112,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+         self.gc_handler = utils.GarbageCollection(
+             gc_freq=job_config.training.gc_freq, debug=job_config.training.gc_debug
+         )
+-
++        logger.info(f"world_mesh before set_determinism: {world_mesh}")
+         # Set random seed, and maybe enable deterministic mode
+         # (mainly for debugging, expect perf loss).
+         dist_utils.set_determinism(
+@@ -121,6 +121,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+             job_config.training.seed,
+             job_config.training.deterministic,
+         )
++        logger.info(f"world_mesh after set_determinism: {world_mesh}")
+         self.train_spec = train_spec_module.get_train_spec(job_config.model.name)
+ 
+         # build tokenizer and dataloader
+@@ -386,17 +387,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+     ) -> Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]:
+         """Returns an iterator that processes batches from the data iterator."""
+         device_type = utils.device_type
++        logger.info(f"[DEBUG] batch_generator: creating iterator from data_iterable (type={type(data_iterable).__name__})...")
+         data_iterator = iter(data_iterable)
++        logger.info(f"[DEBUG] batch_generator: iterator created")
+ 
+         while True:
+             data_load_start = time.perf_counter()
+             try:
++                logger.info(f"[DEBUG] batch_generator: calling next(data_iterator)...")
+                 batch = next(data_iterator)
++                logger.info(f"[DEBUG] batch_generator: next() returned, batch type={type(batch)}")
+             except StopIteration as ex:
+                 # If data runs out during gradient accumulation, that
+                 # entire step will not be executed.
+                 raise DataloaderExhaustedError() from ex
+             input_dict, labels = batch
++            logger.info(f"[DEBUG] batch_generator: unpacked batch, input_dict keys={list(input_dict.keys())}, labels shape={labels.shape}")
+             ntokens_batch = labels.numel()
+             self.ntokens_seen += ntokens_batch
+             self.metrics_processor.ntokens_since_last_log += ntokens_batch
+@@ -405,16 +411,23 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+             )
+ 
+             # Move tensors to the appropriate device
++            logger.info(f"[DEBUG] batch_generator: moving tensors to device {device_type}...")
+             for k, v in input_dict.items():
+                 if isinstance(v, torch.Tensor):
++                    logger.info(f"[DEBUG] batch_generator: moving input_dict['{k}'] (shape={v.shape}, dtype={v.dtype}, device={v.device}) to {device_type}...")
+                     input_dict[k] = v.to(device_type)
++                    logger.info(f"[DEBUG] batch_generator: input_dict['{k}'] moved to {device_type}")
++            logger.info(f"[DEBUG] batch_generator: moving labels (shape={labels.shape}, dtype={labels.dtype}) to {device_type}...")
+             labels = labels.to(device_type)
++            logger.info(f"[DEBUG] batch_generator: labels moved to {device_type}")
++            logger.info(f"[DEBUG] batch_generator: all tensors moved to device, yielding batch...")
+ 
+             yield input_dict, labels
+ 
+     def forward_backward_step(
+         self, input_dict: dict[str, torch.Tensor], labels: torch.Tensor
+     ) -> torch.Tensor:
++        logger.info(f"[DEBUG] forward_backward_step: entered")
+         model_parts = self.model_parts
+         parallel_dims = self.parallel_dims
+ 
+@@ -426,15 +439,18 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+         extra_args = {}
+ 
+         if getattr(self.model_args, "use_flex_attn", False):
++            logger.info(f"[DEBUG] forward_backward_step: getting flex attention masks...")
+             extra_args["attention_masks"] = model_parts[0].get_attention_masks(
+                 input_batch=inputs,
+                 tokenizer=self.tokenizer,
+                 extra_inputs=extra_inputs,
+             )
++            logger.info(f"[DEBUG] forward_backward_step: flex attention masks obtained")
+ 
+         # apply context parallelism if cp is enabled
+         # ensure CP handles the separate freqs_cis buffer for each pp stage
+         cp_mesh = parallel_dims.world_mesh["cp"] if parallel_dims.cp_enabled else None
++        logger.info(f"[DEBUG] forward_backward_step: pp_enabled={parallel_dims.pp_enabled}, cp_enabled={parallel_dims.cp_enabled}")
+         optional_context_parallel_ctx = (
+             dist_utils.create_context_parallel_ctx(
+                 cp_mesh=parallel_dims.world_mesh["cp"],
+@@ -448,11 +464,13 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+         )
+ 
+         if parallel_dims.pp_enabled:
++            logger.info(f"[DEBUG] forward_backward_step: PP path, entering train_context...")
+             # Pipeline Parallel forward / backward inside step() call
+             with self.train_context(optional_context_parallel_ctx):
+                 targets, losses = (
+                     (labels, []) if self.pp_has_last_stage else (None, None)
+                 )
++                logger.info(f"[DEBUG] forward_backward_step: pp_schedule.step, pp_has_first_stage={self.pp_has_first_stage}")
+                 if self.pp_has_first_stage:
+                     self.pp_schedule.step(
+                         inputs,
+@@ -469,6 +487,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+                         losses=losses,
+                         input_batch=inputs,
+                     )
++                logger.info(f"[DEBUG] forward_backward_step: pp_schedule.step done")
+ 
+             # accumulate losses across pipeline microbatches
+             # TODO: PP+FSDP unexpectedly puts the loss back to the CPU
+@@ -496,9 +515,11 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+     def train_step(
+         self, data_iterator: Iterable[tuple[dict[str, torch.Tensor], torch.Tensor]]
+     ):
++        logger.info(f"[DEBUG] train_step: zero_grad...")
+         self.optimizers.zero_grad()
+         # Save the current step learning rate for logging
+         lr = self.lr_schedulers.schedulers[0].get_last_lr()[0]
++        logger.info(f"[DEBUG] train_step: lr={lr}")
+ 
+         # Keep these variables local to shorten the code as these are
+         # the major variables that are used in the training loop.
+@@ -508,10 +529,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+         # If data runs out during gradient accumulation, that
+         # entire step will not be executed.
+         for _microbatch in range(self.gradient_accumulation_steps):
++            logger.info(f"[DEBUG] train_step: microbatch={_microbatch}, fetching data...")
+             input_dict, labels = next(data_iterator)
++            logger.info(f"[DEBUG] train_step: microbatch={_microbatch}, data fetched, input shape={input_dict['input'].shape if 'input' in input_dict else 'N/A'}, labels shape={labels.shape}")
++            logger.info(f"[DEBUG] train_step: microbatch={_microbatch}, calling forward_backward_step...")
+             loss = self.forward_backward_step(input_dict, labels)
++            logger.info(f"[DEBUG] train_step: microbatch={_microbatch}, forward_backward done, loss tensor created")
+             accumulated_losses.append(loss.detach())
+ 
++        logger.info(f"[DEBUG] train_step: grad clipping...")
+         grad_norm = dist_utils.clip_grad_norm_(
+             [p for m in self.model_parts for p in m.parameters()],
+             self.job_config.training.max_norm,
+@@ -521,9 +547,15 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+             ),
+             ep_enabled=parallel_dims.ep_enabled,
+         )
++        logger.info(f"[DEBUG] train_step: grad clipping done, grad_norm={grad_norm}")
++        logger.info(f"[DEBUG] train_step: maybe_wait_for_staging...")
+         self.checkpointer.maybe_wait_for_staging()
++        
++        logger.info(f"[DEBUG] train_step: optimizer.step...")
+         self.optimizers.step()
++        logger.info(f"[DEBUG] train_step: lr_scheduler.step...")
+         self.lr_schedulers.step()
++        logger.info(f"[DEBUG] train_step: done")
+ 
+         # Reduce the data collected over gradient accumulation steps.
+         loss = torch.sum(torch.stack(accumulated_losses))
+@@ -532,6 +564,7 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+         if not self.metrics_processor.should_log(self.step):
+             return
+ 
++        logger.info(f"[DEBUG] train_step: logging metrics...")
+         if parallel_dims.dp_cp_enabled:
+             loss = loss.detach()
+             ft_pg = self.ft_manager.loss_sync_pg
+@@ -561,19 +594,22 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+             grad_norm.item(),
+             extra_metrics=extra_metrics,
+         )
++        logger.info(f"[DEBUG] train_step: metrics logged")
+ 
+     @record
+     def train(self):
+         job_config = self.job_config
+ 
++        logger.info(f"[DEBUG] train() entered, loading checkpoint...")
+         self.checkpointer.load(step=job_config.checkpoint.load_step)
+-        logger.info(f"Training starts at step {self.step + 1}")
++        logger.info(f"[DEBUG] checkpoint loaded, Training starts at step {self.step + 1}")
+ 
+         leaf_folder = (
+             ""
+             if not self.ft_manager.enabled
+             else f"replica_{self.ft_manager.replica_id}"
+         )
++        logger.info(f"[DEBUG] entering context managers (profiling/memory_snapshot/semi_sync)...")
+         with (
+             maybe_enable_profiling(
+                 job_config.profiling,
+@@ -604,19 +640,26 @@ class Trainer(torch.distributed.checkpoint.stateful.Stateful):
+                 ),
+             ),
+         ):
++            logger.info(f"[DEBUG] context managers entered, creating batch_generator...")
+             data_iterator = self.batch_generator(self.dataloader)
++            logger.info(f"[DEBUG] batch_generator created, entering training loop...")
+             while self.should_continue_training():
+                 self.step += 1
++                logger.info(f"[DEBUG] step={self.step}, running gc_handler...")
+                 self.gc_handler.run(self.step)
++                logger.info(f"[DEBUG] step={self.step}, calling train_step...")
+                 try:
+                     self.train_step(data_iterator)
++                    logger.info(f"[DEBUG] step={self.step}, train_step completed")
+                 except DataloaderExhaustedError:
+                     logger.warning("Ran out of data; last step was canceled.")
+                     break
+ 
++                logger.info(f"[DEBUG] step={self.step}, saving checkpoint...")
+                 self.checkpointer.save(
+                     self.step, last_step=(self.step == job_config.training.steps)
+                 )
++                logger.info(f"[DEBUG] step={self.step}, checkpoint saved")
+ 
+                 # Run validation if validator is available
+                 if (
