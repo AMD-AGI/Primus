@@ -9,20 +9,15 @@ Megatron-Bridge Dataset Patches
 
 This module patches Megatron-Bridge's default dataset configurations to use
 updated dataset paths compatible with HuggingFace's namespace reorganization.
+
+NOTE: This patch is applied at module import time (not via @register_patch)
+      to ensure it takes effect before recipe modules are imported.
 """
 
-from primus.core.patches import PatchContext, register_patch
 from primus.modules.module_utils import log_rank_0
 
 
-@register_patch(
-    "megatron.bridge.recipes.utils.finetune_utils",
-    backend="megatron_bridge",
-    phase="setup",
-    description="Patch default_squad_config to use rajpurkar/squad (HF namespace migration)",
-    condition=lambda ctx: True,  # Always apply this patch
-)
-def patch_default_squad_config(ctx: PatchContext):
+def _patch_default_squad_config():
     """
     Patch default_squad_config to use 'rajpurkar/squad' instead of 'squad'.
 
@@ -37,51 +32,62 @@ def patch_default_squad_config(ctx: PatchContext):
         - Fixes 404 errors when using default squad dataset
         - Enables finetuning recipes to work out-of-the-box
         - No breaking changes (squad dataset still used, just updated path)
+
+    Implementation:
+        This patch is applied at module import time to ensure it takes effect
+        before any recipe modules (qwen3.py, llama3.py, etc.) are imported.
+        This avoids the issue where 'from finetune_utils import default_squad_config'
+        creates a local reference to the un-patched function.
     """
-    log_rank_0("[Megatron-Bridge Patch] Updating default_squad_config to use 'rajpurkar/squad'...")
+    try:
+        import megatron.bridge.recipes.utils.finetune_utils as finetune_utils
+        from megatron.bridge.data.builders.hf_dataset import HFDatasetConfig
+        from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
+        from megatron.bridge.data.hf_processors import process_squad_example
 
-    import megatron.bridge.recipes.utils.finetune_utils as finetune_utils
-    from megatron.bridge.data.builders.hf_dataset import HFDatasetConfig
-    from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
-    from megatron.bridge.data.hf_processors import process_squad_example
+        def patched_default_squad_config(seq_length: int, packed_sequence: bool = False) -> HFDatasetConfig:
+            """
+            Patched version of default_squad_config using rajpurkar/squad.
 
-    # Save original function for reference
-    finetune_utils.default_squad_config
+            This is identical to the original except for the dataset_name.
+            """
+            if packed_sequence:
+                # Packed sequence configuration
+                dataset_kwargs = {"pad_to_max_length": True}
+                packed_sequence_specs = PackedSequenceSpecs(packed_sequence_size=seq_length)
+            else:
+                # Standard configuration
+                dataset_kwargs = {}
+                packed_sequence_specs = None
 
-    def patched_default_squad_config(seq_length: int, packed_sequence: bool = False) -> HFDatasetConfig:
-        """
-        Patched version of default_squad_config using rajpurkar/squad.
+            # Use 'batch' sampler for variable-length finetuning
+            dataloader_type = "batch"
 
-        This is identical to the original except for the dataset_name.
-        """
-        if packed_sequence:
-            # Packed sequence configuration
-            dataset_kwargs = {"pad_to_max_length": True}
-            packed_sequence_specs = PackedSequenceSpecs(packed_sequence_size=seq_length)
-        else:
-            # Standard configuration
-            dataset_kwargs = {}
-            packed_sequence_specs = None
+            return HFDatasetConfig(
+                dataset_name="rajpurkar/squad",  # ✅ PATCHED: Updated from "squad"
+                process_example_fn=process_squad_example,
+                seq_length=seq_length,
+                seed=5678,  # Different from pretrain seed
+                dataloader_type=dataloader_type,
+                num_workers=1,
+                do_validation=True,
+                do_test=False,
+                val_proportion=0.1,
+                dataset_kwargs=dataset_kwargs,
+                packed_sequence_specs=packed_sequence_specs,
+                rewrite=False,
+            )
 
-        # Use 'batch' sampler for variable-length finetuning
-        dataloader_type = "batch"
+        # Apply the patch to the source module
+        finetune_utils.default_squad_config = patched_default_squad_config
 
-        return HFDatasetConfig(
-            dataset_name="rajpurkar/squad",  # ✅ PATCHED: Updated from "squad"
-            process_example_fn=process_squad_example,
-            seq_length=seq_length,
-            seed=5678,  # Different from pretrain seed
-            dataloader_type=dataloader_type,
-            num_workers=1,
-            do_validation=True,
-            do_test=False,
-            val_proportion=0.1,
-            dataset_kwargs=dataset_kwargs,
-            packed_sequence_specs=packed_sequence_specs,
-            rewrite=False,
-        )
+        log_rank_0("[Megatron-Bridge Patch] ✅ default_squad_config patched to use 'rajpurkar/squad'")
 
-    # Apply the patch
-    finetune_utils.default_squad_config = patched_default_squad_config
+    except ImportError as e:
+        # It's okay if the import fails - it means Megatron-Bridge isn't installed yet
+        # The patch will be applied when it is imported
+        log_rank_0(f"[Megatron-Bridge Patch] Skipping dataset patch (Megatron-Bridge not yet imported): {e}")
 
-    log_rank_0("[Megatron-Bridge Patch] ✅ default_squad_config patched successfully")
+
+# Apply patch at module import time
+_patch_default_squad_config()

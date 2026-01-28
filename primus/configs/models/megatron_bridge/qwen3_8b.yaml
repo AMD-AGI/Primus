@@ -2,5 +2,5 @@ recipe: qwen.qwen3
 flavor: qwen3_8b_finetune_config
 hf_path: Qwen/Qwen3-8B
 
-dataset:
-    dataset_name: "rajpurkar/squad"
+# dataset:
+#     dataset_name: "rajpurkar/squad"
