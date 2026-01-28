@@ -17,7 +17,6 @@ FAMILY_RULES = [
     ("qwen", "Qwen"),
     ("grok", "Grok"),
     ("gpt", "GPT"),
-    ("language_model", "GPT"),
 ]
 
 FAMILY_COLUMNS = [
