@@ -59,7 +59,7 @@ def get_default_args(
     gpus_per_node: int = 8,
     tp: int = 1,
     pp: int = 1,
-    dp: int = -1,  # Auto-calculated if -1
+    _dp: int = -1,  # Auto-calculated if -1 (currently unused, retained for API compatibility)
     ep: int = 1,
     cp: int = 1,
     hardware_config: Optional[Dict[str, Any]] = None,
@@ -76,7 +76,7 @@ def get_default_args(
         gpus_per_node: GPUs per node
         tp: Tensor parallelism size
         pp: Pipeline parallelism size
-        dp: Data parallelism size (auto-calculated if -1)
+        _dp: Data parallelism size (currently unused, retained for API compatibility)
         ep: Expert parallelism size
         cp: Context parallelism size
         hardware_config: Optional dictionary to override default hardware parameters.
@@ -113,11 +113,6 @@ def get_default_args(
         >>> args = get_default_args(num_nodes=4, gpus_per_node=8,
         >>>                         hardware_config=hw_config)
     """
-    total_gpus = num_nodes * gpus_per_node
-
-    if dp == -1:
-        dp = total_gpus // (tp * pp * ep * cp)
-
     # Start with default CollectiveArgs
     args = CollectiveArgs(
         node_size=gpus_per_node,
