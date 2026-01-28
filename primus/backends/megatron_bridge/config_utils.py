@@ -131,68 +131,47 @@ def auto_filter_and_call(func: Callable, kwargs: Dict[str, Any], max_retries: in
     )
 
 
-def _merge_dataclass_recursive(target: Any, source: Any, path: str = "") -> None:
+def _merge_dict_to_dataclass(target: Any, source_dict: dict, path: str = "") -> None:
     """
-    Recursively merge dataclass fields from source into target.
-
-    This function performs a deep merge of dataclass objects, allowing partial
-    overrides of nested configurations without replacing entire objects.
-
-    Source can be:
-        - A dataclass instance: Fields will be extracted and merged
-        - A dict: Keys will be treated as field names and merged
-        - A SimpleNamespace: Attributes will be extracted and merged
-        - Other types: Direct assignment (handled by caller)
-
-    Example:
-        Recipe returns: TrainingConfig(train_iters=1000, eval_interval=500)
-        User overrides: SimpleNamespace(train_iters=2000) (from YAML)
-        Result: TrainingConfig(train_iters=2000, eval_interval=500)  # eval_interval preserved!
+    Recursively merge dict values into a dataclass target.
 
     Args:
-        target: Target dataclass to merge into (will be modified in-place)
-        source: Source to merge from (dataclass, dict, or SimpleNamespace)
-        path: Current path for logging (e.g., "config_container.train.optimizer")
+        target: Target dataclass to merge into (modified in-place)
+        source_dict: Source dict containing values to merge
+        path: Current path for logging (e.g., "config_container.train")
 
     Returns:
         None (modifies target in-place)
     """
     from dataclasses import fields, is_dataclass
-    from types import SimpleNamespace
 
-    # Extract items based on source type
-    if isinstance(source, dict):
-        source_items = source.items()
-    elif isinstance(source, SimpleNamespace):
-        source_items = vars(source).items()
-    elif is_dataclass(source):
-        source_items = ((f.name, getattr(source, f.name)) for f in fields(source))
-    else:
-        return  # Source is not a supported type for merging
+    if not is_dataclass(target):
+        return  # Target is not a dataclass, nothing to merge
 
-    for field_name, source_value in source_items:
-        if source_value is None:
-            continue  # Skip None values - don't override with None
+    for field in fields(target):
+        field_name = field.name
 
-        current_path = f"{path}.{field_name}" if path else field_name
-
-        if not hasattr(target, field_name):
-            # Target doesn't have this field, just set it
-            setattr(target, field_name, source_value)
-            log_rank_0(f"  ↳ Setting {current_path} (new field)")
+        # Skip if source doesn't have this field
+        if field_name not in source_dict:
             continue
 
+        source_value = source_dict[field_name]
+
+        # Skip None values
+        if source_value is None:
+            continue
+
+        current_path = f"{path}.{field_name}" if path else field_name
         target_value = getattr(target, field_name)
 
-        # If target is dataclass and source is a mergeable type, recursively merge
-        if is_dataclass(target_value) and (
-            is_dataclass(source_value) or isinstance(source_value, (dict, SimpleNamespace))
-        ):
-            _merge_dataclass_recursive(target_value, source_value, current_path)
+        # If target field is dataclass and source value is dict, recursively merge
+        if is_dataclass(target_value) and isinstance(source_value, dict):
+            _merge_dict_to_dataclass(target_value, source_value, current_path)
+            log_rank_0(f"  ↳ Merged {current_path} (recursive)")
         else:
-            # Non-dataclass target or source type mismatch: direct override
+            # Direct assignment for non-dataclass fields or non-dict source
             setattr(target, field_name, source_value)
-            log_rank_0(f"  ↳ Overriding {current_path}")
+            log_rank_0(f"  ↳ Set {current_path} = {source_value}")
 
 
 def load_recipe_config(backend_args: SimpleNamespace) -> Any:
@@ -297,16 +276,12 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
 
     # Override config_container fields with values from backend_args
     # This ensures user overrides in YAML take precedence over recipe defaults
-    # Uses recursive merge for nested dataclass fields to allow partial overrides
-    from dataclasses import fields, is_dataclass
-    from types import SimpleNamespace
-
     log_rank_0("Applying backend_args overrides to config_container...")
 
-    # Fields that should NOT be merged from backend_args because they have
-    # different meanings in Primus vs Megatron-Bridge ConfigContainer
-    # - model: In Primus it's a string path to YAML, in ConfigContainer it's GPTModelProvider object
-    # - recipe/flavor: Metadata fields for recipe selection, not part of ConfigContainer
+    # Convert backend_args to dict for easier processing
+    backend_dict = namespace_to_dict(backend_args)
+
+    # Fields that should NOT be merged (metadata fields)
     primus_metadata_fields = {
         "model",  # Primus: YAML path string, ConfigContainer: GPTModelProvider object
         "recipe",  # Primus metadata: which recipe module to use
@@ -314,27 +289,12 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
         "primus",  # Primus internal metadata
     }
 
-    for field in fields(config_container):
-        field_name = field.name
+    # Remove metadata fields from backend_dict
+    for field in primus_metadata_fields:
+        backend_dict.pop(field, None)
 
-        # Skip Primus metadata fields
-        if field_name in primus_metadata_fields:
-            continue
-
-        if hasattr(backend_args, field_name):
-            field_value = getattr(backend_args, field_name)
-            if field_value is not None:  # Only override if explicitly set
-                target_value = getattr(config_container, field_name)
-
-                # If target is dataclass and source is a mergeable type, recursively merge
-                if is_dataclass(target_value) and (
-                    is_dataclass(field_value) or isinstance(field_value, (dict, SimpleNamespace))
-                ):
-                    _merge_dataclass_recursive(target_value, field_value, f"config_container.{field_name}")
-                else:
-                    # Non-dataclass target or incompatible source type: direct replacement
-                    setattr(config_container, field_name, field_value)
-                    log_rank_0(f"  ↳ Replacing config_container.{field_name}")
+    # Recursively merge backend_dict into config_container
+    _merge_dict_to_dataclass(config_container, backend_dict, "config_container")
 
     return config_container
 
