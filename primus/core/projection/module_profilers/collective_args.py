@@ -1,9 +1,3 @@
-###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-
 """
 Default configuration for collective communication modeling.
 Hardware parameters can be customized via config file.
@@ -11,6 +5,12 @@ Hardware parameters can be customized via config file.
 
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 
 @dataclass
