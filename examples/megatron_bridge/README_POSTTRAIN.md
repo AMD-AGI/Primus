@@ -51,12 +51,47 @@ dataset:
   num_test_samples: 5000
 ```
 
-#### Option 2: Use Alternative Dataset
+#### Option 2: Use Alternative Dataset (Recommended) ✅
+
+**Verified Compatible Datasets:**
+
+##### A. Stanford Alpaca (Cleaned)
+- **Dataset:** `yahma/alpaca-cleaned`
+- **Size:** 51,760 instruction-following samples
+- **Features:** instruction, input, output
+- **Config:** `qwen3_32b_sft_alpaca.yaml`
+
+```bash
+bash run.sh examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_alpaca.yaml
+```
+
+##### B. Databricks Dolly 15K
+- **Dataset:** `databricks/databricks-dolly-15k`
+- **Size:** 15,011 instruction-response pairs
+- **Features:** instruction, context, response, category
+- **Config:** `qwen3_32b_sft_dolly.yaml`
+
+```bash
+bash run.sh examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_dolly.yaml
+```
+
+##### C. OpenAssistant (oasst1)
+- **Dataset:** `OpenAssistant/oasst1`
+- **Size:** 84,437 conversation messages
+- **Features:** Multi-turn conversations with rankings
+- **Note:** Requires custom processing function
+
+##### D. Custom Dataset Configuration
 ```yaml
 dataset:
   _target_: megatron.bridge.data.builders.hf_dataset.HFDatasetConfig
-  dataset_name: "rajpurkar/squad_v2"  # Try v2 if available
+  dataset_name: "your-dataset-name"  # Any compatible HF dataset
   seq_length: 2048
+  seed: 5678
+  dataloader_type: "batch"
+  num_workers: 2
+  do_validation: true
+  val_proportion: 0.1
 ```
 
 #### Option 3: Use Local Dataset
@@ -70,15 +105,47 @@ dataset:
 
 ## Configuration Files
 
-### Mock Dataset (Recommended)
+### Available Datasets
+
+| Config File | Dataset | Size | Status | Use Case |
+|-------------|---------|------|--------|----------|
+| `qwen3_32b_sft_posttrain_mock.yaml` | Mock Data | Configurable | ✅ Ready | Testing, Development |
+| `qwen3_32b_sft_alpaca.yaml` | Alpaca Cleaned | 51K | ✅ Verified | Instruction Following |
+| `qwen3_32b_sft_dolly.yaml` | Dolly 15K | 15K | ✅ Verified | General Instructions |
+| `qwen3_32b_sft_posttrain.yaml` | Squad (default) | N/A | ⚠️ Incompatible | Reference Only |
+
+### Mock Dataset (Recommended for Testing)
 - **File:** `examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_posttrain_mock.yaml`
 - **Use case:** Testing, development, no network required
 - **Features:** Fast, reliable, no external dependencies
 
-### Real Dataset (When Available)
+### Real Datasets (Production Ready)
+
+#### Alpaca Cleaned - Instruction Following
+- **File:** `examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_alpaca.yaml`
+- **Dataset:** `yahma/alpaca-cleaned`
+- **Samples:** 51,760 instruction-response pairs
+- **Use case:** General-purpose instruction tuning
+- **Command:**
+  ```bash
+  bash run.sh examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_alpaca.yaml
+  ```
+
+#### Dolly 15K - Diverse Instructions
+- **File:** `examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_dolly.yaml`
+- **Dataset:** `databricks/databricks-dolly-15k`
+- **Samples:** 15,011 high-quality instruction-response pairs
+- **Categories:** Open Q&A, Closed Q&A, Creative Writing, etc.
+- **Use case:** Diverse instruction capabilities
+- **Command:**
+  ```bash
+  bash run.sh examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_dolly.yaml
+  ```
+
+### Legacy Config (Reference Only)
 - **File:** `examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_posttrain.yaml`
-- **Use case:** Production training with actual data
-- **Note:** Requires compatible dataset and network access
+- **Use case:** Template for custom dataset configuration
+- **Note:** Default squad dataset has compatibility issues (see troubleshooting)
 
 ## Troubleshooting
 
