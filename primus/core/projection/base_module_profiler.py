@@ -1,3 +1,4 @@
+from abc import ABC
 from typing import Optional
 
 ###############################################################################
@@ -5,8 +6,6 @@ from typing import Optional
 #
 # See LICENSE for license information.
 ###############################################################################
-
-from abc import ABC
 
 
 class BaseModuleProfiler(ABC):

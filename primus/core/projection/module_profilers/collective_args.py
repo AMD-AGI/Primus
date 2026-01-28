@@ -10,7 +10,7 @@ Hardware parameters can be customized via config file.
 """
 
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 
 @dataclass

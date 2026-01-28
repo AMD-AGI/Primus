@@ -1,17 +1,16 @@
 from typing import Optional
 
-###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-
-
 import torch
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 
 from .utils import benchmark_layer
+
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 
 class EmbeddingProfiler(BaseModuleProfiler):
