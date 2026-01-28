@@ -96,7 +96,7 @@ def auto_filter_and_call(func: Callable, kwargs: Dict[str, Any], max_retries: in
                     del current_kwargs[invalid_param]
                     log_rank_0(
                         f"⚠️  Retry {attempt + 1}: Removing invalid parameter '{invalid_param}' "
-                        f"({len(current_kwargs)} params remaining)"
+                        f"({len(current_kwargs)} params remaining) error_msg: {error_msg}"
                     )
                     attempt += 1
                     continue
@@ -129,61 +129,63 @@ def auto_filter_and_call(func: Callable, kwargs: Dict[str, Any], max_retries: in
     )
 
 
-def load_recipe_config(backend_args: SimpleNamespace) -> Any:
+def _merge_dict_to_dataclass(target: Any, source_dict: dict, path: str = "") -> None:
     """
-    Load Megatron-Bridge recipe configuration if specified.
-
-    Recipe format:
-        ns.recipe: Module path (e.g., "qwen.qwen3")
-        ns.flavor: Function name (e.g., "qwen3_32b_finetune_config")
-        ns.<recipe_params>: Simple parameters passed to recipe function
-        ns.<container_fields>: Complex fields merged with recipe result later
-        Full function: megatron.bridge.recipes.{recipe}.{flavor}(**recipe_params)
-
-    Parameter Filtering:
-        The function intelligently filters which ns attributes to pass to recipe:
-
-        NOT passed to recipe (metadata):
-            - recipe, flavor, recipe_kwargs, primus
-
-        NOT passed to recipe (ConfigContainer fields for later merging):
-            - train, model, optimizer, scheduler, dataset, logger, tokenizer, checkpoint
-            - ddp, dist, ft, profiling, comm_overlap, mixed_precision, etc.
-
-        PASSED to recipe (simple recipe parameters):
-            - hf_path, peft, tensor_model_parallel_size, pipeline_model_parallel_size
-            - train_iters, global_batch_size, micro_batch_size, seq_length
-            - lr, min_lr, data_paths, pretrained_checkpoint, etc.
-
-    Example 1 (basic - no parameters):
-        ns.recipe = "qwen.qwen3"
-        ns.flavor = "qwen3_32b_finetune_config"
-        → Calls megatron.bridge.recipes.qwen.qwen3.qwen3_32b_finetune_config()
-
-    Example 2 (with recipe parameters):
-        ns.recipe = "qwen.qwen3"
-        ns.flavor = "qwen3_32b_finetune_config"
-        ns.hf_path = "Qwen/Qwen3-32B"
-        ns.peft = "lora"
-        ns.tensor_model_parallel_size = 8
-        → Passes to recipe: hf_path, peft, tensor_model_parallel_size
-
-    Example 3 (with container field overrides - merged later):
-        ns.recipe = "qwen.qwen3"
-        ns.flavor = "qwen3_32b_finetune_config"
-        ns.train = TrainingConfig(...)  # Complex object
-        → train is NOT passed to recipe, merged with result later
+    Recursively merge dict values into a dataclass target.
 
     Args:
-        ns: SimpleNamespace containing recipe specification and user configuration
+        target: Target dataclass to merge into (modified in-place)
+        source_dict: Source dict containing values to merge
+        path: Current path for logging (e.g., "config_container.train")
 
     Returns:
-        ConfigContainer from recipe (guaranteed non-None)
-
-    Raises:
-        AssertionError: If recipe or flavor is not specified (both are mandatory)
-        RuntimeError: If recipe loading fails (import error, function not found, etc.)
+        None (modifies target in-place)
     """
+    from dataclasses import fields, is_dataclass
+
+    if not is_dataclass(target):
+        return  # Target is not a dataclass, nothing to merge
+
+    for field in fields(target):
+        field_name = field.name
+
+        # Skip if source doesn't have this field
+        if field_name not in source_dict:
+            continue
+
+        source_value = source_dict[field_name]
+
+        # Skip None values
+        if source_value is None:
+            continue
+
+        current_path = f"{path}.{field_name}" if path else field_name
+        target_value = getattr(target, field_name)
+
+        # If target field is dataclass and source value is dict, recursively merge
+        if is_dataclass(target_value) and isinstance(source_value, dict):
+            _merge_dict_to_dataclass(target_value, source_value, current_path)
+            log_rank_0(f"  ↳ Merged {current_path} (recursive)")
+        else:
+            # For non-dataclass fields, check type compatibility before assignment
+            # Get expected type from target field
+            target_type = type(target_value)
+            source_type = type(source_value)
+
+            # Allow assignment if types match or target is None (uninitialized)
+            # if target_value is None or source_type == target_type or isinstance(source_value, target_type):
+            if source_type == target_type or isinstance(source_value, target_type):
+                setattr(target, field_name, source_value)
+                log_rank_0(f"  ↳ Set {current_path} = {source_value}")
+            else:
+                # Type mismatch - log warning and skip
+                log_rank_0(
+                    f"  ⚠️  Skipping {current_path}: type mismatch "
+                    f"(target={target_type.__name__}, source={source_type.__name__})"
+                )
+
+
+def load_recipe_config(backend_args: SimpleNamespace) -> Any:
     recipe = backend_args.recipe
     flavor = backend_args.flavor
 
@@ -208,9 +210,13 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
     ), f"Recipe loading failed: Function '{function_name}' not found in '{full_module_path}'"
     recipe_func = getattr(module, function_name)
 
+    # Convert backend_args to dict once (used for both recipe call and config override)
     backend_dict = namespace_to_dict(backend_args)
+
+    # Call recipe function with filtered dict
     config_container = auto_filter_and_call(recipe_func, backend_dict)
     log_rank_0(f"Successfully loaded recipe: {full_module_path}.{function_name}()")
+    # log_dict_aligned("[debug]ConfigContainer", config_container.to_dict())
 
     # Validate return type
     from megatron.bridge.training.config import ConfigContainer
@@ -219,6 +225,9 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
         f"Recipe function '{full_module_path}.{function_name}()' must return "
         f"ConfigContainer, but returned {type(config_container).__name__}"
     )
+
+    log_rank_0("Applying backend_args overrides to config_container...")
+    _merge_dict_to_dataclass(config_container, backend_dict, "config_container")
 
     return config_container
 
