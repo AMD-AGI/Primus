@@ -289,8 +289,24 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
 
     log_rank_0("Applying backend_args overrides to config_container...")
 
+    # Fields that should NOT be merged from backend_args because they have
+    # different meanings in Primus vs Megatron-Bridge ConfigContainer
+    # - model: In Primus it's a string path to YAML, in ConfigContainer it's GPTModelProvider object
+    # - recipe/flavor: Metadata fields for recipe selection, not part of ConfigContainer
+    primus_metadata_fields = {
+        "model",  # Primus: YAML path string, ConfigContainer: GPTModelProvider object
+        "recipe",  # Primus metadata: which recipe module to use
+        "flavor",  # Primus metadata: which recipe function to call
+        "primus",  # Primus internal metadata
+    }
+
     for field in fields(config_container):
         field_name = field.name
+
+        # Skip Primus metadata fields
+        if field_name in primus_metadata_fields:
+            continue
+
         if hasattr(backend_args, field_name):
             field_value = getattr(backend_args, field_name)
             if field_value is not None:  # Only override if explicitly set
