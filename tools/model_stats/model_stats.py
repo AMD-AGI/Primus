@@ -6,7 +6,7 @@ from collections import defaultdict
 FAMILY_RULES = [
     ("moe_proxy", "MoE_Proxy"),
     ("moe_", "MoE_Proxy"),
-    ("mixtral", "Mixtral/MoE"),
+    ("mixtral", "Mixtral"),
     ("llama", "LLaMA"),
     ("deepseek", "DeepSeek"),
     ("qwen", "Qwen"),
@@ -19,7 +19,7 @@ FAMILY_COLUMNS = [
     "LLaMA",
     "DeepSeek",
     "Qwen",
-    "Mixtral/MoE",
+    "Mixtral",
     "MoE_Proxy",
     "Grok",
     "GPT",
@@ -107,21 +107,26 @@ def generate_chart(counts, chart_path: str):
             "matplotlib is required to generate the chart. " "Install it or set a different output flow."
         ) from exc
 
-    frameworks = ["Megatron-LM", "TorchTitan", "MaxText (JAX)", "Megatron Bridge"]
+    frameworks = [
+        ("Megatron-LM", "megatron"),
+        ("TorchTitan", "torchtitan"),
+        ("MaxText (JAX)", "maxtext"),
+        ("Megatron Bridge", "megatron_bridge"),
+    ]
     families = FAMILY_COLUMNS
 
     values = {}
-    for fw in frameworks:
-        key = fw.lower().replace(" ", "_").replace("(", "").replace(")", "")
-        values[fw] = [counts.get(key, {}).get(fam, 0) for fam in families]
+    for label, key in frameworks:
+        values[label] = [counts.get(key, {}).get(fam, 0) for fam in families]
 
     x = list(range(len(frameworks)))
     bar_width = 0.1
     offsets = [(i - (len(families) - 1) / 2) * bar_width for i in range(len(families))]
 
     fig, ax = plt.subplots(figsize=(12, 6))
+    labels = [label for label, _ in frameworks]
     for i, fam in enumerate(families):
-        y = [values[fw][i] for fw in frameworks]
+        y = [values[label][i] for label in labels]
         bars = ax.bar([xi + offsets[i] for xi in x], y, width=bar_width, label=fam)
         for bar, val in zip(bars, y):
             if val == 0:
@@ -136,7 +141,7 @@ def generate_chart(counts, chart_path: str):
             )
 
     ax.set_xticks(x)
-    ax.set_xticklabels(frameworks, rotation=0)
+    ax.set_xticklabels(labels, rotation=0)
     ax.set_ylabel("Config Count (base and fp8 excluded)")
     ax.set_xlabel("Framework")
     ax.set_title("Model Families by Framework")
