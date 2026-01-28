@@ -1,7 +1,7 @@
-from typing import Optional
 import importlib
 import json
 import os
+from typing import Optional
 
 from primus.core.pipeline_parallel.scheduler.scheduler_node import (
     FuncType,

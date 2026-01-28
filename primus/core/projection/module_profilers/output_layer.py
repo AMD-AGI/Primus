@@ -1,15 +1,14 @@
 from typing import Optional
 
+from primus.core.projection.base_module_profiler import BaseModuleProfiler
+
+from .utils import benchmark_layer
+
 ###############################################################################
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
-
-
-from primus.core.projection.base_module_profiler import BaseModuleProfiler
-
-from .utils import benchmark_layer
 
 
 class OutputLayerProfiler(BaseModuleProfiler):

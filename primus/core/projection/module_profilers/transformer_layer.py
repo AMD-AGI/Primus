@@ -1,12 +1,5 @@
 from typing import Optional
 
-###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-
-
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import TrainingConfig
@@ -18,6 +11,12 @@ from .moe_mlp import MoEMLPProfiler
 from .residual_add import ResidualAddProfiler
 from .router import RouterProfiler
 from .utils import benchmark_layer
+
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 # Transformer Layer Data Flow
 #

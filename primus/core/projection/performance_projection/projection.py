@@ -1,26 +1,19 @@
-from typing import List, Dict, Optional, Any, Tuple
-
-###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-
 import copy
 import math
 import os
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
 from primus.core.launcher.parser import load_primus_config
+from primus.core.projection.module_profilers import collective_model as cm
+from primus.core.projection.module_profilers.collective_args import get_default_args
 from primus.core.projection.module_profilers.language_model import (
     LanguageModelProfiler,
     build_profiler,
     get_language_model_profiler_spec,
 )
-from primus.core.projection.module_profilers.collective_args import get_default_args
-from primus.core.projection.module_profilers import collective_model as cm
 from primus.core.projection.performance_projection.simulator import (
     SchedulerSimulationRunner,
 )
@@ -28,6 +21,12 @@ from primus.core.projection.training_config import (
     convert_primus_config_to_projection_config,
 )
 from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
+
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 _MAX_EXPERT_PARALLEL_SIZE = 8
 _BYTES_PER_GB = 1024**3
@@ -995,8 +994,10 @@ def _run_pipeline_simulation_megatron_zb(training_config, profiling_results):
     Returns:
         float: Step time in ms from pipeline simulation
     """
-    from primus.backends.megatron.core.pipeline_parallel.zerobubble.scheduler.graph import GraphConfig
     from primus.backends.megatron.core.pipeline_parallel.zerobubble.scheduler import zb
+    from primus.backends.megatron.core.pipeline_parallel.zerobubble.scheduler.graph import (
+        GraphConfig,
+    )
 
     # Build chunk time matrix
     chunk_time_matrix = _build_chunk_time_matrix(training_config, profiling_results)
