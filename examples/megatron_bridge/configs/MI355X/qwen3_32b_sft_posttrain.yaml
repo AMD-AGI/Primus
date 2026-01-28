@@ -53,3 +53,22 @@ modules:
       recompute_granularity: full
       recompute_method: uniform
       recompute_num_layers: 1
+
+      # Dataset configuration
+      # Defaults to SQuAD dataset (automatically patched to use "rajpurkar/squad")
+      # NOTE: Primus patch system automatically updates squad → rajpurkar/squad
+      #       due to HuggingFace namespace reorganization (Jan 2026)
+      #
+      # To use a custom dataset, uncomment and configure:
+      # dataset:
+      #   _target_: megatron.bridge.data.builders.hf_dataset.HFDatasetConfig
+      #   dataset_name: "rajpurkar/squad"  # Or any other HF dataset
+      #   seq_length: 2048
+      #   seed: 5678
+      #
+      # To use mock data for testing:
+      # dataset:
+      #   _target_: megatron.bridge.data.datasets.mock_dataset.MockDatasetConfig
+      #   seq_length: 2048
+      #   vocab_size: 152064  # Qwen3 vocab size
+      #   num_train_samples: 50000
