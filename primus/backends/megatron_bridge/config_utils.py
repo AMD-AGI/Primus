@@ -274,7 +274,10 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
     ), f"Recipe loading failed: Function '{function_name}' not found in '{full_module_path}'"
     recipe_func = getattr(module, function_name)
 
+    # Convert backend_args to dict once (used for both recipe call and config override)
     backend_dict = namespace_to_dict(backend_args)
+
+    # Call recipe function with backend_dict
     config_container = auto_filter_and_call(recipe_func, backend_dict)
     log_rank_0(f"Successfully loaded recipe: {full_module_path}.{function_name}()")
 
@@ -289,9 +292,6 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
     # Override config_container fields with values from backend_args
     # This ensures user overrides in YAML take precedence over recipe defaults
     log_rank_0("Applying backend_args overrides to config_container...")
-
-    # Convert backend_args to dict for easier processing
-    backend_dict = namespace_to_dict(backend_args)
 
     # Fields that should NOT be merged (metadata fields)
     primus_metadata_fields = {
