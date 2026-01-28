@@ -1170,6 +1170,7 @@ def _run_multinode_projection(training_config, single_node_time_ms, profiling_re
     gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
     
     # Calculate minimum nodes required by parallelism config
+    # EP is included in the minimum GPUs calculation (need GPUs to hold experts)
     gpus_required = tp * pp * ep * cp
     min_nodes_required = (gpus_required + gpus_per_node - 1) // gpus_per_node
     
@@ -1181,13 +1182,15 @@ def _run_multinode_projection(training_config, single_node_time_ms, profiling_re
             f"--target-nodes must be >= {min_nodes_required}."
         )
     
-    # Calculate target DP
+    # Calculate DP for scaling - EXCLUDES EP (DP scaling is independent of EP)
+    # EP distributes experts but doesn't affect how many data batches can be processed in parallel
+    gpus_for_dp = tp * pp * cp  # EP excluded for DP calculation
     total_gpus_target = target_nodes * gpus_per_node
-    dp_target = total_gpus_target // gpus_required
+    dp_target = total_gpus_target // gpus_for_dp
     
-    # Calculate minimum DP (for reporting speedup)
+    # Calculate minimum DP (for baseline)
     min_gpus = min_nodes_required * gpus_per_node
-    min_dp = min_gpus // gpus_required
+    min_dp = min_gpus // gpus_for_dp
     
     if is_rank_0:
         print("\n" + "=" * 100)
@@ -1423,13 +1426,14 @@ def launch_projection_from_cli(args, overrides):
     print(f"  Target Config: PP={pp}, EP={ep}, TP={tp}, CP={cp}, DP={target_dp} ({target_nodes} nodes)")
     print(f"    Note: EP does not reduce DP for microbatch calculation")
     
-    # Use TARGET DP for microbatch calculation (simulator needs to know target's microbatch count)
+    # Use BENCHMARK DP for pipeline simulation to get consistent baseline
+    # The multinode projection will then scale from this baseline to target
     global_batch = training_config.runtime_config.global_batch_size
     micro_batch = training_config.runtime_config.micro_batch_size
-    num_microbatches = global_batch // (micro_batch * target_dp)
-    print(f"  Microbatches: {num_microbatches} (global_batch={global_batch}, micro_batch={micro_batch}, target_dp={target_dp})")
+    benchmark_microbatches = global_batch // (micro_batch * benchmark_dp)
+    print(f"  Benchmark Microbatches: {benchmark_microbatches} (global_batch={global_batch}, micro_batch={micro_batch}, benchmark_dp={benchmark_dp})")
     
-    training_config.runtime_config.data_parallel_size = target_dp
+    training_config.runtime_config.data_parallel_size = benchmark_dp
 
 
     # If EP was rescaled, adjust profiling_results to add EP overhead BEFORE pipeline simulation
