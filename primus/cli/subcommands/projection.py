@@ -67,8 +67,7 @@ def register_subcommand(subparsers):
 
     # ---------- performance ----------
     performance = suite_parsers.add_parser(
-        "performance", 
-        help="Performance projection with optional multinode scaling."
+        "performance", help="Performance projection with optional multinode scaling."
     )
     add_pretrain_parser(performance)
     performance.add_argument(

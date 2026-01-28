@@ -1,4 +1,5 @@
 from typing import List, Optional
+
 ###############################################################################
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -143,8 +144,8 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
         tp = mp_config.tensor_model_parallel_size
         pp = mp_config.pipeline_model_parallel_size
-        ep = getattr(mp_config, 'expert_model_parallel_size', 1)
-        cp = getattr(mp_config, 'context_model_parallel_size', 1)
+        ep = getattr(mp_config, "expert_model_parallel_size", 1)
+        cp = getattr(mp_config, "context_model_parallel_size", 1)
 
         # Only estimate communication for EP (TP AllReduce is already in the benchmarked run)
         # PP communication is handled separately in pipeline simulation
@@ -162,6 +163,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
         gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
 
         from primus.core.projection.module_profilers.collective_args import get_default_args
+
         coll_args = get_default_args(
             num_nodes=num_nodes,
             gpus_per_node=gpus_per_node,
@@ -175,11 +177,11 @@ class LanguageModelProfiler(BaseModuleProfiler):
         comm_ops = []
 
         # MoE All-to-All (if EP > 1 and this is a MoE layer)
-        if ep > 1 and layer_type == 'moe':
+        if ep > 1 and layer_type == "moe":
             tokens_per_batch = seq_len * batch_size
             dispatch_size = tokens_per_batch * hidden_size * moe_router_topk * 2  # BF16
 
-            a2a_dispatch = cm.alltoall(coll_args, dispatch_size, ep, groups=['ep'])
+            a2a_dispatch = cm.alltoall(coll_args, dispatch_size, ep, groups=["ep"])
             # dispatch time is same as combine time
             a2a_combine = a2a_dispatch
 
@@ -187,13 +189,15 @@ class LanguageModelProfiler(BaseModuleProfiler):
             fwd_time = (a2a_dispatch + a2a_combine) / 1000  # Convert to ms
             bwd_time = fwd_time  # Same as forward
 
-            comm_ops.append({
-                'type': 'MoE All-to-All',
-                'time_fwd_ms': fwd_time,
-                'time_bwd_ms': bwd_time,
-                'message_size_mb': dispatch_size / (1024 * 1024),
-                'group_size': ep,
-            })
+            comm_ops.append(
+                {
+                    "type": "MoE All-to-All",
+                    "time_fwd_ms": fwd_time,
+                    "time_bwd_ms": bwd_time,
+                    "message_size_mb": dispatch_size / (1024 * 1024),
+                    "group_size": ep,
+                }
+            )
 
         return comm_ops
 
