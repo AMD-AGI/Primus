@@ -1,12 +1,5 @@
-from typing import List, Optional
-
-###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-
 import os
+from typing import List, Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
@@ -20,6 +13,12 @@ from .transformer_layer import (
     get_dense_transformer_layer_profiler_spec,
     get_moe_transformer_layer_profiler_spec,
 )
+
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 
 def build_profiler(spec: ModuleProfilerSpec, depth=0) -> BaseModuleProfiler:
@@ -135,8 +134,10 @@ class LanguageModelProfiler(BaseModuleProfiler):
         Returns:
             List of communication operations with time and message size
         """
-        import os
         from primus.core.projection.module_profilers import collective_model as cm
+        from primus.core.projection.module_profilers.collective_args import (
+            get_default_args,
+        )
 
         mp_config = self.config.model_parallel_config
         model_config = self.config.model_config
@@ -161,8 +162,6 @@ class LanguageModelProfiler(BaseModuleProfiler):
         # Setup collective model
         num_nodes = int(os.getenv("NNODES", "1"))
         gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
-
-        from primus.core.projection.module_profilers.collective_args import get_default_args
 
         coll_args = get_default_args(
             num_nodes=num_nodes,
