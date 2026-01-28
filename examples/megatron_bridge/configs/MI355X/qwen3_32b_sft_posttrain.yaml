@@ -53,20 +53,3 @@ modules:
       recompute_granularity: full
       recompute_method: uniform
       recompute_num_layers: 1
-
-      # Dataset configuration (defaults to squad if not specified)
-      # NOTE: HuggingFace recently reorganized datasets. Use "rajpurkar/squad" instead of "squad"
-      # To use a custom dataset, uncomment and configure:
-      # dataset:
-      #   _target_: megatron.bridge.data.builders.hf_dataset.HFDatasetConfig
-      #   dataset_name: "rajpurkar/squad"  # Updated dataset path (was "squad")
-      #   seq_length: 2048
-      #   seed: 5678
-      #   # ... other dataset parameters
-      #
-      # To use mock data for testing:
-      # dataset:
-      #   _target_: megatron.bridge.data.datasets.mock_dataset.MockDatasetConfig
-      #   seq_length: 2048
-      #   vocab_size: 152064  # Qwen3 vocab size
-      #   num_train_samples: 50000
