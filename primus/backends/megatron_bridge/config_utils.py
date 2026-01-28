@@ -164,11 +164,6 @@ def _merge_dict_to_dataclass(target: Any, source_dict: dict, path: str = "") -> 
         current_path = f"{path}.{field_name}" if path else field_name
         target_value = getattr(target, field_name)
 
-        # Debug logging
-        log_rank_0(f"  [DEBUG] Processing {current_path}:")
-        log_rank_0(f"    target_value type: {type(target_value)}, is_dataclass: {is_dataclass(target_value)}")
-        log_rank_0(f"    source_value type: {type(source_value)}, is dict: {isinstance(source_value, dict)}")
-
         # If target field is dataclass and source value is dict, recursively merge
         if is_dataclass(target_value) and isinstance(source_value, dict):
             _merge_dict_to_dataclass(target_value, source_value, current_path)
@@ -282,8 +277,42 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
     # Convert backend_args to dict once (used for both recipe call and config override)
     backend_dict = namespace_to_dict(backend_args)
 
-    # Call recipe function with backend_dict
-    config_container = auto_filter_and_call(recipe_func, backend_dict)
+    # Fields that should NOT be passed to recipe function (ConfigContainer fields)
+    # These will be merged later to override recipe's default values
+    container_fields = {
+        "rng",
+        "rerun_state_machine",
+        "train",
+        "model",
+        "optimizer",
+        "ddp",
+        "scheduler",
+        "dataset",
+        "logger",
+        "tokenizer",
+        "checkpoint",
+        "dist",
+        "ft",
+        "straggler",
+        "nvrx_straggler",
+        "profiling",
+        "peft",
+        "comm_overlap",
+        "mixed_precision",
+        "tensor_inspect",
+        "inprocess_restart",
+    }
+
+    # Metadata fields (also should not be passed to recipe)
+    metadata_fields = {"recipe", "flavor", "primus"}
+
+    # Create a copy for recipe call, excluding container and metadata fields
+    recipe_dict = {
+        k: v for k, v in backend_dict.items() if k not in container_fields and k not in metadata_fields
+    }
+
+    # Call recipe function with filtered dict
+    config_container = auto_filter_and_call(recipe_func, recipe_dict)
     log_rank_0(f"Successfully loaded recipe: {full_module_path}.{function_name}()")
 
     # Validate return type
@@ -298,16 +327,8 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
     # This ensures user overrides in YAML take precedence over recipe defaults
     log_rank_0("Applying backend_args overrides to config_container...")
 
-    # Fields that should NOT be merged (metadata fields)
-    primus_metadata_fields = {
-        "model",  # Primus: YAML path string, ConfigContainer: GPTModelProvider object
-        "recipe",  # Primus metadata: which recipe module to use
-        "flavor",  # Primus metadata: which recipe function to call
-        "primus",  # Primus internal metadata
-    }
-
-    # Remove metadata fields from backend_dict
-    for field in primus_metadata_fields:
+    # Remove metadata fields from backend_dict (they don't exist in ConfigContainer)
+    for field in metadata_fields:
         backend_dict.pop(field, None)
 
     # Recursively merge backend_dict into config_container
