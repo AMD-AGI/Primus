@@ -131,6 +131,57 @@ def auto_filter_and_call(func: Callable, kwargs: Dict[str, Any], max_retries: in
     )
 
 
+def _merge_dataclass_recursive(target: Any, source: Any, path: str = "") -> None:
+    """
+    Recursively merge dataclass fields from source into target.
+
+    This function performs a deep merge of dataclass objects, allowing partial
+    overrides of nested configurations without replacing entire objects.
+
+    Example:
+        Recipe returns: TrainingConfig(train_iters=1000, eval_interval=500)
+        User overrides: TrainingConfig(train_iters=2000)
+        Result: TrainingConfig(train_iters=2000, eval_interval=500)  # eval_interval preserved!
+
+    Args:
+        target: Target dataclass to merge into (will be modified in-place)
+        source: Source dataclass to merge from
+        path: Current path for logging (e.g., "config_container.train.optimizer")
+
+    Returns:
+        None (modifies target in-place)
+    """
+    from dataclasses import fields, is_dataclass
+
+    if not is_dataclass(source):
+        return  # Source is not a dataclass, nothing to merge
+
+    for field in fields(source):
+        field_name = field.name
+        source_value = getattr(source, field_name)
+
+        if source_value is None:
+            continue  # Skip None values - don't override with None
+
+        current_path = f"{path}.{field_name}" if path else field_name
+
+        if not hasattr(target, field_name):
+            # Target doesn't have this field, just set it
+            setattr(target, field_name, source_value)
+            log_rank_0(f"  ↳ Setting {current_path} (new field)")
+            continue
+
+        target_value = getattr(target, field_name)
+
+        # If both are dataclasses, recursively merge
+        if is_dataclass(target_value) and is_dataclass(source_value):
+            _merge_dataclass_recursive(target_value, source_value, current_path)
+        else:
+            # Non-dataclass or mixed types: direct override
+            setattr(target, field_name, source_value)
+            log_rank_0(f"  ↳ Overriding {current_path}")
+
+
 def load_recipe_config(backend_args: SimpleNamespace) -> Any:
     """
     Load Megatron-Bridge recipe configuration if specified.
@@ -233,15 +284,25 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
 
     # Override config_container fields with values from backend_args
     # This ensures user overrides in YAML take precedence over recipe defaults
-    from dataclasses import fields
+    # Uses recursive merge for nested dataclass fields to allow partial overrides
+    from dataclasses import fields, is_dataclass
+
+    log_rank_0("Applying backend_args overrides to config_container...")
 
     for field in fields(config_container):
         field_name = field.name
         if hasattr(backend_args, field_name):
             field_value = getattr(backend_args, field_name)
             if field_value is not None:  # Only override if explicitly set
-                setattr(config_container, field_name, field_value)
-                log_rank_0(f"  ↳ Overriding config_container.{field_name} with backend_args value")
+                target_value = getattr(config_container, field_name)
+
+                # If both are dataclasses, recursively merge to preserve unset fields
+                if is_dataclass(target_value) and is_dataclass(field_value):
+                    _merge_dataclass_recursive(target_value, field_value, f"config_container.{field_name}")
+                else:
+                    # Non-dataclass or None target: direct replacement
+                    setattr(config_container, field_name, field_value)
+                    log_rank_0(f"  ↳ Replacing config_container.{field_name}")
 
     return config_container
 
