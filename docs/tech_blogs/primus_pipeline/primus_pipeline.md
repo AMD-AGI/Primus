@@ -100,6 +100,28 @@ gradient_accumulation_fusion: true
 
 ```
 
+### PP schedule algorithm comparison
+
+We currently focus on the zero-bubble family proposed by Sea AI Lab, including zerobubble/zbv/v-half/v-min. We do not support post-validation yet because it requires substantial optimizer changes that are hard to maintain across Megatron-LM versions.
+
+Assuming the same execution time for forward, backward, and wgrad, the schedule comparison is listed below:
+
+
+| Algorithm        | VPP size | Bubble Rate               | Max Activation Memory | Communication Volume |
+|------------------|----------|---------------------------|-----------------------|----------------------|
+| 1f1b             | 1        | (p - 1) / (m + p -1)      | p                     | 1                    |
+| 1f1b-interleaved | N        | (p - 1) / (m * N + p - 1) | p + (p - 1) / p       | N                    |
+| ZeroBubble(ZB1P) | 1        | (p - 1) / 3 * (m + p -1)  | p                     | 1                    |
+| ZBV-formatted    | 2        | (p - 1) / (p - 1 + 6 * m) | p                     | 2                    |
+| V-half           | 2        | -                         | p / 2 + x             | 2                    |
+| V-min            | 2        | -                         | p / 3 + x             | 2                    |
+
+Because V-half and v-min use a greedy algorithm, they do not have closed-form bubble-rate formulas; use the simulator to estimate them.
+
+- * p: number of pipeline stages
+- * m: number of minibatches
+- * x: constant
+
 ### Experiments
 
 We ran experiments to verify the performance of Primus-pipeline. Here we list results for [Llama2-7B](https://huggingface.co/meta-llama/Llama-2-7b) on 1 node with PP8 and the [Qwen3-235B](https://huggingface.co/Qwen/Qwen3-235B-A22B) MoE model with PP4 EP8.
@@ -108,20 +130,53 @@ We ran experiments to verify the performance of Primus-pipeline. Here we list re
 
 - Cluster with MI300, 1 node, PP8, Llama2-7B model
 
+| PP | VPP | PP-algorithm | tokens/s/device | TFLOPS | max_memory | max_mem_percent | hbm overhead | speed up ratio |
+|----|-----|-------------|----------------|--------|------------|-----------------|--------------|---------------|
+| 8  | 1   | 1f1b        | 10057          | 235.7  | 16.26171875 | 90.83%         | 1            | 1             |
+| 8  | 2   | 1f1b-interleaved(vpp2) | 10974 | 257.3 | 21.40625 | 89.53% | 1.316358395 | 1.091180272 |
+| 8  | 2   | zbb         | 11411          | 268    | 16.59082031 | 79.27% | 1.020237809 | 1.134632594 |
+| 8  | 2   | zbv         | 11347          | 265.9  | 18.11230469 | 98.74% | 1.113800144 | 1.128268867 |
+| 8  | 2   | v-half      | 10894          | 255.1  | 14.06347656 | 94.50% | 0.864821043 | 1.083225614 |
+| 8  | 2   | v-min       | 8897.2         | 208.5  | 11.90234375 | 99.70% | 0.731924093 | 0.884677339 |
+
+
 ![llama2-7B-perf](imgs/llama2-7B-perf.png)
 
 #### Qwen 235B verification
 
 - Cluster with MI355, 4 nodes, PP4, EP8, Qwen-235B model.
 
+| PP | VPP | PP-algorithm | tokens/s/device | TFLOPS | max_memory | max_mem_percent | hbm overhead | speed up ratio |
+|----|-----|--------------|----------------|--------|------------|-----------------|--------------|---------------|
+| 4  | 1   | 1f1b         | 2742.4         | 406    | 261.58     | 90.83%          | 1            | 1             |
+| 4  | 2   | v-half       | 2912.9         | 431.2  | 257.84     | 89.53%          | 0.98         | 1.06          |
+| 4  | 2   | v-min        | 2200.6         | 325.8  | 228.28     | 79.27%          | 0.87         | 0.80          |
+| 4  | 2   | zbv-formatted | 2952.7        | 437.1  | 284.36     | 98.74%          | 1.09         | 1.08          |
+| 4  | 1   | zero-bubble  | 2963.1         | 438.6  | 272.13     | 94.50%          | 1.04         | 1.08          |
+| 4  | 3   | 1f1b-interleaved-vpp2 | OOM   | | | | | |
+| 4  | 3   | 1f1b-interleaved-vpp3 | 3012.1 | 445.9 | 287.13 | 99.70% | 1.097675663 | 1.098344516 |
+| 4  | 4   | 1f1b-interleaved-vpp4 | 3024.5 | 447.7 | 278.82 | 96.82% | 1.065907179 | 1.102866103 |
+
 ![qwen-235B-perf](imgs/qwen-235B-perf.png)
 
-#### Conclusion
 
-Based on the results shown above, we draw the following conclusions.
+### Conclusions and Best Practice Guide
+
+Based on the results above, we draw the following conclusions.
 
 - Llama-based models show higher throughput and memory gains than MoE models, because the overall network has a larger GEMM footprint and higher activation memory.
 - For large MoE cases in practice, 1f1b-interleaved reaches a higher throughput roofline than zero-bubble schedules, but it is harder to reduce memory usage. In memory-limited scenarios, v-half is a reasonable option.
+
+Based on these conclusions, we recommend using zero-bubble based algorithms (zero-bubble / zbv / v-half / v-min) instead of 1f1b-interleaved in the following cases:
+
+- A large share of GEMM/GroupedGEMM in the model: dense-layer-heavy models benefit more from splitting weight-grad and input-grad computation. Imbalanced time between the two phases tends to introduce extra bubbles.
+
+- Memory is the bottleneck: 1f1b-interleaved offers limited ways to reduce memory consumption, while v-half and v-min provide practical options when memory is tight.
+
+- Communication is inefficient: 1f1b-interleaved trades extra communication for lower bubble rates, and larger VPP increases communication volume. In most cases, p2p communication can be hidden by overlapping computation, but without AINIC or RDMA support, zbv/v-half/v-min have clearer advantages.
+
+- Extreme partitioning limits: when the model cannot be split beyond VPP rank 2, zbv/v-half/v-min usually outperform 1f1b-interleaved.
+
 
 ## Future works
 
