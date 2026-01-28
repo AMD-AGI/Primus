@@ -169,9 +169,21 @@ def _merge_dict_to_dataclass(target: Any, source_dict: dict, path: str = "") -> 
             _merge_dict_to_dataclass(target_value, source_value, current_path)
             log_rank_0(f"  ↳ Merged {current_path} (recursive)")
         else:
-            # Direct assignment for non-dataclass fields or non-dict source
-            setattr(target, field_name, source_value)
-            log_rank_0(f"  ↳ Set {current_path} = {source_value}")
+            # For non-dataclass fields, check type compatibility before assignment
+            # Get expected type from target field
+            target_type = type(target_value)
+            source_type = type(source_value)
+
+            # Allow assignment if types match or target is None (uninitialized)
+            if target_value is None or source_type == target_type or isinstance(source_value, target_type):
+                setattr(target, field_name, source_value)
+                log_rank_0(f"  ↳ Set {current_path} = {source_value}")
+            else:
+                # Type mismatch - log warning and skip
+                log_rank_0(
+                    f"  ⚠️  Skipping {current_path}: type mismatch "
+                    f"(target={target_type.__name__}, source={source_type.__name__})"
+                )
 
 
 def load_recipe_config(backend_args: SimpleNamespace) -> Any:
