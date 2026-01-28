@@ -1259,17 +1259,12 @@ def _run_multinode_projection(training_config, single_node_time_ms, profiling_re
             target_grad_ar = target_breakdown.get('gradient_allreduce', 0)
             grad_ar_msg = f"{target_grad_ar:.3f} ms (overlapped - not in critical path)"
         else:
-            target_grad_ar = 0
             grad_ar_msg = "N/A"
     
     # For reporting, get full breakdown for target
     total_comm_time_ms, breakdown, message_info, per_layer_info = calculate_collective_communication_time(
         training_config, target_nodes, gpus_per_node, tp, pp, ep, cp, dp_target, hardware_config_dict
     )
-    
-    # Calculate speedup
-    speedup = benchmarked_time_ms / projected_time_ms if projected_time_ms > 0 else 0
-    ideal_speedup = dp_target / min_dp if min_dp > 0 else dp_target
     
     # Print results (only from rank 0)
     if is_rank_0:
