@@ -142,7 +142,7 @@ def generate_chart(counts, chart_path: str):
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=0)
-    ax.set_ylabel("Config Count (base and fp8 excluded)")
+    ax.set_ylabel("Model Count")
     ax.set_xlabel("Framework")
     ax.set_title("Model Families by Framework")
     ax.legend(ncol=4, frameon=False)
