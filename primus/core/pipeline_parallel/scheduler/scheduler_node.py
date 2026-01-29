@@ -19,6 +19,8 @@ class FuncType(Enum):
     SB = "SEND_BACKWARD"
     RF = "RECV_FORWARD"
     RB = "RECV_BACKWARD"
+    O = "OFFLOAD"
+    R = "RELOAD"
 
     def reverse(self):
         reverse_map = {
@@ -28,6 +30,8 @@ class FuncType(Enum):
             FuncType.SB: FuncType.RB,
             FuncType.RF: FuncType.SF,
             FuncType.RB: FuncType.SB,
+            FuncType.O: FuncType.R,
+            FuncType.R: FuncType.O,
         }
         return reverse_map[self]
 
