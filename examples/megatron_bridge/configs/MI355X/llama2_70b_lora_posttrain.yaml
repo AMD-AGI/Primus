@@ -1,0 +1,65 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama2_70b_lora_posttrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+# IMPORTANT: The checkpoint will be saved to a NEW directory to avoid conflicts
+# with the base model checkpoint (which doesn't have LoRA adapters)
+
+modules:
+  post_trainer:
+    framework: megatron_bridge
+    config: post_trainer.yaml
+
+    # Model to run
+    model: llama2_70b.yaml
+
+    overrides:
+      # Parallelism configuration
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      pipeline_dtype: null
+      virtual_pipeline_model_parallel_size: null
+      context_parallel_size: 1
+      sequence_parallel: false
+      use_megatron_fsdp: false
+
+      # Finetuning-specific params
+      # Use pretrained_checkpoint to load base model weights without LoRA adapters
+      pretrained_checkpoint: /home/gyuzakor/Primus/data/megatron_checkpoints/Llama-2-70b-hf/iter_0000000
+      peft: lora
+      packed_sequence: false
+      
+      # Optional: Configure LoRA parameters (defaults shown)
+      # peft_config:
+      #   dim: 32          # LoRA rank
+      #   alpha: 32        # LoRA alpha scaling factor
+      #   target_modules: ['linear_qkv', 'linear_proj', 'linear_fc1', 'linear_fc2']
+
+      # Training configuration
+      train_iters: 384
+      global_batch_size: 8
+      micro_batch_size: 1
+      seq_length: 8192
+      eval_interval: 384
+      eval_iters: 32
+      save_interval: null
+
+      # Optimizer configuration
+      adam_beta1: 0.9
+      adam_beta2: 0.99
+      adam_eps: 1e-8
+      weight_decay: 0.0001
+      min_lr: 0.0
+      finetune_lr: 1.0e-4
+      lr_warmup_iters: 0
+      lr_decay_iters: null
+
+      # W&B logging
+      wandb_project: null
+      wandb_entity: null
+      wandb_exp_name: null
+
+      # Precision
+      precision_config: bf16_mixed
+      comm_overlap_config: null

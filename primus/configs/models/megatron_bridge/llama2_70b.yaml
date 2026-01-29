@@ -1,0 +1,9 @@
+recipe: llama.llama2
+flavor: llama2_70b_pretrain_config
+hf_path: meta-llama/Llama-2-70b-hf
+#data_paths: /data
+train_data_path: [/data/]
+valid_data_path: [/data/]
+
+# dataset:
+#     dataset_name: "rajpurkar/squad"
