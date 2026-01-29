@@ -1,0 +1,216 @@
+diff --git a/src/megatron/bridge/recipes/llama/llama2.py b/src/megatron/bridge/recipes/llama/llama2.py
+index 99d1b6c6..ccff4454 100644
+--- a/src/megatron/bridge/recipes/llama/llama2.py
++++ b/src/megatron/bridge/recipes/llama/llama2.py
+@@ -13,13 +13,17 @@
+ # limitations under the License.
+ 
+ import os
++from sqlite3 import adapt
+ from typing import List, Optional, Union
+ 
+ import torch
+ from typing_extensions import TypedDict, Unpack
+ 
+ from megatron.bridge import AutoBridge
++from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
++from megatron.bridge.peft.base import PEFT
+ from megatron.bridge.recipes.utils.dataset_utils import get_blend_fields_from_data_paths
++from megatron.bridge.recipes.utils.finetune_utils import default_peft_config
+ from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
+ from megatron.bridge.recipes.utils.tokenizer_utils import DEFAULT_NULL_TOKENIZER_VOCAB_SIZE
+ from megatron.bridge.training.comm_overlap import CommOverlapConfig
+@@ -27,7 +31,7 @@ from megatron.bridge.training.config import (
+     CheckpointConfig,
+     ConfigContainer,
+     DistributedDataParallelConfig,
+-    GPTDatasetConfig,
++    FinetuningDatasetConfig,
+     LoggerConfig,
+     RNGConfig,
+     TokenizerConfig,
+@@ -74,6 +78,13 @@ class Llama2CommonKwargs(TypedDict, total=False):
+     # Precision / overlap configs
+     precision_config: Optional[Union[MixedPrecisionConfig, str]]
+     comm_overlap_config: Optional[CommOverlapConfig]
++    adam_beta1: float = 0.9
++    adam_beta2: float = 0.99
++    adam_eps: float = 1e-8
++    weight_decay: float = 0.0001
++    eval_iters: int = 32
++    pretrained_checkpoint: str | None
++    peft: str | PEFT | None
+ 
+ 
+ def llama2_7b_pretrain_config(**user_kwargs: Unpack[Llama2CommonKwargs]) -> ConfigContainer:
+@@ -81,6 +92,7 @@ def llama2_7b_pretrain_config(**user_kwargs: Unpack[Llama2CommonKwargs]) -> Conf
+ 
+     See `_llama2_common` for the full list of parameters.
+     """
++    peft_value = user_kwargs.get("peft", "lora")
+     recommended_kwargs: Llama2CommonKwargs = {
+         "hf_path": "meta-llama/Llama-2-7b-hf",
+         "tensor_model_parallel_size": 2,
+@@ -91,6 +103,39 @@ def llama2_7b_pretrain_config(**user_kwargs: Unpack[Llama2CommonKwargs]) -> Conf
+         "lr_warmup_iters": 2000,
+         "eval_interval": 2000,
+         "save_interval": 2000,
++        "adam_beta1": 0.9,
++        "adam_beta2": 0.99,
++        "adam_eps": 1e-8,
++        "weight_decay": 0.0001,
++        "eval_iters": 32,
++        "peft": peft_value,
++    }
++    # Combine defaults with user kwargs; user values take precedence.
++    combined_kwargs: Llama2CommonKwargs = {**recommended_kwargs, **user_kwargs}
++    return _llama2_common(**combined_kwargs)
++
++def llama2_70b_pretrain_config(**user_kwargs: Unpack[Llama2CommonKwargs]) -> ConfigContainer:
++    """Return a pre-training config for Llama-2 7B.
++
++    See `_llama2_common` for the full list of parameters.
++    """
++    peft_value = user_kwargs.get("peft", "lora")
++    recommended_kwargs: Llama2CommonKwargs = {
++        "hf_path": "meta-llama/Llama-2-7b-hf",
++        "tensor_model_parallel_size": 2,
++        "pipeline_model_parallel_size": 1,
++        "train_iters": 1_168_251,
++        "global_batch_size": 512,
++        "micro_batch_size": 1,
++        "lr_warmup_iters": 2000,
++        "eval_interval": 2000,
++        "save_interval": 2000,
++        "adam_beta1": 0.9,
++        "adam_beta2": 0.99,
++        "adam_eps": 1e-8,
++        "weight_decay": 0.0001,
++        "eval_iters": 32,
++        "peft": peft_value,
+     }
+     # Combine defaults with user kwargs; user values take precedence.
+     combined_kwargs: Llama2CommonKwargs = {**recommended_kwargs, **user_kwargs}
+@@ -129,7 +174,14 @@ def _llama2_common(
+     eval_interval: int = 2000,
+     save_interval: int = 2000,
+     use_null_tokenizer: bool = True,
+-    # Precision recipe
++    pretrained_checkpoint: str | None = None,
++    peft: str | PEFT | None = "lora",
++    adam_beta1: float = 0.9,
++    adam_beta2: float = 0.95,
++    adam_eps: float = 1e-5,
++    weight_decay: float = 0.1,
++    eval_iters: int = 32,
++    # Precision recipe    
+     precision_config: Optional[Union[MixedPrecisionConfig, str]] = "bf16_mixed",
+     comm_overlap_config: Optional[CommOverlapConfig] = None,
+ ) -> ConfigContainer:
+@@ -166,6 +218,11 @@ def _llama2_common(
+         save_interval (int): Save interval.
+         precision_config (Optional[Union[MixedPrecisionConfig, str]]): Precision configuration for the model.
+         comm_overlap_config (Optional[CommOverlapConfig]): Communication overlap configuration for the model.
++        adam_beta1 (float): Beta1 parameter for Adam optimizer.
++        adam_beta2 (float): Beta2 parameter for Adam optimizer.
++        adam_eps (float): Epsilon parameter for Adam optimizer.
++        weight_decay (float): Weight decay parameter for Adam optimizer.
++        eval_iters (int): Number of iterations to run for evaluation validation/test for.
+ 
+     Returns:
+         ConfigContainer: Configuration for pre-training.
+@@ -175,10 +232,6 @@ def _llama2_common(
+     checkpoint_dir = os.path.join(run_output_dir, "checkpoints")
+     tensorboard_dir = os.path.join(run_output_dir, "tb_logs")
+ 
+-    blend, blend_per_split, split = get_blend_fields_from_data_paths(
+-        data_paths, data_args_path, train_data_path, valid_data_path, test_data_path, per_split_data_args_path, mock
+-    )
+-
+     bridge = AutoBridge.from_hf_pretrained(hf_path)
+     model_cfg = bridge.to_megatron_provider(load_weights=False)
+     model_cfg.tensor_model_parallel_size = tensor_model_parallel_size
+@@ -192,21 +245,24 @@ def _llama2_common(
+     opt_config, scheduler = distributed_fused_adam_with_cosine_annealing(
+         lr_warmup_iters=lr_warmup_iters,
+         lr_decay_iters=lr_decay_iters,
+-        adam_beta1=0.9,
+-        adam_beta2=0.95,
+-        adam_eps=1e-5,
+-        weight_decay=0.1,
++        adam_beta1=adam_beta1,
++        adam_beta2=adam_beta2,
++        adam_eps=adam_eps,
++        weight_decay=weight_decay,
+         max_lr=lr,
+         min_lr=min_lr,
+     )
+ 
++    # PEFT config
++    peft_config = default_peft_config(peft)
++
+     # Config Container
+     cfg = ConfigContainer(
+         model=model_cfg,
+         train=TrainingConfig(
+             train_iters=train_iters,
+             eval_interval=eval_interval,
+-            eval_iters=32,
++            eval_iters=eval_iters,
+             global_batch_size=global_batch_size,
+             micro_batch_size=micro_batch_size,
+             manual_gc=True,
+@@ -224,22 +280,22 @@ def _llama2_common(
+             use_distributed_optimizer=True,
+             use_megatron_fsdp=use_megatron_fsdp,  # need use_distributed_optimizer=True
+         ),
+-        dataset=GPTDatasetConfig(
+-            random_seed=1234,
+-            reset_attention_mask=False,
+-            reset_position_ids=False,
+-            eod_mask_loss=False,
++        dataset=FinetuningDatasetConfig(
++            dataset_root="/data",  # Point to your .npy files directory
+             seq_length=seq_length,
+-            num_dataset_builder_threads=1,
+-            blend=blend,
+-            blend_per_split=blend_per_split,
+-            split=split,
++            seed=1234,
++            packed_sequence_specs=PackedSequenceSpecs(
++                packed_sequence_size=seq_length,  # Should match your packed data
++                tokenizer_model_name=hf_path,
++                packed_train_data_path="/data/train.npy",  # Path to your .npy file
++                packed_val_data_path="/data/validation.npy",  # Optional
++            ),
+             # Dataloader config parameters
+             data_sharding=True,
+-            dataloader_type="single",
+-            num_workers=8,
+-            skip_getting_attention_mask_from_dataset=True,
++            dataloader_type="batch",  # "batch" is recommended for fine-tuning
++            num_workers=1,
+         ),
++
+         logger=LoggerConfig(
+             log_interval=10,
+             tensorboard_dir=tensorboard_dir,
+@@ -251,14 +307,16 @@ def _llama2_common(
+         ),
+         checkpoint=CheckpointConfig(
+             save_interval=save_interval,
+-            save=checkpoint_dir,
+-            load=checkpoint_dir,
++            save=None,
++            load=None,
++            pretrained_checkpoint=pretrained_checkpoint,
+             ckpt_format="torch_dist",
+             fully_parallel_save=True,
+         ),
+         rng=RNGConfig(seed=1234),
+         comm_overlap=comm_overlap_config,
+         mixed_precision=precision_config,
++        peft=peft_config,
+     )
+ 
+     if cfg.comm_overlap is None:
