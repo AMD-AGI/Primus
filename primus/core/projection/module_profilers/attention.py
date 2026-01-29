@@ -1,15 +1,16 @@
-###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-
+from typing import Optional
 
 import torch
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 
 from .utils import benchmark_layer
+
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 
 class AttentionProfiler(BaseModuleProfiler):
@@ -26,7 +27,7 @@ class AttentionProfiler(BaseModuleProfiler):
         self._cached_results = None
         self._cache_key = None
 
-    def estimated_num_params(self, rank: int | None = None) -> int:
+    def estimated_num_params(self, rank: Optional[int] = None) -> int:
         args = self.config.model_config
         # Group-query & multi-latent attention support.
         # If GQA not enabled, fall back to per-head queries.

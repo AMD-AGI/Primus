@@ -1,9 +1,4 @@
-###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-
+from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
@@ -16,6 +11,12 @@ from .moe_mlp import MoEMLPProfiler
 from .residual_add import ResidualAddProfiler
 from .router import RouterProfiler
 from .utils import benchmark_layer
+
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 # Transformer Layer Data Flow
 #
@@ -82,7 +83,7 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
         self._cached_results = None
         self._cache_key = None
 
-    def estimated_num_params(self, rank: int | None = None) -> int:
+    def estimated_num_params(self, rank: Optional[int] = None) -> int:
         return (
             self.sub_profilers["layer_norm"].estimated_num_params(rank) * 3
             + self.sub_profilers["self_attention"].estimated_num_params(rank)
@@ -142,7 +143,7 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         self._cached_results = None
         self._cache_key = None
 
-    def estimated_num_params(self, rank: int | None = None) -> int:
+    def estimated_num_params(self, rank: Optional[int] = None) -> int:
         return (
             self.sub_profilers["layer_norm"].estimated_num_params(rank) * 3
             + self.sub_profilers["self_attention"].estimated_num_params(rank)

@@ -1,10 +1,5 @@
-###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-
 import os
+from typing import List, Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
@@ -18,6 +13,12 @@ from .transformer_layer import (
     get_dense_transformer_layer_profiler_spec,
     get_moe_transformer_layer_profiler_spec,
 )
+
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 
 def build_profiler(spec: ModuleProfilerSpec, depth=0) -> BaseModuleProfiler:
@@ -89,8 +90,8 @@ class LanguageModelProfiler(BaseModuleProfiler):
         tp_size: int,
         cp_size: int,
         ep_size: int,
-        num_virtual_pipeline_stages: int | None = None,
-    ) -> list[int]:
+        num_virtual_pipeline_stages: Optional[int] = None,
+    ) -> List[int]:
         total_stages = pp_size
         if num_virtual_pipeline_stages is not None:
             total_stages = total_stages * num_virtual_pipeline_stages
@@ -122,6 +123,83 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
         return assigned_layers
 
+    def _estimate_layer_communication(self, layer_idx: int, layer_type: str):
+        """
+        Estimate communication overhead for a single layer.
+
+        Args:
+            layer_idx: Index of the layer
+            layer_type: Type of layer ('dense' or 'moe')
+
+        Returns:
+            List of communication operations with time and message size
+        """
+        from primus.core.projection.module_profilers import collective_model as cm
+        from primus.core.projection.module_profilers.collective_args import (
+            get_default_args,
+        )
+
+        mp_config = self.config.model_parallel_config
+        model_config = self.config.model_config
+        runtime_config = self.config.runtime_config
+
+        tp = mp_config.tensor_model_parallel_size
+        pp = mp_config.pipeline_model_parallel_size
+        ep = getattr(mp_config, "expert_model_parallel_size", 1)
+        cp = getattr(mp_config, "context_model_parallel_size", 1)
+
+        # Only estimate communication for EP (TP AllReduce is already in the benchmarked run)
+        # PP communication is handled separately in pipeline simulation
+        if ep == 1:
+            return []
+
+        # Get configuration
+        hidden_size = model_config.hidden_size
+        batch_size = runtime_config.micro_batch_size
+        seq_len = runtime_config.sequence_length
+        moe_router_topk = model_config.moe_router_topk
+
+        # Setup collective model
+        num_nodes = int(os.getenv("NNODES", "1"))
+        gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
+
+        coll_args = get_default_args(
+            num_nodes=num_nodes,
+            gpus_per_node=gpus_per_node,
+            tp=tp,
+            pp=pp,
+            ep=ep,
+            cp=cp,
+            hardware_config=None,
+        )
+
+        comm_ops = []
+
+        # MoE All-to-All (if EP > 1 and this is a MoE layer)
+        if ep > 1 and layer_type == "moe":
+            tokens_per_batch = seq_len * batch_size
+            dispatch_size = tokens_per_batch * hidden_size * moe_router_topk * 2  # BF16
+
+            a2a_dispatch = cm.alltoall(coll_args, dispatch_size, ep, groups=["ep"])
+            # dispatch time is same as combine time
+            a2a_combine = a2a_dispatch
+
+            # Forward: dispatch + combine, Backward: same
+            fwd_time = (a2a_dispatch + a2a_combine) / 1000  # Convert to ms
+            bwd_time = fwd_time  # Same as forward
+
+            comm_ops.append(
+                {
+                    "type": "MoE All-to-All",
+                    "time_fwd_ms": fwd_time,
+                    "time_bwd_ms": bwd_time,
+                    "message_size_mb": dispatch_size / (1024 * 1024),
+                    "group_size": ep,
+                }
+            )
+
+        return comm_ops
+
     def get_dp_size(self) -> int:
         num_nodes = int(os.getenv("NNODES", "1"))
         if num_nodes == 1:
@@ -148,7 +226,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
         optimizer_state_multiplier = 10 / dp_size  # DP sharding
         return multiplier + optimizer_state_multiplier
 
-    def estimated_num_params(self, rank: int | None = None) -> int:
+    def estimated_num_params(self, rank: Optional[int] = None) -> int:
         total_params = 0
         if rank is None:
             layers = range(self.config.model_config.num_layers)
@@ -361,13 +439,15 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
             profiled_types.add(layer_type)
 
-            print(f"  Forward time:  {forward_time:.2f} ms")
-            print(f"  Backward time: {backward_time:.2f} ms")
+            print(f"  Forward time :  {forward_time:.2f} ms")
+            print(f"  Backward time : {backward_time:.2f} ms")
             print(f"  Activation memory: {activation_memory / (1024**2):.2f} MB")
             print(f"  Attention Forward: {attn_forward:.2f} ms, Backward: {attn_backward:.2f} ms")
             print(f"  Attention Activation memory: {attn_mem / (1024**2):.2f} MB")
             print(f"  MLP Forward: {mlp_forward:.2f} ms, Backward: {mlp_backward:.2f} ms")
             print(f"  MLP Activation memory: {mlp_mem / (1024**2):.2f} MB")
+            # Note: Communication time (All-to-All) is already included in the benchmarked kernel timing
+            # EP scaling overhead is handled separately in performance_projection when EP is rescaled
 
         # Expand results to all layers
         final_results = {}
