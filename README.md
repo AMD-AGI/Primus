@@ -90,6 +90,7 @@ Comprehensive documentation is available in the [`docs/`](./docs/) directory:
 - **[Quick Start Guide](./docs/quickstart.md)** - Get started in 5 minutes
 - **[Primus CLI User Guide](./docs/cli/PRIMUS-CLI-GUIDE.md)** - Complete CLI reference and usage
 - **[CLI Architecture](./docs/cli/CLI-ARCHITECTURE.md)** - Technical design and architecture
+- **[Native SFT Guide](./docs/sft_native.md)** - Supervised fine-tuning with native Megatron backend
 - **[Backend Patch Notes](./docs/backends/overview.md)** - Primus-specific backend arguments
 - **[Full Documentation Index](./docs/README.md)** - Browse all available documentation
 
