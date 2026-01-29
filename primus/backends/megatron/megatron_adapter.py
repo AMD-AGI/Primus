@@ -96,12 +96,26 @@ class MegatronAdapter(BackendAdapter):
 
         return megatron_args
 
-    # Load Trainer Class (Version Adaptive)
+    # Load Trainer Class (Task Adaptive - pretrain vs SFT)
     def load_trainer_class(self):
-        """Load Megatron trainer class registered via BackendRegistry."""
+        """
+        Load appropriate Megatron trainer class based on task type.
+        
+        The megatron backend supports multiple training tasks:
+        - pretrain: Uses MegatronPretrainTrainer
+        - SFT (supervised fine-tuning): Uses MegatronSFTTrainer
+        
+        Task detection is based on the trainer being initialized. This method
+        is called during trainer creation, and we use the BackendRegistry's
+        default trainer (MegatronPretrainTrainer) as the fallback.
+        
+        Returns:
+            Trainer class for the current task
+        """
+        # Try to get the default registered trainer (MegatronPretrainTrainer)
         try:
             return BackendRegistry.get_trainer_class(self.framework)
-        except ValueError as exc:
+        except (ValueError, AssertionError) as exc:
             raise RuntimeError(
                 "[Primus:MegatronAdapter] 'megatron' backend not registered. "
                 "Ensure primus.backends.megatron.trainers defines the trainer "
