@@ -249,9 +249,9 @@ class BackendAdapter(ABC):
             merge_namespace(backend_args, params, allow_override=False, excepts=excepts)
             module_config.params = backend_args
 
-        # 5) load trainer class from backend
+        # 5) load trainer class from backend (with stage detection)
         log_rank_0("[Step 5/5] Loading trainer class...")
-        TrainerClass = self.load_trainer_class()
+        TrainerClass = self.load_trainer_class(module_config)
         log_rank_0(f"Trainer class loaded: {TrainerClass.__name__}")
 
         log_rank_0("=" * 80)

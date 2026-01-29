@@ -130,9 +130,12 @@ class MegatronBridgeAdapter(BackendAdapter):
         return bridge_args
 
     # Load Trainer Class
-    def load_trainer_class(self):
+    def load_trainer_class(self, module_config=None):
         """
         Load Megatron-Bridge trainer class registered via BackendRegistry.
+
+        Args:
+            module_config: Module configuration (optional, for stage detection)
 
         This allows Primus runtime to remain agnostic to the actual trainer
         implementation (pretrain, sft, etc.).
