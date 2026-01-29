@@ -12,6 +12,3 @@ modules:
     model: wan22.yaml
     overrides:
       stderr_sink_level: DEBUG
-      warp_denoising_step: true # need to remove - 0 in denoising_step_list if warp_denoising_step is true
-      num_frames: 121
-      num_training_frames: 31
