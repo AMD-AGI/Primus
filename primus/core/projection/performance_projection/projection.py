@@ -1279,7 +1279,7 @@ def _run_multinode_projection(
         runtime_config = training_config.runtime_config
         seq_len = getattr(runtime_config, "sequence_length", 4096)
         global_batch = getattr(runtime_config, "global_batch_size", 128)
-        
+
         # Calculate tokens/s (tokens processed per second across all GPUs)
         tokens_per_iter = global_batch * seq_len
         target_tokens_per_sec = tokens_per_iter * 1000 / projected_time_ms if projected_time_ms > 0 else 0
