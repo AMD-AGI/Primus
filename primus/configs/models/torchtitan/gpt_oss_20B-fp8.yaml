@@ -1,0 +1,11 @@
+job:
+  dump_folder: "./outputs"
+  description: "GPT-OSS 20B training"
+
+model:
+  name: "gpt_oss"
+  flavor: "20b"
+  hf_assets_path: "openai/gpt-oss-20b"
+  converters:
+    - primus_turbo
+    - quantize.linear.float8
