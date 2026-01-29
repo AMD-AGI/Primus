@@ -113,7 +113,7 @@ class TestMegatronAdapterTrainerLoading:
         mock_registry.get_trainer_class.return_value = mock_trainer_class
 
         adapter = MegatronAdapter()
-        result = adapter.load_trainer_class()
+        result = adapter.load_trainer_class(stage=None)
 
         mock_registry.get_trainer_class.assert_called_once_with("megatron", stage=None)
         assert result == mock_trainer_class
@@ -126,7 +126,7 @@ class TestMegatronAdapterTrainerLoading:
         adapter = MegatronAdapter()
 
         with pytest.raises(RuntimeError) as exc_info:
-            adapter.load_trainer_class()
+            adapter.load_trainer_class(stage=None)
 
         error_msg = str(exc_info.value)
         assert "megatron" in error_msg

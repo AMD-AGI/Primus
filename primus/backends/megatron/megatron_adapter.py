@@ -96,24 +96,17 @@ class MegatronAdapter(BackendAdapter):
 
         return megatron_args
 
-    # Load Trainer Class (Version Adaptive)
-    def load_trainer_class(self, module_config=None):
+    # Load Trainer Class (Stage-Aware)
+    def load_trainer_class(self, stage: str | None = None):
         """
         Load Megatron trainer class registered via BackendRegistry.
 
-        The stage is determined by (in order of priority):
-            1. module_config.stage (explicit configuration)
-            2. module_config.params.stage (from YAML overrides)
-            3. Inferred from module name (pre_trainer → pretrain, sft_trainer → sft)
-            4. Default stage for the framework
-
         Args:
-            module_config: Module configuration (optional, for stage detection)
+            stage: Optional stage name (e.g., "pretrain", "sft").
 
         Returns:
-            Trainer class for the determined stage.
+            Trainer class for the specified stage.
         """
-        stage = self._resolve_stage(module_config)
         if stage:
             log_rank_0(f"[Primus:MegatronAdapter] Loading trainer for stage: {stage}")
 
@@ -132,64 +125,3 @@ class MegatronAdapter(BackendAdapter):
                     "[Primus:MegatronAdapter] 'megatron' backend not registered. "
                     "Ensure primus.backends.megatron defines the trainer."
                 ) from exc
-
-    def _resolve_stage(self, module_config) -> str:
-        """
-        Resolve training stage from module configuration.
-
-        Priority:
-            1. module_config.stage (explicit)
-            2. module_config.params.stage (from overrides)
-            3. Inferred from module name
-            4. Default stage (None - let registry decide)
-
-        Args:
-            module_config: Module configuration
-
-        Returns:
-            Stage name (e.g., "pretrain", "sft") or None for default
-        """
-        if module_config is None:
-            return None
-
-        # 1. Explicit stage in module_config
-        if hasattr(module_config, "stage") and module_config.stage:
-            return module_config.stage
-
-        # 2. Stage in params (from YAML overrides)
-        params = getattr(module_config, "params", None)
-        if params and hasattr(params, "stage") and params.stage:
-            return params.stage
-
-        # 3. Infer from module name
-        module_name = getattr(module_config, "name", "")
-        return self._infer_stage_from_name(module_name)
-
-    def _infer_stage_from_name(self, module_name: str) -> str:
-        """
-        Infer training stage from module name.
-
-        Mapping:
-            - pre_trainer, pretrain_trainer → pretrain
-            - sft_trainer → sft
-            - post_trainer, posttrain_trainer → sft
-
-        Args:
-            module_name: Module name from config
-
-        Returns:
-            Inferred stage name, or None if cannot infer
-        """
-        if not module_name:
-            return None
-
-        name_lower = module_name.lower()
-
-        if "pre_train" in name_lower or name_lower == "pre_trainer":
-            return "pretrain"
-        elif "sft" in name_lower:
-            return "sft"
-        elif "post_train" in name_lower or name_lower == "post_trainer":
-            return "sft"  # post_trainer typically means SFT
-
-        return None
