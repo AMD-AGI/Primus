@@ -204,24 +204,25 @@ Min Nodes = ceil(TP × PP × EP × CP / GPUs_per_node)
   Benchmark Microbatches: 160 (global_batch=640, micro_batch=4, benchmark_dp=1)
 
 ====================================================================================================
-[Primus:Performance] Running multinode scaling projection
+Multinode Scaling Projection Results
 ====================================================================================================
 
-====================================================================================================
-Parallelism Configuration
-====================================================================================================
-  TP: 1, PP: 1, EP: 8, CP: 1
-  GPUs per Node: 8
-  Minimum GPUs Required: 8
-  Minimum Nodes Required: 1
-  Target Nodes: 4
+📊 Parallelism: TP=1, PP=1, EP=8, CP=1
 
-====================================================================================================
-📊 Performance Summary:
-   Base Projection:   15789.123 ms (1 node, DP=1) [from single-node profiling]
-   Target Projection: 4012.456 ms (4 nodes, DP=4)
-   Gradient AllReduce: +45.123 ms (inter-node)
-   
+🎯 Target Configuration (4 nodes):
+   Nodes: 4, GPUs: 32
+   TP=1, PP=1, EP=8, CP=1, DP=4
+   DP Scaling Factor: 4.0x
+   Iteration Time: 4012.456 ms
+   Tokens/s: 649,123
+
+📡 Communication Breakdown:
+   gradient_allreduce: 45.123 ms (message: 1024.00 MB) [OVERLAPPED]
+   moe_a2a_fwd: 230.500 ms (message: 64.00 MB, 26 layers × 8.866 ms/layer)
+   moe_a2a_bwd: 230.500 ms (message: 64.00 MB, 26 layers × 8.866 ms/layer)
+
+   Total Communication (critical path): 461.000 ms
+
 ====================================================================================================
 ```
 
