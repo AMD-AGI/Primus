@@ -10,7 +10,7 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: deepseek_v3_16b.yaml
+    model: deepseek_v3_16b-fp8.yaml
     overrides:
       profiling:
         enable_profiling: false
