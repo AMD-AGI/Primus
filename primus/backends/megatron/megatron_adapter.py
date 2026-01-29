@@ -142,9 +142,11 @@ class MegatronAdapter(BackendAdapter):
         Determine if the current task is SFT based on module_config.
         
         Detection strategy:
-        1. Check for explicit SFT marker (is_instruction_dataset, is_sft, etc.)
-        2. Check for SFT-specific parameters
-        3. Default to False (pretrain)
+        1. Check for explicit SFT marker (is_instruction_dataset, is_sft)
+        2. Default to False (pretrain)
+        
+        Note: We DO NOT use finetune_lr as an indicator, as it can be used
+        for non-SFT fine-tuning tasks or continued pretraining.
         
         Returns:
             True if SFT task, False otherwise
@@ -155,17 +157,19 @@ class MegatronAdapter(BackendAdapter):
         # Check for explicit SFT markers in params
         params = getattr(self._current_module_config, 'params', None)
         if params:
-            # Check for is_instruction_dataset flag
-            if hasattr(params, 'is_instruction_dataset'):
-                return bool(params.is_instruction_dataset)
-            
-            # Check for other SFT indicators
-            if hasattr(params, 'is_sft'):
-                return bool(params.is_sft)
-            
-            # Check for finetune_lr (commonly used for SFT)
-            if hasattr(params, 'finetune_lr'):
-                return True
+            # Handle both SimpleNamespace and dict params
+            if isinstance(params, dict):
+                # params is a dictionary
+                if params.get('is_instruction_dataset', False):
+                    return True
+                if params.get('is_sft', False):
+                    return True
+            else:
+                # params is a SimpleNamespace or similar object
+                if getattr(params, 'is_instruction_dataset', False):
+                    return True
+                if getattr(params, 'is_sft', False):
+                    return True
         
         # Default to pretrain
         return False

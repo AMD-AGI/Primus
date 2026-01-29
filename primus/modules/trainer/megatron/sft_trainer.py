@@ -69,7 +69,7 @@ class MegatronSFTTrainer(MegatronTrainer):
                     shard_batch_on_this_cp_rank,
                 )
             except ImportError:
-                raise ImportError("Module 'primus_turbo' may not installed. Please install it")
+                raise ImportError("Module 'primus_turbo' may not be installed. Please install it")
             sharder = produce_attention_sharder(args.cp_comm_type)
             batch = shard_batch_on_this_cp_rank(sharder, batch)
         else:

@@ -56,12 +56,11 @@ modules:
 
 ### Task Detection
 
-The megatron backend automatically detects SFT tasks using these markers:
-1. `is_instruction_dataset: true` (explicit marker)
+The megatron backend automatically detects SFT tasks using explicit markers:
+1. `is_instruction_dataset: true` (recommended marker)
 2. `is_sft: true` (alternative marker)
-3. `finetune_lr` parameter (indicates fine-tuning)
 
-If any of these are present, the backend loads the SFT trainer instead of the pretrain trainer.
+**Important**: At least one of these markers must be explicitly set to `true` in your configuration for the SFT trainer to be selected. The backend does NOT automatically infer SFT based on other parameters like `finetune_lr` to avoid incorrect trainer selection for non-SFT fine-tuning tasks.
 
 ### Example Configuration
 
@@ -213,14 +212,14 @@ no_load_rng: true  # Don't load RNG state
 
 ### Issue: Trainer not detected as SFT
 
-**Solution**: Ensure you have one of these markers in your config:
+**Solution**: Ensure you explicitly set one of these markers in your config:
 ```yaml
-is_instruction_dataset: true
+is_instruction_dataset: true  # Recommended
 # OR
 is_sft: true
-# OR
-finetune_lr: 5.0e-6
 ```
+
+Note: The backend does NOT automatically detect SFT from other parameters like `finetune_lr` to avoid incorrect trainer selection for non-SFT fine-tuning tasks. You must explicitly mark your configuration as SFT.
 
 ### Issue: Loss not being masked correctly
 
