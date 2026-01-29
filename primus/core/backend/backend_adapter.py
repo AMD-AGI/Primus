@@ -83,13 +83,17 @@ class BackendAdapter(ABC):
         """
 
     @abstractmethod
-    def load_trainer_class(self):
+    def load_trainer_class(self, module_config=None):
         """
         Return backend Trainer class.
 
-        Megatron → MegatronTrainer
-        Titan → TitanTrainer
-        Turbo → TurboTrainer
+        Args:
+            module_config: Module configuration (optional, for stage detection)
+                           Backends with multiple stages (e.g., pretrain, sft)
+                           can use this to select the appropriate trainer class.
+
+        Returns:
+            Trainer class (Megatron → MegatronTrainer, etc.)
         """
 
     @abstractmethod

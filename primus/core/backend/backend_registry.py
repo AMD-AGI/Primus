@@ -54,8 +54,14 @@ class BackendRegistry:
     # Backend → AdapterClass (class, not instance)
     _adapters: Dict[str, Type] = {}
 
-    # Backend → TrainerClass (optional)
+    # Backend → TrainerClass (optional, for simple backends)
     _trainer_classes: Dict[str, Type] = {}
+
+    # (Backend, Stage) → TrainerClass (for backends with multiple stages)
+    _staged_trainer_classes: Dict[tuple, Type] = {}
+
+    # Backend → default stage
+    _default_stages: Dict[str, str] = {}
 
     # Backend → list of setup hooks
     _setup_hooks: Dict[str, List[Callable]] = {}
@@ -290,23 +296,115 @@ class BackendRegistry:
     #  TrainerClass Registration (optional)
     # ----------------------------------------------------------------------
     @classmethod
-    def register_trainer_class(cls, backend: str, trainer_cls: Type):
+    def register_trainer_class(cls, backend: str, trainer_cls: Type, stage: str = None):
         """
-        Register trainer class for backend (optional).
-        This is useful for simple backends or Primus-native trainer classes.
+        Register trainer class for backend with optional stage.
+
+        Args:
+            backend: Backend name (e.g., "megatron", "torchtitan")
+            trainer_cls: Trainer class to register
+            stage: Optional stage name (e.g., "pretrain", "sft", "posttrain")
+                   If None, registers as the default/only trainer for this backend.
+
+        Examples:
+            # Simple registration (no stages)
+            register_trainer_class("torchtitan", TorchTitanPretrainTrainer)
+
+            # Staged registration
+            register_trainer_class("megatron", MegatronPretrainTrainer, stage="pretrain")
+            register_trainer_class("megatron", MegatronSFTTrainer, stage="sft")
         """
-        cls._trainer_classes[backend] = trainer_cls
+        if stage is None:
+            # Simple registration (backward compatible)
+            cls._trainer_classes[backend] = trainer_cls
+        else:
+            # Staged registration
+            cls._staged_trainer_classes[(backend, stage)] = trainer_cls
 
     @classmethod
-    def get_trainer_class(cls, backend: str):
-        assert (
-            backend in cls._trainer_classes
-        ), f"[Primus] No trainer class registered for backend '{backend}'."
-        return cls._trainer_classes[backend]
+    def set_default_stage(cls, backend: str, stage: str):
+        """
+        Set the default stage for a backend.
+
+        When get_trainer_class is called without a stage, this default is used.
+
+        Args:
+            backend: Backend name
+            stage: Default stage name
+        """
+        cls._default_stages[backend] = stage
 
     @classmethod
-    def has_trainer_class(cls, backend: str) -> bool:
+    def get_trainer_class(cls, backend: str, stage: str = None):
+        """
+        Get trainer class for backend with optional stage.
+
+        Args:
+            backend: Backend name (e.g., "megatron", "torchtitan")
+            stage: Optional stage name. If None:
+                   - First checks for staged registration with default stage
+                   - Falls back to simple registration
+
+        Returns:
+            Trainer class
+
+        Raises:
+            ValueError: If no trainer class found for backend/stage combination
+        """
+        # If stage not specified, try to use default stage
+        if stage is None:
+            stage = cls._default_stages.get(backend)
+
+        # Try staged registration first
+        if stage is not None:
+            key = (backend, stage)
+            if key in cls._staged_trainer_classes:
+                return cls._staged_trainer_classes[key]
+
+        # Fall back to simple registration
+        if backend in cls._trainer_classes:
+            return cls._trainer_classes[backend]
+
+        # Build error message
+        available_stages = cls.list_stages(backend)
+        if available_stages:
+            raise ValueError(
+                f"[Primus] No trainer class for backend '{backend}' with stage '{stage}'.\n"
+                f"Available stages for '{backend}': {', '.join(available_stages)}"
+            )
+        else:
+            raise ValueError(
+                f"[Primus] No trainer class registered for backend '{backend}'."
+            )
+
+    @classmethod
+    def has_trainer_class(cls, backend: str, stage: str = None) -> bool:
+        """Check if trainer class is registered for backend/stage."""
+        if stage is None:
+            stage = cls._default_stages.get(backend)
+
+        if stage is not None:
+            if (backend, stage) in cls._staged_trainer_classes:
+                return True
+
         return backend in cls._trainer_classes
+
+    @classmethod
+    def list_stages(cls, backend: str) -> List[str]:
+        """
+        List all registered stages for a backend.
+
+        Args:
+            backend: Backend name
+
+        Returns:
+            List of stage names
+        """
+        stages = []
+        for (b, s) in cls._staged_trainer_classes.keys():
+            if b == backend:
+                stages.append(s)
+        return sorted(stages)
 
     # ----------------------------------------------------------------------
     # Setup Hook Registration
@@ -352,5 +450,7 @@ class BackendRegistry:
         print("Path Names:       ", cls._path_names)
         print("Adapters:         ", cls._adapters)
         print("Trainer Classes:  ", cls._trainer_classes)
+        print("Staged Trainers:  ", {f"{b}:{s}": t.__name__ for (b, s), t in cls._staged_trainer_classes.items()})
+        print("Default Stages:   ", cls._default_stages)
         print("Setup Hooks:      ", {k: len(v) for k, v in cls._setup_hooks.items()})
         print("=============================================\n")
