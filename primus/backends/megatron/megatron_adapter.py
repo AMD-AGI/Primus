@@ -110,18 +110,4 @@ class MegatronAdapter(BackendAdapter):
         if stage:
             log_rank_0(f"[Primus:MegatronAdapter] Loading trainer for stage: {stage}")
 
-        try:
-            return BackendRegistry.get_trainer_class(self.framework, stage=stage)
-        except ValueError as exc:
-            available_stages = BackendRegistry.list_stages(self.framework)
-            if available_stages:
-                raise RuntimeError(
-                    f"[Primus:MegatronAdapter] No trainer for stage '{stage}'.\n"
-                    f"Available stages: {', '.join(available_stages)}\n"
-                    f"Hint: Set stage in config or use module name like 'pre_trainer' or 'sft_trainer'"
-                ) from exc
-            else:
-                raise RuntimeError(
-                    "[Primus:MegatronAdapter] 'megatron' backend not registered. "
-                    "Ensure primus.backends.megatron defines the trainer."
-                ) from exc
+        return BackendRegistry.get_trainer_class(self.framework, stage=stage)
