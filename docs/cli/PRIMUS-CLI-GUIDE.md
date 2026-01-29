@@ -22,7 +22,7 @@
 ### Basic Syntax
 
 ```bash
-primus-cli [global-options] <mode> [mode-args] -- [Primus commands and args]
+./primus-cli [global-options] <mode> [mode-args] -- [Primus commands and args]
 ```
 
 ### Core Concepts
@@ -36,7 +36,7 @@ primus-cli [global-options] <mode> [mode-args] -- [Primus commands and args]
 
 ```bash
 # Run GEMM benchmark directly on current host
-primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
+./primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
 ```
 
 ---
@@ -56,19 +56,19 @@ Primus CLI supports three execution modes, each suitable for different scenarios
 
 **Syntax**:
 ```bash
-primus-cli direct [options] -- <Primus-command>
+./primus-cli direct [options] -- <Primus-command>
 ```
 
 **Examples**:
 ```bash
 # Basic training
-primus-cli direct -- train pretrain --config config.yaml
+./primus-cli direct -- train pretrain --config config.yaml
 
 # GEMM benchmark
-primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
+./primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
 
 # Environment check (info only)
-primus-cli direct -- preflight --host --gpu --network
+./primus-cli direct -- preflight --host --gpu --network
 ```
 
 **Suitable for**:
@@ -91,7 +91,7 @@ primus-cli direct -- preflight --host --gpu --network
 
 **Syntax**:
 ```bash
-primus-cli container [container-options] -- <Primus-command>
+./primus-cli container [container-options] -- <Primus-command>
 ```
 
 **Common Options**:
@@ -106,19 +106,19 @@ primus-cli container [container-options] -- <Primus-command>
 **Examples**:
 ```bash
 # Run training with default image
-primus-cli container -- train pretrain --config config.yaml
+./primus-cli container -- train pretrain --config config.yaml
 
 # Specify image and mount data directory
-primus-cli container --image rocm/primus:latest \
+./primus-cli container --image rocm/primus:latest \
   --volume /mnt/data:/data \
   -- train pretrain --config /data/config.yaml
 
 # Set resource limits
-primus-cli container --cpus 32 --memory 256G \
+./primus-cli container --cpus 32 --memory 256G \
   -- benchmark gemm -M 8192 -N 8192 -K 8192
 
 # Mount local Primus code for development
-primus-cli container --volume ~/workspace/Primus:/workspace/Primus \
+./primus-cli container --volume ~/workspace/Primus:/workspace/Primus \
   -- train pretrain
 ```
 
@@ -142,7 +142,7 @@ primus-cli container --volume ~/workspace/Primus:/workspace/Primus \
 
 **Syntax**:
 ```bash
-primus-cli slurm [srun|sbatch] [Slurm-params] -- <Primus-command>
+./primus-cli slurm [srun|sbatch] [Slurm-params] -- <Primus-command>
 ```
 
 **Common Slurm Parameters**:
@@ -157,17 +157,17 @@ primus-cli slurm [srun|sbatch] [Slurm-params] -- <Primus-command>
 **Examples**:
 ```bash
 # Run training on 4 nodes using srun (interactive)
-primus-cli slurm srun -N 4 -p gpu -- train pretrain --config config.yaml
+./primus-cli slurm srun -N 4 -p gpu -- train pretrain --config config.yaml
 
 # Submit batch job using sbatch
-primus-cli slurm sbatch -N 8 -p AIG_Model -t 8:00:00 -o train.log \
+./primus-cli slurm sbatch -N 8 -p AIG_Model -t 8:00:00 -o train.log \
   -- train pretrain --config deepseek_v2.yaml
 
 # Run distributed GEMM benchmark
-primus-cli slurm srun -N 2 -- benchmark gemm -M 16384 -N 16384 -K 16384
+./primus-cli slurm srun -N 2 -- benchmark gemm -M 16384 -N 16384 -K 16384
 
 # Multi-node environment check (info only)
-primus-cli slurm srun -N 4 -- preflight --host --gpu --network
+./primus-cli slurm srun -N 4 -- preflight --host --gpu --network
 ```
 
 **Suitable for**:
@@ -241,13 +241,13 @@ direct:
 
 ```bash
 # Use project config file
-primus-cli --config .primus.yaml slurm srun -N 4 -- train pretrain
+./primus-cli --config .primus.yaml slurm srun -N 4 -- train pretrain
 
 # Use custom user config
-primus-cli --config ~/my-config.yaml container -- benchmark gemm
+./primus-cli --config ~/my-config.yaml container -- benchmark gemm
 
 # Config file + command-line args (command-line has higher priority)
-primus-cli --config prod.yaml slurm srun -N 8 -- train pretrain
+./primus-cli --config prod.yaml slurm srun -N 8 -- train pretrain
 ```
 
 ### Configuration Priority
@@ -261,7 +261,7 @@ Command-line args > Specified config file > System default config > User config
 ```bash
 # Config file sets nodes=2, command-line specifies -N 4
 # Final result uses 4 nodes (command-line takes priority)
-primus-cli --config .primus.yaml slurm srun -N 4 -- train pretrain
+./primus-cli --config .primus.yaml slurm srun -N 4 -- train pretrain
 ```
 
 ---
@@ -273,30 +273,30 @@ primus-cli --config .primus.yaml slurm srun -N 4 -- train pretrain
 #### Single-Node Training (Direct)
 ```bash
 # Basic training
-primus-cli direct -- train pretrain --config config.yaml
+./primus-cli direct -- train pretrain --config config.yaml
 
 # With debug mode
-primus-cli --debug direct -- train pretrain --config config.yaml
+./primus-cli --debug direct -- train pretrain --config config.yaml
 ```
 
 #### Single-Node Training (Container)
 ```bash
 # Run in container
-primus-cli container --volume /data:/data \
+./primus-cli container --volume /data:/data \
   -- train pretrain --config /data/config.yaml
 
 # Custom resource limits
-primus-cli container --cpus 64 --memory 512G \
+./primus-cli container --cpus 64 --memory 512G \
   -- train pretrain --config config.yaml
 ```
 
 #### Multi-Node Training (Slurm)
 ```bash
 # 4-node distributed training
-primus-cli slurm srun -N 4 -p gpu -- train pretrain --config config.yaml
+./primus-cli slurm srun -N 4 -p gpu -- train pretrain --config config.yaml
 
 # Submit batch job
-primus-cli slurm sbatch -N 8 -p AIG_Model -t 12:00:00 \
+./primus-cli slurm sbatch -N 8 -p AIG_Model -t 12:00:00 \
   -o train_%j.log -e train_%j.err \
   -- train pretrain --config deepseek_v2.yaml
 ```
@@ -306,56 +306,56 @@ primus-cli slurm sbatch -N 8 -p AIG_Model -t 12:00:00 \
 #### GEMM Benchmark
 ```bash
 # Single-node GEMM
-primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
+./primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
 
 # Run in container
-primus-cli container -- benchmark gemm -M 8192 -N 8192 -K 8192
+./primus-cli container -- benchmark gemm -M 8192 -N 8192 -K 8192
 
 # Multi-node GEMM
-primus-cli slurm srun -N 2 -- benchmark gemm -M 16384 -N 16384 -K 16384
+./primus-cli slurm srun -N 2 -- benchmark gemm -M 16384 -N 16384 -K 16384
 ```
 
 #### Other Benchmarks
 ```bash
 # All-reduce benchmark
-primus-cli slurm srun -N 4 -- benchmark allreduce --size 1GB
+./primus-cli slurm srun -N 4 -- benchmark allreduce --size 1GB
 
 # End-to-end training performance
-primus-cli slurm srun -N 8 -- benchmark e2e --model llama2-7b
+./primus-cli slurm srun -N 8 -- benchmark e2e --model llama2-7b
 ```
 
 ### Environment Check (Preflight)
 
 ```bash
 # GPU info only
-primus-cli direct -- preflight --gpu
+./primus-cli direct -- preflight --gpu
 
 # Network info only
-primus-cli slurm srun -N 4 -- preflight --network
+./primus-cli slurm srun -N 4 -- preflight --network
 
 # Info only (host + GPU + network)
-primus-cli slurm srun -N 4 -- preflight --host --gpu --network
+./primus-cli slurm srun -N 4 -- preflight --host --gpu --network
 
 # Full preflight (all info + perf tests)
-primus-cli slurm srun -N 4 -- preflight
+./primus-cli slurm srun -N 4 -- preflight
 
 # Perf tests only
-primus-cli slurm srun -N 4 -- preflight --perf-test
+./primus-cli slurm srun -N 4 -- preflight --perf-test
 ```
 
 > Tip: `preflight --host --gpu --network` is intended to be fast (info collection only).
-> For full diagnostics (info + compute + intra/inter-node comm benchmarks), run `primus-cli preflight`
+> For full diagnostics (info + compute + intra/inter-node comm benchmarks), run `./primus-cli preflight`
 > or use `--perf-test` for benchmarks only.
 
 ### Combined Usage
 
 ```bash
 # Config file + debug mode + dry-run
-primus-cli --config prod.yaml --debug --dry-run \
+./primus-cli --config prod.yaml --debug --dry-run \
   slurm srun -N 4 -- train pretrain
 
 # Container + custom image + multiple mount points
-primus-cli container \
+./primus-cli container \
   --image rocm/primus:dev \
   --volume /data:/data \
   --volume /models:/models:ro \
@@ -363,7 +363,7 @@ primus-cli container \
   -- train pretrain --config /data/config.yaml
 
 # Slurm + config file + resource limits
-primus-cli --config cluster.yaml slurm sbatch \
+./primus-cli --config cluster.yaml slurm sbatch \
   -N 16 -p bigmem --exclusive \
   -- train pretrain --config llama3-70b.yaml
 ```
@@ -391,13 +391,13 @@ Specify a custom configuration file, overriding the default config.
 
 ```bash
 # Use production environment config
-primus-cli --config configs/prod.yaml slurm srun -N 4 -- train pretrain
+./primus-cli --config configs/prod.yaml slurm srun -N 4 -- train pretrain
 
 # Use relative path
-primus-cli --config ./my-config.yaml direct -- benchmark gemm
+./primus-cli --config ./my-config.yaml direct -- benchmark gemm
 
 # Use absolute path
-primus-cli --config /shared/configs/cluster.yaml container -- train pretrain
+./primus-cli --config /shared/configs/cluster.yaml container -- train pretrain
 ```
 
 **Config Priority**: `--config` specified file > System default `runner/.primus.yaml` > User config `~/.primus.yaml`
@@ -411,13 +411,13 @@ Enable debug mode, output detailed execution logs including:
 
 ```bash
 # Debug Slurm job
-primus-cli --debug slurm srun -N 2 -- train pretrain --config config.yaml
+./primus-cli --debug slurm srun -N 2 -- train pretrain --config config.yaml
 
 # Debug container startup
-primus-cli --debug container --image rocm/primus:dev -- benchmark gemm
+./primus-cli --debug container --image rocm/primus:dev -- benchmark gemm
 
 # Debug config loading
-primus-cli --debug --config test.yaml direct -- preflight --gpu
+./primus-cli --debug --config test.yaml direct -- preflight --gpu
 ```
 
 **Environment Variable**: `--debug` sets `PRIMUS_LOG_LEVEL=DEBUG`
@@ -431,13 +431,13 @@ Dry-run mode, shows the complete execution command without actually running it. 
 
 ```bash
 # View how Slurm job would be submitted
-primus-cli --dry-run slurm sbatch -N 8 -p gpu -- train pretrain
+./primus-cli --dry-run slurm sbatch -N 8 -p gpu -- train pretrain
 
 # View container startup command
-primus-cli --dry-run container --volume /data:/data -- benchmark gemm
+./primus-cli --dry-run container --volume /data:/data -- benchmark gemm
 
 # View distributed training command
-primus-cli --dry-run direct -- train pretrain --config config.yaml
+./primus-cli --dry-run direct -- train pretrain --config config.yaml
 ```
 
 **Output Format**:
@@ -458,7 +458,7 @@ Entry Script: primus-cli-slurm-entry.sh
 Show Primus CLI version info and exit.
 
 ```bash
-primus-cli --version
+./primus-cli --version
 # Output: Primus CLI v1.0.0
 ```
 
@@ -467,44 +467,44 @@ Show help info, can be used at different levels:
 
 ```bash
 # Main entry help
-primus-cli --help
+./primus-cli --help
 
 # Mode-specific help
-primus-cli direct --help
-primus-cli container --help
-primus-cli slurm --help
+./primus-cli direct --help
+./primus-cli container --help
+./primus-cli slurm --help
 
 # Primus Python CLI help
-primus-cli direct -- --help
-primus-cli direct -- train --help
-primus-cli direct -- benchmark --help
+./primus-cli direct -- --help
+./primus-cli direct -- train --help
+./primus-cli direct -- benchmark --help
 ```
 
 ### Combined Usage Examples
 
 #### Debug + Config File
 ```bash
-primus-cli --config dev.yaml --debug direct -- train pretrain
+./primus-cli --config dev.yaml --debug direct -- train pretrain
 ```
 
 #### Dry-run + Custom Config
 ```bash
-primus-cli --config prod.yaml --dry-run slurm srun -N 4 -- train pretrain
+./primus-cli --config prod.yaml --dry-run slurm srun -N 4 -- train pretrain
 ```
 
 #### Multi-level Debugging
 ```bash
 # View complete command building and execution process
-primus-cli --debug --dry-run slurm sbatch -N 8 -- container --debug -- train pretrain
+./primus-cli --debug --dry-run slurm sbatch -N 8 -- container --debug -- train pretrain
 ```
 
 ### Global Options Scope
 
 ```
-primus-cli [global-options] <mode> [mode-args] -- [Primus commands]
+./primus-cli [global-options] <mode> [mode-args] -- [Primus commands]
            ↑
            └─ Affects entire execution flow
-              • Main entry (primus-cli)
+              • Main entry (./primus-cli)
               • Mode scripts (primus-cli-*.sh)
               • Final execution (primus-cli-direct.sh)
 ```
@@ -526,7 +526,7 @@ primus-cli [global-options] <mode> [mode-args] -- [Primus commands]
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │   User Command                                                         │
-│   primus-cli [global-options] <mode> [mode-args] -- [Primus-cmd]       │
+│   ./primus-cli [global-options] <mode> [mode-args] -- [Primus-cmd]       │
 └─────────────────────────────────┬──────────────────────────────────────┘
                                   │
                                   ↓
@@ -588,7 +588,7 @@ primus-cli [global-options] <mode> [mode-args] -- [Primus commands]
 A complete Slurm multi-node containerized training command:
 
 ```bash
-primus-cli --config prod.yaml --debug \
+./primus-cli --config prod.yaml --debug \
   slurm srun -N 4 -- container --image rocm/megatron-lm:v25.8_py310 \
   -- train pretrain --config deepseek_v2.yaml
 ```
@@ -596,7 +596,7 @@ primus-cli --config prod.yaml --debug \
 **Execution Steps Explained**:
 
 ```
-Step 1: primus-cli main entry
+Step 1: ./primus-cli main entry
   ├─ Parse global options: --config prod.yaml, --debug
   ├─ Load config: prod.yaml + .primus.yaml
   ├─ Extract main.debug=true
@@ -643,8 +643,7 @@ Step 4: primus-cli-container.sh (on each node)
                 --env MASTER_ADDR=$MASTER_ADDR \
                 rocm/megatron-lm:v25.8_py310 \
                 /bin/bash -c "cd /workspace/Primus && \
-                  bash runner/primus-cli-direct.sh \
-                  --config prod.yaml --debug \
+                  ./primus-cli --config prod.yaml --debug direct \
                   -- train pretrain --config deepseek_v2.yaml"
 
 Step 5: primus-cli-direct.sh (runs inside container)
@@ -792,26 +791,26 @@ configs/
 
 ```bash
 # First use dry-run to see what will be executed
-primus-cli --dry-run slurm srun -N 4 -- train pretrain
+./primus-cli --dry-run slurm srun -N 4 -- train pretrain
 
 # After confirming, use debug mode for detailed tracking
-primus-cli --debug slurm srun -N 4 -- train pretrain
+./primus-cli --debug slurm srun -N 4 -- train pretrain
 ```
 
 ### 3. Container Development Workflow
 
 ```bash
 # Local dev: mount local code
-primus-cli container \
+./primus-cli container \
   --volume ~/workspace/Primus:/workspace/Primus \
   -- train pretrain --config config.yaml
 
 # Testing: use staging image
-primus-cli container --image rocm/primus:staging \
+./primus-cli container --image rocm/primus:staging \
   -- benchmark gemm
 
 # Production: use release image
-primus-cli container --image rocm/primus:v1.0.0 \
+./primus-cli container --image rocm/primus:v1.0.0 \
   -- train pretrain
 ```
 
@@ -819,10 +818,10 @@ primus-cli container --image rocm/primus:v1.0.0 \
 
 ```bash
 # Interactive dev and debugging
-primus-cli slurm srun -N 1 -- train pretrain --debug
+./primus-cli slurm srun -N 1 -- train pretrain --debug
 
 # Production training: batch mode
-primus-cli slurm sbatch -N 8 -t 24:00:00 \
+./primus-cli slurm sbatch -N 8 -t 24:00:00 \
   -o logs/train_%j.log \
   -- train pretrain --config production.yaml
 ```
@@ -831,13 +830,13 @@ primus-cli slurm sbatch -N 8 -t 24:00:00 \
 
 ```bash
 # Slurm auto-manages logs
-primus-cli slurm sbatch -N 4 \
+./primus-cli slurm sbatch -N 4 \
   -o logs/stdout_%j.log \
   -e logs/stderr_%j.log \
   -- train pretrain
 
 # Container log redirect
-primus-cli container -- train pretrain 2>&1 | tee train.log
+./primus-cli container -- train pretrain 2>&1 | tee train.log
 ```
 
 ---
@@ -856,8 +855,8 @@ primus-cli container -- train pretrain 2>&1 | tee train.log
 ls runner/primus-cli-*.sh
 
 # Ensure correct mode name is used
-primus-cli slurm ...    # ✓ Correct
-primus-cli Slurm ...    # ✗ Wrong (case-sensitive)
+./primus-cli slurm ...    # ✓ Correct
+./primus-cli Slurm ...    # ✗ Wrong (case-sensitive)
 ```
 
 #### 2. "Config file not found"
@@ -867,10 +866,10 @@ primus-cli Slurm ...    # ✗ Wrong (case-sensitive)
 **Solution**:
 ```bash
 # Use absolute path
-primus-cli --config /full/path/to/config.yaml ...
+./primus-cli --config /full/path/to/config.yaml ...
 
 # Or relative to current directory
-primus-cli --config ./configs/dev.yaml ...
+./primus-cli --config ./configs/dev.yaml ...
 ```
 
 #### 3. Container Startup Failure
@@ -887,7 +886,7 @@ docker ps
 podman ps
 
 # Use dry-run to view command
-primus-cli --dry-run container -- train pretrain
+./primus-cli --dry-run container -- train pretrain
 ```
 
 #### 4. Slurm Job Submission Failure
@@ -903,7 +902,7 @@ sinfo
 squeue
 
 # Use dry-run to check command
-primus-cli --dry-run slurm srun -N 4 -- train pretrain
+./primus-cli --dry-run slurm srun -N 4 -- train pretrain
 ```
 
 #### 5. "Failed to load library"
@@ -925,40 +924,40 @@ ls runner/lib/
 #### Enable Verbose Logging
 ```bash
 # Method 1: Use --debug
-primus-cli --debug direct -- train pretrain
+./primus-cli --debug direct -- train pretrain
 
 # Method 2: Set environment variable
 export PRIMUS_LOG_LEVEL=DEBUG
-primus-cli direct -- train pretrain
+./primus-cli direct -- train pretrain
 ```
 
 #### Use Dry-run
 ```bash
 # View complete command without executing
-primus-cli --dry-run slurm srun -N 4 -- train pretrain
+./primus-cli --dry-run slurm srun -N 4 -- train pretrain
 ```
 
 #### Check Config Loading
 ```bash
 # Use debug mode to view loaded config
-primus-cli --debug --config .primus.yaml direct -- train pretrain
+./primus-cli --debug --config .primus.yaml direct -- train pretrain
 ```
 
 ### Getting Help
 
 ```bash
 # Main entry help
-primus-cli --help
+./primus-cli --help
 
 # Mode-specific help
-primus-cli slurm --help
-primus-cli container --help
-primus-cli direct --help
+./primus-cli slurm --help
+./primus-cli container --help
+./primus-cli direct --help
 
 # Primus Python CLI help
-primus-cli direct -- --help
-primus-cli direct -- train --help
-primus-cli direct -- benchmark --help
+./primus-cli direct -- --help
+./primus-cli direct -- train --help
+./primus-cli direct -- benchmark --help
 ```
 
 ---
