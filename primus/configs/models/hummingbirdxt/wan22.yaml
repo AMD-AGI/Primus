@@ -42,7 +42,7 @@ guidance_scale: 6.0
 denoising_loss_type: x0
 mixed_precision: true
 seed: 1234
-wandb_key: null
+wandb_key: your key
 wandb_entity: null
 wandb_project: TI2V_dmd_5B
 wandb_host: https://api.wandb.ai
@@ -84,7 +84,7 @@ wan_model_folder: wan_models
 no_save: false
 debug: false
 no_visualize: true
-disable_wandb: false
+disable_wandb: true
 logdir: "./model_save_path"
 data_path: "./data/DMD_train_data.csv"
 wandb_save_dir: "./wandb"
