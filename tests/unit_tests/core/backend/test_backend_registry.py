@@ -25,7 +25,7 @@ class MockAdapter(BackendAdapter):
     def convert_config(self, config):
         return {}
 
-    def load_trainer_class(self):
+    def load_trainer_class(self, module_config=None):
         return object
 
     def detect_backend_version(self) -> str:
@@ -40,8 +40,14 @@ class TestBackendRegistryErrorHandling:
         # Save original state
         self._original_adapters = registry_module.BackendRegistry._adapters.copy()
         self._original_path_names = registry_module.BackendRegistry._path_names.copy()
+        self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
+        self._original_staged_trainers = registry_module.BackendRegistry._staged_trainer_classes.copy()
+        self._original_default_stages = registry_module.BackendRegistry._default_stages.copy()
         registry_module.BackendRegistry._adapters.clear()
         registry_module.BackendRegistry._path_names.clear()
+        registry_module.BackendRegistry._trainer_classes.clear()
+        registry_module.BackendRegistry._staged_trainer_classes.clear()
+        registry_module.BackendRegistry._default_stages.clear()
 
         # Silence logging dependencies (logger may not be initialized in tests)
         self._orig_log_rank_0 = registry_module.log_rank_0
@@ -51,6 +57,9 @@ class TestBackendRegistryErrorHandling:
         """Restore registry after each test."""
         registry_module.BackendRegistry._adapters = self._original_adapters
         registry_module.BackendRegistry._path_names = self._original_path_names
+        registry_module.BackendRegistry._trainer_classes = self._original_trainer_classes
+        registry_module.BackendRegistry._staged_trainer_classes = self._original_staged_trainers
+        registry_module.BackendRegistry._default_stages = self._original_default_stages
         registry_module.log_rank_0 = self._orig_log_rank_0
 
     def test_get_adapter_not_found_helpful_error(self):
@@ -83,7 +92,7 @@ class TestBackendRegistryErrorHandling:
             def convert_config(self, config):
                 return {}
 
-            def load_trainer_class(self):
+            def load_trainer_class(self, module_config=None):
                 return object
 
             def detect_backend_version(self) -> str:
@@ -105,7 +114,13 @@ class TestBackendRegistryLazyLoading:
         """Clear registry before each test."""
         # Reset adapter registry state
         self._original_adapters = registry_module.BackendRegistry._adapters.copy()
+        self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
+        self._original_staged_trainers = registry_module.BackendRegistry._staged_trainer_classes.copy()
+        self._original_default_stages = registry_module.BackendRegistry._default_stages.copy()
         registry_module.BackendRegistry._adapters.clear()
+        registry_module.BackendRegistry._trainer_classes.clear()
+        registry_module.BackendRegistry._staged_trainer_classes.clear()
+        registry_module.BackendRegistry._default_stages.clear()
 
         # Ensure backend module can be re-imported so that lazy loading
         # re-runs registration even if other tests imported it earlier.
@@ -120,6 +135,9 @@ class TestBackendRegistryLazyLoading:
     def teardown_method(self):
         """Restore registry after each test."""
         registry_module.BackendRegistry._adapters = self._original_adapters
+        registry_module.BackendRegistry._trainer_classes = self._original_trainer_classes
+        registry_module.BackendRegistry._staged_trainer_classes = self._original_staged_trainers
+        registry_module.BackendRegistry._default_stages = self._original_default_stages
         registry_module.log_rank_0 = self._orig_log_rank_0
 
         # Restore original backend module to avoid impacting other tests
@@ -171,11 +189,17 @@ class TestBackendRegistryPathNames:
         """Clear registry before each test."""
         self._original_path_names = registry_module.BackendRegistry._path_names.copy()
         self._original_adapters = registry_module.BackendRegistry._adapters.copy()
+        self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
+        self._original_staged_trainers = registry_module.BackendRegistry._staged_trainer_classes.copy()
+        self._original_default_stages = registry_module.BackendRegistry._default_stages.copy()
         registry_module.BackendRegistry._path_names.clear()
         registry_module.BackendRegistry._path_names.update(
             {"megatron": "Megatron-LM", "torchtitan": "torchtitan"}
         )
         registry_module.BackendRegistry._adapters.clear()
+        registry_module.BackendRegistry._trainer_classes.clear()
+        registry_module.BackendRegistry._staged_trainer_classes.clear()
+        registry_module.BackendRegistry._default_stages.clear()
 
         # Silence logging dependencies
         self._orig_log_rank_0 = registry_module.log_rank_0
@@ -187,6 +211,12 @@ class TestBackendRegistryPathNames:
         registry_module.BackendRegistry._path_names.update(self._original_path_names)
         registry_module.BackendRegistry._adapters.clear()
         registry_module.BackendRegistry._adapters.update(self._original_adapters)
+        registry_module.BackendRegistry._trainer_classes.clear()
+        registry_module.BackendRegistry._trainer_classes.update(self._original_trainer_classes)
+        registry_module.BackendRegistry._staged_trainer_classes.clear()
+        registry_module.BackendRegistry._staged_trainer_classes.update(self._original_staged_trainers)
+        registry_module.BackendRegistry._default_stages.clear()
+        registry_module.BackendRegistry._default_stages.update(self._original_default_stages)
         registry_module.log_rank_0 = self._orig_log_rank_0
 
     def test_register_and_get_path_name(self):
@@ -374,11 +404,17 @@ class TestBackendRegistryTrainerClasses:
     def setup_method(self):
         """Clear trainer classes before each test."""
         self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
+        self._original_staged_trainers = registry_module.BackendRegistry._staged_trainer_classes.copy()
+        self._original_default_stages = registry_module.BackendRegistry._default_stages.copy()
         registry_module.BackendRegistry._trainer_classes.clear()
+        registry_module.BackendRegistry._staged_trainer_classes.clear()
+        registry_module.BackendRegistry._default_stages.clear()
 
     def teardown_method(self):
         """Restore trainer classes after each test."""
         registry_module.BackendRegistry._trainer_classes = self._original_trainer_classes
+        registry_module.BackendRegistry._staged_trainer_classes = self._original_staged_trainers
+        registry_module.BackendRegistry._default_stages = self._original_default_stages
 
     def test_register_and_get_trainer_class(self):
         """Test registering and retrieving trainer classes."""
@@ -393,7 +429,7 @@ class TestBackendRegistryTrainerClasses:
 
     def test_get_trainer_class_not_found(self):
         """Test error when trainer class not registered."""
-        with pytest.raises(AssertionError) as exc_info:
+        with pytest.raises(ValueError) as exc_info:
             registry_module.BackendRegistry.get_trainer_class("non_existent_backend")
 
         assert "No trainer class registered for backend 'non_existent_backend'" in str(exc_info.value)
@@ -407,6 +443,28 @@ class TestBackendRegistryTrainerClasses:
         assert registry_module.BackendRegistry.has_trainer_class("test_backend") is False
         registry_module.BackendRegistry.register_trainer_class("test_backend", DummyTrainer)
         assert registry_module.BackendRegistry.has_trainer_class("test_backend") is True
+
+    def test_register_and_get_staged_trainer_class(self):
+        """Test staged trainer registration and retrieval."""
+
+        class DummyTrainer:
+            pass
+
+        registry_module.BackendRegistry.register_trainer_class(
+            "test_backend", DummyTrainer, stage="sft"
+        )
+        registry_module.BackendRegistry.set_default_stage("test_backend", "sft")
+
+        trainer_cls = registry_module.BackendRegistry.get_trainer_class("test_backend")
+        assert trainer_cls is DummyTrainer
+
+        trainer_cls = registry_module.BackendRegistry.get_trainer_class("test_backend", stage="sft")
+        assert trainer_cls is DummyTrainer
+
+        assert registry_module.BackendRegistry.has_trainer_class("test_backend") is True
+        assert registry_module.BackendRegistry.has_trainer_class("test_backend", stage="sft") is True
+
+        assert registry_module.BackendRegistry.list_stages("test_backend") == ["sft"]
 
 
 class TestBackendRegistrySetupHooks:

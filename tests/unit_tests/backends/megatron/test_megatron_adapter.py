@@ -115,7 +115,7 @@ class TestMegatronAdapterTrainerLoading:
         adapter = MegatronAdapter()
         result = adapter.load_trainer_class()
 
-        mock_registry.get_trainer_class.assert_called_once_with("megatron")
+        mock_registry.get_trainer_class.assert_called_once_with("megatron", stage=None)
         assert result == mock_trainer_class
 
     @patch("primus.backends.megatron.megatron_adapter.BackendRegistry")
