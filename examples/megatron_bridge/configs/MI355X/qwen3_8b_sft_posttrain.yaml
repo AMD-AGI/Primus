@@ -6,7 +6,7 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 modules:
   post_trainer:
     framework: megatron_bridge
-    config: post_trainer.yaml
+    config: sft_trainer.yaml
 
     # Model to run
     model: qwen3_8b.yaml
