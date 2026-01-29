@@ -1253,19 +1253,9 @@ def _run_multinode_projection(
         )
         target_grad_ar = target_breakdown.get("gradient_allreduce", 0)
         projected_time_ms = projected_compute_time_ms + target_grad_ar
-        grad_ar_msg = f"{target_grad_ar:.3f} ms (not overlapped)"
     else:
         # Gradient all-reduce is overlapped, so not in critical path
         projected_time_ms = projected_compute_time_ms
-        if dp_target > 1:
-            # Still calculate for reporting
-            _, target_breakdown, _, _ = calculate_collective_communication_time(
-                training_config, target_nodes, gpus_per_node, tp, pp, ep, cp, dp_target, hardware_config_dict
-            )
-            target_grad_ar = target_breakdown.get("gradient_allreduce", 0)
-            grad_ar_msg = f"{target_grad_ar:.3f} ms (overlapped - not in critical path)"
-        else:
-            grad_ar_msg = "N/A"
 
     # For reporting, get full breakdown for target
     total_comm_time_ms, breakdown, message_info, per_layer_info = calculate_collective_communication_time(
@@ -1285,12 +1275,14 @@ def _run_multinode_projection(
         min_dp_for_microbatch = min_world_size // (tp * pp * cp)
         target_dp_for_microbatch = target_world_size // (tp * pp * cp)
 
-        print(
-            f"\n📦 Minimum Configuration ({min_nodes_required} node{'s' if min_nodes_required > 1 else ''}):"
-        )
-        print(f"   Nodes: {min_nodes_required}, GPUs: {min_world_size}")
-        print(f"   TP={tp}, PP={pp}, EP={ep}, CP={cp}, DP={min_dp_for_microbatch}")
-        print(f"   Iteration Time: {benchmarked_time_ms:.3f} ms")
+        # Get runtime config for tokens/s calculation
+        runtime_config = training_config.runtime_config
+        seq_len = getattr(runtime_config, "sequence_length", 4096)
+        global_batch = getattr(runtime_config, "global_batch_size", 128)
+        
+        # Calculate tokens/s (tokens processed per second across all GPUs)
+        tokens_per_iter = global_batch * seq_len
+        target_tokens_per_sec = tokens_per_iter * 1000 / projected_time_ms if projected_time_ms > 0 else 0
 
         print(f"\n🎯 Target Configuration ({target_nodes} nodes):")
         print(f"   Nodes: {target_nodes}, GPUs: {target_world_size}")
@@ -1298,6 +1290,8 @@ def _run_multinode_projection(
         print(
             f"   DP Scaling Factor: {target_dp_for_microbatch/min_dp_for_microbatch if min_dp_for_microbatch > 0 else target_dp_for_microbatch:.1f}x"
         )
+        print(f"   Iteration Time: {projected_time_ms:.3f} ms")
+        print(f"   Tokens/s: {target_tokens_per_sec:,.0f}")
 
         print(f"\n📡 Communication Breakdown:")
 
@@ -1325,15 +1319,6 @@ def _run_multinode_projection(
                     print()
 
         print(f"\n   Total Communication (critical path): {total_comm_time_ms:.3f} ms")
-
-        print(f"\n📊 Performance Summary:")
-        print(
-            f"   Base Projection:   {benchmarked_time_ms:.3f} ms ({min_nodes_required} node{'s' if min_nodes_required > 1 else ''}, DP={min_dp_for_microbatch}) [from single-node profiling]"
-        )
-        print(
-            f"   Target Projection: {projected_time_ms:.3f} ms ({target_nodes} nodes, DP={target_dp_for_microbatch})"
-        )
-        print(f"   Gradient AllReduce: {grad_ar_msg}")
 
         print("\n" + "=" * 100)
 

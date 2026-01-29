@@ -113,6 +113,9 @@ def get_default_args(
         >>> args = get_default_args(num_nodes=4, gpus_per_node=8,
         >>>                         hardware_config=hw_config)
     """
+    # Calculate total GPUs
+    total_gpus = num_nodes * gpus_per_node
+
     # Start with default CollectiveArgs
     args = CollectiveArgs(
         node_size=gpus_per_node,
