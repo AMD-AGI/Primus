@@ -6,6 +6,8 @@ This directory contains example configurations for running **Supervised Fine-Tun
 
 The `megatron_sft` framework provides SFT capabilities using Megatron-LM's `pretrain()` infrastructure with:
 
+- **Full Fine-tuning**: Train all model parameters
+- **LoRA Support**: Parameter-efficient fine-tuning with Low-Rank Adaptation
 - **SFT Dataset Support**: JSON/JSONL files and HuggingFace datasets
 - **Chat Template**: Automatic chat template application via HuggingFace tokenizers
 - **Answer-Only Loss**: Loss masking to only compute loss on assistant responses
@@ -13,12 +15,21 @@ The `megatron_sft` framework provides SFT capabilities using Megatron-LM's `pret
 
 ## Quick Start
 
+### Full Fine-tuning
+
 ```bash
 # Run SFT with default configuration
 primus train --config examples/megatron_sft/exp_sft.yaml
 
 # Run Llama3 8B SFT on MI300X
 primus train --config examples/megatron_sft/configs/MI300X/llama3_8B-BF16-sft.yaml
+```
+
+### LoRA Fine-tuning
+
+```bash
+# Run Llama3 8B with LoRA on MI300X
+primus train --config examples/megatron_sft/configs/MI300X/llama3_8B-BF16-lora-sft.yaml
 ```
 
 ## Configuration
@@ -34,9 +45,26 @@ primus train --config examples/megatron_sft/configs/MI300X/llama3_8B-BF16-sft.ya
 | `train_data_path` | Path to local JSON/JSONL file | `/path/to/train.jsonl` |
 | `load` | Pretrained checkpoint to fine-tune | `/path/to/checkpoint` |
 
-### Data Format
+### LoRA Parameters
 
-#### JSON/JSONL Format
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `peft` | PEFT method (`"none"` or `"lora"`) | `"none"` |
+| `lora_enable` | Alternative way to enable LoRA | `false` |
+| `lora_r` | LoRA rank (dimension of low-rank matrices) | `16` |
+| `lora_alpha` | LoRA scaling factor | `32` |
+| `lora_dropout` | Dropout probability for LoRA layers | `0.05` |
+| `lora_bias` | Bias config (`"none"`, `"all"`, `"lora_only"`) | `"none"` |
+| `lora_target_modules` | Module patterns to apply LoRA | See below |
+
+**Default target modules for LoRA:**
+- `query`, `key`, `value`, `dense` (attention)
+- `linear_qkv`, `linear_proj` (attention projections)
+- `linear_fc1`, `linear_fc2` (MLP layers)
+
+## Data Format
+
+### JSON/JSONL Format
 
 The SFT dataset expects conversations in OpenAI format:
 
@@ -60,7 +88,7 @@ Or ShareGPT format (automatically converted):
 }
 ```
 
-#### Supported HuggingFace Datasets
+### Supported HuggingFace Datasets
 
 - `Open-Orca/OpenOrca`
 - `Open-Orca/SlimOrca`
@@ -70,7 +98,7 @@ Or ShareGPT format (automatically converted):
 
 ## Example Configurations
 
-### Basic SFT with HuggingFace Dataset
+### Full Fine-tuning with HuggingFace Dataset
 
 ```yaml
 modules:
@@ -85,6 +113,34 @@ modules:
       load: /path/to/pretrained/checkpoint
       train_iters: 2000
       lr: 2.0e-5
+```
+
+### LoRA Fine-tuning
+
+```yaml
+modules:
+  sft_trainer:
+    framework: megatron_sft
+    config: sft_trainer.yaml
+    model: llama3_8B.yaml
+    overrides:
+      # Enable LoRA
+      peft: lora
+      lora_r: 16
+      lora_alpha: 32
+      lora_dropout: 0.05
+      lora_target_modules:
+        - query
+        - key
+        - value
+        - dense
+
+      # Other settings
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: meta-llama/Meta-Llama-3-8B
+      finetune_hf_dataset: Open-Orca/SlimOrca
+      load: /path/to/pretrained/checkpoint
+      lr: 1.0e-4  # Higher LR for LoRA
 ```
 
 ### SFT with Local Data
@@ -109,16 +165,29 @@ modules:
 
 ```
 examples/megatron_sft/
-├── README.md                 # This file
-├── exp_sft.yaml              # Basic SFT example
+├── README.md                              # This file
+├── exp_sft.yaml                           # Basic SFT example
 └── configs/
     └── MI300X/
-        └── llama3_8B-BF16-sft.yaml  # Llama3 8B on MI300X
+        ├── llama3_8B-BF16-sft.yaml        # Llama3 8B full fine-tuning
+        └── llama3_8B-BF16-lora-sft.yaml   # Llama3 8B with LoRA
 ```
+
+## LoRA vs Full Fine-tuning
+
+| Aspect | Full Fine-tuning | LoRA |
+|--------|------------------|------|
+| Memory | High | Low (~10-20% of full) |
+| Speed | Slower | Faster |
+| Quality | Best | Near full-finetuning quality |
+| Trainable Params | 100% | ~0.1-1% |
+| Learning Rate | 1e-5 to 5e-5 | 1e-4 to 3e-4 |
+| Use Case | Production models | Quick experiments, multi-adapter |
 
 ## Notes
 
 1. **Tokenizer**: SFT requires `HuggingFaceTokenizer` to support chat templates
 2. **Micro Batch Size**: Must be 1 for sample packing to work correctly
 3. **Checkpoint**: Always load a pretrained checkpoint for fine-tuning
-4. **Learning Rate**: Typically 1e-5 to 5e-5 (lower than pretraining)
+4. **LoRA Learning Rate**: Typically 5-10x higher than full fine-tuning
+5. **Distributed Optimizer**: May need to be disabled for LoRA (`use_distributed_optimizer: false`)

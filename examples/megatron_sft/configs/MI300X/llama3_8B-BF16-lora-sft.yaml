@@ -1,0 +1,116 @@
+###############################################################################
+# Llama3 8B LoRA SFT Configuration for MI300X
+#
+# This configuration runs LoRA-based supervised fine-tuning on Llama3 8B
+# using native Megatron-LM on AMD MI300X GPUs.
+#
+# LoRA (Low-Rank Adaptation) enables parameter-efficient fine-tuning by only
+# training small adapter matrices instead of the full model weights.
+#
+# Usage:
+#   primus train --config examples/megatron_sft/configs/MI300X/llama3_8B-BF16-lora-sft.yaml
+###############################################################################
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3_8B_lora_sft}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  sft_trainer:
+    framework: megatron
+    stage: sft                    # Explicitly set stage (optional if module name is sft_trainer)
+    config: sft_trainer.yaml
+    model: llama3_8B.yaml
+
+    overrides:
+      # ============================================================
+      # Parallelism (8 GPUs on MI300X)
+      # ============================================================
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      sequence_parallel: false
+      context_parallel_size: 1
+
+      # ============================================================
+      # Training Configuration
+      # ============================================================
+      train_iters: 2000
+      global_batch_size: 64
+      micro_batch_size: 1
+      seq_length: 4096
+      max_position_embeddings: 8192
+
+      # ============================================================
+      # LoRA Configuration
+      # ============================================================
+      peft: lora                  # Enable LoRA
+      lora_r: 16                  # LoRA rank
+      lora_alpha: 32              # LoRA alpha (scaling = alpha/r = 2.0)
+      lora_dropout: 0.05          # LoRA dropout
+      lora_bias: "none"           # Don't train biases
+      # Target attention and MLP layers
+      lora_target_modules:
+        - query
+        - key
+        - value
+        - dense
+        - linear_qkv
+        - linear_proj
+        - linear_fc1
+        - linear_fc2
+
+      # ============================================================
+      # Learning Rate (can be higher with LoRA)
+      # ============================================================
+      lr: 1.0e-4                  # Higher LR is typical for LoRA
+      min_lr: 0.0
+      lr_warmup_iters: 100
+      lr_decay_style: cosine
+      weight_decay: 0.01
+
+      # ============================================================
+      # Tokenizer
+      # ============================================================
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: meta-llama/Meta-Llama-3-8B
+
+      # ============================================================
+      # SFT Data
+      # ============================================================
+      finetune_hf_dataset: Open-Orca/SlimOrca
+
+      # ============================================================
+      # Checkpoint
+      # ============================================================
+      load: ${PRIMUS_PRETRAINED_CKPT:null}
+      save: ${PRIMUS_SAVE_PATH:./checkpoints/llama3_8B_lora_sft}
+      finetune: true
+      no_load_optim: true
+      no_load_rng: true
+      save_interval: 500
+
+      # ============================================================
+      # Precision
+      # ============================================================
+      bf16: true
+      fp16: false
+
+      # ============================================================
+      # Evaluation & Logging
+      # ============================================================
+      eval_interval: 200
+      eval_iters: 20
+      log_interval: 10
+      wandb_project: Primus_Llama3_LoRA_SFT
+
+      # ============================================================
+      # Optimization
+      # ============================================================
+      use_flash_attn: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      # Note: use_distributed_optimizer may need adjustment for LoRA
+      use_distributed_optimizer: false
+      gradient_accumulation_fusion: true

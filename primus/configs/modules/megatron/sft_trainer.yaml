@@ -3,6 +3,8 @@
 #
 # This configuration extends the trainer base and adds SFT-specific defaults.
 # Used with framework: megatron_sft
+#
+# Supports both full fine-tuning and LoRA (Low-Rank Adaptation).
 ###############################################################################
 
 extends:
@@ -66,3 +68,23 @@ use_distributed_optimizer: true
 eod_mask_loss: true
 reset_position_ids: true
 reset_attention_mask: true
+
+# ============================================================
+# LoRA Configuration (Parameter-Efficient Fine-Tuning)
+# ============================================================
+# Set peft: "lora" or lora_enable: true to enable LoRA
+peft: "none"              # Options: "none", "lora"
+lora_enable: false        # Alternative way to enable LoRA
+lora_r: 16                # LoRA rank (dimension of low-rank matrices)
+lora_alpha: 32            # LoRA scaling factor (alpha/r is the actual scaling)
+lora_dropout: 0.05        # Dropout probability for LoRA layers
+lora_bias: "none"         # Bias configuration: "none", "all", "lora_only"
+# lora_target_modules:    # Module patterns to apply LoRA (default: query, key, value, dense, etc.)
+#   - query
+#   - key
+#   - value
+#   - dense
+#   - linear_qkv
+#   - linear_proj
+#   - linear_fc1
+#   - linear_fc2
