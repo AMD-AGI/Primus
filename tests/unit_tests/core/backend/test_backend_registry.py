@@ -155,9 +155,7 @@ class TestBackendRegistryLazyLoading:
         # Don't pre-register, let it lazy load
         # This will try to load megatron backend
         # Mock setup_backend_path to avoid dependency on actual file system
-        with patch.object(
-            registry_module.BackendRegistry, "setup_backend_path", return_value="/tmp"
-        ):
+        with patch.object(registry_module.BackendRegistry, "setup_backend_path", return_value="/tmp"):
             adapter = registry_module.BackendRegistry.get_adapter("megatron", backend_path=None)
         # If megatron is installed and registered correctly, this should not raise
         # and must return a non-None adapter instance.
@@ -428,9 +426,7 @@ class TestBackendRegistryTrainerClasses:
             pass
 
         # Register with explicit stage "sft"
-        registry_module.BackendRegistry.register_trainer_class(
-            DummyTrainer, "test_backend", stage="sft"
-        )
+        registry_module.BackendRegistry.register_trainer_class(DummyTrainer, "test_backend", stage="sft")
 
         # Get with explicit stage "sft" should work
         trainer_cls = registry_module.BackendRegistry.get_trainer_class("test_backend", stage="sft")
