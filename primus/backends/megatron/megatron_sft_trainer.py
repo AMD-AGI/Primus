@@ -91,43 +91,37 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
         Execute Megatron SFT training.
 
         This method is called by BaseTrainer.run() after applying patches.
-        It delegates to the MegatronSFTTrainer module which contains the 
-        actual SFT training loop implementation.
+        It uses Megatron's standard pretrain infrastructure but with SFT-specific
+        forward_step and loss functions.
         """
         log_rank_0("Executing Megatron SFT training...")
 
         try:
-            # Import the module-level SFT trainer that contains the actual training loop
-            from primus.modules.trainer.megatron.sft_trainer import MegatronSFTTrainer as ModuleSFTTrainer
-
-            # The module trainer expects to be instantiated with module_name, config, etc.
-            # and then have init() and run() called. However, we're already inside the  
-            # training flow (run_train is called from BaseTrainer.run()), so we can't 
-            # reinitialize. Instead, we need to call the training directly.
-            
-            # Import Megatron training infrastructure similar to pretrain_trainer
             import inspect
             from megatron.core.enums import ModelType
             from megatron.training import pretrain  # type: ignore
-            
-            # For SFT, we use a custom forward_step and dataset provider
-            # These should come from the module-level SFT trainer
             from primus.core.utils.import_utils import get_model_provider
             
-            # Create an instance of the module SFT trainer to get its methods
-            # Note: This is a temporary solution - ideally the module trainer
-            # should be refactored to separate initialization from training logic
-            module_trainer = ModuleSFTTrainer(
+            # Create SFT-specific forward_step function
+            # This will be provided to Megatron's pretrain() call
+            from primus.modules.trainer.megatron.sft_trainer import MegatronSFTTrainer as ModuleSFTTrainer
+            
+            # Create instance to access SFT-specific methods
+            # Note: We only use this for the methods, not for running the full trainer
+            sft_module = ModuleSFTTrainer(
                 module_name="sft_trainer",
                 module_config=self.module_config,
                 primus_config=self.primus_config,
             )
             
-            # Get forward_step and dataset provider from module trainer
-            forward_step_func = module_trainer.forward_step
-            train_valid_test_datasets_provider = module_trainer.train_valid_test_datasets_provider
+            # Use SFT-specific forward_step
+            forward_step = sft_module.forward_step
             
-            # Mark dataset provider as distributed
+            # Use standard dataset provider (for now - can be customized later)
+            # For SFT, the dataset should provide instruction+response pairs with loss_mask
+            from pretrain_gpt import train_valid_test_datasets_provider  # type: ignore
+            
+            # Mark as distributed
             if hasattr(train_valid_test_datasets_provider, "is_distributed"):
                 train_valid_test_datasets_provider.is_distributed = True
             
@@ -154,7 +148,7 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                 train_valid_test_datasets_provider,
                 get_model_provider(),
                 ModelType.encoder_or_decoder,
-                forward_step_func,
+                forward_step,
                 **kwargs,
             )
 

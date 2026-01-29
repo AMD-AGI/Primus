@@ -1,0 +1,36 @@
+# Megatron Native Post-training (SFT) Base Configuration
+# This configuration file defines the base settings for supervised fine-tuning (SFT)
+# using the native Megatron-LM backend (not Megatron-Bridge)
+
+extends:
+  - ../module_base.yaml
+
+# Mark as trainable module
+trainable: true
+
+# SFT-specific default parameters
+# These can be overridden in experiment configs
+params:
+  # Training mode
+  is_instruction_dataset: true  # Indicates SFT/instruction dataset
+  
+  # Default SFT hyperparameters
+  # These are commonly different from pretrain defaults
+  lr_decay_style: "cosine"
+  min_lr: 0.0
+  
+  # SFT typically uses smaller learning rates
+  # (to be overridden per model in experiment config)
+  finetune_lr: 5.0e-6
+  
+  # Evaluation settings for SFT
+  eval_interval: 100
+  eval_iters: 10
+  
+  # Logging
+  log_interval: 10
+  
+  # SFT-specific data settings
+  # Users should override these in their experiment configs
+  # data_path: null  # Path to SFT dataset
+  # split: "98,2,0"  # train/val/test split

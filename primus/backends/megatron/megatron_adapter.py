@@ -26,6 +26,9 @@ class MegatronAdapter(BackendAdapter):
 
     def __init__(self, framework="megatron"):
         super().__init__(framework)
+        # Temporary storage for module_config during trainer creation
+        # This allows load_trainer_class() to access task information
+        self._current_module_config = None
 
     # Backend Setup & Patches
     def prepare_backend(self, config):
@@ -82,6 +85,9 @@ class MegatronAdapter(BackendAdapter):
         Returns:
             SimpleNamespace with Megatron args
         """
+        # Store module_config for later use in load_trainer_class()
+        self._current_module_config = module_config
+        
         # Instantiate the builder
         builder = MegatronArgBuilder()
 
@@ -102,22 +108,64 @@ class MegatronAdapter(BackendAdapter):
         Load appropriate Megatron trainer class based on task type.
         
         The megatron backend supports multiple training tasks:
-        - pretrain: Uses MegatronPretrainTrainer
+        - pretrain: Uses MegatronPretrainTrainer  
         - SFT (supervised fine-tuning): Uses MegatronSFTTrainer
         
-        Task detection is based on the trainer being initialized. This method
-        is called during trainer creation, and we use the BackendRegistry's
-        default trainer (MegatronPretrainTrainer) as the fallback.
+        Task detection is based on configuration markers:
+        - If is_instruction_dataset=True or similar SFT markers → SFT trainer
+        - Otherwise → Pretrain trainer (default)
         
         Returns:
             Trainer class for the current task
         """
-        # Try to get the default registered trainer (MegatronPretrainTrainer)
-        try:
-            return BackendRegistry.get_trainer_class(self.framework)
-        except (ValueError, AssertionError) as exc:
-            raise RuntimeError(
-                "[Primus:MegatronAdapter] 'megatron' backend not registered. "
-                "Ensure primus.backends.megatron.trainers defines the trainer "
-                "and imports BackendRegistry."
-            ) from exc
+        # Detect training task based on module_config
+        is_sft = self._is_sft_task()
+        
+        if is_sft:
+            log_rank_0("[Primus:MegatronAdapter] Detected SFT task, loading MegatronSFTTrainer")
+            from primus.backends.megatron.megatron_sft_trainer import MegatronSFTTrainer
+            return MegatronSFTTrainer
+        else:
+            log_rank_0("[Primus:MegatronAdapter] Detected pretrain task, loading MegatronPretrainTrainer")
+            # Use the default registered trainer (MegatronPretrainTrainer)
+            try:
+                return BackendRegistry.get_trainer_class(self.framework)
+            except (ValueError, AssertionError) as exc:
+                raise RuntimeError(
+                    "[Primus:MegatronAdapter] 'megatron' backend not registered. "
+                    "Ensure primus.backends.megatron defines the trainer "
+                    "and imports BackendRegistry."
+                ) from exc
+    
+    def _is_sft_task(self):
+        """
+        Determine if the current task is SFT based on module_config.
+        
+        Detection strategy:
+        1. Check for explicit SFT marker (is_instruction_dataset, is_sft, etc.)
+        2. Check for SFT-specific parameters
+        3. Default to False (pretrain)
+        
+        Returns:
+            True if SFT task, False otherwise
+        """
+        if self._current_module_config is None:
+            return False
+        
+        # Check for explicit SFT markers in params
+        params = getattr(self._current_module_config, 'params', None)
+        if params:
+            # Check for is_instruction_dataset flag
+            if hasattr(params, 'is_instruction_dataset'):
+                return bool(params.is_instruction_dataset)
+            
+            # Check for other SFT indicators
+            if hasattr(params, 'is_sft'):
+                return bool(params.is_sft)
+            
+            # Check for finetune_lr (commonly used for SFT)
+            if hasattr(params, 'finetune_lr'):
+                return True
+        
+        # Default to pretrain
+        return False
