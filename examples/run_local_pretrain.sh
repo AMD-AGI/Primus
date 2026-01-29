@@ -73,9 +73,12 @@ if [ "$NODE_RANK" = "0" ]; then
     echo ""
 fi
 
-# Pass all PRIMUS_, NCCL_, RCCL_, and IONIC_ environment variables into the container
+# Pass all PRIMUS_, NCCL_, RCCL_, HIPBLASLT_, and IONIC_ environment variables into the container
 ENV_ARGS=()
 
+while IFS='=' read -r name _; do
+    ENV_ARGS+=("--env" "$name")
+done < <(env | grep "^HIPBLASLT_")
 while IFS='=' read -r name _; do
     ENV_ARGS+=("--env" "$name")
 done < <(env | grep "^PRIMUS_")
@@ -100,6 +103,11 @@ ENV_ARGS+=("--env" "HF_TOKEN")
 ENV_ARGS+=("--env" "WANDB_API_KEY")
 ENV_ARGS+=("--env" "ENABLE_NUMA_BINDING")
 ENV_ARGS+=("--env" "HSA_KERNARG_POOL_SIZE")
+ENV_ARGS+=("--env" "DATABRICKS_TOKEN")
+ENV_ARGS+=("--env" "DATABRICKS_HOST")
+ENV_ARGS+=("--env" "MLFLOW_TRACKING_URI")
+ENV_ARGS+=("--env" "MLFLOW_REGISTRY_URI")
+ENV_ARGS+=("--env" "MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING")
 echo "ENV_ARGS: ${ENV_ARGS[*]}"
 
 HOSTNAME=$(hostname)

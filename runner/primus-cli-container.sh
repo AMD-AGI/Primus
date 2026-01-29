@@ -356,7 +356,7 @@ fi
 # This keeps container runs closer to direct-mode behavior without requiring users
 # to manually list every env var in config/CLI.
 while IFS= read -r env_key; do
-    [[ "$env_key" =~ ^(PRIMUS_|NCCL_|RCCL_|GLOO_|IONIC_) ]] || continue
+    [[ "$env_key" =~ ^(PRIMUS_|NCCL_|RCCL_|GLOO_|IONIC_|HIPBLASLT_) ]] || continue
     [[ -n "${env_keys_seen[$env_key]:-}" ]] && continue
 
     env_val="${!env_key-}"

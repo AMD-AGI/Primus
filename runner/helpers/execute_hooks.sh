@@ -87,20 +87,22 @@ execute_hooks() {
             local exit_code
 
             if [[ "$hook_file" == *.sh ]]; then
-                hook_output="$(bash "$hook_file" "${args[@]}" 2>&1)"
+                # Capture output and display in real-time
+                # Use set -o pipefail to propagate exit code through pipe
+                hook_output="$(set -o pipefail; bash "$hook_file" "${args[@]}" 2>&1 | tee /dev/stderr)"
                 exit_code=$?
             elif [[ "$hook_file" == *.py ]]; then
-                hook_output="$(python3 "$hook_file" "${args[@]}" 2>&1)"
+                # Capture output and display in real-time
+                # Use set -o pipefail to propagate exit code through pipe
+                hook_output="$(set -o pipefail; python3 "$hook_file" "${args[@]}" 2>&1 | tee /dev/stderr)"
                 exit_code=$?
             else
                 LOG_WARN "[Hooks] Skipping unknown hook type: $hook_file"
                 continue
             fi
 
-            # Re-echo hook output so users see logs as usual.
-            if [[ -n "$hook_output" ]]; then
-                printf '%s\n' "$hook_output"
-            fi
+            # Note: hook_output is still captured for parsing extra.* and env.* variables
+            # The tee command ensures logs are printed in real-time to the terminal
 
             # Parse hook output for extra.* and env.* key=value pairs.
             while IFS= read -r line; do
@@ -121,6 +123,13 @@ execute_hooks() {
 
             if [[ $exit_code -ne 0 ]]; then
                 LOG_ERROR_RANK0 "[Hooks] Hook failed: $hook_file (exit code: $exit_code)"
+                # Re-print captured output on failure to make it visible in log aggregators
+                # that may not capture streaming stderr from `tee /dev/stderr`.
+                if [ "${NODE_RANK:-0}" -eq 0 ]; then
+                    echo "[ERROR] [Hooks] --- hook output begin: $hook_file ---" >&2
+                    printf '%s\n' "$hook_output" >&2
+                    echo "[ERROR] [Hooks] --- hook output end: $hook_file ---" >&2
+                fi
                 return 1
             fi
 
