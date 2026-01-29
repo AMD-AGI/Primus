@@ -1,0 +1,15 @@
+bases:
+  - mamba_base.yaml
+
+# Mamba 370M configuration
+tokenizer_type: GPT2BPETokenizer
+vocab_size: 50257
+
+# Model size parameters
+num_layers: 48
+hidden_size: 1024
+ffn_hidden_size: null
+mamba_state_dim: 16
+mamba_head_dim: 64
+mamba_num_groups: 8
+

@@ -105,7 +105,11 @@ def megatron_derive_default_args(args):
     if args.num_experts is None:
         args.moe_pattern = [0] * args.num_layers
     else:
-        if isinstance(args.moe_layer_freq, int):
+        # Check if moe_layer_freq is defined before accessing it
+        if not hasattr(args, "moe_layer_freq"):
+            # If not defined, default to all layers being MoE (equivalent to moe_layer_freq=1)
+            args.moe_pattern = [1] * args.num_layers
+        elif isinstance(args.moe_layer_freq, int):
             args.moe_pattern = [1 if (i % args.moe_layer_freq == 0) else 0 for i in range(args.num_layers)]
         elif isinstance(args.moe_layer_freq, list):
             args.moe_pattern = args.moe_layer_freq
@@ -117,6 +121,9 @@ def megatron_derive_default_args(args):
             assert (
                 len(args.moe_pattern) == args.num_layers
             ), f"Invalid moe_layer_freq length: {len(args.moe_pattern)} (expected {args.num_layers})"
+        else:
+            # Fallback for unexpected types
+            args.moe_pattern = [1] * args.num_layers
 
     # naming conversion
     args.sequence_length = args.seq_length
