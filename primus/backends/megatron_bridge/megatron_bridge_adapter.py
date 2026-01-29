@@ -19,8 +19,6 @@ from __future__ import annotations
 
 from typing import Any
 
-# Trigger registration of all Megatron-Bridge patches
-import primus.backends.megatron_bridge.patches  # noqa: F401
 from primus.backends.megatron_bridge.argument_builder import MegatronBridgeArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.core.backend.backend_registry import BackendRegistry
