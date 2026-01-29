@@ -7,3 +7,4 @@ extends:
 
 # # Mark as trainable module
 trainable: true
+stage: sft

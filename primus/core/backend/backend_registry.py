@@ -114,12 +114,12 @@ class BackendRegistry:
         """
         # Fast path: adapter already registered
         if backend not in cls._adapters:
-            # Step 1: Setup backend path (idempotent - won't duplicate if already in sys.path)
-            resolved_path = cls.setup_backend_path(backend, backend_path=backend_path, verbose=True)
-
-            # Step 2: Lazily load backend (expected to register adapter)
+            # Step 1: Lazily load backend (expected to register adapter)
             cls._load_backend(backend)
-
+            
+            # Step 2: Setup backend path (idempotent - won't duplicate if already in sys.path)
+            resolved_path = cls.setup_backend_path(backend, backend_path=backend_path, verbose=True)
+            
             # Step 3: Ensure adapter is available, then create instance
             assert backend in cls._adapters, (
                 f"[Primus] Backend '{backend}' not found.\n"

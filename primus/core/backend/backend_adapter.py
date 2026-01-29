@@ -171,63 +171,6 @@ class BackendAdapter(ABC):
             },
         )
 
-    def _resolve_stage(self, module_config) -> str | None:
-        """
-        Resolve training stage from module configuration.
-
-        Priority:
-            1. module_config.stage (explicit)
-            2. module_config.params.stage (from overrides)
-            3. Inferred from module name
-            4. Default stage (None - let registry decide)
-
-        Args:
-            module_config: Module configuration
-
-        Returns:
-            Stage name (e.g., "pretrain", "sft") or None for default
-        """
-        if module_config is None:
-            return None
-
-        stage = getattr(module_config, "stage", None)
-        if stage:
-            return stage
-
-        params = getattr(module_config, "params", None)
-        if params and hasattr(params, "stage") and params.stage:
-            return params.stage
-
-        module_name = getattr(module_config, "name", "")
-        return self._infer_stage_from_name(module_name)
-
-    def _infer_stage_from_name(self, module_name: str) -> str | None:
-        """
-        Infer training stage from module name.
-
-        Mapping:
-            - pre_trainer, pretrain_trainer → pretrain
-            - sft_trainer → sft
-            - post_trainer, posttrain_trainer → sft
-
-        Args:
-            module_name: Module name from config
-
-        Returns:
-            Inferred stage name, or None if cannot infer
-        """
-        if not module_name:
-            return None
-
-        name_lower = module_name.lower()
-        if "pre_train" in name_lower or name_lower == "pre_trainer":
-            return "pretrain"
-        if "sft" in name_lower:
-            return "sft"
-        if "post_train" in name_lower or name_lower == "post_trainer":
-            return "sft"
-
-        return None
     # ============================================================================
     # Public API
     # ============================================================================
@@ -307,8 +250,7 @@ class BackendAdapter(ABC):
 
         # 5) load trainer class from backend (stage resolved in upper layer)
         log_rank_0("[Step 5/5] Loading trainer class...")
-        stage = self._resolve_stage(module_config) or "pretrain"
-        TrainerClass = self.load_trainer_class(stage=stage)
+        TrainerClass = self.load_trainer_class(stage=getattr(params, "stage", "pretrain"))
         log_rank_0(f"Trainer class loaded: {TrainerClass.__name__}")
 
         log_rank_0("=" * 80)
