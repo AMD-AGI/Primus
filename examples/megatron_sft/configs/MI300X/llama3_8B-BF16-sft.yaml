@@ -1,0 +1,93 @@
+###############################################################################
+# Llama3 8B SFT Configuration for MI300X
+#
+# This configuration runs supervised fine-tuning on Llama3 8B using
+# native Megatron-LM on AMD MI300X GPUs.
+#
+# Usage:
+#   primus train --config examples/megatron_sft/configs/MI300X/llama3_8B-BF16-sft.yaml
+###############################################################################
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3_8B_sft}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  sft_trainer:
+    framework: megatron_sft
+    config: sft_trainer.yaml
+    model: llama3_8B.yaml
+
+    overrides:
+      # ============================================================
+      # Parallelism (8 GPUs on MI300X)
+      # ============================================================
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+      sequence_parallel: false
+      context_parallel_size: 1
+
+      # ============================================================
+      # Training Configuration
+      # ============================================================
+      train_iters: 2000
+      global_batch_size: 64
+      micro_batch_size: 1
+      seq_length: 4096
+      max_position_embeddings: 8192
+
+      # ============================================================
+      # Learning Rate
+      # ============================================================
+      lr: 2.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 100
+      lr_decay_style: cosine
+      weight_decay: 0.01
+
+      # ============================================================
+      # Tokenizer
+      # ============================================================
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: meta-llama/Meta-Llama-3-8B
+
+      # ============================================================
+      # SFT Data
+      # ============================================================
+      # Use HuggingFace dataset
+      finetune_hf_dataset: Open-Orca/SlimOrca
+
+      # ============================================================
+      # Checkpoint
+      # ============================================================
+      load: ${PRIMUS_PRETRAINED_CKPT:null}
+      save: ${PRIMUS_SAVE_PATH:./checkpoints/llama3_8B_sft}
+      finetune: true
+      no_load_optim: true
+      no_load_rng: true
+      save_interval: 500
+
+      # ============================================================
+      # Precision
+      # ============================================================
+      bf16: true
+      fp16: false
+
+      # ============================================================
+      # Evaluation & Logging
+      # ============================================================
+      eval_interval: 200
+      eval_iters: 20
+      log_interval: 10
+      wandb_project: Primus_Llama3_SFT
+
+      # ============================================================
+      # Optimization
+      # ============================================================
+      use_flash_attn: true
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      use_distributed_optimizer: true
+      gradient_accumulation_fusion: true

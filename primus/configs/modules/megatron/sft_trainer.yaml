@@ -1,0 +1,68 @@
+###############################################################################
+# Megatron SFT Trainer Base Configuration
+#
+# This configuration extends the trainer base and adds SFT-specific defaults.
+# Used with framework: megatron_sft
+###############################################################################
+
+extends:
+  - trainer_base.yaml
+
+# ============================================================
+# Training Configuration
+# ============================================================
+train_iters: 1000
+global_batch_size: 64
+micro_batch_size: 1  # SFT requires micro_batch_size=1 for packing
+eval_iters: 10
+eval_interval: 100
+seq_length: 4096
+num_workers: 4
+split: null
+dataloader_type: cyclic
+
+# ============================================================
+# Checkpointing
+# ============================================================
+finetune: true
+no_load_optim: true
+no_load_rng: true
+save_interval: 500
+log_interval: 1
+tensorboard_log_interval: 1
+log_throughput: true
+log_timers_to_tensorboard: true
+log_batch_size_to_tensorboard: true
+log_learning_rate_to_tensorboard: true
+
+# ============================================================
+# Learning Rate (typically lower than pretrain)
+# ============================================================
+lr: 2.0e-05
+min_lr: 0.0
+lr_decay_iters: null
+lr_warmup_iters: 100
+lr_decay_style: cosine
+weight_decay: 0.01
+adam_beta1: 0.9
+adam_beta2: 0.95
+override_opt_param_scheduler: true
+
+# ============================================================
+# Tokenizer (HuggingFaceTokenizer required for chat templates)
+# ============================================================
+tokenizer_type: HuggingFaceTokenizer
+
+# ============================================================
+# Model Configuration
+# ============================================================
+use_flash_attn: true
+distributed_timeout_minutes: 60
+use_distributed_optimizer: true
+
+# ============================================================
+# Loss Masking for SFT
+# ============================================================
+eod_mask_loss: true
+reset_position_ids: true
+reset_attention_mask: true

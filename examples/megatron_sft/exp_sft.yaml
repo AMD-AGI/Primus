@@ -1,0 +1,112 @@
+###############################################################################
+# Primus Megatron-LM Native SFT Example Configuration
+#
+# This example shows how to run supervised fine-tuning (SFT) using native
+# Megatron-LM with the megatron_sft framework.
+#
+# Usage:
+#   primus train --config examples/megatron_sft/exp_sft.yaml
+#
+# Key differences from pretrain:
+#   - Uses HuggingFaceTokenizer for chat template support
+#   - Supports JSON/JSONL/HuggingFace datasets
+#   - Applies answer-only loss masking for instruction tuning
+###############################################################################
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: &exp_name ${PRIMUS_EXP_NAME:exp_sft}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  sft_trainer:
+    framework: megatron_sft
+    config: sft_trainer.yaml
+
+    # Model to fine-tune
+    model: ${PRIMUS_MODEL:llama3_8B}.yaml
+
+    overrides:
+      # ============================================================
+      # Logging
+      # ============================================================
+      wandb_project: "Primus_SFT"
+      stderr_sink_level: INFO
+
+      # ============================================================
+      # Training Hyperparameters
+      # ============================================================
+      train_iters: 1000
+      micro_batch_size: 1        # SFT typically uses micro_batch_size=1
+      global_batch_size: 64
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+
+      # Learning rate (typically lower than pretrain)
+      lr: 2.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 100
+      lr_decay_iters: null
+      lr_decay_style: cosine
+
+      # Optimizer
+      weight_decay: 0.01
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+
+      # ============================================================
+      # Parallelism
+      # ============================================================
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:1}
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+
+      # ============================================================
+      # Tokenizer (REQUIRED for SFT - must be HuggingFaceTokenizer)
+      # ============================================================
+      tokenizer_type: HuggingFaceTokenizer
+      tokenizer_model: ${PRIMUS_TOKENIZER_PATH:meta-llama/Llama-3-8B}
+
+      # ============================================================
+      # SFT Data Configuration
+      # ============================================================
+      # Option 1: Use HuggingFace dataset
+      finetune_hf_dataset: ${PRIMUS_HF_DATASET:Open-Orca/OpenOrca}
+
+      # Option 2: Use local JSON/JSONL files (uncomment to use)
+      # train_data_path:
+      #   - /path/to/train.jsonl
+      # valid_data_path:
+      #   - /path/to/valid.jsonl
+      # test_data_path:
+      #   - /path/to/test.jsonl
+
+      # ============================================================
+      # Checkpoint Configuration
+      # ============================================================
+      # Load pretrained checkpoint for fine-tuning
+      load: ${PRIMUS_PRETRAINED_CKPT:null}
+      finetune: true              # Enable fine-tuning mode
+      no_load_optim: true         # Don't load optimizer state
+      no_load_rng: true           # Don't load RNG state
+
+      # Save configuration
+      save: ${PRIMUS_SAVE_PATH:null}
+      save_interval: 500
+      disable_last_saving: false
+      ckpt_format: torch
+
+      # ============================================================
+      # Evaluation
+      # ============================================================
+      eval_interval: 100
+      eval_iters: 10
+
+      # ============================================================
+      # Loss masking
+      # ============================================================
+      eod_mask_loss: true
+      reset_position_ids: true
+      reset_attention_mask: true
