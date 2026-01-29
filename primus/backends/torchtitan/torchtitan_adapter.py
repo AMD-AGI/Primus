@@ -90,12 +90,12 @@ class TorchTitanAdapter(BackendAdapter):
         return titan_args
 
     # Load Trainer Class
-    def load_trainer_class(self, stage: str | None = None):
+    def load_trainer_class(self, stage: str = "pretrain"):
         """
         Load TorchTitan trainer class registered via BackendRegistry.
 
         Args:
-            stage: Optional stage name (unused for torchtitan)
+            stage: Stage name (unused for torchtitan)
 
         This allows Primus runtime to remain agnostic to the actual trainer
         implementation (pretrain, sft, etc.).

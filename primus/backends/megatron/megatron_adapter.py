@@ -59,7 +59,7 @@ class MegatronAdapter(BackendAdapter):
             RuntimeError: If version cannot be detected
         """
         # Get trainer class and call its detect_version classmethod
-        TrainerClass = self.load_trainer_class()
+        TrainerClass = self.load_trainer_class(stage="pretrain")
         return TrainerClass.detect_version()
 
     # Config → Megatron Args
@@ -97,12 +97,12 @@ class MegatronAdapter(BackendAdapter):
         return megatron_args
 
     # Load Trainer Class (Stage-Aware)
-    def load_trainer_class(self, stage: str | None = None):
+    def load_trainer_class(self, stage: str = "pretrain"):
         """
         Load Megatron trainer class registered via BackendRegistry.
 
         Args:
-            stage: Optional stage name (e.g., "pretrain", "sft").
+            stage: Stage name (e.g., "pretrain", "sft").
 
         Returns:
             Trainer class for the specified stage.

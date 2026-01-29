@@ -25,7 +25,7 @@ class MockAdapter(BackendAdapter):
     def convert_config(self, config):
         return {}
 
-    def load_trainer_class(self, stage: str | None = None):
+    def load_trainer_class(self, stage: str = "pretrain"):
         return object
 
     def detect_backend_version(self) -> str:
@@ -92,7 +92,7 @@ class TestBackendRegistryErrorHandling:
             def convert_config(self, config):
                 return {}
 
-            def load_trainer_class(self, stage: str | None = None):
+            def load_trainer_class(self, stage: str = "pretrain"):
                 return object
 
             def detect_backend_version(self) -> str:

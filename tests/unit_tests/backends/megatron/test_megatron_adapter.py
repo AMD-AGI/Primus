@@ -113,9 +113,9 @@ class TestMegatronAdapterTrainerLoading:
         mock_registry.get_trainer_class.return_value = mock_trainer_class
 
         adapter = MegatronAdapter()
-        result = adapter.load_trainer_class(stage=None)
+        result = adapter.load_trainer_class()
 
-        mock_registry.get_trainer_class.assert_called_once_with("megatron", stage=None)
+        mock_registry.get_trainer_class.assert_called_once_with("megatron", stage="pretrain")
         assert result == mock_trainer_class
 
     @patch("primus.backends.megatron.megatron_adapter.BackendRegistry")
@@ -126,7 +126,7 @@ class TestMegatronAdapterTrainerLoading:
         adapter = MegatronAdapter()
 
         with pytest.raises(RuntimeError) as exc_info:
-            adapter.load_trainer_class(stage=None)
+            adapter.load_trainer_class()
 
         error_msg = str(exc_info.value)
         assert "megatron" in error_msg

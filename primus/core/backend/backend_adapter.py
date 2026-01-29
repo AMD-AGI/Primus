@@ -83,12 +83,12 @@ class BackendAdapter(ABC):
         """
 
     @abstractmethod
-    def load_trainer_class(self, stage: str | None = None):
+    def load_trainer_class(self, stage: str = "pretrain"):
         """
         Return backend Trainer class.
 
         Args:
-            stage: Optional stage name (e.g., "pretrain", "sft").
+            stage: Stage name (e.g., "pretrain", "sft").
                    The stage is resolved in the upper layer and passed down.
 
         Returns:
@@ -307,7 +307,7 @@ class BackendAdapter(ABC):
 
         # 5) load trainer class from backend (stage resolved in upper layer)
         log_rank_0("[Step 5/5] Loading trainer class...")
-        stage = self._resolve_stage(module_config)
+        stage = self._resolve_stage(module_config) or "pretrain"
         TrainerClass = self.load_trainer_class(stage=stage)
         log_rank_0(f"Trainer class loaded: {TrainerClass.__name__}")
 

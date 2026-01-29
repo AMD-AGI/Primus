@@ -130,12 +130,12 @@ class MegatronBridgeAdapter(BackendAdapter):
         return bridge_args
 
     # Load Trainer Class
-    def load_trainer_class(self, stage: str | None = None):
+    def load_trainer_class(self, stage: str = "pretrain"):
         """
         Load Megatron-Bridge trainer class registered via BackendRegistry.
 
         Args:
-            stage: Optional stage name (unused for megatron_bridge)
+            stage: Stage name (unused for megatron_bridge)
 
         This allows Primus runtime to remain agnostic to the actual trainer
         implementation (pretrain, sft, etc.).
