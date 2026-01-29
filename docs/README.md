@@ -16,6 +16,8 @@ Start here if you're new to Primus:
 
 Guides for common workflows and features:
 
+- **[Dataset Processing Guide](./dataset_processing.md)** - Data preparation and preprocessing (数据集处理指南)
+- **[Native SFT Guide](./sft_native.md)** - Supervised fine-tuning with native Megatron backend
 - **[Configuration Guide](./configuration.md)** - YAML/TOML configuration, recommended patterns, and examples
 - **[Slurm & Container Usage](./slurm-container.md)** - Distributed training and containerization workflows
 - **[Experiment Management](./experiments.md)** - Organizing and tracking your training runs
@@ -43,6 +45,8 @@ Get help and find answers:
 ### I want to...
 
 - **Train a model locally** → [Quick Start](./quickstart.md) + [CLI User Guide](./cli/PRIMUS-CLI-GUIDE.md)
+- **Prepare datasets for training** → [Dataset Processing Guide](./dataset_processing.md)
+- **Fine-tune a model (SFT)** → [Native SFT Guide](./sft_native.md)
 - **Run distributed training on Slurm** → [Slurm & Container Usage](./slurm-container.md)
 - **Configure my training run** → [Configuration Guide](./configuration.md)
 - **Benchmark performance** → [Benchmark Suite](./benchmark.md)
