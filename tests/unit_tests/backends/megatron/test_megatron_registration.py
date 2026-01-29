@@ -73,12 +73,11 @@ class TestMegatronBackendRegistration:
         trainer_cls = BackendRegistry.get_trainer_class("megatron")
         assert trainer_cls is MegatronPretrainTrainer, (
             f"Expected MegatronPretrainTrainer, got {trainer_cls}. "
-            "Check BackendRegistry.register_trainer_class('megatron', MegatronPretrainTrainer)"
+            "Check BackendRegistry.register_trainer_class(MegatronPretrainTrainer, 'megatron')"
         )
 
-        # Verify staged registration also works
+        # Explicit stage should also work
         assert BackendRegistry.has_trainer_class("megatron", stage="pretrain")
-        assert BackendRegistry.list_stages("megatron") == ["pretrain"]
 
     def test_adapter_can_be_instantiated_via_registry(self):
         """Verify that get_adapter returns a working MegatronAdapter instance."""
@@ -95,21 +94,14 @@ class TestMegatronBackendRegistration:
         original_path_names = BackendRegistry._path_names.copy()
         original_adapters = BackendRegistry._adapters.copy()
         original_trainers = BackendRegistry._trainer_classes.copy()
-        original_staged_trainers = BackendRegistry._staged_trainer_classes.copy()
-        original_default_stages = BackendRegistry._default_stages.copy()
         try:
             BackendRegistry._adapters.pop("megatron", None)
-            BackendRegistry._trainer_classes.pop("megatron", None)
-            BackendRegistry._staged_trainer_classes.pop(("megatron", "pretrain"), None)
-            BackendRegistry._default_stages.pop("megatron", None)
+            BackendRegistry._trainer_classes.pop(("megatron", "pretrain"), None)
 
             def _fake_load_backend(_backend: str) -> None:
                 BackendRegistry.register_path_name("megatron", "Megatron-LM")
                 BackendRegistry.register_adapter("megatron", MegatronAdapter)
-                BackendRegistry.register_trainer_class(
-                    "megatron", MegatronPretrainTrainer, stage="pretrain"
-                )
-                BackendRegistry.set_default_stage("megatron", "pretrain")
+                BackendRegistry.register_trainer_class(MegatronPretrainTrainer, "megatron")
 
             with patch.object(BackendRegistry, "setup_backend_path", return_value="/tmp"):
                 with patch.object(BackendRegistry, "_load_backend", side_effect=_fake_load_backend):
@@ -118,8 +110,6 @@ class TestMegatronBackendRegistration:
             BackendRegistry._path_names = original_path_names
             BackendRegistry._adapters = original_adapters
             BackendRegistry._trainer_classes = original_trainers
-            BackendRegistry._staged_trainer_classes = original_staged_trainers
-            BackendRegistry._default_stages = original_default_stages
 
         # Verify instance type
         assert isinstance(
@@ -137,21 +127,14 @@ class TestMegatronBackendRegistration:
         original_path_names = BackendRegistry._path_names.copy()
         original_adapters = BackendRegistry._adapters.copy()
         original_trainers = BackendRegistry._trainer_classes.copy()
-        original_staged_trainers = BackendRegistry._staged_trainer_classes.copy()
-        original_default_stages = BackendRegistry._default_stages.copy()
         try:
             BackendRegistry._adapters.pop("megatron", None)
-            BackendRegistry._trainer_classes.pop("megatron", None)
-            BackendRegistry._staged_trainer_classes.pop(("megatron", "pretrain"), None)
-            BackendRegistry._default_stages.pop("megatron", None)
+            BackendRegistry._trainer_classes.pop(("megatron", "pretrain"), None)
 
             def _fake_load_backend(_backend: str) -> None:
                 BackendRegistry.register_path_name("megatron", "Megatron-LM")
                 BackendRegistry.register_adapter("megatron", MegatronAdapter)
-                BackendRegistry.register_trainer_class(
-                    "megatron", MegatronPretrainTrainer, stage="pretrain"
-                )
-                BackendRegistry.set_default_stage("megatron", "pretrain")
+                BackendRegistry.register_trainer_class(MegatronPretrainTrainer, "megatron")
 
             with patch.object(BackendRegistry, "setup_backend_path", return_value="/tmp"):
                 with patch.object(BackendRegistry, "_load_backend", side_effect=_fake_load_backend):
@@ -160,8 +143,6 @@ class TestMegatronBackendRegistration:
             BackendRegistry._path_names = original_path_names
             BackendRegistry._adapters = original_adapters
             BackendRegistry._trainer_classes = original_trainers
-            BackendRegistry._staged_trainer_classes = original_staged_trainers
-            BackendRegistry._default_stages = original_default_stages
 
         # Adapter should be able to load the registered trainer class
         trainer_cls = adapter.load_trainer_class()
@@ -204,16 +185,11 @@ class TestMegatronRegistrationOrder:
         original_path_names = BackendRegistry._path_names.copy()
         original_adapters = BackendRegistry._adapters.copy()
         original_trainers = BackendRegistry._trainer_classes.copy()
-        original_staged_trainers = BackendRegistry._staged_trainer_classes.copy()
-        original_default_stages = BackendRegistry._default_stages.copy()
-
         try:
             # Remove megatron registrations
             BackendRegistry._path_names.pop("megatron", None)
             BackendRegistry._adapters.pop("megatron", None)
-            BackendRegistry._trainer_classes.pop("megatron", None)
-            BackendRegistry._staged_trainer_classes.pop(("megatron", "pretrain"), None)
-            BackendRegistry._default_stages.pop("megatron", None)
+            BackendRegistry._trainer_classes.pop(("megatron", "pretrain"), None)
 
             # Verify it's gone
             assert not BackendRegistry.has_adapter("megatron")
@@ -235,8 +211,6 @@ class TestMegatronRegistrationOrder:
             BackendRegistry._path_names = original_path_names
             BackendRegistry._adapters = original_adapters
             BackendRegistry._trainer_classes = original_trainers
-            BackendRegistry._staged_trainer_classes = original_staged_trainers
-            BackendRegistry._default_stages = original_default_stages
 
 
 class TestMegatronRegistrationFailures:
@@ -267,10 +241,7 @@ class TestMegatronRegistrationFailures:
     def test_missing_trainer_registration_would_fail(self):
         """Demonstrate what happens if trainer class registration is missing."""
         # Simulate missing trainer registration
-        original = BackendRegistry._trainer_classes.pop("megatron", None)
-        original_staged = BackendRegistry._staged_trainer_classes.pop(("megatron", "pretrain"), None)
-        original_default_stage = BackendRegistry._default_stages.pop("megatron", None)
-
+        original = BackendRegistry._trainer_classes.pop(("megatron", "pretrain"), None)
         try:
             # Without trainer registration, get_trainer_class should fail
             with pytest.raises(ValueError, match="No trainer class registered"):
@@ -278,11 +249,7 @@ class TestMegatronRegistrationFailures:
         finally:
             # Restore
             if original:
-                BackendRegistry._trainer_classes["megatron"] = original
-            if original_staged:
-                BackendRegistry._staged_trainer_classes[("megatron", "pretrain")] = original_staged
-            if original_default_stage:
-                BackendRegistry._default_stages["megatron"] = original_default_stage
+                BackendRegistry._trainer_classes[("megatron", "pretrain")] = original
 
 
 if __name__ == "__main__":

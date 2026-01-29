@@ -15,12 +15,8 @@ BackendRegistry.register_adapter("megatron", MegatronAdapter)
 # Register trainer classes by stage
 # Usage: framework=megatron with module name "pre_trainer" or "sft_trainer"
 # Or explicitly set stage in config: stage: pretrain / stage: sft
-BackendRegistry.register_trainer_class("megatron", MegatronPretrainTrainer, stage="pretrain")
-
-# Set default stage for backward compatibility
-# When stage cannot be inferred, "pretrain" is used
-BackendRegistry.set_default_stage("megatron", "pretrain")
+BackendRegistry.register_trainer_class(MegatronPretrainTrainer, "megatron")
 
 # Note: To add SFT support, import and register the SFT trainer:
 # from primus.backends.megatron.megatron_sft_trainer import MegatronSFTTrainer
-# BackendRegistry.register_trainer_class("megatron", MegatronSFTTrainer, stage="sft")
+# BackendRegistry.register_trainer_class(MegatronSFTTrainer, "megatron", stage="sft")
