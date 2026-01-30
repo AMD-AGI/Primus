@@ -4,7 +4,7 @@ exp_name: ${PRIMUS_EXP_NAME:llama3_8B-sft}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
-  sft_trainer:
+  post_trainer:
     framework: megatron
     config: sft_trainer.yaml
     

@@ -4,6 +4,8 @@
 
 extends:
   - trainer_base.yaml
+      
+stage: sft
 
 # Training iterations and batch size
 train_iters: 1000
