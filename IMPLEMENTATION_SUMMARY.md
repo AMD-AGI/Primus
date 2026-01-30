@@ -219,7 +219,21 @@ This implementation provides a clean, direct integration of SFT training with Me
 
 ## Recent Updates
 
-### Tokenizer Interface Compatibility (Latest)
+### Position IDs Fix (Latest)
+
+**Problem**: Training was failing with `TypeError: GPTModel.forward() missing 1 required positional argument: 'position_ids'`.
+
+**Solution**: Added position_ids generation in the forward_step function:
+- Generate position_ids tensor with shape [batch_size, seq_len]
+- Standard position encoding: [0, 1, 2, ..., seq_len-1] for each sample
+- Pass position_ids as positional argument to model forward call
+
+**Files Changed**:
+- `primus/backends/megatron/megatron_sft_trainer.py` - Added position_ids generation (4 lines)
+
+See `POSITION_IDS_FIX.md` for detailed information.
+
+### Tokenizer Interface Compatibility
 
 **Problem**: The SFT dataset was failing with `AttributeError: '_HuggingFaceTokenizer' object has no attribute 'convert_tokens_to_ids'` when using Megatron's tokenizer wrapper.
 
