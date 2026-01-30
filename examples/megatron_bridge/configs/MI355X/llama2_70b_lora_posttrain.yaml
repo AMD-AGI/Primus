@@ -16,7 +16,7 @@ modules:
 
     overrides:
       # Parallelism configuration
-      tensor_model_parallel_size: 1
+      tensor_model_parallel_size: 2
       pipeline_model_parallel_size: 1
       pipeline_dtype: null
       virtual_pipeline_model_parallel_size: null
