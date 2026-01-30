@@ -26,8 +26,8 @@ bash "${PRIMUS_PATH}"/tools/docker/docker_podman_proxy.sh run -d \
     --security-opt seccomp=unconfined \
     --group-add video \
     --privileged \
-    --env DATA_PATH="${DATA_PATH}" \
+    --env DATA_PATH="/data" \
     -v "${PRIMUS_PATH}:/workspace/Primus" \
-    -v "${DATA_PATH}:${DATA_PATH}" \
+    -v "${DATA_PATH}:/data" \
     -w "/workspace/Primus" \
     "$DOCKER_IMAGE" sleep infinity
