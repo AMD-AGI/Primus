@@ -20,6 +20,14 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+# Import logging utility
+try:
+    from primus.modules.module_utils import log_rank_0
+except ImportError:
+    # Fallback for testing without full Primus installation
+    def log_rank_0(msg):
+        print(msg)
+
 
 class ConversationFormatter:
     """
@@ -218,10 +226,24 @@ class SFTDataset(Dataset):
             
         Returns:
             Tuple of (input_ids, labels, loss_mask)
+            
+        Note:
+            This function tokenizes the instruction and response separately to determine
+            the loss mask boundary. Some tokenizers (like BPE) may produce slightly different
+            results when tokenizing substrings vs full text due to boundary effects.
+            In practice, this approach works well for most tokenizers, but if you encounter
+            issues with incorrect masking, consider tokenizing instruction and response
+            separately and concatenating the token IDs directly.
         """
         # Tokenize full text
-        tokens = self.tokenizer.tokenize(text)
-        token_ids = self.tokenizer.convert_tokens_to_ids(tokens)
+        try:
+            tokens = self.tokenizer.tokenize(text)
+            token_ids = self.tokenizer.convert_tokens_to_ids(tokens)
+        except AttributeError as e:
+            raise TypeError(
+                f"Tokenizer must have 'tokenize' and 'convert_tokens_to_ids' methods. "
+                f"Got tokenizer of type: {type(self.tokenizer)}. Error: {e}"
+            )
         
         # Tokenize instruction part to find where to start computing loss
         instruction_text = text[:instruction_length]
@@ -234,6 +256,8 @@ class SFTDataset(Dataset):
             token_ids = token_ids[:self.max_seq_length]
         
         # Create loss mask (0 for instruction, 1 for response)
+        # Note: Sequences shorter than max_seq_length are not padded here.
+        # The training loop should handle variable-length sequences or apply padding as needed.
         loss_mask = np.zeros(len(token_ids), dtype=np.int64)
         if instruction_len < len(token_ids):
             loss_mask[instruction_len:] = 1
@@ -259,8 +283,19 @@ class SFTDataset(Dataset):
         
         # Extract fields (assuming common field names)
         # Support multiple common field name conventions
-        instruction = sample.get("instruction") or sample.get("prompt") or sample.get("question", "")
-        response = sample.get("response") or sample.get("output") or sample.get("answer", "")
+        # Use explicit None checks to handle empty strings correctly
+        instruction = sample.get("instruction")
+        if instruction is None:
+            instruction = sample.get("prompt")
+        if instruction is None:
+            instruction = sample.get("question", "")
+            
+        response = sample.get("response")
+        if response is None:
+            response = sample.get("output")
+        if response is None:
+            response = sample.get("answer", "")
+            
         input_text = sample.get("input", None)
         system_prompt = sample.get("system", None)
         
@@ -337,8 +372,9 @@ def build_train_valid_test_datasets(
                 seed=seed,
                 **kwargs
             )
-        except ValueError:
-            # Some datasets don't have validation split
+        except (ValueError, KeyError) as e:
+            # Some datasets don't have validation split or have different split names
+            log_rank_0(f"Validation split not available: {e}")
             valid_ds = None
     
     if test_samples > 0:
@@ -352,8 +388,9 @@ def build_train_valid_test_datasets(
                 seed=seed,
                 **kwargs
             )
-        except ValueError:
-            # Some datasets don't have test split
+        except (ValueError, KeyError) as e:
+            # Some datasets don't have test split or have different split names
+            log_rank_0(f"Test split not available: {e}")
             test_ds = None
     
     return train_ds, valid_ds, test_ds

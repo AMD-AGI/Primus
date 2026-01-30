@@ -165,7 +165,9 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
             try:
                 batch = next(data_iterator)
             except StopIteration:
-                return None, lambda x: None
+                # Return None for output and a no-op loss function
+                # This signals the training loop that iteration is complete
+                return None, lambda output: torch.tensor(0.0, device='cuda')
             
             # Extract tensors from batch
             tokens = batch['input_ids'].long().cuda()
@@ -221,13 +223,17 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                 # Apply mask (only compute loss on response tokens)
                 masked_losses = losses * shift_mask
                 
-                # Compute mean loss
-                loss = masked_losses.sum() / (shift_mask.sum() + 1e-10)
+                # Compute mean loss (handle case where all tokens are masked)
+                num_unmasked = shift_mask.sum()
+                if num_unmasked > 0:
+                    loss = masked_losses.sum() / num_unmasked
+                else:
+                    # All tokens masked - return zero loss
+                    loss = torch.tensor(0.0, device=masked_losses.device, dtype=masked_losses.dtype)
                 
                 # Average across data parallel group
-                averaged_loss = tensor_parallel.get_data_parallel_world_size() > 1
-                if averaged_loss:
-                    loss = tensor_parallel.reduce_from_tensor_parallel_region(loss)
+                if tensor_parallel.get_data_parallel_world_size() > 1:
+                    torch.distributed.all_reduce(loss, group=tensor_parallel.get_data_parallel_group())
                 
                 return loss
             
@@ -243,7 +249,9 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
             
             if hasattr(inprocess_restart, "maybe_wrap_for_inprocess_restart"):
                 wrapped_pretrain, store = inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
-        except Exception:
+        except (ImportError, AttributeError) as e:
+            # Expected for older Megatron versions that don't have inprocess_restart
+            log_rank_0(f"Inprocess restart not available, using standard pretrain: {e}")
             pass
         
         # Execute training

@@ -113,7 +113,7 @@ class MegatronAdapter(BackendAdapter):
             # Determine trainer key based on module name
             module_name = module_config.name if module_config and hasattr(module_config, 'name') else None
             
-            if module_name and "sft" in module_name:
+            if module_name and module_name == "sft_trainer":
                 trainer_key = "megatron_sft"
             else:
                 # Default to pretrain trainer
