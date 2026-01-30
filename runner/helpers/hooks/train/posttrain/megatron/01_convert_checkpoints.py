@@ -205,17 +205,34 @@ def main():
         try:
             convert_checkpoint(hf_path, str(megatron_path))
             
-            # Fix metadata file for converted checkpoints
-            # Megatron-Bridge creates iteration 0, but Megatron-LM requires > 0 or "release"
+            # Fix metadata and directory structure for converted checkpoints
+            # Megatron-Bridge creates iter_0000000 directory with iteration=0 metadata
+            # But Megatron-LM requires:
+            #   - iteration > 0 OR metadata = "release"
+            #   - If metadata = "release", checkpoint must be in "release/" directory
+            
             metadata_file = megatron_path / "latest_checkpointed_iteration.txt"
-            if metadata_file.exists():
+            iter_dir = megatron_path / "iter_0000000"
+            release_dir = megatron_path / "release"
+            
+            if metadata_file.exists() and iter_dir.exists():
                 with open(metadata_file, 'r') as f:
                     content = f.read().strip()
+                
                 if content == "0":
-                    log_info("Fixing metadata file: changing iteration 0 to 'release'")
+                    log_info("Fixing HuggingFace converted checkpoint structure:")
+                    
+                    # Step 1: Update metadata file
+                    log_info("  1. Changing metadata from '0' to 'release'")
                     with open(metadata_file, 'w') as f:
                         f.write("release")
-                    log_success("Metadata file fixed for HuggingFace converted checkpoint")
+                    
+                    # Step 2: Rename directory to match
+                    if not release_dir.exists():
+                        log_info("  2. Renaming 'iter_0000000' -> 'release'")
+                        iter_dir.rename(release_dir)
+                    
+                    log_success("Checkpoint structure fixed for Megatron-LM compatibility")
             
             done_file.touch()
             log_success(f"Checkpoint prepared at {megatron_path}")
