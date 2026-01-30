@@ -281,3 +281,62 @@ Added support for local JSONL and JSON files:
 - Conversion utilities provided
 
 See `OFFLINE_DATASET_IMPLEMENTATION.md` and `docs/OFFLINE_DATASET_GUIDE.md` for details.
+
+### Parallel State API Fix
+
+**Problem**: Training was crashing with `RuntimeError: module 'megatron.core.tensor_parallel' has no attribute 'get_data_parallel_world_size'`
+
+**Solution**: Changed to use correct `parallel_state` module instead of `tensor_parallel` for data parallel operations:
+- Import `parallel_state` instead of `tensor_parallel`
+- Use `parallel_state.get_data_parallel_world_size()` for checking data parallel group size
+- Use `parallel_state.get_data_parallel_group()` for all_reduce operations
+- Removed unused `tensor_parallel` import from loss_func
+
+**Files Changed**:
+- `primus/backends/megatron/megatron_sft_trainer.py` - Fixed imports and API calls
+
+See `PARALLEL_STATE_FIX.md` for detailed information.
+
+## Testing
+
+The implementation includes comprehensive testing:
+
+1. **Unit Tests**
+   - Registration tests for stage-based trainer selection
+   - Messages format tests for multi-turn conversations
+   - Offline dataset loading tests
+   
+2. **Integration Testing**
+   - Verified with actual Megatron-LM environment
+   - Fixed runtime errors through iterative testing
+   - Validated loss computation and masking behavior
+
+3. **Manual Verification**
+   - Dataset loading from both HF and local files
+   - Multi-turn conversation formatting
+   - Loss masking for instruction tuning
+   - Position IDs generation
+   - Parallel state operations
+
+## Status
+
+✅ **Implementation Complete**
+- All core features implemented
+- All critical runtime errors fixed
+- Comprehensive documentation provided
+- Ready for production use
+
+## Known Limitations
+
+1. Requires Megatron-LM to be properly installed
+2. Tokenizer must be compatible with Megatron's interface
+3. Loss averaging assumes data parallel training setup
+
+## Future Enhancements
+
+Potential improvements:
+- Additional conversation formats (Claude, Gemini, etc.)
+- Streaming dataset support
+- Advanced loss weighting strategies
+- Integration with RLHF/PPO training stages
+
