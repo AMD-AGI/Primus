@@ -156,7 +156,7 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                 output_tensor: Model output
                 loss_func: Function to compute loss
             """
-            from megatron.core import tensor_parallel
+            from megatron.core import parallel_state
             from megatron.training import get_args
             
             args = get_args()
@@ -203,7 +203,6 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                 Returns:
                     Loss tensor
                 """
-                from megatron.core import tensor_parallel
                 import torch.nn.functional as F
                 
                 # Get logits and labels
@@ -238,8 +237,8 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
                     loss = torch.tensor(0.0, device=masked_losses.device, dtype=masked_losses.dtype)
                 
                 # Average across data parallel group
-                if tensor_parallel.get_data_parallel_world_size() > 1:
-                    torch.distributed.all_reduce(loss, group=tensor_parallel.get_data_parallel_group())
+                if parallel_state.get_data_parallel_world_size() > 1:
+                    torch.distributed.all_reduce(loss, group=parallel_state.get_data_parallel_group())
                 
                 return loss
             
