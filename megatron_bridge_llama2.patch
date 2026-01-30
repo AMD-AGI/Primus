@@ -247,3 +247,48 @@ index 99d1b6c6..3834c9b5 100644
      )
  
      if cfg.comm_overlap is None:
+diff --git a/src/megatron/bridge/training/eval.py b/src/megatron/bridge/training/eval.py
+index a8a89537..63da1be3 100644
+--- a/src/megatron/bridge/training/eval.py
++++ b/src/megatron/bridge/training/eval.py
+@@ -253,6 +253,7 @@ def evaluate_and_print_results(
+     if write_to_tensorboard:
+         writer = state.tensorboard_logger
+     else:
++        assert False, "write_to_tensorboard is False"
+         writer = None
+ 
+     wandb_writer = state.wandb_logger
+@@ -263,6 +264,7 @@ def evaluate_and_print_results(
+ 
+     # Timelimit hit during evaluation
+     if timelimit:
++        assert False, "Timelimit hit during evaluation"
+         return
+     string = f" validation loss at {prefix} | "
+     for key in total_loss_dict:
+diff --git a/src/megatron/bridge/training/pretrain.py b/src/megatron/bridge/training/pretrain.py
+index 03afb0d4..8dad48f6 100644
+--- a/src/megatron/bridge/training/pretrain.py
++++ b/src/megatron/bridge/training/pretrain.py
+@@ -128,6 +128,7 @@ def _pretrain(
+     ckpt_context = setup_output.checkpointing_context
+     pg_collection = setup_output.pg_collection
+ 
++    state.train_state.do_valid = True
+     # TRAINING
+     if not config.train.skip_train:
+         if state.train_state.do_train and config.train.train_iters > 0:
+diff --git a/src/megatron/bridge/training/state.py b/src/megatron/bridge/training/state.py
+index c2500aa7..8b1d019f 100644
+--- a/src/megatron/bridge/training/state.py
++++ b/src/megatron/bridge/training/state.py
+@@ -49,7 +49,7 @@ class TrainState(Stateful):
+     consumed_valid_samples: int = 0
+     floating_point_operations_so_far: int = 0
+     do_train: bool = False
+-    do_valid: bool = False
++    do_valid: bool = True
+     do_test: bool = False
+ 
+     def state_dict(self) -> dict[str, torch.Tensor]:
