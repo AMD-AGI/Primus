@@ -4,6 +4,8 @@
 
 This implementation adds a Supervised Fine-Tuning (SFT) trainer directly based on Megatron-LM to the Primus framework, without depending on Megatron-Bridge. It uses Primus's stage-based trainer registration system for flexible trainer selection.
 
+> **Design Note**: This trainer implements a custom `forward_step` function rather than reusing Megatron-Bridge's implementation. See [FORWARD_STEP_DESIGN_DECISION.md](./FORWARD_STEP_DESIGN_DECISION.md) for a detailed explanation of this design choice.
+
 ## Key Features
 
 ### 1. Direct Megatron-LM Integration

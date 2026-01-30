@@ -6,11 +6,13 @@ This directory contains the implementation of a Supervised Fine-Tuning (SFT) tra
 
 The SFT trainer provides:
 - Direct integration with Megatron-LM's training infrastructure
-- Universal dataset interface supporting HuggingFace datasets
-- Multiple conversation format support (Alpaca, ChatML, extensible)
+- Universal dataset interface supporting HuggingFace datasets and local files
+- Multiple conversation format support (Alpaca, ChatML, OpenAI messages, extensible)
 - Proper loss masking for instruction tuning
 - Compatible with distributed training
 - Stage-based registration system for flexible trainer selection
+
+> **Why not use Megatron-Bridge?** This trainer is designed for direct Megatron-LM integration without external dependencies. If you prefer Megatron-Bridge features, use `MegatronBridgePosttrainTrainer` instead. See [FORWARD_STEP_DESIGN_DECISION.md](../../../FORWARD_STEP_DESIGN_DECISION.md) for details.
 
 ## Key Components
 
