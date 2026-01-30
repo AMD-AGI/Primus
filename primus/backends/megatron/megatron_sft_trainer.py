@@ -187,8 +187,9 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
             position_ids = torch.arange(seq_len, dtype=torch.long, device=tokens.device)
             position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
             
-            # Forward pass through model
-            output_tensor = model(tokens, position_ids, attention_mask=None, labels=labels)
+            # Forward pass through model (without labels to get logits)
+            # We compute loss separately with custom masking
+            output_tensor = model(tokens, position_ids, attention_mask=None)
             
             # Define loss function
             def loss_func(loss_mask, output_tensor):
