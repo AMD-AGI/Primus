@@ -12,6 +12,9 @@ modules:
     model: llama3_8B.yaml
     
     overrides:
+      # Specify stage to use SFT trainer (required)
+      stage: sft
+      
       # SFT-specific configuration
       # Dataset from HuggingFace (default: tatsu-lab/alpaca)
       sft_dataset_name: "tatsu-lab/alpaca"

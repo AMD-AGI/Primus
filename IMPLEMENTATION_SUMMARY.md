@@ -2,7 +2,7 @@
 
 ## Overview
 
-This implementation adds a Supervised Fine-Tuning (SFT) trainer directly based on Megatron-LM to the Primus framework, without depending on Megatron-Bridge.
+This implementation adds a Supervised Fine-Tuning (SFT) trainer directly based on Megatron-LM to the Primus framework, without depending on Megatron-Bridge. It uses Primus's stage-based trainer registration system for flexible trainer selection.
 
 ## Key Features
 
@@ -10,6 +10,7 @@ This implementation adds a Supervised Fine-Tuning (SFT) trainer directly based o
 - **No Megatron-Bridge dependency**: Directly integrates with Megatron-LM's `pretrain()` function
 - **Follows Megatron patterns**: Uses the same dataset provider and forward step patterns as pretrain
 - **Version compatible**: Works with both older (v0.12.0) and newer Megatron-LM versions
+- **Stage-based selection**: Uses `stage="sft"` parameter for trainer selection
 
 ### 2. Universal Dataset Interface
 - **HuggingFace Integration**: Loads datasets directly from HuggingFace Hub
@@ -49,30 +50,33 @@ This implementation adds a Supervised Fine-Tuning (SFT) trainer directly based o
    - Usage examples
    - Extension guide
 
-6. **tests/unit_tests/backends/megatron/test_megatron_sft_trainer.py** (123 lines)
-   - Unit tests for trainer registration
-   - Tests for trainer selection logic
-
 ### Files Modified
 
 1. **primus/backends/megatron/__init__.py**
-   - Registers `MegatronSFTTrainer` alongside `MegatronPretrainTrainer`
-   - Enables selection between pretrain and SFT trainers
+   - Registers `MegatronSFTTrainer` with `stage="sft"`
+   - Uses stage-based registration API
 
-2. **primus/backends/megatron/megatron_adapter.py**
-   - Updated `load_trainer_class()` to select trainer based on module name
-   - Exact match for "sft_trainer" → MegatronSFTTrainer
-   - Otherwise → MegatronPretrainTrainer (default)
+2. **primus/core/backend/backend_registry.py**
+   - Updated to support stage-based trainer registration
+   - Trainer classes now indexed by `(backend, stage)` tuple
+   - `register_trainer_class(trainer_cls, backend, stage="pretrain")`
 
 3. **primus/core/backend/backend_adapter.py**
-   - Modified `load_trainer_class()` to accept optional `module_config` parameter
-   - Passes module config to adapter for trainer selection
+   - Modified `load_trainer_class()` to accept `stage` parameter
+   - Passes stage from config params
 
-4. **primus/backends/torchtitan/torchtitan_adapter.py**
-   - Updated signature for compatibility
+4. **primus/backends/megatron/megatron_adapter.py**
+   - Updated `load_trainer_class(stage)` to use stage parameter
+   - Simplified version detection using `MegatronBaseTrainer.detect_version()`
 
-5. **primus/backends/megatron_bridge/megatron_bridge_adapter.py**
-   - Updated signature for compatibility
+5. **primus/backends/torchtitan/torchtitan_adapter.py**
+   - Updated signature for compatibility with stage-based API
+
+6. **primus/backends/megatron_bridge/megatron_bridge_adapter.py**
+   - Updated signature for compatibility with stage-based API
+
+7. **Other backend __init__.py files**
+   - Updated registration calls to new signature
 
 ## Usage Example
 
@@ -85,6 +89,9 @@ modules:
     model: llama3_8B.yaml
     
     overrides:
+      # Specify stage to use SFT trainer
+      stage: sft
+      
       # Dataset configuration
       sft_dataset_name: "tatsu-lab/alpaca"
       sft_conversation_format: "alpaca"
@@ -100,13 +107,17 @@ modules:
       save: /path/to/save/finetuned
 ```
 
+**Key configuration**: The `stage: sft` parameter tells Primus to use the SFT trainer instead of the default pretrain trainer.
+
 ## Architecture
 
 ```
-User Config (sft_trainer module)
+User Config (stage: sft)
     ↓
-MegatronAdapter.load_trainer_class(module_config)
-    ↓ (module_name == "sft_trainer")
+MegatronAdapter.load_trainer_class(stage="sft")
+    ↓
+BackendRegistry.get_trainer_class("megatron", stage="sft")
+    ↓
 MegatronSFTTrainer
     ↓ inherits from
 MegatronBaseTrainer
@@ -123,10 +134,28 @@ run_train()
 Megatron pretrain(dataset_provider, model_provider, forward_step)
 ```
 
+### Stage-Based Registration
+
+The implementation uses Primus's stage-based trainer registration:
+
+```python
+# In primus/backends/megatron/__init__.py
+BackendRegistry.register_trainer_class(MegatronPretrainTrainer, "megatron")          # stage="pretrain" (default)
+BackendRegistry.register_trainer_class(MegatronSFTTrainer, "megatron", "sft")       # stage="sft"
+```
+
+Trainer selection:
+- **Config specifies stage**: `stage: sft` → MegatronSFTTrainer
+- **No stage specified**: defaults to `stage: pretrain` → MegatronPretrainTrainer
+
 ## Key Design Decisions
 
-### 1. Module-Based Trainer Selection
-Instead of creating a separate backend name, we reuse the "megatron" backend and select the trainer based on the module name. This keeps the architecture simple and consistent.
+### 1. Stage-Based Trainer Selection
+Instead of using module names or creating separate backend identifiers, we use Primus's stage-based registration system. This provides:
+- **Clean separation**: Different training stages (pretrain, sft, etc.) are explicit
+- **Flexible configuration**: Easy to switch between trainers via `stage` parameter
+- **Consistent API**: All backends use the same stage-based selection mechanism
+- **Extensible**: Easy to add new stages (e.g., "rlhf", "dpo") in the future
 
 ### 2. Loss Masking Approach
 We tokenize the instruction and response separately to determine the boundary, then create a binary mask. While this approach has minor tokenization boundary effects with some BPE tokenizers, it works well in practice and is simple to understand.

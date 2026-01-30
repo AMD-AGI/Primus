@@ -10,6 +10,7 @@ The SFT trainer provides:
 - Multiple conversation format support (Alpaca, ChatML, extensible)
 - Proper loss masking for instruction tuning
 - Compatible with distributed training
+- Stage-based registration system for flexible trainer selection
 
 ## Key Components
 
@@ -31,6 +32,11 @@ Universal dataset interface that:
 - `primus/configs/modules/megatron/sft_trainer.yaml` - Base SFT trainer config
 - `examples/megatron/configs/MI355X/llama3_8B-BF16-sft.yaml` - Example experiment config
 
+### 4. Stage-Based Registration
+The trainer uses Primus's stage-based registration system:
+- Registered with `stage="sft"` to differentiate from pretrain
+- Allows flexible trainer selection via `stage` parameter in config
+
 ## Usage
 
 ### 1. Basic SFT Training
@@ -50,6 +56,9 @@ modules:
     model: llama3_8B.yaml
     
     overrides:
+      # Specify stage to use SFT trainer
+      stage: sft
+      
       # SFT-specific settings
       sft_dataset_name: "tatsu-lab/alpaca"
       sft_conversation_format: "alpaca"
@@ -159,7 +168,15 @@ This ensures the model learns to generate appropriate responses without being pe
 
 ## Architecture
 
+The SFT trainer uses Primus's stage-based registration system:
+
 ```
+Config (stage: sft)
+    ↓
+BackendAdapter.load_trainer_class(stage="sft")
+    ↓
+BackendRegistry.get_trainer_class("megatron", stage="sft")
+    ↓
 MegatronSFTTrainer (megatron_sft_trainer.py)
     ↓ inherits from
 MegatronBaseTrainer (megatron_base_trainer.py)
@@ -172,6 +189,18 @@ BaseTrainer (primus/core/trainer/base_trainer.py)
     - Universal training workflow
     - Patch management
 ```
+
+### Stage-Based Registration
+
+The trainer registration happens in `primus/backends/megatron/__init__.py`:
+```python
+BackendRegistry.register_trainer_class(MegatronPretrainTrainer, "megatron")           # stage="pretrain" (default)
+BackendRegistry.register_trainer_class(MegatronSFTTrainer, "megatron", "sft")        # stage="sft"
+```
+
+The stage is selected via configuration:
+- **Explicit**: Set `stage: sft` in config overrides
+- **Default**: If not specified, defaults to `stage: pretrain`
 
 ## Configuration Parameters
 
