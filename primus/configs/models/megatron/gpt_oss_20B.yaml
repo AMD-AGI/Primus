@@ -2,7 +2,7 @@ extends:
   - deepseek_v2_base.yaml
 
 tokenizer_type: Llama3Tokenizer
-tokenizer_model: ${MODEL:-meta-llama/Llama-3.1-8B}
+tokenizer_model: ${MODEL:meta-llama/Llama-3.1-8B}
 
 # model
 num_layers: 24
