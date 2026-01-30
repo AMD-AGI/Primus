@@ -1,0 +1,129 @@
+#!/bin/bash
+# Script to setup and start llama2_70b_lora training
+# This script automates all the steps required to start training
+
+set -e  # Exit on error
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+echo_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+echo_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+echo_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Configuration variables
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DATA_DIR="/data/mlperf_llama2/data"
+PATCH_FILE="megatron_bridge_llama2.patch"
+SEQ_LENGTH=8192
+HF_TOKEN="${HF_TOKEN:-}"
+if [ -z "$HF_TOKEN" ]; then
+    echo -e "${RED}[ERROR]${NC} HF_TOKEN is not set or is empty. Please set your Hugging Face token in the environment or in this script."
+    exit 1
+fi
+
+# Docker configuration (for start_container.sh)
+export DOCKER_IMAGE="${DOCKER_IMAGE:-docker.io/rocm/primus:v25.10}"
+export DATA_PATH="${DATA_DIR}"
+export CONTAINER_NAME="${CONTAINER_NAME:-primus_llama2_lora}"
+
+# Step 1: Update submodules
+echo_info "Step 1: Updating submodules..."
+git submodule update --init --recursive
+echo_info "Submodules updated successfully"
+
+# Step 2: Apply the megatron-bridge patch
+echo_info "Step 2: Applying megatron-bridge patch..."
+if [ -f "${PATCH_FILE}" ]; then
+    # Check if patch is already applied
+    cd third_party/Megatron-Bridge
+    if git apply --check "../../${PATCH_FILE}" > /dev/null 2>&1; then
+        echo_info "Patch is not yet applied. Applying patch..."
+        git apply "../../${PATCH_FILE}"
+        echo_info "Patch applied successfully."
+    else
+        echo_warn "Patch may already be applied or there is a conflict. Verifying..."
+        if git apply --reverse --check "../../${PATCH_FILE}" > /dev/null 2>&1; then
+            echo_warn "Patch already applied. Skipping patch step."
+        else
+            echo_error "Patch cannot be applied or reverted. Please check patch status manually."
+            cd ../..
+            exit 1
+        fi
+    fi
+    cd ../..
+else
+    echo_error "Patch file ${PATCH_FILE} not found in ${SCRIPT_DIR}"
+    exit 1
+fi
+
+# Step 3: Start Primus Docker container with data mount
+echo_info "Step 3: Starting Primus Docker container..."
+echo_info "Data directory: ${DATA_DIR}"
+echo_info "Container name: ${CONTAINER_NAME}"
+echo_info "Docker image: ${DOCKER_IMAGE}"
+
+# Check if data directory exists
+if [ ! -d "${DATA_DIR}" ]; then
+    echo_error "Data directory ${DATA_DIR} does not exist!"
+    echo_error "Please create it or update DATA_DIR variable in this script."
+    exit 1
+fi
+
+# Check if container is already running
+if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    echo_info "Container ${CONTAINER_NAME} is already running."
+elif docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    echo_info "Container ${CONTAINER_NAME} exists but is stopped. Starting it..."
+    docker start "${CONTAINER_NAME}"
+else
+    echo_info "Creating and starting new container using start_container.sh..."
+    bash "${SCRIPT_DIR}/tools/docker/start_container.sh"
+    echo_info "Container started successfully"
+fi
+
+# Step 4: Convert data to packed format
+echo_info "Step 4: Converting data to packed format..."
+docker exec "${CONTAINER_NAME}" bash -c "
+    cd /workspace/Primus
+    if [ ! -f data/train_packed.npy ]; then
+        echo 'Converting training data...'
+        python3 convert_to_packed_format.py data/train.npy data/train_packed.npy
+    else
+        echo 'Training data already converted: data/train_packed.npy'
+    fi
+    
+    if [ ! -f data/validation_packed.npy ]; then
+        echo 'Converting validation data...'
+        python3 convert_to_packed_format.py data/validation.npy data/validation_packed.npy
+    else
+        echo 'Validation data already converted: data/validation_packed.npy'
+    fi
+"
+
+# Step 5: Create tokenizer metadata
+echo_info "Step 5: Creating tokenizer metadata..."
+docker exec "${CONTAINER_NAME}" bash -c "
+    cd /workspace/Primus
+    if [ ! -f data/packed_metadata.jsonl ]; then
+        python3 create_metadata.py ${SEQ_LENGTH} data/packed_metadata.jsonl
+    else
+        echo 'Metadata already exists: data/packed_metadata.jsonl'
+    fi
+"
+
+# Step 6: Start training
+echo_info "Step 6: Starting llama2_70b_lora training..."
+echo_info "Training configuration: examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml"
+docker exec -it "${CONTAINER_NAME}" bash -c "cd /workspace/Primus && HF_TOKEN=${HF_TOKEN} ./runner/primus-cli direct train posttrain --config examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml"
