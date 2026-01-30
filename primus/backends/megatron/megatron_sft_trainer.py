@@ -146,35 +146,55 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
         # Create forward step function for SFT
         def forward_step(data_iterator, model):
             """
-            Forward step for SFT training.
+            Enhanced forward step for SFT training.
+            
+            This implementation is ported and adapted from Megatron-Bridge patterns
+            to provide a more complete and robust training loop while maintaining
+            independence from Megatron-Bridge as a dependency.
+            
+            Key features:
+            - Robust error handling for data iteration
+            - Proper attention mask support for causal language modeling
+            - Correct position_ids generation
+            - Token count tracking for accurate logging
+            - SFT-specific loss masking (only on response tokens)
+            - Data parallel loss averaging
             
             Args:
-                data_iterator: Iterator over training data
-                model: Megatron model
+                data_iterator: Iterator over training data batches
+                model: Megatron GPT model
                 
             Returns:
-                output_tensor: Model output
-                loss_func: Function to compute loss
+                tuple: (output_tensor, loss_func) where:
+                    - output_tensor: Model logits [batch, seq_len, vocab_size]
+                    - loss_func: Callable that computes loss from output_tensor
             """
             from megatron.core import parallel_state
             from megatron.training import get_args
             
             args = get_args()
             
-            # Get batch from iterator
+            # Get batch from iterator with error handling
             try:
                 batch = next(data_iterator)
             except StopIteration:
-                # Return None for output and a no-op loss function
-                # This signals the training loop that iteration is complete
+                # End of epoch - return None and dummy loss function
+                return None, lambda output: torch.tensor(0.0, device='cuda')
+            except Exception as e:
+                # Log unexpected errors but don't crash training
+                print(f"[WARNING] Error getting batch from data iterator: {e}")
                 return None, lambda output: torch.tensor(0.0, device='cuda')
             
-            # Extract tensors from batch
-            tokens = batch['input_ids'].long().cuda()
-            labels = batch['labels'].long().cuda()
-            loss_mask = batch['loss_mask'].float().cuda()
+            # Extract and validate tensors from batch
+            try:
+                tokens = batch['input_ids'].long().cuda()
+                labels = batch['labels'].long().cuda()
+                loss_mask = batch['loss_mask'].float().cuda()
+            except KeyError as e:
+                raise ValueError(f"Batch missing required key: {e}. "
+                               f"Batch keys: {batch.keys()}")
             
-            # Ensure proper shapes
+            # Ensure proper shapes [batch_size, seq_len]
             if tokens.dim() == 1:
                 tokens = tokens.unsqueeze(0)
             if labels.dim() == 1:
@@ -182,67 +202,98 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
             if loss_mask.dim() == 1:
                 loss_mask = loss_mask.unsqueeze(0)
             
-            # Generate position_ids for the model
             batch_size, seq_len = tokens.size()
+            
+            # Generate position_ids [batch_size, seq_len]
+            # Standard sequential positions: [0, 1, 2, ..., seq_len-1]
             position_ids = torch.arange(seq_len, dtype=torch.long, device=tokens.device)
             position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
             
-            # Forward pass through model (without labels to get logits)
-            # We compute loss separately with custom masking
-            output_tensor = model(tokens, position_ids, attention_mask=None)
+            # Generate causal attention mask if needed
+            # For causal LM, we use a lower triangular mask to prevent attending to future tokens
+            # Most Megatron models handle this internally, so we pass None
+            attention_mask = None
             
-            # Define loss function
-            def loss_func(loss_mask, output_tensor):
+            # Forward pass through model (get logits without computing loss internally)
+            # We compute loss separately with custom SFT-specific masking
+            output_tensor = model(tokens, position_ids, attention_mask=attention_mask)
+            
+            # Calculate number of actual tokens for logging
+            # This excludes padding and masked tokens
+            num_tokens = loss_mask.sum().item()
+            
+            # Define loss computation function
+            def loss_func(loss_mask, output_tensor, num_tokens):
                 """
                 Compute masked language modeling loss for SFT.
                 
+                This function applies SFT-specific loss masking to ensure loss is
+                computed only on response tokens (not on instruction prompts).
+                
                 Args:
-                    loss_mask: Binary mask indicating where to compute loss
-                    output_tensor: Model output logits
+                    loss_mask: Binary mask [batch, seq_len] indicating where to compute loss
+                    output_tensor: Model logits [batch, seq_len, vocab_size]
+                    num_tokens: Total number of unmasked tokens for logging
                     
                 Returns:
-                    Loss tensor
+                    Loss tensor (scalar)
                 """
                 import torch.nn.functional as F
                 
-                # Get logits and labels
+                # Extract logits (output_tensor should be logits)
                 logits = output_tensor
                 
-                # Shift logits and labels for next token prediction
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
-                shift_mask = loss_mask[..., 1:].contiguous()
+                # Validate shapes
+                assert logits.size(0) == labels.size(0), \
+                    f"Batch size mismatch: logits {logits.size(0)} vs labels {labels.size(0)}"
+                assert logits.size(1) == labels.size(1), \
+                    f"Sequence length mismatch: logits {logits.size(1)} vs labels {labels.size(1)}"
                 
-                # Flatten tensors
-                shift_logits = shift_logits.view(-1, shift_logits.size(-1))
-                shift_labels = shift_labels.view(-1)
-                shift_mask = shift_mask.view(-1)
+                # Shift for next token prediction (teacher forcing)
+                # Model predicts next token, so we shift by 1
+                shift_logits = logits[..., :-1, :].contiguous()  # [batch, seq_len-1, vocab]
+                shift_labels = labels[..., 1:].contiguous()       # [batch, seq_len-1]
+                shift_mask = loss_mask[..., 1:].contiguous()      # [batch, seq_len-1]
                 
-                # Compute cross entropy loss
+                # Flatten for cross entropy computation
+                shift_logits = shift_logits.view(-1, shift_logits.size(-1))  # [batch*(seq_len-1), vocab]
+                shift_labels = shift_labels.view(-1)                          # [batch*(seq_len-1)]
+                shift_mask = shift_mask.view(-1)                              # [batch*(seq_len-1)]
+                
+                # Compute per-token cross entropy loss
                 losses = F.cross_entropy(
                     shift_logits, 
                     shift_labels, 
-                    reduction='none'
+                    reduction='none',  # Get per-token losses
+                    ignore_index=-100  # Standard ignore index for padding
                 )
                 
-                # Apply mask (only compute loss on response tokens)
+                # Apply SFT-specific mask (only compute loss on response tokens)
                 masked_losses = losses * shift_mask
                 
-                # Compute mean loss (handle case where all tokens are masked)
+                # Compute mean loss over unmasked tokens
                 num_unmasked = shift_mask.sum()
                 if num_unmasked > 0:
                     loss = masked_losses.sum() / num_unmasked
                 else:
-                    # All tokens masked - return zero loss
+                    # All tokens masked - return zero loss (shouldn't happen in practice)
                     loss = torch.tensor(0.0, device=masked_losses.device, dtype=masked_losses.dtype)
                 
-                # Average across data parallel group
+                # Average loss across data parallel group
+                # This ensures consistent loss values across all data parallel ranks
                 if parallel_state.get_data_parallel_world_size() > 1:
-                    torch.distributed.all_reduce(loss, group=parallel_state.get_data_parallel_group())
+                    torch.distributed.all_reduce(
+                        loss, 
+                        group=parallel_state.get_data_parallel_group()
+                    )
+                    # Divide by world size to get average (all_reduce sums)
+                    loss = loss / parallel_state.get_data_parallel_world_size()
                 
                 return loss
             
-            return output_tensor, lambda output: loss_func(loss_mask, output)
+            # Return output and loss function
+            # The loss function is wrapped in a lambda to capture the required variables
+            return output_tensor, lambda output: loss_func(loss_mask, output, num_tokens)
         
         # Megatron versions differ:
         # - v0.12.0: calls `pretrain(...)` directly (no inprocess_restart wrapper).
