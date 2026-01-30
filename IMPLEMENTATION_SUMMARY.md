@@ -216,3 +216,39 @@ Potential areas for enhancement:
 ## Conclusion
 
 This implementation provides a clean, direct integration of SFT training with Megatron-LM, following the patterns established by the pretrain trainer while adding SFT-specific functionality. The design is extensible and well-documented, making it easy for users to customize for their specific needs.
+
+## Recent Updates
+
+### Tokenizer Interface Compatibility (Latest)
+
+**Problem**: The SFT dataset was failing with `AttributeError: '_HuggingFaceTokenizer' object has no attribute 'convert_tokens_to_ids'` when using Megatron's tokenizer wrapper.
+
+**Solution**: Added flexible `_tokenize_text()` helper method that handles multiple tokenizer interfaces:
+- Megatron-style tokenizers (tokenize() returns IDs directly)
+- Standard HuggingFace tokenizers (tokenize() + convert_tokens_to_ids())
+- Encode-based tokenizers (encode() method)
+
+**Files Changed**:
+- `primus/backends/megatron/core/datasets/sft_dataset.py` - Added helper method and updated all tokenization calls
+
+See `TOKENIZER_FIX.md` for detailed information.
+
+### Multi-Turn Conversation Support
+
+Added comprehensive support for multi-turn conversations using OpenAI messages format:
+- `OpenAIMessagesFormatter` class for formatting role-content message lists
+- Specialized loss masking for multi-turn (only on assistant responses)
+- Auto-detection of messages format in dataset
+- Formatter options: "openai" and "messages"
+
+See `MULTI_TURN_IMPLEMENTATION.md` and `docs/MULTI_TURN_CONVERSATIONS.md` for details.
+
+### Offline Dataset Support
+
+Added support for local JSONL and JSON files:
+- Load data from local files without internet
+- Support for both JSONL and JSON array formats
+- Automatic format detection
+- Conversion utilities provided
+
+See `OFFLINE_DATASET_IMPLEMENTATION.md` and `docs/OFFLINE_DATASET_GUIDE.md` for details.
