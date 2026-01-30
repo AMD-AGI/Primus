@@ -1,15 +1,33 @@
+diff --git a/src/megatron/bridge/peft/lora.py b/src/megatron/bridge/peft/lora.py
+index b1f8b55d..704684bc 100644
+--- a/src/megatron/bridge/peft/lora.py
++++ b/src/megatron/bridge/peft/lora.py
+@@ -80,15 +80,15 @@ class LoRA(PEFT, ModuleMatcher):
+     """
+ 
+     target_modules: List[str] = field(
+-        default_factory=lambda: ["linear_qkv", "linear_proj", "linear_fc1", "linear_fc2"]
++        default_factory=lambda: ["linear_qkv", "linear_proj"]
+     )
+-    dim: int = 32
++    dim: int = 16
+     alpha: int = 32
+-    dropout: float = 0.0
++    dropout: float = 0.1
+     dropout_position: Literal["pre", "post"] = "pre"
+-    lora_A_init_method: str = "xavier"
++    lora_A_init_method: str = "kaiming"
+     lora_B_init_method: str = "zero"
+-    a2a_experimental: bool = False
++    a2a_experimental: bool = True
+     lora_dtype: torch.dtype = None
+ 
+     def transform(self, module: nn.Module, name: Optional[str] = None, prefix: Optional[str] = None) -> nn.Module:
 diff --git a/src/megatron/bridge/recipes/llama/llama2.py b/src/megatron/bridge/recipes/llama/llama2.py
-index 99d1b6c6..ccff4454 100644
+index 99d1b6c6..3834c9b5 100644
 --- a/src/megatron/bridge/recipes/llama/llama2.py
 +++ b/src/megatron/bridge/recipes/llama/llama2.py
-@@ -13,13 +13,17 @@
- # limitations under the License.
- 
- import os
-+from sqlite3 import adapt
- from typing import List, Optional, Union
- 
- import torch
+@@ -19,7 +19,10 @@ import torch
  from typing_extensions import TypedDict, Unpack
  
  from megatron.bridge import AutoBridge
@@ -20,7 +38,7 @@ index 99d1b6c6..ccff4454 100644
  from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
  from megatron.bridge.recipes.utils.tokenizer_utils import DEFAULT_NULL_TOKENIZER_VOCAB_SIZE
  from megatron.bridge.training.comm_overlap import CommOverlapConfig
-@@ -27,7 +31,7 @@ from megatron.bridge.training.config import (
+@@ -27,7 +30,7 @@ from megatron.bridge.training.config import (
      CheckpointConfig,
      ConfigContainer,
      DistributedDataParallelConfig,
@@ -29,7 +47,7 @@ index 99d1b6c6..ccff4454 100644
      LoggerConfig,
      RNGConfig,
      TokenizerConfig,
-@@ -74,6 +78,13 @@ class Llama2CommonKwargs(TypedDict, total=False):
+@@ -74,6 +77,17 @@ class Llama2CommonKwargs(TypedDict, total=False):
      # Precision / overlap configs
      precision_config: Optional[Union[MixedPrecisionConfig, str]]
      comm_overlap_config: Optional[CommOverlapConfig]
@@ -40,10 +58,14 @@ index 99d1b6c6..ccff4454 100644
 +    eval_iters: int = 32
 +    pretrained_checkpoint: str | None
 +    peft: str | PEFT | None
++    packed_sequence: bool
++    packed_train_data_path: str | None
++    packed_val_data_path: str | None
++    packed_metadata_path: str | None
  
  
  def llama2_7b_pretrain_config(**user_kwargs: Unpack[Llama2CommonKwargs]) -> ConfigContainer:
-@@ -81,6 +92,7 @@ def llama2_7b_pretrain_config(**user_kwargs: Unpack[Llama2CommonKwargs]) -> Conf
+@@ -81,6 +95,7 @@ def llama2_7b_pretrain_config(**user_kwargs: Unpack[Llama2CommonKwargs]) -> Conf
  
      See `_llama2_common` for the full list of parameters.
      """
@@ -51,7 +73,7 @@ index 99d1b6c6..ccff4454 100644
      recommended_kwargs: Llama2CommonKwargs = {
          "hf_path": "meta-llama/Llama-2-7b-hf",
          "tensor_model_parallel_size": 2,
-@@ -91,6 +103,39 @@ def llama2_7b_pretrain_config(**user_kwargs: Unpack[Llama2CommonKwargs]) -> Conf
+@@ -91,6 +106,39 @@ def llama2_7b_pretrain_config(**user_kwargs: Unpack[Llama2CommonKwargs]) -> Conf
          "lr_warmup_iters": 2000,
          "eval_interval": 2000,
          "save_interval": 2000,
@@ -91,23 +113,27 @@ index 99d1b6c6..ccff4454 100644
      }
      # Combine defaults with user kwargs; user values take precedence.
      combined_kwargs: Llama2CommonKwargs = {**recommended_kwargs, **user_kwargs}
-@@ -129,7 +174,14 @@ def _llama2_common(
+@@ -128,7 +176,18 @@ def _llama2_common(
+     lr_decay_iters: Optional[int] = None,
      eval_interval: int = 2000,
      save_interval: int = 2000,
-     use_null_tokenizer: bool = True,
--    # Precision recipe
+-    use_null_tokenizer: bool = True,
++    use_null_tokenizer: bool = False,
 +    pretrained_checkpoint: str | None = None,
 +    peft: str | PEFT | None = "lora",
++    packed_sequence: bool = False,
++    packed_train_data_path: str | None = None,
++    packed_val_data_path: str | None = None,
++    packed_metadata_path: str | None = None,
 +    adam_beta1: float = 0.9,
 +    adam_beta2: float = 0.95,
 +    adam_eps: float = 1e-5,
 +    weight_decay: float = 0.1,
 +    eval_iters: int = 32,
-+    # Precision recipe    
+     # Precision recipe
      precision_config: Optional[Union[MixedPrecisionConfig, str]] = "bf16_mixed",
      comm_overlap_config: Optional[CommOverlapConfig] = None,
- ) -> ConfigContainer:
-@@ -166,6 +218,11 @@ def _llama2_common(
+@@ -166,6 +225,11 @@ def _llama2_common(
          save_interval (int): Save interval.
          precision_config (Optional[Union[MixedPrecisionConfig, str]]): Precision configuration for the model.
          comm_overlap_config (Optional[CommOverlapConfig]): Communication overlap configuration for the model.
@@ -119,7 +145,7 @@ index 99d1b6c6..ccff4454 100644
  
      Returns:
          ConfigContainer: Configuration for pre-training.
-@@ -175,10 +232,6 @@ def _llama2_common(
+@@ -175,10 +239,6 @@ def _llama2_common(
      checkpoint_dir = os.path.join(run_output_dir, "checkpoints")
      tensorboard_dir = os.path.join(run_output_dir, "tb_logs")
  
@@ -130,7 +156,7 @@ index 99d1b6c6..ccff4454 100644
      bridge = AutoBridge.from_hf_pretrained(hf_path)
      model_cfg = bridge.to_megatron_provider(load_weights=False)
      model_cfg.tensor_model_parallel_size = tensor_model_parallel_size
-@@ -192,21 +245,24 @@ def _llama2_common(
+@@ -192,21 +252,36 @@ def _llama2_common(
      opt_config, scheduler = distributed_fused_adam_with_cosine_annealing(
          lr_warmup_iters=lr_warmup_iters,
          lr_decay_iters=lr_decay_iters,
@@ -149,6 +175,18 @@ index 99d1b6c6..ccff4454 100644
 +    # PEFT config
 +    peft_config = default_peft_config(peft)
 +
++    # Packed sequence configuration
++    if packed_sequence:
++        packed_sequence_specs = PackedSequenceSpecs(
++            packed_sequence_size=seq_length,  # Must be > 0 to use packed files
++            tokenizer_model_name=hf_path,
++            packed_train_data_path=packed_train_data_path or "/data/train_packed.npy",
++            packed_val_data_path=packed_val_data_path or "/data/validation_packed.npy",
++            packed_metadata_path=packed_metadata_path or "/data/packed_metadata.jsonl",  # Metadata for packed sequences
++        )
++    else:
++        packed_sequence_specs = None
++
      # Config Container
      cfg = ConfigContainer(
          model=model_cfg,
@@ -160,7 +198,7 @@ index 99d1b6c6..ccff4454 100644
              global_batch_size=global_batch_size,
              micro_batch_size=micro_batch_size,
              manual_gc=True,
-@@ -224,22 +280,22 @@ def _llama2_common(
+@@ -224,22 +299,17 @@ def _llama2_common(
              use_distributed_optimizer=True,
              use_megatron_fsdp=use_megatron_fsdp,  # need use_distributed_optimizer=True
          ),
@@ -177,12 +215,7 @@ index 99d1b6c6..ccff4454 100644
 -            blend_per_split=blend_per_split,
 -            split=split,
 +            seed=1234,
-+            packed_sequence_specs=PackedSequenceSpecs(
-+                packed_sequence_size=seq_length,  # Should match your packed data
-+                tokenizer_model_name=hf_path,
-+                packed_train_data_path="/data/train.npy",  # Path to your .npy file
-+                packed_val_data_path="/data/validation.npy",  # Optional
-+            ),
++            packed_sequence_specs=packed_sequence_specs,
              # Dataloader config parameters
              data_sharding=True,
 -            dataloader_type="single",
@@ -195,7 +228,7 @@ index 99d1b6c6..ccff4454 100644
          logger=LoggerConfig(
              log_interval=10,
              tensorboard_dir=tensorboard_dir,
-@@ -251,14 +307,16 @@ def _llama2_common(
+@@ -251,14 +321,16 @@ def _llama2_common(
          ),
          checkpoint=CheckpointConfig(
              save_interval=save_interval,
