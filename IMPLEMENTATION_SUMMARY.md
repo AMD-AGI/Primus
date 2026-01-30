@@ -219,7 +219,22 @@ This implementation provides a clean, direct integration of SFT training with Me
 
 ## Recent Updates
 
-### Position IDs Fix (Latest)
+### Loss Computation Fix (Latest)
+
+**Problem**: Training was failing during loss computation with type mismatch error.
+
+**Solution**: Removed `labels` parameter from model forward call:
+- Model now returns logits instead of computing loss internally
+- Custom loss_func can properly process logits with shape [batch_size, seq_len, vocab_size]
+- Masking is applied correctly to compute loss only on response tokens
+- Aligns with standard Megatron SFT pattern
+
+**Files Changed**:
+- `primus/backends/megatron/megatron_sft_trainer.py` - Removed labels from model call
+
+See `LOSS_COMPUTATION_FIX.md` for detailed information.
+
+### Position IDs Fix
 
 **Problem**: Training was failing with `TypeError: GPTModel.forward() missing 1 required positional argument: 'position_ids'`.
 
