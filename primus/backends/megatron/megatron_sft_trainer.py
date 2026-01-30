@@ -182,8 +182,13 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
             if loss_mask.dim() == 1:
                 loss_mask = loss_mask.unsqueeze(0)
             
+            # Generate position_ids for the model
+            batch_size, seq_len = tokens.size()
+            position_ids = torch.arange(seq_len, dtype=torch.long, device=tokens.device)
+            position_ids = position_ids.unsqueeze(0).expand(batch_size, -1)
+            
             # Forward pass through model
-            output_tensor = model(tokens, attention_mask=None, labels=labels)
+            output_tensor = model(tokens, position_ids, attention_mask=None, labels=labels)
             
             # Define loss function
             def loss_func(loss_mask, output_tensor):
