@@ -57,6 +57,7 @@ def _is_primus_turbo_enabled(ctx: PatchContext) -> bool:
     phase="before_train",
     description="Replace TESpecProvider with PrimusTurboSpecProvider when PrimusTurbo is enabled",
     condition=_is_primus_turbo_enabled,
+    backend_versions=["<0.16"],
 )
 def patch_te_spec_provider(ctx: PatchContext):
     """
