@@ -155,6 +155,50 @@ sft_conversation_format: "chatml"
 # {response}<|im_end|>
 ```
 
+#### OpenAI Messages Format (Multi-Turn Conversations)
+```python
+sft_conversation_format: "openai"  # or "messages"
+
+# Supports multi-turn conversations with role-content pairs
+# Data format:
+{
+  "messages": [
+    {"role": "system", "content": "You are a helpful assistant"},
+    {"role": "user", "content": "Hello"},
+    {"role": "assistant", "content": "Hi! How can I help?"},
+    {"role": "user", "content": "What's the weather?"},
+    {"role": "assistant", "content": "I don't have access to weather data."}
+  ]
+}
+
+# Formatted output (ChatML-style):
+# <|im_start|>system
+# You are a helpful assistant<|im_end|>
+# <|im_start|>user
+# Hello<|im_end|>
+# <|im_start|>assistant
+# Hi! How can I help?<|im_end|>
+# <|im_start|>user
+# What's the weather?<|im_end|>
+# <|im_start|>assistant
+# I don't have access to weather data.<|im_end|>
+
+# Loss is computed ONLY on assistant message content
+```
+
+**Key Features of OpenAI Messages Format:**
+- ✅ Support for multi-turn conversations
+- ✅ Loss computed only on assistant responses
+- ✅ System, user, and assistant roles supported
+- ✅ Compatible with OpenAI API message format
+- ✅ Automatically masks non-assistant content
+
+**Example JSONL with messages:**
+```jsonl
+{"messages": [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}]}
+{"messages": [{"role": "system", "content": "Be helpful"}, {"role": "user", "content": "Help me"}, {"role": "assistant", "content": "I'm here to help!"}]}
+```
+
 ### 4. Adding Custom Conversation Formats
 
 To add a new format, extend the `ConversationFormatter` class in `sft_dataset.py`:

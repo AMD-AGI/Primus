@@ -190,6 +190,140 @@ class ChatMLFormatter(ConversationFormatter):
         }
 
 
+class OpenAIMessagesFormatter(ConversationFormatter):
+    """
+    OpenAI Messages conversation format for multi-turn conversations.
+    
+    Supports the standard OpenAI messages format with role-content pairs.
+    This enables training on multi-turn conversations where loss is computed
+    only on assistant responses.
+    
+    Format:
+        {
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant"},
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi! How can I help?"},
+                {"role": "user", "content": "What's the weather?"},
+                {"role": "assistant", "content": "I don't have access to weather data."}
+            ]
+        }
+    
+    The formatted output will be:
+        <|im_start|>system
+        You are a helpful assistant<|im_end|>
+        <|im_start|>user
+        Hello<|im_end|>
+        <|im_start|>assistant
+        Hi! How can I help?<|im_end|>
+        <|im_start|>user
+        What's the weather?<|im_end|>
+        <|im_start|>assistant
+        I don't have access to weather data.<|im_end|>
+    
+    Loss is only computed on assistant message content.
+    """
+    
+    def format_messages(self, messages: List[Dict[str, str]]) -> Tuple[str, List[Tuple[int, int]]]:
+        """
+        Format a list of messages into training text.
+        
+        Args:
+            messages: List of message dicts with 'role' and 'content' keys
+                     role can be: 'system', 'user', 'assistant'
+        
+        Returns:
+            Tuple of (formatted_text, assistant_ranges)
+            assistant_ranges: List of (start, end) character positions for assistant content
+        """
+        parts = []
+        assistant_ranges = []
+        current_pos = 0
+        
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            
+            if not role or not content:
+                continue
+                
+            # Format: <|im_start|>role\ncontent<|im_end|>\n
+            role_header = f"<|im_start|>{role}\n"
+            role_footer = "<|im_end|>\n"
+            
+            parts.append(role_header)
+            current_pos += len(role_header)
+            
+            # Track assistant content positions for loss masking
+            if role == "assistant":
+                start_pos = current_pos
+                end_pos = current_pos + len(content)
+                assistant_ranges.append((start_pos, end_pos))
+            
+            parts.append(content)
+            current_pos += len(content)
+            
+            parts.append(role_footer)
+            current_pos += len(role_footer)
+        
+        formatted_text = "".join(parts)
+        return formatted_text, assistant_ranges
+    
+    def format_conversation(
+        self, 
+        instruction: str = "", 
+        response: str = "", 
+        input_text: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        messages: Optional[List[Dict[str, str]]] = None
+    ) -> Tuple[str, int]:
+        """
+        Format conversation - delegates to format_messages if messages provided.
+        
+        This method maintains compatibility with the ConversationFormatter interface
+        but also supports the messages parameter for multi-turn conversations.
+        
+        Args:
+            instruction: Single-turn instruction (ignored if messages provided)
+            response: Single-turn response (ignored if messages provided)
+            input_text: Additional input (ignored if messages provided)
+            system_prompt: System prompt (ignored if messages provided)
+            messages: List of message dicts for multi-turn conversations
+        
+        Returns:
+            Tuple of (formatted_text, instruction_length)
+            For multi-turn, instruction_length is 0 (loss masking handled separately)
+        """
+        if messages:
+            # Multi-turn conversation
+            formatted_text, _ = self.format_messages(messages)
+            # Return 0 for instruction_length - we'll handle masking differently
+            return formatted_text, 0
+        else:
+            # Single-turn conversation (fallback compatibility)
+            single_turn_messages = []
+            if system_prompt:
+                single_turn_messages.append({"role": "system", "content": system_prompt})
+            
+            user_content = instruction
+            if input_text:
+                user_content = f"{instruction}\n\n{input_text}"
+            single_turn_messages.append({"role": "user", "content": user_content})
+            single_turn_messages.append({"role": "assistant", "content": response})
+            
+            formatted_text, assistant_ranges = self.format_messages(single_turn_messages)
+            # For single turn, return the position before assistant response
+            instruction_length = assistant_ranges[0][0] if assistant_ranges else len(formatted_text)
+            return formatted_text, instruction_length
+    
+    def get_special_tokens(self) -> Dict[str, str]:
+        """Return special tokens used in this format."""
+        return {
+            "im_start": "<|im_start|>",
+            "im_end": "<|im_end|>"
+        }
+
+
 class SFTDataset(Dataset):
     """
     Universal SFT dataset that supports HuggingFace datasets and local JSONL files.
@@ -223,7 +357,7 @@ class SFTDataset(Dataset):
             tokenizer: Megatron tokenizer instance
             max_seq_length: Maximum sequence length
             split: Dataset split (train/validation/test) - only used for HuggingFace datasets
-            formatter: Conversation format type ("alpaca", "chatml")
+            formatter: Conversation format type ("alpaca", "chatml", "openai", "messages")
             seed: Random seed for dataset shuffling
             **kwargs: Additional arguments passed to load_dataset (for HuggingFace only)
         """
@@ -238,8 +372,10 @@ class SFTDataset(Dataset):
             self.formatter = AlpacaFormatter()
         elif formatter == "chatml":
             self.formatter = ChatMLFormatter()
+        elif formatter == "openai" or formatter == "messages":
+            self.formatter = OpenAIMessagesFormatter()
         else:
-            raise ValueError(f"Unknown formatter: {formatter}. Supported: alpaca, chatml")
+            raise ValueError(f"Unknown formatter: {formatter}. Supported: alpaca, chatml, openai, messages")
         
         # Determine if this is a local file or HuggingFace dataset
         is_local_file = (
@@ -302,6 +438,92 @@ class SFTDataset(Dataset):
     def __len__(self) -> int:
         """Return dataset size."""
         return len(self.dataset)
+    
+    def _tokenize_and_mask_messages(
+        self,
+        text: str,
+        messages: List[Dict[str, str]]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Tokenize text and create loss mask for multi-turn messages format.
+        
+        For multi-turn conversations, we need to compute loss only on assistant messages.
+        This method identifies assistant message positions in the formatted text and
+        creates appropriate loss masks.
+        
+        Args:
+            text: Full formatted conversation text
+            messages: List of message dicts with 'role' and 'content' keys
+            
+        Returns:
+            Tuple of (input_ids, labels, loss_mask)
+        """
+        # Tokenize full text
+        try:
+            tokens = self.tokenizer.tokenize(text)
+            token_ids = self.tokenizer.convert_tokens_to_ids(tokens)
+        except AttributeError as e:
+            raise TypeError(
+                f"Tokenizer must have 'tokenize' and 'convert_tokens_to_ids' methods. "
+                f"Got tokenizer of type: {type(self.tokenizer)}. Error: {e}"
+            )
+        
+        # Truncate if needed
+        if len(token_ids) > self.max_seq_length:
+            token_ids = token_ids[:self.max_seq_length]
+        
+        # Create loss mask - start with all zeros
+        loss_mask = np.zeros(len(token_ids), dtype=np.int64)
+        
+        # Find assistant message positions and set mask to 1
+        # We need to tokenize segments to find approximate positions
+        current_pos = 0
+        current_char_pos = 0
+        
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            
+            if not role or not content:
+                continue
+            
+            # Format: <|im_start|>role\ncontent<|im_end|>\n
+            role_header = f"<|im_start|>{role}\n"
+            role_footer = "<|im_end|>\n"
+            message_text = role_header + content + role_footer
+            
+            # Tokenize this message segment
+            msg_tokens = self.tokenizer.tokenize(message_text)
+            msg_token_ids = self.tokenizer.convert_tokens_to_ids(msg_tokens)
+            msg_len = len(msg_token_ids)
+            
+            # If this is an assistant message, mark it for loss computation
+            if role == "assistant":
+                # Tokenize header to find where content starts
+                header_tokens = self.tokenizer.tokenize(role_header)
+                header_len = len(header_tokens)
+                
+                # Mark content tokens (after header, before footer)
+                content_start = current_pos + header_len
+                content_end = current_pos + msg_len - len(self.tokenizer.tokenize(role_footer))
+                
+                # Set mask for assistant content
+                if content_start < len(token_ids) and content_end <= len(token_ids):
+                    loss_mask[content_start:content_end] = 1
+            
+            current_pos += msg_len
+            current_char_pos += len(message_text)
+            
+            # Stop if we've exceeded sequence length
+            if current_pos >= len(token_ids):
+                break
+        
+        # Convert to tensors
+        input_ids = torch.tensor(token_ids, dtype=torch.int64)
+        labels = input_ids.clone()
+        loss_mask = torch.tensor(loss_mask, dtype=torch.int64)
+        
+        return input_ids, labels, loss_mask
     
     def _tokenize_and_mask(
         self, 
@@ -372,34 +594,70 @@ class SFTDataset(Dataset):
         """
         sample = self.dataset[idx]
         
-        # Extract fields (assuming common field names)
-        # Support multiple common field name conventions
-        # Use explicit None checks to handle empty strings correctly
-        instruction = sample.get("instruction")
-        if instruction is None:
-            instruction = sample.get("prompt")
-        if instruction is None:
-            instruction = sample.get("question", "")
+        # Check if this is a messages format (multi-turn conversation)
+        if "messages" in sample and isinstance(sample["messages"], list):
+            # Multi-turn conversation with OpenAI messages format
+            messages = sample["messages"]
             
-        response = sample.get("response")
-        if response is None:
-            response = sample.get("output")
-        if response is None:
-            response = sample.get("answer", "")
+            # Format messages
+            if isinstance(self.formatter, OpenAIMessagesFormatter):
+                full_text, _ = self.formatter.format_messages(messages)
+                # Use specialized tokenization and masking for messages
+                input_ids, labels, loss_mask = self._tokenize_and_mask_messages(full_text, messages)
+            else:
+                # Fallback: convert messages to single-turn format
+                # Extract last user message as instruction and last assistant as response
+                instruction = ""
+                response = ""
+                system_prompt = None
+                
+                for msg in messages:
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                    if role == "system":
+                        system_prompt = content
+                    elif role == "user":
+                        instruction = content
+                    elif role == "assistant":
+                        response = content
+                
+                full_text, instruction_length = self.formatter.format_conversation(
+                    instruction=instruction,
+                    response=response,
+                    input_text=None,
+                    system_prompt=system_prompt
+                )
+                input_ids, labels, loss_mask = self._tokenize_and_mask(full_text, instruction_length)
+        else:
+            # Single-turn conversation (traditional format)
+            # Extract fields (assuming common field names)
+            # Support multiple common field name conventions
+            # Use explicit None checks to handle empty strings correctly
+            instruction = sample.get("instruction")
+            if instruction is None:
+                instruction = sample.get("prompt")
+            if instruction is None:
+                instruction = sample.get("question", "")
+                
+            response = sample.get("response")
+            if response is None:
+                response = sample.get("output")
+            if response is None:
+                response = sample.get("answer", "")
+                
+            input_text = sample.get("input", None)
+            system_prompt = sample.get("system", None)
             
-        input_text = sample.get("input", None)
-        system_prompt = sample.get("system", None)
-        
-        # Format conversation
-        full_text, instruction_length = self.formatter.format_conversation(
-            instruction=instruction,
-            response=response,
-            input_text=input_text,
-            system_prompt=system_prompt
-        )
-        
-        # Tokenize and create masks
-        input_ids, labels, loss_mask = self._tokenize_and_mask(full_text, instruction_length)
+            # Format conversation
+            full_text, instruction_length = self.formatter.format_conversation(
+                instruction=instruction,
+                response=response,
+                input_text=input_text,
+                system_prompt=system_prompt
+            )
+            
+            # Tokenize and create masks
+            input_ids, labels, loss_mask = self._tokenize_and_mask(full_text, instruction_length)
         
         return {
             "input_ids": input_ids,
