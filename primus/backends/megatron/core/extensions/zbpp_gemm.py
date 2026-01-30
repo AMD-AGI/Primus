@@ -14,8 +14,8 @@ import grouped_gemm
 import torch
 from primus_turbo.pytorch.kernels.gemm.gemm_csrc_impl import gemm_impl
 from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_csrc_impl import (
-    grouped_gemm_csrc_impl,
-    grouped_gemm_variable_k_csrc_impl,
+    grouped_gemm_impl,
+    grouped_gemm_variable_k_impl,
 )
 from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
     grouped_gemm_compute_offs,
@@ -178,11 +178,9 @@ def grouped_gemm_with_weight_gradient_store(
     if gg_backend == "turbo-gg":
         if group_offs is None:
             group_offs = grouped_gemm_compute_offs(group_lens)
-        group_gemm_backend_func = functools.partial(
-            grouped_gemm_csrc_impl, group_offs=group_offs, num_cu=num_cu
-        )
+        group_gemm_backend_func = functools.partial(grouped_gemm_impl, group_offs=group_offs, num_cu=num_cu)
         wgrad_gemm_backend_func = functools.partial(
-            grouped_gemm_variable_k_csrc_impl, group_offs=group_offs, num_cu=num_cu
+            grouped_gemm_variable_k_impl, group_offs=group_offs, num_cu=num_cu
         )
     elif gg_backend == "lagacy-gg":
         group_gemm_backend_func = grouped_gemm.backend.gmm
