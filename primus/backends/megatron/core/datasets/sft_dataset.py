@@ -1,0 +1,359 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""
+SFT Dataset for Megatron-LM based supervised fine-tuning.
+
+This module provides a universal dataset interface for SFT training that:
+1. Supports HuggingFace datasets as data source
+2. Handles various conversation formats (extensible)
+3. Implements proper loss masking for instruction tuning
+4. Follows Megatron-LM's dataset provider pattern
+"""
+
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+
+class ConversationFormatter:
+    """
+    Base class for conversation formatting.
+    
+    Different conversation formats (ChatML, Alpaca, ShareGPT, etc.) can be 
+    implemented by subclassing this and providing format-specific logic.
+    """
+    
+    def format_conversation(
+        self, 
+        instruction: str, 
+        response: str, 
+        input_text: Optional[str] = None,
+        system_prompt: Optional[str] = None
+    ) -> Tuple[str, int]:
+        """
+        Format a conversation into a training sample.
+        
+        Args:
+            instruction: The instruction/question text
+            response: The response/answer text
+            input_text: Optional additional input context
+            system_prompt: Optional system prompt
+            
+        Returns:
+            Tuple of (formatted_text, instruction_length)
+            instruction_length is used to determine where to mask loss
+        """
+        raise NotImplementedError
+    
+    def get_special_tokens(self) -> Dict[str, str]:
+        """Return special tokens used in this format."""
+        return {}
+
+
+class AlpacaFormatter(ConversationFormatter):
+    """
+    Alpaca conversation format.
+    
+    Format:
+        Below is an instruction that describes a task. Write a response that appropriately completes the request.
+        
+        ### Instruction:
+        {instruction}
+        
+        ### Response:
+        {response}
+    """
+    
+    def format_conversation(
+        self, 
+        instruction: str, 
+        response: str, 
+        input_text: Optional[str] = None,
+        system_prompt: Optional[str] = None
+    ) -> Tuple[str, int]:
+        """Format conversation in Alpaca style."""
+        prompt_template = "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n"
+        
+        if system_prompt:
+            prompt_template = system_prompt + "\n\n"
+            
+        instruction_part = f"### Instruction:\n{instruction}\n\n"
+        
+        if input_text:
+            instruction_part += f"### Input:\n{input_text}\n\n"
+            
+        instruction_part += "### Response:\n"
+        
+        full_instruction = prompt_template + instruction_part
+        full_text = full_instruction + response
+        
+        return full_text, len(full_instruction)
+
+
+class ChatMLFormatter(ConversationFormatter):
+    """
+    ChatML conversation format.
+    
+    Format:
+        <|im_start|>system
+        {system_prompt}<|im_end|>
+        <|im_start|>user
+        {instruction}<|im_end|>
+        <|im_start|>assistant
+        {response}<|im_end|>
+    """
+    
+    def format_conversation(
+        self, 
+        instruction: str, 
+        response: str, 
+        input_text: Optional[str] = None,
+        system_prompt: Optional[str] = None
+    ) -> Tuple[str, int]:
+        """Format conversation in ChatML style."""
+        parts = []
+        
+        if system_prompt:
+            parts.append(f"<|im_start|>system\n{system_prompt}<|im_end|>\n")
+            
+        user_content = instruction
+        if input_text:
+            user_content = f"{instruction}\n\n{input_text}"
+            
+        parts.append(f"<|im_start|>user\n{user_content}<|im_end|>\n")
+        parts.append("<|im_start|>assistant\n")
+        
+        instruction_text = "".join(parts)
+        full_text = instruction_text + response + "<|im_end|>"
+        
+        return full_text, len(instruction_text)
+    
+    def get_special_tokens(self) -> Dict[str, str]:
+        """Return ChatML special tokens."""
+        return {
+            "im_start": "<|im_start|>",
+            "im_end": "<|im_end|>"
+        }
+
+
+class SFTDataset(Dataset):
+    """
+    Universal SFT dataset that supports HuggingFace datasets.
+    
+    This dataset:
+    1. Loads data from HuggingFace datasets
+    2. Formats conversations using specified formatter
+    3. Tokenizes text
+    4. Creates loss masks (only compute loss on response tokens)
+    """
+    
+    def __init__(
+        self,
+        dataset_name: str,
+        tokenizer,
+        max_seq_length: int,
+        split: str = "train",
+        formatter: str = "alpaca",
+        seed: int = 1234,
+        **kwargs
+    ):
+        """
+        Initialize SFT dataset.
+        
+        Args:
+            dataset_name: HuggingFace dataset name or path
+            tokenizer: Megatron tokenizer instance
+            max_seq_length: Maximum sequence length
+            split: Dataset split (train/validation/test)
+            formatter: Conversation format type ("alpaca", "chatml")
+            seed: Random seed for dataset shuffling
+            **kwargs: Additional arguments passed to load_dataset
+        """
+        super().__init__()
+        
+        self.tokenizer = tokenizer
+        self.max_seq_length = max_seq_length
+        self.seed = seed
+        
+        # Initialize formatter
+        if formatter == "alpaca":
+            self.formatter = AlpacaFormatter()
+        elif formatter == "chatml":
+            self.formatter = ChatMLFormatter()
+        else:
+            raise ValueError(f"Unknown formatter: {formatter}. Supported: alpaca, chatml")
+        
+        # Load dataset from HuggingFace
+        try:
+            from datasets import load_dataset
+        except ImportError:
+            raise ImportError(
+                "HuggingFace datasets library is required. "
+                "Install with: pip install datasets"
+            )
+        
+        self.dataset = load_dataset(dataset_name, split=split, **kwargs)
+        
+    def __len__(self) -> int:
+        """Return dataset size."""
+        return len(self.dataset)
+    
+    def _tokenize_and_mask(
+        self, 
+        text: str, 
+        instruction_length: int
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Tokenize text and create loss mask.
+        
+        Args:
+            text: Full conversation text
+            instruction_length: Character length of instruction part
+            
+        Returns:
+            Tuple of (input_ids, labels, loss_mask)
+        """
+        # Tokenize full text
+        tokens = self.tokenizer.tokenize(text)
+        token_ids = self.tokenizer.convert_tokens_to_ids(tokens)
+        
+        # Tokenize instruction part to find where to start computing loss
+        instruction_text = text[:instruction_length]
+        instruction_tokens = self.tokenizer.tokenize(instruction_text)
+        instruction_token_ids = self.tokenizer.convert_tokens_to_ids(instruction_tokens)
+        instruction_len = len(instruction_token_ids)
+        
+        # Truncate if needed
+        if len(token_ids) > self.max_seq_length:
+            token_ids = token_ids[:self.max_seq_length]
+        
+        # Create loss mask (0 for instruction, 1 for response)
+        loss_mask = np.zeros(len(token_ids), dtype=np.int64)
+        if instruction_len < len(token_ids):
+            loss_mask[instruction_len:] = 1
+        
+        # Convert to tensors
+        input_ids = torch.tensor(token_ids, dtype=torch.int64)
+        labels = input_ids.clone()
+        loss_mask = torch.tensor(loss_mask, dtype=torch.int64)
+        
+        return input_ids, labels, loss_mask
+    
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """
+        Get a single training sample.
+        
+        Returns:
+            Dictionary containing:
+                - input_ids: Token IDs for input
+                - labels: Token IDs for labels (same as input_ids for causal LM)
+                - loss_mask: Binary mask (1 where loss should be computed)
+        """
+        sample = self.dataset[idx]
+        
+        # Extract fields (assuming common field names)
+        # Support multiple common field name conventions
+        instruction = sample.get("instruction") or sample.get("prompt") or sample.get("question", "")
+        response = sample.get("response") or sample.get("output") or sample.get("answer", "")
+        input_text = sample.get("input", None)
+        system_prompt = sample.get("system", None)
+        
+        # Format conversation
+        full_text, instruction_length = self.formatter.format_conversation(
+            instruction=instruction,
+            response=response,
+            input_text=input_text,
+            system_prompt=system_prompt
+        )
+        
+        # Tokenize and create masks
+        input_ids, labels, loss_mask = self._tokenize_and_mask(full_text, instruction_length)
+        
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+            "loss_mask": loss_mask,
+        }
+
+
+def build_train_valid_test_datasets(
+    dataset_name: str,
+    tokenizer,
+    max_seq_length: int,
+    train_val_test_num_samples: List[int],
+    formatter: str = "alpaca",
+    seed: int = 1234,
+    **kwargs
+) -> Tuple[Optional[SFTDataset], Optional[SFTDataset], Optional[SFTDataset]]:
+    """
+    Build train, validation, and test datasets for SFT.
+    
+    This follows Megatron-LM's dataset provider pattern.
+    
+    Args:
+        dataset_name: HuggingFace dataset name
+        tokenizer: Megatron tokenizer
+        max_seq_length: Maximum sequence length
+        train_val_test_num_samples: List of [train_samples, val_samples, test_samples]
+        formatter: Conversation format type
+        seed: Random seed
+        **kwargs: Additional arguments for load_dataset
+        
+    Returns:
+        Tuple of (train_dataset, valid_dataset, test_dataset)
+        Any can be None if num_samples is 0
+    """
+    train_samples, valid_samples, test_samples = train_val_test_num_samples
+    
+    train_ds = None
+    valid_ds = None
+    test_ds = None
+    
+    if train_samples > 0:
+        train_ds = SFTDataset(
+            dataset_name=dataset_name,
+            tokenizer=tokenizer,
+            max_seq_length=max_seq_length,
+            split="train",
+            formatter=formatter,
+            seed=seed,
+            **kwargs
+        )
+    
+    if valid_samples > 0:
+        try:
+            valid_ds = SFTDataset(
+                dataset_name=dataset_name,
+                tokenizer=tokenizer,
+                max_seq_length=max_seq_length,
+                split="validation",
+                formatter=formatter,
+                seed=seed,
+                **kwargs
+            )
+        except ValueError:
+            # Some datasets don't have validation split
+            valid_ds = None
+    
+    if test_samples > 0:
+        try:
+            test_ds = SFTDataset(
+                dataset_name=dataset_name,
+                tokenizer=tokenizer,
+                max_seq_length=max_seq_length,
+                split="test",
+                formatter=formatter,
+                seed=seed,
+                **kwargs
+            )
+        except ValueError:
+            # Some datasets don't have test split
+            test_ds = None
+    
+    return train_ds, valid_ds, test_ds

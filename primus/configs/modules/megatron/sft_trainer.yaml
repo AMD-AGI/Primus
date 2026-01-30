@@ -1,0 +1,56 @@
+# Megatron-LM SFT Trainer Configuration
+# This configuration file defines the base settings for supervised fine-tuning
+# using direct Megatron-LM integration (without Megatron-Bridge)
+
+extends:
+  - trainer_base.yaml
+
+# Training iterations and batch size
+train_iters: 1000
+global_batch_size: 128
+micro_batch_size: 1
+
+# Evaluation settings
+eval_iters: 10
+eval_interval: 50
+
+# Sequence length
+seq_length: 2048
+
+# Data loading
+num_workers: 8
+split: null
+dataloader_type: cyclic
+
+# Checkpoint settings
+finetune: true
+save_interval: 100
+log_interval: 1
+tensorboard_log_interval: 1
+log_throughput: true
+log_timers_to_tensorboard: true
+log_batch_size_to_tensorboard: true
+log_learning_rate_to_tensorboard: true
+
+# Learning rate (lower than pretraining for fine-tuning)
+lr: 1.0e-5
+min_lr: 0.0
+lr_decay_iters: null
+lr_warmup_iters: 50
+lr_decay_style: cosine
+
+# Optimizer settings
+weight_decay: 0.1
+adam_beta1: 0.9
+adam_beta2: 0.95
+override_opt_param_scheduler: true
+
+# Attention and distributed settings
+use_flash_attn: true
+distributed_timeout_minutes: 60
+use_distributed_optimizer: true
+
+# SFT-specific settings
+# Note: These are typically overridden in the experiment config
+sft_dataset_name: "tatsu-lab/alpaca"
+sft_conversation_format: "alpaca"

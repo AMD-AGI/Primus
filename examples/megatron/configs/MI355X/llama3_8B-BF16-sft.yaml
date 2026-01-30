@@ -1,0 +1,90 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3_8B-sft}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  sft_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+    
+    # Model to run
+    model: llama3_8B.yaml
+    
+    overrides:
+      # SFT-specific configuration
+      # Dataset from HuggingFace (default: tatsu-lab/alpaca)
+      sft_dataset_name: "tatsu-lab/alpaca"
+      # Conversation format: "alpaca" or "chatml"
+      sft_conversation_format: "alpaca"
+      
+      # Logging
+      wandb_project: "Primus_Llama3_SFT"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      
+      # Training configuration
+      train_iters: 1000
+      micro_batch_size: 1
+      global_batch_size: 128
+      
+      # Sequence length
+      seq_length: 2048
+      max_position_embeddings: 2048
+      
+      # Learning rate (typically lower for fine-tuning)
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 50
+      lr_decay_iters: 950
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      
+      # Loss masking
+      eod_mask_loss: false  # SFT uses custom loss masking
+      
+      # Model initialization
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+      
+      # Parallelism configuration
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      sequence_parallel: false
+      
+      # Data parallelism
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+      
+      # Checkpoint configuration
+      finetune: true  # Load pretrained checkpoint
+      load: null  # Path to pretrained checkpoint
+      save: null  # Path to save fine-tuned checkpoint
+      save_interval: 100
+      eval_interval: 50
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: false
+      ckpt_format: torch
+      
+      # Precision (BF16 mixed precision)
+      bf16: true
+      
+      # Turbo optimizations
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
+      
+      # Validation
+      eval_iters: 10
+      
+      # Note: For SFT, you typically want to:
+      # 1. Set finetune: true and provide path to pretrained checkpoint in load
+      # 2. Use lower learning rate than pretraining (e.g., 1e-5 vs 3e-4)
+      # 3. Use smaller global_batch_size if dataset is small
+      # 4. Monitor validation loss frequently with eval_interval
