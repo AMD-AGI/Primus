@@ -28,7 +28,10 @@ modules:
       # Use pretrained_checkpoint to load base model weights without LoRA adapters
       pretrained_checkpoint: /home/gyuzakor/Primus/data/megatron_checkpoints/Llama-2-70b-hf/iter_0000000
       peft: lora
-      packed_sequence: false
+      packed_sequence: true
+      packed_train_data_path: /data/train_packed.npy
+      packed_val_data_path: /data/validation_packed.npy
+      packed_metadata_path: /data/packed_metadata.jsonl
       
       # Optional: Configure LoRA parameters (defaults shown)
       # peft_config:
@@ -37,12 +40,12 @@ modules:
       #   target_modules: ['linear_qkv', 'linear_proj', 'linear_fc1', 'linear_fc2']
 
       # Training configuration
-      train_iters: 384
+      train_iters: 1000
       global_batch_size: 8
       micro_batch_size: 1
       seq_length: 8192
-      eval_interval: 384
-      eval_iters: 32
+      eval_interval: 50
+      eval_iters: 48
       save_interval: null
 
       # Optimizer configuration
