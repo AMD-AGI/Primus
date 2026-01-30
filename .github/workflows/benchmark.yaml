@@ -3,7 +3,7 @@ name: Primus-Benchmark
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 16 * * *'
 
 env:
   PRIMUS_TURBO_COMMIT: 5233748e9c5c5795a6484ab31ece47c442d29ec2 # feat(mxfp4): refactor gemm mxfp4 and mxfp8. fuse transpose, hadamard transform and quantization. (#195)
@@ -14,6 +14,9 @@ jobs:
     env:
       PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
       GPU_NAME: MI325  # Change this to your GPU model
+      DATA_PATH: /wekafs/primus-data
+      HSA_NO_SCRATCH_RECLAIM: 1
+      HF_TOKEN: ${{secrets.HF_TOKEN}}
     runs-on: [primus-lm-bench-torch-wkhbx]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
@@ -71,77 +74,235 @@ jobs:
           mkdir -p "${BENCHMARK_LOG_DIR}"
           echo "BENCHMARK_DATE_DIR=${BENCHMARK_DATE_DIR}" >> $GITHUB_ENV
           echo "BENCHMARK_LOG_DIR=${BENCHMARK_LOG_DIR}" >> $GITHUB_ENV
-      - name: Run Primus Model Benchmark -- Megatron-LM
-        env:
-          DATA_PATH: /wekafs/primus-data
-          HSA_NO_SCRATCH_RECLAIM: 1
-          HF_TOKEN: ${{secrets.HF_TOKEN}}
-        timeout-minutes: 240
+      # Megatron-LM Benchmarks
+      - name: "[1/33][Megatron] llama3.3_70B-BF16"
+        timeout-minutes: 60
         continue-on-error: true
         run: |
-          echo "run llama2_7B-BF16"
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.3_70B-BF16.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/llama3.3_70B-BF16-pretrain.yaml
+
+      - name: "[2/33][Megatron] llama3.3_70B-FP8"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.3_70B-FP8.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/llama3.3_70B-FP8-pretrain.yaml
+
+      - name: "[3/33][Megatron] llama2_7B-BF16"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama2_7B-BF16.log" \
           -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
-          echo "run llama2_7B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama2_7B-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-FP8-pretrain.yaml
-          echo "run llama2_70B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama2_70B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama2_70B-BF16-pretrain.yaml
-          echo "run llama3.1_8B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.1_8B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-          echo "run qwen2.5_7B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/qwen2.5_7B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/qwen2.5_7B-BF16-pretrain.yaml
-          echo "run mixtral_8x7B_v0.1-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/mixtral_8x7B_v0.1-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
-          echo "run llama3.1_70B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.1_70B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml
-          echo "run llama3.1_8B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.1_8B-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml
-          echo "run mixtral_8x7B_v0.1-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/mixtral_8x7B_v0.1-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-FP8-pretrain.yaml
-          echo "run qwen2.5_72B-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/qwen2.5_72B-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/qwen2.5_72B-BF16-pretrain.yaml
-          echo "run qwen2.5_7B-FP8"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/qwen2.5_7B-FP8.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/qwen2.5_7B-FP8-pretrain.yaml
-          echo "run deepseek_v2_lite-BF16"
-          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/deepseek_v2_lite-BF16.log" \
-          -- train pretrain --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
-      - name: Run Primus Model Benchmark -- TorchTitan
-        env:
-          DATA_PATH: /wekafs/primus-data
-          HSA_NO_SCRATCH_RECLAIM: 1
-          HF_TOKEN: ${{secrets.HF_TOKEN}}
-        timeout-minutes: 240
+
+      - name: "[4/33][Megatron] llama2_7B-FP8"
+        timeout-minutes: 60
         continue-on-error: true
         run: |
-          echo "run llama3.1_8B-BF16"
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama2_7B-FP8.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-FP8-pretrain.yaml
+
+      - name: "[5/33][Megatron] llama2_70B-BF16"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama2_70B-BF16.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/llama2_70B-BF16-pretrain.yaml
+
+      - name: "[6/33][Megatron] llama2_70B-FP8"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama2_70B-FP8.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/llama2_70B-FP8-pretrain.yaml
+
+      - name: "[7/33][Megatron] llama3.1_8B-BF16"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.1_8B-BF16.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
+
+      - name: "[8/33][Megatron] llama3.1_8B-FP8"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.1_8B-FP8.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml
+
+      - name: "[9/33][Megatron] qwen2.5_7B-BF16"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/qwen2.5_7B-BF16.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/qwen2.5_7B-BF16-pretrain.yaml
+
+      - name: "[10/33][Megatron] qwen2.5_7B-FP8"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/qwen2.5_7B-FP8.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/qwen2.5_7B-FP8-pretrain.yaml
+
+      - name: "[11/33][Megatron] mixtral_8x7B_v0.1-BF16"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/mixtral_8x7B_v0.1-BF16.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml
+
+      - name: "[12/33][Megatron] mixtral_8x7B_v0.1-FP8"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/mixtral_8x7B_v0.1-FP8.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-FP8-pretrain.yaml
+
+      - name: "[13/33][Megatron] llama3.1_70B-BF16"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.1_70B-BF16.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml
+
+      - name: "[14/33][Megatron] llama3.1_70B-FP8"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3.1_70B-FP8.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml
+
+      - name: "[15/33][Megatron] qwen2.5_72B-BF16"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/qwen2.5_72B-BF16.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/qwen2.5_72B-BF16-pretrain.yaml
+
+      - name: "[16/33][Megatron] qwen2.5_72B-FP8"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/qwen2.5_72B-FP8.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/qwen2.5_72B-FP8-pretrain.yaml
+
+      - name: "[17/33][Megatron] deepseek_v2_lite-BF16"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/deepseek_v2_lite-BF16.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
+
+      - name: "[18/33][Megatron] deepseek_v2_lite-FP8"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/deepseek_v2_lite-FP8.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/deepseek_v2_lite-FP8-pretrain.yaml
+
+      - name: "[19/33][Megatron] gpt_oss_20B-BF16"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/gpt_oss_20B-BF16.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/gpt_oss_20B-BF16-pretrain.yaml
+
+      - name: "[20/33][Megatron] gpt_oss_20B-FP8"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/gpt_oss_20B-FP8.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/gpt_oss_20B-FP8-pretrain.yaml
+
+      - name: "[21/33][Megatron] llama3_70B-BF16"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3_70B-BF16.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/llama3_70B-BF16-pretrain.yaml
+
+      - name: "[22/33][Megatron] llama3_70B-FP8"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3_70B-FP8.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/llama3_70B-FP8-pretrain.yaml
+
+      - name: "[23/33][Megatron] llama3_8B-BF16"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3_8B-BF16.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/llama3_8B-BF16-pretrain.yaml
+
+      - name: "[24/33][Megatron] llama3_8B-FP8"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/llama3_8B-FP8.log" \
+          -- train pretrain --config examples/megatron/configs/MI300X/llama3_8B-FP8-pretrain.yaml
+      # TorchTitan Benchmarks
+      - name: "[25/33][TorchTitan] llama3.1_8B-BF16"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/llama3.1_8B-BF16.log" \
           -- train pretrain --config examples/torchtitan/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
-          echo "run llama3.1_8B-FP8"
+
+      - name: "[26/33][TorchTitan] llama3.1_8B-FP8"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/llama3.1_8B-FP8.log" \
           -- train pretrain --config examples/torchtitan/configs/MI300X/llama3.1_8B-FP8-pretrain.yaml
-          echo "run qwen3_1.7B"
+
+      - name: "[27/33][TorchTitan] deepseek_v3_16b-BF16"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/deepseek_v3_16b-BF16.log" \
+          -- train pretrain --config examples/torchtitan/configs/MI300X/deepseek_v3_16b-BF16-pretrain.yaml
+
+      - name: "[28/33][TorchTitan] deepseek_v3_16b-FP8"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/deepseek_v3_16b-FP8.log" \
+          -- train pretrain --config examples/torchtitan/configs/MI300X/deepseek_v3_16b-FP8-pretrain.yaml
+
+      - name: "[29/33][TorchTitan] qwen3_1.7B"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/qwen3_1.7B-pretrain.log" \
           -- train pretrain --config examples/torchtitan/configs/MI300X/qwen3_1.7B-pretrain.yaml
-          echo "run llama3.1_70B-BF16"
+
+      - name: "[30/33][TorchTitan] llama3.1_70B-BF16"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/llama3.1_70B-BF16.log" \
           -- train pretrain --config examples/torchtitan/configs/MI300X/llama3.1_70B-BF16-pretrain.yaml
-          echo "run llama3.1_70B-FP8"
+
+      - name: "[31/33][TorchTitan] llama3.1_70B-FP8"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/llama3.1_70B-FP8.log" \
           -- train pretrain --config examples/torchtitan/configs/MI300X/llama3.1_70B-FP8-pretrain.yaml
-          echo "run qwen3_0.6B.log"
+
+      - name: "[32/33][TorchTitan] qwen3_0.6B"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/qwen3_0.6B.log" \
           -- train pretrain --config examples/torchtitan/configs/MI300X/qwen3_0.6B-pretrain.yaml
-          echo "run qwen3_32B.log"
+
+      - name: "[33/33][TorchTitan] qwen3_32B"
+        timeout-minutes: 60
+        continue-on-error: true
+        run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/qwen3_32B.log" \
           -- train pretrain --config examples/torchtitan/configs/MI300X/qwen3_32B-pretrain.yaml
       - name: Generate Summary Report
