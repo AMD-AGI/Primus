@@ -83,16 +83,16 @@ class BackendAdapter(ABC):
         """
 
     @abstractmethod
-    def load_trainer_class(self, module_config=None):
+    def load_trainer_class(self, stage: str = "pretrain"):
         """
         Return backend Trainer class.
 
         Args:
-            module_config: Optional module configuration to help select trainer variant
+            stage: Stage name (e.g., "pretrain", "sft").
+                   The stage is resolved in the upper layer and passed down.
 
-        Megatron → MegatronTrainer
-        Titan → TitanTrainer
-        Turbo → TurboTrainer
+        Returns:
+            Trainer class (Megatron → MegatronTrainer, etc.)
         """
 
     @abstractmethod
@@ -248,9 +248,9 @@ class BackendAdapter(ABC):
             merge_namespace(backend_args, params, allow_override=False, excepts=excepts)
             module_config.params = backend_args
 
-        # 5) load trainer class from backend
+        # 5) load trainer class from backend (stage resolved in upper layer)
         log_rank_0("[Step 5/5] Loading trainer class...")
-        TrainerClass = self.load_trainer_class(module_config=module_config)
+        TrainerClass = self.load_trainer_class(stage=getattr(params, "stage", "pretrain"))
         log_rank_0(f"Trainer class loaded: {TrainerClass.__name__}")
 
         log_rank_0("=" * 80)

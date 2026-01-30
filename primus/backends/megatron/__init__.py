@@ -9,13 +9,11 @@ from primus.backends.megatron.megatron_pretrain_trainer import MegatronPretrainT
 from primus.backends.megatron.megatron_sft_trainer import MegatronSFTTrainer
 from primus.core.backend.backend_registry import BackendRegistry
 
+# Register megatron backend
 BackendRegistry.register_path_name("megatron", "Megatron-LM")
-
-# Register adapter
 BackendRegistry.register_adapter("megatron", MegatronAdapter)
 
-# Register default trainer (pretrain)
-BackendRegistry.register_trainer_class("megatron", MegatronPretrainTrainer)
-
-# Register additional trainers with specific names
-BackendRegistry.register_trainer_class("megatron_sft", MegatronSFTTrainer)
+# Register trainer classes by stage
+# Usage: framework=megatron with stage: pretrain / stage: sft in config
+BackendRegistry.register_trainer_class(MegatronPretrainTrainer, "megatron")
+BackendRegistry.register_trainer_class(MegatronSFTTrainer, "megatron", "sft")

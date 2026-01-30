@@ -90,19 +90,15 @@ class TorchTitanAdapter(BackendAdapter):
         return titan_args
 
     # Load Trainer Class
-    def load_trainer_class(self, module_config=None):
+    def load_trainer_class(self, stage: str = "pretrain"):
         """
         Load TorchTitan trainer class registered via BackendRegistry.
-
-        Args:
-            module_config: Optional module configuration (unused for TorchTitan)
-
         This allows Primus runtime to remain agnostic to the actual trainer
         implementation (pretrain, sft, etc.).
         """
         try:
-            return BackendRegistry.get_trainer_class(self.framework)
-        except AssertionError as exc:
+            return BackendRegistry.get_trainer_class(self.framework, stage=stage)
+        except (ValueError, AssertionError) as exc:
             raise RuntimeError(
                 "[Primus:TorchTitanAdapter] 'torchtitan' backend trainer not registered. "
                 "Ensure primus.backends.torchtitan.trainers (or equivalent) registers "
