@@ -458,15 +458,8 @@ class SFTDataset(Dataset):
         Returns:
             Tuple of (input_ids, labels, loss_mask)
         """
-        # Tokenize full text
-        try:
-            tokens = self.tokenizer.tokenize(text)
-            token_ids = self.tokenizer.convert_tokens_to_ids(tokens)
-        except AttributeError as e:
-            raise TypeError(
-                f"Tokenizer must have 'tokenize' and 'convert_tokens_to_ids' methods. "
-                f"Got tokenizer of type: {type(self.tokenizer)}. Error: {e}"
-            )
+        # Tokenize full text - handle different tokenizer interfaces
+        token_ids = self._tokenize_text(text)
         
         # Truncate if needed
         if len(token_ids) > self.max_seq_length:
@@ -493,19 +486,19 @@ class SFTDataset(Dataset):
             message_text = role_header + content + role_footer
             
             # Tokenize this message segment
-            msg_tokens = self.tokenizer.tokenize(message_text)
-            msg_token_ids = self.tokenizer.convert_tokens_to_ids(msg_tokens)
+            msg_token_ids = self._tokenize_text(message_text)
             msg_len = len(msg_token_ids)
             
             # If this is an assistant message, mark it for loss computation
             if role == "assistant":
                 # Tokenize header to find where content starts
-                header_tokens = self.tokenizer.tokenize(role_header)
-                header_len = len(header_tokens)
+                header_token_ids = self._tokenize_text(role_header)
+                header_len = len(header_token_ids)
                 
                 # Mark content tokens (after header, before footer)
                 content_start = current_pos + header_len
-                content_end = current_pos + msg_len - len(self.tokenizer.tokenize(role_footer))
+                footer_token_ids = self._tokenize_text(role_footer)
+                content_end = current_pos + msg_len - len(footer_token_ids)
                 
                 # Set mask for assistant content
                 if content_start < len(token_ids) and content_end <= len(token_ids):
@@ -524,6 +517,49 @@ class SFTDataset(Dataset):
         loss_mask = torch.tensor(loss_mask, dtype=torch.int64)
         
         return input_ids, labels, loss_mask
+    
+    def _tokenize_text(self, text: str) -> List[int]:
+        """
+        Tokenize text and return token IDs.
+        
+        Handles different tokenizer interfaces:
+        - Megatron _HuggingFaceTokenizer (has tokenize() method that returns IDs directly)
+        - Standard HuggingFace tokenizer (has encode() method)
+        - Tokenizers with tokenize() + convert_tokens_to_ids() methods
+        
+        Args:
+            text: Text to tokenize
+            
+        Returns:
+            List of token IDs
+        """
+        try:
+            # Try Megatron's interface first - tokenize() might return IDs directly
+            result = self.tokenizer.tokenize(text)
+            
+            # Check if result is already token IDs (list of ints)
+            if result and isinstance(result[0], int):
+                return result
+            
+            # If result is tokens (strings), need to convert to IDs
+            if hasattr(self.tokenizer, 'convert_tokens_to_ids'):
+                return self.tokenizer.convert_tokens_to_ids(result)
+            
+            # Try encode method as fallback
+            if hasattr(self.tokenizer, 'encode'):
+                return self.tokenizer.encode(text, add_special_tokens=False)
+            
+            raise AttributeError("Tokenizer missing required methods")
+            
+        except (AttributeError, TypeError) as e:
+            # Try encode method directly
+            if hasattr(self.tokenizer, 'encode'):
+                return self.tokenizer.encode(text, add_special_tokens=False)
+            
+            raise TypeError(
+                f"Tokenizer must have either 'encode()' method or 'tokenize()' method that returns token IDs. "
+                f"Got tokenizer of type: {type(self.tokenizer)}. Error: {e}"
+            )
     
     def _tokenize_and_mask(
         self, 
@@ -548,20 +584,12 @@ class SFTDataset(Dataset):
             issues with incorrect masking, consider tokenizing instruction and response
             separately and concatenating the token IDs directly.
         """
-        # Tokenize full text
-        try:
-            tokens = self.tokenizer.tokenize(text)
-            token_ids = self.tokenizer.convert_tokens_to_ids(tokens)
-        except AttributeError as e:
-            raise TypeError(
-                f"Tokenizer must have 'tokenize' and 'convert_tokens_to_ids' methods. "
-                f"Got tokenizer of type: {type(self.tokenizer)}. Error: {e}"
-            )
+        # Tokenize full text using flexible interface
+        token_ids = self._tokenize_text(text)
         
         # Tokenize instruction part to find where to start computing loss
         instruction_text = text[:instruction_length]
-        instruction_tokens = self.tokenizer.tokenize(instruction_text)
-        instruction_token_ids = self.tokenizer.convert_tokens_to_ids(instruction_tokens)
+        instruction_token_ids = self._tokenize_text(instruction_text)
         instruction_len = len(instruction_token_ids)
         
         # Truncate if needed
