@@ -1,0 +1,10 @@
+job:
+  dump_folder: "./outputs"
+  description: "Qwen 3 235B-A22B training"
+
+model:
+  name: "qwen3"
+  flavor: "235B-A22B"
+  hf_assets_path: "Qwen/Qwen3-235B-A22B"
+  converters:
+    - primus_turbo
