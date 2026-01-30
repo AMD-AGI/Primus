@@ -90,9 +90,12 @@ class TorchTitanAdapter(BackendAdapter):
         return titan_args
 
     # Load Trainer Class
-    def load_trainer_class(self):
+    def load_trainer_class(self, module_config=None):
         """
         Load TorchTitan trainer class registered via BackendRegistry.
+
+        Args:
+            module_config: Optional module configuration (unused for TorchTitan)
 
         This allows Primus runtime to remain agnostic to the actual trainer
         implementation (pretrain, sft, etc.).

@@ -59,7 +59,8 @@ class MegatronAdapter(BackendAdapter):
             RuntimeError: If version cannot be detected
         """
         # Get trainer class and call its detect_version classmethod
-        TrainerClass = self.load_trainer_class()
+        # For version detection, use the base pretrain trainer (all trainers share same version)
+        TrainerClass = self.load_trainer_class(module_config=None)
         return TrainerClass.detect_version()
 
     # Config → Megatron Args
@@ -97,13 +98,31 @@ class MegatronAdapter(BackendAdapter):
         return megatron_args
 
     # Load Trainer Class (Version Adaptive)
-    def load_trainer_class(self):
-        """Load Megatron trainer class registered via BackendRegistry."""
+    def load_trainer_class(self, module_config=None):
+        """
+        Load Megatron trainer class registered via BackendRegistry.
+        
+        Args:
+            module_config: Module configuration containing the module name
+                          (e.g., "sft_trainer", "pre_trainer")
+                        
+        Returns:
+            Trainer class for the specified module type
+        """
         try:
-            return BackendRegistry.get_trainer_class(self.framework)
+            # Determine trainer key based on module name
+            module_name = module_config.name if module_config and hasattr(module_config, 'name') else None
+            
+            if module_name and "sft" in module_name:
+                trainer_key = "megatron_sft"
+            else:
+                # Default to pretrain trainer
+                trainer_key = self.framework
+            
+            return BackendRegistry.get_trainer_class(trainer_key)
         except ValueError as exc:
             raise RuntimeError(
-                "[Primus:MegatronAdapter] 'megatron' backend not registered. "
-                "Ensure primus.backends.megatron.trainers defines the trainer "
-                "and imports BackendRegistry."
+                f"[Primus:MegatronAdapter] Trainer for '{trainer_key}' not registered. "
+                f"Ensure primus.backends.megatron defines the trainer "
+                f"and imports BackendRegistry."
             ) from exc

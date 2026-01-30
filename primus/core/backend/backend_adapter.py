@@ -83,9 +83,12 @@ class BackendAdapter(ABC):
         """
 
     @abstractmethod
-    def load_trainer_class(self):
+    def load_trainer_class(self, module_config=None):
         """
         Return backend Trainer class.
+
+        Args:
+            module_config: Optional module configuration to help select trainer variant
 
         Megatron → MegatronTrainer
         Titan → TitanTrainer
@@ -247,7 +250,7 @@ class BackendAdapter(ABC):
 
         # 5) load trainer class from backend
         log_rank_0("[Step 5/5] Loading trainer class...")
-        TrainerClass = self.load_trainer_class()
+        TrainerClass = self.load_trainer_class(module_config=module_config)
         log_rank_0(f"Trainer class loaded: {TrainerClass.__name__}")
 
         log_rank_0("=" * 80)
