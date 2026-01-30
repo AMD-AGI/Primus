@@ -18,6 +18,10 @@ modules:
       # SFT-specific configuration
       # Dataset from HuggingFace (default: tatsu-lab/alpaca)
       sft_dataset_name: "tatsu-lab/alpaca"
+      
+      # OR: Use local JSONL file for offline training
+      # sft_dataset_name: "/path/to/your/data.jsonl"
+      
       # Conversation format: "alpaca" or "chatml"
       sft_conversation_format: "alpaca"
       

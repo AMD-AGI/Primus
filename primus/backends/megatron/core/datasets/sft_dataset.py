@@ -9,11 +9,14 @@ SFT Dataset for Megatron-LM based supervised fine-tuning.
 
 This module provides a universal dataset interface for SFT training that:
 1. Supports HuggingFace datasets as data source
-2. Handles various conversation formats (extensible)
-3. Implements proper loss masking for instruction tuning
-4. Follows Megatron-LM's dataset provider pattern
+2. Supports local JSONL files for offline training
+3. Handles various conversation formats (extensible)
+4. Implements proper loss masking for instruction tuning
+5. Follows Megatron-LM's dataset provider pattern
 """
 
+import json
+import os
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -27,6 +30,43 @@ except ImportError:
     # Fallback for testing without full Primus installation
     def log_rank_0(msg):
         print(msg)
+
+
+def load_jsonl_file(file_path: str) -> List[Dict]:
+    """
+    Load data from a JSONL (JSON Lines) file.
+    
+    Each line in the file should be a valid JSON object.
+    
+    Args:
+        file_path: Path to the JSONL file
+        
+    Returns:
+        List of dictionaries, one per line
+        
+    Raises:
+        FileNotFoundError: If file doesn't exist
+        json.JSONDecodeError: If a line is not valid JSON
+    """
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"JSONL file not found: {file_path}")
+    
+    data = []
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if line:  # Skip empty lines
+                try:
+                    data.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    raise json.JSONDecodeError(
+                        f"Invalid JSON on line {line_num} in {file_path}: {e.msg}",
+                        e.doc,
+                        e.pos
+                    )
+    
+    log_rank_0(f"Loaded {len(data)} samples from {file_path}")
+    return data
 
 
 class ConversationFormatter:
@@ -152,10 +192,10 @@ class ChatMLFormatter(ConversationFormatter):
 
 class SFTDataset(Dataset):
     """
-    Universal SFT dataset that supports HuggingFace datasets.
+    Universal SFT dataset that supports HuggingFace datasets and local JSONL files.
     
     This dataset:
-    1. Loads data from HuggingFace datasets
+    1. Loads data from HuggingFace datasets OR local JSONL files
     2. Formats conversations using specified formatter
     3. Tokenizes text
     4. Creates loss masks (only compute loss on response tokens)
@@ -175,13 +215,17 @@ class SFTDataset(Dataset):
         Initialize SFT dataset.
         
         Args:
-            dataset_name: HuggingFace dataset name or path
+            dataset_name: HuggingFace dataset name, local file path, or JSONL file path.
+                         Examples:
+                         - "tatsu-lab/alpaca" (HuggingFace Hub)
+                         - "/path/to/data.jsonl" (local JSONL file)
+                         - "/path/to/data.json" (local JSON file)
             tokenizer: Megatron tokenizer instance
             max_seq_length: Maximum sequence length
-            split: Dataset split (train/validation/test)
+            split: Dataset split (train/validation/test) - only used for HuggingFace datasets
             formatter: Conversation format type ("alpaca", "chatml")
             seed: Random seed for dataset shuffling
-            **kwargs: Additional arguments passed to load_dataset
+            **kwargs: Additional arguments passed to load_dataset (for HuggingFace only)
         """
         super().__init__()
         
@@ -197,16 +241,63 @@ class SFTDataset(Dataset):
         else:
             raise ValueError(f"Unknown formatter: {formatter}. Supported: alpaca, chatml")
         
-        # Load dataset from HuggingFace
-        try:
-            from datasets import load_dataset
-        except ImportError:
-            raise ImportError(
-                "HuggingFace datasets library is required. "
-                "Install with: pip install datasets"
-            )
+        # Determine if this is a local file or HuggingFace dataset
+        is_local_file = (
+            dataset_name.endswith('.jsonl') or 
+            dataset_name.endswith('.json') or 
+            os.path.isfile(dataset_name)
+        )
         
-        self.dataset = load_dataset(dataset_name, split=split, **kwargs)
+        if is_local_file:
+            # Load from local JSONL/JSON file
+            log_rank_0(f"Loading dataset from local file: {dataset_name}")
+            
+            # Load data from file
+            if dataset_name.endswith('.jsonl'):
+                data = load_jsonl_file(dataset_name)
+            elif dataset_name.endswith('.json'):
+                # Also support single JSON file with array of objects
+                with open(dataset_name, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if not isinstance(data, list):
+                    raise ValueError(f"JSON file must contain a list of objects, got {type(data)}")
+                log_rank_0(f"Loaded {len(data)} samples from {dataset_name}")
+            else:
+                # Try to detect format by reading the file
+                try:
+                    data = load_jsonl_file(dataset_name)
+                except json.JSONDecodeError:
+                    # If JSONL fails, try as single JSON
+                    with open(dataset_name, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if not isinstance(data, list):
+                        raise ValueError(f"File must contain a list of objects or be JSONL format")
+                    log_rank_0(f"Loaded {len(data)} samples from {dataset_name}")
+            
+            # Convert to HuggingFace Dataset format for compatibility
+            try:
+                from datasets import Dataset as HFDataset
+            except ImportError:
+                raise ImportError(
+                    "HuggingFace datasets library is required. "
+                    "Install with: pip install datasets"
+                )
+            
+            self.dataset = HFDataset.from_list(data)
+            log_rank_0(f"Created dataset with {len(self.dataset)} samples")
+            
+        else:
+            # Load dataset from HuggingFace Hub
+            log_rank_0(f"Loading dataset from HuggingFace Hub: {dataset_name}, split: {split}")
+            try:
+                from datasets import load_dataset
+            except ImportError:
+                raise ImportError(
+                    "HuggingFace datasets library is required. "
+                    "Install with: pip install datasets"
+                )
+            
+            self.dataset = load_dataset(dataset_name, split=split, **kwargs)
         
     def __len__(self) -> int:
         """Return dataset size."""

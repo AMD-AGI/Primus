@@ -14,6 +14,7 @@ This implementation adds a Supervised Fine-Tuning (SFT) trainer directly based o
 
 ### 2. Universal Dataset Interface
 - **HuggingFace Integration**: Loads datasets directly from HuggingFace Hub
+- **Offline Support**: Supports local JSONL and JSON files for offline training
 - **Multiple Formats**: Built-in support for Alpaca and ChatML conversation formats
 - **Extensible Design**: Easy to add new conversation formats by subclassing `ConversationFormatter`
 - **Flexible Field Mapping**: Supports various field naming conventions (instruction/prompt/question, response/output/answer)
@@ -94,6 +95,8 @@ modules:
       
       # Dataset configuration
       sft_dataset_name: "tatsu-lab/alpaca"
+      # OR use local file:
+      # sft_dataset_name: "/path/to/data.jsonl"
       sft_conversation_format: "alpaca"
       
       # Training parameters

@@ -84,18 +84,48 @@ modules:
 
 ### 2. Supported Datasets
 
+The SFT trainer supports multiple data sources:
+
+#### HuggingFace Hub Datasets
 Any HuggingFace dataset with instruction-response pairs:
 
 ```yaml
-# Alpaca format dataset
+# Alpaca format dataset from HuggingFace Hub
 sft_dataset_name: "tatsu-lab/alpaca"
 
-# Custom dataset
+# Custom dataset from HuggingFace Hub
 sft_dataset_name: "your-org/your-dataset"
-
-# Local dataset
-sft_dataset_name: "/path/to/local/dataset"
 ```
+
+#### Local JSONL Files (Offline Training)
+For offline training, you can use local JSONL (JSON Lines) files:
+
+```yaml
+# Local JSONL file
+sft_dataset_name: "/path/to/data.jsonl"
+
+# Local JSON array file
+sft_dataset_name: "/path/to/data.json"
+```
+
+**JSONL Format**: Each line is a separate JSON object:
+```jsonl
+{"instruction": "What is Python?", "response": "Python is a programming language."}
+{"instruction": "Explain AI.", "response": "AI stands for Artificial Intelligence..."}
+```
+
+**JSON Format**: Single JSON array of objects:
+```json
+[
+    {"instruction": "What is Python?", "response": "Python is a programming language."},
+    {"instruction": "Explain AI.", "response": "AI stands for Artificial Intelligence..."}
+]
+```
+
+**Supported Field Names**:
+- Instruction: `instruction`, `prompt`, or `question`
+- Response: `response`, `output`, or `answer`
+- Optional: `input` (additional context), `system` (system prompt)
 
 ### 3. Conversation Formats
 
