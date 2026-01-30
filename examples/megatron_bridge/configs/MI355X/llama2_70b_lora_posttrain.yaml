@@ -44,7 +44,7 @@ modules:
       global_batch_size: 8
       micro_batch_size: 1
       seq_length: 8192
-      eval_interval: 50
+      eval_interval: 5
       eval_iters: 48
       save_interval: null
 
