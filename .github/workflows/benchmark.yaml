@@ -7,14 +7,14 @@ on:
 
 env:
   PRIMUS_TURBO_COMMIT: 5233748e9c5c5795a6484ab31ece47c442d29ec2 # feat(mxfp4): refactor gemm mxfp4 and mxfp8. fuse transpose, hadamard transform and quantization. (#195)
-  BENCHMARK_ROOT_DIR: /home1/primus/benchmark
+  BENCHMARK_ROOT_DIR: /wekafs/primus/benchmark
 
 jobs:
   run-benchmark-torch-part1:
     env:
-      PRIMUS_WORKDIR: /home1/primus-data/torch
+      PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
       GPU_NAME: MI325  # Change this to your GPU model
-      DATA_PATH: /home1/primus-data
+      DATA_PATH: /wekafs/primus-data
       HSA_NO_SCRATCH_RECLAIM: 1
       HF_TOKEN: ${{secrets.HF_TOKEN}}
     runs-on: [primus-lm-bench-torch-rwskq]
@@ -221,9 +221,9 @@ jobs:
 
   run-benchmark-torch-part2:
     env:
-      PRIMUS_WORKDIR: /home1/primus-data/torch
+      PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
       GPU_NAME: MI325  # Change this to your GPU model
-      DATA_PATH: /home1/primus-data
+      DATA_PATH: /wekafs/primus-data
       HSA_NO_SCRATCH_RECLAIM: 1
       HF_TOKEN: ${{secrets.HF_TOKEN}}
     needs: run-benchmark-torch-part1
@@ -385,9 +385,9 @@ jobs:
 
   run-benchmark-jax:
     env:
-      PRIMUS_WORKDIR: /home1/primus-data/jax
+      PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/jax
       GPU_NAME: MI325  # Change this to your GPU model
-      DATA_PATH: /home1/primus-data
+      DATA_PATH: /wekafs/primus-data
       HF_TOKEN: ${{secrets.HF_TOKEN}}
     needs: run-benchmark-torch-part2
     runs-on: [primus-lm-bench-jax-hhhf5]
