@@ -90,6 +90,9 @@ fi
 # Step 4: Install rocmProfileData
 echo_info "Step 4: Installing rocmProfileData..."
 docker exec "${CONTAINER_NAME}" bash -c "
+    sudo apt-get update && \
+    sudo apt-get install -y uuid-runtime sqlite3 libsqlite3-dev libfmt-dev
+
     if [ ! -d /tmp/rocmProfileData ]; then
         cd /tmp
         git clone https://github.com/ROCmSoftwarePlatform/rocmProfileData
