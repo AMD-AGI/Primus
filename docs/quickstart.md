@@ -32,7 +32,7 @@ cd Primus
 
 ```bash
 # Run a quick benchmark in container
-./runner/primus-cli container --image rocm/primus:v25.10 \
+./primus-cli container --image rocm/primus:v25.10 \
   -- benchmark gemm -M 4096 -N 4096 -K 4096
 ```
 
@@ -50,7 +50,7 @@ Use the Docker image you just pulled:
 
 ```bash
 # Run training in container (recommended for getting started)
-./runner/primus-cli container --image rocm/primus:v25.10 \
+./primus-cli container --image rocm/primus:v25.10 \
   -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 ```
 
@@ -58,11 +58,11 @@ Use the Docker image you just pulled:
 
 ```bash
 # Direct mode (if running on bare metal with ROCm installed)
-./runner/primus-cli direct -- train pretrain \
+./primus-cli direct -- train pretrain \
   --config examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml
 
 # Slurm mode (for multi-node cluster)
-./runner/primus-cli slurm srun -N 8 -p gpu -- container --image rocm/primus:v25.10 \
+./primus-cli slurm srun -N 8 -p gpu -- container --image rocm/primus:v25.10 \
   -- train pretrain --config examples/megatron/configs/MI300X/llama2_7B-pretrain.yaml
 ```
 
