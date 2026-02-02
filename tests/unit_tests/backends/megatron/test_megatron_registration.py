@@ -73,8 +73,11 @@ class TestMegatronBackendRegistration:
         trainer_cls = BackendRegistry.get_trainer_class("megatron")
         assert trainer_cls is MegatronPretrainTrainer, (
             f"Expected MegatronPretrainTrainer, got {trainer_cls}. "
-            "Check BackendRegistry.register_trainer_class('megatron', MegatronPretrainTrainer)"
+            "Check BackendRegistry.register_trainer_class(MegatronPretrainTrainer, 'megatron')"
         )
+
+        # Explicit stage should also work
+        assert BackendRegistry.has_trainer_class("megatron", stage="pretrain")
 
     def test_adapter_can_be_instantiated_via_registry(self):
         """Verify that get_adapter returns a working MegatronAdapter instance."""
@@ -93,12 +96,12 @@ class TestMegatronBackendRegistration:
         original_trainers = BackendRegistry._trainer_classes.copy()
         try:
             BackendRegistry._adapters.pop("megatron", None)
-            BackendRegistry._trainer_classes.pop("megatron", None)
+            BackendRegistry._trainer_classes.pop(("megatron", "pretrain"), None)
 
             def _fake_load_backend(_backend: str) -> None:
                 BackendRegistry.register_path_name("megatron", "Megatron-LM")
                 BackendRegistry.register_adapter("megatron", MegatronAdapter)
-                BackendRegistry.register_trainer_class("megatron", MegatronPretrainTrainer)
+                BackendRegistry.register_trainer_class(MegatronPretrainTrainer, "megatron")
 
             with patch.object(BackendRegistry, "setup_backend_path", return_value="/tmp"):
                 with patch.object(BackendRegistry, "_load_backend", side_effect=_fake_load_backend):
@@ -126,12 +129,12 @@ class TestMegatronBackendRegistration:
         original_trainers = BackendRegistry._trainer_classes.copy()
         try:
             BackendRegistry._adapters.pop("megatron", None)
-            BackendRegistry._trainer_classes.pop("megatron", None)
+            BackendRegistry._trainer_classes.pop(("megatron", "pretrain"), None)
 
             def _fake_load_backend(_backend: str) -> None:
                 BackendRegistry.register_path_name("megatron", "Megatron-LM")
                 BackendRegistry.register_adapter("megatron", MegatronAdapter)
-                BackendRegistry.register_trainer_class("megatron", MegatronPretrainTrainer)
+                BackendRegistry.register_trainer_class(MegatronPretrainTrainer, "megatron")
 
             with patch.object(BackendRegistry, "setup_backend_path", return_value="/tmp"):
                 with patch.object(BackendRegistry, "_load_backend", side_effect=_fake_load_backend):
@@ -182,12 +185,11 @@ class TestMegatronRegistrationOrder:
         original_path_names = BackendRegistry._path_names.copy()
         original_adapters = BackendRegistry._adapters.copy()
         original_trainers = BackendRegistry._trainer_classes.copy()
-
         try:
             # Remove megatron registrations
             BackendRegistry._path_names.pop("megatron", None)
             BackendRegistry._adapters.pop("megatron", None)
-            BackendRegistry._trainer_classes.pop("megatron", None)
+            BackendRegistry._trainer_classes.pop(("megatron", "pretrain"), None)
 
             # Verify it's gone
             assert not BackendRegistry.has_adapter("megatron")
@@ -239,16 +241,15 @@ class TestMegatronRegistrationFailures:
     def test_missing_trainer_registration_would_fail(self):
         """Demonstrate what happens if trainer class registration is missing."""
         # Simulate missing trainer registration
-        original = BackendRegistry._trainer_classes.pop("megatron", None)
-
+        original = BackendRegistry._trainer_classes.pop(("megatron", "pretrain"), None)
         try:
             # Without trainer registration, get_trainer_class should fail
-            with pytest.raises(AssertionError, match="No trainer class registered"):
+            with pytest.raises(ValueError, match="No trainer class registered"):
                 BackendRegistry.get_trainer_class("megatron")
         finally:
             # Restore
             if original:
-                BackendRegistry._trainer_classes["megatron"] = original
+                BackendRegistry._trainer_classes[("megatron", "pretrain")] = original
 
 
 if __name__ == "__main__":
