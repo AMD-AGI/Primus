@@ -35,7 +35,7 @@ fi
 # Docker configuration (for start_container.sh)
 export DOCKER_IMAGE="${DOCKER_IMAGE:-docker.io/rocm/primus:v25.10}"
 export DATA_PATH="${DATA_DIR}"
-export MOUNT_DATA_PATH="${MOUNT_DATA_PATH}"
+export MOUNT_DATA_PATH="${MOUNT_DATA_PATH:-/data}"
 export CONTAINER_NAME="${CONTAINER_NAME:-primus_llama2_lora}"
 
 # Step 1: Update submodules
@@ -56,6 +56,18 @@ if [ ! -d "${DATA_DIR}" ]; then
     exit 1
 fi
 
+# Check if container is already running
+if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    echo_info "Container ${CONTAINER_NAME} is already running."
+elif docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+    echo_info "Container ${CONTAINER_NAME} exists but is stopped. Starting it..."
+    docker start "${CONTAINER_NAME}"
+else
+    echo_info "Creating and starting new container using start_container.sh..."
+    bash "${SCRIPT_DIR}/tools/docker/start_container.sh"
+    echo_info "Container started successfully"
+fi
+
 # Step 3: Download dataset and create tokenizer metadata
 echo_info "Step 3: Download dataset and create tokenizer metadata..."
 docker exec "${CONTAINER_NAME}" bash -c "
@@ -73,19 +85,6 @@ docker exec "${CONTAINER_NAME}" bash -c "
         echo 'Metadata already exists: data/packed_metadata.jsonl'
     fi
 "
-
-# Check if container is already running
-if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-    echo_info "Container ${CONTAINER_NAME} is already running."
-elif docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
-    echo_info "Container ${CONTAINER_NAME} exists but is stopped. Starting it..."
-    docker start "${CONTAINER_NAME}"
-else
-    echo_info "Creating and starting new container using start_container.sh..."
-    bash "${SCRIPT_DIR}/tools/docker/start_container.sh"
-    echo_info "Container started successfully"
-fi
-
 
 # Step 4: Install rocmProfileData
 echo_info "Step 4: Installing rocmProfileData..."
