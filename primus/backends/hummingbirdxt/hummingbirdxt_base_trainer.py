@@ -7,13 +7,10 @@
 from typing import Any
 
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.modules.module_utils import log_rank_0
 
 
 class HummingbirdXTBaseTrainer(BaseTrainer):
     def __init__(self, primus_config: Any, module_config: Any, backend_args: Any):
-        log_rank_0("hb_base_trainer __init__ ...")
-
         # Initialize BaseTrainer (stores configs, enables patch management)
         super().__init__(
             primus_config=primus_config,
@@ -23,8 +20,8 @@ class HummingbirdXTBaseTrainer(BaseTrainer):
 
     @classmethod
     def detect_version(cls) -> str:
-        log_rank_0("hb_base_trainer detect_version ...")
+        pass
 
     @classmethod
     def detect_hummingbirdxt_version(cls) -> str:
-        log_rank_0("hb_base_trainer detect_hummingbirdxt_version ...")
+        pass

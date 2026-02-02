@@ -11,7 +11,6 @@ from primus.backends.hummingbirdxt.hummingbirdxt_base_trainer import (
     HummingbirdXTBaseTrainer,
 )
 from primus.core.utils.yaml_utils import nested_namespace_to_dict
-from primus.modules.module_utils import log_rank_0
 
 
 class HummingbirdXTPosttrainTrainer(HummingbirdXTBaseTrainer):
@@ -21,14 +20,11 @@ class HummingbirdXTPosttrainTrainer(HummingbirdXTBaseTrainer):
             module_config=module_config,
             backend_args=backend_args,
         )
-        log_rank_0("hb_trainer __init__ ...")
 
     def setup(self):
-        log_rank_0("hb_trainer setup ...")
+        pass
 
     def init(self):
-        log_rank_0(f"hb_trainer init ..., self.backend_args={self.backend_args}")
-
         from omegaconf import OmegaConf
         from trainer import Wan22ScoreDistillationTrainer
 
@@ -36,5 +32,4 @@ class HummingbirdXTPosttrainTrainer(HummingbirdXTBaseTrainer):
         self._trainer = Wan22ScoreDistillationTrainer(configs)
 
     def run_train(self):
-        log_rank_0("hb_trainer run_train ...")
         self._trainer.train()

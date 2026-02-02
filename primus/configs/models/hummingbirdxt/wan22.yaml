@@ -88,5 +88,5 @@ disable_wandb: true
 logdir: "./model_save_path"
 data_path: "./data/DMD_train_data.csv"
 wandb_save_dir: "./wandb"
-config_name: "primus_hbxt_20260129_0"
+config_name: "primus_hummingbirdxt_wan22"
 # -->

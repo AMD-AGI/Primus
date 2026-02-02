@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:wan22_hummingbirdxt_distill}
+exp_name: ${PRIMUS_EXP_NAME:wan22_hummingbirdxt_posttrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
@@ -11,4 +11,4 @@ modules:
     # Model to run
     model: wan22.yaml
     overrides:
-      stderr_sink_level: DEBUG
+      stderr_sink_level: INFO
