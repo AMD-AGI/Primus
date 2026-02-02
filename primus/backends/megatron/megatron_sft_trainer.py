@@ -4,20 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""
-MegatronSFTTrainer: Primus wrapper for Megatron-LM based supervised fine-tuning.
-
-This trainer bridges Primus configuration system with Megatron-LM's training loop
-for supervised fine-tuning (SFT) tasks.
-
-Key features:
-    - Direct integration with Megatron-LM (no Megatron-Bridge dependency)
-    - Universal dataset interface supporting HuggingFace datasets
-    - Multiple conversation format support (Alpaca, ChatML, etc.)
-    - Proper loss masking for instruction tuning
-    - Compatible with Megatron-LM's distributed training infrastructure
-    - LoRA (Low-Rank Adaptation) support for parameter-efficient fine-tuning
-"""
+"""MegatronSFTTrainer: Megatron-LM based supervised fine-tuning trainer."""
 
 from typing import Any, Optional
 
@@ -33,7 +20,7 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
         - SFT workflows with HuggingFace datasets
         - Instruction tuning with proper loss masking
         - Multiple conversation formats (extensible)
-        - Direct Megatron-LM integration without Megatron-Bridge
+        - Direct Megatron-LM integration
         - Support for various model architectures (Llama, GPT, etc.)
         - LoRA (Low-Rank Adaptation) for parameter-efficient fine-tuning
     
@@ -223,8 +210,8 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
         # Mark as distributed (required by Megatron)
         train_valid_test_datasets_provider.is_distributed = True
         
-        # Import forward step function from separate module
-        from .sft_forward_step import create_sft_forward_step
+        # Import forward step function from SFT module
+        from .sft.forward_step import create_sft_forward_step
         
         # Create forward step function for SFT
         forward_step = create_sft_forward_step()
