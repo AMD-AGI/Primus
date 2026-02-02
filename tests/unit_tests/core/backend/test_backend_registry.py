@@ -62,16 +62,16 @@ class TestBackendRegistryErrorHandling:
         registry_module.BackendRegistry.register_adapter("test_backend", MockAdapter)
 
         # Try to get non-existent backend
-        # get_adapter first calls setup_backend_path, which fails with AssertionError
-        # when the backend path doesn't exist.
-        with pytest.raises(AssertionError, match="No valid backend path"):
+        # get_adapter first calls _load_backend, which fails with ModuleNotFoundError
+        # when the backend module doesn't exist.
+        with pytest.raises(ModuleNotFoundError, match="No module named 'primus.backends.non_existent'"):
             registry_module.BackendRegistry.get_adapter("non_existent")
 
     def test_get_adapter_empty_registry_error(self):
         """Test error message when no backends are registered."""
-        # get_adapter first calls setup_backend_path, which fails with AssertionError
-        # when the backend path doesn't exist.
-        with pytest.raises(AssertionError, match="No valid backend path"):
+        # get_adapter first calls _load_backend, which fails with ModuleNotFoundError
+        # when the backend module doesn't exist.
+        with pytest.raises(ModuleNotFoundError, match="No module named 'primus.backends.any_backend'"):
             registry_module.BackendRegistry.get_adapter("any_backend")
 
     def test_get_adapter_creation_failure(self):
@@ -351,8 +351,8 @@ class TestBackendRegistryGetAdapterIntegration:
     def test_get_adapter_path_not_found_error(self):
         """Test get_adapter provides helpful error when path not found."""
         # Force the lazy-load path (backend not registered yet) so that
-        # setup_backend_path() validates the provided backend_path and fails fast.
-        with pytest.raises(AssertionError, match="Backend path not found"):
+        # _load_backend() tries to import the module first and fails with ModuleNotFoundError.
+        with pytest.raises(ModuleNotFoundError, match="No module named 'primus.backends.test_backend'"):
             registry_module.BackendRegistry.get_adapter("test_backend", backend_path="/non/existent/path")
 
 
