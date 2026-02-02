@@ -24,7 +24,7 @@ echo_error() {
 
 # Configuration variables
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR=""${MOUNT_DATA_PATH}"/mlperf_llama2"${MOUNT_DATA_PATH}""
+DATA_DIR="/data/mlperf_llama2/data"
 SEQ_LENGTH=8192
 HF_TOKEN="${HF_TOKEN:-}"
 if [ -z "$HF_TOKEN" ]; then
