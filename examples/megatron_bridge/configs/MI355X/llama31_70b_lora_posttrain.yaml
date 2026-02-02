@@ -12,6 +12,8 @@ modules:
     model: llama31_70b.yaml
 
     overrides:
+      stderr_sink_level: DEBUG
+
       # Parallelism configuration
       tensor_model_parallel_size: 8
       pipeline_model_parallel_size: 1
