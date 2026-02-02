@@ -25,7 +25,6 @@ echo_error() {
 # Configuration variables
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA_DIR="/data/mlperf_llama2/data"
-PATCH_FILE="megatron_bridge_llama2.patch"
 SEQ_LENGTH=8192
 HF_TOKEN="${HF_TOKEN:-}"
 if [ -z "$HF_TOKEN" ]; then
@@ -43,32 +42,7 @@ echo_info "Step 1: Updating submodules..."
 git submodule update --init --recursive
 echo_info "Submodules updated successfully"
 
-# Step 2: Apply the megatron-bridge patch
-echo_info "Step 2: Applying megatron-bridge patch..."
-if [ -f "${PATCH_FILE}" ]; then
-    # Check if patch is already applied
-    cd third_party/Megatron-Bridge
-    if git apply --check "../../${PATCH_FILE}" > /dev/null 2>&1; then
-        echo_info "Patch is not yet applied. Applying patch..."
-        git apply "../../${PATCH_FILE}"
-        echo_info "Patch applied successfully."
-    else
-        echo_warn "Patch may already be applied or there is a conflict. Verifying..."
-        if git apply --reverse --check "../../${PATCH_FILE}" > /dev/null 2>&1; then
-            echo_warn "Patch already applied. Skipping patch step."
-        else
-            echo_error "Patch cannot be applied or reverted. Please check patch status manually."
-            cd ../..
-            exit 1
-        fi
-    fi
-    cd ../..
-else
-    echo_error "Patch file ${PATCH_FILE} not found in ${SCRIPT_DIR}"
-    exit 1
-fi
-
-# Step 3: Start Primus Docker container with data mount
+# Step 2: Start Primus Docker container with data mount
 echo_info "Step 3: Starting Primus Docker container..."
 echo_info "Data directory: ${DATA_DIR}"
 echo_info "Container name: ${CONTAINER_NAME}"
@@ -92,25 +66,6 @@ else
     bash "${SCRIPT_DIR}/tools/docker/start_container.sh"
     echo_info "Container started successfully"
 fi
-
-# Step 4: Convert data to packed format
-echo_info "Step 4: Converting data to packed format..."
-docker exec "${CONTAINER_NAME}" bash -c "
-    cd /workspace/Primus
-    if [ ! -f data/train_packed.npy ]; then
-        echo 'Converting training data...'
-        python3 convert_to_packed_format.py data/train.npy data/train_packed.npy
-    else
-        echo 'Training data already converted: data/train_packed.npy'
-    fi
-    
-    if [ ! -f data/validation_packed.npy ]; then
-        echo 'Converting validation data...'
-        python3 convert_to_packed_format.py data/validation.npy data/validation_packed.npy
-    else
-        echo 'Validation data already converted: data/validation_packed.npy'
-    fi
-"
 
 # Step 5: Create tokenizer metadata
 echo_info "Step 5: Creating tokenizer metadata..."

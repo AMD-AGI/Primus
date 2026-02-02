@@ -29,8 +29,8 @@ modules:
       pretrained_checkpoint: /home/gyuzakor/Primus/data/megatron_checkpoints/Llama-2-70b-hf/iter_0000000
       peft: lora
       packed_sequence: true
-      packed_train_data_path: /data/train_packed.npy
-      packed_val_data_path: /data/validation_packed.npy
+      packed_train_data_path: /data/train.npy
+      packed_val_data_path: /data/validation.npy
       packed_metadata_path: /data/packed_metadata.jsonl
       
       # Optional: Configure LoRA parameters (defaults shown)
@@ -40,11 +40,11 @@ modules:
       #   target_modules: ['linear_qkv', 'linear_proj', 'linear_fc1', 'linear_fc2']
 
       # Training configuration
-      train_iters: 1000
+      train_iters: 384
       global_batch_size: 8
       micro_batch_size: 1
       seq_length: 8192
-      eval_interval: 5
+      eval_interval: 48
       eval_iters: 48
       save_interval: null
 
@@ -64,5 +64,11 @@ modules:
       wandb_exp_name: null
 
       # Precision
-      precision_config: bf16_mixed
+      precision_config: bf16_with_fp8_hybrid
       comm_overlap_config: null
+
+      # TensorBoard logging
+      # tensorboard_dir: /workspace/Primus/tensorboard
+      # tensorboard_log_interval: 1
+      # log_validation_ppl_to_tensorboard: true
+
