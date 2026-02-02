@@ -8,6 +8,7 @@
 PRIMUS_PATH=$(realpath "$(dirname "$0")/../..")
 DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v26.1"}
 DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
+MOUNT_DATA_PATH=${MOUNT_DATA_PATH:-"${PRIMUS_PATH}/data"}
 SANITIZED_USER=$(echo "${USER:-unknown}" | tr -cd '[:alnum:]_-')
 if [ -z "$SANITIZED_USER" ]; then
     SANITIZED_USER="unknown"
@@ -26,8 +27,8 @@ bash "${PRIMUS_PATH}"/tools/docker/docker_podman_proxy.sh run -d \
     --security-opt seccomp=unconfined \
     --group-add video \
     --privileged \
-    --env DATA_PATH="/data" \
+    --env DATA_PATH="${MOUNT_DATA_PATH}" \
     -v "${PRIMUS_PATH}:/workspace/Primus" \
-    -v "${DATA_PATH}:/data" \
+    -v "${DATA_PATH}:${MOUNT_DATA_PATH}" \
     -w "/workspace/Primus" \
     "$DOCKER_IMAGE" sleep infinity

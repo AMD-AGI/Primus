@@ -35,6 +35,7 @@ fi
 # Docker configuration (for start_container.sh)
 export DOCKER_IMAGE="${DOCKER_IMAGE:-docker.io/rocm/primus:v25.10}"
 export DATA_PATH="${DATA_DIR}"
+export MOUNT_DATA_PATH="/data"
 export CONTAINER_NAME="${CONTAINER_NAME:-primus_llama2_lora}"
 
 # Step 1: Update submodules
@@ -43,7 +44,7 @@ git submodule update --init --recursive
 echo_info "Submodules updated successfully"
 
 # Step 2: Start Primus Docker container with data mount
-echo_info "Step 3: Starting Primus Docker container..."
+echo_info "Step 2: Starting Primus Docker container..."
 echo_info "Data directory: ${DATA_DIR}"
 echo_info "Container name: ${CONTAINER_NAME}"
 echo_info "Docker image: ${DOCKER_IMAGE}"
@@ -67,8 +68,8 @@ else
     echo_info "Container started successfully"
 fi
 
-# Step 5: Create tokenizer metadata
-echo_info "Step 5: Creating tokenizer metadata..."
+# Step 3: Create tokenizer metadata
+echo_info "Step 3: Creating tokenizer metadata..."
 docker exec "${CONTAINER_NAME}" bash -c "
     cd /workspace/Primus
     if [ ! -f data/packed_metadata.jsonl ]; then
@@ -78,7 +79,39 @@ docker exec "${CONTAINER_NAME}" bash -c "
     fi
 "
 
-# Step 6: Start training
-echo_info "Step 6: Starting llama2_70b_lora training..."
+# Step 4: Install rocmProfileData
+echo_info "Step 4: Installing rocmProfileData..."
+docker exec "${CONTAINER_NAME}" bash -c "
+    if [ ! -d /tmp/rocmProfileData ]; then
+        cd /tmp
+        git clone https://github.com/ROCmSoftwarePlatform/rocmProfileData
+        cd rocmProfileData
+
+        # Build and install rocpd_python
+        cd rocpd_python
+        python3 setup.py bdist_wheel
+        pip install dist/*.whl
+        cd ..
+
+        # Build and install rpd_tracer
+        cd rpd_tracer
+        python3 setup.py bdist_wheel
+        pip3 install dist/*.whl
+        cd ..
+
+        # Fix Makefiles
+        sed -i 's/pip install --user \./pip install ./g' rocpd_python/Makefile
+        sed -i 's/pip install --user \./pip install ./g' rpd_tracer/Makefile
+
+        # Install
+        make && make install
+        echo 'rocmProfileData installed successfully'
+    else
+        echo 'rocmProfileData already installed'
+    fi
+"
+
+# Step 5: Start training
+echo_info "Step 5: Starting llama2_70b_lora training..."
 echo_info "Training configuration: examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml"
 docker exec -it "${CONTAINER_NAME}" bash -c "cd /workspace/Primus && HF_TOKEN=${HF_TOKEN} ./runner/primus-cli direct train posttrain --config examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml"
