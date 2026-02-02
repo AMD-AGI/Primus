@@ -14,6 +14,9 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version
 
 from primus.backends.megatron.core.enums import Fp4Recipe
+from primus.backends.megatron.core.extensions.primus_turbo import (
+    primus_turbo_fp4_autocast,
+)
 from primus.modules.module_utils import warning_rank_0
 
 # Check if Transformer Engine is installed
@@ -113,6 +116,10 @@ if HAVE_TE and HAVE_TURBO:
                     warning_rank_0(
                         f"Primus-Turbo FP4 {config.fp4_recipe} not work since {fp4_quant_config_none_reason}"
                     )
+                if is_init:
+                    warning_rank_0(
+                        f"Primus-Turbo FP4 {config.fp4_recipe} not work since Primus-Turbo not support fp4 model init."
+                    )
                 WARN_ONCE = False
 
             fp4_group = None
@@ -122,9 +129,12 @@ if HAVE_TE and HAVE_TURBO:
                 )
 
             if not is_init:
-                # TE currently uses fp8_autocast for fp8 and fp4 quantization.
-                fp4_context = transformer_engine.pytorch.fp8_autocast(
-                    enabled=True, fp8_recipe=fp4_recipe, fp8_group=fp4_group
+                fp4_context = primus_turbo_fp4_autocast(
+                    enabled=True if fp4_recipe is not None else False,
+                    fp4_recipe=fp4_recipe,
+                    fp4_group=fp4_group,
+                    enabled_turbo=True if fp4_quant_config is not None else False,
+                    turbo_quant_config=fp4_quant_config,
                 )
             else:
                 import inspect
