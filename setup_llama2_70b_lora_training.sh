@@ -24,7 +24,7 @@ echo_error() {
 
 # Configuration variables
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATA_DIR="/data/mlperf_llama2/data"
+DATA_DIR=""${MOUNT_DATA_PATH}"/mlperf_llama2"${MOUNT_DATA_PATH}""
 SEQ_LENGTH=8192
 HF_TOKEN="${HF_TOKEN:-}"
 if [ -z "$HF_TOKEN" ]; then
@@ -35,7 +35,7 @@ fi
 # Docker configuration (for start_container.sh)
 export DOCKER_IMAGE="${DOCKER_IMAGE:-docker.io/rocm/primus:v25.10}"
 export DATA_PATH="${DATA_DIR}"
-export MOUNT_DATA_PATH="/data"
+export MOUNT_DATA_PATH="${MOUNT_DATA_PATH}"
 export CONTAINER_NAME="${CONTAINER_NAME:-primus_llama2_lora}"
 
 # Step 1: Update submodules
@@ -56,6 +56,24 @@ if [ ! -d "${DATA_DIR}" ]; then
     exit 1
 fi
 
+# Step 3: Download dataset and create tokenizer metadata
+echo_info "Step 3: Download dataset and create tokenizer metadata..."
+docker exec "${CONTAINER_NAME}" bash -c "
+    cd /workspace/Primus
+    if [ ! -f ${MOUNT_DATA_PATH}/train.npy ]; then
+        python download_dataset.py --data_dir ${MOUNT_DATA_PATH}
+        python convert_dataset.py --data_dir ${MOUNT_DATA_PATH}
+    else
+        echo 'Dataset already exists: ${MOUNT_DATA_PATH}/train.npy'
+    fi
+
+    if [ ! -f data/packed_metadata.jsonl ]; then
+        python3 create_metadata.py ${SEQ_LENGTH} data/packed_metadata.jsonl
+    else
+        echo 'Metadata already exists: data/packed_metadata.jsonl'
+    fi
+"
+
 # Check if container is already running
 if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     echo_info "Container ${CONTAINER_NAME} is already running."
@@ -68,16 +86,6 @@ else
     echo_info "Container started successfully"
 fi
 
-# Step 3: Create tokenizer metadata
-echo_info "Step 3: Creating tokenizer metadata..."
-docker exec "${CONTAINER_NAME}" bash -c "
-    cd /workspace/Primus
-    if [ ! -f data/packed_metadata.jsonl ]; then
-        python3 create_metadata.py ${SEQ_LENGTH} data/packed_metadata.jsonl
-    else
-        echo 'Metadata already exists: data/packed_metadata.jsonl'
-    fi
-"
 
 # Step 4: Install rocmProfileData
 echo_info "Step 4: Installing rocmProfileData..."
