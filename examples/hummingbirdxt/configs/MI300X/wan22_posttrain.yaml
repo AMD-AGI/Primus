@@ -11,4 +11,4 @@ modules:
     # Model to run
     model: wan22.yaml
     overrides:
-      stderr_sink_level: INFO
+      stderr_sink_level: DEBUG
