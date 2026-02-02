@@ -12,4 +12,3 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
 exec bash "${REPO_ROOT}/runner/primus-cli" "$@"
-

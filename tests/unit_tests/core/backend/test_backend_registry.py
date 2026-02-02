@@ -25,7 +25,7 @@ class MockAdapter(BackendAdapter):
     def convert_config(self, config):
         return {}
 
-    def load_trainer_class(self):
+    def load_trainer_class(self, stage: str = "pretrain"):
         return object
 
     def detect_backend_version(self) -> str:
@@ -40,8 +40,10 @@ class TestBackendRegistryErrorHandling:
         # Save original state
         self._original_adapters = registry_module.BackendRegistry._adapters.copy()
         self._original_path_names = registry_module.BackendRegistry._path_names.copy()
+        self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
         registry_module.BackendRegistry._adapters.clear()
         registry_module.BackendRegistry._path_names.clear()
+        registry_module.BackendRegistry._trainer_classes.clear()
 
         # Silence logging dependencies (logger may not be initialized in tests)
         self._orig_log_rank_0 = registry_module.log_rank_0
@@ -51,6 +53,7 @@ class TestBackendRegistryErrorHandling:
         """Restore registry after each test."""
         registry_module.BackendRegistry._adapters = self._original_adapters
         registry_module.BackendRegistry._path_names = self._original_path_names
+        registry_module.BackendRegistry._trainer_classes = self._original_trainer_classes
         registry_module.log_rank_0 = self._orig_log_rank_0
 
     def test_get_adapter_not_found_helpful_error(self):
@@ -59,14 +62,16 @@ class TestBackendRegistryErrorHandling:
         registry_module.BackendRegistry.register_adapter("test_backend", MockAdapter)
 
         # Try to get non-existent backend
-        # In the new core runtime, this fails at import time for the backend module.
-        with pytest.raises(ImportError):
+        # get_adapter first calls _load_backend, which fails with ModuleNotFoundError
+        # when the backend module doesn't exist.
+        with pytest.raises(ModuleNotFoundError, match="No module named 'primus.backends.non_existent'"):
             registry_module.BackendRegistry.get_adapter("non_existent")
 
     def test_get_adapter_empty_registry_error(self):
         """Test error message when no backends are registered."""
-        # In the new core runtime, this also fails at import time for the backend module.
-        with pytest.raises(ImportError):
+        # get_adapter first calls _load_backend, which fails with ModuleNotFoundError
+        # when the backend module doesn't exist.
+        with pytest.raises(ModuleNotFoundError, match="No module named 'primus.backends.any_backend'"):
             registry_module.BackendRegistry.get_adapter("any_backend")
 
     def test_get_adapter_creation_failure(self):
@@ -83,7 +88,7 @@ class TestBackendRegistryErrorHandling:
             def convert_config(self, config):
                 return {}
 
-            def load_trainer_class(self):
+            def load_trainer_class(self, stage: str = "pretrain"):
                 return object
 
             def detect_backend_version(self) -> str:
@@ -105,7 +110,10 @@ class TestBackendRegistryLazyLoading:
         """Clear registry before each test."""
         # Reset adapter registry state
         self._original_adapters = registry_module.BackendRegistry._adapters.copy()
+        self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
+        self._original_path_names = registry_module.BackendRegistry._path_names.copy()
         registry_module.BackendRegistry._adapters.clear()
+        registry_module.BackendRegistry._trainer_classes.clear()
 
         # Ensure backend module can be re-imported so that lazy loading
         # re-runs registration even if other tests imported it earlier.
@@ -120,6 +128,8 @@ class TestBackendRegistryLazyLoading:
     def teardown_method(self):
         """Restore registry after each test."""
         registry_module.BackendRegistry._adapters = self._original_adapters
+        registry_module.BackendRegistry._trainer_classes = self._original_trainer_classes
+        registry_module.BackendRegistry._path_names = self._original_path_names
         registry_module.log_rank_0 = self._orig_log_rank_0
 
         # Restore original backend module to avoid impacting other tests
@@ -140,10 +150,13 @@ class TestBackendRegistryLazyLoading:
 
     def test_get_adapter_with_lazy_loading(self):
         """Test that get_adapter triggers lazy loading."""
+        from unittest.mock import patch
+
         # Don't pre-register, let it lazy load
         # This will try to load megatron backend
-        # Note: get_adapter now also tries setup_backend_path
-        adapter = registry_module.BackendRegistry.get_adapter("megatron", backend_path=None)
+        # Mock setup_backend_path to avoid dependency on actual file system
+        with patch.object(registry_module.BackendRegistry, "setup_backend_path", return_value="/tmp"):
+            adapter = registry_module.BackendRegistry.get_adapter("megatron", backend_path=None)
         # If megatron is installed and registered correctly, this should not raise
         # and must return a non-None adapter instance.
         assert adapter is not None
@@ -171,11 +184,10 @@ class TestBackendRegistryPathNames:
         """Clear registry before each test."""
         self._original_path_names = registry_module.BackendRegistry._path_names.copy()
         self._original_adapters = registry_module.BackendRegistry._adapters.copy()
+        self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
         registry_module.BackendRegistry._path_names.clear()
-        registry_module.BackendRegistry._path_names.update(
-            {"megatron": "Megatron-LM", "torchtitan": "torchtitan"}
-        )
         registry_module.BackendRegistry._adapters.clear()
+        registry_module.BackendRegistry._trainer_classes.clear()
 
         # Silence logging dependencies
         self._orig_log_rank_0 = registry_module.log_rank_0
@@ -187,6 +199,8 @@ class TestBackendRegistryPathNames:
         registry_module.BackendRegistry._path_names.update(self._original_path_names)
         registry_module.BackendRegistry._adapters.clear()
         registry_module.BackendRegistry._adapters.update(self._original_adapters)
+        registry_module.BackendRegistry._trainer_classes.clear()
+        registry_module.BackendRegistry._trainer_classes.update(self._original_trainer_classes)
         registry_module.log_rank_0 = self._orig_log_rank_0
 
     def test_register_and_get_path_name(self):
@@ -196,17 +210,15 @@ class TestBackendRegistryPathNames:
         path_name = registry_module.BackendRegistry.get_path_name("test_backend")
         assert path_name == "TestBackend-Path"
 
-    def test_get_path_name_with_lazy_loading(self):
-        """Test get_path_name triggers lazy loading."""
-        # Pre-registered in _path_names
+    def test_get_path_name_with_fallback(self):
+        """Test get_path_name falls back to backend name."""
         path_name = registry_module.BackendRegistry.get_path_name("megatron")
-        assert path_name == "Megatron-LM"
+        assert path_name == "megatron"
 
     def test_get_path_name_not_found(self):
-        """Test error when path name not registered and can't be loaded."""
-        # In the new lazy-loading logic, an unknown backend triggers a ModuleNotFoundError.
-        with pytest.raises(ModuleNotFoundError):
-            registry_module.BackendRegistry.get_path_name("non_existent_backend")
+        """Test get_path_name returns backend name when not registered."""
+        path_name = registry_module.BackendRegistry.get_path_name("non_existent_backend")
+        assert path_name == "non_existent_backend"
 
 
 class TestBackendRegistrySetupPath:
@@ -264,9 +276,8 @@ class TestBackendRegistrySetupPath:
         assert str(backend_dir) in sys.path
 
     def test_setup_backend_path_not_found(self):
-        """Test setup_backend_path raises error when backend not registered."""
-        # Missing backend now fails during lazy loading with ModuleNotFoundError.
-        with pytest.raises(ModuleNotFoundError):
+        """Test setup_backend_path raises error when backend path missing."""
+        with pytest.raises(AssertionError):
             registry_module.BackendRegistry.setup_backend_path("non_existent_backend", verbose=False)
 
     def test_setup_backend_path_already_in_sys_path(self, tmp_path):
@@ -340,8 +351,8 @@ class TestBackendRegistryGetAdapterIntegration:
     def test_get_adapter_path_not_found_error(self):
         """Test get_adapter provides helpful error when path not found."""
         # Force the lazy-load path (backend not registered yet) so that
-        # setup_backend_path() validates the provided backend_path and fails fast.
-        with pytest.raises(AssertionError, match="Backend path not found"):
+        # _load_backend() tries to import the module first and fails with ModuleNotFoundError.
+        with pytest.raises(ModuleNotFoundError, match="No module named 'primus.backends.test_backend'"):
             registry_module.BackendRegistry.get_adapter("test_backend", backend_path="/non/existent/path")
 
 
@@ -386,14 +397,14 @@ class TestBackendRegistryTrainerClasses:
         class DummyTrainer:
             pass
 
-        registry_module.BackendRegistry.register_trainer_class("test_backend", DummyTrainer)
+        registry_module.BackendRegistry.register_trainer_class(DummyTrainer, "test_backend")
 
         trainer_cls = registry_module.BackendRegistry.get_trainer_class("test_backend")
         assert trainer_cls is DummyTrainer
 
     def test_get_trainer_class_not_found(self):
         """Test error when trainer class not registered."""
-        with pytest.raises(AssertionError) as exc_info:
+        with pytest.raises(ValueError) as exc_info:
             registry_module.BackendRegistry.get_trainer_class("non_existent_backend")
 
         assert "No trainer class registered for backend 'non_existent_backend'" in str(exc_info.value)
@@ -405,8 +416,27 @@ class TestBackendRegistryTrainerClasses:
             pass
 
         assert registry_module.BackendRegistry.has_trainer_class("test_backend") is False
-        registry_module.BackendRegistry.register_trainer_class("test_backend", DummyTrainer)
+        registry_module.BackendRegistry.register_trainer_class(DummyTrainer, "test_backend")
         assert registry_module.BackendRegistry.has_trainer_class("test_backend") is True
+
+    def test_register_and_get_trainer_class_with_stage(self):
+        """Test trainer registration with explicit stage."""
+
+        class DummyTrainer:
+            pass
+
+        # Register with explicit stage "sft"
+        registry_module.BackendRegistry.register_trainer_class(DummyTrainer, "test_backend", stage="sft")
+
+        # Get with explicit stage "sft" should work
+        trainer_cls = registry_module.BackendRegistry.get_trainer_class("test_backend", stage="sft")
+        assert trainer_cls is DummyTrainer
+
+        # has_trainer_class with explicit stage should work
+        assert registry_module.BackendRegistry.has_trainer_class("test_backend", stage="sft") is True
+
+        # Default stage "pretrain" should not find it
+        assert registry_module.BackendRegistry.has_trainer_class("test_backend") is False
 
 
 class TestBackendRegistrySetupHooks:

@@ -89,7 +89,7 @@ class BaseTrainer(TrainerComponent):
         # circular dependencies during module import and to keep BaseTrainer
         # backend-agnostic.
         if hasattr(self.module_config, "params") and self.module_config.params is not None:
-            if self.backend_name == "megatron":
+            if self.backend_name == "megatron" or self.backend_name == "megatron_bridge":
                 from primus.backends.megatron.training.global_vars import (  # noqa: WPS433
                     set_primus_global_variables,
                 )
