@@ -32,12 +32,6 @@ modules:
       packed_train_data_path: /data/train.npy
       packed_val_data_path: /data/validation.npy
       packed_metadata_path: /data/packed_metadata.jsonl
-      
-      # Optional: Configure LoRA parameters (defaults shown)
-      # peft_config:
-      #   dim: 32          # LoRA rank
-      #   alpha: 32        # LoRA alpha scaling factor
-      #   target_modules: ['linear_qkv', 'linear_proj', 'linear_fc1', 'linear_fc2']
 
       # Training configuration
       train_iters: 384
