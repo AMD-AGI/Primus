@@ -49,7 +49,7 @@ def bf16_with_fp8_hybrid() -> MixedPrecisionConfig:
         MixedPrecisionConfig: Configuration for BF16 with MXFP8 mixed precision training
     """
     cfg = bf16_mixed()
-    cfg.fp8 = "e4m3"
+    cfg.fp8 = "hybrid"
     cfg.fp8_recipe = "delayed"
     cfg.fp8_amax_history_len = 4
     cfg.fp8_amax_compute_algo = "most_recent"
@@ -238,7 +238,6 @@ def _llama2_common(
     """
     base_output_dir = dir if dir is not None else os.path.join(os.getcwd(), "nemo_experiments")
     run_output_dir = os.path.join(base_output_dir, name)
-    checkpoint_dir = os.path.join(run_output_dir, "checkpoints")
     tensorboard_dir = os.path.join(run_output_dir, "tb_logs")
 
     bridge = AutoBridge.from_hf_pretrained(hf_path)
