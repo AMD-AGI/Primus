@@ -49,8 +49,8 @@ class MegatronAdapter(BackendAdapter):
         """
         Detect Megatron-LM version.
 
-        Delegates to the trainer class's detect_version() classmethod to ensure
-        consistency and proper separation of concerns.
+        Delegates to the Megatron base trainer's detect_version() to keep
+        version detection independent of the selected stage.
 
         Returns:
             Version string (e.g., "0.15.0rc8")
@@ -58,9 +58,9 @@ class MegatronAdapter(BackendAdapter):
         Raises:
             RuntimeError: If version cannot be detected
         """
-        # Get trainer class and call its detect_version classmethod
-        TrainerClass = self.load_trainer_class()
-        return TrainerClass.detect_version()
+        from primus.backends.megatron.megatron_base_trainer import MegatronBaseTrainer
+
+        return MegatronBaseTrainer.detect_version()
 
     # Config → Megatron Args
     def convert_config(self, module_config):
@@ -96,14 +96,12 @@ class MegatronAdapter(BackendAdapter):
 
         return megatron_args
 
-    # Load Trainer Class (Version Adaptive)
-    def load_trainer_class(self):
-        """Load Megatron trainer class registered via BackendRegistry."""
+    # Load Trainer Class (Stage-Aware)
+    def load_trainer_class(self, stage: str = "pretrain"):
         try:
-            return BackendRegistry.get_trainer_class(self.framework)
-        except ValueError as exc:
+            return BackendRegistry.get_trainer_class(self.framework, stage=stage)
+        except (ValueError, AssertionError) as exc:
             raise RuntimeError(
-                "[Primus:MegatronAdapter] 'megatron' backend not registered. "
-                "Ensure primus.backends.megatron.trainers defines the trainer "
-                "and imports BackendRegistry."
+                "[Primus:MegatronAdapter] 'megatron' backend trainer not registered. "
+                "Ensure primus.backends.megatron registers the trainer class via BackendRegistry."
             ) from exc

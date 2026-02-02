@@ -35,6 +35,21 @@ TORCHTITAN_ITERATION_PATTERN = re.compile(
     r"mfu:\s*([\d.]+)%",
 )
 
+# MaxText log pattern
+# Example: "completed step: 49, seconds: 5.018, TFLOP/s/device: 107.127, Tokens/s/device: 6529.527, loss: 10.172"
+MAXTEXT_ITERATION_PATTERN = re.compile(
+    r"completed\s+step:\s*(\d+)"
+    r".*?"
+    r"seconds:\s*([\d.]+)"
+    r".*?"
+    r"TFLOP/s/device:\s*([\d.]+)"
+    r".*?"
+    r"Tokens/s/device:\s*([\d,]+(?:\.\d+)?)"
+    r".*?"
+    r"loss:\s*([\d.]+)",
+    re.DOTALL | re.IGNORECASE,
+)
+
 
 def remove_ansi_escape(text: str) -> str:
     return ANSI_ESCAPE_PATTERN.sub("", text)
@@ -64,6 +79,50 @@ def parse_metrics_for_torchtitan(file_path: str) -> Dict[str, float]:
     }
 
 
+def parse_metrics_for_maxtext(file_path: str) -> Dict[str, float]:
+    """Extract performance metrics from MaxText log file.
+
+    MaxText logs in format like:
+    [INFO] completed step: 49, seconds: 5.018, TFLOP/s/device: 107.127,
+           Tokens/s/device: 6529.527, total_weights: 262144, loss: 10.172
+
+    Note: Same step may be logged multiple times, we deduplicate by keeping the last occurrence.
+    """
+    with open(file_path, "r", encoding="utf-8") as f:
+        log_text = f.read()
+    log_text = remove_ansi_escape(log_text)
+
+    matches = MAXTEXT_ITERATION_PATTERN.findall(log_text)
+    if not matches:
+        raise ValueError(f"No valid iteration metrics found in {file_path}")
+
+    # Use dict to deduplicate by step number (keep last occurrence)
+    step_metrics = {}
+    for m in matches:
+        # m[0] = step, m[1] = seconds, m[2] = TFLOP/s/device, m[3] = Tokens/s/device, m[4] = loss
+        step_num = int(m[0])
+        tokens_per_device = m[3].replace(",", "")
+        step_metrics[step_num] = {
+            "seconds": float(m[1]),
+            "tflops": float(m[2]),
+            "tps": float(tokens_per_device),
+        }
+
+    # Extract deduplicated metrics
+    metrics = {"seconds": [], "tflops": [], "tps": []}
+    for step_data in step_metrics.values():
+        metrics["seconds"].append(step_data["seconds"])
+        metrics["tflops"].append(step_data["tflops"])
+        metrics["tps"].append(step_data["tps"])
+
+    return {
+        "TFLOP/s/GPU": round(statistics.mean(metrics["tflops"]), 2),
+        "Tokens/s/GPU": round(statistics.mean(metrics["tps"]), 1),
+        "Step Time (s)": round(statistics.mean(metrics["seconds"]), 3),
+        "Mem Usage": "",  # MaxText doesn't log memory in this format
+    }
+
+
 def parse_last_metrics_from_log(file_path: str) -> Dict[str, float]:
     """Extract last iteration's performance metrics from the log file."""
     with open(file_path, "r", encoding="utf-8") as f:
@@ -89,7 +148,7 @@ def parse_last_metrics_from_log(file_path: str) -> Dict[str, float]:
 
 
 def parse_log_file(file_path: Path) -> Dict[str, str]:
-
+    """Parse log file and extract metrics based on framework type."""
     dimension_info = {
         "Model": file_path.stem,
         "Framework": file_path.parts[-2],
@@ -97,19 +156,70 @@ def parse_log_file(file_path: Path) -> Dict[str, str]:
         "date": file_path.parts[-4],
     }
 
-    if dimension_info["Framework"] == "megatron":
+    framework = dimension_info["Framework"].lower()
+
+    if framework == "megatron":
         metrics = parse_last_metrics_from_log(str(file_path))
-    elif dimension_info["Framework"] == "torchtitan":
+    elif framework == "torchtitan":
         metrics = parse_metrics_for_torchtitan(str(file_path))
+    elif framework == "maxtext":
+        metrics = parse_metrics_for_maxtext(str(file_path))
+    else:
+        raise ValueError(f"Unknown framework: {framework}. Supported: megatron, torchtitan, maxtext")
+
     return {**dimension_info, **metrics}
 
 
 def write_csv_report(data: list[Dict[str, str]], output_path: str) -> None:
+    """Write benchmark data to CSV file with consistent field ordering."""
+    if not data:
+        print("⚠️ No data to write.")
+        return
+
+    # Define consistent field order
+    # Dimension fields first, then metric fields, TFLOP/s/GPU at the end
+    preferred_order = [
+        "date",
+        "GPU",
+        "Framework",
+        "Model",
+        "Tokens/s/GPU",
+        "Step Time (s)",
+        "Mem Usage",
+        "TFLOP/s/GPU",  # Moved to last position
+    ]
+
+    # Collect all unique fields from all records
+    all_fields = set()
+    for record in data:
+        all_fields.update(record.keys())
+
+    # Ensure all preferred fields are included (even if not present in any record)
+    # This guarantees consistent CSV structure
+    for field in preferred_order:
+        all_fields.add(field)
+
+    # Sort fields: preferred order first, then alphabetically for any extra fields
+    fieldnames = []
+    for field in preferred_order:
+        if field in all_fields:
+            fieldnames.append(field)
+            all_fields.discard(field)  # Use discard instead of remove to avoid KeyError
+    # Add any remaining fields (sorted alphabetically)
+    fieldnames.extend(sorted(all_fields))
+
+    # Ensure all records have all fields (fill missing with empty string)
+    normalized_data = []
+    for record in data:
+        normalized_record = {field: record.get(field, "") for field in fieldnames}
+        normalized_data.append(normalized_record)
+
+    # Write CSV
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=data[0].keys())
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(data)
+        writer.writerows(normalized_data)
     print(f"✅ Report written to: {output_path}")
 
 

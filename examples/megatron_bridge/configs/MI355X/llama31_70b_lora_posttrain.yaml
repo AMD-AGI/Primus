@@ -6,12 +6,14 @@ workspace: ${PRIMUS_WORKSPACE:./output}
 modules:
   post_trainer:
     framework: megatron_bridge
-    config: post_trainer.yaml
+    config: sft_trainer.yaml
 
     # Model to run
     model: llama31_70b.yaml
 
     overrides:
+      stderr_sink_level: DEBUG
+
       # Parallelism configuration
       tensor_model_parallel_size: 8
       pipeline_model_parallel_size: 1

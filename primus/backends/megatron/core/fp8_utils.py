@@ -191,6 +191,10 @@ if HAVE_TE and HAVE_TURBO:
                     warning_rank_0(
                         f"Primus-Turbo FP8 {config.fp8_recipe} not work since {fp8_quant_config_none_reason}"
                     )
+                if is_init:
+                    warning_rank_0(
+                        f"Primus-Turbo FP8 {config.fp8_recipe} not work since Primus-Turbo not support fp8 model init."
+                    )
                 WARN_ONCE = False
 
             fp8_group = None

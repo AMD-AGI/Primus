@@ -130,15 +130,14 @@ class MegatronBridgeAdapter(BackendAdapter):
         return bridge_args
 
     # Load Trainer Class
-    def load_trainer_class(self):
+    def load_trainer_class(self, stage: str = "pretrain"):
         """
         Load Megatron-Bridge trainer class registered via BackendRegistry.
-
         This allows Primus runtime to remain agnostic to the actual trainer
         implementation (pretrain, sft, etc.).
         """
         try:
-            return BackendRegistry.get_trainer_class(self.framework)
+            return BackendRegistry.get_trainer_class(self.framework, stage=stage)
         except ValueError as exc:
             raise RuntimeError(
                 "[Primus:MegatronBridgeAdapter] 'megatron_bridge' backend trainer not registered. "
