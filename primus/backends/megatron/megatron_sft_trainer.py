@@ -16,6 +16,7 @@ Key features:
     - Multiple conversation format support (Alpaca, ChatML, etc.)
     - Proper loss masking for instruction tuning
     - Compatible with Megatron-LM's distributed training infrastructure
+    - LoRA (Low-Rank Adaptation) support for parameter-efficient fine-tuning
 """
 
 from typing import Any, Optional
@@ -34,6 +35,7 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
         - Multiple conversation formats (extensible)
         - Direct Megatron-LM integration without Megatron-Bridge
         - Support for various model architectures (Llama, GPT, etc.)
+        - LoRA (Low-Rank Adaptation) for parameter-efficient fine-tuning
     
     Inherits from MegatronBaseTrainer which provides:
         - Argument injection into Megatron runtime
@@ -62,7 +64,47 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
         self.optimizer = None
         self.opt_param_scheduler = None
         
+        # Initialize LoRA if enabled
+        self.peft = None
+        self._init_lora()
+        
         log_rank_0(f"Initialized MegatronSFTTrainer for model: {module_config.model or 'custom'}")
+    
+    def _init_lora(self):
+        """Initialize LoRA (Low-Rank Adaptation) if enabled in config."""
+        lora_enabled = getattr(self.backend_args, 'lora_enabled', False)
+        
+        if not lora_enabled:
+            log_rank_0("LoRA disabled, using full fine-tuning")
+            return
+        
+        from primus.backends.megatron.peft import LoRA
+        
+        # Get LoRA configuration from backend_args
+        lora_rank = getattr(self.backend_args, 'lora_rank', 32)
+        lora_alpha = getattr(self.backend_args, 'lora_alpha', 32)
+        lora_dropout = getattr(self.backend_args, 'lora_dropout', 0.0)
+        lora_dropout_position = getattr(self.backend_args, 'lora_dropout_position', 'pre')
+        lora_A_init = getattr(self.backend_args, 'lora_A_init_method', 'xavier')
+        lora_B_init = getattr(self.backend_args, 'lora_B_init_method', 'zero')
+        lora_target_modules = getattr(
+            self.backend_args, 
+            'lora_target_modules', 
+            ['linear_qkv', 'linear_proj', 'linear_fc1', 'linear_fc2']
+        )
+        
+        log_rank_0(f"Initializing LoRA with rank={lora_rank}, alpha={lora_alpha}, "
+                   f"dropout={lora_dropout}, targets={lora_target_modules}")
+        
+        self.peft = LoRA(
+            target_modules=lora_target_modules,
+            dim=lora_rank,
+            alpha=lora_alpha,
+            dropout=lora_dropout,
+            dropout_position=lora_dropout_position,
+            lora_A_init_method=lora_A_init,
+            lora_B_init_method=lora_B_init,
+        )
 
     def setup(self):
         """
@@ -90,6 +132,44 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
             log_rank_0(f"SFT Dataset: {self.backend_args.sft_dataset_name}")
         if hasattr(self.backend_args, 'sft_conversation_format'):
             log_rank_0(f"Conversation Format: {self.backend_args.sft_conversation_format}")
+
+    def _create_model_provider_with_lora(self, base_model_provider):
+        """
+        Wrap the model provider to apply LoRA after model creation.
+        
+        Args:
+            base_model_provider: Original model provider function
+            
+        Returns:
+            Wrapped model provider that applies LoRA to the created model
+        """
+        peft = self.peft
+        
+        def model_provider_with_lora(pre_process=True, post_process=True):
+            """Model provider that applies LoRA after model creation."""
+            # Create the base model
+            model = base_model_provider(pre_process=pre_process, post_process=post_process)
+            
+            # Apply LoRA if enabled
+            if peft is not None:
+                log_rank_0("=" * 60)
+                log_rank_0("Applying LoRA to model...")
+                model = peft(model, training=True)
+                
+                # Log trainable parameters
+                total_params = sum(p.numel() for p in model.parameters())
+                trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                frozen_params = total_params - trainable_params
+                
+                log_rank_0(f"LoRA Summary:")
+                log_rank_0(f"  - Total parameters:     {total_params:,}")
+                log_rank_0(f"  - Trainable parameters: {trainable_params:,} ({100*trainable_params/total_params:.2f}%)")
+                log_rank_0(f"  - Frozen parameters:    {frozen_params:,} ({100*frozen_params/total_params:.2f}%)")
+                log_rank_0("=" * 60)
+            
+            return model
+        
+        return model_provider_with_lora
 
     def run_train(self):
         """
@@ -149,6 +229,14 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
         # Create forward step function for SFT
         forward_step = create_sft_forward_step()
         
+        # Get model provider, wrap with LoRA if enabled
+        base_model_provider = get_model_provider()
+        if self.peft is not None:
+            model_provider = self._create_model_provider_with_lora(base_model_provider)
+            log_rank_0("Using LoRA-enabled model provider")
+        else:
+            model_provider = base_model_provider
+        
         # Megatron versions differ:
         # - v0.12.0: calls `pretrain(...)` directly (no inprocess_restart wrapper).
         # - newer: wraps pretrain via inprocess_restart and may pass `store=...`.
@@ -177,7 +265,7 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
         
         wrapped_pretrain(
             train_valid_test_datasets_provider,
-            get_model_provider(),
+            model_provider,
             ModelType.encoder_or_decoder,
             forward_step,
             **kwargs,

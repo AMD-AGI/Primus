@@ -34,6 +34,13 @@ log_timers_to_tensorboard: true
 log_batch_size_to_tensorboard: true
 log_learning_rate_to_tensorboard: true
 
+# Checkpoint format settings
+# auto_detect_ckpt_format: Automatically detect checkpoint format during loading
+# This is essential for loading HuggingFace converted checkpoints
+auto_detect_ckpt_format: true
+ckpt_format: torch_dist
+fully_parallel_save: true
+
 # Learning rate (lower than pretraining for fine-tuning)
 lr: 1.0e-5
 min_lr: 0.0
@@ -56,3 +63,21 @@ use_distributed_optimizer: true
 # Note: These are typically overridden in the experiment config
 sft_dataset_name: "tatsu-lab/alpaca"
 sft_conversation_format: "alpaca"
+
+# LoRA (Low-Rank Adaptation) settings
+# Set lora_enabled: true to use LoRA for parameter-efficient fine-tuning
+lora_enabled: false
+lora_rank: 32                    # Low-rank dimension (8-64 typical)
+lora_alpha: 32                   # Scaling factor (usually = rank)
+lora_dropout: 0.0                # Dropout rate (0.0-0.1)
+lora_dropout_position: pre       # Dropout position: "pre" or "post"
+lora_A_init_method: xavier       # Matrix A init: "xavier" or "kaiming"
+lora_B_init_method: zero         # Matrix B init: "zero" (standard)
+lora_target_modules:             # Modules to apply LoRA
+  - linear_qkv
+  - linear_proj
+  - linear_fc1
+  - linear_fc2
+
+ckpt_format: torch_dist
+fully_parallel_save: true
