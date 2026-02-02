@@ -148,8 +148,8 @@ from primus.backends.megatron.training.global_vars import (
     get_train_start_time,
     set_primus_global_variables,
     set_train_start_time,
-    upload_mlflow_artifacts,
 )
+from primus.backends.megatron.training.mlflow_setup import upload_mlflow_artifacts
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
