@@ -150,6 +150,46 @@ def wait_for_conversion(done_file: Path, lock_file: Path, timeout: int = 600):
         raise TimeoutError("Timeout waiting for checkpoint conversion")
 
 
+def fix_common_pt_for_megatron_lm(checkpoint_dir: Path):
+    """
+    Fix common.pt to include 'args' for Megatron-LM compatibility.
+    
+    Megatron-LM expects 'args' in common.pt's state_dict for loading torch_dist
+    checkpoints. HuggingFace converted checkpoints are always TP=1, PP=1.
+    """
+    import torch
+    from types import SimpleNamespace
+    
+    common_pt = checkpoint_dir / "common.pt"
+    
+    log_info(f"  3. Adding 'args' to common.pt for Megatron-LM compatibility")
+    
+    # Load existing common.pt
+    state_dict = torch.load(common_pt, map_location='cpu')
+    
+    # Check if args already exists
+    if 'args' in state_dict:
+        log_info("     'args' already exists in common.pt, skipping")
+        return
+    
+    # Create args namespace with default values for HuggingFace converted checkpoints
+    # HF models are single-device, so TP=1, PP=1
+    args = SimpleNamespace(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        world_size=1,
+        data_parallel_size=1,
+        no_save_rng=True,
+        no_save_optim=True,
+        ckpt_fully_parallel_save=False,
+    )
+    
+    # Add args to state_dict and save
+    state_dict['args'] = args
+    torch.save(state_dict, common_pt)
+    log_success("     Successfully added 'args' to common.pt")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Convert HF checkpoint to Megatron format")
     parser.add_argument("--config", type=str, required=True, help="Path to config file")
@@ -233,6 +273,10 @@ def main():
                         iter_dir.rename(release_dir)
                     
                     log_success("Checkpoint structure fixed for Megatron-LM compatibility")
+            
+            # Step 3: Add 'args' to common.pt for Megatron-LM compatibility
+            # Megatron-Bridge saves config to run_config.yaml, but Megatron-LM expects 'args' in common.pt
+            fix_common_pt_for_megatron_lm(release_dir if release_dir.exists() else iter_dir)
             
             done_file.touch()
             log_success(f"Checkpoint prepared at {megatron_path}")
