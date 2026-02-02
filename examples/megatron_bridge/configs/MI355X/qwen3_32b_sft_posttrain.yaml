@@ -12,6 +12,8 @@ modules:
     model: qwen3_32b.yaml
 
     overrides:
+      stderr_sink_level: DEBUG
+
       # Parallelism configuration
       tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 1
