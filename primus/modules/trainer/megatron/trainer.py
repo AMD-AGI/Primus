@@ -146,9 +146,11 @@ from primus.backends.megatron.model_provider import primus_model_provider
 from primus.backends.megatron.training.global_vars import (
     get_mlflow_writer,
     get_train_start_time,
-    set_exp_root_path,
     set_primus_global_variables,
     set_train_start_time,
+)
+from primus.backends.megatron.training.mlflow_setup import (
+    set_exp_root_path,
     upload_mlflow_artifacts,
 )
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer

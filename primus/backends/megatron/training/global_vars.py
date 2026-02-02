@@ -5,6 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+
 import json
 import time
 
@@ -14,11 +15,8 @@ from primus.backends.megatron.training.git_metadata import (
 )
 from primus.modules.module_utils import debug_rank_0
 
-from .mlflow_artifacts import upload_artifacts_to_mlflow
-
 _GLOBAL_ARGS = None
 _GLOBAL_MLFLOW_WRITER = None
-_GLOBAL_EXP_ROOT_PATH = None
 _TRAIN_START_TIME = None
 
 
@@ -31,17 +29,6 @@ def get_args():
     """Return arguments."""
     _ensure_var_is_initialized(_GLOBAL_ARGS, "args")
     return _GLOBAL_ARGS
-
-
-def set_exp_root_path(exp_root_path):
-    """Set the experiment root path for artifact logging."""
-    global _GLOBAL_EXP_ROOT_PATH
-    _GLOBAL_EXP_ROOT_PATH = exp_root_path
-
-
-def get_exp_root_path():
-    """Return experiment root path. Can be None."""
-    return _GLOBAL_EXP_ROOT_PATH
 
 
 def set_train_start_time(start_time=None):
@@ -149,51 +136,14 @@ def _set_mlflow_writer(args):
         _GLOBAL_MLFLOW_WRITER = mlflow
 
 
-def upload_mlflow_artifacts(
-    upload_traces: bool = True,
-    upload_logs: bool = True,
-):
-    """
-    Upload trace files and log files to MLflow as artifacts.
-
-    This should be called before ending the MLflow run to ensure all
-    artifacts are uploaded. Only the rank that initialized MLflow
-    (typically rank world_size - 1) should call this.
-
-    Args:
-        upload_traces: Whether to upload profiler trace files
-        upload_logs: Whether to upload training log files
-
-    Returns:
-        Dictionary with counts of uploaded files, or None if MLflow is not enabled
-    """
-    mlflow_writer = get_mlflow_writer()
-    if mlflow_writer is None:
-        return None
-
-    args = get_args()
-    exp_root_path = get_exp_root_path()
-    tensorboard_dir = getattr(args, "tensorboard_dir", None)
-
-    return upload_artifacts_to_mlflow(
-        mlflow_writer=mlflow_writer,
-        tensorboard_dir=tensorboard_dir,
-        exp_root_path=exp_root_path,
-        upload_traces=upload_traces,
-        upload_logs=upload_logs,
-    )
-
-
 def unset_global_variables():
     """Unset global vars."""
 
     global _GLOBAL_ARGS
     global _GLOBAL_MLFLOW_WRITER
-    global _GLOBAL_EXP_ROOT_PATH
 
     _GLOBAL_ARGS = None
     _GLOBAL_MLFLOW_WRITER = None
-    _GLOBAL_EXP_ROOT_PATH = None
 
 
 def _ensure_var_is_initialized(var, name):
@@ -208,8 +158,4 @@ def _ensure_var_is_not_initialized(var, name):
 
 def destroy_global_vars():
     global _GLOBAL_ARGS
-    global _GLOBAL_MLFLOW_WRITER
-    global _GLOBAL_EXP_ROOT_PATH
     _GLOBAL_ARGS = None
-    _GLOBAL_MLFLOW_WRITER = None
-    _GLOBAL_EXP_ROOT_PATH = None
