@@ -3,16 +3,13 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:llama2_70b_lora_posttrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
-# IMPORTANT: The checkpoint will be saved to a NEW directory to avoid conflicts
-# with the base model checkpoint (which doesn't have LoRA adapters)
-
 modules:
   post_trainer:
     framework: megatron_bridge
     config: post_trainer.yaml
 
     # Model to run
-    model: llama2_70b.yaml
+    model: llama2_70b_lora.yaml
 
     overrides:
       # Parallelism configuration

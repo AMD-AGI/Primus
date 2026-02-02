@@ -1,6 +1,4 @@
 # Custom recipe from Primus (can be modified without changing Megatron-Bridge code)
 recipe: primus.recipes.llama2_custom
-flavor: llama2_70b_pretrain_config
+flavor: llama2_70b_lora_config
 hf_path: meta-llama/Llama-2-70b-hf
-train_data_path: [/data/]
-valid_data_path: [/data/]

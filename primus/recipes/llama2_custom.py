@@ -108,12 +108,12 @@ class Llama2CustomKwargs(TypedDict, total=False):
     packed_metadata_path: str | None
 
 
-def llama2_70b_pretrain_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigContainer:
+def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigContainer:
     """
     Return a custom pre-training config for Llama-2 70B.
 
     This is a custom variant that can be modified without changing Megatron-Bridge code.
-    See `_llama2_common` for the full list of parameters.
+    See `_llama2_lora` for the full list of parameters.
     """
     peft_value = user_kwargs.get("peft", "lora")
     recommended_kwargs: Llama2CustomKwargs = {
@@ -135,10 +135,10 @@ def llama2_70b_pretrain_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> Con
     }
     # Combine defaults with user kwargs; user values take precedence.
     combined_kwargs: Llama2CustomKwargs = {**recommended_kwargs, **user_kwargs}
-    return _llama2_common(**combined_kwargs)
+    return _llama2_lora(**combined_kwargs)
 
 
-def _llama2_common(
+def _llama2_lora(
     hf_path: str,
     dir: Optional[str] = None,
     name: str = "default",
