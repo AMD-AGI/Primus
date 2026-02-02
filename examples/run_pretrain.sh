@@ -149,28 +149,11 @@ fi
 # export AITER_JIT_DIR="${TMP_BUILD_DIR}/${CACHE_TAG}_aiter_cache"
 
 
-# Extract model name from EXP config file path (e.g., deepseek_v2_lite-pretrain.yaml -> deepseek_v2_lite-pretrain)
-MODEL_NAME=$(basename "${EXP}" .yaml)
-
-# Only generate new timestamp/paths if not already set by run_slurm_pretrain.sh.
-# This ensures single-node runs get a fresh timestamp, while multi-node runs share the same directory.
-if [ -z "${PRIMUS_EXP_NAME}" ]; then
-    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    export PRIMUS_WORKSPACE=${PRIMUS_WORKSPACE:-"./output"}
-    export PRIMUS_EXP_NAME="${MODEL_NAME}_${TIMESTAMP}"
-    export LOG_DIR="${PRIMUS_WORKSPACE}/${PRIMUS_EXP_NAME}"
-fi
-# Clear work_group and user_name to simplify path: workspace/exp_name
-export PRIMUS_TEAM=""
-export PRIMUS_USER=""
-
-mkdir -p "$LOG_DIR"
-TRAIN_LOG="${LOG_DIR}/log_mp_pretrain.txt"
+TRAIN_LOG=${TRAIN_LOG:-"output/log_mp_pretrain_$(basename "$EXP" .yaml).txt"}
 
 LOG_INFO_RANK0 "==========Training info=========="
 LOG_INFO_RANK0 "EXP: $EXP"
-LOG_INFO_RANK0 "BACKEND: $BACKEND"
-LOG_INFO_RANK0 "OUTPUT_DIR: ${LOG_DIR}"
+LOG_INFO_RANK0 "EXP: $BACKEND"
 LOG_INFO_RANK0 "TRAIN_LOG: $TRAIN_LOG"
 LOG_INFO_RANK0 "PRIMUS_PATH: $PRIMUS_PATH"
 LOG_INFO_RANK0 "DATA_PATH: $DATA_PATH"
