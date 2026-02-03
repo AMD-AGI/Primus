@@ -8,6 +8,8 @@ extends:
 # # Mark as trainable module
 trainable: true
 
+stage: "sft"
+
 
 # main control flag
 enable_primus_turbo: false
