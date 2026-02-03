@@ -51,7 +51,7 @@ def patch_filesystem_writer_async(ctx: PatchContext):
 @register_patch(
     "megatron.checkpoint.save_checkpoint",
     backend="megatron",
-    phase="setup",
+    phase="before_train",
     description="Wrap save_checkpoint to skip saving at the last iteration",
 )
 def patch_save_checkpoint(ctx: PatchContext):
