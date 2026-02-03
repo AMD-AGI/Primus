@@ -1127,6 +1127,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         mlflow_writer = get_mlflow_writer()
         if mlflow_writer:
+            # Barrier to ensure all ranks have finished writing files before upload
+            if dist.is_initialized():
+                dist.barrier()
             # Upload artifacts before ending the run
             upload_mlflow_artifacts(
                 upload_traces=getattr(args, "mlflow_upload_traces", True),
@@ -1576,6 +1579,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 wandb_writer.finish()
             mlflow_writer = get_mlflow_writer()
             if mlflow_writer:
+                # Barrier to ensure all ranks have finished writing files before upload
+                if dist.is_initialized():
+                    dist.barrier()
                 # Upload artifacts before ending the run
                 upload_mlflow_artifacts(
                     upload_traces=getattr(args, "mlflow_upload_traces", True),

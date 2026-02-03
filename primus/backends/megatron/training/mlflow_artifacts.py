@@ -14,6 +14,12 @@ Features:
 - Upload profiler trace files from all profiled ranks (including multi-node)
 - Upload log files from all levels and all ranks
 - Supports both local and distributed training scenarios
+
+Note:
+    Multi-node training requires shared storage (e.g., NFS) for artifact uploads.
+    Only the last rank (world_size - 1) performs the upload, so it must have
+    access to trace and log files from all nodes. If using node-local storage,
+    only files from the uploading node will be uploaded.
 """
 
 import glob
@@ -122,6 +128,16 @@ def upload_trace_files_to_mlflow(
         log_rank_0("[MLflow] No trace files found to upload")
         return 0
 
+    total_files = len(trace_files)
+
+    # Warn about potentially long upload times for large uploads
+    if total_files > 10:
+        total_size_mb = sum(os.path.getsize(f) for f in trace_files) / (1024 * 1024)
+        warning_rank_0(
+            f"[MLflow] Uploading {total_files} trace files ({total_size_mb:.1f} MB total). "
+            "This may take a while..."
+        )
+
     uploaded_count = 0
     for trace_file in trace_files:
         try:
@@ -136,11 +152,15 @@ def upload_trace_files_to_mlflow(
 
             mlflow_writer.log_artifact(trace_file, artifact_path=artifact_subpath)
             uploaded_count += 1
-            log_rank_0(f"[MLflow] Uploaded trace file: {os.path.basename(trace_file)}")
+            # Progress logging with counter
+            log_rank_0(
+                f"[MLflow] Uploaded trace file ({uploaded_count}/{total_files}): "
+                f"{os.path.basename(trace_file)}"
+            )
         except Exception as e:
             warning_rank_0(f"[MLflow] Failed to upload trace file {trace_file}: {e}")
 
-    log_rank_0(f"[MLflow] Uploaded {uploaded_count} trace files to '{artifact_path}'")
+    log_rank_0(f"[MLflow] Uploaded {uploaded_count}/{total_files} trace files to '{artifact_path}'")
     return uploaded_count
 
 
@@ -173,6 +193,16 @@ def upload_log_files_to_mlflow(
         log_rank_0("[MLflow] No log files found to upload")
         return 0
 
+    total_files = len(log_files)
+
+    # Warn about potentially long upload times for large uploads
+    if total_files > 20:
+        total_size_mb = sum(os.path.getsize(f) for f in log_files) / (1024 * 1024)
+        warning_rank_0(
+            f"[MLflow] Uploading {total_files} log files ({total_size_mb:.1f} MB total). "
+            "This may take a while..."
+        )
+
     logs_base_dir = os.path.join(exp_root_path, "logs")
     uploaded_count = 0
 
@@ -191,7 +221,7 @@ def upload_log_files_to_mlflow(
         except Exception as e:
             warning_rank_0(f"[MLflow] Failed to upload log file {log_file}: {e}")
 
-    log_rank_0(f"[MLflow] Uploaded {uploaded_count} log files to '{artifact_path}'")
+    log_rank_0(f"[MLflow] Uploaded {uploaded_count}/{total_files} log files to '{artifact_path}'")
     return uploaded_count
 
 
@@ -207,6 +237,11 @@ def upload_artifacts_to_mlflow(
 
     This is the main entry point for uploading artifacts to MLflow.
     It handles both trace files from profiling and log files from training.
+
+    Note:
+        Multi-node training requires shared storage (e.g., NFS) for complete
+        artifact uploads. Only the last rank performs the upload, so it must
+        have filesystem access to trace/log files from all nodes.
 
     Args:
         mlflow_writer: The MLflow module instance (from get_mlflow_writer())
@@ -225,6 +260,15 @@ def upload_artifacts_to_mlflow(
     if mlflow_writer is None:
         log_rank_0("[MLflow] MLflow writer not available, skipping artifact upload")
         return {"traces": 0, "logs": 0}
+
+    # Warn about multi-node shared storage requirement
+    nnodes = int(os.environ.get("NNODES", os.environ.get("SLURM_NNODES", "1")))
+    if nnodes > 1:
+        warning_rank_0(
+            f"[MLflow] Multi-node training detected ({nnodes} nodes). "
+            "Ensure shared storage (e.g., NFS) is used for complete artifact uploads. "
+            "Only files accessible from this node will be uploaded."
+        )
 
     log_rank_0("[MLflow] Starting artifact upload to MLflow...")
     log_rank_0(f"[MLflow] tensorboard_dir: {tensorboard_dir}")
