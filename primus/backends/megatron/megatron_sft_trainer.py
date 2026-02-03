@@ -59,39 +59,20 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
     
     def _init_lora(self):
         """Initialize LoRA (Low-Rank Adaptation) if enabled in config."""
-        lora_enabled = getattr(self.backend_args, 'lora_enabled', False)
+        lora_config = getattr(self.backend_args, 'lora', None)
         
-        if not lora_enabled:
+        if lora_config is None or not getattr(lora_config, 'enabled', False):
             log_rank_0("LoRA disabled, using full fine-tuning")
             return
         
         from primus.backends.megatron.peft import LoRA
         
-        # Get LoRA configuration from backend_args
-        lora_rank = getattr(self.backend_args, 'lora_rank', 32)
-        lora_alpha = getattr(self.backend_args, 'lora_alpha', 32)
-        lora_dropout = getattr(self.backend_args, 'lora_dropout', 0.0)
-        lora_dropout_position = getattr(self.backend_args, 'lora_dropout_position', 'pre')
-        lora_A_init = getattr(self.backend_args, 'lora_A_init_method', 'xavier')
-        lora_B_init = getattr(self.backend_args, 'lora_B_init_method', 'zero')
-        lora_target_modules = getattr(
-            self.backend_args, 
-            'lora_target_modules', 
-            ['linear_qkv', 'linear_proj', 'linear_fc1', 'linear_fc2']
-        )
+        # Convert config to dict, excluding 'enabled' field
+        lora_kwargs = {k: v for k, v in vars(lora_config).items() if k != 'enabled'}
         
-        log_rank_0(f"Initializing LoRA with rank={lora_rank}, alpha={lora_alpha}, "
-                   f"dropout={lora_dropout}, targets={lora_target_modules}")
+        log_rank_0(f"Initializing LoRA with config: {lora_kwargs}")
         
-        self.peft = LoRA(
-            target_modules=lora_target_modules,
-            dim=lora_rank,
-            alpha=lora_alpha,
-            dropout=lora_dropout,
-            dropout_position=lora_dropout_position,
-            lora_A_init_method=lora_A_init,
-            lora_B_init_method=lora_B_init,
-        )
+        self.peft = LoRA(**lora_kwargs)
 
     def setup(self):
         """
@@ -110,15 +91,7 @@ class MegatronSFTTrainer(MegatronBaseTrainer):
             Argument injection is already done by MegatronBaseTrainer.__init__()
             This method can be used for trainer-specific initialization.
         """
-        log_rank_0("Initializing Megatron SFT training...")
-        log_rank_0(f"Model: {self.module_config.model or 'custom'}")
-        log_rank_0(f"Framework: {self.module_config.framework}")
-        
-        # Get SFT-specific configuration from backend_args
-        if hasattr(self.backend_args, 'sft_dataset_name'):
-            log_rank_0(f"SFT Dataset: {self.backend_args.sft_dataset_name}")
-        if hasattr(self.backend_args, 'sft_conversation_format'):
-            log_rank_0(f"Conversation Format: {self.backend_args.sft_conversation_format}")
+        log_rank_0(f"Initializing Megatron SFT training for model: {self.module_config.model or 'custom'}")
 
     def _create_model_provider_with_lora(self, base_model_provider):
         """

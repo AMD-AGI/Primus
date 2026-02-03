@@ -91,23 +91,23 @@ modules:
       eval_iters: 10
       
       # LoRA (Low-Rank Adaptation) configuration
-      # Set lora_enabled: true for parameter-efficient fine-tuning
-      lora_enabled: true
-      lora_rank: 32                    # Low-rank dimension (8-64)
-      lora_alpha: 32                   # Scaling factor (usually = rank)
-      lora_dropout: 0.0                # Dropout rate (0.0-0.1)
-      lora_dropout_position: pre       # "pre" or "post"
-      lora_A_init_method: xavier       # "xavier" or "kaiming"
-      lora_B_init_method: zero         # "zero" (standard)
-      lora_target_modules:             # Modules to apply LoRA
-        - linear_qkv
-        - linear_proj
-        - linear_fc1
-        - linear_fc2
+      lora:
+        enabled: true                    # Set true for parameter-efficient fine-tuning
+        dim: 32                          # Low-rank dimension (8-64)
+        alpha: 32                        # Scaling factor (usually = dim)
+        dropout: 0.0                     # Dropout rate (0.0-0.1)
+        dropout_position: pre            # "pre" or "post"
+        lora_A_init_method: xavier       # "xavier" or "kaiming"
+        lora_B_init_method: zero         # "zero" (standard)
+        target_modules:                  # Modules to apply LoRA
+          - linear_qkv
+          - linear_proj
+          - linear_fc1
+          - linear_fc2
       
       # Note: For SFT, you typically want to:
       # 1. Set finetune: true and provide path to pretrained checkpoint in load
       # 2. Use lower learning rate than pretraining (e.g., 1e-5 vs 3e-4)
       # 3. Use smaller global_batch_size if dataset is small
       # 4. Monitor validation loss frequently with eval_interval
-      # 5. For LoRA: use higher lr (2e-4) and set lora_enabled: true
+      # 5. For LoRA: use higher lr (2e-4) and set lora.enabled: true

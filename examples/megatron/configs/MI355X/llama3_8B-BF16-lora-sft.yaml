@@ -5,15 +5,16 @@ extends:
   - llama3_8B-BF16-sft.yaml
 
 # Enable LoRA for parameter-efficient fine-tuning
-lora_enabled: true
-lora_rank: 32          # Low-rank dimension (smaller = fewer params, less expressiveness)
-lora_alpha: 32         # Scaling factor (typically equal to rank)
-lora_dropout: 0.05     # Dropout for regularization
-lora_target_modules:   # Which modules to apply LoRA to
-  - linear_qkv         # Query, Key, Value projections
-  - linear_proj        # Output projection
-  - linear_fc1         # MLP first layer
-  - linear_fc2         # MLP second layer
+lora:
+  enabled: true
+  dim: 32              # Low-rank dimension (smaller = fewer params)
+  alpha: 32            # Scaling factor (typically = dim)
+  dropout: 0.05        # Dropout for regularization
+  target_modules:      # Modules to apply LoRA
+    - linear_qkv
+    - linear_proj
+    - linear_fc1
+    - linear_fc2
 
 # LoRA typically uses higher learning rate
 lr: 2.0e-4
