@@ -19,4 +19,4 @@ BackendRegistry.register_adapter("hummingbirdxt", HummingbirdXTAdapter)
 # HummingbirdXT is designed for self-forcing DMD post-training tasks based on the Wan Models
 # blog : https://rocm.blogs.amd.com/artificial-intelligence/hummingbirdxt/README.html
 # code : https://github.com/AMD-AGI/HummingbirdXT
-BackendRegistry.register_trainer_class("hummingbirdxt", HummingbirdXTPosttrainTrainer)
+BackendRegistry.register_trainer_class(HummingbirdXTPosttrainTrainer, "hummingbirdxt", "posttrain")

@@ -20,8 +20,4 @@ class HummingbirdXTBaseTrainer(BaseTrainer):
 
     @classmethod
     def detect_version(cls) -> str:
-        pass
-
-    @classmethod
-    def detect_hummingbirdxt_version(cls) -> str:
-        pass
+        return "unknown"

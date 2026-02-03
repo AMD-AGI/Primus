@@ -3,3 +3,4 @@ extends:
 
 # # Mark as trainable module
 trainable: true
+stage: posttrain
