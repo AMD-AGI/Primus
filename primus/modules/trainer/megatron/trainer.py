@@ -483,8 +483,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if args.iterations_to_skip is None:
             args.iterations_to_skip = []
 
-        # support moe_freq_type
-        if isinstance(args.moe_layer_freq, str):
+        # support moe_freq_type - ensure moe_layer_freq has a default value
+        if not hasattr(args, 'moe_layer_freq'):
+            args.moe_layer_freq = 1
+        elif isinstance(args.moe_layer_freq, str):
             try:
                 args.moe_layer_freq = eval(args.moe_layer_freq)
             except Exception:
