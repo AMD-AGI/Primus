@@ -107,13 +107,11 @@ class MegatronBridgeArgBuilder:
         Produce the final Megatron-Bridge configuration as a SimpleNamespace.
 
         This method ensures API consistency with MegatronArgBuilder.to_namespace().
-        The namespace contains a nested structure matching TorchTitan's JobConfig.
 
-        Fields not provided by Primus are automatically filled with TorchTitan's defaults.
+        Fields not provided by Primus are automatically filled with MegatronBridge's defaults.
 
         Returns:
-            SimpleNamespace with nested TorchTitan configuration that can be passed
-            to convert back to JobConfig when needed
+            SimpleNamespace with nested MegatronBridge configuration
         """
         merged = self.to_dict()
         return dict_to_nested_namespace(merged)
