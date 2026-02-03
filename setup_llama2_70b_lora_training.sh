@@ -79,10 +79,10 @@ docker exec "${CONTAINER_NAME}" bash -c "
         echo 'Dataset already exists: ${MOUNT_DATA_PATH}/train.npy'
     fi
 
-    if [ ! -f data/packed_metadata.jsonl ]; then
-        python3 create_metadata.py ${SEQ_LENGTH} data/packed_metadata.jsonl
+    if [ ! -f ${MOUNT_DATA_PATH}/packed_metadata.jsonl ]; then
+        python3 create_metadata.py ${SEQ_LENGTH} ${MOUNT_DATA_PATH}/packed_metadata.jsonl
     else
-        echo 'Metadata already exists: data/packed_metadata.jsonl'
+        echo 'Metadata already exists: ${MOUNT_DATA_PATH}/packed_metadata.jsonl'
     fi
 "
 
