@@ -63,7 +63,8 @@ def patch_build_tokenizer_override(ctx: PatchContext):
       → ✅ Success
     """
     try:
-        import megatron.training.tokenizer as megatron_tokenizer_module
+        import megatron.training.global_vars as megatron_global_vars
+        import pretrain_gpt
     except ImportError as e:
         log_rank_0(
             f"[Patch:megatron.tokenizer.build_tokenizer_override] "
@@ -77,11 +78,14 @@ def patch_build_tokenizer_override(ctx: PatchContext):
     )
 
     # Save original for reference (optional)
-    if not hasattr(megatron_tokenizer_module, "_original_build_tokenizer"):
-        megatron_tokenizer_module._original_build_tokenizer = megatron_tokenizer_module.build_tokenizer
+    if not hasattr(megatron_global_vars, "_original_build_tokenizer"):
+        megatron_global_vars._original_build_tokenizer = megatron_global_vars.build_tokenizer
+    if not hasattr(pretrain_gpt, "_original_build_tokenizer"):
+        pretrain_gpt._original_build_tokenizer = pretrain_gpt.build_tokenizer
 
     # Replace Megatron's build_tokenizer with Primus version
-    megatron_tokenizer_module.build_tokenizer = primus_build_tokenizer
+    megatron_global_vars.build_tokenizer = primus_build_tokenizer
+    pretrain_gpt.build_tokenizer = primus_build_tokenizer
 
     log_rank_0(
         "[Patch:megatron.tokenizer.build_tokenizer_override] "
