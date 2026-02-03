@@ -154,8 +154,8 @@ class TestUploadTraceFilesToMlflow:
         assert count == 0
         mlflow_mock.log_artifact.assert_not_called()
 
-    @patch("primus.backends.megatron.training.mlflow_artifacts.log_rank_0")
-    @patch("primus.backends.megatron.training.mlflow_artifacts.warning_rank_0")
+    @patch("primus.backends.megatron.training.mlflow_artifacts.log_rank_last")
+    @patch("primus.backends.megatron.training.mlflow_artifacts._log_warning")
     def test_uploads_trace_files(self, mock_warning, mock_log, tmp_path):
         """Should upload trace files and return count."""
         trace_file = tmp_path / "rank_0.pt.trace.json"
@@ -167,8 +167,8 @@ class TestUploadTraceFilesToMlflow:
         assert count == 1
         mlflow_mock.log_artifact.assert_called_once()
 
-    @patch("primus.backends.megatron.training.mlflow_artifacts.log_rank_0")
-    @patch("primus.backends.megatron.training.mlflow_artifacts.warning_rank_0")
+    @patch("primus.backends.megatron.training.mlflow_artifacts.log_rank_last")
+    @patch("primus.backends.megatron.training.mlflow_artifacts._log_warning")
     def test_handles_upload_error(self, mock_warning, mock_log, tmp_path):
         """Should continue on upload error and log warning."""
         trace_file = tmp_path / "rank_0.pt.trace.json"
@@ -181,8 +181,8 @@ class TestUploadTraceFilesToMlflow:
         assert count == 0
         mock_warning.assert_called()
 
-    @patch("primus.backends.megatron.training.mlflow_artifacts.log_rank_0")
-    @patch("primus.backends.megatron.training.mlflow_artifacts.warning_rank_0")
+    @patch("primus.backends.megatron.training.mlflow_artifacts.log_rank_last")
+    @patch("primus.backends.megatron.training.mlflow_artifacts._log_warning")
     def test_preserves_relative_path(self, mock_warning, mock_log, tmp_path):
         """Should preserve subdirectory structure in artifact path."""
         subdir = tmp_path / "subdir"
@@ -215,8 +215,8 @@ class TestUploadLogFilesToMlflow:
 
         assert count == 0
 
-    @patch("primus.backends.megatron.training.mlflow_artifacts.log_rank_0")
-    @patch("primus.backends.megatron.training.mlflow_artifacts.warning_rank_0")
+    @patch("primus.backends.megatron.training.mlflow_artifacts.log_rank_last")
+    @patch("primus.backends.megatron.training.mlflow_artifacts._log_warning")
     def test_uploads_log_files(self, mock_warning, mock_log, tmp_path):
         """Should upload log files and return count."""
         logs_dir = tmp_path / "logs"
@@ -240,8 +240,8 @@ class TestUploadArtifactsToMlflow:
 
         assert result == {"traces": 0, "logs": 0}
 
-    @patch("primus.backends.megatron.training.mlflow_artifacts.log_rank_0")
-    @patch("primus.backends.megatron.training.mlflow_artifacts.warning_rank_0")
+    @patch("primus.backends.megatron.training.mlflow_artifacts.log_rank_last")
+    @patch("primus.backends.megatron.training.mlflow_artifacts._log_warning")
     def test_respects_upload_traces_flag(self, mock_warning, mock_log, tmp_path):
         """Should skip trace upload when upload_traces=False."""
         trace_file = tmp_path / "rank_0.pt.trace.json"
@@ -258,8 +258,8 @@ class TestUploadArtifactsToMlflow:
         assert result["traces"] == 0
         mlflow_mock.log_artifact.assert_not_called()
 
-    @patch("primus.backends.megatron.training.mlflow_artifacts.log_rank_0")
-    @patch("primus.backends.megatron.training.mlflow_artifacts.warning_rank_0")
+    @patch("primus.backends.megatron.training.mlflow_artifacts.log_rank_last")
+    @patch("primus.backends.megatron.training.mlflow_artifacts._log_warning")
     def test_warns_for_multi_node(self, mock_warning, mock_log, tmp_path, monkeypatch):
         """Should warn when multi-node training is detected."""
         monkeypatch.setenv("NNODES", "2")
