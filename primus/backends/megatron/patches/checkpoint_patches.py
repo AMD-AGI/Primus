@@ -67,7 +67,6 @@ def patch_save_checkpoint(ctx: PatchContext):
     """
     try:
         import megatron.training.training as training_module
-        from megatron.training import get_args
     except ImportError as e:
         log_rank_0(f"[Patch:megatron.checkpoint.save_checkpoint] Skip patch (Megatron not available): {e}")
         return
@@ -75,33 +74,51 @@ def patch_save_checkpoint(ctx: PatchContext):
     # Save original function
     original_save_checkpoint = training_module.save_checkpoint
 
+    # The following signature is used to match the original Megatron save_checkpoint interface,
+    # but the wrapper will only use a subset of the arguments as handled below.
     def wrapped_save_checkpoint(
         iteration,
         model,
         optimizer,
         opt_param_scheduler,
         num_floating_point_operations_so_far,
-        checkpointing_context,
+        checkpointing_context=None,
+        pipeline_rank=None,
+        expert_rank=None,
+        tensor_rank=None,
+        pipeline_parallel=None,
+        expert_parallel=None,
         non_persistent_ckpt=False,
         train_data_iterator=None,
+        preprocess_common_state_dict_fn=None,
+        release=False,
     ):
-        args = get_args()
+        args = ctx.extra.get("backend_args", {})
+        primus_config = ctx.extra.get("primus_config", {})
 
-        if args.disable_last_saving and iteration == args.train_iters:
+        if primus_config.disable_last_saving and iteration == args.train_iters:
             log_rank_0(
                 f"[Patch:megatron.checkpoint.save_checkpoint] Skip saving at the last iteration: {iteration}"
             )
             return
 
+        # Call the original save_checkpoint function with explicit keyword arguments for clarity.
         return original_save_checkpoint(
             iteration,
             model,
             optimizer,
             opt_param_scheduler,
             num_floating_point_operations_so_far,
-            checkpointing_context,
-            non_persistent_ckpt=False,
-            train_data_iterator=None,
+            checkpointing_context=checkpointing_context,
+            pipeline_rank=pipeline_rank,
+            expert_rank=expert_rank,
+            tensor_rank=tensor_rank,
+            pipeline_parallel=pipeline_parallel,
+            expert_parallel=expert_parallel,
+            non_persistent_ckpt=non_persistent_ckpt,
+            train_data_iterator=train_data_iterator,
+            preprocess_common_state_dict_fn=preprocess_common_state_dict_fn,
+            release=release,
         )
 
     training_module.save_checkpoint = wrapped_save_checkpoint
