@@ -7,8 +7,29 @@ mlflow_run_name: null
 mlflow_experiment_name: null
 # NOTE: When disable_mlflow=false, traces and logs are uploaded by default.
 # Set these to false if you only want metrics/params logged to MLflow.
-mlflow_upload_traces: true  # Upload profiler trace files to MLflow
-mlflow_upload_logs: true    # Upload training log files to MLflow
+mlflow_upload_traces: true           # Upload profiler trace files to MLflow
+mlflow_upload_logs: true             # Upload training log files to MLflow
+
+# TraceLens Report Generation & Upload
+# ----------------------------------------------------------------------------
+# generate_tracelens_report:          Generate TraceLens analysis reports locally
+# mlflow_upload_tracelens_report:     Upload reports to MLflow (auto-enables generation)
+#
+# Usage patterns:
+#   generate=false, upload=false  →  No reports generated
+#   generate=true,  upload=false  →  Generate reports locally only
+#   generate=false, upload=true   →  Generate AND upload (auto-enabled)
+#   generate=true,  upload=true   →  Generate AND upload (explicit)
+#
+# To limit number of reports: Specify fewer ranks in mlflow_tracelens_ranks
+#   Default: [0, 8] = one rank per node (assumes 8 GPUs/node)
+#   Use null for all ranks, or customize list like [0, 1, 8, 9] for more coverage
+# ----------------------------------------------------------------------------
+generate_tracelens_report: true     # Generate TraceLens analysis reports locally
+mlflow_upload_tracelens_report: true  # Upload TraceLens reports to MLflow (implies generation)
+mlflow_tracelens_ranks: [0, 8]       # List of ranks to analyze (default: one per node for 2-node setup)
+mlflow_tracelens_output_format: all  # TraceLens report format: all (xlsx+csv), xlsx, or csv
+mlflow_tracelens_cleanup_after_upload: false  # Keep local reports (true to cleanup and save disk space)
 disable_compile_dependencies: true
 # NOTE:
 # - If `use_rocm_mem_info = True`, ROCm memory information will be collected
