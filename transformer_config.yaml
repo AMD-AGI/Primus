@@ -1,0 +1,203 @@
+# TransformerConfig Configuration Breakdown
+
+## Parallelism Configuration
+tensor_model_parallel_size: 1
+pipeline_model_parallel_size: 1
+pipeline_model_parallel_comm_backend: null
+virtual_pipeline_model_parallel_size: null
+sequence_parallel: false
+context_parallel_size: 1
+hierarchical_context_parallel_sizes: null
+expert_model_parallel_size: 1
+expert_tensor_parallel_size: 1
+moe_extended_tp: false
+
+## Model Architecture
+num_layers: 80
+hidden_size: 8192
+num_attention_heads: 64
+num_query_groups: 8  # GQA
+kv_channels: 128
+ffn_hidden_size: 28672
+moe_ffn_hidden_size: 28672
+
+## Pipeline Stages
+first_pipeline_num_layers: null
+last_pipeline_num_layers: null
+pipeline_model_parallel_split_rank: null
+
+## Attention Configuration
+attention_backend: AttnBackend.auto  # 5
+attention_dropout: 0.0
+attention_softmax_in_fp32: false
+flash_decode: false
+fp8_dot_product_attention: 0
+fp8_multi_head_attention: false
+multi_latent_attention: false
+
+## Attention Variants
+window_size: null
+qk_layernorm: false
+
+## Normalization & Activation
+normalization: RMSNorm
+layernorm_epsilon: 1.0e-05
+layernorm_zero_centered_gamma: false
+memory_efficient_layer_norm: false
+persist_layer_norm: true
+activation_func: <function silu>
+activation_func_fp8_input_store: false
+gated_linear_unit: true
+
+## Precision & Data Types
+fp16: false
+bf16: true
+params_dtype: torch.bfloat16
+pipeline_dtype: torch.bfloat16
+autocast_dtype: torch.bfloat16
+enable_autocast: false
+
+## FP8 Configuration
+fp8: hybrid
+fp8_margin: 0
+fp8_interval: 1
+fp8_amax_history_len: 4
+fp8_amax_compute_algo: most_recent
+fp8_wgrad: true
+tp_only_amax_red: false
+keep_fp8_weight_transpose_cache: false
+
+## Dropout & Regularization
+hidden_dropout: 0.0
+bias_dropout_fusion: false
+
+## Bias Configuration
+add_bias_linear: false
+add_qkv_bias: false
+moe_router_enable_expert_bias: false
+
+## Residual Connections
+fp32_residual_connection: false
+apply_residual_connection_post_layernorm: false
+
+## Initialization
+perform_initialization: true
+use_cpu_initialization: false
+init_method: <function init_method_normal.<locals>.init_>
+output_layer_init_method: <function scaled_init_method_normal.<locals>.init_>
+init_method_std: 0.02
+
+## Activation Checkpointing
+recompute_granularity: null
+recompute_method: null
+recompute_num_layers: null
+distribute_saved_activations: false
+num_microbatches_with_partial_activation_checkpoints: null
+
+## Communication Optimization
+gradient_accumulation_fusion: false
+async_tensor_model_parallel_allreduce: false
+tp_comm_overlap: false
+tp_comm_bulk_wgrad: true
+tp_comm_bulk_dgrad: true
+tp_comm_overlap_ag: false
+tp_comm_overlap_rs: false
+tp_comm_overlap_rs_dgrad: false
+tp_comm_split_ag: true
+tp_comm_atomic_ag: false
+tp_comm_split_rs: true
+tp_comm_atomic_rs: false
+tp_comm_overlap_disable_qkv: false
+tp_comm_overlap_disable_fc1: false
+tp_comm_bootstrap_backend: nccl
+
+## Pipeline Parallelism
+variable_seq_lengths: false
+overlap_p2p_comm: false
+batch_p2p_comm: 'False'  # String value
+batch_p2p_sync: true
+use_ring_exchange_p2p: false
+deallocate_pipeline_outputs: true
+overlap_p2p_comm_warmup_flush: false
+microbatch_group_size_per_vp_stage: 1
+
+## Mixture of Experts (MoE)
+num_moe_experts: null
+moe_shared_expert_intermediate_size: null
+moe_shared_expert_overlap: false
+moe_layer_freq: 1
+moe_router_load_balancing_type: aux_loss
+moe_router_topk: 2
+moe_router_topk_limited_devices: null
+moe_router_num_groups: null
+moe_router_group_topk: null
+moe_router_pre_softmax: false
+moe_router_topk_scaling_factor: null
+moe_router_score_function: softmax
+moe_router_bias_update_rate: 0.001
+moe_router_force_load_balancing: false
+moe_grouped_gemm: false
+moe_use_legacy_grouped_gemm: false
+moe_aux_loss_coeff: 0
+moe_z_loss_coeff: null
+moe_input_jitter_eps: null
+moe_token_dropping: false
+moe_token_dispatcher_type: allgather
+moe_per_layer_logging: false
+moe_expert_capacity_factor: null
+moe_pad_expert_input_to_capacity: false
+moe_token_drop_policy: probs
+moe_layer_recompute: false
+moe_permute_fusion: false
+
+## Loss & Training
+cross_entropy_loss_fusion: false
+calculate_per_token_loss: false
+
+## Gradient & Weight Computation
+defer_embedding_wgrad_compute: false
+wgrad_deferral_limit: 0
+
+## Fusions
+bias_activation_fusion: true
+masked_softmax_fusion: true
+apply_rope_fusion: true
+
+## Position Embeddings
+rotary_interleaved: false
+
+## CPU Offloading
+cpu_offloading: false
+cpu_offloading_num_layers: 0
+_cpu_offloading_context: null
+cpu_offloading_activations: true
+cpu_offloading_weights: true
+
+## CUDA Graph
+enable_cuda_graph: false
+external_cuda_graph: false
+
+## Transformer Engine
+use_te_rng_tracker: false
+
+## Embeddings
+clone_scatter_output_in_embedding: true
+
+## Context Parallel
+cp_comm_type: null
+
+## Query/Key Scaling
+apply_query_key_layer_scaling: false
+
+## Miscellaneous
+timers: null
+finalize_model_grads_func: null
+grad_scale_func: null
+no_sync_func: null
+grad_sync_func: null
+param_sync_func: null
+deterministic_mode: false
+barrier_with_L1_time: true
+test_mode: false
+disable_parameter_transpose_cache: true
+config_logger_dir: ''

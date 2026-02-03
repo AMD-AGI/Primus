@@ -307,7 +307,7 @@ def _llama2_lora(
     tensorboard_dir = os.path.join(run_output_dir, "tb_logs")
 
     bridge = AutoBridge.from_hf_pretrained(hf_path)
-    model_cfg = bridge.to_megatron_provider(load_weights=False)
+    model_cfg = bridge.to_megatron_provider(load_weights=True) #GPTProvider
     model_cfg.tensor_model_parallel_size = tensor_model_parallel_size
     model_cfg.pipeline_model_parallel_size = pipeline_model_parallel_size
     model_cfg.pipeline_dtype = pipeline_dtype
@@ -315,6 +315,22 @@ def _llama2_lora(
     model_cfg.context_parallel_size = context_parallel_size
     model_cfg.sequence_parallel = sequence_parallel
     model_cfg.seq_length = seq_length
+    model_cfg.perform_initialization = True
+    model_cfg.fp16 = False
+    model_cfg.bf16 = True
+    model_cfg.params_dtype = torch.bfloat16
+    model_cfg.autocast_dtype = torch.bfloat16
+    model_cfg.pipeline_dtype = torch.bfloat16
+    model_cfg.gradient_accumulation_fusion = False
+    model_cfg.cross_entropy_loss_fusion = False
+    model_cfg.bias_dropout_fusion = False
+    model_cfg.fp8 = 'hybrid'
+    model_cfg.fp8_recipe = 'delayed'
+    model_cfg.fp8_amax_history_len = 4
+    model_cfg.disable_parameter_transpose_cache = True
+    model_cfg.use_transformer_engine_full_layer_spec = False # Doesn't work beacuse of RMSNorm is not supported in FusedLayerNorm
+    model_cfg.cpu_offloading = False
+    model_cfg.cpu_offloading_num_layers = 0
 
     opt_config, scheduler = distributed_fused_adam_with_cosine_annealing(
         lr_warmup_iters=lr_warmup_iters,
@@ -371,8 +387,9 @@ def _llama2_lora(
             overlap_grad_reduce=True,
             overlap_param_gather=True,
             average_in_collective=True,
-            use_distributed_optimizer=True,
-            use_megatron_fsdp=use_megatron_fsdp,  # need use_distributed_optimizer=True
+            use_distributed_optimizer=False,
+            use_megatron_fsdp=False,
+            keep_fp8_transpose_cache=False,
         ),
         dataset=FinetuningDatasetConfig(
             dataset_root="/data",  # Point to your .npy files directory
