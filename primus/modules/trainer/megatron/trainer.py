@@ -178,6 +178,32 @@ from .utils import (
 set_train_start_time()
 
 
+def _finalize_mlflow_run(args, mlflow_writer) -> None:
+    """
+    Finalize MLflow run: sync ranks, upload artifacts, and end the run.
+
+    This helper function consolidates the MLflow finalization logic to avoid
+    code duplication between normal training completion and exit conditions.
+
+    Args:
+        args: Megatron arguments containing mlflow_upload_traces/logs settings
+        mlflow_writer: The MLflow writer instance (or None if not enabled)
+    """
+    if mlflow_writer is None:
+        return
+
+    # Barrier to ensure all ranks have finished writing files before upload
+    if dist.is_initialized():
+        dist.barrier()
+
+    # Upload artifacts before ending the run
+    upload_mlflow_artifacts(
+        upload_traces=getattr(args, "mlflow_upload_traces", True),
+        upload_logs=getattr(args, "mlflow_upload_logs", True),
+    )
+    mlflow_writer.end_run()
+
+
 class MegatronTrainer(BaseTrainer, BaseModule):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1126,16 +1152,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         ft_integration.on_checkpointing_end(is_async_finalization=True)
 
         mlflow_writer = get_mlflow_writer()
-        if mlflow_writer:
-            # Barrier to ensure all ranks have finished writing files before upload
-            if dist.is_initialized():
-                dist.barrier()
-            # Upload artifacts before ending the run
-            upload_mlflow_artifacts(
-                upload_traces=getattr(args, "mlflow_upload_traces", True),
-                upload_logs=getattr(args, "mlflow_upload_logs", True),
-            )
-            mlflow_writer.end_run()
+        _finalize_mlflow_run(args, mlflow_writer)
 
         one_logger and one_logger.log_metrics({"app_finish_time": one_logger_utils.get_timestamp_in_ms()})
 
@@ -1578,16 +1595,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             if wandb_writer:
                 wandb_writer.finish()
             mlflow_writer = get_mlflow_writer()
-            if mlflow_writer:
-                # Barrier to ensure all ranks have finished writing files before upload
-                if dist.is_initialized():
-                    dist.barrier()
-                # Upload artifacts before ending the run
-                upload_mlflow_artifacts(
-                    upload_traces=getattr(args, "mlflow_upload_traces", True),
-                    upload_logs=getattr(args, "mlflow_upload_logs", True),
-                )
-                mlflow_writer.end_run()
+            _finalize_mlflow_run(args, mlflow_writer)
             ft_integration.shutdown()
             sys.exit(exit_code)
 
