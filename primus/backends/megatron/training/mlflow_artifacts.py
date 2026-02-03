@@ -387,6 +387,8 @@ def generate_tracelens_report(
 
         # For "all" format: TraceLens uses either/or logic - if output_csvs_dir is set,
         # it ONLY generates CSVs. So we need to call it twice for both formats.
+        # Note: This means the trace file is parsed twice, roughly doubling processing time
+        # compared to a single format. This is a TraceLens limitation, not a bug.
         if output_format == "all":
             xlsx_path = os.path.join(output_dir, f"{report_name}_analysis.xlsx")
             csv_subdir = os.path.join(output_dir, report_name)
@@ -397,8 +399,9 @@ def generate_tracelens_report(
 
             # Check XLSX output
             if os.path.exists(xlsx_path):
+                num_tabs = len(dfs) if dfs else 0
                 log_rank_0(
-                    f"[TraceLens] Generated XLSX report with {len(dfs)} tabs: {os.path.basename(xlsx_path)}"
+                    f"[TraceLens] Generated XLSX report with {num_tabs} tabs: {os.path.basename(xlsx_path)}"
                 )
                 generated_files.append(xlsx_path)
 
@@ -416,8 +419,9 @@ def generate_tracelens_report(
             xlsx_path = os.path.join(output_dir, f"{report_name}_analysis.xlsx")
             dfs = generate_perf_report_pytorch(trace_file, output_xlsx_path=xlsx_path)
             if os.path.exists(xlsx_path):
+                num_tabs = len(dfs) if dfs else 0
                 log_rank_0(
-                    f"[TraceLens] Generated XLSX report with {len(dfs)} tabs: {os.path.basename(xlsx_path)}"
+                    f"[TraceLens] Generated XLSX report with {num_tabs} tabs: {os.path.basename(xlsx_path)}"
                 )
                 generated_files.append(xlsx_path)
 
@@ -440,14 +444,20 @@ def generate_tracelens_report(
         return []
 
     except ImportError:
-        log_rank_0("[TraceLens] TraceLens not available, using fallback CSV summary")
-        # Fallback to simple CSV summary
+        warning_rank_0(
+            "[TraceLens] TraceLens not available. Using simplified fallback CSV summary. "
+            "Install TraceLens for comprehensive kernel, memory, and communication analysis."
+        )
+        # Fallback to simple CSV summary (basic stats only, may not handle all trace formats)
         csv_path = _generate_trace_summary_csv(trace_file, output_dir, f"{report_name}_summary.csv")
         return [csv_path] if csv_path else []
 
     except Exception as e:
-        warning_rank_0(f"[TraceLens] Error generating report: {e}")
-        # Fallback to simple CSV summary
+        warning_rank_0(
+            f"[TraceLens] Error generating report: {e}. "
+            "Using simplified fallback CSV summary with basic statistics only."
+        )
+        # Fallback to simple CSV summary (basic stats only, may not handle all trace formats)
         csv_path = _generate_trace_summary_csv(trace_file, output_dir, f"{report_name}_summary.csv")
         return [csv_path] if csv_path else []
 
@@ -602,8 +612,15 @@ def generate_tracelens_reports(
 
     # Filter by ranks if specified
     if ranks is not None:
+        original_count = len(trace_files)
         trace_files = _filter_traces_by_rank(trace_files, ranks)
         log_rank_0(f"[TraceLens] Filtered to {len(trace_files)} trace files for ranks: {ranks}")
+        if not trace_files and original_count > 0:
+            warning_rank_0(
+                f"[TraceLens] Warning: No trace files match the specified ranks {ranks}. "
+                f"Found {original_count} trace files but none matched. "
+                "Check that the rank numbers are correct."
+            )
 
     log_rank_0(
         f"[TraceLens] Generating {output_format.upper()} reports for {len(trace_files)} trace files..."
