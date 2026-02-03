@@ -24,7 +24,7 @@ Note:
 
 import glob
 import os
-from typing import Optional
+from typing import List, Optional
 
 from primus.modules.module_utils import log_rank_last
 
@@ -38,7 +38,7 @@ def _log_warning(msg: str) -> None:
     log_rank_last(f"[WARNING] {msg}")
 
 
-def _get_all_trace_files(tensorboard_dir: str) -> list:
+def _get_all_trace_files(tensorboard_dir: Optional[str]) -> List[str]:
     """
     Find all profiler trace files in the tensorboard directory.
 
@@ -75,7 +75,7 @@ def _get_all_trace_files(tensorboard_dir: str) -> list:
     return unique_files
 
 
-def _get_all_log_files(exp_root_path: str) -> list:
+def _get_all_log_files(exp_root_path: Optional[str]) -> List[str]:
     """
     Find all log files in the experiment logs directory.
 
@@ -112,8 +112,8 @@ def upload_trace_files_to_mlflow(
     Upload all profiler trace files to MLflow as artifacts.
 
     This function collects trace files from the tensorboard directory and
-    uploads them to MLflow. In distributed settings, only rank 0 (or the
-    last rank where MLflow writer is initialized) should call this.
+    uploads them to MLflow. In distributed settings, only the last rank
+    (world_size - 1) where MLflow writer is initialized should call this.
 
     Args:
         mlflow_writer: The MLflow module instance (from get_mlflow_writer())
@@ -141,7 +141,14 @@ def upload_trace_files_to_mlflow(
 
     # Warn about potentially long upload times for large uploads
     if total_files > 10:
-        total_size_mb = sum(os.path.getsize(f) for f in trace_files) / (1024 * 1024)
+        # Safely calculate total size (files may be deleted between discovery and size check)
+        total_size_bytes = 0
+        for f in trace_files:
+            try:
+                total_size_bytes += os.path.getsize(f)
+            except OSError:
+                pass  # File may have been deleted
+        total_size_mb = total_size_bytes / (1024 * 1024)
         _log_warning(
             f"[MLflow] Uploading {total_files} trace files ({total_size_mb:.1f} MB total). "
             "This may take a while..."
@@ -206,7 +213,14 @@ def upload_log_files_to_mlflow(
 
     # Warn about potentially long upload times for large uploads
     if total_files > 20:
-        total_size_mb = sum(os.path.getsize(f) for f in log_files) / (1024 * 1024)
+        # Safely calculate total size (files may be deleted between discovery and size check)
+        total_size_bytes = 0
+        for f in log_files:
+            try:
+                total_size_bytes += os.path.getsize(f)
+            except OSError:
+                pass  # File may have been deleted
+        total_size_mb = total_size_bytes / (1024 * 1024)
         _log_warning(
             f"[MLflow] Uploading {total_files} log files ({total_size_mb:.1f} MB total). "
             "This may take a while..."
