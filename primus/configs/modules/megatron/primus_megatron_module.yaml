@@ -39,6 +39,25 @@ disable_compile_dependencies: true
 use_rocm_mem_info: false
 use_rocm_mem_info_iters: [1,2]
 
+# MLflow performance metrics - comprehensive metrics for scaling tests
+# When enabled, automatically enables throughput calculations and logs to MLflow:
+#
+#   1. Performance Metrics:
+#      - perf/throughput_tflops_per_gpu: TFLOP/s per GPU
+#      - perf/tps_tokens_per_sec_per_gpu: Tokens/sec per GPU
+#      - perf/iteration_time_ms: Time per training step (ms)
+#
+#   2. Memory Metrics:
+#      - perf/{rocm/hip}_peak_mem_gb: Peak GPU memory usage (GB)
+#      - perf/{rocm/hip}_mem_utilization_pct: Memory utilization (% of total)
+#
+#   3. System Metrics:
+#      - perf/gpu_utilization_pct_rank{N}: GPU utilization per rank (%)
+#      - perf/gpu_utilization_pct_avg: Average GPU utilization across all ranks (%)
+#
+# Note: This flag implicitly enables log_throughput behavior for metric collection.
+mlflow_upload_performance_metrics: false
+
 # profiling
 disable_profiler_activity_cpu: false
 torch_profiler_record_shapes: true

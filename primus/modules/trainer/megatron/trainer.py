@@ -152,7 +152,7 @@ from primus.backends.megatron.training.global_vars import (
 from primus.backends.megatron.training.mlflow_setup import upload_mlflow_artifacts
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
-from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
+from primus.core.utils.rocm_mem_info import get_rocm_smi_gpu_util, get_rocm_smi_mem_info
 from primus.core.utils.yaml_utils import nested_namespace_to_dict
 from primus.modules.base_module import BaseModule
 from primus.modules.module_utils import (
@@ -1974,13 +1974,24 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if iteration % args.log_interval == 0:
             # Note(wenx): If we want to collect rocm-smi memory information for the first two iterations,
             # place the collection before the timer to minimize its impact on latency measurements for iterations ≥ 3.
-            if args.log_throughput:
+            rocm_gpu_util = None
+            # Enable throughput calculations if log_throughput or mlflow_upload_performance_metrics is set
+            enable_perf_metrics = args.log_throughput or getattr(
+                args, "mlflow_upload_performance_metrics", False
+            )
+            if enable_perf_metrics:
                 if args.use_rocm_mem_info or (
                     args.use_rocm_mem_info_iters is not None and iteration in args.use_rocm_mem_info_iters
                 ):
                     rocm_total_mem, rocm_used_mem, rocm_free_mem = get_rocm_smi_mem_info(
                         self.module_local_rank
                     )
+                # Collect GPU utilization for performance metrics
+                if getattr(args, "mlflow_upload_performance_metrics", False):
+                    try:
+                        rocm_gpu_util = get_rocm_smi_gpu_util(self.module_local_rank)
+                    except Exception:
+                        rocm_gpu_util = None
 
             elapsed_time = timers("interval-time").elapsed(barrier=True)
             elapsed_time_per_iteration = elapsed_time / total_iterations
@@ -2017,7 +2028,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 elapsed_time_per_iteration * 1000.0,
                 statistics.mean(self.recent_iteration_times),
             )
-            if args.log_throughput:
+            if enable_perf_metrics:
                 if (
                     iteration == self.log_avg_skip_iterations + 1
                     or len(self.recent_tflop_throughputs) >= self.log_avg_reset_interval
@@ -2159,6 +2170,52 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                         mlflow_writer.log_metric(
                             f"{mem_collector}_mem_usage_percent", mem_usage * 100.0, iteration
                         )
+
+                # Upload performance metrics to MLflow
+                # Groups: Performance (throughput, TPS, iteration time), Memory (peak, usage %), System (GPU util)
+                if getattr(args, "mlflow_upload_performance_metrics", False) and mlflow_writer:
+                    # Performance metrics
+                    mlflow_writer.log_metric("perf/throughput_tflops_per_gpu", throughput, iteration)
+                    mlflow_writer.log_metric("perf/tps_tokens_per_sec_per_gpu", token_throughput, iteration)
+                    mlflow_writer.log_metric(
+                        "perf/iteration_time_ms",
+                        elapsed_time_per_iteration * 1000.0,
+                        iteration,
+                    )
+                    # Memory metrics
+                    mlflow_writer.log_metric(
+                        f"perf/{mem_collector}_peak_mem_gb",
+                        used_mem / 1024 / 1024 / 1024,
+                        iteration,
+                    )
+                    mlflow_writer.log_metric(
+                        f"perf/{mem_collector}_mem_utilization_pct",
+                        mem_usage * 100.0,
+                        iteration,
+                    )
+                    # System metrics - GPU utilization per rank
+                    if rocm_gpu_util is not None:
+                        util_tensor = torch.tensor([rocm_gpu_util], device="cuda", dtype=torch.float32)
+                        world_size = dist.get_world_size()
+                        gathered_utils = [torch.zeros_like(util_tensor) for _ in range(world_size)]
+                        dist.all_gather(gathered_utils, util_tensor)
+                        if dist.get_rank() == world_size - 1:  # MLflow runs on last rank
+                            for rank, util_val in enumerate(gathered_utils):
+                                util = util_val.item()
+                                if util >= 0:
+                                    mlflow_writer.log_metric(
+                                        f"perf/gpu_utilization_pct_rank{rank}",
+                                        util,
+                                        iteration,
+                                    )
+                            # Also log average GPU utilization
+                            avg_util = sum(t.item() for t in gathered_utils) / world_size
+                            mlflow_writer.log_metric(
+                                "perf/gpu_utilization_pct_avg",
+                                avg_util,
+                                iteration,
+                            )
+
             assert learning_rate is not None
             # Decoupled_learning_rate should be not None only on first and last pipeline stage.
             log_string += " learning rate: {:.6E} |".format(learning_rate)
