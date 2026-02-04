@@ -5,26 +5,75 @@
 ###############################################################################
 
 
+from contextlib import nullcontext
 from typing import List, Tuple, Union
 
 import torch
 
 
+class _FP8ContextFactory:
+    """Factory that creates fresh FP8 contexts on each `with` statement."""
+    def __init__(self, transformer_config):
+        self.transformer_config = transformer_config
+        self.fp8_enabled = getattr(transformer_config, 'fp8', None) if transformer_config else None
+        self._printed = False
+        
+    def __enter__(self):
+        if not self.fp8_enabled:
+            self._ctx = nullcontext()
+        else:
+            try:
+                from primus.backends.megatron.core.fp8_utils import get_fp8_context
+                self._ctx = get_fp8_context(self.transformer_config, layer_no=-1)
+                if not self._printed:
+                    print(f"  [FP8] Using FP8 autocast context for benchmarking (fp8={self.fp8_enabled})")
+                    self._printed = True
+            except Exception as e:
+                try:
+                    import transformer_engine.pytorch as te
+                    self._ctx = te.fp8_autocast(enabled=True)
+                    if not self._printed:
+                        print("  [FP8] Using TE fp8_autocast fallback for benchmarking")
+                        self._printed = True
+                except Exception:
+                    if not self._printed:
+                        print(f"  [FP8] Warning: Could not enable FP8 context: {e}")
+                        self._printed = True
+                    self._ctx = nullcontext()
+        return self._ctx.__enter__()
+    
+    def __exit__(self, *args):
+        return self._ctx.__exit__(*args)
+
+
+def _get_fp8_context_for_benchmark(transformer_config):
+    """Get FP8 context factory for benchmarking if FP8 is enabled."""
+    return _FP8ContextFactory(transformer_config)
+
+
 def benchmark_layer(
     layer_module: torch.nn.Module,
     input_shapes: List[Union[Tuple[int, ...], Tuple[Tuple[int, ...], torch.dtype]]],
-    num_iterations: int = 10,
+    num_iterations: int = 64,  # Match typical microbatch count
+    transformer_config=None,  # Optional: pass config to enable FP8 context
 ) -> tuple[float, float, int]:
     """
     Benchmark both forward and backward passes of a transformer layer using CUDA events.
-    Also measures activation memory used by the forward pass.
-
+    
+    Optimizations for accurate timing:
+    1. Warmup (20 iterations) to fully warm GPU caches and JIT
+    2. Many benchmark iterations (64) for stable steady-state measurement
+    3. Separate forward/backward timing with CUDA events for accurate splits
+    4. Pre-allocated grad_outputs tensors reused across iterations
+    5. FP8 autocast context when enabled (critical for accurate FP8 timing!)
+    
     Args:
         layer_module: The transformer layer module
         input_shapes: List of input shapes. Each element can be:
                       - A tuple of integers (shape), defaults to bfloat16 and requires_grad=True
                       - A tuple of ((shape), dtype), defaults to requires_grad=True if float, False otherwise
         num_iterations: Number of iterations to average over
+        transformer_config: Optional TransformerConfig to enable FP8 autocast
 
     Returns:
         Tuple of (average forward time in ms, average backward time in ms, activation memory in bytes)
@@ -33,7 +82,6 @@ def benchmark_layer(
     try:
         device = next(layer_module.parameters()).device
     except StopIteration:
-        # Fallback if module has no parameters (unlikely for profiled modules)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def create_input(spec):
@@ -59,111 +107,106 @@ def benchmark_layer(
 
     inputs = [create_input(spec) for spec in input_shapes]
 
-    # Warm-up: forward and backward passes
-    for _ in range(3):
-        outputs = layer_module(*inputs)
-        if not isinstance(outputs, (tuple, list)):
-            outputs = (outputs,)
+    # ===========================================================================
+    # Get FP8 context - CRITICAL for accurate FP8 timing!
+    # ===========================================================================
+    fp8_context = _get_fp8_context_for_benchmark(transformer_config)
 
-        # Backward on all outputs that require grad
-        grad_outputs = []
-        valid_outputs = []
-        for out in outputs:
-            if isinstance(out, torch.Tensor) and out.requires_grad:
-                grad_outputs.append(torch.randn_like(out))
-                valid_outputs.append(out)
+    # ===========================================================================
+    # WARMUP (20 iterations) - fully warm GPU caches, JIT, and allocators
+    # This matches the "warmed up" state of actual training after many iterations
+    # ===========================================================================
+    grad_outputs = None
+    output_indices = []
+    num_warmup = 20  # Many warmup iterations to match sustained training state
+    
+    with fp8_context:
+        for _ in range(num_warmup):
+            outputs = layer_module(*inputs)
+            if not isinstance(outputs, (tuple, list)):
+                outputs = (outputs,)
 
-        if valid_outputs:
-            torch.autograd.backward(valid_outputs, grad_outputs)
+            # Create grad_outputs once during warmup (reused for all subsequent iterations)
+            if grad_outputs is None:
+                grad_outputs = []
+                for i, out in enumerate(outputs):
+                    if isinstance(out, torch.Tensor) and out.requires_grad:
+                        grad_outputs.append(torch.randn_like(out))
+                        output_indices.append(i)
 
-        layer_module.zero_grad()
-        for inp in inputs:
-            if inp.requires_grad:
-                inp.grad = None
+            valid_outputs = [outputs[i] for i in output_indices]
+            if valid_outputs:
+                torch.autograd.backward(valid_outputs, grad_outputs)
 
-    # Synchronize before timing
+            layer_module.zero_grad(set_to_none=True)
+            for inp in inputs:
+                if inp.requires_grad:
+                    inp.grad = None
+
+    # Synchronize after warmup - GPU is now in "hot" state
     if device.type == "cuda":
         torch.cuda.synchronize(device)
 
-    # Measure forward and backward passes using CUDA events
-    forward_times = []
-    backward_times = []
-    activation_memories = []
-
-    # Clear cache and reset memory stats before measuring forward pass
+    # --- Measure activation memory (forward-only loop) ---
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(device)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     mem_before = torch.cuda.memory_allocated(device)
-    outputs_cache = []
-
-    # First loop: Measure forward pass only
-    for _ in range(num_iterations):
-        # Measure forward pass
-        forward_start = torch.cuda.Event(enable_timing=True)
-        forward_end = torch.cuda.Event(enable_timing=True)
-
-        forward_start.record()
-        outputs = layer_module(*inputs)
-        outputs_cache.append(outputs)
-        forward_end.record()
-
-        # Wait for forward pass to complete
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        # Record forward time
-        forward_times.append(forward_start.elapsed_time(forward_end))
-
-    # Measure activation memory (peak memory during forward - baseline)
+    
+    with fp8_context:
+        for _ in range(num_iterations):
+            outputs = layer_module(*inputs)
+    
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
     mem_after_forward = torch.cuda.max_memory_allocated(device)
     activation_memory = (mem_after_forward - mem_before) // num_iterations
-    activation_memories.append(activation_memory)
+    
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats(device)
-    del outputs_cache
+    del outputs
 
-    # Second loop: Measure backward pass only
-    for _ in range(num_iterations):
-        # Forward pass (not timed)
-        outputs = layer_module(*inputs)
-        if not isinstance(outputs, (tuple, list)):
-            outputs = (outputs,)
-
-        grad_outputs = []
-        valid_outputs = []
-        for out in outputs:
-            if isinstance(out, torch.Tensor) and out.requires_grad:
-                grad_outputs.append(torch.randn_like(out))
-                valid_outputs.append(out)
-
-        # Measure backward pass
-        backward_start = torch.cuda.Event(enable_timing=True)
-        backward_end = torch.cuda.Event(enable_timing=True)
-
-        backward_start.record()
-        if valid_outputs:
-            torch.autograd.backward(valid_outputs, grad_outputs)
-        backward_end.record()
-
-        # Wait for backward pass to complete
-        if device.type == "cuda":
+    # ===========================================================================
+    # BENCHMARK: Measure forward and backward separately with CUDA events
+    # ===========================================================================
+    forward_times = []
+    backward_times = []
+    
+    with fp8_context:
+        for _ in range(num_iterations):
+            # --- Forward pass ---
+            forward_start = torch.cuda.Event(enable_timing=True)
+            forward_end = torch.cuda.Event(enable_timing=True)
+            
+            forward_start.record()
+            outputs = layer_module(*inputs)
+            forward_end.record()
+            
+            # --- Backward pass ---
+            backward_start = torch.cuda.Event(enable_timing=True)
+            backward_end = torch.cuda.Event(enable_timing=True)
+            
+            if not isinstance(outputs, (tuple, list)):
+                outputs = (outputs,)
+            valid_outputs = [outputs[i] for i in output_indices]
+            
+            backward_start.record()
+            if valid_outputs:
+                torch.autograd.backward(valid_outputs, grad_outputs)
+            backward_end.record()
+            
             torch.cuda.synchronize(device)
-
-        # Record backward time
-        backward_times.append(backward_start.elapsed_time(backward_end))
-
-        # Clear gradients for next iteration
-        layer_module.zero_grad()
-        for inp in inputs:
-            if inp.requires_grad:
-                inp.grad = None
-        del outputs, grad_outputs, valid_outputs
-
+            
+            forward_times.append(forward_start.elapsed_time(forward_end))
+            backward_times.append(backward_start.elapsed_time(backward_end))
+            
+            layer_module.zero_grad(set_to_none=True)
+            for inp in inputs:
+                if inp.requires_grad:
+                    inp.grad = None
+    
     avg_forward_time = sum(forward_times) / len(forward_times)
     avg_backward_time = sum(backward_times) / len(backward_times)
-    avg_activation_memory = (
-        int(sum(activation_memories) / len(activation_memories)) if activation_memories else 0
-    )
 
-    return avg_forward_time, avg_backward_time, avg_activation_memory
+    return avg_forward_time, avg_backward_time, int(activation_memory)

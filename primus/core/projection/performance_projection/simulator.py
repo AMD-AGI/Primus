@@ -77,7 +77,7 @@ class SchedulerSimulationRunner:
         if duration is not None and duration > 0:
             return float(duration)
         else:
-            raise ValueError(f"Duration is not found.")
+            raise ValueError("Duration is not found.")
 
     def _chunk_activation(self, rank: int, chunk: int | None, vpp_size: int | None) -> float:
         if self.chunk_time_ms is None:
@@ -206,7 +206,7 @@ class SchedulerSimulationRunner:
         while True:
             max_retry -= 1
             if max_retry <= 0:
-                print(f"Max retry reached, May have bugs in the schedule table")
+                print("Max retry reached, May have bugs in the schedule table")
                 print(communication_map)
                 break
 
