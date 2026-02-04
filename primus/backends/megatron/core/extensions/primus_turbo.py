@@ -99,6 +99,9 @@ class PrimusTurboQuantConfig:
             )
             self._is_fp8 = True
 
+    def data(self):
+        return self._quant_config
+
     def is_fp4(self):
         return self._is_fp4
 
@@ -251,6 +254,34 @@ def primus_turbo_fp8_autocast(
         calibrating=calibrating,
         fp8_recipe=fp8_recipe,
         fp8_group=fp8_group,
+        _graph=_graph,
+        enabled_turbo=enabled_turbo,
+        turbo_quant_config=turbo_quant_config,
+    )
+    try:
+        yield
+    finally:
+        PrimusTurboLowPrecisionGlobalStateManager.set_fp8_autocast_state(fp8_state)
+        PrimusTurboLowPrecisionGlobalStateManager.fp8_autocast_exit(enabled, _graph=_graph)
+
+
+@contextmanager
+def primus_turbo_fp4_autocast(
+    enabled: bool = True,
+    calibrating: bool = False,
+    fp4_recipe: Optional[Recipe] = None,
+    fp4_group: Optional[dist_group_type] = None,
+    _graph: bool = False,
+    enabled_turbo: bool = False,
+    turbo_quant_config: Optional[PrimusTurboQuantConfig] = None,
+) -> None:  # type: ignore
+    # TE currently uses fp8_autocast for fp8 and fp4 quantization.
+    fp8_state = PrimusTurboLowPrecisionGlobalStateManager.get_fp8_autocast_state()
+    PrimusTurboLowPrecisionGlobalStateManager.fp8_autocast_enter(
+        enabled=enabled,
+        calibrating=calibrating,
+        fp8_recipe=fp4_recipe,
+        fp8_group=fp4_group,
         _graph=_graph,
         enabled_turbo=enabled_turbo,
         turbo_quant_config=turbo_quant_config,
@@ -507,7 +538,9 @@ class PrimusTurboLinear(TELinear):
             else:
                 raise ValueError("Not support quant config.")
 
-            out = fp8_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
+            out = fp8_gemm(
+                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+            )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
             if quant_config.mxfp4_scaling():
@@ -515,7 +548,9 @@ class PrimusTurboLinear(TELinear):
             else:
                 raise ValueError("Not support quant config.")
 
-            out = fp4_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
+            out = fp4_gemm(
+                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+            )
         else:
             out = self.gemm(input_, weights)
 
@@ -626,7 +661,9 @@ class PrimusTurboRowParallelLinear(TELinear):
             else:
                 raise ValueError("Not support quant config.")
 
-            out = fp8_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
+            out = fp8_gemm(
+                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+            )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
             if quant_config.mxfp4_scaling():
@@ -634,7 +671,9 @@ class PrimusTurboRowParallelLinear(TELinear):
             else:
                 raise ValueError("Not support quant config.")
 
-            out = fp4_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
+            out = fp4_gemm(
+                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+            )
         else:
             out = self.gemm(input_, weights)
 
@@ -736,7 +775,9 @@ class PrimusTurboColumnParallelLinear(TELinear):
             else:
                 raise ValueError("Not support quant config.")
 
-            out = fp8_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
+            out = fp8_gemm(
+                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+            )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
             if quant_config.mxfp4_scaling():
@@ -744,7 +785,9 @@ class PrimusTurboColumnParallelLinear(TELinear):
             else:
                 raise ValueError("Not support quant config.")
 
-            out = fp4_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
+            out = fp4_gemm(
+                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+            )
         else:
             out = self.gemm(input_, weights)
 
@@ -841,7 +884,9 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
             else:
                 raise ValueError("Not support quant config.")
 
-            out = fp8_gemm(input_, weight, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
+            out = fp8_gemm(
+                input_, weight, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+            )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
             if quant_config.mxfp4_scaling():
@@ -849,7 +894,9 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
             else:
                 raise ValueError("Not support quant config.")
 
-            out = fp4_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
+            out = fp4_gemm(
+                input_, weight, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+            )
         else:
             out = self.gemm(input_, weight)
         out = out.view(original_shape[0], original_shape[1], -1)
@@ -975,7 +1022,9 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             else:
                 raise ValueError("Not support quant config.")
 
-            out = fp8_gemm(inp, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
+            out = fp8_gemm(
+                inp, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+            )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
             if quant_config.mxfp4_scaling():
@@ -983,7 +1032,9 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             else:
                 raise ValueError("Not support quant config.")
 
-            out = fp4_gemm(input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config)
+            out = fp4_gemm(
+                inp, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+            )
         else:
             out = self.gemm(inp, weights)
 
@@ -1083,7 +1134,11 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                 fc1_output = pt.ops.grouped_gemm_fp8(
-                    permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, config=quant_config
+                    permuted_local_hidden_states,
+                    w1,
+                    tokens_per_expert,
+                    trans_b=False,
+                    config=quant_config.data(),
                 )
             else:
                 fc1_output = self.grouped_gemm(
@@ -1104,7 +1159,11 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
                     quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                     fc2_output = pt.ops.grouped_gemm_fp8(
-                        intermediate_parallel, w2, tokens_per_expert, trans_b=False, config=quant_config
+                        intermediate_parallel,
+                        w2,
+                        tokens_per_expert,
+                        trans_b=False,
+                        config=quant_config.data(),
                     )
                 else:
                     fc2_output = self.grouped_gemm(
@@ -1123,7 +1182,11 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
                     quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                     fc2_output = pt.ops.grouped_gemm_fp8(
-                        intermediate_parallel, w2, tokens_per_expert, trans_b=False, config=quant_config
+                        intermediate_parallel,
+                        w2,
+                        tokens_per_expert,
+                        trans_b=False,
+                        config=quant_config.data(),
                     )
                 else:
                     fc2_output = self.grouped_gemm(

@@ -19,3 +19,6 @@
 	path = third_party/mamba
 	url = https://github.com/AndreasKaratzas/mamba.git
 	branch = enable-primus-hybrid-models
+[submodule "third_party/HummingbirdXT"]
+	path = third_party/HummingbirdXT
+	url = https://github.com/AMD-AGI/HummingbirdXT.git
