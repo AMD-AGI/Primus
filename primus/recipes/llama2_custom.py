@@ -58,7 +58,6 @@ from megatron.bridge.training.config import (
     TokenizerConfig,
     TrainingConfig,
 )
-from megatron.bridge.training.eval import evaluate_and_print_results
 from megatron.bridge.training.forward_step_func_types import ForwardStepCallable
 from megatron.bridge.training.mixed_precision import (
     MixedPrecisionConfig,
@@ -431,6 +430,83 @@ def _llama2_lora(
         )
 
     return cfg
+
+from megatron.bridge.training import eval 
+def evaluate_and_print_results_custom(
+    state: GlobalState,
+    prefix: str,
+    forward_step_func: ForwardStepCallable,
+    data_iterator: Optional[Union[RerunDataIterator, list[RerunDataIterator]]],
+    model: list[MegatronModule],
+    config: ConfigContainer,
+    verbose: bool = False,
+    write_to_tensorboard: bool = True,
+    process_non_loss_data_func: Optional[Callable] = None,
+    non_loss_data_func: Optional[Callable] = None,
+) -> None:
+    """Helper function to evaluate and dump results on screen.
+
+    Args:
+        state (GlobalState): The global state object.
+        prefix (str): Prefix for logging evaluation results.
+        forward_step_func (Callable): The function that performs a forward step.
+        data_iterator (Optional[Union[RerunDataIterator, list[RerunDataIterator]]]): Iterator over evaluation data.
+        model (list[MegatronModule]): list of model chunks.
+        config (ConfigContainer): Configuration container (potentially redundant).
+        verbose (bool, optional): Whether to print evaluation progress. Defaults to False.
+        write_to_tensorboard (bool, optional): Whether to write results to TensorBoard. Defaults to True.
+        process_non_loss_data_func (Optional[Callable], optional): Function to process non-loss data. Defaults to None.
+        non_loss_data_func (Optional[Callable], optional): Function to compute non-loss data. Defaults to None.
+    """
+    def is_last_rank():
+        return torch.distributed.get_rank() == (torch.distributed.get_world_size() - 1)
+    import math
+    if write_to_tensorboard:
+        writer = state.tensorboard_logger
+    else:
+        writer = None
+
+    wandb_writer = state.wandb_logger
+
+    total_loss_dict, collected_non_loss_data, timelimit = eval.evaluate(
+        state, forward_step_func, data_iterator, model, process_non_loss_data_func, config, verbose, non_loss_data_func
+    )
+
+    # Timelimit hit during evaluation
+    if timelimit:
+        return
+    string = f" validation loss at {prefix} | "
+    for key in total_loss_dict:
+        string += "{} value: {:.6E} | ".format(key, total_loss_dict[key].item())
+        ppl = math.exp(min(20, total_loss_dict[key].item()))
+        string += "{} PPL: {:.6E} | ".format(key, ppl)
+        if writer:
+            writer.add_scalar("{} validation".format(key), total_loss_dict[key].item(), state.train_state.step)
+            writer.add_scalar(
+                "{} validation vs samples".format(key),
+                total_loss_dict[key].item(),
+                state.train_state.consumed_train_samples,
+            )
+            if state.cfg.logger.log_validation_ppl_to_tensorboard:
+                writer.add_scalar("{} validation ppl".format(key), ppl, state.train_state.step)
+                writer.add_scalar(
+                    "{} validation ppl vs samples".format(key), ppl, state.train_state.consumed_train_samples
+                )
+
+        if wandb_writer and is_last_rank():
+            wandb_writer.log({"{} validation".format(key): total_loss_dict[key].item()}, state.train_state.step)
+            if state.cfg.logger.log_validation_ppl_to_tensorboard:
+                wandb_writer.log({"{} validation ppl".format(key): ppl}, state.train_state.step)
+
+    if process_non_loss_data_func is not None and writer and is_last_rank():
+        process_non_loss_data_func(collected_non_loss_data, state.train_state.step, writer)
+
+    length = len(string) + 1
+    log_rank_last("-" * length)
+    log_rank_last(string)
+    log_rank_last("-" * length)
+
+eval.evaluate_and_print_results = evaluate_and_print_results_custom
 
 def megatron_bridge_train_override(
     forward_step_func: ForwardStepCallable,
@@ -848,7 +924,7 @@ def megatron_bridge_train_override(
                 gc.collect()
             prefix = f"iteration {global_state.train_state.step}"
             timers("eval-time", log_level=0).start(barrier=True)
-            evaluate_and_print_results(
+            evaluate_and_print_results_custom(
                 global_state,
                 prefix,
                 forward_step_func,
