@@ -9,7 +9,6 @@
 import primus.backends.megatron.patches  # noqa: F401
 from primus.backends.megatron.argument_builder import MegatronArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
-from primus.core.backend.backend_registry import BackendRegistry
 from primus.modules.module_utils import log_rank_0
 
 
@@ -26,31 +25,33 @@ class MegatronAdapter(BackendAdapter):
 
     def __init__(self, framework="megatron"):
         super().__init__(framework)
+        self.third_party_dir_name = "Megatron-LM"
 
-    # Backend Setup & Patches
-    def prepare_backend(self, config):
+    def load_trainer_class(self, stage: str = "pretrain"):
         """
-        Megatron-specific environment preparation.
+        Return the Megatron Trainer class for the specified training stage.
 
-        Steps:
-            - Run Primus setup hooks
-            - Set environment variables
+        Args:
+            stage: Training stage ("pretrain" for pre-training)
 
-        Note: setup patches are applied automatically by the base class
-        before this method is called.
+        Returns:
+            Trainer class for the specified stage
+
+        Raises:
+            ValueError: If stage is not supported
         """
-        # Run setup hooks from BackendRegistry
-        BackendRegistry.run_setup("megatron")
+        if stage == "pretrain":
+            from primus.backends.megatron.megatron_pretrain_trainer import (
+                MegatronPretrainTrainer,
+            )
 
-        log_rank_0("[Primus:MegatronAdapter] Backend prepared")
+            return MegatronPretrainTrainer
+        else:
+            raise ValueError(f"Invalid stage: {stage}")
 
-    # Override base class method for version detection
     def detect_backend_version(self) -> str:
         """
         Detect Megatron-LM version.
-
-        Delegates to the Megatron base trainer's detect_version() to keep
-        version detection independent of the selected stage.
 
         Returns:
             Version string (e.g., "0.15.0rc8")
@@ -58,11 +59,46 @@ class MegatronAdapter(BackendAdapter):
         Raises:
             RuntimeError: If version cannot be detected
         """
-        from primus.backends.megatron.megatron_base_trainer import MegatronBaseTrainer
+        import ast
+        from pathlib import Path
 
-        return MegatronBaseTrainer.detect_version()
+        def get_megatron_version_str(package_info_path: str | Path) -> str:
+            """
+            Return version string equivalent to package_info.__version__
+            without importing megatron.
 
-    # Config → Megatron Args
+            Example: '0.15.0rc8'
+            """
+            path = Path(package_info_path)
+            if not path.exists():
+                raise RuntimeError(f"{path} does not exist")
+
+            tree = ast.parse(path.read_text())
+
+            values = {}
+            for node in tree.body:
+                if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                    name = getattr(node.targets[0], "id", None)
+                    if name in {"MAJOR", "MINOR", "PATCH", "PRE_RELEASE"}:
+                        values[name] = ast.literal_eval(node.value)
+            major = values["MAJOR"]
+            minor = values["MINOR"]
+            patch = values["PATCH"]
+            pre = values.get("PRE_RELEASE")
+
+            return f"{major}.{minor}.{patch}" + (str(pre) if pre else "")
+
+        # Scan sys.path manually to avoid triggering any __init__.py execution
+        # (importlib.util.find_spec would execute parent package __init__.py files)
+        import sys
+
+        for path in sys.path:
+            package_info_path = Path(path) / "megatron" / "core" / "package_info.py"
+            if package_info_path.exists():
+                return get_megatron_version_str(package_info_path)
+
+        raise RuntimeError("Cannot locate megatron/core/package_info.py in sys.path")
+
     def convert_config(self, module_config):
         """
         Convert Primus ModuleConfig → final Megatron-LM argument Namespace.
@@ -95,13 +131,3 @@ class MegatronAdapter(BackendAdapter):
         log_rank_0(f"[Primus:MegatronAdapter] Converted config → {len(vars(megatron_args))} Megatron args")
 
         return megatron_args
-
-    # Load Trainer Class (Stage-Aware)
-    def load_trainer_class(self, stage: str = "pretrain"):
-        try:
-            return BackendRegistry.get_trainer_class(self.framework, stage=stage)
-        except (ValueError, AssertionError) as exc:
-            raise RuntimeError(
-                "[Primus:MegatronAdapter] 'megatron' backend trainer not registered. "
-                "Ensure primus.backends.megatron registers the trainer class via BackendRegistry."
-            ) from exc

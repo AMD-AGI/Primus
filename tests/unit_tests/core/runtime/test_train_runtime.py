@@ -85,13 +85,13 @@ class TestPrimusRuntime(PrimusUT):
             side_effect=ValueError("backend boom"),
         ):
             with self.assertRaises(ValueError) as ctx:
-                runtime._initialize_backend()
+                runtime._initialize_adapter()
 
         msg = str(ctx.exception)
         self.assertIn("backend boom", msg)
 
     def test_initialize_trainer_wraps_creation_errors(self):
-        """Adapter.create_trainer errors should be wrapped into RuntimeError."""
+        """Adapter.convert_config errors should be wrapped into RuntimeError."""
         args = self._build_args()
         runtime = PrimusRuntime(args=args)
 
@@ -99,8 +99,17 @@ class TestPrimusRuntime(PrimusUT):
         runtime._initialize_configuration(module_name="pre_trainer", overrides=[])
 
         class FailingAdapter:
-            def create_trainer(self, primus_config, module_config):
+            def detect_backend_version(self):
+                return "unknown"
+
+            def prepare_backend(self, module_config):
+                return None
+
+            def convert_config(self, module_config):
                 raise RuntimeError("trainer boom")
+
+            def load_trainer_class(self, stage: str = "pretrain"):
+                raise AssertionError("should not be called")
 
         runtime.ctx.adapter = FailingAdapter()  # type: ignore[attr-defined]
 
@@ -117,8 +126,9 @@ class TestPrimusRuntime(PrimusUT):
 
         # Use a dummy trainer that records the call order.
         class DummyTrainer:
-            def __init__(self):
+            def __init__(self, primus_config=None, module_config=None, backend_args=None):
                 self.calls = []
+                self.backend_args = backend_args
 
             def setup(self):
                 self.calls.append("setup")
@@ -132,20 +142,66 @@ class TestPrimusRuntime(PrimusUT):
             def cleanup(self, on_error: bool = False):
                 self.calls.append("cleanup_error" if on_error else "cleanup")
 
-        trainer = DummyTrainer()
-
-        # Patch backend adapter creation to return our dummy trainer
+        # Patch backend adapter creation to return our dummy adapter
         with patch(
             "primus.core.backend.backend_registry.BackendRegistry.get_adapter",
         ) as mock_get_adapter:
             mock_adapter = Mock()
-            mock_adapter.create_trainer.return_value = trainer
+            mock_adapter.detect_backend_version.return_value = "test-version"
+            mock_adapter.prepare_backend.return_value = None
+            mock_adapter.convert_config.return_value = SimpleNamespace(lr=1e-4)
+            mock_adapter.load_trainer_class.return_value = DummyTrainer
             mock_get_adapter.return_value = mock_adapter
 
             # This will go through the full happy path, including lifecycle.
             runtime.run_train_module(module_name="pre_trainer", overrides=[])
 
+        # The trainer instance is created inside runtime; verify it executed in order.
+        trainer = runtime.ctx.trainer
         self.assertEqual(trainer.calls, ["setup", "init", "run", "cleanup"])
+
+    def test_runtime_applies_patch_phases_in_expected_order(self):
+        args = self._build_args()
+        runtime = PrimusRuntime(args=args)
+
+        phases = []
+
+        def _fake_run_patches(**kwargs):
+            phases.append(kwargs["phase"])
+            return 0
+
+        # Patch run_patches inside the runtime module
+        with patch("primus.core.runtime.train_runtime.run_patches", side_effect=_fake_run_patches):
+            # Dummy trainer
+            class DummyTrainer:
+                def __init__(self, primus_config=None, module_config=None, backend_args=None):
+                    self.backend_args = backend_args
+
+                def setup(self):
+                    pass
+
+                def init(self):
+                    pass
+
+                def run(self):
+                    pass
+
+                def cleanup(self, on_error: bool = False):
+                    pass
+
+            with patch(
+                "primus.core.backend.backend_registry.BackendRegistry.get_adapter"
+            ) as mock_get_adapter:
+                mock_adapter = Mock()
+                mock_adapter.detect_backend_version.return_value = "test-version"
+                mock_adapter.prepare_backend.return_value = None
+                mock_adapter.convert_config.return_value = SimpleNamespace(lr=1e-4, stage="pretrain")
+                mock_adapter.load_trainer_class.return_value = DummyTrainer
+                mock_get_adapter.return_value = mock_adapter
+
+                runtime.run_train_module(module_name="pre_trainer", overrides=[])
+
+        assert phases == ["setup", "build_args", "before_train", "after_train"]
 
 
 if __name__ == "__main__":

@@ -23,7 +23,6 @@ from typing import Any
 import primus.backends.torchtitan.patches  # noqa: F401
 from primus.backends.torchtitan.argument_builder import TorchTitanJobConfigBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
-from primus.core.backend.backend_registry import BackendRegistry
 from primus.modules.module_utils import log_rank_0
 
 
@@ -39,23 +38,42 @@ class TorchTitanAdapter(BackendAdapter):
 
     def __init__(self, framework: str = "torchtitan"):
         super().__init__(framework)
+        self.third_party_dir_name = "torchtitan"
 
-    # Backend Setup & Patches
-    def prepare_backend(self, config: Any):
+    def load_trainer_class(self, stage: str = "pretrain"):
         """
-        TorchTitan-specific environment preparation.
+        Return backend Trainer class registered in `BackendRegistry`.
 
-        Steps:
-            - Run Primus setup hooks
-            - (Future) add any TorchTitan-specific env setup if needed
-
-        Note: Patches are already registered at module import time (top of this file).
-        Setup patches are applied automatically by the base class before this method is called.
+        Default behavior:
+          - Lookup trainer via `BackendRegistry.get_trainer_class(self.framework, stage=stage)`
         """
-        # Run setup hooks from BackendRegistry
-        BackendRegistry.run_setup("torchtitan")
+        if stage == "pretrain":
+            from primus.backends.torchtitan.torchtitan_pretrain_trainer import (
+                TorchTitanPretrainTrainer,
+            )
 
-        log_rank_0("[Primus:TorchTitanAdapter] Backend prepared")
+            return TorchTitanPretrainTrainer
+        else:
+            raise ValueError(f"Invalid stage: {stage}")
+
+    # Version Detection
+    def detect_backend_version(self) -> str:
+        """
+        Detect TorchTitan version for patching/diagnostics.
+
+        We try to resolve the installed ``torchtitan`` package version.
+        If this fails (e.g., editable install without metadata), we fall
+        back to "unknown".
+        """
+        try:
+            import importlib.metadata as importlib_metadata
+        except Exception:  # pragma: no cover - very old Python / fallback
+            return "unknown"
+
+        try:
+            return importlib_metadata.version("torchtitan")
+        except Exception:
+            return "unknown"
 
     # Config → TorchTitan JobConfig
     def convert_config(self, module_config: Any):
@@ -88,38 +106,3 @@ class TorchTitanAdapter(BackendAdapter):
 
         log_rank_0(f"[Primus:TorchTitanAdapter] Converted Primus module params → TorchTitan args")
         return titan_args
-
-    # Load Trainer Class
-    def load_trainer_class(self, stage: str = "pretrain"):
-        """
-        Load TorchTitan trainer class registered via BackendRegistry.
-        This allows Primus runtime to remain agnostic to the actual trainer
-        implementation (pretrain, sft, etc.).
-        """
-        try:
-            return BackendRegistry.get_trainer_class(self.framework, stage=stage)
-        except (ValueError, AssertionError) as exc:
-            raise RuntimeError(
-                "[Primus:TorchTitanAdapter] 'torchtitan' backend trainer not registered. "
-                "Ensure primus.backends.torchtitan.trainers (or equivalent) registers "
-                "the trainer class via BackendRegistry."
-            ) from exc
-
-    # Version Detection
-    def detect_backend_version(self) -> str:
-        """
-        Detect TorchTitan version for logging and patching.
-
-        We try to read the ``torchtitan`` package version if installed; otherwise
-        we fall back to 'unknown'. This is sufficient until we need stricter
-        version gating for patches.
-        """
-        try:
-            import importlib.metadata as importlib_metadata
-        except Exception:  # pragma: no cover - very old Python
-            return "unknown"
-
-        try:
-            return importlib_metadata.version("torchtitan")
-        except Exception:
-            return "unknown"

@@ -33,24 +33,18 @@ class TorchTitanPretrainTrainer(TorchTitanBaseTrainer):
     Trainer class for TorchTitan pre-training.
     """
 
-    def __init__(self, primus_config: Any, module_config: Any, backend_args: Any):
+    def __init__(self, backend_args: Any):
         """
         Initialize TorchTitan pretrain trainer.
 
         Args:
-            primus_config: Full Primus configuration
-            module_config: Module-specific configuration
             backend_args: TorchTitan configuration as SimpleNamespace (from TorchTitanAdapter)
         """
-        super().__init__(
-            primus_config=primus_config,
-            module_config=module_config,
-            backend_args=backend_args,
-        )
+        super().__init__(backend_args=backend_args)
 
         self._trainer: Optional["Trainer"] = None  # type: ignore[name-defined]
 
-        log_rank_0(f"Initialized TorchTitanPretrainTrainer for model: {module_config.model or 'custom'}")
+        log_rank_0("TorchTitanPretrainTrainer initialized")
 
     # --------------------------------------------------------------------- #
     # Lifecycle hooks

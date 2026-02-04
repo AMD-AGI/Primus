@@ -18,6 +18,7 @@ This mirrors the role of TorchTitanBaseTrainer for TorchTitan:
 
 from typing import Any
 
+from primus.backends.megatron.training.global_vars import set_primus_global_variables
 from primus.core.patches import run_patches
 from primus.core.trainer.base_trainer import BaseTrainer
 from primus.modules.module_utils import log_rank_0
@@ -38,13 +39,11 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
         - Handle Megatron-Bridge specific initialization and setup
     """
 
-    def __init__(self, primus_config: Any, module_config: Any, backend_args: Any):
+    def __init__(self, backend_args: Any):
         """
         Initialize Megatron-Bridge base trainer.
 
         Args:
-            primus_config: Full Primus configuration
-            module_config: Module-specific configuration
             backend_args: Megatron-Bridge configuration as SimpleNamespace
                          (from MegatronBridgeArgBuilder)
         """
@@ -52,12 +51,9 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
         log_rank_0("Initializing MegatronBridgeBaseTrainer...")
         log_rank_0("=" * 80)
 
-        # Initialize BaseTrainer (stores configs, enables patch management)
-        super().__init__(
-            primus_config=primus_config,
-            module_config=module_config,
-            backend_args=backend_args,
-        )
+        # Initialize BaseTrainer
+        super().__init__(backend_args=backend_args)
+        set_primus_global_variables(self.backend_args)
 
         import primus.backends.megatron.patches  # noqa: F401
 
@@ -65,11 +61,8 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
             backend="megatron",
             phase="before_train",
             backend_version=type(self).detect_megatron_version(),
-            model_name=self.model_name,
             extra={
                 "backend_args": self.backend_args,
-                "primus_config": self.primus_config,
-                "module_config": self.module_config,
             },
         )
 

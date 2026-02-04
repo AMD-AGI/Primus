@@ -21,7 +21,6 @@ from typing import Any
 
 from primus.backends.megatron_bridge.argument_builder import MegatronBridgeArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
-from primus.core.backend.backend_registry import BackendRegistry
 from primus.modules.module_utils import log_dict_aligned, log_rank_0
 
 
@@ -38,11 +37,33 @@ class MegatronBridgeAdapter(BackendAdapter):
 
     def __init__(self, framework: str = "megatron_bridge"):
         super().__init__(framework)
+        self.third_party_dir_name = "Megatron-Bridge"
 
-    # Backend-specific sys.path setup
-    def setup_sys_path(self, backend_path: str):
+    def load_trainer_class(self, stage: str = "pretrain"):
         """
-        Add Megatron-Bridge and Megatron-LM paths to sys.path.
+        Return the Megatron-Bridge Trainer class for the specified training stage.
+
+        Args:
+            stage: Training stage ("sft" for supervised fine-tuning)
+
+        Returns:
+            Trainer class for the specified stage
+
+        Raises:
+            ValueError: If stage is not supported
+        """
+        if stage == "sft":
+            from primus.backends.megatron_bridge.megatron_bridge_posttrain_trainer import (
+                MegatronBridgePosttrainTrainer,
+            )
+
+            return MegatronBridgePosttrainTrainer
+        else:
+            raise ValueError(f"Invalid stage: {stage}")
+
+    def setup_backend_path(self, backend_path=None) -> str:
+        """
+        Set up Megatron-Bridge backend path, then add additional paths.
 
         Megatron-Bridge uses a src-layout structure:
             third_party/
@@ -55,43 +76,30 @@ class MegatronBridgeAdapter(BackendAdapter):
                         └── megatron/
 
         We need to add:
-        1. Megatron-Bridge/src/ for 'import megatron.bridge'
-        2. Megatron-Bridge/3rdparty/Megatron-LM/ for base Megatron functionality
+        1. Megatron-Bridge root (via parent class)
+        2. Megatron-Bridge/src/ for 'import megatron.bridge'
+        3. Megatron-Bridge/3rdparty/Megatron-LM/ for base Megatron functionality
         """
         import os
         import sys
 
-        # 1. Add Megatron-Bridge src directory
-        src_path = os.path.join(backend_path, "src")
+        # 1. Call parent to set up the main backend path
+        resolved = super().setup_backend_path(backend_path)
+
+        # 2. Add Megatron-Bridge src directory
+        src_path = os.path.join(resolved, "src")
         if os.path.isdir(src_path) and src_path not in sys.path:
             sys.path.insert(0, src_path)
             log_rank_0(f"sys.path.insert → {src_path}")
 
-        # 2. Add Megatron-LM directory (from megatron-bridge/3rdparty/)
-        megatron_lm_path = os.path.join(backend_path, "3rdparty", "Megatron-LM")
+        # 3. Add Megatron-LM directory (from megatron-bridge/3rdparty/)
+        megatron_lm_path = os.path.join(resolved, "3rdparty", "Megatron-LM")
         if os.path.isdir(megatron_lm_path) and megatron_lm_path not in sys.path:
             sys.path.insert(0, megatron_lm_path)
             log_rank_0(f"sys.path.insert → {megatron_lm_path}")
 
-    # Backend Setup & Patches
-    def prepare_backend(self, config: Any):
-        """
-        Megatron-Bridge-specific environment preparation.
+        return resolved
 
-        Steps:
-            - Run Primus setup hooks
-            - Set up Megatron-Bridge specific environment variables
-            - Initialize Hugging Face model conversion capabilities
-
-        Note: Patches are already registered at module import time.
-        Setup patches are applied automatically by the base class before this method is called.
-        """
-        # Run setup hooks from BackendRegistry
-        BackendRegistry.run_setup("megatron_bridge")
-
-        log_rank_0("[Primus:MegatronBridgeAdapter] Backend prepared")
-
-    # Config → Megatron-Bridge Args
     def convert_config(self, module_config: Any):
         """
         Convert Primus ModuleConfig → Megatron-Bridge configuration Namespace.
@@ -129,23 +137,6 @@ class MegatronBridgeAdapter(BackendAdapter):
 
         return bridge_args
 
-    # Load Trainer Class
-    def load_trainer_class(self, stage: str = "pretrain"):
-        """
-        Load Megatron-Bridge trainer class registered via BackendRegistry.
-        This allows Primus runtime to remain agnostic to the actual trainer
-        implementation (pretrain, sft, etc.).
-        """
-        try:
-            return BackendRegistry.get_trainer_class(self.framework, stage=stage)
-        except ValueError as exc:
-            raise RuntimeError(
-                "[Primus:MegatronBridgeAdapter] 'megatron_bridge' backend trainer not registered. "
-                "Ensure primus.backends.megatron_bridge defines the trainer class "
-                "and imports BackendRegistry."
-            ) from exc
-
-    # Version Detection
     def detect_backend_version(self) -> str:
         """
         Detect Megatron-Bridge version for logging and patching.

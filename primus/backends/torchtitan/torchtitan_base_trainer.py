@@ -36,13 +36,11 @@ class TorchTitanBaseTrainer(BaseTrainer):
         - Provide a classmethod ``detect_version`` used by the patch system
     """
 
-    def __init__(self, primus_config: Any, module_config: Any, backend_args: Any):
+    def __init__(self, backend_args: Any):
         """
         Initialize TorchTitan base trainer.
 
         Args:
-            primus_config: Full Primus configuration
-            module_config: Module-specific configuration
             backend_args: TorchTitan configuration as SimpleNamespace (from TorchTitanAdapter)
         """
         # Patch TorchTitan logger before any other initialization
@@ -52,40 +50,12 @@ class TorchTitanBaseTrainer(BaseTrainer):
         log_rank_0("Initializing TorchTitanBaseTrainer...")
         log_rank_0("=" * 80)
 
-        # Initialize BaseTrainer (stores configs, enables patch management)
-        super().__init__(
-            primus_config=primus_config,
-            module_config=module_config,
-            backend_args=backend_args,
-        )
-
-        # Log version and basic metadata
-        log_rank_0(f"TorchTitan version: {type(self).detect_version()}")
-        log_rank_0(f"Model: {module_config.model}")
-        log_rank_0(f"Framework: {module_config.framework}")
+        # Initialize BaseTrainer
+        super().__init__(backend_args=backend_args)
 
         log_rank_0("=" * 80)
         log_rank_0("TorchTitanBaseTrainer initialized successfully")
         log_rank_0("=" * 80)
-
-    @classmethod
-    def detect_version(cls) -> str:
-        """
-        Detect TorchTitan version.
-
-        We try to resolve the installed ``torchtitan`` package version.
-        If this fails (e.g., editable install without metadata), we fall
-        back to "unknown".
-        """
-        try:
-            import importlib.metadata as importlib_metadata
-        except Exception:  # pragma: no cover - very old Python / fallback
-            return "unknown"
-
-        try:
-            return importlib_metadata.version("torchtitan")
-        except Exception:
-            return "unknown"
 
     def patch_torchtitan_logger(self):
         from primus.core.utils.logger import _logger as primus_logger

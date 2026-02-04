@@ -23,24 +23,103 @@ from primus.backends.megatron.megatron_adapter import MegatronAdapter
 
 
 class TestMegatronAdapterVersionDetection:
-    """Test that version detection delegates to the trainer class."""
+    """Test that version detection uses AST parsing without executing __init__.py."""
 
-    def test_detect_version_delegates_to_trainer(self, monkeypatch: pytest.MonkeyPatch):
-        class DummyTrainer:
-            @staticmethod
-            def detect_version():
-                return "0.15.0rc8"
+    def test_detect_version_without_executing_init(self, tmp_path, monkeypatch):
+        """
+        Test that detect_backend_version uses AST parsing and does NOT execute
+        any __init__.py files in the megatron package hierarchy.
+        """
+        # Create a fake megatron package structure with __init__.py that would fail if executed
+        megatron_dir = tmp_path / "megatron"
+        core_dir = megatron_dir / "core"
+        core_dir.mkdir(parents=True)
 
-        # MegatronAdapter should delegate to the trainer class returned by load_trainer_class().
-        monkeypatch.setattr(
-            "primus.backends.megatron.megatron_adapter.MegatronAdapter.load_trainer_class",
-            lambda self: DummyTrainer,
+        # Create __init__.py files that raise an error if executed
+        (megatron_dir / "__init__.py").write_text(
+            'raise RuntimeError("megatron/__init__.py should NOT be executed!")'
         )
+        (core_dir / "__init__.py").write_text(
+            'raise RuntimeError("megatron/core/__init__.py should NOT be executed!")'
+        )
+
+        # Create a valid package_info.py with version info
+        (core_dir / "package_info.py").write_text(
+            """
+MAJOR = 0
+MINOR = 15
+PATCH = 0
+PRE_RELEASE = "rc8"
+
+__version__ = f"{MAJOR}.{MINOR}.{PATCH}{PRE_RELEASE}"
+"""
+        )
+
+        # Prepend tmp_path to sys.path so it's found first
+        import sys
+
+        monkeypatch.syspath_prepend(str(tmp_path))
+
+        # Remove any cached megatron modules to ensure clean state
+        modules_to_remove = [k for k in sys.modules if k.startswith("megatron")]
+        for mod in modules_to_remove:
+            monkeypatch.delitem(sys.modules, mod, raising=False)
 
         adapter = MegatronAdapter()
         version = adapter.detect_backend_version()
 
+        # If we get here without RuntimeError, __init__.py files were NOT executed
         assert version == "0.15.0rc8"
+
+        # Double-check: megatron modules should NOT be in sys.modules
+        assert "megatron" not in sys.modules, "megatron should not be imported"
+        assert "megatron.core" not in sys.modules, "megatron.core should not be imported"
+        assert (
+            "megatron.core.package_info" not in sys.modules
+        ), "megatron.core.package_info should not be imported"
+
+    def test_detect_version_parses_version_correctly(self, tmp_path, monkeypatch):
+        """Test that version string is correctly assembled from MAJOR, MINOR, PATCH, PRE_RELEASE."""
+        megatron_dir = tmp_path / "megatron" / "core"
+        megatron_dir.mkdir(parents=True)
+
+        # Test without PRE_RELEASE
+        (megatron_dir / "package_info.py").write_text(
+            """
+MAJOR = 1
+MINOR = 2
+PATCH = 3
+"""
+        )
+
+        import sys
+
+        monkeypatch.syspath_prepend(str(tmp_path))
+        modules_to_remove = [k for k in sys.modules if k.startswith("megatron")]
+        for mod in modules_to_remove:
+            monkeypatch.delitem(sys.modules, mod, raising=False)
+
+        adapter = MegatronAdapter()
+        version = adapter.detect_backend_version()
+
+        assert version == "1.2.3"
+
+    def test_detect_version_not_found_raises_error(self, tmp_path, monkeypatch):
+        """Test that RuntimeError is raised when package_info.py cannot be found."""
+        import sys
+
+        # Clear sys.path to simulate missing megatron
+        monkeypatch.setattr(sys, "path", [str(tmp_path)])
+        modules_to_remove = [k for k in sys.modules if k.startswith("megatron")]
+        for mod in modules_to_remove:
+            monkeypatch.delitem(sys.modules, mod, raising=False)
+
+        adapter = MegatronAdapter()
+
+        with pytest.raises(RuntimeError) as exc_info:
+            adapter.detect_backend_version()
+
+        assert "Cannot locate" in str(exc_info.value)
 
 
 class TestMegatronAdapterConfigConversion:

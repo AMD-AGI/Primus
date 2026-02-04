@@ -4,12 +4,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""
-Unit tests for BaseTrainer and its integration with the patch system.
-"""
+"""Unit tests for BaseTrainer."""
 
 from types import SimpleNamespace
-from typing import Any, Dict, List
 
 import pytest
 
@@ -47,20 +44,11 @@ class DummyTrainer(BaseTrainer):
 
 
 class TestBaseTrainerPatchIntegration:
-    """Verify that BaseTrainer.run wires patch execution correctly."""
+    """Verify that BaseTrainer.run delegates to run_train()."""
 
     def test_run_invokes_patches_and_training(self, monkeypatch):
         # Silence logging inside BaseTrainer
         monkeypatch.setattr("primus.modules.module_utils.log_rank_0", lambda *args, **kwargs: None)
-        # Capture run_patches calls
-        calls: List[Dict[str, Any]] = []
-
-        def fake_run_patches(**kwargs):
-            calls.append(kwargs)
-            # Return a deterministic patch count so BaseTrainer logging works
-            return 1
-
-        monkeypatch.setattr("primus.core.trainer.base_trainer.run_patches", fake_run_patches)
 
         primus_config = SimpleNamespace(exp_root_path="/tmp/exp", exp_meta_info={})
         module_params = SimpleNamespace()
@@ -74,33 +62,10 @@ class TestBaseTrainerPatchIntegration:
 
         trainer = DummyTrainer(primus_config, module_config, backend_args=backend_args)
 
-        # Reset class-level detect counter before run
-        DummyTrainer.detect_calls_counter = 0  # type: ignore[attr-defined]
-
         trainer.run()
 
         # Training loop executed exactly once
         assert trainer.run_calls == 1
-
-        # detect_version is called once per phase (before_train and after_train)
-        assert DummyTrainer.detect_calls_counter == 2  # type: ignore[attr-defined]
-
-        # Patches were invoked twice: before_train and after_train
-        assert len(calls) == 2
-
-        before_call, after_call = calls
-
-        # Common assertions for both phases
-        for call, phase in zip((before_call, after_call), ("before_train", "after_train")):
-            assert call["backend"] == "megatron"
-            assert call["phase"] == phase
-            assert call["backend_version"] == "test-version"
-            assert call["model_name"] == "llama2_7B"
-
-            extra = call["extra"]
-            assert extra["backend_args"] is backend_args
-            assert extra["primus_config"] is primus_config
-            assert extra["module_config"] is module_config
 
     def test_missing_framework_or_model_raises(self):
         primus_config = SimpleNamespace()
@@ -116,16 +81,8 @@ class TestBaseTrainerPatchIntegration:
             DummyTrainer(primus_config, module_config)
 
     def test_run_allows_missing_backend_args(self, monkeypatch):
-        """If backend_args is None, patches still receive the key with None value."""
+        """If backend_args is None, trainer.run() still works."""
         monkeypatch.setattr("primus.modules.module_utils.log_rank_0", lambda *args, **kwargs: None)
-
-        calls: List[Dict[str, Any]] = []
-
-        def fake_run_patches(**kwargs):
-            calls.append(kwargs)
-            return 1
-
-        monkeypatch.setattr("primus.core.trainer.base_trainer.run_patches", fake_run_patches)
 
         primus_config = SimpleNamespace(exp_root_path="/tmp/exp", exp_meta_info={})
         module_params = SimpleNamespace()
@@ -145,9 +102,4 @@ class TestBaseTrainerPatchIntegration:
         trainer = DummyTrainer(primus_config, module_config)
         trainer.run()
 
-        # Two patch invocations, both should carry backend_args=None
-        assert len(calls) == 2
-        for call in calls:
-            assert call["extra"]["backend_args"] is None
-            assert call["extra"]["primus_config"] is primus_config
-            assert call["extra"]["module_config"] is module_config
+        assert trainer.run_calls == 1

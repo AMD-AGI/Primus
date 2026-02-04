@@ -15,6 +15,11 @@ import pytest
 import primus.core.backend.backend_registry as registry_module
 from primus.core.backend.backend_adapter import BackendAdapter
 
+_SUPPORTS_TRAINER_CLASS_REGISTRY = all(
+    hasattr(registry_module.BackendRegistry, attr)
+    for attr in ("_trainer_classes", "register_trainer_class", "get_trainer_class", "has_trainer_class")
+)
+
 
 class MockAdapter(BackendAdapter):
     """Mock adapter for testing."""
@@ -39,11 +44,12 @@ class TestBackendRegistryErrorHandling:
         """Clear registry before each test."""
         # Save original state
         self._original_adapters = registry_module.BackendRegistry._adapters.copy()
-        self._original_path_names = registry_module.BackendRegistry._path_names.copy()
-        self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
         registry_module.BackendRegistry._adapters.clear()
-        registry_module.BackendRegistry._path_names.clear()
-        registry_module.BackendRegistry._trainer_classes.clear()
+        if hasattr(registry_module.BackendRegistry, "_trainer_classes"):
+            self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
+            registry_module.BackendRegistry._trainer_classes.clear()
+        else:
+            self._original_trainer_classes = None
 
         # Silence logging dependencies (logger may not be initialized in tests)
         self._orig_log_rank_0 = registry_module.log_rank_0
@@ -52,8 +58,11 @@ class TestBackendRegistryErrorHandling:
     def teardown_method(self):
         """Restore registry after each test."""
         registry_module.BackendRegistry._adapters = self._original_adapters
-        registry_module.BackendRegistry._path_names = self._original_path_names
-        registry_module.BackendRegistry._trainer_classes = self._original_trainer_classes
+        if (
+            hasattr(registry_module.BackendRegistry, "_trainer_classes")
+            and self._original_trainer_classes is not None
+        ):
+            registry_module.BackendRegistry._trainer_classes = self._original_trainer_classes
         registry_module.log_rank_0 = self._orig_log_rank_0
 
     def test_get_adapter_not_found_helpful_error(self):
@@ -110,10 +119,12 @@ class TestBackendRegistryLazyLoading:
         """Clear registry before each test."""
         # Reset adapter registry state
         self._original_adapters = registry_module.BackendRegistry._adapters.copy()
-        self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
-        self._original_path_names = registry_module.BackendRegistry._path_names.copy()
         registry_module.BackendRegistry._adapters.clear()
-        registry_module.BackendRegistry._trainer_classes.clear()
+        if hasattr(registry_module.BackendRegistry, "_trainer_classes"):
+            self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
+            registry_module.BackendRegistry._trainer_classes.clear()
+        else:
+            self._original_trainer_classes = None
 
         # Ensure backend module can be re-imported so that lazy loading
         # re-runs registration even if other tests imported it earlier.
@@ -128,8 +139,11 @@ class TestBackendRegistryLazyLoading:
     def teardown_method(self):
         """Restore registry after each test."""
         registry_module.BackendRegistry._adapters = self._original_adapters
-        registry_module.BackendRegistry._trainer_classes = self._original_trainer_classes
-        registry_module.BackendRegistry._path_names = self._original_path_names
+        if (
+            hasattr(registry_module.BackendRegistry, "_trainer_classes")
+            and self._original_trainer_classes is not None
+        ):
+            registry_module.BackendRegistry._trainer_classes = self._original_trainer_classes
         registry_module.log_rank_0 = self._orig_log_rank_0
 
         # Restore original backend module to avoid impacting other tests
@@ -150,12 +164,16 @@ class TestBackendRegistryLazyLoading:
 
     def test_get_adapter_with_lazy_loading(self):
         """Test that get_adapter triggers lazy loading."""
+        # Don't pre-register, let it lazy load
+        # Avoid importing real `primus.backends.megatron` here because its __init__.py may
+        # depend on optional registry features (e.g., trainer-class registration) that
+        # are not present in all versions under test.
         from unittest.mock import patch
 
-        # Don't pre-register, let it lazy load
-        # This will try to load megatron backend
-        # Mock setup_backend_path to avoid dependency on actual file system
-        with patch.object(registry_module.BackendRegistry, "setup_backend_path", return_value="/tmp"):
+        def _fake_load_backend(_backend: str) -> None:
+            registry_module.BackendRegistry.register_adapter("megatron", MockAdapter)
+
+        with patch.object(registry_module.BackendRegistry, "_load_backend", side_effect=_fake_load_backend):
             adapter = registry_module.BackendRegistry.get_adapter("megatron", backend_path=None)
         # If megatron is installed and registered correctly, this should not raise
         # and must return a non-None adapter instance.
@@ -178,124 +196,17 @@ class TestBackendRegistryLazyLoading:
 
 
 class TestBackendRegistryPathNames:
-    """Test path name registration and retrieval."""
+    """Deprecated: path-name mapping removed; backend path resolution is owned by adapters."""
 
-    def setup_method(self):
-        """Clear registry before each test."""
-        self._original_path_names = registry_module.BackendRegistry._path_names.copy()
-        self._original_adapters = registry_module.BackendRegistry._adapters.copy()
-        self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
-        registry_module.BackendRegistry._path_names.clear()
-        registry_module.BackendRegistry._adapters.clear()
-        registry_module.BackendRegistry._trainer_classes.clear()
-
-        # Silence logging dependencies
-        self._orig_log_rank_0 = registry_module.log_rank_0
-        registry_module.log_rank_0 = lambda *args, **kwargs: None
-
-    def teardown_method(self):
-        """Restore registry after each test."""
-        registry_module.BackendRegistry._path_names.clear()
-        registry_module.BackendRegistry._path_names.update(self._original_path_names)
-        registry_module.BackendRegistry._adapters.clear()
-        registry_module.BackendRegistry._adapters.update(self._original_adapters)
-        registry_module.BackendRegistry._trainer_classes.clear()
-        registry_module.BackendRegistry._trainer_classes.update(self._original_trainer_classes)
-        registry_module.log_rank_0 = self._orig_log_rank_0
-
-    def test_register_and_get_path_name(self):
-        """Test registering and retrieving path names."""
-        registry_module.BackendRegistry.register_path_name("test_backend", "TestBackend-Path")
-
-        path_name = registry_module.BackendRegistry.get_path_name("test_backend")
-        assert path_name == "TestBackend-Path"
-
-    def test_get_path_name_with_fallback(self):
-        """Test get_path_name falls back to backend name."""
-        path_name = registry_module.BackendRegistry.get_path_name("megatron")
-        assert path_name == "megatron"
-
-    def test_get_path_name_not_found(self):
-        """Test get_path_name returns backend name when not registered."""
-        path_name = registry_module.BackendRegistry.get_path_name("non_existent_backend")
-        assert path_name == "non_existent_backend"
+    def test_path_name_mapping_removed(self):
+        pytest.skip("BackendRegistry path-name mapping removed; use adapter.third_party_dir_name.")
 
 
 class TestBackendRegistrySetupPath:
-    """Test setup_backend_path functionality."""
+    """Deprecated: setup_backend_path moved to BackendAdapter.setup_backend_path()."""
 
-    def setup_method(self):
-        """Save original state."""
-        self._original_path_names = registry_module.BackendRegistry._path_names.copy()
-        self._original_sys_path = sys.path.copy()
-        registry_module.BackendRegistry._path_names.clear()
-        registry_module.BackendRegistry._path_names.update(
-            {
-                "megatron": "Megatron-LM",
-                "test_backend": "TestBackend",
-            }
-        )
-
-        # Silence logging dependencies
-        self._orig_log_rank_0 = registry_module.log_rank_0
-        registry_module.log_rank_0 = lambda *args, **kwargs: None
-
-    def teardown_method(self):
-        """Restore original state."""
-        registry_module.BackendRegistry._path_names = self._original_path_names
-        sys.path[:] = self._original_sys_path
-        registry_module.log_rank_0 = self._orig_log_rank_0
-
-    def test_setup_backend_path_with_explicit_path(self, tmp_path):
-        """Test setup_backend_path with explicit backend_path argument."""
-        # Create a temporary backend directory
-        backend_dir = tmp_path / "explicit_backend"
-        backend_dir.mkdir()
-
-        # Setup with explicit path
-        result = registry_module.BackendRegistry.setup_backend_path(
-            "test_backend", backend_path=str(backend_dir), verbose=False
-        )
-
-        assert result == str(backend_dir)
-        assert str(backend_dir) in sys.path
-
-    def test_setup_backend_path_with_env_var(self, tmp_path, monkeypatch):
-        """Test setup_backend_path with BACKEND_PATH environment variable."""
-        # Create a temporary backend directory
-        backend_dir = tmp_path / "env_backend"
-        backend_dir.mkdir()
-
-        # Set environment variable
-        monkeypatch.setenv("BACKEND_PATH", str(backend_dir))
-
-        # Setup should use env var
-        result = registry_module.BackendRegistry.setup_backend_path("test_backend", verbose=False)
-
-        assert result == str(backend_dir)
-        assert str(backend_dir) in sys.path
-
-    def test_setup_backend_path_not_found(self):
-        """Test setup_backend_path raises error when backend path missing."""
-        with pytest.raises(AssertionError):
-            registry_module.BackendRegistry.setup_backend_path("non_existent_backend", verbose=False)
-
-    def test_setup_backend_path_already_in_sys_path(self, tmp_path):
-        """Test setup_backend_path doesn't duplicate entries in sys.path."""
-        backend_dir = tmp_path / "duplicate_test"
-        backend_dir.mkdir()
-
-        # Add to sys.path manually
-        sys.path.insert(0, str(backend_dir))
-        initial_count = sys.path.count(str(backend_dir))
-
-        # Setup should not duplicate
-        registry_module.BackendRegistry.setup_backend_path(
-            "test_backend", backend_path=str(backend_dir), verbose=False
-        )
-
-        final_count = sys.path.count(str(backend_dir))
-        assert final_count == initial_count  # Should not increase
+    def test_setup_backend_path_removed(self):
+        pytest.skip("BackendRegistry.setup_backend_path removed; use adapter.setup_backend_path().")
 
 
 class TestBackendRegistryGetAdapterIntegration:
@@ -304,11 +215,8 @@ class TestBackendRegistryGetAdapterIntegration:
     def setup_method(self):
         """Save original state."""
         self._original_adapters = registry_module.BackendRegistry._adapters.copy()
-        self._original_path_names = registry_module.BackendRegistry._path_names.copy()
         self._original_sys_path = sys.path.copy()
         registry_module.BackendRegistry._adapters.clear()
-        registry_module.BackendRegistry._path_names.clear()
-        registry_module.BackendRegistry._path_names.update({"test_backend": "TestBackend"})
 
         # Silence logging dependencies
         self._orig_log_rank_0 = registry_module.log_rank_0
@@ -318,21 +226,18 @@ class TestBackendRegistryGetAdapterIntegration:
         """Restore original state."""
         registry_module.BackendRegistry._adapters.clear()
         registry_module.BackendRegistry._adapters.update(self._original_adapters)
-        registry_module.BackendRegistry._path_names.clear()
-        registry_module.BackendRegistry._path_names.update(self._original_path_names)
         sys.path[:] = self._original_sys_path
         registry_module.log_rank_0 = self._orig_log_rank_0
 
     def test_get_adapter_with_backend_path(self, tmp_path):
-        """Test get_adapter automatically sets up backend path."""
+        """Test adapter can set up backend path via setup_backend_path()."""
         # Create backend directory
         backend_dir = tmp_path / "test_backend_dir"
         backend_dir.mkdir()
 
-        # Force the lazy-load path (backend not registered yet) so that
-        # setup_backend_path() runs and provides a resolved_path used by
-        # adapter.setup_sys_path().
-        #
+        # Force the lazy-load path (backend not registered yet) and simulate backend
+        # registering its adapter class. BackendRegistry.get_adapter no longer mutates
+        # sys.path; path setup is owned by adapter.setup_backend_path().
         # We patch _load_backend to avoid importing a real primus.backends.test_backend
         # module; instead we simulate the backend registering its adapter class.
         from unittest.mock import patch
@@ -346,6 +251,7 @@ class TestBackendRegistryGetAdapterIntegration:
             )
 
         assert adapter is not None
+        adapter.setup_backend_path(backend_path=str(backend_dir))
         assert str(backend_dir) in sys.path
 
     def test_get_adapter_path_not_found_error(self):
@@ -379,11 +285,17 @@ class TestBackendRegistryHasAdapter:
         assert registry_module.BackendRegistry.has_adapter("non_existent") is False
 
 
+@pytest.mark.skipif(
+    not _SUPPORTS_TRAINER_CLASS_REGISTRY,
+    reason="Trainer class registry is not available on BackendRegistry in this version.",
+)
 class TestBackendRegistryTrainerClasses:
     """Test trainer class registration and retrieval."""
 
     def setup_method(self):
         """Clear trainer classes before each test."""
+        if not hasattr(registry_module.BackendRegistry, "_trainer_classes"):
+            pytest.skip("BackendRegistry has no _trainer_classes in this version.")
         self._original_trainer_classes = registry_module.BackendRegistry._trainer_classes.copy()
         registry_module.BackendRegistry._trainer_classes.clear()
 

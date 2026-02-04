@@ -47,21 +47,15 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
     # Task type identifier for logging
     TASK_TYPE = "Post-training (SFT/Instruction Tuning)"
 
-    def __init__(self, primus_config: Any, module_config: Any, backend_args: Any):
+    def __init__(self, backend_args: Any):
         """
         Initialize Megatron-Bridge posttrain trainer.
 
         Args:
-            primus_config: Full Primus configuration
-            module_config: Module-specific configuration
             backend_args: Megatron-Bridge argument namespace (from MegatronBridgeArgBuilder)
         """
         # Initialize MegatronBridgeBaseTrainer (which initializes BaseTrainer)
-        super().__init__(
-            primus_config=primus_config,
-            module_config=module_config,
-            backend_args=backend_args,
-        )
+        super().__init__(backend_args=backend_args)
 
     def setup(self):
         """

@@ -29,6 +29,7 @@ In-depth technical documentation:
 - **[Supported Models](./backends/overview.md#supported-models)** - Supported LLM architectures and feature compatibility matrix
 - **[Advanced Features](./advanced.md)** - Mixed precision, parallelism strategies, optimization techniques
 - **[Backend Patch Notes](./backends/overview.md)** - Primus-specific arguments for Megatron, TorchTitan, etc.
+- **[Add a Model/Backend](./backends/ADDING-MODEL-AND-BACKEND.md)** - How to add new models and backends
 
 ### 💡 Help & Support
 

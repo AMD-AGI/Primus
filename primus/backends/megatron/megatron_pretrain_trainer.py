@@ -17,8 +17,6 @@ The trainer inherits from MegatronBaseTrainer which handles:
 This class only needs to implement run_train() with the actual training logic.
 """
 
-from typing import Any
-
 from primus.backends.megatron.megatron_base_trainer import MegatronBaseTrainer
 from primus.modules.module_utils import log_rank_0
 
@@ -38,29 +36,6 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         - run_train(): Execute actual training loop (no patch management needed)
     """
 
-    def __init__(self, primus_config: Any, module_config: Any, backend_args: Any):
-        """
-        Initialize Megatron pretrain trainer.
-
-        Args:
-            primus_config: Full Primus configuration
-            module_config: Module-specific configuration
-            backend_args: Megatron-LM argument namespace (from MegatronArgBuilder)
-        """
-        # Initialize base class (handles argument injection)
-        super().__init__(
-            primus_config=primus_config,
-            module_config=module_config,
-            backend_args=backend_args,
-        )
-
-        # Training components (will be set during training)
-        self.model = None
-        self.optimizer = None
-        self.opt_param_scheduler = None
-
-        log_rank_0(f"Initialized for model: {module_config.model or 'custom'}")
-
     def setup(self):
         """
         Setup phase (optional, for compatibility with BaseModule interface).
@@ -78,10 +53,7 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             Argument injection is already done by MegatronBaseTrainer.__init__()
             This method can be used for trainer-specific initialization.
         """
-        log_rank_0(f"Initializing Megatron training...")
-        log_rank_0(f"Model: {self.module_config.model or 'custom'}")
-        log_rank_0(f"Framework: {self.module_config.framework}")
-
+        log_rank_0("Initializing Megatron training...")
         # Trainer-specific initialization can go here if needed
 
     def run_train(self):
