@@ -1,0 +1,115 @@
+###############################################################################
+# Copyright 2023–2025 Google LLC. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+import functools
+
+from flax import nnx
+from jax.sharding import Mesh
+
+from MaxText import max_utils
+from MaxText.sharding import maybe_shard_with_logical
+from MaxText.common_types import MODEL_MODE_PREFILL, Config
+from MaxText.layers import quantizations
+from MaxText.layers.attentions import Attention
+from MaxText.layers.linears import MlpBlock, Dropout
+from MaxText.layers.normalizations import RMSNorm
+from MaxText.layers.quantizations import AqtQuantization as Quant
+from MaxText.layers.llama2 import LlamaDecoderLayer
+
+
+class PrimusLlamaDecoderLayer(LlamaDecoderLayer):
+    def __init__(
+        self,
+        config: Config,
+        model_mode: str,
+        mesh: Mesh,
+        rngs: nnx.Rngs,
+        quant: None | Quant = None,
+    ):
+
+        self.config = config
+        self.mesh = mesh
+        self.quant = quant
+
+        if model_mode == MODEL_MODE_PREFILL:
+            self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+        else:
+            self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+
+        batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
+        dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
+
+        self.pre_self_attention_layer_norm = RMSNorm(
+            num_features=config.emb_dim,
+            dtype=config.dtype,
+            weight_dtype=config.weight_dtype,
+            shard_mode=config.shard_mode,
+            kernel_axes=("norm",),
+            epsilon=config.normalization_layer_epsilon,
+            rngs=rngs,
+        )
+
+        self.self_attention = Attention(
+            config=config,
+            num_query_heads=config.num_query_heads,
+            num_kv_heads=config.num_kv_heads,
+            head_dim=config.head_dim,
+            max_target_length=config.max_target_length,
+            max_prefill_predict_length=config.max_prefill_predict_length,
+            attention_kernel=config.attention,
+            inputs_q_shape=dummy_inputs_shape,
+            inputs_kv_shape=dummy_inputs_shape,
+            mesh=mesh,
+            dtype=config.dtype,
+            weight_dtype=config.weight_dtype,
+            dropout_rate=config.dropout_rate,
+            float32_qk_product=config.float32_qk_product,
+            float32_logits=config.float32_logits,
+            quant=self.quant,
+            kv_quant=quantizations.configure_kv_quant(config),
+            prefill_cache_axis_order=tuple(map(int, config.prefill_cache_axis_order.split(","))),
+            ar_cache_axis_order=tuple(map(int, config.ar_cache_axis_order.split(","))),
+            compute_axis_order=tuple(map(int, config.compute_axis_order.split(","))),
+            reshape_q=config.reshape_q,
+            use_ragged_attention=config.use_ragged_attention,
+            ragged_block_size=config.ragged_block_size,
+            query_pre_attn_scalar=(config.head_dim**-0.5),
+            model_mode=model_mode,
+            rngs=rngs,
+        )
+
+        self.post_self_attention_layer_norm = RMSNorm(
+            num_features=config.emb_dim,
+            dtype=config.dtype,
+            weight_dtype=config.weight_dtype,
+            shard_mode=config.shard_mode,
+            kernel_axes=("norm",),
+            epsilon=config.normalization_layer_epsilon,
+            rngs=rngs,
+        )
+
+        self.mlp = MlpBlock(
+            in_features=config.emb_dim,
+            intermediate_dim=config.mlp_dim,
+            activations=config.mlp_activations,
+            intermediate_dropout_rate=config.dropout_rate,
+            dtype=config.dtype,
+            weight_dtype=config.weight_dtype,
+            config=config,
+            mesh=mesh,
+            quant=self.quant,
+            model_mode=model_mode,
+            rngs=rngs,
+        )
+
+        self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=rngs)
+
+        self._maybe_shard_with_logical = functools.partial(
+            maybe_shard_with_logical,
+            mesh=self.mesh,
+            shard_mode=config.shard_mode,
+        )

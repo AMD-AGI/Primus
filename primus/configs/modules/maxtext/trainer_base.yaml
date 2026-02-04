@@ -48,7 +48,6 @@ async_checkpointing: true
 checkpoint_period: 10_000
 # enables one replica to read the ckpt then broadcast to the rest
 enable_single_replica_ckpt_restoring: false
-max_to_keep: 5
 
 force_unroll: false # during generate_param_only_checkpoint should we unroll the loop?
 
@@ -121,9 +120,11 @@ save_quantized_params_path: ""
 model_call_mode: ""
 use_qwix_quantization: false # Whether to use qwix for quantization. If set to True, the model will be quantized using qwix.
 # Quantization calibration method used for weights and activations. Supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#L70-L80
-quantization_calibration_method: "absmax"
 # Shard the range finding operation for quantization. By default this is set to number of slices.
 quantization_local_shard_count: -1
+act_quantization_calibration_method: absmax
+bwd_quantization_calibration_method: absmax
+weight_quantization_calibration_method: absmax
 
 # Global parameter scale needs to be a power of 2. If you want finer grained control of the model sizes
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
@@ -154,10 +155,6 @@ megablox: true
 sparse_matmul: true
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 use_turbo_grouped_gemm: false # requires sparse_matmul=true and JAX_ENABLE_X64=1
-# Tunable tiling dimensions used for Megablox
-tile_batch_seq: 512
-tile_activation_dim: 1024
-tile_weight_dim: 1024
 
 # How the expert axis is used to shard attention weights and activations
 # "fsdp" (ep acts as fsdp parallelism)
@@ -246,6 +243,8 @@ param_scan_axis: 1
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
 # moved to model_base.yaml
+attention_bias: False
+attention_sink: False
 
 # MLA parameters
 # moved to model_base.yaml
@@ -270,12 +269,6 @@ local_checkpoint_directory: ""
 
 # It should be a positive number when and only when `enable_emergency_checkpoint` is True.
 local_checkpoint_period: 0
-
-# Whether to use emergency checkpoint with the replicator service.
-use_replicator_service: false
-
-# The interval to backup local checkpoints to the persistent storage.
-replicator_backup_interval_minutes: 0
 
 # Jax cache directory
 jax_cache_dir: "~/jax_cache"
@@ -412,7 +405,6 @@ train_image_column: 'image'
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_image_column: 'image'
 packing: true
-max_segments: 32
 num_epoch: 1  # only grain and tfds pipeline supports num_epoch > 1
 
 # direct preference optimization (DPO)
@@ -449,6 +441,7 @@ hf_access_token: ''
 # For more details, see https://github.com/google/maxtext/blob/main/getting_started/Data_Input_Pipeline.md#grain-input-pipeline
 grain_train_files: ''
 grain_eval_files: ''
+grain_train_mixture_config_path: '' # Path to a JSON file specifying the mixture weights for Grain training data.
 grain_file_type: 'arrayrecord' # arrayrecord or parquet
 grain_worker_count: 1
 grain_worker_count_eval: 1
@@ -733,3 +726,90 @@ projector_dropout_for_vit: 0.0
 # Subslice shape in the form of "x,y,z" when using pathways (single controller).
 # Example: "8,8" to use a 8x8 subgrid (64 chips) of a full pod (16x16) of trillium.
 subslice_shape: ""
+
+# tile
+wi_tile_dlhs_batch_seq: 512
+wi_tile_dlhs_embed_dim: 1024
+wi_tile_dlhs_mlp_dim: 1024
+wi_tile_drhs_batch_seq: 512
+wi_tile_drhs_embed_dim: 1024
+wi_tile_drhs_mlp_dim: 1024
+wi_tile_fwd_batch_seq: 512
+wi_tile_fwd_embed_dim: 1024
+wi_tile_fwd_mlp_dim: 1024
+wo_tile_dlhs_batch_seq: 512
+wo_tile_dlhs_embed_dim: 1024
+wo_tile_dlhs_mlp_dim: 1024
+wo_tile_drhs_batch_seq: 512
+wo_tile_drhs_embed_dim: 1024
+wo_tile_drhs_mlp_dim: 1024
+wo_tile_fwd_batch_seq: 512
+wo_tile_fwd_embed_dim: 1024
+wo_tile_fwd_mlp_dim: 1024
+
+chat_template_path: ""
+context_parallel_strategy: all_gather
+conv_stride_for_vit: 14
+cost_estimate_flops_bwd: -1
+cost_estimate_flops_fwd: -1
+debug.rl: False
+deepstack_visual_indexes_for_vit: []
+dq_reduction_steps: 0
+enable_multi_tier_checkpointing: False
+enable_nnx: False
+enable_rampup_batch_size: False
+float32_weight_sum: True
+fsdp_shard_on_exp: False
+gdn_chunk_size: 64
+gdn_conv_kernel_dim: 4
+gdn_key_head_dim: 128
+gdn_num_key_heads: 16
+gdn_num_value_heads: 32
+gdn_value_head_dim: 128
+generate_padding_batch_eval: False
+generate_padding_batch_train: False
+global_rampup_samples: 500
+grad_dtype: float32
+grain_data_source_max_workers: 16
+grain_num_threads: 16
+grain_num_threads_eval: 16
+grain_per_worker_buffer_size: 1
+grain_per_worker_buffer_size_eval: 1
+grain_prefetch_buffer_size: 500
+grain_prefetch_buffer_size_eval: 500
+hide_profiler_step_metric: False
+max_num_checkpoints_to_keep: None
+max_num_images_per_example: -1
+max_segments_per_seq: 32
+mlp_activations_limit: -1.0
+mlp_bias: False
+moba: False
+moba_chunk_size: 1024
+moba_topk: 8
+moe_fsdp_use_two_stage_all_gather: False
+mtc_data_parallelism: 0
+multi_tier_checkpointing_backup_interval_minutes: 0
+num_position_embeddings_for_vit: 1024
+num_vocab_tiling: 1
+out_hidden_size_for_vit: 512
+partial_rotary_factor: 1.0
+per_device_batch_size_increment: 2.0
+per_device_batch_size_start: 4.0
+posemb_type_for_vit: learn
+rope_attention_scaling: False
+rope_interleave: True
+rope_linear_scaling_factor: 1.0
+rope_truncate: True
+save_checkpoint_on_completion: True
+shard_mode: auto
+shard_optimizer_over_data: False
+spatial_merge_size_for_vit: 2
+temporal_patch_size_for_vit: 2
+use_batch_split_schedule: False
+use_custom_sort_vjp: True
+use_max_logit_estimate: -1
+use_qk_norm_in_gdn: True
+use_ring_of_experts: False
+use_tokamax_gmm: False
+use_tokamax_splash: False
+use_truncation: True
