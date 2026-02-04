@@ -502,7 +502,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         model_type = getattr(args, 'model_type', 'gpt')
         log_rank_0(f"-detected model_type: {model_type}")
 
-        # Ensure softcapping attributes have default values
+        # Ensure required attributes have safe defaults if missing from config
         if not hasattr(args, 'final_logit_softcapping'):
             args.final_logit_softcapping = None
         if not hasattr(args, 'router_logit_softcapping'):
@@ -512,7 +512,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             log_rank_0(f"-enable final_logit_softcapping: {args.final_logit_softcapping}")
             self.model_provider = functools.partial(primus_model_provider, get_model_provider(model_type=model_type))
         else:
-            self.model_provider = get_model_provider(model_type=model_type)
+            log_rank_0(f"-getting model provider for model_type={model_type}")
+            model_provider = get_model_provider(model_type=model_type)
+            log_rank_0(f"-model_provider: {model_provider}")
+            self.model_provider = model_provider
 
         if args.router_logit_softcapping is not None and args.router_logit_softcapping > 0.0:
             log_rank_0(f"-enable router_logit_softcapping: {args.router_logit_softcapping}")
@@ -879,6 +882,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             log_rank_0(f"use te backend...")
 
         log_rank_0(f"-run get_model")
+        log_rank_0(f"-model_provider_func: {model_provider_func}")
+        log_rank_0(f"-model_type: {model_type}")
         model = get_model(model_provider_func, model_type)
         log_rank_0(model)
         # get_megatron_optimizer will use the ddp_config

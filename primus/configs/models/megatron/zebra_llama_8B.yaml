@@ -2,6 +2,7 @@ bases:
   - mamba_base.yaml
 
 # Zebra Llama 8B configuration
+model_type: mamba  # CRITICAL: Hybrid models must use mamba model type
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: meta-llama/Llama-3.2-1B
 
