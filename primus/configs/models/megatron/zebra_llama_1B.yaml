@@ -32,10 +32,11 @@ v_head_dim: 64      # Value head dimension
 rotary_scaling_factor: 1.0
 mscale: 1.0
 mscale_all_dim: 1.0
+normalization: "RMSNorm"
 
 # MLA uses its own internal positional encoding 
 rotary_base: 500000
 position_embedding_type: none
 add_position_embedding: true
 use_rotary_position_embeddings: false
-max_position_embeddings: 131072
+original_max_position_embeddings: 131072

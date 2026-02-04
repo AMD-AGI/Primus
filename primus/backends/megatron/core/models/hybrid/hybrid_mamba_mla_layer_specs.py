@@ -96,7 +96,6 @@ hybrid_stack_spec = ModuleSpec(
         mlp_layer=ModuleSpec(
             module=MLPLayer,
             submodules=TransformerLayerSubmodules(
-                pre_mlp_layernorm=TENorm,
                 mlp=ModuleSpec(
                     module=MLP,
                     submodules=MLPSubmodules(

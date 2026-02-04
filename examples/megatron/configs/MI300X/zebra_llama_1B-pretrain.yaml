@@ -20,17 +20,18 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 100
-      micro_batch_size: 2
+      train_iters: 500000
+      micro_batch_size: 16
       global_batch_size: 128
 
-      seq_length: 4096
-      max_position_embeddings: 4096
+      seq_length: 2048
+      max_position_embeddings: 2048
+      original_max_position_embeddings: 2048
 
       lr: 2.0e-4
-      min_lr: 2.0e-5
-      lr_warmup_iters: 200
-      lr_decay_iters: 10000
+      min_lr: 1.0e-5
+      lr_warmup_iters: 15000
+      lr_decay_iters: 485000
       lr_decay_style: cosine
       weight_decay: 0.1
       adam_beta1: 0.9
@@ -54,17 +55,28 @@ modules:
       gradient_accumulation_fusion: true
 
       # data
-      mock_data: true
-      train_data_path: null
+      mock_data: false
+      # NOTE: MegatronTrainer.update_primus_config expects *string* paths and splits on spaces.
+      # Use a folded scalar so YAML stays readable but resolves to a single space-separated string.
+      train_data_path: >
+        /vfs/silo/mingyyan/home_backup/Primus/data/fineweb-edu-100BT/HuggingFaceTokenizer/fineweb_edu_100BT_0_text_sentence
+        /vfs/silo/mingyyan/home_backup/Primus/data/fineweb-edu-100BT/HuggingFaceTokenizer/fineweb_edu_100BT_1_text_sentence
+        /vfs/silo/mingyyan/home_backup/Primus/data/fineweb-edu-100BT/HuggingFaceTokenizer/fineweb_edu_100BT_2_text_sentence
+        /vfs/silo/mingyyan/home_backup/Primus/data/fineweb-edu-100BT/HuggingFaceTokenizer/fineweb_edu_100BT_3_text_sentence
       valid_data_path: null
       test_data_path: null
 
       # ckpt
       finetune: false
       auto_continue_train: false
-      load: null
-      save: null
-      save_interval: 10000
-      disable_last_saving: true
+      load: /vfs/silo/mingyyan/home_backup/Primus/output/zebra_llama_1B-pretrain
+      save: /vfs/silo/mingyyan/home_backup/Primus/output/zebra_llama_1B-pretrain
+      save_interval: 50000
+      disable_last_saving: false
       ckpt_format: torch
+
+      # Turbo
+      # enable_primus_turbo: true
+      # use_turbo_attention: true
+      # use_turbo_grouped_mlp: true
 
