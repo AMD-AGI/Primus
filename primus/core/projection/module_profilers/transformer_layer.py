@@ -67,7 +67,9 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
         super().__init__(config, sub_profilers)
         self.layer_module = None  # Will be set during benchmarking
-        self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
+        self._cached_results = (
+            None  # Cache for (forward_time, backward_time, activation_memory)
+        )
         self._cache_key = None  # Cache key (batch_size, seq_len)
 
     def get_sub_profiler(self, name: str):
@@ -93,18 +95,28 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
         return (
-            self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 3
-            + self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len)
+            self.sub_profilers["layer_norm"].estimated_activation_memory(
+                batch_size, seq_len
+            )
+            * 3
+            + self.sub_profilers["self_attention"].estimated_activation_memory(
+                batch_size, seq_len
+            )
             + self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len)
-            + self.sub_profilers["residual_add"].estimated_activation_memory(batch_size, seq_len) * 2
+            + self.sub_profilers["residual_add"].estimated_activation_memory(
+                batch_size, seq_len
+            )
+            * 2
         )
 
-    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+    def _get_benchmark_results(
+        self, batch_size: int, seq_len: int
+    ) -> tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
             # Get TransformerConfig from the layer module itself (has fp8 setting)
-            transformer_config = getattr(self.layer_module, 'config', None)
+            transformer_config = getattr(self.layer_module, "config", None)
             self._cached_results = benchmark_layer(
                 self.layer_module,
                 [(seq_len, batch_size, self.config.model_config.hidden_size)],
@@ -130,7 +142,9 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
         super().__init__(config, sub_profilers)
         self.layer_module = None  # Will be set during benchmarking
-        self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
+        self._cached_results = (
+            None  # Cache for (forward_time, backward_time, activation_memory)
+        )
         self._cache_key = None  # Cache key (batch_size, seq_len)
 
     def get_sub_profiler(self, name: str):
@@ -157,19 +171,31 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
         return (
-            self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 3
-            + self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len)
+            self.sub_profilers["layer_norm"].estimated_activation_memory(
+                batch_size, seq_len
+            )
+            * 3
+            + self.sub_profilers["self_attention"].estimated_activation_memory(
+                batch_size, seq_len
+            )
             + self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len)
-            + self.sub_profilers["router"].estimated_activation_memory(batch_size, seq_len)
-            + self.sub_profilers["residual_add"].estimated_activation_memory(batch_size, seq_len) * 2
+            + self.sub_profilers["router"].estimated_activation_memory(
+                batch_size, seq_len
+            )
+            + self.sub_profilers["residual_add"].estimated_activation_memory(
+                batch_size, seq_len
+            )
+            * 2
         )
 
-    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+    def _get_benchmark_results(
+        self, batch_size: int, seq_len: int
+    ) -> tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
             # Get TransformerConfig from the layer module itself (has fp8 setting)
-            transformer_config = getattr(self.layer_module, 'config', None)
+            transformer_config = getattr(self.layer_module, "config", None)
             self._cached_results = benchmark_layer(
                 self.layer_module,
                 [(seq_len, batch_size, self.config.model_config.hidden_size)],
@@ -191,7 +217,9 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         return activation_memory
 
 
-def get_dense_transformer_layer_profiler_spec(config: TrainingConfig) -> "ModuleProfilerSpec":
+def get_dense_transformer_layer_profiler_spec(
+    config: TrainingConfig,
+) -> "ModuleProfilerSpec":
     return ModuleProfilerSpec(
         profiler=DenseTransformerLayerProfiler,
         config=config,
@@ -204,7 +232,9 @@ def get_dense_transformer_layer_profiler_spec(config: TrainingConfig) -> "Module
     )
 
 
-def get_moe_transformer_layer_profiler_spec(config: TrainingConfig) -> "ModuleProfilerSpec":
+def get_moe_transformer_layer_profiler_spec(
+    config: TrainingConfig,
+) -> "ModuleProfilerSpec":
     return ModuleProfilerSpec(
         profiler=MoETransformerLayerProfiler,
         config=config,
