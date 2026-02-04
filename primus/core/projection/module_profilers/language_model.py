@@ -318,8 +318,10 @@ class LanguageModelProfiler(BaseModuleProfiler):
             if hasattr(unwrapped, "output_layer"):
                 output_module = unwrapped.output_layer
 
-        print(f"\n[Primus:Performance Projection] Found {len(all_layers)} transformer layers")
-        print(f"[Primus:Performance Projection] This rank is responsible for layers: {self.layers}")
+        is_rank_0 = int(os.getenv("RANK", "0")) == 0
+        if is_rank_0:
+            print(f"\n[Primus:Performance Projection] Found {len(all_layers)} transformer layers")
+            print(f"[Primus:Performance Projection] This rank is responsible for layers: {self.layers}")
 
         embedding_stats = None
         output_stats = None
@@ -327,9 +329,11 @@ class LanguageModelProfiler(BaseModuleProfiler):
         # Benchmark embedding if this rank hosts it.
         if 0 in self.layers:
             if embedding_module is None:
-                print("[Primus:Performance Projection] WARNING: Embedding module not found on this rank.")
+                if is_rank_0:
+                    print("[Primus:Performance Projection] WARNING: Embedding module not found on this rank.")
             else:
-                print("[Primus:Performance Projection] Benchmarking embedding layer...")
+                if is_rank_0:
+                    print("[Primus:Performance Projection] Benchmarking embedding layer...")
                 profiler = self.sub_profilers["embedding"]
                 module = (
                     embedding_module.word_embeddings
@@ -340,11 +344,12 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 emb_forward = profiler.measured_forward_time(batch_size, seq_len)
                 emb_backward = profiler.measured_backward_time(batch_size, seq_len)
                 emb_mem = profiler.measured_activation_memory(batch_size, seq_len)
-                print(
-                    f"  Embedding -> fwd: {emb_forward:.2f} ms, "
-                    f"bwd: {emb_backward:.2f} ms, "
-                    f"act: {emb_mem / (1024**2):.2f} MB"
-                )
+                if is_rank_0:
+                    print(
+                        f"  Embedding -> fwd: {emb_forward:.2f} ms, "
+                        f"bwd: {emb_backward:.2f} ms, "
+                        f"act: {emb_mem / (1024**2):.2f} MB"
+                    )
                 embedding_stats = {
                     "type": "embedding",
                     "forward_time_ms": emb_forward,
@@ -356,19 +361,22 @@ class LanguageModelProfiler(BaseModuleProfiler):
         last_layer_id = self.config.model_config.num_layers - 1
         if last_layer_id in self.layers:
             if output_module is None:
-                print("[Primus:Performance Projection] WARNING: Output layer module not found on this rank.")
+                if is_rank_0:
+                    print("[Primus:Performance Projection] WARNING: Output layer module not found on this rank.")
             else:
-                print("[Primus:Performance Projection] Benchmarking output layer...")
+                if is_rank_0:
+                    print("[Primus:Performance Projection] Benchmarking output layer...")
                 profiler = self.sub_profilers["output_layer"]
                 profiler.set_module(output_module)
                 out_forward = profiler.measured_forward_time(batch_size, seq_len)
                 out_backward = profiler.measured_backward_time(batch_size, seq_len)
                 out_mem = profiler.measured_activation_memory(batch_size, seq_len)
-                print(
-                    f"  Output Layer -> fwd: {out_forward:.2f} ms, "
-                    f"bwd: {out_backward:.2f} ms, "
-                    f"act: {out_mem / (1024**2):.2f} MB"
-                )
+                if is_rank_0:
+                    print(
+                        f"  Output Layer -> fwd: {out_forward:.2f} ms, "
+                        f"bwd: {out_backward:.2f} ms, "
+                        f"act: {out_mem / (1024**2):.2f} MB"
+                    )
                 output_stats = {
                     "type": "output",
                     "forward_time_ms": out_forward,
@@ -376,13 +384,16 @@ class LanguageModelProfiler(BaseModuleProfiler):
                     "activation_memory_bytes": out_mem,
                 }
 
-        # Benchmark each layer type (dense/MoE) once
+        # ==============================================================================
+        # BENCHMARK LAYER TYPES (one of each type: dense, moe)
+        # ==============================================================================
         results = {}
         profiled_types = set()
 
         for layer_idx in self.layers:
             if layer_idx >= len(all_layers):
-                print(f"[WARNING] Layer index {layer_idx} exceeds available layers ({len(all_layers)})")
+                if is_rank_0:
+                    print(f"[WARNING] Layer index {layer_idx} exceeds available layers ({len(all_layers)})")
                 continue
 
             is_moe = self.config.model_config.moe_pattern[layer_idx]
@@ -393,7 +404,8 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
             layer_module = all_layers[layer_idx]
 
-            print(f"\n[Primus:Performance Projection] Benchmarking Layer {layer_idx} ({layer_type})...")
+            if is_rank_0:
+                print(f"\n[Primus:Performance Projection] Benchmarking Layer {layer_idx} ({layer_type})...")
 
             # Get the appropriate profiler
             if is_moe:
@@ -404,6 +416,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
             # Set the layer module
             layer_profiler.set_layer_module(layer_module)
 
+            # Benchmark full layer (uses optimized benchmark_layer with 64 iterations, warm caches)
             forward_time = layer_profiler.measured_forward_time(batch_size, seq_len)
             backward_time = layer_profiler.measured_backward_time(batch_size, seq_len)
             activation_memory = layer_profiler.measured_activation_memory(batch_size, seq_len)
@@ -439,15 +452,14 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
             profiled_types.add(layer_type)
 
-            print(f"  Forward time :  {forward_time:.2f} ms")
-            print(f"  Backward time : {backward_time:.2f} ms")
-            print(f"  Activation memory: {activation_memory / (1024**2):.2f} MB")
-            print(f"  Attention Forward: {attn_forward:.2f} ms, Backward: {attn_backward:.2f} ms")
-            print(f"  Attention Activation memory: {attn_mem / (1024**2):.2f} MB")
-            print(f"  MLP Forward: {mlp_forward:.2f} ms, Backward: {mlp_backward:.2f} ms")
-            print(f"  MLP Activation memory: {mlp_mem / (1024**2):.2f} MB")
-            # Note: Communication time (All-to-All) is already included in the benchmarked kernel timing
-            # EP scaling overhead is handled separately in performance_projection when EP is rescaled
+            is_rank_0 = int(os.getenv("RANK", "0")) == 0
+            if is_rank_0:
+                print(f"  Forward time:  {forward_time:.2f} ms")
+                print(f"  Backward time: {backward_time:.2f} ms")
+                print(f"  Total: {forward_time + backward_time:.2f} ms")
+                print(f"  Activation memory: {activation_memory / (1024**2):.2f} MB")
+                print(f"  Attention: fwd={attn_forward:.2f} ms, bwd={attn_backward:.2f} ms")
+                print(f"  MLP: fwd={mlp_forward:.2f} ms, bwd={mlp_backward:.2f} ms")
 
         # Expand results to all layers
         final_results = {}

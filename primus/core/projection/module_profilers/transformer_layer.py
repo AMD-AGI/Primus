@@ -103,9 +103,12 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
+            # Get TransformerConfig from the layer module itself (has fp8 setting)
+            transformer_config = getattr(self.layer_module, 'config', None)
             self._cached_results = benchmark_layer(
                 self.layer_module,
                 [(seq_len, batch_size, self.config.model_config.hidden_size)],
+                transformer_config=transformer_config,
             )
             self._cache_key = cache_key
         return self._cached_results
@@ -165,9 +168,12 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
+            # Get TransformerConfig from the layer module itself (has fp8 setting)
+            transformer_config = getattr(self.layer_module, 'config', None)
             self._cached_results = benchmark_layer(
                 self.layer_module,
                 [(seq_len, batch_size, self.config.model_config.hidden_size)],
+                transformer_config=transformer_config,
             )
             self._cache_key = cache_key
         return self._cached_results
