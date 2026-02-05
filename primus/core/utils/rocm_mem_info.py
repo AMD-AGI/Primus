@@ -30,21 +30,26 @@ def get_rocm_smi_mem_info(device_id: int):
     return total_mem, used_mem, free_mem
 
 
-def get_rocm_smi_gpu_util(device_id: int) -> Optional[float]:
+def get_rocm_smi_gpu_util(device_id: int, timeout: float = 5.0) -> Optional[float]:
     """
     Get GPU utilization percentage from rocm-smi.
 
     Args:
         device_id: The GPU device ID to query
+        timeout: Maximum seconds to wait for rocm-smi response (default: 5.0)
 
     Returns:
-        GPU utilization as a float (0-100), or None if unable to parse
+        GPU utilization as a float (0-100), or None if unable to parse or timeout
     """
     try:
-        out = subprocess.check_output(["rocm-smi", "--showuse", f"-d={device_id}"], text=True)
+        out = subprocess.check_output(
+            ["rocm-smi", "--showuse", f"-d={device_id}"],
+            text=True,
+            timeout=timeout,
+        )
     except FileNotFoundError:
         raise RuntimeError("rocm-smi not found, please ensure ROCm is installed and in PATH")
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
 
     match = re.search(r"GPU\s*use.*?:\s*([0-9]+)", out, re.IGNORECASE)
