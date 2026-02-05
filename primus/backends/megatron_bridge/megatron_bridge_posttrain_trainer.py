@@ -129,6 +129,11 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
 
         except Exception as e:
             log_rank_0(f"Error during post-training: {e}")
+            if ENABLE_MEMORY_PROFILING:
+                log_rank_0("Dumping memory snapshot on exception...")
+                torch.cuda.memory._dump_snapshot(f"/workspace/Primus/memory_snapshot_events-{MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT}-{module_utils._rank}.pickle")
+                torch.cuda.memory._record_memory_history(enabled=None)
+                log_rank_0("Memory history recorded.")
             raise
 
         log_rank_0("Megatron-Bridge post-train execution completed.")
