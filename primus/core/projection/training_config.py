@@ -25,6 +25,11 @@ class ModelParallelConfig:
     expert_model_parallel_size: int = 1
     use_torch_fsdp2: bool = False
     use_distributed_optimizer: bool = False
+    overlap_grad_reduce: bool = True
+    overlap_param_gather: bool = False
+    # Recomputation settings
+    recompute_granularity: str = None  # "full" or "selective"
+    recompute_num_layers: int = 0
 
 
 @dataclass

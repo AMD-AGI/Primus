@@ -94,8 +94,17 @@ def calculate_collective_communication_time(
     message_info = {}
     per_layer_info = []  # Store per-layer communication details
 
-    # 1. Gradient AllReduce (DP group)
-    if dp > 1:
+    # Check if FSDP is enabled (needed to determine gradient sync strategy)
+    mp_config = training_config.model_parallel_config
+    # Note: use_torch_fsdp2 = True means actual FSDP (shards weights, uses all-gather/reduce-scatter)
+    # use_distributed_optimizer = True means ZeRO-1 style (shards optimizer state only, uses all-reduce)
+    # These are DIFFERENT! Only FSDP2 replaces gradient all-reduce with reduce-scatter.
+    use_fsdp = getattr(mp_config, "use_torch_fsdp2", False)
+
+    # 1. Gradient AllReduce (DP group) - ONLY if NOT using FSDP2
+    # With FSDP2, gradient sync is handled by reduce-scatter, not all-reduce
+    # With distributed_optimizer (ZeRO-1), we still need gradient all-reduce
+    if dp > 1 and not use_fsdp:
         grad_size = num_params_per_rank * 4  # FP32 gradients
         ar_time_dp = cm.allreduce(coll_args, grad_size, dp, groups=["dp"])
         breakdown["gradient_allreduce"] = ar_time_dp / 1000  # Convert to ms
@@ -134,6 +143,47 @@ def calculate_collective_communication_time(
     # Note: TP AllReduce is already included in the benchmarked run, so we don't add it here
     message_info["num_layers"] = num_layers
 
+    # 3. FSDP Communication (if enabled)
+    # FSDP shards weights across DP ranks. Each layer needs:
+    #   - Forward: All-gather to reconstruct full weights
+    #   - Backward: Reduce-scatter to distribute gradients back to shards
+    # Note: use_fsdp and mp_config already defined above
+
+    if use_fsdp and dp > 1:
+        # Per-layer weight size (simplified estimate)
+        # Dense layer: ~12 * hidden^2 params (qkv_proj, o_proj, mlp up/down/gate)
+        # MoE layer: similar attention + num_experts * expert_params
+        ffn_hidden = model_config.ffn_hidden_size or hidden_size * 4
+        params_per_dense_layer = hidden_size * hidden_size * 4 + hidden_size * ffn_hidden * 3  # attn + MLP
+        params_per_dense_layer = params_per_dense_layer // tp  # Divide by TP (params are TP-sharded)
+
+        # Weight size in bytes (BF16 = 2 bytes)
+        weight_size_per_layer = params_per_dense_layer * 2
+
+        # All-gather: each rank sends its shard (1/DP), receives full weights
+        # Total data moved = weight_size * (DP-1)/DP per rank
+        ag_time_per_layer = cm.allgather(coll_args, weight_size_per_layer, dp, groups=["dp"])
+
+        # Reduce-scatter: each rank sends full gradients, receives its shard
+        # Gradients are in FP32 for optimizer (4 bytes), but reduce-scatter often uses BF16
+        grad_size_per_layer = params_per_dense_layer * 2  # BF16 gradients for communication
+        rs_time_per_layer = cm.reduce_scatter(coll_args, grad_size_per_layer, dp, groups=["dp"])
+
+        # Calculate total FSDP time for all layers
+        total_fsdp_ag_fwd = (ag_time_per_layer * num_layers) / 1000  # ms
+        total_fsdp_rs_bwd = (rs_time_per_layer * num_layers) / 1000  # ms
+
+        breakdown["fsdp_allgather_fwd"] = total_fsdp_ag_fwd
+        breakdown["fsdp_reducescatter_bwd"] = total_fsdp_rs_bwd
+        message_info["fsdp_weight_size_per_layer_mb"] = weight_size_per_layer / (1024 * 1024)
+        message_info["fsdp_ag_per_layer_ms"] = ag_time_per_layer / 1000
+        message_info["fsdp_rs_per_layer_ms"] = rs_time_per_layer / 1000
+        message_info["fsdp_enabled"] = True
+    else:
+        breakdown["fsdp_allgather_fwd"] = 0.0
+        breakdown["fsdp_reducescatter_bwd"] = 0.0
+        message_info["fsdp_enabled"] = False
+
     # Note: PP P2P communication is NOT calculated here because it's already
     # accounted for in the pipeline scheduler simulator (simulator.py).
     # The simulator handles send/receive synchronization and bubble time.
@@ -163,7 +213,6 @@ def calculate_collective_communication_time(
     total_comm_time = sum(breakdown.values())
 
     # Check if gradient all-reduce should be overlapped
-    mp_config = training_config.model_parallel_config
     overlap_grad_reduce = getattr(mp_config, "overlap_grad_reduce", True)  # Default to True
 
     # If overlapped, don't add to critical path
@@ -172,6 +221,41 @@ def calculate_collective_communication_time(
         message_info["gradient_allreduce_overlapped"] = True
     else:
         message_info["gradient_allreduce_overlapped"] = False
+
+    # Check if FSDP communication can be overlapped
+    # In FSDP2, prefetch can overlap all-gather with compute of current layer
+    # Reduce-scatter can overlap with forward of next microbatch
+    # However, overlap is NOT 100%:
+    #   - First layer's all-gather cannot overlap (nothing before it)
+    #   - Last layer's reduce-scatter cannot overlap (nothing after it)
+    #   - There's always some exposed communication at boundaries
+    if use_fsdp and dp > 1:
+        overlap_fsdp = getattr(mp_config, "use_torch_fsdp2", False)  # FSDP2 has better overlap
+        if overlap_fsdp:
+            # Calculate per-layer times
+            fsdp_ag_per_layer = message_info.get("fsdp_ag_per_layer_ms", 0)
+            fsdp_rs_per_layer = message_info.get("fsdp_rs_per_layer_ms", 0)
+
+            # Exposed time: first layer's all-gather + last layer's reduce-scatter
+            # Plus some overhead from imperfect pipelining (~10-20% of remaining)
+            exposed_ag = fsdp_ag_per_layer  # First layer cannot overlap
+            exposed_rs = fsdp_rs_per_layer  # Last layer cannot overlap
+            remaining_ag = breakdown.get("fsdp_allgather_fwd", 0) - exposed_ag
+            remaining_rs = breakdown.get("fsdp_reducescatter_bwd", 0) - exposed_rs
+
+            # Assume ~70% overlap efficiency for the rest (conservative for multi-node)
+            overlap_efficiency = 0.7
+            hidden_ag = remaining_ag * overlap_efficiency
+            hidden_rs = remaining_rs * overlap_efficiency
+
+            total_comm_time -= hidden_ag
+            total_comm_time -= hidden_rs
+            message_info["fsdp_overlapped"] = True
+            message_info["fsdp_exposed_ms"] = (
+                exposed_ag + exposed_rs + (remaining_ag + remaining_rs) * (1 - overlap_efficiency)
+            )
+        else:
+            message_info["fsdp_overlapped"] = False
 
     return total_comm_time, breakdown, message_info, per_layer_info
 
@@ -197,13 +281,21 @@ def extract_single_node_time_from_profiling(profiling_results: dict, training_co
         print("-" * 100)
 
     model_config = training_config.model_config
+    mp_config = training_config.model_parallel_config
     moe_pattern = model_config.moe_pattern  # Full model pattern (e.g., 27 layers)
+
+    # Get recomputation settings
+    recompute_granularity = getattr(mp_config, "recompute_granularity", None)
+    recompute_num_layers = getattr(mp_config, "recompute_num_layers", 0) or 0
+    num_total_layers = len(moe_pattern)
 
     # Get profiled layer indices
     profiled_layer_indices = sorted([k for k in profiling_results.keys() if isinstance(k, int)])
     if is_rank_0:
         print(f"  Profiled layers: {profiled_layer_indices}")
-        print(f"  Full model has {len(moe_pattern)} transformer layers")
+        print(f"  Full model has {num_total_layers} transformer layers")
+        if recompute_granularity == "full" and recompute_num_layers > 0:
+            print(f"  Recomputation: {recompute_num_layers} layers (granularity={recompute_granularity})")
 
     total_time_ms = 0.0
 
@@ -215,23 +307,33 @@ def extract_single_node_time_from_profiling(profiling_results: dict, training_co
         if is_rank_0:
             print(f"  Embedding: {emb_time:.2f} ms")
 
-    # Analyze profiled transformer layers
+    # Analyze profiled transformer layers - track forward times separately for recompute
     profiled_dense_times = []
+    profiled_dense_fwd_times = []
     profiled_moe_times = []
+    profiled_moe_fwd_times = []
 
     for layer_idx in profiled_layer_indices:
         if layer_idx < len(moe_pattern):
             layer_data = profiling_results[layer_idx]
-            layer_time = layer_data.get("forward_time_ms", 0) + layer_data.get("backward_time_ms", 0)
+            fwd_time = layer_data.get("forward_time_ms", 0)
+            bwd_time = layer_data.get("backward_time_ms", 0)
+            layer_time = fwd_time + bwd_time
 
             if moe_pattern[layer_idx] == 0:
                 profiled_dense_times.append(layer_time)
+                profiled_dense_fwd_times.append(fwd_time)
             else:
                 profiled_moe_times.append(layer_time)
+                profiled_moe_fwd_times.append(fwd_time)
 
     # Calculate averages from profiled layers
     avg_dense_time = sum(profiled_dense_times) / len(profiled_dense_times) if profiled_dense_times else 0
+    avg_dense_fwd = (
+        sum(profiled_dense_fwd_times) / len(profiled_dense_fwd_times) if profiled_dense_fwd_times else 0
+    )
     avg_moe_time = sum(profiled_moe_times) / len(profiled_moe_times) if profiled_moe_times else 0
+    avg_moe_fwd = sum(profiled_moe_fwd_times) / len(profiled_moe_fwd_times) if profiled_moe_fwd_times else 0
 
     # Count total dense and MoE layers in full model
     num_dense_layers = sum(1 for x in moe_pattern if x == 0)
@@ -248,12 +350,12 @@ def extract_single_node_time_from_profiling(profiling_results: dict, training_co
     if is_rank_0:
         if profiled_dense_times:
             print(f"  Dense Layers: {len(profiled_dense_times)} profiled → {num_dense_layers} total")
-            print(f"    Avg per layer: {avg_dense_time:.2f} ms")
+            print(f"    Avg per layer: {avg_dense_time:.2f} ms (fwd={avg_dense_fwd:.2f} ms)")
             print(f"    Total time: {total_dense_time:.2f} ms")
 
         if profiled_moe_times:
             print(f"  MoE Layers: {len(profiled_moe_times)} profiled → {num_moe_layers} total")
-            print(f"    Avg per layer: {avg_moe_time:.2f} ms")
+            print(f"    Avg per layer: {avg_moe_time:.2f} ms (fwd={avg_moe_fwd:.2f} ms)")
             print(f"    Total time: {total_moe_time:.2f} ms")
 
     # Output layer
@@ -264,10 +366,34 @@ def extract_single_node_time_from_profiling(profiling_results: dict, training_co
         if is_rank_0:
             print(f"  Output Layer: {out_time:.2f} ms")
 
+    # Add recomputation overhead
+    # With recompute_granularity="full", during backward pass the forward is re-run for recomputed layers
+    # This adds approximately 1x forward time per recomputed layer
+    recompute_overhead_ms = 0.0
+    if recompute_granularity == "full" and recompute_num_layers > 0:
+        # Calculate how many dense vs MoE layers are recomputed
+        # Typically recompute_num_layers applies to all transformer layers
+        recompute_ratio = min(recompute_num_layers, num_total_layers) / num_total_layers
+
+        # Recompute overhead = forward time for recomputed layers
+        recompute_dense_layers = int(num_dense_layers * recompute_ratio)
+        recompute_moe_layers = int(num_moe_layers * recompute_ratio)
+
+        recompute_overhead_ms = (avg_dense_fwd * recompute_dense_layers) + (
+            avg_moe_fwd * recompute_moe_layers
+        )
+        total_time_ms += recompute_overhead_ms
+
+        if is_rank_0:
+            print(f"  Recomputation Overhead: {recompute_overhead_ms:.2f} ms")
+            print(f"    ({recompute_dense_layers} dense + {recompute_moe_layers} MoE layers recomputed)")
+
     if is_rank_0:
         print("-" * 100)
         print(f"[Primus:Performance Projection] Extrapolated Baseline Time: {total_time_ms:.2f} ms/iteration")
-        print(f"  (Based on {len(profiled_layer_indices)} profiled layers → {len(moe_pattern)} total layers)")
+        if recompute_overhead_ms > 0:
+            print(f"  (Includes {recompute_overhead_ms:.2f} ms recomputation overhead)")
+        print(f"  (Based on {len(profiled_layer_indices)} profiled layers → {num_total_layers} total layers)")
         print("=" * 100)
 
     return total_time_ms
@@ -1338,6 +1464,14 @@ def _run_multinode_projection(
         hardware_config_dict,
     )
 
+    # Add exposed FSDP communication time to projected time
+    # (total_comm_time_ms already has overlap accounted for - it's the critical path)
+    # Note: gradient all-reduce is already handled above with max(compute, ar)
+    # So we only add FSDP exposed time here (don't double-count gradient AR)
+    fsdp_exposed = message_info.get("fsdp_exposed_ms", 0)
+    if fsdp_exposed > 0:
+        projected_time_ms += fsdp_exposed
+
     # Calculate values needed for both printing and return
     target_world_size = target_nodes * gpus_per_node
     target_dp_for_microbatch = target_world_size // (tp * pp * cp)
@@ -1352,6 +1486,21 @@ def _run_multinode_projection(
     target_microbatches_per_gpu = (
         global_batch // (micro_batch * target_dp_for_microbatch) if target_dp_for_microbatch > 0 else 1
     )
+
+    # Handle edge case where global_batch is smaller than micro_batch * target_dp
+    if target_microbatches_per_gpu == 0:
+        if is_rank_0:
+            required_batch = micro_batch * target_dp_for_microbatch
+            print(
+                f"⚠️  WARNING: global_batch_size ({global_batch}) < micro_batch ({micro_batch}) × target_DP ({target_dp_for_microbatch}) = {required_batch}"
+            )
+            print(
+                f"   Consider increasing global_batch_size to at least {required_batch} for {target_nodes} nodes"
+            )
+            print(
+                f"   Using 1 microbatch for projection (effective global_batch = {micro_batch * target_dp_for_microbatch})"
+            )
+        target_microbatches_per_gpu = 1
 
     # If time already includes all microbatches (from pipeline simulation), use it directly
     # Otherwise, multiply per-microbatch time by number of microbatches
@@ -1396,7 +1545,7 @@ def _run_multinode_projection(
                         f" (message: {message_info['moe_a2a_size_mb']:.2f} MB, {message_info['num_moe_layers']} layers × {message_info['moe_a2a_per_layer_fwd']:.3f} ms/layer)"
                     )
                 else:
-                    print()
+                    print("")
         print(f"   Total Communication (critical path): {total_comm_time_ms:.3f} ms")
 
         # Target Configuration Summary (at the end for easy visibility)
