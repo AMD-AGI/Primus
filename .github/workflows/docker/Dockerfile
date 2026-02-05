@@ -71,7 +71,7 @@ RUN cd /opt && \
     pip3 install --no-build-isolation . -v \
     cd ep/deep_ep_wrapper && pip3 install --no-build-isolation . -v
 
-RUN rm -rf /tmp/uccl
+RUN rm -rf /opt/uccl
 
 # Set the default working directory
 WORKDIR /opt
