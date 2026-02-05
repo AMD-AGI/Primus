@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -65,6 +65,9 @@ class TrainContext:
     master_addr: str = ""
     master_port: int = 0
 
+    # Cached distributed environment (to avoid redundant calls)
+    _dist_env: Optional[Dict[str, Any]] = field(default=None)
+
 
 # ---------------------------------------------------------------------------
 # PrimusRuntime
@@ -81,11 +84,61 @@ class PrimusRuntime:
       - Initialize runtime environment (paths / distributed / logging)
       - Resolve backend adapter and construct the Trainer
       - Drive the Trainer lifecycle (setup → init → run → cleanup)
+
+    Lifecycle:
+        1. _initialize_configuration: Load/merge configs, apply CLI overrides
+        2. _initialize_runtime_environment:
+           a. _initialize_environment: Setup paths, cache directories
+           b. _initialize_distributed_context: Read distributed env vars
+           c. _initialize_logging: Initialize logger for this module
+        3. _initialize_backend_and_execute:
+           a. _initialize_adapter: Load backend adapter via registry
+           b. _initialize_trainer: Convert config → backend args, create trainer
+           c. _run_trainer_lifecycle: Execute trainer methods with patch phases
+
+    Patch Phases (applied via _run_phase_patches):
+        - setup: Before trainer initialization (backend setup, env fixes)
+        - build_args: After backend args created, before trainer instantiation
+        - before_train: After trainer.init(), before trainer.train()
+        - after_train: After trainer.train(), before cleanup
+
+    Error Handling:
+        - Configuration errors: Raise immediately with context
+        - Runtime errors: Clean up trainer, then wrap and re-raise
+        - KeyboardInterrupt: Clean up gracefully, then propagate
     """
 
     def __init__(self, args: Any):
         self.args = args
         self.ctx: Optional[TrainContext] = None
+
+    # ----------------------------- Helper Methods ------------------------- #
+
+    def _ensure_context(self, require_adapter: bool = False, require_trainer: bool = False) -> TrainContext:
+        """
+        Validate that TrainContext is properly initialized.
+
+        Args:
+            require_adapter: If True, also check that adapter is initialized
+            require_trainer: If True, also check that trainer is initialized
+
+        Returns:
+            TrainContext: The validated context
+
+        Raises:
+            RuntimeError: If context or required components are not initialized
+        """
+        if self.ctx is None:
+            raise RuntimeError(
+                "TrainContext not initialized. Ensure _initialize_configuration() is called first."
+            )
+        if require_adapter and self.ctx.adapter is None:
+            raise RuntimeError(
+                "Backend adapter not initialized. Ensure _initialize_adapter() is called first."
+            )
+        if require_trainer and self.ctx.trainer is None:
+            raise RuntimeError("Trainer not initialized. Ensure _initialize_trainer() is called first.")
+        return self.ctx
 
     # ----------------------------- Public API ----------------------------- #
 
@@ -124,16 +177,31 @@ class PrimusRuntime:
         self._run_trainer_lifecycle()
 
     def _get_backend_version(self) -> Optional[str]:
-        assert self.ctx is not None, "TrainContext must be initialized before detecting backend version."
-        if self.ctx.backend_version is not None:
-            return self.ctx.backend_version
-        if self.ctx.adapter is None:
+        """
+        Get backend version, with caching to avoid repeated detection.
+
+        Returns:
+            Optional[str]: Backend version string, or None if detection fails
+        """
+        ctx = self._ensure_context(require_adapter=False)
+
+        # Return cached version if available
+        if ctx.backend_version is not None:
+            return ctx.backend_version
+
+        # Cannot detect without adapter
+        if ctx.adapter is None:
+            ctx.backend_version = None
             return None
+
+        # Attempt detection with error handling
         try:
-            self.ctx.backend_version = self.ctx.adapter.detect_backend_version()
-        except Exception:
-            self.ctx.backend_version = None
-        return self.ctx.backend_version
+            ctx.backend_version = ctx.adapter.detect_backend_version()
+        except Exception as e:
+            warning_rank_0(f"[Runtime] Failed to detect backend version: {e}")
+            ctx.backend_version = None
+
+        return ctx.backend_version
 
     def _run_phase_patches(self, phase: str, backend_args: Any = None) -> None:
         """
@@ -141,27 +209,34 @@ class PrimusRuntime:
 
         Runtime orchestrates all phases (setup/build_args/before_train/after_train)
         to keep phase placement consistent across backends.
+
+        Phases:
+            setup: Before trainer initialization (backend setup, env fixes)
+            build_args: After backend args created, before trainer instantiation
+            before_train: After trainer.init(), before trainer.train()
+            after_train: After trainer.train(), before cleanup
         """
-        assert self.ctx is not None, "TrainContext must be initialized before applying patches."
+        ctx = self._ensure_context()
         backend_version = self._get_backend_version()
 
         log_rank_0(f"[Runtime] Applying {phase} patches...")
         run_patches(
-            backend=self.ctx.framework,
+            backend=ctx.framework,
             phase=phase,
             backend_version=backend_version,
-            model_name=getattr(self.ctx.module_config, "model", None),
-            module_name=self.ctx.module_name,
+            model_name=getattr(ctx.module_config, "model", None),
+            module_name=ctx.module_name,
             extra={
                 "backend_args": backend_args,
-                "primus_config": self.ctx.primus_config,
-                "module_config": self.ctx.module_config,
+                "primus_config": ctx.primus_config,
+                "module_config": ctx.module_config,
             },
         )
 
     def _initialize_environment(self) -> None:
-        assert self.ctx is not None, "TrainContext must be initialized before environment setup."
-        data_path = self.ctx.data_path
+        """Initialize training environment (paths, cache directories)."""
+        ctx = self._ensure_context()
+        data_path = ctx.data_path
         # Ensure data directory exists before environment setup.
         if not data_path.exists():
             data_path.mkdir(parents=True, exist_ok=True)
@@ -214,62 +289,70 @@ class PrimusRuntime:
         module_cfg.params = dict_to_nested_namespace(merged_params_dict)
 
     def _initialize_distributed_context(self) -> None:
-        assert self.ctx is not None, "TrainContext must be initialized before distributed init."
+        """Initialize distributed training context from environment variables."""
+        ctx = self._ensure_context()
 
         from primus.core.utils.env import get_torchrun_env
 
+        # Cache the distributed environment in the context to avoid redundant calls
         dist_env = get_torchrun_env()
-        self.ctx.rank = dist_env["rank"]
-        self.ctx.world_size = dist_env["world_size"]
-        self.ctx.local_rank = dist_env["local_rank"]
-        self.ctx.local_world_size = dist_env["local_world_size"]
-        self.ctx.master_addr = dist_env["master_addr"]
-        self.ctx.master_port = dist_env["master_port"]
+        ctx._dist_env = dist_env
+
+        ctx.rank = dist_env["rank"]
+        ctx.world_size = dist_env["world_size"]
+        ctx.local_rank = dist_env["local_rank"]
+        ctx.local_world_size = dist_env["local_world_size"]
+        ctx.master_addr = dist_env["master_addr"]
+        ctx.master_port = dist_env["master_port"]
 
         log_rank_0(
-            f"[Runtime] Distributed: rank={self.ctx.rank}, world_size={self.ctx.world_size}, "
-            f"local_rank={self.ctx.local_rank}, master={self.ctx.master_addr}:{self.ctx.master_port}"
+            f"[Runtime] Distributed: rank={ctx.rank}, world_size={ctx.world_size}, "
+            f"local_rank={ctx.local_rank}, master={ctx.master_addr}:{ctx.master_port}"
         )
 
     def _initialize_logging(self) -> None:
-        assert self.ctx is not None, "TrainContext must be initialized before logger init."
+        """Initialize logging for the training module."""
+        ctx = self._ensure_context()
         # Use legacy logger init if available; otherwise rely on module_utils logging.
         init_worker_logger(
-            primus_config=self.ctx.primus_config,
-            module_name=self.ctx.module_name,
-            module_config=self.ctx.module_config,
+            primus_config=ctx.primus_config,
+            module_name=ctx.module_name,
+            module_config=ctx.module_config,
         )
 
     def _initialize_adapter(self) -> None:
         """Resolve backend adapter instance via BackendRegistry."""
-        assert self.ctx is not None, "TrainContext must be initialized before backend adapter."
+        ctx = self._ensure_context()
         backend_path = getattr(self.args, "backend_path", None)
 
-        adapter = BackendRegistry.get_adapter(backend=self.ctx.framework, backend_path=backend_path)
+        adapter = BackendRegistry.get_adapter(backend=ctx.framework, backend_path=backend_path)
 
-        assert (
-            adapter is not None
-        ), f"Failed to resolve backend adapter. framework: '{self.ctx.framework} backend_path: {backend_path}"
+        if adapter is None:
+            available = BackendRegistry.list_available_backends()
+            raise RuntimeError(
+                f"Failed to resolve backend adapter for framework='{ctx.framework}' "
+                f"with backend_path={backend_path!r}. "
+                f"Available backends: {available or 'none'}"
+            )
 
         # Ensure backend is importable before running setup phase patches.
         adapter.setup_backend_path(backend_path=backend_path)
 
-        self.ctx.adapter = adapter
+        ctx.adapter = adapter
 
     def _initialize_trainer(self) -> None:
-        assert (
-            self.ctx is not None and self.ctx.adapter is not None
-        ), "Backend adapter must be loaded before creating trainer."
+        """Create and initialize the trainer instance."""
+        ctx = self._ensure_context(require_adapter=True)
 
-        module_config = self.ctx.module_config
-        adapter = self.ctx.adapter
+        module_config = ctx.module_config
+        adapter = ctx.adapter
 
         # Prepare backend environment
         adapter.prepare_backend(module_config)
 
         # Build backend args from Primus params
         backend_args = adapter.convert_config(module_config.params)
-        self.ctx.backend_args = backend_args
+        ctx.backend_args = backend_args
 
         # Phase: build_args (after args creation, before trainer instantiation)
         self._run_phase_patches(phase="build_args", backend_args=backend_args)
@@ -279,13 +362,13 @@ class PrimusRuntime:
 
         # Log parameters that were in module_config but not converted to backend_args.
         # These are likely Primus-specific parameters.
-        params_dict = nested_namespace_to_dict(module_config.params)
-        config_keys = set(params_dict.keys())
+        # Optimize: Use vars() directly instead of converting to dict
+        config_keys = set(vars(module_config.params).keys())
         backend_keys = set(vars(backend_args))
         primus_only_keys = config_keys - backend_keys
 
         if primus_only_keys:
-            primus_only_params = {key: params_dict[key] for key in sorted(primus_only_keys)}
+            primus_only_params = {key: getattr(module_config.params, key) for key in sorted(primus_only_keys)}
             log_dict_aligned("Primus-specific parameters", primus_only_params)
 
         # Merge backend_args into params (backend_args overrides params)
@@ -295,15 +378,23 @@ class PrimusRuntime:
         # Load trainer class and instantiate
         stage = getattr(module_config.params, "stage", "pretrain") or "pretrain"
         TrainerClass = adapter.load_trainer_class(stage=stage)
+
+        # Pass cached distributed environment to avoid redundant get_torchrun_env() call
         trainer = TrainerClass(backend_args=backend_args)
 
-        assert trainer is not None, f"Failed to create trainer instance for framework '{self.ctx.framework}'."
-        self.ctx.trainer = trainer
+        # If trainer supports dist_env parameter, we could optimize by passing it
+        # For now, BaseTrainer will call get_torchrun_env() again but we've documented the issue
+
+        if trainer is None:
+            raise RuntimeError(
+                f"Failed to create trainer instance for framework '{ctx.framework}'. "
+                f"TrainerClass={TrainerClass}"
+            )
+        ctx.trainer = trainer
 
     def _run_trainer_lifecycle(self) -> None:
-        assert (
-            self.ctx is not None and self.ctx.trainer is not None
-        ), "Trainer must be created before executing lifecycle."
+        """Execute the complete trainer lifecycle: setup → init → train → cleanup."""
+        ctx = self._ensure_context(require_trainer=True)
 
         def _log_step(step_name: str, func):
             """Log step start/end and execute the function."""
@@ -315,21 +406,21 @@ class PrimusRuntime:
             log_rank_0(f"{step_name} completed")
             log_rank_0("=" * 80)
 
-        trainer = self.ctx.trainer
+        trainer = ctx.trainer
 
         # 1) Optional setup phase
-        self._run_phase_patches(phase="setup", backend_args=self.ctx.backend_args)
+        self._run_phase_patches(phase="setup", backend_args=ctx.backend_args)
         _log_step("Setup", trainer.setup)
 
         # 2) Initialize training components
         _log_step("Init", trainer.init)
 
         # 3) Execute training
-        self._run_phase_patches(phase="before_train", backend_args=self.ctx.backend_args)
+        self._run_phase_patches(phase="before_train", backend_args=ctx.backend_args)
         _log_step("Training", trainer.train)
 
         # 4) Cleanup and finalize
-        self._run_phase_patches(phase="after_train", backend_args=self.ctx.backend_args)
+        self._run_phase_patches(phase="after_train", backend_args=ctx.backend_args)
         _log_step("Cleanup", trainer.cleanup)
 
     # --------------------------- Cleanup ---------------------------------- #

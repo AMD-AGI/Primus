@@ -10,13 +10,16 @@ from typing import Any, Dict
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Recursively merge two dictionaries.
+    Recursively merge two dictionaries with copy-on-write optimization.
 
     Rules:
       - override wins (override overwrites base)
       - nested dicts are merged recursively
       - non-dict values replaced directly
       - override can introduce new fields
+
+    Optimization: Only copies modified branches instead of deep-copying
+    the entire base dict upfront, reducing memory usage for large configs.
 
     Example:
         base = {"a": 1, "b": {"x": 10, "y": 20}}
@@ -28,13 +31,23 @@ def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]
             "c": 3,
         }
     """
-    result = copy.deepcopy(base)
+    result = {}
 
-    for key, val in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(val, dict):
-            result[key] = deep_merge(result[key], val)  # recursive merge
+    # Copy base keys, recursively merging if needed
+    for key, val in base.items():
+        if key not in override:
+            result[key] = val
+        elif isinstance(val, dict) and isinstance(override[key], dict):
+            # Recursive merge for nested dicts
+            result[key] = deep_merge(val, override[key])
         else:
-            result[key] = val  # override or append
+            # Override value wins
+            result[key] = override[key]
+
+    # Add new keys from override
+    for key in override:
+        if key not in base:
+            result[key] = override[key]
 
     return result
 
