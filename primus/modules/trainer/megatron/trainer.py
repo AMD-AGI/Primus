@@ -433,6 +433,30 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         log_kv_rank_0(f"  -wandb_save_dir", f"{args.wandb_save_dir}")
         log_kv_rank_0(f"  -wandb_entity", f"{args.wandb_entity}")
 
+        # mlflow - auto-enable dependencies
+        # If any mlflow_upload_* flag is True, auto-enable mlflow
+        mlflow_upload_flags = [
+            getattr(args, "mlflow_upload_traces", False),
+            getattr(args, "mlflow_upload_logs", False),
+            getattr(args, "mlflow_upload_tracelens_report", False),
+            getattr(args, "mlflow_upload_performance_metrics", False),
+        ]
+        if any(mlflow_upload_flags) and args.disable_mlflow:
+            args.disable_mlflow = False
+            debug_rank_0("Auto-enabled MLflow (disable_mlflow=False) because mlflow_upload_* flags are set")
+
+        # If uploading traces or tracelens reports, auto-enable profiling
+        needs_profiling = getattr(args, "mlflow_upload_traces", False) or getattr(
+            args, "mlflow_upload_tracelens_report", False
+        )
+        if needs_profiling:
+            if not getattr(args, "profile", False):
+                args.profile = True
+                debug_rank_0("Auto-enabled profile=True for mlflow trace/tracelens upload")
+            if not getattr(args, "use_pytorch_profiler", False):
+                args.use_pytorch_profiler = True
+                debug_rank_0("Auto-enabled use_pytorch_profiler=True for mlflow trace/tracelens upload")
+
         # mlflow
         log_kv_rank_0(f"-disable_mlflow", f"{args.disable_mlflow}")
         if not args.disable_mlflow:
@@ -2173,34 +2197,41 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
                 # Upload performance metrics to MLflow
                 # Groups: Performance (throughput, TPS, iteration time), Memory (peak, usage %), System (GPU util)
-                if getattr(args, "mlflow_upload_performance_metrics", False) and mlflow_writer:
-                    # Performance metrics
-                    mlflow_writer.log_metric("perf/throughput_tflops_per_gpu", throughput, iteration)
-                    mlflow_writer.log_metric("perf/tps_tokens_per_sec_per_gpu", token_throughput, iteration)
-                    mlflow_writer.log_metric(
-                        "perf/iteration_time_ms",
-                        elapsed_time_per_iteration * 1000.0,
-                        iteration,
-                    )
-                    # Memory metrics
-                    mlflow_writer.log_metric(
-                        f"perf/{mem_collector}_peak_mem_gb",
-                        used_mem / 1024 / 1024 / 1024,
-                        iteration,
-                    )
-                    mlflow_writer.log_metric(
-                        f"perf/{mem_collector}_mem_utilization_pct",
-                        mem_usage * 100.0,
-                        iteration,
-                    )
+                # NOTE: mlflow_writer only exists on last rank, but all_gather requires all ranks to participate
+                if getattr(args, "mlflow_upload_performance_metrics", False):
                     # System metrics - GPU utilization per rank
-                    # Use -1 as sentinel for unavailable GPU util to ensure all ranks participate in all_gather
+                    # ALL ranks must participate in all_gather, even if they don't have mlflow_writer
+                    # Use -1 as sentinel for unavailable GPU util
                     util_value = rocm_gpu_util if rocm_gpu_util is not None else -1.0
                     util_tensor = torch.tensor([util_value], device="cuda", dtype=torch.float32)
                     world_size = dist.get_world_size()
                     gathered_utils = [torch.zeros_like(util_tensor) for _ in range(world_size)]
                     dist.all_gather(gathered_utils, util_tensor)
-                    if dist.get_rank() == world_size - 1:  # MLflow runs on last rank
+
+                    # Only the last rank (which has mlflow_writer) logs the metrics
+                    if mlflow_writer:
+                        # Performance metrics
+                        mlflow_writer.log_metric("perf/throughput_tflops_per_gpu", throughput, iteration)
+                        mlflow_writer.log_metric(
+                            "perf/tps_tokens_per_sec_per_gpu", token_throughput, iteration
+                        )
+                        mlflow_writer.log_metric(
+                            "perf/iteration_time_ms",
+                            elapsed_time_per_iteration * 1000.0,
+                            iteration,
+                        )
+                        # Memory metrics
+                        mlflow_writer.log_metric(
+                            f"perf/{mem_collector}_peak_mem_gb",
+                            used_mem / 1024 / 1024 / 1024,
+                            iteration,
+                        )
+                        mlflow_writer.log_metric(
+                            f"perf/{mem_collector}_mem_utilization_pct",
+                            mem_usage * 100.0,
+                            iteration,
+                        )
+                        # Log GPU utilization from gathered values
                         valid_utils = []
                         for rank, util_val in enumerate(gathered_utils):
                             util = util_val.item()
