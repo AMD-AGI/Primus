@@ -47,13 +47,15 @@ class SchedulerSimulationRunner:
         chunk_idx = chunk or 0
         if self.chunk_time_ms is None:
             if func_type == FuncType.F:
-                return float(self.config["fwd_time"])
+                return float(self.config["fwd_time"]) // scheduler_config["vpp_size"]
             elif func_type == FuncType.B:
-                return float(self.config["bwd_time"])
+                return float(self.config["bwd_time"]) // scheduler_config["vpp_size"]
             elif func_type == FuncType.W:
-                return float(self.config["wgrad_time"])
+                return float(self.config["wgrad_time"]) // scheduler_config["vpp_size"]
             elif func_type == FuncType.BW:
-                return float(self.config["bwd_time"]) + float(self.config["wgrad_time"])
+                return (
+                    float(self.config["bwd_time"]) + float(self.config["wgrad_time"])
+                ) // scheduler_config["vpp_size"]
             else:
                 return 0.0
 
