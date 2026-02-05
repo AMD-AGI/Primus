@@ -38,7 +38,7 @@ class TestMegatronAdapterVersionDetection:
         )
 
         adapter = MegatronAdapter()
-        version = adapter.detect_backend_version()
+        version = adapter.load_trainer_class().detect_version()
 
         assert version == "0.15.0rc8"
 
