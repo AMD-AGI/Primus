@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import argparse
 import json
 import os
 from enum import Enum
@@ -12,6 +13,7 @@ import matplotlib
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
+import yaml
 
 
 class Pipeline_Color(str, Enum):
@@ -120,6 +122,12 @@ def get_task_data(task_list):
             task_data["config"] = json.load(f)
 
         pp_size = task_data["config"]["pp_size"]
+
+        if "vp_size" not in task_data["config"]:
+            task_data["config"]["vp_size"] = task_data["config"]["vpp_size"]
+        if "num_mbs" not in task_data["config"]:
+            task_data["config"]["num_mbs"] = task_data["config"]["micro_batches"]
+
         vp_size = task_data["config"]["vp_size"]
         num_mbs = task_data["config"]["num_mbs"]
 
@@ -307,7 +315,7 @@ def draw(task_data_list):
     plt.show()
 
 
-def main():
+def draw_from_task_list():
     show_exps = ["pp8", "pp8_vpp2"]
     task_list = [
         {
@@ -324,5 +332,30 @@ def main():
     draw(task_data_list)
 
 
+def draw_from_config(args):
+    yaml_config = yaml.load(open(args.config, "r"), Loader=yaml.SafeLoader)
+    print(yaml_config)
+
+    exp_names = [exp["name"] for exp in yaml_config["schedulers"]]
+    task_list = [
+        {
+            "title": exp_name,
+            "iter_to_vis": [0],
+            "log_path": f"{yaml_config['output_dir']}/{exp_name}/",
+        }
+        for exp_name in exp_names
+    ]
+    matplotlib.use("WebAgg")
+
+    task_data_list = get_task_data(task_list)
+    draw(task_data_list)
+
+
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default=None)
+    args = parser.parse_args()
+    if args.config is not None:
+        draw_from_config(args)
+    else:
+        draw_from_task_list()
