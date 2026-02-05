@@ -117,50 +117,23 @@ class MegatronBridgeAdapter(BackendAdapter):
         return bridge_args
 
     def detect_backend_version(self) -> str:
-        """
-        Detect Megatron-Bridge version for logging and patching.
-
-        Note: We read the version file directly instead of importing to avoid
-        triggering __init__.py, which imports all model classes (some may not
-        be available in the current transformers version).
-
-        Returns:
-            Version string (e.g., "0.3.0rc0")
-
-        Raises:
-            RuntimeError: If version cannot be detected
-        """
-        import os
-        import re
+        """Detect Megatron-Bridge version via AST parsing (avoids __init__.py execution)."""
+        import ast
         import sys
+        from pathlib import Path
 
-        # Strategy 1: Read package_info.py directly (avoids __init__.py imports)
+        def parse_version(package_info_path: Path) -> str:
+            tree = ast.parse(package_info_path.read_text())
+            for node in tree.body:
+                if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                    name = getattr(node.targets[0], "id", None)
+                    if name == "__version__":
+                        return ast.literal_eval(node.value)
+            raise RuntimeError(f"__version__ not found in {package_info_path}")
+
         for path in sys.path:
-            package_info_file = os.path.join(path, "megatron", "bridge", "package_info.py")
-            if os.path.exists(package_info_file):
-                try:
-                    with open(package_info_file, "r", encoding="utf-8") as f:
-                        content = f.read()
+            package_info_path = Path(path) / "megatron" / "bridge" / "package_info.py"
+            if package_info_path.exists():
+                return parse_version(package_info_path)
 
-                    # Match: __version__ = "x.y.z" or __version__ = 'x.y.z'
-                    match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
-                    if match:
-                        version = match.group(1)
-                        log_rank_0(f"Detected Megatron-Bridge version: {version}")
-                        return version
-
-                except Exception as e:
-                    log_rank_0(f"Warning: Failed to read {package_info_file}: {e}")
-                    continue
-
-        # Strategy 2: Try importing (may fail due to __init__.py model imports)
-        try:
-            from megatron.bridge.package_info import __version__
-
-            log_rank_0(f"Detected Megatron-Bridge version: {__version__}")
-            return __version__
-        except ImportError as e:
-            raise RuntimeError(
-                f"Failed to detect Megatron-Bridge version. "
-                f"package_info.py not found and import failed: {e}"
-            )
+        raise RuntimeError("Cannot locate megatron/bridge/package_info.py in sys.path")

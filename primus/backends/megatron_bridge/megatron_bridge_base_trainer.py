@@ -16,6 +16,7 @@ This mirrors the role of TorchTitanBaseTrainer for TorchTitan:
     - Handles common setup logic shared across all Megatron-Bridge training tasks
 """
 
+from types import SimpleNamespace
 from typing import Any
 
 from primus.backends.megatron.training.global_vars import set_primus_global_variables
@@ -57,11 +58,15 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
 
         import primus.backends.megatron.patches  # noqa: F401
 
+        # Create module_config from backend_args for patch context
+        module_config = SimpleNamespace(params=self.backend_args)
+
         run_patches(
             backend="megatron",
             phase="before_train",
             backend_version=type(self).detect_megatron_version(),
             extra={
+                "module_config": module_config,
                 "backend_args": self.backend_args,
             },
         )
