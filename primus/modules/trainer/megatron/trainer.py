@@ -2194,22 +2194,26 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                         iteration,
                     )
                     # System metrics - GPU utilization per rank
-                    if rocm_gpu_util is not None:
-                        util_tensor = torch.tensor([rocm_gpu_util], device="cuda", dtype=torch.float32)
-                        world_size = dist.get_world_size()
-                        gathered_utils = [torch.zeros_like(util_tensor) for _ in range(world_size)]
-                        dist.all_gather(gathered_utils, util_tensor)
-                        if dist.get_rank() == world_size - 1:  # MLflow runs on last rank
-                            for rank, util_val in enumerate(gathered_utils):
-                                util = util_val.item()
-                                if util >= 0:
-                                    mlflow_writer.log_metric(
-                                        f"perf/gpu_utilization_pct_rank{rank}",
-                                        util,
-                                        iteration,
-                                    )
-                            # Also log average GPU utilization
-                            avg_util = sum(t.item() for t in gathered_utils) / world_size
+                    # Use -1 as sentinel for unavailable GPU util to ensure all ranks participate in all_gather
+                    util_value = rocm_gpu_util if rocm_gpu_util is not None else -1.0
+                    util_tensor = torch.tensor([util_value], device="cuda", dtype=torch.float32)
+                    world_size = dist.get_world_size()
+                    gathered_utils = [torch.zeros_like(util_tensor) for _ in range(world_size)]
+                    dist.all_gather(gathered_utils, util_tensor)
+                    if dist.get_rank() == world_size - 1:  # MLflow runs on last rank
+                        valid_utils = []
+                        for rank, util_val in enumerate(gathered_utils):
+                            util = util_val.item()
+                            if util >= 0:  # Filter out sentinel values (-1)
+                                mlflow_writer.log_metric(
+                                    f"perf/gpu_utilization_pct_rank{rank}",
+                                    util,
+                                    iteration,
+                                )
+                                valid_utils.append(util)
+                        # Also log average GPU utilization (only from valid values)
+                        if valid_utils:
+                            avg_util = sum(valid_utils) / len(valid_utils)
                             mlflow_writer.log_metric(
                                 "perf/gpu_utilization_pct_avg",
                                 avg_util,
