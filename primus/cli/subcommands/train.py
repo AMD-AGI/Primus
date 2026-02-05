@@ -17,7 +17,7 @@ def _resolve_pretrain_runtime(args) -> str:
 
     Priority:
       1) Explicit env override via PRIMUS_TRAIN_RUNTIME
-      2) Auto-detect by backend framework (TorchTitan -> core, others -> legacy)
+      2) Auto-detect by backend framework (TorchTitan Megatron -> core, others -> legacy)
     """
     runtime_entry = getenv("PRIMUS_TRAIN_RUNTIME", "").strip().lower()
     if runtime_entry in ("legacy", "core"):
@@ -38,7 +38,8 @@ def _resolve_pretrain_runtime(args) -> str:
     except Exception:
         framework = None
 
-    return "core" if framework == "torchtitan" else "legacy"
+    supported_frameworks = ["torchtitan", "megatron"]
+    return "core" if framework in supported_frameworks else "legacy"
 
 
 def run(args, overrides: List[str]):
