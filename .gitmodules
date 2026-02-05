@@ -15,3 +15,6 @@
 [submodule "third_party/Megatron-Bridge"]
 	path = third_party/Megatron-Bridge
 	url = https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+[submodule "third_party/HummingbirdXT"]
+	path = third_party/HummingbirdXT
+	url = https://github.com/AMD-AGI/HummingbirdXT.git
