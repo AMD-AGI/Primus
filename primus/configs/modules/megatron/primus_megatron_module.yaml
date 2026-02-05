@@ -25,8 +25,8 @@ mlflow_upload_logs: true             # Upload training log files to MLflow
 #   Default: [0, 8] = one rank per node (assumes 8 GPUs/node)
 #   Use null for all ranks, or customize list like [0, 1, 8, 9] for more coverage
 # ----------------------------------------------------------------------------
-generate_tracelens_report: true     # Generate TraceLens analysis reports locally
-mlflow_upload_tracelens_report: true  # Upload TraceLens reports to MLflow (implies generation)
+generate_tracelens_report: false    # Generate TraceLens analysis reports locally (auto-enabled when upload=true)
+mlflow_upload_tracelens_report: false # Upload TraceLens reports to MLflow (auto-enables generation, profiling, tensorboard)
 mlflow_tracelens_ranks: [0, 8]       # List of ranks to analyze (default: one per node for 2-node setup)
 mlflow_tracelens_output_format: all  # TraceLens report format: all (xlsx+csv), xlsx, or csv
 mlflow_tracelens_cleanup_after_upload: false  # Keep local reports (true to cleanup and save disk space)
