@@ -462,6 +462,25 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         log_kv_rank_0(f"  -wandb_save_dir", f"{args.wandb_save_dir}")
         log_kv_rank_0(f"  -wandb_entity", f"{args.wandb_entity}")
 
+        # mlflow - auto-enable dependencies
+        # If mlflow_upload_traces or mlflow_upload_logs is True, auto-enable mlflow
+        mlflow_upload_flags = [
+            getattr(args, "mlflow_upload_traces", False),
+            getattr(args, "mlflow_upload_logs", False),
+        ]
+        if any(mlflow_upload_flags) and args.disable_mlflow:
+            args.disable_mlflow = False
+            debug_rank_0("Auto-enabled MLflow (disable_mlflow=False) because mlflow_upload_* flags are set")
+
+        # If uploading traces, auto-enable profiling
+        if getattr(args, "mlflow_upload_traces", False):
+            if not getattr(args, "profile", False):
+                args.profile = True
+                debug_rank_0("Auto-enabled profile=True for mlflow trace upload")
+            if not getattr(args, "use_pytorch_profiler", False):
+                args.use_pytorch_profiler = True
+                debug_rank_0("Auto-enabled use_pytorch_profiler=True for mlflow trace upload")
+
         # mlflow
         log_kv_rank_0(f"-disable_mlflow", f"{args.disable_mlflow}")
         if not args.disable_mlflow:
