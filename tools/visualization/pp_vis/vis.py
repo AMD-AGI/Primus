@@ -333,7 +333,8 @@ def draw_from_task_list():
 
 
 def draw_from_config(args):
-    yaml_config = yaml.load(open(args.config, "r"), Loader=yaml.SafeLoader)
+    with open(args.config, "r") as f:
+        yaml_config = yaml.load(f, Loader=yaml.SafeLoader)
     print(yaml_config)
 
     exp_names = [exp["name"] for exp in yaml_config["schedulers"]]
