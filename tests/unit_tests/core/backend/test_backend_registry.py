@@ -27,7 +27,7 @@ class MockAdapter(BackendAdapter):
     def prepare_backend(self, config):
         pass
 
-    def convert_config(self, config):
+    def convert_config(self, params):
         return {}
 
     def load_trainer_class(self, stage: str = "pretrain"):

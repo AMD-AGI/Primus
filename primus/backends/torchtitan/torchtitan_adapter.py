@@ -76,30 +76,10 @@ class TorchTitanAdapter(BackendAdapter):
             return "unknown"
 
     # Config → TorchTitan JobConfig
-    def convert_config(self, module_config: Any):
-        """
-        Convert Primus ModuleConfig → TorchTitan configuration Namespace.
-
-        This layer:
-            - Takes module_config.params (which already includes CLI overrides)
-            - Merges them into TorchTitan's default JobConfig
-            - Produces a SimpleNamespace (consistent with MegatronAdapter)
-
-        Note: build_args patches are applied automatically by the base class
-        after this method returns.
-
-        Args:
-            module_config: ModuleConfig instance with params dict
-
-        Returns:
-            SimpleNamespace with TorchTitan configuration
-        """
-        # Instantiate the builder
+    def convert_config(self, params: Any):
+        """Convert Primus params to TorchTitan argument Namespace."""
         builder = TorchTitanJobConfigBuilder()
-
-        # Feed in config params (already merged with CLI overrides in train_launcher)
-        # module_config.params is a flat dict of TorchTitan-recognized fields.
-        builder.update(module_config.params)
+        builder.update(params)
 
         # Produce the final TorchTitan Namespace (with distributed env injected)
         titan_args = builder.finalize()

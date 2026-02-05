@@ -30,7 +30,7 @@ class DummyTrainer(BaseTrainer):
         """No-op setup for testing."""
         return None
 
-    def run_train(self):
+    def train(self):
         self.run_calls += 1
 
     @classmethod
@@ -44,7 +44,7 @@ class DummyTrainer(BaseTrainer):
 
 
 class TestBaseTrainerPatchIntegration:
-    """Verify that BaseTrainer.run delegates to run_train()."""
+    """Verify that BaseTrainer.run delegates to train()."""
 
     def test_run_invokes_patches_and_training(self, monkeypatch):
         # Silence logging inside BaseTrainer

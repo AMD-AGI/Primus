@@ -9,7 +9,7 @@ Unit tests for MegatronPretrainTrainer.
 
 Focus:
     - Construction behavior (delegates to MegatronBaseTrainer and initializes fields)
-    - run_train wiring to Megatron pretrain entrypoint
+    - train wiring to Megatron pretrain entrypoint
 """
 
 import sys
@@ -68,13 +68,13 @@ class TestMegatronPretrainTrainer:
         assert trainer.optimizer is None
         assert trainer.opt_param_scheduler is None
 
-    def test_run_train_invokes_megatron_pretrain_with_expected_arguments(
+    def test_train_invokes_megatron_pretrain_with_expected_arguments(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ):
         trainer = _build_trainer(monkeypatch)
 
-        # Prepare fake Megatron and helper modules used inside run_train().
+        # Prepare fake Megatron and helper modules used inside train().
         calls: List[Tuple[tuple, dict]] = []
 
         # 1) megatron.core.enums.ModelType
@@ -121,7 +121,7 @@ class TestMegatronPretrainTrainer:
         monkeypatch.setitem(sys.modules, "primus.core.utils.import_utils", import_utils_mod)
 
         # Execute training wiring.
-        trainer.run_train()
+        trainer.train()
 
         # Train datasets provider should be marked distributed.
         assert train_valid_test_datasets_provider.is_distributed is True

@@ -141,9 +141,8 @@ class TestMegatronAdapterConfigConversion:
         )
         mock_builder.finalize.return_value = mock_args
 
-        # Create mock module_config
-        mock_module_config = Mock()
-        mock_module_config.params = {
+        # Create mock params
+        mock_params = {
             "micro_batch_size": 4,
             "global_batch_size": 32,
             "seq_length": 2048,
@@ -151,10 +150,10 @@ class TestMegatronAdapterConfigConversion:
 
         # Test conversion
         adapter = MegatronAdapter()
-        result = adapter.convert_config(mock_module_config)
+        result = adapter.convert_config(mock_params)
 
         # Verify builder was called correctly
-        mock_builder.update.assert_called_once_with(mock_module_config.params)
+        mock_builder.update.assert_called_once_with(mock_params)
         mock_builder.finalize.assert_called_once()
 
         # Verify result
@@ -171,13 +170,12 @@ class TestMegatronAdapterConfigConversion:
         mock_builder_class.return_value = mock_builder
         mock_builder.finalize.return_value = SimpleNamespace()
 
-        mock_module_config = Mock()
-        mock_module_config.params = {}
+        mock_params = {}
 
         adapter = MegatronAdapter()
-        result = adapter.convert_config(mock_module_config)
+        result = adapter.convert_config(mock_params)
 
-        mock_builder.update.assert_called_once_with({})
+        mock_builder.update.assert_called_once_with(mock_params)
         assert isinstance(result, SimpleNamespace)
 
 
@@ -277,7 +275,7 @@ class TestMegatronAdapterIntegration:
         adapter.prepare_backend(mock_module_config)
 
         # 2. Convert config
-        backend_args = adapter.convert_config(mock_module_config)
+        backend_args = adapter.convert_config(mock_module_config.params)
         assert backend_args.micro_batch_size == 4
 
         # 3. Load trainer class

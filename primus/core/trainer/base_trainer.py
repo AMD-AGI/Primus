@@ -12,7 +12,7 @@ backends (Megatron, TorchTitan, JAX/Maxtext, etc.).
 
 Responsibilities:
     - Provide access to configuration and runtime context
-    - Define training lifecycle (setup, init, run_train, cleanup)
+    - Define training lifecycle (setup, init, train, cleanup)
     - Access distributed training parameters from environment
     - Store backend-specific arguments
 """
@@ -35,7 +35,7 @@ class BaseTrainer(ABC):
     Subclasses (backend-specific trainers) must implement:
         - setup(): Pre-initialization setup (optional logic)
         - init(): Initialize training components
-        - run_train(): The actual training logic
+        - train(): The actual training logic
 
     Example hierarchy:
         BaseTrainer (this class)
@@ -77,7 +77,7 @@ class BaseTrainer(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def run_train(self):
+    def train(self):
         """
         Execute the actual training loop.
 
@@ -85,16 +85,16 @@ class BaseTrainer(ABC):
         the task-specific training logic.
 
         Example (MegatronPretrainTrainer):
-            def run_train(self):
+            def train(self):
                 from megatron.training import pretrain
                 pretrain(train_valid_test_datasets_provider, model_provider, ...)
 
         Example (TorchtitanPretrainTrainer):
-            def run_train(self):
+            def train(self):
                 from torchtitan.train import train
                 train(config, ...)
         """
-        raise NotImplementedError(f"{self.__class__.__name__} must implement run_train()")
+        raise NotImplementedError(f"{self.__class__.__name__} must implement train()")
 
     def cleanup(self, on_error: bool = False):
         """

@@ -81,7 +81,7 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
 
         log_rank_0("Post-training initialization completed")
 
-    def run_train(self):
+    def train(self):
         """
         Execute Megatron-Bridge post-training (SFT, instruction tuning).
 

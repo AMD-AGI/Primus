@@ -5,7 +5,7 @@
 ###############################################################################
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 
 class BackendAdapter(ABC):
@@ -121,18 +121,15 @@ class BackendAdapter(ABC):
         """
 
     @abstractmethod
-    def convert_config(self, config: Any) -> Dict[str, Any]:
+    def convert_config(self, params: Any) -> Any:
         """
-        Convert TypedConfig (PrimusConfig + ModuleConfig) to backend args.
+        Convert Primus params to backend-specific arguments.
 
-        Example:
-            Primus PretrainConfig -> Megatron args OR Titan args
+        Args:
+            params: Parameters from module_config.params (SimpleNamespace or dict)
 
-        Note: build_args patches are applied automatically by the base class
-        after this method returns.
-
-        Return:
-            A dict or namespace containing args for the backend trainer.
+        Returns:
+            Backend-specific arguments (SimpleNamespace or dict)
         """
 
     @abstractmethod

@@ -12,7 +12,7 @@ These tests verify that:
 """
 
 from types import SimpleNamespace
-from typing import Any, Dict, List
+from typing import Any, List
 
 import pytest
 
@@ -57,8 +57,8 @@ class DummyBackendAdapter(adapter_module.BackendAdapter):
     def prepare_backend(self, config: Any):
         self.prepare_calls.append(config)
 
-    def convert_config(self, config: Any) -> Dict[str, Any]:
-        self.convert_calls.append(config)
+    def convert_config(self, params: Any) -> Any:
+        self.convert_calls.append(params)
         # Use SimpleNamespace instead of a plain dict so that BackendAdapter
         # can treat backend_args like a real backend object:
         #   - vars(backend_args) works (matching how real argparse.Namespace behaves)
@@ -67,7 +67,7 @@ class DummyBackendAdapter(adapter_module.BackendAdapter):
         return SimpleNamespace(
             lr=1e-4,
             global_batch_size=128,
-            model_name=getattr(config, "model", None),
+            model_name=params.get("model") if isinstance(params, dict) else getattr(params, "model", None),
         )
 
     def load_trainer_class(self, stage: str = "pretrain"):
@@ -104,12 +104,12 @@ def test_create_trainer_orchestrates_flow(monkeypatch, primus_config, module_con
 
     # Abstract methods were called exactly once
     adapter.prepare_backend(module_config)
-    adapter.convert_config(module_config)
+    adapter.convert_config(module_config.params)
     adapter.load_trainer_class(stage="pretrain")
     adapter.detect_backend_version()
 
     assert adapter.prepare_calls == [module_config]
-    assert adapter.convert_calls == [module_config]
+    assert adapter.convert_calls == [module_config.params]
     assert adapter.load_trainer_calls == 1
     assert adapter.detect_version_calls == 1
 

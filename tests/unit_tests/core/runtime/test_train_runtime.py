@@ -105,7 +105,7 @@ class TestPrimusRuntime(PrimusUT):
             def prepare_backend(self, module_config):
                 return None
 
-            def convert_config(self, module_config):
+            def convert_config(self, params):
                 raise RuntimeError("trainer boom")
 
             def load_trainer_class(self, stage: str = "pretrain"):

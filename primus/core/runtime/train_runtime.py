@@ -262,13 +262,13 @@ class PrimusRuntime:
         adapter = self.ctx.adapter
 
         # Phase: setup (before backend environment preparation)
-        self._run_phase_patches(phase="setup", backend_args=None)
+        # self._run_phase_patches(phase="setup", backend_args=None)
 
         # Prepare backend environment (sys.path customization is already handled by BackendRegistry.get_adapter())
         adapter.prepare_backend(module_config)
 
-        # Build backend args from Primus module_config
-        backend_args = adapter.convert_config(module_config)
+        # Build backend args from Primus params
+        backend_args = adapter.convert_config(module_config.params)
         self.ctx.backend_args = backend_args
 
         # Phase: build_args (after args creation, before trainer instantiation)
@@ -288,22 +288,12 @@ class PrimusRuntime:
             primus_only_params = {key: params_dict[key] for key in sorted(primus_only_keys)}
             log_dict_aligned("Primus-specific parameters", primus_only_params)
 
-        params = getattr(module_config, "params", None)
-        if hasattr(backend_args, "__dict__") and hasattr(params, "__dict__"):
-            backend_keys = set(vars(backend_args).keys())
-            params_keys = set(vars(params).keys())
-            excepts = list(backend_keys & params_keys)
-            merge_namespace(backend_args, params, allow_override=False, excepts=excepts)
-            module_config.params = backend_args
+        # Merge backend_args into params (backend_args overrides params)
+        merge_namespace(backend_args, module_config.params, allow_override=False, excepts=[])
+        module_config.params = backend_args
 
         # Load trainer class and instantiate
-        stage = "pretrain"
-        params_obj = getattr(module_config, "params", None)
-        if hasattr(params_obj, "stage"):
-            stage = getattr(params_obj, "stage") or "pretrain"
-        elif isinstance(params_obj, dict) and "stage" in params_obj:
-            stage = params_obj.get("stage") or "pretrain"
-
+        stage = getattr(module_config.params, "stage", "pretrain") or "pretrain"
         TrainerClass = adapter.load_trainer_class(stage=stage)
         trainer = TrainerClass(backend_args=backend_args)
 
@@ -328,6 +318,7 @@ class PrimusRuntime:
         trainer = self.ctx.trainer
 
         # 1) Optional setup phase
+        self._run_phase_patches(phase="setup", backend_args=self.ctx.backend_args)
         _log_step("Setup", trainer.setup)
 
         # 2) Initialize training components
@@ -335,7 +326,7 @@ class PrimusRuntime:
 
         # 3) Execute training
         self._run_phase_patches(phase="before_train", backend_args=self.ctx.backend_args)
-        _log_step("Training", trainer.run_train)
+        _log_step("Training", trainer.train)
 
         # 4) Cleanup and finalize
         self._run_phase_patches(phase="after_train", backend_args=self.ctx.backend_args)

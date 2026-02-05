@@ -100,31 +100,10 @@ class MegatronBridgeAdapter(BackendAdapter):
 
         return resolved
 
-    def convert_config(self, module_config: Any):
-        """
-        Convert Primus ModuleConfig → Megatron-Bridge configuration Namespace.
-
-        This layer:
-            - Takes module_config.params (which already includes CLI overrides)
-            - Merges them into Megatron-Bridge's configuration
-            - Produces a SimpleNamespace (consistent with MegatronAdapter)
-            - Handles recipe-based configuration if specified
-
-        Note: build_args patches are applied automatically by the base class
-        after this method returns.
-
-        Args:
-            module_config: ModuleConfig instance with params dict
-
-        Returns:
-            SimpleNamespace with Megatron-Bridge configuration
-        """
-        # Instantiate the builder
+    def convert_config(self, params: Any):
+        """Convert Primus params to Megatron-Bridge argument Namespace."""
         builder = MegatronBridgeArgBuilder()
-
-        # Feed in config params (already merged with CLI overrides in train_launcher)
-        # module_config.params is a flat dict of Megatron-Bridge-recognized fields.
-        builder.update(module_config.params)
+        builder.update(params)
 
         # Produce the final Megatron-Bridge Namespace
         bridge_args = builder.finalize()

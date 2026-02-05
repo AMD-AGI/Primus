@@ -18,7 +18,7 @@ The trainer inherits from ``TorchTitanBaseTrainer`` which handles:
 This class only needs to implement:
     - setup(): optional pre-initialization
     - init(): construct the underlying TorchTitan Trainer
-    - run_train(): call into TorchTitan's training loop
+    - train(): call into TorchTitan's training loop
 """
 
 from typing import Any, Optional
@@ -75,14 +75,14 @@ class TorchTitanPretrainTrainer(TorchTitanBaseTrainer):
     # Training entrypoint
     # --------------------------------------------------------------------- #
 
-    def run_train(self):
+    def train(self):
         """
         Execute TorchTitan pre-training using its Trainer.train() loop.
 
         This method is called by BaseTrainer.run() after applying patches.
         """
         if self._trainer is None:
-            raise RuntimeError("TorchTitanPretrainTrainer.init() must be called before run_train().")
+            raise RuntimeError("TorchTitanPretrainTrainer.init() must be called before train().")
 
         log_rank_0("Executing TorchTitan pretrain...")
         self._trainer.train()
