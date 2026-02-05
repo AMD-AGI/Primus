@@ -136,6 +136,36 @@ def _set_mlflow_writer(args):
         _GLOBAL_MLFLOW_WRITER = mlflow
 
 
+def end_mlflow_run(status="FINISHED", termination_reason=None):
+    """End MLflow run with specified status.
+
+    Args:
+        status: MLflow run status - "FINISHED", "FAILED", or "KILLED".
+        termination_reason: Optional free-form string tag recorded as
+            "termination_reason" on the run.
+    """
+    global _GLOBAL_MLFLOW_WRITER
+
+    if _GLOBAL_MLFLOW_WRITER is None:
+        return
+
+    try:
+        # Optionally attach a coarse termination reason tag for debugging.
+        if termination_reason is not None:
+            try:
+                _GLOBAL_MLFLOW_WRITER.set_tag("termination_reason", termination_reason)
+            except Exception:
+                # Ignore tagging failures; status update is more important.
+                pass
+
+        _GLOBAL_MLFLOW_WRITER.end_run(status=status)
+    except Exception:
+        # Swallow MLflow/network errors to avoid masking the original failure.
+        pass
+    finally:
+        _GLOBAL_MLFLOW_WRITER = None
+
+
 def unset_global_variables():
     """Unset global vars."""
 
