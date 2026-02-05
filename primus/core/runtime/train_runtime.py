@@ -205,7 +205,8 @@ class PrimusRuntime:
             return
 
         override_dict: Dict[str, Any] = parse_cli_overrides(overrides)
-        log_rank_0(f"[Runtime] Applying CLI overrides: {override_dict}")
+        # Use print() here since logger may not be initialized yet
+        print(f"[Primus:Runtime] Applying CLI overrides: {override_dict}")
 
         # module_cfg.params is a nested SimpleNamespace tree; convert to dict for merging,
         # apply deep_merge, then convert back to SimpleNamespace.
@@ -226,8 +227,9 @@ class PrimusRuntime:
         self.ctx.master_addr = dist_env["master_addr"]
         self.ctx.master_port = dist_env["master_port"]
 
-        log_rank_0(
-            f"[Runtime] Distributed: rank={self.ctx.rank}, world_size={self.ctx.world_size}, "
+        # Use print() here since logger may not be initialized yet
+        print(
+            f"[Primus:Env] rank={self.ctx.rank}, world_size={self.ctx.world_size}, "
             f"local_rank={self.ctx.local_rank}, master={self.ctx.master_addr}:{self.ctx.master_port}"
         )
 
