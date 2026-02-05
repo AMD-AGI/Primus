@@ -53,7 +53,19 @@ def patch_torchtitan_moe(ctx: PatchContext) -> None:
     torchtitan.models.moe.moe._run_experts_grouped_mm = functools.partial(
         _run_experts_grouped_mm,
         use_fp8=use_moe_fp8,
+    )   
+        
+    # GPT-OSS has a different function signature, so we need a different implementation
+    import torchtitan.models.gpt_oss.model.moe
+    from primus.backends.torchtitan.models.gpt_oss.model.moe import (
+        _run_experts_grouped_mm as gptoss_run_experts_grouped_mm
     )
+    
+    gptoss_patched_function = functools.partial(
+        gptoss_run_experts_grouped_mm,
+        use_fp8=use_moe_fp8,
+    )
+    torchtitan.models.gpt_oss.model.moe._run_experts_grouped_mm = gptoss_patched_function
 
     log_rank_0(
         "[Patch:torchtitan.primus_turbo.moe_grouped_mm] "

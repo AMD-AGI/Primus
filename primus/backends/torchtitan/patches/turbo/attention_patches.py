@@ -31,11 +31,11 @@ from primus.modules.module_utils import log_rank_0
 )
 def patch_turbo_attention(ctx: PatchContext) -> None:
     """
-    Monkey patch LLaMA3, LLaMA4 and DeepSeek-V3 to use Primus-Turbo Attention.
+    Monkey patch LLaMA3, LLaMA4, DeepSeek-V3 , GPT-OSS to use Primus-Turbo Attention.
     """
     log_rank_0(
         "[Patch:torchtitan.primus_turbo.turbo_attention] "
-        "Enabling Primus-Turbo Attention for LLaMA3/LLaMA4/DeepSeek-V3...",
+        "Enabling Primus-Turbo Attention for LLaMA3/LLaMA4/DeepSeek-V3/GPT-OSS...",
     )
 
     # ******* LLaMA3 Attention Model *******
@@ -56,6 +56,15 @@ def patch_turbo_attention(ctx: PatchContext) -> None:
 
     torchtitan.models.llama4.model.model.Attention = Llama4Attention
 
+        # ******* GPT-OSS Attention Model *******
+    import torchtitan.models.gpt_oss.model.model
+
+    from primus.backends.torchtitan.models.gpt_oss.model.model import (
+        Attention as GptOssAttention,
+    )
+
+    torchtitan.models.gpt_oss.model.model.Attention = GptOssAttention
+
     # ******* DeepSeek-V3 Attention Model *******
     import torchtitan.models.deepseek_v3.model.model
 
@@ -68,5 +77,5 @@ def patch_turbo_attention(ctx: PatchContext) -> None:
     log_rank_0(
         "[Patch:torchtitan.primus_turbo.turbo_attention] "
         "Primus-Turbo Attention successfully installed "
-        "for LLaMA3, LLaMA4 and DeepSeek-V3.",
-    )
+        "for LLaMA3, LLaMA4, DeepSeek-V3  GPT-OSS.",
+    )   
