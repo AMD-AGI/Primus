@@ -180,56 +180,42 @@ class TestMegatronAdapterConfigConversion:
 
 
 class TestMegatronAdapterTrainerLoading:
-    """Test trainer class loading from BackendRegistry."""
+    """Test trainer class loading."""
 
-    @patch("primus.backends.megatron.megatron_adapter.BackendRegistry")
-    def test_load_trainer_class_success(self, mock_registry):
+    @patch("primus.backends.megatron.megatron_adapter.log_rank_0")
+    def test_load_trainer_class_success(self, mock_log):
         """Test successful trainer class loading."""
-        # Mock trainer class
-        mock_trainer_class = type("MegatronPretrainTrainer", (), {})
-        mock_registry.get_trainer_class.return_value = mock_trainer_class
-
         adapter = MegatronAdapter()
         result = adapter.load_trainer_class()
 
-        mock_registry.get_trainer_class.assert_called_once_with("megatron", stage="pretrain")
-        assert result == mock_trainer_class
+        # Should return the actual MegatronPretrainTrainer class
+        from primus.backends.megatron.megatron_pretrain_trainer import (
+            MegatronPretrainTrainer,
+        )
 
-    @patch("primus.backends.megatron.megatron_adapter.BackendRegistry")
-    def test_load_trainer_class_not_registered(self, mock_registry):
-        """Test error handling when trainer not registered."""
-        mock_registry.get_trainer_class.side_effect = ValueError("Backend not registered")
+        assert result == MegatronPretrainTrainer
 
+    def test_load_trainer_class_invalid_stage(self):
+        """Test error handling for invalid stage."""
         adapter = MegatronAdapter()
 
-        with pytest.raises(RuntimeError) as exc_info:
-            adapter.load_trainer_class()
+        with pytest.raises(ValueError) as exc_info:
+            adapter.load_trainer_class(stage="invalid_stage")
 
-        error_msg = str(exc_info.value)
-        assert "megatron" in error_msg
-        assert "not registered" in error_msg
+        assert "Invalid stage" in str(exc_info.value)
 
 
 class TestMegatronAdapterBackendPreparation:
     """Test backend preparation workflow."""
 
-    @patch("primus.backends.megatron.megatron_adapter.log_rank_0")
-    @patch("primus.backends.megatron.megatron_adapter.BackendRegistry")
-    def test_prepare_backend_success(self, mock_registry, mock_log):
+    @patch("primus.modules.module_utils.log_rank_0")
+    def test_prepare_backend_success(self, mock_log):
         """Test successful backend preparation."""
         adapter = MegatronAdapter()
         mock_config = Mock()
 
-        # Should not raise
+        # Should not raise - prepare_backend is inherited from BackendAdapter
         adapter.prepare_backend(mock_config)
-
-        # Verify setup was called
-        mock_registry.run_setup.assert_called_once_with("megatron")
-
-        # Verify logging
-        mock_log.assert_called()
-        log_message = mock_log.call_args[0][0]
-        assert "Backend prepared" in log_message
 
 
 class TestMegatronAdapterInitialization:
@@ -249,11 +235,11 @@ class TestMegatronAdapterInitialization:
 class TestMegatronAdapterIntegration:
     """Integration tests for complete adapter workflow."""
 
+    @patch("primus.modules.module_utils.log_rank_0")
     @patch("primus.backends.megatron.megatron_adapter.MegatronAdapter.detect_backend_version")
-    @patch("primus.backends.megatron.megatron_adapter.BackendRegistry")
     @patch("primus.backends.megatron.megatron_adapter.MegatronArgBuilder")
     @patch("primus.backends.megatron.megatron_adapter.log_rank_0")
-    def test_full_workflow_success(self, mock_log, mock_builder_class, mock_registry, mock_detect):
+    def test_full_workflow_success(self, mock_log, mock_builder_class, mock_detect, mock_base_log):
         """Test complete adapter workflow from config to trainer."""
         # Setup mocks
         mock_detect.return_value = "0.15.0rc8"
@@ -263,24 +249,24 @@ class TestMegatronAdapterIntegration:
         mock_args = SimpleNamespace(micro_batch_size=4)
         mock_builder.finalize.return_value = mock_args
 
-        mock_trainer_class = type("MegatronTrainer", (), {})
-        mock_registry.get_trainer_class.return_value = mock_trainer_class
-
-        mock_module_config = Mock()
-        mock_module_config.params = {"micro_batch_size": 4}
+        mock_params = {"micro_batch_size": 4}
 
         adapter = MegatronAdapter()
 
         # 1. Prepare backend
-        adapter.prepare_backend(mock_module_config)
+        adapter.prepare_backend(Mock())
 
         # 2. Convert config
-        backend_args = adapter.convert_config(mock_module_config.params)
+        backend_args = adapter.convert_config(mock_params)
         assert backend_args.micro_batch_size == 4
 
         # 3. Load trainer class
+        from primus.backends.megatron.megatron_pretrain_trainer import (
+            MegatronPretrainTrainer,
+        )
+
         trainer_class = adapter.load_trainer_class()
-        assert trainer_class == mock_trainer_class
+        assert trainer_class == MegatronPretrainTrainer
 
         # Verify version detection worked
         version = adapter.detect_backend_version()

@@ -36,7 +36,6 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
         - Call into the shared BaseTrainer to enable the unified workflow
           (before/after_train patches, lifecycle, logging)
         - Log Megatron-Bridge metadata (version, model, framework, task)
-        - Provide a classmethod detect_version used by the patch system
         - Handle Megatron-Bridge specific initialization and setup
     """
 
@@ -74,26 +73,6 @@ class MegatronBridgeBaseTrainer(BaseTrainer):
         log_rank_0("=" * 80)
         log_rank_0("MegatronBridgeBaseTrainer initialized successfully")
         log_rank_0("=" * 80)
-
-    @classmethod
-    def detect_version(cls) -> str:
-        """
-        Detect Megatron-Bridge version.
-
-        Returns:
-            Version string (e.g., "0.3.0rc0") from package_info
-
-        Raises:
-            RuntimeError: If version detection fails
-        """
-        try:
-            from megatron.bridge.package_info import __version__
-
-            return __version__
-        except ImportError as e:
-            raise RuntimeError(
-                "Failed to detect Megatron-Bridge version. " "Make sure Megatron-Bridge is installed."
-            ) from e
 
     @classmethod
     def detect_megatron_version(cls) -> str:

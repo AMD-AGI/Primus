@@ -161,47 +161,6 @@ class BackendRegistry:
             log_rank_0("[Primus] Warning: No backends discovered")
 
     # ----------------------------------------------------------------------
-    #  TrainerClass Registration (optional)
-    # ----------------------------------------------------------------------
-    # @classmethod
-    # def register_trainer_class(cls, trainer_cls: Type, backend: str, stage: str = "pretrain"):
-    #     """
-    #     Register trainer class for backend with optional stage.
-
-    #     Args:
-    #         trainer_cls: Trainer class to register
-    #         backend: Backend name (e.g., "megatron", "torchtitan")
-    #         stage: Stage name (e.g., "pretrain", "sft"). Defaults to "pretrain".
-    #     """
-    #     cls._trainer_classes[(backend, stage)] = trainer_cls
-
-    # @classmethod
-    # def get_trainer_class(cls, backend: str, stage: str = "pretrain"):
-    #     """
-    #     Get trainer class for backend.
-
-    #     Args:
-    #         backend: Backend name (e.g., "megatron", "torchtitan")
-    #         stage: Stage name. Defaults to "pretrain".
-
-    #     Returns:
-    #         Trainer class
-
-    #     Raises:
-    #         ValueError: If no trainer class found for backend/stage combination
-    #     """
-    #     key = (backend, stage)
-    #     if key in cls._trainer_classes:
-    #         return cls._trainer_classes[key]
-
-    #     raise ValueError(f"[Primus] No trainer class registered for backend '{backend}' stage '{stage}'.")
-
-    # @classmethod
-    # def has_trainer_class(cls, backend: str, stage: str = "pretrain") -> bool:
-    #     """Check if trainer class is registered for backend/stage."""
-    #     return (backend, stage) in cls._trainer_classes
-
-    # ----------------------------------------------------------------------
     # Setup Hook Registration
     # ----------------------------------------------------------------------
     @classmethod
