@@ -7,13 +7,10 @@
 """
 MegatronBridgeBaseTrainer: Base class for all Megatron-Bridge trainers.
 
-This mirrors the role of TorchTitanBaseTrainer for TorchTitan:
-
-    - Inherits from the unified BaseTrainer so it participates in the
-      common training workflow and patch management (via run_patches)
-    - Provides a central place for Megatron-Bridge-specific initialization logic
-      and version detection
-    - Handles common setup logic shared across all Megatron-Bridge training tasks
+Responsibilities:
+    - Inherits from BaseTrainer for common training workflow
+    - Provides Megatron-Bridge-specific initialization and setup
+    - Handles common logic shared across all Megatron-Bridge training tasks
 """
 
 from types import SimpleNamespace
