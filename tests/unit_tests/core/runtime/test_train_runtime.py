@@ -65,7 +65,7 @@ class TestPrimusRuntime(PrimusUT):
         )
 
         overrides = ["a=10", "nested.b=20", "new_key=30"]
-        runtime._apply_overrides("pre_trainer", module_cfg, overrides)
+        runtime._apply_overrides(module_cfg, overrides)
 
         # After _apply_overrides, params is converted back to SimpleNamespace tree
         self.assertEqual(module_cfg.params.a, 10)
