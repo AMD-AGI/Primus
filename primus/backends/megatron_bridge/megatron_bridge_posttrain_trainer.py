@@ -22,8 +22,12 @@ from primus.backends.megatron_bridge.config_utils import load_recipe_config
 from primus.backends.megatron_bridge.megatron_bridge_base_trainer import (
     MegatronBridgeBaseTrainer,
 )
+from primus.modules import module_utils
 from primus.modules.module_utils import log_dict_aligned, log_rank_0
-
+import os
+import torch
+MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT=100000
+ENABLE_MEMORY_PROFILING = int(os.environ.get("ENABLE_MEMORY_PROFILING", '0')) == 1
 
 class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
     """
@@ -62,6 +66,11 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
             module_config=module_config,
             backend_args=backend_args,
         )
+        if ENABLE_MEMORY_PROFILING:
+            log_rank_0("Recording memory history...")
+            torch.cuda.memory._record_memory_history(
+                max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
+            )
 
     def setup(self):
         """
@@ -111,6 +120,12 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
             # log_rank_0(f"ConfigContainer: {self.cfg_container}")
             log_dict_aligned("ConfigContainer", self.cfg_container.to_dict())
             finetune(self.cfg_container, forward_step_func=forward_step)
+
+            if ENABLE_MEMORY_PROFILING:
+                log_rank_0("Dumping memory snapshot...")
+                torch.cuda.memory._dump_snapshot(f"/workspace/Primus/memory_snapshot_events-{MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT}-{module_utils._rank}.pickle")
+                torch.cuda.memory._record_memory_history(enabled=None)
+                log_rank_0("Memory history recorded.")
 
         except Exception as e:
             log_rank_0(f"Error during post-training: {e}")
