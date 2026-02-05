@@ -57,6 +57,14 @@ class TrainContext:
     backend_args: Any = None
     backend_version: Optional[str] = None
 
+    # Distributed context
+    rank: int = 0
+    world_size: int = 1
+    local_rank: int = 0
+    local_world_size: int = 1
+    master_addr: str = ""
+    master_port: int = 0
+
 
 # ---------------------------------------------------------------------------
 # PrimusRuntime
@@ -101,7 +109,7 @@ class PrimusRuntime:
             self._safe_cleanup(error=e)
             raise RuntimeError(f"Training execution failed: {e}") from e
 
-    # --------------------------- Internal Steps --------------------------- #ide_str}")
+    # --------------------------- Internal Steps --------------------------- #
 
     def _initialize_runtime_environment(self) -> None:
         """Initialize full runtime environment before creating backend/trainer."""
@@ -166,9 +174,6 @@ class PrimusRuntime:
 
         primus_cfg = load_primus_config(cfg_path, self.args)
 
-        # For platform detection in distributed init.
-        # set_global_variables(primus_cfg)
-
         # Resolve module configuration via core helper.
         module_cfg = get_module_config(primus_cfg, module_name)
         available_modules = get_module_names(primus_cfg) or ["none"]
@@ -193,17 +198,15 @@ class PrimusRuntime:
         )
 
         # Apply CLI overrides to module params as part of configuration initialization.
-        self._apply_overrides(module_name, module_cfg, overrides)
+        self._apply_overrides(module_cfg, overrides)
 
-    def _apply_overrides(self, module_name: str, module_cfg: Any, overrides: Optional[List[str]]):
+    def _apply_overrides(self, module_cfg: Any, overrides: Optional[List[str]]):
         if not overrides:
             return
 
         override_dict: Dict[str, Any] = parse_cli_overrides(overrides)
-        print(
-            f"[Primus:TrainRuntime] Applying CLI overrides for module "
-            f"'{self.ctx.module_name}': {override_dict}"
-        )
+        log_rank_0(f"[Runtime] Applying CLI overrides: {override_dict}")
+
         # module_cfg.params is a nested SimpleNamespace tree; convert to dict for merging,
         # apply deep_merge, then convert back to SimpleNamespace.
         base_params_dict = nested_namespace_to_dict(module_cfg.params)
@@ -211,7 +214,6 @@ class PrimusRuntime:
         module_cfg.params = dict_to_nested_namespace(merged_params_dict)
 
     def _initialize_distributed_context(self) -> None:
-
         assert self.ctx is not None, "TrainContext must be initialized before distributed init."
 
         from primus.core.utils.env import get_torchrun_env
@@ -224,8 +226,9 @@ class PrimusRuntime:
         self.ctx.master_addr = dist_env["master_addr"]
         self.ctx.master_port = dist_env["master_port"]
 
-        print(
-            f"[Primus:Env] rank: {self.ctx.rank}, world_size: {self.ctx.world_size}, local_rank: {self.ctx.local_rank}, local_world_size: {self.ctx.local_world_size}, master_addr: {self.ctx.master_addr}, master_port: {self.ctx.master_port}"
+        log_rank_0(
+            f"[Runtime] Distributed: rank={self.ctx.rank}, world_size={self.ctx.world_size}, "
+            f"local_rank={self.ctx.local_rank}, master={self.ctx.master_addr}:{self.ctx.master_port}"
         )
 
     def _initialize_logging(self) -> None:
@@ -257,14 +260,11 @@ class PrimusRuntime:
         assert (
             self.ctx is not None and self.ctx.adapter is not None
         ), "Backend adapter must be loaded before creating trainer."
-        self.ctx.primus_config
+
         module_config = self.ctx.module_config
         adapter = self.ctx.adapter
 
-        # Phase: setup (before backend environment preparation)
-        # self._run_phase_patches(phase="setup", backend_args=None)
-
-        # Prepare backend environment (sys.path customization is already handled by BackendRegistry.get_adapter())
+        # Prepare backend environment
         adapter.prepare_backend(module_config)
 
         # Build backend args from Primus params
