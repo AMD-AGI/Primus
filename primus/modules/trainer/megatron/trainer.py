@@ -149,6 +149,7 @@ from primus.backends.megatron.training.global_vars import (
     set_primus_global_variables,
     set_train_start_time,
 )
+from primus.backends.megatron.training.mlflow_setup import upload_mlflow_artifacts
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
@@ -394,6 +395,32 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     warning_rank_0(f"-set args.use_checkpoint_args=True [auto_continue_train]")
             else:
                 log_rank_0(f"-{latest_file} does not exist, skip auto_continue_train.")
+
+        # Auto-enable dependencies for mlflow upload flags
+        # This must run BEFORE tensorboard section to ensure paths are set correctly
+        mlflow_upload_flags = [
+            getattr(args, "mlflow_upload_traces", False),
+            getattr(args, "mlflow_upload_logs", False),
+            getattr(args, "mlflow_upload_tracelens_report", False),
+        ]
+        if any(mlflow_upload_flags) and args.disable_mlflow:
+            args.disable_mlflow = False
+            debug_rank_0("Auto-enabled MLflow (disable_mlflow=False) because mlflow_upload_* flags are set")
+
+        # If uploading traces or tracelens reports, auto-enable profiling and tensorboard
+        needs_profiling = getattr(args, "mlflow_upload_traces", False) or getattr(
+            args, "mlflow_upload_tracelens_report", False
+        )
+        if needs_profiling:
+            if not getattr(args, "profile", False):
+                args.profile = True
+                debug_rank_0("Auto-enabled profile=True for mlflow trace/tracelens upload")
+            if not getattr(args, "use_pytorch_profiler", False):
+                args.use_pytorch_profiler = True
+                debug_rank_0("Auto-enabled use_pytorch_profiler=True for mlflow trace/tracelens upload")
+            if getattr(args, "disable_tensorboard", True):
+                args.disable_tensorboard = False
+                debug_rank_0("Auto-enabled tensorboard (disable_tensorboard=False) for profiler trace output")
 
         # tensorboard
         if not args.disable_tensorboard:
@@ -1121,6 +1148,18 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         mlflow_writer = get_mlflow_writer()
         if mlflow_writer:
+            # Upload artifacts to MLflow before ending the run
+            upload_mlflow_artifacts(
+                tensorboard_dir=args.tensorboard_dir,
+                exp_root_path=self.exp_root_path,
+                upload_traces=getattr(args, "mlflow_upload_traces", True),
+                upload_logs=getattr(args, "mlflow_upload_logs", True),
+                generate_tracelens_report=getattr(args, "generate_tracelens_report", False),
+                upload_tracelens_report=getattr(args, "mlflow_upload_tracelens_report", False),
+                tracelens_ranks=getattr(args, "mlflow_tracelens_ranks", None),
+                tracelens_output_format=getattr(args, "mlflow_tracelens_output_format", "all"),
+                tracelens_cleanup_after_upload=getattr(args, "mlflow_tracelens_cleanup_after_upload", False),
+            )
             mlflow_writer.end_run()
 
         one_logger and one_logger.log_metrics({"app_finish_time": one_logger_utils.get_timestamp_in_ms()})
