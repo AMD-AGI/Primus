@@ -8,98 +8,88 @@
 
 from types import SimpleNamespace
 
-import pytest
-
 from primus.core.trainer.base_trainer import BaseTrainer
 
 
 class DummyTrainer(BaseTrainer):
     """Minimal concrete implementation of BaseTrainer for testing."""
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.run_calls: int = 0
-        # Track how many times detect_version is called on this instance
-        self.detect_calls: int = 0
+    def __init__(self, backend_args=None):
+        super().__init__(backend_args=backend_args)
+        self.train_calls: int = 0
+        self.setup_calls: int = 0
+        self.init_calls: int = 0
 
     def init(self, *args, **kwargs):
         """No-op init for testing."""
+        self.init_calls += 1
         return None
 
     def setup(self, *args, **kwargs):
         """No-op setup for testing."""
+        self.setup_calls += 1
         return None
 
     def train(self):
-        self.run_calls += 1
-
-    @classmethod
-    def detect_version(cls) -> str:
-        # Increment per-call counter to validate BaseTrainer.run usage
-        # NOTE: For classmethod, we use a simple class attribute counter.
-        if not hasattr(cls, "detect_calls_counter"):
-            cls.detect_calls_counter = 0  # type: ignore[attr-defined]
-        cls.detect_calls_counter += 1  # type: ignore[attr-defined]
-        return "test-version"
+        self.train_calls += 1
 
 
-class TestBaseTrainerPatchIntegration:
-    """Verify that BaseTrainer.run delegates to train()."""
+class TestBaseTrainer:
+    """Verify BaseTrainer interface and lifecycle."""
 
-    def test_run_invokes_patches_and_training(self, monkeypatch):
-        # Silence logging inside BaseTrainer
-        monkeypatch.setattr("primus.modules.module_utils.log_rank_0", lambda *args, **kwargs: None)
+    def test_trainer_stores_backend_args(self):
+        """Backend args should be stored on the trainer instance."""
+        backend_args = SimpleNamespace(lr=1e-4, batch_size=32)
+        trainer = DummyTrainer(backend_args=backend_args)
 
-        primus_config = SimpleNamespace(exp_root_path="/tmp/exp", exp_meta_info={})
-        module_params = SimpleNamespace()
-        module_config = SimpleNamespace(
-            framework="megatron",
-            model="llama2_7B",
-            trainable=True,
-            params=module_params,
-        )
-        backend_args = {"lr": 1e-4}
+        assert trainer.backend_args is backend_args
+        assert trainer.backend_args.lr == 1e-4
+        assert trainer.backend_args.batch_size == 32
 
-        trainer = DummyTrainer(primus_config, module_config, backend_args=backend_args)
+    def test_trainer_allows_none_backend_args(self):
+        """Trainer should accept None as backend_args."""
+        trainer = DummyTrainer(backend_args=None)
+        assert trainer.backend_args is None
 
-        trainer.run()
+    def test_trainer_train_method_executes(self):
+        """The train() method should execute correctly."""
+        backend_args = SimpleNamespace(lr=1e-4)
+        trainer = DummyTrainer(backend_args=backend_args)
 
-        # Training loop executed exactly once
-        assert trainer.run_calls == 1
+        trainer.train()
 
-    def test_missing_framework_or_model_raises(self):
-        primus_config = SimpleNamespace()
+        assert trainer.train_calls == 1
 
-        # Missing framework
-        module_config = SimpleNamespace(model="llama2_7B", trainable=True)
-        with pytest.raises(ValueError, match="'framework' is required"):
-            DummyTrainer(primus_config, module_config)
+    def test_trainer_lifecycle_methods_exist(self):
+        """Trainer should have setup, init, train, cleanup methods."""
+        backend_args = SimpleNamespace()
+        trainer = DummyTrainer(backend_args=backend_args)
 
-        # Missing model
-        module_config = SimpleNamespace(framework="megatron", trainable=True)
-        with pytest.raises(ValueError, match="'model' is required"):
-            DummyTrainer(primus_config, module_config)
+        # All lifecycle methods should be callable
+        trainer.setup()
+        trainer.init()
+        trainer.train()
+        trainer.cleanup()
 
-    def test_run_allows_missing_backend_args(self, monkeypatch):
-        """If backend_args is None, trainer.run() still works."""
-        monkeypatch.setattr("primus.modules.module_utils.log_rank_0", lambda *args, **kwargs: None)
+        assert trainer.setup_calls == 1
+        assert trainer.init_calls == 1
+        assert trainer.train_calls == 1
 
-        primus_config = SimpleNamespace(exp_root_path="/tmp/exp", exp_meta_info={})
-        module_params = SimpleNamespace()
-        module_config = SimpleNamespace(
-            framework="megatron",
-            model="llama2_7B",
-            trainable=True,
-            params=module_params,
-        )
+    def test_cleanup_accepts_on_error_flag(self):
+        """cleanup() should accept on_error parameter."""
+        trainer = DummyTrainer(backend_args=None)
 
-        # Reset Megatron global vars between tests so set_primus_global_variables
-        # can be called multiple times in this test module without assertion.
-        from primus.backends.megatron.training.global_vars import destroy_global_vars
+        # Should not raise
+        trainer.cleanup(on_error=False)
+        trainer.cleanup(on_error=True)
 
-        destroy_global_vars()
+    def test_trainer_has_distributed_env_attributes(self):
+        """Trainer should expose distributed environment attributes."""
+        trainer = DummyTrainer(backend_args=None)
 
-        trainer = DummyTrainer(primus_config, module_config)
-        trainer.run()
-
-        assert trainer.run_calls == 1
+        # These attributes should exist (values depend on env)
+        assert hasattr(trainer, "rank")
+        assert hasattr(trainer, "world_size")
+        assert hasattr(trainer, "local_rank")
+        assert hasattr(trainer, "master_addr")
+        assert hasattr(trainer, "master_port")

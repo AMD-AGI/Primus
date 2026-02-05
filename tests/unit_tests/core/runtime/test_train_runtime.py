@@ -120,13 +120,13 @@ class TestPrimusRuntime(PrimusUT):
         self.assertIn("trainer boom", msg)
 
     def test_run_trainer_lifecycle_calls_trainer_methods_in_order(self):
-        """Trainer lifecycle should call setup → init → run → cleanup in order."""
+        """Trainer lifecycle should call setup → init → train → cleanup in order."""
         args = self._build_args()
         runtime = PrimusRuntime(args=args)
 
         # Use a dummy trainer that records the call order.
         class DummyTrainer:
-            def __init__(self, primus_config=None, module_config=None, backend_args=None):
+            def __init__(self, backend_args=None):
                 self.calls = []
                 self.backend_args = backend_args
 
@@ -136,8 +136,8 @@ class TestPrimusRuntime(PrimusUT):
             def init(self):
                 self.calls.append("init")
 
-            def run(self):
-                self.calls.append("run")
+            def train(self):
+                self.calls.append("train")
 
             def cleanup(self, on_error: bool = False):
                 self.calls.append("cleanup_error" if on_error else "cleanup")
@@ -158,7 +158,7 @@ class TestPrimusRuntime(PrimusUT):
 
         # The trainer instance is created inside runtime; verify it executed in order.
         trainer = runtime.ctx.trainer
-        self.assertEqual(trainer.calls, ["setup", "init", "run", "cleanup"])
+        self.assertEqual(trainer.calls, ["setup", "init", "train", "cleanup"])
 
     def test_runtime_applies_patch_phases_in_expected_order(self):
         args = self._build_args()
@@ -174,7 +174,7 @@ class TestPrimusRuntime(PrimusUT):
         with patch("primus.core.runtime.train_runtime.run_patches", side_effect=_fake_run_patches):
             # Dummy trainer
             class DummyTrainer:
-                def __init__(self, primus_config=None, module_config=None, backend_args=None):
+                def __init__(self, backend_args=None):
                     self.backend_args = backend_args
 
                 def setup(self):
@@ -183,7 +183,7 @@ class TestPrimusRuntime(PrimusUT):
                 def init(self):
                     pass
 
-                def run(self):
+                def train(self):
                     pass
 
                 def cleanup(self, on_error: bool = False):
@@ -201,7 +201,7 @@ class TestPrimusRuntime(PrimusUT):
 
                 runtime.run_train_module(module_name="pre_trainer", overrides=[])
 
-        assert phases == ["setup", "build_args", "before_train", "after_train"]
+        assert phases == ["build_args", "setup", "before_train", "after_train"]
 
 
 if __name__ == "__main__":
