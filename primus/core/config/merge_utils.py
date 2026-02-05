@@ -10,7 +10,7 @@ from typing import Any, Dict
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Recursively merge two dictionaries with copy-on-write optimization.
+    Recursively merge two dictionaries with selective copying optimization.
 
     Rules:
       - override wins (override overwrites base)
@@ -18,8 +18,14 @@ def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]
       - non-dict values replaced directly
       - override can introduce new fields
 
-    Optimization: Only copies modified branches instead of deep-copying
-    the entire base dict upfront, reducing memory usage for large configs.
+    Optimization: Avoids deep-copying the entire base dict upfront.
+    Instead, only recursively merges nested dict branches, while non-dict
+    values are assigned by reference. This reduces memory allocations
+    for configs with many nested dicts.
+
+    Note: This creates a new dict with references to non-dict values from base
+    and override. If base/override contain mutable non-dict objects and you
+    need true isolation, consider copy.deepcopy() on the result.
 
     Example:
         base = {"a": 1, "b": {"x": 10, "y": 20}}

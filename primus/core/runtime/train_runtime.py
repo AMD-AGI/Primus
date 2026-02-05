@@ -65,8 +65,8 @@ class TrainContext:
     master_addr: str = ""
     master_port: int = 0
 
-    # Cached distributed environment (to avoid redundant calls)
-    _dist_env: Optional[Dict[str, Any]] = field(default=None)
+    # Cached distributed environment (to avoid redundant get_torchrun_env calls)
+    dist_env_cache: Optional[Dict[str, Any]] = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +296,7 @@ class PrimusRuntime:
 
         # Cache the distributed environment in the context to avoid redundant calls
         dist_env = get_torchrun_env()
-        ctx._dist_env = dist_env
+        ctx.dist_env_cache = dist_env
 
         ctx.rank = dist_env["rank"]
         ctx.world_size = dist_env["world_size"]
@@ -379,11 +379,14 @@ class PrimusRuntime:
         stage = getattr(module_config.params, "stage", "pretrain") or "pretrain"
         TrainerClass = adapter.load_trainer_class(stage=stage)
 
-        # Pass cached distributed environment to avoid redundant get_torchrun_env() call
+        # Create trainer instance
+        # Note: We cache dist_env in ctx.dist_env_cache to avoid redundant get_torchrun_env() calls.
+        # However, BaseTrainer.__init__ currently doesn't accept dist_env as a parameter,
+        # so it will call get_torchrun_env() again. This is acceptable since:
+        # 1. The call is cheap (just reading environment variables)
+        # 2. Changing BaseTrainer signature would require updating all backend trainers
+        # 3. The performance impact is negligible compared to actual training
         trainer = TrainerClass(backend_args=backend_args)
-
-        # If trainer supports dist_env parameter, we could optimize by passing it
-        # For now, BaseTrainer will call get_torchrun_env() again but we've documented the issue
 
         if trainer is None:
             raise RuntimeError(
