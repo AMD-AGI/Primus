@@ -16,6 +16,7 @@ mechanism that discovers all ``*_patches`` modules (including those under this
 package), so simply importing this package is not required for patch
 registration but is provided for convenience.
 """
+
 from . import (  # noqa: F401
     checkpoint_path_patches,
     data_path_split_patches,

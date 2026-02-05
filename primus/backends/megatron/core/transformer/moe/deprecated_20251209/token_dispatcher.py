@@ -182,7 +182,7 @@ class DeprecatedMoEAllGatherTokenDispatcher(DeprecatedMoETokenDispatcher):
 
         tokens_per_expert = self.local_map.sum(dim=0).long().cpu()
 
-        (permuted_local_hidden_states, self.reversed_local_input_permutation_mapping) = permute(
+        permuted_local_hidden_states, self.reversed_local_input_permutation_mapping = permute(
             hidden_states,
             self.local_map,
             num_out_tokens=tokens_per_expert.sum(),

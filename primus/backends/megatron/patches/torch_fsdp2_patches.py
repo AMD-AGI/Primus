@@ -11,7 +11,6 @@ This module contains patches that modify Megatron's FSDP integration to use
 Primus-specific implementations when requested via module_config.
 """
 
-
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
 

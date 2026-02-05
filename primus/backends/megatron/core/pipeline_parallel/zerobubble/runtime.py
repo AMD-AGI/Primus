@@ -1564,7 +1564,7 @@ def get_zero_bubble_forward_backward_func():
             log_rank_all(f"rank {torch.distributed.get_rank()} profiling conclusion: {conclusion}")
 
             def estimate_free_memory_on_this_rank(old_schedule):
-                (memory_free, memory_all) = [x // 1000000 for x in torch.cuda.mem_get_info()]
+                memory_free, memory_all = [x // 1000000 for x in torch.cuda.mem_get_info()]
                 memory_all = memory_all * get_args().zero_bubble_adaptive_memory_limit_percentile / 100
                 activation_cost = 0
                 stage = parallel_state.get_pipeline_model_parallel_rank()

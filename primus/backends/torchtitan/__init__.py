@@ -17,4 +17,4 @@ BackendRegistry.register_path_name("torchtitan", "torchtitan")
 BackendRegistry.register_adapter("torchtitan", TorchTitanAdapter)
 
 # Register trainer
-BackendRegistry.register_trainer_class("torchtitan", TorchTitanPretrainTrainer)
+BackendRegistry.register_trainer_class(TorchTitanPretrainTrainer, "torchtitan")

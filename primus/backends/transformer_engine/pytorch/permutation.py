@@ -7,6 +7,7 @@
 
 
 """MoE Permutaion API"""
+
 import warnings
 from typing import Optional, Tuple
 

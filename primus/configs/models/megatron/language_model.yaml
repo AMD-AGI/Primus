@@ -22,6 +22,7 @@ num_query_groups: null
 add_position_embedding: false
 position_embedding_type: learned_absolute
 max_position_embeddings: null
+original_max_position_embeddings: null
 untie_embeddings_and_output_weights: true
 
 ffn_hidden_size: null

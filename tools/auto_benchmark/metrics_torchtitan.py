@@ -141,8 +141,7 @@ def print_table(headers, rows):
 
 
 def print_note():
-    print(
-        """
+    print("""
 NOTE:
 - "Steps" represents the number of training steps USED to compute averages.
 - Steps are sorted by step number and the FIRST TWO steps are dropped
@@ -153,8 +152,7 @@ NOTE:
     * step 1, step 10, step 20
 - TPS and TFLOPS values may contain commas (e.g. 1,202.17);
   commas are removed before averaging.
-"""
-    )
+""")
 
 
 # ============================================================

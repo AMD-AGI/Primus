@@ -10,7 +10,6 @@ Transformer Engine Linear FP8 Cache Patches
 Patches for disabling FP8 weight transpose cache in TELinear layers.
 """
 
-
 from primus.backends.megatron.patches.te_patches.utils import (
     make_get_extra_te_kwargs_with_override,
 )

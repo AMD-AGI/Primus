@@ -2,13 +2,15 @@ bases:
   - mamba_base.yaml
 
 # Zebra Llama 8B configuration
+model_type: mamba  # CRITICAL: Hybrid models must use mamba model type
 tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: meta-llama/Llama-3.2-1B
 
 # Model size parameters
 num_layers: 64
 hidden_size: 4096
-ffn_hidden_size: 14436 
+ffn_hidden_size: 14436
+normalization: "RMSNorm"
 
 # Mamba parameters
 is_hybrid_model: true
@@ -24,7 +26,7 @@ swiglu: true
 num_query_groups: null
 multi_latent_attention: true
 num_attention_heads: 32
-q_lora_rank: 2048   # Query LoRA rank 
+q_lora_rank: 2048   # Query LoRA rank
 kv_lora_rank: 160   # Key-Value LoRA rank
 qk_head_dim: 64     # Query-Key head dimension
 qk_pos_emb_head_dim: 64  # Positional embedding head dimension
@@ -33,9 +35,9 @@ rotary_scaling_factor: 1.0
 mscale: 1.0
 mscale_all_dim: 1.0
 
-# MLA uses its own internal positional encoding 
+# MLA uses its own internal positional encoding
 rotary_base: 500000
 position_embedding_type: none
 add_position_embedding: true
 use_rotary_position_embeddings: false
-max_position_embeddings: 131072
+original_max_position_embeddings: 131072

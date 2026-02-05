@@ -578,7 +578,7 @@ def reorder_communication(
                 and not local_order[stage][i].type.is_post_validation_related()
                 and local_order[stage][i].start_time <= local_order[stage][i - 1].completion_time
             ):
-                (local_order[stage][i], local_order[stage][i - 1]) = (
+                local_order[stage][i], local_order[stage][i - 1] = (
                     local_order[stage][i - 1],
                     local_order[stage][i],
                 )

@@ -28,10 +28,7 @@ def parse_cli_args():
         "--primus-log-dir",
         type=str,
         required=True,
-        help=(
-            "Directory containing Primus training log folders. "
-            "The general structure is as follows: "
-            """
+        help=("Directory containing Primus training log folders. " "The general structure is as follows: " """
             .
             ├── rank-0
             │ ├── debug.log
@@ -44,8 +41,7 @@ def parse_cli_args():
             │ ├── info.log
             │ └── warning.log
             ...
-            """
-        ),
+            """),
     )
     parser.add_argument(
         "--ckpt-dir",

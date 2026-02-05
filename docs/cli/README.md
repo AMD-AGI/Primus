@@ -28,6 +28,14 @@ The Primus CLI provides a unified command-line interface for training, benchmark
 primus-cli [global-options] <mode> [mode-args] -- [Primus commands]
 ```
 
+### Running from a source checkout
+
+If you're running from the Primus repo root (after `git clone ... && cd Primus`), you can invoke the launcher as:
+
+```bash
+./primus-cli [global-options] <mode> [mode-args] -- [Primus commands]
+```
+
 ### Your First Command
 
 ```bash
