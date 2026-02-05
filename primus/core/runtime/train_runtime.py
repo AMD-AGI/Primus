@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -64,9 +64,6 @@ class TrainContext:
     local_world_size: int = 1
     master_addr: str = ""
     master_port: int = 0
-
-    # Cached distributed environment (to avoid redundant get_torchrun_env calls)
-    dist_env_cache: Optional[Dict[str, Any]] = field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -294,10 +291,7 @@ class PrimusRuntime:
 
         from primus.core.utils.env import get_torchrun_env
 
-        # Cache the distributed environment in the context to avoid redundant calls
         dist_env = get_torchrun_env()
-        ctx.dist_env_cache = dist_env
-
         ctx.rank = dist_env["rank"]
         ctx.world_size = dist_env["world_size"]
         ctx.local_rank = dist_env["local_rank"]
@@ -378,14 +372,6 @@ class PrimusRuntime:
         # Load trainer class and instantiate
         stage = getattr(module_config.params, "stage", "pretrain") or "pretrain"
         TrainerClass = adapter.load_trainer_class(stage=stage)
-
-        # Create trainer instance
-        # Note: We cache dist_env in ctx.dist_env_cache to avoid redundant get_torchrun_env() calls.
-        # However, BaseTrainer.__init__ currently doesn't accept dist_env as a parameter,
-        # so it will call get_torchrun_env() again. This is acceptable since:
-        # 1. The call is cheap (just reading environment variables)
-        # 2. Changing BaseTrainer signature would require updating all backend trainers
-        # 3. The performance impact is negligible compared to actual training
         trainer = TrainerClass(backend_args=backend_args)
 
         if trainer is None:
