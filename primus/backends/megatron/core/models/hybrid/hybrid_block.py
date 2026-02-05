@@ -10,8 +10,6 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
 import torch
-from torch import Tensor, nn
-
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.enums import Fp8Recipe
@@ -20,12 +18,13 @@ from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.ssm.mamba_hybrid_layer_allocation import Symbols as LayerSymbols
-from megatron.core.ssm.mamba_hybrid_layer_allocation import allocate_layers
 from megatron.core.transformer import TransformerConfig
+from torch import Tensor, nn
 
 # CudaGraphScope is not available in older Megatron versions
 try:
     from megatron.core.transformer.enums import CudaGraphScope
+
     HAS_CUDA_GRAPH_SCOPE = True
 except ImportError:
     CudaGraphScope = None
@@ -36,7 +35,11 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.transformer.utils import sharded_state_dict_default
-from megatron.core.utils import WrappedTensor, deprecate_inference_params, make_viewless_tensor
+from megatron.core.utils import (
+    WrappedTensor,
+    deprecate_inference_params,
+    make_viewless_tensor,
+)
 
 
 @dataclass
@@ -110,9 +113,9 @@ class HybridStack(MegatronModule):
         self.hybrid_attention_ratio = hybrid_attention_ratio
         self.hybrid_mlp_ratio = hybrid_mlp_ratio
         self.hybrid_override_pattern = hybrid_override_pattern
-        
+
         # Customized layer allocation
-        # hybrid_mlp_ratio is not used in this hybrid stack. 
+        # hybrid_mlp_ratio is not used in this hybrid stack.
         # It is by default to be always followed by mamba or mla (i.e., mamba + MLP or MLA + MLP)
         # By setting hybrid_attention_ratio, attention layers are by default to be distributed uniformly.
         self.layer_type_list = self.allocate_layers(
@@ -125,7 +128,7 @@ class HybridStack(MegatronModule):
             pp_layer_offset, self.layer_type_list = self._select_layers_for_pipeline_parallel(
                 self.layer_type_list
             )
-        
+
         print(f"layer_type_list: {self.layer_type_list}")
 
         self.layers = nn.ModuleList()
@@ -158,9 +161,7 @@ class HybridStack(MegatronModule):
                     )
                 elif layer_type == LayerSymbols.MOE:
                     # Transformer layers apply their own pp_layer_offset
-                    layer = build_module(
-                        submodules.moe_layer, config=self.config, layer_number=i + 1
-                    )
+                    layer = build_module(submodules.moe_layer, config=self.config, layer_number=i + 1)
                 else:
                     assert False, "unexpected layer_type"
             self.layers.append(layer)
@@ -175,28 +176,35 @@ class HybridStack(MegatronModule):
                 hidden_size=self.config.hidden_size,
                 eps=self.config.layernorm_epsilon,
             )
+
     def allocate_layers(self, num_layers, hybrid_attention_ratio):
         layer_type_list = []
-        num_attention_layers = int(num_layers//2 * hybrid_attention_ratio)
-        num_mamba_layers = num_layers//2 - num_attention_layers
+        num_attention_layers = int(num_layers // 2 * hybrid_attention_ratio)
+        num_mamba_layers = num_layers // 2 - num_attention_layers
         num_mamba_per_attention_layer = num_mamba_layers // num_attention_layers
 
         if hybrid_attention_ratio <= 0.5:
-            base_block = [LayerSymbols.ATTENTION, LayerSymbols.MLP] + [LayerSymbols.MAMBA, LayerSymbols.MLP] * num_mamba_per_attention_layer
-            layer_type_list += base_block*num_attention_layers
-            layer_type_list += [LayerSymbols.MAMBA, LayerSymbols.MLP] * (num_mamba_layers % num_attention_layers)
+            base_block = [LayerSymbols.ATTENTION, LayerSymbols.MLP] + [
+                LayerSymbols.MAMBA,
+                LayerSymbols.MLP,
+            ] * num_mamba_per_attention_layer
+            layer_type_list += base_block * num_attention_layers
+            layer_type_list += [LayerSymbols.MAMBA, LayerSymbols.MLP] * (
+                num_mamba_layers % num_attention_layers
+            )
         else:
             base_block = [LayerSymbols.ATTENTION, LayerSymbols.MLP] + [LayerSymbols.MAMBA, LayerSymbols.MLP]
-            layer_type_list += [LayerSymbols.ATTENTION, LayerSymbols.MLP] * (num_attention_layers - num_mamba_layers)
-            layer_type_list += base_block*num_mamba_layers
+            layer_type_list += [LayerSymbols.ATTENTION, LayerSymbols.MLP] * (
+                num_attention_layers - num_mamba_layers
+            )
+            layer_type_list += base_block * num_mamba_layers
         return layer_type_list
 
     def _select_layers_for_pipeline_parallel(self, layer_type_list):
         num_layers_per_pipeline_rank = self.config.num_layers // self.pp_group.size()
 
         assert self.config.virtual_pipeline_model_parallel_size is None, (
-            "The Mamba hybrid model does not currently support "
-            "virtual/interleaved pipeline parallelism"
+            "The Mamba hybrid model does not currently support " "virtual/interleaved pipeline parallelism"
         )
 
         offset = self.pp_group.rank() * num_layers_per_pipeline_rank
@@ -285,7 +293,7 @@ class HybridStack(MegatronModule):
             sequence_len_offset = torch.tensor(
                 [inference_context.sequence_len_offset] * current_batch_size,
                 dtype=torch.int32,
-                device='cuda',
+                device="cuda",
             )
         else:
             sequence_len_offset = None
@@ -338,11 +346,9 @@ class HybridStack(MegatronModule):
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
         )
 
-
-
     def sharded_state_dict(
         self,
-        prefix: str = '',
+        prefix: str = "",
         sharded_offsets: Optional[tuple] = None,
         metadata: Optional[dict] = None,
     ) -> ShardedStateDict:
@@ -363,16 +369,14 @@ class HybridStack(MegatronModule):
         """
 
         sharded_state_dict = {}
-        layer_prefix = f'{prefix}layers.'
+        layer_prefix = f"{prefix}layers."
 
         for local_layer_idx, layer in enumerate(self.layers):
 
             global_layer_offset = layer.layer_number - 1  # self.layer_number starts at 1
-            state_dict_prefix = (
-                f'{layer_prefix}{local_layer_idx}.'  # module list index in MambaBlock
-            )
+            state_dict_prefix = f"{layer_prefix}{local_layer_idx}."  # module list index in MambaBlock
 
-            sharded_prefix = f'{layer_prefix}{global_layer_offset}.'
+            sharded_prefix = f"{layer_prefix}{global_layer_offset}."
             sharded_pp_offset = []
 
             layer_sharded_state_dict = layer.sharded_state_dict(
@@ -389,7 +393,7 @@ class HybridStack(MegatronModule):
                 sharded_state_dict.update(
                     sharded_state_dict_default(
                         module,
-                        f'{prefix}{name}.',
+                        f"{prefix}{name}.",
                         sharded_offsets,
                         metadata,
                         tp_group=self.tp_group,

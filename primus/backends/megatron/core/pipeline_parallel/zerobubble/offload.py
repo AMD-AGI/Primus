@@ -212,7 +212,7 @@ class ActivationStore(saved_tensors_hooks):
 
         recompute = partial_recompute._save_tensor(tensor)
         if recompute[0] == PartialRecompute.RecomputeSaveType.RECOMPUTE:
-            (parents, function, rng_states) = recompute[1]
+            parents, function, rng_states = recompute[1]
             parent_handles = [self._save_tensor(x) for x in parents]
             return ActivationStore.SaveType.RECOMPUTE, (parent_handles, function, rng_states)
 

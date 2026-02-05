@@ -6,7 +6,7 @@
 # 2. pre-commit install(the first time you download the repo, it will be cached for future use)
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.0.1
+    rev: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
@@ -14,7 +14,7 @@ repos:
       - id: check-added-large-files
       - id: check-merge-conflict
   - repo: https://github.com/pycqa/isort
-    rev: 5.13.2
+    rev: 7.0.0
     hooks:
       - id: isort
         args: ["--profile", "black"]
@@ -33,11 +33,11 @@ repos:
           ]
   # Using this mirror lets us use mypyc-compiled black, which is about 2x faster
   - repo: https://github.com/psf/black-pre-commit-mirror
-    rev: 24.8.0
+    rev: 26.1.0
     hooks:
       - id: black
         args: ["--verbose", "--line-length=110"]
   - repo: https://github.com/shellcheck-py/shellcheck-py
-    rev: v0.10.0.1
+    rev: v0.11.0.1
     hooks:
       - id: shellcheck

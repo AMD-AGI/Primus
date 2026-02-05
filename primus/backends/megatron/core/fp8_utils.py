@@ -5,6 +5,7 @@
 ###############################################################################
 
 """Utility functions related to FP8 that are used throughout Megatron core"""
+
 from contextlib import nullcontext
 
 import torch

@@ -144,7 +144,7 @@ class DeprecatedMoELayer(DeprecatedBaseMoELayer):
         # process MoE
         def custom_forward(hidden_states):
             probs, routing_map = self.router(hidden_states)
-            (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(
+            dispatched_input, tokens_per_expert = self.token_dispatcher.token_permutation(
                 hidden_states, probs, routing_map
             )
             expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert)

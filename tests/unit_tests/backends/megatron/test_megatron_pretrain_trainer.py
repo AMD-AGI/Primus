@@ -128,7 +128,7 @@ class TestMegatronPretrainTrainer:
 
         # wrapped_pretrain should have been called exactly once.
         assert len(calls) == 1
-        (args, kwargs) = calls[0]
+        args, kwargs = calls[0]
 
         # Positional arguments:
         assert args[0] is train_valid_test_datasets_provider

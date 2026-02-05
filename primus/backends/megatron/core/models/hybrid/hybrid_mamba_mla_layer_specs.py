@@ -8,21 +8,21 @@ from megatron.core.extensions.transformer_engine import (
     TENorm,
     TERowParallelLinear,
 )
-from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
-from megatron.core.ssm.mamba_block import MambaStack, MambaStackSubmodules
 from megatron.core.ssm.mamba_layer import MambaLayer, MambaLayerSubmodules
 from megatron.core.ssm.mamba_mixer import MambaMixer, MambaMixerSubmodules
 from megatron.core.ssm.mlp_layer import MLPLayer
+from megatron.core.transformer.identity_op import IdentityOp
+from megatron.core.transformer.multi_latent_attention import (
+    MLASelfAttention,
+    MLASelfAttentionSubmodules,
+)
+
 # Import HybridStack from relative path
 from primus.backends.megatron.core.models.hybrid.hybrid_block import (
     HybridStack,
     HybridStackSubmodules,
-)
-from megatron.core.transformer.multi_latent_attention import (
-    MLASelfAttention,
-    MLASelfAttentionSubmodules,
 )
 
 # Inference layers may not be available in older Megatron versions
@@ -32,6 +32,7 @@ try:
         InferenceLayerNormColumnParallelLinear,
         InferenceRowParallelLinear,
     )
+
     HAS_INFERENCE_LAYERS = True
 except ImportError:
     # Fallback to regular layers for inference spec
@@ -39,11 +40,13 @@ except ImportError:
     InferenceRowParallelLinear = TERowParallelLinear
     HAS_INFERENCE_LAYERS = False
 
-from megatron.core.transformer.attention import SelfAttention, SelfAttentionSubmodules
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.mlp import MLP, MLPSubmodules
 from megatron.core.transformer.spec_utils import ModuleSpec
-from megatron.core.transformer.transformer_layer import TransformerLayer, TransformerLayerSubmodules
+from megatron.core.transformer.transformer_layer import (
+    TransformerLayer,
+    TransformerLayerSubmodules,
+)
 
 moe = get_moe_module_spec(
     use_te=True,
@@ -60,7 +63,7 @@ hybrid_stack_spec = ModuleSpec(
             submodules=MambaLayerSubmodules(
                 mixer=ModuleSpec(
                     module=MambaMixer,
-                     params={
+                    params={
                         "expand": 1,
                         "d_conv": 4,
                     },
@@ -71,7 +74,7 @@ hybrid_stack_spec = ModuleSpec(
                 mamba_bda=get_bias_dropout_add,
             ),
         ),
-        attention_layer = ModuleSpec(
+        attention_layer=ModuleSpec(
             module=TransformerLayer,
             submodules=TransformerLayerSubmodules(
                 input_layernorm=TENorm,

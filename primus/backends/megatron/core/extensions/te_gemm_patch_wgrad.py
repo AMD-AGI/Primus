@@ -5,6 +5,7 @@
 # See LICENSE for license information.
 
 """Linear API"""
+
 import functools
 from functools import reduce
 from operator import mul as multiply_op

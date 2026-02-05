@@ -14,4 +14,3 @@ ffn_hidden_size: null
 mamba_state_dim: 16
 mamba_head_dim: 64
 mamba_num_groups: 8
-

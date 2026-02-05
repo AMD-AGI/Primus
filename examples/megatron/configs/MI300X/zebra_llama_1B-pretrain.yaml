@@ -41,11 +41,11 @@ modules:
       # Mamba-specific: must provide spec
       # Use custom hybrid Mamba+MLA spec
       spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'hybrid_stack_spec']
-      
+
       # Tokenizer
       tokenizer_type: HuggingFaceTokenizer
       tokenizer_model: meta-llama/Llama-3.2-1B
-      
+
       # parallel
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
@@ -68,4 +68,3 @@ modules:
       save_interval: 10000
       disable_last_saving: true
       ckpt_format: torch
-

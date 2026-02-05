@@ -155,21 +155,17 @@ elif HAVE_TE:
                 try:
                     fp4_recipe = transformer_engine.common.recipe.NVFP4BlockScaling()
                 except AttributeError:
-                    raise ValueError(
-                        """NVFP4BlockScaling recipe is not available in this version of
+                    raise ValueError("""NVFP4BlockScaling recipe is not available in this version of
                         Transformer Engine. Please make sure you are using TE version
-                        >= 2.7.0.dev0."""
-                    )
+                        >= 2.7.0.dev0.""")
             else:
                 raise ValueError(
                     "NVFP4BlockScaling is the only supported FP4 recipe. "
                     "Please make sure you are using a compatible TE version >= 2.7.0.dev0."
                 )
         else:
-            raise ValueError(
-                """FP4 support requires TransformerEngine version >= 2.7.0.dev0
-                for NVFP4BlockScaling."""
-            )
+            raise ValueError("""FP4 support requires TransformerEngine version >= 2.7.0.dev0
+                for NVFP4BlockScaling.""")
         return fp4_recipe
 
     def get_fp4_context(config: TransformerConfig, layer_no: int = -1, is_init: bool = False):

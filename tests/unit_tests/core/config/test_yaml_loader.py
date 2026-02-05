@@ -58,14 +58,12 @@ class TestYamlLoader:
         base2.write_text("b: 2\nc: 2")
 
         main = tmp_path / "main.yaml"
-        main.write_text(
-            """
+        main.write_text("""
         extends:
           - base1.yaml
           - base2.yaml
         c: 3
-        """
-        )
+        """)
 
         result = parse_yaml(str(main))
         assert result["a"] == 1
