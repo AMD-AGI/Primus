@@ -375,6 +375,54 @@ else
     LOG_INFO "Skip Primus Turbo rebuild. REBUILD_PRIMUS_TURBO=$REBUILD_PRIMUS_TURBO"
 fi
 
+# ----------------- Rebuild UCCL -----------------
+export REBUILD_UCCL=${REBUILD_UCCL:-0}
+if [ "$REBUILD_UCCL" == "1" ]; then
+    LOG_INFO "Rebuilding UCCL from source..."
+    apt update && apt install -y rdma-core libibverbs-dev libnuma-dev libgoogle-glog-dev
+    mkdir -p "/workspace/"
+    cd "/workspace" || exit
+
+    # Clean up old directory if exists to avoid git clone conflicts
+    if [ -d "uccl" ]; then
+        LOG_INFO "Removing existing uccl directory..."
+        rm -rf uccl
+    fi
+
+    git clone https://github.com/uccl-project/uccl.git
+    cd uccl || exit
+    cd ep && PYTORCH_ROCM_ARCH="gfx942;gfx950" python3 setup.py build && cd ..
+    cp ep/build/**/*.so uccl
+    pip3 install --no-build-isolation .
+    cd ep/deep_ep_wrapper && pip3 install --no-build-isolation . -v
+    cd "${PRIMUS_PATH}" || exit
+    LOG_INFO "Rebuilding UCCL from source done."
+else
+    LOG_INFO "Skip UCCL rebuild. REBUILD_UCCL=$REBUILD_UCCL"
+fi
+
+# ----------------- Using UCCL-EP -----------------
+if [ "$USING_UEP" == "1" ]; then
+    LOG_INFO "USING_UEP is enabled, checking required packages..."
+
+    if ! pip show uccl &>/dev/null || ! pip show deep_ep &>/dev/null; then
+        LOG_ERROR "uccl is not installed! Please use pre-installed primus image or set REBUILD_UCCL=1."
+        exit 1
+    fi
+    LOG_INFO "uccl package is installed: $(pip show uccl | grep Version)"
+    LOG_INFO "deep_ep package is installed: $(pip show deep_ep | grep Version)"
+
+    if [ "$ENABLE_NUMA_BINDING" != "1" ]; then
+        LOG_INFO "ENABLE_NUMA_BINDING is not enabled! Please set ENABLE_NUMA_BINDING=1 to avoid dataloader worker exited unexpectedly."
+    fi
+
+    export PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND=DEEP_EP
+    LOG_INFO "PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND set to DEEP_EP"
+else
+    export PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND=TURBO
+    LOG_INFO "USING_UEP is disabled. PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND set to TURBO"
+fi
+
 # nvte debug envs
 export NVTE_DEBUG=0 # 0, 1
 export NVTE_DEBUG_LEVEL=0 # 0, 1, 2

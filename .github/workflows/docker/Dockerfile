@@ -4,7 +4,7 @@ FROM ${BASE_IMAGE}
 ARG PRIMUS_TURBO_COMMIT
 ARG PRIMUS_TURBO_FRAMEWORK
 ARG ROCSHMEM_COMMIT
-
+ARG UCCL_COMMIT
 # Non-interactive APT
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -58,6 +58,20 @@ RUN cd /opt && \
     pip3 install --no-build-isolation . -v
 
 RUN rm -rf /opt/Primus-Turbo
+
+# ---------------------------------------------------------------------------
+# Install UCCL-EP
+# ---------------------------------------------------------------------------
+RUN cd /opt && \
+    git clone https://github.com/uccl-project/uccl.git && \
+    cd uccl && \
+    git checkout ${UCCL_COMMIT} && \
+    cd ep && python3 setup.py build && cd .. && \
+    cp ep/build/**/*.so uccl && \
+    pip3 install --no-build-isolation . -v \
+    cd ep/deep_ep_wrapper && pip3 install --no-build-isolation . -v
+
+RUN rm -rf /tmp/uccl
 
 # Set the default working directory
 WORKDIR /opt
