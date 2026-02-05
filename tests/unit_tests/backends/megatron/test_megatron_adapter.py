@@ -66,7 +66,7 @@ __version__ = f"{MAJOR}.{MINOR}.{PATCH}{PRE_RELEASE}"
             monkeypatch.delitem(sys.modules, mod, raising=False)
 
         adapter = MegatronAdapter()
-        version = adapter.detect_backend_version()
+        version = adapter.load_trainer_class().detect_version()
 
         # If we get here without RuntimeError, __init__.py files were NOT executed
         assert version == "0.15.0rc8"
