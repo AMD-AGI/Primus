@@ -5,6 +5,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
+set -euo pipefail
+
 print_usage() {
 cat << EOF
 Primus Direct Launcher
