@@ -416,12 +416,6 @@ def _llama2_lora(
             load=None,
             pretrained_checkpoint=pretrained_checkpoint,
             ckpt_format="torch_dist",
-            fully_parallel_save=True,
-            load_optim=False,
-            fully_parallel_load=True,
-            load_rng=False, # TODO check if this needed
-            # dist_ckpt_optim_fully_reshardable=True, # not compatible with distrib_optim_fully_reshardable_mem_efficient
-            # distrib_optim_fully_reshardable_mem_efficient=True,
         ),
         rng=RNGConfig(seed=1234),
         comm_overlap=comm_overlap_config,
