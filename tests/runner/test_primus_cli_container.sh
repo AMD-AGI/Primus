@@ -102,7 +102,7 @@ assert_fail() {
 }
 
 # Print test section header
-print_section() {
+local_print_section() {
     echo ""
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${YELLOW}$1${NC}"
@@ -113,7 +113,7 @@ print_section() {
 # Test 1: Basic dry-run functionality
 # ============================================================================
 test_basic_dry_run() {
-    print_section "Test 1: Basic Dry-Run Functionality"
+    local_print_section "Test 1: Basic Dry-Run Functionality"
 
     # Create a temporary config to provide required image
     local test_config="/tmp/test_container_config_$$.yaml"
@@ -142,7 +142,7 @@ EOF
 # Test 2: Image override via CLI
 # ============================================================================
 test_image_override() {
-    print_section "Test 2: Image Override via CLI"
+    local_print_section "Test 2: Image Override via CLI"
 
     local test_config="/tmp/test_container_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -166,7 +166,7 @@ EOF
 # Test 3: Volume mounting
 # ============================================================================
 test_volume_mounting() {
-    print_section "Test 3: Volume Mounting"
+    local_print_section "Test 3: Volume Mounting"
 
     local test_config="/tmp/test_container_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -192,7 +192,7 @@ EOF
 # Test 4: Environment variables
 # ============================================================================
 test_environment_variables() {
-    print_section "Test 4: Environment Variables"
+    local_print_section "Test 4: Environment Variables"
 
     local test_config="/tmp/test_container_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -218,7 +218,7 @@ EOF
 # Test 5: Device configuration
 # ============================================================================
 test_device_configuration() {
-    print_section "Test 5: Device Configuration"
+    local_print_section "Test 5: Device Configuration"
 
     local test_config="/tmp/test_container_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -243,7 +243,7 @@ EOF
 # Test 6: Resource limits (memory, cpus)
 # ============================================================================
 test_resource_limits() {
-    print_section "Test 6: Resource Limits"
+    local_print_section "Test 6: Resource Limits"
 
     local test_config="/tmp/test_container_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -267,7 +267,7 @@ EOF
 # Test 7: Network and IPC modes
 # ============================================================================
 test_network_ipc_modes() {
-    print_section "Test 7: Network and IPC Modes"
+    local_print_section "Test 7: Network and IPC Modes"
 
     local test_config="/tmp/test_container_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -293,7 +293,7 @@ EOF
 # Test 8: Boolean flags (privileged, rm)
 # ============================================================================
 test_boolean_flags() {
-    print_section "Test 8: Boolean Flags"
+    local_print_section "Test 8: Boolean Flags"
 
     local test_config="/tmp/test_container_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -317,7 +317,7 @@ EOF
 # Test 9: Config priority (CLI > Config > Default)
 # ============================================================================
 test_config_priority() {
-    print_section "Test 9: Config Priority (CLI > Config > Default)"
+    local_print_section "Test 9: Config Priority (CLI > Config > Default)"
 
     local test_config="/tmp/test_container_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -345,7 +345,7 @@ EOF
 # Test 10: Help output
 # ============================================================================
 test_help_output() {
-    print_section "Test 10: Help Output"
+    local_print_section "Test 10: Help Output"
 
     local output
     output=$(bash "$RUNNER_DIR/primus-cli-container.sh" --help 2>&1)
