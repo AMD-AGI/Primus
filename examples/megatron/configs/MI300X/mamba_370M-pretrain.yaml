@@ -43,7 +43,7 @@ modules:
 
       # Mamba-specific: must provide spec
       spec: ['megatron.core.models.mamba.mamba_layer_specs', 'mamba_stack_spec']
-      
+
       # Tokenizer
       tokenizer_type: HuggingFaceTokenizer
       tokenizer_model: EleutherAI/gpt-neox-20b
@@ -83,4 +83,3 @@ modules:
       # Cross entropy flags
       # cross_entropy_fusion_impl: "native"
       # cross_entropy_loss_fusion: false
-

@@ -52,7 +52,9 @@ def get_model_provider(model_type="gpt"):
         )
         # Try to import mamba_builder (for Mamba models)
         try:
-            mamba_builder = lazy_import(["mamba_builders"], "mamba_builder", log_prefix="[Primus][MegatronCompat]")
+            mamba_builder = lazy_import(
+                ["mamba_builders"], "mamba_builder", log_prefix="[Primus][MegatronCompat]"
+            )
             return partial(model_provider, mamba_builder)
         except ImportError:
             return model_provider

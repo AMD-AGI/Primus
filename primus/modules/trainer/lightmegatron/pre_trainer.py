@@ -37,23 +37,23 @@ class LightMegatronPretrainTrainer(BaseModule):
         log_rank_0("run light-megatron")
 
         from megatron.core.enums import ModelType
-        from megatron.training import inprocess_restart, pretrain
-        from megatron.training import get_args
+        from megatron.training import get_args, inprocess_restart, pretrain
 
         # Determine model type from config (gpt or mamba)
         megatron_args = get_args()
-        model_type = getattr(megatron_args, 'model_type', 'gpt')
+        model_type = getattr(megatron_args, "model_type", "gpt")
         log_rank_0(f"Detected model_type: {model_type}")
 
-        if model_type == 'mamba':
+        if model_type == "mamba":
             # Import from pretrain_mamba
             from pretrain_mamba import forward_step, train_valid_test_datasets_provider
+
             train_valid_test_datasets_provider.is_distributed = True
             wrapped_pretrain, store = inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
 
             wrapped_pretrain(
                 train_valid_test_datasets_provider,
-                get_model_provider(model_type='mamba'),
+                get_model_provider(model_type="mamba"),
                 ModelType.encoder_or_decoder,
                 forward_step,
                 store=store,
@@ -61,12 +61,13 @@ class LightMegatronPretrainTrainer(BaseModule):
         else:
             # Default to GPT
             from pretrain_gpt import forward_step, train_valid_test_datasets_provider
+
             train_valid_test_datasets_provider.is_distributed = True
             wrapped_pretrain, store = inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
 
             wrapped_pretrain(
                 train_valid_test_datasets_provider,
-                get_model_provider(model_type='gpt'),
+                get_model_provider(model_type="gpt"),
                 ModelType.encoder_or_decoder,
                 forward_step,
                 store=store,

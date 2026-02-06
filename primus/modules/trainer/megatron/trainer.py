@@ -484,7 +484,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.iterations_to_skip = []
 
         # support moe_freq_type - ensure moe_layer_freq has a default value
-        if not hasattr(args, 'moe_layer_freq'):
+        if not hasattr(args, "moe_layer_freq"):
             args.moe_layer_freq = 1
         elif isinstance(args.moe_layer_freq, str):
             try:
@@ -499,18 +499,20 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.test_data_path = None
 
         # Determine model type (gpt or mamba)
-        model_type = getattr(args, 'model_type', 'gpt')
+        model_type = getattr(args, "model_type", "gpt")
         log_rank_0(f"-detected model_type: {model_type}")
 
         # Ensure required attributes have safe defaults if missing from config
-        if not hasattr(args, 'final_logit_softcapping'):
+        if not hasattr(args, "final_logit_softcapping"):
             args.final_logit_softcapping = None
-        if not hasattr(args, 'router_logit_softcapping'):
+        if not hasattr(args, "router_logit_softcapping"):
             args.router_logit_softcapping = None
 
         if args.final_logit_softcapping is not None and args.final_logit_softcapping > 0.0:
             log_rank_0(f"-enable final_logit_softcapping: {args.final_logit_softcapping}")
-            self.model_provider = functools.partial(primus_model_provider, get_model_provider(model_type=model_type))
+            self.model_provider = functools.partial(
+                primus_model_provider, get_model_provider(model_type=model_type)
+            )
         else:
             log_rank_0(f"-getting model provider for model_type={model_type}")
             model_provider = get_model_provider(model_type=model_type)

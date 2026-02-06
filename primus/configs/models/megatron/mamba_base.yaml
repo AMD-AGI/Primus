@@ -2,7 +2,7 @@ bases:
   - language_model.yaml
 
 # Mamba-specific configuration
-# Note: Mamba-specific parameters (spec, is_hybrid_model, mamba_state_dim, etc.) 
+# Note: Mamba-specific parameters (spec, is_hybrid_model, mamba_state_dim, etc.)
 # must be set in the pretrain config overrides, not here
 
 model_type: mamba

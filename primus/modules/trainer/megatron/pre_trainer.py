@@ -242,20 +242,20 @@ class MegatronPretrainTrainer(MegatronTrainer):
                 assert (
                     args.overlap_moe_expert_parallel_comm
                 ), "overlap_moe_expert_parallel_comm must be enabled to return the schedule plan"
-                
+
                 # Schedule plan building is only supported for GPT models
                 # Check if this is a Mamba model
                 unwrapped_model = model
-                while hasattr(unwrapped_model, 'module'):
+                while hasattr(unwrapped_model, "module"):
                     unwrapped_model = unwrapped_model.module
                 model_class_name = unwrapped_model.__class__.__name__
-                
-                if 'Mamba' in model_class_name:
+
+                if "Mamba" in model_class_name:
                     raise NotImplementedError(
                         "Schedule plan building is not supported for Mamba models. "
                         "Please disable overlap_moe_expert_parallel_comm for Mamba."
                     )
-                
+
                 if args.patch_moe_overlap:
                     assert (
                         not args.delay_wgrad_compute
@@ -285,15 +285,13 @@ class MegatronPretrainTrainer(MegatronTrainer):
                 # MambaModel doesn't accept loss_mask, but GPTModel does
                 # Unwrap the model to get the actual model class
                 unwrapped_model = model
-                while hasattr(unwrapped_model, 'module'):
+                while hasattr(unwrapped_model, "module"):
                     unwrapped_model = unwrapped_model.module
                 model_class_name = unwrapped_model.__class__.__name__
-                
-                if 'Mamba' in model_class_name:
+
+                if "Mamba" in model_class_name:
                     # MambaModel doesn't accept loss_mask parameter
-                    output_tensor = model(
-                        tokens, position_ids, attention_mask, labels=labels
-                    )
+                    output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
                 else:
                     # GPTModel and other models accept loss_mask parameter
                     output_tensor = model(
