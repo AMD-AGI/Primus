@@ -33,7 +33,7 @@ if [ -z "$HF_TOKEN" ]; then
 fi
 
 # Docker configuration (for start_container.sh)
-export DOCKER_IMAGE="${DOCKER_IMAGE:-docker.io/rocm/primus:v25.10}"
+export DOCKER_IMAGE="${DOCKER_IMAGE:-docker.io/rocm/primus:v26.1}"
 export DATA_PATH="${DATA_DIR}"
 export MOUNT_DATA_PATH="${MOUNT_DATA_PATH:-/data}"
 export CONTAINER_NAME="${CONTAINER_NAME:-primus_llama2_lora}"
