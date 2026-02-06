@@ -12,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Install build dependencies
 # ---------------------------------------------------------------------------
 RUN apt-get update && \
-    apt-get install -y rdma-core libibverbs-dev libnuma-dev numactl&& \
+    apt-get install -y rdma-core libibverbs-dev libnuma-dev numactl libgoogle-glog-dev && \
     apt-get install -y --reinstall binutils
 
 RUN rm -rf /var/lib/apt/lists/*
