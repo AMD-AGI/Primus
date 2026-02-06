@@ -62,7 +62,7 @@ After binding execution functions on the schedule table, it is launched by [Sche
 
 To validate and compare performance of different PP algorithms, we offer tools that can perform projections without hardware and also observe and profile PP schedules in real runs.
 
-#### 💻 Simulator
+#### Simulator
 
 Given a `ScheduleTable`, the simulator estimates bubble rate, memory footprint, and timing based on a provided configuration without requiring physical devices. This enables rapid comparison of different schedule designs and iterative development before running full-scale experiments.
 
@@ -77,7 +77,7 @@ python3 primus/core/projection/performance_projection/simulator.py --config=prim
 ![simulator shell](imgs/simulator_shell.png)
 
 
-#### 🔧 Perf & Visualization tools
+#### Perf & Visualization tools
 
 Turn on the flag `dump_pp_data: True`; the Primus framework will dump forward and backward times for each minibatch execution. Use the [PP visualization tools](https://github.com/AMD-AGI/Primus/blob/main/tools/visualization/pp_vis/README.md) to visualize the PP schedule.
 
@@ -117,14 +117,14 @@ Our implementation primarily focuses on the zero-bubble family proposed by Sea A
 The following table compares different PP scheduling algorithms under the assumption that forward, backward, and weight-grad operations have equal execution time:
 
 
-| Algorithm        | VPP size | Bubble Rate               | Max Activation Memory | Communication Volume |
-|------------------|----------|---------------------------|-----------------------|----------------------|
-| 1f1b             | 1        | (p - 1) / (m + p -1)      | p                     | 1                    |
-| 1f1b-interleaved | N        | (p - 1) / (m * N + p - 1) | p + (p - 1) / p       | N                    |
-| ZeroBubble(ZB1P) | 1        | (p - 1) / 3 * (m + p -1)  | p                     | 1                    |
-| ZBV-formatted    | 2        | (p - 1) / (p - 1 + 6 * m) | p                     | 2                    |
-| V-half           | 2        | -                         | p / 2 + x             | 2                    |
-| V-min            | 2        | -                         | p / 3 + x             | 2                    |
+| Algorithm        | VPP size | Bubble Rate                 | Max Activation Memory | Communication Volume |
+|------------------|----------|-----------------------------|-----------------------|----------------------|
+| 1f1b             | 1        | (p - 1) / (m + p -1)        | p                     | 1                    |
+| 1f1b-interleaved | N        | (p - 1) / (m * N + p - 1)   | p + (p - 1) / p       | N                    |
+| ZeroBubble(ZB1P) | 1        | (p - 1) / (3 * (m + p - 1)) | p                     | 1                    |
+| ZBV-formatted    | 2        | (p - 1) / (p - 1 + 6 * m)   | p                     | 2                    |
+| V-half           | 2        | -                           | p / 2 + x             | 2                    |
+| V-min            | 2        | -                           | p / 3 + x             | 2                    |
 
 **Note:** V-half and V-min employ greedy algorithms and therefore lack closed-form bubble-rate formulas. Use the simulator to estimate their bubble rates.
 
@@ -143,12 +143,12 @@ We ran experiments to verify the performance of Primus-pipeline. Here we list re
 
 | PP | VPP | PP-algorithm | tokens/s/device | TFLOPS | max_memory | max_mem_percent | hbm overhead | speed up ratio |
 |----|-----|-------------|----------------|--------|------------|-----------------|--------------|---------------|
-| 8  | 1   | 1f1b        | 10057          | 235.7  | 16.26 | 90.83%         | 1            | 1             |
-| 8  | 2   | 1f1b-interleaved(vpp2) | 10974 | 257.3 | 21.40 | 89.53% | 1.31 | 1.09 |
-| 8  | 2   | zbb         | 11411          | 268    | 16.59 | 79.27% | 1.02 | 1.13 |
-| 8  | 2   | zbv         | 11347          | 265.9  | 18.11 | 98.74% | 1.11 | 1.12 |
-| 8  | 2   | v-half      | 10894          | 255.1  | 14.06 | 94.50% | 0.86 | 1.08 |
-| 8  | 2   | v-min       | 8897.2         | 208.5  | 11.90 | 99.70% | 0.73 | 0.88 |
+| 8  | 1   | 1f1b        | 10057          | 235.7  | 16.26 | 8.47%         | 1            | 1             |
+| 8  | 2   | 1f1b-interleaved(vpp2) | 10974 | 257.3 | 21.40 | 11.15% | 1.31 | 1.09 |
+| 8  | 2   | zbb         | 11411          | 268    | 16.59 | 8.64% | 1.02 | 1.13 |
+| 8  | 2   | zbv         | 11347          | 265.9  | 18.11 | 9.43% | 1.11 | 1.12 |
+| 8  | 2   | v-half      | 10894          | 255.1  | 14.06 | 7.32% | 0.86 | 1.08 |
+| 8  | 2   | v-min       | 8897.2         | 208.5  | 11.90 | 6.20% | 0.73 | 0.88 |
 
 
 ![llama2-7B-perf](imgs/llama2-7B-perf.png)
