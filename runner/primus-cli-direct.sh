@@ -5,6 +5,9 @@
 # See LICENSE for license information.
 ###############################################################################
 
+# Ensure pipelines (e.g. "... | tee ...") fail if the main command fails.
+set -o pipefail
+
 print_usage() {
 cat << EOF
 Primus Direct Launcher
@@ -543,7 +546,7 @@ print_section ""
 # STEP 12: Execute command
 ###############################################################################
 eval "$CMD"
-exit_code=${PIPESTATUS[0]}
+exit_code=$?
 
 # Print result based on exit code
 if [[ $exit_code -ge 128 ]]; then
