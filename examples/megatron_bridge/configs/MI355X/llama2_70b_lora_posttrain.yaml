@@ -58,6 +58,8 @@ modules:
       precision_config: bf16_with_fp8_hybrid
       comm_overlap_config: null
 
+      no_fp8_weight_transpose_cache: true
+
       # TensorBoard logging
       # tensorboard_dir: /workspace/Primus/tensorboard
       # tensorboard_log_interval: 1
