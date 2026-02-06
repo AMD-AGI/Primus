@@ -92,7 +92,7 @@ Notes:
 EOF
 }
 
-if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     print_usage
     exit 0
 fi
@@ -154,24 +154,25 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         --env)
-            if [[ "$2" == *=* ]]; then
+            if [[ "${2:-}" == *=* ]]; then
                 # Inline KEY=VALUE form: export immediately and keep for later so that
                 # direct.env / --env can be re-applied with highest priority.
-                export "${2%%=*}"="${2#*=}"
-                PRE_PARSE_ARGS+=("$1" "$2")
+                _env_val="${2:-}"
+                export "${_env_val%%=*}"="${_env_val#*=}"
+                PRE_PARSE_ARGS+=("$1" "${2:-}")
                 shift 2
             else
                 # Non KEY=VALUE form: treat as env file path and defer sourcing until
                 # after hooks and patches (STEP 9). Use a synthetic --env_file option
                 # so that it is tracked via direct_config[env_file].
-                PRE_PARSE_ARGS+=("--env_file" "$2")
-                LOG_INFO_RANK0 "[direct] CLI: --env_file $2"
+                PRE_PARSE_ARGS+=("--env_file" "${2:-}")
+                LOG_INFO_RANK0 "[direct] CLI: --env_file ${2:-}"
                 shift 2
             fi
             ;;
         --script|--log_file|--patch)
             # Runner options that take a value
-            PRE_PARSE_ARGS+=("$1" "$2")
+            PRE_PARSE_ARGS+=("$1" "${2:-}")
             shift 2
             ;;
         --numa|--no-numa|--single)
@@ -360,7 +361,7 @@ source "${RUNNER_DIR}/helpers/envs/primus-env.sh"
 # shellcheck disable=SC1091
 source "${RUNNER_DIR}/helpers/execute_hooks.sh"
 HOOK_EXTRA_PRIMUS_ARGS=()
-if ! execute_hooks "$1" "$2" "$@"; then
+if ! execute_hooks "${1:-}" "${2:-}" "$@"; then
     LOG_ERROR "[direct] Hooks execution failed"
     exit 1
 fi
@@ -392,7 +393,7 @@ fi
 ###############################################################################
 # STEP 8.5: Apply extra Primus args from patches (extra.* protocol)
 ###############################################################################
-if [[ ${#PATCH_EXTRA_PRIMUS_ARGS[@]:-0} -gt 0 ]]; then
+if [[ ${#PATCH_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
     set -- "$@" "${PATCH_EXTRA_PRIMUS_ARGS[@]}"
     LOG_INFO_RANK0 "[direct] Applied extra args from patches: ${PATCH_EXTRA_PRIMUS_ARGS[*]}"
 fi
@@ -439,7 +440,7 @@ fi
 ###############################################################################
 
 # Allow RUN_MODE to be overridden by environment variable
-RUN_MODE="${RUN_MODE:-${direct_config[run_mode]}}"
+RUN_MODE="${RUN_MODE:-${direct_config[run_mode]:-torchrun}}"
 
 CMD="${direct_config[script]:-} $* 2>&1 | tee ${direct_config[log_file]:-}"
 if [[ "$RUN_MODE" == "single" ]]; then
@@ -462,16 +463,16 @@ elif [[ "$RUN_MODE" == "torchrun" ]]; then
         --master_port "${MASTER_PORT:-1234}"
     )
 
-    LAST_NODE=$((NNODES - 1))
+    LAST_NODE=$((${NNODES:-1} - 1))
     FILTERS=()
     # Add local rank 0 on the first node
-    if [ "$NODE_RANK" -eq 0 ]; then
+    if [ "${NODE_RANK:-0}" -eq 0 ]; then
         FILTERS+=(0)
     fi
 
     # Add the last local rank on the last node
-    if [ "$NODE_RANK" -eq "$LAST_NODE" ]; then
-        FILTERS+=($((GPUS_PER_NODE - 1)))
+    if [ "${NODE_RANK:-0}" -eq "$LAST_NODE" ]; then
+        FILTERS+=($((${GPUS_PER_NODE:-8} - 1)))
     fi
 
     # Build filter argument (only if FILTERS is non-empty)
@@ -546,8 +547,11 @@ print_section ""
 ###############################################################################
 # STEP 12: Execute command
 ###############################################################################
+# Temporarily allow pipeline to fail so we can capture PIPESTATUS and log it
+set +e
 eval "$CMD"
 exit_code=${PIPESTATUS[0]}
+set -e
 
 # Print result based on exit code
 if [[ $exit_code -ge 128 ]]; then
