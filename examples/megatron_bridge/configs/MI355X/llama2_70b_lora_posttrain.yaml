@@ -12,6 +12,7 @@ modules:
     model: llama2_70b_lora.yaml
 
     overrides:
+      stderr_sink_level: DEBUG
       # Parallelism configuration
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
@@ -59,9 +60,3 @@ modules:
       comm_overlap_config: null
 
       no_fp8_weight_transpose_cache: true
-
-      # TensorBoard logging
-      # tensorboard_dir: /workspace/Primus/tensorboard
-      # tensorboard_log_interval: 1
-      # log_validation_ppl_to_tensorboard: true
-
