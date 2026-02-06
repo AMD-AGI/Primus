@@ -92,23 +92,35 @@ class LanguageModelProfiler(BaseModuleProfiler):
         ep_size: int,
         num_virtual_pipeline_stages: Optional[int] = None,
     ) -> List[int]:
+        """
+        Get layers assigned to a specific rank, handling imbalanced layer distribution.
+        
+        When layers aren't evenly divisible by PP*VPP, distribute remainder layers
+        to the first virtual stages (or use decoder_first/last_pipeline_num_layers if set).
+        """
         total_stages = pp_size
-        if num_virtual_pipeline_stages is not None:
-            total_stages = total_stages * num_virtual_pipeline_stages
-
-        if n_layers % total_stages != 0:
-            raise ValueError(
-                f"Total number of layers ({n_layers}) must be divisible by "
-                f"the number of virtual pipeline stages ({total_stages})."
-            )
+        vpp_size = num_virtual_pipeline_stages if num_virtual_pipeline_stages is not None else 1
+        total_stages = pp_size * vpp_size
 
         model_parallel_size = pp_size * tp_size * cp_size * ep_size
         model_parallel_rank = global_rank % model_parallel_size
         pp_rank = model_parallel_rank // (tp_size * cp_size * ep_size)
 
-        # Calculate how many layers are in each virtual stage (chunk)
-        layers_per_virtual_stage = n_layers // total_stages
-
+        # Check for explicit first/last pipeline layer counts
+        mp_config = self.config.model_parallel_config
+        decoder_first = getattr(mp_config, 'decoder_first_pipeline_num_layers', None)
+        decoder_last = getattr(mp_config, 'decoder_last_pipeline_num_layers', None)
+        
+        # Build layer counts per virtual stage
+        if decoder_first is not None or decoder_last is not None:
+            # Use explicit layer distribution
+            layers_per_stage = self._get_explicit_layer_distribution(
+                n_layers, total_stages, decoder_first, decoder_last
+            )
+        else:
+            # Auto-distribute: spread remainder layers across first stages
+            layers_per_stage = self._get_balanced_layer_distribution(n_layers, total_stages)
+        
         # A physical pp_rank hosts multiple virtual stages in an interleaved fashion.
         # pp_rank 0 gets virtual stages: 0, pp_size, 2*pp_size, ...
         # pp_rank 1 gets virtual stages: 1, pp_size+1, 2*pp_size+1, ...
@@ -116,12 +128,86 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
         assigned_layers = []
         for vs_index in my_virtual_stages:
-            start_layer = vs_index * layers_per_virtual_stage
-            end_layer = (vs_index + 1) * layers_per_virtual_stage - 1
+            # Calculate start layer by summing layers in all previous stages
+            start_layer = sum(layers_per_stage[:vs_index])
+            end_layer = start_layer + layers_per_stage[vs_index] - 1
             for layer in range(start_layer, end_layer + 1):
                 assigned_layers.append(layer)
 
         return assigned_layers
+    
+    def _get_balanced_layer_distribution(self, n_layers: int, total_stages: int) -> List[int]:
+        """
+        Distribute layers across stages as evenly as possible.
+        Remainder layers are distributed to the first stages.
+        
+        Example: 61 layers, 4 stages -> [16, 15, 15, 15]
+        """
+        base_layers = n_layers // total_stages
+        remainder = n_layers % total_stages
+        
+        layers_per_stage = []
+        for i in range(total_stages):
+            # First 'remainder' stages get one extra layer
+            if i < remainder:
+                layers_per_stage.append(base_layers + 1)
+            else:
+                layers_per_stage.append(base_layers)
+        
+        return layers_per_stage
+    
+    def _get_explicit_layer_distribution(
+        self, 
+        n_layers: int, 
+        total_stages: int,
+        decoder_first: Optional[int],
+        decoder_last: Optional[int]
+    ) -> List[int]:
+        """
+        Get layer distribution with explicit first/last stage layer counts.
+        Middle stages get evenly distributed remainder.
+        """
+        if total_stages == 1:
+            return [n_layers]
+        
+        layers_per_stage = [0] * total_stages
+        
+        # Handle first and last stages
+        first_layers = decoder_first if decoder_first is not None else 0
+        last_layers = decoder_last if decoder_last is not None else 0
+        
+        # If not specified, they'll be computed from the middle distribution
+        remaining_layers = n_layers - first_layers - last_layers
+        middle_stages = total_stages - 2 if (decoder_first is not None and decoder_last is not None) else \
+                        total_stages - 1 if (decoder_first is not None or decoder_last is not None) else \
+                        total_stages
+        
+        if middle_stages > 0 and remaining_layers > 0:
+            base_middle = remaining_layers // middle_stages
+            middle_remainder = remaining_layers % middle_stages
+            
+            # Fill middle stages
+            start_idx = 1 if decoder_first is not None else 0
+            end_idx = total_stages - 1 if decoder_last is not None else total_stages
+            
+            for i in range(start_idx, end_idx):
+                local_idx = i - start_idx
+                if local_idx < middle_remainder:
+                    layers_per_stage[i] = base_middle + 1
+                else:
+                    layers_per_stage[i] = base_middle
+        
+        # Set first and last
+        if decoder_first is not None:
+            layers_per_stage[0] = first_layers
+        elif remaining_layers > 0 and decoder_last is not None:
+            # First was not specified but last was - first gets from distribution above
+            pass
+        
+        if decoder_last is not None:
+            layers_per_stage[-1] = last_layers
+        
+        return layers_per_stage
 
     def _estimate_layer_communication(self, layer_idx: int, layer_type: str):
         """
@@ -247,19 +333,77 @@ class LanguageModelProfiler(BaseModuleProfiler):
         return total_params
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
-        total_act = 0
+        """
+        Calculate activation memory accounting for recomputation.
+        
+        When recompute is enabled, recomputed layers only store input activation
+        (hidden_size * batch_size * seq_len * dtype_bytes), not full intermediate activations.
+        """
         pp_size = self.config.model_parallel_config.pipeline_model_parallel_size
         vpp_size = self.config.model_parallel_config.virtual_pipeline_model_parallel_size
-        for layer in self.layers:
-            is_moe = self.config.model_config.moe_pattern[layer]
-            if is_moe:
-                total_act += self.sub_profilers["moe_transformer_layer"].estimated_activation_memory(
-                    batch_size, seq_len
-                )
+        recompute_granularity = self.config.model_parallel_config.recompute_granularity
+        recompute_num_layers = self.config.model_parallel_config.recompute_num_layers
+        
+        # Calculate number of layers per virtual pipeline stage on this rank
+        layers_per_rank = len(self.layers)
+        layers_per_vpp_stage = layers_per_rank // vpp_size if vpp_size > 0 else layers_per_rank
+        
+        # Determine how many layers are recomputed on this rank
+        if recompute_granularity == "full" and recompute_num_layers is not None:
+            # recompute_num_layers is per virtual pipeline stage
+            recomputed_layers_per_vpp = min(recompute_num_layers, layers_per_vpp_stage)
+            total_recomputed_layers = recomputed_layers_per_vpp * vpp_size
+            non_recomputed_layers = layers_per_rank - total_recomputed_layers
+        elif recompute_granularity == "selective":
+            # Selective recompute: only attention is recomputed, MLP activations kept
+            # For now, treat as no full layer recompute
+            total_recomputed_layers = 0
+            non_recomputed_layers = layers_per_rank
+        else:
+            # No recompute
+            total_recomputed_layers = 0
+            non_recomputed_layers = layers_per_rank
+        
+        # Input activation size per layer (only thing stored for recomputed layers)
+        # hidden_size * batch_size * seq_len * dtype_bytes (bf16 = 2 bytes)
+        input_act_per_layer = (
+            self.config.model_config.hidden_size 
+            * batch_size 
+            * seq_len 
+            // self.config.model_parallel_config.tensor_model_parallel_size
+            // self.config.model_parallel_config.context_model_parallel_size
+            * 2  # bf16
+        )
+        
+        # Calculate full layer activation for non-recomputed layers
+        layer_act = 0
+        for i, layer in enumerate(self.layers):
+            # Determine if this layer is recomputed
+            local_layer_idx = i % layers_per_vpp_stage if layers_per_vpp_stage > 0 else i
+            is_recomputed = (
+                recompute_granularity == "full" 
+                and recompute_num_layers is not None
+                and local_layer_idx < recompute_num_layers
+            )
+            
+            if is_recomputed:
+                # Recomputed layer: only store input activation
+                layer_act += input_act_per_layer
             else:
-                total_act += self.sub_profilers["dense_transformer_layer"].estimated_activation_memory(
-                    batch_size, seq_len
-                )
+                # Non-recomputed layer: store full activations
+                is_moe = self.config.model_config.moe_pattern[layer]
+                if is_moe:
+                    layer_act += self.sub_profilers["moe_transformer_layer"].estimated_activation_memory(
+                        batch_size, seq_len
+                    )
+                else:
+                    layer_act += self.sub_profilers["dense_transformer_layer"].estimated_activation_memory(
+                        batch_size, seq_len
+                    )
+        
+        total_act = layer_act
+        
+        # Add embedding/output activations
         if 0 in self.layers:
             total_act += self.sub_profilers["embedding"].estimated_activation_memory(batch_size, seq_len)
         if self.config.model_config.num_layers - 1 in self.layers:
@@ -268,13 +412,19 @@ class LanguageModelProfiler(BaseModuleProfiler):
             )
             total_act += self.sub_profilers["output_layer"].estimated_activation_memory(batch_size, seq_len)
             total_act += self.sub_profilers["calc_loss"].estimated_activation_memory(batch_size, seq_len)
-        # 1F1B
+        
+        # 1F1B pipeline schedule: need to store activations for pp_size microbatches
         total_act *= pp_size
+        
+        # VPP interleaved schedule memory penalty
         interleaved_schedule_memory_penalty = 1 + ((pp_size - 1) / (pp_size * vpp_size))
+        
+        # Gradient accumulation memory saving
         ga = self.config.runtime_config.global_batch_size // self.get_dp_size()
         gs_saving = 1 if ga > pp_size else ga / pp_size
+        
         total_act *= gs_saving * interleaved_schedule_memory_penalty
-        return total_act
+        return int(total_act)
 
     def run_layer_benchmark(self, model, batch_size: int, seq_len: int) -> dict:
         """Benchmark transformer layers plus embedding/output layers on this rank."""
