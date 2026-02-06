@@ -5,7 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 #
-# System hook: enable using ucep settings.
+# System hook: enable using UEP settings.
 #
 # Trigger:
 #   export USING_UEP=1
