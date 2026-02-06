@@ -104,6 +104,7 @@ class AttentionProfiler(BaseModuleProfiler):
             k_width = q_width  # key stores the same latent + positional dims
             v_width = heads * v_head_dim
             context_width = v_width  # attention output before the final projection
+            query_projection_size = q_width  # For softmax width calculation
 
             if args.qk_layernorm:
                 ln_width += q_width
