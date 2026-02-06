@@ -327,10 +327,10 @@ done
 ###############################################################################
 # STEP 4.6: Setup log file path
 ###############################################################################
-if [[ -z "${direct_config[log_file]}" ]]; then
+if [[ -z "${direct_config[log_file]:-}" ]]; then
     direct_config[log_file]="logs/log_$(date +%Y%m%d_%H%M%S).txt"
 fi
-mkdir -p "$(dirname "${direct_config[log_file]}")"
+mkdir -p "$(dirname "${direct_config[log_file]:-}")"
 
 
 ###############################################################################
@@ -376,6 +376,8 @@ fi
 ###############################################################################
 # Execute patch scripts from config + CLI.
 # Note: direct_config[patch] is stored as a newline-separated list.
+# Initialize so it is defined when no patches run (set -u safe).
+PATCH_EXTRA_PRIMUS_ARGS=()
 if [[ -n "${direct_config[patch]:-}" ]]; then
     # shellcheck disable=SC1091
     source "${RUNNER_DIR}/helpers/execute_patches.sh"
@@ -390,7 +392,7 @@ fi
 ###############################################################################
 # STEP 8.5: Apply extra Primus args from patches (extra.* protocol)
 ###############################################################################
-if [[ ${#PATCH_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
+if [[ ${#PATCH_EXTRA_PRIMUS_ARGS[@]:-0} -gt 0 ]]; then
     set -- "$@" "${PATCH_EXTRA_PRIMUS_ARGS[@]}"
     LOG_INFO_RANK0 "[direct] Applied extra args from patches: ${PATCH_EXTRA_PRIMUS_ARGS[*]}"
 fi
@@ -410,7 +412,7 @@ if [[ -n "${direct_config[env_file]:-}" ]]; then
         # shellcheck disable=SC1090
         source "$env_file"
         LOG_INFO_RANK0 "[direct] Sourced env file (final): $env_file"
-    done <<< "${direct_config[env_file]}"
+    done <<< "${direct_config[env_file]:-}"
 fi
 
 # Then, build primus_env_kv array and export inline KEY=VALUE envs. This happens
@@ -429,7 +431,7 @@ if [[ -n "${direct_config[env]:-}" ]]; then
         primus_env_kv+=("$env_entry")
         export "${env_entry%%=*}"="${env_entry#*=}"
         LOG_INFO_RANK0 "[direct] Exported env (final): ${env_entry%%=*}=${env_entry#*=}"
-    done <<< "${direct_config[env]}"
+    done <<< "${direct_config[env]:-}"
 fi
 
 ###############################################################################
@@ -439,13 +441,13 @@ fi
 # Allow RUN_MODE to be overridden by environment variable
 RUN_MODE="${RUN_MODE:-${direct_config[run_mode]}}"
 
-CMD="${direct_config[script]} $* 2>&1 | tee ${direct_config[log_file]}"
+CMD="${direct_config[script]:-} $* 2>&1 | tee ${direct_config[log_file]:-}"
 if [[ "$RUN_MODE" == "single" ]]; then
     CMD="python3 ${CMD}"
     LOG_INFO_RANK0 "[direct] Using python launcher (single mode)"
 elif [[ "$RUN_MODE" == "torchrun" ]]; then
     # Step 2: Add NUMA binding prefix if enabled
-    if [[ "${direct_config[numa]}" == "true" ]]; then
+    if [[ "${direct_config[numa]:-}" == "true" ]]; then
         CMD="--no-python ${RUNNER_DIR}/helpers/numa_bind.sh ${CMD}"
         LOG_INFO_RANK0 "[direct] NUMA binding: ENABLED (forced by CLI)"
     else
@@ -480,7 +482,7 @@ elif [[ "$RUN_MODE" == "torchrun" ]]; then
         FILTER_ARG=()
     fi
 
-    CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS} ${CMD}"
+    CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS:-} ${CMD}"
 fi
 
 ###############################################################################
@@ -492,13 +494,13 @@ else
     print_section "Primus Direct Launch Configuration"
 fi
 
-PRINT_INFO_RANK0 "  Run Mode        : ${direct_config[run_mode]}"
-PRINT_INFO_RANK0 "  Script Path     : ${direct_config[script]}"
+PRINT_INFO_RANK0 "  Run Mode        : ${direct_config[run_mode]:-}"
+PRINT_INFO_RANK0 "  Script Path     : ${direct_config[script]:-}"
 PRINT_INFO_RANK0 "  Config File     : ${CONFIG_FILE:-<none>}"
-PRINT_INFO_RANK0 "  Log File        : ${direct_config[log_file]}"
-PRINT_INFO_RANK0 "  NUMA Binding    : ${direct_config[numa]}"
+PRINT_INFO_RANK0 "  Log File        : ${direct_config[log_file]:-}"
+PRINT_INFO_RANK0 "  NUMA Binding    : ${direct_config[numa]:-}"
 if [[ -n "${direct_config[patch]:-}" ]]; then
-    PRINT_INFO_RANK0 "  Patch Scripts   : $(echo "${direct_config[patch]}" | tr '\n' ' ')"
+    PRINT_INFO_RANK0 "  Patch Scripts   : $(echo "${direct_config[patch]:-}" | tr '\n' ' ')"
 else
     PRINT_INFO_RANK0 "  Patch Scripts   : <none>"
 fi
@@ -513,7 +515,7 @@ if [[ ${#primus_env_kv[@]} -gt 0 ]]; then
     PRINT_INFO_RANK0 ""
 fi
 
-if [[ "${direct_config[run_mode]}" == "torchrun" ]]; then
+if [[ "${direct_config[run_mode]:-}" == "torchrun" ]]; then
     PRINT_INFO_RANK0 "  Distributed Settings:"
     PRINT_INFO_RANK0 "    NNODES          : ${NNODES:-1}"
     PRINT_INFO_RANK0 "    NODE_RANK       : ${NODE_RANK:-0}"
