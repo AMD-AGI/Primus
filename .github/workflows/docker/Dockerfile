@@ -68,7 +68,7 @@ RUN cd /opt && \
     git checkout ${UCCL_COMMIT} && \
     cd ep && python3 setup.py build && cd .. && \
     cp ep/build/**/*.so uccl && \
-    pip3 install --no-build-isolation . -v \
+    pip3 install --no-build-isolation . -v && \
     cd ep/deep_ep_wrapper && pip3 install --no-build-isolation . -v
 
 RUN rm -rf /opt/uccl
