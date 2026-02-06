@@ -352,6 +352,10 @@ class TestMegatronTrainerDeterministic(PrimusUT):
             "PRIMUS_NUM_LAYERS": "4",
             # deterministic vars
             "PRIMUS_DETERMINISTIC": "1",
+            "NCCL_ALGO": "Ring",
+            "TORCH_COMPILE_DISABLE": "1",
+            "ROCBLAS_DEFAULT_ATOMICS_MODE": "0",
+            "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
         }
         stdout, _ = run_script(
             self.__class__.__name__,
@@ -379,6 +383,10 @@ class TestMegatronTrainerDeterministic(PrimusUT):
             "PRIMUS_NUM_LAYERS": "4",
             # deterministic vars
             "PRIMUS_DETERMINISTIC": "1",
+            "NCCL_ALGO": "Ring",
+            "TORCH_COMPILE_DISABLE": "1",
+            "ROCBLAS_DEFAULT_ATOMICS_MODE": "0",
+            "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
         }
         stdout, _ = run_script(
             self.__class__.__name__,
