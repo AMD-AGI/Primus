@@ -40,7 +40,18 @@ def run_script(
     run_stdout = subprocess.PIPE if not do_print_at_runtime else sys.stdout
     run_stderr = subprocess.PIPE if not do_print_at_runtime else sys.stderr
 
-    cmd = ["bash", shell_entry, "direct", "--", "train", "pretrain", "--config", exp_path]
+    cmd = [
+        "bash",
+        shell_entry,
+        "direct",
+        "--log_file",
+        train_log_path,
+        "--",
+        "train",
+        "pretrain",
+        "--config",
+        exp_path,
+    ]
     if extra_args:
         cmd.extend(extra_args)
 
