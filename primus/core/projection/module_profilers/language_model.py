@@ -73,6 +73,84 @@ def get_language_model_profiler_spec(config: TrainingConfig) -> ModuleProfilerSp
     )
 
 
+def _get_balanced_layer_distribution(n_layers: int, total_stages: int) -> List[int]:
+    """
+    Distribute layers across stages as evenly as possible.
+    Remainder layers are distributed to the first stages.
+
+    Example: 61 layers, 4 stages -> [16, 15, 15, 15]
+    """
+    base_layers = n_layers // total_stages
+    remainder = n_layers % total_stages
+
+    layers_per_stage = []
+    for i in range(total_stages):
+        # First 'remainder' stages get one extra layer
+        if i < remainder:
+            layers_per_stage.append(base_layers + 1)
+        else:
+            layers_per_stage.append(base_layers)
+
+    return layers_per_stage
+
+
+def _get_explicit_layer_distribution(
+    n_layers: int,
+    total_stages: int,
+    decoder_first: Optional[int],
+    decoder_last: Optional[int],
+) -> List[int]:
+    """
+    Get layer distribution with explicit first/last stage layer counts.
+    Middle stages get evenly distributed remainder.
+    """
+    if total_stages == 1:
+        return [n_layers]
+
+    layers_per_stage = [0] * total_stages
+
+    # Handle first and last stages
+    first_layers = decoder_first if decoder_first is not None else 0
+    last_layers = decoder_last if decoder_last is not None else 0
+
+    # If not specified, they'll be computed from the middle distribution
+    remaining_layers = n_layers - first_layers - last_layers
+    middle_stages = (
+        total_stages - 2
+        if (decoder_first is not None and decoder_last is not None)
+        else total_stages - 1
+        if (decoder_first is not None or decoder_last is not None)
+        else total_stages
+    )
+
+    if middle_stages > 0 and remaining_layers > 0:
+        base_middle = remaining_layers // middle_stages
+        middle_remainder = remaining_layers % middle_stages
+
+        # Fill middle stages
+        start_idx = 1 if decoder_first is not None else 0
+        end_idx = total_stages - 1 if decoder_last is not None else total_stages
+
+        for i in range(start_idx, end_idx):
+            local_idx = i - start_idx
+            if local_idx < middle_remainder:
+                layers_per_stage[i] = base_middle + 1
+            else:
+                layers_per_stage[i] = base_middle
+
+    # Set first and last
+    if decoder_first is not None:
+        layers_per_stage[0] = first_layers
+    elif remaining_layers > 0 and decoder_last is not None:
+        # First was not specified but last was - first gets from distribution above
+        pass
+
+    if decoder_last is not None:
+        layers_per_stage[-1] = last_layers
+
+    return layers_per_stage
+
+
 # language profiler spec -> build_profiler() -> language profiler -> run profiling methods
 class LanguageModelProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
@@ -97,6 +175,8 @@ class LanguageModelProfiler(BaseModuleProfiler):
         cp_size: int,
         ep_size: int,
         num_virtual_pipeline_stages: Optional[int] = None,
+        decoder_first_pipeline_num_layers: Optional[int] = None,
+        decoder_last_pipeline_num_layers: Optional[int] = None,
     ) -> List[int]:
         """
         Get layers assigned to a specific rank, handling imbalanced layer distribution.
@@ -117,21 +197,25 @@ class LanguageModelProfiler(BaseModuleProfiler):
         pp_rank = model_parallel_rank // (tp_size * cp_size * ep_size)
 
         # Check for explicit first/last pipeline layer counts
-        mp_config = self.config.model_parallel_config
-        decoder_first = getattr(mp_config, "decoder_first_pipeline_num_layers", None)
-        decoder_last = getattr(mp_config, "decoder_last_pipeline_num_layers", None)
+        # Try to get from self.config if available, otherwise use passed arguments
+        decoder_first = decoder_first_pipeline_num_layers
+        decoder_last = decoder_last_pipeline_num_layers
+        if self is not None and hasattr(self, "config") and self.config is not None:
+            mp_config = self.config.model_parallel_config
+            if decoder_first is None:
+                decoder_first = getattr(mp_config, "decoder_first_pipeline_num_layers", None)
+            if decoder_last is None:
+                decoder_last = getattr(mp_config, "decoder_last_pipeline_num_layers", None)
 
         # Build layer counts per virtual stage
         if decoder_first is not None or decoder_last is not None:
             # Use explicit layer distribution
-            layers_per_stage = self._get_explicit_layer_distribution(
+            layers_per_stage = _get_explicit_layer_distribution(
                 n_layers, total_stages, decoder_first, decoder_last
             )
         else:
             # Auto-distribute: spread remainder layers across first stages
-            layers_per_stage = self._get_balanced_layer_distribution(
-                n_layers, total_stages
-            )
+            layers_per_stage = _get_balanced_layer_distribution(n_layers, total_stages)
 
         # A physical pp_rank hosts multiple virtual stages in an interleaved fashion.
         # pp_rank 0 gets virtual stages: 0, pp_size, 2*pp_size, ...
@@ -147,87 +231,6 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 assigned_layers.append(layer)
 
         return assigned_layers
-
-    def _get_balanced_layer_distribution(
-        self, n_layers: int, total_stages: int
-    ) -> List[int]:
-        """
-        Distribute layers across stages as evenly as possible.
-        Remainder layers are distributed to the first stages.
-
-        Example: 61 layers, 4 stages -> [16, 15, 15, 15]
-        """
-        base_layers = n_layers // total_stages
-        remainder = n_layers % total_stages
-
-        layers_per_stage = []
-        for i in range(total_stages):
-            # First 'remainder' stages get one extra layer
-            if i < remainder:
-                layers_per_stage.append(base_layers + 1)
-            else:
-                layers_per_stage.append(base_layers)
-
-        return layers_per_stage
-
-    def _get_explicit_layer_distribution(
-        self,
-        n_layers: int,
-        total_stages: int,
-        decoder_first: Optional[int],
-        decoder_last: Optional[int],
-    ) -> List[int]:
-        """
-        Get layer distribution with explicit first/last stage layer counts.
-        Middle stages get evenly distributed remainder.
-        """
-        if total_stages == 1:
-            return [n_layers]
-
-        layers_per_stage = [0] * total_stages
-
-        # Handle first and last stages
-        first_layers = decoder_first if decoder_first is not None else 0
-        last_layers = decoder_last if decoder_last is not None else 0
-
-        # If not specified, they'll be computed from the middle distribution
-        remaining_layers = n_layers - first_layers - last_layers
-        middle_stages = (
-            total_stages - 2
-            if (decoder_first is not None and decoder_last is not None)
-            else (
-                total_stages - 1
-                if (decoder_first is not None or decoder_last is not None)
-                else total_stages
-            )
-        )
-
-        if middle_stages > 0 and remaining_layers > 0:
-            base_middle = remaining_layers // middle_stages
-            middle_remainder = remaining_layers % middle_stages
-
-            # Fill middle stages
-            start_idx = 1 if decoder_first is not None else 0
-            end_idx = total_stages - 1 if decoder_last is not None else total_stages
-
-            for i in range(start_idx, end_idx):
-                local_idx = i - start_idx
-                if local_idx < middle_remainder:
-                    layers_per_stage[i] = base_middle + 1
-                else:
-                    layers_per_stage[i] = base_middle
-
-        # Set first and last
-        if decoder_first is not None:
-            layers_per_stage[0] = first_layers
-        elif remaining_layers > 0 and decoder_last is not None:
-            # First was not specified but last was - first gets from distribution above
-            pass
-
-        if decoder_last is not None:
-            layers_per_stage[-1] = last_layers
-
-        return layers_per_stage
 
     def _estimate_layer_communication(self, layer_idx: int, layer_type: str):
         """

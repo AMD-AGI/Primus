@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import os
 from pathlib import Path
@@ -49,7 +51,7 @@ def add_posttrain_parser(parser: argparse.ArgumentParser):
     return add_pretrain_parser(parser)
 
 
-def _parse_args(extra_args_provider=None, ignore_unknown_args=False) -> tuple[argparse.Namespace, List[str]]:
+def _parse_args(extra_args_provider=None, ignore_unknown_args=False) -> Tuple[argparse.Namespace, List[str]]:
     parser = argparse.ArgumentParser(description="Primus Arguments", allow_abbrev=False)
 
     parser.add_argument(
