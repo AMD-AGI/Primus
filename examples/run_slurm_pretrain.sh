@@ -45,15 +45,28 @@ srun -N "${NNODES}" \
      --cpus-per-task="${CPUS_PER_TASK:-128}" \
      bash -c "
           readarray -t node_array < <(scontrol show hostnames \"\$SLURM_JOB_NODELIST\")
+          # Get IP address of master node from ens9np0 interface
+          MASTER_NODE=\${node_array[0]}
+          if [ \"\$SLURM_NODEID\" = \"0\" ]; then
+              # We are on the master node, get IP directly
+              MASTER_IP=\$(ip addr show ens9np0 | grep 'inet ' | awk '{print \$2}' | cut -d/ -f1)
+          else
+              # Query the master node via ssh
+              MASTER_IP=\$(ssh \$MASTER_NODE \"ip addr show ens9np0 | grep 'inet ' | awk '{print \\\$2}' | cut -d/ -f1\")
+          fi
           if [ \"\$SLURM_NODEID\" = \"0\" ]; then
               echo \"========== Slurm cluster info ==========\"
               echo \"SLURM_NODELIST: \${node_array[*]}\"
               echo \"SLURM_NNODES: \${SLURM_NNODES}\"
               echo \"SLURM_GPUS_ON_NODE: \${SLURM_GPUS_ON_NODE}\"
+              echo \"MASTER_NODE: \$MASTER_NODE\"
+              echo \"MASTER_ADDR (IP): \$MASTER_IP\"
               echo \"\"
           fi
-          export MASTER_ADDR=\${node_array[0]}
+          export MASTER_ADDR=\${MASTER_IP}
           export MASTER_PORT=\${MASTER_PORT}
+          export GLOO_SOCKET_IFNAME=ens9np0
+          export NCCL_SOCKET_IFNAME=ens9np0
           export NNODES=\${SLURM_NNODES}
           export NODE_RANK=\${SLURM_PROCID}
           export GPUS_PER_NODE=\${SLURM_GPUS_ON_NODE}

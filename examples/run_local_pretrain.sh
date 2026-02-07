@@ -134,10 +134,10 @@ export CLEAN_DOCKER_CONTAINER=${CLEAN_DOCKER_CONTAINER:-0}
 
 # ------------------ Optional Container Cleanup ------------------
 docker_podman_proxy() {
-    if command -v podman &>/dev/null; then
-        podman "$@"
-    elif command -v docker &>/dev/null; then
+    if command -v docker &>/dev/null; then
         docker "$@"
+    elif command -v podman &>/dev/null; then
+        podman "$@"
     else
         echo "Neither Docker nor Podman found!" >&2
         return 1
@@ -163,7 +163,7 @@ if [[ "${SKIP_TRAIN:-0}" == "1" ]]; then
 else
     echo "Node-${NODE_RANK}: Launching training container."
 fi
-
+docker stop $(docker ps -aq) || true
 # ------------------ Launch Training Container ------------------
 docker_podman_proxy run --rm \
     --env MASTER_ADDR \

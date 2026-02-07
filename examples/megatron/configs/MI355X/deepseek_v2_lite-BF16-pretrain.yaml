@@ -13,6 +13,8 @@ modules:
     overrides:
       # log
       wandb_project: "Primus_DeepSeek_Pretrain"
+      disable_wandb: false
+      disable_tensorboard: false
       stderr_sink_level: DEBUG
 
       # debug
@@ -52,7 +54,7 @@ modules:
       valid_data_path: null
       test_data_path: null
 
-      moe_use_legacy_grouped_gemm: false
+      moe_use_legacy_grouped_gemm: true
       # MLA
       multi_latent_attention: true
 
@@ -71,12 +73,12 @@ modules:
       eval_iters: 0
 
       # Turbo
-      enable_primus_turbo: true
+      enable_primus_turbo: false
       use_turbo_attention: false
       use_turbo_grouped_mlp: false
 
       # deepep
-      use_turbo_deepep: true
+      use_turbo_deepep: false
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 

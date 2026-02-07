@@ -13,6 +13,7 @@ modules:
     overrides:
       # log
       wandb_project: "Primus_DeepSeek_Pretrain"
+      wandb_disable: false
       stderr_sink_level: DEBUG
 
       # debug

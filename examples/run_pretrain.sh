@@ -178,7 +178,7 @@ if [ "$USING_AINIC" == "1" ]; then
     export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
     export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
     export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi"}
-    export NCCL_NET_PLUGIN=librccl-anp.so
+    # export NCCL_NET_PLUGIN=librccl-anp.so # this for anp version 1.1.0-5.
 
     LOG_INFO_RANK0 "Using AINIC"
     LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
@@ -189,8 +189,8 @@ if [ "$USING_AINIC" == "1" ]; then
     export NCCL_IB_GID_INDEX=1
     # export NCCL_IB_ROCE_VERSION_NUM=2
     export NCCL_MAX_P2P_CHANNELS=56
-    export NCCL_IB_TC=104
-    export NCCL_IB_FIFO_TC=192
+    export NCCL_IB_TC=41
+    export NCCL_IB_FIFO_TC=185
     export NET_OPTIONAL_RECV_COMPLETION=1
     export NCCL_IB_USE_INLINE=1
     export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
@@ -199,8 +199,9 @@ if [ "$USING_AINIC" == "1" ]; then
     export NCCL_IGNORE_CPU_AFFINITY=1
     export NCCL_IB_QPS_PER_CONNECTION=1
 
-    export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib:$LD_LIBRARY_PATH
-
+    #export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib:$LD_LIBRARY_PATH
+    export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
+    export LD_PRELOAD=${ANP_HOME_DIR}/build/librccl-net.so:${RCCL_HOME_DIR}/build/release/librccl.so.1.0
 else
     export NCCL_IB_GID_INDEX=3
 fi

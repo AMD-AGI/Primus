@@ -13,6 +13,8 @@ modules:
     overrides:
       # log
       wandb_project: "Primus_DeepSeek_Pretrain"
+      disable_wandb: false
+      disable_tensorboard: false
       stderr_sink_level: DEBUG
 
       # debug
@@ -22,7 +24,7 @@ modules:
 
       # hyper parameters
       train_iters: 50
-      micro_batch_size: 4
+      micro_batch_size: 1
       global_batch_size: 256
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
@@ -46,13 +48,18 @@ modules:
       overlap_param_gather: true
       gradient_accumulation_fusion: false
 
+      # recompute
+      recompute_granularity: full # full, selective
+      recompute_method: block # uniform, block
+      recompute_num_layers: 61 # int
+
       # data
       mock_data: true
       train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
 
-      moe_use_legacy_grouped_gemm: true
+      moe_use_legacy_grouped_gemm: false # need to disalbe  legacy grouped gemm for dsv3 as it will hang the job
       # MLA
       multi_latent_attention: true
 
@@ -71,6 +78,10 @@ modules:
       ckpt_format: torch
       eval_iters: 0
 
+      # Turbo
+      enable_primus_turbo: false
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"
       # cross_entropy_loss_fusion: true
