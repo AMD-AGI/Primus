@@ -548,10 +548,8 @@ print_section ""
 # STEP 12: Execute command
 ###############################################################################
 # Temporarily allow pipeline to fail so we can capture PIPESTATUS and log it
-set +e
 eval "$CMD"
-exit_code=${PIPESTATUS[0]}
-set -e
+exit_code=$?
 
 # Print result based on exit code
 if [[ $exit_code -ge 128 ]]; then
