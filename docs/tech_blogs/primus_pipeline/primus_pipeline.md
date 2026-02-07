@@ -26,7 +26,7 @@ This blog covers a flexible pipeline parallelism implementation in the Primus Me
 
 ## Background
 
-Pipeline parallelism is an efficient strategy for large language model pretraining. It partitions the transformer layers across devices, which is especially useful when the model is too large to fit on a single card.
+Pipeline parallelism(PP) is an efficient strategy for large language model pretraining. For models that must span nodes, pipeline parallelism enables model sharding with primarily neighbor point‑to‑point activation transfers (instead of heavy global collectives), often improving the scalability and predictability of scale‑out communication.
 
 1f1b and 1f1b-interleaved are two PP scheduling algorithms widely used in LLM training frameworks such as Megatron-LM and DeepSpeed. In recent years, several state-of-the-art pipeline parallelism methods have been proposed, such as the [zero-bubble algorithm](https://github.com/sail-sg/zero-bubble-pipeline-parallelism) by Sea AI Lab and [DualPipe/DualPipe-V](https://github.com/deepseek-ai/DualPipe) by the DeepSeek team, but they are not integrated into open-source LLM training frameworks mainly because the scheduling logic is fixed and hard to modify.
 
