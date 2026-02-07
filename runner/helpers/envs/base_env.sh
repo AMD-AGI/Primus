@@ -131,16 +131,16 @@ export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
 export NCCL_CROSS_NIC=0
 
 # Dynamically get InfiniBand Host Channel Adapter index for NCCL if not set
-if [ -z "${NCCL_IB_HCA}" ]; then
+if [ -z "${NCCL_IB_HCA:-}" ]; then
     NCCL_IB_HCA=$(bash "${SCRIPT_DIR}/get_nccl_ib_hca.sh" 2>/dev/null || echo "")
 fi
-export NCCL_IB_HCA
+export NCCL_IB_HCA="${NCCL_IB_HCA:-}"
 
 # Dynamically get network interface IP address for socket communication if not set
-if [ -z "${IP_INTERFACE}" ]; then
+if [ -z "${IP_INTERFACE:-}" ]; then
     IP_INTERFACE=$(bash "${SCRIPT_DIR}/get_ip_interface.sh" 2>/dev/null || hostname -I | awk '{print $1}')
 fi
-export IP_INTERFACE
+export IP_INTERFACE="${IP_INTERFACE:-}"
 
 # Set network interfaces for NCCL and Gloo, fallback to detected IP_INTERFACE
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-$IP_INTERFACE}
