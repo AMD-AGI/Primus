@@ -324,6 +324,40 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def test_deepseekv2_lite_uep(self):
+        run_script(
+            self.__class__.__name__,
+            "deepseekv2_lite_uep",
+            exp_path="examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml",
+            env_override={"USING_UEP": "1"},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--moe_layer_freq",
+                "1",
+                "--expert_model_parallel_size",
+                "8",
+                "--use_turbo_deepep",
+                "1",
+                "--enable_primus_turbo",
+                "1",
+                "--moe_router_dtype",
+                "fp32",
+                "--moe_shared_expert_overlap",
+                "0",
+                "--moe_use_legacy_grouped_gemm",
+                "1",
+                "--turbo_sync_free_moe_stage",
+                "3",
+            ],
+        )
+
 
 class TestMegatronTrainerDeterministic(PrimusUT):
     def __init__(self, *args, **kwargs):
