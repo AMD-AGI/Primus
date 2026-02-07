@@ -60,9 +60,9 @@ RUN cd /opt && \
 RUN rm -rf /opt/Primus-Turbo
 
 # ---------------------------------------------------------------------------
-# Install UCCL-EP (skip for jax framework)
+# Install UCCL-EP (skip for JAX framework)
 # ---------------------------------------------------------------------------
-RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "jax" ]; then \
+RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
     cd /opt && \
     git clone https://github.com/uccl-project/uccl.git && \
     cd uccl && \
