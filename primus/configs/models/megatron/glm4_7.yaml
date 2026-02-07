@@ -1,35 +1,35 @@
 extends:
-  - qwen2.5_base.yaml
+  - language_model.yaml
 
-# https://huggingface.co/Qwen/Qwen3-235B-A22B
-#  235B in total and 22B activated
+# GLM4.7 Model (GLM-4-Plus MoE)
+# 345.78B total params, 21.01B active params
 
 tokenizer_type: HuggingFaceTokenizer
-tokenizer_model: Qwen/Qwen3-235B-A22B
+tokenizer_model: THUDM/glm-4-9b  # Use appropriate tokenizer
 
-# model
-num_layers: 94
-hidden_size: 4096
+# model architecture
+num_layers: 90
+hidden_size: 5120
 ffn_hidden_size: 12288
-num_attention_heads: 64
+num_attention_heads: 96
 
-# moe
-moe_layer_freq: "1"
-num_experts: 128
-moe_router_topk: 8
-moe_ffn_hidden_size: 1536
-num_shared_experts: 1
-moe_shared_expert_intermediate_size: 1536
-
-# vocabulary (from CSV)
-padded_vocab_size: 151936
-
-# gqa
+# attention (GQA)
 group_query_attention: true
-num_query_groups: 4
-qk_layernorm: true
+num_query_groups: 8
 kv_channels: 128
 
+# moe - all layers are MoE
+moe_layer_freq: "1"
+num_experts: 160
+moe_router_topk: 8
+num_shared_experts: 1
+moe_ffn_hidden_size: 1536
+moe_shared_expert_intermediate_size: 1536
+
+# vocabulary
+padded_vocab_size: 151936
+
+# other settings
 swiglu: true
 bias_swiglu_fusion: false
 add_bias_linear: false
@@ -39,12 +39,7 @@ hidden_dropout: 0.0
 attention_dropout: 0.0
 
 position_embedding_type: rope
-rotary_base: 1000000
-rotary_percent: 1.0
-rotary_seq_len_interpolation_factor: 1
 normalization: RMSNorm
-
-# max_position_embeddings: 40960
 norm_epsilon: 1.0e-6
 init_method_std: 0.008
 

@@ -1,6 +1,7 @@
 import importlib
 import json
 import os
+from typing import Optional
 
 from primus.core.pipeline_parallel.scheduler.scheduler_node import (
     FuncType,
@@ -37,7 +38,7 @@ class SchedulerSimulationRunner:
         }
 
     def _chunk_duration(
-        self, rank: int, chunk: int | None, func_type: FuncType, scheduler_config: dict
+        self, rank: int, chunk: Optional[int], func_type: FuncType, scheduler_config: dict
     ) -> float:
         chunk_idx = chunk or 0
         assert self.chunk_time_ms is not None
@@ -58,9 +59,9 @@ class SchedulerSimulationRunner:
         if duration is not None and duration > 0:
             return float(duration)
         else:
-            raise ValueError(f"Duration is not found.")
+            raise ValueError("Duration is not found.")
 
-    def _chunk_activation(self, rank: int, chunk: int | None) -> float:
+    def _chunk_activation(self, rank: int, chunk: Optional[int]) -> float:
         if self.chunk_time_ms is None:
             return 0.0
         chunk_idx = chunk or 0
@@ -132,7 +133,7 @@ class SchedulerSimulationRunner:
         while True:
             max_retry -= 1
             if max_retry <= 0:
-                print(f"Max retry reached, May have bugs in the schedule table")
+                print("Max retry reached, May have bugs in the schedule table")
                 print(communication_map)
                 break
 
