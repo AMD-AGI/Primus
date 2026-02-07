@@ -391,7 +391,7 @@ if [ "$REBUILD_UCCL" == "1" ]; then
 
     git clone https://github.com/uccl-project/uccl.git
     cd uccl || exit
-    cd ep && PYTORCH_ROCM_ARCH="gfx942;gfx950" python3 setup.py build && cd ..
+    cd ep && TORCH_CUDA_ARCH_LIST="gfx942,gfx950" python3 setup.py build && cd ..
     cp ep/build/**/*.so uccl
     pip3 install --no-build-isolation .
     cd ep/deep_ep_wrapper && pip3 install --no-build-isolation . -v
