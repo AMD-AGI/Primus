@@ -21,7 +21,7 @@ fi
 UCCL_DIR="/tmp/uccl"
 UCCL_BUILD_DIR="${UCCL_BUILD_DIR:-/tmp/uccl_${HOSTNAME:-$(hostname)}}"
 UCCL_REF="${UCCL_REF:-}"
-GPU_ARCHS="${GPU_ARCHS:-gfx942;gfx950}"
+GPU_ARCHS="${GPU_ARCHS:-gfx942,gfx950}"
 
 LOG_INFO_RANK0 "[hook system] REBUILD_UCCL=1 → Building uccl in /tmp "
 LOG_INFO_RANK0 "  Build directory : ${UCCL_BUILD_DIR}"
@@ -47,7 +47,7 @@ if [[ -n "$UCCL_REF" ]]; then
 fi
 
 LOG_INFO_RANK0 "[hook system] Building uccl ep"
-cd ep && PYTORCH_ROCM_ARCH="${GPU_ARCHS}" python3 setup.py build && cd ..
+cd ep && TORCH_CUDA_ARCH_LIST="${GPU_ARCHS}" python3 setup.py build && cd ..
 
 LOG_INFO_RANK0 "[hook system] Building uccl ep done"
 

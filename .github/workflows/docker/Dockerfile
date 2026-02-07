@@ -60,18 +60,19 @@ RUN cd /opt && \
 RUN rm -rf /opt/Primus-Turbo
 
 # ---------------------------------------------------------------------------
-# Install UCCL-EP
+# Install UCCL-EP (skip for jax framework)
 # ---------------------------------------------------------------------------
-RUN cd /opt && \
+RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "jax" ]; then \
+    cd /opt && \
     git clone https://github.com/uccl-project/uccl.git && \
     cd uccl && \
     git checkout ${UCCL_COMMIT} && \
     cd ep && TORCH_CUDA_ARCH_LIST="gfx942,gfx950" python3 setup.py build && cd .. && \
     cp ep/build/**/*.so uccl && \
     pip3 install --no-build-isolation . -v && \
-    cd ep/deep_ep_wrapper && pip3 install --no-build-isolation . -v
-
-RUN rm -rf /opt/uccl
+    cd ep/deep_ep_wrapper && pip3 install --no-build-isolation . -v && \
+    rm -rf /opt/uccl; \
+    fi
 
 # Set the default working directory
 WORKDIR /opt
