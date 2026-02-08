@@ -310,11 +310,11 @@ class PrimusRuntime:
         def _log_step(step_name: str, func):
             """Log step start/end and execute the function."""
             log_rank_0("=" * 80)
-            log_rank_0(f"{step_name} started")
+            log_rank_0(f"{step_name} started.")
             log_rank_0("=" * 80)
             func()
             log_rank_0("=" * 80)
-            log_rank_0(f"{step_name} completed")
+            log_rank_0(f"{step_name} completed.")
             log_rank_0("=" * 80)
 
         trainer = self.ctx.trainer
