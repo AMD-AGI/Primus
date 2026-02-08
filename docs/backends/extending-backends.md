@@ -104,6 +104,17 @@ class DummyAdapter(BackendAdapter):
     def __init__(self, framework: str = "dummy"):
         super().__init__(framework)
 
+    def setup_backend_path(self, backend_path=None) -> str:
+        """
+        Dummy backend lives inside the Primus tree (no third_party submodule),
+        so we don't need to modify sys.path or resolve any external path here.
+
+        For real backends that live under third_party/<backend>, you can rely on
+        the default implementation in BackendAdapter instead.
+        """
+        log_rank_0("[Primus:DummyAdapter] setup_backend_path: no-op for in-tree dummy backend")
+        return ""
+
     def prepare_backend(self, config: Any):
         """Run any one-time backend setup (paths, env, hooks)."""
         # Example: run any registered setup hooks for this backend
@@ -123,14 +134,11 @@ class DummyAdapter(BackendAdapter):
         return backend_args
 
     def load_trainer_class(self, stage: str = "pretrain"):
-        """Return trainer class registered for this backend/stage."""
-        try:
-            return BackendRegistry.get_trainer_class(self.framework, stage=stage)
-        except (ValueError, AssertionError) as exc:
-            raise RuntimeError(
-                "[Primus:DummyAdapter] Trainer not registered. "
-                "Ensure primus.backends.dummy registers it via BackendRegistry."
-            ) from exc
+        """Return the Trainer class for the specified training stage."""
+        from primus.backends.dummy.dummy_pretrain_trainer import DummyPretrainTrainer
+
+        log_rank_0("[Primus:DummyAdapter] Loaded trainer class: DummyPretrainTrainer")
+        return DummyPretrainTrainer
 
     def detect_backend_version(self) -> str:
         """Return a version string used by the patch system."""
@@ -139,11 +147,14 @@ class DummyAdapter(BackendAdapter):
 
 Key points:
 
+- Since the dummy backend is implemented directly under `primus.backends.dummy`
+  (not in `third_party/`), it overrides `setup_backend_path()` as a **no-op**
+  so that the default third_party path resolution is skipped.
 - `prepare_backend()` is called **after** setup patches and before config
   conversion. Use it for imports, extra `sys.path` tweaks, or framework init.
 - `convert_config()` returns whatever your trainer expects as `backend_args`.
-- `load_trainer_class()` delegates to `BackendRegistry` so that trainers can be
-  registered decoupled from the adapter.
+- `load_trainer_class()` imports and returns `DummyPretrainTrainer` directly
+  (similar to `MegatronAdapter`), without going through a registry lookup.
 - `detect_backend_version()` is used to key version-specific patches.
 
 ---
@@ -155,7 +166,7 @@ Key points:
 ```python
 from typing import Any
 
-from primus.backends.dummy.dummy_base_trainer import DummyBaseTrainer
+from primus.core.trainer.base_trainer import BaseTrainer
 from primus.modules.module_utils import log_rank_0
 
 
@@ -211,20 +222,6 @@ from primus.core.backend.backend_registry import BackendRegistry
 
 # Register adapter (backend name → adapter class)
 BackendRegistry.register_adapter("dummy", DummyAdapter)
-
-
-def _register_setup_hooks():
-    """Optional: register backend-specific setup hooks."""
-    from primus.core.backend.backend_registry import BackendRegistry as _BR
-
-    def _dummy_setup_hook():
-        # Example: set environment variables or log a message
-        print("[Primus:DummyBackend] Running setup hook")
-
-    _BR.register_setup_hook("dummy", _dummy_setup_hook)
-
-
-_register_setup_hooks()
 ```
 
 At runtime, when `framework: dummy` is requested:
@@ -323,7 +320,7 @@ save_interval: 100
 ```
 
 This file defines **default training hyperparameters** for the `dummy` backend.
-Fields under `modules.dummy_trainer.overrides` in the top-level config will be
+Fields under `modules.pre_trainer.overrides` in the top-level config will be
 deep-merged on top of these defaults.
 
 ### 7.3 Model-level config
@@ -343,7 +340,7 @@ num_attention_heads: 32
 This file plays the same role as Megatron model configs under
 `primus/configs/models/megatron/`. It is loaded via:
 
-- `modules.dummy_trainer.model: dummy_8B.yaml`
+- `modules.pre_trainer.model: dummy_8B.yaml`
 - resolved as `primus/configs/models/{framework}/dummy_8B.yaml`
 
 ### 7.4 Running the example
