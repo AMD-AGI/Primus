@@ -192,6 +192,9 @@ class DummyPretrainTrainer(BaseTrainer):
             raise RuntimeError("DummyPretrainTrainer.init() must be called before train().")
 
         log_rank_0("[DummyPretrainTrainer] train()")
+        # Example: access a custom param (e.g., 'hello') from backend_args.
+        hello_value = getattr(self.backend_args, "hello", "<missing>")
+        log_rank_0(f"[DummyPretrainTrainer] hello={hello_value}")
         # Real training loop would go here.
         log_rank_0("[DummyPretrainTrainer] training finished successfully.")
 
