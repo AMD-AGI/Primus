@@ -1,0 +1,46 @@
+fwd_time: 1000
+bwd_time: 1000
+wgrad_time: 1000
+
+print_simulation_result: true
+
+output_dir: ./pp_simulation_result
+
+schedulers:
+  - name: basic_1f1b
+    class: primus.core.pipeline_parallel.scheduler.algorithms.basic_1f1b.Schedule1F1B
+    pp_size: 8
+    vpp_size: 1
+    micro_batches: 32
+
+  - name: zerobubble
+    class: primus.core.pipeline_parallel.scheduler.algorithms.zerobubble.ScheduleZeroBubble
+    pp_size: 8
+    vpp_size: 1
+    micro_batches: 32
+
+  - name: interleaved_1f1b
+    class: primus.core.pipeline_parallel.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B
+    pp_size: 8
+    vpp_size: 2
+    micro_batches: 32
+
+  - name: zbv-formatted
+    class: primus.core.pipeline_parallel.scheduler.algorithms.zbv_formatted.ScheduleZBVFormatted
+    pp_size: 8
+    vpp_size: 2
+    micro_batches: 32
+
+  - name: v-half
+    class: primus.core.pipeline_parallel.scheduler.algorithms.zbv_greedy.ScheduleZBVGreedy
+    pp_size: 8
+    vpp_size: 2
+    micro_batches: 32
+    memory_config: half
+
+  - name: v-min
+    class: primus.core.pipeline_parallel.scheduler.algorithms.zbv_greedy.ScheduleZBVGreedy
+    pp_size: 8
+    vpp_size: 2
+    micro_batches: 32
+    memory_config: min
