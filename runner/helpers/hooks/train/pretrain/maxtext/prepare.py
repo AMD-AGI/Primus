@@ -9,7 +9,7 @@ MaxText pre-train preparation hook for primus-cli direct.
 
 This script is invoked by:
 
-    runner/helpers/hooks/train/pretrain/prepare_experiment.py
+    runner/helpers/hooks/train/pretrain/prepare_experiment.sh
 
 via:
 
