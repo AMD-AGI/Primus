@@ -7,19 +7,15 @@
 ###############################################################################
 # Primus BackendRegistry
 #
-# This module manages registration & lookup for:
-#   - Backend Path Names (used by _setup_backend_path)
-#   - Backend Adapters (MegatronAdapter, TitanAdapter, TurboAdapter...)
-#   - Backend Trainer Classes (optional)
-#   - Backend Setup Hooks (patches or environment initialization)
+# Responsibilities:
+#   - Register and lookup backend adapter classes
+#   - Lazy-load backend modules (on demand)
+#   - Register and lookup trainer classes (per backend/stage)
+#   - Register and run backend setup hooks
 #
-# Design Philosophy:
-#   - Pure Lazy Loading: Backends are loaded on-demand when first accessed
-#   - No Hard-coded Backend List: All backends discovered dynamically
-#   - Zero Startup Overhead: No upfront imports or initialization
-#   - Fail-Safe: Missing backends don't break other backends
-#
-# This is the foundation of Primus's plugin-based backend system.
+# Notes:
+#   - Backend path / sys.path setup is owned by `BackendAdapter.setup_backend_path()`
+#     and is orchestrated by the runtime, not the registry.
 ###############################################################################
 
 from typing import Callable, Dict, List, Type
@@ -38,45 +34,19 @@ class BackendRegistry:
         - Third-party plug-in backend
 
     This registry enables:
-        - path name registration (for third_party/<path_name>)
-        - adapter registration (BackendAdapter)
-        - trainer class registration (optional)
+        - adapter registration (BackendAdapter subclass)
+        - trainer class registration (per backend/stage)
         - framework-specific setup hook registration
     """
-
-    # Backend → third_party folder name (optional override)
-    # If not registered, we fall back to using the backend/framework name itself.
-    _path_names: Dict[str, str] = {}
 
     # Backend → AdapterClass (class, not instance)
     _adapters: Dict[str, Type] = {}
 
     # (Backend, Stage) → TrainerClass
-    _trainer_classes: Dict[tuple, Type] = {}
+    # _trainer_classes: Dict[tuple, Type] = {}
 
     # Backend → list of setup hooks
     _setup_hooks: Dict[str, List[Callable]] = {}
-
-    # ----------------------------------------------------------------------
-    #  Path Name Registration
-    # ----------------------------------------------------------------------
-    @classmethod
-    def register_path_name(cls, backend: str, path_name: str):
-        """
-        Register mapping: framework_name → directory name under third_party/.
-        e.g., register_path_name("megatron", "Megatron-LM")
-        """
-        cls._path_names[backend] = path_name
-
-    @classmethod
-    def get_path_name(cls, backend: str) -> str:
-        """
-        Get path name for backend.
-
-        If no explicit path name is registered for the backend, the backend
-        name itself is returned (i.e., third_party/<backend>).
-        """
-        return cls._path_names.get(backend, backend)
 
     # ----------------------------------------------------------------------
     #  Backend Adapter Registration
@@ -92,18 +62,16 @@ class BackendRegistry:
     @classmethod
     def get_adapter(cls, backend: str, backend_path=None):
         """
-        Get adapter for backend (with lazy loading and automatic path setup).
+        Get adapter for backend (with lazy loading).
 
         This method automatically:
         1. Returns an already-registered adapter if available
-        2. Otherwise sets up backend path in sys.path
-        3. Lazily loads the backend module (which is expected to register the adapter)
-        4. Creates and returns the adapter instance
-        5. Calls adapter's setup_sys_path for backend-specific path customization
+        2. Otherwise lazily loads the backend module (which is expected to register the adapter)
+        3. Creates and returns the adapter instance
 
         Args:
             backend: Backend name (e.g., "megatron", "torchtitan")
-            backend_path: Optional explicit path(s) to backend installation
+            backend_path: Deprecated; backend path setup is owned by the adapter/runtime.
 
         Returns:
             Backend adapter instance
@@ -112,108 +80,23 @@ class BackendRegistry:
             AssertionError: If backend cannot be found/registered
             ImportError: If backend module import fails
         """
-        # Fast path: adapter already registered
+        # Ensure adapter class is registered (lazy import)
         if backend not in cls._adapters:
-            # Step 1: Lazily load backend (expected to register adapter)
             cls._load_backend(backend)
 
-            # Step 2: Setup backend path (idempotent - won't duplicate if already in sys.path)
-            resolved_path = cls.setup_backend_path(backend, backend_path=backend_path, verbose=True)
+        assert backend in cls._adapters, (
+            f"[Primus] Backend '{backend}' not found.\n"
+            f"Available backends: {', '.join(cls._adapters.keys()) if cls._adapters else 'none'}\n"
+            f"Hint: Make sure '{backend}' is installed and properly configured."
+        )
 
-            # Step 3: Ensure adapter is available, then create instance
-            assert backend in cls._adapters, (
-                f"[Primus] Backend '{backend}' not found.\n"
-                f"Available backends: {', '.join(cls._adapters.keys()) if cls._adapters else 'none'}\n"
-                f"Hint: Make sure '{backend}' is installed and properly configured."
-            )
-
-            # Step 4: Create adapter instance
-            adapter_instance = cls._adapters[backend](backend)
-        else:
-            # Adapter already registered - skip path setup as it was done during registration
-            # Directly create adapter instance
-            adapter_instance = cls._adapters[backend](backend)
-
-        adapter_instance.setup_sys_path(resolved_path)
-        return adapter_instance
+        # Create adapter instance; backend path setup is owned by adapter.setup_backend_path().
+        return cls._adapters[backend](backend)
 
     @classmethod
     def has_adapter(cls, backend: str) -> bool:
         """Check if adapter is registered for backend."""
         return backend in cls._adapters
-
-    # ----------------------------------------------------------------------
-    #  Backend Discovery & Lazy Loading
-    # ----------------------------------------------------------------------
-    @classmethod
-    def setup_backend_path(cls, backend: str, backend_path=None, verbose=True) -> str:
-        """
-        Insert Python import path for backend modules.
-
-        Priority:
-            1. backend_path argument (--backend-path CLI option)
-            2. BACKEND_PATH environment variable
-            3. primus/third_party/<backend_dir_name>
-
-        Args:
-            backend: Backend name (e.g., "megatron", "torchtitan")
-            backend_path: Optional explicit path(s) to backend
-            verbose: Whether to print sys.path insertion message
-
-        Returns:
-            The path that was added to sys.path
-
-        Raises:
-            FileNotFoundError: If no valid backend path found
-        """
-        import os
-        import sys
-        from pathlib import Path
-
-        def _use_backend_path(path: str, error_msg: str) -> str:
-            """
-            Normalize, validate existence, insert into sys.path (if needed),
-            and return the normalized path. On failure, raises via assert.
-            """
-            norm_path = os.path.abspath(os.path.normpath(str(path)))
-            if os.path.exists(norm_path):
-                if norm_path not in sys.path:
-                    sys.path.insert(0, norm_path)
-                    log_rank_0(f"sys.path.insert → {norm_path}")
-                return norm_path
-
-            assert False, error_msg
-
-        # 1) CLI argument: if provided, it must exist. No fallback.
-        if backend_path:
-            cli_error = (
-                f"Backend path not found for '{backend}'.\n"
-                f"Requested path: {backend_path}\n"
-                f"Hint: Fix --backend_path or remove it to use BACKEND_PATH or the default third_party location."
-            )
-            return _use_backend_path(backend_path, cli_error)
-
-        # 2) Environment variable: if set, it must exist. No fallback.
-        env_path = os.getenv("BACKEND_PATH")
-        if env_path:
-            env_error = (
-                f"BACKEND_PATH does not exist for '{backend}'.\n"
-                f"BACKEND_PATH={env_path}\n"
-                f"Hint: Fix BACKEND_PATH or unset it to use the default third_party location."
-            )
-            return _use_backend_path(env_path, env_error)
-
-        # 3) Default: primus/third_party/<backend_dir_name> must exist.
-        backend_dir_name = cls.get_path_name(backend)
-        # Navigate from this file to project root: primus/core/backend/backend_registry.py -> <repo_root>/
-        primus_root = Path(__file__).resolve().parents[3]
-        default_path = primus_root / "third_party" / backend_dir_name
-        default_error = (
-            f"No valid backend path for '{backend}'.\n"
-            f"Tried default path: {default_path}\n"
-            f"Hint: Install backend to primus/third_party/{backend_dir_name} or provide a valid --backend_path/BACKEND_PATH."
-        )
-        return _use_backend_path(default_path, default_error)
 
     @classmethod
     def _load_backend(cls, backend: str) -> None:
@@ -233,6 +116,7 @@ class BackendRegistry:
 
         module_path = f"primus.backends.{backend}"
         importlib.import_module(module_path)
+        log_rank_0(f"[Primus:BackendRegistry] lazy-load backend='{backend}' module='{module_path}'")
 
     # Backward-compatible alias; old name kept for tests and external callers.
     _try_load_backend = _load_backend
@@ -277,47 +161,6 @@ class BackendRegistry:
             log_rank_0("[Primus] Warning: No backends discovered")
 
     # ----------------------------------------------------------------------
-    #  TrainerClass Registration (optional)
-    # ----------------------------------------------------------------------
-    @classmethod
-    def register_trainer_class(cls, trainer_cls: Type, backend: str, stage: str = "pretrain"):
-        """
-        Register trainer class for backend with optional stage.
-
-        Args:
-            trainer_cls: Trainer class to register
-            backend: Backend name (e.g., "megatron", "torchtitan")
-            stage: Stage name (e.g., "pretrain", "sft"). Defaults to "pretrain".
-        """
-        cls._trainer_classes[(backend, stage)] = trainer_cls
-
-    @classmethod
-    def get_trainer_class(cls, backend: str, stage: str = "pretrain"):
-        """
-        Get trainer class for backend.
-
-        Args:
-            backend: Backend name (e.g., "megatron", "torchtitan")
-            stage: Stage name. Defaults to "pretrain".
-
-        Returns:
-            Trainer class
-
-        Raises:
-            ValueError: If no trainer class found for backend/stage combination
-        """
-        key = (backend, stage)
-        if key in cls._trainer_classes:
-            return cls._trainer_classes[key]
-
-        raise ValueError(f"[Primus] No trainer class registered for backend '{backend}' stage '{stage}'.")
-
-    @classmethod
-    def has_trainer_class(cls, backend: str, stage: str = "pretrain") -> bool:
-        """Check if trainer class is registered for backend/stage."""
-        return (backend, stage) in cls._trainer_classes
-
-    # ----------------------------------------------------------------------
     # Setup Hook Registration
     # ----------------------------------------------------------------------
     @classmethod
@@ -358,11 +201,6 @@ class BackendRegistry:
     @classmethod
     def debug_dump(cls):
         print("\n========== Primus BackendRegistry ==========")
-        print("Path Names:       ", cls._path_names)
         print("Adapters:         ", cls._adapters)
-        print(
-            "Trainer Classes:  ",
-            {f"{b}:{s}": t.__name__ for (b, s), t in cls._trainer_classes.items()},
-        )
         print("Setup Hooks:      ", {k: len(v) for k, v in cls._setup_hooks.items()})
         print("=============================================\n")
