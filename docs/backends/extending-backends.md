@@ -115,12 +115,6 @@ class DummyAdapter(BackendAdapter):
         log_rank_0("[Primus:DummyAdapter] setup_backend_path: no-op for in-tree dummy backend")
         return ""
 
-    def prepare_backend(self, config: Any):
-        """Run any one-time backend setup (paths, env, hooks)."""
-        # Example: run any registered setup hooks for this backend
-        BackendRegistry.run_setup(self.framework)
-        log_rank_0("[Primus:DummyAdapter] Backend prepared")
-
     def convert_config(self, config: Any) -> Dict[str, Any]:
         """
         Convert Primus ModuleConfig → backend-specific args.
@@ -139,10 +133,6 @@ class DummyAdapter(BackendAdapter):
 
         log_rank_0("[Primus:DummyAdapter] Loaded trainer class: DummyPretrainTrainer")
         return DummyPretrainTrainer
-
-    def detect_backend_version(self) -> str:
-        """Return a version string used by the patch system."""
-        return "dummy-0.0.1"
 ```
 
 Key points:
@@ -150,12 +140,9 @@ Key points:
 - Since the dummy backend is implemented directly under `primus.backends.dummy`
   (not in `third_party/`), it overrides `setup_backend_path()` as a **no-op**
   so that the default third_party path resolution is skipped.
-- `prepare_backend()` is called **after** setup patches and before config
-  conversion. Use it for imports, extra `sys.path` tweaks, or framework init.
 - `convert_config()` returns whatever your trainer expects as `backend_args`.
 - `load_trainer_class()` imports and returns `DummyPretrainTrainer` directly
   (similar to `MegatronAdapter`), without going through a registry lookup.
-- `detect_backend_version()` is used to key version-specific patches.
 
 ---
 
@@ -254,7 +241,7 @@ modules:
 Run:
 
 ```bash
-primus train pretrain --config examples/dummy/configs/dummy_8B-pretrain.yaml
+./primus-cli direct -- train pretrain --config examples/dummy/configs/dummy_8B-pretrain.yaml
 ```
 
 You should see logs similar to:
@@ -351,7 +338,7 @@ This file plays the same role as Megatron model configs under
 Run:
 
 ```bash
-primus train pretrain --config examples/dummy/configs/dummy_8B-pretrain.yaml
+./primus-cli direct -- train pretrain --config examples/dummy/configs/dummy_8B-pretrain.yaml
 ```
 
 Primus will:
