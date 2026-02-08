@@ -1,0 +1,6 @@
+extends:
+  - ../module_base.yaml
+
+# # Mark as trainable module
+trainable: true
+stage: posttrain

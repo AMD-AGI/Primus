@@ -4,50 +4,50 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from __future__ import annotations
 
-def run(args, overrides):
+import sys
+from os import getenv
+from typing import List
+
+
+def _resolve_pretrain_runtime(args) -> str:
+    """
+    Resolve the runtime entry for pretrain.
+
+    Priority:
+      1) Explicit env override via PRIMUS_TRAIN_RUNTIME
+      2) Auto-detect by backend framework (TorchTitan Megatron -> core, others -> legacy)
+    """
+    runtime_entry = getenv("PRIMUS_TRAIN_RUNTIME", "").strip().lower()
+    if runtime_entry in ("legacy", "core"):
+        return runtime_entry
+    if runtime_entry:
+        print(
+            f"[Primus:Train] Ignoring invalid PRIMUS_TRAIN_RUNTIME='{runtime_entry}'.",
+            file=sys.stderr,
+        )
+
+    try:
+        from primus.core.utils import yaml_utils
+
+        exp_cfg = yaml_utils.parse_yaml_to_namespace(args.config)
+        modules_cfg = getattr(exp_cfg, "modules", None)
+        pre_trainer_cfg = getattr(modules_cfg, "pre_trainer", None) if modules_cfg is not None else None
+        framework = getattr(pre_trainer_cfg, "framework", None) if pre_trainer_cfg is not None else None
+    except Exception:
+        framework = None
+
+    supported_frameworks = ["torchtitan", "megatron"]
+    return "core" if framework in supported_frameworks else "legacy"
+
+
+def run(args, overrides: List[str]):
     """
     Entry point for the 'train' subcommand.
     """
     if args.suite == "pretrain":
-        # Select which training entry to use.
-        #
-        # To avoid changing the existing CLI surface, the choice between the
-        # legacy and core runtime is controlled via an environment variable:
-        #
-        #   PRIMUS_TRAIN_RUNTIME = "legacy" | "core"
-        #
-        # Priority:
-        #   1) Explicit env override via PRIMUS_TRAIN_RUNTIME
-        #   2) If not set, auto-select default by backend framework:
-        #        - TorchTitan  -> "core" (new runtime)
-        #        - others      -> "legacy" (keep existing behavior)
-        from os import getenv
-
-        # 1) Explicit env override (highest priority)
-        runtime_entry = getenv("PRIMUS_TRAIN_RUNTIME", "").strip().lower()
-
-        if runtime_entry not in ("legacy", "core"):
-            # 2) Auto-detect framework from exp config to choose a sensible default
-            #    without requiring users to set PRIMUS_TRAIN_RUNTIME explicitly.
-            try:
-                from primus.core.utils import yaml_utils
-
-                exp_cfg = yaml_utils.parse_yaml_to_namespace(args.config)
-                modules_cfg = getattr(exp_cfg, "modules", None)
-                pre_trainer_cfg = (
-                    getattr(modules_cfg, "pre_trainer", None) if modules_cfg is not None else None
-                )
-                framework = (
-                    getattr(pre_trainer_cfg, "framework", None) if pre_trainer_cfg is not None else None
-                )
-            except Exception:
-                framework = None
-
-            if framework == "torchtitan":
-                runtime_entry = "core"
-            else:
-                runtime_entry = "legacy"
+        runtime_entry = _resolve_pretrain_runtime(args)
 
         if runtime_entry == "core":
             # New core runtime path: mirror `train_launcher.launch_train`.
@@ -70,7 +70,9 @@ def run(args, overrides):
         runtime = PrimusRuntime(args=args)
         runtime.run_train_module(module_name="post_trainer", overrides=overrides or [])
     else:
-        raise NotImplementedError(f"Unsupported train suite: {args.suite}")
+        raise NotImplementedError(
+            f"Unsupported train suite: {args.suite}. " "Expected one of: pretrain, posttrain."
+        )
 
 
 def register_subcommand(subparsers):
@@ -96,7 +98,7 @@ def register_subcommand(subparsers):
     parser = subparsers.add_parser(
         "train",
         help="Launch Primus pretrain with Megatron or TorchTitan",
-        description="Primus training entry. Supports pretrain now; posttrain/finetune/evaluate reserved for future use.",
+        description="Primus training entry. Supports pretrain and posttrain (SFT); finetune/evaluate reserved for future use.",
     )
     suite_parsers = parser.add_subparsers(dest="suite", required=True)
 

@@ -71,7 +71,7 @@ class DummyBackendAdapter(adapter_module.BackendAdapter):
             model_name=getattr(config, "model", None),
         )
 
-    def load_trainer_class(self):
+    def load_trainer_class(self, stage: str = "pretrain"):
         self.load_trainer_calls += 1
         return DummyTrainer
 

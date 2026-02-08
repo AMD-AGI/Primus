@@ -26,7 +26,7 @@ container:
   # All keys directly map to CLI arguments (--key value)
   options:
     # Container image
-    image: "rocm/primus:v25.10"
+    image: "rocm/primus:v26.1"
 
     # Single-value options
     ipc: "host"

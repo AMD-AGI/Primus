@@ -49,8 +49,8 @@ def _parse_semver(version: str) -> Optional[Tuple[int, ...]]:
     """
     Parse semantic version string 'X.Y.Z' into a tuple (X, Y, Z).
 
-    Returns None if the version contains non-numeric components
-    (e.g., commit hashes).
+    Accepts prerelease suffixes like '0.15.0rc8' by extracting the
+    leading numeric portion of each segment.
     """
     if not version:
         return None
@@ -58,10 +58,10 @@ def _parse_semver(version: str) -> Optional[Tuple[int, ...]]:
     parts = version.split(".")
     nums = []
     for p in parts:
-        if p.isdigit():
-            nums.append(int(p))
-        else:
+        m = re.match(r"^(\d+)", p)
+        if not m:
             return None
+        nums.append(int(m.group(1)))
     return tuple(nums)
 
 
