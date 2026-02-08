@@ -162,7 +162,7 @@ This is the most common pattern when you need a fixed software stack.
 bash runner/primus-cli slurm \
   -N 4 \
   --nodelist "node[01-04]" \
--- --image "rocm/primus:v25.10" \
+-- --image "rocm/primus:v26.1" \
 -- --env NCCL_DEBUG=INFO \
 -- train pretrain --config examples/megatron/configs/MI300X/llama3.1_8B-BF16-pretrain.yaml
 ```

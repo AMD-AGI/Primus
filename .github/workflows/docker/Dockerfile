@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=docker.io/rocm/primus:v25.10
+ARG BASE_IMAGE=docker.io/rocm/primus:v26.1
 FROM ${BASE_IMAGE}
 
 ARG PRIMUS_TURBO_COMMIT
