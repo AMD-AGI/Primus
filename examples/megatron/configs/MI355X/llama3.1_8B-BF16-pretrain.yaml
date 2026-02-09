@@ -20,9 +20,14 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 50
-      micro_batch_size: 4
-      global_batch_size: 256
+      train_iters: 4
+      micro_batch_size: 1
+      global_batch_size: 8
+
+      apply_rope_fusion: false
+      transformer_impl: local
+      no_persist_layer_norm: true
+      num_layers: 2
 
       seq_length: 8192
       max_position_embeddings: 8192
