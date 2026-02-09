@@ -155,8 +155,11 @@ modules:
     # model to run
     model: tinyllama_1.1B.yaml
     overrides:
+      save: null
+      disable_last_saving: true
       stderr_sink_level: DEBUG
 
+      mock_data: true
       train_iters: 50
       micro_batch_size: 2
       global_batch_size: 128
