@@ -151,7 +151,7 @@ from primus.backends.megatron.training.global_vars import (
 from primus.backends.megatron.training.mlflow_setup import upload_mlflow_artifacts
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
-from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
+from primus.core.utils.rocm_mem_info import get_rocm_smi_gpu_util, get_rocm_smi_mem_info
 from primus.core.utils.yaml_utils import nested_namespace_to_dict
 from primus.modules.base_module import BaseModule
 from primus.modules.module_utils import (
@@ -396,28 +396,25 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             else:
                 log_rank_0(f"-{latest_file} does not exist, skip auto_continue_train.")
 
-        # Auto-enable dependencies for mlflow upload flags
-        # This must run BEFORE tensorboard section to ensure paths are set correctly
-        mlflow_upload_flags = [
-            getattr(args, "mlflow_upload_traces", False),
-            getattr(args, "mlflow_upload_logs", False),
-            getattr(args, "mlflow_upload_tracelens_report", False),
-        ]
-        if any(mlflow_upload_flags) and args.disable_mlflow:
-            args.disable_mlflow = False
-            debug_rank_0("Auto-enabled MLflow (disable_mlflow=False) because mlflow_upload_* flags are set")
-
-        # If uploading traces or tracelens reports, auto-enable profiling and tensorboard
-        needs_profiling = getattr(args, "mlflow_upload_traces", False) or getattr(
-            args, "mlflow_upload_tracelens_report", False
-        )
+        # Auto-enable profiling and tensorboard when traces are needed: for MLflow upload
+        # (only if MLflow is enabled) or for local TraceLens report generation.
+        # Without this, generate_tracelens_report=True with profile=False would produce no traces.
+        needs_profiling = (
+            (
+                getattr(args, "mlflow_upload_traces", False)
+                or getattr(args, "mlflow_upload_tracelens_report", False)
+            )
+            and not args.disable_mlflow
+        ) or getattr(args, "generate_tracelens_report", False)
         if needs_profiling:
             if not getattr(args, "profile", False):
                 args.profile = True
-                debug_rank_0("Auto-enabled profile=True for mlflow trace/tracelens upload")
+                debug_rank_0("Auto-enabled profile=True for trace/tracelens (upload or local generation)")
             if not getattr(args, "use_pytorch_profiler", False):
                 args.use_pytorch_profiler = True
-                debug_rank_0("Auto-enabled use_pytorch_profiler=True for mlflow trace/tracelens upload")
+                debug_rank_0(
+                    "Auto-enabled use_pytorch_profiler=True for trace/tracelens (upload or local generation)"
+                )
             if getattr(args, "disable_tensorboard", True):
                 args.disable_tensorboard = False
                 debug_rank_0("Auto-enabled tensorboard (disable_tensorboard=False) for profiler trace output")
@@ -1147,19 +1144,20 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         ft_integration.on_checkpointing_end(is_async_finalization=True)
 
         mlflow_writer = get_mlflow_writer()
+        # Always call: uploads to MLflow when enabled; when MLflow disabled, still runs
+        # local-only TraceLens report generation if generate_tracelens_report=True.
+        upload_mlflow_artifacts(
+            tensorboard_dir=args.tensorboard_dir,
+            exp_root_path=self.exp_root_path,
+            upload_traces=getattr(args, "mlflow_upload_traces", False),
+            upload_logs=getattr(args, "mlflow_upload_logs", False),
+            generate_tracelens_report=getattr(args, "generate_tracelens_report", False),
+            upload_tracelens_report=getattr(args, "mlflow_upload_tracelens_report", False),
+            tracelens_ranks=getattr(args, "mlflow_tracelens_ranks", None),
+            tracelens_output_format=getattr(args, "mlflow_tracelens_output_format", "xlsx"),
+            tracelens_cleanup_after_upload=getattr(args, "mlflow_tracelens_cleanup_after_upload", False),
+        )
         if mlflow_writer:
-            # Upload artifacts to MLflow before ending the run
-            upload_mlflow_artifacts(
-                tensorboard_dir=args.tensorboard_dir,
-                exp_root_path=self.exp_root_path,
-                upload_traces=getattr(args, "mlflow_upload_traces", True),
-                upload_logs=getattr(args, "mlflow_upload_logs", True),
-                generate_tracelens_report=getattr(args, "generate_tracelens_report", False),
-                upload_tracelens_report=getattr(args, "mlflow_upload_tracelens_report", False),
-                tracelens_ranks=getattr(args, "mlflow_tracelens_ranks", None),
-                tracelens_output_format=getattr(args, "mlflow_tracelens_output_format", "all"),
-                tracelens_cleanup_after_upload=getattr(args, "mlflow_tracelens_cleanup_after_upload", False),
-            )
             mlflow_writer.end_run()
 
         one_logger and one_logger.log_metrics({"app_finish_time": one_logger_utils.get_timestamp_in_ms()})
@@ -2000,13 +1998,24 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if iteration % args.log_interval == 0:
             # Note(wenx): If we want to collect rocm-smi memory information for the first two iterations,
             # place the collection before the timer to minimize its impact on latency measurements for iterations ≥ 3.
-            if args.log_throughput:
+            rocm_gpu_util = None
+            # Enable throughput calculations if log_throughput or mlflow_upload_performance_metrics is set
+            enable_perf_metrics = args.log_throughput or getattr(
+                args, "mlflow_upload_performance_metrics", False
+            )
+            if enable_perf_metrics:
                 if args.use_rocm_mem_info or (
                     args.use_rocm_mem_info_iters is not None and iteration in args.use_rocm_mem_info_iters
                 ):
                     rocm_total_mem, rocm_used_mem, rocm_free_mem = get_rocm_smi_mem_info(
                         self.module_local_rank
                     )
+                # Collect GPU utilization for performance metrics
+                if getattr(args, "mlflow_upload_performance_metrics", False):
+                    try:
+                        rocm_gpu_util = get_rocm_smi_gpu_util(self.module_local_rank)
+                    except Exception:
+                        rocm_gpu_util = None
 
             elapsed_time = timers("interval-time").elapsed(barrier=True)
             elapsed_time_per_iteration = elapsed_time / total_iterations
@@ -2043,7 +2052,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 elapsed_time_per_iteration * 1000.0,
                 statistics.mean(self.recent_iteration_times),
             )
-            if args.log_throughput:
+            if enable_perf_metrics:
                 if (
                     iteration == self.log_avg_skip_iterations + 1
                     or len(self.recent_tflop_throughputs) >= self.log_avg_reset_interval
@@ -2185,6 +2194,63 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                         mlflow_writer.log_metric(
                             f"{mem_collector}_mem_usage_percent", mem_usage * 100.0, iteration
                         )
+
+                # Upload performance metrics to MLflow
+                # Groups: Performance (throughput, TPS, iteration time), Memory (peak, usage %), System (GPU util)
+                # NOTE: mlflow_writer only exists on last rank, but all_gather requires all ranks to participate
+                if getattr(args, "mlflow_upload_performance_metrics", False):
+                    # System metrics - GPU utilization per rank
+                    # ALL ranks must participate in all_gather, even if they don't have mlflow_writer
+                    # Use -1 as sentinel for unavailable GPU util
+                    util_value = rocm_gpu_util if rocm_gpu_util is not None else -1.0
+                    util_tensor = torch.tensor([util_value], device="cuda", dtype=torch.float32)
+                    world_size = dist.get_world_size()
+                    gathered_utils = [torch.zeros_like(util_tensor) for _ in range(world_size)]
+                    dist.all_gather(gathered_utils, util_tensor)
+
+                    # Only the last rank (which has mlflow_writer) logs the metrics
+                    if mlflow_writer:
+                        # Performance metrics
+                        mlflow_writer.log_metric("perf/throughput_tflops_per_gpu", throughput, iteration)
+                        mlflow_writer.log_metric(
+                            "perf/tps_tokens_per_sec_per_gpu", token_throughput, iteration
+                        )
+                        mlflow_writer.log_metric(
+                            "perf/iteration_time_ms",
+                            elapsed_time_per_iteration * 1000.0,
+                            iteration,
+                        )
+                        # Memory metrics
+                        mlflow_writer.log_metric(
+                            f"perf/{mem_collector}_peak_mem_gb",
+                            used_mem / 1024 / 1024 / 1024,
+                            iteration,
+                        )
+                        mlflow_writer.log_metric(
+                            f"perf/{mem_collector}_mem_utilization_pct",
+                            mem_usage * 100.0,
+                            iteration,
+                        )
+                        # Log GPU utilization from gathered values
+                        valid_utils = []
+                        for rank, util_val in enumerate(gathered_utils):
+                            util = util_val.item()
+                            if util >= 0:  # Filter out sentinel values (-1)
+                                mlflow_writer.log_metric(
+                                    f"perf/gpu_utilization_pct_rank{rank}",
+                                    util,
+                                    iteration,
+                                )
+                                valid_utils.append(util)
+                        # Also log average GPU utilization (only from valid values)
+                        if valid_utils:
+                            avg_util = sum(valid_utils) / len(valid_utils)
+                            mlflow_writer.log_metric(
+                                "perf/gpu_utilization_pct_avg",
+                                avg_util,
+                                iteration,
+                            )
+
             assert learning_rate is not None
             # Decoupled_learning_rate should be not None only on first and last pipeline stage.
             log_string += " learning rate: {:.6E} |".format(learning_rate)

@@ -14,7 +14,10 @@ reports) to MLflow. Separated from global_vars.py to reduce merge conflicts.
 from typing import List, Optional
 
 from .global_vars import get_mlflow_writer
-from .mlflow_artifacts import upload_artifacts_to_mlflow
+from .mlflow_artifacts import (
+    generate_tracelens_reports_locally,
+    upload_artifacts_to_mlflow,
+)
 
 
 def upload_mlflow_artifacts(
@@ -64,6 +67,14 @@ def upload_mlflow_artifacts(
     """
     mlflow_writer = get_mlflow_writer()
     if mlflow_writer is None:
+        # Local-only TraceLens generation: run even when MLflow is disabled
+        if generate_tracelens_report and tensorboard_dir and exp_root_path:
+            generate_tracelens_reports_locally(
+                tensorboard_dir=tensorboard_dir,
+                exp_root_path=exp_root_path,
+                ranks=tracelens_ranks,
+                output_format=tracelens_output_format,
+            )
         return None
 
     return upload_artifacts_to_mlflow(

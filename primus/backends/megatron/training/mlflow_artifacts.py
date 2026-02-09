@@ -28,9 +28,9 @@ MLflow Artifact Structure:
         └── ...
 
 TraceLens Report Formats:
-    - xlsx: Multi-tab Excel with sections for kernels, memory, communication, etc.
+    - xlsx: Multi-tab Excel (default; single parse, fastest)
     - csv:  Multiple CSV files per rank (kernels, memory, communication, etc.)
-    - all:  Both xlsx and csv files (default)
+    - all:  Both xlsx and csv (parses trace twice, ~2x processing time; use when both formats needed)
 """
 
 import glob
@@ -352,7 +352,7 @@ def generate_tracelens_report(
     trace_file: str,
     output_dir: str,
     report_name: Optional[str] = None,
-    output_format: str = "all",
+    output_format: str = "xlsx",
 ) -> List[str]:
     """
     Generate a TraceLens analysis report for a single trace file.
@@ -362,9 +362,10 @@ def generate_tracelens_report(
         output_dir: Directory to save the report
         report_name: Optional custom name for the report (base name for CSVs)
         output_format: Output format:
-                      - "all" (default): Both XLSX and CSV files
-                      - "xlsx": Single multi-tab Excel file with detailed analysis
+                      - "xlsx" (default): Single multi-tab Excel; one trace parse, fastest.
                       - "csv": Multiple CSV files (kernels, memory, communication, etc.)
+                      - "all": Both XLSX and CSV; trace is parsed twice (~2x processing time).
+                      Prefer "xlsx" or "csv" to avoid this overhead unless both are needed.
 
     Returns:
         List of paths to generated report files
@@ -393,9 +394,14 @@ def generate_tracelens_report(
 
         # For "all" format: TraceLens uses either/or logic - if output_csvs_dir is set,
         # it ONLY generates CSVs. So we need to call it twice for both formats.
-        # Note: This means the trace file is parsed twice, roughly doubling processing time
-        # compared to a single format. This is a TraceLens limitation, not a bug.
+        # Performance: trace file is parsed twice (~2x time; large traces can be hundreds of MB).
+        # A future workaround could write CSVs from the DataFrames returned by the first call
+        # if TraceLens API exposes a suitable export; for now we accept the double parse.
         if output_format == "all":
+            warning_rank_0(
+                "[TraceLens] output_format='all' parses the trace file twice (~2x processing time). "
+                "Use 'xlsx' or 'csv' if only one format is needed."
+            )
             xlsx_path = os.path.join(output_dir, f"{report_name}_analysis.xlsx")
             csv_subdir = os.path.join(output_dir, report_name)
             os.makedirs(csv_subdir, exist_ok=True)
@@ -440,7 +446,10 @@ def generate_tracelens_report(
             # Collect all generated CSV files (escape path to handle [] characters in filenames)
             csv_files = glob.glob(os.path.join(glob.escape(csv_subdir), "*.csv"))
             if csv_files:
-                log_rank_0(f"[TraceLens] Generated {len(csv_files)} CSV files for {report_name}")
+                num_sections = len(dfs) if dfs else 0
+                log_rank_0(
+                    f"[TraceLens] Generated {len(csv_files)} CSV files ({num_sections} sections) for {report_name}"
+                )
                 generated_files.append(csv_subdir)  # Upload directory to preserve structure
 
         if generated_files:
@@ -575,7 +584,7 @@ def generate_tracelens_reports(
     tensorboard_dir: str,
     output_dir: str,
     ranks: Optional[List[int]] = None,
-    output_format: str = "all",
+    output_format: str = "xlsx",
 ) -> List[str]:
     """
     Generate TraceLens analysis reports for trace files.
@@ -586,9 +595,9 @@ def generate_tracelens_reports(
         ranks: List of ranks to generate reports for (None = all ranks)
                To limit number of reports, specify fewer ranks in the list
         output_format: Output format:
-                      - "all" (default): Both XLSX and CSV files
-                      - "xlsx": Multi-tab Excel with detailed analysis
+                      - "xlsx" (default): Multi-tab Excel; single parse, fastest
                       - "csv": Multiple CSV files per rank (kernels, memory, comm, etc.)
+                      - "all": Both XLSX and CSV; trace parsed twice (~2x processing time)
 
     Returns:
         List of paths to all generated report files
@@ -596,7 +605,8 @@ def generate_tracelens_reports(
     # Try to install tracelens, but continue with fallback if not available
     _ensure_tracelens_installed()
 
-    # Normalize ranks parameter: handle string input from config parser
+    # Normalize ranks: config/CLI can pass mlflow_tracelens_ranks as a string (e.g. env override
+    # or serialized list), but we need a list or None for filtering.
     if ranks is not None and isinstance(ranks, str):
         import ast
 
@@ -646,7 +656,7 @@ def generate_tracelens_reports_locally(
     tensorboard_dir: str,
     exp_root_path: str,
     ranks: Optional[List[int]] = None,
-    output_format: str = "all",
+    output_format: str = "xlsx",
 ) -> int:
     """
     Generate TraceLens analysis reports locally (without MLflow upload).
@@ -659,7 +669,7 @@ def generate_tracelens_reports_locally(
         exp_root_path: Root path of the experiment (for saving reports)
         ranks: List of ranks to analyze (None = all ranks, [0] = rank 0 only)
                Specify fewer ranks to limit number of reports
-        output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
+        output_format: Report format - "xlsx" (default), "csv", or "all" (xlsx+csv, ~2x time)
 
     Returns:
         Number of reports generated
@@ -703,7 +713,7 @@ def upload_tracelens_reports_to_mlflow(
     tensorboard_dir: str,
     exp_root_path: str,
     ranks: Optional[List[int]] = None,
-    output_format: str = "all",
+    output_format: str = "xlsx",
     artifact_path: str = "trace_analysis",
     cleanup_after_upload: bool = False,
 ) -> int:
@@ -722,7 +732,7 @@ def upload_tracelens_reports_to_mlflow(
         exp_root_path: Root path of the experiment (for saving reports)
         ranks: List of ranks to analyze (None = all ranks, [0] = rank 0 only)
                Specify fewer ranks to limit number of reports
-        output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
+        output_format: Report format - "xlsx" (default), "csv", or "all" (xlsx+csv, ~2x time)
         artifact_path: MLflow artifact subdirectory for reports
         cleanup_after_upload: If True, removes local reports after upload to save disk space.
                              If False, keeps reports locally for inspection. Default: False.
@@ -738,7 +748,8 @@ def upload_tracelens_reports_to_mlflow(
         log_rank_0("[TraceLens] MLflow writer not available, skipping report upload")
         return 0
 
-    # Normalize ranks parameter: handle string input from config parser
+    # Normalize ranks: config/CLI can pass mlflow_tracelens_ranks as a string (e.g. env override
+    # or serialized list), but we need a list or None for filtering.
     if ranks is not None and isinstance(ranks, str):
         import ast
 
@@ -774,27 +785,46 @@ def upload_tracelens_reports_to_mlflow(
         log_rank_0("[TraceLens] No reports generated, nothing to upload")
         return 0
 
-    # Upload reports to MLflow
+    # Upload reports to MLflow (files via log_artifact, dirs via log_artifacts for correct behavior)
     uploaded_count = 0
     for report_path in reports:
         try:
-            mlflow_writer.log_artifact(report_path, artifact_path=artifact_path)
+            if os.path.isdir(report_path):
+                subpath = (
+                    os.path.join(artifact_path, os.path.basename(report_path))
+                    if artifact_path
+                    else os.path.basename(report_path)
+                )
+                mlflow_writer.log_artifacts(report_path, artifact_path=subpath)
+                log_rank_0(f"[MLflow] Uploaded TraceLens report dir: {os.path.basename(report_path)}")
+            else:
+                mlflow_writer.log_artifact(report_path, artifact_path=artifact_path)
+                log_rank_0(f"[MLflow] Uploaded TraceLens report: {os.path.basename(report_path)}")
             uploaded_count += 1
-            log_rank_0(f"[MLflow] Uploaded TraceLens report: {os.path.basename(report_path)}")
         except Exception as e:
             warning_rank_0(f"[MLflow] Failed to upload report {report_path}: {e}")
 
-    log_rank_0(f"[TraceLens] Uploaded {uploaded_count} reports to '{artifact_path}'")
+    log_rank_0(
+        f"[TraceLens] Uploaded {uploaded_count} report item(s) to '{artifact_path}' "
+        "(each item may be a file or a directory of CSV files)"
+    )
 
-    # Optionally clean up local reports after successful upload to save disk space
+    # Optionally clean up local reports only when all uploads succeeded, to avoid losing data
+    # when some uploads failed (reported via warning_rank_0 above).
     if cleanup_after_upload:
-        try:
-            import shutil
+        if uploaded_count == len(reports):
+            try:
+                import shutil
 
-            shutil.rmtree(reports_dir)
-            log_rank_0(f"[TraceLens] Cleaned up local reports directory: {reports_dir}")
-        except Exception as e:
-            warning_rank_0(f"[TraceLens] Failed to cleanup reports directory: {e}")
+                shutil.rmtree(reports_dir)
+                log_rank_0(f"[TraceLens] Cleaned up local reports directory: {reports_dir}")
+            except Exception as e:
+                warning_rank_0(f"[TraceLens] Failed to cleanup reports directory: {e}")
+        else:
+            log_rank_0(
+                f"[TraceLens] Skipping cleanup (only {uploaded_count}/{len(reports)} uploads succeeded); "
+                f"keeping local reports at: {reports_dir}"
+            )
     else:
         log_rank_0(f"[TraceLens] Keeping local reports at: {reports_dir}")
 
@@ -815,7 +845,7 @@ def upload_artifacts_to_mlflow(
     generate_tracelens_report: bool = False,
     upload_tracelens_report: bool = False,
     tracelens_ranks: Optional[List[int]] = None,
-    tracelens_output_format: str = "all",
+    tracelens_output_format: str = "xlsx",
     tracelens_cleanup_after_upload: bool = False,
 ) -> dict:
     """
@@ -855,7 +885,7 @@ def upload_artifacts_to_mlflow(
         tracelens_ranks: List of ranks to generate TraceLens reports for
                         (None = all ranks, [0, 8] = ranks 0 and 8 only)
                         Specify fewer ranks to limit number of reports
-        tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
+        tracelens_output_format: Report format - "xlsx" (default), "csv", or "all" (xlsx+csv, ~2x time)
         tracelens_cleanup_after_upload: If True, removes local reports after upload to save disk space.
                                        If False, keeps reports locally for inspection (default).
 

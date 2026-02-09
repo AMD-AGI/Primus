@@ -12,23 +12,28 @@ mlflow_upload_logs: false            # Upload training log files to MLflow
 
 # TraceLens Report Generation & Upload
 # ----------------------------------------------------------------------------
+# Supported options: generate_tracelens_report, mlflow_upload_tracelens_report,
+#   mlflow_tracelens_ranks, mlflow_tracelens_output_format, mlflow_tracelens_cleanup_after_upload
+#
 # generate_tracelens_report:          Generate TraceLens analysis reports locally
 # mlflow_upload_tracelens_report:     Upload reports to MLflow (auto-enables generation)
 #
 # Usage patterns:
-#   generate=false, upload=false  →  No reports generated
-#   generate=true,  upload=false  →  Generate reports locally only
-#   generate=false, upload=true   →  Generate AND upload (auto-enabled)
-#   generate=true,  upload=true   →  Generate AND upload (explicit)
+#   generate=false, upload=false  ->  No reports generated
+#   generate=true,  upload=false  ->  Generate reports locally only
+#   generate=false, upload=true   ->  Generate AND upload (auto-enabled)
+#   generate=true,  upload=true   ->  Generate AND upload (explicit)
 #
-# To limit number of reports: Specify fewer ranks in mlflow_tracelens_ranks
+# To limit number of reports: use mlflow_tracelens_ranks (no separate max_reports option).
 #   Default: [0, 8] = one rank per node (assumes 8 GPUs/node)
 #   Use null for all ranks, or customize list like [0, 1, 8, 9] for more coverage
 # ----------------------------------------------------------------------------
 generate_tracelens_report: false    # Generate TraceLens analysis reports locally (auto-enabled when upload=true)
 mlflow_upload_tracelens_report: false # Upload TraceLens reports to MLflow (auto-enables generation, profiling, tensorboard)
 mlflow_tracelens_ranks: [0, 8]       # List of ranks to analyze (default: one per node for 2-node setup)
-mlflow_tracelens_output_format: all  # TraceLens report format: all (xlsx+csv), xlsx, or csv
+# TraceLens report format: xlsx (default, single parse, fastest), csv, or all (xlsx+csv;
+# parses each trace twice so ~2x processing time; use only when both formats are needed)
+mlflow_tracelens_output_format: xlsx
 mlflow_tracelens_cleanup_after_upload: false  # Keep local reports (true to cleanup and save disk space)
 disable_compile_dependencies: true
 # NOTE:
@@ -38,6 +43,25 @@ disable_compile_dependencies: true
 #   at the iterations specified in `use_rocm_mem_info_iters`.
 use_rocm_mem_info: false
 use_rocm_mem_info_iters: [1,2]
+
+# MLflow performance metrics - comprehensive metrics for scaling tests
+# When enabled, automatically enables throughput calculations and logs to MLflow:
+#
+#   1. Performance Metrics:
+#      - perf/throughput_tflops_per_gpu: TFLOP/s per GPU
+#      - perf/tps_tokens_per_sec_per_gpu: Tokens/sec per GPU
+#      - perf/iteration_time_ms: Time per training step (ms)
+#
+#   2. Memory Metrics:
+#      - perf/{rocm/hip}_peak_mem_gb: Peak GPU memory usage (GB)
+#      - perf/{rocm/hip}_mem_utilization_pct: Memory utilization (% of total)
+#
+#   3. System Metrics:
+#      - perf/gpu_utilization_pct_rank{N}: GPU utilization per rank (%)
+#      - perf/gpu_utilization_pct_avg: Average GPU utilization across all ranks (%)
+#
+# Note: This flag implicitly enables log_throughput behavior for metric collection.
+mlflow_upload_performance_metrics: false
 
 # profiling
 disable_profiler_activity_cpu: false
