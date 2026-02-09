@@ -189,12 +189,13 @@ def _finalize_mlflow_run(args, mlflow_writer) -> None:
         args: Megatron arguments containing mlflow_upload_traces/logs settings
         mlflow_writer: The MLflow writer instance (or None if not enabled)
     """
-    if mlflow_writer is None:
-        return
-
-    # Barrier to ensure all ranks have finished writing files before upload
+    # Barrier to ensure all ranks have finished writing files before upload.
+    # Must run on ALL ranks to avoid deadlock (only last rank has mlflow_writer).
     if dist.is_initialized():
         dist.barrier()
+
+    if mlflow_writer is None:
+        return
 
     # Upload artifacts before ending the run
     upload_mlflow_artifacts(
