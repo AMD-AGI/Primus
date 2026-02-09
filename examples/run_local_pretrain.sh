@@ -84,6 +84,9 @@ while IFS='=' read -r name _; do
 done < <(env | grep "^PRIMUS_")
 while IFS='=' read -r name _; do
     ENV_ARGS+=("--env" "$name")
+done < <(env | grep "^UCCL_")
+while IFS='=' read -r name _; do
+    ENV_ARGS+=("--env" "$name")
 done < <(env | grep "^NCCL_")
 while IFS='=' read -r name _; do
     ENV_ARGS+=("--env" "$name")
