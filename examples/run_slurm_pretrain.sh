@@ -51,8 +51,8 @@ srun -N "${NNODES}" \
               # We are on the master node, get IP directly
               MASTER_IP=\$(ip addr show ens9np0 | grep 'inet ' | awk '{print \$2}' | cut -d/ -f1)
           else
-              # Query the master node via ssh
-              MASTER_IP=\$(ssh \$MASTER_NODE \"ip addr show ens9np0 | grep 'inet ' | awk '{print \\\$2}' | cut -d/ -f1\")
+              # Resolve master node IP via DNS (no SSH needed)
+              MASTER_IP=\$(getent hosts \$MASTER_NODE | awk '{print \$1}')
           fi
           if [ \"\$SLURM_NODEID\" = \"0\" ]; then
               echo \"========== Slurm cluster info ==========\"

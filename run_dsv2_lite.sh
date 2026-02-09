@@ -1,8 +1,7 @@
 #!/bin/bash
-export HF_TOKEN="your_hf_token" # change it to your own hf token
-export WANDB_API_KEY="your_wandb_api_key" # change it to your own wandb api key
-export DOCKER_IMAGE=primus_kernel_benchmark:backup
-export NNODES=4
+export HF_TOKEN="your_hf_token"  # make it your own hf token
+export WANDB_API_KEY="your_wandb_api_key"  # make it your own wandb api key
+export DOCKER_IMAGE=john132/tas:primus-25.9-ainic-56
 export NCCL_IB_HCA=ionic_0,ionic_2,ionic_3,ionic_4,ionic_5,ionic_7,ionic_8,ionic_9
 export GLOBAL_BATCH_SIZE=$((96 * NNODES))
 export ANP_HOME_DIR=${ANP_HOME_DIR:-"/workspace/ainic/amd-anp"}

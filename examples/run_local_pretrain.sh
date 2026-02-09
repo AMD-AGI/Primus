@@ -118,6 +118,9 @@ if [[ -f "$PATH_TO_BNXT_TAR_PACKAGE" ]]; then
     VOLUME_ARGS+=(-v "$PATH_TO_BNXT_TAR_PACKAGE":"$PATH_TO_BNXT_TAR_PACKAGE")
 fi
 
+if [[ -n "${DOCKER_MOUNT_PATH:-}" ]]; then
+    VOLUME_ARGS+=(-v "${DOCKER_MOUNT_PATH}":"${DOCKER_MOUNT_PATH}")
+fi
 # using ainic
 if [ "$USING_AINIC" == "1" ]; then
     ENV_ARGS+=("--env" "USING_AINIC")
@@ -125,7 +128,7 @@ if [ "$USING_AINIC" == "1" ]; then
     ENV_ARGS+=("--env" "ANP_HOME_DIR")
     ENV_ARGS+=("--env" "MPI_HOME_DIR")
 
-    # VOLUME_ARGS+=(-v /mnt/shared:/mnt/shared)
+    # VOLUME_ARGS+=(-v /shared:/shared)
     # VOLUME_ARGS+=(-v /etc/libibverbs.d/:/etc/libibverbs.d:ro)
     # VOLUME_ARGS+=(-v /usr/lib/x86_64-linux-gnu/libibverbs/:/usr/lib/x86_64-linux-gnu/libibverbs/:ro)
 fi
