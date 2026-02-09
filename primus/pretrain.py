@@ -112,6 +112,8 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
     }
     mapped_name = fallback_name_map.get(framework, framework)
     default_path = Path(__file__).resolve().parent.parent / "third_party" / mapped_name
+    if framework == "maxtext" and os.path.join(default_path, "src").exists():
+        default_path = os.path.join(default_path, "src")
     candidate_paths.append(default_path)
 
     # Normalize & deduplicate

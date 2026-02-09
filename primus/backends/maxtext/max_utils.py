@@ -182,38 +182,11 @@ def initialize_wandb_writer(config):
     if jax.process_index() != 0 or not config.enable_wandb:
         return None
 
-    def safe_get_config(config, key, default=None):
-        try:
-            return getattr(config, key)
-        except KeyError:
-            return default
-
     import wandb
+    os.makedirs(config.wandb_save_dir, exist_ok=True)
 
-    if safe_get_config(config, "wandb_save_dir") is None or config.wandb_save_dir == "":
-        wandb_save_dir = os.path.join(config.base_output_directory, "wandb")
-    else:
-        wandb_save_dir = config.wandb_save_dir
-
-    if safe_get_config(config, "wandb_project") is None or config.wandb_project == "":
-        wandb_project = os.getenv("WANDB_PROJECT", "Primus-MaxText-Pretrain")
-    else:
-        wandb_project = config.wandb_project
-    if safe_get_config(config, "wandb_exp_name") is None or config.wandb_exp_name == "":
-        wandb_exp_name = config.run_name
-    else:
-        wandb_exp_name = config.wandb_exp_name
-
-    if config.enable_wandb and "WANDB_API_KEY" not in os.environ:
-        max_logging.log(
-            "The environment variable WANDB_API_KEY is not set. Please set it or login wandb before proceeding"
-        )
-        return None
-
-    os.makedirs(wandb_save_dir, exist_ok=True)
-
-    wandb.init(project=wandb_project, name=wandb_exp_name, dir=wandb_save_dir, config=dict(config.get_keys()))
-    max_logging.log(f"WandB logging enabled: {wandb_save_dir=}, {wandb_project=}, {wandb_exp_name=}")
+    wandb.init(project=config.wandb_project, name=config.wandb_exp_name, dir=config.wandb_save_dir, config=dict(config.get_keys()))
+    max_logging.log(f"WandB logging enabled: {config.wandb_save_dir=}, {config.wandb_project=}, {config.wandb_exp_name=}")
     return wandb
 
 
