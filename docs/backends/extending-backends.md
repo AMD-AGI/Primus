@@ -372,3 +372,67 @@ Once these are in place, your backend is fully integrated into the Primus
 runtime and follows the same lifecycle and patch phases as the built-in
 backends.
 
+---
+
+## 9. Advanced: backend-specific setup with train hooks
+
+For more advanced scenarios (e.g., installing extra Python packages or
+configuring backend-specific env vars at runtime), you can use **train hooks**
+under `runner/helpers/hooks`.
+
+- **Hook locations for training**:
+  - Global hooks (run for all commands):  
+    `runner/helpers/hooks/*.sh|*.py`
+  - Train-specific hooks (per framework):  
+    `runner/helpers/hooks/train/pretrain/<framework>/*.sh|*.py`  
+    `runner/helpers/hooks/train/posttrain/<framework>/*.sh|*.py`  
+    where `<framework>` is `megatron`, `torchtitan`, `dummy`, etc.
+- Files in each directory are discovered with `find ... -name "*.sh" -o -name "*.py"`
+  and executed in **lexicographical order** of their filenames.
+
+When you run:
+
+```bash
+./primus-cli direct -- train pretrain --config <exp.yaml>
+```
+
+Primus will:
+
+- Call `execute_hooks train pretrain ...`, which:
+  - Runs global hooks under `runner/helpers/hooks/`
+  - Then runs command-specific hooks under
+    `runner/helpers/hooks/train/pretrain/<framework>/`
+
+Each hook script can **emit control lines on stdout** that Primus parses:
+
+- **`env.*=value` → environment variables**
+
+  ```bash
+  # inside runner/helpers/hooks/train/pretrain/<framework>/<something>.sh
+  echo "env.MY_BACKEND_FLAG=1"        # becomes: export MY_BACKEND_FLAG=1
+  echo "env.PYTHONPATH=/opt/mylib:$PYTHONPATH"
+  ```
+
+  These are exported into the environment of the `primus-cli direct` process,
+  so downstream backend code and trainers see them.
+
+- **`extra.*=value` → extra CLI arguments**
+
+  ```bash
+  # inside the same hook
+  echo "extra.backend_path=/opt/my-backend"   # becomes: --backend_path /opt/my-backend
+  echo "extra.train_data_path=/my/data"       # becomes: --train_data_path /my/data
+  ```
+
+  These `extra.*` pairs are appended to the Primus CLI invocation as
+  `--<name> <value>` after hook execution.
+
+Typical pattern to install or configure packages for a backend:
+
+- Add a script under `runner/helpers/hooks/train/pretrain/<framework>/<NNN>-setup.sh`
+  (use a numeric prefix like `000-` / `010-` to control ordering).
+- In that script:
+  - Optionally run `python -m pip install ...` or other setup commands.
+  - Emit `env.*=...` lines to export any required env vars.
+  - Emit `extra.*=...` lines if you need to pass additional CLI arguments
+    (e.g., `backend_path`) into the Primus runtime for this run.
