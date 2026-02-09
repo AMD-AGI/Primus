@@ -41,6 +41,9 @@ from typing import List, Optional
 
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
+# Pinned ref for runtime TraceLens install (supply-chain safety and reproducibility)
+TRACELENS_INSTALL_REF = "v0.4.0"
+
 
 def _get_all_trace_files(tensorboard_dir: str) -> list:
     """
@@ -263,20 +266,23 @@ def _ensure_tracelens_installed() -> bool:
     except ImportError:
         log_rank_0("[TraceLens] TraceLens not found, attempting to install from GitHub...")
         try:
-            # TraceLens is on GitHub, not PyPI
+            # TraceLens is on GitHub, not PyPI; pin to a tag for reproducibility and supply-chain safety
+            install_spec = f"git+https://github.com/AMD-AGI/TraceLens.git@{TRACELENS_INSTALL_REF}"
             subprocess.check_call(
                 [
                     sys.executable,
                     "-m",
                     "pip",
                     "install",
-                    "git+https://github.com/AMD-AGI/TraceLens.git",
+                    install_spec,
                     "-q",
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            log_rank_0("[TraceLens] Successfully installed TraceLens from GitHub")
+            log_rank_0(
+                f"[TraceLens] Successfully installed TraceLens from GitHub (ref={TRACELENS_INSTALL_REF})"
+            )
         except subprocess.CalledProcessError as e:
             warning_rank_0(f"[TraceLens] Failed to install TraceLens: {e}")
             return False
