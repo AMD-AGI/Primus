@@ -9,16 +9,15 @@ import functools
 
 from flax import nnx
 from jax.sharding import Mesh
-
 from MaxText import max_utils
-from MaxText.sharding import maybe_shard_with_logical
 from MaxText.common_types import MODEL_MODE_PREFILL, Config
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import Attention
-from MaxText.layers.linears import MlpBlock, Dropout
+from MaxText.layers.linears import Dropout, MlpBlock
+from MaxText.layers.llama2 import LlamaDecoderLayer
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
-from MaxText.layers.llama2 import LlamaDecoderLayer
+from MaxText.sharding import maybe_shard_with_logical
 
 
 class PrimusLlamaDecoderLayer(LlamaDecoderLayer):
@@ -36,7 +35,11 @@ class PrimusLlamaDecoderLayer(LlamaDecoderLayer):
         self.quant = quant
 
         if model_mode == MODEL_MODE_PREFILL:
-            self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+            self.activation_axis_names = (
+                "activation_batch",
+                "prefill_activation_norm_length",
+                "activation_embed",
+            )
         else:
             self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
 

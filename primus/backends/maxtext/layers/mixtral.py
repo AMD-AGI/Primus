@@ -8,18 +8,14 @@
 from flax import linen as nn
 from flax import nnx
 from jax.sharding import Mesh
-
 from MaxText import max_utils
 from MaxText.common_types import Config
-from MaxText.layers import initializers
-from MaxText.layers import moe
-from MaxText.layers import quantizations
+from MaxText.layers import initializers, moe, quantizations
 from MaxText.layers.attentions import Attention
 from MaxText.layers.linears import Dropout
+from MaxText.layers.mixtral import MixtralDecoderLayer
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
-
-from MaxText.layers.mistral import MixtralDecoderLayer
 
 
 class PrimusMixtralDecoderLayer(MixtralDecoderLayer):

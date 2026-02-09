@@ -9,16 +9,14 @@ from typing import Optional
 
 from flax import nnx
 from jax.sharding import Mesh
-
 from MaxText import max_utils
-from MaxText.common_types import Config, MODEL_MODE_PREFILL
+from MaxText.common_types import MODEL_MODE_PREFILL, Config
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import Attention, AttentionType
-from MaxText.layers.linears import MlpBlock, Dropout
+from MaxText.layers.gemma2 import Gemma2DecoderLayer
+from MaxText.layers.linears import Dropout, MlpBlock
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
-
-from MaxText.layers.gemma2 import Gemma2DecoderLayer
 
 
 class PrimusGemma2DecoderLayer(Gemma2DecoderLayer):
@@ -190,6 +188,10 @@ class PrimusGemma2DecoderLayer(Gemma2DecoderLayer):
             )
 
         if model_mode == MODEL_MODE_PREFILL:
-            self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
+            self.activation_axis_names = (
+                "activation_batch",
+                "prefill_activation_norm_length",
+                "activation_embed",
+            )
         else:
             self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
