@@ -425,18 +425,14 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             else:
                 log_rank_0(f"-{latest_file} does not exist, skip auto_continue_train.")
 
-        # Auto-enable dependencies for mlflow upload flags
-        # This must run BEFORE tensorboard section to ensure paths are set correctly
-        mlflow_upload_flags = [
-            getattr(args, "mlflow_upload_traces", False),
-            getattr(args, "mlflow_upload_logs", False),
-        ]
-        if any(mlflow_upload_flags) and args.disable_mlflow:
-            args.disable_mlflow = False
-            debug_rank_0("Auto-enabled MLflow (disable_mlflow=False) because mlflow_upload_* flags are set")
-
-        # If uploading traces, auto-enable profiling and tensorboard
-        if getattr(args, "mlflow_upload_traces", False):
+        # If uploading traces (or tracelens) to MLflow, auto-enable profiling and tensorboard.
+        # Only when MLflow is enabled (disable_mlflow=False); we do not override disable_mlflow
+        # so MLflow remains opt-in and users with disable_mlflow: true are not surprised.
+        needs_profiling = (
+            getattr(args, "mlflow_upload_traces", False)
+            or getattr(args, "mlflow_upload_tracelens_report", False)
+        ) and not args.disable_mlflow
+        if needs_profiling:
             if not getattr(args, "profile", False):
                 args.profile = True
                 debug_rank_0("Auto-enabled profile=True for mlflow trace upload")
