@@ -285,7 +285,11 @@ def upload_artifacts_to_mlflow(
         return {"traces": 0, "logs": 0}
 
     # Warn about multi-node shared storage requirement
-    nnodes = int(os.environ.get("NNODES", os.environ.get("SLURM_NNODES", "1")))
+    try:
+        nnodes = int(os.environ.get("NNODES", os.environ.get("SLURM_NNODES", "1")))
+    except ValueError:
+        nnodes = 1
+        _log_warning("[MLflow] NNODES/SLURM_NNODES could not be parsed as integer; assuming 1 node.")
     if nnodes > 1:
         _log_warning(
             f"[MLflow] Multi-node training detected ({nnodes} nodes). "
