@@ -15,13 +15,15 @@ from typing import Dict
 ANSI_ESCAPE_PATTERN = re.compile(r"\x1B[@-_][0-?]*[ -/]*[@-~]")
 
 MEGATRON_ITERATION_PATTERN = re.compile(
-    r"iteration\s+\d+/\s*\d+.*?"
-    r"elapsed time per iteration\s*\(ms\):\s*([\d.]+)/([\d.]+).*?"
-    r"hip mem usage/free/total/usage_ratio:\s*([\d.]+)GiB/([\d.]+)GiB/([\d.]+)GiB/([\d.]+)%.*?"
-    r"throughput per GPU\s*\(TFLOP/s/GPU\):\s*([\d.]+)/([\d.]+).*?"
-    r"tokens per GPU\s*\(tokens/s/GPU\):\s*([\d.]+)/([\d.]+)",
+    r"iteration\s+\d+\s*/\s*\d+.*?"
+    r"elapsed time per iteration\s*\(ms\):\s*(?P<elapsed_ms>[\d.]+)(?:/(?P<elapsed_ms_avg>[\d.]+))?.*?"
+    r"throughput per GPU\s*\(TFLOP/s/GPU\):\s*(?P<tflops>[\d.]+)/(?P<tflops_avg>[\d.]+).*?"
+    r"tokens per GPU\s*\(tokens/s/GPU\):\s*(?P<tokens>[\d.]+)/(?P<tokens_avg>[\d.]+).*?"
+    r"hip mem usage/free/total/usage_ratio:\s*"
+    r"(?P<hip_used>[\d.]+)\s*G(?:i)?B/(?P<hip_free>[\d.]+)\s*G(?:i)?B/(?P<hip_total>[\d.]+)\s*G(?:i)?B/(?P<hip_ratio>[\d.]+)%",
     re.DOTALL,
 )
+
 
 TORCHTITAN_ITERATION_PATTERN = re.compile(
     r"rank-0(?:/\d+)?"
@@ -129,20 +131,22 @@ def parse_last_metrics_from_log(file_path: str) -> Dict[str, float]:
         log_text = f.read()
     log_text = remove_ansi_escape(log_text)
 
-    matches = MEGATRON_ITERATION_PATTERN.findall(log_text)
-    if not matches:
-        raise ValueError(f"No valid iteration metrics found in {file_path}")
+    last_m = None
+    for m in MEGATRON_ITERATION_PATTERN.finditer(log_text):
+        last_m = m
 
-    last = matches[-1]
-    step_time_s = float(last[1]) / 1000
-    mem_usage = float(last[2])
-    tflops = float(last[7])
-    tokens_per_gpu = float(last[9])
+    if not last_m:
+        raise ValueError(f"No valid iteration metrics found in {file_path}")
+    metric = last_m.groupdict()
+    step_time_s = float(metric["elapsed_ms"]) / 1000.0
+    mem_usage = float(metric["hip_used"])
+    tflops_avg = float(metric["tflops_avg"])
+    tokens_avg = float(metric["tokens_avg"])
 
     return {
-        "TFLOP/s/GPU": round(tflops, 2),
+        "TFLOP/s/GPU": round(tflops_avg, 2),
         "Step Time (s)": round(step_time_s, 3),
-        "Tokens/s/GPU": round(tokens_per_gpu, 1),
+        "Tokens/s/GPU": round(tokens_avg, 1),
         "Mem Usage": round(mem_usage, 2),
     }
 

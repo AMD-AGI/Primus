@@ -452,6 +452,10 @@ jobs:
       - name: "[1/7][MaxText] deepseek_v2_16B"
         timeout-minutes: 120
         continue-on-error: true
+        env:
+          IP_INTERFACE: "eth0"
+          NCCL_SOCKET_IFNAME: "eth0"
+          GLOO_SOCKET_IFNAME: "eth0"
         run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/deepseek_v2_16B.log" \
           -- train pretrain --config examples/maxtext/configs/MI300X/deepseek_v2_16B-pretrain.yaml
