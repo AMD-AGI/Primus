@@ -42,7 +42,7 @@ EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
 
 # Default docker image
 if [ "${BACKEND:-}" = "MaxText" ]; then
-    DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/jax-training:maxtext-v25.9"}
+    DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/mad-private:jax_rocm7.1_jax_0.8.2_ci_e5be0ef_20260131_v3"}
 else
     DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10"}
 fi

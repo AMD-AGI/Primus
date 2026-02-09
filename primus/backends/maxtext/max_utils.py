@@ -11,10 +11,16 @@ import socket
 
 import jax
 import orbax.checkpoint as ocp
-from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import initialization
-
 from MaxText import max_logging
-from MaxText.max_utils import _retrieve_jax_init_info, is_gpu_backend, is_cpu_backend, get_coordinator_ip_address
+from MaxText.max_utils import (
+    _retrieve_jax_init_info,
+    get_coordinator_ip_address,
+    is_cpu_backend,
+    is_gpu_backend,
+)
+from orbax.checkpoint.experimental.emergency.multi_tier_checkpointing import (
+    initialization,
+)
 
 
 def maybe_initialize_jax_distributed_system(raw_keys):
@@ -49,17 +55,19 @@ def maybe_initialize_jax_distributed_system(raw_keys):
         initialize_jax_for_cpu(raw_keys)
         max_logging.log("Jax distributed system initialized on CPUs!")
     elif raw_keys["enable_multi_tier_checkpointing"]:
-        max_logging.log("Attempting to initialize the jax distributed system for multi-tier " "checkpointing...")
+        max_logging.log(
+            "Attempting to initialize the jax distributed system for multi-tier " "checkpointing..."
+        )
         initialization.initialize_multi_tier_checkpointing(
             local_checkpoint_directory=raw_keys["local_checkpoint_directory"],
             backup_interval_minutes=raw_keys["multi_tier_checkpointing_backup_interval_minutes"],
             run_name=raw_keys["run_name"],
             jax_initialization_timeout_seconds=raw_keys["jax_distributed_initialization_timeout"],
             data_parallelism=raw_keys["mtc_data_parallelism"],
-            )
+        )
         max_logging.log("Jax distributed system initialized for multi-tier checkpointing!")
     elif (raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1) or raw_keys[
-    "hardware"
+        "hardware"
     ] == "gpu_multiprocess":
         max_logging.log("Attempting to initialize the jax distributed system...")
         if not raw_keys["enable_emergency_checkpoint"]:
@@ -183,10 +191,18 @@ def initialize_wandb_writer(config):
         return None
 
     import wandb
+
     os.makedirs(config.wandb_save_dir, exist_ok=True)
 
-    wandb.init(project=config.wandb_project, name=config.wandb_exp_name, dir=config.wandb_save_dir, config=dict(config.get_keys()))
-    max_logging.log(f"WandB logging enabled: {config.wandb_save_dir=}, {config.wandb_project=}, {config.wandb_exp_name=}")
+    wandb.init(
+        project=config.wandb_project,
+        name=config.wandb_exp_name,
+        dir=config.wandb_save_dir,
+        config=dict(config.get_keys()),
+    )
+    max_logging.log(
+        f"WandB logging enabled: {config.wandb_save_dir=}, {config.wandb_project=}, {config.wandb_exp_name=}"
+    )
     return wandb
 
 

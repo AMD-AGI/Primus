@@ -9,16 +9,14 @@ from typing import Optional
 
 from flax import nnx
 from jax.sharding import Mesh
-
 from MaxText import max_utils
 from MaxText.common_types import Config
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import Attention
-from MaxText.layers.linears import MlpBlock, Dropout
+from MaxText.layers.gemma import GemmaDecoderLayer
+from MaxText.layers.linears import Dropout, MlpBlock
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
-
-from MaxText.layers.gemma import GemmaDecoderLayer
 
 
 class PrimusGemmaDecoderLayer(GemmaDecoderLayer):

@@ -122,10 +122,10 @@ class MaxTextPretrainTrainer(BaseModule):
         import MaxText.max_utils as orig_max_utils
 
         from primus.backends.maxtext.max_utils import (
-            maybe_initialize_jax_distributed_system,
-            initialize_jax_for_gpu,
             initialize_jax_for_cpu,
+            initialize_jax_for_gpu,
             initialize_jax_for_tpu_with_emergency_checkpointing,
+            maybe_initialize_jax_distributed_system,
             print_system_information,
             save_device_information,
         )
@@ -133,7 +133,9 @@ class MaxTextPretrainTrainer(BaseModule):
         orig_max_utils.maybe_initialize_jax_distributed_system = maybe_initialize_jax_distributed_system
         orig_max_utils.initialize_jax_for_gpu = initialize_jax_for_gpu
         orig_max_utils.initialize_jax_for_cpu = initialize_jax_for_cpu
-        orig_max_utils.initialize_jax_for_tpu_with_emergency_checkpointing = initialize_jax_for_tpu_with_emergency_checkpointing
+        orig_max_utils.initialize_jax_for_tpu_with_emergency_checkpointing = (
+            initialize_jax_for_tpu_with_emergency_checkpointing
+        )
         orig_max_utils.print_system_information = print_system_information
         orig_max_utils.save_device_information = save_device_information
         warning_rank_0("MaxText Pre-Trainer: patch max_utils successfully.")
@@ -143,8 +145,8 @@ class MaxTextPretrainTrainer(BaseModule):
         import MaxText.train_utils as orig_train_utils
 
         from primus.backends.maxtext.checkpointing import (
-            load_state_if_possible,
             create_orbax_checkpoint_manager,
+            load_state_if_possible,
         )
         from primus.backends.maxtext.train_utils import create_training_tools
 
@@ -193,6 +195,7 @@ class MaxTextPretrainTrainer(BaseModule):
 
     def patch_config_types(self):
         import MaxText.configs.types as orig_config_types
+
         from primus.backends.maxtext.configs.types import PrimusMaxTextConfig
 
         orig_config_types.MaxTextConfig = PrimusMaxTextConfig
@@ -240,7 +243,7 @@ class MaxTextPretrainTrainer(BaseModule):
             import MaxText.layers.llama2 as orig_llama2
             import MaxText.layers.mistral as orig_mistral
             import MaxText.layers.mixtral as orig_mixtral
-    
+
             from primus.backends.maxtext.layers.gemma import PrimusGemmaDecoderLayer
             from primus.backends.maxtext.layers.gemma2 import PrimusGemma2DecoderLayer
             from primus.backends.maxtext.layers.llama2 import PrimusLlamaDecoderLayer

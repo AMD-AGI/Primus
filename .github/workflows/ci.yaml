@@ -13,7 +13,7 @@ env:
   PRIMUS_TURBO_COMMIT: a4f1ff4935059c249721697c19bd2b22dfd9417d # feat(mxfp4/mxfp8): refine quantization api and optimize kernels perf (#207)
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   BASE_IMAGE: docker.io/rocm/primus:v25.10
-  MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v25.9
+  MAXTEXT_BASE_IMAGE: docker.io/rocm/mad-private:jax_rocm7.1_jax_0.8.2_ci_e5be0ef_20260131_v3
 
 jobs:
   code-lint:

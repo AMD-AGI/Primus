@@ -85,7 +85,9 @@ class PrimusRoutedMoE(RoutedMoE):
             gate_logits = jnp.broadcast_to(rotated_weights[None, :, :], (batch_size, seq_len, num_experts))
             ############################################# end ####################################################
             ##########################################
-        return super().dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias)
+        return super().dense_matmul(
+            inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
+        )
 
     def sparse_matmul(
         self,
@@ -115,7 +117,15 @@ class PrimusRoutedMoE(RoutedMoE):
             # Fallback to original implementation if primus_turbo is not available
             max_logging.log("WARNING: primus_turbo not available, using default ragged_dot in MoE")
             return super().sparse_matmul(
-                inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
+                inputs,
+                gate_logits,
+                pre_bias_logits,
+                w0_kernel,
+                w1_kernel,
+                wo_kernel,
+                w0_bias,
+                w1_bias,
+                wo_bias,
             )
 
         max_logging.log("Using primus_turbo grouped_gemm in MoE")
@@ -135,7 +145,15 @@ class PrimusRoutedMoE(RoutedMoE):
         jax.lax.ragged_dot = _turbo_ragged_dot
         try:
             return super().sparse_matmul(
-                inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
+                inputs,
+                gate_logits,
+                pre_bias_logits,
+                w0_kernel,
+                w1_kernel,
+                wo_kernel,
+                w0_bias,
+                w1_bias,
+                wo_bias,
             )
         finally:
             jax.lax.ragged_dot = _orig_ragged_dot

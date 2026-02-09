@@ -6,7 +6,12 @@
 ###############################################################################
 
 import jax.numpy as jnp
-from MaxText.common_types import DEFAULT_MASK_VALUE, MODEL_MODE_TRAIN, Array, AttentionType
+from MaxText.common_types import (
+    DEFAULT_MASK_VALUE,
+    MODEL_MODE_TRAIN,
+    Array,
+    AttentionType,
+)
 from MaxText.layers import nnx_wrappers
 from MaxText.layers.attention_op import AttentionOp
 
@@ -29,8 +34,12 @@ class PrimusAttentionOp(AttentionOp):
         """
         # These imports are only meant to work in a GPU build.
         # pylint: disable=import-outside-toplevel
-        from transformer_engine.jax.flax.transformer import DotProductAttention  # pytype: disable=import-error
-        from transformer_engine.jax.attention import SequenceDescriptor  # pytype: disable=import-error
+        from transformer_engine.jax.attention import (
+            SequenceDescriptor,  # pytype: disable=import-error
+        )
+        from transformer_engine.jax.flax.transformer import (
+            DotProductAttention,  # pytype: disable=import-error
+        )
 
         _, _, _, head_dim = query.shape  # pylint: disable=unused-variable
 
@@ -51,10 +60,14 @@ class PrimusAttentionOp(AttentionOp):
             qkv_layout = "THD_THD_THD"  # Packed format: 'T3HD', 'THD_T2HD' or 'THD_THD_THD'
             if decoder_segment_ids is None:
                 decoder_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-            attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=decoder_segment_ids, segment_pos=None)
+            attn_mask = SequenceDescriptor.from_segment_ids_and_pos(
+                segment_ids=decoder_segment_ids, segment_pos=None
+            )
             # Create dummy SequenceDescriptor for lazy_init
             dummy_segment_ids = jnp.ones(shape=query.shape[:2], dtype=jnp.int32)
-            dummy_attn_mask = SequenceDescriptor.from_segment_ids_and_pos(segment_ids=dummy_segment_ids, segment_pos=None)
+            dummy_attn_mask = SequenceDescriptor.from_segment_ids_and_pos(
+                segment_ids=dummy_segment_ids, segment_pos=None
+            )
             max_segments_per_seq = self.config.max_segments_per_seq
         elif using_context_parallelism or self.config.dataset_type == "synthetic":
             if self.attention_type == AttentionType.LOCAL_SLIDING:
@@ -65,7 +78,9 @@ class PrimusAttentionOp(AttentionOp):
             mask_type = "causal"
         else:
             # Default case: no packing, no context parallelism
-            dummy_attn_mask = jnp.zeros((1, 1, 1, self.max_target_length, self.max_target_length), dtype=jnp.uint8)
+            dummy_attn_mask = jnp.zeros(
+                (1, 1, 1, self.max_target_length, self.max_target_length), dtype=jnp.uint8
+            )
             attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
             attn_mask = jnp.where((attn_mask >= DEFAULT_MASK_VALUE * 0.5), 0, 1).astype(jnp.uint8)
 
@@ -93,10 +108,14 @@ class PrimusAttentionOp(AttentionOp):
         dummy_query_prefill = jnp.zeros(
             (1, self.max_target_length, self.num_query_heads, self.config.head_dim), dtype=self.dtype
         )
-        dummy_key_prefill = jnp.zeros((1, self.max_target_length, self.num_kv_heads, self.config.head_dim), dtype=self.dtype)
+        dummy_key_prefill = jnp.zeros(
+            (1, self.max_target_length, self.num_kv_heads, self.config.head_dim), dtype=self.dtype
+        )
         dummy_value_prefill = jnp.zeros(
             (1, self.max_target_length, self.num_kv_heads, self.config.head_dim), dtype=self.dtype
         )
 
-        dpa_layer.lazy_init(dummy_query_prefill, dummy_key_prefill, dummy_value_prefill, sequence_descriptor=dummy_attn_mask)
+        dpa_layer.lazy_init(
+            dummy_query_prefill, dummy_key_prefill, dummy_value_prefill, sequence_descriptor=dummy_attn_mask
+        )
         return dpa_layer(query, key, value, sequence_descriptor=attn_mask)
