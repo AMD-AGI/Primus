@@ -282,6 +282,7 @@ logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['activation_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence','autoregressive']],
                       ['activation_kv_heads', ['tensor', 'tensor_transpose', 'sequence','tensor_sequence']],
                       ['activation_length', ['sequence', 'context', 'expert']],
@@ -301,7 +302,7 @@ logical_axis_rules: [
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_batch_no_exp', ['data', 'fsdp', 'fsdp_transpose']],
                       ['activation_kv_head_dim', ['tensor', 'tensor_transpose', 'tensor_sequence']],
-                      ['activation_vocab', ['tensor', 'tensor_transpose', 'sequence', 'tensor_sequence']],
+                      ['activation_vocab', ['tensor', 'tensor_transpose', 'tensor_sequence']],
                       ['activation_vocab', ['tensor', 'tensor_transpose']],
                       ['activation_vocab', 'tensor_sequence'],
                       ['activation_vocab', ['sequence','context']],
@@ -310,6 +311,7 @@ logical_axis_rules: [
                       ['decode_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['decode_length', ['sequence']],
                       ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
+                      ['mlp_no_fsdp', ['tensor', 'tensor_sequence', 'autoregressive']],
                       ['vocab', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
                       ['q_heads', ['tensor', 'tensor_transpose', 'tensor_sequence', 'autoregressive']],
@@ -322,15 +324,17 @@ logical_axis_rules: [
                       ['embed_no_exp', ['fsdp', 'sequence', 'tensor_transpose', 'context']],
                       ['embed_no_exp', ['fsdp', 'fsdp_transpose', 'sequence', 'context']],
                       ['embed_no_exp', ['fsdp', 'sequence', 'context']],
-                      ['embed_tensor_transpose', ['tensor_transpose']],
+                      ['embed_tensor_transpose', ['tensor_transpose']],           
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['q_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['q_lora', ['fsdp', 'sequence', 'context', 'expert']],
+                      ["q_lora_up_proj",[]],
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['kv_lora', ['fsdp', 'sequence', 'context', 'tensor_transpose', 'expert']],
                       ['kv_lora', ['fsdp', 'fsdp_transpose', 'sequence', 'context', 'expert']],
                       ['kv_lora', ['fsdp', 'sequence', 'context', 'expert']],
+                      ["kv_lora_up_proj",[]],
                       ['norm', ['tensor', 'tensor_transpose']],
                       ['layers', 'stage'],
                       ['kv', []],
@@ -347,6 +351,8 @@ logical_axis_rules: [
                       ['num_pages', []],
                       ['tokens_per_page', []],
                       ['paged_kv_head_dim_size', []],
+                      ['dense_layers', []],
+                      ['moe_layers', []],
                     ]
 # Axes used for DCN must be earlier in this list than ICI, see (b/339009148) for details
 data_sharding: [['data', 'stage', 'fsdp', 'fsdp_transpose', 'sequence', 'context', 'context_autoregressive', 'tensor', 'tensor_transpose', 'tensor_sequence', 'expert', 'autoregressive']]
@@ -576,9 +582,6 @@ report_performance_metric_for_gcp_monitoring: false
 
 enable_tensorboard: true
 enable_wandb: false
-wandb_project: ""
-wandb_exp_name: ""
-wandb_save_dir: ""
 
 # Vertex AI Tensorboard Configurations - https://github.com/google/maxtext/tree/main/getting_started/Use_Vertex_AI_Tensorboard.md
 # Set to True for GCE, False if running via XPK

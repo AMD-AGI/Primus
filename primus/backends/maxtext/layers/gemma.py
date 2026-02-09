@@ -11,10 +11,10 @@ from flax import nnx
 from jax.sharding import Mesh
 
 from MaxText import max_utils
-from MaxText.common_types import MODEL_MODE_PREFILL, Config
+from MaxText.common_types import Config
 from MaxText.layers import quantizations
 from MaxText.layers.attentions import Attention
-from MaxText.layers.linears import MlpBlock
+from MaxText.layers.linears import MlpBlock, Dropout
 from MaxText.layers.normalizations import RMSNorm
 from MaxText.layers.quantizations import AqtQuantization as Quant
 
@@ -73,16 +73,7 @@ class PrimusGemmaDecoderLayer(GemmaDecoderLayer):
             rngs=self.rngs,
         )
 
-        if config.use_post_attn_norm:
-            self.post_self_attention_norm_global = RMSNorm(
-                num_features=config.emb_dim,
-                dtype=config.dtype,
-                weight_dtype=config.weight_dtype,
-                kernel_axes=("norm",),
-                rngs=self.rngs,
-            )
-
-        self.pre_ffw_norm_global = RMSNorm(
+        self.pre_ffw_norm = RMSNorm(
             num_features=config.emb_dim,
             dtype=config.dtype,
             weight_dtype=config.weight_dtype,
@@ -90,7 +81,7 @@ class PrimusGemmaDecoderLayer(GemmaDecoderLayer):
             rngs=self.rngs,
         )
 
-        self.mlp_global = MlpBlock(
+        self.mlp = MlpBlock(
             config=config,
             mesh=self.mesh,
             in_features=config.emb_dim,
@@ -104,16 +95,6 @@ class PrimusGemmaDecoderLayer(GemmaDecoderLayer):
             rngs=self.rngs,
         )
 
-        if config.use_post_ffw_norm:
-            self.post_ffw_norm_global = RMSNorm(
-                num_features=config.emb_dim,
-                dtype=config.dtype,
-                weight_dtype=config.weight_dtype,
-                kernel_axes=("norm",),
-                rngs=self.rngs,
-            )
+        self.dropout = Dropout(rate=config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
 
-        if model_mode == MODEL_MODE_PREFILL:
-            self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
-        else:
-            self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+        self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")

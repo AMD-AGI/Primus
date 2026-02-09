@@ -29,18 +29,19 @@ from MaxText import (
     maxtext_utils,
     profiler,
     pyconfig,
+    sharding,
     train_utils,
 )
-from MaxText.data_loader import DataLoader
+from MaxText.common_types import ShardMode
 from MaxText.metric_logger import MetricLogger
 from MaxText.train import (
     _merge_dpo_state,
     _split_dpo_state,
     eval_step,
     get_first_step,
-    setup_train_loop,
     train_step,
 )
+from MaxText.train_utils import validate_train_config
 from MaxText.utils import gcs_utils
 from MaxText.utils.goodput_utils import (
     GoodputEvent,
@@ -102,6 +103,16 @@ def train_loop(config, recorder, state=None):
 
   # Write train config params, num model params, and XLA flags to tensorboard
   metric_logger.write_setup_info_to_tensorboard(state.params)
+
+  # Synchronize all hosts before entering the training loop.
+  # Without this barrier, timing variance during initialization (JIT compilation,
+  # profiler/logger setup, etc.) causes hosts to enter the training loop at different
+  # times. The first collective operation (data sharding in load_next_batch) then
+  # times out waiting for straggler hosts, resulting in "collective operation timeout"
+  # or "stop sending heartbeats" errors.
+  max_logging.log("====== BARRIER: Synchronizing hosts before training loop ======")
+  jax.experimental.multihost_utils.sync_global_devices("sync_before_training_loop")
+  max_logging.log("====== BARRIER PASSED: Starting training loop ======")
 
   try:
     last_step_completion = datetime.datetime.now()
@@ -183,52 +194,54 @@ def train_loop(config, recorder, state=None):
   return state
 
 
-def initialize(argv: Sequence[str], **kwargs) -> tuple[pyconfig.HyperParameters, Any, Any]:
-    """Initialization of hyperparameters and utilities"""
-    pathwaysutils.initialize()
-    jax.config.update("jax_default_prng_impl", "unsafe_rbg")
-    # TF allocates extraneous GPU memory when using TFDS data
-    # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
-    tf.config.set_visible_devices([], "GPU")
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
-    if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
-        os.environ["LIBTPU_INIT_ARGS"] = (
-            os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
-        )
-    # TODO: mazumdera@ : ensure missing mandatory fields in base.yml are filled in in argv,
-    # or fill in here
-    config = pyconfig.initialize(argv, **kwargs)
-    jax.config.update("jax_use_shardy_partitioner", config.shardy)
-    max_utils.print_system_information()
-    validate_train_config(config)
-    max_utils.save_device_information(config)
-    os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
-    vertex_tensorboard_manager = VertexTensorboardManager()
-    if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
-        vertex_tensorboard_manager.configure_vertex_tensorboard(config)
-
-    # Goodput configurations
-    maybe_monitor_goodput(config)
-    recorder = create_goodput_recorder(config)
-
-    # Stack traces configurations
-    debug_config = debug_configuration.DebugConfig(
-        stack_trace_config=stack_trace_configuration.StackTraceConfig(
-            collect_stack_trace=config.collect_stack_trace,
-            stack_trace_to_cloud=config.stack_trace_to_cloud,
-            stack_trace_interval_seconds=config.stack_trace_interval_seconds,
-        )
+def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any, Any]:
+  """Initialization of hyperparameters and utilities"""
+  pathwaysutils.initialize()
+  jax.config.update("jax_default_prng_impl", "unsafe_rbg")
+  # TF allocates extraneous GPU memory when using TFDS data
+  # this leads to CUDA OOMs. WAR for now is to hide GPUs from TF
+  tf.config.set_visible_devices([], "GPU")
+  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
+  if "xla_tpu_spmd_rng_bit_generator_unsafe" not in os.environ.get("LIBTPU_INIT_ARGS", ""):
+    os.environ["LIBTPU_INIT_ARGS"] = (
+      os.environ.get("LIBTPU_INIT_ARGS", "") + " --xla_tpu_spmd_rng_bit_generator_unsafe=true"
     )
-    diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
-    return config, recorder, diagnostic_config
+  # TODO: mazumdera@ : ensure missing mandatory fields in base.yml are filled in in argv,
+  # or fill in here
+  config = pyconfig.initialize(argv)
+  max_utils.print_system_information()
+  validate_train_config(config)
+  max_utils.save_device_information(config)
+  jax.config.update("jax_use_shardy_partitioner", config.shardy)
+  # update explicit sharding-supported config
+  if config.shard_mode == ShardMode.EXPLICIT:
+    jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+  os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
+  vertex_tensorboard_manager = VertexTensorboardManager()
+  if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
+    vertex_tensorboard_manager.configure_vertex_tensorboard(config)
+
+  # Create the Goodput recorder
+  recorder = create_goodput_recorder(config)
+
+  # Stack traces configurations
+  debug_config = debug_configuration.DebugConfig(
+    stack_trace_config=stack_trace_configuration.StackTraceConfig(
+        collect_stack_trace=config.collect_stack_trace,
+        stack_trace_to_cloud=config.stack_trace_to_cloud,
+        stack_trace_interval_seconds=config.stack_trace_interval_seconds,
+      )
+    )
+  diagnostic_config = diagnostic_configuration.DiagnosticConfig(debug_config)
+  return config, recorder, diagnostic_config
 
 
 def run(config, recorder, diagnostic_config):
-    """Run the job given hyperparameters and utilities"""
-    with (
-        diagnostic.diagnose(diagnostic_config),
-        maybe_record_goodput(recorder, GoodputEvent.JOB),
-        max_utils.maybe_get_transformer_engine_context(config),
-        maybe_monitor_goodput(config),
-    ):
-        train_loop(config, recorder)
+  """Run the job given hyperparameters and utilities"""
+  with (
+    diagnostic.diagnose(diagnostic_config),
+    maybe_record_goodput(recorder, GoodputEvent.JOB),
+    max_utils.maybe_get_transformer_engine_context(config),
+    maybe_monitor_goodput(config),
+  ):
+    train_loop(config, recorder)
