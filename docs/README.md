@@ -30,6 +30,7 @@ In-depth technical documentation:
 - **[Advanced Features](./advanced.md)** - Mixed precision, parallelism strategies, optimization techniques
 - **[Backend Patch Notes](./backends/overview.md)** - Primus-specific arguments for Megatron, TorchTitan, etc.
  - **[Backend Extension Guide](./backends/extending-backends.md)** - How to add a new backend using the current adapter/trainer architecture
+ - **[Megatron Model Extension Guide](./backends/adding-megatron-models.md)** - How to add a new Megatron model config
 
 ### 💡 Help & Support
 
