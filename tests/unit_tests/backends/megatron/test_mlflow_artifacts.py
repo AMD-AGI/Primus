@@ -100,6 +100,12 @@ class TestExtractRankFromFilename:
         assert mlflow_artifacts_mod._extract_rank_from_filename("rank_0_step_2.json.gz") == 0
         assert mlflow_artifacts_mod._extract_rank_from_filename("rank_15_step_1.pt.trace.json") == 15
 
+    def test_rank_underscore_number_dot(self):
+        """Match rank_N. (dot after rank), e.g. rank_0.pt.trace.json.gz used by PyTorch profiler."""
+        assert mlflow_artifacts_mod._extract_rank_from_filename("rank_0.pt.trace.json") == 0
+        assert mlflow_artifacts_mod._extract_rank_from_filename("rank_0.pt.trace.json.gz") == 0
+        assert mlflow_artifacts_mod._extract_rank_from_filename("rank_8.pt.trace.json") == 8
+
     def test_rank_bracket_number_bracket(self):
         assert (
             mlflow_artifacts_mod._extract_rank_from_filename("primus-megatron-exp-rank[0].pt.trace.json") == 0

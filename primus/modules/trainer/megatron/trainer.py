@@ -2199,6 +2199,21 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 # Groups: Performance (throughput, TPS, iteration time), Memory (peak, usage %), System (GPU util)
                 # NOTE: mlflow_writer only exists on last rank, but all_gather requires all ranks to participate
                 if getattr(args, "mlflow_upload_performance_metrics", False):
+                    # Ensure memory metrics are available when log_timers_to_tensorboard is False
+                    # (mem_collector, used_mem, mem_usage are otherwise only set inside log_timers_to_tensorboard)
+                    if not args.log_timers_to_tensorboard:
+                        if args.use_rocm_mem_info or (
+                            args.use_rocm_mem_info_iters is not None
+                            and iteration in args.use_rocm_mem_info_iters
+                        ):
+                            mem_collector = "rocm"
+                            used_mem = rocm_used_mem
+                            mem_usage = rocm_mem_usage
+                        else:
+                            hip_free_mem, hip_total_mem = torch.cuda.mem_get_info()
+                            used_mem = hip_total_mem - hip_free_mem
+                            mem_usage = used_mem / hip_total_mem
+                            mem_collector = "hip"
                     # System metrics - GPU utilization per rank
                     # ALL ranks must participate in all_gather, even if they don't have mlflow_writer
                     # Use -1 as sentinel for unavailable GPU util

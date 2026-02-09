@@ -4,7 +4,38 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import re
 import subprocess
+
+
+def get_rocm_smi_gpu_util(device_id: int):
+    """
+    Return current GPU utilization (0-100) for the given device via rocm-smi --showuse.
+
+    Returns:
+        float: GPU use percentage (0-100), or raises on failure (caller should catch and use fallback).
+    """
+    try:
+        out = subprocess.check_output(
+            ["rocm-smi", "--showuse", f"-d={device_id}"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        raise RuntimeError("rocm-smi not found, please ensure ROCm is installed and in PATH")
+
+    # Parse output: look for GPU use (%) or similar (e.g. "GPU use (%): 42" or "GPU Use: 42%")
+    for line in out.splitlines():
+        line_lower = line.lower()
+        if "use" not in line_lower and "busy" not in line_lower:
+            continue
+        # Extract a number in 0-100 range (integer or float)
+        numbers = re.findall(r"\b(\d+(?:\.\d+)?)\s*%?\b", line)
+        for n in numbers:
+            val = float(n)
+            if 0 <= val <= 100:
+                return val
+    raise RuntimeError(f"rocm-smi --showuse did not report a GPU use percentage for device {device_id}")
 
 
 def get_rocm_smi_mem_info(device_id: int):

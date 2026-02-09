@@ -41,8 +41,9 @@ from typing import List, Optional
 
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
-# Pinned ref for runtime TraceLens install (supply-chain safety and reproducibility)
-TRACELENS_INSTALL_REF = "v0.4.0"
+# Pinned to immutable commit SHA for supply-chain safety (tags can be moved).
+# This corresponds to tag v0.4.0 in AMD-AGI/TraceLens.
+TRACELENS_INSTALL_REF = "0cba6840e20bf3bda74f26bed27a3497017101e6"
 
 
 def _get_all_trace_files(tensorboard_dir: str) -> list:
@@ -287,9 +288,6 @@ def _ensure_tracelens_installed() -> bool:
             warning_rank_0(f"[TraceLens] Failed to install TraceLens: {e}")
             return False
 
-    # Ensure openpyxl is installed for XLSX generation
-    _ensure_openpyxl_installed()
-
     return True
 
 
@@ -298,8 +296,9 @@ def _extract_rank_from_filename(filename: str) -> Optional[int]:
     Extract rank number from trace filename.
 
     Expected patterns:
-    - rank_0_step_2.json.gz
-    - primus-megatron-exp-rank[0].*.json
+    - rank_0_step_2.json.gz, rank_15_step_1.pt.trace.json (rank_N_)
+    - rank_0.pt.trace.json, rank_0.pt.trace.json.gz (rank_N. with dot after rank)
+    - primus-megatron-exp-rank[0].*.json (rank[N], -rankN., _rankN.)
 
     Args:
         filename: The trace filename
@@ -309,9 +308,10 @@ def _extract_rank_from_filename(filename: str) -> Optional[int]:
     """
     import re
 
-    # Try pattern: rank_N_ or rank[N]
+    # Try pattern: rank_N_, rank_N. (dot), rank[N], -rankN., _rankN.
     patterns = [
         r"rank_(\d+)_",
+        r"rank_(\d+)\.",  # e.g. rank_0.pt.trace.json.gz
         r"rank\[(\d+)\]",
         r"-rank(\d+)\.",
         r"_rank(\d+)\.",
@@ -374,13 +374,17 @@ def generate_tracelens_report(
         warning_rank_0(f"[TraceLens] Trace file not found: {trace_file}")
         return []
 
+    # Only ensure openpyxl when XLSX output is requested (avoids pip install in CSV-only or restricted envs)
+    if output_format in ("xlsx", "all"):
+        _ensure_openpyxl_installed()
+
     os.makedirs(output_dir, exist_ok=True)
 
     # Generate base name from trace filename if not provided
     if report_name is None:
         base_name = os.path.basename(trace_file)
-        # Remove extensions like .json.gz
-        for trace_ext in [".json.gz", ".json", ".pt.trace.json.gz", ".pt.trace.json"]:
+        # Remove extensions like .json.gz (check most specific first so e.g. rank_0.pt.trace.json.gz -> rank_0)
+        for trace_ext in [".pt.trace.json.gz", ".pt.trace.json", ".json.gz", ".json"]:
             if base_name.endswith(trace_ext):
                 base_name = base_name[: -len(trace_ext)]
                 break

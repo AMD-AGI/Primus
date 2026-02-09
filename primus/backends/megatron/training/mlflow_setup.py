@@ -13,7 +13,9 @@ reports) to MLflow. Separated from global_vars.py to reduce merge conflicts.
 
 from typing import List, Optional
 
-from .global_vars import get_mlflow_writer
+import torch.distributed as dist
+
+from .global_vars import get_mlflow_writer, get_primus_args
 from .mlflow_artifacts import (
     generate_tracelens_reports_locally,
     upload_artifacts_to_mlflow,
@@ -67,8 +69,14 @@ def upload_mlflow_artifacts(
     """
     mlflow_writer = get_mlflow_writer()
     if mlflow_writer is None:
-        # Local-only TraceLens generation: run even when MLflow is disabled
-        if generate_tracelens_report and tensorboard_dir and exp_root_path:
+        # Local-only TraceLens generation: run on a single rank only to avoid duplicate
+        # work and races writing exp_root_path/tracelens_reports (rank 0 when multi-rank).
+        try:
+            args = get_primus_args()
+            is_single_rank = args.rank == 0
+        except Exception:
+            is_single_rank = not dist.is_initialized() or dist.get_rank() == 0
+        if is_single_rank and generate_tracelens_report and tensorboard_dir and exp_root_path:
             generate_tracelens_reports_locally(
                 tensorboard_dir=tensorboard_dir,
                 exp_root_path=exp_root_path,
