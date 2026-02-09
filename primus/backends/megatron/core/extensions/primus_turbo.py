@@ -208,12 +208,12 @@ class PrimusTurboLowPrecisionGlobalStateManager(FP8GlobalStateManager):
     ) -> Tuple[bool, bool, Recipe, dist_group_type, bool, bool, PrimusTurboQuantConfig]:
         """FP8 autocast state getter"""
         return (
-            cls.FP8_ENABLED,
-            cls.FP8_CALIBRATION,
-            cls.FP8_RECIPE,
-            cls.FP8_DISTRIBUTED_GROUP,
-            cls.IS_FIRST_FP8_MODULE,
-            cls.FP8_GRAPH_CAPTURING,
+            FP8GlobalStateManager.FP8_ENABLED,
+            FP8GlobalStateManager.FP8_CALIBRATION,
+            FP8GlobalStateManager.FP8_RECIPE,
+            FP8GlobalStateManager.FP8_DISTRIBUTED_GROUP,
+            FP8GlobalStateManager.IS_FIRST_FP8_MODULE,
+            FP8GlobalStateManager.FP8_GRAPH_CAPTURING,
             cls.PRIMUS_TURBO_FP8_ENABLED,
             cls.PRIMUS_TURBO_FP4_ENABLED,
             cls.PRIMUS_TURBO_QUANT_CONFIG,
@@ -226,12 +226,12 @@ class PrimusTurboLowPrecisionGlobalStateManager(FP8GlobalStateManager):
     ) -> None:
         """FP8 autocast state setter"""
         (
-            cls.FP8_ENABLED,
-            cls.FP8_CALIBRATION,
-            cls.FP8_RECIPE,
-            cls.FP8_DISTRIBUTED_GROUP,
-            cls.IS_FIRST_FP8_MODULE,
-            cls.FP8_GRAPH_CAPTURING,
+            FP8GlobalStateManager.FP8_ENABLED,
+            FP8GlobalStateManager.FP8_CALIBRATION,
+            FP8GlobalStateManager.FP8_RECIPE,
+            FP8GlobalStateManager.FP8_DISTRIBUTED_GROUP,
+            FP8GlobalStateManager.IS_FIRST_FP8_MODULE,
+            FP8GlobalStateManager.FP8_GRAPH_CAPTURING,
             cls.PRIMUS_TURBO_FP8_ENABLED,
             cls.PRIMUS_TURBO_FP4_ENABLED,
             cls.PRIMUS_TURBO_QUANT_CONFIG,
@@ -262,7 +262,10 @@ def primus_turbo_fp8_autocast(
         yield
     finally:
         PrimusTurboLowPrecisionGlobalStateManager.set_fp8_autocast_state(fp8_state)
-        PrimusTurboLowPrecisionGlobalStateManager.fp8_autocast_exit(enabled, _graph=_graph)
+        # NOTE(ruibin): use FP8GlobalStateManager.fp8_autocast_exit instead of
+        # PrimusTurboLowPrecisionGlobalStateManager.fp8_autocast_exit to make sure
+        # FP8GlobalStateManager.FP8_AUTOCAST_DEPTH is updated correctly.
+        FP8GlobalStateManager.fp8_autocast_exit(enabled, _graph=_graph)
 
 
 @contextmanager
