@@ -538,7 +538,7 @@ def validate_args_on_rocm(args):
         ), "DeepEP only supports float32 probs, please set `moe_router_dtype=fp32`"
         if (
             args.expert_model_parallel_size >= 16
-            and os.getenv("PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND") == "TURBO"
+            and os.getenv("PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND", "DEEP_EP") == "TURBO"
         ):
-            # Turbo DeepEP is not supported CUs > 32 when using internode dispatch/combine.
+            # Turbo DeepEP is not supported for CUs > 32 when using internode dispatch/combine.
             assert args.turbo_deepep_num_cu <= 32, "Set `turbo_deepep_num_cu<=32` when using ep_size >= 16."
