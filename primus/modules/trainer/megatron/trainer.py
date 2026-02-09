@@ -149,6 +149,7 @@ from primus.backends.megatron.training.global_vars import (
     set_train_start_time,
 )
 from primus.backends.megatron.training.mlflow_setup import (
+    reset_exp_root_path,
     set_exp_root_path,
     upload_mlflow_artifacts,
 )
@@ -195,6 +196,7 @@ def _finalize_mlflow_run(args, mlflow_writer) -> None:
         dist.barrier()
 
     if mlflow_writer is None:
+        reset_exp_root_path()
         return
 
     # Upload artifacts before ending the run
@@ -203,6 +205,8 @@ def _finalize_mlflow_run(args, mlflow_writer) -> None:
         upload_logs=getattr(args, "mlflow_upload_logs", True),
     )
     mlflow_writer.end_run()
+    # Reset so subsequent runs in the same process don't use a stale path
+    reset_exp_root_path()
 
 
 class MegatronTrainer(BaseTrainer, BaseModule):
