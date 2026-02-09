@@ -405,12 +405,12 @@ fi
 if [ "$USING_UEP" == "1" ]; then
     LOG_INFO "USING_UEP is enabled, checking required packages..."
 
-    if ! pip show uccl &>/dev/null || ! pip show deep_ep &>/dev/null; then
+    if ! python3 -m pip show uccl &>/dev/null || ! python3 -m pip show deep_ep &>/dev/null; then
         LOG_ERROR "uccl is not installed! Please use pre-installed primus image or set REBUILD_UCCL=1."
         exit 1
     fi
-    LOG_INFO "uccl package is installed: $(pip show uccl | grep Version)"
-    LOG_INFO "deep_ep package is installed: $(pip show deep_ep | grep Version)"
+    LOG_INFO "uccl package is installed: $(python3 -m pip show uccl | grep Version)"
+    LOG_INFO "deep_ep package is installed: $(python3 -m pip show deep_ep | grep Version)"
 
     if [ "$ENABLE_NUMA_BINDING" != "1" ]; then
         LOG_INFO "ENABLE_NUMA_BINDING is not enabled! Please set ENABLE_NUMA_BINDING=1 to avoid dataloader worker exited unexpectedly."
