@@ -708,7 +708,9 @@ def generate_tracelens_reports(
         report_paths = generate_tracelens_report(trace_file, output_dir, output_format=output_format)
         generated_reports.extend(report_paths)
 
-    log_rank_0(f"[TraceLens] Generated {len(generated_reports)} report files from {len(trace_files)} traces")
+    log_rank_0(
+        f"[TraceLens] Generated {len(generated_reports)} report item(s) " f"from {len(trace_files)} traces"
+    )
     return generated_reports
 
 

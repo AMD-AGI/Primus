@@ -29,9 +29,26 @@ def get_rocm_smi_gpu_util(device_id: int):
         line_lower = line.lower()
         if "use" not in line_lower and "busy" not in line_lower:
             continue
-        # Extract a number in 0-100 range (integer or float)
-        numbers = re.findall(r"\b(\d+(?:\.\d+)?)\s*%?\b", line)
-        for n in numbers:
+        # Prefer a number that follows a use/busy label.
+        labeled_match = re.search(
+            r"(?:use|busy)[^0-9%]*([0-9]+(?:\.[0-9]+)?)\s*%?",
+            line_lower,
+        )
+        if labeled_match:
+            val = float(labeled_match.group(1))
+            if 0 <= val <= 100:
+                return val
+
+        # Otherwise, take the last percentage on the line to avoid grabbing GPU index.
+        percent_numbers = re.findall(r"(\d+(?:\.\d+)?)\s*%", line)
+        for n in reversed(percent_numbers):
+            val = float(n)
+            if 0 <= val <= 100:
+                return val
+
+        # Fallback: take the last 0-100 number if no percent sign is present.
+        numbers = re.findall(r"\b(\d+(?:\.\d+)?)\b", line)
+        for n in reversed(numbers):
             val = float(n)
             if 0 <= val <= 100:
                 return val
