@@ -1,0 +1,10 @@
+job:
+  dump_folder: "./outputs"
+  description: "Qwen 3 30B-A3B training"
+
+model:
+  name: "qwen3"
+  flavor: "30B-A3B"
+  hf_assets_path: "Qwen/Qwen3-30B-A3B"
+  converters:
+    - primus_turbo
