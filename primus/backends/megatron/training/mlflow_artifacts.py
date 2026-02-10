@@ -437,10 +437,6 @@ def generate_tracelens_report(
         warning_rank_0(f"[TraceLens] Trace file not found: {trace_file}")
         return []
 
-    # Only ensure openpyxl when XLSX output is requested (avoids pip install in CSV-only or restricted envs)
-    if output_format in ("xlsx", "all"):
-        _ensure_openpyxl_installed()
-
     os.makedirs(output_dir, exist_ok=True)
 
     # Generate base name from trace filename if not provided
@@ -456,6 +452,10 @@ def generate_tracelens_report(
     try:
         # Try using TraceLens Python API directly
         from TraceLens.Reporting import generate_perf_report_pytorch
+
+        # Only ensure openpyxl when XLSX output is requested (avoids pip install in CSV-only or restricted envs)
+        if output_format in ("xlsx", "all"):
+            _ensure_openpyxl_installed()
 
         generated_files = []
 
