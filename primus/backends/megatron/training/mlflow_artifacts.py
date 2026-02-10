@@ -325,6 +325,66 @@ def _extract_rank_from_filename(filename: str) -> Optional[int]:
     return None
 
 
+def _normalize_tracelens_ranks(ranks: Optional[List[int]]) -> Optional[List[int]]:
+    """Normalize and validate TraceLens rank filters."""
+    if ranks is None:
+        return None
+
+    if isinstance(ranks, str):
+        import ast
+
+        try:
+            ranks = ast.literal_eval(ranks)
+        except (ValueError, SyntaxError) as e:
+            warning_rank_0(f"[TraceLens] Failed to parse ranks '{ranks}': {e}. Disabling rank filter.")
+            return None
+
+    if not isinstance(ranks, list):
+        warning_rank_0(
+            f"[TraceLens] Ranks evaluated to {type(ranks).__name__}, expected list. Disabling rank filter."
+        )
+        return None
+
+    normalized = []
+    invalid = []
+    for rank in ranks:
+        if isinstance(rank, bool):
+            invalid.append(rank)
+            continue
+        try:
+            rank_int = int(rank)
+        except (TypeError, ValueError):
+            invalid.append(rank)
+            continue
+        if rank_int < 0:
+            invalid.append(rank)
+            continue
+        normalized.append(rank_int)
+
+    if invalid:
+        warning_rank_0("[TraceLens] Ignoring invalid ranks: " + ", ".join(str(rank) for rank in invalid))
+
+    if not normalized:
+        warning_rank_0("[TraceLens] No valid ranks provided after validation.")
+        return []
+
+    try:
+        world_size = int(os.environ.get("WORLD_SIZE", os.environ.get("SLURM_NTASKS", "0")))
+    except ValueError:
+        world_size = 0
+
+    if world_size > 0:
+        out_of_range = [rank for rank in normalized if rank >= world_size]
+        if out_of_range:
+            warning_rank_0(f"[TraceLens] Ignoring ranks outside world_size={world_size}: {out_of_range}")
+            normalized = [rank for rank in normalized if rank < world_size]
+            if not normalized:
+                warning_rank_0("[TraceLens] No valid ranks remain after world_size filtering.")
+                return []
+
+    return sorted(set(normalized))
+
+
 def _filter_traces_by_rank(trace_files: List[str], ranks: List[int]) -> List[str]:
     """
     Filter trace files to only include specified ranks.
@@ -336,7 +396,7 @@ def _filter_traces_by_rank(trace_files: List[str], ranks: List[int]) -> List[str
     Returns:
         Filtered list of trace files
     """
-    if not ranks:
+    if ranks is None:
         return trace_files
 
     filtered = []
@@ -364,7 +424,10 @@ def generate_tracelens_report(
         output_format: Output format:
                       - "xlsx" (default): Single multi-tab Excel; one trace parse, fastest.
                       - "csv": Multiple CSV files (kernels, memory, communication, etc.)
+                               saved under {output_dir}/{report_name}/*.csv.
                       - "all": Both XLSX and CSV; trace is parsed twice (~2x processing time).
+                               XLSX: {output_dir}/{report_name}_analysis.xlsx
+                               CSVs: {output_dir}/{report_name}/*.csv
                       Prefer "xlsx" or "csv" to avoid this overhead unless both are needed.
 
     Returns:
@@ -601,7 +664,10 @@ def generate_tracelens_reports(
         output_format: Output format:
                       - "xlsx" (default): Multi-tab Excel; single parse, fastest
                       - "csv": Multiple CSV files per rank (kernels, memory, comm, etc.)
-                      - "all": Both XLSX and CSV; trace parsed twice (~2x processing time)
+                               saved under {output_dir}/{report_name}/*.csv.
+                      - "all": Both XLSX and CSV; trace parsed twice (~2x processing time).
+                               XLSX: {output_dir}/{report_name}_analysis.xlsx
+                               CSVs: {output_dir}/{report_name}/*.csv
 
     Returns:
         List of paths to all generated report files
@@ -609,21 +675,11 @@ def generate_tracelens_reports(
     # Try to install tracelens, but continue with fallback if not available
     _ensure_tracelens_installed()
 
-    # Normalize ranks: config/CLI can pass mlflow_tracelens_ranks as a string (e.g. env override
-    # or serialized list), but we need a list or None for filtering.
-    if ranks is not None and isinstance(ranks, str):
-        import ast
-
-        try:
-            ranks = ast.literal_eval(ranks)
-            if not isinstance(ranks, list):
-                log_rank_0(
-                    f"[TraceLens] Warning: ranks evaluated to {type(ranks).__name__}, expected list. Using None."
-                )
-                ranks = None
-        except (ValueError, SyntaxError) as e:
-            log_rank_0(f"[TraceLens] Warning: Failed to parse ranks '{ranks}': {e}. Using None.")
-            ranks = None
+    # Normalize and validate ranks (config/CLI can pass as a string)
+    ranks = _normalize_tracelens_ranks(ranks)
+    if ranks == []:
+        warning_rank_0("[TraceLens] No valid ranks after validation; skipping report generation.")
+        return []
 
     trace_files = _get_all_trace_files(tensorboard_dir)
     if not trace_files:
@@ -673,7 +729,9 @@ def generate_tracelens_reports_locally(
         exp_root_path: Root path of the experiment (for saving reports)
         ranks: List of ranks to analyze (None = all ranks, [0] = rank 0 only)
                Specify fewer ranks to limit number of reports
-        output_format: Report format - "xlsx" (default), "csv", or "all" (xlsx+csv, ~2x time)
+        output_format: Report format - "xlsx" (default), "csv", or "all" (xlsx+csv, ~2x time).
+                       For "all": XLSX at {exp_root_path}/tracelens_reports/{report_name}_analysis.xlsx
+                       and CSVs under {exp_root_path}/tracelens_reports/{report_name}/*.csv
 
     Returns:
         Number of reports generated
@@ -736,7 +794,9 @@ def upload_tracelens_reports_to_mlflow(
         exp_root_path: Root path of the experiment (for saving reports)
         ranks: List of ranks to analyze (None = all ranks, [0] = rank 0 only)
                Specify fewer ranks to limit number of reports
-        output_format: Report format - "xlsx" (default), "csv", or "all" (xlsx+csv, ~2x time)
+        output_format: Report format - "xlsx" (default), "csv", or "all" (xlsx+csv, ~2x time).
+                       For "all": XLSX at {exp_root_path}/tracelens_reports/{report_name}_analysis.xlsx
+                       and CSVs under {exp_root_path}/tracelens_reports/{report_name}/*.csv
         artifact_path: MLflow artifact subdirectory for reports
         cleanup_after_upload: If True, removes local reports after upload to save disk space.
                              If False, keeps reports locally for inspection. Default: False.
@@ -752,21 +812,11 @@ def upload_tracelens_reports_to_mlflow(
         log_rank_0("[TraceLens] MLflow writer not available, skipping report upload")
         return 0
 
-    # Normalize ranks: config/CLI can pass mlflow_tracelens_ranks as a string (e.g. env override
-    # or serialized list), but we need a list or None for filtering.
-    if ranks is not None and isinstance(ranks, str):
-        import ast
-
-        try:
-            ranks = ast.literal_eval(ranks)
-            if not isinstance(ranks, list):
-                log_rank_0(
-                    f"[TraceLens] Warning: ranks evaluated to {type(ranks).__name__}, expected list. Using None."
-                )
-                ranks = None
-        except (ValueError, SyntaxError) as e:
-            log_rank_0(f"[TraceLens] Warning: Failed to parse ranks '{ranks}': {e}. Using None.")
-            ranks = None
+    # Normalize and validate ranks (config/CLI can pass as a string)
+    ranks = _normalize_tracelens_ranks(ranks)
+    if ranks == []:
+        warning_rank_0("[TraceLens] No valid ranks after validation; skipping report upload.")
+        return 0
 
     # Create output directory for reports
     reports_dir = os.path.join(exp_root_path, "tracelens_reports")
@@ -889,7 +939,9 @@ def upload_artifacts_to_mlflow(
         tracelens_ranks: List of ranks to generate TraceLens reports for
                         (None = all ranks, [0, 8] = ranks 0 and 8 only)
                         Specify fewer ranks to limit number of reports
-        tracelens_output_format: Report format - "xlsx" (default), "csv", or "all" (xlsx+csv, ~2x time)
+        tracelens_output_format: Report format - "xlsx" (default), "csv", or "all" (xlsx+csv, ~2x time).
+                                For "all": XLSX at {exp_root_path}/tracelens_reports/{report_name}_analysis.xlsx
+                                and CSVs under {exp_root_path}/tracelens_reports/{report_name}/*.csv
         tracelens_cleanup_after_upload: If True, removes local reports after upload to save disk space.
                                        If False, keeps reports locally for inspection (default).
 
