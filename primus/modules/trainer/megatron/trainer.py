@@ -200,10 +200,12 @@ def _finalize_mlflow_run(args, mlflow_writer) -> None:
         return
 
     # Upload artifacts before ending the run
-    upload_mlflow_artifacts(
-        upload_traces=getattr(args, "mlflow_upload_traces", True),
-        upload_logs=getattr(args, "mlflow_upload_logs", True),
-    )
+    mlflow_artifact_kwargs = {}
+    if hasattr(args, "mlflow_upload_traces"):
+        mlflow_artifact_kwargs["upload_traces"] = args.mlflow_upload_traces
+    if hasattr(args, "mlflow_upload_logs"):
+        mlflow_artifact_kwargs["upload_logs"] = args.mlflow_upload_logs
+    upload_mlflow_artifacts(**mlflow_artifact_kwargs)
     mlflow_writer.end_run()
     # Reset so subsequent runs in the same process don't use a stale path
     reset_exp_root_path()

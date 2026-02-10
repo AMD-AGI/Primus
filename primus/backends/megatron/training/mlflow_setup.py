@@ -11,7 +11,6 @@ Separated from global_vars.py to reduce merge conflicts.
 """
 
 from .global_vars import get_args, get_mlflow_writer
-from .mlflow_artifacts import upload_artifacts_to_mlflow
 
 _GLOBAL_EXP_ROOT_PATH = None
 
@@ -54,6 +53,8 @@ def upload_mlflow_artifacts(
     mlflow_writer = get_mlflow_writer()
     if mlflow_writer is None:
         return None
+
+    from .mlflow_artifacts import upload_artifacts_to_mlflow
 
     args = get_args()
     exp_root_path = get_exp_root_path()

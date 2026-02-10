@@ -24,6 +24,7 @@ Note:
 
 import glob
 import os
+import traceback
 from typing import List, Optional
 
 from primus.modules.module_utils import log_rank_last
@@ -31,6 +32,12 @@ from primus.modules.module_utils import log_rank_last
 # Note: This module is called on the last rank (where MLflow is initialized).
 # Using log_rank_last ensures messages are visible. For warnings, we prefix
 # with [WARNING] since warning_rank_last doesn't exist.
+try:
+    from mlflow.exceptions import MlflowException
+except ModuleNotFoundError:
+
+    class MlflowException(Exception):
+        """Fallback exception when mlflow isn't available."""
 
 
 def _log_warning(msg: str) -> None:
@@ -173,8 +180,9 @@ def upload_trace_files_to_mlflow(
                 f"[MLflow] Uploaded trace file ({uploaded_count}/{total_files}): "
                 f"{os.path.basename(trace_file)}"
             )
-        except Exception as e:
-            _log_warning(f"[MLflow] Failed to upload trace file {trace_file}: {e}")
+        except (OSError, RuntimeError, ValueError, MlflowException) as e:
+            _log_warning(f"[MLflow] Failed to upload trace file {trace_file}: {type(e).__name__}: {e}")
+            _log_warning(traceback.format_exc().strip())
 
     log_rank_last(f"[MLflow] Uploaded {uploaded_count}/{total_files} trace files to '{artifact_path}'")
     return uploaded_count
@@ -241,8 +249,9 @@ def upload_log_files_to_mlflow(
 
             mlflow_writer.log_artifact(log_file, artifact_path=artifact_subpath)
             uploaded_count += 1
-        except Exception as e:
-            _log_warning(f"[MLflow] Failed to upload log file {log_file}: {e}")
+        except (OSError, RuntimeError, ValueError, MlflowException) as e:
+            _log_warning(f"[MLflow] Failed to upload log file {log_file}: {type(e).__name__}: {e}")
+            _log_warning(traceback.format_exc().strip())
 
     log_rank_last(f"[MLflow] Uploaded {uploaded_count}/{total_files} log files to '{artifact_path}'")
     return uploaded_count
