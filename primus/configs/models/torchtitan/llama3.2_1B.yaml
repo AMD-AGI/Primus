@@ -1,0 +1,10 @@
+job:
+  dump_folder: "./outputs"
+  description: "Llama 3.2 1B training"
+
+model:
+  name: "llama3"
+  flavor: "1B"
+  hf_assets_path: "meta-llama/Llama-3.2-1B"
+  converters:
+    - primus_turbo
