@@ -6,7 +6,9 @@
 ###############################################################################
 
 
+import json
 import time
+
 from primus.modules.module_utils import debug_rank_0
 
 _GLOBAL_ARGS = None
@@ -80,7 +82,53 @@ def _set_mlflow_writer(args):
             mlflow.set_experiment(experiment_name=args.mlflow_experiment_name)
 
         mlflow.start_run(run_name=args.mlflow_run_name)
+
+        # 1) Original args
         mlflow.log_params(vars(args))
+
+        # 2) Env as params (with prefix to avoid collisions)
+        try:
+            env_params = {f"env__{k}": v for k, v in get_env_variables().items()}
+            mlflow.log_params(env_params)
+        except Exception as e:
+            debug_rank_0(f"WARNING: Failed to log environment variables to MLflow: {e}")
+
+        # 3) Git metadata
+        try:
+            # This will:
+            #  - log Primus as git/primus_*
+            #  - scan the parent directory of Primus (workspace_root, defaults to primus_root.parent) for other git repos
+            git_meta = collect_git_metadata()
+
+            if git_meta:
+                # 3a) Auto-select top-level repo commits/dirty (excludes submodules)
+                summary_tags = {
+                    k: v
+                    for k, v in git_meta.items()
+                    if "/submodule/" not in k and k.endswith(("_commit", "_dirty"))
+                }
+
+                # MLflow "source" tags
+                primus_commit = git_meta.get("git/primus_commit", None)
+                primus_remote = git_meta.get("git/primus_remote", None)
+
+                if primus_commit:
+                    mlflow.set_tag("mlflow.source.git.commit", primus_commit)
+                if primus_remote:
+                    mlflow.set_tag("mlflow.source.git.repoURL", primus_remote)
+
+                if summary_tags:
+                    mlflow.set_tags(summary_tags)
+
+                # 3b) Full metadata as a single artifact for exact reproducibility
+                mlflow.log_text(
+                    json.dumps(git_meta, indent=2, sort_keys=True),
+                    "system/git_metadata.json",
+                )
+
+        except Exception as e:
+            debug_rank_0(f"WARNING: Failed to log git metadata to MLflow: {e}")
+
         _GLOBAL_MLFLOW_WRITER = mlflow
 
 

@@ -1,6 +1,10 @@
+import argparse
 import importlib
 import json
 import os
+
+import plotext as plt
+import yaml
 
 from primus.core.pipeline_parallel.scheduler.scheduler_node import (
     FuncType,
@@ -12,6 +16,7 @@ class SchedulerSimulationRunner:
     def __init__(self, config: dict):
         self.config = config
         self.chunk_time_ms = self.config.get("chunk_time_ms")
+        self.print_simulation_result = self.config.get("print_simulation_result", False)
         self._result_key_dict = {
             FuncType.F: "fwd",
             FuncType.B: "bwd",
@@ -40,6 +45,20 @@ class SchedulerSimulationRunner:
         self, rank: int, chunk: int | None, func_type: FuncType, scheduler_config: dict
     ) -> float:
         chunk_idx = chunk or 0
+        if self.chunk_time_ms is None:
+            if func_type == FuncType.F:
+                return float(self.config["fwd_time"]) // scheduler_config["vpp_size"]
+            elif func_type == FuncType.B:
+                return float(self.config["bwd_time"]) // scheduler_config["vpp_size"]
+            elif func_type == FuncType.W:
+                return float(self.config["wgrad_time"]) // scheduler_config["vpp_size"]
+            elif func_type == FuncType.BW:
+                return (
+                    float(self.config["bwd_time"]) + float(self.config["wgrad_time"])
+                ) // scheduler_config["vpp_size"]
+            else:
+                return 0.0
+
         assert self.chunk_time_ms is not None
         chunk_entry = self.chunk_time_ms[rank][chunk_idx]
         assert chunk_entry is not None
@@ -60,12 +79,59 @@ class SchedulerSimulationRunner:
         else:
             raise ValueError(f"Duration is not found.")
 
-    def _chunk_activation(self, rank: int, chunk: int | None) -> float:
+    def _chunk_activation(self, rank: int, chunk: int | None, vpp_size: int | None) -> float:
         if self.chunk_time_ms is None:
-            return 0.0
+            if vpp_size is None:
+                vpp_size = 1
+            return 1.0 / vpp_size
         chunk_idx = chunk or 0
         chunk_entry = self.chunk_time_ms[rank][chunk_idx]
         return float(chunk_entry.get("activation", 0.0) or 0.0)
+
+    def _print_simulation_result(self, simulation_result: list[dict]):
+        print(f"max memory: {[ r['memory'] for r in simulation_result]}")
+        print(f"execution time: {[ r['total'] for r in simulation_result]}")
+
+        ranks = list(range(len(simulation_result)))
+
+        plt.plotsize(20 * len(simulation_result), 15)
+        plt.subplots(1, 2)
+        plt.subplot(1, 1)
+
+        plt.bar(ranks, [r["memory"] for r in simulation_result], width=0.3, color=(15, 163, 64))
+        plt.title("max memory")
+        plt.xlabel("rank")
+
+        plt.subplot(1, 2)
+        plt.bar(ranks, [r["total"] for r in simulation_result], width=0.3, color=(255, 99, 32))
+        plt.title("execution time")
+        plt.xlabel("rank")
+        plt.show()
+
+    def _print_summary_result(self, run_summaries: list[dict]):
+        width = 30 * len(run_summaries)
+        print("=" * width)
+        title = "Algorithm summary result"
+        space_cnt = width // 2 - len(title) // 2
+        print(f"{' '*space_cnt}{title}{' '*space_cnt}")
+        print("=" * width)
+        plt.plotsize(width, 15)
+
+        exp_names = [r["name"] for r in run_summaries]
+
+        plt.subplots(1, 2)
+        plt.subplot(1, 1)
+        plt.bar(
+            exp_names, [r["summary"]["max_memory"] for r in run_summaries], width=0.3, color=(210, 96, 94)
+        )
+        plt.title("algorithm max memory")
+
+        plt.subplot(1, 2)
+        plt.bar(
+            exp_names, [r["summary"]["step_time_ms"] for r in run_summaries], width=0.3, color=(159, 160, 192)
+        )
+        plt.title("algorithm execution time")
+        plt.show()
 
     def run(self):
         run_summaries = []
@@ -79,9 +145,11 @@ class SchedulerSimulationRunner:
 
             scheduler_instance = scheduler_class(**scheduler_params)
             schedule_table = scheduler_instance.generate_schedule_table()
-            print(f"{'='*80}")
-            print(f"Scheduler: {scheduler_config['name']}")
-            print(f"{'='*80}")
+            print(f"{'='*20 * scheduler_config['pp_size']}")
+            title = f"Scheduler: {scheduler_config['name']}"
+            space_cnt = 20 * scheduler_config["pp_size"] // 2 - len(title) // 2
+            print(f"{' '*space_cnt}{title}{' '*space_cnt}")
+            print(f"{'='*20 * scheduler_config['pp_size']}")
             if self.debug_simulator:
                 scheduler_instance.print_schedule_table(schedule_table)
             simulation_result = self.simulate_scheduler_table(schedule_table, scheduler_config)
@@ -95,6 +163,10 @@ class SchedulerSimulationRunner:
                     "per_rank": simulation_result,
                 }
             )
+
+        if self.print_simulation_result:
+            self._print_summary_result(run_summaries)
+
         return run_summaries
 
     def simulate_scheduler_table(self, schedule_table: list[list[SchedulerNode]], scheduler_config: dict):
@@ -104,6 +176,8 @@ class SchedulerSimulationRunner:
         rank_idx = [0 for _ in range(len(schedule_table))]
 
         rank_memory = [0.0 for _ in range(len(schedule_table))]
+
+        recv_time_map = dict()
 
         communication_map = dict()
 
@@ -165,7 +239,8 @@ class SchedulerSimulationRunner:
                         # merge the send op behind
                         for i in range(merge_comm_index, len(schedule_table[current_rank])):
                             if schedule_table[current_rank][i].func_type in [FuncType.SF, FuncType.SB]:
-                                send_key = f"{node.args['from_pp_rank']}_{node.args['to_pp_rank']}_{node.func_type}_{node.mini_batch}_{node.args['send_to_chunk']}"
+                                send_node = schedule_table[current_rank][i]
+                                send_key = f"{send_node.args['from_pp_rank']}_{send_node.args['to_pp_rank']}_{send_node.func_type}_{send_node.mini_batch}_{send_node.args['send_to_chunk']}"
                                 communication_map[send_key] = rank_clock[current_rank]
                             else:
                                 break
@@ -176,9 +251,18 @@ class SchedulerSimulationRunner:
 
                     send_time = communication_map.pop(send_key)
 
-                    rank_clock[current_rank] = max(rank_clock[current_rank], send_time)
+                    recv_time_map[f"{node.mini_batch}_{node.chunk}_{node.func_type}"] = send_time
 
                 if node.func_type in [FuncType.F, FuncType.B, FuncType.W, FuncType.BW, FuncType.FB]:
+                    if node.func_type in [FuncType.F, FuncType.B, FuncType.BW]:
+                        recv_node_type = FuncType.RF if node.func_type == FuncType.F else FuncType.RB
+                        recv_key = f"{node.mini_batch}_{node.chunk}_{recv_node_type}"
+                        if recv_key in recv_time_map:
+                            rank_clock[current_rank] = max(
+                                rank_clock[current_rank],
+                                recv_time_map[f"{node.mini_batch}_{node.chunk}_{recv_node_type}"],
+                            )
+
                     simulation_result[current_rank][f"{self._result_key_dict[node.func_type]}_start"].append(
                         rank_clock[current_rank]
                     )
@@ -196,7 +280,9 @@ class SchedulerSimulationRunner:
                         node.chunk
                     )
                     if node.func_type == FuncType.F:
-                        act_gb = self._chunk_activation(current_rank, getattr(node, "chunk", 0))
+                        act_gb = self._chunk_activation(
+                            current_rank, getattr(node, "chunk", 0), scheduler_config["vpp_size"]
+                        )
                         rank_memory[current_rank] += act_gb
                         simulation_result[current_rank]["memory"] = max(
                             simulation_result[current_rank]["memory"], rank_memory[current_rank]
@@ -205,7 +291,9 @@ class SchedulerSimulationRunner:
                             rank_memory[current_rank]
                         )
                     elif node.func_type in [FuncType.BW, FuncType.W]:
-                        act_gb = self._chunk_activation(current_rank, getattr(node, "chunk", 0))
+                        act_gb = self._chunk_activation(
+                            current_rank, getattr(node, "chunk", 0), scheduler_config["vpp_size"]
+                        )
                         rank_memory[current_rank] = rank_memory[current_rank] - act_gb
                         simulation_result[current_rank]["activation_memory_usage"].append(
                             rank_memory[current_rank]
@@ -213,6 +301,9 @@ class SchedulerSimulationRunner:
                 rank_idx[current_rank] += 1
 
             current_rank = (current_rank + 1) % len(schedule_table)
+
+        if self.print_simulation_result:
+            self._print_simulation_result(simulation_result)
 
         return simulation_result
 
@@ -231,3 +322,17 @@ class SchedulerSimulationRunner:
             with open(f"{result_dir}/pp_rank_{i}.json", "w") as f:
                 dump_dict = {"0": simulation_result[i]}
                 json.dump(dump_dict, f, indent=2)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, default="primus/core/projection/configs/pp_simulation.yaml")
+    args = parser.parse_args()
+
+    config_dict = None
+
+    with open(args.config, "r") as f:
+        config_dict = yaml.load(f, Loader=yaml.SafeLoader)
+
+    runner = SchedulerSimulationRunner(config=config_dict)
+    runner.run()

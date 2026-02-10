@@ -93,13 +93,13 @@ def override_namespace(original_ns: SimpleNamespace, overrides_ns: SimpleNamespa
 def merge_namespace(dst: SimpleNamespace, src: SimpleNamespace, allow_override=False, excepts: list = None):
     src_dict = vars(src)
     dst_dict = vars(dst)
+    excepts = excepts or []
     for key, value in src_dict.items():
         if key in excepts:
             continue
         if key in dst_dict and not allow_override:
-            raise ValueError(f"Key '{key}' from {src.name} already exists in {dst.name}.")
-        else:
-            setattr(dst, key, value)
+            continue  # Skip duplicate keys, keep dst value
+        setattr(dst, key, value)
 
 
 def dump_namespace_to_yaml(ns: SimpleNamespace, file_path: str):

@@ -10,14 +10,14 @@ env:
   BENCHMARK_ROOT_DIR: /wekafs/primus/benchmark
 
 jobs:
-  run-benchmark-torch:
+  run-benchmark-torch-part1:
     env:
       PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
       GPU_NAME: MI325  # Change this to your GPU model
       DATA_PATH: /wekafs/primus-data
       HSA_NO_SCRATCH_RECLAIM: 1
       HF_TOKEN: ${{secrets.HF_TOKEN}}
-    runs-on: [primus-lm-bench-torch-wkhbx]
+    runs-on: [primus-lm-bench-torch-rwskq]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Set commit hash to env
@@ -214,7 +214,76 @@ jobs:
         run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/megatron/gpt_oss_20B-FP8.log" \
           -- train pretrain --config examples/megatron/configs/MI300X/gpt_oss_20B-FP8-pretrain.yaml
+      - name: Clean
+        run: |
+          rm -rf ${PRIMUS_WORKDIR}/Primus-Turbo
+          rm -rf ${PRIMUS_WORKDIR}/Primus
 
+  run-benchmark-torch-part2:
+    env:
+      PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
+      GPU_NAME: MI325  # Change this to your GPU model
+      DATA_PATH: /wekafs/primus-data
+      HSA_NO_SCRATCH_RECLAIM: 1
+      HF_TOKEN: ${{secrets.HF_TOKEN}}
+    needs: run-benchmark-torch-part1
+    runs-on: [primus-lm-bench-torch-rwskq]
+    steps:
+      - run: echo "🎉 Begin Primus-Turbo Checkout."
+      - name: Set commit hash to env
+        run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
+      - name: Checkout Repo Primus-Turbo
+        uses: actions/checkout@v4
+        with:
+          repository: AMD-AIG-AIMA/Primus-Turbo
+          submodules: "recursive"
+          path: Primus-Turbo
+          ref: ${{ env.PRIMUS_TURBO_COMMIT }}
+      - run: echo "Begin Primus-Turbo Install."
+      - name: Install Primus-Turbo
+        run: |
+          mv Primus-Turbo /tmp/
+          echo "Primus-Turbo dir: /tmp/Primus-Turbo"
+          git config --global --add safe.directory /tmp/Primus-Turbo
+          cd /tmp/Primus-Turbo
+          start_time=$(date +%s)
+          echo "✅ [Pip install requirements] started at: $(date)"
+          mkdir -p ${PRIMUS_WORKDIR}/primus-cache
+          MAX_JOBS=128 pip install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --no-build-isolation --no-clean -r requirements.txt
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "✅ [Pip install requirements] ended at: $(date)"
+          echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
+          start_time=$(date +%s)
+          echo "✅ [build primus-turbo] started at: $(date)"
+          pip3 install --no-build-isolation -e . -v
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "✅ [build primus-turbo] ended at: $(date)"
+          echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
+      - run: echo "🎉 Begin Primus Benchmark."
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Show Environment Info
+        run: |
+          echo "Hostname: $(hostname)"
+          echo "PWD: $(pwd)"
+          echo "HOME: $HOME"
+          echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
+          echo "Runner Temp Dir: $RUNNER_TEMP"
+          echo "Runner Tool Cache: $RUNNER_TOOL_CACHE"
+      - name: Install Primus
+        run: |
+          pip install -r requirements.txt
+      - name: Set BENCHMARK_PATH
+        run: |
+          BENCHMARK_DATE=$(date +%Y%m%d)
+          BENCHMARK_DATE_DIR="${BENCHMARK_ROOT_DIR}/${BENCHMARK_DATE}"
+          BENCHMARK_LOG_DIR="${BENCHMARK_DATE_DIR}/${GPU_NAME}"
+          mkdir -p "${BENCHMARK_LOG_DIR}"
+          echo "BENCHMARK_DATE_DIR=${BENCHMARK_DATE_DIR}" >> $GITHUB_ENV
+          echo "BENCHMARK_LOG_DIR=${BENCHMARK_LOG_DIR}" >> $GITHUB_ENV
       - name: "[21/33][Megatron] llama3_70B-BF16"
         timeout-minutes: 60
         continue-on-error: true
@@ -305,6 +374,127 @@ jobs:
         run: |
           ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/torchtitan/qwen3_32B.log" \
           -- train pretrain --config examples/torchtitan/configs/MI300X/qwen3_32B-pretrain.yaml
+      - name: Generate Summary Report
+        run: |
+          echo "Generate Summary Report"
+          python3 tools/daily/daily_report.py --report-csv-path "${BENCHMARK_DATE_DIR}/summary.csv" --benchmark-log-dir "${BENCHMARK_LOG_DIR}"
+      - name: Clean
+        run: |
+          rm -rf ${PRIMUS_WORKDIR}/Primus-Turbo
+          rm -rf ${PRIMUS_WORKDIR}/Primus
+
+  run-benchmark-jax:
+    env:
+      PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/jax
+      GPU_NAME: MI325  # Change this to your GPU model
+      DATA_PATH: /wekafs/primus-data
+      HF_TOKEN: ${{secrets.HF_TOKEN}}
+    needs: run-benchmark-torch-part2
+    runs-on: [primus-lm-bench-jax-hhhf5]
+    steps:
+      - run: echo "🎉 Begin Primus-Turbo Checkout."
+      - name: Set commit hash to env
+        run: echo "PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT}" >> $GITHUB_ENV
+      - name: Checkout Repo Primus-Turbo
+        uses: actions/checkout@v4
+        with:
+          repository: AMD-AIG-AIMA/Primus-Turbo
+          submodules: "recursive"
+          path: Primus-Turbo
+          ref: ${{ env.PRIMUS_TURBO_COMMIT }}
+      - run: echo "Begin Primus-Turbo Install."
+      - name: Install Primus-Turbo
+        run: |
+          mv Primus-Turbo /tmp/
+          echo "Primus-Turbo dir: /tmp/Primus-Turbo"
+          git config --global --add safe.directory /tmp/Primus-Turbo
+          cd /tmp/Primus-Turbo
+          start_time=$(date +%s)
+          echo "✅ [Pip install requirements] started at: $(date)"
+          mkdir -p  ${PRIMUS_WORKDIR}/primus-cache
+          python3 -m pip install --upgrade pip setuptools
+          pip3 install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm7.0
+          MAX_JOBS=128 pip3 install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --no-build-isolation --no-clean -r requirements.txt
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "✅ [Pip install requirements] ended at: $(date)"
+          echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
+          start_time=$(date +%s)
+          echo "✅ [build primus-turbo] started at: $(date)"
+          PRIMUS_TURBO_FRAMEWORK="JAX" pip3 install --no-build-isolation -e . -v
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "✅ [build primus-turbo] ended at: $(date)"
+          echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
+      - run: echo "🎉 Begin Primus Benchmark."
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Show Environment Info
+        run: |
+          echo "Hostname: $(hostname)"
+          echo "PWD: $(pwd)"
+          echo "HOME: $HOME"
+          echo "GITHUB_WORKSPACE: $GITHUB_WORKSPACE"
+          echo "Runner Temp Dir: $RUNNER_TEMP"
+          echo "Runner Tool Cache: $RUNNER_TOOL_CACHE"
+      - name: Install Primus
+        run: |
+          pip install -r requirements-jax.txt
+      - name: Set BENCHMARK_PATH
+        run: |
+          BENCHMARK_DATE=$(date +%Y%m%d)
+          BENCHMARK_DATE_DIR="${BENCHMARK_ROOT_DIR}/${BENCHMARK_DATE}"
+          BENCHMARK_LOG_DIR="${BENCHMARK_DATE_DIR}/${GPU_NAME}"
+          mkdir -p "${BENCHMARK_LOG_DIR}"
+          echo "BENCHMARK_DATE_DIR=${BENCHMARK_DATE_DIR}" >> $GITHUB_ENV
+          echo "BENCHMARK_LOG_DIR=${BENCHMARK_LOG_DIR}" >> $GITHUB_ENV
+      - name: "[1/7][MaxText] deepseek_v2_16B"
+        timeout-minutes: 120
+        continue-on-error: true
+        env:
+          IP_INTERFACE: "eth0"
+          NCCL_SOCKET_IFNAME: "eth0"
+          GLOO_SOCKET_IFNAME: "eth0"
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/deepseek_v2_16B.log" \
+          -- train pretrain --config examples/maxtext/configs/MI300X/deepseek_v2_16B-pretrain.yaml
+      - name: "[2/7][MaxText] llama2_70B"
+        timeout-minutes: 120
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/llama2_70B.log" \
+          -- train pretrain --config examples/maxtext/configs/MI300X/llama2_70B-pretrain.yaml
+      - name: "[3/7][MaxText] llama2_7B"
+        timeout-minutes: 120
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/llama2_7B.log" \
+          -- train pretrain --config examples/maxtext/configs/MI300X/llama2_7B-pretrain.yaml
+      - name: "[4/7][MaxText] llama3.3_70B"
+        timeout-minutes: 120
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/llama3.3_70B.log" \
+          -- train pretrain --config examples/maxtext/configs/MI300X/llama3.3_70B-pretrain.yaml
+      - name: "[5/7][MaxText] llama3_70B"
+        timeout-minutes: 120
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/llama3_70B.log" \
+          -- train pretrain --config examples/maxtext/configs/MI300X/llama3_70B-pretrain.yaml
+      - name: "[6/7][MaxText] llama3_8B"
+        timeout-minutes: 120
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/llama3_8B.log" \
+          -- train pretrain --config examples/maxtext/configs/MI300X/llama3_8B-pretrain.yaml
+      - name: "[7/7][MaxText] mixtral_8x7B"
+        timeout-minutes: 120
+        continue-on-error: true
+        run: |
+          ./runner/primus-cli direct --log_file "${BENCHMARK_LOG_DIR}/maxtext/mixtral_8x7B.log" \
+          -- train pretrain --config examples/maxtext/configs/MI300X/mixtral_8x7B-pretrain.yaml
       - name: Generate Summary Report
         run: |
           echo "Generate Summary Report"

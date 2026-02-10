@@ -21,7 +21,6 @@ from typing import Any
 
 from primus.backends.megatron_bridge.argument_builder import MegatronBridgeArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
-from primus.core.backend.backend_registry import BackendRegistry
 from primus.modules.module_utils import log_dict_aligned, log_rank_0
 
 
@@ -38,11 +37,33 @@ class MegatronBridgeAdapter(BackendAdapter):
 
     def __init__(self, framework: str = "megatron_bridge"):
         super().__init__(framework)
+        self.third_party_dir_name = "Megatron-Bridge"
 
-    # Backend-specific sys.path setup
-    def setup_sys_path(self, backend_path: str):
+    def load_trainer_class(self, stage: str = "pretrain"):
         """
-        Add Megatron-Bridge and Megatron-LM paths to sys.path.
+        Return the Megatron-Bridge Trainer class for the specified training stage.
+
+        Args:
+            stage: Training stage ("sft" for supervised fine-tuning)
+
+        Returns:
+            Trainer class for the specified stage
+
+        Raises:
+            ValueError: If stage is not supported
+        """
+        if stage == "sft":
+            from primus.backends.megatron_bridge.megatron_bridge_posttrain_trainer import (
+                MegatronBridgePosttrainTrainer,
+            )
+
+            return MegatronBridgePosttrainTrainer
+        else:
+            raise ValueError(f"Invalid stage: {stage}")
+
+    def setup_backend_path(self, backend_path=None) -> str:
+        """
+        Set up Megatron-Bridge backend path, then add additional paths.
 
         Megatron-Bridge uses a src-layout structure:
             third_party/
@@ -55,68 +76,34 @@ class MegatronBridgeAdapter(BackendAdapter):
                         └── megatron/
 
         We need to add:
-        1. Megatron-Bridge/src/ for 'import megatron.bridge'
-        2. Megatron-Bridge/3rdparty/Megatron-LM/ for base Megatron functionality
+        1. Megatron-Bridge root (via parent class)
+        2. Megatron-Bridge/src/ for 'import megatron.bridge'
+        3. Megatron-Bridge/3rdparty/Megatron-LM/ for base Megatron functionality
         """
         import os
         import sys
 
-        # 1. Add Megatron-Bridge src directory
-        src_path = os.path.join(backend_path, "src")
+        # 1. Call parent to set up the main backend path
+        resolved = super().setup_backend_path(backend_path)
+
+        # 2. Add Megatron-Bridge src directory
+        src_path = os.path.join(resolved, "src")
         if os.path.isdir(src_path) and src_path not in sys.path:
             sys.path.insert(0, src_path)
             log_rank_0(f"sys.path.insert → {src_path}")
 
-        # 2. Add Megatron-LM directory (from megatron-bridge/3rdparty/)
-        megatron_lm_path = os.path.join(backend_path, "3rdparty", "Megatron-LM")
+        # 3. Add Megatron-LM directory (from megatron-bridge/3rdparty/)
+        megatron_lm_path = os.path.join(resolved, "3rdparty", "Megatron-LM")
         if os.path.isdir(megatron_lm_path) and megatron_lm_path not in sys.path:
             sys.path.insert(0, megatron_lm_path)
             log_rank_0(f"sys.path.insert → {megatron_lm_path}")
 
-    # Backend Setup & Patches
-    def prepare_backend(self, config: Any):
-        """
-        Megatron-Bridge-specific environment preparation.
+        return resolved
 
-        Steps:
-            - Run Primus setup hooks
-            - Set up Megatron-Bridge specific environment variables
-            - Initialize Hugging Face model conversion capabilities
-
-        Note: Patches are already registered at module import time.
-        Setup patches are applied automatically by the base class before this method is called.
-        """
-        # Run setup hooks from BackendRegistry
-        BackendRegistry.run_setup("megatron_bridge")
-
-        log_rank_0("[Primus:MegatronBridgeAdapter] Backend prepared")
-
-    # Config → Megatron-Bridge Args
-    def convert_config(self, module_config: Any):
-        """
-        Convert Primus ModuleConfig → Megatron-Bridge configuration Namespace.
-
-        This layer:
-            - Takes module_config.params (which already includes CLI overrides)
-            - Merges them into Megatron-Bridge's configuration
-            - Produces a SimpleNamespace (consistent with MegatronAdapter)
-            - Handles recipe-based configuration if specified
-
-        Note: build_args patches are applied automatically by the base class
-        after this method returns.
-
-        Args:
-            module_config: ModuleConfig instance with params dict
-
-        Returns:
-            SimpleNamespace with Megatron-Bridge configuration
-        """
-        # Instantiate the builder
+    def convert_config(self, params: Any):
+        """Convert Primus params to Megatron-Bridge argument Namespace."""
         builder = MegatronBridgeArgBuilder()
-
-        # Feed in config params (already merged with CLI overrides in train_launcher)
-        # module_config.params is a flat dict of Megatron-Bridge-recognized fields.
-        builder.update(module_config.params)
+        builder.update(params)
 
         # Produce the final Megatron-Bridge Namespace
         bridge_args = builder.finalize()
@@ -129,69 +116,24 @@ class MegatronBridgeAdapter(BackendAdapter):
 
         return bridge_args
 
-    # Load Trainer Class
-    def load_trainer_class(self):
-        """
-        Load Megatron-Bridge trainer class registered via BackendRegistry.
-
-        This allows Primus runtime to remain agnostic to the actual trainer
-        implementation (pretrain, sft, etc.).
-        """
-        try:
-            return BackendRegistry.get_trainer_class(self.framework)
-        except ValueError as exc:
-            raise RuntimeError(
-                "[Primus:MegatronBridgeAdapter] 'megatron_bridge' backend trainer not registered. "
-                "Ensure primus.backends.megatron_bridge defines the trainer class "
-                "and imports BackendRegistry."
-            ) from exc
-
-    # Version Detection
     def detect_backend_version(self) -> str:
-        """
-        Detect Megatron-Bridge version for logging and patching.
-
-        Note: We read the version file directly instead of importing to avoid
-        triggering __init__.py, which imports all model classes (some may not
-        be available in the current transformers version).
-
-        Returns:
-            Version string (e.g., "0.3.0rc0")
-
-        Raises:
-            RuntimeError: If version cannot be detected
-        """
-        import os
-        import re
+        """Detect Megatron-Bridge version via AST parsing (avoids __init__.py execution)."""
+        import ast
         import sys
+        from pathlib import Path
 
-        # Strategy 1: Read package_info.py directly (avoids __init__.py imports)
+        def parse_version(package_info_path: Path) -> str:
+            tree = ast.parse(package_info_path.read_text())
+            for node in tree.body:
+                if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                    name = getattr(node.targets[0], "id", None)
+                    if name == "__version__":
+                        return ast.literal_eval(node.value)
+            raise RuntimeError(f"__version__ not found in {package_info_path}")
+
         for path in sys.path:
-            package_info_file = os.path.join(path, "megatron", "bridge", "package_info.py")
-            if os.path.exists(package_info_file):
-                try:
-                    with open(package_info_file, "r", encoding="utf-8") as f:
-                        content = f.read()
+            package_info_path = Path(path) / "megatron" / "bridge" / "package_info.py"
+            if package_info_path.exists():
+                return parse_version(package_info_path)
 
-                    # Match: __version__ = "x.y.z" or __version__ = 'x.y.z'
-                    match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', content)
-                    if match:
-                        version = match.group(1)
-                        log_rank_0(f"Detected Megatron-Bridge version: {version}")
-                        return version
-
-                except Exception as e:
-                    log_rank_0(f"Warning: Failed to read {package_info_file}: {e}")
-                    continue
-
-        # Strategy 2: Try importing (may fail due to __init__.py model imports)
-        try:
-            from megatron.bridge.package_info import __version__
-
-            log_rank_0(f"Detected Megatron-Bridge version: {__version__}")
-            return __version__
-        except ImportError as e:
-            raise RuntimeError(
-                f"Failed to detect Megatron-Bridge version. "
-                f"package_info.py not found and import failed: {e}"
-            )
+        raise RuntimeError("Cannot locate megatron/bridge/package_info.py in sys.path")
