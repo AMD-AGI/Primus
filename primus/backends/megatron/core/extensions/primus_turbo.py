@@ -20,15 +20,20 @@ from megatron.core.parallel_state import (
     get_context_parallel_group,
     get_hierarchical_context_parallel_groups,
     get_tensor_model_parallel_group,
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.tensor_parallel.layers import ColumnParallelLinear
+from megatron.core.tensor_parallel.layers import (
+    ColumnParallelLinear,
+    _initialize_affine_weight_cpu,
+)
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.moe.experts import GroupedMLP
 from megatron.core.transformer.moe.token_dispatcher import MoETokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
-from megatron.core.utils import get_tensor_model_parallel_group_if_none
+from megatron.core.utils import divide, get_tensor_model_parallel_group_if_none
 from megatron.training.global_vars import get_args
 from primus_turbo.pytorch.core.low_precision import (
     Float4QuantConfig,
@@ -623,6 +628,37 @@ class PrimusTurboRowParallelLinear(TELinear):
             tp_group=tp_group,
         )
 
+        # Manual weight initialization when use_cpu_initialization=True
+        if config.use_cpu_initialization:
+            world_size = get_tensor_model_parallel_world_size()
+            rank = get_tensor_model_parallel_rank()
+            input_size_per_partition = divide(input_size, world_size)
+
+            self.master_weight = _initialize_affine_weight_cpu(
+                self.weight,
+                output_size,
+                input_size,
+                input_size_per_partition,
+                1,  # partition_dim (row parallel partitions along input dimension)
+                init_method=condition_init_method(config, init_method),
+                stride=1,
+                return_master_weight=False,
+                params_dtype=config.params_dtype,
+                rank=rank,
+                world_size=world_size,
+                skip_set_tensor_parallel_attributes=True,
+            )
+
+            # Bias initialization
+            if bias:
+                with torch.no_grad():
+                    bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
+                    bias_tensor.zero_()
+                # Set allreduce attribute for distributed training
+                for bias_name in self.bias_names:
+                    bias_param = getattr(self, bias_name)
+                    setattr(bias_param, "allreduce", True)
+
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Sharding along axis 1, bias not sharded"""
         state_dict = self.state_dict(prefix="", keep_vars=True)
@@ -708,6 +744,7 @@ class PrimusTurboColumnParallelLinear(TELinear):
             raise ValueError(f"{__class__.__name__} layers do not support gather_output = True")
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
+        args = get_args()
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
 
@@ -738,6 +775,37 @@ class PrimusTurboColumnParallelLinear(TELinear):
             symmetric_ar_type=config.symmetric_ar_type,
             tp_group=tp_group,
         )
+
+        # Manual weight initialization when use_cpu_initialization=True
+        if config.use_cpu_initialization:
+            world_size = get_tensor_model_parallel_world_size()
+            rank = get_tensor_model_parallel_rank()
+            output_size_per_partition = divide(output_size, world_size)
+
+            _ = _initialize_affine_weight_cpu(
+                self.weight,
+                output_size,
+                input_size,
+                output_size_per_partition,
+                0,  # partition_dim (column parallel partitions along output dimension)
+                init_method=condition_init_method(config, init_method),
+                stride=1,
+                return_master_weight=False,
+                params_dtype=config.params_dtype,
+                rank=rank,
+                world_size=world_size,
+                skip_set_tensor_parallel_attributes=True,
+            )
+
+            # Bias initialization
+            if bias:
+                with torch.no_grad():
+                    bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
+                    bias_tensor.zero_()
+                # Set allreduce attribute for distributed training
+                for bias_name in self.bias_names:
+                    bias_param = getattr(self, bias_name)
+                    setattr(bias_param, "allreduce", True)
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Sharding along axis 0, bias sharded"""
@@ -983,6 +1051,37 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             return_layernorm_output=False,
             zero_centered_gamma=self.config.layernorm_zero_centered_gamma,
         )
+
+        # Manual weight initialization when use_cpu_initialization=True
+        if config.use_cpu_initialization:
+            world_size = get_tensor_model_parallel_world_size()
+            rank = get_tensor_model_parallel_rank()
+            output_size_per_partition = divide(output_size, world_size)
+
+            _ = _initialize_affine_weight_cpu(
+                self.weight,
+                output_size,
+                input_size,
+                output_size_per_partition,
+                0,  # partition_dim (column parallel partitions along output dimension)
+                init_method=condition_init_method(config, init_method),
+                stride=1,
+                return_master_weight=False,
+                params_dtype=config.params_dtype,
+                rank=rank,
+                world_size=world_size,
+                skip_set_tensor_parallel_attributes=True,
+            )
+
+            # Bias initialization
+            if bias:
+                with torch.no_grad():
+                    bias_tensor = torch.cat([getattr(self, name) for name in self.bias_names])
+                    bias_tensor.zero_()
+                # Set allreduce attribute for distributed training
+                for bias_name in self.bias_names:
+                    bias_param = getattr(self, bias_name)
+                    setattr(bias_param, "allreduce", True)
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Sharding along axis 0, bias sharded"""
