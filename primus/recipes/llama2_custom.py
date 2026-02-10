@@ -39,6 +39,14 @@ from megatron.core.transformer.cuda_graphs import TECudaGraphHelper
 from megatron.core.utils import check_param_hashes_across_dp_replicas, get_model_config
 from megatron.core.full_cuda_graph import FullCudaGraphWrapper
 
+# Replace Megatron-Bridge's logging with Primus's logging so that it is visible in the output logs
+from primus.modules.module_utils import log_rank_0, log_rank_last
+from megatron.bridge.utils import common_utils
+common_utils.print_rank_0 = log_rank_0
+common_utils.print_rank_last = log_rank_last
+common_utils.warn_rank_0 = log_rank_0
+common_utils.warn_rank_last = log_rank_last
+
 from megatron.bridge import AutoBridge
 from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
 from megatron.bridge.peft.base import PEFT
@@ -97,14 +105,6 @@ from megatron.bridge.training.train import (
     _delete_cuda_graphs,
     _maybe_register_fsdp_buffers,
 )
-
-# Replace Megatron-Bridge's logging with Primus's logging so that it is visible in the output logs
-from primus.modules.module_utils import log_rank_0, log_rank_last
-from megatron.bridge.utils import common_utils
-common_utils.print_rank_0 = log_rank_0
-common_utils.print_rank_last = log_rank_last
-common_utils.warn_rank_0 = log_rank_0
-common_utils.warn_rank_last = log_rank_last
 
 @register
 def bf16_with_fp8_hybrid() -> MixedPrecisionConfig:
@@ -377,6 +377,7 @@ def _llama2_lora(
             manual_gc=True,
             manual_gc_interval=100,
             manual_gc_eval=100,
+            empty_unused_memory_level=0, # 0: No empty, 1: Empty at end of eval, 2: Empty at end of eval and train. 
         ),
         optimizer=opt_config,
         scheduler=scheduler,
@@ -457,6 +458,7 @@ def evaluate_and_print_results_custom(
         process_non_loss_data_func (Optional[Callable], optional): Function to process non-loss data. Defaults to None.
         non_loss_data_func (Optional[Callable], optional): Function to compute non-loss data. Defaults to None.
     """
+    log_rank_0(f"Evaluating and printing results at {prefix}")
     def is_last_rank():
         return torch.distributed.get_rank() == (torch.distributed.get_world_size() - 1)
     import math
@@ -467,9 +469,11 @@ def evaluate_and_print_results_custom(
 
     wandb_writer = state.wandb_logger
 
+    log_rank_0(f"Calling eval.evaluate")
     total_loss_dict, collected_non_loss_data, timelimit = eval.evaluate(
         state, forward_step_func, data_iterator, model, process_non_loss_data_func, config, verbose, non_loss_data_func
     )
+    log_rank_0(f"Evaluation completed")
 
     # Timelimit hit during evaluation
     if timelimit:
@@ -506,6 +510,26 @@ def evaluate_and_print_results_custom(
     log_rank_last("-" * length)
 
 eval.evaluate_and_print_results = evaluate_and_print_results_custom
+
+def warmup_eval(
+    state: GlobalState,
+    forward_step_func: ForwardStepCallable,
+    data_iterator: Optional[Union[RerunDataIterator, list[RerunDataIterator]]],
+    model: list[MegatronModule],
+    config: ConfigContainer,
+    verbose: bool = False,
+    process_non_loss_data_func: Optional[Callable] = None,
+    non_loss_data_func: Optional[Callable] = None,
+    num_warmup_iters: int = 10,
+) -> None:
+    log_rank_0(f"Starting warmup eval...")
+    for i in range(num_warmup_iters):
+        log_rank_0(f"Warmup eval iteration {i} running...")
+        eval.evaluate(
+            state, forward_step_func, data_iterator, model, process_non_loss_data_func, config, verbose, non_loss_data_func
+        )
+        log_rank_0(f"Warmup eval iteration {i} completed")
+    log_rank_0(f"Warmup eval completed")
 
 def megatron_bridge_train_override(
     forward_step_func: ForwardStepCallable,
@@ -700,6 +724,18 @@ def megatron_bridge_train_override(
         forward_backward_func = FullCudaGraphWrapper(
             forward_backward_func, cuda_graph_warmup_steps=config.model.cuda_graph_warmup_steps
         )
+
+    warmup_eval(
+        global_state,
+        forward_step_func,
+        valid_data_iterator,
+        model,
+        config,
+        verbose=False,
+        process_non_loss_data_func=process_non_loss_data_func,
+        non_loss_data_func=non_loss_data_func,
+        num_warmup_iters=5,
+    )
 
     start_iteration = global_state.train_state.step
     log_rank_0(f"Starting training loop at iteration {start_iteration}")
