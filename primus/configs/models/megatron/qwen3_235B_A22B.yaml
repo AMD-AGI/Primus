@@ -18,11 +18,6 @@ moe_layer_freq: "1"
 num_experts: 128
 moe_router_topk: 8
 moe_ffn_hidden_size: 1536
-num_shared_experts: 1
-moe_shared_expert_intermediate_size: 1536
-
-# vocabulary (from CSV)
-padded_vocab_size: 151936
 
 # gqa
 group_query_attention: true

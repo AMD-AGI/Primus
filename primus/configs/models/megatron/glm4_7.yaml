@@ -26,9 +26,6 @@ num_shared_experts: 1
 moe_ffn_hidden_size: 1536
 moe_shared_expert_intermediate_size: 1536
 
-# vocabulary
-padded_vocab_size: 151936
-
 # other settings
 swiglu: true
 bias_swiglu_fusion: false
