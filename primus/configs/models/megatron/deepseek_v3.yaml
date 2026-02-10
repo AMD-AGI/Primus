@@ -31,9 +31,6 @@ num_shared_experts: 1
 moe_ffn_hidden_size: 2048
 moe_shared_expert_intermediate_size: 2048 # num_shared_experts * moe_ffn_hidden_size
 
-# vocabulary (from CSV)
-padded_vocab_size: 163840
-
 # device limited routing
 expert_model_parallel_size: 8
 moe_router_num_groups: 8 # int
