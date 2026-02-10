@@ -403,6 +403,21 @@ if [[ "$PATCH_TE_FLASH_ATTN" == "1" ]]; then
 fi
 LOG_INFO_RANK0 ""
 
+# -------------------- Install required packages for Jax --------------------
+install_pkgs_for_maxtext() {
+    LOG_INFO_RANK0 "========== Install IB required packages for Jax/MaxText =========="
+    apt update
+    apt install autoconf automake libtool pkg-config -y
+    apt install jq dpkg-dev kmod xz-utils -y
+    apt install libibverbs-dev ibverbs-utils infiniband-diags -y
+    apt install rdma-core librdmacm-dev libibverbs-dev libibumad-dev -y
+    LOG_INFO_RANK0 "========== Install IB required packages for Jax/MaxText Done =========="
+}
+
+if [[ "$NNODES" -gt 1 ]] && [[ "${BACKEND:-}" == "MaxText" ]]; then
+    install_pkgs_for_maxtext
+fi
+
 # ----------------- Rebuild nbxt -----------------
 export REBUILD_BNXT=${REBUILD_BNXT:-0}
 export PATH_TO_BNXT_TAR_PACKAGE=${PATH_TO_BNXT_TAR_PACKAGE}
@@ -421,20 +436,6 @@ if [[ "$REBUILD_BNXT" == "1" && -f "$PATH_TO_BNXT_TAR_PACKAGE" ]]; then
     LOG_INFO "Rebuilding libbnxt done."
 else
   LOG_INFO "Skip bnxt rebuild. REBUILD_BNXT=$REBUILD_BNXT, PATH_TO_BNXT_TAR_PACKAGE=$PATH_TO_BNXT_TAR_PACKAGE"
-fi
-
-# -------------------- Install required packages for Jax --------------------
-install_pkgs_for_maxtext() {
-    LOG_INFO_RANK0 "========== Install required packages for Jax/MaxText =========="
-    apt install iproute2 -y
-    apt install -y linux-headers-"$(uname -r)" libelf-dev
-    apt install -y gcc make libtool autoconf librdmacm-dev rdmacm-utils infiniband-diags ibverbs-utils perftest ethtool libibverbs-dev \
-        rdma-core strace libibmad5 libibnetdisc5 ibverbs-providers libibumad-dev libibumad3 libibverbs1 libnl-3-dev libnl-route-3-dev
-    LOG_INFO_RANK0 "========== Install required packages for Jax/MaxText Done =========="
-}
-
-if [[ "$NNODES" -gt 1 ]] && [[ "${BACKEND:-}" == "MaxText" ]]; then
-    install_pkgs_for_maxtext
 fi
 
 # -------------------- HipBLASLt Tuning --------------------
