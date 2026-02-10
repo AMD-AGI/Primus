@@ -2237,7 +2237,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                         )
                         # Memory metrics
                         mlflow_writer.log_metric(
-                            f"perf/{mem_collector}_peak_mem_gb",
+                            f"perf/{mem_collector}_current_mem_gb",
                             used_mem / 1024 / 1024 / 1024,
                             iteration,
                         )
