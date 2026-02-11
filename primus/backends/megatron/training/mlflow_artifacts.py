@@ -257,6 +257,42 @@ def _ensure_openpyxl_installed() -> bool:
             return False
 
 
+def _verify_tracelens_ref_exists(ref: str) -> bool:
+    """
+    Verify that the TraceLens git reference exists before installing.
+
+    Returns:
+        True if the ref exists or verification is skipped, False otherwise
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", "https://github.com/AMD-AGI/TraceLens.git", ref],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except FileNotFoundError:
+        warning_rank_0("[TraceLens] git not found; skipping TraceLens ref verification.")
+        return True
+    except subprocess.TimeoutExpired:
+        warning_rank_0("[TraceLens] TraceLens ref verification timed out.")
+        return False
+    except subprocess.CalledProcessError as e:
+        stderr_output = e.stderr.strip() if e.stderr else "No stderr output captured."
+        warning_rank_0(
+            f"[TraceLens] TraceLens ref verification failed: {e}\n" f"[TraceLens] git stderr: {stderr_output}"
+        )
+        return False
+
+    if not result.stdout.strip():
+        warning_rank_0(f"[TraceLens] TraceLens ref '{ref}' not found; skipping install.")
+        return False
+
+    return True
+
+
 def _ensure_tracelens_installed(auto_install: bool = True) -> bool:
     """
     Ensure TraceLens and its dependencies are installed.
@@ -279,6 +315,8 @@ def _ensure_tracelens_installed(auto_install: bool = True) -> bool:
         try:
             # TraceLens is on GitHub, not PyPI; pin to a commit SHA for reproducibility and supply-chain safety
             install_spec = f"git+https://github.com/AMD-AGI/TraceLens.git@{TRACELENS_INSTALL_REF}"
+            if not _verify_tracelens_ref_exists(TRACELENS_INSTALL_REF):
+                return False
             subprocess.run(
                 [
                     sys.executable,
@@ -513,7 +551,7 @@ def generate_tracelens_report(
 
         # For "all" format: TraceLens uses either/or logic - if output_csvs_dir is set,
         # it ONLY generates CSVs. So we need to call it twice for both formats.
-        # Performance: trace file is parsed twice (~2x time; large traces can be hundreds of MB).
+        # Performance: trace file is parsed twice intentionally (~2x time; large traces can be hundreds of MB).
         # A future workaround could write CSVs from the DataFrames returned by the first call
         # if TraceLens API exposes a suitable export; for now we accept the double parse.
         if output_format == "all":
