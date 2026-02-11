@@ -139,10 +139,10 @@ class TestFilterTracesByRank:
         out = mlflow_artifacts_mod._filter_traces_by_rank(paths, None)
         assert out == paths
 
-    def test_returns_all_when_ranks_empty_list(self, tmp_path):
+    def test_returns_empty_when_ranks_empty_list(self, tmp_path):
         paths = [str(tmp_path / "rank_0.pt.trace.json")]
         out = mlflow_artifacts_mod._filter_traces_by_rank(paths, [])
-        assert out == paths
+        assert out == []
 
     def test_filters_to_specified_ranks(self, tmp_path):
         paths = [

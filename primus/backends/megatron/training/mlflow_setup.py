@@ -1,6 +1,5 @@
 ###############################################################################
-# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
-# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -78,15 +77,15 @@ def upload_mlflow_artifacts(
         # so skip local generation on non-writer ranks.
         try:
             args = get_primus_args()
-            is_single_rank = args.rank == 0
+            is_rank_zero = args.rank == 0
             mlflow_expected = getattr(args, "mlflow_run_name", None) is not None
             is_distributed = args.world_size > 1
         except Exception:
-            is_single_rank = not dist.is_initialized() or dist.get_rank() == 0
+            is_rank_zero = not dist.is_initialized() or dist.get_rank() == 0
             mlflow_expected = False
             is_distributed = dist.is_initialized()
 
-        should_generate_locally = is_single_rank and (not mlflow_expected or not is_distributed)
+        should_generate_locally = is_rank_zero and (not mlflow_expected or not is_distributed)
         if should_generate_locally and generate_tracelens_report and tensorboard_dir and exp_root_path:
             generate_tracelens_reports_locally(
                 tensorboard_dir=tensorboard_dir,

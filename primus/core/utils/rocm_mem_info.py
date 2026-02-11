@@ -49,12 +49,6 @@ def get_rocm_smi_gpu_util(device_id: int):
             if 0 <= val <= 100:
                 return val
 
-        # Fallback: take the last 0-100 number if no percent sign is present.
-        numbers = re.findall(r"\b(\d+(?:\.\d+)?)\b", line)
-        for n in reversed(numbers):
-            val = float(n)
-            if 0 <= val <= 100:
-                return val
     raise RuntimeError(f"rocm-smi --showuse did not report a GPU use percentage for device {device_id}")
 
 

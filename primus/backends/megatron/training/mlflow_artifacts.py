@@ -237,15 +237,23 @@ def _ensure_openpyxl_installed() -> bool:
     except ImportError:
         log_rank_0("[TraceLens] openpyxl not found, installing for XLSX support...")
         try:
-            subprocess.check_call(
+            result = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "openpyxl", "-q"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
             )
             log_rank_0("[TraceLens] Successfully installed openpyxl")
             return True
         except subprocess.CalledProcessError as e:
-            warning_rank_0(f"[TraceLens] Failed to install openpyxl: {e}")
+            stdout_output = e.stdout.strip() if e.stdout else "No stdout output captured."
+            stderr_output = e.stderr.strip() if e.stderr else "No stderr output captured."
+            warning_rank_0(
+                f"[TraceLens] Failed to install openpyxl: {e}\n"
+                f"[TraceLens] pip stdout: {stdout_output}\n"
+                f"[TraceLens] pip stderr: {stderr_output}"
+            )
             return False
 
 
@@ -280,7 +288,7 @@ def _ensure_tracelens_installed(auto_install: bool = True) -> bool:
                     install_spec,
                     "-q",
                 ],
-                stdout=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
                 check=True,
@@ -300,9 +308,12 @@ def _ensure_tracelens_installed(auto_install: bool = True) -> bool:
             warning_rank_0("[TraceLens] TraceLens install timed out after 300s. Skipping install.")
             return False
         except subprocess.CalledProcessError as e:
+            stdout_output = e.stdout.strip() if e.stdout else "No stdout output captured."
             stderr_output = e.stderr.strip() if e.stderr else "No stderr output captured."
             warning_rank_0(
-                f"[TraceLens] Failed to install TraceLens: {e}\n" f"[TraceLens] pip stderr: {stderr_output}"
+                f"[TraceLens] Failed to install TraceLens: {e}\n"
+                f"[TraceLens] pip stdout: {stdout_output}\n"
+                f"[TraceLens] pip stderr: {stderr_output}"
             )
             return False
 
@@ -433,6 +444,8 @@ def _filter_traces_by_rank(trace_files: List[str], ranks: List[int]) -> List[str
     """
     if ranks is None:
         return trace_files
+    if not ranks:
+        return []
 
     filtered = []
     for trace_file in trace_files:

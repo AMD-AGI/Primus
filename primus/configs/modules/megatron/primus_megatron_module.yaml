@@ -25,13 +25,14 @@ mlflow_upload_logs: false            # Upload training log files to MLflow
 #   generate=true,  upload=true   ->  Generate AND upload (explicit)
 #
 # To limit number of reports: use mlflow_tracelens_ranks (no separate max_reports option).
-#   Default: [0, 8] = one rank per node (assumes 8 GPUs/node)
-#   Use null for all ranks (e.g., null or [0, 1, 2] for explicit list)
+#   Default: null = all ranks
+#   Example (8 GPUs/node): [0, 8] = one rank per node (assumes 8 GPUs/node)
+#   Use an explicit list for specific ranks (e.g., [0, 1, 2])
 # ----------------------------------------------------------------------------
 generate_tracelens_report: false    # Generate TraceLens analysis reports locally (auto-enabled when upload=true)
 mlflow_upload_tracelens_report: false # Upload TraceLens reports to MLflow (auto-enables generation, profiling, tensorboard)
-mlflow_tracelens_ranks: [0, 8]       # List of ranks to analyze (null = all, e.g. [0, 1, 2])
-# TraceLens report format: xlsx (default, single parse, fastest), csv, or all (xlsx+csv;
+mlflow_tracelens_ranks: null         # List of ranks to analyze (null = all, e.g. [0, 1, 2])
+# TraceLens report format: xlsx (default; single parse, fastest), csv, or all (xlsx+csv;
 # parses each trace twice so ~2x processing time; use only when both formats are needed)
 mlflow_tracelens_output_format: xlsx
 mlflow_tracelens_cleanup_after_upload: false  # Keep local reports (true to cleanup and save disk space)
@@ -62,6 +63,7 @@ use_rocm_mem_info_iters: [1,2]
 #      - perf/gpu_utilization_pct_avg: Average GPU utilization across all ranks (%)
 #
 # Note: This flag implicitly enables log_throughput behavior for metric collection.
+# Note: GPU utilization collection uses all_gather on every log_interval (sync across ranks).
 mlflow_upload_performance_metrics: false
 
 # profiling
