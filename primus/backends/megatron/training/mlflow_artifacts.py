@@ -264,9 +264,13 @@ def _verify_tracelens_ref_exists(ref: str) -> bool:
     Returns:
         True if the ref exists or verification is skipped, False otherwise
     """
+    is_commit_sha = bool(re.fullmatch(r"[0-9a-fA-F]{7,40}", ref))
     try:
+        ls_remote_cmd = ["git", "ls-remote", "https://github.com/AMD-AGI/TraceLens.git"]
+        if not is_commit_sha:
+            ls_remote_cmd.append(ref)
         result = subprocess.run(
-            ["git", "ls-remote", "https://github.com/AMD-AGI/TraceLens.git", ref],
+            ls_remote_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -286,9 +290,15 @@ def _verify_tracelens_ref_exists(ref: str) -> bool:
         )
         return False
 
-    if not result.stdout.strip():
+    output = result.stdout.strip()
+    if not output:
         warning_rank_0(f"[TraceLens] TraceLens ref '{ref}' not found; skipping install.")
         return False
+    if is_commit_sha:
+        sha_lower = ref.lower()
+        if not any(line.lower().startswith(sha_lower) for line in output.splitlines()):
+            warning_rank_0(f"[TraceLens] TraceLens SHA '{ref}' not found; skipping install.")
+            return False
 
     return True
 
