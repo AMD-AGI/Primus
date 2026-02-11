@@ -17,9 +17,7 @@ class DenseMLPProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
         super().__init__(config, sub_profilers)
         self.module = None  # Will be set during benchmarking
-        self._cached_results = (
-            None  # Cache for (forward_time, backward_time, activation_memory)
-        )
+        self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
         self._cache_key = None  # Cache key (batch_size, seq_len)
 
     def set_module(self, module):
@@ -49,26 +47,18 @@ class DenseMLPProfiler(BaseModuleProfiler):
         # Memory after first projection(s)
         if self.config.model_config.swiglu:
             # Need to store both gate and up projections for backward
-            intermediate_memory = (
-                2 * num_tokens * self.config.model_config.ffn_hidden_size * 2
-            )  # bf16
+            intermediate_memory = 2 * num_tokens * self.config.model_config.ffn_hidden_size * 2  # bf16
         else:
-            intermediate_memory = (
-                num_tokens * self.config.model_config.ffn_hidden_size * 2
-            )  # bf16
+            intermediate_memory = num_tokens * self.config.model_config.ffn_hidden_size * 2  # bf16
 
         # After activation
-        activation_memory = (
-            num_tokens * self.config.model_config.ffn_hidden_size * 2
-        )  # bf16
+        activation_memory = num_tokens * self.config.model_config.ffn_hidden_size * 2  # bf16
         output_memory = num_tokens * self.config.model_config.hidden_size * 2  # bf16
 
         # Peak memory is input + intermediate (both needed for backward)
         return intermediate_memory + activation_memory + output_memory
 
-    def _get_benchmark_results(
-        self, batch_size: int, seq_len: int
-    ) -> Tuple[float, float, int]:
+    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> Tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
