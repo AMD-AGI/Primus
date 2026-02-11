@@ -63,7 +63,7 @@ def upload_mlflow_artifacts(
         tracelens_ranks: List of ranks to analyze with TraceLens
                         (None = all, [0, 8] = ranks 0 and 8 only)
                         Specify fewer ranks to limit number of reports
-        tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
+        tracelens_output_format: Report format - "xlsx" (default), "csv", or "all"
         tracelens_cleanup_after_upload: Remove local reports after upload (default: False)
         tracelens_auto_install: Whether to attempt auto-installing TraceLens if missing
 
