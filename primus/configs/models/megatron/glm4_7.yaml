@@ -22,7 +22,7 @@ kv_channels: 128
 moe_layer_freq: "1"
 num_experts: 160
 moe_router_topk: 8
-num_shared_experts: 1
+# num_shared_experts: 1  # Calculated as moe_shared_expert_intermediate_size // moe_ffn_hidden_size
 moe_ffn_hidden_size: 1536
 moe_shared_expert_intermediate_size: 1536
 

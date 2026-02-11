@@ -13,7 +13,6 @@ hidden_size: 7168
 ffn_hidden_size: 18432
 num_attention_heads: 128
 # mla
-multi_latent_attention: true
 q_lora_rank: 1536
 kv_lora_rank: 512
 qk_head_dim: 128
@@ -27,7 +26,7 @@ mtp_loss_scaling_factor: 0.1
 moe_layer_freq: "([0]*3+[1]*58)"
 num_experts: 256
 moe_router_topk: 8
-num_shared_experts: 1
+# num_shared_experts: 1  # Calculated as moe_shared_expert_intermediate_size // moe_ffn_hidden_size
 moe_ffn_hidden_size: 2048
 moe_shared_expert_intermediate_size: 2048 # num_shared_experts * moe_ffn_hidden_size
 

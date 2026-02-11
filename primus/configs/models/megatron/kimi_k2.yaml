@@ -29,7 +29,7 @@ mtp_loss_scaling_factor: 0.1
 moe_layer_freq: "([0]*3+[1]*58)"
 num_experts: 384
 moe_router_topk: 8
-num_shared_experts: 1
+# num_shared_experts: 1  # Calculated as moe_shared_expert_intermediate_size // moe_ffn_hidden_size
 moe_ffn_hidden_size: 2048
 moe_shared_expert_intermediate_size: 2048
 

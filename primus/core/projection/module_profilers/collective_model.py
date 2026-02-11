@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 from math import ceil
 
 import numpy as np
@@ -104,7 +110,9 @@ def sendrecv(args, msg_size):
     return t
 
 
-def direct_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None, original_msg_size=None):
+def direct_alltoall(
+    args, msg_size, gpus, groups=["ep"], protocol=None, original_msg_size=None
+):
     """
     Direct alltoall for HP=1, hierarchical with parallel NIC utilization.
 
@@ -133,7 +141,9 @@ def direct_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None, original
     intra_node_volume = msg_size * intra_fraction
     inter_node_volume_per_gpu = msg_size * inter_fraction
 
-    node_lat, intra_vol_adj = node_latency_and_volume_protocol(args, intra_node_volume, protocol)
+    node_lat, intra_vol_adj = node_latency_and_volume_protocol(
+        args, intra_node_volume, protocol
+    )
     pod_lat = args.pod_lat
 
     # Intra-node time
@@ -148,7 +158,10 @@ def direct_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None, original
         t_inter = total_inter_volume / aggregate_inter_bw * 1.0e-3 + pod_lat
     else:
         remote_nodes = num_nodes - 1
-        t_inter = inter_node_volume_per_gpu / (args.bw_eff * args.pod_bw) * 1.0e-3 + pod_lat * remote_nodes
+        t_inter = (
+            inter_node_volume_per_gpu / (args.bw_eff * args.pod_bw) * 1.0e-3
+            + pod_lat * remote_nodes
+        )
 
     # Overlap intra and inter
     t_a2a = max(t_intra, t_inter)
@@ -189,7 +202,9 @@ def run_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None):
     elif (args.hp * gpus > args.node_size) and (args.hp * gpus) <= args.pod_size:
         # Alltoall fits within pod
         if args.hp == 1:
-            return direct_alltoall(args, msg_size, gpus, groups, protocol, original_msg_size)
+            return direct_alltoall(
+                args, msg_size, gpus, groups, protocol, original_msg_size
+            )
         bw = args.bw_eff * args.pod_bw
         lat = args.pod_lat
     else:
@@ -225,7 +240,11 @@ def cp_allgather(args, msg_size, gpus, protocol=None):
         bw = args.cluster_bw * args.bw_eff
         lat = args.cluster_lat
     # Logarithmic steps for tree allgather
-    t = msg_size / bw * 1.0e-3 + lat * np.ceil(np.log2(gpus)) + args.kernel_launch_latency
+    t = (
+        msg_size / bw * 1.0e-3
+        + lat * np.ceil(np.log2(gpus))
+        + args.kernel_launch_latency
+    )
     return t
 
 
@@ -445,7 +464,9 @@ def single_shot_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     t_intra_node = 0
     t_inter_node = 0
     if intra_node_gpus > 0:
-        node_lat, msg_size_per_peer_adj = node_latency_and_volume_protocol(args, msg_size_per_peer, protocol)
+        node_lat, msg_size_per_peer_adj = node_latency_and_volume_protocol(
+            args, msg_size_per_peer, protocol
+        )
         node_bw = args.bw_eff * args.node_bw
         intra_node_rounds = ceil(intra_node_gpus / intra_node_fanout)
         t_intra_node = intra_node_rounds * node_lat
@@ -493,7 +514,9 @@ def hierarchical_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     inter_node_volume_per_gpu = msg_size * (gpus - gpus_per_node) / gpus
 
     # Intra-node time
-    node_lat, intra_vol_adj = node_latency_and_volume_protocol(args, intra_node_volume, protocol)
+    node_lat, intra_vol_adj = node_latency_and_volume_protocol(
+        args, intra_node_volume, protocol
+    )
     node_bw = args.bw_eff * args.node_bw
     t_intra = node_lat + intra_vol_adj / node_bw * 1.0e-3
 
@@ -504,7 +527,10 @@ def hierarchical_alltoall(args, msg_size, gpus, groups=None, protocol=None):
         t_inter = args.pod_lat + total_inter_volume / aggregate_inter_bw * 1.0e-3
     else:
         effective_pod_bw = args.bw_eff * args.pod_bw
-        t_inter = args.pod_lat * num_nodes + inter_node_volume_per_gpu / effective_pod_bw * 1.0e-3
+        t_inter = (
+            args.pod_lat * num_nodes
+            + inter_node_volume_per_gpu / effective_pod_bw * 1.0e-3
+        )
 
     t_total = max(t_intra, t_inter)
     t_total += args.kernel_launch_latency
@@ -527,7 +553,9 @@ def single_shot_allgather(args, msg_size, gpus, groups=None, protocol=None):
     t_intra_node = 0
     t_inter_node = 0
     if intra_node_gpus > 0:
-        node_lat, msg_size_per_peer_node = node_latency_and_volume_protocol(args, msg_size_per_peer, protocol)
+        node_lat, msg_size_per_peer_node = node_latency_and_volume_protocol(
+            args, msg_size_per_peer, protocol
+        )
         node_bw = args.bw_eff * args.node_bw
         intra_node_rounds = ceil(intra_node_gpus / intra_node_fanout)
         t_intra_node = intra_node_rounds * node_lat
@@ -560,7 +588,9 @@ def single_shot_reduce_scatter(args, msg_size, gpus, groups=["hp"], protocol=Non
     t_intra_node = 0
     t_inter_node = 0
     if intra_node_gpus > 0:
-        node_lat, msg_size_per_peer_node = node_latency_and_volume_protocol(args, msg_size_per_peer, protocol)
+        node_lat, msg_size_per_peer_node = node_latency_and_volume_protocol(
+            args, msg_size_per_peer, protocol
+        )
         node_bw = args.bw_eff * args.node_bw
         intra_node_rounds = ceil(intra_node_gpus / intra_node_fanout)
         t_intra_node = intra_node_rounds * node_lat
@@ -590,7 +620,9 @@ def single_shot_allreduce(args, msg_size, gpus, groups=["hp"], protocol=None):
         return 0
     t_rs = single_shot_reduce_scatter(args, msg_size, gpus, groups, protocol)
     t_ag = single_shot_allgather(args, msg_size, gpus, groups, protocol)
-    t_ar = t_rs + t_ag - args.kernel_launch_latency  # Remove duplicate kernel launch latency
+    t_ar = (
+        t_rs + t_ag - args.kernel_launch_latency
+    )  # Remove duplicate kernel launch latency
     return t_ar
 
 
@@ -612,7 +644,9 @@ def allreduce(args, msg_size, gpus, groups=["dp"]):
         hypercubeallreduce = oneshotHCallreduce(args, msg_size, gpus, protocol=p)
         ss_allreduce = single_shot_allreduce(args, msg_size, gpus, protocol=p)
         ringallreduce = RingAllreduce(args, msg_size, gpus, protocol=p)
-        min_ar_alg_time = min(ringallreduce, bruck_time, hypercubeallreduce, ss_allreduce)
+        min_ar_alg_time = min(
+            ringallreduce, bruck_time, hypercubeallreduce, ss_allreduce
+        )
         if min_ar_alg_time < min_ar_time:
             min_ar_time = min_ar_alg_time
     return min_ar_time

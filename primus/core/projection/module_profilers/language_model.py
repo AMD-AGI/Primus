@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 import os
 from typing import List, Optional
 
@@ -14,19 +20,15 @@ from .transformer_layer import (
     get_moe_transformer_layer_profiler_spec,
 )
 
-###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-#
-# See LICENSE for license information.
-###############################################################################
-
 
 def build_profiler(spec: ModuleProfilerSpec, depth=0) -> BaseModuleProfiler:
     """
     Recursively build a profiler instance from a ModuleProfilerSpec.
     """
     if not issubclass(spec.profiler, BaseModuleProfiler):
-        raise TypeError(f"spec.profiler must be subclass of BaseModuleProfiler, got {spec.profiler}")
+        raise TypeError(
+            f"spec.profiler must be subclass of BaseModuleProfiler, got {spec.profiler}"
+        )
 
     if depth == 0:
         print(f"Begin build profiler: {spec.profiler.__name__}")
@@ -47,7 +49,9 @@ def build_profiler(spec: ModuleProfilerSpec, depth=0) -> BaseModuleProfiler:
                 print(f"{'--'*(depth+1)}[{sub_spec.__name__}]({name})")
                 sub_profilers[name] = sub_spec(spec.config, sub_profilers=None)
             else:
-                raise TypeError(f"Invalid type for sub_profiler_specs['{name}']: {type(sub_spec)}")
+                raise TypeError(
+                    f"Invalid type for sub_profiler_specs['{name}']: {type(sub_spec)}"
+                )
 
     return spec.profiler(config=spec.config, sub_profilers=sub_profilers)
 
@@ -58,7 +62,9 @@ def get_language_model_profiler_spec(config: TrainingConfig) -> ModuleProfilerSp
         config=config,
         sub_profiler_specs={
             "embedding": EmbeddingProfiler,
-            "dense_transformer_layer": get_dense_transformer_layer_profiler_spec(config),
+            "dense_transformer_layer": get_dense_transformer_layer_profiler_spec(
+                config
+            ),
             "moe_transformer_layer": get_moe_transformer_layer_profiler_spec(config),
             "final_layernorm": LayerNormProfiler,
             "output_layer": OutputLayerProfiler,
@@ -112,7 +118,11 @@ def _get_explicit_layer_distribution(
     middle_stages = (
         total_stages - 2
         if (decoder_first is not None and decoder_last is not None)
-        else total_stages - 1 if (decoder_first is not None or decoder_last is not None) else total_stages
+        else (
+            total_stages - 1
+            if (decoder_first is not None or decoder_last is not None)
+            else total_stages
+        )
     )
 
     if middle_stages > 0 and remaining_layers > 0:
@@ -177,7 +187,11 @@ class LanguageModelProfiler(BaseModuleProfiler):
         to the first virtual stages (or use decoder_first/last_pipeline_num_layers if set).
         """
         total_stages = pp_size
-        vpp_size = num_virtual_pipeline_stages if num_virtual_pipeline_stages is not None else 1
+        vpp_size = (
+            num_virtual_pipeline_stages
+            if num_virtual_pipeline_stages is not None
+            else 1
+        )
         total_stages = pp_size * vpp_size
 
         model_parallel_size = pp_size * tp_size * cp_size * ep_size
@@ -191,9 +205,13 @@ class LanguageModelProfiler(BaseModuleProfiler):
         if self is not None and hasattr(self, "config") and self.config is not None:
             mp_config = self.config.model_parallel_config
             if decoder_first is None:
-                decoder_first = getattr(mp_config, "decoder_first_pipeline_num_layers", None)
+                decoder_first = getattr(
+                    mp_config, "decoder_first_pipeline_num_layers", None
+                )
             if decoder_last is None:
-                decoder_last = getattr(mp_config, "decoder_last_pipeline_num_layers", None)
+                decoder_last = getattr(
+                    mp_config, "decoder_last_pipeline_num_layers", None
+                )
 
         # Build layer counts per virtual stage
         if decoder_first is not None or decoder_last is not None:
@@ -332,14 +350,22 @@ class LanguageModelProfiler(BaseModuleProfiler):
         for layer in layers:
             is_moe = self.config.model_config.moe_pattern[layer]
             if is_moe:
-                total_params += self.sub_profilers["moe_transformer_layer"].estimated_num_params(rank)
+                total_params += self.sub_profilers[
+                    "moe_transformer_layer"
+                ].estimated_num_params(rank)
             else:
-                total_params += self.sub_profilers["dense_transformer_layer"].estimated_num_params(rank)
+                total_params += self.sub_profilers[
+                    "dense_transformer_layer"
+                ].estimated_num_params(rank)
         if 0 in self.layers:
             total_params += self.sub_profilers["embedding"].estimated_num_params(rank)
         if self.config.model_config.num_layers - 1 in self.layers:
-            total_params += self.sub_profilers["final_layernorm"].estimated_num_params(rank)
-            total_params += self.sub_profilers["output_layer"].estimated_num_params(rank)
+            total_params += self.sub_profilers["final_layernorm"].estimated_num_params(
+                rank
+            )
+            total_params += self.sub_profilers["output_layer"].estimated_num_params(
+                rank
+            )
             total_params += self.sub_profilers["calc_loss"].estimated_num_params(rank)
         return total_params
 
@@ -351,13 +377,17 @@ class LanguageModelProfiler(BaseModuleProfiler):
         (hidden_size * batch_size * seq_len * dtype_bytes), not full intermediate activations.
         """
         pp_size = self.config.model_parallel_config.pipeline_model_parallel_size
-        vpp_size = self.config.model_parallel_config.virtual_pipeline_model_parallel_size
+        vpp_size = (
+            self.config.model_parallel_config.virtual_pipeline_model_parallel_size
+        )
         recompute_granularity = self.config.model_parallel_config.recompute_granularity
         recompute_num_layers = self.config.model_parallel_config.recompute_num_layers
 
         # Calculate number of layers per virtual pipeline stage on this rank
         layers_per_rank = len(self.layers)
-        layers_per_vpp_stage = layers_per_rank // vpp_size if vpp_size > 0 else layers_per_rank
+        layers_per_vpp_stage = (
+            layers_per_rank // vpp_size if vpp_size > 0 else layers_per_rank
+        )
 
         # Input activation size per layer (only thing stored for recomputed layers)
         # hidden_size * batch_size * seq_len * dtype_bytes (bf16 = 2 bytes)
@@ -374,7 +404,9 @@ class LanguageModelProfiler(BaseModuleProfiler):
         layer_act = 0
         for i, layer in enumerate(self.layers):
             # Determine if this layer is recomputed
-            local_layer_idx = i % layers_per_vpp_stage if layers_per_vpp_stage > 0 else i
+            local_layer_idx = (
+                i % layers_per_vpp_stage if layers_per_vpp_stage > 0 else i
+            )
             is_recomputed = (
                 recompute_granularity == "full"
                 and recompute_num_layers is not None
@@ -388,25 +420,31 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 # Non-recomputed layer: store full activations
                 is_moe = self.config.model_config.moe_pattern[layer]
                 if is_moe:
-                    layer_act += self.sub_profilers["moe_transformer_layer"].estimated_activation_memory(
-                        batch_size, seq_len
-                    )
+                    layer_act += self.sub_profilers[
+                        "moe_transformer_layer"
+                    ].estimated_activation_memory(batch_size, seq_len)
                 else:
-                    layer_act += self.sub_profilers["dense_transformer_layer"].estimated_activation_memory(
-                        batch_size, seq_len
-                    )
+                    layer_act += self.sub_profilers[
+                        "dense_transformer_layer"
+                    ].estimated_activation_memory(batch_size, seq_len)
 
         total_act = layer_act
 
         # Add embedding/output activations
         if 0 in self.layers:
-            total_act += self.sub_profilers["embedding"].estimated_activation_memory(batch_size, seq_len)
-        if self.config.model_config.num_layers - 1 in self.layers:
-            total_act += self.sub_profilers["final_layernorm"].estimated_activation_memory(
+            total_act += self.sub_profilers["embedding"].estimated_activation_memory(
                 batch_size, seq_len
             )
-            total_act += self.sub_profilers["output_layer"].estimated_activation_memory(batch_size, seq_len)
-            total_act += self.sub_profilers["calc_loss"].estimated_activation_memory(batch_size, seq_len)
+        if self.config.model_config.num_layers - 1 in self.layers:
+            total_act += self.sub_profilers[
+                "final_layernorm"
+            ].estimated_activation_memory(batch_size, seq_len)
+            total_act += self.sub_profilers["output_layer"].estimated_activation_memory(
+                batch_size, seq_len
+            )
+            total_act += self.sub_profilers["calc_loss"].estimated_activation_memory(
+                batch_size, seq_len
+            )
 
         # 1F1B pipeline schedule: need to store activations for pp_size microbatches
         total_act *= pp_size
@@ -444,9 +482,13 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 if hasattr(language_model, "output_layer"):
                     output_module = language_model.output_layer
 
-                if hasattr(language_model, "encoder") and hasattr(language_model.encoder, "layers"):
+                if hasattr(language_model, "encoder") and hasattr(
+                    language_model.encoder, "layers"
+                ):
                     all_layers.extend(language_model.encoder.layers)
-                elif hasattr(language_model, "decoder") and hasattr(language_model.decoder, "layers"):
+                elif hasattr(language_model, "decoder") and hasattr(
+                    language_model.decoder, "layers"
+                ):
                     all_layers.extend(language_model.decoder.layers)
                 elif hasattr(language_model, "layers"):
                     all_layers.extend(language_model.layers)
@@ -457,7 +499,9 @@ class LanguageModelProfiler(BaseModuleProfiler):
             elif hasattr(unwrapped, "layers"):
                 all_layers.extend(unwrapped.layers)
             else:
-                raise ValueError(f"Cannot find transformer layers in model chunk: {type(unwrapped)}")
+                raise ValueError(
+                    f"Cannot find transformer layers in model chunk: {type(unwrapped)}"
+                )
             if hasattr(unwrapped, "embedding"):
                 embedding_module = unwrapped.embedding
             if hasattr(unwrapped, "output_layer"):
@@ -465,8 +509,12 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
         is_rank_0 = int(os.getenv("RANK", "0")) == 0
         if is_rank_0:
-            print(f"\n[Primus:Performance Projection] Found {len(all_layers)} transformer layers")
-            print(f"[Primus:Performance Projection] This rank is responsible for layers: {self.layers}")
+            print(
+                f"\n[Primus:Performance Projection] Found {len(all_layers)} transformer layers"
+            )
+            print(
+                f"[Primus:Performance Projection] This rank is responsible for layers: {self.layers}"
+            )
 
         embedding_stats = None
         output_stats = None
@@ -475,10 +523,14 @@ class LanguageModelProfiler(BaseModuleProfiler):
         if 0 in self.layers:
             if embedding_module is None:
                 if is_rank_0:
-                    print("[Primus:Performance Projection] WARNING: Embedding module not found on this rank.")
+                    print(
+                        "[Primus:Performance Projection] WARNING: Embedding module not found on this rank."
+                    )
             else:
                 if is_rank_0:
-                    print("[Primus:Performance Projection] Benchmarking embedding layer...")
+                    print(
+                        "[Primus:Performance Projection] Benchmarking embedding layer..."
+                    )
                 profiler = self.sub_profilers["embedding"]
                 module = (
                     embedding_module.word_embeddings
@@ -512,7 +564,9 @@ class LanguageModelProfiler(BaseModuleProfiler):
                     )
             else:
                 if is_rank_0:
-                    print("[Primus:Performance Projection] Benchmarking output layer...")
+                    print(
+                        "[Primus:Performance Projection] Benchmarking output layer..."
+                    )
                 profiler = self.sub_profilers["output_layer"]
                 profiler.set_module(output_module)
                 out_forward = profiler.measured_forward_time(batch_size, seq_len)
@@ -540,7 +594,9 @@ class LanguageModelProfiler(BaseModuleProfiler):
         for layer_idx in self.layers:
             if layer_idx >= len(all_layers):
                 if is_rank_0:
-                    print(f"[WARNING] Layer index {layer_idx} exceeds available layers ({len(all_layers)})")
+                    print(
+                        f"[WARNING] Layer index {layer_idx} exceeds available layers ({len(all_layers)})"
+                    )
                 continue
 
             is_moe = self.config.model_config.moe_pattern[layer_idx]
@@ -552,7 +608,9 @@ class LanguageModelProfiler(BaseModuleProfiler):
             layer_module = all_layers[layer_idx]
 
             if is_rank_0:
-                print(f"\n[Primus:Performance Projection] Benchmarking Layer {layer_idx} ({layer_type})...")
+                print(
+                    f"\n[Primus:Performance Projection] Benchmarking Layer {layer_idx} ({layer_type})..."
+                )
 
             # Get the appropriate profiler
             if is_moe:
@@ -566,7 +624,9 @@ class LanguageModelProfiler(BaseModuleProfiler):
             # Benchmark full layer (uses optimized benchmark_layer with 64 iterations, warm caches)
             forward_time = layer_profiler.measured_forward_time(batch_size, seq_len)
             backward_time = layer_profiler.measured_backward_time(batch_size, seq_len)
-            activation_memory = layer_profiler.measured_activation_memory(batch_size, seq_len)
+            activation_memory = layer_profiler.measured_activation_memory(
+                batch_size, seq_len
+            )
 
             # Benchmark Attention
             attn_profiler = layer_profiler.get_sub_profiler("self_attention")
@@ -605,7 +665,9 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 print(f"  Backward time: {backward_time:.2f} ms")
                 print(f"  Total: {forward_time + backward_time:.2f} ms")
                 print(f"  Activation memory: {activation_memory / (1024**2):.2f} MB")
-                print(f"  Attention: fwd={attn_forward:.2f} ms, bwd={attn_backward:.2f} ms")
+                print(
+                    f"  Attention: fwd={attn_forward:.2f} ms, bwd={attn_backward:.2f} ms"
+                )
                 print(f"  MLP: fwd={mlp_forward:.2f} ms, bwd={mlp_backward:.2f} ms")
 
         # Expand results to all layers
