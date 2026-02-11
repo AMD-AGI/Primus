@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 import os
 from pathlib import Path
 
@@ -54,7 +60,13 @@ def print_profiler_hierarchy(profiler, batch_size, seq_len, rank=None, name="roo
                 if sub_profiler is not None:
                     print()  # Add spacing between components
                     print_profiler_hierarchy(
-                        sub_profiler, batch_size, seq_len, rank, sub_name, depth + 1, visited
+                        sub_profiler,
+                        batch_size,
+                        seq_len,
+                        rank,
+                        sub_name,
+                        depth + 1,
+                        visited,
                     )
     except Exception as e:
         print(f"{indent}[{name}] - Error calculating metrics: {e}")
@@ -89,7 +101,12 @@ def launch_projection_from_cli(args, overrides):
 
     # Print the complete hierarchy recursively
     print_profiler_hierarchy(
-        model_profiler, batch_size, seq_len, rank=rank, name="LanguageModelProfiler", depth=0
+        model_profiler,
+        batch_size,
+        seq_len,
+        rank=rank,
+        name="LanguageModelProfiler",
+        depth=0,
     )
 
     # Get overall totals from the model profiler for this rank

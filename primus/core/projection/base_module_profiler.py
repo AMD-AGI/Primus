@@ -1,10 +1,11 @@
+from abc import ABC
+from typing import Optional
+
 ###############################################################################
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
-
-from abc import ABC
 
 
 class BaseModuleProfiler(ABC):
@@ -17,7 +18,7 @@ class BaseModuleProfiler(ABC):
         self.sub_profilers = sub_profilers
 
     # -------- Parameter related --------
-    def estimated_num_params(self, rank: int | None = None) -> int:
+    def estimated_num_params(self, rank: Optional[int] = None) -> int:
         """Return estimated parameter count (based on formula).
         If rank is provided, return the parameter count for the given rank,
         otherwise return the total parameter count for the entire model.

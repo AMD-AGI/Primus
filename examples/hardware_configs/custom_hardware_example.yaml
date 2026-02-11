@@ -1,0 +1,31 @@
+# Custom Hardware Configuration for Primus Performance Projection
+# This file defines hardware parameters used for communication modeling
+# when projecting performance to multi-node configurations.
+
+hardware_config:
+  # GPU Memory and Compute
+  gpu_memory_gb: 192  # MI300X has 192GB HBM3
+  gpu_compute_tflops: 1307  # BF16 peak TFLOPS for MI300X
+  
+  # Intra-node Communication (NVLink/xGMI equivalent)
+  intra_node_bandwidth_gbps: 896  # MI300X Infinity Fabric bandwidth (GB/s bidirectional)
+  intra_node_latency_us: 1.0  # Approximate latency in microseconds
+  
+  # Inter-node Communication (InfiniBand/RoCE)
+  inter_node_bandwidth_gbps: 400  # 400 Gbps InfiniBand (50 GB/s)
+  inter_node_latency_us: 2.0  # Approximate latency in microseconds
+  
+  # Network Topology
+  gpus_per_node: 8
+  nics_per_node: 8  # Number of network interfaces per node
+  
+  # AllReduce efficiency factors (0.0 to 1.0)
+  # These account for protocol overhead, congestion, etc.
+  intra_node_efficiency: 0.85
+  inter_node_efficiency: 0.70
+  
+  # All-to-All efficiency for MoE expert parallelism
+  alltoall_intra_efficiency: 0.80
+  alltoall_inter_efficiency: 0.60
+
+
