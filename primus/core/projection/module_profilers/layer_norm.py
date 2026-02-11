@@ -1,7 +1,3 @@
-from typing import Optional
-
-from primus.core.projection.base_module_profiler import BaseModuleProfiler
-
 ###############################################################################
 # Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
 #
@@ -9,6 +5,8 @@ from primus.core.projection.base_module_profiler import BaseModuleProfiler
 ###############################################################################
 
 from typing import Optional
+
+from primus.core.projection.base_module_profiler import BaseModuleProfiler
 
 
 class LayerNormProfiler(BaseModuleProfiler):

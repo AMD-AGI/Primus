@@ -98,9 +98,6 @@ def calculate_collective_communication_time(
     dense_mlp_params = 3 * hidden_size * ffn_hidden  # gate, up, down
     expert_mlp_params = 3 * hidden_size * moe_ffn  # per expert
 
-    dense_layer_params = attn_params + dense_mlp_params
-    moe_layer_params = attn_params + num_experts * expert_mlp_params
-
     # Non-expert params are replicated across EP; expert params are partitioned by EP
     non_expert_params = num_layers * attn_params + num_dense_layers * dense_mlp_params
     expert_total_params = num_moe_layers * num_experts * expert_mlp_params
@@ -1471,9 +1468,6 @@ def _run_multinode_projection(
     gpus_for_dp = tp * pp * cp  # EP excluded for DP calculation
     total_gpus_target = target_nodes * gpus_per_node
     dp_target = total_gpus_target // gpus_for_dp
-
-    # Calculate minimum DP (for baseline)
-    min_gpus = min_nodes_required * gpus_per_node
 
     if is_rank_0:
         print("" + "=" * 100)
