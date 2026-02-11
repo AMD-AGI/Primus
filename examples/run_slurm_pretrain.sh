@@ -34,6 +34,11 @@ export NNODES=${NNODES:-1}
 
 SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 
+# Align EXP default with run_local_pretrain.sh to avoid unknown names
+if [[ -z "${EXP:-}" ]]; then
+    export EXP="${SCRIPT_DIR}/megatron/exp_pretrain.yaml"
+fi
+
 export LOG_DIR=${LOG_DIR:-"./output"}
 LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
