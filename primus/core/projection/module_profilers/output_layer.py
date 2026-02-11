@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 
@@ -24,7 +25,7 @@ class OutputLayerProfiler(BaseModuleProfiler):
         self._cached_results = None
         self._cache_key = None
 
-    def estimated_num_params(self, rank: int | None = None) -> int:
+    def estimated_num_params(self, rank: Optional[int] = None) -> int:
         return self.config.model_config.padded_vocab_size * self.config.model_config.hidden_size
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
