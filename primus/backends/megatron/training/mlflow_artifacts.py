@@ -237,7 +237,7 @@ def _ensure_openpyxl_installed() -> bool:
     except ImportError:
         log_rank_0("[TraceLens] openpyxl not found, installing for XLSX support...")
         try:
-            result = subprocess.run(
+            subprocess.run(
                 [sys.executable, "-m", "pip", "install", "openpyxl", "-q"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
