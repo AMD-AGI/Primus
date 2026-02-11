@@ -492,7 +492,9 @@ def generate_tracelens_report(
 
         # Only ensure openpyxl when XLSX output is requested (avoids pip install in CSV-only or restricted envs)
         if output_format in ("xlsx", "all"):
-            _ensure_openpyxl_installed()
+            if not _ensure_openpyxl_installed():
+                warning_rank_0("[TraceLens] openpyxl unavailable; downgrading output_format to 'csv'.")
+                output_format = "csv"
 
         generated_files = []
 

@@ -30,7 +30,7 @@ def upload_mlflow_artifacts(
     generate_tracelens_report: bool = False,
     upload_tracelens_report: bool = False,
     tracelens_ranks: Optional[List[int]] = None,
-    tracelens_output_format: str = "all",
+    tracelens_output_format: str = "xlsx",
     tracelens_cleanup_after_upload: bool = False,
     tracelens_auto_install: bool = True,
 ) -> Optional[dict]:
@@ -74,12 +74,20 @@ def upload_mlflow_artifacts(
     if mlflow_writer is None:
         # Local-only TraceLens generation: run on a single rank only to avoid duplicate
         # work and races writing exp_root_path/tracelens_reports (rank 0 when multi-rank).
+        # If MLflow is enabled in a distributed run, the writer rank will handle generation,
+        # so skip local generation on non-writer ranks.
         try:
             args = get_primus_args()
             is_single_rank = args.rank == 0
+            mlflow_expected = getattr(args, "mlflow_run_name", None) is not None
+            is_distributed = args.world_size > 1
         except Exception:
             is_single_rank = not dist.is_initialized() or dist.get_rank() == 0
-        if is_single_rank and generate_tracelens_report and tensorboard_dir and exp_root_path:
+            mlflow_expected = False
+            is_distributed = dist.is_initialized()
+
+        should_generate_locally = is_single_rank and (not mlflow_expected or not is_distributed)
+        if should_generate_locally and generate_tracelens_report and tensorboard_dir and exp_root_path:
             generate_tracelens_reports_locally(
                 tensorboard_dir=tensorboard_dir,
                 exp_root_path=exp_root_path,
