@@ -32,6 +32,7 @@ def upload_mlflow_artifacts(
     tracelens_ranks: Optional[List[int]] = None,
     tracelens_output_format: str = "all",
     tracelens_cleanup_after_upload: bool = False,
+    tracelens_auto_install: bool = True,
 ) -> Optional[dict]:
     """
     Upload trace files, log files, and TraceLens reports to MLflow as artifacts.
@@ -64,6 +65,7 @@ def upload_mlflow_artifacts(
                         Specify fewer ranks to limit number of reports
         tracelens_output_format: Report format - "all" (default, xlsx+csv), "xlsx", or "csv"
         tracelens_cleanup_after_upload: Remove local reports after upload (default: False)
+        tracelens_auto_install: Whether to attempt auto-installing TraceLens if missing
 
     Returns:
         Dictionary with counts of uploaded files, or None if MLflow is not enabled
@@ -83,6 +85,7 @@ def upload_mlflow_artifacts(
                 exp_root_path=exp_root_path,
                 ranks=tracelens_ranks,
                 output_format=tracelens_output_format,
+                auto_install=tracelens_auto_install,
             )
         return None
 
@@ -97,4 +100,5 @@ def upload_mlflow_artifacts(
         tracelens_ranks=tracelens_ranks,
         tracelens_output_format=tracelens_output_format,
         tracelens_cleanup_after_upload=tracelens_cleanup_after_upload,
+        tracelens_auto_install=tracelens_auto_install,
     )

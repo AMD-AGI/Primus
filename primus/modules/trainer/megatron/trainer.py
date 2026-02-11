@@ -1146,19 +1146,24 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         mlflow_writer = get_mlflow_writer()
         # Always call: uploads to MLflow when enabled; when MLflow disabled, still runs
         # local-only TraceLens report generation if generate_tracelens_report=True.
-        upload_mlflow_artifacts(
-            tensorboard_dir=args.tensorboard_dir,
-            exp_root_path=self.exp_root_path,
-            upload_traces=getattr(args, "mlflow_upload_traces", False),
-            upload_logs=getattr(args, "mlflow_upload_logs", False),
-            generate_tracelens_report=getattr(args, "generate_tracelens_report", False),
-            upload_tracelens_report=getattr(args, "mlflow_upload_tracelens_report", False),
-            tracelens_ranks=getattr(args, "mlflow_tracelens_ranks", None),
-            tracelens_output_format=getattr(args, "mlflow_tracelens_output_format", "xlsx"),
-            tracelens_cleanup_after_upload=getattr(args, "mlflow_tracelens_cleanup_after_upload", False),
-        )
-        if mlflow_writer:
-            mlflow_writer.end_run()
+        try:
+            upload_mlflow_artifacts(
+                tensorboard_dir=args.tensorboard_dir,
+                exp_root_path=self.exp_root_path,
+                upload_traces=getattr(args, "mlflow_upload_traces", False),
+                upload_logs=getattr(args, "mlflow_upload_logs", False),
+                generate_tracelens_report=getattr(args, "generate_tracelens_report", False),
+                upload_tracelens_report=getattr(args, "mlflow_upload_tracelens_report", False),
+                tracelens_ranks=getattr(args, "mlflow_tracelens_ranks", None),
+                tracelens_output_format=getattr(args, "mlflow_tracelens_output_format", "xlsx"),
+                tracelens_cleanup_after_upload=getattr(args, "mlflow_tracelens_cleanup_after_upload", False),
+                tracelens_auto_install=getattr(args, "mlflow_tracelens_auto_install", True),
+            )
+        except Exception as e:
+            warning_rank_0(f"[MLflow] Artifact upload failed: {e}")
+        finally:
+            if mlflow_writer:
+                mlflow_writer.end_run()
 
         one_logger and one_logger.log_metrics({"app_finish_time": one_logger_utils.get_timestamp_in_ms()})
 

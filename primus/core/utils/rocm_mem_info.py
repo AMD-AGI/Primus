@@ -20,9 +20,12 @@ def get_rocm_smi_gpu_util(device_id: int):
             ["rocm-smi", "--showuse", f"-d={device_id}"],
             text=True,
             stderr=subprocess.DEVNULL,
+            timeout=10,
         )
     except FileNotFoundError:
         raise RuntimeError("rocm-smi not found, please ensure ROCm is installed and in PATH")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("rocm-smi --showuse timed out")
 
     # Parse output: look for GPU use (%) or similar (e.g. "GPU use (%): 42" or "GPU Use: 42%")
     for line in out.splitlines():

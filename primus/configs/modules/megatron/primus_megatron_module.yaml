@@ -26,15 +26,16 @@ mlflow_upload_logs: false            # Upload training log files to MLflow
 #
 # To limit number of reports: use mlflow_tracelens_ranks (no separate max_reports option).
 #   Default: [0, 8] = one rank per node (assumes 8 GPUs/node)
-#   Use null for all ranks, or customize list like [0, 1, 8, 9] for more coverage
+#   Use null for all ranks (e.g., null or [0, 1, 2] for explicit list)
 # ----------------------------------------------------------------------------
 generate_tracelens_report: false    # Generate TraceLens analysis reports locally (auto-enabled when upload=true)
 mlflow_upload_tracelens_report: false # Upload TraceLens reports to MLflow (auto-enables generation, profiling, tensorboard)
-mlflow_tracelens_ranks: [0, 8]       # List of ranks to analyze (default: one per node for 2-node setup)
+mlflow_tracelens_ranks: [0, 8]       # List of ranks to analyze (null = all, e.g. [0, 1, 2])
 # TraceLens report format: xlsx (default, single parse, fastest), csv, or all (xlsx+csv;
 # parses each trace twice so ~2x processing time; use only when both formats are needed)
 mlflow_tracelens_output_format: xlsx
 mlflow_tracelens_cleanup_after_upload: false  # Keep local reports (true to cleanup and save disk space)
+mlflow_tracelens_auto_install: true           # Auto-install TraceLens if missing (set false to disable)
 disable_compile_dependencies: true
 # NOTE:
 # - If `use_rocm_mem_info = True`, ROCm memory information will be collected
@@ -53,7 +54,7 @@ use_rocm_mem_info_iters: [1,2]
 #      - perf/iteration_time_ms: Time per training step (ms)
 #
 #   2. Memory Metrics:
-#      - perf/{rocm/hip}_peak_mem_gb: Peak GPU memory usage (GB)
+#      - perf/{rocm/hip}_current_mem_gb: Current GPU memory usage (GB)
 #      - perf/{rocm/hip}_mem_utilization_pct: Memory utilization (% of total)
 #
 #   3. System Metrics:
