@@ -1,0 +1,67 @@
+diff --git a/src/megatron/bridge/training/pretrain.py b/src/megatron/bridge/training/pretrain.py
+index 03afb0d4..2f1b08ee 100644
+--- a/src/megatron/bridge/training/pretrain.py
++++ b/src/megatron/bridge/training/pretrain.py
+@@ -12,9 +12,13 @@
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
+ 
++import os
+ from typing import Optional
+ 
++import psutil
++import torch
+ import torch.distributed as dist
++from torch.profiler import profile, ProfilerActivity
+ from nvidia_resiliency_ext.inprocess import CallWrapper
+ 
+ from megatron.bridge.data.utils import get_dataset_provider
+@@ -117,7 +121,47 @@ def _pretrain(
+ 
+     config = state.cfg
+     dataset_provider = get_dataset_provider(config.dataset)
+-    setup_output = setup(state, dataset_provider, restart_store=store)
++
++    from primus.modules.module_utils import log_rank_all
++
++    process = psutil.Process(os.getpid())
++    mem_before = process.memory_info().rss
++    log_rank_all(f"[Memory] CPU RSS before setup: {mem_before / (1024 ** 3):.3f} GB")
++
++    # Record CPU memory allocations with PyTorch profiler
++    torch.cuda.memory._record_memory_history(enabled=None)  # reset any prior recording
++    with profile(
++        activities=[ProfilerActivity.CPU],
++        profile_memory=True,
++        record_shapes=True,
++        with_stack=True,
++    ) as prof:
++        setup_output = setup(state, dataset_provider, restart_store=store)
++
++    mem_after = process.memory_info().rss
++    log_rank_all(f"[Memory] CPU RSS after setup:  {mem_after / (1024 ** 3):.3f} GB")
++    log_rank_all(f"[Memory] CPU RSS delta (setup): {(mem_after - mem_before) / (1024 ** 3):.3f} GB")
++
++    # Export profiler results
++    rank = dist.get_rank() if dist.is_initialized() else 0
++    prof_dir = os.path.join("/workspace/Primus/setup_cpu_memory_profile")
++    os.makedirs(prof_dir, exist_ok=True)
++
++    # Key averages sorted by CPU memory usage
++    mem_table = prof.key_averages().table(sort_by="self_cpu_memory_usage", row_limit=30)
++    log_rank_all(f"[Profiler] CPU memory allocation table (top 30):\n{mem_table}")
++
++    # Save full chrome trace for visualization
++    trace_path = os.path.join(prof_dir, f"setup_cpu_trace_rank{rank}.json")
++    prof.export_chrome_trace(trace_path)
++    log_rank_all(f"[Profiler] Chrome trace saved to: {trace_path}")
++
++    # Save memory table to text file
++    table_path = os.path.join(prof_dir, f"setup_cpu_memory_rank{rank}.txt")
++    with open(table_path, "w") as f:
++        f.write(prof.key_averages().table(sort_by="self_cpu_memory_usage", row_limit=100))
++    log_rank_all(f"[Profiler] Memory table saved to: {table_path}")
++
+     state = setup_output.state
+     model = setup_output.model
+     optimizer = setup_output.optimizer
