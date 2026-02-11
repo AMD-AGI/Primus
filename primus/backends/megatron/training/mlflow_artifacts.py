@@ -120,8 +120,8 @@ def upload_trace_files_to_mlflow(
     Upload all profiler trace files to MLflow as artifacts.
 
     This function collects trace files from the tensorboard directory and
-    uploads them to MLflow. In distributed settings, only rank 0 (or the
-    last rank where MLflow writer is initialized) should call this.
+    uploads them to MLflow. In distributed settings, only the last rank
+    (where the MLflow writer is initialized) should call this.
 
     Args:
         mlflow_writer: The MLflow module instance (from get_mlflow_writer())
