@@ -267,9 +267,9 @@ def _ensure_tracelens_installed() -> bool:
     except ImportError:
         log_rank_0("[TraceLens] TraceLens not found, attempting to install from GitHub...")
         try:
-            # TraceLens is on GitHub, not PyPI; pin to a tag for reproducibility and supply-chain safety
+            # TraceLens is on GitHub, not PyPI; pin to a commit SHA for reproducibility and supply-chain safety
             install_spec = f"git+https://github.com/AMD-AGI/TraceLens.git@{TRACELENS_INSTALL_REF}"
-            subprocess.check_call(
+            subprocess.run(
                 [
                     sys.executable,
                     "-m",
@@ -279,13 +279,22 @@ def _ensure_tracelens_installed() -> bool:
                     "-q",
                 ],
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+                timeout=300,
             )
             log_rank_0(
                 f"[TraceLens] Successfully installed TraceLens from GitHub (ref={TRACELENS_INSTALL_REF})"
             )
+        except subprocess.TimeoutExpired:
+            warning_rank_0("[TraceLens] TraceLens install timed out after 300s. Skipping install.")
+            return False
         except subprocess.CalledProcessError as e:
-            warning_rank_0(f"[TraceLens] Failed to install TraceLens: {e}")
+            stderr_output = e.stderr.strip() if e.stderr else "No stderr output captured."
+            warning_rank_0(
+                f"[TraceLens] Failed to install TraceLens: {e}\n" f"[TraceLens] pip stderr: {stderr_output}"
+            )
             return False
 
     return True
@@ -672,14 +681,14 @@ def generate_tracelens_reports(
     Returns:
         List of paths to all generated report files
     """
-    # Try to install tracelens, but continue with fallback if not available
-    _ensure_tracelens_installed()
-
     # Normalize and validate ranks (config/CLI can pass as a string)
     ranks = _normalize_tracelens_ranks(ranks)
     if ranks == []:
         warning_rank_0("[TraceLens] No valid ranks after validation; skipping report generation.")
         return []
+
+    # Try to install tracelens, but continue with fallback if not available
+    _ensure_tracelens_installed()
 
     trace_files = _get_all_trace_files(tensorboard_dir)
     if not trace_files:

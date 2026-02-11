@@ -37,8 +37,9 @@ def upload_mlflow_artifacts(
     Upload trace files, log files, and TraceLens reports to MLflow as artifacts.
 
     This function should be called at the end of training to upload all
-    artifacts to MLflow. Only the rank that initialized MLflow (last rank)
-    should call this to avoid duplicate uploads.
+    artifacts to MLflow. It is safe to call on all ranks: non-writer ranks
+    will no-op when MLflow is disabled, while the writer rank performs uploads
+    (and local-only TraceLens generation may still occur when configured).
 
     MLflow Artifact Structure:
         artifacts/
