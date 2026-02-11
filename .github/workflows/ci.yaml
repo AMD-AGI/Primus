@@ -10,7 +10,7 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 5233748e9c5c5795a6484ab31ece47c442d29ec2 # feat(mxfp4): refactor gemm mxfp4 and mxfp8. fuse transpose, hadamard transform and quantization. (#195)
+  PRIMUS_TURBO_COMMIT: 7de945a3949e68af54f91dbc2a311664e52b6e63 # feat: grouped gemm auto-tune on load-balance mode (#231)
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   BASE_IMAGE: docker.io/rocm/primus:v26.1
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v25.9
