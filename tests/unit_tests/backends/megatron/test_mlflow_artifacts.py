@@ -174,7 +174,7 @@ class TestUploadTraceFilesToMlflow:
         trace_file = tmp_path / "rank_0.pt.trace.json"
         trace_file.touch()
         mlflow_mock = MagicMock()
-        mlflow_mock.log_artifact.side_effect = Exception("Upload failed")
+        mlflow_mock.log_artifact.side_effect = RuntimeError("Upload failed")
 
         count = upload_trace_files_to_mlflow(mlflow_mock, str(tmp_path))
 

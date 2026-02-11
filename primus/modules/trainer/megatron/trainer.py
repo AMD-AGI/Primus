@@ -197,6 +197,8 @@ def _finalize_mlflow_run(args, mlflow_writer) -> None:
 
     if mlflow_writer is None:
         reset_exp_root_path()
+        if dist.is_initialized():
+            dist.barrier()
         return
 
     # Upload artifacts before ending the run
@@ -209,6 +211,8 @@ def _finalize_mlflow_run(args, mlflow_writer) -> None:
     mlflow_writer.end_run()
     # Reset so subsequent runs in the same process don't use a stale path
     reset_exp_root_path()
+    if dist.is_initialized():
+        dist.barrier()
 
 
 class MegatronTrainer(BaseTrainer, BaseModule):
