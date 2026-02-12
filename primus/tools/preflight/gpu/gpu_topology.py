@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+from collections import Counter
 from typing import Any, Dict, List, Optional
 
 from .gpu_probe import probe_gpus
@@ -111,7 +112,7 @@ def run_gpu_standard_checks(*, force_topology: bool = False) -> Dict[str, Any]:
         nodes = [x.get("numa_node") for x in numa.get("gpus", []) if x.get("numa_node") is not None]
         imbalance = False
         if nodes:
-            counts = [nodes.count(n) for n in set(nodes)]
+            counts = Counter(nodes).values()
             imbalance = len(set(counts)) > 1
         findings.append(
             Finding("info", "GPU↔NUMA mapping", {"mapping": numa.get("gpus", []), "imbalance": imbalance})
