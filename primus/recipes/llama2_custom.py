@@ -332,7 +332,7 @@ def _llama2_lora(
     model_cfg.use_transformer_engine_full_layer_spec = False # Doesn't work beacuse of RMSNorm is not supported in FusedLayerNorm
     model_cfg.cpu_offloading = False
     model_cfg.cpu_offloading_num_layers = 0
-    model_cfg.empty_unused_memory_level = 2
+    model_cfg.empty_unused_memory_level = 0 # 0: No empty, 1: Empty at end of eval, 2: Empty at end of eval and train.
 
     opt_config, scheduler = distributed_fused_adam_with_cosine_annealing(
         lr_warmup_iters=lr_warmup_iters,
