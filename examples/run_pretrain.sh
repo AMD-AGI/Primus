@@ -375,6 +375,82 @@ else
     LOG_INFO "Skip Primus Turbo rebuild. REBUILD_PRIMUS_TURBO=$REBUILD_PRIMUS_TURBO"
 fi
 
+# ----------------- Rebuild UCCL -----------------
+export REBUILD_UCCL=${REBUILD_UCCL:-0}
+if [ "$REBUILD_UCCL" == "1" ]; then
+    LOG_INFO "Rebuilding UCCL from source..."
+    apt update && apt install -y rdma-core libibverbs-dev libnuma-dev libgoogle-glog-dev
+    mkdir -p "/workspace/"
+    cd "/workspace" || exit
+
+    # Clean up old directory if exists to avoid git clone conflicts
+    if [ -d "uccl" ]; then
+        LOG_INFO "Removing existing uccl directory..."
+        rm -rf uccl
+    fi
+
+    git clone https://github.com/uccl-project/uccl.git
+    cd uccl || exit
+    cd ep && python3 setup.py build && cd ..
+    cp ep/build/**/*.so uccl
+    pip3 install --no-build-isolation .
+    cd ep/deep_ep_wrapper && pip3 install --no-build-isolation . -v
+    cd "${PRIMUS_PATH}" || exit
+    LOG_INFO "Rebuilding UCCL from source done."
+else
+    LOG_INFO "Skip UCCL rebuild. REBUILD_UCCL=$REBUILD_UCCL"
+fi
+
+# ----------------- Using UCCL-EP -----------------
+if [ "$USING_UEP" == "1" ]; then
+    LOG_INFO "USING_UEP is enabled, checking required packages..."
+
+    if ! python3 -m pip show uccl &>/dev/null || ! python3 -m pip show deep_ep &>/dev/null; then
+        LOG_ERROR "uccl is not installed! Please use pre-installed primus image or set REBUILD_UCCL=1."
+        exit 1
+    fi
+    LOG_INFO "uccl package is installed: $(python3 -m pip show uccl | grep Version)"
+    LOG_INFO "deep_ep package is installed: $(python3 -m pip show deep_ep | grep Version)"
+
+    if [ "$ENABLE_NUMA_BINDING" != "1" ]; then
+        LOG_INFO "ENABLE_NUMA_BINDING is not enabled! Please set ENABLE_NUMA_BINDING=1 to avoid dataloader worker exited unexpectedly."
+    fi
+
+    export PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND=DEEP_EP
+    LOG_INFO "PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND set to DEEP_EP"
+
+
+    # network settings for UCCL
+    export UCCL_IB_GID_INDEX=${UCCL_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
+    export UCCL_IB_HCA=${UCCL_IB_HCA:-$NCCL_IB_HCA}
+    export UCCL_SOCKET_IFNAME=${UCCL_SOCKET_IFNAME:-$NCCL_SOCKET_IFNAME}
+
+    # set low latency and normal inflight and bytes to avoid hang on AMD Pollara AI NIC and Broadcom Thor-2
+    if [ "$USING_AINIC" == "1" ]; then
+        export UCCL_IB_MAX_INFLIGHT_NORMAL=${UCCL_IB_MAX_INFLIGHT_NORMAL:-1}
+        export UCCL_IB_MAX_INFLIGHT_LOW_LATENCY=${UCCL_IB_MAX_INFLIGHT_LOW_LATENCY:-1}
+        export UCCL_IB_MAX_INFLIGHT_BYTES=${UCCL_IB_MAX_INFLIGHT_BYTES:-4194304} # 4MB
+    elif [ "$REBUILD_BNXT" == "1" ]; then # Broadcom Thor-2
+        # FIXME(zhuang12): use `USING_BNXT` for Broadcom Thor-2 maybe better than `REBUILD_BNXT`
+        export UCCL_IB_MAX_INFLIGHT_NORMAL=${UCCL_IB_MAX_INFLIGHT_NORMAL:-1}
+        export UCCL_IB_MAX_INFLIGHT_LOW_LATENCY=${UCCL_IB_MAX_INFLIGHT_LOW_LATENCY:-1}
+        export UCCL_IB_MAX_INFLIGHT_BYTES=${UCCL_IB_MAX_INFLIGHT_BYTES:-1572864}
+    fi
+
+
+    LOG_INFO "==========UCCL Network Settings=========="
+    LOG_INFO "UCCL_IB_GID_INDEX: $UCCL_IB_GID_INDEX"
+    LOG_INFO "UCCL_IB_HCA: $UCCL_IB_HCA"
+    LOG_INFO "UCCL_SOCKET_IFNAME: $UCCL_SOCKET_IFNAME"
+    LOG_INFO "UCCL_IB_MAX_INFLIGHT_NORMAL: $UCCL_IB_MAX_INFLIGHT_NORMAL"
+    LOG_INFO "UCCL_IB_MAX_INFLIGHT_LOW_LATENCY: $UCCL_IB_MAX_INFLIGHT_LOW_LATENCY"
+    LOG_INFO "UCCL_IB_MAX_INFLIGHT_BYTES: $UCCL_IB_MAX_INFLIGHT_BYTES"
+    LOG_INFO ""
+else
+    export PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND=TURBO
+    LOG_INFO "USING_UEP is disabled. PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND set to TURBO"
+fi
+
 # nvte debug envs
 export NVTE_DEBUG=0 # 0, 1
 export NVTE_DEBUG_LEVEL=0 # 0, 1, 2

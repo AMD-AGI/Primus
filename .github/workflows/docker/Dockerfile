@@ -4,7 +4,7 @@ FROM ${BASE_IMAGE}
 ARG PRIMUS_TURBO_COMMIT
 ARG PRIMUS_TURBO_FRAMEWORK
 ARG ROCSHMEM_COMMIT
-
+ARG UCCL_COMMIT
 # Non-interactive APT
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -12,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Install build dependencies
 # ---------------------------------------------------------------------------
 RUN apt-get update && \
-    apt-get install -y rdma-core libibverbs-dev libnuma-dev numactl&& \
+    apt-get install -y rdma-core libibverbs-dev libnuma-dev numactl libgoogle-glog-dev && \
     apt-get install -y --reinstall binutils
 
 RUN rm -rf /var/lib/apt/lists/*
@@ -58,6 +58,21 @@ RUN cd /opt && \
     pip3 install --no-build-isolation . -v
 
 RUN rm -rf /opt/Primus-Turbo
+
+# ---------------------------------------------------------------------------
+# Install UCCL-EP (skip for JAX framework)
+# ---------------------------------------------------------------------------
+RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
+    cd /opt && \
+    git clone https://github.com/uccl-project/uccl.git && \
+    cd uccl && \
+    git checkout ${UCCL_COMMIT} && \
+    cd ep && TORCH_CUDA_ARCH_LIST="gfx942,gfx950" python3 setup.py build && cd .. && \
+    cp ep/build/**/*.so uccl && \
+    pip3 install --no-build-isolation . -v && \
+    cd ep/deep_ep_wrapper && pip3 install --no-build-isolation . -v && \
+    rm -rf /opt/uccl; \
+    fi
 
 # Set the default working directory
 WORKDIR /opt

@@ -12,6 +12,7 @@ on:
 env:
   PRIMUS_TURBO_COMMIT: 5233748e9c5c5795a6484ab31ece47c442d29ec2 # feat(mxfp4): refactor gemm mxfp4 and mxfp8. fuse transpose, hadamard transform and quantization. (#195)
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
+  UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
   BASE_IMAGE: docker.io/rocm/primus:v26.1
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v25.9
 
@@ -101,6 +102,7 @@ jobs:
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=PYTORCH \
+               --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
                $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
@@ -139,6 +141,7 @@ jobs:
                --build-arg BASE_IMAGE=${MAXTEXT_BASE_IMAGE} \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=JAX \
+               --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} .
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))

@@ -73,11 +73,12 @@ export TRAIN_ITERS=${TRAIN_ITERS:-10}
 # 5 - Sync-free MoE (stage 1)
 # 6 - CPU NUMA binding helper
 # 7 - Manual GC helper
+# 8 - Using UCCL-EP
 # MoE_Features=(0 7)
 # MoE_Features=(3 7)
 # MoE_Features=(3 4 7)
 # MoE_Features=(3 4 5 7)
-MoE_Features=(3 4 5 6 7)
+MoE_Features=(3 4 5 6 7 8)
 
 FEATURE_ARGS=()
 PRIMUS_TURBO_ENABLED="False"
@@ -132,6 +133,9 @@ for feature in "${MoE_Features[@]}"; do
     7)
         FEATURE_ARGS+=("--manual_gc" "True")
         FEATURE_ARGS+=("--manual_gc_interval" "1")
+        ;;
+    8)
+        export USING_UEP=1
         ;;
     *) ;;
     esac
