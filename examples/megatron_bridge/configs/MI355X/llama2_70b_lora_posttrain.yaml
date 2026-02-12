@@ -26,10 +26,12 @@ modules:
       # Use pretrained_checkpoint to load base model weights without LoRA adapters
       pretrained_checkpoint: /data/megatron_checkpoints/Llama-2-70b-hf/iter_0000000
       peft: lora
-      packed_sequence: false
-      # packed_train_data_path: /data/train.npy
-      # packed_val_data_path: /data/validation.npy
-      # packed_metadata_path: /data/packed_metadata.jsonl
+      dataset_type: mlperf_dataset # can be squad or mlperf_dataset
+      # for mlperf_dataset, you need to set the following parameters
+      packed_sequence: true
+      packed_train_data_path: /data/train.npy
+      packed_val_data_path: /data/validation.npy
+      packed_metadata_path: /data/packed_metadata.jsonl
 
       # Training configuration
       train_iters: 1000

@@ -172,6 +172,7 @@ class Llama2CustomKwargs(TypedDict, total=False):
     packed_train_data_path: str | None
     packed_val_data_path: str | None
     packed_metadata_path: str | None
+    dataset_type: str
 
 
 def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigContainer:
@@ -242,6 +243,7 @@ def _llama2_lora(
     packed_train_data_path: str | None = None,
     packed_val_data_path: str | None = None,
     packed_metadata_path: str | None = None,
+    dataset_type: str = "squad",
     adam_beta1: float = 0.9,
     adam_beta2: float = 0.95,
     adam_eps: float = 1e-5,
@@ -298,6 +300,7 @@ def _llama2_lora(
         packed_train_data_path (str | None): Path to packed training data.
         packed_val_data_path (str | None): Path to packed validation data.
         packed_metadata_path (str | None): Path to packed metadata.
+        dataset_type (str): Dataset type to use. Either "squad" (default) or "mlperf_dataset".
 
     Returns:
         ConfigContainer: Configuration for pre-training.
@@ -357,24 +360,37 @@ def _llama2_lora(
         target_modules=["linear_qkv", "linear_proj"],
     )
 
-    # Packed sequence configuration
-    # if packed_sequence:
-    #     packed_sequence_specs = PackedSequenceSpecs(
-    #         packed_sequence_size=seq_length,  # Must be > 0 to use packed files
-    #         tokenizer_model_name=hf_path,
-    #         packed_train_data_path=packed_train_data_path or "/data/train.npy",
-    #         packed_val_data_path=packed_val_data_path or "/data/validation.npy",
-    #         packed_metadata_path=packed_metadata_path or "/data/packed_metadata.jsonl",  # Metadata for packed sequences
-    #     )
-    # else:
-    #     packed_sequence_specs = None
+    # Dataset configuration - switch between squad and mlperf_dataset
+    if dataset_type == "squad":
+        dataset_cfg = default_squad_config(seq_length, packed_sequence)
+    elif dataset_type == "mlperf_dataset":
+        if packed_sequence:
+            packed_sequence_specs = PackedSequenceSpecs(
+                packed_sequence_size=seq_length,
+                tokenizer_model_name=hf_path,
+                packed_train_data_path=packed_train_data_path or "/data/train.npy",
+                packed_val_data_path=packed_val_data_path or "/data/validation.npy",
+                packed_metadata_path=packed_metadata_path or "/data/packed_metadata.jsonl",
+            )
+        else:
+            packed_sequence_specs = None
+        dataset_cfg = FinetuningDatasetConfig(
+            dataset_root="/data",
+            seq_length=seq_length,
+            seed=1234,
+            packed_sequence_specs=packed_sequence_specs,
+            data_sharding=True,
+            dataloader_type="batch",
+            num_workers=1,
+        )
+    else:
+        raise ValueError(f"Unknown dataset_type: {dataset_type!r}. Expected 'squad' or 'mlperf_dataset'.")
 
-    dataset_cfg=default_squad_config(seq_length, packed_sequence)
     dataset_cfg.num_workers = 0
-    dataset_cfg.memmap_workers = 1
-    dataset_cfg.pin_memory = False
+    dataset_cfg.memmap_workers = 1 # needs to be 1>0
+    dataset_cfg.pin_memory = True
     dataset_cfg.persistent_workers = False
-    dataset_cfg.dataloader_type = "single"
+    dataset_cfg.dataloader_type = "batch"
 
     # Config Container
     cfg = ConfigContainer(
@@ -403,16 +419,6 @@ def _llama2_lora(
             keep_fp8_transpose_cache=False,
         ),
         dataset=dataset_cfg,
-        # dataset=FinetuningDatasetConfig(
-        #     dataset_root="/data",  # Point to your .npy files directory
-        #     seq_length=seq_length,
-        #     seed=1234,
-        #     packed_sequence_specs=packed_sequence_specs,
-        #     # Dataloader config parameters
-        #     data_sharding=True,
-        #     dataloader_type="batch",  # "batch" is recommended for fine-tuning
-        #     num_workers=1,
-        # ),
         logger=LoggerConfig(
             log_interval=10,
             tensorboard_dir=tensorboard_dir,
