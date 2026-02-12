@@ -1,0 +1,51 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3.1_405B-pretrain}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: maxtext
+    config: pre_trainer.yaml
+
+    # model to run
+    model: llama3.1_405B.yaml
+    overrides:
+      run_name: "llama3.1_405b_training"
+      base_output_directory: "./output"
+      steps: 50
+      log_period: 10
+      profiler: ""
+
+      # data
+      dataset_type: "synthetic"
+      hf_access_token: ${HF_TOKEN:""}
+
+      # checkpoint
+      enable_checkpointing: false
+      async_checkpointing: false
+
+      # inter-node parallelism strategy
+      dcn_data_parallelism: 1
+      dcn_fsdp_parallelism: -1
+      dcn_pipeline_parallelism: 1
+      dcn_tensor_parallelism: 1
+      dcn_sequence_parallelism: 1
+
+      # intra-node parallelism strategy
+      ici_fsdp_parallelism: -1
+      ici_data_parallelism: 1
+      ici_sequence_parallelism: 1
+      ici_tensor_parallelism: 1
+      ici_pipeline_parallelism: 1
+
+      remat_policy: 'full'
+      optimizer_memory_host_offload: False
+      param_scan_axis: 1
+      megablox: False
+
+      use_iota_embed: True
+      scan_layers: True
+
+      max_target_length: 8192
+      per_device_batch_size: 5
