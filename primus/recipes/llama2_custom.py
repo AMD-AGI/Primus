@@ -305,12 +305,14 @@ def _llama2_lora(
     base_output_dir = dir if dir is not None else os.path.join(os.getcwd(), "nemo_experiments")
     run_output_dir = os.path.join(base_output_dir, name)
     tensorboard_dir = os.path.join(run_output_dir, "tb_logs")
+    from transformers import AutoConfig
 
-    bridge = AutoBridge.from_hf_pretrained(hf_path)
-    model_cfg = bridge.to_megatron_provider(load_weights=True) #GPTProvider
+    config = AutoConfig.from_pretrained("/data/huggingface/hub/models--meta-llama--Llama-2-70b-hf/snapshots/3aba440b59558f995867ba6e1f58f21d0336b5bb/")
+    bridge = AutoBridge.from_hf_config(config)
+    model_cfg = bridge.to_megatron_provider(load_weights=False) #GPTProvider
     model_cfg.tensor_model_parallel_size = tensor_model_parallel_size
     model_cfg.pipeline_model_parallel_size = pipeline_model_parallel_size
-    model_cfg.pipeline_dtype = pipeline_dtype
+    model_cfg.pipeline_dtype = None
     model_cfg.virtual_pipeline_model_parallel_size = virtual_pipeline_model_parallel_size
     model_cfg.context_parallel_size = context_parallel_size
     model_cfg.sequence_parallel = sequence_parallel
@@ -367,6 +369,13 @@ def _llama2_lora(
     # else:
     #     packed_sequence_specs = None
 
+    dataset_cfg=default_squad_config(seq_length, packed_sequence)
+    dataset_cfg.num_workers = 0
+    dataset_cfg.memmap_workers = 1
+    dataset_cfg.pin_memory = False
+    dataset_cfg.persistent_workers = False
+    dataset_cfg.dataloader_type = "single"
+
     # Config Container
     cfg = ConfigContainer(
         model=model_cfg,
@@ -393,7 +402,7 @@ def _llama2_lora(
             use_megatron_fsdp=False,
             keep_fp8_transpose_cache=False,
         ),
-        dataset=default_squad_config(seq_length, packed_sequence),
+        dataset=dataset_cfg,
         # dataset=FinetuningDatasetConfig(
         #     dataset_root="/data",  # Point to your .npy files directory
         #     seq_length=seq_length,
