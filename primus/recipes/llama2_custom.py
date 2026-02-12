@@ -49,7 +49,6 @@ common_utils.warn_rank_last = log_rank_last
 
 from megatron.bridge import AutoBridge
 from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
-from megatron.bridge.recipes.utils.finetune_utils import default_squad_config
 from megatron.bridge.peft.base import PEFT
 from megatron.bridge.peft.lora import LoRA
 from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
@@ -358,23 +357,28 @@ def _llama2_lora(
     )
 
     # Packed sequence configuration
-    # if packed_sequence:
-    #     packed_sequence_specs = PackedSequenceSpecs(
-    #         packed_sequence_size=seq_length,  # Must be > 0 to use packed files
-    #         tokenizer_model_name=hf_path,
-    #         packed_train_data_path=packed_train_data_path or "/data/train.npy",
-    #         packed_val_data_path=packed_val_data_path or "/data/validation.npy",
-    #         packed_metadata_path=packed_metadata_path or "/data/packed_metadata.jsonl",  # Metadata for packed sequences
-    #     )
-    # else:
-    #     packed_sequence_specs = None
+    if packed_sequence:
+        packed_sequence_specs = PackedSequenceSpecs(
+            packed_sequence_size=seq_length,  # Must be > 0 to use packed files
+            tokenizer_model_name=hf_path,
+            packed_train_data_path=packed_train_data_path or "/data/train.npy",
+            packed_val_data_path=packed_val_data_path or "/data/validation.npy",
+            packed_metadata_path=packed_metadata_path or "/data/packed_metadata.jsonl",  # Metadata for packed sequences
+        )
+    else:
+        packed_sequence_specs = None
 
-    dataset_cfg=default_squad_config(seq_length, packed_sequence)
-    dataset_cfg.num_workers = 0
-    dataset_cfg.memmap_workers = 1
-    dataset_cfg.pin_memory = False
-    dataset_cfg.persistent_workers = False
-    dataset_cfg.dataloader_type = "single"
+    dataset_cfg=FinetuningDatasetConfig(
+        dataset_root="/data",  # Point to your .npy files directory
+        seq_length=seq_length,
+        seed=1234,
+        packed_sequence_specs=packed_sequence_specs,
+        dataloader_type="single",  # "batch" is recommended for fine-tuning
+        num_workers=0,
+        memmap_workers=1,
+        pin_memory=False,
+        persistent_workers=False,
+    )
 
     # Config Container
     cfg = ConfigContainer(
@@ -403,16 +407,6 @@ def _llama2_lora(
             keep_fp8_transpose_cache=False,
         ),
         dataset=dataset_cfg,
-        # dataset=FinetuningDatasetConfig(
-        #     dataset_root="/data",  # Point to your .npy files directory
-        #     seq_length=seq_length,
-        #     seed=1234,
-        #     packed_sequence_specs=packed_sequence_specs,
-        #     # Dataloader config parameters
-        #     data_sharding=True,
-        #     dataloader_type="batch",  # "batch" is recommended for fine-tuning
-        #     num_workers=1,
-        # ),
         logger=LoggerConfig(
             log_interval=10,
             tensorboard_dir=tensorboard_dir,
