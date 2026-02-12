@@ -107,6 +107,8 @@ from megatron.bridge.training.train import (
     _maybe_register_fsdp_buffers,
 )
 
+MLPERF_TARGET_LOSS = 0.925
+
 @register
 def bf16_with_fp8_hybrid() -> MixedPrecisionConfig:
     """Create a MixedPrecisionConfig for mixed precision training using BF16 with MXFP8.
@@ -467,7 +469,7 @@ def evaluate_and_print_results_custom(
     write_to_tensorboard: bool = True,
     process_non_loss_data_func: Optional[Callable] = None,
     non_loss_data_func: Optional[Callable] = None,
-) -> None:
+) -> bool:
     """Helper function to evaluate and dump results on screen.
 
     Args:
@@ -483,6 +485,7 @@ def evaluate_and_print_results_custom(
         non_loss_data_func (Optional[Callable], optional): Function to compute non-loss data. Defaults to None.
     """
     log_rank_0(f"Evaluating and printing results at {prefix}")
+    should_exit = False
     def is_last_rank():
         return torch.distributed.get_rank() == (torch.distributed.get_world_size() - 1)
     import math
@@ -493,11 +496,9 @@ def evaluate_and_print_results_custom(
 
     wandb_writer = state.wandb_logger
 
-    log_rank_0(f"Calling eval.evaluate")
     total_loss_dict, collected_non_loss_data, timelimit = eval.evaluate(
         state, forward_step_func, data_iterator, model, process_non_loss_data_func, config, verbose, non_loss_data_func
     )
-    log_rank_0(f"Evaluation completed")
 
     # Timelimit hit during evaluation
     if timelimit:
@@ -532,6 +533,10 @@ def evaluate_and_print_results_custom(
     log_rank_last("-" * length)
     log_rank_last(string)
     log_rank_last("-" * length)
+    if total_loss_dict['lm loss'] < MLPERF_TARGET_LOSS:
+        should_exit = True
+        log_rank_0(f"Validation loss is less than {MLPERF_TARGET_LOSS}, exiting training")
+    return should_exit
 
 eval.evaluate_and_print_results = evaluate_and_print_results_custom
 
@@ -978,7 +983,7 @@ def megatron_bridge_train_override(
                 gc.collect()
             prefix = f"iteration {global_state.train_state.step}"
             timers("eval-time", log_level=0).start(barrier=True)
-            evaluate_and_print_results_custom(
+            should_exit = evaluate_and_print_results_custom(
                 global_state,
                 prefix,
                 forward_step_func,
@@ -1031,17 +1036,6 @@ def megatron_bridge_train_override(
             config.train.manual_gc,
             config.train.manual_gc_interval,
             global_state.train_state.step,
-        )
-
-        # Checkpoint and decide whether to exit.
-        should_exit = checkpoint_and_decide_exit(
-            global_state,
-            model,
-            optimizer,
-            scheduler,
-            num_floating_point_operations_so_far,
-            checkpointing_context,
-            train_data_iterator,
         )
         if should_exit:
             break
