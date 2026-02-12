@@ -752,7 +752,7 @@ def megatron_bridge_train_override(
         verbose=False,
         process_non_loss_data_func=process_non_loss_data_func,
         non_loss_data_func=non_loss_data_func,
-        num_warmup_iters=5,
+        num_warmup_iters=1,
     )
 
     start_iteration = global_state.train_state.step
