@@ -583,6 +583,13 @@ def megatron_bridge_train_override(
         This is an experimental API and is subject to change in backwards
         incompatible ways without notice.
     """
+
+    # import ctypes
+    # import gc
+    # libc = ctypes.CDLL("libc.so.6")
+    # gc.collect()
+    # libc.malloc_trim(0)
+
     config: ConfigContainer = global_state.cfg
     model_config = get_model_config(model[0])
     train_config = config.train
@@ -865,18 +872,6 @@ def megatron_bridge_train_override(
 
         if config.logger.log_throughput_to_tensorboard:
             history_wct.append(time.time() - global_state.start_time)
-
-        if should_checkpoint:
-            save_checkpoint_and_time(
-                global_state,
-                model,
-                optimizer,
-                scheduler,
-                num_floating_point_operations_so_far,
-                checkpointing_context,
-                train_data_iterator=train_data_iterator,
-                non_persistent_ckpt=False,  # TODO: implement non-persistent checkpointing
-            )
         if should_exit:
             break
 
