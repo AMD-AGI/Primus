@@ -52,7 +52,7 @@ modules:
       expert_model_parallel_size: 1
       overlap_grad_reduce: true
       overlap_param_gather: true
-      gradient_accumulation_fusion: true
+      gradient_accumulation_fusion: false
 
       # data
       mock_data: true
