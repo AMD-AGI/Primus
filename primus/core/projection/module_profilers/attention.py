@@ -19,11 +19,25 @@ class AttentionProfiler(BaseModuleProfiler):
         self.module = None  # Will be set during benchmarking
         self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
         self._cache_key = None  # Cache key (batch_size, seq_len)
+        self._gemm_backend = None  # Optional: GEMM simulation backend
+        self._sdpa_backend = None  # Optional: SDPA simulation backend
 
     def set_module(self, module):
         """Set the actual attention module for benchmarking."""
         self.module = module
         # Invalidate cache when module changes
+        self._cached_results = None
+        self._cache_key = None
+
+    def set_gemm_backend(self, backend):
+        """Set a GEMM simulation backend for attention linear projections."""
+        self._gemm_backend = backend
+        self._cached_results = None
+        self._cache_key = None
+
+    def set_sdpa_backend(self, backend):
+        """Set an SDPA simulation backend for attention computation."""
+        self._sdpa_backend = backend
         self._cached_results = None
         self._cache_key = None
 
@@ -131,23 +145,76 @@ class AttentionProfiler(BaseModuleProfiler):
 
         return tokens_per_rank * (activation_width + ln_width) * bytes_per_value
 
+    def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+        """Get simulated results from GEMM + SDPA simulation backends."""
+        args = self.config.model_config
+        mp = self.config.model_parallel_config
+        tp_size = max(1, mp.tensor_model_parallel_size)
+        cp_size = max(1, mp.context_model_parallel_size)
+
+        batch_tokens = batch_size * seq_len // tp_size // cp_size
+        slen_per_cp = seq_len // cp_size
+
+        fwd_time = 0.0
+        bwd_time = 0.0
+
+        # 1. Simulate linear projection GEMMs (Q, K, V, O) using GEMM backend
+        if self._gemm_backend is not None:
+            num_query_groups = (
+                args.num_query_groups
+                if args.group_query_attention and args.num_query_groups
+                else args.num_attention_heads
+            )
+            gemm_result = self._gemm_backend.simulate_attention_gemms(
+                batch_tokens=batch_tokens,
+                hidden_size=args.hidden_size,
+                num_attention_heads=args.num_attention_heads,
+                kv_channels=args.kv_channels,
+                num_query_groups=num_query_groups,
+                dtype="bf16",
+            )
+            fwd_time += gemm_result.forward_time_ms
+            bwd_time += gemm_result.backward_time_ms
+
+        # 2. Simulate SDPA core computation using SDPA backend
+        if self._sdpa_backend is not None:
+            heads_per_rank = max(1, args.num_attention_heads // tp_size)
+            sdpa_result = self._sdpa_backend.simulate_sdpa(
+                batch_size=batch_size,
+                num_heads=heads_per_rank,
+                seq_len=slen_per_cp,
+                head_dim=args.kv_channels,
+                causal=True,
+                dtype="bf16",
+            )
+            fwd_time += sdpa_result.forward_time_ms
+            bwd_time += sdpa_result.backward_time_ms
+
+        activation_memory = self.estimated_activation_memory(batch_size, seq_len)
+        return (fwd_time, bwd_time, activation_memory)
+
     def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
 
         if self._cached_results is None or self._cache_key != cache_key:
-            # Context parallel / Sequence parallel adjustment
-            cp_size = self.config.model_parallel_config.context_model_parallel_size
-            # Effective sequence length per rank if CP is used
-            slen_per_cp = seq_len // cp_size
+            if self._gemm_backend is not None or self._sdpa_backend is not None:
+                # Use simulation mode
+                self._cached_results = self._get_simulated_results(batch_size, seq_len)
+            else:
+                # Use actual GPU benchmarking
+                # Context parallel / Sequence parallel adjustment
+                cp_size = self.config.model_parallel_config.context_model_parallel_size
+                # Effective sequence length per rank if CP is used
+                slen_per_cp = seq_len // cp_size
 
-            self._cached_results = benchmark_layer(
-                self.module,
-                [
-                    (seq_len, batch_size, self.config.model_config.hidden_size),
-                    ((1, 1, slen_per_cp, seq_len), torch.bool),
-                ],
-            )
+                self._cached_results = benchmark_layer(
+                    self.module,
+                    [
+                        (seq_len, batch_size, self.config.model_config.hidden_size),
+                        ((1, 1, slen_per_cp, seq_len), torch.bool),
+                    ],
+                )
             self._cache_key = cache_key
         return self._cached_results
 

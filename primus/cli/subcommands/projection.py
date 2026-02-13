@@ -14,9 +14,13 @@ def run(args, overrides):
 
         launch_projection_from_cli(args, overrides)
     elif args.suite == "performance":
-        from primus.pretrain import setup_backend_path
+        profiling_mode = getattr(args, "profiling_mode", "benchmark")
 
-        setup_backend_path(framework="megatron", verbose=True)
+        if profiling_mode != "simulate":
+            # Benchmark or "both" modes need the Megatron backend
+            from primus.pretrain import setup_backend_path
+
+            setup_backend_path(framework="megatron", verbose=True)
 
         from primus.core.projection.performance_projection import (
             launch_projection_from_cli,
@@ -90,6 +94,41 @@ def register_subcommand(subparsers):
         help=(
             "Path to YAML file with hardware configuration for collective communication modeling. "
             "If not provided, uses default cluster parameters.\n\n"
+        ),
+    )
+    performance.add_argument(
+        "--profiling-mode",
+        type=str,
+        required=False,
+        default="benchmark",
+        choices=["benchmark", "simulate", "both"],
+        help=(
+            "Profiling mode for layer timing:\n"
+            "  benchmark  - Run actual GPU benchmarks (default, requires GPU)\n"
+            "  simulate   - Use simulation backends (origami for GEMM,\n"
+            "               analytical model for SDPA). No GPU required.\n"
+            "  both       - Run both benchmark and simulation, report side-by-side\n"
+        ),
+    )
+    performance.add_argument(
+        "--gemm-backend",
+        type=str,
+        required=False,
+        default=None,
+        choices=["origami"],
+        help=(
+            "GEMM simulation backend (only used when --profiling-mode is 'simulate' or 'both').\n"
+            "  origami  - Open-source GEMM performance model (default)\n"
+        ),
+    )
+    performance.add_argument(
+        "--gpu-arch",
+        type=str,
+        required=False,
+        default=None,
+        help=(
+            "Target GPU architecture for simulation (e.g. 'mi300x', 'gfx942', 'mi355x', 'gfx950').\n"
+            "If not specified, auto-detected or uses PRIMUS_GPU_ARCH env var.\n"
         ),
     )
 
