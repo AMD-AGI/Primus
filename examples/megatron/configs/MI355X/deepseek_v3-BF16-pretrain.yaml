@@ -71,6 +71,19 @@ modules:
       ckpt_format: torch
       eval_iters: 0
 
+      # deepep
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+
+      # 64 or 80 for ep8, 32 for ep16-64 is best practice
+      turbo_deepep_num_cu: 64
+      turbo_deepep_use_comm_stream: false
+
+      # sync-free moe support stage 1-2, 0 means not use sync-free moe
+      # stage 2 is recommended for better performance
+      turbo_sync_free_moe_stage: 1
+
       # Cross entropy flags
-      # cross_entropy_fusion_impl: "te"
-      # cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
