@@ -373,7 +373,9 @@ def _llama2_lora(
         weight_decay=weight_decay,
         max_lr=lr,
         min_lr=min_lr,
+        clip_grad=0.3 # TODO: make this a param
     )
+    opt_config.use_distributed_optimizer=False # Only for singe node
 
     peft_config = LoRA(
         dim=16,
