@@ -256,7 +256,7 @@ def _llama2_lora(
     global_batch_size: int = 512,
     micro_batch_size: int = 1,
     seq_length: int = 4096,
-    lr: float = 3e-4,
+    lr: float = 4e-4,
     min_lr: float = 3e-5,
     lr_warmup_iters: int = 2000,
     lr_decay_iters: Optional[int] = None,

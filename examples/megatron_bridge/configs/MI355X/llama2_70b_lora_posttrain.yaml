@@ -48,7 +48,7 @@ modules:
       adam_eps: 1.0e-8
       weight_decay: 0.0001
       min_lr: 0.0
-      finetune_lr: 1.0e-4
+      lr: 4.0e-4
       lr_warmup_iters: 0
       lr_decay_iters: null
 
