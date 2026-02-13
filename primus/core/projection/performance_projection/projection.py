@@ -23,10 +23,16 @@ from primus.core.projection.module_profilers.language_model import (
 from primus.core.projection.performance_projection.simulator import (
     SchedulerSimulationRunner,
 )
+from primus.core.projection.simulation_backends.factory import (
+    get_gemm_simulation_backend,
+    get_sdpa_simulation_backend,
+)
 from primus.core.projection.training_config import (
     convert_primus_config_to_projection_config,
 )
-from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
+# NOTE: MegatronPretrainTrainer is imported lazily inside _run_layer_benchmark()
+# to avoid pulling in the megatron dependency when running in pure simulation mode
+# (--profiling-mode simulate).
 
 _MAX_EXPERT_PARALLEL_SIZE = 8
 _BYTES_PER_GB = 1024**3
@@ -199,6 +205,10 @@ def calculate_collective_communication_time(
     # FSDP shards weights across DP ranks. Each layer needs:
     #   - Forward: All-gather to reconstruct full weights
     #   - Backward: Reduce-scatter to distribute gradients back to shards
+    #
+    # Recompute correction: with recompute_granularity="full", every backward
+    # layer recomputes its forward pass, requiring a SECOND AllGather per
+    # layer to re-fetch the sharded weights.
     # Note: use_fsdp and mp_config already defined above
 
     if use_fsdp and dp > 1:
@@ -214,22 +224,36 @@ def calculate_collective_communication_time(
 
         # All-gather: each rank sends its shard (1/DP), receives full weights
         # Total data moved = weight_size * (DP-1)/DP per rank
-        ag_time_per_layer = cm.allgather(coll_args, weight_size_per_layer, dp, groups=["dp"])
+        ag_time_per_layer_us = cm.allgather(coll_args, weight_size_per_layer, dp, groups=["dp"])
 
         # Reduce-scatter: each rank sends full gradients, receives its shard
-        # Gradients are in FP32 for optimizer (4 bytes), but reduce-scatter often uses BF16
         grad_size_per_layer = params_per_dense_layer * 2  # BF16 gradients for communication
-        rs_time_per_layer = cm.reduce_scatter(coll_args, grad_size_per_layer, dp, groups=["dp"])
+        rs_time_per_layer_us = cm.reduce_scatter(coll_args, grad_size_per_layer, dp, groups=["dp"])
+
+        # --- Recompute correction ---
+        # With recompute_granularity="full", during the backward pass each layer
+        # re-runs its forward pass.  This means the weights must be AllGathered
+        # AGAIN for each recomputed layer (the first AG result was freed after
+        # the initial forward).  The ReduceScatter count is unchanged (1 per
+        # layer backward).
+        recompute_gran = getattr(mp_config, "recompute_granularity", None)
+        recomp_n_layers = getattr(mp_config, "recompute_num_layers", 0) or 0
+        ag_multiplier = 1  # default: AG once per layer (forward)
+        if recompute_gran == "full" and recomp_n_layers > 0:
+            # Each recomputed layer needs a second AG in backward
+            recomp_ratio = min(recomp_n_layers, num_layers) / num_layers
+            ag_multiplier = 1 + recomp_ratio  # e.g. 2.0 when all layers recomputed
 
         # Calculate total FSDP time for all layers
-        total_fsdp_ag_fwd = (ag_time_per_layer * num_layers) / 1000  # ms
-        total_fsdp_rs_bwd = (rs_time_per_layer * num_layers) / 1000  # ms
+        total_fsdp_ag_fwd = (ag_time_per_layer_us * num_layers * ag_multiplier) / 1000  # ms
+        total_fsdp_rs_bwd = (rs_time_per_layer_us * num_layers) / 1000  # ms
 
         breakdown["fsdp_allgather_fwd"] = total_fsdp_ag_fwd
         breakdown["fsdp_reducescatter_bwd"] = total_fsdp_rs_bwd
         message_info["fsdp_weight_size_per_layer_mb"] = weight_size_per_layer / (1024 * 1024)
-        message_info["fsdp_ag_per_layer_ms"] = ag_time_per_layer / 1000
-        message_info["fsdp_rs_per_layer_ms"] = rs_time_per_layer / 1000
+        message_info["fsdp_ag_per_layer_ms"] = ag_time_per_layer_us / 1000
+        message_info["fsdp_rs_per_layer_ms"] = rs_time_per_layer_us / 1000
+        message_info["fsdp_ag_multiplier"] = ag_multiplier
         message_info["fsdp_enabled"] = True
     else:
         breakdown["fsdp_allgather_fwd"] = 0.0
@@ -1177,6 +1201,8 @@ def _report_simulation_results(sim_results, training_config):
 
 
 def _run_layer_benchmark(primus_config, unknown_overrides):
+    from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
+
     module_config = primus_config.get_module_config("pre_trainer")
     _limit_layers_for_projection(module_config)
     rescale_info = _rescale_expert_parallelism(module_config)
@@ -1242,6 +1268,68 @@ def _run_layer_benchmark(primus_config, unknown_overrides):
 
     profiling_results = model_profiler.run_layer_benchmark(
         model=trainer.model,
+        batch_size=batch_size,
+        seq_len=seq_len,
+    )
+    return profiling_results
+
+
+def _run_layer_simulation(primus_config, args):
+    """
+    Run layer simulation using GEMM + SDPA simulation backends (no GPU required).
+
+    This mirrors :func:`_run_layer_benchmark` but replaces actual GPU kernel
+    benchmarks with analytical / model-based simulation.  It does *not*
+    instantiate a trainer or model – only the profiler tree is built from the
+    ``TrainingConfig``.
+
+    Args:
+        primus_config: Primus configuration (will be mutated – layer counts
+            are reduced for consistency with the benchmark flow).
+        args: CLI arguments (``--gemm-backend``, ``--gpu-arch``).
+
+    Returns:
+        dict: Profiling results in the same format as ``_run_layer_benchmark``.
+    """
+    module_config = primus_config.get_module_config("pre_trainer")
+    _limit_layers_for_projection(module_config)
+    _rescale_expert_parallelism(module_config)
+    training_config = convert_primus_config_to_projection_config(primus_config)
+
+    is_rank_0 = int(os.getenv("RANK", "0")) == 0
+
+    # ---- Create simulation backends ----
+    gemm_backend_name = getattr(args, "gemm_backend", None)
+    gpu_arch = getattr(args, "gpu_arch", None)
+
+    gemm_backend = get_gemm_simulation_backend(backend_name=gemm_backend_name, gpu_arch=gpu_arch)
+    sdpa_backend = get_sdpa_simulation_backend(gpu_arch=gpu_arch)
+
+    # ---- Build profiler tree (no model needed) ----
+    if is_rank_0:
+        print("[Primus:Performance Projection] Building simulation profiler...")
+    model_profiler_spec = get_language_model_profiler_spec(training_config)
+    model_profiler = build_profiler(model_profiler_spec)
+
+    # Wire simulation backends into the entire profiler hierarchy
+    model_profiler.set_simulation_backends(gemm_backend, sdpa_backend)
+
+    seq_len = training_config.runtime_config.sequence_length
+    batch_size = training_config.runtime_config.micro_batch_size
+
+    if is_rank_0:
+        print("[Primus:Performance Projection] Simulating with:")
+        print(f"  Batch Size: {batch_size}")
+        print(f"  Sequence Length: {seq_len}")
+        print(f"  GEMM backend: {gemm_backend.name()}")
+        print(f"  SDPA backend: {sdpa_backend.name()}")
+        print("" + "=" * 100)
+        print("[Primus:Performance Projection] Starting layer simulation...")
+        print("=" * 100)
+
+    # Run simulation (model=None – no GPU required)
+    profiling_results = model_profiler.run_layer_benchmark(
+        model=None,
         batch_size=batch_size,
         seq_len=seq_len,
     )
@@ -1768,7 +1856,48 @@ def launch_projection_from_cli(args, overrides):
             "benchmark_ep"
         ]
 
-    profiling_results = _run_layer_benchmark(primus_config, unknown_overrides)
+    # Determine profiling mode
+    profiling_mode = getattr(args, "profiling_mode", "benchmark")
+
+    if profiling_mode == "simulate":
+        # Pure simulation – no GPU / trainer required
+        profiling_results = _run_layer_simulation(primus_config, args)
+    elif profiling_mode == "both":
+        # Run both benchmark and simulation, keep benchmark results for
+        # downstream pipeline simulation / multinode projection, but print
+        # a side-by-side comparison.
+        sim_results = _run_layer_simulation(copy.deepcopy(primus_config), args)
+        bench_results = _run_layer_benchmark(primus_config, unknown_overrides)
+
+        is_rank_0 = int(os.getenv("RANK", "0")) == 0
+        if is_rank_0:
+            print("\n" + "=" * 100)
+            print("[Primus:Performance Projection] Benchmark vs Simulation Comparison")
+            print("=" * 100)
+            for key in bench_results:
+                if key in ("embedding", "output"):
+                    continue
+                bd = bench_results[key]
+                sd = sim_results.get(key, {})
+                if not isinstance(bd, dict):
+                    continue
+                lt = bd.get("type", key)
+                b_fwd = bd.get("forward_time_ms", 0)
+                b_bwd = bd.get("backward_time_ms", 0)
+                s_fwd = sd.get("forward_time_ms", 0)
+                s_bwd = sd.get("backward_time_ms", 0)
+                fwd_err = ((s_fwd - b_fwd) / b_fwd * 100) if b_fwd else 0
+                bwd_err = ((s_bwd - b_bwd) / b_bwd * 100) if b_bwd else 0
+                print(f"  Layer type: {lt}")
+                print(f"    Forward:  bench={b_fwd:.2f} ms  sim={s_fwd:.2f} ms  (err={fwd_err:+.1f}%)")
+                print(f"    Backward: bench={b_bwd:.2f} ms  sim={s_bwd:.2f} ms  (err={bwd_err:+.1f}%)")
+            print("=" * 100)
+
+        # Use benchmark results for the rest of the pipeline
+        profiling_results = bench_results
+    else:
+        # Default: actual GPU benchmark
+        profiling_results = _run_layer_benchmark(primus_config, unknown_overrides)
 
     # Use original config for projection calculations
     training_config = convert_primus_config_to_projection_config(primus_config_original)

@@ -69,9 +69,30 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
         self.layer_module = None  # Will be set during benchmarking
         self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
         self._cache_key = None  # Cache key (batch_size, seq_len)
+        self._gemm_backend = None  # Optional: GEMM simulation backend
+        self._sdpa_backend = None  # Optional: SDPA simulation backend
 
     def get_sub_profiler(self, name: str):
         return self.sub_profilers.get(name)
+
+    def set_simulation_backends(self, gemm_backend=None, sdpa_backend=None):
+        """Set simulation backends and propagate to sub-profilers."""
+        self._gemm_backend = gemm_backend
+        self._sdpa_backend = sdpa_backend
+        # Propagate to sub-profilers
+        if "self_attention" in self.sub_profilers:
+            attn = self.sub_profilers["self_attention"]
+            if gemm_backend is not None and hasattr(attn, "set_gemm_backend"):
+                attn.set_gemm_backend(gemm_backend)
+            if sdpa_backend is not None and hasattr(attn, "set_sdpa_backend"):
+                attn.set_sdpa_backend(sdpa_backend)
+        if "mlp" in self.sub_profilers:
+            mlp = self.sub_profilers["mlp"]
+            if gemm_backend is not None and hasattr(mlp, "set_gemm_backend"):
+                mlp.set_gemm_backend(gemm_backend)
+        # Invalidate cache
+        self._cached_results = None
+        self._cache_key = None
 
     def set_layer_module(self, layer_module):
         """Set the actual transformer layer module for benchmarking."""
@@ -99,17 +120,32 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
             + self.sub_profilers["residual_add"].estimated_activation_memory(batch_size, seq_len) * 2
         )
 
+    def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+        """Aggregate simulated results from sub-profilers."""
+        attn_fwd = self.sub_profilers["self_attention"].measured_forward_time(batch_size, seq_len)
+        attn_bwd = self.sub_profilers["self_attention"].measured_backward_time(batch_size, seq_len)
+        mlp_fwd = self.sub_profilers["mlp"].measured_forward_time(batch_size, seq_len)
+        mlp_bwd = self.sub_profilers["mlp"].measured_backward_time(batch_size, seq_len)
+        fwd_time = attn_fwd + mlp_fwd
+        bwd_time = attn_bwd + mlp_bwd
+        activation_memory = self.estimated_activation_memory(batch_size, seq_len)
+        return (fwd_time, bwd_time, activation_memory)
+
     def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
-            # Get TransformerConfig from the layer module itself (has fp8 setting)
-            transformer_config = getattr(self.layer_module, "config", None)
-            self._cached_results = benchmark_layer(
-                self.layer_module,
-                [(seq_len, batch_size, self.config.model_config.hidden_size)],
-                transformer_config=transformer_config,
-            )
+            if self._gemm_backend is not None or self._sdpa_backend is not None:
+                # Use simulation mode
+                self._cached_results = self._get_simulated_results(batch_size, seq_len)
+            else:
+                # Get TransformerConfig from the layer module itself (has fp8 setting)
+                transformer_config = getattr(self.layer_module, "config", None)
+                self._cached_results = benchmark_layer(
+                    self.layer_module,
+                    [(seq_len, batch_size, self.config.model_config.hidden_size)],
+                    transformer_config=transformer_config,
+                )
             self._cache_key = cache_key
         return self._cached_results
 
@@ -132,9 +168,30 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         self.layer_module = None  # Will be set during benchmarking
         self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
         self._cache_key = None  # Cache key (batch_size, seq_len)
+        self._gemm_backend = None  # Optional: GEMM simulation backend
+        self._sdpa_backend = None  # Optional: SDPA simulation backend
 
     def get_sub_profiler(self, name: str):
         return self.sub_profilers.get(name)
+
+    def set_simulation_backends(self, gemm_backend=None, sdpa_backend=None):
+        """Set simulation backends and propagate to sub-profilers."""
+        self._gemm_backend = gemm_backend
+        self._sdpa_backend = sdpa_backend
+        # Propagate to sub-profilers
+        if "self_attention" in self.sub_profilers:
+            attn = self.sub_profilers["self_attention"]
+            if gemm_backend is not None and hasattr(attn, "set_gemm_backend"):
+                attn.set_gemm_backend(gemm_backend)
+            if sdpa_backend is not None and hasattr(attn, "set_sdpa_backend"):
+                attn.set_sdpa_backend(sdpa_backend)
+        if "mlp" in self.sub_profilers:
+            mlp = self.sub_profilers["mlp"]
+            if gemm_backend is not None and hasattr(mlp, "set_gemm_backend"):
+                mlp.set_gemm_backend(gemm_backend)
+        # Invalidate cache
+        self._cached_results = None
+        self._cache_key = None
 
     def set_layer_module(self, layer_module):
         """Set the actual transformer layer module for benchmarking."""
@@ -164,17 +221,32 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
             + self.sub_profilers["residual_add"].estimated_activation_memory(batch_size, seq_len) * 2
         )
 
+    def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+        """Aggregate simulated results from sub-profilers."""
+        attn_fwd = self.sub_profilers["self_attention"].measured_forward_time(batch_size, seq_len)
+        attn_bwd = self.sub_profilers["self_attention"].measured_backward_time(batch_size, seq_len)
+        mlp_fwd = self.sub_profilers["mlp"].measured_forward_time(batch_size, seq_len)
+        mlp_bwd = self.sub_profilers["mlp"].measured_backward_time(batch_size, seq_len)
+        fwd_time = attn_fwd + mlp_fwd
+        bwd_time = attn_bwd + mlp_bwd
+        activation_memory = self.estimated_activation_memory(batch_size, seq_len)
+        return (fwd_time, bwd_time, activation_memory)
+
     def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
-            # Get TransformerConfig from the layer module itself (has fp8 setting)
-            transformer_config = getattr(self.layer_module, "config", None)
-            self._cached_results = benchmark_layer(
-                self.layer_module,
-                [(seq_len, batch_size, self.config.model_config.hidden_size)],
-                transformer_config=transformer_config,
-            )
+            if self._gemm_backend is not None or self._sdpa_backend is not None:
+                # Use simulation mode
+                self._cached_results = self._get_simulated_results(batch_size, seq_len)
+            else:
+                # Get TransformerConfig from the layer module itself (has fp8 setting)
+                transformer_config = getattr(self.layer_module, "config", None)
+                self._cached_results = benchmark_layer(
+                    self.layer_module,
+                    [(seq_len, batch_size, self.config.model_config.hidden_size)],
+                    transformer_config=transformer_config,
+                )
             self._cache_key = cache_key
         return self._cached_results
 
