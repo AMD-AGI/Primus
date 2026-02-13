@@ -124,6 +124,30 @@ def bf16_with_fp8_hybrid() -> MixedPrecisionConfig:
     cfg.fp8_param_gather = True
     return cfg
 
+class Timer:
+    def __init__(self, gbs):
+        self.start_time = None
+        self.stop_time = None
+        self.elapsed_time = 0
+        self.samples = 0
+        self.gbs = gbs
+        self.consumed_samples = 0
+
+    def start(self):
+        self.start_time = time.time()
+
+    def stop(self):
+        self.stop_time = time.time()
+        self.samples += self.gbs
+        self.consumed_samples += self.gbs
+        self.elapsed_time += self.stop_time - self.start_time
+
+    def get_throughput(self):
+        throughput = self.samples / self.elapsed_time
+        self.samples = 0
+        self.elapsed_time = 0
+        return throughput
+
 
 class Llama2CustomKwargs(TypedDict, total=False):
     """Typed options accepted by custom Llama2 recipe helper functions."""
@@ -441,8 +465,6 @@ def _llama2_lora(
             replication_factor=0,
             most_recent_k=0,
             finetune=True,
-            load_optim=False,
-            load_rng=False,
         ),
         rng=RNGConfig(seed=1234),
         comm_overlap=comm_overlap_config,
@@ -469,6 +491,7 @@ def evaluate_and_print_results_custom(
     write_to_tensorboard: bool = True,
     process_non_loss_data_func: Optional[Callable] = None,
     non_loss_data_func: Optional[Callable] = None,
+    throughput: float = 0.0, # samples/sec
 ) -> bool:
     """Helper function to evaluate and dump results on screen.
 
@@ -493,13 +516,12 @@ def evaluate_and_print_results_custom(
         writer = state.tensorboard_logger
     else:
         writer = None
-
-    wandb_writer = state.wandb_logger
-
+        
+    eval_start = time.time()
     total_loss_dict, collected_non_loss_data, timelimit = eval.evaluate(
         state, forward_step_func, data_iterator, model, process_non_loss_data_func, config, verbose, non_loss_data_func
     )
-
+    eval_duration = time.time() - eval_start
     # Timelimit hit during evaluation
     if timelimit:
         return
@@ -521,13 +543,14 @@ def evaluate_and_print_results_custom(
                     "{} validation ppl vs samples".format(key), ppl, state.train_state.consumed_train_samples
                 )
 
-        if wandb_writer and is_last_rank():
-            wandb_writer.log({"{} validation".format(key): total_loss_dict[key].item()}, state.train_state.step)
-            if state.cfg.logger.log_validation_ppl_to_tensorboard:
-                wandb_writer.log({"{} validation ppl".format(key): ppl}, state.train_state.step)
-
     if process_non_loss_data_func is not None and writer and is_last_rank():
         process_non_loss_data_func(collected_non_loss_data, state.train_state.step, writer)
+
+    string += "throughput: {:.6E} | ".format(throughput)
+    string += "eval duration: {:.6E} | ".format(eval_duration)
+    if writer:
+        writer.add_scalar("{} throughput samples/sec".format(key), throughput, state.train_state.step)
+        writer.add_scalar("{} throughput samples/sec vs samples".format(key), throughput, state.train_state.consumed_train_samples)
 
     length = len(string) + 1
     log_rank_last("-" * length)
@@ -775,6 +798,10 @@ def megatron_bridge_train_override(
 
     start_iteration = global_state.train_state.step
     log_rank_0(f"Starting training loop at iteration {start_iteration}")
+    
+    dp_size = pg_collection.dp.size()
+    batch_size = dp_size * train_config.micro_batch_size * get_num_microbatches()
+    timer = Timer(batch_size)
 
     # Run training iterations till done.
     while global_state.train_state.step < train_config.train_iters:
@@ -800,10 +827,6 @@ def megatron_bridge_train_override(
         if nvtx_ctx is not None:
             nsys_nvtx_context = nvtx_ctx
 
-        fault_tolerance.on_checkpointing_start(global_state)
-        maybe_finalize_async_save(global_state=global_state, ckpt_cfg=config.checkpoint, blocking=False)
-        fault_tolerance.on_checkpointing_end(global_state=global_state, is_async_finalization=True)
-
         # Update the timeout for all process groups after initialization
         # We update the timeout after the first successful iteration,
         # which takes longer than others usually
@@ -812,49 +835,23 @@ def megatron_bridge_train_override(
             if distributed_timeout_seconds_after_init is not None:
                 update_pg_timeout(timedelta(seconds=distributed_timeout_seconds_after_init))
 
-        # Update number of microbatches first without consistency check to decide if a
-        # checkpoint should be saved. If the number of microbatches is different
-        # from the previous iteration, save a checkpoint. Then run consistency check
-        # to make sure training configuration is still valid.
-        update_num_microbatches(global_state.train_state.consumed_train_samples, consistency_check=False, verbose=True)
-        if get_num_microbatches() != num_microbatches and global_state.train_state.step != 0:
-            assert get_num_microbatches() > num_microbatches, (
-                f"Number of microbatches should be increasing due to batch size rampup; "
-                f"instead going from {num_microbatches} to {get_num_microbatches()}"
-            )
-            if config.checkpoint.save is not None:
-                save_checkpoint_and_time(
-                    global_state,
-                    model,
-                    optimizer,
-                    scheduler,
-                    num_floating_point_operations_so_far,
-                    checkpointing_context,
-                    non_persistent_ckpt=False,  # TODO: implement non-persistent checkpointing
-                    train_data_iterator=train_data_iterator,
-                )
-        num_microbatches = get_num_microbatches()
-        update_num_microbatches(global_state.train_state.consumed_train_samples, consistency_check=True, verbose=True)
-
-        # Completely skip iteration if needed.
-        if _should_skip_and_handle_iteration(global_state, train_data_iterator, pg_collection):
-            continue
 
         # Capture CUDA Graphs after warmup.
-        if (
-            model_config.cuda_graph_impl == "transformer_engine"
-            and cuda_graph_helper is not None
-            and not cuda_graph_helper.graphs_created()
-            and global_state.train_state.step - start_iteration == model_config.cuda_graph_warmup_steps
-        ):
-            if model_config.cuda_graph_warmup_steps > 0 and should_toggle_forward_pre_hook:
-                disable_forward_pre_hook(model, param_sync=False)
-            cuda_graph_helper.create_cudagraphs()
-            if model_config.cuda_graph_warmup_steps > 0 and should_toggle_forward_pre_hook:
-                enable_forward_pre_hook(model)
-                cuda_graph_helper.cuda_graph_set_manual_hooks()
+        # if (
+        #     model_config.cuda_graph_impl == "transformer_engine"
+        #     and cuda_graph_helper is not None
+        #     and not cuda_graph_helper.graphs_created()
+        #     and global_state.train_state.step - start_iteration == model_config.cuda_graph_warmup_steps
+        # ):
+        #     if model_config.cuda_graph_warmup_steps > 0 and should_toggle_forward_pre_hook:
+        #         disable_forward_pre_hook(model, param_sync=False)
+        #     cuda_graph_helper.create_cudagraphs()
+        #     if model_config.cuda_graph_warmup_steps > 0 and should_toggle_forward_pre_hook:
+        #         enable_forward_pre_hook(model)
+        #         cuda_graph_helper.cuda_graph_set_manual_hooks()
 
         # Run training step.
+        timer.start()
         fault_tolerance.on_training_step_start(global_state)
         (
             loss_dict,
@@ -875,8 +872,8 @@ def megatron_bridge_train_override(
             pg_collection,
             forward_backward_func,
         )
-
         fault_tolerance.on_training_step_end(global_state)
+        timer.stop()
 
         # Advance NVIDIA DLFw Inspect step if enabled
         tensor_inspect_step_if_enabled(config.tensor_inspect)
@@ -914,11 +911,9 @@ def megatron_bridge_train_override(
         global_state.train_state.step += 1
 
         # If fsdp_manual_registration is enabled, manually register FSDP communication buffers after one training step.
-        if global_state.train_state.step == start_iteration + 1 and config.ddp.use_megatron_fsdp:
-            _maybe_register_fsdp_buffers(config, model)
+        # if global_state.train_state.step == start_iteration + 1 and config.ddp.use_megatron_fsdp:
+        #     _maybe_register_fsdp_buffers(config, model)
 
-        dp_size = pg_collection.dp.size()
-        batch_size = dp_size * train_config.micro_batch_size * get_num_microbatches()
         global_state.train_state.consumed_train_samples += batch_size
         num_skipped_samples_in_batch = get_current_global_batch_size() - get_current_running_global_batch_size()
         if train_config.decrease_batch_size_if_needed:
@@ -983,6 +978,7 @@ def megatron_bridge_train_override(
                 gc.collect()
             prefix = f"iteration {global_state.train_state.step}"
             timers("eval-time", log_level=0).start(barrier=True)
+            assert timer.consumed_samples == global_state.train_state.consumed_train_samples, "Timer and global_state sample mismatch"
             should_exit = evaluate_and_print_results_custom(
                 global_state,
                 prefix,
@@ -994,6 +990,7 @@ def megatron_bridge_train_override(
                 write_to_tensorboard=True,
                 process_non_loss_data_func=process_non_loss_data_func,
                 non_loss_data_func=non_loss_data_func,
+                throughput=timer.get_throughput(),
             )
             eval_duration += timers("eval-time").elapsed()
             eval_iterations += train_config.eval_iters
