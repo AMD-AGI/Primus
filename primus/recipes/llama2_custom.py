@@ -191,9 +191,9 @@ class Llama2CustomKwargs(TypedDict, total=False):
     adam_beta2: float = 0.99
     adam_eps: float = 1e-8
     weight_decay: float = 0.0001
-    eval_iters: int = 32
+    eval_iters: int = 48
+    clip_grad: float = 0.3
     pretrained_checkpoint: str | None
-    peft: str | PEFT | None
     packed_sequence: bool
     packed_train_data_path: str | None
     packed_val_data_path: str | None
@@ -208,23 +208,20 @@ def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigC
     This is a custom variant that can be modified without changing Megatron-Bridge code.
     See `_llama2_lora` for the full list of parameters.
     """
-    peft_value = user_kwargs.get("peft", "lora")
     recommended_kwargs: Llama2CustomKwargs = {
         "hf_path": "meta-llama/Llama-2-70b-hf",
         "tensor_model_parallel_size": 2,
         "pipeline_model_parallel_size": 1,
-        "train_iters": 1_168_251,
-        "global_batch_size": 512,
+        "train_iters": 1000,
+        "global_batch_size": 8,
         "micro_batch_size": 1,
-        "lr_warmup_iters": 2000,
-        "eval_interval": 2000,
-        "save_interval": 2000,
+        "eval_interval": 48,
+        "eval_iters": 32,
         "adam_beta1": 0.9,
-        "adam_beta2": 0.99,
+        "adam_beta2": 0.999,
         "adam_eps": 1e-8,
         "weight_decay": 0.0001,
-        "eval_iters": 32,
-        "peft": peft_value,
+        "clip_grad": 0.3,
     }
     # Combine defaults with user kwargs; user values take precedence.
     combined_kwargs: Llama2CustomKwargs = {**recommended_kwargs, **user_kwargs}
@@ -235,48 +232,37 @@ def _llama2_lora(
     hf_path: str,
     dir: Optional[str] = None,
     name: str = "default",
-    # Dataset configuration
-    data_paths: Optional[List[str]] = None,
-    data_args_path: Optional[str] = None,
-    train_data_path: Optional[List[str]] = None,
-    valid_data_path: Optional[List[str]] = None,
-    test_data_path: Optional[List[str]] = None,
-    per_split_data_args_path: Optional[str] = None,
-    mock: bool = False,
     # Model configuration
-    tensor_model_parallel_size: int = 2,
+    tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
-    pipeline_dtype: Optional[torch.dtype] = None,
     virtual_pipeline_model_parallel_size: Optional[int] = None,
     context_parallel_size: int = 1,
     sequence_parallel: bool = False,
-    use_megatron_fsdp: bool = False,
     # Training hyperparameters
-    train_iters: int = 1_168_251,
-    global_batch_size: int = 512,
+    train_iters: int = 1000,
+    global_batch_size: int = 8,
     micro_batch_size: int = 1,
-    seq_length: int = 4096,
+    seq_length: int = 8192,
     lr: float = 4e-4,
-    min_lr: float = 3e-5,
-    lr_warmup_iters: int = 2000,
+    min_lr: float = 0.0,
+    lr_warmup_iters: int = 0,
     lr_decay_iters: Optional[int] = None,
-    eval_interval: int = 2000,
-    save_interval: int = 2000,
+    eval_interval: int = 48,
+    eval_iters: int = 48,
     use_null_tokenizer: bool = False,
     pretrained_checkpoint: str | None = None,
-    peft: str | PEFT | None = "lora",
     packed_sequence: bool = False,
     packed_train_data_path: str | None = None,
     packed_val_data_path: str | None = None,
     packed_metadata_path: str | None = None,
-    dataset_type: str = "squad",
+    dataset_type: str = "mlperf_dataset",
     adam_beta1: float = 0.9,
-    adam_beta2: float = 0.95,
-    adam_eps: float = 1e-5,
-    weight_decay: float = 0.1,
-    eval_iters: int = 32,
+    adam_beta2: float = 0.999,
+    adam_eps: float = 1e-8,
+    weight_decay: float = 0.0001,
+    clip_grad: float = 0.3,
     # Precision recipe
-    precision_config: Optional[Union[MixedPrecisionConfig, str]] = "bf16_mixed",
+    precision_config: Optional[Union[MixedPrecisionConfig, str]] = "bf16_with_fp8_hybrid",
     comm_overlap_config: Optional[CommOverlapConfig] = None,
 ) -> ConfigContainer:
     """
@@ -373,7 +359,7 @@ def _llama2_lora(
         weight_decay=weight_decay,
         max_lr=lr,
         min_lr=min_lr,
-        clip_grad=0.3 # TODO: make this a param
+        clip_grad=clip_grad
     )
     opt_config.use_distributed_optimizer=False # Only for singe node
 
