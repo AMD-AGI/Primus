@@ -81,6 +81,13 @@ def calculate_collective_communication_time(
         hardware_config=hardware_config,
     )
 
+    # Check if DeepEP is enabled and pass it to coll_args
+    mp_config = training_config.model_parallel_config
+    moe_enable_deepep = getattr(mp_config, "moe_enable_deepep", False)
+    use_turbo_deepep = getattr(mp_config, "use_turbo_deepep", False)
+    coll_args.moe_enable_deepep = moe_enable_deepep
+    coll_args.use_turbo_deepep = use_turbo_deepep
+
     # Model parameters
     hidden_size = model_config.hidden_size
     num_layers = model_config.num_layers
@@ -115,7 +122,7 @@ def calculate_collective_communication_time(
     message_info = {}
     per_layer_info = []  # Store per-layer communication details
 
-    # Check if FSDP is enabled (needed to determine gradient sync strategy)
+    # Get model parallel config (already retrieved above for DeepEP check)
     mp_config = training_config.model_parallel_config
     # Note: use_torch_fsdp2 = True means actual FSDP (shards weights, uses all-gather/reduce-scatter)
     # use_distributed_optimizer = True means ZeRO-1 style (shards optimizer state only, uses all-reduce)
@@ -299,38 +306,61 @@ def calculate_collective_communication_time(
     else:
         message_info["gradient_allreduce_overlapped"] = False
 
-    # Check if FSDP communication can be overlapped
-    # In FSDP2, prefetch can overlap all-gather with compute of current layer
-    # Reduce-scatter can overlap with forward of next microbatch
-    # However, overlap is NOT 100%:
-    #   - First layer's all-gather cannot overlap (nothing before it)
-    #   - Last layer's reduce-scatter cannot overlap (nothing after it)
-    #   - There's always some exposed communication at boundaries
+    # FSDP overlap model (calibrated against LLaMA3-70B MI300X trace)
+    # ---------------------------------------------------------------
+    # FSDP2 prefetches next layer's AllGather while the current layer
+    # computes, and ReduceScatter runs after backward completes.
+    # Overlap differs significantly between forward and backward:
+    #
+    #   Forward AG:  ~90-95% overlap — prefetch hides AG behind compute
+    #   Backward AG: ~24%    overlap — eager prefetch finishes long before
+    #                                  the compute stream is ready (dependency
+    #                                  chain through previous layer's backward)
+    #   RS:          ~34%    overlap — inherently post-compute, only partially
+    #                                  overlaps with next layer's recompute AG
+    #
+    # These per-phase percentages are largely model-independent for FSDP2
+    # with full recompute; the overall overlap is ~50% for 70B-class models
+    # and ~64% without recompute.
     if use_fsdp and dp > 1:
-        overlap_fsdp = getattr(mp_config, "use_torch_fsdp2", False)  # FSDP2 has better overlap
+        overlap_fsdp = getattr(mp_config, "use_torch_fsdp2", False)
         if overlap_fsdp:
-            # Calculate per-layer times
-            fsdp_ag_per_layer = message_info.get("fsdp_ag_per_layer_ms", 0)
-            fsdp_rs_per_layer = message_info.get("fsdp_rs_per_layer_ms", 0)
+            recompute_gran = getattr(mp_config, "recompute_granularity", None)
+            recomp_n = getattr(mp_config, "recompute_num_layers", 0) or 0
+            has_recompute = recompute_gran == "full" and recomp_n > 0
 
-            # Exposed time: first layer's all-gather + last layer's reduce-scatter
-            # Plus some overhead from imperfect pipelining (~10-20% of remaining)
-            exposed_ag = fsdp_ag_per_layer  # First layer cannot overlap
-            exposed_rs = fsdp_rs_per_layer  # Last layer cannot overlap
-            remaining_ag = breakdown.get("fsdp_allgather_fwd", 0) - exposed_ag
-            remaining_rs = breakdown.get("fsdp_reducescatter_bwd", 0) - exposed_rs
+            total_fsdp_ag = breakdown.get("fsdp_allgather_fwd", 0)
+            total_fsdp_rs = breakdown.get("fsdp_reducescatter_bwd", 0)
 
-            # Assume ~70% overlap efficiency for the rest (conservative for multi-node)
-            overlap_efficiency = 0.7
-            hidden_ag = remaining_ag * overlap_efficiency
-            hidden_rs = remaining_rs * overlap_efficiency
+            if has_recompute:
+                # With full recompute the AG total already includes the 2×
+                # multiplier.  Split into forward AG and backward (recomp) AG.
+                recomp_ratio = min(recomp_n, num_layers) / num_layers
+                ag_multiplier_val = message_info.get("fsdp_ag_multiplier", 1 + recomp_ratio)
+                fwd_ag_total = total_fsdp_ag / ag_multiplier_val
+                bwd_ag_total = total_fsdp_ag - fwd_ag_total
+            else:
+                fwd_ag_total = total_fsdp_ag
+                bwd_ag_total = 0.0
 
-            total_comm_time -= hidden_ag
-            total_comm_time -= hidden_rs
+            # Per-phase overlap percentages (from trace calibration)
+            FWD_AG_OVERLAP = 0.90   # forward AG hidden behind compute
+            BWD_AG_OVERLAP = 0.24   # backward recompute AG (structural limit)
+            RS_OVERLAP     = 0.34   # ReduceScatter (structural limit)
+
+            hidden_fwd_ag = fwd_ag_total * FWD_AG_OVERLAP
+            hidden_bwd_ag = bwd_ag_total * BWD_AG_OVERLAP
+            hidden_rs     = total_fsdp_rs * RS_OVERLAP
+
+            total_hidden = hidden_fwd_ag + hidden_bwd_ag + hidden_rs
+            total_comm_time -= total_hidden
             message_info["fsdp_overlapped"] = True
-            message_info["fsdp_exposed_ms"] = (
-                exposed_ag + exposed_rs + (remaining_ag + remaining_rs) * (1 - overlap_efficiency)
-            )
+            message_info["fsdp_fwd_ag_overlap"] = FWD_AG_OVERLAP
+            message_info["fsdp_bwd_ag_overlap"] = BWD_AG_OVERLAP
+            message_info["fsdp_rs_overlap"] = RS_OVERLAP
+            total_fsdp = total_fsdp_ag + total_fsdp_rs
+            message_info["fsdp_overall_overlap"] = total_hidden / total_fsdp if total_fsdp > 0 else 0
+            message_info["fsdp_exposed_ms"] = total_fsdp - total_hidden
         else:
             message_info["fsdp_overlapped"] = False
 
