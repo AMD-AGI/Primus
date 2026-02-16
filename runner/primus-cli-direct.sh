@@ -334,9 +334,45 @@ mkdir -p "$(dirname "${direct_config[log_file]}")"
 ###############################################################################
 # STEP 5: Install dependencies
 ###############################################################################
+# Detect the backend framework from the experiment YAML (--config in PRIMUS_ARGS)
+# so we can install the correct requirements file:
+#   maxtext -> requirements-jax.txt
+#   others  -> requirements.txt
+_detect_framework() {
+    local cfg_path=""
+    local args=("${primus_args[@]}")
+    for ((i=0; i<${#args[@]}; i++)); do
+        if [[ "${args[$i]}" == "--config" && -n "${args[$((i+1))]:-}" ]]; then
+            cfg_path="${args[$((i+1))]}"
+            break
+        fi
+    done
+    if [[ -z "$cfg_path" || ! -f "$cfg_path" ]]; then
+        echo ""
+        return
+    fi
+    python3 -c "
+import yaml, sys
+try:
+    cfg = yaml.safe_load(open('$cfg_path'))
+    print(cfg.get('modules',{}).get('pre_trainer',{}).get('framework',''))
+except Exception:
+    print('')
+" 2>/dev/null
+}
+
+DETECTED_FRAMEWORK="$(_detect_framework)"
+LOG_INFO_RANK0 "[direct] Detected framework: ${DETECTED_FRAMEWORK:-unknown}"
+
 # Skip pip install in dry-run mode
 if [[ "$DRY_RUN_MODE" != "1" ]]; then
-    pip install -qq -r requirements.txt
+    if [[ "$DETECTED_FRAMEWORK" == "maxtext" ]]; then
+        LOG_INFO_RANK0 "[direct] Installing JAX dependencies (requirements-jax.txt)"
+        pip install -qq -r requirements-jax.txt
+    else
+        LOG_INFO_RANK0 "[direct] Installing PyTorch dependencies (requirements.txt)"
+        pip install -qq -r requirements.txt
+    fi
 fi
 
 ###############################################################################
