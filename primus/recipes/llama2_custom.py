@@ -642,6 +642,7 @@ def megatron_bridge_train_override(
     # Turn on training mode which enables dropout.
     for model_module in model:
         model_module.train()
+        log_rank_0(f"Model module: {model_module}")
 
     # Tracking loss.
     total_loss_dict = {}
