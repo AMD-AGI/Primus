@@ -17,7 +17,9 @@ class AttentionProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
         super().__init__(config, sub_profilers)
         self.module = None  # Will be set during benchmarking
-        self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
+        self._cached_results = (
+            None  # Cache for (forward_time, backward_time, activation_memory)
+        )
         self._cache_key = None  # Cache key (batch_size, seq_len)
         self._gemm_backend = None  # Optional: GEMM simulation backend
         self._sdpa_backend = None  # Optional: SDPA simulation backend
@@ -52,7 +54,9 @@ class AttentionProfiler(BaseModuleProfiler):
         )
 
         # Projection ratio: (kv_channels * n_heads) / hidden_size
-        query_proj_to_hidden = (args.kv_channels * args.num_attention_heads) / args.hidden_size
+        query_proj_to_hidden = (
+            args.kv_channels * args.num_attention_heads
+        ) / args.hidden_size
 
         if args.multi_latent_attention:
             # q_term: either dense or LoRA factored Q with RoPE/Q-norm
@@ -65,14 +69,19 @@ class AttentionProfiler(BaseModuleProfiler):
             else:
                 q_term = args.q_lora_rank * (
                     args.hidden_size
-                    + args.num_attention_heads * (args.qk_head_dim + args.qk_pos_emb_head_dim)
+                    + args.num_attention_heads
+                    * (args.qk_head_dim + args.qk_pos_emb_head_dim)
                     + 1
                 )
             attn = (
                 q_term
                 # kv lora + rope + kv norm
                 + args.kv_lora_rank
-                * (args.hidden_size + args.num_attention_heads * (args.qk_head_dim + args.v_head_dim) + 1)
+                * (
+                    args.hidden_size
+                    + args.num_attention_heads * (args.qk_head_dim + args.v_head_dim)
+                    + 1
+                )
                 # pos emb
                 + args.hidden_size * args.qk_pos_emb_head_dim
                 # out proj
@@ -85,7 +94,10 @@ class AttentionProfiler(BaseModuleProfiler):
             2
             * args.hidden_size
             * args.hidden_size
-            * ((1 + (num_query_groups / args.num_attention_heads)) * query_proj_to_hidden)
+            * (
+                (1 + (num_query_groups / args.num_attention_heads))
+                * query_proj_to_hidden
+            )
         )
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
@@ -130,7 +142,9 @@ class AttentionProfiler(BaseModuleProfiler):
             kv_projection_size = args.kv_channels * _num_query_groups()
 
             # Need to retain Q, K, V as well as the projected context/output.
-            activation_width = query_projection_size + 2 * kv_projection_size + args.hidden_size
+            activation_width = (
+                query_projection_size + 2 * kv_projection_size + args.hidden_size
+            )
 
             if args.qk_layernorm:
                 ln_width += kv_projection_size * 2
@@ -145,7 +159,9 @@ class AttentionProfiler(BaseModuleProfiler):
 
         return tokens_per_rank * (activation_width + ln_width) * bytes_per_value
 
-    def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+    def _get_simulated_results(
+        self, batch_size: int, seq_len: int
+    ) -> tuple[float, float, int]:
         """Get simulated results from GEMM + SDPA simulation backends."""
         args = self.config.model_config
         mp = self.config.model_parallel_config
@@ -165,13 +181,15 @@ class AttentionProfiler(BaseModuleProfiler):
                 if args.group_query_attention and args.num_query_groups
                 else args.num_attention_heads
             )
+            # FP8-hybrid: linear projections (QKV, O) run in FP8
+            gemm_dtype = "fp8" if getattr(args, "fp8", None) else "bf16"
             gemm_result = self._gemm_backend.simulate_attention_gemms(
                 batch_tokens=batch_tokens,
                 hidden_size=args.hidden_size,
                 num_attention_heads=args.num_attention_heads,
                 kv_channels=args.kv_channels,
                 num_query_groups=num_query_groups,
-                dtype="bf16",
+                dtype=gemm_dtype,
             )
             fwd_time += gemm_result.forward_time_ms
             bwd_time += gemm_result.backward_time_ms
@@ -193,7 +211,9 @@ class AttentionProfiler(BaseModuleProfiler):
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 
-    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+    def _get_benchmark_results(
+        self, batch_size: int, seq_len: int
+    ) -> tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
 

@@ -64,7 +64,9 @@ def register_subcommand(subparsers):
     suite_parsers = parser.add_subparsers(dest="suite", required=True)
 
     # ---------- memory ----------
-    memory = suite_parsers.add_parser("memory", help="Memory projection only (per-GPU memory analysis).")
+    memory = suite_parsers.add_parser(
+        "memory", help="Memory projection only (per-GPU memory analysis)."
+    )
     from primus.core.launcher.parser import add_pretrain_parser
 
     add_pretrain_parser(memory)
@@ -129,6 +131,19 @@ def register_subcommand(subparsers):
         help=(
             "Target GPU architecture for simulation (e.g. 'mi300x', 'gfx942', 'mi355x', 'gfx950').\n"
             "If not specified, auto-detected or uses PRIMUS_GPU_ARCH env var.\n"
+        ),
+    )
+    performance.add_argument(
+        "--gpu-clock-mhz",
+        type=int,
+        required=False,
+        default=None,
+        help=(
+            "Override the GPU compute clock frequency in MHz for simulation.\n"
+            "If not specified, uses the default from the hardware profile for the\n"
+            "given --gpu-arch (e.g. 2100 MHz for MI300X, 1200 MHz for MI325X).\n"
+            "Can also be set via the PRIMUS_GPU_CLOCK_MHZ env var.\n"
+            "Example: --gpu-clock-mhz 1500\n"
         ),
     )
 
