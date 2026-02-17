@@ -199,6 +199,7 @@ class Llama2CustomKwargs(TypedDict, total=False):
     packed_val_data_path: str | None
     packed_metadata_path: str | None
     dataset_type: str
+    seed: int
 
 
 def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigContainer:
@@ -264,6 +265,7 @@ def _llama2_lora(
     # Precision recipe
     precision_config: Optional[Union[MixedPrecisionConfig, str]] = "bf16_with_fp8_hybrid",
     comm_overlap_config: Optional[CommOverlapConfig] = None,
+    seed: int = 1234,
 ) -> ConfigContainer:
     """
     Create a custom pre-training configuration for Llama2 models.
@@ -391,7 +393,7 @@ def _llama2_lora(
         dataset_cfg = FinetuningDatasetConfig(
             dataset_root="/data",
             seq_length=seq_length,
-            seed=1234,
+            seed=seed,
             packed_sequence_specs=packed_sequence_specs,
             data_sharding=True,
             dataloader_type="batch",
@@ -454,7 +456,7 @@ def _llama2_lora(
             most_recent_k=0,
             finetune=True,
         ),
-        rng=RNGConfig(seed=1234),
+        rng=RNGConfig(seed=seed),
         comm_overlap=comm_overlap_config,
         mixed_precision=precision_config,
         peft=peft_config,

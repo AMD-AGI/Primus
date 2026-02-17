@@ -63,3 +63,4 @@ modules:
       comm_overlap_config: null
 
       no_fp8_weight_transpose_cache: true
+      seed: ${SEED:1234}
