@@ -43,8 +43,9 @@ from primus.backends.megatron.training.global_vars import get_primus_args
 class PrimusTurboSpecProvider(BackendSpecProvider):
     """A protocol for providing the submodules used in Spec building."""
 
-    def __init__(self):
+    def __init__(self, fallback_to_eager_attn: bool = False):
         self.cfg = get_primus_args()
+        self.fallback_to_eager_attn = fallback_to_eager_attn
 
     def linear(self) -> type:
         """Which linear module TE backend uses"""
