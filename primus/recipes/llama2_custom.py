@@ -370,7 +370,7 @@ def _llama2_lora(
         alpha=32,
         dropout=0.1,
         dropout_position="pre",
-        lora_A_init_method="kaiming",
+        lora_A_init_method="xavier",
         lora_B_init_method="zero",
         a2a_experimental=True,
         target_modules=["linear_qkv", "linear_proj"],
