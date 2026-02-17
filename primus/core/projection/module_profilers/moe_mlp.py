@@ -17,7 +17,9 @@ class MoEMLPProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
         super().__init__(config, sub_profilers)
         self.module = None  # Will be set during benchmarking
-        self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
+        self._cached_results = (
+            None  # Cache for (forward_time, backward_time, activation_memory)
+        )
         self._cache_key = None  # Cache key (batch_size, seq_len)
         self._gemm_backend = None  # Optional: GEMM simulation backend
 
@@ -44,16 +46,26 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # For SwiGLU: 3 projections per expert (gate, up, down)
         # For standard FFN: 2 projections per expert (up, down)
         num_ffn_projections = 3 if self.config.model_config.swiglu else 2
-        per_expert_params = num_ffn_projections * self.config.model_config.hidden_size * moe_ffn
-        ep = 1 if rank is None else self.config.model_parallel_config.expert_model_parallel_size
+        per_expert_params = (
+            num_ffn_projections * self.config.model_config.hidden_size * moe_ffn
+        )
+        ep = (
+            1
+            if rank is None
+            else self.config.model_parallel_config.expert_model_parallel_size
+        )
 
-        all_experts_params = self.config.model_config.num_experts * per_expert_params // ep
+        all_experts_params = (
+            self.config.model_config.num_experts * per_expert_params // ep
+        )
 
         # Shared experts (if any)
         shared_sz = 0
         if self.config.model_config.moe_shared_expert_intermediate_size is not None:
             shared_sz = self.config.model_config.moe_shared_expert_intermediate_size
-        shared_params = num_ffn_projections * self.config.model_config.hidden_size * shared_sz
+        shared_params = (
+            num_ffn_projections * self.config.model_config.hidden_size * shared_sz
+        )
 
         return all_experts_params + shared_params
 
@@ -90,12 +102,16 @@ class MoEMLPProfiler(BaseModuleProfiler):
 
             # After activation
             activation_memory = num_tokens * moe_ffn * 2  # bf16
-            output_memory = num_tokens * self.config.model_config.hidden_size * 2  # bf16
+            output_memory = (
+                num_tokens * self.config.model_config.hidden_size * 2
+            )  # bf16
             total += intermediate_memory + activation_memory + output_memory
 
         return total
 
-    def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+    def _get_simulated_results(
+        self, batch_size: int, seq_len: int
+    ) -> tuple[float, float, int]:
         """Get simulated results from the GEMM simulation backend for MoE MLP."""
         tp_size = self.config.model_parallel_config.tensor_model_parallel_size
         cp_size = self.config.model_parallel_config.context_model_parallel_size
@@ -114,11 +130,13 @@ class MoEMLPProfiler(BaseModuleProfiler):
         num_local_experts = (self.config.model_config.num_experts or 1) // ep_size
         tokens_per_expert = topk_tokens // max(num_local_experts, 1)
 
+        # FP8-hybrid: MoE expert MLP projections run in FP8
+        gemm_dtype = "fp8" if getattr(self.config.model_config, "fp8", None) else "bf16"
         sim_result = self._gemm_backend.simulate_mlp_gemms(
             batch_tokens=tokens_per_expert,
             hidden_size=self.config.model_config.hidden_size,
             ffn_hidden_size=moe_ffn,
-            dtype="bf16",
+            dtype=gemm_dtype,
             swiglu=self.config.model_config.swiglu,
         )
         # Scale by number of local experts (they run sequentially or in grouped GEMM)
@@ -132,7 +150,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
                 batch_tokens=batch_tokens,
                 hidden_size=self.config.model_config.hidden_size,
                 ffn_hidden_size=shared_sz,
-                dtype="bf16",
+                dtype=gemm_dtype,
                 swiglu=self.config.model_config.swiglu,
             )
             fwd_time += shared_result.forward_time_ms
@@ -141,7 +159,9 @@ class MoEMLPProfiler(BaseModuleProfiler):
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 
-    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+    def _get_benchmark_results(
+        self, batch_size: int, seq_len: int
+    ) -> tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
