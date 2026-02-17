@@ -364,6 +364,7 @@ def _llama2_lora(
         clip_grad=clip_grad
     )
     opt_config.use_distributed_optimizer=False # Only for singe node
+    opt_config.params_dtype=torch.bfloat16
 
     peft_config = LoRA(
         dim=16,
@@ -426,13 +427,14 @@ def _llama2_lora(
         scheduler=scheduler,
         ddp=DistributedDataParallelConfig(
             check_for_nan_in_grad=True,
-            grad_reduce_in_fp32=True,
+            grad_reduce_in_fp32=False,
             overlap_grad_reduce=True,
             overlap_param_gather=True,
             average_in_collective=True,
             use_distributed_optimizer=False,
             use_megatron_fsdp=False,
             keep_fp8_transpose_cache=False,
+            fp8_param_gather=True,
         ),
         dataset=dataset_cfg,
         logger=LoggerConfig(
@@ -455,6 +457,9 @@ def _llama2_lora(
             replication_factor=0,
             most_recent_k=0,
             finetune=True,
+            load_main_params_from_ckpt=False,
+            load_optim=False,
+            load_rng=False,
         ),
         rng=RNGConfig(seed=seed),
         comm_overlap=comm_overlap_config,
