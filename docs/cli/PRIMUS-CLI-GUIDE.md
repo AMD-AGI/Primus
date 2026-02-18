@@ -36,7 +36,7 @@
 
 ```bash
 # Run GEMM benchmark directly on current host
-./primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
+./primus-cli direct -- benchmark gemm --M 4096 --N 4096 --K 4096
 ```
 
 ---
@@ -65,7 +65,7 @@ Primus CLI supports three execution modes, each suitable for different scenarios
 ./primus-cli direct -- train pretrain --config config.yaml
 
 # GEMM benchmark
-./primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
+./primus-cli direct -- benchmark gemm --M 4096 --N 4096 --K 4096
 
 # Environment check (info only)
 ./primus-cli direct -- preflight --host --gpu --network
@@ -115,7 +115,7 @@ Primus CLI supports three execution modes, each suitable for different scenarios
 
 # Set resource limits
 ./primus-cli container --cpus 32 --memory 256G \
-  -- benchmark gemm -M 8192 -N 8192 -K 8192
+  -- benchmark gemm --M 8192 --N 8192 --K 8192
 
 # Mount local Primus code for development
 ./primus-cli container --volume ~/workspace/Primus:/workspace/Primus \
@@ -164,10 +164,18 @@ Primus CLI supports three execution modes, each suitable for different scenarios
   -- train pretrain --config deepseek_v2.yaml
 
 # Run distributed GEMM benchmark
-./primus-cli slurm srun -N 2 -- benchmark gemm -M 16384 -N 16384 -K 16384
+./primus-cli slurm srun -N 2 -- benchmark gemm --M 16384 --N 16384 --K 16384
 
 # Multi-node environment check (info only)
+# this will generate a fast info report of the host, GPU, and network
 ./primus-cli slurm srun -N 4 -- preflight --host --gpu --network
+
+# this will generate a full preflight report of the host, GPU, and network, as well as the performance tests
+./primus-cli slurm srun -N 4 -- preflight --report-file-name preflight-report-4N
+
+# if you are using AINIC in your cluster, use the appropriate configuration file
+# for preflight test, set docker image to rocm/primus:v26.1 in the configuration file
+./primus-cli --config runner/use_ainic.yaml slurm srun -N 2 -- preflight --report-file-name preflight-report-2N
 ```
 
 **Suitable for**:
@@ -250,6 +258,15 @@ direct:
 ./primus-cli --config prod.yaml slurm srun -N 8 -- train pretrain
 ```
 
+### Using AINIC Configuration File
+
+If you are using AINIC in your cluster, you can use `runner/use_ainic.yaml` configuration file to configure the AINIC environment. In this file, we have already set the environment variables for AINIC: `USING_AINIC=1`, `NCCL_PXN_DISABLE=0`, and `NCCL_IB_GID_INDEX=1`. You can modify the `NCCL_IB_GID_INDEX` value based on your AINIC settings. Also, you can modify the `image` value to the appropriate Docker image you are using. 
+
+Here is an example of using the AINIC configuration file to run a training job: 
+```bash
+./primus-cli --config runner/use_ainic.yaml slurm srun -N 2 -- train pretrain --config examples/maxtext/configs/MI355X/llama2_7B-pretrain.yaml
+```
+
 ### Configuration Priority
 
 **Priority Order** (high to low):
@@ -306,13 +323,13 @@ Command-line args > Specified config file > System default config > User config
 #### GEMM Benchmark
 ```bash
 # Single-node GEMM
-./primus-cli direct -- benchmark gemm -M 4096 -N 4096 -K 4096
+./primus-cli direct -- benchmark gemm --M 4096 --N 4096 --K 4096
 
 # Run in container
-./primus-cli container -- benchmark gemm -M 8192 -N 8192 -K 8192
+./primus-cli container -- benchmark gemm --M 8192 --N 8192 --K 8192
 
 # Multi-node GEMM
-./primus-cli slurm srun -N 2 -- benchmark gemm -M 16384 -N 16384 -K 16384
+./primus-cli slurm srun -N 2 -- benchmark gemm --M 16384 --N 16384 --K 16384
 ```
 
 #### Other Benchmarks
