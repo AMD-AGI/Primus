@@ -227,19 +227,19 @@ Recommended for environment isolation and dependency management.
 
 **Pull Docker image:**
 ```bash
-docker pull docker.io/rocm/primus:v26.1
+docker pull docker.io/rocm/primus:latest
 ```
 
 **SFT Example:**
 ```bash
-./runner/primus-cli container --image rocm/primus:v26.1 \
+./runner/primus-cli container --image rocm/primus:latest \
   train posttrain \
   --config ./examples/megatron_bridge/configs/MI355X/qwen3_32b_sft_posttrain.yaml
 ```
 
 **LoRA Example:**
 ```bash
-./runner/primus-cli container --image rocm/primus:v26.1 \
+./runner/primus-cli container --image rocm/primus:latest \
   train posttrain \
   --config ./examples/megatron_bridge/configs/MI355X/qwen3_32b_lora_posttrain.yaml
 ```
@@ -441,7 +441,7 @@ recompute_num_layers: 1       # Number of layers to recompute
   --config ./examples/megatron_bridge/configs/MI355X/qwen3_32b_lora_posttrain.yaml
 
 # SFT on MI300X (container mode)
-./runner/primus-cli container --image rocm/primus:v26.1 train posttrain \
+./runner/primus-cli container --image rocm/primus:latest train posttrain \
   --config ./examples/megatron_bridge/configs/MI300X/qwen3_32b_sft_posttrain.yaml
 ```
 
