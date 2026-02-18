@@ -1,0 +1,132 @@
+diff --git a/megatron/core/optimizer/optimizer.py b/megatron/core/optimizer/optimizer.py
+index 1829cb424..e1db76fd7 100644
+--- a/megatron/core/optimizer/optimizer.py
++++ b/megatron/core/optimizer/optimizer.py
+@@ -589,7 +589,10 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
+     def step(self):
+         timers = self.config.timers
+ 
++        print(f"[DEBUG-MIXOPT] prepare_grads...", flush=True)
+         found_inf_flag = self.prepare_grads()
++        torch.cuda.synchronize()
++        print(f"[DEBUG-MIXOPT] prepare_grads done, found_inf={found_inf_flag}", flush=True)
+         if found_inf_flag:
+             return False, None, None
+ 
+@@ -600,7 +603,10 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
+             )
+         grad_norm = 0.0
+         if self.config.clip_grad > 0.0:
++            print(f"[DEBUG-MIXOPT] clip_grad_norm...", flush=True)
+             grad_norm = self.clip_grad_norm(self.config.clip_grad)
++            torch.cuda.synchronize()
++            print(f"[DEBUG-MIXOPT] clip_grad_norm done, grad_norm={grad_norm}", flush=True)
+         if timers is not None:
+             timers('optimizer-clip-main-grad').stop()
+ 
+@@ -613,7 +619,10 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
+         if timers is not None:
+             timers('optimizer-count-zeros').stop()
+ 
++        print(f"[DEBUG-MIXOPT] step_with_ready_grads...", flush=True)
+         success = self.step_with_ready_grads()
++        torch.cuda.synchronize()
++        print(f"[DEBUG-MIXOPT] step_with_ready_grads done, success={success}", flush=True)
+ 
+         # Successful update.
+         return success, grad_norm, num_zeros_in_grad
+@@ -957,9 +966,13 @@ class FP32Optimizer(MegatronOptimizer):
+     def step(self):
+         """Clip gradients (if needed) and step the base optimizer.
+         Always return successful since there is no overflow."""
++        import torch as _torch
+         timers = self.config.timers
+ 
++        print(f"[DEBUG-FP32OPT] prepare_grads...", flush=True)
+         found_inf_flag = self.prepare_grads()
++        _torch.cuda.synchronize()
++        print(f"[DEBUG-FP32OPT] prepare_grads done, found_inf={found_inf_flag}", flush=True)
+         if found_inf_flag:
+             return False, None, None
+ 
+@@ -970,7 +983,10 @@ class FP32Optimizer(MegatronOptimizer):
+             )
+         grad_norm = None
+         if self.config.clip_grad > 0.0:
++            print(f"[DEBUG-FP32OPT] clip_grad_norm...", flush=True)
+             grad_norm = self.clip_grad_norm(self.config.clip_grad)
++            _torch.cuda.synchronize()
++            print(f"[DEBUG-FP32OPT] clip_grad_norm done, grad_norm={grad_norm}", flush=True)
+         if timers is not None:
+             timers('optimizer-clip-main-grad').stop()
+ 
+@@ -983,7 +999,10 @@ class FP32Optimizer(MegatronOptimizer):
+         if timers is not None:
+             timers('optimizer-count-zeros').stop()
+ 
++        print(f"[DEBUG-FP32OPT] step_with_ready_grads...", flush=True)
+         success = self.step_with_ready_grads()
++        _torch.cuda.synchronize()
++        print(f"[DEBUG-FP32OPT] step_with_ready_grads done, success={success}", flush=True)
+ 
+         # No overflow for FP32 optimizer.
+         return success, grad_norm, num_zeros_in_grad
+diff --git a/megatron/training/initialize.py b/megatron/training/initialize.py
+index c563a223b..89dd18675 100644
+--- a/megatron/training/initialize.py
++++ b/megatron/training/initialize.py
+@@ -347,8 +347,12 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
+             'timeout': timedelta(minutes=args.distributed_timeout_minutes),
+         }
+ 
++        print(f"[DEBUG-DIST] calling torch.distributed.init_process_group(backend={args.distributed_backend}, world_size={args.world_size}, rank={args.rank}) ...", flush=True)
+         torch.distributed.init_process_group(**init_process_group_kwargs)
++        print(f"[DEBUG-DIST] torch.distributed.init_process_group done", flush=True)
++        print(f"[DEBUG-DIST] calling maybe_force_nccl_backend_init...", flush=True)
+         inprocess_restart.maybe_force_nccl_backend_init(device_id)
++        print(f"[DEBUG-DIST] maybe_force_nccl_backend_init done", flush=True)
+ 
+     # Set the tensor model-parallel, pipeline model-parallel, and
+     # data-parallel communicators.
+@@ -356,6 +360,7 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
+         if mpu.model_parallel_is_initialized():
+             print("model parallel is already initialized")
+         else:
++            print(f"[DEBUG-DIST] calling mpu.initialize_model_parallel(tp={args.tensor_model_parallel_size}, pp={args.pipeline_model_parallel_size}) ...", flush=True)
+             mpu.initialize_model_parallel(
+                 args.tensor_model_parallel_size,
+                 args.pipeline_model_parallel_size,
+@@ -376,6 +381,7 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
+                 high_priority_stream_groups=args.high_priority_stream_groups,
+                 sharp_enabled_group=args.sharp_enabled_group,
+             )
++            print(f"[DEBUG-DIST] mpu.initialize_model_parallel done", flush=True)
+             if args.rank == 0:
+                 print(
+                     f"> initialized tensor model parallel with size "
+diff --git a/megatron/training/utils.py b/megatron/training/utils.py
+index cef711607..548ae8e67 100644
+--- a/megatron/training/utils.py
++++ b/megatron/training/utils.py
+@@ -252,15 +252,20 @@ def logical_and_across_model_parallel_group(input: bool) -> bool:
+     """
+     This function gathers a bool value across the model parallel group
+     """
++    print(f"[DEBUG-ALLREDUCE] logical_and: creating tensor on cuda...", flush=True)
+     if input is True:
+         input = 1
+     else:
+         input = 0
+     input = torch.tensor([input], dtype=torch.int, device=torch.cuda.current_device())
++    print(f"[DEBUG-ALLREDUCE] logical_and: tensor created, calling all_reduce...", flush=True)
+     torch.distributed.all_reduce(
+         input, op=torch.distributed.ReduceOp.MIN, group=mpu.get_model_parallel_group()
+     )
+-    return bool(input.item())
++    print(f"[DEBUG-ALLREDUCE] logical_and: all_reduce done, calling .item()...", flush=True)
++    result = bool(input.item())
++    print(f"[DEBUG-ALLREDUCE] logical_and: done, result={result}", flush=True)
++    return result
+ 
+ 
+ def report_memory(name):

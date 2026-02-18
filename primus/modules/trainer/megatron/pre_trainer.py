@@ -21,6 +21,8 @@ from megatron.training.utils import (
 
 stimer = StragglerDetector()
 
+from primus.modules.module_utils import debug_rank_0, log_rank_0
+
 from .trainer import MegatronTrainer
 
 mb_batch = None
@@ -122,6 +124,7 @@ class DataLoaderStore:
 
 class MegatronPretrainTrainer(MegatronTrainer):
     def __init__(self, *args, **kwargs):
+        print(f"[PRIMUS-PRETRAINER] MegatronPretrainTrainer.__init__() entered", flush=True)
         kwargs["module_name"] = "pre_trainer"
 
         # Explicitly reject unknown extra_args
@@ -133,9 +136,11 @@ class MegatronPretrainTrainer(MegatronTrainer):
             )
 
         super().__init__(*args, **kwargs)
+        print(f"[PRIMUS-PRETRAINER] MegatronPretrainTrainer.__init__() done", flush=True)
 
     def get_batch(self, data_iterator, vp_stage=None):
         """Generate a batch."""
+        debug_rank_0(f"MegatronPretrainTrainer.get_batch() vp_stage={vp_stage}")
         return get_batch_func(data_iterator, vp_stage)
 
     def loss_func(self, loss_mask: torch.Tensor, output_tensor: torch.Tensor):
@@ -151,19 +156,25 @@ class MegatronPretrainTrainer(MegatronTrainer):
             a dict containing reporting metrics on the loss and number of tokens across
                 the data parallel ranks
         """
+        debug_rank_0(f"loss_func() entered: loss_mask.shape={loss_mask.shape}, output_tensor.shape={output_tensor.shape}")
         args = get_args()
 
         losses = output_tensor.float()
         loss_mask = loss_mask.view(-1).float()
         total_tokens = loss_mask.sum()
+        debug_rank_0(f"loss_func() total_tokens={total_tokens.item()}")
         loss = torch.cat([torch.sum(losses.view(-1) * loss_mask).view(1), total_tokens.view(1)])
+        debug_rank_0(f"loss_func() raw masked loss={loss[0].item():.6f}")
 
         if args.context_parallel_size > 1:
+            debug_rank_0(f"loss_func() all-reducing loss across context parallel group (cp_size={args.context_parallel_size})")
             torch.distributed.all_reduce(loss, group=mpu.get_context_parallel_group())
+            debug_rank_0(f"loss_func() loss after CP all-reduce={loss[0].item():.6f}")
 
         # Check individual rank losses are not NaN prior to DP all-reduce.
         rerun_state_machine = get_rerun_state_machine()
         if args.check_for_nan_in_loss_and_grad:
+            debug_rank_0(f"loss_func() checking for NaN/Inf in loss...")
             rerun_state_machine.validate_result(
                 result=loss[0],
                 rejection_func=torch.isnan,
@@ -178,8 +189,10 @@ class MegatronPretrainTrainer(MegatronTrainer):
                 tolerance=0.0,  # forward pass calculations are determinisic
                 fatal=True,
             )
+            debug_rank_0(f"loss_func() NaN/Inf check passed")
         # Check for spiky loss
         if args.check_for_spiky_loss:
+            debug_rank_0(f"loss_func() checking for spiky loss...")
             rerun_state_machine.validate_result(
                 result=loss[0],
                 rejection_func=partial(
@@ -191,14 +204,18 @@ class MegatronPretrainTrainer(MegatronTrainer):
                 tolerance=0.0,  # forward pass calculations are determinisic
                 fatal=False,
             )
+            debug_rank_0(f"loss_func() spiky loss check passed")
         # Reduce loss for logging.
+        debug_rank_0(f"loss_func() all-reducing loss across DP group for reporting...")
         reporting_loss = loss.clone().detach()
         torch.distributed.all_reduce(reporting_loss, group=mpu.get_data_parallel_group())
+        debug_rank_0(f"loss_func() reporting_loss={reporting_loss[0].item():.6f}, reporting_tokens={reporting_loss[1].item()}")
 
         # loss[0] is a view of loss, so it has ._base not None, which triggers assert error
         # in core/pipeline_parallel/schedule.py::deallocate_output_tensor, calling .clone()
         # on loss[0] fixes this
         local_num_tokens = loss[1].clone().detach().to(torch.int)
+        debug_rank_0(f"loss_func() done: loss={loss[0].item():.6f}, local_num_tokens={local_num_tokens.item()}")
         return (
             loss[0].clone(),
             local_num_tokens,
@@ -212,6 +229,7 @@ class MegatronPretrainTrainer(MegatronTrainer):
             data_iterator : Input data iterator
             model (GPTModel): The GPT Model
         """
+        debug_rank_0(f"MegatronPretrainTrainer.forward_step() entered: return_schedule_plan={return_schedule_plan}")
         args = get_args()
         timers = get_timers()
 
@@ -237,6 +255,7 @@ class MegatronPretrainTrainer(MegatronTrainer):
                 DataLoaderStore.push(data_iterator, h2d_stream=False, vp_stage=vp_stage)
                 tokens, labels, loss_mask, attention_mask, position_ids = DataLoaderStore.pop()
 
+        debug_rank_0(f"forward_step() batch loaded, running model forward...")
         with stimer:
             if return_schedule_plan:
                 assert (

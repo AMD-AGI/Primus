@@ -15,6 +15,7 @@ from primus.core.launcher.parser import add_pretrain_parser, load_primus_config
 
 # Lazy backend loader
 def load_backend_trainer(framework: str):
+    print(f"[PRIMUS-PRETRAIN] load_backend_trainer() entered: framework={framework}", flush=True)
     if framework == "megatron":
         import megatron.training.training as training
         import torch
@@ -57,22 +58,26 @@ def load_backend_trainer(framework: str):
 
         from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
 
+        print(f"[PRIMUS-PRETRAIN] load_backend_trainer() returning MegatronPretrainTrainer", flush=True)
         return MegatronPretrainTrainer
     elif framework == "light-megatron":
         from primus.modules.trainer.lightmegatron.pre_trainer import (
             LightMegatronPretrainTrainer,
         )
 
+        print(f"[PRIMUS-PRETRAIN] load_backend_trainer() returning LightMegatronPretrainTrainer", flush=True)
         return LightMegatronPretrainTrainer
     elif framework == "torchtitan":
         from primus.modules.trainer.torchtitan.pre_trainer import (
             TorchTitanPretrainTrainer,
         )
 
+        print(f"[PRIMUS-PRETRAIN] load_backend_trainer() returning TorchTitanPretrainTrainer", flush=True)
         return TorchTitanPretrainTrainer
     elif framework == "maxtext":
         from primus.modules.trainer.maxtext.pre_trainer import MaxTextPretrainTrainer
 
+        print(f"[PRIMUS-PRETRAIN] load_backend_trainer() returning MaxTextPretrainTrainer", flush=True)
         return MaxTextPretrainTrainer
     else:
         raise ValueError(f"Unsupported framework: {framework}")
@@ -90,6 +95,7 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
     Returns:
         str: The first valid backend path inserted into sys.path.
     """
+    print(f"[PRIMUS-PRETRAIN] setup_backend_path() entered: framework={framework}, backend_path={backend_path}", flush=True)
     candidate_paths = []
 
     # 1) From CLI
@@ -133,6 +139,7 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
 
 
 def setup_env(data_path: str):
+    print(f"[PRIMUS-PRETRAIN] setup_env() entered: data_path={data_path}", flush=True)
     if "HF_HOME" not in os.environ:
         hf_home = os.path.join(data_path, "huggingface")
         os.environ["HF_HOME"] = hf_home
@@ -154,7 +161,9 @@ def launch_pretrain_trainer(primus_cfg: PrimusConfig, extra_args=None):
     framework = pre_trainer_cfg.framework
 
     # Lazy import backend trainer
+    print(f"[DEBUG-LAUNCH] loading backend trainer for framework={framework}...", flush=True)
     TrainerClass = load_backend_trainer(framework)
+    print(f"[DEBUG-LAUNCH] TrainerClass loaded: {TrainerClass}", flush=True)
 
     master_addr = os.getenv("MASTER_ADDR", "127.0.0.1")
     master_port = int(os.getenv("MASTER_PORT", "29500"))
@@ -168,6 +177,7 @@ def launch_pretrain_trainer(primus_cfg: PrimusConfig, extra_args=None):
         world_size = int(os.getenv("WORLD_SIZE", "1"))
 
     # Initialize trainer
+    print(f"[DEBUG-LAUNCH] creating TrainerClass(rank={rank}, world_size={world_size})...", flush=True)
     trainer = TrainerClass(
         module_name="pre_trainer",
         primus_config=primus_cfg,
@@ -177,10 +187,14 @@ def launch_pretrain_trainer(primus_cfg: PrimusConfig, extra_args=None):
         module_master_port=master_port,
         extra_args=extra_args,
     )
+    print(f"[DEBUG-LAUNCH] TrainerClass created", flush=True)
 
     # Launch training
+    print(f"[DEBUG-LAUNCH] calling trainer.init()...", flush=True)
     trainer.init()
+    print(f"[DEBUG-LAUNCH] trainer.init() done, calling trainer.run()...", flush=True)
     trainer.run()
+    print(f"[DEBUG-LAUNCH] trainer.run() done", flush=True)
 
 
 def launch_pretrain_from_cli(args, overrides):
@@ -194,13 +208,16 @@ def launch_pretrain_from_cli(args, overrides):
         4. Setup backend path
         5. Launch the training
     """
+    print(f"[PRIMUS-PRETRAIN] launch_pretrain_from_cli() entered: config={args.config}", flush=True)
     cfg_path = Path(args.config)
     if not cfg_path.exists():
         raise FileNotFoundError(f"[Primus:Train] Config file '{cfg_path}' not found.")
 
     setup_env(data_path=args.data_path)
 
+    print(f"[PRIMUS-PRETRAIN] loading primus config...", flush=True)
     primus_cfg, unknown_overrides = load_primus_config(args, overrides)
+    print(f"[PRIMUS-PRETRAIN] primus config loaded, unknown_overrides={unknown_overrides}", flush=True)
 
     # Export merged config if requested
     if args.export_config:
@@ -210,6 +227,7 @@ def launch_pretrain_from_cli(args, overrides):
     framework = primus_cfg.get_module_config("pre_trainer").framework
     setup_backend_path(framework=framework, backend_path=args.backend_path, verbose=True)
 
+    print(f"[DEBUG-LAUNCH] calling launch_pretrain_trainer...", flush=True)
     launch_pretrain_trainer(primus_cfg=primus_cfg, extra_args=unknown_overrides)
 
 

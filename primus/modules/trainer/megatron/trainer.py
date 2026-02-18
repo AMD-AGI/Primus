@@ -176,6 +176,7 @@ set_train_start_time()
 
 class MegatronTrainer(BaseTrainer, BaseModule):
     def __init__(self, *args, **kwargs):
+        print(f"[PRIMUS-TRAINER] MegatronTrainer.__init__() entered", flush=True)
         super().__init__(*args, **kwargs)
 
         self.is_v_schedule = is_v_schedule_enabled(self.module_config)
@@ -191,7 +192,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if "aiter" in logging.root.manager.loggerDict:
             logging.getLogger("aiter").setLevel(logging.ERROR)
 
+        print(f"[PRIMUS-TRAINER] MegatronTrainer.__init__() done", flush=True)
+
     def init(self, *init_args, **kwargs):
+        print(f"[PRIMUS-TRAINER] MegatronTrainer.init() entered", flush=True)
         allowed_keys = {
             "extra_args_provider",
             "args_defaults",
@@ -213,6 +217,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         # Apply patches during initialization
         # These patches need to be applied before model setup
+        print(f"[PRIMUS-TRAINER] init() applying pre-train patches...", flush=True)
         from types import SimpleNamespace
 
         from primus.core.patches import run_patches
@@ -230,8 +235,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 "module_config": temp_module_config,
             },
         )
+        print(f"[PRIMUS-TRAINER] init() patches applied", flush=True)
 
         # Initalize and get arguments, timers, and Tensorboard writer.
+        print(f"[PRIMUS-TRAINER] init() calling initialize_megatron()...", flush=True)
         log_rank_0(f"-run initialize_megatron...")
         self.initialize_megatron(
             extra_args_provider=kwargs.get("extra_args_provider", None),
@@ -290,6 +297,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.app_metrics["app_start_time"] = round(get_train_start_time() * 1000.0)
         self.app_metrics["app_model_init_start_time"] = round(get_train_start_time() * 1000.0)
 
+        print(f"[DEBUG-INIT] initialize_megatron completed", flush=True)
         log_rank_0(
             "time to initialize megatron (seconds): {:.3f}".format(time.time() - get_train_start_time())
         )
@@ -329,7 +337,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         else:
             self.checkpointing_context = {}
 
+        print(f"[PRIMUS-TRAINER] init() calling self.setup()...", flush=True)
         self.setup()
+        print(f"[PRIMUS-TRAINER] init() self.setup() done", flush=True)
+        print(f"[PRIMUS-TRAINER] MegatronTrainer.init() completed", flush=True)
 
     def update_primus_config(
         self,
@@ -520,6 +531,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         return after
 
     def setup(self):
+        log_rank_0(f"[ENTER] MegatronTrainer.setup()")
         args = get_args()
         timers = get_timers()
         # Model, optimizer, and learning rate.
@@ -533,11 +545,13 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         )
 
         timers("model-and-optimizer-setup").stop()
+        log_rank_0(f"setup() model and optimizer built")
         print_datetime("after model, optimizer, and learning rate " "scheduler are built")
         self.app_metrics["app_build_optimizer_finish_time"] = one_logger_utils.get_timestamp_in_ms()
         self.config = get_model_config(self.model[0])
 
         # Data stuff.
+        log_rank_0(f"setup() building data iterators...")
         self.app_metrics["app_build_dataiters_start_time"] = one_logger_utils.get_timestamp_in_ms()
         timers("train/valid/test-data-iterators-setup", log_level=0).start(barrier=True)
 
@@ -573,6 +587,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 self.test_data_iterator,
             ) = build_train_valid_test_data_iterators(train_valid_test_datasets_provider_func)
         timers("train/valid/test-data-iterators-setup").stop()
+        log_rank_0(f"setup() data iterators built")
         print_datetime("after dataloaders are built")
         self.app_metrics["app_build_dataiters_finish_time"] = one_logger_utils.get_timestamp_in_ms()
 
@@ -589,7 +604,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         )
 
         # Print setup timing.
-        log_rank_0("done with setup ...")
+        log_rank_0("[EXIT] MegatronTrainer.setup() completed")
         timers.log(
             ["model-and-optimizer-setup", "train/valid/test-data-iterators-setup"],
             barrier=True,
@@ -672,6 +687,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         Returns a function to finalize distributed env initialization
         (optionally, only when args.lazy_mpu_init == True)
         """
+        print(f"[PRIMUS-TRAINER] initialize_megatron() entered", flush=True)
         if not allow_no_cuda:
             # Make sure cuda is available.
             assert torch.cuda.is_available(), "Megatron requires CUDA."
@@ -685,7 +701,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         # Build Megatron arguments by merging Primus config into Megatron defaults.
         # 1) Load Megatron defaults (no Primus overrides)
+        print(f"[DEBUG-INIT] loading megatron defaults...", flush=True)
         megatron_defaults = _load_megatron_defaults()
+        print(f"[DEBUG-INIT] megatron defaults loaded", flush=True)
 
         # 2) Convert Primus module_config (nested namespace) to a plain dict
         primus_args = nested_namespace_to_dict(self.module_config)
@@ -744,20 +762,27 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         # monkey patch _set_wandb_writer before set_global_variables
         log_rank_0(f"-monkey patch megatron.training.global_vars._set_wandb_writer...")
+        print(f"[DEBUG-INIT] monkey patch _set_wandb_writer done", flush=True)
         megatron.training.global_vars._set_wandb_writer = set_wandb_writer_patch
 
         # set global args, build tokenizer, and set adlr-autoresume,
         # tensorboard-writer, and timers.
         log_rank_0(f"-set_global_variables...")
+        print(f"[DEBUG-INIT] calling set_global_variables...", flush=True)
         set_global_variables(args, build_tokenizer=False)
+        print(f"[DEBUG-INIT] set_global_variables done", flush=True)
         log_rank_0(f"-set_primus_global_variables...")
+        print(f"[DEBUG-INIT] calling set_primus_global_variables...", flush=True)
         set_primus_global_variables(args)
+        print(f"[DEBUG-INIT] set_primus_global_variables done", flush=True)
         args = get_args()
 
         # set tokenizer
         log_rank_0(f"-build_tokenizer...")
+        print(f"[PRIMUS-TRAINER] initialize_megatron() building tokenizer...", flush=True)
         global_vars._ensure_var_is_not_initialized(global_vars._GLOBAL_TOKENIZER, "tokenizer")
         global_vars._GLOBAL_TOKENIZER = build_tokenizer(args)
+        print(f"[PRIMUS-TRAINER] initialize_megatron() tokenizer built", flush=True)
 
         # set logging level
         setup_logging()
@@ -786,10 +811,13 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args = get_args()
             # Pytorch distributed.
             log_rank_0(f"-initialize_distributed...")
+            print(f"[DEBUG-INIT] calling _initialize_distributed...", flush=True)
             _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, None)
+            print(f"[DEBUG-INIT] _initialize_distributed done", flush=True)
 
             # Random seeds for reproducibility.
             log_kv_rank_0(f"-seeds", f"{args.seed}")
+            print(f"[DEBUG-INIT] calling _set_random_seed...", flush=True)
             _set_random_seed(
                 args.seed,
                 args.data_parallel_random_init,
@@ -797,6 +825,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 args.inference_rng_tracker,
                 use_cudagraphable_rng=args.enable_cuda_graph,
             )
+            print(f"[DEBUG-INIT] _set_random_seed done", flush=True)
 
             # Setup MoE aux loss scale value.
             if args.num_experts is not None:
@@ -821,15 +850,21 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             return finish_mpu_init
         else:
             # Megatron's MPU is the master. Complete initialization right away.
+            print(f"[DEBUG-INIT] calling finish_mpu_init...", flush=True)
             finish_mpu_init()
+            print(f"[DEBUG-INIT] finish_mpu_init done", flush=True)
 
             # Autoresume.
+            print(f"[DEBUG-INIT] calling _init_autoresume...", flush=True)
             _init_autoresume()
+            print(f"[DEBUG-INIT] _init_autoresume done", flush=True)
 
             # Compile dependencies.
             if not args.disable_compile_dependencies:
                 log_rank_0(f"-compile_dependencies...")
+                print(f"[DEBUG-INIT] calling _compile_dependencies...", flush=True)
                 _compile_dependencies()
+                print(f"[DEBUG-INIT] _compile_dependencies done", flush=True)
 
             if args.tp_comm_overlap:
                 # TODO: Should this be activated with just decoder-tp-comm-overlap too?
@@ -848,6 +883,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         checkpointing_context=None,
     ):
         """Setup model and optimizer."""
+        log_rank_0(f"[ENTER] setup_model_and_optimizer()")
         args = get_args()
         timers = get_timers()
         one_logger = get_one_logger()
@@ -858,16 +894,17 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args = get_args()
             if args.tensor_model_parallel_size == 1:
                 if args.enable_primus_turbo:
-                    log_rank_0(f"use pt backend...")
+                    log_rank_0(f"primus_turbo installed and enabled, using primus_turbo backend")
                 else:
-                    log_rank_0(f"use te backend...")
+                    log_rank_0(f"primus_turbo installed but not enabled (enable_primus_turbo=False), using default backend")
             elif args.enable_primus_turbo:
-                log_rank_0(f"primus turbo does not support tp, use te backend...")
+                log_rank_0(f"primus_turbo does not support tp_size>1 (tp_size={args.tensor_model_parallel_size}), falling back to default backend")
         else:
-            log_rank_0(f"use te backend...")
+            log_rank_0(f"primus_turbo not installed, using default backend")
 
-        log_rank_0(f"-run get_model")
+        log_rank_0(f"setup_model_and_optimizer() calling get_model()...")
         model = get_model(model_provider_func, model_type)
+        log_rank_0(f"setup_model_and_optimizer() get_model() done")
         log_rank_0(model)
         # get_megatron_optimizer will use the ddp_config
         if isinstance(model[0], torch_FSDP):
@@ -910,7 +947,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 layer_wise_distributed_optimizer="dist" in config.optimizer,
             )
 
+        log_rank_0(f"setup_model_and_optimizer() building optimizer param scheduler...")
         opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
+        log_rank_0(f"setup_model_and_optimizer() optimizer param scheduler built")
 
         if args.moe_use_upcycling:
             torch.distributed.barrier()
@@ -957,7 +996,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             )
             timers("load-checkpoint", log_level=0).start(barrier=True)
 
-            log_rank_0(f"-run load_checkpoint")
+            log_rank_0(f"setup_model_and_optimizer() loading checkpoint...")
             log_rank_0(f"  -args.load={args.load}")
             args.iteration, args.num_floating_point_operations_so_far = load_checkpoint(
                 model,
@@ -1009,9 +1048,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             torch.distributed.barrier()
             exit()
 
+        log_rank_0(f"[EXIT] setup_model_and_optimizer() completed")
         return model, optimizer, opt_param_scheduler
 
     def run(self, *args, **kwargs):
+        log_rank_0(f"[ENTER] MegatronTrainer.run()")
         one_logger = get_one_logger()
         args = get_args()
 
@@ -1031,7 +1072,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         process_non_loss_data_func = None
         non_loss_data_func = None
         if not args.skip_train:
-            log_rank_0("training ...")
+            log_rank_0("run() starting training loop...")
 
             if args.dataloader_type == "cyclic" and args.retro_project_dir:
                 assert args.retro_cyclic_train_iters is not None
@@ -1040,6 +1081,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
             iteration = 0
             if args.do_train and args.train_iters > 0:
+                log_rank_0(f"run() calling self.train() for {args.train_iters} iterations...")
                 iteration, num_floating_point_operations_so_far = self.train(
                     self.forward_step,
                     self.model,
@@ -1053,6 +1095,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     non_loss_data_func,
                 )
 
+            log_rank_0(f"run() training loop finished at iteration {iteration}")
             print_datetime("after training is done")
 
             if (
@@ -1082,6 +1125,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             iteration = args.iteration
 
         if args.do_valid:
+            log_rank_0(f"run() starting validation at iteration {iteration}...")
             prefix = f"iteration {iteration} on validation set"
             evaluate_and_print_results(
                 prefix,
@@ -1097,6 +1141,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             )
 
         if args.do_test:
+            log_rank_0(f"run() starting test evaluation at iteration {iteration}...")
             prefix = f"iteration {iteration} on test set"
             evaluate_and_print_results(
                 prefix,
@@ -1128,6 +1173,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         ft_integration.shutdown()
         one_logger_utils.finish()
 
+        log_rank_0(f"[EXIT] MegatronTrainer.run() completed")
         # clean up torch pg resources on exit
         if dist.is_initialized():
             dist.destroy_process_group()
@@ -1146,6 +1192,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         non_loss_data_func,
     ):
         """Training function: run train_step desired number of times, run validation, checkpoint."""
+        log_rank_0(f"[ENTER] MegatronTrainer.train()")
         args = get_args()
         timers = get_timers()
         one_logger = get_one_logger()
@@ -1216,6 +1263,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         config.finalize_model_grads_func = finalize_model_grads
 
         timers("interval-time", log_level=0).start(barrier=True)
+        log_rank_0(f"train() entering main training loop (start_iter={args.iteration}, train_iters={args.train_iters})")
         print_datetime("before the start of training step")
         report_memory_flag = True
         pre_hook_enabled = False
@@ -1391,6 +1439,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 config,
             )
             ft_integration.on_training_step_end()
+            print(f"[DEBUG-LOOP] train_step() returned, loss_dict={loss_dict}", flush=True)
             if should_checkpoint:
                 save_checkpoint_and_time(
                     iteration,
@@ -1443,6 +1492,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             num_floating_point_operations_since_last_log_event += num_floating_point_operations_in_batch
 
             # Logging.
+            print(f"[DEBUG-LOOP] preparing logging for iteration {iteration}...", flush=True)
             if not optimizer.is_stub_optimizer:
                 loss_scale = optimizer.get_loss_scale().item()
             else:
@@ -1458,6 +1508,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     decoupled_learning_rate = param_group["lr"]
                 else:
                     learning_rate = param_group["lr"]
+            print(f"[DEBUG-LOOP] calling training_log()...", flush=True)
             report_memory_flag = self.training_log(
                 loss_dict,
                 total_loss_dict,
@@ -1472,6 +1523,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 num_zeros_in_grad,
             )
 
+            print(f"[DEBUG-LOOP] training_log() done for iteration {iteration}", flush=True)
             # Evaluation.
             if args.eval_interval and iteration % args.eval_interval == 0 and args.do_valid:
                 timers("interval-time").stop()
@@ -1584,6 +1636,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         """Single training step."""
         args = get_args()
         timers = get_timers()
+        debug_rank_0(f"[ENTER] train_step() iteration={getattr(args, 'curr_iteration', '?')}")
 
         def run_forward_backward_func(optimizer=None):
             """Forward pass.
@@ -1611,12 +1664,19 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         rerun_state_machine = get_rerun_state_machine()
         while rerun_state_machine.should_run_forward_backward(data_iterator):
             # Set grad to zero.
+            debug_rank_0(f"train_step() zeroing gradients...")
             for model_chunk in model:
                 model_chunk.zero_grad_buffer()
             optimizer.zero_grad()
 
             # Forward pass.
+            debug_rank_0(f"train_step() running forward+backward...")
+            torch.cuda.synchronize()
+            print(f"[DEBUG-SYNC] >>> forward+backward START", flush=True)
             losses_reduced = run_forward_backward_func()
+            torch.cuda.synchronize()
+            print(f"[DEBUG-SYNC] >>> forward+backward END", flush=True)
+            debug_rank_0(f"train_step() forward+backward done")
 
         should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
         if should_exit:
@@ -1632,41 +1692,62 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             unwrapped_model.cancel_gradients_last_layer(args.curr_iteration)
 
         # Update parameters.
-
+        torch.cuda.synchronize()
+        print(f"[DEBUG-SYNC] >>> optimizer step START", flush=True)
+        debug_rank_0(f"train_step() updating parameters (optimizer step)...")
         timers("optimizer", log_level=1).start(barrier=args.barrier_with_L1_time)
         # update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
         if get_args().profile:
             torch.cuda.nvtx.range_push("Optimizer")
         if args.patch_zero_bubble and args.enable_optimizer_post_validation:
+            print(f"[DEBUG-OPT] zero_bubble path: post_validation_enabled={optimizer.post_validation_enabled}", flush=True)
             if optimizer.post_validation_enabled and not no_optimizer_post_validation:
+                print(f"[DEBUG-OPT] calling optimizer.pre_step...", flush=True)
                 optimizer.pre_step(args, timers)
+                torch.cuda.synchronize()
+                print(f"[DEBUG-OPT] optimizer.pre_step done", flush=True)
                 if get_args().profile:
                     torch.cuda.nvtx.range_pop()
                 if get_args().profile:
                     torch.cuda.nvtx.range_push("post_validation_phase")
+                print(f"[DEBUG-OPT] calling run_forward_backward_func(optimizer)...", flush=True)
                 update_successful, grad_norm, num_zeros_in_grad = run_forward_backward_func(optimizer)
+                torch.cuda.synchronize()
+                print(f"[DEBUG-OPT] run_forward_backward_func done", flush=True)
                 if get_args().profile:
                     torch.cuda.nvtx.range_pop()
                 # Here num_zeros_in_grad is a fake name, representing for optimizer_rollback
             else:
+                print(f"[DEBUG-OPT] calling optimizer.step() (zero_bubble else)...", flush=True)
                 update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+                torch.cuda.synchronize()
+                print(f"[DEBUG-OPT] optimizer.step() done", flush=True)
                 if get_args().profile:
                     torch.cuda.nvtx.range_pop()
             optimizer.record_grad_norm(grad_norm)
         else:
+            print(f"[DEBUG-OPT] calling optimizer.step() (default path)...", flush=True)
             update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+            torch.cuda.synchronize()
+            print(f"[DEBUG-OPT] optimizer.step() done: update_successful={update_successful}, grad_norm={grad_norm}", flush=True)
             if get_args().profile:
                 torch.cuda.nvtx.range_pop()
 
         timers("optimizer").stop()
+        torch.cuda.synchronize()
+        print(f"[DEBUG-SYNC] >>> optimizer step END", flush=True)
+        debug_rank_0(f"train_step() optimizer step done")
 
         # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
         # so we must gather across mp ranks
+        print(f"[DEBUG-STEP] logical_and_across_model_parallel_group...", flush=True)
         update_successful = logical_and_across_model_parallel_group(update_successful)
+        print(f"[DEBUG-STEP] reduce_max_stat grad_norm...", flush=True)
         # grad_norm and num_zeros_in_grad will be None on ranks without trainable params,
         # so we must gather across mp ranks
         grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
         if args.log_num_zeros_in_grad:
+            print(f"[DEBUG-STEP] reduce_max_stat num_zeros_in_grad...", flush=True)
             num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
 
         # Vision momentum.
@@ -1675,17 +1756,22 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             unwrapped_model.update_momentum(args.curr_iteration)
 
         # Update learning rate.
+        print(f"[DEBUG-STEP] updating learning rate (update_successful={update_successful})...", flush=True)
         if update_successful:
             increment = get_num_microbatches() * args.micro_batch_size * args.data_parallel_size
             opt_param_scheduler.step(increment=increment)
             skipped_iter = 0
         else:
             skipped_iter = 1
+        print(f"[DEBUG-STEP] learning rate updated, skipped_iter={skipped_iter}", flush=True)
 
         # Empty unused memory.
         if args.empty_unused_memory_level >= 2:
+            print(f"[DEBUG-STEP] emptying unused memory...", flush=True)
             torch.cuda.empty_cache()
+            print(f"[DEBUG-STEP] empty_cache done", flush=True)
 
+        print(f"[DEBUG-STEP] averaging loss across microbatches...", flush=True)
         if is_pipeline_stage_containing_loss():
             # Average loss across microbatches.
             loss_reduced = {}
@@ -1705,6 +1791,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                         numerator += val
                         denominator += 1
                 loss_reduced[key] = numerator / denominator
+            print(f"[DEBUG-STEP] train_step() returning loss_reduced={loss_reduced}", flush=True)
             return (
                 loss_reduced,
                 skipped_iter,
@@ -1714,6 +1801,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 grad_norm,
                 num_zeros_in_grad,
             )
+        print(f"[DEBUG-STEP] train_step() returning (no loss stage)", flush=True)
         return (
             {},
             skipped_iter,

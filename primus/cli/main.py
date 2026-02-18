@@ -69,14 +69,21 @@ def main():
     - preflight: Environment and configuration checks.
       ...
     """
+    print("[PRIMUS-CLI] main() entered", flush=True)
     parser = argparse.ArgumentParser(prog="primus", description="Primus Unified CLI for Training & Utilities")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    print("[PRIMUS-CLI] loading subcommands...", flush=True)
     _load_subcommands(subparsers)
+    print("[PRIMUS-CLI] subcommands loaded", flush=True)
 
     args, unknown_args = parser.parse_known_args()
+    print(f"[PRIMUS-CLI] parsed command={getattr(args, 'command', None)}, unknown_args={unknown_args}", flush=True)
 
     if hasattr(args, "func"):
+        func_name = getattr(args.func, "__name__", str(args.func))
+        func_module = getattr(args.func, "__module__", "unknown")
+        print(f"[PRIMUS-CLI] dispatching to {func_module}.{func_name}()", flush=True)
         try:
             args.func(args, unknown_args)
         except SystemExit:
@@ -86,6 +93,7 @@ def main():
             # Print here so users can see the real root cause.
             traceback.print_exc()
             raise
+        print(f"[PRIMUS-CLI] {func_module}.{func_name}() completed", flush=True)
     else:
         parser.print_help()
 
