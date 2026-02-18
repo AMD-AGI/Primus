@@ -141,7 +141,6 @@ def install_maxtext_dependencies() -> None:
     cmd = (
         "apt install iproute2 -y && "
         "apt install -y "
-        'linux-headers-"$(uname -r)" '
         "libelf-dev "
         "gcc make libtool autoconf "
         "librdmacm-dev rdmacm-utils infiniband-diags ibverbs-utils perftest ethtool "
