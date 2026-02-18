@@ -1,0 +1,93 @@
+# Primus CLI System Default Configuration
+# This file provides system-wide default settings for Primus CLI
+#
+# Priority: CLI args > User config (~/.primus.yaml) > System defaults (this file)
+
+# Main settings (apply to all modes)
+main:
+  debug: false
+  dry_run: false
+
+# Slurm-specific settings
+slurm:
+  debug: false
+  dry_run: false
+  # partition: ""
+  nodes: 1
+  gpus_per_node: 8
+  time: "4:00:00"
+
+# Container-specific settings
+container:
+  debug: false
+  dry_run: false
+
+  # Docker/Podman runtime options
+  # All keys directly map to CLI arguments (--key value)
+  options:
+    # Container image
+    image: "rocm/jax-training:maxtext-v26.1"
+
+    # Single-value options
+    ipc: "host"
+    network: "host"
+    # cpus: "96"
+    # memory: "256G"
+    name: "primus-training"
+    privileged: "true"
+    security-opt: "seccomp=unconfined"
+    group-add: "video"
+
+    # Cumulative options (can be specified multiple times via CLI)
+    # Device access (each passed as --device)
+    # NOTE: Do not modify these device paths - they are required for ROCm/GPU access
+    #   /dev/kfd  - Kernel Fusion Driver (ROCm core)
+    #   /dev/dri  - Direct Rendering Infrastructure (GPU access)
+    #   /dev/infiniband - InfiniBand network device (multi-node communication)
+    device:
+      - "/dev/kfd"
+      - "/dev/dri"
+      - "/dev/infiniband"
+
+    # Linux capabilities (each passed as --cap-add)
+    # NOTE: Do not modify these capabilities - they are required for proper container operation
+    #   SYS_PTRACE     - Required for debugging and profiling tools
+    #   CAP_SYS_ADMIN  - Required for system administration operations
+    cap-add:
+      - "SYS_PTRACE"
+      - "CAP_SYS_ADMIN"
+
+    # Volume mounts (each passed as --volume)
+    volume: []
+    # volume:
+    #   - "/data:/data"
+    #   - "/output:/output"
+    #   - "/workspace/Primus"
+    #   - "/model_weights:/model_weights:ro"
+
+    # Environment variables (each passed as --env KEY=VALUE)
+    env:
+      # If using AINIC, set the environment variables for AINIC
+      # make sure NCCL_IB_GID_INDEX value is set appropriately
+      - "USING_AINIC=1"
+      - "NCCL_PXN_DISABLE=0"
+      - "NCCL_IB_GID_INDEX=1"
+# Direct mode settings
+direct:
+  debug: false
+
+  # Distributed training parameters
+  gpus_per_node: 8
+  master_port: 1234
+  nnodes: 1
+  master_addr: "localhost"
+
+  # Direct mode specific options
+  run_mode: "torchrun"
+  script: "primus/cli/main.py"
+  numa: "auto"
+  log_file: ""
+
+  # Default patch scripts and env vars
+  patch: []
+  env: []
