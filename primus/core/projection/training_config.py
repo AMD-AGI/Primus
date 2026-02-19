@@ -66,6 +66,10 @@ class ModelConfig:
     # Precision – None means bf16, "hybrid" means FP8-hybrid (linear GEMMs in FP8)
     fp8: str = None
 
+    # Primus Turbo flags — used to select the grouped-GEMM performance model
+    enable_primus_turbo: bool = False
+    use_turbo_grouped_mlp: bool = False
+
 
 @dataclass
 class TrainingConfig:

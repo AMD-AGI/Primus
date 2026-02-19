@@ -88,11 +88,9 @@ def get_sdpa_simulation_backend(
     Args:
         gpu_arch: GPU architecture override (e.g. "mi300x", "mi355x").
         compute_efficiency: Fraction of peak compute achieved (0-1).
-            Defaults to 0.51 — calibrated against measured FAv3 traces on
-            MI300X (B=3, H_Q=64, S=8192, D=128, H_KV=8, GQA, causal, BF16).
-            The lower-than-theoretical efficiency accounts for GQA head
-            broadcasting overhead, LDS bank conflicts, barrier synchronisation,
-            and register pressure.
+            Defaults to 0.51. The lower-than-theoretical efficiency accounts
+            for GQA head broadcasting overhead, LDS bank conflicts, barrier
+            synchronisation, and register pressure.
         memory_efficiency: Fraction of peak HBM bandwidth achieved (0-1).
             Defaults to 0.85 — FAv3 streaming pattern typically achieves 0.80-0.90.
         gpu_clock_mhz: Override the GPU compute clock frequency in MHz.

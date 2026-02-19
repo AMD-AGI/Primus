@@ -213,6 +213,10 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
             self._ensure_initialized(dtype)
 
         # ----- Build origami problem_t -----
+        # NOTE: problem.batch models **batched** GEMM (all sub-problems share
+        # the same M, N, K).  For MoE experts this is used as an approximation
+        # of grouped GEMM under uniform token distribution.  Origami does not
+        # currently expose a native grouped-GEMM model.
         problem = _origami.problem_t()
         problem.size = _origami.dim3_t(m, n, k)
         problem.batch = batch

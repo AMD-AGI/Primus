@@ -4,6 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import math
+import os
 from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
@@ -11,6 +13,10 @@ from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import TrainingConfig
 
 from .utils import benchmark_layer
+
+# Memory-bandwidth constants for non-GEMM MoE overhead estimation
+_PERMUTE_EFF_BW_GBPS = 300.0   # scatter/gather effective BW (~5-10% peak HBM)
+_ACTIVATION_BW_GBPS = 3000.0   # sequential element-wise ops (~60% peak HBM)
 
 
 class MoEMLPProfiler(BaseModuleProfiler):
@@ -112,43 +118,183 @@ class MoEMLPProfiler(BaseModuleProfiler):
     def _get_simulated_results(
         self, batch_size: int, seq_len: int
     ) -> tuple[float, float, int]:
-        """Get simulated results from the GEMM simulation backend for MoE MLP."""
+        """Get simulated results from the GEMM simulation backend for MoE MLP.
+
+        In addition to expert GEMM time, this method estimates several
+        components of MoE execution that the GEMM simulation alone misses:
+
+        1. **Router overhead** — gate linear projection + softmax/top-K.
+        2. **Token permutation** — dispatch (scatter) and combine (gather)
+           memory traffic with random-access patterns.
+        3. **Activation function** — SwiGLU / GELU element-wise overhead.
+
+        **Grouped GEMM performance model selection**:
+        When ``enable_primus_turbo`` and ``use_turbo_grouped_mlp`` are both
+        ``True`` in the training config, the expert GEMMs are modelled using
+        Origami's *batched* GEMM path (``batch=num_local_experts``).  Primus
+        Turbo's grouped-GEMM kernel achieves near-ideal batched execution,
+        so the batched model is an accurate proxy.
+
+        Otherwise (legacy ``grouped_gemm`` package), each expert is simulated
+        independently (``batch=1``) and the result is scaled by the number of
+        local experts.  This more closely reflects the sequential per-expert
+        execution of the legacy kernel.
+        """
         tp_size = self.config.model_parallel_config.tensor_model_parallel_size
         cp_size = self.config.model_parallel_config.context_model_parallel_size
         ep_size = self.config.model_parallel_config.expert_model_parallel_size
 
+        hidden_size = self.config.model_config.hidden_size
         batch_tokens = batch_size * seq_len // tp_size // cp_size
-        topk_tokens = batch_tokens * self.config.model_config.moe_router_topk
+        topk = self.config.model_config.moe_router_topk
+        topk_tokens = batch_tokens * topk
 
         if self.config.model_config.moe_ffn_hidden_size is not None:
             moe_ffn = self.config.model_config.moe_ffn_hidden_size
         else:
             moe_ffn = self.config.model_config.ffn_hidden_size
 
-        # Simulate routed expert MLP GEMMs (topk tokens through experts / EP)
-        # Each expert processes topk_tokens / num_local_experts tokens on average
-        num_local_experts = (self.config.model_config.num_experts or 1) // ep_size
+        num_experts = self.config.model_config.num_experts or 1
+        num_local_experts = num_experts // ep_size
         tokens_per_expert = topk_tokens // max(num_local_experts, 1)
 
         # FP8-hybrid: MoE expert MLP projections run in FP8
         gemm_dtype = "fp8" if getattr(self.config.model_config, "fp8", None) else "bf16"
-        sim_result = self._gemm_backend.simulate_mlp_gemms(
-            batch_tokens=tokens_per_expert,
-            hidden_size=self.config.model_config.hidden_size,
-            ffn_hidden_size=moe_ffn,
-            dtype=gemm_dtype,
-            swiglu=self.config.model_config.swiglu,
-        )
-        # Scale by number of local experts (they run sequentially or in grouped GEMM)
-        fwd_time = sim_result.forward_time_ms * num_local_experts
-        bwd_time = sim_result.backward_time_ms * num_local_experts
+        bytes_per_el = 1 if gemm_dtype == "fp8" else 2
 
-        # Shared experts (if any)
+        # ── 1. Routed expert GEMMs ──
+        M = tokens_per_expert
+        H = hidden_size
+        F = moe_ffn
+
+        # Determine grouped-GEMM performance model.
+        # Primus Turbo's grouped-GEMM kernel achieves near-ideal batched
+        # execution → model as Origami batched GEMM (batch=num_local_experts).
+        # Legacy grouped_gemm executes experts more sequentially → model as
+        # individual GEMM (batch=1) × num_local_experts.
+        use_turbo = (
+            getattr(self.config.model_config, "enable_primus_turbo", False)
+            and getattr(self.config.model_config, "use_turbo_grouped_mlp", False)
+        )
+
+        is_rank_0 = int(os.getenv("RANK", "0")) == 0
+        if is_rank_0 and num_local_experts > 1:
+            mode = "Turbo (batched)" if use_turbo else "Legacy (sequential)"
+            print(f"  [MoE MLP] Grouped-GEMM model: {mode}"
+                  f"  ({num_local_experts} local experts, M={M}, H={H}, F={F})")
+
+        expert_fwd_ms = 0.0
+        expert_bwd_ms = 0.0
+
+        if use_turbo:
+            # ── Turbo model: batched GEMM (all experts in parallel) ──
+            B = num_local_experts
+            if self.config.model_config.swiglu:
+                gate_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
+                up_fwd   = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
+                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                expert_fwd_ms = (gate_fwd.forward_time_ms
+                                 + up_fwd.forward_time_ms
+                                 + down_fwd.forward_time_ms)
+                gate_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                gate_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
+                up_dg   = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                up_wg   = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
+                down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
+                down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=B)
+                expert_bwd_ms = (gate_dg.forward_time_ms + gate_wg.forward_time_ms
+                                 + up_dg.forward_time_ms + up_wg.forward_time_ms
+                                 + down_dg.forward_time_ms + down_wg.forward_time_ms)
+            else:
+                up_fwd   = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
+                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                expert_fwd_ms = up_fwd.forward_time_ms + down_fwd.forward_time_ms
+                up_dg   = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                up_wg   = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
+                down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
+                down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=B)
+                expert_bwd_ms = (up_dg.forward_time_ms + up_wg.forward_time_ms
+                                 + down_dg.forward_time_ms + down_wg.forward_time_ms)
+
+            expert_fwd = expert_fwd_ms
+            expert_bwd = expert_bwd_ms
+        else:
+            # ── Legacy model: individual GEMM × num_local_experts ──
+            if self.config.model_config.swiglu:
+                gate_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
+                up_fwd   = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
+                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
+                expert_fwd_ms = (gate_fwd.forward_time_ms
+                                 + up_fwd.forward_time_ms
+                                 + down_fwd.forward_time_ms)
+                gate_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
+                gate_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
+                up_dg   = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
+                up_wg   = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
+                down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
+                down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=1)
+                expert_bwd_ms = (gate_dg.forward_time_ms + gate_wg.forward_time_ms
+                                 + up_dg.forward_time_ms + up_wg.forward_time_ms
+                                 + down_dg.forward_time_ms + down_wg.forward_time_ms)
+            else:
+                up_fwd   = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
+                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
+                expert_fwd_ms = up_fwd.forward_time_ms + down_fwd.forward_time_ms
+                up_dg   = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
+                up_wg   = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
+                down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
+                down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=1)
+                expert_bwd_ms = (up_dg.forward_time_ms + up_wg.forward_time_ms
+                                 + down_dg.forward_time_ms + down_wg.forward_time_ms)
+
+            expert_fwd = expert_fwd_ms * num_local_experts
+            expert_bwd = expert_bwd_ms * num_local_experts
+
+        fwd_time = expert_fwd
+        bwd_time = expert_bwd
+
+        # ── 2. Router overhead ──
+        # Gate linear: [batch_tokens, num_experts, hidden_size]
+        router_gemm = self._gemm_backend.simulate_gemm(
+            batch_tokens, num_experts, hidden_size, gemm_dtype
+        )
+        router_fwd_ms = router_gemm.forward_time_ms
+        # Softmax + top-K selection + auxiliary loss overhead (empirical)
+        topk_overhead_ms = 0.1 + 0.002 * num_experts
+        router_fwd_ms += topk_overhead_ms
+        # Backward: dgrad + wgrad for gate linear
+        router_bwd_ms = 2.0 * router_gemm.forward_time_ms + topk_overhead_ms
+
+        fwd_time += router_fwd_ms
+        bwd_time += router_bwd_ms
+
+        # ── 3. Token permutation overhead (dispatch + combine) ──
+        # Dispatch: gather tokens by expert assignment → irregular memory access
+        # Combine: scatter expert outputs back → weighted reduce
+        dispatch_bytes = (batch_tokens + topk_tokens) * hidden_size * bytes_per_el
+        combine_bytes = (topk_tokens + batch_tokens) * hidden_size * bytes_per_el
+        permute_fwd_ms = dispatch_bytes / (_PERMUTE_EFF_BW_GBPS * 1e6)
+        permute_bwd_ms = combine_bytes / (_PERMUTE_EFF_BW_GBPS * 1e6)
+
+        fwd_time += permute_fwd_ms
+        bwd_time += permute_bwd_ms
+
+        # ── 4. Activation function overhead (SwiGLU / GELU) ──
+        if self.config.model_config.swiglu:
+            act_bytes = 3 * topk_tokens * moe_ffn * bytes_per_el  # gate+up read, result write
+        else:
+            act_bytes = 2 * topk_tokens * moe_ffn * bytes_per_el  # read + write
+        activation_ms = act_bytes / (_ACTIVATION_BW_GBPS * 1e6)
+
+        fwd_time += activation_ms
+        bwd_time += activation_ms
+
+        # ── 5. Shared experts (if any) ──
         shared_sz = self.config.model_config.moe_shared_expert_intermediate_size
         if shared_sz:
             shared_result = self._gemm_backend.simulate_mlp_gemms(
                 batch_tokens=batch_tokens,
-                hidden_size=self.config.model_config.hidden_size,
+                hidden_size=hidden_size,
                 ffn_hidden_size=shared_sz,
                 dtype=gemm_dtype,
                 swiglu=self.config.model_config.swiglu,
