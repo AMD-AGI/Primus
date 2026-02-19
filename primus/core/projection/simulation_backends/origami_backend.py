@@ -72,19 +72,20 @@ class _HardwareProfile:
     lds_capacity: int  # bytes
     l2_capacity: int  # bytes (per XCD)
     compute_clock_khz: int
+    hbm_bandwidth_gbps: float = 5300.0  # peak HBM bandwidth (GB/s)
 
 
 _KNOWN_PROFILES: Dict[str, _HardwareProfile] = {
-    # MI300X / gfx942
-    "mi300x": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000),
-    "gfx942": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000),
-    # MI325X / gfx942 (same die as MI300X, HBM3E upgrade)
-    "mi325x": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000),
-    # MI355X / gfx950
-    "mi355x": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000),
-    "gfx950": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000),
+    # MI300X / gfx942: HBM3 ~5.3 TB/s
+    "mi300x": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000, 5300.0),
+    "gfx942": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000, 5300.0),
+    # MI325X / gfx942 (same die as MI300X, HBM3E upgrade): ~6.0 TB/s
+    "mi325x": _HardwareProfile("gfx942", 304, 65536, 4_194_304, 2_100_000, 6000.0),
+    # MI355X / gfx950: HBM3E ~8.0 TB/s
+    "mi355x": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000, 8000.0),
+    "gfx950": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000, 8000.0),
     # MI300A
-    "mi300a": _HardwareProfile("gfx942", 228, 65536, 4_194_304, 2_100_000),
+    "mi300a": _HardwareProfile("gfx942", 228, 65536, 4_194_304, 2_100_000, 4000.0),
 }
 
 # ---------------------------------------------------------------------------
@@ -141,6 +142,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         self,
         gpu_arch: Optional[str] = None,
         gpu_clock_mhz: Optional[int] = None,
+        n_cu_override: Optional[int] = None,
     ):
         """
         Args:
@@ -150,6 +152,11 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
             gpu_clock_mhz: Override the compute clock frequency in MHz.
                       If *None*, uses the profile default or the
                       ``PRIMUS_GPU_CLOCK_MHZ`` env var.
+            n_cu_override: Override the number of Compute Units used by
+                      Origami's performance model.  Set to ``1`` for
+                      per-tile / single-CU simulation (e.g. SDPA tile-level
+                      modelling).  If *None*, the profile's default CU
+                      count is used.
         """
         self._gpu_arch = gpu_arch or os.getenv("PRIMUS_GPU_ARCH", None)
         if self._gpu_arch is not None:
@@ -160,6 +167,8 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         self._clock_override_mhz: Optional[int] = gpu_clock_mhz or (
             int(_env_clock) if _env_clock else None
         )
+
+        self._n_cu_override = n_cu_override
 
         # Lazily initialised origami objects – see ``_ensure_initialized``.
         self._hardware = None  # origami.hardware_t
@@ -179,6 +188,19 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
     def is_available(self) -> bool:
         return _try_import_origami()
 
+    @property
+    def hbm_bandwidth_gbps(self) -> Optional[float]:
+        """Peak HBM bandwidth for the target architecture (GB/s).
+
+        Resolved from the arch profile (``_KNOWN_PROFILES``) or the
+        ``PRIMUS_GPU_ARCH`` env var.  Returns ``None`` only when no
+        architecture could be determined.
+        """
+        arch = self._gpu_arch or os.getenv("PRIMUS_GPU_ARCH", "mi300x")
+        arch = arch.lower().strip()
+        profile = _KNOWN_PROFILES.get(arch)
+        return profile.hbm_bandwidth_gbps if profile is not None else None
+
     def simulate_gemm(
         self,
         m: int,
@@ -196,10 +218,26 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 "#subdirectory=shared/origami/python"
             )
 
-        # FP8 fallback: if Origami doesn't support FP8 MI for this arch,
-        # simulate as BF16.  On MI300X, Origami BF16 predictions already
-        # closely match FP8-hybrid measured performance (the natural model
-        # overestimation roughly offsets the FP8 compute gain).
+        # FP8 fallback strategy
+        # ~~~~~~~~~~~~~~~~~~~~~~
+        # Origami v0.1.0 maps the Primus "fp8" dtype to "bf8_fnuz" (the FNUZ
+        # variant used by gfx942 / MI300X), but this datatype string is not
+        # yet recognised by Origami's ``string_to_datatype``.  As a result,
+        # ``_ensure_initialized("fp8")`` sets ``_fp8_mi_unavailable = True``
+        # on *all* current architectures.
+        #
+        # When the FP8 MI is unavailable we simulate in BF16 and halve the
+        # time (``÷ 2.0`` below).  This is a first-order approximation:
+        # FP8 doubles the matrix-instruction throughput relative to BF16 on
+        # both gfx942 and gfx950.
+        #
+        # Origami does expose *native* ``bf8`` / ``f8`` MI for gfx950
+        # (MI=16×16×128 vs BF16 MI=16×16×32), but its tile-level performance
+        # model currently does not translate the higher MI throughput into
+        # proportional time savings — native FP8 predictions are only ~1.03×
+        # faster than BF16 instead of the expected ~2×.  Until Origami's FP8
+        # performance model is updated, the BF16 ÷ 2 heuristic is more
+        # accurate for all supported architectures.
         fp8_fallback = False
         sim_dtype = dtype
         if dtype == "fp8":
@@ -248,9 +286,10 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         latency_cycles = result.latency
         time_ms = latency_cycles / (self._clock_ghz * 1e6)
 
-        # FP8 speedup: when Origami can't natively simulate FP8 (no FP8 MI)
-        # we ran the simulation in BF16.  FP8 has 2x the throughput of BF16
-        # on gfx942, so divide the time by 2.
+        # FP8 speedup heuristic: we simulated in BF16 because Origami could
+        # not use a native FP8 matrix instruction.  FP8 MFMA throughput is 2×
+        # that of BF16 on both gfx942 and gfx950, so halving the BF16 time is
+        # a reasonable first-order approximation for compute-bound GEMMs.
         if fp8_fallback:
             time_ms /= 2.0
 
@@ -368,10 +407,11 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
             clock_khz = profile.compute_clock_khz
             if self._clock_override_mhz is not None:
                 clock_khz = self._clock_override_mhz * 1000
+            n_cu = self._n_cu_override if self._n_cu_override is not None else profile.n_cu
             arch_enum = getattr(_origami.architecture_t, profile.arch_enum_name)
             hw = _origami.get_hardware_for_arch(
                 arch_enum,
-                profile.n_cu,
+                n_cu,
                 profile.lds_capacity,
                 profile.l2_capacity,
                 clock_khz,
@@ -380,10 +420,11 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 override_tag = ""
                 if self._clock_override_mhz is not None:
                     override_tag = " (overridden via --gpu-clock-mhz)"
+                cu_tag = f" (n_cu_override={n_cu})" if self._n_cu_override is not None else ""
                 print(
                     f"[Primus:Origami] Using hardware profile for "
-                    f"'{self._gpu_arch}': N_CU={profile.n_cu}, "
-                    f"clock={clock_khz / 1e6:.1f} GHz{override_tag}"
+                    f"'{self._gpu_arch}': N_CU={n_cu}, "
+                    f"clock={clock_khz / 1e6:.1f} GHz{override_tag}{cu_tag}"
                 )
             return hw
 
@@ -421,10 +462,11 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         clock_khz = profile.compute_clock_khz
         if self._clock_override_mhz is not None:
             clock_khz = self._clock_override_mhz * 1000
+        n_cu = self._n_cu_override if self._n_cu_override is not None else profile.n_cu
         arch_enum = getattr(_origami.architecture_t, profile.arch_enum_name)
         hw = _origami.get_hardware_for_arch(
             arch_enum,
-            profile.n_cu,
+            n_cu,
             profile.lds_capacity,
             profile.l2_capacity,
             clock_khz,
@@ -433,9 +475,10 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
             override_tag = ""
             if self._clock_override_mhz is not None:
                 override_tag = " (overridden via --gpu-clock-mhz)"
+            cu_tag = f" (n_cu_override={n_cu})" if self._n_cu_override is not None else ""
             print(
                 f"[Primus:Origami] Using known hardware profile for "
-                f"'{self._gpu_arch}': N_CU={profile.n_cu}, "
-                f"clock={clock_khz / 1e6:.1f} GHz{override_tag}"
+                f"'{self._gpu_arch}': N_CU={n_cu}, "
+                f"clock={clock_khz / 1e6:.1f} GHz{override_tag}{cu_tag}"
             )
         return hw

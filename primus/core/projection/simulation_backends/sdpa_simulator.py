@@ -15,7 +15,6 @@ configurations:
       • 1 Thread-Group, 8 Wavefronts per workgroup (512 threads)
       • Q-tile  = 256 rows   (32m × 8 wavefronts)
       • KV-tile = 64 columns  per loop iteration
-      • MFMA instruction: ``v_mfma_f32_32x32x16_bf16``
       • 64 MFMAs per loop iteration  (QKᵀ + softmax + PV, pipelined)
       • Workgroups = ⌈S / 256⌉ × B × H
 
@@ -28,17 +27,21 @@ configurations:
       • Workgroups = ⌈S / 256⌉ × B × H
       • Inner-loop iterations = ⌈S / 16⌉  (over Q blocks)
 
-The model uses a **roofline** approach:
-    time = max(compute_time, memory_time, atomic_time)
-with FAv3-specific compute/memory efficiency factors and CU utilisation
-derived from the tile sizes.
+Tile-level simulation using Origami with a 1-CU backend.
+Flash Attention is a fused kernel where sub-operations (QKᵀ, softmax, PV)
+execute **sequentially** within each workgroup tile.  By running Origami on
+a single CU for each per-tile GEMM and then multiplying by the number of
+waves (workgroups / N_CU), we capture the additive cost structure and
+per-tile wave quantisation effects that a global roofline misses.
+
+**Origami is required** — this simulator cannot operate without it.
 
 In the backward pass, the dQ gradient is accumulated across KV-workgroups
 using ``buffer_atomic_add_f32`` (72 atomic instructions in the kernel).
 Each KV-workgroup processes all Q positions and atomically adds its partial
 dQ contribution, leading to contention proportional to ⌈S / 256⌉ concurrent
-writers per dQ cache line.  The atomic overhead is modelled as a separate
-bottleneck dimension in the roofline.
+writers per dQ cache line.  The atomic overhead is modelled as an additive
+cost on top of the compute/memory time.
 """
 
 from __future__ import annotations
@@ -78,6 +81,16 @@ _FAV3_BWD = _FAv3TileConfig(q_tile_m=16, kv_tile_n=256, n_wavefronts=4)
 
 
 # =========================================================================
+# Backward dQ atomic latencies (for tile-level model)
+# =========================================================================
+# dQ is accumulated via buffer_atomic_add_f32 across KV-workgroups.
+# Latency estimates for CDNA3 (gfx942) at typical clocks:
+_ATOMIC_LATENCY_GLOBAL_NS = 400  # HBM read-modify-write latency per atomic op
+_ATOMIC_LATENCY_LOCAL_NS = 40  # L1 / LDS atomic latency per op
+_WARP_SIZE = 64  # CDNA wavefront width
+
+
+# =========================================================================
 # GPU hardware specs
 # =========================================================================
 
@@ -96,9 +109,6 @@ class GPUHardwareSpec:
 
     # Total CUs on the device
     n_cu: int = 304  # MI300X
-
-    # Max wavefronts per CU (SIMD occupancy limit)
-    max_waves_per_cu: int = 8
 
     # Number of XCDs on the device (cross-die atomics are more expensive)
     n_xcd: int = 8  # MI300X has 8 XCDs
@@ -171,7 +181,7 @@ def _get_hardware_spec(
         _PROFILE_CLOCK_MHZ = {
             "mi300x": 2100,
             "gfx942": 2100,
-            "mi325x": 1200,
+            "mi325x": 2100,  # same gfx942 compute die as MI300X
             "mi355x": 2100,
             "gfx950": 2100,
             "mi300a": 2100,
@@ -198,29 +208,24 @@ class SDPASimulator(SDPASimulationBackend):
     """
     Analytical SDPA simulation modelling the FAv3 kernel structure.
 
-    The model captures:
-      1. **Total FLOPs** from the SDPA math (QKᵀ, softmax, PV for fwd;
-         dV, dP/dS, dQ, dK, softmax-bwd for bwd).
-      2. **Flash-Attention memory IO** — Q/K/V are streamed from HBM;
-         the full S/P matrices are never materialised.
-      3. **CU utilisation** — derived from the FAv3 tile sizes and the
-         number of workgroups that can execute concurrently.
-      4. **Achieved efficiency** — higher than generic kernels because
-         FAv3 is hand-tuned ISA with software pipelining and LDS-based
-         data movement.
-      5. **Atomic overhead (BWD only)** — dQ is accumulated across
-         KV-workgroups via ``buffer_atomic_add_f32`` in FP32.  The model
-         accounts for the read-modify-write penalty and contention from
-         ⌈S / 256⌉ concurrent writers per dQ cache line.
+    Uses an Origami GEMM backend with ``n_cu=1`` to simulate per-tile
+    GEMM execution time.  Flash Attention is modelled as a fused kernel
+    where QKᵀ, softmax, and PV are sequential within each workgroup.
+    The total time = (per-tile-QKᵀ + per-tile-PV) × num_waves.  This
+    naturally captures wave quantisation and per-tile efficiency without
+    needing an empirical ``compute_efficiency`` parameter.
+
+    Also models the backward dQ atomic overhead from
+    ``buffer_atomic_add_f32`` accumulation across KV-workgroups.
+
+    **Origami is required** — instantiation will fail if the Origami
+    backend is not available.
     """
 
     def __init__(
         self,
         gpu_arch: Optional[str] = None,
         hardware_spec: Optional[GPUHardwareSpec] = None,
-        compute_efficiency: float = 0.51,
-        memory_efficiency: float = 0.85,
-        atomic_rmw_factor: float = 4.0,
         gpu_clock_mhz: Optional[int] = None,
     ):
         """
@@ -228,29 +233,30 @@ class SDPASimulator(SDPASimulationBackend):
             gpu_arch: GPU architecture string (e.g. "mi300x", "gfx942",
                 "mi355x", "gfx950").
             hardware_spec: Override hardware spec directly.
-            compute_efficiency: Fraction of peak TFLOPS achieved (0-1).
-                The lower-than-peak efficiency (vs theoretical 0.75-0.85)
-                accounts for GQA head broadcasting, LDS bank conflicts,
-                barrier synchronisation, and register pressure.
-            memory_efficiency: Fraction of peak HBM bandwidth achieved (0-1).
-                FAv3 streaming pattern typically achieves 0.80-0.90.
-            atomic_rmw_factor: Base slowdown of ``buffer_atomic_add_f32``
-                relative to a plain ``buffer_store`` (read-modify-write
-                overhead).  Typical range 3-6 on CDNA3.  Contention from
-                multiple writers is modelled *on top* of this factor.
             gpu_clock_mhz: Override the GPU compute clock frequency in MHz.
                 If provided, the profile's TFLOPS are scaled proportionally.
+
+        Raises:
+            RuntimeError: If the Origami backend is not available.
         """
         self._hw = hardware_spec or _get_hardware_spec(gpu_arch, gpu_clock_mhz)
-        self._compute_eff = compute_efficiency
-        self._memory_eff = memory_efficiency
-        self._atomic_rmw_factor = atomic_rmw_factor
+
+        # Create the Origami 1-CU backend for tile-level simulation.
+        # This is required — SDPA simulation cannot proceed without it.
+        self._tile_gemm = self._create_tile_gemm_backend(gpu_arch, gpu_clock_mhz)
+        if self._tile_gemm is None:
+            raise RuntimeError(
+                "SDPASimulator requires the Origami backend but it is not "
+                "available.  Please install the 'origami' package or ensure "
+                "primus.core.projection.simulation_backends.origami_backend "
+                "is importable."
+            )
 
     def name(self) -> str:
         return "sdpa_simulator (FAv3)"
 
     def is_available(self) -> bool:
-        return True  # Pure-Python analytical model, always available
+        return self._tile_gemm is not None and self._tile_gemm.is_available()
 
     # ------------------------------------------------------------------
     # Public API
@@ -269,8 +275,8 @@ class SDPASimulator(SDPASimulationBackend):
         head_dim_v: Optional[int] = None,
     ) -> SimulationResult:
         """
-        Simulate FAv3 SDPA execution time using a roofline model
-        parameterised by the actual FAv3 tile configuration.
+        Simulate FAv3 SDPA execution time using Origami 1-CU tile-level
+        simulation parameterised by the actual FAv3 tile configuration.
 
         Args:
             batch_size: Batch size (B).
@@ -299,161 +305,213 @@ class SDPASimulator(SDPASimulationBackend):
         D_v = head_dim_v if head_dim_v is not None else head_dim
         bpe = self._bytes_per_element(dtype)
 
-        # GQA ratio: each KV head serves (H_Q / H_K) query heads.
-        # The FLOPs are still per-query-head, so total FLOPs scale with H_Q.
-        # Memory for K/V scales with H_K, memory for Q/O scales with H_Q.
+        return self._simulate_tile_level(
+            B, H_Q, S_Q, S_K, H_K, D_qk, D_v, causal, dtype, bpe,
+        )
 
+    # ------------------------------------------------------------------
+    # Tile-level simulation (primary mode — requires Origami)
+    # ------------------------------------------------------------------
+
+    def _create_tile_gemm_backend(
+        self,
+        gpu_arch: Optional[str],
+        gpu_clock_mhz: Optional[int],
+    ):
+        """Try to create an Origami backend with 1 CU for per-tile simulation.
+
+        Returns the backend on success, or ``None`` if Origami is not available.
+        """
+        try:
+            from primus.core.projection.simulation_backends.origami_backend import (
+                OrigamiGEMMBackend,
+            )
+
+            backend = OrigamiGEMMBackend(
+                gpu_arch=gpu_arch,
+                gpu_clock_mhz=gpu_clock_mhz,
+                n_cu_override=1,
+            )
+            if backend.is_available():
+                is_rank_0 = int(os.getenv("RANK", "0")) == 0
+                if is_rank_0:
+                    print(
+                        "[Primus:SDPA] Using Origami 1-CU tile-level simulation "
+                        "for Flash Attention"
+                    )
+                return backend
+        except Exception:
+            pass
+        return None
+
+    def _simulate_tile_level(
+        self,
+        B: int,
+        H_Q: int,
+        S_Q: int,
+        S_K: int,
+        H_K: int,
+        D_qk: int,
+        D_v: int,
+        causal: bool,
+        dtype: str,
+        bpe: int,
+    ) -> SimulationResult:
+        """
+        Tile-level SDPA simulation using Origami on a single CU.
+
+        Flash Attention is a **fused** kernel — within each workgroup, the
+        sub-operations (QKᵀ, softmax, PV) execute **sequentially** and the
+        intermediate S/P matrices stay in LDS/registers (never written to
+        HBM).  This means the correct timing model is **additive** across
+        sub-operations per tile, not a global ``max(compute, memory)``
+        roofline.
+
+        Approach:
+          1. Simulate each per-tile GEMM using Origami with ``n_cu=1``.
+             This captures tile-level wave quantisation, LDS traffic, and
+             pipeline effects that a global FLOP-rate model misses.
+          2. Sum the per-tile GEMM times (additive, sequential execution).
+          3. Multiply by ``num_waves = ⌈workgroups / N_CU⌉`` to account for
+             CU-level parallelism across tiles.
+          4. Add dQ atomic overhead (backward only).
+
+        Forward per-workgroup (q_tile_m=256 Q rows, sweeps all S_K):
+          QKᵀ: Q_tile[256, D_qk] × Kᵀ[D_qk, S_K] → S[256, S_K]
+          PV:  P_tile[256, S_K]  × V[S_K, D_v]     → O[256, D_v]
+          Workgroups = ⌈S_Q / 256⌉ × B × H_Q
+
+        Backward per-workgroup (kv_tile_n=256 KV cols, sweeps all S_Q):
+          5 GEMMs per workgroup (FA backward algorithm):
+            1. QKᵀ recompute: Q[S_Q, D_qk] × Kᵀ[D_qk, 256] → S[S_Q, 256]
+            2. dP = dO × Vᵀ:  dO[S_Q, D_v]  × Vᵀ[D_v, 256] → dP[S_Q, 256]
+            3. dV = Pᵀ × dO:  Pᵀ[256, S_Q]  × dO[S_Q, D_v] → dV[256, D_v]
+            4. dQ = dS × K:   dS[S_Q, 256]   × K[256, D_qk]  → dQ[S_Q, D_qk]
+            5. dK = dSᵀ × Q:  dSᵀ[256, S_Q]  × Q[S_Q, D_qk] → dK[256, D_qk]
+          Workgroups = ⌈S_K / 256⌉ × B × H_Q
+        """
+        assert self._tile_gemm is not None
+        N_CU = self._hw.n_cu
         causal_factor = 0.5 if causal else 1.0
 
         # ==============================================================
-        # 1.  COMPUTE  (FLOP counts)
+        # FORWARD
         # ==============================================================
-        # Forward  (per query head, then × H_Q)
-        #   QKᵀ : 2·B·H_Q·S_Q·S_K·D_qk    (batched GEMM)
-        #   softmax : ~5·B·H_Q·S_Q·S_K      (exp, sub-max, sum, div, mul)
-        #   PV  : 2·B·H_Q·S_Q·S_K·D_v      (batched GEMM — P is S_Q×S_K, V is S_K×D_v)
-        # NOTE for PV: output is (S_Q, D_v), inner dim is S_K.
-        # For causal masking, only ~half the S_Q×S_K elements are computed
-        # (only valid when S_Q == S_K; for cross-attn causal is usually False).
-        #
-        # When D_qk == D_v (standard MHA/GQA) this reduces to the familiar
-        # 2 × (2·B·H·S·S·D) formula.  For MLA, D_qk > D_v (e.g. 192 vs 128).
-        fwd_qk_flops = 2.0 * B * H_Q * S_Q * S_K * D_qk * causal_factor
-        fwd_pv_flops = 2.0 * B * H_Q * S_Q * S_K * D_v * causal_factor
-        fwd_softmax_flops = 5.0 * B * H_Q * S_Q * S_K * causal_factor
-        fwd_flops = fwd_qk_flops + fwd_pv_flops + fwd_softmax_flops
+        fwd_n_wgs = math.ceil(S_Q / _FAV3_FWD.q_tile_m) * B * H_Q
+        fwd_waves = math.ceil(fwd_n_wgs / N_CU)
 
-        # Backward (4 batched GEMMs + softmax backward)
-        #   dV  = Pᵀ @ dO     : 2·B·H_Q·S_K·S_Q·D_v   (inner dim S_Q, out S_K×D_v)
-        #   dP  = dO @ Vᵀ     : 2·B·H_Q·S_Q·S_K·D_v   (inner dim D_v, out S_Q×S_K)
-        #   dS  = softmax_bwd  : ~5·B·H_Q·S_Q·S_K
-        #   dQ  = dS @ K       : 2·B·H_Q·S_Q·S_K·D_qk  (inner dim S_K, out S_Q×D_qk)
-        #   dK  = dSᵀ @ Q      : 2·B·H_Q·S_K·S_Q·D_qk  (inner dim S_Q, out S_K×D_qk)
-        bwd_dv_flops = 2.0 * B * H_Q * S_K * S_Q * D_v * causal_factor
-        bwd_dp_flops = 2.0 * B * H_Q * S_Q * S_K * D_v * causal_factor
-        bwd_dq_flops = 2.0 * B * H_Q * S_Q * S_K * D_qk * causal_factor
-        bwd_dk_flops = 2.0 * B * H_Q * S_K * S_Q * D_qk * causal_factor
-        bwd_softmax_flops = 5.0 * B * H_Q * S_Q * S_K * causal_factor
-        bwd_flops = bwd_dv_flops + bwd_dp_flops + bwd_dq_flops + bwd_dk_flops + bwd_softmax_flops
+        # Per-workgroup GEMMs on 1 CU (tile sweeps all S_K positions):
+        #   QKᵀ: [q_tile_m, D_qk, S_K]
+        r_fwd_qk = self._tile_gemm.simulate_gemm(
+            m=_FAV3_FWD.q_tile_m, n=S_K, k=D_qk, dtype=dtype,
+        )
+        #   PV:  [q_tile_m, S_K, D_v]
+        r_fwd_pv = self._tile_gemm.simulate_gemm(
+            m=_FAV3_FWD.q_tile_m, n=D_v, k=S_K, dtype=dtype,
+        )
+
+        fwd_time_ms = (
+            r_fwd_qk.forward_time_ms + r_fwd_pv.forward_time_ms
+        ) * fwd_waves
 
         # ==============================================================
-        # 2.  MEMORY IO  (Flash Attention – no S/P materialised to HBM)
+        # BACKWARD
         # ==============================================================
-        # Q and K use D_qk; V and O use D_v.
-        # Forward reads:  Q (B·H_Q·S_Q·D_qk), K (B·H_K·S_K·D_qk), V (B·H_K·S_K·D_v)
-        # Forward writes: O (B·H_Q·S_Q·D_v) + logsumexp (B·H_Q·S_Q, fp32)
-        fwd_read_bytes = (
+        kv_tile = _FAV3_BWD.kv_tile_n  # 256
+        bwd_n_wgs = math.ceil(S_K / kv_tile) * B * H_Q
+        bwd_waves = math.ceil(bwd_n_wgs / N_CU)
+
+        # Per-workgroup GEMMs (5 operations, full Q-sweep on 1 CU):
+        # 1. QKᵀ recompute: [S_Q, D_qk, kv_tile]
+        r_bwd_qk = self._tile_gemm.simulate_gemm(
+            m=S_Q, n=kv_tile, k=D_qk, dtype=dtype,
+        )
+        # 2. dP = dO × Vᵀ: [S_Q, D_v, kv_tile]
+        r_bwd_dp = self._tile_gemm.simulate_gemm(
+            m=S_Q, n=kv_tile, k=D_v, dtype=dtype,
+        )
+        # 3. dV = Pᵀ × dO: [kv_tile, S_Q, D_v]
+        r_bwd_dv = self._tile_gemm.simulate_gemm(
+            m=kv_tile, n=D_v, k=S_Q, dtype=dtype,
+        )
+        # 4. dQ = dS × K: [S_Q, kv_tile, D_qk]
+        r_bwd_dq = self._tile_gemm.simulate_gemm(
+            m=S_Q, n=D_qk, k=kv_tile, dtype=dtype,
+        )
+        # 5. dK = dSᵀ × Q: [kv_tile, S_Q, D_qk]
+        r_bwd_dk = self._tile_gemm.simulate_gemm(
+            m=kv_tile, n=D_qk, k=S_Q, dtype=dtype,
+        )
+
+        bwd_compute_ms = (
+            r_bwd_qk.forward_time_ms
+            + r_bwd_dp.forward_time_ms
+            + r_bwd_dv.forward_time_ms
+            + r_bwd_dq.forward_time_ms
+            + r_bwd_dk.forward_time_ms
+        ) * bwd_waves
+
+        # ── Backward dQ atomics (latency-based model) ──
+        # Each KV-workgroup atomically accumulates dQ via buffer_atomic_add_f32.
+        # The latency model counts warp-level reduction updates (global and
+        # local) and multiplies by the per-op latency.
+        num_k_tiles = math.ceil(kv_tile / kv_tile)  # = 1
+        warp_updates_global = math.ceil(
+            num_k_tiles * math.ceil(D_qk / _WARP_SIZE)
+        )
+        total_updates_global = warp_updates_global * bwd_waves
+
+        warp_updates_local = math.ceil(
+            kv_tile * math.ceil(D_qk / _WARP_SIZE)
+        )
+        total_updates_local = warp_updates_local * bwd_waves
+
+        bwd_atomic_ms = (
+            _ATOMIC_LATENCY_GLOBAL_NS * total_updates_global
+            + _ATOMIC_LATENCY_LOCAL_NS * total_updates_local
+        ) / 1e6  # ns → ms
+
+        bwd_time_ms = bwd_compute_ms + bwd_atomic_ms
+
+        # ==============================================================
+        # METADATA (FLOPs, bytes — for achieved-TFLOPS reporting)
+        # ==============================================================
+        fwd_flops = (
+            2.0 * B * H_Q * S_Q * S_K * D_qk  # QKᵀ
+            + 2.0 * B * H_Q * S_Q * S_K * D_v  # PV
+            + 5.0 * B * H_Q * S_Q * S_K  # softmax
+        ) * causal_factor
+
+        bwd_flops = (
+            2.0 * B * H_Q * S_Q * S_K * D_qk  # QKᵀ recomp
+            + 2.0 * B * H_Q * S_Q * S_K * D_v  # dP
+            + 2.0 * B * H_Q * S_K * S_Q * D_v  # dV
+            + 2.0 * B * H_Q * S_Q * S_K * D_qk  # dQ
+            + 2.0 * B * H_Q * S_K * S_Q * D_qk  # dK
+            + 5.0 * B * H_Q * S_Q * S_K  # softmax bwd
+        ) * causal_factor
+
+        fwd_bytes = (
             B * H_Q * S_Q * D_qk * bpe  # Q
             + B * H_K * S_K * D_qk * bpe  # K
             + B * H_K * S_K * D_v * bpe  # V
+            + B * H_Q * S_Q * D_v * bpe  # O
+            + B * H_Q * S_Q * 4  # logsumexp (fp32)
         )
-        fwd_write_bytes = (
-            B * H_Q * S_Q * D_v * bpe + B * H_Q * S_Q * 4  # O  # logsumexp (fp32)
-        )
-        fwd_bytes = fwd_read_bytes + fwd_write_bytes
-
-        # Backward reads: Q, K, V, O, dO + logsumexp
-        # Backward regular writes: dK (B·H_K·S_K·D_qk) + dV (B·H_K·S_K·D_v)
-        #   NOTE: dQ uses buffer_atomic_add_f32 — accounted separately.
-        bwd_read_bytes = (
+        bwd_bytes = (
             B * H_Q * S_Q * D_qk * bpe  # Q
             + B * H_K * S_K * D_qk * bpe  # K
             + B * H_K * S_K * D_v * bpe  # V
             + B * H_Q * S_Q * D_v * bpe  # O
             + B * H_Q * S_Q * D_v * bpe  # dO
             + B * H_Q * S_Q * 4  # logsumexp (fp32)
-        )
-        bwd_regular_write_bytes = (
-            B * H_K * S_K * D_qk * bpe  # dK
+            + B * H_K * S_K * D_qk * bpe  # dK
             + B * H_K * S_K * D_v * bpe  # dV
         )
-        bwd_bytes = bwd_read_bytes + bwd_regular_write_bytes
 
-        # ==============================================================
-        # 3.  dQ ATOMIC OVERHEAD  (BWD only)
-        # ==============================================================
-        # In FAv3 backward, each KV-workgroup loops over ALL Q positions
-        # and atomically accumulates its partial dQ via buffer_atomic_add_f32.
-        #
-        # From the FAv3 backward kernel:
-        #   - 72 buffer_atomic_add_f32 instructions in the kernel
-        #   - 8 atomics per Q-block (per wavefront, 64 threads each)
-        #   - 4 wavefronts per workgroup
-        #   - Per Q-block: 8 × 64 × 4W = 2048 atomic ops = 8 KB (FP32)
-        #     = 16 rows × 128 cols × 4 bytes = 8192 bytes  ✓
-        #
-        # Contention & L2 coalescing:
-        #   ceil(S_K/256) KV-workgroups all write to the same dQ rows.
-        #   Workgroups on the SAME XCD can coalesce their atomics in the
-        #   local L2 cache (the add is accumulated in L2, only the final
-        #   value is flushed to HBM).  So the effective number of HBM
-        #   atomic writes per dQ element is min(n_kv_wgs, n_xcd) rather
-        #   than the full n_kv_wgs.
-        #
-        #   Each HBM atomic write is a read-modify-write, which costs
-        #   ~rmw_factor × the bandwidth of a regular store.
-        n_kv_workgroups = math.ceil(S_K / _FAV3_BWD.kv_tile_n)
-
-        # How many KV-workgroups per XCD (for L2 coalescing estimate)
-        hbm_writers_per_element = min(n_kv_workgroups, self._hw.n_xcd)
-
-        # Effective dQ bytes hitting HBM (after L2 coalescing)
-        # dQ shape is (B, H_Q, S_Q, D_qk), stored in FP32 (4 bytes)
-        dq_atomic_bytes = float(hbm_writers_per_element) * B * H_Q * S_Q * D_qk * 4.0
-
-        # Atomic slowdown = just the RMW factor (contention within-XCD
-        # is absorbed by L2; cross-XCD traffic goes to different memory
-        # channels and can proceed in parallel)
-        atomic_slowdown = self._atomic_rmw_factor
-
-        # ==============================================================
-        # 4.  CU UTILISATION  (from FAv3 tile config)
-        # ==============================================================
-        fwd_cu_util = self._cu_utilisation(B, H_Q, S_Q, _FAV3_FWD)
-        bwd_cu_util = self._cu_utilisation(B, H_Q, S_K, _FAV3_BWD)
-
-        # ==============================================================
-        # 5.  ROOFLINE:  time = max(compute, memory, atomics)
-        # ==============================================================
-        peak_tflops = self._peak_tflops(dtype)
-
-        # Effective throughput = peak × efficiency × CU utilisation
-        fwd_eff_tflops = peak_tflops * self._compute_eff * fwd_cu_util
-        bwd_eff_tflops = peak_tflops * self._compute_eff * bwd_cu_util
-
-        fwd_eff_bw = self._hw.hbm_bandwidth_gbps * self._memory_eff
-        bwd_eff_bw = self._hw.hbm_bandwidth_gbps * self._memory_eff
-
-        # Effective atomic bandwidth (HBM BW reduced by RMW + contention)
-        bwd_eff_atomic_bw = (
-            self._hw.hbm_bandwidth_gbps * self._memory_eff / atomic_slowdown
-        )
-
-        # Compute-bound time (ms)
-        fwd_compute_ms = (fwd_flops / (fwd_eff_tflops * 1e12)) * 1e3
-        bwd_compute_ms = (bwd_flops / (bwd_eff_tflops * 1e12)) * 1e3
-
-        # Memory-bound time (ms)  — regular (non-atomic) IO
-        fwd_memory_ms = (fwd_bytes / (fwd_eff_bw * 1e9)) * 1e3
-        bwd_memory_ms = (bwd_bytes / (bwd_eff_bw * 1e9)) * 1e3
-
-        # Atomic-bound time (ms)  — dQ accumulation via buffer_atomic_add_f32
-        bwd_atomic_ms = (dq_atomic_bytes / (bwd_eff_atomic_bw * 1e9)) * 1e3
-
-        fwd_time_ms = max(fwd_compute_ms, fwd_memory_ms)
-        bwd_time_ms = max(bwd_compute_ms, bwd_memory_ms, bwd_atomic_ms)
-
-        # Achieved metrics
         fwd_achieved_tflops = (
             (fwd_flops / (fwd_time_ms * 1e-3)) / 1e12 if fwd_time_ms > 0 else 0
         )
-
-        # Determine what bounds each pass
-        bwd_bottleneck = "compute"
-        if bwd_atomic_ms >= bwd_compute_ms and bwd_atomic_ms >= bwd_memory_ms:
-            bwd_bottleneck = "atomic"
-        elif bwd_memory_ms >= bwd_compute_ms:
-            bwd_bottleneck = "memory"
 
         return SimulationResult(
             forward_time_ms=fwd_time_ms,
@@ -463,13 +521,14 @@ class SDPASimulator(SDPASimulationBackend):
                 (fwd_bytes / (fwd_time_ms * 1e-3)) / 1e9 if fwd_time_ms > 0 else 0
             ),
             metadata={
-                "backend": "sdpa_simulator (FAv3)",
-                "fwd_compute_bound": fwd_compute_ms >= fwd_memory_ms,
-                "fwd_compute_ms": fwd_compute_ms,
-                "fwd_memory_ms": fwd_memory_ms,
-                "bwd_bottleneck": bwd_bottleneck,
+                "backend": "sdpa_simulator (FAv3 tile-level, Origami 1-CU)",
+                # Standard metadata keys (for compatibility)
+                "fwd_compute_bound": True,
+                "fwd_compute_ms": fwd_time_ms,
+                "fwd_memory_ms": 0.0,  # included in per-tile Origami model
+                "bwd_bottleneck": "compute+atomic",
                 "bwd_compute_ms": bwd_compute_ms,
-                "bwd_memory_ms": bwd_memory_ms,
+                "bwd_memory_ms": 0.0,  # included in per-tile Origami model
                 "bwd_atomic_ms": bwd_atomic_ms,
                 "fwd_flops": fwd_flops,
                 "bwd_flops": bwd_flops,
@@ -479,23 +538,25 @@ class SDPASimulator(SDPASimulationBackend):
                 "seq_len_kv": S_K,
                 "num_heads_q": H_Q,
                 "num_heads_kv": H_K,
-                # dQ atomic details (buffer_atomic_add_f32)
-                "bwd_dq_kv_workgroups": n_kv_workgroups,
-                "bwd_dq_hbm_writers_per_elem": hbm_writers_per_element,
-                "bwd_dq_atomic_hbm_bytes": dq_atomic_bytes,
-                "bwd_dq_rmw_factor": atomic_slowdown,
-                "bwd_eff_atomic_bw_gbps": bwd_eff_atomic_bw,
-                # CU utilisation
-                "fwd_cu_utilisation": fwd_cu_util,
-                "bwd_cu_utilisation": bwd_cu_util,
                 "causal": causal,
+                # Tile-level details
+                "fwd_waves": fwd_waves,
+                "fwd_n_workgroups": fwd_n_wgs,
+                "fwd_qk_per_tile_ms": r_fwd_qk.forward_time_ms,
+                "fwd_pv_per_tile_ms": r_fwd_pv.forward_time_ms,
+                "bwd_waves": bwd_waves,
+                "bwd_n_workgroups": bwd_n_wgs,
+                "bwd_qk_recomp_per_tile_ms": r_bwd_qk.forward_time_ms,
+                "bwd_dp_per_tile_ms": r_bwd_dp.forward_time_ms,
+                "bwd_dv_per_tile_ms": r_bwd_dv.forward_time_ms,
+                "bwd_dq_per_tile_ms": r_bwd_dq.forward_time_ms,
+                "bwd_dk_per_tile_ms": r_bwd_dk.forward_time_ms,
+                "n_cu": N_CU,
                 # FAv3 tile parameters
                 "fwd_q_tile_m": _FAV3_FWD.q_tile_m,
                 "fwd_kv_tile_n": _FAV3_FWD.kv_tile_n,
-                "fwd_wavefronts": _FAV3_FWD.n_wavefronts,
                 "bwd_q_tile_m": _FAV3_BWD.q_tile_m,
                 "bwd_kv_tile_n": _FAV3_BWD.kv_tile_n,
-                "bwd_wavefronts": _FAV3_BWD.n_wavefronts,
             },
         )
 
@@ -506,50 +567,3 @@ class SDPASimulator(SDPASimulationBackend):
     def _bytes_per_element(self, dtype: str) -> int:
         return {"bf16": 2, "fp16": 2, "fp32": 4, "fp8": 1}.get(dtype, 2)
 
-    def _peak_tflops(self, dtype: str) -> float:
-        return {
-            "bf16": self._hw.peak_tflops_bf16,
-            "fp16": self._hw.peak_tflops_fp16,
-            "fp8": self._hw.peak_tflops_fp8,
-            "fp32": self._hw.peak_tflops_bf16 / 4,
-        }.get(dtype, self._hw.peak_tflops_bf16)
-
-    def _cu_utilisation(
-        self,
-        batch_size: int,
-        num_heads: int,
-        seq_len: int,
-        tile_cfg: _FAv3TileConfig,
-    ) -> float:
-        """
-        Estimate CU utilisation for a FAv3 kernel launch.
-
-        FAv3 forward dispatches one workgroup per Q-tile per (batch, head).
-        FAv3 backward dispatches one workgroup per KV-tile per (batch, head).
-
-        Each workgroup occupies ``n_wavefronts`` wavefront slots on a CU.
-        If the workgroup uses fewer than ``max_waves_per_cu`` wavefronts,
-        multiple workgroups *may* share a CU (higher occupancy).
-
-        CU utilisation = min(active_CUs, N_CU) / N_CU
-        """
-        # Number of workgroups
-        # For FWD: each wg handles q_tile_m rows → ceil(S / q_tile_m) wgs per (B,H)
-        # For BWD: each wg handles kv_tile_n cols → ceil(S / kv_tile_n) wgs per (B,H)
-        if tile_cfg is _FAV3_FWD:
-            n_tiles = math.ceil(seq_len / tile_cfg.q_tile_m)
-        else:
-            # BWD: workgroups over KV dimension
-            n_tiles = math.ceil(seq_len / tile_cfg.kv_tile_n)
-
-        n_workgroups = n_tiles * batch_size * num_heads
-
-        # How many workgroups can share a single CU?
-        wgs_per_cu = self._hw.max_waves_per_cu // tile_cfg.n_wavefronts
-        wgs_per_cu = max(wgs_per_cu, 1)
-
-        # Effective CU slots
-        cu_slots = self._hw.n_cu * wgs_per_cu
-        active_slots = min(n_workgroups, cu_slots)
-
-        return active_slots / cu_slots

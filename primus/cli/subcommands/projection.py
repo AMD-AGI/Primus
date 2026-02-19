@@ -141,7 +141,7 @@ def register_subcommand(subparsers):
         help=(
             "Override the GPU compute clock frequency in MHz for simulation.\n"
             "If not specified, uses the default from the hardware profile for the\n"
-            "given --gpu-arch (e.g. 2100 MHz for MI300X, 1200 MHz for MI325X).\n"
+            "given --gpu-arch (e.g. 2100 MHz for MI300X/MI325X).\n"
             "Can also be set via the PRIMUS_GPU_CLOCK_MHZ env var.\n"
             "Example: --gpu-clock-mhz 1500\n"
         ),

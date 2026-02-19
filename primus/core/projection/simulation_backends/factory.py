@@ -74,29 +74,23 @@ def get_gemm_simulation_backend(
 
 def get_sdpa_simulation_backend(
     gpu_arch: Optional[str] = None,
-    compute_efficiency: float = 0.51,
-    memory_efficiency: float = 0.85,
     gpu_clock_mhz: Optional[int] = None,
 ) -> SDPASimulationBackend:
     """
     Create and return the SDPA simulation backend.
 
-    The default backend is an analytical model of the FAv3 (Flash Attention v3)
-    kernels, with tile sizes, wavefront counts, and efficiency factors
-    derived from the kernel configurations.
+    Uses the Origami 1-CU tile-level model of the FAv3 (Flash Attention v3)
+    kernels.  Origami must be installed.
 
     Args:
         gpu_arch: GPU architecture override (e.g. "mi300x", "mi355x").
-        compute_efficiency: Fraction of peak compute achieved (0-1).
-            Defaults to 0.51. The lower-than-theoretical efficiency accounts
-            for GQA head broadcasting overhead, LDS bank conflicts, barrier
-            synchronisation, and register pressure.
-        memory_efficiency: Fraction of peak HBM bandwidth achieved (0-1).
-            Defaults to 0.85 — FAv3 streaming pattern typically achieves 0.80-0.90.
         gpu_clock_mhz: Override the GPU compute clock frequency in MHz.
 
     Returns:
         An SDPASimulationBackend instance.
+
+    Raises:
+        RuntimeError: If the Origami backend is not available.
     """
     from primus.core.projection.simulation_backends.sdpa_simulator import (
         SDPASimulator,
@@ -105,12 +99,10 @@ def get_sdpa_simulation_backend(
     is_rank_0 = int(os.getenv("RANK", "0")) == 0
     if is_rank_0:
         print(
-            "[Primus:Simulation] Using SDPA backend: sdpa_simulator (FAv3 analytical model)"
+            "[Primus:Simulation] Using SDPA backend: sdpa_simulator (FAv3 Origami 1-CU)"
         )
 
     return SDPASimulator(
         gpu_arch=gpu_arch,
-        compute_efficiency=compute_efficiency,
-        memory_efficiency=memory_efficiency,
         gpu_clock_mhz=gpu_clock_mhz,
     )

@@ -50,6 +50,17 @@ class GEMMSimulationBackend(ABC):
         """Return True if this backend can be used in the current environment."""
         ...
 
+    @property
+    def hbm_bandwidth_gbps(self) -> Optional[float]:
+        """Peak HBM bandwidth in GB/s for the target GPU, or *None* if unknown.
+
+        Concrete backends should override this when the target architecture is
+        known so that downstream profilers (e.g. MoE non-GEMM overhead) can
+        derive memory-bandwidth estimates from the actual hardware rather than
+        relying on hardcoded absolute numbers.
+        """
+        return None
+
     @abstractmethod
     def simulate_gemm(
         self,
