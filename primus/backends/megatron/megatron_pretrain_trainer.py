@@ -98,12 +98,26 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         # Import Megatron components
         from megatron.core.enums import ModelType
         from megatron.training import pretrain  # type: ignore
-        from pretrain_gpt import (  # type: ignore
-            forward_step,
-            train_valid_test_datasets_provider,
-        )
 
         from primus.core.utils.import_utils import get_model_provider
+
+        # Determine model type (gpt or mamba) from backend_args
+        model_type = getattr(self.backend_args, "model_type", "gpt")
+        log_rank_0(f"-detected model_type: {model_type}")
+
+        # Import the appropriate training components based on model_type
+        if model_type == "mamba":
+            from pretrain_mamba import (  # type: ignore
+                forward_step,
+                train_valid_test_datasets_provider,
+            )
+            log_rank_0("Using Mamba model provider and training components")
+        else:
+            from pretrain_gpt import (  # type: ignore
+                forward_step,
+                train_valid_test_datasets_provider,
+            )
+            log_rank_0("Using GPT model provider and training components")
 
         # Configure training components
         if hasattr(train_valid_test_datasets_provider, "is_distributed"):
@@ -133,9 +147,13 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         if "store" in sig.parameters:
             kwargs["store"] = store
 
+        # Get model provider with correct model_type
+        model_provider = get_model_provider(model_type=model_type)
+        log_rank_0(f"-model_provider: {model_provider}")
+
         wrapped_pretrain(
             train_valid_test_datasets_provider,
-            get_model_provider(),
+            model_provider,
             ModelType.encoder_or_decoder,
             forward_step,
             **kwargs,
