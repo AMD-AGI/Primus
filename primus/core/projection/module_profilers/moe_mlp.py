@@ -14,9 +14,22 @@ from primus.core.projection.training_config import TrainingConfig
 
 from .utils import benchmark_layer
 
-# Memory-bandwidth constants for non-GEMM MoE overhead estimation
-_PERMUTE_EFF_BW_GBPS = 300.0   # scatter/gather effective BW (~5-10% peak HBM)
-_ACTIVATION_BW_GBPS = 3000.0   # sequential element-wise ops (~60% peak HBM)
+# Efficiency fractions for non-GEMM MoE overhead estimation.
+# These express achievable bandwidth as a fraction of peak HBM bandwidth.
+# The actual BW is ``fraction × peak_hbm_bw`` for the target architecture,
+# so the model scales automatically across MI300X (5.3 TB/s), MI325X (6.0
+# TB/s), MI355X (8.0 TB/s), etc.
+#
+# PERMUTE (scatter/gather) — random-access token dispatch/combine.  Irregular
+# access patterns achieve only ~5-7 % of peak HBM bandwidth.
+_PERMUTE_BW_FRACTION = 0.057
+#
+# ACTIVATION (SwiGLU / GELU) — sequential element-wise ops that stream over
+# contiguous buffers.  Typically ~55-60 % of peak HBM bandwidth.
+_ACTIVATION_BW_FRACTION = 0.566
+#
+# Fallback absolute values used when the backend cannot report HBM bandwidth.
+_FALLBACK_HBM_BW_GBPS = 5300.0  # MI300X default
 
 
 class MoEMLPProfiler(BaseModuleProfiler):
@@ -271,10 +284,22 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # ── 3. Token permutation overhead (dispatch + combine) ──
         # Dispatch: gather tokens by expert assignment → irregular memory access
         # Combine: scatter expert outputs back → weighted reduce
+        #
+        # Derive effective BW from the target GPU's peak HBM bandwidth so the
+        # model adapts automatically to different architectures.
+        peak_hbm = (
+            self._gemm_backend.hbm_bandwidth_gbps
+            if self._gemm_backend is not None
+            and self._gemm_backend.hbm_bandwidth_gbps is not None
+            else _FALLBACK_HBM_BW_GBPS
+        )
+        permute_eff_bw_gbps = peak_hbm * _PERMUTE_BW_FRACTION
+        activation_bw_gbps = peak_hbm * _ACTIVATION_BW_FRACTION
+
         dispatch_bytes = (batch_tokens + topk_tokens) * hidden_size * bytes_per_el
         combine_bytes = (topk_tokens + batch_tokens) * hidden_size * bytes_per_el
-        permute_fwd_ms = dispatch_bytes / (_PERMUTE_EFF_BW_GBPS * 1e6)
-        permute_bwd_ms = combine_bytes / (_PERMUTE_EFF_BW_GBPS * 1e6)
+        permute_fwd_ms = dispatch_bytes / (permute_eff_bw_gbps * 1e6)
+        permute_bwd_ms = combine_bytes / (permute_eff_bw_gbps * 1e6)
 
         fwd_time += permute_fwd_ms
         bwd_time += permute_bwd_ms
@@ -284,7 +309,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
             act_bytes = 3 * topk_tokens * moe_ffn * bytes_per_el  # gate+up read, result write
         else:
             act_bytes = 2 * topk_tokens * moe_ffn * bytes_per_el  # read + write
-        activation_ms = act_bytes / (_ACTIVATION_BW_GBPS * 1e6)
+        activation_ms = act_bytes / (activation_bw_gbps * 1e6)
 
         fwd_time += activation_ms
         bwd_time += activation_ms
