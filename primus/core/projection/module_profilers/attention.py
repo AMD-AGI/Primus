@@ -159,6 +159,111 @@ class AttentionProfiler(BaseModuleProfiler):
 
         return tokens_per_rank * (activation_width + ln_width) * bytes_per_value
 
+    def _simulate_mla_gemms(
+        self, batch_tokens: int, dtype: str
+    ) -> tuple[float, float]:
+        """Simulate MLA (Multi-Latent Attention) projection GEMMs.
+
+        MLA uses LoRA-factored Q and compressed KV projections instead of
+        standard Q/K/V projections:
+          Forward  (6 GEMMs): Q_down, Q_up, KV_down, KV_up, RoPE_proj, O_proj
+          Backward (12 GEMMs): dgrad + wgrad for each of the 6 projections
+        """
+        args = self.config.model_config
+        backend = self._gemm_backend
+
+        hidden = args.hidden_size
+        heads = args.num_attention_heads
+        q_lora_rank = args.q_lora_rank
+        kv_lora_rank = args.kv_lora_rank
+        qk_head_dim = args.qk_head_dim
+        qk_pos_emb_head_dim = args.qk_pos_emb_head_dim
+        v_head_dim = args.v_head_dim
+
+        fwd_time = 0.0
+        bwd_time = 0.0
+        T = batch_tokens
+
+        # ---------- Forward ----------
+        if q_lora_rank is not None:
+            # Q down-proj: [T, hidden] × [hidden, q_lora_rank]
+            q_down_out = q_lora_rank
+            r = backend.simulate_gemm(T, q_down_out, hidden, dtype)
+            fwd_time += r.forward_time_ms
+            # Q up-proj: [T, q_lora_rank] × [q_lora_rank, heads*(qk_hd+qk_pe_hd)]
+            q_up_out = heads * (qk_head_dim + qk_pos_emb_head_dim)
+            r = backend.simulate_gemm(T, q_up_out, q_lora_rank, dtype)
+            fwd_time += r.forward_time_ms
+        else:
+            # Direct Q projection (no LoRA): [T, hidden] × [hidden, heads*(qk_hd+qk_pe_hd)]
+            q_up_out = heads * (qk_head_dim + qk_pos_emb_head_dim)
+            r = backend.simulate_gemm(T, q_up_out, hidden, dtype)
+            fwd_time += r.forward_time_ms
+
+        # KV down-proj: [T, hidden] × [hidden, kv_lora_rank]
+        kv_down_out = kv_lora_rank
+        r = backend.simulate_gemm(T, kv_down_out, hidden, dtype)
+        fwd_time += r.forward_time_ms
+        # KV up-proj: [T, kv_lora_rank] × [kv_lora_rank, heads*(qk_hd+v_hd)]
+        kv_up_out = heads * (qk_head_dim + v_head_dim)
+        r = backend.simulate_gemm(T, kv_up_out, kv_lora_rank, dtype)
+        fwd_time += r.forward_time_ms
+
+        # RoPE positional embedding projection: [T, hidden] × [hidden, qk_pos_emb_head_dim]
+        r = backend.simulate_gemm(T, qk_pos_emb_head_dim, hidden, dtype)
+        fwd_time += r.forward_time_ms
+
+        # Output projection: [T, heads*v_hd] × [heads*v_hd, hidden]
+        o_in = heads * v_head_dim
+        r = backend.simulate_gemm(T, hidden, o_in, dtype)
+        fwd_time += r.forward_time_ms
+
+        # ---------- Backward (dgrad + wgrad for each projection) ----------
+        if q_lora_rank is not None:
+            # Q down-proj dgrad: [T, q_down_out] × [q_down_out, hidden] → [T, hidden]
+            r = backend.simulate_gemm(T, hidden, q_down_out, dtype)
+            bwd_time += r.forward_time_ms
+            # Q down-proj wgrad: [hidden, T] × [T, q_down_out] → [hidden, q_down_out]
+            r = backend.simulate_gemm(hidden, q_down_out, T, dtype)
+            bwd_time += r.forward_time_ms
+            # Q up-proj dgrad: [T, q_up_out] × [q_up_out, q_lora_rank] → [T, q_lora_rank]
+            r = backend.simulate_gemm(T, q_lora_rank, q_up_out, dtype)
+            bwd_time += r.forward_time_ms
+            # Q up-proj wgrad: [q_lora_rank, T] × [T, q_up_out] → [q_lora_rank, q_up_out]
+            r = backend.simulate_gemm(q_lora_rank, q_up_out, T, dtype)
+            bwd_time += r.forward_time_ms
+        else:
+            # Direct Q dgrad + wgrad
+            r = backend.simulate_gemm(T, hidden, q_up_out, dtype)
+            bwd_time += r.forward_time_ms
+            r = backend.simulate_gemm(hidden, q_up_out, T, dtype)
+            bwd_time += r.forward_time_ms
+
+        # KV down-proj dgrad + wgrad
+        r = backend.simulate_gemm(T, hidden, kv_down_out, dtype)
+        bwd_time += r.forward_time_ms
+        r = backend.simulate_gemm(hidden, kv_down_out, T, dtype)
+        bwd_time += r.forward_time_ms
+        # KV up-proj dgrad + wgrad
+        r = backend.simulate_gemm(T, kv_lora_rank, kv_up_out, dtype)
+        bwd_time += r.forward_time_ms
+        r = backend.simulate_gemm(kv_lora_rank, kv_up_out, T, dtype)
+        bwd_time += r.forward_time_ms
+
+        # RoPE proj dgrad + wgrad
+        r = backend.simulate_gemm(T, hidden, qk_pos_emb_head_dim, dtype)
+        bwd_time += r.forward_time_ms
+        r = backend.simulate_gemm(hidden, qk_pos_emb_head_dim, T, dtype)
+        bwd_time += r.forward_time_ms
+
+        # O proj dgrad + wgrad
+        r = backend.simulate_gemm(T, o_in, hidden, dtype)
+        bwd_time += r.forward_time_ms
+        r = backend.simulate_gemm(o_in, hidden, T, dtype)
+        bwd_time += r.forward_time_ms
+
+        return fwd_time, bwd_time
+
     def _get_simulated_results(
         self, batch_size: int, seq_len: int
     ) -> tuple[float, float, int]:
@@ -174,36 +279,58 @@ class AttentionProfiler(BaseModuleProfiler):
         fwd_time = 0.0
         bwd_time = 0.0
 
-        # 1. Simulate linear projection GEMMs (Q, K, V, O) using GEMM backend
+        # 1. Simulate linear projection GEMMs using GEMM backend
         if self._gemm_backend is not None:
-            num_query_groups = (
-                args.num_query_groups
-                if args.group_query_attention and args.num_query_groups
-                else args.num_attention_heads
-            )
-            # FP8-hybrid: linear projections (QKV, O) run in FP8
             gemm_dtype = "fp8" if getattr(args, "fp8", None) else "bf16"
-            gemm_result = self._gemm_backend.simulate_attention_gemms(
-                batch_tokens=batch_tokens,
-                hidden_size=args.hidden_size,
-                num_attention_heads=args.num_attention_heads,
-                kv_channels=args.kv_channels,
-                num_query_groups=num_query_groups,
-                dtype=gemm_dtype,
-            )
-            fwd_time += gemm_result.forward_time_ms
-            bwd_time += gemm_result.backward_time_ms
+
+            if getattr(args, "multi_latent_attention", False):
+                # MLA: LoRA-factored Q and compressed KV projections
+                # 6 forward GEMMs + 12 backward GEMMs
+                mla_fwd, mla_bwd = self._simulate_mla_gemms(
+                    batch_tokens, gemm_dtype
+                )
+                fwd_time += mla_fwd
+                bwd_time += mla_bwd
+            else:
+                # Standard attention: Q, K, V, O projections
+                # 4 forward GEMMs + 8 backward GEMMs
+                num_query_groups = (
+                    args.num_query_groups
+                    if args.group_query_attention and args.num_query_groups
+                    else args.num_attention_heads
+                )
+                gemm_result = self._gemm_backend.simulate_attention_gemms(
+                    batch_tokens=batch_tokens,
+                    hidden_size=args.hidden_size,
+                    num_attention_heads=args.num_attention_heads,
+                    kv_channels=args.kv_channels,
+                    num_query_groups=num_query_groups,
+                    dtype=gemm_dtype,
+                )
+                fwd_time += gemm_result.forward_time_ms
+                bwd_time += gemm_result.backward_time_ms
 
         # 2. Simulate SDPA core computation using SDPA backend
         if self._sdpa_backend is not None:
             heads_per_rank = max(1, args.num_attention_heads // tp_size)
+
+            if getattr(args, "multi_latent_attention", False):
+                # MLA: Q·Kᵀ uses qk_head_dim + qk_pos_emb_head_dim (e.g. 192),
+                #       P·V  uses v_head_dim (e.g. 128).
+                sdpa_head_dim = args.qk_head_dim + args.qk_pos_emb_head_dim
+                sdpa_head_dim_v = args.v_head_dim
+            else:
+                sdpa_head_dim = args.kv_channels
+                sdpa_head_dim_v = None  # same as head_dim
+
             sdpa_result = self._sdpa_backend.simulate_sdpa(
                 batch_size=batch_size,
                 num_heads=heads_per_rank,
                 seq_len=slen_per_cp,
-                head_dim=args.kv_channels,
+                head_dim=sdpa_head_dim,
                 causal=True,
                 dtype="bf16",
+                head_dim_v=sdpa_head_dim_v,
             )
             fwd_time += sdpa_result.forward_time_ms
             bwd_time += sdpa_result.backward_time_ms

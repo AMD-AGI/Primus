@@ -229,10 +229,6 @@ class SDPASimulator(SDPASimulationBackend):
                 "mi355x", "gfx950").
             hardware_spec: Override hardware spec directly.
             compute_efficiency: Fraction of peak TFLOPS achieved (0-1).
-                Calibrated against measured FAv3 traces on MI300X:
-                  * Measured FA fwd = 5.05 ms, bwd = 10.00 ms
-                    (B=3, H_Q=64, S=8192, D=128, H_KV=8, causal, BF16)
-                  * 0.51 matches measured within 1%.
                 The lower-than-peak efficiency (vs theoretical 0.75-0.85)
                 accounts for GQA head broadcasting, LDS bank conflicts,
                 barrier synchronisation, and register pressure.
@@ -270,6 +266,7 @@ class SDPASimulator(SDPASimulationBackend):
         dtype: str = "bf16",
         seq_len_kv: Optional[int] = None,
         num_heads_kv: Optional[int] = None,
+        head_dim_v: Optional[int] = None,
     ) -> SimulationResult:
         """
         Simulate FAv3 SDPA execution time using a roofline model
@@ -279,7 +276,9 @@ class SDPASimulator(SDPASimulationBackend):
             batch_size: Batch size (B).
             num_heads: Number of query heads (H_Q).
             seq_len: Query sequence length (S_Q).
-            head_dim: Head dimension (D).
+            head_dim: Head dimension for Q·Kᵀ (D_qk).  For standard
+                MHA/GQA this is ``kv_channels``; for MLA this is
+                ``qk_head_dim + qk_pos_emb_head_dim`` (e.g. 192).
             causal: Whether causal masking is applied.
             dtype: Data type ("bf16", "fp16", "fp8", "fp32").
             seq_len_kv: Key/Value sequence length (S_K).  Defaults to
@@ -287,13 +286,17 @@ class SDPASimulator(SDPASimulationBackend):
                 cross-attention or prefill with separate KV cache length.
             num_heads_kv: Number of KV heads.  Defaults to ``num_heads``
                 (MHA).  Set lower for GQA/MQA.
+            head_dim_v: Value head dimension for P·V (D_v).  Defaults to
+                ``head_dim`` (standard attention).  For MLA set to
+                ``v_head_dim`` (e.g. 128).
         """
         B = batch_size
         H_Q = num_heads
         S_Q = seq_len
         S_K = seq_len_kv if seq_len_kv is not None else seq_len
         H_K = num_heads_kv if num_heads_kv is not None else num_heads
-        D = head_dim
+        D_qk = head_dim
+        D_v = head_dim_v if head_dim_v is not None else head_dim
         bpe = self._bytes_per_element(dtype)
 
         # GQA ratio: each KV head serves (H_Q / H_K) query heads.
@@ -306,54 +309,63 @@ class SDPASimulator(SDPASimulationBackend):
         # 1.  COMPUTE  (FLOP counts)
         # ==============================================================
         # Forward  (per query head, then × H_Q)
-        #   QKᵀ : 2·B·H_Q·S_Q·S_K·D      (batched GEMM)
-        #   softmax : ~5·B·H_Q·S_Q·S_K    (exp, sub-max, sum, div, mul)
-        #   PV  : 2·B·H_Q·S_Q·S_K·D      (batched GEMM — P is S_Q×S_K, V is S_K×D)
-        # NOTE for PV: output is (S_Q, D), inner dim is S_K.
+        #   QKᵀ : 2·B·H_Q·S_Q·S_K·D_qk    (batched GEMM)
+        #   softmax : ~5·B·H_Q·S_Q·S_K      (exp, sub-max, sum, div, mul)
+        #   PV  : 2·B·H_Q·S_Q·S_K·D_v      (batched GEMM — P is S_Q×S_K, V is S_K×D_v)
+        # NOTE for PV: output is (S_Q, D_v), inner dim is S_K.
         # For causal masking, only ~half the S_Q×S_K elements are computed
         # (only valid when S_Q == S_K; for cross-attn causal is usually False).
-        fwd_gemm_flops = 2.0 * (2.0 * B * H_Q * S_Q * S_K * D) * causal_factor
+        #
+        # When D_qk == D_v (standard MHA/GQA) this reduces to the familiar
+        # 2 × (2·B·H·S·S·D) formula.  For MLA, D_qk > D_v (e.g. 192 vs 128).
+        fwd_qk_flops = 2.0 * B * H_Q * S_Q * S_K * D_qk * causal_factor
+        fwd_pv_flops = 2.0 * B * H_Q * S_Q * S_K * D_v * causal_factor
         fwd_softmax_flops = 5.0 * B * H_Q * S_Q * S_K * causal_factor
-        fwd_flops = fwd_gemm_flops + fwd_softmax_flops
+        fwd_flops = fwd_qk_flops + fwd_pv_flops + fwd_softmax_flops
 
         # Backward (4 batched GEMMs + softmax backward)
-        #   dV  = Pᵀ @ dO     : 2·B·H_Q·S_K·S_Q → (S_K, D)  inner dim S_Q
-        #   dP  = dO @ Vᵀ     : 2·B·H_Q·S_Q·D → (S_Q, S_K)  inner dim D
+        #   dV  = Pᵀ @ dO     : 2·B·H_Q·S_K·S_Q·D_v   (inner dim S_Q, out S_K×D_v)
+        #   dP  = dO @ Vᵀ     : 2·B·H_Q·S_Q·S_K·D_v   (inner dim D_v, out S_Q×S_K)
         #   dS  = softmax_bwd  : ~5·B·H_Q·S_Q·S_K
-        #   dQ  = dS @ K       : 2·B·H_Q·S_Q·S_K → (S_Q, D)  inner dim S_K
-        #   dK  = dSᵀ @ Q      : 2·B·H_Q·S_K·S_Q → (S_K, D)  inner dim S_Q
-        bwd_gemm_flops = 2.0 * (4.0 * B * H_Q * S_Q * S_K * D) * causal_factor
+        #   dQ  = dS @ K       : 2·B·H_Q·S_Q·S_K·D_qk  (inner dim S_K, out S_Q×D_qk)
+        #   dK  = dSᵀ @ Q      : 2·B·H_Q·S_K·S_Q·D_qk  (inner dim S_Q, out S_K×D_qk)
+        bwd_dv_flops = 2.0 * B * H_Q * S_K * S_Q * D_v * causal_factor
+        bwd_dp_flops = 2.0 * B * H_Q * S_Q * S_K * D_v * causal_factor
+        bwd_dq_flops = 2.0 * B * H_Q * S_Q * S_K * D_qk * causal_factor
+        bwd_dk_flops = 2.0 * B * H_Q * S_K * S_Q * D_qk * causal_factor
         bwd_softmax_flops = 5.0 * B * H_Q * S_Q * S_K * causal_factor
-        bwd_flops = bwd_gemm_flops + bwd_softmax_flops
+        bwd_flops = bwd_dv_flops + bwd_dp_flops + bwd_dq_flops + bwd_dk_flops + bwd_softmax_flops
 
         # ==============================================================
         # 2.  MEMORY IO  (Flash Attention – no S/P materialised to HBM)
         # ==============================================================
-        # Forward reads:  Q (B·H_Q·S_Q·D), K (B·H_K·S_K·D), V (B·H_K·S_K·D)
-        # Forward writes: O (B·H_Q·S_Q·D) + logsumexp (B·H_Q·S_Q, fp32)
+        # Q and K use D_qk; V and O use D_v.
+        # Forward reads:  Q (B·H_Q·S_Q·D_qk), K (B·H_K·S_K·D_qk), V (B·H_K·S_K·D_v)
+        # Forward writes: O (B·H_Q·S_Q·D_v) + logsumexp (B·H_Q·S_Q, fp32)
         fwd_read_bytes = (
-            B * H_Q * S_Q * D * bpe  # Q
-            + B * H_K * S_K * D * bpe  # K
-            + B * H_K * S_K * D * bpe  # V
+            B * H_Q * S_Q * D_qk * bpe  # Q
+            + B * H_K * S_K * D_qk * bpe  # K
+            + B * H_K * S_K * D_v * bpe  # V
         )
         fwd_write_bytes = (
-            B * H_Q * S_Q * D * bpe + B * H_Q * S_Q * 4  # O  # logsumexp (fp32)
+            B * H_Q * S_Q * D_v * bpe + B * H_Q * S_Q * 4  # O  # logsumexp (fp32)
         )
         fwd_bytes = fwd_read_bytes + fwd_write_bytes
 
         # Backward reads: Q, K, V, O, dO + logsumexp
-        # Backward regular writes: dK (B·H_K·S_K·D) + dV (B·H_K·S_K·D)
+        # Backward regular writes: dK (B·H_K·S_K·D_qk) + dV (B·H_K·S_K·D_v)
         #   NOTE: dQ uses buffer_atomic_add_f32 — accounted separately.
         bwd_read_bytes = (
-            B * H_Q * S_Q * D * bpe  # Q
-            + B * H_K * S_K * D * bpe  # K
-            + B * H_K * S_K * D * bpe  # V
-            + B * H_Q * S_Q * D * bpe  # O
-            + B * H_Q * S_Q * D * bpe  # dO
+            B * H_Q * S_Q * D_qk * bpe  # Q
+            + B * H_K * S_K * D_qk * bpe  # K
+            + B * H_K * S_K * D_v * bpe  # V
+            + B * H_Q * S_Q * D_v * bpe  # O
+            + B * H_Q * S_Q * D_v * bpe  # dO
             + B * H_Q * S_Q * 4  # logsumexp (fp32)
         )
         bwd_regular_write_bytes = (
-            B * H_K * S_K * D * bpe + B * H_K * S_K * D * bpe  # dK  # dV
+            B * H_K * S_K * D_qk * bpe  # dK
+            + B * H_K * S_K * D_v * bpe  # dV
         )
         bwd_bytes = bwd_read_bytes + bwd_regular_write_bytes
 
@@ -386,8 +398,8 @@ class SDPASimulator(SDPASimulationBackend):
         hbm_writers_per_element = min(n_kv_workgroups, self._hw.n_xcd)
 
         # Effective dQ bytes hitting HBM (after L2 coalescing)
-        # dQ shape is (B, H_Q, S_Q, D), stored in FP32 (4 bytes)
-        dq_atomic_bytes = float(hbm_writers_per_element) * B * H_Q * S_Q * D * 4.0
+        # dQ shape is (B, H_Q, S_Q, D_qk), stored in FP32 (4 bytes)
+        dq_atomic_bytes = float(hbm_writers_per_element) * B * H_Q * S_Q * D_qk * 4.0
 
         # Atomic slowdown = just the RMW factor (contention within-XCD
         # is absorbed by L2; cross-XCD traffic goes to different memory
