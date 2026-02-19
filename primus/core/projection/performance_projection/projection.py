@@ -435,7 +435,7 @@ def calculate_collective_communication_time(
     else:
         message_info["gradient_allreduce_overlapped"] = False
 
-    # FSDP overlap model (calibrated against LLaMA3-70B MI300X trace)
+    # FSDP overlap model
     # ---------------------------------------------------------------
     # FSDP2 prefetches next layer's AllGather while the current layer
     # computes, and ReduceScatter runs after backward completes.
@@ -474,7 +474,7 @@ def calculate_collective_communication_time(
                 fwd_ag_total = total_fsdp_ag
                 bwd_ag_total = 0.0
 
-            # Per-phase overlap percentages (from trace calibration)
+            # Per-phase overlap percentages
             FWD_AG_OVERLAP = 0.90  # forward AG hidden behind compute
             BWD_AG_OVERLAP = 0.24  # backward recompute AG (structural limit)
             RS_OVERLAP = 0.34  # ReduceScatter (structural limit)
@@ -813,6 +813,7 @@ def _calculate_single_node_config(original_config, gpus_per_node=8):
     pp = getattr(original_config, "pipeline_model_parallel_size", 1) or 1
     ep = getattr(original_config, "expert_model_parallel_size", 1) or 1
     cp = getattr(original_config, "context_parallel_size", 1) or 1
+    num_experts = getattr(original_config, "num_experts", None)
 
     gpus_required = tp * pp * ep * cp
     nodes_required = (gpus_required + gpus_per_node - 1) // gpus_per_node
@@ -828,6 +829,8 @@ def _calculate_single_node_config(original_config, gpus_per_node=8):
             "original_ep": ep,
             "benchmark_ep": ep,
             "original_cp": cp,
+            "original_num_experts": num_experts,
+            "benchmark_num_experts": num_experts,
         }
 
     # Step 1: Reduce PP to 1
@@ -836,6 +839,7 @@ def _calculate_single_node_config(original_config, gpus_per_node=8):
 
     # Step 2: If still doesn't fit, rescale EP
     benchmark_ep = ep
+    benchmark_num_experts = num_experts
     if benchmark_gpus_required > gpus_per_node:
         print(
             f"[Primus:Performance Projection] After reducing PP to 1, "
@@ -849,6 +853,7 @@ def _calculate_single_node_config(original_config, gpus_per_node=8):
         rescale_info = _rescale_expert_parallelism(original_config)
         if rescale_info:
             benchmark_ep = rescale_info["ep_after"]
+            benchmark_num_experts = rescale_info.get("num_experts_after", num_experts)
             benchmark_gpus_required = tp * benchmark_pp * benchmark_ep * cp
 
             if benchmark_gpus_required > gpus_per_node:
@@ -889,6 +894,8 @@ def _calculate_single_node_config(original_config, gpus_per_node=8):
         "original_ep": ep,
         "benchmark_ep": benchmark_ep,
         "original_cp": cp,
+        "original_num_experts": num_experts,
+        "benchmark_num_experts": benchmark_num_experts,
     }
 
 
@@ -960,47 +967,69 @@ def _estimate_pp_communication_overhead(
     return total_p2p_time_ms
 
 
-def _compute_ep_mlp_scale(model_config, benchmark_ep, original_ep):
+def _compute_ep_mlp_scale(
+    model_config,
+    benchmark_ep,
+    original_ep,
+    original_num_experts=None,
+    benchmark_num_experts=None,
+):
     """
     Compute the MLP time scaling factor when EP changes, accounting for
-    shared experts (EP-independent) vs routed experts (EP-dependent).
+    shared experts (EP-independent) vs routed experts.
 
-    In Megatron MoE:
-    - Routed expert compute per GPU ∝ (topk / EP) × moe_ffn_hidden_size
-    - Shared expert compute is constant regardless of EP
+    Key insight — per-GPU routed compute is EP-invariant
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    In Megatron MoE each GPU in the EP group processes the **same**
+    micro-batch.  After A2A token redistribution every GPU ends up
+    computing ``batch_tokens × topk`` total token-expert pairs,
+    regardless of EP.  Therefore:
 
-    The profiled MLP time at benchmark_ep includes both. When scaling to
-    original_ep, only the routed portion changes.
+    * When ``_rescale_expert_parallelism`` adjusts ``num_experts``
+      proportionally (preserving ``experts_per_rank``), the profiled /
+      simulated MLP time already reflects the correct per-rank workload
+      → **no scaling needed** (returns 1.0).
+
+    * When EP changes but ``num_experts`` stays fixed (hypothetical —
+      our rescaling always preserves experts_per_rank), the GEMM shapes
+      change (fewer, larger GEMMs vs. more, smaller GEMMs) but total
+      FLOPs remain identical.  We conservatively return 1.0 because the
+      simple ``benchmark_ep / original_ep`` ratio does not capture GEMM-
+      efficiency differences.
+
+    Shared expert compute is constant regardless of EP (no A2A needed).
+
+    Args:
+        model_config: Model configuration.
+        benchmark_ep: EP used during profiling / simulation.
+        original_ep: EP of the target deployment.
+        original_num_experts: Total expert count in the target config.
+        benchmark_num_experts: Total expert count after rescaling
+            (may differ from ``original_num_experts`` if
+            ``_rescale_expert_parallelism`` adjusted it).
 
     Returns:
         float: Scale factor to apply to the profiled MLP time.
+              1.0 when experts_per_rank is preserved (the common case).
     """
-    topk = getattr(model_config, "moe_router_topk", 1) or 1
-    moe_ffn = getattr(model_config, "moe_ffn_hidden_size", None)
-    shared_ffn = getattr(model_config, "moe_shared_expert_intermediate_size", None)
-    # Derive num_shared_experts: explicit attribute, or infer from
-    # moe_shared_expert_intermediate_size // moe_ffn_hidden_size
-    num_shared = getattr(model_config, "num_shared_experts", 0) or 0
-    if num_shared == 0 and shared_ffn and moe_ffn:
-        num_shared = shared_ffn // moe_ffn
+    if benchmark_ep == original_ep:
+        return 1.0
 
-    if not moe_ffn or num_shared == 0 or not shared_ffn:
-        # No shared experts — all MLP compute is routed, scales with 1/EP
-        return benchmark_ep / original_ep
+    # Determine whether experts_per_rank was preserved by rescaling.
+    # When it is, per-GPU routed compute is identical — no scaling.
+    if original_num_experts is not None and benchmark_num_experts is not None:
+        orig_epr = original_num_experts / original_ep
+        bench_epr = benchmark_num_experts / benchmark_ep
+        if abs(orig_epr - bench_epr) < 0.5:
+            # experts_per_rank preserved — per-GPU routed compute unchanged.
+            return 1.0
 
-    # FLOPs proportional to tokens × ffn_size
-    # Routed: (topk / benchmark_ep) tokens per expert-slot, through moe_ffn
-    # Shared: all tokens (1.0), through shared_ffn
-    routed_flops = (topk / benchmark_ep) * moe_ffn
-    shared_flops = num_shared * shared_ffn
-    total_flops = routed_flops + shared_flops
-
-    routed_fraction = routed_flops / total_flops
-    shared_fraction = shared_flops / total_flops
-
-    # Routed portion scales by benchmark_ep / original_ep; shared stays constant
-    scale = shared_fraction + routed_fraction * (benchmark_ep / original_ep)
-    return scale
+    # Fallback: per-GPU MoE routed compute is EP-invariant (A2A
+    # redistributes tokens so each GPU processes batch_tokens × topk).
+    # The simple benchmark_ep / original_ep ratio is NOT correct because
+    # total FLOPs are constant; only GEMM shapes differ.  We return 1.0
+    # rather than an inaccurate heuristic.
+    return 1.0
 
 
 def _estimate_ep_communication_overhead(
@@ -2157,6 +2186,12 @@ def launch_projection_from_cli(args, overrides):
         primus_config.get_module_config("pre_trainer").expert_model_parallel_size = (
             reduction_info["benchmark_ep"]
         )
+        # Also propagate num_experts adjustment so that the profiler sees
+        # the correct experts_per_rank (e.g. 128/4=32, not 256/4=64).
+        if reduction_info.get("benchmark_num_experts") is not None:
+            primus_config.get_module_config("pre_trainer").num_experts = (
+                reduction_info["benchmark_num_experts"]
+            )
 
     # Determine profiling mode
     profiling_mode = getattr(args, "profiling_mode", "benchmark")
@@ -2278,13 +2313,15 @@ def launch_projection_from_cli(args, overrides):
     ):
         original_ep = reduction_info["original_ep"]
         benchmark_ep = reduction_info["benchmark_ep"]
+        original_num_experts = reduction_info.get("original_num_experts")
+        benchmark_num_experts = reduction_info.get("benchmark_num_experts")
 
         # Load hardware config if provided
         hardware_config_dict = None
         if hasattr(args, "hardware_config") and args.hardware_config:
             hardware_config_dict = load_hardware_config(args.hardware_config)
 
-        # Calculate EP communication overhead per layer
+        # Calculate EP communication overhead per layer (A2A delta)
         fwd_overhead_per_layer, bwd_overhead_per_layer = (
             _estimate_ep_communication_overhead(
                 training_config,
@@ -2294,11 +2331,18 @@ def launch_projection_from_cli(args, overrides):
             )
         )
 
-        # EP compute scaling: when EP increases, each GPU handles fewer routed
-        # expert tokens, but shared expert compute stays constant.
-        # Use _compute_ep_mlp_scale to get the correct fraction-aware scale.
+        # EP compute scaling.  Per-GPU routed compute is EP-invariant
+        # (A2A redistributes tokens so each GPU always processes
+        # batch_tokens × topk total token-expert pairs).  When
+        # _rescale_expert_parallelism preserves experts_per_rank the
+        # profiled/simulated MLP time already reflects the correct
+        # per-rank workload, so ep_mlp_scale == 1.0.
         ep_mlp_scale = _compute_ep_mlp_scale(
-            training_config.model_config, benchmark_ep, original_ep
+            training_config.model_config,
+            benchmark_ep,
+            original_ep,
+            original_num_experts=original_num_experts,
+            benchmark_num_experts=benchmark_num_experts,
         )
 
         if is_rank_0:
@@ -2306,59 +2350,48 @@ def launch_projection_from_cli(args, overrides):
                 "[Primus:Performance Projection] Adjusting profiling results for EP scaling:"
             )
             print(f"  EP rescaled: {benchmark_ep} → {original_ep}")
+            if original_num_experts is not None and benchmark_num_experts is not None:
+                orig_epr = original_num_experts // original_ep
+                bench_epr = benchmark_num_experts // benchmark_ep
+                print(
+                    f"  Experts per rank: benchmark={bench_epr} "
+                    f"(E={benchmark_num_experts}, EP={benchmark_ep}), "
+                    f"target={orig_epr} "
+                    f"(E={original_num_experts}, EP={original_ep})"
+                )
             print(f"  MLP time scale factor: {ep_mlp_scale:.3f}")
-            # Show shared vs routed breakdown
-            topk = getattr(training_config.model_config, "moe_router_topk", 1) or 1
-            moe_ffn = getattr(training_config.model_config, "moe_ffn_hidden_size", None)
-            shared_ffn = getattr(
-                training_config.model_config,
-                "moe_shared_expert_intermediate_size",
-                None,
-            )
-            num_shared = (
-                getattr(training_config.model_config, "num_shared_experts", 0) or 0
-            )
-            if moe_ffn and num_shared > 0 and shared_ffn:
-                routed_flops = (topk / benchmark_ep) * moe_ffn
-                shared_flops = num_shared * shared_ffn
-                total_flops = routed_flops + shared_flops
-                print(
-                    f"    Routed fraction: {routed_flops/total_flops:.1%} (topk={topk}, EP={benchmark_ep}, ffn={moe_ffn})"
-                )
-                print(
-                    f"    Shared fraction: {shared_flops/total_flops:.1%} ({num_shared} shared expert(s), ffn={shared_ffn})"
-                )
-            else:
-                print(
-                    f"    No shared experts — full routed scaling ({benchmark_ep}/{original_ep})"
-                )
             if fwd_overhead_per_layer > 0 or bwd_overhead_per_layer > 0:
                 print(f"  Adding per-layer All-to-All overhead:")
                 print(f"    Forward:  +{fwd_overhead_per_layer:.3f} ms/layer")
                 print(f"    Backward: +{bwd_overhead_per_layer:.3f} ms/layer")
 
-        # Adjust MoE layer times in profiling_results
+        # Adjust MoE layer times in profiling_results using a DELTA approach:
+        # new_layer_time = old_layer_time + (mlp_delta) + (a2a_delta)
+        # This preserves TP AllReduce, A2A(benchmark_ep), LayerNorm, and
+        # other components that are baked into the profiled layer time.
         moe_layers_adjusted = 0
         for layer_idx, layer_data in profiling_results.items():
             if isinstance(layer_data, dict) and layer_data.get("type") == "moe":
+                old_fwd = layer_data.get("forward_time_ms", 0)
+                old_bwd = layer_data.get("backward_time_ms", 0)
+
                 mlp_info = layer_data.get("mlp", {})
                 mlp_fwd = mlp_info.get("forward_time_ms", 0)
                 mlp_bwd = mlp_info.get("backward_time_ms", 0)
-                attn_info = layer_data.get("attention", {})
-                attn_fwd = attn_info.get("forward_time_ms", 0)
-                attn_bwd = attn_info.get("backward_time_ms", 0)
 
-                # Scale MLP compute (shared-expert-aware), keep attention unchanged
+                # Compute MLP delta (usually 0 when scale == 1.0)
                 new_mlp_fwd = mlp_fwd * ep_mlp_scale
                 new_mlp_bwd = mlp_bwd * ep_mlp_scale
+                mlp_delta_fwd = new_mlp_fwd - mlp_fwd
+                mlp_delta_bwd = new_mlp_bwd - mlp_bwd
 
-                # New layer time = attention + scaled MLP + A2A comm overhead
-                new_fwd = attn_fwd + new_mlp_fwd + fwd_overhead_per_layer
-                new_bwd = attn_bwd + new_mlp_bwd + bwd_overhead_per_layer
+                # Delta approach: start from the full profiled layer time
+                # (which includes TP AR, A2A(benchmark_ep), norms, etc.)
+                # and add the MLP compute delta + A2A comm delta.
+                new_fwd = old_fwd + mlp_delta_fwd + fwd_overhead_per_layer
+                new_bwd = old_bwd + mlp_delta_bwd + bwd_overhead_per_layer
 
                 if is_rank_0 and moe_layers_adjusted == 0:
-                    old_fwd = layer_data.get("forward_time_ms", 0)
-                    old_bwd = layer_data.get("backward_time_ms", 0)
                     print(f"  MoE layer adjustment (per layer):")
                     print(
                         f"    MLP fwd: {mlp_fwd:.2f} → {new_mlp_fwd:.2f} ms (×{ep_mlp_scale:.3f})"
@@ -2366,8 +2399,8 @@ def launch_projection_from_cli(args, overrides):
                     print(
                         f"    MLP bwd: {mlp_bwd:.2f} → {new_mlp_bwd:.2f} ms (×{ep_mlp_scale:.3f})"
                     )
-                    print(f"    Attn fwd: {attn_fwd:.2f} ms (unchanged)")
-                    print(f"    Attn bwd: {attn_bwd:.2f} ms (unchanged)")
+                    print(f"    A2A fwd delta: +{fwd_overhead_per_layer:.3f} ms")
+                    print(f"    A2A bwd delta: +{bwd_overhead_per_layer:.3f} ms")
                     print(f"    Layer fwd: {old_fwd:.2f} → {new_fwd:.2f} ms")
                     print(f"    Layer bwd: {old_bwd:.2f} → {new_bwd:.2f} ms")
 
@@ -2492,9 +2525,16 @@ def launch_projection_from_cli(args, overrides):
                         fwd_overhead_per_layer + bwd_overhead_per_layer
                     ) * num_moe_layers
 
-                    # EP compute scaling (shared-expert-aware)
+                    # EP compute scaling — per-GPU MoE routed compute is
+                    # EP-invariant (see _compute_ep_mlp_scale docstring).
+                    original_num_experts = reduction_info.get("original_num_experts")
+                    benchmark_num_experts = reduction_info.get("benchmark_num_experts")
                     ep_mlp_scale = _compute_ep_mlp_scale(
-                        training_config.model_config, benchmark_ep_val, original_ep
+                        training_config.model_config,
+                        benchmark_ep_val,
+                        original_ep,
+                        original_num_experts=original_num_experts,
+                        benchmark_num_experts=benchmark_num_experts,
                     )
                     # Estimate MLP portion of MoE layer time from profiling results
                     mlp_time_reduction = 0.0
