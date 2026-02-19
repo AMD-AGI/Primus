@@ -120,8 +120,13 @@ docker exec "${CONTAINER_NAME}" bash -c "
         echo 'rocmProfileData already installed'
     fi
 "
+# Step 5: Patch Megatron-Bridge for llama2_70b_lora training
+echo_info "Step 5: Patching Megatron-Bridge for llama2_70b_lora training..."
+docker exec "${CONTAINER_NAME}" bash -c "
+    cd /workspace/Primus/third_party/Megatron-Bridge
+    git apply /workspace/Primus/patches/megatron_bridge_validation_consumed_samples.patch"
 
-# Step 5: Start training
-echo_info "Step 5: Starting llama2_70b_lora training..."
+# Step 6: Start training
+echo_info "Step 6: Starting llama2_70b_lora training..."
 echo_info "Training configuration: examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml"
 docker exec -it "${CONTAINER_NAME}" bash -c "cd /workspace/Primus && HF_TOKEN=${HF_TOKEN} MEGATRON_BRIDGE_LOGGING_LEVEL=10 ./runner/primus-cli direct train posttrain --config examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml"

@@ -1,0 +1,89 @@
+diff --git a/3rdparty/Megatron-LM b/3rdparty/Megatron-LM
+--- a/3rdparty/Megatron-LM
++++ b/3rdparty/Megatron-LM
+@@ -1 +1 @@
+-Subproject commit 5455f0a010eadc81d2de48b0b94dccafd7c08a2f
++Subproject commit 5455f0a010eadc81d2de48b0b94dccafd7c08a2f-dirty
+diff --git a/src/megatron/bridge/data/loaders.py b/src/megatron/bridge/data/loaders.py
+index 8305ebec..b8b3a4a6 100644
+--- a/src/megatron/bridge/data/loaders.py
++++ b/src/megatron/bridge/data/loaders.py
+@@ -126,7 +126,7 @@ def get_train_valid_test_num_samples(cfg: ConfigContainer) -> tuple[int, int, in
+         # Otherwise fallback to calculating samples based on iterations and global batch size
+         train_samples = cfg.train.train_iters * cfg.train.global_batch_size
+ 
+-    eval_iters = (cfg.train.train_iters // cfg.train.eval_interval + 1) * cfg.train.eval_iters
++    eval_iters = cfg.train.eval_iters
+     test_iters = cfg.train.eval_iters
+ 
+     return (
+@@ -205,6 +205,7 @@ def build_train_valid_test_data_loaders(
+         data_parallel_rank=mpu.get_data_parallel_rank(),
+         data_parallel_size=mpu.get_data_parallel_world_size(),
+         global_batch_size=cfg.train.global_batch_size,
++        name="train",
+     )
+     if cfg.train.skip_train and cfg.train.eval_iters > 0:
+         valid_dataloader = build_pretraining_data_loader(
+@@ -221,6 +222,7 @@ def build_train_valid_test_data_loaders(
+             data_parallel_rank=mpu.get_data_parallel_rank(),
+             data_parallel_size=mpu.get_data_parallel_world_size(),
+             global_batch_size=cfg.train.global_batch_size,
++            name="validation",
+         )
+     elif cfg.train.eval_iters > 0:
+         val_dataloader_type = "cyclic" if isinstance(cfg.dataset, GPTDatasetConfig) else cfg.dataset.dataloader_type
+@@ -238,6 +240,8 @@ def build_train_valid_test_data_loaders(
+             data_parallel_rank=mpu.get_data_parallel_rank(),
+             data_parallel_size=mpu.get_data_parallel_world_size(),
+             global_batch_size=cfg.train.global_batch_size,
++            eval_iters=cfg.train.eval_iters,
++            name="validation",
+         )
+ 
+     if cfg.train.eval_iters > 0:
+@@ -255,6 +259,7 @@ def build_train_valid_test_data_loaders(
+             data_parallel_rank=mpu.get_data_parallel_rank(),
+             data_parallel_size=mpu.get_data_parallel_world_size(),
+             global_batch_size=cfg.train.global_batch_size,
++            name="test",
+         )
+ 
+     # Flags to know if we need to do training/validation/testing.
+diff --git a/src/megatron/bridge/data/samplers.py b/src/megatron/bridge/data/samplers.py
+index 137a469e..8ef270eb 100644
+--- a/src/megatron/bridge/data/samplers.py
++++ b/src/megatron/bridge/data/samplers.py
+@@ -25,6 +25,8 @@ def build_pretraining_data_loader(
+     data_parallel_size: int = 1,
+     drop_last: Optional[bool] = True,
+     global_batch_size: Optional[int] = None,
++    eval_iters: Optional[int] = None,
++    name: str = "",
+ ) -> Optional[DataLoader]:
+     """Build a dataloader for pretraining.
+ 
+@@ -63,7 +65,22 @@ def build_pretraining_data_loader(
+         return None
+ 
+     # Megatron sampler
+-    if dataloader_type == "single":
++    if (name == "validation"):
++        if eval_iters is None or global_batch_size is None:
++            raise RuntimeError(
++                "eval_iters and global_batch_size must be provided when creating a validation dataloader. "
++                "This is required to properly cap the number of evaluation samples and ensure consistent evaluation across runs."
++            )
++        eval_samples = eval_iters * global_batch_size  # 64 * 16 = 1024
++        total_samples = min(len(dataset), eval_samples)  # Cap at 1024 even if dataset is larger
++        batch_sampler = MegatronPretrainingSampler(
++            total_samples=total_samples,
++            consumed_samples=0,
++            micro_batch_size=micro_batch_size,
++            data_parallel_rank=data_parallel_rank,
++            data_parallel_size=data_parallel_size,
++        )
++    elif dataloader_type == "single":
+         batch_sampler = MegatronPretrainingSampler(
+             total_samples=len(dataset),
+             consumed_samples=consumed_samples,
