@@ -8,6 +8,7 @@ extends:
 # model architecture
 use_legacy_models: false
 deprecated_use_mcore_models: false
+model_type: gpt # gpt or mamba
 num_layers: 24
 encoder_num_layers: null
 decoder_num_layers: null
@@ -21,6 +22,7 @@ num_query_groups: null
 add_position_embedding: false
 position_embedding_type: learned_absolute
 max_position_embeddings: null
+original_max_position_embeddings: null
 untie_embeddings_and_output_weights: true
 
 ffn_hidden_size: null
@@ -98,6 +100,21 @@ v_head_dim: 128 # int
 rotary_scaling_factor: 1.0 # float
 mscale: 1.0 # float
 mscale_all_dim: 1.0 # float
+
+# Mamba layer configuration
+mamba_state_dim: 128
+mamba_head_dim: 64
+mamba_num_groups: 8
+mamba_num_heads: null
+mamba_expand: 2
+mamba_d_conv: 4
+disable_mamba_mem_eff_path: false
+
+# Hybrid model configuration
+is_hybrid_model: false # bool
+hybrid_attention_ratio: 0.0 # float range [0,0, 1.0]
+hybrid_mlp_ratio: 0.0 # float range [0,0, 1.0]
+hybrid_override_pattern: null # str
 
 # MTP
 mtp_num_layers: null # int

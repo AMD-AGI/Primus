@@ -483,8 +483,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if args.iterations_to_skip is None:
             args.iterations_to_skip = []
 
-        # support moe_freq_type
-        if isinstance(args.moe_layer_freq, str):
+        # support moe_freq_type - ensure moe_layer_freq has a default value
+        if not hasattr(args, "moe_layer_freq"):
+            args.moe_layer_freq = 1
+        elif isinstance(args.moe_layer_freq, str):
             try:
                 args.moe_layer_freq = eval(args.moe_layer_freq)
             except Exception:
@@ -496,11 +498,35 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.valid_data_path = None
             args.test_data_path = None
 
+        # Determine model type (gpt or mamba)
+        model_type = getattr(args, "model_type", "gpt")
+        log_rank_0(f"-detected model_type: {model_type}")
+
+        # Ensure required attributes have safe defaults if missing from config
+        if not hasattr(args, "final_logit_softcapping"):
+            args.final_logit_softcapping = None
+        if not hasattr(args, "router_logit_softcapping"):
+            args.router_logit_softcapping = None
+
+        # Only pass model_type parameter when it's "mamba" to maintain backward compatibility
+        # with main branch behavior for "gpt" (default) case
         if args.final_logit_softcapping is not None and args.final_logit_softcapping > 0.0:
             log_rank_0(f"-enable final_logit_softcapping: {args.final_logit_softcapping}")
-            self.model_provider = functools.partial(primus_model_provider, get_model_provider())
+            if model_type == "mamba":
+                self.model_provider = functools.partial(
+                    primus_model_provider, get_model_provider(model_type=model_type)
+                )
+            else:
+                self.model_provider = functools.partial(primus_model_provider, get_model_provider())
         else:
-            self.model_provider = get_model_provider()
+            if model_type == "mamba":
+                log_rank_0(f"-getting model provider for model_type={model_type}")
+                model_provider = get_model_provider(model_type=model_type)
+                log_rank_0(f"-model_provider: {model_provider}")
+                self.model_provider = model_provider
+            else:
+                # For "gpt" (default), call without arguments to match main branch behavior
+                self.model_provider = get_model_provider()
 
         if args.router_logit_softcapping is not None and args.router_logit_softcapping > 0.0:
             log_rank_0(f"-enable router_logit_softcapping: {args.router_logit_softcapping}")
@@ -867,6 +893,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             log_rank_0(f"use te backend...")
 
         log_rank_0(f"-run get_model")
+        log_rank_0(f"-model_provider_func: {model_provider_func}")
+        log_rank_0(f"-model_type: {model_type}")
         model = get_model(model_provider_func, model_type)
         log_rank_0(model)
         # get_megatron_optimizer will use the ddp_config
