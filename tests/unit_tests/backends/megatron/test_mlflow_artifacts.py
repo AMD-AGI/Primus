@@ -157,6 +157,39 @@ class TestFilterTracesByRank:
 
 
 # -----------------------------------------------------------------------------
+# Normalize TraceLens inputs
+# -----------------------------------------------------------------------------
+
+
+class TestNormalizeTracelensInputs:
+    """Test TraceLens input normalization helpers."""
+
+    def test_normalize_ranks_none(self):
+        assert mlflow_artifacts_mod._normalize_tracelens_ranks(None) is None
+
+    def test_normalize_ranks_string_list(self):
+        ranks = mlflow_artifacts_mod._normalize_tracelens_ranks("[0, 2, '3']")
+        assert ranks == [0, 2, 3]
+
+    def test_normalize_ranks_invalid_string(self):
+        assert mlflow_artifacts_mod._normalize_tracelens_ranks("not a list") is None
+
+    def test_normalize_ranks_filters_invalid_and_world_size(self, monkeypatch):
+        monkeypatch.setenv("WORLD_SIZE", "2")
+        ranks = mlflow_artifacts_mod._normalize_tracelens_ranks([0, 1, 2, -1, "x", True])
+        assert ranks == [0, 1]
+
+    def test_normalize_output_format_none(self):
+        assert mlflow_artifacts_mod._normalize_tracelens_output_format(None) == "xlsx"
+
+    def test_normalize_output_format_valid(self):
+        assert mlflow_artifacts_mod._normalize_tracelens_output_format("CSV") == "csv"
+
+    def test_normalize_output_format_invalid(self):
+        assert mlflow_artifacts_mod._normalize_tracelens_output_format("pdf") == "xlsx"
+
+
+# -----------------------------------------------------------------------------
 # Report generation with mocked TraceLens
 # -----------------------------------------------------------------------------
 
