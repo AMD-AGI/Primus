@@ -148,6 +148,11 @@ from primus.backends.megatron.training.global_vars import (
     set_primus_global_variables,
     set_train_start_time,
 )
+from primus.backends.megatron.training.mlflow_setup import (
+    reset_exp_root_path,
+    set_exp_root_path,
+    upload_mlflow_artifacts,
+)
 from primus.backends.megatron.training.tokenizer.tokenizer import build_tokenizer
 from primus.core.utils import checker, file_utils
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
@@ -172,6 +177,42 @@ from .utils import (
 
 # The earliest we can measure the start time.
 set_train_start_time()
+
+
+def _finalize_mlflow_run(args, mlflow_writer) -> None:
+    """
+    Finalize MLflow run: sync ranks, upload artifacts, and end the run.
+
+    This helper function consolidates the MLflow finalization logic to avoid
+    code duplication between normal training completion and exit conditions.
+
+    Args:
+        args: Megatron arguments containing mlflow_upload_traces/logs settings
+        mlflow_writer: The MLflow writer instance (or None if not enabled)
+    """
+    # Barrier to ensure all ranks have finished writing files before upload.
+    # Must run on ALL ranks to avoid deadlock (only last rank has mlflow_writer).
+    if dist.is_initialized():
+        dist.barrier()
+
+    if mlflow_writer is None:
+        reset_exp_root_path()
+        if dist.is_initialized():
+            dist.barrier()
+        return
+
+    # Upload artifacts before ending the run
+    mlflow_artifact_kwargs = {}
+    if hasattr(args, "mlflow_upload_traces"):
+        mlflow_artifact_kwargs["upload_traces"] = args.mlflow_upload_traces
+    if hasattr(args, "mlflow_upload_logs"):
+        mlflow_artifact_kwargs["upload_logs"] = args.mlflow_upload_logs
+    upload_mlflow_artifacts(**mlflow_artifact_kwargs)
+    mlflow_writer.end_run()
+    # Reset so subsequent runs in the same process don't use a stale path
+    reset_exp_root_path()
+    if dist.is_initialized():
+        dist.barrier()
 
 
 class MegatronTrainer(BaseTrainer, BaseModule):
@@ -394,6 +435,24 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                     warning_rank_0(f"-set args.use_checkpoint_args=True [auto_continue_train]")
             else:
                 log_rank_0(f"-{latest_file} does not exist, skip auto_continue_train.")
+
+        # If uploading traces (or tracelens) to MLflow, auto-enable profiling and tensorboard.
+        # Only when MLflow is enabled (disable_mlflow=False); we do not override disable_mlflow
+        # so MLflow remains opt-in and users with disable_mlflow: true are not surprised.
+        needs_profiling = (
+            getattr(args, "mlflow_upload_traces", False)
+            or getattr(args, "mlflow_upload_tracelens_report", False)
+        ) and not args.disable_mlflow
+        if needs_profiling:
+            if not getattr(args, "profile", False):
+                args.profile = True
+                debug_rank_0("Auto-enabled profile=True for mlflow trace upload")
+            if not getattr(args, "use_pytorch_profiler", False):
+                args.use_pytorch_profiler = True
+                debug_rank_0("Auto-enabled use_pytorch_profiler=True for mlflow trace upload")
+            if getattr(args, "disable_tensorboard", True):
+                args.disable_tensorboard = False
+                debug_rank_0("Auto-enabled tensorboard (disable_tensorboard=False) for profiler trace output")
 
         # tensorboard
         if not args.disable_tensorboard:
@@ -752,6 +811,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         set_global_variables(args, build_tokenizer=False)
         log_rank_0(f"-set_primus_global_variables...")
         set_primus_global_variables(args)
+        # Set exp_root_path for MLflow artifact upload (needed before training starts)
+        set_exp_root_path(self.exp_root_path)
         args = get_args()
 
         # set tokenizer
@@ -1120,8 +1181,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         ft_integration.on_checkpointing_end(is_async_finalization=True)
 
         mlflow_writer = get_mlflow_writer()
-        if mlflow_writer:
-            mlflow_writer.end_run()
+        _finalize_mlflow_run(args, mlflow_writer)
 
         one_logger and one_logger.log_metrics({"app_finish_time": one_logger_utils.get_timestamp_in_ms()})
 
@@ -1564,8 +1624,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             if wandb_writer:
                 wandb_writer.finish()
             mlflow_writer = get_mlflow_writer()
-            if mlflow_writer:
-                mlflow_writer.end_run()
+            _finalize_mlflow_run(args, mlflow_writer)
             ft_integration.shutdown()
             sys.exit(exit_code)
 
