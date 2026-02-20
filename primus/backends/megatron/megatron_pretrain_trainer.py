@@ -67,7 +67,11 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             kwargs["store"] = store
 
         # Get model provider with correct model_type
-        model_provider = get_model_provider(model_type=model_type)
+        # Only pass model_type if it's not the default to maintain compatibility
+        if model_type != "gpt":
+            model_provider = get_model_provider(model_type=model_type)
+        else:
+            model_provider = get_model_provider()
         log_rank_0(f"-model_provider: {model_provider}")
 
         wrapped_pretrain(
