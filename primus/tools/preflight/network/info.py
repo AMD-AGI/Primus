@@ -25,7 +25,7 @@ class Finding:
     details: Dict[str, Any]
 
 
-def collect_network_info() -> List[Finding]:
+def collect_network_info(expect_distributed: bool = True) -> List[Finding]:
     """Collect all network info (basic + standard + runtime)."""
     out: List[Finding] = []
 
@@ -37,7 +37,7 @@ def collect_network_info() -> List[Finding]:
     for f in ns["findings"]:
         out.append(Finding(level=f.level, message=f.message, details=f.details))
 
-    nf = run_network_full_checks()
+    nf = run_network_full_checks(expect_distributed=expect_distributed)
     for f in nf["findings"]:
         out.append(Finding(level=f.level, message=f.message, details=f.details))
 

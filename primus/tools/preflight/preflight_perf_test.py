@@ -49,7 +49,7 @@ def _status_from_counts(fail_count: int, warn_count: int) -> str:
     return "OK"
 
 
-def run_preflight_info(args: Any) -> int:
+def run_preflight_info(args: Any, expect_distributed: bool = True) -> int:
     """
     Run lightweight preflight info collection (host/gpu/network), aggregate across ranks,
     and write Markdown/PDF report on rank0.
@@ -88,7 +88,7 @@ def run_preflight_info(args: Any) -> int:
         for f in collect_gpu_info():
             findings.append(Finding(level=f.level, message=f.message, details=f.details))
     if check_network:
-        for f in collect_network_info():
+        for f in collect_network_info(expect_distributed=expect_distributed):
             findings.append(Finding(level=f.level, message=f.message, details=f.details))
 
     fail_count = sum(1 for x in findings if x.level == "fail")
@@ -209,7 +209,7 @@ def run_preflight(args):
     # 1) Info-only mode: run without distributed init.
     if not perf_test and any_selection:
         # First, emit a local-only report immediately (so user gets output even if PG init hangs).
-        local_rc = run_preflight_info(args)
+        local_rc = run_preflight_info(args, expect_distributed=False)
 
         # Then attempt to initialize distributed with a timeout, and if successful, re-run info
         # to produce an aggregated multi-node report.
@@ -242,7 +242,7 @@ def run_preflight(args):
     # 2) Plain `preflight` (no flags): run info FIRST (no dist init) so we always get a report.
     info_rc = 0
     if not perf_test and not any_selection:
-        info_rc = run_preflight_info(args)
+        info_rc = run_preflight_info(args, expect_distributed=False)
 
     # 3) Perf tests (perf-only OR plain preflight after info): now attempt distributed init
     # with a timeout so we fail fast instead of hanging.
