@@ -97,10 +97,34 @@ def list_ipv4_addrs() -> Dict[str, List[str]]:
     return out
 
 
+def _device_for_local_ip(host_ip: str) -> Optional[str]:
+    """Resolve the interface that has the given local IP from `ip -o addr show`."""
+    try:
+        r = subprocess.run(
+            ["ip", "-o", "addr", "show"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=2,
+        )
+        if r.returncode != 0:
+            return None
+        for line in r.stdout.strip().splitlines():
+            if host_ip in line:
+                parts = line.split()
+                if len(parts) > 1:
+                    return parts[1]
+        return None
+    except Exception:
+        return None
+
+
 def route_to_master() -> Dict[str, Any]:
     """
     Best-effort: determine which interface would be used to reach MASTER_ADDR.
     Uses `ip -o route get <master_ip>` and extracts `dev` and `src`.
+    For local routes (master is this host), resolves dev from `ip addr show`.
     """
     master_addr = os.environ.get("MASTER_ADDR") or ""
     if not master_addr:
@@ -130,12 +154,28 @@ def route_to_master() -> Dict[str, Any]:
         # Typical: "<ip> via <gw> dev <if> src <srcip> ..."
         m_dev = re.search(r"\bdev\s+(\S+)", s)
         m_src = re.search(r"\bsrc\s+(\d+\.\d+\.\d+\.\d+)", s)
+        dev = m_dev.group(1) if m_dev else None
+        src_ip = m_src.group(1) if m_src else None
+
+        if s.startswith("local "):
+            try:
+                host_ip = socket.gethostbyname(socket.gethostname())
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "master_addr": master_addr,
+                    "master_ip": master_ip,
+                    "error": f"resolve local IP failed: {e}",
+                }
+
+            dev = _device_for_local_ip(host_ip) or dev
+
         return {
             "ok": True,
             "master_addr": master_addr,
             "master_ip": master_ip,
-            "dev": m_dev.group(1) if m_dev else None,
-            "src_ip": m_src.group(1) if m_src else None,
+            "dev": dev,
+            "src_ip": src_ip,
             "raw": s,
         }
     except Exception as e:
