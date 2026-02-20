@@ -508,16 +508,25 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         if not hasattr(args, "router_logit_softcapping"):
             args.router_logit_softcapping = None
 
+        # Only pass model_type parameter when it's "mamba" to maintain backward compatibility
+        # with main branch behavior for "gpt" (default) case
         if args.final_logit_softcapping is not None and args.final_logit_softcapping > 0.0:
             log_rank_0(f"-enable final_logit_softcapping: {args.final_logit_softcapping}")
-            self.model_provider = functools.partial(
-                primus_model_provider, get_model_provider(model_type=model_type)
-            )
+            if model_type == "mamba":
+                self.model_provider = functools.partial(
+                    primus_model_provider, get_model_provider(model_type=model_type)
+                )
+            else:
+                self.model_provider = functools.partial(primus_model_provider, get_model_provider())
         else:
-            log_rank_0(f"-getting model provider for model_type={model_type}")
-            model_provider = get_model_provider(model_type=model_type)
-            log_rank_0(f"-model_provider: {model_provider}")
-            self.model_provider = model_provider
+            if model_type == "mamba":
+                log_rank_0(f"-getting model provider for model_type={model_type}")
+                model_provider = get_model_provider(model_type=model_type)
+                log_rank_0(f"-model_provider: {model_provider}")
+                self.model_provider = model_provider
+            else:
+                # For "gpt" (default), call without arguments to match main branch behavior
+                self.model_provider = get_model_provider()
 
         if args.router_logit_softcapping is not None and args.router_logit_softcapping > 0.0:
             log_rank_0(f"-enable router_logit_softcapping: {args.router_logit_softcapping}")
