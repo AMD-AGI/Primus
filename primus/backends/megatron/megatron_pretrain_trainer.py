@@ -32,12 +32,14 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
                 forward_step,
                 train_valid_test_datasets_provider,
             )
+
             log_rank_0("Using Mamba model provider and training components")
         else:
             from pretrain_gpt import (  # type: ignore
                 forward_step,
                 train_valid_test_datasets_provider,
             )
+
             log_rank_0("Using GPT model provider and training components")
 
         # Configure training components
