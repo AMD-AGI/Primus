@@ -142,7 +142,6 @@ from megatron.training.yaml_arguments import validate_yaml
 
 from primus.backends.megatron.argument_builder import _load_megatron_defaults
 from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_metrics
-from primus.backends.megatron.model_provider import primus_model_provider
 from primus.backends.megatron.training.global_vars import (
     get_mlflow_writer,
     get_train_start_time,
@@ -162,6 +161,7 @@ from primus.modules.module_utils import (
     warning_rank_0,
 )
 from primus.modules.trainer.base_trainer import BaseTrainer
+from primus.modules.trainer.megatron.model_provider import primus_model_provider
 
 from .utils import (
     is_v_schedule_enabled,

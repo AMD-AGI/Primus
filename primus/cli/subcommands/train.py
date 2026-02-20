@@ -38,8 +38,9 @@ def _resolve_pretrain_runtime(args) -> str:
     except Exception:
         framework = None
 
-    supported_frameworks = ["torchtitan", "megatron"]
-    return "core" if framework in supported_frameworks else "legacy"
+    # Default: use the new core runtime for all frameworks except MaxText.
+    # MaxText still uses the legacy path (examples/run_pretrain.sh integration).
+    return "legacy" if framework == "maxtext" else "core"
 
 
 def run(args, overrides: List[str]):

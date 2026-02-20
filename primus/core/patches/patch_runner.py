@@ -101,6 +101,9 @@ def run_patches(
     # This avoids checking applies_to on every iteration
     patches = [p for p in patches if p.applies_to(ctx)]
 
+    # Run lower priority number first (stable: ties preserve registration order)
+    patches = sorted(patches, key=lambda p: p.priority)
+
     log_rank_0(
         f"[Patch] Pre-filtered {len(patches)} patches (out of {all_patches_count} total) for {backend}/{phase}"
     )

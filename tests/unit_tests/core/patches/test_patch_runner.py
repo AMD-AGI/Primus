@@ -86,9 +86,9 @@ class TestPatchRunner:
             order.append("p3")
 
         run_patches(backend="x", phase="y")
-        # Patches execute in registration order (no sorting by priority)
+        # Patches execute in ascending priority; ties keep registration order.
         # Registration order: p2, p1, p3
-        assert order == ["p2", "p1", "p3"]
+        assert order == ["p3", "p2", "p1"]
 
     def test_run_patches_filtering_by_backend_and_enabled_ids(self, monkeypatch):
         called = []
@@ -162,6 +162,7 @@ class TestPatchRunner:
 
     def test_stop_on_error(self, monkeypatch):
         monkeypatch.setattr("primus.core.patches.patch_runner.log_rank_0", lambda *args, **kwargs: None)
+        monkeypatch.setattr("primus.core.patches.patch_runner.error_rank_0", lambda *args, **kwargs: None)
 
         @register_patch("fail")
         def p1(ctx):

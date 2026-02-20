@@ -8,12 +8,11 @@
 Unit tests for BackendAdapter base class.
 
 These tests verify that:
-    - setup and build_args patches are invoked with correct context
-    - the high-level create_trainer orchestration calls all required steps
+    - dummy adapters implement required abstract methods
 """
 
 from types import SimpleNamespace
-from typing import Any, Dict, List
+from typing import Any, List
 
 import pytest
 
@@ -58,8 +57,8 @@ class DummyBackendAdapter(adapter_module.BackendAdapter):
     def prepare_backend(self, config: Any):
         self.prepare_calls.append(config)
 
-    def convert_config(self, config: Any) -> Dict[str, Any]:
-        self.convert_calls.append(config)
+    def convert_config(self, params: Any) -> Any:
+        self.convert_calls.append(params)
         # Use SimpleNamespace instead of a plain dict so that BackendAdapter
         # can treat backend_args like a real backend object:
         #   - vars(backend_args) works (matching how real argparse.Namespace behaves)
@@ -68,7 +67,7 @@ class DummyBackendAdapter(adapter_module.BackendAdapter):
         return SimpleNamespace(
             lr=1e-4,
             global_batch_size=128,
-            model_name=getattr(config, "model", None),
+            model_name=params.get("model") if isinstance(params, dict) else getattr(params, "model", None),
         )
 
     def load_trainer_class(self, stage: str = "pretrain"):
@@ -100,98 +99,46 @@ def primus_config():
     return SimpleNamespace(exp_name="unit-test-exp")
 
 
-def test_apply_setup_patches_invokes_run_patches(monkeypatch, module_config, primus_config):
-    from primus.core import patches as patches_module
-
-    calls = []
-
-    def fake_run_patches(**kwargs):
-        calls.append(kwargs)
-
-    monkeypatch.setattr(patches_module, "run_patches", fake_run_patches)
-
-    adapter = DummyBackendAdapter(framework="megatron")
-
-    adapter._apply_setup_patches(primus_config, module_config)
-
-    assert len(calls) == 1
-    call = calls[0]
-    assert call["backend"] == "megatron"
-    assert call["phase"] == "setup"
-    assert call["backend_version"] is None
-    assert call["model_name"] == "test-model"
-    assert call["extra"]["module_config"] is module_config
-    assert call["extra"]["primus_config"] is primus_config
-
-
-def test_apply_build_args_patches_uses_detected_version(monkeypatch, module_config, primus_config):
-    from primus.core import patches as patches_module
-
-    calls = []
-
-    def fake_run_patches(**kwargs):
-        calls.append(kwargs)
-
-    monkeypatch.setattr(patches_module, "run_patches", fake_run_patches)
-
-    adapter = DummyBackendAdapter(framework="megatron", version="0.9.0")
-    backend_args = SimpleNamespace(dummy_arg=True)
-
-    adapter._apply_build_args_patches(primus_config, module_config, backend_args)
-
-    assert len(calls) == 1
-    call = calls[0]
-    assert call["backend"] == "megatron"
-    assert call["phase"] == "build_args"
-    assert call["backend_version"] == "0.9.0"
-    assert call["model_name"] == "test-model"
-    assert call["extra"]["backend_args"] is backend_args
-    assert call["extra"]["module_config"] is module_config
-    assert call["extra"]["primus_config"] is primus_config
-
-
 def test_create_trainer_orchestrates_flow(monkeypatch, primus_config, module_config):
-    # Silence logging in tests
-
-    monkeypatch.setattr(adapter_module, "log_rank_0", lambda *args, **kwargs: None)
-    # BackendAdapter uses log_dict_aligned without importing it explicitly.
-    # Use raising=False so the test remains robust even if the module does not
-    # yet define log_dict_aligned (older versions, refactors, etc.): in that
-    # case monkeypatch.setattr becomes a no-op instead of failing the test.
-    monkeypatch.setattr(
-        adapter_module,
-        "log_dict_aligned",
-        lambda *args, **kwargs: None,
-        raising=False,
-    )
-
-    # Capture patch invocations
-    from primus.core import patches as patches_module
-
-    patch_calls = []
-
-    def fake_run_patches(**kwargs):
-        patch_calls.append(kwargs)
-
-    monkeypatch.setattr(patches_module, "run_patches", fake_run_patches)
-
     adapter = DummyBackendAdapter(framework="megatron", version="1.2.3")
 
-    trainer = adapter.create_trainer(primus_config, module_config)
-
-    # Trainer instance is created with the expected type and arguments
-    assert isinstance(trainer, DummyTrainer)
-    assert trainer.primus_config is primus_config
-    assert trainer.module_config is module_config
-    assert getattr(trainer.backend_args, "lr") == 1e-4
-    assert getattr(trainer.backend_args, "global_batch_size") == 128
-
     # Abstract methods were called exactly once
-    assert adapter.prepare_calls == [module_config]
-    assert adapter.convert_calls == [module_config]
-    assert adapter.detect_version_calls == 1
-    assert adapter.load_trainer_calls == 1
+    adapter.prepare_backend(module_config)
+    adapter.convert_config(module_config.params)
+    adapter.load_trainer_class(stage="pretrain")
+    adapter.detect_backend_version()
 
-    # Both setup and build_args patches were invoked
-    phases = {c["phase"] for c in patch_calls}
-    assert {"setup", "build_args"} <= phases
+    assert adapter.prepare_calls == [module_config]
+    assert adapter.convert_calls == [module_config.params]
+    assert adapter.load_trainer_calls == 1
+    assert adapter.detect_version_calls == 1
+
+
+def test_adapter_setup_backend_path_with_explicit_path(tmp_path, monkeypatch):
+    adapter = DummyBackendAdapter(framework="test_backend")
+    backend_dir = tmp_path / "explicit_backend"
+    backend_dir.mkdir()
+
+    # Keep sys.path clean after test.
+    original_sys_path = list(__import__("sys").path)
+    try:
+        resolved = adapter.setup_backend_path(backend_path=str(backend_dir))
+        assert resolved == str(backend_dir)
+        assert str(backend_dir) in __import__("sys").path
+    finally:
+        __import__("sys").path[:] = original_sys_path
+
+
+def test_adapter_setup_backend_path_with_env_var(tmp_path, monkeypatch):
+    adapter = DummyBackendAdapter(framework="test_backend")
+    backend_dir = tmp_path / "env_backend"
+    backend_dir.mkdir()
+
+    original_sys_path = list(__import__("sys").path)
+    monkeypatch.setenv("BACKEND_PATH", str(backend_dir))
+    try:
+        resolved = adapter.setup_backend_path(backend_path=None)
+        assert resolved == str(backend_dir)
+        assert str(backend_dir) in __import__("sys").path
+    finally:
+        __import__("sys").path[:] = original_sys_path

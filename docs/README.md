@@ -24,11 +24,16 @@ Guides for common workflows and features:
 
 In-depth technical documentation:
 
+- **[Post-Training Guide](./posttraining.md)** - Fine-tuning with SFT and LoRA using Primus CLI
+- **[Performance Projection](./projection.md)** - Project training performance to multi-node configurations
 - **[Preflight](./preflight.md)** - Cluster diagnostics (host/GPU/network info + perf tests)
 - **[Benchmark Suite](./benchmark.md)** - GEMM, RCCL, end-to-end benchmarks and profiling
 - **[Supported Models](./backends/overview.md#supported-models)** - Supported LLM architectures and feature compatibility matrix
 - **[Advanced Features](./advanced.md)** - Mixed precision, parallelism strategies, optimization techniques
 - **[Backend Patch Notes](./backends/overview.md)** - Primus-specific arguments for Megatron, TorchTitan, etc.
+- **[Backend Extension Guide](./backends/extending-backends.md)** - How to add a new backend using the current adapter/trainer architecture
+ - **[Megatron Model Extension Guide](./backends/adding-megatron-models.md)** - How to add a new Megatron model config
+ - **[TorchTitan Model Extension Guide](./backends/adding-torchtitan-models.md)** - How to add a new TorchTitan model config
 
 ### 💡 Help & Support
 
@@ -45,6 +50,7 @@ Get help and find answers:
 - **Train a model locally** → [Quick Start](./quickstart.md) + [CLI User Guide](./cli/PRIMUS-CLI-GUIDE.md)
 - **Run distributed training on Slurm** → [Slurm & Container Usage](./slurm-container.md)
 - **Configure my training run** → [Configuration Guide](./configuration.md)
+- **Project performance to multi-node** → [Performance Projection](./projection.md)
 - **Benchmark performance** → [Benchmark Suite](./benchmark.md)
 - **Understand the CLI design** → [CLI Architecture](./cli/CLI-ARCHITECTURE.md)
 - **Troubleshoot issues** → [FAQ](./faq.md)

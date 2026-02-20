@@ -40,7 +40,18 @@ def run_script(
     run_stdout = subprocess.PIPE if not do_print_at_runtime else sys.stdout
     run_stderr = subprocess.PIPE if not do_print_at_runtime else sys.stderr
 
-    cmd = ["bash", shell_entry, "direct", "--", "train", "pretrain", "--config", exp_path]
+    cmd = [
+        "bash",
+        shell_entry,
+        "direct",
+        "--log_file",
+        train_log_path,
+        "--",
+        "train",
+        "pretrain",
+        "--config",
+        exp_path,
+    ]
     if extra_args:
         cmd.extend(extra_args)
 
@@ -77,7 +88,7 @@ def run_script(
             except Exception as log_err:
                 logger.warning(f"[{tag}] Failed to read train log: {log_err}")
 
-        if "after training is done" in stdout_output:
+        if "Training completed." in stdout_output:
             logger.warning(f"[{tag}] Training likely succeeded despite return code != 0.")
             logger.warning(f"stderr excerpt:\n{stderr_output[:1000]}")
         else:
