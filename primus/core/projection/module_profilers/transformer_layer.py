@@ -21,6 +21,7 @@ from .residual_add import ResidualAddProfiler
 from .router import RouterProfiler
 from .utils import benchmark_layer
 
+
 def _estimate_tp_allreduce_time_ms(config, batch_size: int, seq_len: int) -> float:
     """
     Estimate TP AllReduce time for a single AllReduce operation (in ms).
@@ -53,7 +54,10 @@ def _estimate_tp_allreduce_time_ms(config, batch_size: int, seq_len: int) -> flo
     coll_args = get_default_args(
         num_nodes=num_nodes,
         gpus_per_node=gpus_per_node,
-        tp=tp, pp=pp, ep=ep, cp=cp,
+        tp=tp,
+        pp=pp,
+        ep=ep,
+        cp=cp,
     )
 
     # TP AllReduce is across tp ranks (typically intra-node)
@@ -97,11 +101,16 @@ def _estimate_moe_a2a_time_ms(config, batch_size: int, seq_len: int) -> float:
     coll_args = get_default_args(
         num_nodes=num_nodes,
         gpus_per_node=gpus_per_node,
-        tp=tp, pp=pp, ep=ep, cp=cp,
+        tp=tp,
+        pp=pp,
+        ep=ep,
+        cp=cp,
     )
 
     # Propagate DeepEP setting if present (affects A2A algorithm selection)
-    moe_enable_deepep = getattr(config.model_parallel_config, "moe_enable_deepep", False)
+    moe_enable_deepep = getattr(
+        config.model_parallel_config, "moe_enable_deepep", False
+    )
     use_turbo_deepep = getattr(config.model_parallel_config, "use_turbo_deepep", False)
     coll_args.moe_enable_deepep = moe_enable_deepep
     coll_args.use_turbo_deepep = use_turbo_deepep
@@ -162,7 +171,9 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
         super().__init__(config, sub_profilers)
         self.layer_module = None  # Will be set during benchmarking
-        self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
+        self._cached_results = (
+            None  # Cache for (forward_time, backward_time, activation_memory)
+        )
         self._cache_key = None  # Cache key (batch_size, seq_len)
         self._gemm_backend = None  # Optional: GEMM simulation backend
         self._sdpa_backend = None  # Optional: SDPA simulation backend
@@ -209,16 +220,30 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
         return (
-            self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 3
-            + self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len)
+            self.sub_profilers["layer_norm"].estimated_activation_memory(
+                batch_size, seq_len
+            )
+            * 3
+            + self.sub_profilers["self_attention"].estimated_activation_memory(
+                batch_size, seq_len
+            )
             + self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len)
-            + self.sub_profilers["residual_add"].estimated_activation_memory(batch_size, seq_len) * 2
+            + self.sub_profilers["residual_add"].estimated_activation_memory(
+                batch_size, seq_len
+            )
+            * 2
         )
 
-    def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+    def _get_simulated_results(
+        self, batch_size: int, seq_len: int
+    ) -> tuple[float, float, int]:
         """Aggregate simulated results from sub-profilers, including TP AllReduce."""
-        attn_fwd = self.sub_profilers["self_attention"].measured_forward_time(batch_size, seq_len)
-        attn_bwd = self.sub_profilers["self_attention"].measured_backward_time(batch_size, seq_len)
+        attn_fwd = self.sub_profilers["self_attention"].measured_forward_time(
+            batch_size, seq_len
+        )
+        attn_bwd = self.sub_profilers["self_attention"].measured_backward_time(
+            batch_size, seq_len
+        )
         mlp_fwd = self.sub_profilers["mlp"].measured_forward_time(batch_size, seq_len)
         mlp_bwd = self.sub_profilers["mlp"].measured_backward_time(batch_size, seq_len)
 
@@ -234,7 +259,9 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 
-    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+    def _get_benchmark_results(
+        self, batch_size: int, seq_len: int
+    ) -> tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
@@ -269,7 +296,9 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
         super().__init__(config, sub_profilers)
         self.layer_module = None  # Will be set during benchmarking
-        self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
+        self._cached_results = (
+            None  # Cache for (forward_time, backward_time, activation_memory)
+        )
         self._cache_key = None  # Cache key (batch_size, seq_len)
         self._gemm_backend = None  # Optional: GEMM simulation backend
         self._sdpa_backend = None  # Optional: SDPA simulation backend
@@ -317,22 +346,38 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
         return (
-            self.sub_profilers["layer_norm"].estimated_activation_memory(batch_size, seq_len) * 3
-            + self.sub_profilers["self_attention"].estimated_activation_memory(batch_size, seq_len)
+            self.sub_profilers["layer_norm"].estimated_activation_memory(
+                batch_size, seq_len
+            )
+            * 3
+            + self.sub_profilers["self_attention"].estimated_activation_memory(
+                batch_size, seq_len
+            )
             + self.sub_profilers["mlp"].estimated_activation_memory(batch_size, seq_len)
-            + self.sub_profilers["router"].estimated_activation_memory(batch_size, seq_len)
-            + self.sub_profilers["residual_add"].estimated_activation_memory(batch_size, seq_len) * 2
+            + self.sub_profilers["router"].estimated_activation_memory(
+                batch_size, seq_len
+            )
+            + self.sub_profilers["residual_add"].estimated_activation_memory(
+                batch_size, seq_len
+            )
+            * 2
         )
 
-    def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+    def _get_simulated_results(
+        self, batch_size: int, seq_len: int
+    ) -> tuple[float, float, int]:
         """Aggregate simulated results from sub-profilers.
 
         Includes TP AllReduce and MoE All-to-All communication overhead that
         would be captured in the measured layer time during benchmark mode but
         must be added explicitly in simulation mode.
         """
-        attn_fwd = self.sub_profilers["self_attention"].measured_forward_time(batch_size, seq_len)
-        attn_bwd = self.sub_profilers["self_attention"].measured_backward_time(batch_size, seq_len)
+        attn_fwd = self.sub_profilers["self_attention"].measured_forward_time(
+            batch_size, seq_len
+        )
+        attn_bwd = self.sub_profilers["self_attention"].measured_backward_time(
+            batch_size, seq_len
+        )
         mlp_fwd = self.sub_profilers["mlp"].measured_forward_time(batch_size, seq_len)
         mlp_bwd = self.sub_profilers["mlp"].measured_backward_time(batch_size, seq_len)
 
@@ -355,7 +400,9 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 
-    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+    def _get_benchmark_results(
+        self, batch_size: int, seq_len: int
+    ) -> tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:

@@ -110,7 +110,9 @@ def sendrecv(args, msg_size):
     return t
 
 
-def direct_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None, original_msg_size=None):
+def direct_alltoall(
+    args, msg_size, gpus, groups=["ep"], protocol=None, original_msg_size=None
+):
     """
     Direct alltoall for HP=1, hierarchical with parallel NIC utilization.
 
@@ -139,7 +141,9 @@ def direct_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None, original
     intra_node_volume = msg_size * intra_fraction
     inter_node_volume_per_gpu = msg_size * inter_fraction
 
-    node_lat, intra_vol_adj = node_latency_and_volume_protocol(args, intra_node_volume, protocol)
+    node_lat, intra_vol_adj = node_latency_and_volume_protocol(
+        args, intra_node_volume, protocol
+    )
     pod_lat = args.pod_lat
 
     # Intra-node time
@@ -154,7 +158,10 @@ def direct_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None, original
         t_inter = total_inter_volume / aggregate_inter_bw * 1.0e-3 + pod_lat
     else:
         remote_nodes = num_nodes - 1
-        t_inter = inter_node_volume_per_gpu / (args.bw_eff * args.pod_bw) * 1.0e-3 + pod_lat * remote_nodes
+        t_inter = (
+            inter_node_volume_per_gpu / (args.bw_eff * args.pod_bw) * 1.0e-3
+            + pod_lat * remote_nodes
+        )
 
     # Overlap intra and inter
     t_a2a = max(t_intra, t_inter)
@@ -195,7 +202,9 @@ def run_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None):
     elif (args.hp * gpus > args.node_size) and (args.hp * gpus) <= args.pod_size:
         # Alltoall fits within pod
         if args.hp == 1:
-            return direct_alltoall(args, msg_size, gpus, groups, protocol, original_msg_size)
+            return direct_alltoall(
+                args, msg_size, gpus, groups, protocol, original_msg_size
+            )
         bw = args.bw_eff * args.pod_bw
         lat = args.pod_lat
     else:
@@ -231,7 +240,11 @@ def cp_allgather(args, msg_size, gpus, protocol=None):
         bw = args.cluster_bw * args.bw_eff
         lat = args.cluster_lat
     # Logarithmic steps for tree allgather
-    t = msg_size / bw * 1.0e-3 + lat * np.ceil(np.log2(gpus)) + args.kernel_launch_latency
+    t = (
+        msg_size / bw * 1.0e-3
+        + lat * np.ceil(np.log2(gpus))
+        + args.kernel_launch_latency
+    )
     return t
 
 
@@ -454,7 +467,9 @@ def single_shot_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     t_intra_node = 0
     t_inter_node = 0
     if intra_node_gpus > 0:
-        node_lat, msg_size_per_peer_adj = node_latency_and_volume_protocol(args, msg_size_per_peer, protocol)
+        node_lat, msg_size_per_peer_adj = node_latency_and_volume_protocol(
+            args, msg_size_per_peer, protocol
+        )
         node_bw = args.bw_eff * args.node_bw
         intra_node_rounds = ceil(intra_node_gpus / intra_node_fanout)
         t_intra_node = intra_node_rounds * node_lat
@@ -505,7 +520,9 @@ def hierarchical_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     inter_node_volume_per_gpu = msg_size * (gpus - gpus_per_node) / gpus
 
     # Intra-node time
-    node_lat, intra_vol_adj = node_latency_and_volume_protocol(args, intra_node_volume, protocol)
+    node_lat, intra_vol_adj = node_latency_and_volume_protocol(
+        args, intra_node_volume, protocol
+    )
     node_bw = args.bw_eff * args.node_bw
     t_intra = node_lat + intra_vol_adj / node_bw * 1.0e-3
 
@@ -516,7 +533,10 @@ def hierarchical_alltoall(args, msg_size, gpus, groups=None, protocol=None):
         t_inter = args.pod_lat + total_inter_volume / aggregate_inter_bw * 1.0e-3
     else:
         effective_pod_bw = args.bw_eff * args.pod_bw
-        t_inter = args.pod_lat * num_nodes + inter_node_volume_per_gpu / effective_pod_bw * 1.0e-3
+        t_inter = (
+            args.pod_lat * num_nodes
+            + inter_node_volume_per_gpu / effective_pod_bw * 1.0e-3
+        )
 
     t_total = max(t_intra, t_inter)
     t_total += args.kernel_launch_latency
@@ -527,10 +547,10 @@ def hierarchical_alltoall(args, msg_size, gpus, groups=None, protocol=None):
 def pxn_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     """
     PXN All-to-All - pipelined implementation for DeepEP.
-    
-    Based on DeepEP implementation of pipelined PXN-A2A with pipelined 
+
+    Based on DeepEP implementation of pipelined PXN-A2A with pipelined
     scale-up (intra-node) and scale-out (inter-node) communication.
-    
+
     Key features:
     - Overlaps scale-up and scale-out communication
     - Scale-out doesn't start until 4MB is accumulated for dispatch
@@ -538,60 +558,68 @@ def pxn_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     """
     if gpus == 1 or msg_size == 0:
         return 0
-    
+
     original_msg_size = msg_size
-    
+
     # Account for TP striding: with TP (hp) > 1, each EP rank occupies
     # hp GPUs, so only node_size/hp EP ranks fit on a single node.
     hp = getattr(args, "hp", 1)
     effective_gpus_per_node = min(gpus, args.node_size // max(hp, 1))
     num_nodes = ceil(gpus / max(effective_gpus_per_node, 1))
-    
+
     # If A2A is not crossing node boundaries, fall back to regular alltoall
     if num_nodes <= 1:
         return min(
             single_shot_alltoall(args, msg_size, gpus, groups, protocol),
-            run_alltoall(args, msg_size, gpus, groups, protocol)
+            run_alltoall(args, msg_size, gpus, groups, protocol),
         )
-    
+
     # PXN - AlltoAll - pipeline implementation
     chunk_size = 4194304  # 4MB - DeepEP waits until 4MB is accumulated
-    
+
     # Scale-out message size (inter-node communication)
     scale_out_msg_size = int(original_msg_size * (num_nodes - 1) / num_nodes)
-    
+
     # Scale-up delay: time to accumulate 4MB before scale-out starts
     scaleup_delay = 0.0
     if scale_out_msg_size < chunk_size:
-        # If total scale-out msg size is less than 4MB, 
+        # If total scale-out msg size is less than 4MB,
         # total time = scaleup_delay + scaleout_time
-        node_lat, _ = node_latency_and_volume_protocol(args, scale_out_msg_size, protocol)
+        node_lat, _ = node_latency_and_volume_protocol(
+            args, scale_out_msg_size, protocol
+        )
         scaleup_delay = node_lat + scale_out_msg_size / args.node_bw * 1.0e-3
     else:
         # Scale-out comm doesn't start until 4MB is accumulated
         node_lat, _ = node_latency_and_volume_protocol(args, chunk_size, protocol)
         scaleup_delay = node_lat + chunk_size / args.node_bw * 1.0e-3
-    
+
     # Assume PXN style alltoall with overlapped scale-up and scale-out
-    node_msg_size = int(original_msg_size * (effective_gpus_per_node - 1) / effective_gpus_per_node)
+    node_msg_size = int(
+        original_msg_size * (effective_gpus_per_node - 1) / effective_gpus_per_node
+    )
     scale_out_msg_size = int(original_msg_size * (num_nodes - 1) / num_nodes)
-    
+
     # Calculate latencies with protocol inflation
-    node_lat, node_msg_size_adj = node_latency_and_volume_protocol(args, node_msg_size, protocol)
-    pod_lat, scale_out_msg_size_adj = pod_latency_and_volume_protocol(args, scale_out_msg_size, protocol)
-    
+    node_lat, node_msg_size_adj = node_latency_and_volume_protocol(
+        args, node_msg_size, protocol
+    )
+    pod_lat, scale_out_msg_size_adj = pod_latency_and_volume_protocol(
+        args, scale_out_msg_size, protocol
+    )
+
     # Scale-up (intra-node) time
     node_bw = args.bw_eff * args.node_bw
     t_a2a_node = node_lat + node_msg_size_adj / node_bw * 1.0e-3
-    
+
     # Scale-out (inter-node) time with scaleup delay
     pod_bw = args.bw_eff * args.pod_bw
     t_a2a_scale_out = pod_lat + scale_out_msg_size_adj / pod_bw * 1.0e-3 + scaleup_delay
-    
+
     # Total time is max of scale-up and scale-out (they overlap)
     t_total = max(t_a2a_node, t_a2a_scale_out)
     t_total += args.kernel_launch_latency
-    
+
     return t_total
 
 
@@ -610,7 +638,9 @@ def single_shot_allgather(args, msg_size, gpus, groups=None, protocol=None):
     t_intra_node = 0
     t_inter_node = 0
     if intra_node_gpus > 0:
-        node_lat, msg_size_per_peer_node = node_latency_and_volume_protocol(args, msg_size_per_peer, protocol)
+        node_lat, msg_size_per_peer_node = node_latency_and_volume_protocol(
+            args, msg_size_per_peer, protocol
+        )
         node_bw = args.bw_eff * args.node_bw
         intra_node_rounds = ceil(intra_node_gpus / intra_node_fanout)
         t_intra_node = intra_node_rounds * node_lat
@@ -643,7 +673,9 @@ def single_shot_reduce_scatter(args, msg_size, gpus, groups=["hp"], protocol=Non
     t_intra_node = 0
     t_inter_node = 0
     if intra_node_gpus > 0:
-        node_lat, msg_size_per_peer_node = node_latency_and_volume_protocol(args, msg_size_per_peer, protocol)
+        node_lat, msg_size_per_peer_node = node_latency_and_volume_protocol(
+            args, msg_size_per_peer, protocol
+        )
         node_bw = args.bw_eff * args.node_bw
         intra_node_rounds = ceil(intra_node_gpus / intra_node_fanout)
         t_intra_node = intra_node_rounds * node_lat
@@ -673,7 +705,9 @@ def single_shot_allreduce(args, msg_size, gpus, groups=["hp"], protocol=None):
         return 0
     t_rs = single_shot_reduce_scatter(args, msg_size, gpus, groups, protocol)
     t_ag = single_shot_allgather(args, msg_size, gpus, groups, protocol)
-    t_ar = t_rs + t_ag - args.kernel_launch_latency  # Remove duplicate kernel launch latency
+    t_ar = (
+        t_rs + t_ag - args.kernel_launch_latency
+    )  # Remove duplicate kernel launch latency
     return t_ar
 
 
@@ -695,7 +729,9 @@ def allreduce(args, msg_size, gpus, groups=["dp"]):
         hypercubeallreduce = oneshotHCallreduce(args, msg_size, gpus, protocol=p)
         ss_allreduce = single_shot_allreduce(args, msg_size, gpus, protocol=p)
         ringallreduce = RingAllreduce(args, msg_size, gpus, protocol=p)
-        min_ar_alg_time = min(ringallreduce, bruck_time, hypercubeallreduce, ss_allreduce)
+        min_ar_alg_time = min(
+            ringallreduce, bruck_time, hypercubeallreduce, ss_allreduce
+        )
         if min_ar_alg_time < min_ar_time:
             min_ar_time = min_ar_alg_time
     return min_ar_time
@@ -706,13 +742,15 @@ def alltoall(args, msg_size, gpus, groups=["ep"]):
     Select best alltoall algorithm among several options.
     Tries multiple protocols and algorithms, returns fastest.
     Applies per-peer latency overhead and minimum latency floor.
-    
+
     If DeepEP is enabled (moe_enable_deepep=True), uses PXN All-to-All
     which pipelines scale-up and scale-out communication.
     """
     # Check if DeepEP is enabled
-    use_deepep = getattr(args, "moe_enable_deepep", False) or getattr(args, "use_turbo_deepep", False)
-    
+    use_deepep = getattr(args, "moe_enable_deepep", False) or getattr(
+        args, "use_turbo_deepep", False
+    )
+
     min_a2a_time = float("inf")
     for p in ["simple", "ll", "ll64", "ll128"]:
         if use_deepep:
@@ -722,10 +760,14 @@ def alltoall(args, msg_size, gpus, groups=["ep"]):
         else:
             # Use regular All-to-All algorithms
             direct_a2a_time = run_alltoall(args, msg_size, gpus, protocol=p)
-            single_shot_a2a_time = single_shot_alltoall(args, msg_size, gpus, protocol=p)
-            hierarchical_a2a_time = hierarchical_alltoall(args, msg_size, gpus, protocol=p)
+            single_shot_a2a_time = single_shot_alltoall(
+                args, msg_size, gpus, protocol=p
+            )
+            hierarchical_a2a_time = hierarchical_alltoall(
+                args, msg_size, gpus, protocol=p
+            )
             a2a_time = min(direct_a2a_time, single_shot_a2a_time, hierarchical_a2a_time)
-        
+
         if a2a_time < min_a2a_time:
             min_a2a_time = a2a_time
 
@@ -740,15 +782,21 @@ def alltoall(args, msg_size, gpus, groups=["ep"]):
     gpus_per_node = args.node_size
     intra_node_peers = min(gpus - 1, gpus_per_node - 1)  # Peers within same node
     inter_node_peers = max(0, gpus - gpus_per_node)  # Peers on other nodes
-    
+
     # Intra-node overhead is much higher due to synchronization and scheduling
     # Based on preflight measurements: EP=8 intra-node A2A needs ~19-28 us per peer
     # Inter-node overhead is lower (~0.45 us per peer) due to RDMA efficiency
-    intra_node_overhead_per_peer = getattr(args, "a2a_intra_node_peer_lat", 28.0)  # Default 28 us
-    inter_node_overhead_per_peer = getattr(args, "a2a_peer_lat", 0.45)  # Default 0.45 us
-    
-    peer_overhead = (intra_node_overhead_per_peer * intra_node_peers + 
-                    inter_node_overhead_per_peer * inter_node_peers)
+    intra_node_overhead_per_peer = getattr(
+        args, "a2a_intra_node_peer_lat", 28.0
+    )  # Default 28 us
+    inter_node_overhead_per_peer = getattr(
+        args, "a2a_peer_lat", 0.45
+    )  # Default 0.45 us
+
+    peer_overhead = (
+        intra_node_overhead_per_peer * intra_node_peers
+        + inter_node_overhead_per_peer * inter_node_peers
+    )
     min_a2a_time += peer_overhead
 
     return min_a2a_time

@@ -407,7 +407,9 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
             clock_khz = profile.compute_clock_khz
             if self._clock_override_mhz is not None:
                 clock_khz = self._clock_override_mhz * 1000
-            n_cu = self._n_cu_override if self._n_cu_override is not None else profile.n_cu
+            n_cu = (
+                self._n_cu_override if self._n_cu_override is not None else profile.n_cu
+            )
             arch_enum = getattr(_origami.architecture_t, profile.arch_enum_name)
             hw = _origami.get_hardware_for_arch(
                 arch_enum,
@@ -420,7 +422,11 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 override_tag = ""
                 if self._clock_override_mhz is not None:
                     override_tag = " (overridden via --gpu-clock-mhz)"
-                cu_tag = f" (n_cu_override={n_cu})" if self._n_cu_override is not None else ""
+                cu_tag = (
+                    f" (n_cu_override={n_cu})"
+                    if self._n_cu_override is not None
+                    else ""
+                )
                 print(
                     f"[Primus:Origami] Using hardware profile for "
                     f"'{self._gpu_arch}': N_CU={n_cu}, "
@@ -475,7 +481,9 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
             override_tag = ""
             if self._clock_override_mhz is not None:
                 override_tag = " (overridden via --gpu-clock-mhz)"
-            cu_tag = f" (n_cu_override={n_cu})" if self._n_cu_override is not None else ""
+            cu_tag = (
+                f" (n_cu_override={n_cu})" if self._n_cu_override is not None else ""
+            )
             print(
                 f"[Primus:Origami] Using known hardware profile for "
                 f"'{self._gpu_arch}': N_CU={n_cu}, "

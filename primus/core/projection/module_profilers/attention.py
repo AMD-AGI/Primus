@@ -159,9 +159,7 @@ class AttentionProfiler(BaseModuleProfiler):
 
         return tokens_per_rank * (activation_width + ln_width) * bytes_per_value
 
-    def _simulate_mla_gemms(
-        self, batch_tokens: int, dtype: str
-    ) -> tuple[float, float]:
+    def _simulate_mla_gemms(self, batch_tokens: int, dtype: str) -> tuple[float, float]:
         """Simulate MLA (Multi-Latent Attention) projection GEMMs.
 
         MLA uses LoRA-factored Q and compressed KV projections instead of
@@ -286,9 +284,7 @@ class AttentionProfiler(BaseModuleProfiler):
             if getattr(args, "multi_latent_attention", False):
                 # MLA: LoRA-factored Q and compressed KV projections
                 # 6 forward GEMMs + 12 backward GEMMs
-                mla_fwd, mla_bwd = self._simulate_mla_gemms(
-                    batch_tokens, gemm_dtype
-                )
+                mla_fwd, mla_bwd = self._simulate_mla_gemms(batch_tokens, gemm_dtype)
                 fwd_time += mla_fwd
                 bwd_time += mla_bwd
             else:

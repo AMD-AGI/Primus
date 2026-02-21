@@ -2170,9 +2170,9 @@ def launch_projection_from_cli(args, overrides):
         # Also propagate num_experts adjustment so that the profiler sees
         # the correct experts_per_rank (e.g. 128/4=32, not 256/4=64).
         if reduction_info.get("benchmark_num_experts") is not None:
-            primus_config.get_module_config("pre_trainer").num_experts = (
-                reduction_info["benchmark_num_experts"]
-            )
+            primus_config.get_module_config("pre_trainer").num_experts = reduction_info[
+                "benchmark_num_experts"
+            ]
 
     # Determine profiling mode
     profiling_mode = getattr(args, "profiling_mode", "benchmark")
