@@ -437,22 +437,6 @@ def calculate_collective_communication_time(
     else:
         message_info["gradient_allreduce_overlapped"] = False
 
-    # FSDP overlap model
-    # ---------------------------------------------------------------
-    # FSDP2 prefetches next layer's AllGather while the current layer
-    # computes, and ReduceScatter runs after backward completes.
-    # Overlap differs significantly between forward and backward:
-    #
-    #   Forward AG:  ~90-95% overlap — prefetch hides AG behind compute
-    #   Backward AG: ~24%    overlap — eager prefetch finishes long before
-    #                                  the compute stream is ready (dependency
-    #                                  chain through previous layer's backward)
-    #   RS:          ~34%    overlap — inherently post-compute, only partially
-    #                                  overlaps with next layer's recompute AG
-    #
-    # These per-phase percentages are largely model-independent for FSDP2
-    # with full recompute; the overall overlap is ~50% for 70B-class models
-    # and ~64% without recompute.
     if use_fsdp and dp > 1:
         overlap_fsdp = getattr(mp_config, "use_torch_fsdp2", False)
         if overlap_fsdp:
@@ -476,25 +460,16 @@ def calculate_collective_communication_time(
                 fwd_ag_total = total_fsdp_ag
                 bwd_ag_total = 0.0
 
-            # Per-phase overlap percentages
-            FWD_AG_OVERLAP = 0.90  # forward AG hidden behind compute
-            BWD_AG_OVERLAP = 0.24  # backward recompute AG (structural limit)
-            RS_OVERLAP = 0.34  # ReduceScatter (structural limit)
+            # Overlap factor applied uniformly to all FSDP
+            # communication - (AllGather fwd, AllGather recompute, ReduceScatter).
+            FSDP_OVERLAP = 0.93
 
-            hidden_fwd_ag = fwd_ag_total * FWD_AG_OVERLAP
-            hidden_bwd_ag = bwd_ag_total * BWD_AG_OVERLAP
-            hidden_rs = total_fsdp_rs * RS_OVERLAP
-
-            total_hidden = hidden_fwd_ag + hidden_bwd_ag + hidden_rs
+            total_fsdp = total_fsdp_ag + total_fsdp_rs
+            total_hidden = total_fsdp * FSDP_OVERLAP
             total_comm_time -= total_hidden
             message_info["fsdp_overlapped"] = True
-            message_info["fsdp_fwd_ag_overlap"] = FWD_AG_OVERLAP
-            message_info["fsdp_bwd_ag_overlap"] = BWD_AG_OVERLAP
-            message_info["fsdp_rs_overlap"] = RS_OVERLAP
-            total_fsdp = total_fsdp_ag + total_fsdp_rs
-            message_info["fsdp_overall_overlap"] = (
-                total_hidden / total_fsdp if total_fsdp > 0 else 0
-            )
+            message_info["fsdp_overlap"] = FSDP_OVERLAP
+            message_info["fsdp_overall_overlap"] = FSDP_OVERLAP
             message_info["fsdp_exposed_ms"] = total_fsdp - total_hidden
         else:
             message_info["fsdp_overlapped"] = False
