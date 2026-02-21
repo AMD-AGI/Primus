@@ -17,7 +17,9 @@ class EmbeddingProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
         super().__init__(config, sub_profilers)
         self.module = None  # Will be set during benchmarking
-        self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
+        self._cached_results = (
+            None  # Cache for (forward_time, backward_time, activation_memory)
+        )
         self._cache_key = None  # Cache key (batch_size, seq_len)
         self._simulation_mode = False  # Set to True when simulation backends are active
 
@@ -35,7 +37,10 @@ class EmbeddingProfiler(BaseModuleProfiler):
         self._cache_key = None
 
     def estimated_num_params(self, rank: Optional[int] = None) -> int:
-        return self.config.model_config.padded_vocab_size * self.config.model_config.hidden_size
+        return (
+            self.config.model_config.padded_vocab_size
+            * self.config.model_config.hidden_size
+        )
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:
         return (
@@ -47,7 +52,9 @@ class EmbeddingProfiler(BaseModuleProfiler):
             * 2
         )  # bf16
 
-    def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+    def _get_simulated_results(
+        self, batch_size: int, seq_len: int
+    ) -> tuple[float, float, int]:
         """Estimate embedding time analytically (lookup is memory-bound, very fast)."""
         tp_size = self.config.model_parallel_config.tensor_model_parallel_size
         cp_size = self.config.model_parallel_config.context_model_parallel_size
@@ -63,7 +70,9 @@ class EmbeddingProfiler(BaseModuleProfiler):
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 
-    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+    def _get_benchmark_results(
+        self, batch_size: int, seq_len: int
+    ) -> tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
 

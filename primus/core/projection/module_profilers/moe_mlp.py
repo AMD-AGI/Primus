@@ -185,16 +185,17 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # execution → model as Origami batched GEMM (batch=num_local_experts).
         # Legacy grouped_gemm executes experts more sequentially → model as
         # individual GEMM (batch=1) × num_local_experts.
-        use_turbo = (
-            getattr(self.config.model_config, "enable_primus_turbo", False)
-            and getattr(self.config.model_config, "use_turbo_grouped_mlp", False)
-        )
+        use_turbo = getattr(
+            self.config.model_config, "enable_primus_turbo", False
+        ) and getattr(self.config.model_config, "use_turbo_grouped_mlp", False)
 
         is_rank_0 = int(os.getenv("RANK", "0")) == 0
         if is_rank_0 and num_local_experts > 1:
             mode = "Turbo (batched)" if use_turbo else "Legacy (sequential)"
-            print(f"  [MoE MLP] Grouped-GEMM model: {mode}"
-                  f"  ({num_local_experts} local experts, M={M}, H={H}, F={F})")
+            print(
+                f"  [MoE MLP] Grouped-GEMM model: {mode}"
+                f"  ({num_local_experts} local experts, M={M}, H={H}, F={F})"
+            )
 
         expert_fwd_ms = 0.0
         expert_bwd_ms = 0.0
@@ -203,62 +204,96 @@ class MoEMLPProfiler(BaseModuleProfiler):
             # ── Turbo model: batched GEMM (all experts in parallel) ──
             B = num_local_experts
             if self.config.model_config.swiglu:
-                gate_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                up_fwd   = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
-                expert_fwd_ms = (gate_fwd.forward_time_ms
-                                 + up_fwd.forward_time_ms
-                                 + down_fwd.forward_time_ms)
+                gate_fwd = self._gemm_backend.simulate_gemm(
+                    M, F, H, gemm_dtype, batch=B
+                )
+                up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
+                down_fwd = self._gemm_backend.simulate_gemm(
+                    M, H, F, gemm_dtype, batch=B
+                )
+                expert_fwd_ms = (
+                    gate_fwd.forward_time_ms
+                    + up_fwd.forward_time_ms
+                    + down_fwd.forward_time_ms
+                )
                 gate_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
                 gate_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
-                up_dg   = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
-                up_wg   = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
+                up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                up_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
                 down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
                 down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=B)
-                expert_bwd_ms = (gate_dg.forward_time_ms + gate_wg.forward_time_ms
-                                 + up_dg.forward_time_ms + up_wg.forward_time_ms
-                                 + down_dg.forward_time_ms + down_wg.forward_time_ms)
+                expert_bwd_ms = (
+                    gate_dg.forward_time_ms
+                    + gate_wg.forward_time_ms
+                    + up_dg.forward_time_ms
+                    + up_wg.forward_time_ms
+                    + down_dg.forward_time_ms
+                    + down_wg.forward_time_ms
+                )
             else:
-                up_fwd   = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
+                down_fwd = self._gemm_backend.simulate_gemm(
+                    M, H, F, gemm_dtype, batch=B
+                )
                 expert_fwd_ms = up_fwd.forward_time_ms + down_fwd.forward_time_ms
-                up_dg   = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
-                up_wg   = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
+                up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                up_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
                 down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
                 down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=B)
-                expert_bwd_ms = (up_dg.forward_time_ms + up_wg.forward_time_ms
-                                 + down_dg.forward_time_ms + down_wg.forward_time_ms)
+                expert_bwd_ms = (
+                    up_dg.forward_time_ms
+                    + up_wg.forward_time_ms
+                    + down_dg.forward_time_ms
+                    + down_wg.forward_time_ms
+                )
 
             expert_fwd = expert_fwd_ms
             expert_bwd = expert_bwd_ms
         else:
             # ── Legacy model: individual GEMM × num_local_experts ──
             if self.config.model_config.swiglu:
-                gate_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                up_fwd   = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
-                expert_fwd_ms = (gate_fwd.forward_time_ms
-                                 + up_fwd.forward_time_ms
-                                 + down_fwd.forward_time_ms)
+                gate_fwd = self._gemm_backend.simulate_gemm(
+                    M, F, H, gemm_dtype, batch=1
+                )
+                up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
+                down_fwd = self._gemm_backend.simulate_gemm(
+                    M, H, F, gemm_dtype, batch=1
+                )
+                expert_fwd_ms = (
+                    gate_fwd.forward_time_ms
+                    + up_fwd.forward_time_ms
+                    + down_fwd.forward_time_ms
+                )
                 gate_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
                 gate_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
-                up_dg   = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
-                up_wg   = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
+                up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
+                up_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
                 down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
                 down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=1)
-                expert_bwd_ms = (gate_dg.forward_time_ms + gate_wg.forward_time_ms
-                                 + up_dg.forward_time_ms + up_wg.forward_time_ms
-                                 + down_dg.forward_time_ms + down_wg.forward_time_ms)
+                expert_bwd_ms = (
+                    gate_dg.forward_time_ms
+                    + gate_wg.forward_time_ms
+                    + up_dg.forward_time_ms
+                    + up_wg.forward_time_ms
+                    + down_dg.forward_time_ms
+                    + down_wg.forward_time_ms
+                )
             else:
-                up_fwd   = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
+                up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
+                down_fwd = self._gemm_backend.simulate_gemm(
+                    M, H, F, gemm_dtype, batch=1
+                )
                 expert_fwd_ms = up_fwd.forward_time_ms + down_fwd.forward_time_ms
-                up_dg   = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
-                up_wg   = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
+                up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
+                up_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
                 down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
                 down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=1)
-                expert_bwd_ms = (up_dg.forward_time_ms + up_wg.forward_time_ms
-                                 + down_dg.forward_time_ms + down_wg.forward_time_ms)
+                expert_bwd_ms = (
+                    up_dg.forward_time_ms
+                    + up_wg.forward_time_ms
+                    + down_dg.forward_time_ms
+                    + down_wg.forward_time_ms
+                )
 
             expert_fwd = expert_fwd_ms * num_local_experts
             expert_bwd = expert_bwd_ms * num_local_experts
@@ -306,7 +341,9 @@ class MoEMLPProfiler(BaseModuleProfiler):
 
         # ── 4. Activation function overhead (SwiGLU / GELU) ──
         if self.config.model_config.swiglu:
-            act_bytes = 3 * topk_tokens * moe_ffn * bytes_per_el  # gate+up read, result write
+            act_bytes = (
+                3 * topk_tokens * moe_ffn * bytes_per_el
+            )  # gate+up read, result write
         else:
             act_bytes = 2 * topk_tokens * moe_ffn * bytes_per_el  # read + write
         activation_ms = act_bytes / (activation_bw_gbps * 1e6)

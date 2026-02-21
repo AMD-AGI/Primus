@@ -17,7 +17,9 @@ from primus.core.projection.training_config import (
 )
 
 
-def print_profiler_hierarchy(profiler, batch_size, seq_len, rank=None, name="root", depth=0, visited=None):
+def print_profiler_hierarchy(
+    profiler, batch_size, seq_len, rank=None, name="root", depth=0, visited=None
+):
     """
     Recursively print the profiler hierarchy with num_params and activation_memory for each component.
 
@@ -46,13 +48,17 @@ def print_profiler_hierarchy(profiler, batch_size, seq_len, rank=None, name="roo
         if depth == 0:
             # Only output the total number of parameters for the entire model for depth 0.
             num_params = profiler.estimated_num_params(rank=None)
-            print(f"{indent}  Total Number of Parameters: {num_params / 1e9:.6f} Billion ({num_params:,})")
+            print(
+                f"{indent}  Total Number of Parameters: {num_params / 1e9:.6f} Billion ({num_params:,})"
+            )
         else:
             num_params = profiler.estimated_num_params(rank=rank)
             activation_mem = profiler.estimated_activation_memory(batch_size, seq_len)
             print(f"{indent}[{name}]")
             print(f"{indent}  Params: {num_params / 1e9:.6f} Billion ({num_params:,})")
-            print(f"{indent}  Activation Memory: {activation_mem / 1024 / 1024 / 1024:.4f} GB")
+            print(
+                f"{indent}  Activation Memory: {activation_mem / 1024 / 1024 / 1024:.4f} GB"
+            )
 
         # Recursively process sub_profilers if they exist
         if hasattr(profiler, "sub_profilers") and profiler.sub_profilers:
@@ -79,7 +85,9 @@ def launch_projection_from_cli(args, overrides):
     """
     cfg_path = Path(args.config)
     if not cfg_path.exists():
-        raise FileNotFoundError(f"[Primus:Projection] Config file '{cfg_path}' not found.")
+        raise FileNotFoundError(
+            f"[Primus:Projection] Config file '{cfg_path}' not found."
+        )
 
     config_parser = PrimusParser()
     primus_config = config_parser.parse(args)
@@ -117,7 +125,9 @@ def launch_projection_from_cli(args, overrides):
     print("=" * 100)
     print(f"[Primus:Projection] Memory Projection Summary on Rank {rank}:")
     print(f"  Params: {num_params / 1e9:.6f} Billion ({num_params:,})")
-    print(f"  Param+Optimizer Memory: {num_params * num_bytes_per_param / 1024 / 1024 / 1024:.4f} GB")
+    print(
+        f"  Param+Optimizer Memory: {num_params * num_bytes_per_param / 1024 / 1024 / 1024:.4f} GB"
+    )
     print(
         f"  Activation Memory (per batch size {batch_size}, seq len {seq_len}): "
         f"{activation_memory / 1024 / 1024 / 1024:.4f} GB"
