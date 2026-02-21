@@ -14,9 +14,13 @@ def run(args, overrides):
 
         launch_projection_from_cli(args, overrides)
     elif args.suite == "performance":
-        from primus.pretrain import setup_backend_path
+        profiling_mode = getattr(args, "profiling_mode", "benchmark")
 
-        setup_backend_path(framework="megatron", verbose=True)
+        if profiling_mode != "simulate":
+            # Benchmark or "both" modes need the Megatron backend
+            from primus.pretrain import setup_backend_path
+
+            setup_backend_path(framework="megatron", verbose=True)
 
         from primus.core.projection.performance_projection import (
             launch_projection_from_cli,
@@ -60,7 +64,9 @@ def register_subcommand(subparsers):
     suite_parsers = parser.add_subparsers(dest="suite", required=True)
 
     # ---------- memory ----------
-    memory = suite_parsers.add_parser("memory", help="Memory projection only (per-GPU memory analysis).")
+    memory = suite_parsers.add_parser(
+        "memory", help="Memory projection only (per-GPU memory analysis)."
+    )
     from primus.core.launcher.parser import add_pretrain_parser
 
     add_pretrain_parser(memory)
@@ -90,6 +96,54 @@ def register_subcommand(subparsers):
         help=(
             "Path to YAML file with hardware configuration for collective communication modeling. "
             "If not provided, uses default cluster parameters.\n\n"
+        ),
+    )
+    performance.add_argument(
+        "--profiling-mode",
+        type=str,
+        required=False,
+        default="benchmark",
+        choices=["benchmark", "simulate", "both"],
+        help=(
+            "Profiling mode for layer timing:\n"
+            "  benchmark  - Run actual GPU benchmarks (default, requires GPU)\n"
+            "  simulate   - Use simulation backends (origami for GEMM,\n"
+            "               analytical model for SDPA). No GPU required.\n"
+            "  both       - Run both benchmark and simulation, report side-by-side\n"
+        ),
+    )
+    performance.add_argument(
+        "--gemm-backend",
+        type=str,
+        required=False,
+        default=None,
+        choices=["origami"],
+        help=(
+            "GEMM simulation backend (only used when --profiling-mode is 'simulate' or 'both').\n"
+            "  origami  - Open-source GEMM performance model (default)\n"
+        ),
+    )
+    performance.add_argument(
+        "--gpu-arch",
+        type=str,
+        required=False,
+        default=None,
+        help=(
+            "Target GPU architecture for simulation (e.g. 'mi300x', 'gfx942', 'mi355x', 'gfx950').\n"
+            "If not specified, auto-detected or uses PRIMUS_GPU_ARCH env var.\n"
+        ),
+    )
+    performance.add_argument(
+        "--gpu-clock-mhz",
+        type=int,
+        required=False,
+        default=None,
+        help=(
+            "Override the GPU compute clock frequency in MHz for simulation.\n"
+            "If not specified, uses the default from the hardware profile for the\n"
+            "given --gpu-arch (e.g. 2100 MHz for MI300X/MI325X).\n"
+            "Can also be set via the PRIMUS_GPU_CLOCK_MHZ env var.\n"
+            "Example: --gpu-clock-mhz 1500\n"
         ),
     )
 

@@ -63,6 +63,12 @@ class ModelConfig:
     moe_shared_expert_intermediate_size: int = 0
     # Misc
     share_embeddings_and_output_weights: bool = False
+    # Precision – None means bf16, "hybrid" means FP8-hybrid (linear GEMMs in FP8)
+    fp8: str = None
+
+    # Primus Turbo flags — used to select the grouped-GEMM performance model
+    enable_primus_turbo: bool = False
+    use_turbo_grouped_mlp: bool = False
 
 
 @dataclass
@@ -94,7 +100,9 @@ def megatron_derive_default_args(args):
 
     if not hasattr(args, "data_parallel_size") or args.data_parallel_size is None:
         args.data_parallel_size = world_size // (
-            args.tensor_model_parallel_size * args.pipeline_model_parallel_size * args.context_parallel_size
+            args.tensor_model_parallel_size
+            * args.pipeline_model_parallel_size
+            * args.context_parallel_size
         )
     if not hasattr(args, "virtual_pipeline_model_parallel_size"):
         args.virtual_pipeline_model_parallel_size = None
@@ -105,23 +113,31 @@ def megatron_derive_default_args(args):
         args.virtual_pipeline_model_parallel_size = 1
     elif args.num_layers_per_virtual_pipeline_stage is not None:
         args.virtual_pipeline_model_parallel_size = args.num_layers // (
-            args.num_layers_per_virtual_pipeline_stage * args.pipeline_model_parallel_size
+            args.num_layers_per_virtual_pipeline_stage
+            * args.pipeline_model_parallel_size
         )
 
-    args.share_embeddings_and_output_weights = not args.untie_embeddings_and_output_weights
+    args.share_embeddings_and_output_weights = (
+        not args.untie_embeddings_and_output_weights
+    )
 
     if args.num_experts is None:
         args.moe_pattern = [0] * args.num_layers
     else:
         if isinstance(args.moe_layer_freq, int):
-            args.moe_pattern = [1 if (i % args.moe_layer_freq == 0) else 0 for i in range(args.num_layers)]
+            args.moe_pattern = [
+                1 if (i % args.moe_layer_freq == 0) else 0
+                for i in range(args.num_layers)
+            ]
         elif isinstance(args.moe_layer_freq, list):
             args.moe_pattern = args.moe_layer_freq
         elif isinstance(args.moe_layer_freq, str):
             try:
                 parsed = eval(args.moe_layer_freq)
             except Exception:
-                raise ValueError(f"Invalid moe_layer_freq format: {args.moe_layer_freq}")
+                raise ValueError(
+                    f"Invalid moe_layer_freq format: {args.moe_layer_freq}"
+                )
 
             # Handle case where eval returns an int (e.g., "1" -> 1 means all layers are MoE)
             if isinstance(parsed, int):
@@ -130,14 +146,18 @@ def megatron_derive_default_args(args):
                     args.moe_pattern = [1] * args.num_layers
                 else:
                     # Every Nth layer is MoE
-                    args.moe_pattern = [1 if (i % parsed == 0) else 0 for i in range(args.num_layers)]
+                    args.moe_pattern = [
+                        1 if (i % parsed == 0) else 0 for i in range(args.num_layers)
+                    ]
             elif isinstance(parsed, list):
                 args.moe_pattern = parsed
                 assert (
                     len(args.moe_pattern) == args.num_layers
                 ), f"Invalid moe_layer_freq length: {len(args.moe_pattern)} (expected {args.num_layers})"
             else:
-                raise ValueError(f"Invalid moe_layer_freq format after eval: {type(parsed)}")
+                raise ValueError(
+                    f"Invalid moe_layer_freq format after eval: {type(parsed)}"
+                )
 
     # naming conversion
     args.sequence_length = args.seq_length

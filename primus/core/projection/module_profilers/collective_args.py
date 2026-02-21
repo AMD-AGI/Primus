@@ -51,7 +51,20 @@ class CollectiveArgs:
     nics_per_node: Optional[int] = 8  # NICs per node (None = gpus_per_node)
 
     # All-to-all specific
-    a2a_peer_lat: float = 0.45  # Per-peer latency overhead for a2a
+    a2a_peer_lat: float = 0.45  # Per-peer latency overhead for inter-node a2a
+    a2a_intra_node_peer_lat: float = (
+        28.0  # Per-peer latency overhead for intra-node a2a
+    )
+    # Intra-node overhead is higher (~19-28 us) due to:
+    # - P2P scatter/gather scheduling overhead
+    # - RCCL internal synchronization barriers
+    # - Memory copy and buffer management
+    # Note: Preflight measurements for EP=8 intra-node A2A show:
+    #   - Linear extrapolation: ~27.4 us per peer
+    #   - 2MB measurement: ~28.1 us per peer
+    #   - After subtracting bandwidth component: ~19.4 us per peer
+    # Default 28 us matches preflight measurements (middle of range)
+    # Can be overridden via hardware_config for GPU-specific calibration
 
 
 def get_default_args(
