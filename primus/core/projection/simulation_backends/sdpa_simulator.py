@@ -306,7 +306,16 @@ class SDPASimulator(SDPASimulationBackend):
         bpe = self._bytes_per_element(dtype)
 
         return self._simulate_tile_level(
-            B, H_Q, S_Q, S_K, H_K, D_qk, D_v, causal, dtype, bpe,
+            B,
+            H_Q,
+            S_Q,
+            S_K,
+            H_K,
+            D_qk,
+            D_v,
+            causal,
+            dtype,
+            bpe,
         )
 
     # ------------------------------------------------------------------
@@ -403,16 +412,20 @@ class SDPASimulator(SDPASimulationBackend):
         # Per-workgroup GEMMs on 1 CU (tile sweeps all S_K positions):
         #   QKᵀ: [q_tile_m, D_qk, S_K]
         r_fwd_qk = self._tile_gemm.simulate_gemm(
-            m=_FAV3_FWD.q_tile_m, n=S_K, k=D_qk, dtype=dtype,
+            m=_FAV3_FWD.q_tile_m,
+            n=S_K,
+            k=D_qk,
+            dtype=dtype,
         )
         #   PV:  [q_tile_m, S_K, D_v]
         r_fwd_pv = self._tile_gemm.simulate_gemm(
-            m=_FAV3_FWD.q_tile_m, n=D_v, k=S_K, dtype=dtype,
+            m=_FAV3_FWD.q_tile_m,
+            n=D_v,
+            k=S_K,
+            dtype=dtype,
         )
 
-        fwd_time_ms = (
-            r_fwd_qk.forward_time_ms + r_fwd_pv.forward_time_ms
-        ) * fwd_waves
+        fwd_time_ms = (r_fwd_qk.forward_time_ms + r_fwd_pv.forward_time_ms) * fwd_waves
 
         # ==============================================================
         # BACKWARD
@@ -424,23 +437,38 @@ class SDPASimulator(SDPASimulationBackend):
         # Per-workgroup GEMMs (5 operations, full Q-sweep on 1 CU):
         # 1. QKᵀ recompute: [S_Q, D_qk, kv_tile]
         r_bwd_qk = self._tile_gemm.simulate_gemm(
-            m=S_Q, n=kv_tile, k=D_qk, dtype=dtype,
+            m=S_Q,
+            n=kv_tile,
+            k=D_qk,
+            dtype=dtype,
         )
         # 2. dP = dO × Vᵀ: [S_Q, D_v, kv_tile]
         r_bwd_dp = self._tile_gemm.simulate_gemm(
-            m=S_Q, n=kv_tile, k=D_v, dtype=dtype,
+            m=S_Q,
+            n=kv_tile,
+            k=D_v,
+            dtype=dtype,
         )
         # 3. dV = Pᵀ × dO: [kv_tile, S_Q, D_v]
         r_bwd_dv = self._tile_gemm.simulate_gemm(
-            m=kv_tile, n=D_v, k=S_Q, dtype=dtype,
+            m=kv_tile,
+            n=D_v,
+            k=S_Q,
+            dtype=dtype,
         )
         # 4. dQ = dS × K: [S_Q, kv_tile, D_qk]
         r_bwd_dq = self._tile_gemm.simulate_gemm(
-            m=S_Q, n=D_qk, k=kv_tile, dtype=dtype,
+            m=S_Q,
+            n=D_qk,
+            k=kv_tile,
+            dtype=dtype,
         )
         # 5. dK = dSᵀ × Q: [kv_tile, S_Q, D_qk]
         r_bwd_dk = self._tile_gemm.simulate_gemm(
-            m=kv_tile, n=D_qk, k=S_Q, dtype=dtype,
+            m=kv_tile,
+            n=D_qk,
+            k=S_Q,
+            dtype=dtype,
         )
 
         bwd_compute_ms = (
@@ -456,14 +484,10 @@ class SDPASimulator(SDPASimulationBackend):
         # The latency model counts warp-level reduction updates (global and
         # local) and multiplies by the per-op latency.
         num_k_tiles = math.ceil(kv_tile / kv_tile)  # = 1
-        warp_updates_global = math.ceil(
-            num_k_tiles * math.ceil(D_qk / _WARP_SIZE)
-        )
+        warp_updates_global = math.ceil(num_k_tiles * math.ceil(D_qk / _WARP_SIZE))
         total_updates_global = warp_updates_global * bwd_waves
 
-        warp_updates_local = math.ceil(
-            kv_tile * math.ceil(D_qk / _WARP_SIZE)
-        )
+        warp_updates_local = math.ceil(kv_tile * math.ceil(D_qk / _WARP_SIZE))
         total_updates_local = warp_updates_local * bwd_waves
 
         bwd_atomic_ms = (
@@ -566,4 +590,3 @@ class SDPASimulator(SDPASimulationBackend):
 
     def _bytes_per_element(self, dtype: str) -> int:
         return {"bf16": 2, "fp16": 2, "fp32": 4, "fp8": 1}.get(dtype, 2)
-

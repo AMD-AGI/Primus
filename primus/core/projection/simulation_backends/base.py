@@ -141,53 +141,92 @@ class GEMMSimulationBackend(ABC):
 
         if swiglu:
             # Gate projection fwd:  [tokens, hidden] x [hidden, ffn] -> [tokens, ffn]
-            gate_fwd = self.simulate_gemm(batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b)
+            gate_fwd = self.simulate_gemm(
+                batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b
+            )
             # Up projection fwd:  same shape as gate
-            up_fwd = self.simulate_gemm(batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b)
+            up_fwd = self.simulate_gemm(
+                batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b
+            )
             # Down projection fwd:  [tokens, ffn] x [ffn, hidden] -> [tokens, hidden]
-            down_fwd = self.simulate_gemm(batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b)
+            down_fwd = self.simulate_gemm(
+                batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b
+            )
 
-            fwd_time = gate_fwd.forward_time_ms + up_fwd.forward_time_ms + down_fwd.forward_time_ms
+            fwd_time = (
+                gate_fwd.forward_time_ms
+                + up_fwd.forward_time_ms
+                + down_fwd.forward_time_ms
+            )
 
             # Backward: simulate actual dgrad + wgrad GEMMs per projection
             # Gate dgrad:  [tokens, ffn] x [ffn, hidden] -> [tokens, hidden]
-            gate_dgrad = self.simulate_gemm(batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b)
+            gate_dgrad = self.simulate_gemm(
+                batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b
+            )
             # Gate wgrad:  [hidden, tokens] x [tokens, ffn] -> [hidden, ffn]
-            gate_wgrad = self.simulate_gemm(hidden_size, ffn_hidden_size, batch_tokens, dtype, batch=b)
+            gate_wgrad = self.simulate_gemm(
+                hidden_size, ffn_hidden_size, batch_tokens, dtype, batch=b
+            )
             # Up dgrad + wgrad: same shapes as gate
-            up_dgrad = self.simulate_gemm(batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b)
-            up_wgrad = self.simulate_gemm(hidden_size, ffn_hidden_size, batch_tokens, dtype, batch=b)
+            up_dgrad = self.simulate_gemm(
+                batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b
+            )
+            up_wgrad = self.simulate_gemm(
+                hidden_size, ffn_hidden_size, batch_tokens, dtype, batch=b
+            )
             # Down dgrad:  [tokens, hidden] x [hidden, ffn] -> [tokens, ffn]
-            down_dgrad = self.simulate_gemm(batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b)
+            down_dgrad = self.simulate_gemm(
+                batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b
+            )
             # Down wgrad:  [ffn, tokens] x [tokens, hidden] -> [ffn, hidden]
-            down_wgrad = self.simulate_gemm(ffn_hidden_size, hidden_size, batch_tokens, dtype, batch=b)
+            down_wgrad = self.simulate_gemm(
+                ffn_hidden_size, hidden_size, batch_tokens, dtype, batch=b
+            )
 
             bwd_time = (
-                gate_dgrad.forward_time_ms + gate_wgrad.forward_time_ms
-                + up_dgrad.forward_time_ms + up_wgrad.forward_time_ms
-                + down_dgrad.forward_time_ms + down_wgrad.forward_time_ms
+                gate_dgrad.forward_time_ms
+                + gate_wgrad.forward_time_ms
+                + up_dgrad.forward_time_ms
+                + up_wgrad.forward_time_ms
+                + down_dgrad.forward_time_ms
+                + down_wgrad.forward_time_ms
             )
         else:
             # Up projection fwd:  [tokens, hidden] x [hidden, ffn] -> [tokens, ffn]
-            up_fwd = self.simulate_gemm(batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b)
+            up_fwd = self.simulate_gemm(
+                batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b
+            )
             # Down projection fwd:  [tokens, ffn] x [ffn, hidden] -> [tokens, hidden]
-            down_fwd = self.simulate_gemm(batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b)
+            down_fwd = self.simulate_gemm(
+                batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b
+            )
 
             fwd_time = up_fwd.forward_time_ms + down_fwd.forward_time_ms
 
             # Backward: simulate actual dgrad + wgrad GEMMs per projection
             # Up dgrad:  [tokens, ffn] x [ffn, hidden] -> [tokens, hidden]
-            up_dgrad = self.simulate_gemm(batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b)
+            up_dgrad = self.simulate_gemm(
+                batch_tokens, hidden_size, ffn_hidden_size, dtype, batch=b
+            )
             # Up wgrad:  [hidden, tokens] x [tokens, ffn] -> [hidden, ffn]
-            up_wgrad = self.simulate_gemm(hidden_size, ffn_hidden_size, batch_tokens, dtype, batch=b)
+            up_wgrad = self.simulate_gemm(
+                hidden_size, ffn_hidden_size, batch_tokens, dtype, batch=b
+            )
             # Down dgrad:  [tokens, hidden] x [hidden, ffn] -> [tokens, ffn]
-            down_dgrad = self.simulate_gemm(batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b)
+            down_dgrad = self.simulate_gemm(
+                batch_tokens, ffn_hidden_size, hidden_size, dtype, batch=b
+            )
             # Down wgrad:  [ffn, tokens] x [tokens, hidden] -> [ffn, hidden]
-            down_wgrad = self.simulate_gemm(ffn_hidden_size, hidden_size, batch_tokens, dtype, batch=b)
+            down_wgrad = self.simulate_gemm(
+                ffn_hidden_size, hidden_size, batch_tokens, dtype, batch=b
+            )
 
             bwd_time = (
-                up_dgrad.forward_time_ms + up_wgrad.forward_time_ms
-                + down_dgrad.forward_time_ms + down_wgrad.forward_time_ms
+                up_dgrad.forward_time_ms
+                + up_wgrad.forward_time_ms
+                + down_dgrad.forward_time_ms
+                + down_wgrad.forward_time_ms
             )
 
         return SimulationResult(forward_time_ms=fwd_time, backward_time_ms=bwd_time)

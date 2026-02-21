@@ -16,7 +16,9 @@ class _FP8ContextFactory:
 
     def __init__(self, transformer_config):
         self.transformer_config = transformer_config
-        self.fp8_enabled = getattr(transformer_config, "fp8", None) if transformer_config else None
+        self.fp8_enabled = (
+            getattr(transformer_config, "fp8", None) if transformer_config else None
+        )
         self._printed = False
 
     def __enter__(self):
@@ -28,7 +30,9 @@ class _FP8ContextFactory:
 
                 self._ctx = get_fp8_context(self.transformer_config, layer_no=-1)
                 if not self._printed:
-                    print(f"  [FP8] Using FP8 autocast context for benchmarking (fp8={self.fp8_enabled})")
+                    print(
+                        f"  [FP8] Using FP8 autocast context for benchmarking (fp8={self.fp8_enabled})"
+                    )
                     self._printed = True
             except Exception as e:
                 try:
@@ -88,7 +92,11 @@ def benchmark_layer(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def create_input(spec):
-        if isinstance(spec, tuple) and len(spec) == 2 and isinstance(spec[1], torch.dtype):
+        if (
+            isinstance(spec, tuple)
+            and len(spec) == 2
+            and isinstance(spec[1], torch.dtype)
+        ):
             shape, dtype = spec
         else:
             shape = spec

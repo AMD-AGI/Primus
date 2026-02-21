@@ -52,7 +52,9 @@ class CollectiveArgs:
 
     # All-to-all specific
     a2a_peer_lat: float = 0.45  # Per-peer latency overhead for inter-node a2a
-    a2a_intra_node_peer_lat: float = 28.0  # Per-peer latency overhead for intra-node a2a
+    a2a_intra_node_peer_lat: float = (
+        28.0  # Per-peer latency overhead for intra-node a2a
+    )
     # Intra-node overhead is higher (~19-28 us) due to:
     # - P2P scatter/gather scheduling overhead
     # - RCCL internal synchronization barriers
