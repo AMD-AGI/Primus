@@ -294,9 +294,11 @@ def calculate_collective_communication_time(
         message_info["moe_ar_no_overlap"] = False
 
     # 2. MoE All-to-All (EP group)
+    # With TP > 1 and sequence parallelism, each GPU holds S/TP tokens.
+    # The A2A dispatches these S/TP tokens; AG(TP) recovers full S after A2A.
     if ep > 1 and num_moe_layers > 0:
-        tokens_per_batch = seq_len * batch_size
-        dispatch_size = tokens_per_batch * hidden_size * moe_router_topk * 2  # BF16
+        tokens_per_gpu = seq_len * batch_size // max(tp, 1)  # S/TP with seq parallel
+        dispatch_size = tokens_per_gpu * hidden_size * moe_router_topk * 2  # BF16
 
         a2a_dispatch = cm.alltoall(coll_args, dispatch_size, ep, groups=["ep"])
         a2a_combine = cm.alltoall(coll_args, dispatch_size, ep, groups=["ep"])
@@ -1093,13 +1095,17 @@ def _estimate_ep_communication_overhead(
     )
 
     # Calculate All-to-All message size for MoE layers
+    # With TP > 1 and sequence parallelism, each GPU holds S/TP tokens.
+    # The AlltoAll dispatcher sends these S/TP tokens across the EP group,
+    # then AllGather(TP) recovers full S tokens after A2A (see workflow in
+    # MoEAlltoAllTokenDispatcher: step 3 = A2A(EP), step 4 = AG(TP)).
     hidden_size = model_config.hidden_size
     batch_size = runtime_config.micro_batch_size
     seq_len = runtime_config.sequence_length
     moe_router_topk = getattr(model_config, "moe_router_topk", 2)
 
-    tokens_per_batch = seq_len * batch_size
-    dispatch_size = tokens_per_batch * hidden_size * moe_router_topk * 2  # BF16
+    tokens_per_gpu = seq_len * batch_size // max(tp, 1)  # S/TP with seq parallel
+    dispatch_size = tokens_per_gpu * hidden_size * moe_router_topk * 2  # BF16
 
     # Calculate All-to-All time for original EP (dispatch + combine)
     a2a_dispatch_original = cm.alltoall(

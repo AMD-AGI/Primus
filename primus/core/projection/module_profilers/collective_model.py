@@ -443,7 +443,10 @@ def single_shot_alltoall(args, msg_size, gpus, groups=None, protocol=None):
         return 0
     intra_node_fanout, inter_node_fanout = get_max_fanout(args)
     msg_size_per_peer = ceil(msg_size / gpus)
-    gpus_per_node = min(gpus, args.node_size)
+    # Account for TP striding: with TP (hp) > 1, each EP rank occupies
+    # hp GPUs, so only node_size/hp EP ranks fit on a single node.
+    hp = getattr(args, "hp", 1)
+    gpus_per_node = min(gpus, args.node_size // max(hp, 1))
     nics_per_node = args.nics_per_node if args.nics_per_node else gpus_per_node
     intra_node_gpus = gpus_per_node - 1
     inter_node_gpus = max(0, gpus - gpus_per_node)
@@ -487,8 +490,11 @@ def hierarchical_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     if gpus == 1 or msg_size == 0:
         return 0
 
-    gpus_per_node = min(gpus, args.node_size)
-    num_nodes = ceil(gpus / args.node_size)
+    # Account for TP striding: with TP (hp) > 1, each EP rank occupies
+    # hp GPUs, so only node_size/hp EP ranks fit on a single node.
+    hp = getattr(args, "hp", 1)
+    gpus_per_node = min(gpus, args.node_size // max(hp, 1))
+    num_nodes = ceil(gpus / max(gpus_per_node, 1))
     nics_per_node = args.nics_per_node if args.nics_per_node else gpus_per_node
 
     if num_nodes == 1:
@@ -535,8 +541,11 @@ def pxn_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     
     original_msg_size = msg_size
     
-    # Nodes participating in the exchange
-    num_nodes = ceil(gpus / args.node_size)
+    # Account for TP striding: with TP (hp) > 1, each EP rank occupies
+    # hp GPUs, so only node_size/hp EP ranks fit on a single node.
+    hp = getattr(args, "hp", 1)
+    effective_gpus_per_node = min(gpus, args.node_size // max(hp, 1))
+    num_nodes = ceil(gpus / max(effective_gpus_per_node, 1))
     
     # If A2A is not crossing node boundaries, fall back to regular alltoall
     if num_nodes <= 1:
@@ -564,7 +573,7 @@ def pxn_alltoall(args, msg_size, gpus, groups=None, protocol=None):
         scaleup_delay = node_lat + chunk_size / args.node_bw * 1.0e-3
     
     # Assume PXN style alltoall with overlapped scale-up and scale-out
-    node_msg_size = int(original_msg_size * (args.node_size - 1) / args.node_size)
+    node_msg_size = int(original_msg_size * (effective_gpus_per_node - 1) / effective_gpus_per_node)
     scale_out_msg_size = int(original_msg_size * (num_nodes - 1) / num_nodes)
     
     # Calculate latencies with protocol inflation
