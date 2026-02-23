@@ -384,8 +384,6 @@ def _extract_rank_from_filename(filename: str) -> Optional[int]:
     Returns:
         Rank number or None if not found
     """
-    import re
-
     # Try pattern: rank_N_, rank_N. (dot), rank[N], -rankN., _rankN.
     patterns = [
         r"rank_(\d+)_",
