@@ -1,0 +1,28 @@
+extends:
+  - deepseek_v2_base.yaml
+
+# https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite
+# 16B total params, 2.4B active params
+
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: deepseek-ai/DeepSeek-V2-Lite
+
+# model
+num_layers: 16
+hidden_size: 2048
+ffn_hidden_size: 10944
+
+multi_latent_attention: false
+group_query_attention: true
+num_attention_heads: 32
+num_query_groups: 4
+qk_head_dim: 64
+v_head_dim: 64
+kv_channels: 64
+
+# moe
+num_experts: 256
+moe_router_topk: 8
+moe_ffn_hidden_size: 512
+# num_shared_experts: 0
+# moe_shared_expert_intermediate_size: 2816 # num_shared_experts * moe_ffn_hidden_size

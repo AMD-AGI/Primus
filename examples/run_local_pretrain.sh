@@ -126,22 +126,24 @@ if [ "$USING_AINIC" == "1" ]; then
     ENV_ARGS+=("--env" "MPI_HOME_DIR")
 
     # VOLUME_ARGS+=(-v /mnt/shared:/mnt/shared)
-    # VOLUME_ARGS+=(-v /etc/libibverbs.d/:/etc/libibverbs.d:ro)
-    # VOLUME_ARGS+=(-v /usr/lib/x86_64-linux-gnu/libibverbs/:/usr/lib/x86_64-linux-gnu/libibverbs/:ro)
+    VOLUME_ARGS+=(-v /etc/libibverbs.d/:/etc/libibverbs.d:ro)
+    VOLUME_ARGS+=(-v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/:ro)
+    VOLUME_ARGS+=(-v /usr/lib/x86_64-linux-gnu/libibverbs/:/usr/lib/x86_64-linux-gnu/libibverbs/:ro)
 fi
 
 export CLEAN_DOCKER_CONTAINER=${CLEAN_DOCKER_CONTAINER:-0}
 
 # ------------------ Optional Container Cleanup ------------------
 docker_podman_proxy() {
-    if command -v podman &>/dev/null; then
-        podman "$@"
-    elif command -v docker &>/dev/null; then
-        docker "$@"
-    else
-        echo "Neither Docker nor Podman found!" >&2
-        return 1
-    fi
+    docker "$@"
+    # if command -v podman &>/dev/null; then
+    #     podman "$@"
+    # elif command -v docker &>/dev/null; then
+    #     docker "$@"
+    # else
+    #     echo "Neither Docker nor Podman found!" >&2
+    #     return 1
+    # fi
 }
 
 if [[ "${CLEAN_DOCKER_CONTAINER:-0}" == "1" ]]; then
@@ -164,8 +166,10 @@ else
     echo "Node-${NODE_RANK}: Launching training container."
 fi
 
+
 # ------------------ Launch Training Container ------------------
-docker_podman_proxy run --rm \
+# docker_podman_proxy run --rm \
+docker run --rm \
     --env MASTER_ADDR \
     --env MASTER_PORT \
     --env NNODES \
