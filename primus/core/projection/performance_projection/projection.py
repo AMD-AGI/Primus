@@ -38,6 +38,33 @@ from primus.core.projection.training_config import (
 _MAX_EXPERT_PARALLEL_SIZE = 8
 _BYTES_PER_GB = 1024**3
 
+# Projection mode constants
+MODE_TRAINING = "training"
+MODE_INFERENCE = "inference"
+MODE_PREFILL = "prefill"
+MODE_DECODE = "decode"
+
+
+def _calculate_min_gpus(tp, pp, ep, cp):
+    """Calculate minimum GPUs required by parallelism config.
+
+    For MoE models (EP > 1), CP is folded into EP via MoE Parallel Folding:
+    the CP ranks are a subset of the EP ranks, so the minimum GPU count is
+    TP × PP × EP.  Constraints: CP ≤ EP and EP % CP == 0.
+
+    For dense models (EP ≤ 1), CP is an independent parallelism axis, so the
+    minimum GPU count is TP × PP × CP.
+
+    Note: DP is *not* affected by this folding — EP borrows from the DP
+    dimension, so DP = world_size / (TP × PP × CP) in both cases.
+    """
+    if ep > 1:
+        # MoE: CP is folded into EP (MoE Parallel Folding)
+        return tp * pp * ep
+    else:
+        # Dense: CP is an independent axis
+        return tp * pp * cp
+
 # HBM bandwidth (GB/s) by GPU architecture — used for optimizer step estimation
 _HBM_BANDWIDTH_GBPS: Dict[str, float] = {
     "mi300x": 5300.0,
@@ -46,6 +73,235 @@ _HBM_BANDWIDTH_GBPS: Dict[str, float] = {
     "mi355x": 8000.0,
     "gfx950": 8000.0,
 }
+
+# Peak BF16 TFLOPS per GPU — used for compute roofline in decode estimation
+_PEAK_TFLOPS_BF16: Dict[str, float] = {
+    "mi300x": 1307.0,
+    "gfx942": 1307.0,
+    "mi325x": 1307.0,
+    "mi355x": 2611.0,
+    "gfx950": 2611.0,
+}
+
+
+def _get_hw_params(gpu_arch: Optional[str] = None):
+    """Return (hbm_bandwidth_gb_s, peak_tflops_bf16) for the given GPU arch."""
+    arch = (gpu_arch or os.getenv("PRIMUS_GPU_ARCH", "mi300x")).lower().strip()
+    hbm_bw = _HBM_BANDWIDTH_GBPS.get(arch, 5300.0)
+    peak_tf = _PEAK_TFLOPS_BF16.get(arch, 1307.0)
+    return hbm_bw, peak_tf
+
+
+# =========================================================================
+# Analytical Decode Model
+# =========================================================================
+
+
+def _estimate_decode_time_per_token(
+    training_config,
+    decode_batch_size: int,
+    context_length: int,
+    tp: int = 1,
+    pp: int = 1,
+    ep: int = 1,
+    gpu_arch: Optional[str] = None,
+    hardware_config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Analytically estimate the time for **one decode step** (generating one token
+    per sequence in the batch).
+
+    Decode is memory-bandwidth-bound for small batch sizes: the GPU must load
+    all model weights once per step, and read the KV cache.  The computation
+    (tiny GEMMs of shape ``[batch, 1, …]``) is far below the compute roofline.
+
+    Model:
+        time_per_token ≈ (weight_bytes + kv_cache_bytes) / HBM_bandwidth
+                        + TP_allreduce_latency
+
+    Args:
+        training_config: TrainingConfig with model / parallel config.
+        decode_batch_size: Number of sequences decoded concurrently.
+        context_length: Number of tokens already in the KV cache.
+        tp, pp, ep: Parallelism dimensions.
+        gpu_arch: GPU architecture string (for HBM BW / peak TFLOPS).
+        hardware_config: Optional custom HW config dict.
+
+    Returns:
+        Dict with detailed breakdown (all times in milliseconds).
+    """
+    mc = training_config.model_config
+    hidden = mc.hidden_size
+    num_layers = mc.num_layers
+    num_heads = mc.num_attention_heads
+    head_dim = mc.kv_channels or (hidden // num_heads)
+    gqa = mc.group_query_attention
+    num_kv_heads = mc.num_query_groups if gqa else num_heads
+    ffn_hidden = mc.ffn_hidden_size or (hidden * 4)
+    vocab_size = mc.padded_vocab_size or 100352
+    moe_pattern = mc.moe_pattern or [0] * num_layers
+    num_experts = mc.num_experts or 0
+    moe_ffn = mc.moe_ffn_hidden_size or ffn_hidden
+    moe_topk = mc.moe_router_topk or 1
+    shared_expert_size = mc.moe_shared_expert_intermediate_size or 0
+
+    bytes_per_param = 2  # BF16
+
+    hbm_bw_gbps, peak_tflops = _get_hw_params(gpu_arch)
+    hbm_bw_bytes_per_ms = hbm_bw_gbps * 1e9 / 1e3  # bytes / ms
+    peak_flops_per_ms = peak_tflops * 1e12 / 1e3  # FLOPs / ms
+
+    # Per-layer weight bytes (sharded by TP)
+    # Attention: Q(h→h) + K(h→kv_dim) + V(h→kv_dim) + O(h→h)
+    kv_dim = num_kv_heads * head_dim
+    attn_weight_bytes = (
+        hidden * hidden  # Q
+        + hidden * kv_dim  # K
+        + hidden * kv_dim  # V
+        + hidden * hidden  # O
+    ) * bytes_per_param // tp
+
+    # Dense MLP: gate(h→ffn) + up(h→ffn) + down(ffn→h)  (SwiGLU has gate+up)
+    dense_mlp_weight_bytes = 3 * hidden * ffn_hidden * bytes_per_param // tp
+
+    # MoE MLP weights per GPU (num_experts/EP experts, each gate+up+down, divided by expert_TP)
+    expert_tp = 1  # expert TP typically 1
+    if num_experts > 0:
+        experts_per_gpu = max(num_experts // max(ep, 1), 1)
+        moe_mlp_weight_bytes = (
+            3 * hidden * moe_ffn * experts_per_gpu * bytes_per_param // expert_tp
+        )
+        # Router weight: (hidden → num_experts)
+        router_weight_bytes = hidden * num_experts * bytes_per_param
+        # Shared expert (if any)
+        shared_expert_weight_bytes = (
+            3 * hidden * shared_expert_size * bytes_per_param // tp
+            if shared_expert_size > 0
+            else 0
+        )
+    else:
+        moe_mlp_weight_bytes = 0
+        router_weight_bytes = 0
+        shared_expert_weight_bytes = 0
+
+    # KV cache bytes per layer per decode step
+    # Read K: batch × num_kv_heads/TP × context_len × head_dim × bytes
+    # Read V: same
+    kv_heads_per_gpu = max(num_kv_heads // tp, 1)
+    kv_cache_per_layer_bytes = (
+        2 * decode_batch_size * kv_heads_per_gpu * context_length * head_dim
+        * bytes_per_param
+    )
+
+    # Compute FLOPs per layer per decode step (batch × 1 token)
+    # Linear projections: 2 * batch * M * N  (M=1, N=weight cols)
+    attn_proj_flops = (
+        2 * decode_batch_size * (
+            hidden * hidden  # Q
+            + hidden * kv_dim  # K
+            + hidden * kv_dim  # V
+            + hidden * hidden  # O
+        )
+    ) // tp
+    dense_mlp_flops = 2 * decode_batch_size * 3 * hidden * ffn_hidden // tp
+
+    # Attention score + V multiply: batch × num_heads/TP × context_len × head_dim × 2
+    heads_per_gpu = max(num_heads // tp, 1)
+    attn_score_flops = 2 * decode_batch_size * heads_per_gpu * context_length * head_dim  # Q·K^T
+    attn_v_flops = 2 * decode_batch_size * heads_per_gpu * context_length * head_dim  # score·V
+    attn_kv_flops = attn_score_flops + attn_v_flops
+
+    # MoE compute: each token routed to topk experts
+    if num_experts > 0:
+        moe_mlp_flops = (
+            2 * decode_batch_size * moe_topk * 3 * hidden * moe_ffn // max(ep, 1)
+        )
+    else:
+        moe_mlp_flops = 0
+
+    # ---- Aggregate across all layers ----
+    num_dense_layers = sum(1 for p in moe_pattern if p == 0)
+    num_moe_layers = sum(1 for p in moe_pattern if p == 1)
+    layers_per_pp = num_layers // max(pp, 1)
+
+    total_weight_bytes = (
+        attn_weight_bytes * num_layers  # attention in every layer
+        + dense_mlp_weight_bytes * num_dense_layers
+        + (moe_mlp_weight_bytes + router_weight_bytes + shared_expert_weight_bytes)
+        * num_moe_layers
+    ) // max(pp, 1)
+
+    total_kv_bytes = kv_cache_per_layer_bytes * layers_per_pp
+
+    # Embedding + output layer weights
+    embedding_weight_bytes = vocab_size * hidden * bytes_per_param // tp  # only on first PP stage
+    output_weight_bytes = vocab_size * hidden * bytes_per_param // tp  # only on last PP stage
+    # Amortise across PP stages
+    total_weight_bytes += (embedding_weight_bytes + output_weight_bytes) // max(pp, 1)
+
+    total_compute_flops = (
+        (attn_proj_flops + attn_kv_flops) * layers_per_pp
+        + dense_mlp_flops * (num_dense_layers // max(pp, 1))
+        + moe_mlp_flops * (num_moe_layers // max(pp, 1))
+    )
+
+    # ---- Roofline: memory time vs compute time ----
+    memory_time_ms = (total_weight_bytes + total_kv_bytes) / hbm_bw_bytes_per_ms
+    compute_time_ms = total_compute_flops / peak_flops_per_ms
+
+    # TP AllReduce latency (2× per layer: after attention + after MLP)
+    # For decode, messages are tiny (batch × hidden × 2 bytes) — latency-dominated
+    tp_latency_per_ar_us = 5.0  # ~5 µs typical intra-node AllReduce latency
+    if hardware_config:
+        tp_latency_per_ar_us = hardware_config.get("intra_node_latency_us", 1.0) * 3
+    tp_allreduce_count = 2 * layers_per_pp  # attn + MLP per layer
+    tp_overhead_ms = (tp_allreduce_count * tp_latency_per_ar_us / 1000) if tp > 1 else 0
+
+    # PP overhead (serial forward through PP stages, activation P2P)
+    pp_p2p_latency_us = 5.0
+    if hardware_config:
+        pp_p2p_latency_us = hardware_config.get("intra_node_latency_us", 1.0) * 3
+    pp_overhead_ms = ((pp - 1) * pp_p2p_latency_us / 1000) if pp > 1 else 0
+
+    # EP All-to-All for MoE decode (tiny messages, latency-dominated)
+    ep_a2a_latency_us = 10.0
+    if hardware_config:
+        ep_a2a_latency_us = hardware_config.get("intra_node_latency_us", 1.0) * 5
+    moe_a2a_per_layer_ms = (2 * ep_a2a_latency_us / 1000) if ep > 1 else 0  # dispatch + combine
+    moe_a2a_total_ms = moe_a2a_per_layer_ms * (num_moe_layers // max(pp, 1))
+
+    # Total decode time per token
+    decode_time_ms = max(memory_time_ms, compute_time_ms) + tp_overhead_ms + pp_overhead_ms + moe_a2a_total_ms
+
+    # Arithmetic intensity (FLOPs / byte) — shows how memory-bound we are
+    total_bytes_accessed = total_weight_bytes + total_kv_bytes
+    arith_intensity = total_compute_flops / total_bytes_accessed if total_bytes_accessed > 0 else 0
+    # Machine balance point: peak_flops / hbm_bw
+    balance_point = (peak_tflops * 1e12) / (hbm_bw_gbps * 1e9)
+
+    return {
+        "decode_time_ms": decode_time_ms,
+        "memory_time_ms": memory_time_ms,
+        "compute_time_ms": compute_time_ms,
+        "tp_overhead_ms": tp_overhead_ms,
+        "pp_overhead_ms": pp_overhead_ms,
+        "moe_a2a_total_ms": moe_a2a_total_ms,
+        "total_weight_bytes": total_weight_bytes,
+        "total_kv_bytes": total_kv_bytes,
+        "total_weight_mb": total_weight_bytes / (1024 * 1024),
+        "total_kv_mb": total_kv_bytes / (1024 * 1024),
+        "total_compute_tflops": total_compute_flops / 1e12,
+        "arithmetic_intensity": arith_intensity,
+        "balance_point": balance_point,
+        "is_memory_bound": arith_intensity < balance_point,
+        "hbm_bw_gbps": hbm_bw_gbps,
+        "peak_tflops": peak_tflops,
+        "decode_batch_size": decode_batch_size,
+        "context_length": context_length,
+        "layers_per_pp": layers_per_pp,
+        "num_dense_layers": num_dense_layers,
+        "num_moe_layers": num_moe_layers,
+    }
 
 
 def _estimate_optimizer_step_ms(
@@ -650,6 +906,121 @@ def extract_single_node_time_from_profiling(
     return total_time_ms
 
 
+def extract_single_node_time_inference(
+    profiling_results: dict, training_config
+) -> float:
+    """
+    Extract total single-node **forward-only** time from profiling results.
+
+    This is the inference counterpart of :func:`extract_single_node_time_from_profiling`.
+    It uses only the forward pass timings (no backward, no recomputation overhead).
+
+    Args:
+        profiling_results: Dict with integer keys for layers and "embedding", "output"
+        training_config: Training configuration containing model config
+
+    Returns:
+        Total forward-only time in milliseconds for the full model (one pass)
+    """
+    is_rank_0 = int(os.getenv("RANK", "0")) == 0
+
+    if is_rank_0:
+        print(
+            "[Primus:Inference Projection] Extracting forward-only timing from benchmark results..."
+        )
+        print("-" * 100)
+
+    model_config = training_config.model_config
+    moe_pattern = model_config.moe_pattern
+
+    num_total_layers = len(moe_pattern)
+
+    profiled_layer_indices = sorted(
+        [k for k in profiling_results.keys() if isinstance(k, int)]
+    )
+    if is_rank_0:
+        print(f"  Profiled layers: {profiled_layer_indices}")
+        print(f"  Full model has {num_total_layers} transformer layers")
+
+    total_time_ms = 0.0
+
+    # Embedding layer (forward only)
+    if "embedding" in profiling_results:
+        emb = profiling_results["embedding"]
+        emb_time = emb.get("forward_time_ms", 0)
+        total_time_ms += emb_time
+        if is_rank_0:
+            print(f"  Embedding (fwd): {emb_time:.2f} ms")
+
+    # Analyze profiled transformer layers — forward only
+    profiled_dense_fwd = []
+    profiled_moe_fwd = []
+
+    for layer_idx in profiled_layer_indices:
+        if layer_idx < len(moe_pattern):
+            layer_data = profiling_results[layer_idx]
+            fwd_time = layer_data.get("forward_time_ms", 0)
+
+            if moe_pattern[layer_idx] == 0:
+                profiled_dense_fwd.append(fwd_time)
+            else:
+                profiled_moe_fwd.append(fwd_time)
+
+    avg_dense_fwd = (
+        sum(profiled_dense_fwd) / len(profiled_dense_fwd)
+        if profiled_dense_fwd
+        else 0
+    )
+    avg_moe_fwd = (
+        sum(profiled_moe_fwd) / len(profiled_moe_fwd)
+        if profiled_moe_fwd
+        else 0
+    )
+
+    num_dense_layers = sum(1 for x in moe_pattern if x == 0)
+    num_moe_layers = sum(1 for x in moe_pattern if x == 1)
+
+    total_dense_time = avg_dense_fwd * num_dense_layers
+    total_moe_time = avg_moe_fwd * num_moe_layers
+    total_transformer_time = total_dense_time + total_moe_time
+    total_time_ms += total_transformer_time
+
+    if is_rank_0:
+        if profiled_dense_fwd:
+            print(
+                f"  Dense Layers: {len(profiled_dense_fwd)} profiled → {num_dense_layers} total"
+            )
+            print(f"    Avg fwd per layer: {avg_dense_fwd:.2f} ms")
+            print(f"    Total fwd time: {total_dense_time:.2f} ms")
+
+        if profiled_moe_fwd:
+            print(
+                f"  MoE Layers: {len(profiled_moe_fwd)} profiled → {num_moe_layers} total"
+            )
+            print(f"    Avg fwd per layer: {avg_moe_fwd:.2f} ms")
+            print(f"    Total fwd time: {total_moe_time:.2f} ms")
+
+    # Output layer (forward only)
+    if "output" in profiling_results:
+        out = profiling_results["output"]
+        out_time = out.get("forward_time_ms", 0)
+        total_time_ms += out_time
+        if is_rank_0:
+            print(f"  Output Layer (fwd): {out_time:.2f} ms")
+
+    if is_rank_0:
+        print("-" * 100)
+        print(
+            f"[Primus:Inference Projection] Extrapolated Forward-Only Time: {total_time_ms:.2f} ms"
+        )
+        print(
+            f"  (Based on {len(profiled_layer_indices)} profiled layers → {num_total_layers} total layers)"
+        )
+        print("=" * 100)
+
+    return total_time_ms
+
+
 # =============================================================================
 # Layer Configuration Functions
 # =============================================================================
@@ -712,7 +1083,10 @@ def _limit_layers_for_projection(module_config):
 
 def _rescale_expert_parallelism(module_config):
     """
-    Cap expert_model_parallel_size so that EP * TP * CP <= 8 and adjust num_experts.
+    Cap expert_model_parallel_size so that EP * TP <= GPUs_per_node and adjust num_experts.
+
+    With MoE Parallel Folding, CP is folded into EP (CP ranks are a subset of
+    EP ranks), so the minimum GPUs for a MoE config is EP * TP, not EP * TP * CP.
     """
     expert_mp_size = getattr(module_config, "expert_model_parallel_size", None)
     if expert_mp_size is None or expert_mp_size <= _MAX_EXPERT_PARALLEL_SIZE:
@@ -720,13 +1094,16 @@ def _rescale_expert_parallelism(module_config):
         current_cp = getattr(module_config, "context_parallel_size", 1) or 1
         if expert_mp_size is None:
             expert_mp_size = 1
-        if expert_mp_size * current_tp * current_cp <= _MAX_EXPERT_PARALLEL_SIZE:
+        # MoE Parallel Folding: CP is folded into EP, so min GPUs = EP * TP
+        if expert_mp_size * current_tp <= _MAX_EXPERT_PARALLEL_SIZE:
             return None
 
     num_experts = getattr(module_config, "num_experts", None)
     current_tp = getattr(module_config, "tensor_model_parallel_size", 1) or 1
     current_cp = getattr(module_config, "context_parallel_size", 1) or 1
-    total_parallel_product = max(1, current_tp * current_cp)
+    # MoE Parallel Folding: CP is folded into EP, so only TP contributes to
+    # the per-EP-rank GPU cost.
+    total_parallel_product = max(1, current_tp)
     max_ep_allowed = max(1, _MAX_EXPERT_PARALLEL_SIZE // total_parallel_product)
     new_expert_mp = min(expert_mp_size, _MAX_EXPERT_PARALLEL_SIZE, max_ep_allowed)
 
@@ -792,7 +1169,7 @@ def _calculate_single_node_config(original_config, gpus_per_node=8):
     cp = getattr(original_config, "context_parallel_size", 1) or 1
     num_experts = getattr(original_config, "num_experts", None)
 
-    gpus_required = tp * pp * ep * cp
+    gpus_required = _calculate_min_gpus(tp, pp, ep, cp)
     nodes_required = (gpus_required + gpus_per_node - 1) // gpus_per_node
 
     # If already fits on 1 node, no adjustment needed
@@ -812,7 +1189,7 @@ def _calculate_single_node_config(original_config, gpus_per_node=8):
 
     # Step 1: Reduce PP to 1
     benchmark_pp = 1
-    benchmark_gpus_required = tp * benchmark_pp * ep * cp
+    benchmark_gpus_required = _calculate_min_gpus(tp, benchmark_pp, ep, cp)
 
     # Step 2: If still doesn't fit, rescale EP
     benchmark_ep = ep
@@ -831,7 +1208,7 @@ def _calculate_single_node_config(original_config, gpus_per_node=8):
         if rescale_info:
             benchmark_ep = rescale_info["ep_after"]
             benchmark_num_experts = rescale_info.get("num_experts_after", num_experts)
-            benchmark_gpus_required = tp * benchmark_pp * benchmark_ep * cp
+            benchmark_gpus_required = _calculate_min_gpus(tp, benchmark_pp, benchmark_ep, cp)
 
             if benchmark_gpus_required > gpus_per_node:
                 raise ValueError(
@@ -903,7 +1280,7 @@ def _estimate_pp_communication_overhead(
 
     # Get hardware setup
     gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
-    gpus_required = tp * pp_size * ep * cp
+    gpus_required = _calculate_min_gpus(tp, pp_size, ep, cp)
     num_nodes = (gpus_required + gpus_per_node - 1) // gpus_per_node
 
     # Get collective model args
@@ -926,8 +1303,9 @@ def _estimate_pp_communication_overhead(
     p2p_size = batch_size * seq_len * hidden_size * 2  # BF16
 
     # Number of microbatches
+    # DP = world_size / (TP × PP × CP) — EP excluded (borrows from DP via folding)
     global_batch_size = runtime_config.global_batch_size
-    data_parallel_size = (num_nodes * gpus_per_node) // (tp * pp_size * ep * cp)
+    data_parallel_size = (num_nodes * gpus_per_node) // (tp * pp_size * cp)
     num_microbatches = global_batch_size // (batch_size * data_parallel_size)
 
     # P2P time: 2 * (PP-1) sends per microbatch (forward + backward)
@@ -1040,11 +1418,11 @@ def _estimate_ep_communication_overhead(
     gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
 
     # Calculate nodes required for original EP
-    gpus_required_original = tp * pp * original_ep * cp
+    gpus_required_original = _calculate_min_gpus(tp, pp, original_ep, cp)
     num_nodes_original = (gpus_required_original + gpus_per_node - 1) // gpus_per_node
 
     # Calculate nodes for benchmark EP (should be 1)
-    gpus_required_benchmark = tp * pp * benchmark_ep * cp
+    gpus_required_benchmark = _calculate_min_gpus(tp, pp, benchmark_ep, cp)
     num_nodes_benchmark = (gpus_required_benchmark + gpus_per_node - 1) // gpus_per_node
 
     # Get collective model args for original EP configuration
@@ -1491,6 +1869,7 @@ def _run_layer_benchmark(primus_config, unknown_overrides):
 
     print("[Primus:Performance Projection] Initializing Megatron...")
     trainer.init()
+
     print("[Primus:Performance Projection] Setting up model and optimizer...")
     trainer.setup()
 
@@ -1813,9 +2192,10 @@ def _run_multinode_projection(
     cp = getattr(mp_config, "context_model_parallel_size", 1)
     gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
 
-    # Calculate minimum nodes required by parallelism config
-    # EP is included in the minimum GPUs calculation (need GPUs to hold experts)
-    gpus_required = tp * pp * ep * cp
+    # Calculate minimum nodes required by parallelism config.
+    # For MoE (EP > 1): CP is folded into EP via MoE Parallel Folding,
+    # so min GPUs = TP × PP × EP.  For dense: min GPUs = TP × PP × CP.
+    gpus_required = _calculate_min_gpus(tp, pp, ep, cp)
     min_nodes_required = (gpus_required + gpus_per_node - 1) // gpus_per_node
 
     # Validate target >= minimum required
@@ -1826,9 +2206,12 @@ def _run_multinode_projection(
             f"--target-nodes must be >= {min_nodes_required}."
         )
 
-    # Calculate DP for scaling - EXCLUDES EP (DP scaling is independent of EP)
-    # EP distributes experts but doesn't affect how many data batches can be processed in parallel
-    gpus_for_dp = tp * pp * cp  # EP excluded for DP calculation
+    # Calculate DP for scaling.  EP is excluded from this divisor because, with
+    # MoE Parallel Folding, EP borrows from the DP dimension (not from extra
+    # GPUs).  Data-loading DP = world_size / (TP × PP × CP) for both dense and
+    # MoE models.  Within each EP group the CP ranks share context-parallel
+    # attention work while EP/CP ranks provide inner data-parallel streams.
+    gpus_for_dp = tp * pp * cp  # EP excluded — it borrows from DP
     total_gpus_target = target_nodes * gpus_per_node
     dp_target = total_gpus_target // gpus_for_dp
 
@@ -2085,6 +2468,583 @@ def _run_multinode_projection(
     }
 
 
+# =============================================================================
+# Inference Projection Functions
+# =============================================================================
+
+
+def calculate_inference_communication_time(
+    training_config,
+    num_nodes: int,
+    gpus_per_node: int,
+    tp: int,
+    pp: int,
+    ep: int,
+    cp: int,
+    hardware_config: Dict[str, Any] = None,
+) -> Tuple[float, Dict[str, float], Dict[str, Any]]:
+    """
+    Calculate collective communication time for **inference** (forward-only).
+
+    Compared to the training version, this skips:
+    - Gradient AllReduce (no backward pass)
+    - Backward MoE All-to-All
+    - FSDP reduce-scatter (no gradient sharding)
+
+    Returns:
+        (total_comm_time_ms, breakdown_dict, message_info_dict)
+    """
+    model_config = training_config.model_config
+    runtime_config = training_config.runtime_config
+
+    coll_args = get_default_args(
+        num_nodes=num_nodes,
+        gpus_per_node=gpus_per_node,
+        tp=tp,
+        pp=pp,
+        ep=ep,
+        cp=cp,
+        hardware_config=hardware_config,
+    )
+
+    hidden_size = model_config.hidden_size
+    num_layers = model_config.num_layers
+    moe_router_topk = model_config.moe_router_topk
+    moe_pattern = model_config.moe_pattern
+    batch_size = runtime_config.micro_batch_size
+    seq_len = runtime_config.sequence_length
+    num_moe_layers = sum(1 for p in moe_pattern if p == 1)
+
+    breakdown = {}
+    message_info = {}
+
+    # No gradient AllReduce for inference
+    breakdown["gradient_allreduce"] = 0.0
+    message_info["gradient_allreduce_size"] = 0
+    message_info["gradient_allreduce_size_mb"] = 0.0
+
+    # MoE All-to-All — forward only (dispatch + combine, no backward)
+    if ep > 1 and num_moe_layers > 0:
+        tokens_per_gpu = seq_len * batch_size // max(tp, 1)
+        dispatch_size = tokens_per_gpu * hidden_size * moe_router_topk * 2  # BF16
+
+        a2a_dispatch = cm.alltoall(coll_args, dispatch_size, ep, groups=["ep"])
+        a2a_combine = cm.alltoall(coll_args, dispatch_size, ep, groups=["ep"])
+
+        total_a2a_fwd = (a2a_dispatch + a2a_combine) * num_moe_layers / 1000  # ms
+
+        breakdown["moe_a2a_fwd"] = total_a2a_fwd
+        message_info["moe_a2a_size"] = dispatch_size
+        message_info["moe_a2a_size_mb"] = dispatch_size / (1024 * 1024)
+        message_info["moe_a2a_per_layer_fwd"] = (a2a_dispatch + a2a_combine) / 1000
+        message_info["num_moe_layers"] = num_moe_layers
+    else:
+        breakdown["moe_a2a_fwd"] = 0.0
+        message_info["moe_a2a_size"] = 0
+        message_info["moe_a2a_size_mb"] = 0.0
+        message_info["moe_a2a_per_layer_fwd"] = 0.0
+        message_info["num_moe_layers"] = 0
+
+    # No backward A2A
+    # No FSDP communication (no gradient sharding in inference)
+    breakdown["fsdp_allgather_fwd"] = 0.0
+    breakdown["fsdp_reducescatter_bwd"] = 0.0
+    message_info["fsdp_enabled"] = False
+
+    message_info["num_layers"] = num_layers
+
+    total_comm_time = sum(breakdown.values())
+    return total_comm_time, breakdown, message_info
+
+
+def _run_inference_projection(
+    training_config,
+    forward_time_ms: float,
+    profiling_results,
+    args,
+    target_nodes: int,
+):
+    """
+    Run inference-mode multinode projection.
+
+    Unlike the training projection, this:
+    - Uses only forward pass time (no backward, no wgrad)
+    - Skips optimizer step estimation
+    - Skips gradient AllReduce
+    - Reports prefill latency and throughput
+
+    Args:
+        training_config: Configuration object
+        forward_time_ms: Measured forward-only time in ms for one pass
+        profiling_results: Layer profiling results
+        args: CLI arguments
+        target_nodes: Target number of nodes for projection
+    """
+    import torch.distributed as dist
+
+    is_rank_0 = not dist.is_initialized() or dist.get_rank() == 0
+
+    mp_config = training_config.model_parallel_config
+
+    tp = mp_config.tensor_model_parallel_size
+    pp = mp_config.pipeline_model_parallel_size
+    ep = getattr(mp_config, "expert_model_parallel_size", 1)
+    cp = getattr(mp_config, "context_model_parallel_size", 1)
+    gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
+
+    gpus_required = tp * pp * ep * cp
+    min_nodes_required = (gpus_required + gpus_per_node - 1) // gpus_per_node
+
+    if target_nodes < min_nodes_required:
+        raise ValueError(
+            f"[Primus:Inference Projection] ERROR: Cannot project to {target_nodes} nodes. "
+            f"Minimum required by parallelism config is {min_nodes_required} nodes."
+        )
+
+    total_gpus_target = target_nodes * gpus_per_node
+    # For inference, DP means we can serve independent requests in parallel
+    gpus_for_dp = tp * pp * cp
+    dp_target = total_gpus_target // gpus_for_dp
+
+    if is_rank_0:
+        print("" + "=" * 100)
+        print("Inference Parallelism Configuration")
+        print("=" * 100)
+        print(f"  TP: {tp}, PP: {pp}, EP: {ep}, CP: {cp}")
+        print(f"  GPUs per Node: {gpus_per_node}")
+        print(f"  Minimum GPUs Required: {gpus_required}")
+        print(f"  Minimum Nodes Required: {min_nodes_required}")
+        print(f"  Target Nodes: {target_nodes}")
+
+    # Load hardware config if provided
+    hardware_config_dict = None
+    if hasattr(args, "hardware_config") and args.hardware_config:
+        hardware_config_dict = load_hardware_config(args.hardware_config)
+        if is_rank_0:
+            print(f"  Using custom hardware config from: {args.hardware_config}")
+
+    # Calculate inference communication times (forward-only)
+    total_comm_time_ms, breakdown, message_info = (
+        calculate_inference_communication_time(
+            training_config,
+            target_nodes,
+            gpus_per_node,
+            tp,
+            pp,
+            ep,
+            cp,
+            hardware_config_dict,
+        )
+    )
+
+    # Inference projected time: forward compute + forward communication
+    projected_time_ms = forward_time_ms
+
+    # For PP > 1, add estimated PP P2P overhead (forward only — one direction)
+    if pp > 1:
+        if hardware_config_dict:
+            pp_bw = hardware_config_dict.get("intra_node_bandwidth_gbps", 896.0)
+        else:
+            pp_bw = 896.0  # Default xGMI bandwidth
+        hidden = training_config.model_config.hidden_size
+        seq_len = training_config.runtime_config.sequence_length
+        micro_batch = training_config.runtime_config.micro_batch_size
+        activation_size = seq_len * micro_batch * hidden * 2  # BF16
+        pp_latency_us = 1.0
+        pp_time_per_stage = (activation_size / (pp_bw * 1e9) * 1e6 + pp_latency_us) / 1000  # ms
+        pp_overhead_ms = pp_time_per_stage * (pp - 1)
+        projected_time_ms += pp_overhead_ms
+        if is_rank_0:
+            print(f"  PP forward overhead ({pp - 1} hops): {pp_overhead_ms:.3f} ms")
+
+    # Get runtime config for throughput calculation
+    runtime_config = training_config.runtime_config
+    seq_len = getattr(runtime_config, "sequence_length", 4096)
+    micro_batch = getattr(runtime_config, "micro_batch_size", 1)
+
+    # Prefill latency = forward time for one batch on one model replica
+    prefill_latency_ms = projected_time_ms
+
+    # Tokens per pass (one forward pass processes all tokens in the sequence)
+    tokens_per_pass = seq_len * micro_batch
+
+    # Throughput per replica
+    tokens_per_sec_per_replica = tokens_per_pass * 1000 / prefill_latency_ms if prefill_latency_ms > 0 else 0
+
+    # Number of independent replicas with DP
+    num_replicas = dp_target
+
+    # Aggregate throughput across all replicas
+    total_tokens_per_sec = tokens_per_sec_per_replica * num_replicas
+    tokens_per_sec_per_gpu = total_tokens_per_sec / total_gpus_target if total_gpus_target > 0 else 0
+
+    if is_rank_0:
+        print("" + "=" * 100)
+        print("Inference Projection Results")
+        print("=" * 100)
+        print(f"📊 Parallelism: TP={tp}, PP={pp}, EP={ep}, CP={cp}")
+
+        # Communication Breakdown
+        if total_comm_time_ms > 0:
+            print("📡 Communication Breakdown (forward-only):")
+            for op_name, op_time in breakdown.items():
+                if op_time > 0:
+                    print(f"   {op_name}: {op_time:.3f} ms", end="")
+                    if op_name == "moe_a2a_fwd" and "moe_a2a_size_mb" in message_info:
+                        print(
+                            f" (message: {message_info['moe_a2a_size_mb']:.2f} MB, "
+                            f"{message_info['num_moe_layers']} layers × "
+                            f"{message_info['moe_a2a_per_layer_fwd']:.3f} ms/layer)"
+                        )
+                    else:
+                        print("")
+            print(f"   Total Communication: {total_comm_time_ms:.3f} ms")
+
+        print(f"🎯 Target Configuration ({target_nodes} nodes):")
+        print(f"   Nodes: {target_nodes}, GPUs: {total_gpus_target}")
+        print(f"   TP={tp}, PP={pp}, EP={ep}, CP={cp}, DP(replicas)={num_replicas}")
+        print(f"   Prefill Latency: {prefill_latency_ms:.3f} ms "
+              f"(seq_len={seq_len}, micro_batch={micro_batch})")
+        print(f"   Tokens/s per replica: {tokens_per_sec_per_replica:,.0f}")
+        print(f"   Tokens/s total ({num_replicas} replicas): {total_tokens_per_sec:,.0f}")
+        print(f"   Tokens/s/GPU: {tokens_per_sec_per_gpu:,.0f}")
+        print("=" * 100)
+
+    return {
+        "target_nodes": target_nodes,
+        "target_gpus": total_gpus_target,
+        "tp": tp,
+        "pp": pp,
+        "ep": ep,
+        "cp": cp,
+        "dp_replicas": num_replicas,
+        "prefill_latency_ms": prefill_latency_ms,
+        "tokens_per_sec_per_replica": tokens_per_sec_per_replica,
+        "tokens_per_sec_total": total_tokens_per_sec,
+        "tokens_per_sec_per_gpu": tokens_per_sec_per_gpu,
+    }
+
+
+def _run_decode_layer_benchmark(primus_config, unknown_overrides, decode_batch_size):
+    """
+    Benchmark transformer layers with seq_len=1 to measure decode-step GEMM
+    times on the GPU.
+
+    The Megatron trainer is initialized with the **original** config (so that
+    all Megatron assertions pass normally).  Only the ``run_layer_benchmark``
+    call uses ``seq_len=1`` and ``batch_size=decode_batch_size`` — these
+    override the input tensor shapes without touching validated Megatron args.
+
+    The resulting forward_time_ms per layer captures real kernel timings for
+    the tiny GEMMs characteristic of autoregressive decode.  Attention timing
+    will be unrealistically small (1-token self-attention without KV cache),
+    so callers should overlay an analytical KV cache model.
+
+    Args:
+        primus_config: Primus configuration (will be mutated for layer
+            limiting / EP rescaling only — seq_length is NOT changed).
+        unknown_overrides: Extra CLI overrides for the trainer.
+        decode_batch_size: Number of concurrent sequences.
+
+    Returns:
+        dict: Profiling results in the same format as _run_layer_benchmark.
+    """
+    from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
+
+    module_config = primus_config.get_module_config("pre_trainer")
+
+    # NOTE: Do NOT change seq_length or micro_batch_size in the module config —
+    # Megatron's argument validation has many assertions on seq_length (e.g.
+    # divisibility by CP, TP, position-embedding limits).  We keep the original
+    # config for trainer init and only pass seq_len=1 to run_layer_benchmark().
+    _limit_layers_for_projection(module_config)
+    rescale_info = _rescale_expert_parallelism(module_config)
+    training_config = convert_primus_config_to_projection_config(primus_config)
+
+    master_addr = os.getenv("MASTER_ADDR", "127.0.0.1")
+    master_port = int(os.getenv("MASTER_PORT", "29500"))
+    rank = int(os.getenv("RANK", "0"))
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+
+    is_rank_0 = rank == 0
+    if is_rank_0:
+        print("[Primus:Decode Benchmark] Initializing MegatronPretrainTrainer...")
+        print("[Primus:Decode Benchmark] (trainer uses original seq_length for init; "
+              "benchmark will use seq_len=1)")
+
+    # Disable overlap/FSDP features for profiling
+    primus_config.get_module_config("pre_trainer").overlap_grad_reduce = False
+    primus_config.get_module_config("pre_trainer").overlap_param_gather = False
+    primus_config.get_module_config("pre_trainer").use_torch_fsdp2 = False
+
+    trainer = MegatronPretrainTrainer(
+        module_name="pre_trainer",
+        primus_config=primus_config,
+        module_rank=rank,
+        module_world_size=world_size,
+        module_master_addr=master_addr,
+        module_master_port=master_port,
+        extra_args=unknown_overrides,
+    )
+
+    if is_rank_0:
+        print("[Primus:Decode Benchmark] Initializing Megatron...")
+    trainer.init()
+    if is_rank_0:
+        print("[Primus:Decode Benchmark] Setting up model and optimizer...")
+    trainer.setup()
+
+    if is_rank_0:
+        print("[Primus:Decode Benchmark] Building model profiler...")
+    model_profiler_spec = get_language_model_profiler_spec(training_config)
+    model_profiler = build_profiler(model_profiler_spec)
+
+    # Override seq_len and batch_size ONLY for the benchmark call
+    seq_len = 1
+    batch_size = decode_batch_size
+
+    if is_rank_0:
+        print("[Primus:Decode Benchmark] Benchmarking with:")
+        print(f"  Rank: {rank}")
+        print(f"  World Size: {world_size}")
+        print(f"  Batch Size: {batch_size} (decode concurrent sequences)")
+        print(f"  Sequence Length: {seq_len} (1 token per decode step)")
+        if rescale_info:
+            note = (
+                f"  NOTE: MoE rescaled -> EP {rescale_info['ep_before']} -> {rescale_info['ep_after']}"
+                f" (TP={rescale_info['tp']}, CP={rescale_info['cp']})"
+            )
+            print(note)
+
+    if is_rank_0:
+        print("" + "=" * 100)
+        print("[Primus:Decode Benchmark] Starting layer benchmarking (seq_len=1)...")
+        print("=" * 100)
+
+    profiling_results = model_profiler.run_layer_benchmark(
+        model=trainer.model,
+        batch_size=batch_size,
+        seq_len=seq_len,
+    )
+    return profiling_results
+
+
+def _run_decode_projection(
+    training_config,
+    args,
+    target_nodes: int,
+    profiling_results: Optional[Dict] = None,
+):
+    """
+    Run decode-mode projection.
+
+    Supports two modes:
+      - **Analytical** (profiling_results=None): Fully analytical model based
+        on HBM bandwidth and model architecture. No GPU needed.
+      - **Benchmark-enhanced** (profiling_results provided): Uses real GPU
+        benchmark timings for GEMMs (seq_len=1) and overlays an analytical
+        KV cache attention model for the portion that benchmarks can't capture.
+
+    Args:
+        training_config: Configuration object.
+        args: CLI arguments (decode_batch_size, decode_context_length, etc.).
+        target_nodes: Target number of nodes for projection.
+        profiling_results: Optional benchmark results from _run_decode_layer_benchmark.
+    """
+    is_rank_0 = int(os.getenv("RANK", "0")) == 0
+    use_benchmark = profiling_results is not None
+
+    mp_config = training_config.model_parallel_config
+    tp = mp_config.tensor_model_parallel_size
+    pp = mp_config.pipeline_model_parallel_size
+    ep = getattr(mp_config, "expert_model_parallel_size", 1)
+    cp = getattr(mp_config, "context_model_parallel_size", 1)
+    gpus_per_node = int(os.getenv("GPUS_PER_NODE", "8"))
+    total_gpus = target_nodes * gpus_per_node
+
+    # DP replicas for decode
+    gpus_for_dp = tp * pp * cp
+    dp_replicas = total_gpus // gpus_for_dp
+
+    # Decode-specific parameters from CLI or config defaults
+    decode_batch = getattr(args, "decode_batch_size", None)
+    if decode_batch is None:
+        decode_batch = training_config.runtime_config.micro_batch_size
+    context_len = getattr(args, "decode_context_length", None)
+    if context_len is None:
+        context_len = training_config.runtime_config.sequence_length
+    num_gen_tokens = getattr(args, "num_generated_tokens", None) or 128
+
+    gpu_arch = getattr(args, "gpu_arch", None)
+    hardware_config_dict = None
+    if hasattr(args, "hardware_config") and args.hardware_config:
+        hardware_config_dict = load_hardware_config(args.hardware_config)
+
+    # Always run analytical model (used for KV cache estimate and as baseline)
+    analytical = _estimate_decode_time_per_token(
+        training_config,
+        decode_batch_size=decode_batch,
+        context_length=context_len,
+        tp=tp,
+        pp=pp,
+        ep=ep,
+        gpu_arch=gpu_arch,
+        hardware_config=hardware_config_dict,
+    )
+
+    # ── Compute decode time ──────────────────────────────────────────────
+    if use_benchmark:
+        # Benchmark-enhanced: real GPU GEMM timings + analytical KV cache
+        #
+        # The benchmark ran layers with seq_len=1.  The forward_time_ms per
+        # layer captures the real GEMM cost (QKV proj, output proj, MLP)
+        # plus TP AllReduce — but attention was only 1-token self-attention
+        # (no KV cache).  We add the analytical KV cache read time on top.
+        mc = training_config.model_config
+        num_layers = mc.num_layers
+        layers_per_pp = num_layers // max(pp, 1)
+
+        # Sum forward times from benchmark (only transformer layers)
+        benchmark_fwd_ms = 0.0
+        layer_count = 0
+        for layer_idx, layer_data in profiling_results.items():
+            if isinstance(layer_data, dict) and "forward_time_ms" in layer_data:
+                benchmark_fwd_ms += layer_data["forward_time_ms"]
+                layer_count += 1
+
+        # Scale to full model depth (benchmark may run fewer representative layers)
+        if layer_count > 0 and layer_count < layers_per_pp:
+            benchmark_fwd_ms = benchmark_fwd_ms * layers_per_pp / layer_count
+
+        # KV cache read time (analytical — benchmark doesn't have a KV cache)
+        hbm_bw_bytes_per_ms = analytical["hbm_bw_gbps"] * 1e9 / 1e3
+        kv_cache_ms = analytical["total_kv_bytes"] / hbm_bw_bytes_per_ms
+
+        # PP overhead (serial stages)
+        pp_overhead_ms = analytical["pp_overhead_ms"]
+
+        # MoE EP All-to-All (latency-dominated for 1-token messages)
+        moe_a2a_ms = analytical["moe_a2a_total_ms"]
+
+        decode_time_ms = benchmark_fwd_ms + kv_cache_ms + pp_overhead_ms + moe_a2a_ms
+        method_label = "Benchmark-Enhanced"
+    else:
+        # Pure analytical
+        decode_time_ms = analytical["decode_time_ms"]
+        benchmark_fwd_ms = None
+        kv_cache_ms = analytical["total_kv_bytes"] / (analytical["hbm_bw_gbps"] * 1e9 / 1e3)
+        pp_overhead_ms = analytical["pp_overhead_ms"]
+        moe_a2a_ms = analytical["moe_a2a_total_ms"]
+        method_label = "Analytical Model"
+
+    tokens_per_sec_per_replica = (
+        decode_batch * 1000 / decode_time_ms if decode_time_ms > 0 else 0
+    )
+    total_tokens_per_sec = tokens_per_sec_per_replica * dp_replicas
+    tokens_per_sec_per_gpu = total_tokens_per_sec / total_gpus if total_gpus > 0 else 0
+
+    total_generation_time_ms = decode_time_ms * num_gen_tokens
+
+    # KV cache memory per GPU
+    kv_mb_per_gpu = analytical["total_kv_mb"]
+    weight_mb_per_gpu = analytical["total_weight_mb"]
+
+    if is_rank_0:
+        print("\n" + "=" * 100)
+        print(f"Decode Projection Results ({method_label})")
+        print("=" * 100)
+
+        print(f"📊 Parallelism: TP={tp}, PP={pp}, EP={ep}, CP={cp}")
+        print(f"   Decode batch size: {decode_batch}")
+        print(f"   Context length (KV cache): {context_len}")
+        print(f"   GPU arch: {(gpu_arch or os.getenv('PRIMUS_GPU_ARCH', 'mi300x')).lower()}")
+        print(f"   HBM bandwidth: {analytical['hbm_bw_gbps']:.0f} GB/s")
+        print(f"   Peak BF16 compute: {analytical['peak_tflops']:.0f} TFLOPS")
+
+        print()
+        print("⏱️  Per-Token Decode Time Breakdown:")
+
+        if use_benchmark:
+            # Show benchmarked GEMM time + analytical KV cache overlay
+            print(f"   Layer fwd (benchmarked, seq_len=1): {benchmark_fwd_ms:.4f} ms "
+                  f"(includes GEMMs + TP AllReduce)")
+            print(f"   KV cache read (analytical):         {kv_cache_ms:.4f} ms "
+                  f"({analytical['total_kv_mb']:.1f} MB)")
+            # Also show analytical-only for comparison
+            analytical_weight_ms = analytical["total_weight_bytes"] / (analytical["hbm_bw_gbps"] * 1e9 / 1e3)
+            analytical_total = analytical["decode_time_ms"]
+            print(f"   ─── Analytical comparison ───")
+            print(f"   Weight loading (analytical):  {analytical_weight_ms:.4f} ms "
+                  f"({analytical['total_weight_mb']:.1f} MB)")
+            print(f"   Total (analytical):           {analytical_total:.4f} ms")
+            print(f"   ────────────────────────────")
+        else:
+            weight_only_ms = analytical["total_weight_bytes"] / (analytical["hbm_bw_gbps"] * 1e9 / 1e3)
+            print(f"   Weight loading:   {weight_only_ms:.4f} ms ({analytical['total_weight_mb']:.1f} MB)")
+            print(f"   KV cache read:    {kv_cache_ms:.4f} ms ({analytical['total_kv_mb']:.1f} MB)")
+            print(f"   Compute:          {analytical['compute_time_ms']:.4f} ms "
+                  f"({analytical['total_compute_tflops'] * 1000:.2f} GFLOPS)")
+            if analytical["tp_overhead_ms"] > 0:
+                print(f"   TP AllReduce:     {analytical['tp_overhead_ms']:.4f} ms")
+
+        if pp_overhead_ms > 0:
+            print(f"   PP P2P:           {pp_overhead_ms:.4f} ms")
+        if moe_a2a_ms > 0:
+            print(f"   MoE All-to-All:   {moe_a2a_ms:.4f} ms")
+
+        if not use_benchmark:
+            bound = "MEMORY-BOUND" if analytical["is_memory_bound"] else "COMPUTE-BOUND"
+            print(f"   Bottleneck: {bound} "
+                  f"(arith intensity={analytical['arithmetic_intensity']:.2f} FLOPs/B, "
+                  f"balance={analytical['balance_point']:.0f} FLOPs/B)")
+
+        print(f"   ─────────────────────────────────────")
+        print(f"   Total per token:  {decode_time_ms:.4f} ms")
+
+        print()
+        print(f"🎯 Target Configuration ({target_nodes} nodes):")
+        print(f"   Nodes: {target_nodes}, GPUs: {total_gpus}")
+        print(f"   TP={tp}, PP={pp}, EP={ep}, CP={cp}, DP(replicas)={dp_replicas}")
+        print(f"   Per-token latency: {decode_time_ms:.4f} ms")
+        print(f"   Tokens/s per replica: {tokens_per_sec_per_replica:,.0f}")
+        print(f"   Tokens/s total ({dp_replicas} replicas): {total_tokens_per_sec:,.0f}")
+        print(f"   Tokens/s/GPU: {tokens_per_sec_per_gpu:,.0f}")
+        print()
+        print(f"   Generation of {num_gen_tokens} tokens: {total_generation_time_ms:.1f} ms "
+              f"({total_generation_time_ms / 1000:.2f} s)")
+
+        print()
+        print("💾 Memory Estimate (per GPU):")
+        print(f"   Model weights:   {weight_mb_per_gpu:.1f} MB ({weight_mb_per_gpu / 1024:.2f} GB)")
+        print(f"   KV cache:        {kv_mb_per_gpu:.1f} MB ({kv_mb_per_gpu / 1024:.2f} GB) "
+              f"(batch={decode_batch}, ctx={context_len})")
+        total_mem_gb = (weight_mb_per_gpu + kv_mb_per_gpu) / 1024
+        print(f"   Total:           {total_mem_gb:.2f} GB")
+
+        print("=" * 100)
+
+    return {
+        "target_nodes": target_nodes,
+        "target_gpus": total_gpus,
+        "tp": tp,
+        "pp": pp,
+        "ep": ep,
+        "cp": cp,
+        "dp_replicas": dp_replicas,
+        "decode_batch_size": decode_batch,
+        "context_length": context_len,
+        "decode_time_per_token_ms": decode_time_ms,
+        "tokens_per_sec_per_replica": tokens_per_sec_per_replica,
+        "tokens_per_sec_total": total_tokens_per_sec,
+        "tokens_per_sec_per_gpu": tokens_per_sec_per_gpu,
+        "total_generation_time_ms": total_generation_time_ms,
+        "weight_mb_per_gpu": weight_mb_per_gpu,
+        "kv_cache_mb_per_gpu": kv_mb_per_gpu,
+        "is_memory_bound": analytical["is_memory_bound"],
+        "method": method_label,
+    }
+
+
 def launch_projection_from_cli(args, overrides):
     """
     Entry point for the 'performance_projection' subcommand.
@@ -2174,6 +3134,56 @@ def launch_projection_from_cli(args, overrides):
                 "benchmark_num_experts"
             ]
 
+    # =========================================================================
+    # DECODE MODE — analytical or benchmark-enhanced
+    # =========================================================================
+    _projection_mode = getattr(args, "mode", MODE_TRAINING)
+    if _projection_mode == MODE_DECODE:
+        training_config = convert_primus_config_to_projection_config(primus_config_original)
+
+        profiling_mode = getattr(args, "profiling_mode", "benchmark")
+        decode_profiling_results = None
+
+        if profiling_mode in ("benchmark", "both"):
+            # Benchmark layers with seq_len=1 to get real GPU GEMM timings
+            decode_batch = getattr(args, "decode_batch_size", None)
+            if decode_batch is None:
+                decode_batch = training_config.runtime_config.micro_batch_size
+
+            decode_profiling_results = _run_decode_layer_benchmark(
+                copy.deepcopy(primus_config),
+                unknown_overrides,
+                decode_batch_size=decode_batch,
+            )
+
+        if profiling_mode == "both":
+            # Run both: show analytical and benchmark-enhanced side by side
+            is_rank_0 = int(os.getenv("RANK", "0")) == 0
+
+            # Analytical
+            if is_rank_0:
+                print("\n" + "=" * 100)
+                print("[Primus:Decode] Running ANALYTICAL projection...")
+                print("=" * 100)
+            _run_decode_projection(training_config, args, target_nodes, profiling_results=None)
+
+            # Benchmark-enhanced
+            if is_rank_0:
+                print("\n" + "=" * 100)
+                print("[Primus:Decode] Running BENCHMARK-ENHANCED projection...")
+                print("=" * 100)
+            _run_decode_projection(
+                training_config, args, target_nodes,
+                profiling_results=decode_profiling_results,
+            )
+        else:
+            # Single mode: benchmark or simulate
+            _run_decode_projection(
+                training_config, args, target_nodes,
+                profiling_results=decode_profiling_results,
+            )
+        return
+
     # Determine profiling mode
     profiling_mode = getattr(args, "profiling_mode", "benchmark")
 
@@ -2224,10 +3234,17 @@ def launch_projection_from_cli(args, overrides):
     # Use original config for projection calculations
     training_config = convert_primus_config_to_projection_config(primus_config_original)
 
+    # Determine projection mode (training / prefill / decode)
+    projection_mode = getattr(args, "mode", MODE_TRAINING)
+    # Normalise: "inference" is an alias for "prefill"
+    if projection_mode == MODE_INFERENCE:
+        projection_mode = MODE_PREFILL
+
     # Update data_parallel_size based on target_nodes
-    # This ensures the pipeline simulation calculates the correct number of microbatches
-    # NOTE: For MoE models, EP does NOT reduce DP (experts are distributed but tokens are replicated)
-    # DP = world_size / (TP × PP × CP)  [EP is excluded]
+    # This ensures the pipeline simulation calculates the correct number of microbatches.
+    # DP = world_size / (TP × PP × CP) for both dense and MoE.  With MoE Parallel
+    # Folding, EP borrows from the DP dimension (CP is folded into EP), so EP
+    # does not appear in the DP divisor.
     mp_config = training_config.model_parallel_config
     tp = mp_config.tensor_model_parallel_size
     pp = mp_config.pipeline_model_parallel_size
@@ -2238,7 +3255,7 @@ def launch_projection_from_cli(args, overrides):
     # The pipeline simulator simulates the target config, so it needs target DP for microbatch calculation
     target_world_size = target_nodes * gpus_per_node
 
-    # For MoE models: DP calculation excludes EP since experts are distributed but data is replicated
+    # DP = world_size / (TP × PP × CP) — EP excluded (borrows from DP via folding)
     target_dp = target_world_size // (tp * pp * cp)
 
     # Also show benchmark config for reference
@@ -2250,14 +3267,88 @@ def launch_projection_from_cli(args, overrides):
     # Only print from rank 0
     is_rank_0 = int(os.getenv("RANK", "0")) == 0
 
+    mode_label = "Prefill" if projection_mode == MODE_PREFILL else "Training"
     if is_rank_0:
-        print("[Primus:Performance Projection] Configuration Summary:")
+        print(f"[Primus:{mode_label} Projection] Configuration Summary:")
         print(
             f"  Benchmark Config: PP={benchmark_pp}, EP={benchmark_ep}, TP={tp}, CP={cp}, DP={benchmark_dp} (1 node)"
         )
         print(
             f"  Target Config: PP={pp}, EP={ep}, TP={tp}, CP={cp}, DP={target_dp} ({target_nodes} nodes)"
         )
+        print(f"  Mode: {projection_mode}")
+
+    # =========================================================================
+    # PREFILL MODE — forward-only projection, no backward/optimizer/gradient
+    # =========================================================================
+    if projection_mode == MODE_PREFILL:
+        # For inference, EP overhead adjustment is forward-only
+        if (
+            reduction_info["adjusted"]
+            and reduction_info["original_ep"] != reduction_info["benchmark_ep"]
+        ):
+            original_ep = reduction_info["original_ep"]
+            benchmark_ep = reduction_info["benchmark_ep"]
+            original_num_experts = reduction_info.get("original_num_experts")
+            benchmark_num_experts = reduction_info.get("benchmark_num_experts")
+
+            hardware_config_dict = None
+            if hasattr(args, "hardware_config") and args.hardware_config:
+                hardware_config_dict = load_hardware_config(args.hardware_config)
+
+            fwd_overhead_per_layer, _ = _estimate_ep_communication_overhead(
+                training_config, original_ep, benchmark_ep, hardware_config_dict,
+            )
+            ep_mlp_scale = _compute_ep_mlp_scale(
+                training_config.model_config,
+                benchmark_ep, original_ep,
+                original_num_experts=original_num_experts,
+                benchmark_num_experts=benchmark_num_experts,
+            )
+
+            if is_rank_0:
+                print("[Primus:Inference Projection] Adjusting profiling for EP (forward-only):")
+                print(f"  EP rescaled: {benchmark_ep} → {original_ep}")
+                print(f"  MLP fwd scale factor: {ep_mlp_scale:.3f}")
+                if fwd_overhead_per_layer > 0:
+                    print(f"  A2A fwd delta: +{fwd_overhead_per_layer:.3f} ms/layer")
+
+            for layer_idx, layer_data in profiling_results.items():
+                if isinstance(layer_data, dict) and layer_data.get("type") == "moe":
+                    old_fwd = layer_data.get("forward_time_ms", 0)
+                    mlp_info = layer_data.get("mlp", {})
+                    mlp_fwd = mlp_info.get("forward_time_ms", 0)
+                    new_mlp_fwd = mlp_fwd * ep_mlp_scale
+                    mlp_delta_fwd = new_mlp_fwd - mlp_fwd
+                    new_fwd = old_fwd + mlp_delta_fwd + fwd_overhead_per_layer
+                    layer_data["forward_time_ms"] = new_fwd
+                    if mlp_info:
+                        mlp_info["forward_time_ms"] = new_mlp_fwd
+
+        # Extract forward-only time
+        forward_time_ms = extract_single_node_time_inference(
+            profiling_results, training_config
+        )
+
+        # Run inference projection
+        if target_nodes >= min_nodes_required:
+            if is_rank_0:
+                print("" + "=" * 100)
+                print("[Primus:Inference] Running inference projection")
+                print("=" * 100)
+
+            _run_inference_projection(
+                training_config,
+                forward_time_ms,
+                profiling_results,
+                args,
+                target_nodes,
+            )
+        return
+
+    # =========================================================================
+    # TRAINING MODE — full forward + backward + optimizer + gradient AllReduce
+    # =========================================================================
 
     # Use BENCHMARK DP for pipeline simulation to get consistent baseline
     # The multinode projection will then scale from this baseline to target
