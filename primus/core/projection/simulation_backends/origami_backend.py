@@ -164,9 +164,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
 
         # Clock override: CLI > env var > profile default
         _env_clock = os.getenv("PRIMUS_GPU_CLOCK_MHZ", None)
-        self._clock_override_mhz: Optional[int] = gpu_clock_mhz or (
-            int(_env_clock) if _env_clock else None
-        )
+        self._clock_override_mhz: Optional[int] = gpu_clock_mhz or (int(_env_clock) if _env_clock else None)
 
         self._n_cu_override = n_cu_override
 
@@ -258,12 +256,8 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         problem = _origami.problem_t()
         problem.size = _origami.dim3_t(m, n, k)
         problem.batch = batch
-        problem.a_transpose = (
-            _origami.transpose_t.T if trans_a else _origami.transpose_t.N
-        )
-        problem.b_transpose = (
-            _origami.transpose_t.T if trans_b else _origami.transpose_t.N
-        )
+        problem.a_transpose = _origami.transpose_t.T if trans_a else _origami.transpose_t.N
+        problem.b_transpose = _origami.transpose_t.T if trans_b else _origami.transpose_t.N
 
         origami_dtype = _origami.string_to_datatype(_DTYPE_MAP.get(sim_dtype, "bf16"))
         problem.a_dtype = origami_dtype
@@ -279,8 +273,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
             result = _origami.select_config(problem, self._hardware, self._configs)
         except Exception as e:
             raise RuntimeError(
-                f"Origami select_config failed for "
-                f"(M={m}, N={n}, K={k}, dtype={dtype}): {e}"
+                f"Origami select_config failed for " f"(M={m}, N={n}, K={k}, dtype={dtype}): {e}"
             ) from e
 
         latency_cycles = result.latency
@@ -407,9 +400,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
             clock_khz = profile.compute_clock_khz
             if self._clock_override_mhz is not None:
                 clock_khz = self._clock_override_mhz * 1000
-            n_cu = (
-                self._n_cu_override if self._n_cu_override is not None else profile.n_cu
-            )
+            n_cu = self._n_cu_override if self._n_cu_override is not None else profile.n_cu
             arch_enum = getattr(_origami.architecture_t, profile.arch_enum_name)
             hw = _origami.get_hardware_for_arch(
                 arch_enum,
@@ -422,11 +413,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 override_tag = ""
                 if self._clock_override_mhz is not None:
                     override_tag = " (overridden via --gpu-clock-mhz)"
-                cu_tag = (
-                    f" (n_cu_override={n_cu})"
-                    if self._n_cu_override is not None
-                    else ""
-                )
+                cu_tag = f" (n_cu_override={n_cu})" if self._n_cu_override is not None else ""
                 print(
                     f"[Primus:Origami] Using hardware profile for "
                     f"'{self._gpu_arch}': N_CU={n_cu}, "
@@ -481,9 +468,7 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
             override_tag = ""
             if self._clock_override_mhz is not None:
                 override_tag = " (overridden via --gpu-clock-mhz)"
-            cu_tag = (
-                f" (n_cu_override={n_cu})" if self._n_cu_override is not None else ""
-            )
+            cu_tag = f" (n_cu_override={n_cu})" if self._n_cu_override is not None else ""
             print(
                 f"[Primus:Origami] Using known hardware profile for "
                 f"'{self._gpu_arch}': N_CU={n_cu}, "

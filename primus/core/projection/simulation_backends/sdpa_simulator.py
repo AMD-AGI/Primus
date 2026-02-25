@@ -173,9 +173,7 @@ def _get_hardware_spec(
     spec = _HW_PROFILES.get(arch, _HW_PROFILES["mi300x"])
 
     # Apply clock override — scale TFLOPS linearly
-    clock_override = gpu_clock_mhz or (
-        int(v) if (v := os.getenv("PRIMUS_GPU_CLOCK_MHZ")) else None
-    )
+    clock_override = gpu_clock_mhz or (int(v) if (v := os.getenv("PRIMUS_GPU_CLOCK_MHZ")) else None)
     if clock_override is not None:
         # Derive the profile's implicit clock from a known reference.
         _PROFILE_CLOCK_MHZ = {
@@ -344,20 +342,14 @@ class SDPASimulator(SDPASimulationBackend):
             if backend.is_available():
                 is_rank_0 = int(os.getenv("RANK", "0")) == 0
                 if is_rank_0:
-                    print(
-                        "[Primus:SDPA] Using Origami 1-CU tile-level simulation "
-                        "for Flash Attention"
-                    )
+                    print("[Primus:SDPA] Using Origami 1-CU tile-level simulation " "for Flash Attention")
                 return backend
         except Exception as exc:
             # If Origami is not available or fails to initialize, fall back to
             # the analytic SDPA model by returning None here.
             is_rank_0 = int(os.getenv("RANK", "0")) == 0
             if is_rank_0:
-                print(
-                    "[Primus:SDPA] Origami 1-CU tile-level simulation disabled "
-                    f"due to error: {exc}"
-                )
+                print("[Primus:SDPA] Origami 1-CU tile-level simulation disabled " f"due to error: {exc}")
         return None
 
     def _simulate_tile_level(
@@ -498,8 +490,7 @@ class SDPASimulator(SDPASimulationBackend):
         total_updates_local = warp_updates_local * bwd_waves
 
         bwd_atomic_ms = (
-            _ATOMIC_LATENCY_GLOBAL_NS * total_updates_global
-            + _ATOMIC_LATENCY_LOCAL_NS * total_updates_local
+            _ATOMIC_LATENCY_GLOBAL_NS * total_updates_global + _ATOMIC_LATENCY_LOCAL_NS * total_updates_local
         ) / 1e6  # ns → ms
 
         bwd_time_ms = bwd_compute_ms + bwd_atomic_ms
@@ -540,17 +531,13 @@ class SDPASimulator(SDPASimulationBackend):
             + B * H_K * S_K * D_v * bpe  # dV
         )
 
-        fwd_achieved_tflops = (
-            (fwd_flops / (fwd_time_ms * 1e-3)) / 1e12 if fwd_time_ms > 0 else 0
-        )
+        fwd_achieved_tflops = (fwd_flops / (fwd_time_ms * 1e-3)) / 1e12 if fwd_time_ms > 0 else 0
 
         return SimulationResult(
             forward_time_ms=fwd_time_ms,
             backward_time_ms=bwd_time_ms,
             tflops=fwd_achieved_tflops,
-            bandwidth_gbps=(
-                (fwd_bytes / (fwd_time_ms * 1e-3)) / 1e9 if fwd_time_ms > 0 else 0
-            ),
+            bandwidth_gbps=((fwd_bytes / (fwd_time_ms * 1e-3)) / 1e9 if fwd_time_ms > 0 else 0),
             metadata={
                 "backend": "sdpa_simulator (FAv3 tile-level, Origami 1-CU)",
                 # Standard metadata keys (for compatibility)
