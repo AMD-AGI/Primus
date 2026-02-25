@@ -289,7 +289,7 @@ if [ "${BACKEND:-}" == "MaxText" ]; then
     export DUMP_HLO_DIR=${DUMP_HLO_DIR:-"${PRIMUS_PATH}/output/xla_dump_hlo"}
     export DUMP_HLO=${DUMP_HLO:-0}
     export NVTE_ALLOW_NONDETERMINISTIC_ALGO=1
-    if [ $NNODES -gt 1 ]; then
+    if [ "${NNODES}" -gt 1 ]; then
         export XLA_PYTHON_CLIENT_MEM_FRACTION=.93
         export JAX_HIP_GRAPH_LOWERING=false
     else

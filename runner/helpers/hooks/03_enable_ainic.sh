@@ -41,7 +41,7 @@ NCCL_IB_QPS_PER_CONNECTION="${NCCL_IB_QPS_PER_CONNECTION:-1}"
 
 # LD_LIBRARY_PATH: prepend AINIC/RCCL/MPI paths while preserving existing.
 _ld_base="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib"
-# Need to append AINIC/RCCL/MPI paths to the existing LD_LIBRARY_PATH. Otherwise, 
+# Need to append AINIC/RCCL/MPI paths to the existing LD_LIBRARY_PATH. Otherwise,
 # JAX MaxText will not find the appropriate ROCm libraries.
 LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}${_ld_base}"
 LOG_INFO_RANK0 "Using AINIC"

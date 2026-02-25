@@ -50,6 +50,7 @@ class PrimusAttentionOp(AttentionOp):
         mask_type = "padding_causal"
         qkv_layout = "BSHD_BSHD_BSHD"  # Non-packed format: 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
         max_segments_per_seq = 1  # max number of segments per sequence; for non-packed its 1
+        attn_mask_threshold = 0.5
 
         # Handle local sliding window attention if configured
         if self.attention_type == AttentionType.LOCAL_SLIDING:
@@ -82,7 +83,9 @@ class PrimusAttentionOp(AttentionOp):
                 (1, 1, 1, self.max_target_length, self.max_target_length), dtype=jnp.uint8
             )
             attn_mask = self.generate_attention_mask(query, key, decoder_segment_ids, model_mode)
-            attn_mask = jnp.where((attn_mask >= DEFAULT_MASK_VALUE * 0.5), 0, 1).astype(jnp.uint8)
+            attn_mask = jnp.where((attn_mask >= DEFAULT_MASK_VALUE * attn_mask_threshold), 0, 1).astype(
+                jnp.uint8
+            )
 
         dpa_layer = DotProductAttention(
             head_dim=head_dim,

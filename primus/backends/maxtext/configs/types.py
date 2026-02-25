@@ -221,13 +221,13 @@ class PrimusMaxTextConfig(
         MaxTextConfig.set_derived_and_validate_values(self)
 
         # Add any Primus-specific validations here if needed
-        if self.wandb_save_dir is None or self.wandb_save_dir == "" and self.base_output_directory:
+        if (self.wandb_save_dir is None or self.wandb_save_dir == "") and self.base_output_directory:
             self.wandb_save_dir = os.path.join(self.base_output_directory, "wandb")
 
         if self.wandb_project is None or self.wandb_project == "":
             self.wandb_project = os.getenv("WANDB_PROJECT", "Primus-MaxText-Pretrain")
 
-        if self.wandb_exp_name is None or self.wandb_exp_name == "" and self.run_name:
+        if (self.wandb_exp_name is None or self.wandb_exp_name == "") and self.run_name:
             self.wandb_exp_name = self.run_name
 
         if self.enable_wandb and "WANDB_API_KEY" not in os.environ:

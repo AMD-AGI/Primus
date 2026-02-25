@@ -247,17 +247,10 @@ def initialize(argv: Sequence[str], **kwargs) -> tuple[pyconfig.HyperParameters,
 
 def run(config, recorder, diagnostic_config):
     """Run the job given hyperparameters and utilities"""
-    try:
-        with (
-            diagnostic.diagnose(diagnostic_config),
-            maybe_record_goodput(recorder, GoodputEvent.JOB),
-            max_utils.maybe_get_transformer_engine_context(config),
-            maybe_monitor_goodput(config),
-        ):
-            train_loop(config, recorder)
-    except Exception as e:
-        max_logging.log(f"Error in train_loop: {e}")
-        import traceback
-
-        max_logging.log(f"Traceback: {traceback.format_exc()}")
-        raise
+    with (
+        diagnostic.diagnose(diagnostic_config),
+        maybe_record_goodput(recorder, GoodputEvent.JOB),
+        max_utils.maybe_get_transformer_engine_context(config),
+        maybe_monitor_goodput(config),
+    ):
+        train_loop(config, recorder)

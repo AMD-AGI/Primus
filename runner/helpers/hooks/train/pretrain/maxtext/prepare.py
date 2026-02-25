@@ -236,7 +236,7 @@ def main():
     print(f"env.DUMP_HLO_DIR={dump_hlo_dir}")
     print(f"env.DUMP_HLO={dump_hlo}")
     print("env.NVTE_ALLOW_NONDETERMINISTIC_ALGO=1")
-    # set XLA_PYTHON_CLIENT_MEM_FRACTION to 0.93 
+    # set XLA_PYTHON_CLIENT_MEM_FRACTION to 0.93
     # to avoid HSA_STATUS_ERROR_OUT_OF_RESOURCES error during multi-node training
     print("env.XLA_PYTHON_CLIENT_MEM_FRACTION=.93")
     print("env.NVTE_USE_HIPBLASLT=1")
