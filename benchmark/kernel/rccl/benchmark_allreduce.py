@@ -1,5 +1,5 @@
 ###############################################################################
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -160,7 +160,7 @@ def benchmark(test_func, output_csv_path, rank, local_rank, world_size, dry_run=
                         "Time(s)": avg_time,
                         "Bandwidth(GB/s)": bandwidth,
                     }
-                    print(result)
+                    # print(result)
                     benchmark_results.append(result)
 
     if rank == 0 and not dry_run:
