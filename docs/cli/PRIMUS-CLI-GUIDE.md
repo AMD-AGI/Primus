@@ -260,7 +260,7 @@ direct:
 
 ### Using AINIC Configuration File
 
-If you are using AINIC in your cluster, you can use `runner/use_ainic.yaml` configuration file to configure the AINIC environment. In this file, we have already set the environment variables for AINIC: `USING_AINIC=1`, `NCCL_PXN_DISABLE=0`, and `NCCL_IB_GID_INDEX=1`. You can modify the `NCCL_IB_GID_INDEX` value based on your AINIC settings. Also, you can modify the `image` value to the appropriate Docker image you are using. 
+If you are using AINIC in your cluster, you can use the `runner/use_ainic.yaml` configuration file to configure the AINIC environment. This file includes pre-configured environment variables for AINIC: `USING_AINIC=1`, `NCCL_PXN_DISABLE=0`, and `NCCL_IB_GID_INDEX=1`. You can modify the `NCCL_IB_GID_INDEX` value based on your AINIC settings and update the `image` value to match your Docker image.
 
 Here is an example of using the AINIC configuration file to run a training job: 
 ```bash
