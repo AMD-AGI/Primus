@@ -696,25 +696,8 @@ def calculate_collective_communication_time(
     if use_fsdp and dp > 1:
         overlap_fsdp = getattr(mp_config, "use_torch_fsdp2", False)
         if overlap_fsdp:
-            recompute_gran = getattr(mp_config, "recompute_granularity", None)
-            recomp_n = getattr(mp_config, "recompute_num_layers", 0) or 0
-            has_recompute = recompute_gran == "full" and recomp_n > 0
-
             total_fsdp_ag = breakdown.get("fsdp_allgather_fwd", 0)
             total_fsdp_rs = breakdown.get("fsdp_reducescatter_bwd", 0)
-
-            if has_recompute:
-                # With full recompute the AG total already includes the 2×
-                # multiplier.  Split into forward AG and backward (recomp) AG.
-                recomp_ratio = min(recomp_n, num_layers) / num_layers
-                ag_multiplier_val = message_info.get(
-                    "fsdp_ag_multiplier", 1 + recomp_ratio
-                )
-                fwd_ag_total = total_fsdp_ag / ag_multiplier_val
-                bwd_ag_total = total_fsdp_ag - fwd_ag_total
-            else:
-                fwd_ag_total = total_fsdp_ag
-                bwd_ag_total = 0.0
 
             # Overlap factor applied uniformly to all FSDP
             # communication - (AllGather fwd, AllGather recompute, ReduceScatter).

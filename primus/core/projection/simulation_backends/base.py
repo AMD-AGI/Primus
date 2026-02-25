@@ -132,8 +132,6 @@ class GEMMSimulationBackend(ABC):
         Returns:
             SimulationResult with forward_time_ms and backward_time_ms.
         """
-        fwd_time = 0.0
-        bwd_time = 0.0
         # Use batched GEMM (batch=num_experts) as approximation of grouped GEMM.
         # Valid under uniform token distribution (all experts get the same M).
         # TODO: switch to native grouped-GEMM simulation if/when Origami supports it.

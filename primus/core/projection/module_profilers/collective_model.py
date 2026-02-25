@@ -581,7 +581,6 @@ def pxn_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     scale_out_msg_size = int(original_msg_size * (num_nodes - 1) / num_nodes)
 
     # Scale-up delay: time to accumulate 4MB before scale-out starts
-    scaleup_delay = 0.0
     if scale_out_msg_size < chunk_size:
         # If total scale-out msg size is less than 4MB,
         # total time = scaleup_delay + scaleout_time
