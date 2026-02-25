@@ -14,10 +14,21 @@ def run(args, overrides):
 
         launch_projection_from_cli(args, overrides)
     elif args.suite == "performance":
+        # Normalise mode: "inference" is an alias for "prefill"
+        mode = getattr(args, "mode", "training")
+        if mode == "inference":
+            args.mode = "prefill"
+
         profiling_mode = getattr(args, "profiling_mode", "benchmark")
 
-        if profiling_mode != "simulate":
-            # Benchmark or "both" modes need the Megatron backend
+        # Decode + simulate is fully analytical — no backend needed.
+        # Decode + benchmark/both needs the Megatron backend (runs real layers
+        # with seq_len=1 to measure decode-step GEMMs on the GPU).
+        needs_backend = profiling_mode != "simulate"
+        if mode == "decode" and profiling_mode == "simulate":
+            needs_backend = False
+
+        if needs_backend:
             from primus.pretrain import setup_backend_path
 
             setup_backend_path(framework="megatron", verbose=True)
@@ -144,6 +155,56 @@ def register_subcommand(subparsers):
             "given --gpu-arch (e.g. 2100 MHz for MI300X/MI325X).\n"
             "Can also be set via the PRIMUS_GPU_CLOCK_MHZ env var.\n"
             "Example: --gpu-clock-mhz 1500\n"
+        ),
+    )
+    performance.add_argument(
+        "--mode",
+        type=str,
+        required=False,
+        default="training",
+        choices=["training", "inference", "prefill", "decode"],
+        help=(
+            "Projection mode:\n"
+            "  training   - Project training iteration time (forward + backward +\n"
+            "               optimizer step + gradient AllReduce). Default.\n"
+            "  inference  - Alias for 'prefill'.\n"
+            "  prefill    - Project inference prefill latency (forward-only, no\n"
+            "               backward pass, optimizer, or gradient communication).\n"
+            "  decode     - Project autoregressive decode latency per token.\n"
+            "               With --profiling-mode simulate: fully analytical (no GPU).\n"
+            "               With --profiling-mode benchmark: benchmarks GEMMs with\n"
+            "               seq_len=1 on GPU, overlays analytical KV cache model.\n"
+        ),
+    )
+    performance.add_argument(
+        "--decode-batch-size",
+        type=int,
+        required=False,
+        default=None,
+        help=(
+            "Number of sequences being decoded concurrently (decode mode only).\n"
+            "Defaults to micro_batch_size from the config.\n"
+        ),
+    )
+    performance.add_argument(
+        "--decode-context-length",
+        type=int,
+        required=False,
+        default=None,
+        help=(
+            "Current context length during decode, i.e. number of previous tokens\n"
+            "in the KV cache (decode mode only). Affects KV cache read time.\n"
+            "Defaults to sequence_length from the config.\n"
+        ),
+    )
+    performance.add_argument(
+        "--num-generated-tokens",
+        type=int,
+        required=False,
+        default=None,
+        help=(
+            "Number of tokens to generate (decode mode only). Used to estimate\n"
+            "total generation time. Defaults to 128.\n"
         ),
     )
 
