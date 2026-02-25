@@ -29,19 +29,18 @@ ITERS = 100
 
 
 def test_allreduce(mbs, seq, hidden, dtype, rank, local_rank, world_size, dry_run=False):
-    if local_rank == 0:
+    if rank == 0:
         size = mbs * seq * hidden * torch.tensor([], dtype=dtype).element_size()
         print("AllReduce with input size(Byte): ", size)
-        print(
-            f"Rccl-test command: \n$ mpirun -np {world_size} -N $NNODES ./build/all_reduce_perf -b {size} -e {size} -g 1"
-        )
+        if dry_run:
+            print(
+                f"Rccl-test command: \n$ mpirun -np {world_size} -N $NNODES ./build/all_reduce_perf -b {size} -e {size} -g 1"
+            )
     if dry_run:
         return 0, 0
     shape = (mbs, seq, hidden)
     device = torch.device(f"cuda:{local_rank}")
     tensor = torch.ones(shape, dtype=dtype, device=device)
-    if local_rank == 0:
-        print("AllReduce with input size(Byte): ", tensor.nelement() * tensor.element_size())
     # Warm-up
     for _ in range(5):
         dist.all_reduce(tensor)
@@ -66,7 +65,7 @@ def test_allreduce(mbs, seq, hidden, dtype, rank, local_rank, world_size, dry_ru
 def test_allgather(mbs, seq, hidden, dtype, rank, local_rank, world_size, dry_run=False):
     local_seq = seq // world_size
 
-    if local_rank == 0:
+    if rank == 0:
         element_size = torch.tensor([], dtype=dtype).element_size()
         nelement = mbs * local_seq * hidden
         print(
@@ -84,13 +83,7 @@ def test_allgather(mbs, seq, hidden, dtype, rank, local_rank, world_size, dry_ru
 
     # Gather buffer
     output = [torch.randn_like(tensor) for _ in range(world_size)]
-    if local_rank == 0:
-        print(
-            "AllGather with input size(Byte): ",
-            tensor.nelement() * tensor.element_size(),
-            " Output size ",
-            world_size * tensor.nelement() * tensor.element_size(),
-        )
+
     for _ in range(5):
         dist.all_gather(output, tensor)
     dist.barrier()
@@ -114,7 +107,7 @@ def test_reducescatter(mbs, seq, hidden, dtype, rank, local_rank, world_size, dr
     chunk_seq = seq // world_size
     chunk_shape = (mbs, chunk_seq, hidden)
 
-    if local_rank == 0:
+    if rank == 0:
         print(
             "ReduceScatter with each output chunk size(Byte): ",
             mbs * chunk_seq * hidden * torch.tensor([], dtype=dtype).element_size(),
@@ -126,8 +119,7 @@ def test_reducescatter(mbs, seq, hidden, dtype, rank, local_rank, world_size, dr
     device = torch.device(f"cuda:{local_rank}")
     tensor = torch.ones(full_shape, dtype=dtype, device=device)
     output = torch.empty(chunk_shape, dtype=dtype, device=device)
-    if local_rank == 0:
-        print("ReduceScatter with each output chunk size(Byte): ", output.nelement() * output.element_size())
+
     for _ in range(5):
         dist.reduce_scatter(output, list(tensor.chunk(world_size, dim=1)))
     dist.barrier()
@@ -151,7 +143,8 @@ def benchmark(test_func, output_csv_path, rank, local_rank, world_size, dry_run=
 
     for model_name, (seq, hidden) in MODEL_PARAMS_TABLE.items():
         for mbs in MBS_LIST:
-            print(f"\nModel Name {model_name}, mbs {mbs}")
+            if rank == 0:
+                print(f"\nModel Name {model_name}, mbs {mbs}")
             for dtype in [torch.float16]:
                 avg_time, bandwidth = test_func(
                     mbs, seq, hidden, dtype, rank, local_rank, world_size, dry_run
@@ -167,6 +160,7 @@ def benchmark(test_func, output_csv_path, rank, local_rank, world_size, dry_run=
                         "Time(s)": avg_time,
                         "Bandwidth(GB/s)": bandwidth,
                     }
+                    print(result)
                     benchmark_results.append(result)
 
     if rank == 0 and not dry_run:
