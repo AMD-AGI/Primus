@@ -4,7 +4,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import math
 import os
 from typing import Optional
 
@@ -196,9 +195,6 @@ class MoEMLPProfiler(BaseModuleProfiler):
                 f"  [MoE MLP] Grouped-GEMM model: {mode}"
                 f"  ({num_local_experts} local experts, M={M}, H={H}, F={F})"
             )
-
-        expert_fwd_ms = 0.0
-        expert_bwd_ms = 0.0
 
         if use_turbo:
             # ── Turbo model: batched GEMM (all experts in parallel) ──

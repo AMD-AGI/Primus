@@ -349,8 +349,15 @@ class SDPASimulator(SDPASimulationBackend):
                         "for Flash Attention"
                     )
                 return backend
-        except Exception:
-            pass
+        except Exception as exc:
+            # If Origami is not available or fails to initialize, fall back to
+            # the analytic SDPA model by returning None here.
+            is_rank_0 = int(os.getenv("RANK", "0")) == 0
+            if is_rank_0:
+                print(
+                    "[Primus:SDPA] Origami 1-CU tile-level simulation disabled "
+                    f"due to error: {exc}"
+                )
         return None
 
     def _simulate_tile_level(
