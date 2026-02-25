@@ -35,9 +35,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
         super().__init__(config, sub_profilers)
         self.module = None  # Will be set during benchmarking
-        self._cached_results = (
-            None  # Cache for (forward_time, backward_time, activation_memory)
-        )
+        self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
         self._cache_key = None  # Cache key (batch_size, seq_len)
         self._gemm_backend = None  # Optional: GEMM simulation backend
 
@@ -64,26 +62,16 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # For SwiGLU: 3 projections per expert (gate, up, down)
         # For standard FFN: 2 projections per expert (up, down)
         num_ffn_projections = 3 if self.config.model_config.swiglu else 2
-        per_expert_params = (
-            num_ffn_projections * self.config.model_config.hidden_size * moe_ffn
-        )
-        ep = (
-            1
-            if rank is None
-            else self.config.model_parallel_config.expert_model_parallel_size
-        )
+        per_expert_params = num_ffn_projections * self.config.model_config.hidden_size * moe_ffn
+        ep = 1 if rank is None else self.config.model_parallel_config.expert_model_parallel_size
 
-        all_experts_params = (
-            self.config.model_config.num_experts * per_expert_params // ep
-        )
+        all_experts_params = self.config.model_config.num_experts * per_expert_params // ep
 
         # Shared experts (if any)
         shared_sz = 0
         if self.config.model_config.moe_shared_expert_intermediate_size is not None:
             shared_sz = self.config.model_config.moe_shared_expert_intermediate_size
-        shared_params = (
-            num_ffn_projections * self.config.model_config.hidden_size * shared_sz
-        )
+        shared_params = num_ffn_projections * self.config.model_config.hidden_size * shared_sz
 
         return all_experts_params + shared_params
 
@@ -120,16 +108,12 @@ class MoEMLPProfiler(BaseModuleProfiler):
 
             # After activation
             activation_memory = num_tokens * moe_ffn * 2  # bf16
-            output_memory = (
-                num_tokens * self.config.model_config.hidden_size * 2
-            )  # bf16
+            output_memory = num_tokens * self.config.model_config.hidden_size * 2  # bf16
             total += intermediate_memory + activation_memory + output_memory
 
         return total
 
-    def _get_simulated_results(
-        self, batch_size: int, seq_len: int
-    ) -> tuple[float, float, int]:
+    def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         """Get simulated results from the GEMM simulation backend for MoE MLP.
 
         In addition to expert GEMM time, this method estimates several
@@ -184,9 +168,9 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # execution → model as Origami batched GEMM (batch=num_local_experts).
         # Legacy grouped_gemm executes experts more sequentially → model as
         # individual GEMM (batch=1) × num_local_experts.
-        use_turbo = getattr(
-            self.config.model_config, "enable_primus_turbo", False
-        ) and getattr(self.config.model_config, "use_turbo_grouped_mlp", False)
+        use_turbo = getattr(self.config.model_config, "enable_primus_turbo", False) and getattr(
+            self.config.model_config, "use_turbo_grouped_mlp", False
+        )
 
         is_rank_0 = int(os.getenv("RANK", "0")) == 0
         if is_rank_0 and num_local_experts > 1:
@@ -200,18 +184,10 @@ class MoEMLPProfiler(BaseModuleProfiler):
             # ── Turbo model: batched GEMM (all experts in parallel) ──
             B = num_local_experts
             if self.config.model_config.swiglu:
-                gate_fwd = self._gemm_backend.simulate_gemm(
-                    M, F, H, gemm_dtype, batch=B
-                )
+                gate_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
                 up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                down_fwd = self._gemm_backend.simulate_gemm(
-                    M, H, F, gemm_dtype, batch=B
-                )
-                expert_fwd_ms = (
-                    gate_fwd.forward_time_ms
-                    + up_fwd.forward_time_ms
-                    + down_fwd.forward_time_ms
-                )
+                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                expert_fwd_ms = gate_fwd.forward_time_ms + up_fwd.forward_time_ms + down_fwd.forward_time_ms
                 gate_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
                 gate_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
                 up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
@@ -228,9 +204,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
                 )
             else:
                 up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                down_fwd = self._gemm_backend.simulate_gemm(
-                    M, H, F, gemm_dtype, batch=B
-                )
+                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
                 expert_fwd_ms = up_fwd.forward_time_ms + down_fwd.forward_time_ms
                 up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
                 up_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
@@ -248,18 +222,10 @@ class MoEMLPProfiler(BaseModuleProfiler):
         else:
             # ── Legacy model: individual GEMM × num_local_experts ──
             if self.config.model_config.swiglu:
-                gate_fwd = self._gemm_backend.simulate_gemm(
-                    M, F, H, gemm_dtype, batch=1
-                )
+                gate_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
                 up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                down_fwd = self._gemm_backend.simulate_gemm(
-                    M, H, F, gemm_dtype, batch=1
-                )
-                expert_fwd_ms = (
-                    gate_fwd.forward_time_ms
-                    + up_fwd.forward_time_ms
-                    + down_fwd.forward_time_ms
-                )
+                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
+                expert_fwd_ms = gate_fwd.forward_time_ms + up_fwd.forward_time_ms + down_fwd.forward_time_ms
                 gate_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
                 gate_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
                 up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
@@ -276,9 +242,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
                 )
             else:
                 up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                down_fwd = self._gemm_backend.simulate_gemm(
-                    M, H, F, gemm_dtype, batch=1
-                )
+                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
                 expert_fwd_ms = up_fwd.forward_time_ms + down_fwd.forward_time_ms
                 up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
                 up_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
@@ -299,9 +263,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
 
         # ── 2. Router overhead ──
         # Gate linear: [batch_tokens, num_experts, hidden_size]
-        router_gemm = self._gemm_backend.simulate_gemm(
-            batch_tokens, num_experts, hidden_size, gemm_dtype
-        )
+        router_gemm = self._gemm_backend.simulate_gemm(batch_tokens, num_experts, hidden_size, gemm_dtype)
         router_fwd_ms = router_gemm.forward_time_ms
         # Softmax + top-K selection + auxiliary loss overhead (empirical)
         topk_overhead_ms = 0.1 + 0.002 * num_experts
@@ -320,8 +282,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # model adapts automatically to different architectures.
         peak_hbm = (
             self._gemm_backend.hbm_bandwidth_gbps
-            if self._gemm_backend is not None
-            and self._gemm_backend.hbm_bandwidth_gbps is not None
+            if self._gemm_backend is not None and self._gemm_backend.hbm_bandwidth_gbps is not None
             else _FALLBACK_HBM_BW_GBPS
         )
         permute_eff_bw_gbps = peak_hbm * _PERMUTE_BW_FRACTION
@@ -337,9 +298,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
 
         # ── 4. Activation function overhead (SwiGLU / GELU) ──
         if self.config.model_config.swiglu:
-            act_bytes = (
-                3 * topk_tokens * moe_ffn * bytes_per_el
-            )  # gate+up read, result write
+            act_bytes = 3 * topk_tokens * moe_ffn * bytes_per_el  # gate+up read, result write
         else:
             act_bytes = 2 * topk_tokens * moe_ffn * bytes_per_el  # read + write
         activation_ms = act_bytes / (activation_bw_gbps * 1e6)
@@ -363,9 +322,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 
-    def _get_benchmark_results(
-        self, batch_size: int, seq_len: int
-    ) -> tuple[float, float, int]:
+    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:

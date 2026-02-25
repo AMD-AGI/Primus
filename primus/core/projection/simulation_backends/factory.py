@@ -51,10 +51,7 @@ def get_gemm_simulation_backend(
     is_rank_0 = int(os.getenv("RANK", "0")) == 0
 
     if name is not None and name != "origami":
-        raise ValueError(
-            f"Unknown GEMM simulation backend: '{name}'. "
-            f"Supported backend: 'origami'"
-        )
+        raise ValueError(f"Unknown GEMM simulation backend: '{name}'. " f"Supported backend: 'origami'")
 
     from primus.core.projection.simulation_backends.origami_backend import (
         OrigamiGEMMBackend,
@@ -63,8 +60,7 @@ def get_gemm_simulation_backend(
     backend = OrigamiGEMMBackend(gpu_arch=gpu_arch, gpu_clock_mhz=gpu_clock_mhz)
     if not backend.is_available():
         raise RuntimeError(
-            "Origami GEMM simulation backend is not available.\n"
-            "Install it with: pip install origami"
+            "Origami GEMM simulation backend is not available.\n" "Install it with: pip install origami"
         )
 
     if is_rank_0:
@@ -98,9 +94,7 @@ def get_sdpa_simulation_backend(
 
     is_rank_0 = int(os.getenv("RANK", "0")) == 0
     if is_rank_0:
-        print(
-            "[Primus:Simulation] Using SDPA backend: sdpa_simulator (FAv3 Origami 1-CU)"
-        )
+        print("[Primus:Simulation] Using SDPA backend: sdpa_simulator (FAv3 Origami 1-CU)")
 
     return SDPASimulator(
         gpu_arch=gpu_arch,

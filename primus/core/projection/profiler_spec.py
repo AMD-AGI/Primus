@@ -15,6 +15,6 @@ from primus.core.projection.training_config import TrainingConfig
 class ModuleProfilerSpec:
     profiler: Type[BaseModuleProfiler]
     config: Type[TrainingConfig]
-    sub_profiler_specs: Optional[
-        Dict[str, Union[Type[BaseModuleProfiler], "ModuleProfilerSpec", None]]
-    ] = field(default_factory=lambda: {})
+    sub_profiler_specs: Optional[Dict[str, Union[Type[BaseModuleProfiler], "ModuleProfilerSpec", None]]] = (
+        field(default_factory=lambda: {})
+    )
