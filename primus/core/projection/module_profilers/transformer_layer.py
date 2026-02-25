@@ -12,8 +12,8 @@ from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import TrainingConfig
 
 from . import collective_model as cm
-from .collective_args import get_default_args
 from .attention import AttentionProfiler
+from .collective_args import get_default_args
 from .dense_mlp import DenseMLPProfiler
 from .layer_norm import LayerNormProfiler
 from .moe_mlp import MoEMLPProfiler

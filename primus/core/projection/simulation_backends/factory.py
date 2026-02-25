@@ -88,9 +88,7 @@ def get_sdpa_simulation_backend(
     Raises:
         RuntimeError: If the Origami backend is not available.
     """
-    from primus.core.projection.simulation_backends.sdpa_simulator import (
-        SDPASimulator,
-    )
+    from primus.core.projection.simulation_backends.sdpa_simulator import SDPASimulator
 
     is_rank_0 = int(os.getenv("RANK", "0")) == 0
     if is_rank_0:
