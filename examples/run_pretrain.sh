@@ -493,6 +493,9 @@ handle_hipblaslt_tuning() {
 # Disable HipBLASLT tuning in deterministic mode
 if [ "${PRIMUS_DETERMINISTIC:-}" != "1" ]; then
     handle_hipblaslt_tuning
+else
+    export TE_HIPBLASLT_TUNING_RUN_COUNT=0
+    export TE_HIPBLASLT_TUNING_ALGO_COUNT=0
 fi
 
 # -------------------- Python Path Setup --------------------
