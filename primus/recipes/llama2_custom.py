@@ -546,8 +546,8 @@ def evaluate_and_print_results_custom(
     string += "throughput: {:.6E} | ".format(throughput)
     string += "eval duration: {:.6E} | ".format(eval_duration)
     if writer:
-        writer.add_scalar("{} throughput samples/sec".format(key), throughput, state.train_state.step)
-        writer.add_scalar("{} throughput samples/sec vs samples".format(key), throughput, state.train_state.consumed_train_samples)
+        writer.add_scalar("throughput samples/sec", throughput, state.train_state.step)
+        writer.add_scalar("throughput samples/sec vs samples", throughput, state.train_state.consumed_train_samples)
 
     length = len(string) + 1
     log_rank_last("-" * length)
