@@ -7,16 +7,21 @@
 """
 Primus MoE Expert ↔ Communication Overlap Patch
 
-Patches MoELayer.forward to use chunked expert computation that overlaps
-expert GEMM with AlltoAll communication via CUDA stream pipelining.
+Patches MoELayer.forward to overlap dispatch AlltoAll communication with
+shared expert computation using separate CUDA streams.
+
+The overlap relies on DeepEP's async dispatch (comm stream) running
+concurrently with shared expert GEMM (compute stream). This gives a
+meaningful speedup for MoE models with shared experts (e.g., DeepSeek-V2/V3)
+where dispatch latency can be hidden behind shared expert computation.
 
 This patch is activated when:
     - enable_primus_turbo == True
     - use_turbo_deepep == True
     - turbo_moe_expert_comm_overlap == True
 
-The number of pipeline chunks is controlled by ``turbo_moe_overlap_num_chunks``
-(default: 2).
+The patch automatically enables ``turbo_deepep_use_comm_stream=True`` so
+that DeepEP runs AlltoAll on a separate comm stream.
 """
 
 import importlib.util
@@ -50,16 +55,15 @@ def _is_expert_comm_overlap_enabled(ctx: PatchContext) -> bool:
     "megatron.turbo.moe_expert_comm_overlap",
     backend="megatron",
     phase="before_train",
-    description="Overlap expert GEMM with AlltoAll communication in MoE layers",
+    description="Overlap dispatch AlltoAll with shared expert compute in MoE layers",
     condition=_is_expert_comm_overlap_enabled,
 )
 def patch_moe_expert_comm_overlap(ctx: PatchContext):
     """
-    Patch MoELayer.forward to use chunked expert–communication overlap.
+    Patch MoELayer.forward to overlap dispatch communication with shared
+    expert computation via CUDA stream pipelining.
 
-    This replaces MoELayer.forward with a version that splits dispatched tokens
-    into chunks and pipelines expert computation with communication operations
-    on separate CUDA streams.
+    Also auto-enables DeepEP comm stream for proper async AlltoAll.
     """
     from megatron.core.transformer.moe import moe_layer
 
@@ -68,21 +72,31 @@ def patch_moe_expert_comm_overlap(ctx: PatchContext):
     )
 
     args = get_args(ctx)
-    num_chunks = int(getattr(args, "turbo_moe_overlap_num_chunks", 2))
+
+    # Auto-enable DeepEP comm stream for async AlltoAll
+    if not getattr(args, "turbo_deepep_use_comm_stream", False):
+        args.turbo_deepep_use_comm_stream = True
+        log_rank_0(
+            "[Patch:moe_expert_comm_overlap] Auto-enabled turbo_deepep_use_comm_stream=True"
+        )
+
+    # Auto-disable Megatron's own shared_expert_overlap to avoid conflict
+    if getattr(args, "moe_shared_expert_overlap", False):
+        log_rank_0(
+            "[Patch:moe_expert_comm_overlap] moe_shared_expert_overlap already enabled, "
+            "Primus overlap will take precedence"
+        )
 
     log_rank_0(
-        f"[Patch:megatron.turbo.moe_expert_comm_overlap] "
-        f"Patching MoELayer.forward with {num_chunks}-chunk expert↔comm overlap..."
+        "[Patch:moe_expert_comm_overlap] "
+        "Patching MoELayer.forward with dispatch↔shared-expert overlap..."
     )
 
-    # Store original forward for reference
     original_forward = moe_layer.MoELayer.forward
-
-    # Create and apply patched forward
-    patched_forward = make_overlapped_forward(original_forward, num_chunks=num_chunks)
+    patched_forward = make_overlapped_forward(original_forward)
     moe_layer.MoELayer.forward = patched_forward
 
     log_rank_0(
-        f"[Patch:megatron.turbo.moe_expert_comm_overlap] "
-        f"Successfully patched MoELayer.forward with {num_chunks}-chunk overlap pipeline"
+        "[Patch:moe_expert_comm_overlap] "
+        "Successfully patched MoELayer.forward with comm↔compute overlap"
     )

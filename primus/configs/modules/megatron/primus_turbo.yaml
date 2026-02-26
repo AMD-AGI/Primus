@@ -20,8 +20,8 @@ turbo_deepep_use_comm_stream: false
 turbo_sync_free_moe_stage: 0
 
 # expert computation ↔ communication overlap (requires use_turbo_deepep)
+# overlaps dispatch AlltoAll with shared expert compute via CUDA streams
 turbo_moe_expert_comm_overlap: false
-turbo_moe_overlap_num_chunks: 2
 
 # use turbo fused activation_with_probs to optmize redundant computation
 use_turbo_fused_act_with_probs: false
