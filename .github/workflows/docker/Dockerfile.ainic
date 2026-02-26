@@ -54,8 +54,10 @@ ENV RCCL_HOME=${WORKDIR}/rccl
 # Build AMD ANP
 # ---------------------------------------------------------------------------
 
-RUN apt-get install -y --allow-unauthenticated libionic-dev && \
-    cd ${WORKDIR} && git clone https://github.com/rocm/amd-anp.git && \
+# RUN apt-get install -y --allow-unauthenticated libionic-dev && \
+RUN cd ${WORKDIR} && \
+    dpkg -i ./amd/ainic/deb-repo/libionic* && \
+    git clone https://github.com/rocm/amd-anp.git && \
     cd amd-anp && git checkout tags/v1.3.0 && \
     make -j 16 RCCL_HOME=${RCCL_HOME} \
                 MPI_INCLUDE=${MPI_PATH}/include/ \
