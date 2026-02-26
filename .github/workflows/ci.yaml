@@ -139,6 +139,7 @@ jobs:
                -t tasimage/primus:${{env.IMAGE_TAG}}-v25.09-ainic \
                --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{env.IMAGE_TAG}} \
                --build-arg AINIC_BUNDLE_PATH=ainic \
+               --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
                $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
