@@ -52,12 +52,12 @@ def detect_distributed_intent() -> Dict[str, Any]:
     )
 
     nnodes = 1
-    if slurm_nnodes_i is not None:
+    if slurm_nnodes_i is not None and slurm_nnodes_i > 0:
         nnodes = slurm_nnodes_i
     elif ompi_size_i is not None and ompi_local_size_i is not None and ompi_size_i > 1 and ompi_local_size_i > 0:
-        nnodes = ompi_size_i // ompi_local_size_i
+        nnodes = (ompi_size_i + ompi_local_size_i - 1) // ompi_local_size_i
     elif world_size > 1 and local_world_size > 0:
-        nnodes = world_size // local_world_size
+        nnodes = (world_size + local_world_size - 1) // local_world_size
 
     network_mode = "multi-node" if nnodes > 1 else "single-node"
 
