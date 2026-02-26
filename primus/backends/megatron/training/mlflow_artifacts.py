@@ -224,7 +224,7 @@ def upload_log_files_to_mlflow(
 # =============================================================================
 
 
-def _ensure_openpyxl_installed() -> bool:
+def _ensure_openpyxl_installed(auto_install: bool = True) -> bool:
     """
     Ensure openpyxl is installed for XLSX generation.
 
@@ -236,6 +236,9 @@ def _ensure_openpyxl_installed() -> bool:
 
         return True
     except ImportError:
+        if not auto_install:
+            warning_rank_0("[TraceLens] openpyxl not installed and auto-install disabled; skipping install.")
+            return False
         log_rank_0("[TraceLens] openpyxl not found, installing for XLSX support...")
         try:
             subprocess.run(
@@ -244,9 +247,13 @@ def _ensure_openpyxl_installed() -> bool:
                 stderr=subprocess.PIPE,
                 text=True,
                 check=True,
+                timeout=300,
             )
             log_rank_0("[TraceLens] Successfully installed openpyxl")
             return True
+        except subprocess.TimeoutExpired:
+            warning_rank_0("[TraceLens] openpyxl install timed out after 300s. Skipping install.")
+            return False
         except subprocess.CalledProcessError as e:
             stdout_output = e.stdout.strip() if e.stdout else "No stdout output captured."
             stderr_output = e.stderr.strip() if e.stderr else "No stderr output captured."
@@ -508,6 +515,7 @@ def generate_tracelens_report(
     output_dir: str,
     report_name: Optional[str] = None,
     output_format: str = "xlsx",
+    auto_install: bool = True,
 ) -> List[str]:
     """
     Generate a TraceLens analysis report for a single trace file.
@@ -552,7 +560,7 @@ def generate_tracelens_report(
 
         # Only ensure openpyxl when XLSX output is requested (avoids pip install in CSV-only or restricted envs)
         if output_format in ("xlsx", "all"):
-            if not _ensure_openpyxl_installed():
+            if not _ensure_openpyxl_installed(auto_install=auto_install):
                 warning_rank_0("[TraceLens] openpyxl unavailable; downgrading output_format to 'csv'.")
                 output_format = "csv"
 
@@ -815,7 +823,9 @@ def generate_tracelens_reports(
     generated_reports = []
     for trace_file in trace_files:
         # generate_tracelens_report now returns a list of files
-        report_paths = generate_tracelens_report(trace_file, output_dir, output_format=output_format)
+        report_paths = generate_tracelens_report(
+            trace_file, output_dir, output_format=output_format, auto_install=auto_install
+        )
         generated_reports.extend(report_paths)
 
     log_rank_0(
