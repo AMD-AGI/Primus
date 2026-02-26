@@ -24,6 +24,7 @@ Guides for common workflows and features:
 
 In-depth technical documentation:
 
+- **[Post-Training Guide](./posttraining.md)** - Fine-tuning with SFT and LoRA using Primus CLI
 - **[Performance Projection](./projection.md)** - Project training performance to multi-node configurations
 - **[Preflight](./preflight.md)** - Cluster diagnostics (host/GPU/network info + perf tests)
 - **[Benchmark Suite](./benchmark.md)** - GEMM, RCCL, end-to-end benchmarks and profiling

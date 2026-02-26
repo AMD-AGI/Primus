@@ -15,7 +15,7 @@ modules:
       stderr_sink_level: DEBUG
 
       # Parallelism configuration
-      tensor_model_parallel_size: 4
+      tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       pipeline_dtype: null
       virtual_pipeline_model_parallel_size: null
@@ -30,9 +30,9 @@ modules:
 
       # Training configuration
       train_iters: 200
-      global_batch_size: 128
+      global_batch_size: 8
       micro_batch_size: 1
-      seq_length: 2048
+      seq_length: 8192
       eval_interval: 30
       save_interval: 50
 
