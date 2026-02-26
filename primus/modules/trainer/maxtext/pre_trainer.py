@@ -60,7 +60,7 @@ class MaxTextPretrainTrainer(BaseModule):
         """
         Monkey patch maxtext cli args to override model args dynamically.
         Supports nested overrides like:
-            {"model": {"num_experts": 16, "base_num_decoder_layers": 4}}
+            {"override_model": {"num_experts": 16, "base_num_decoder_layers": 4}}
 
         All override keys MUST be under the "model" key.
         """
@@ -71,14 +71,14 @@ class MaxTextPretrainTrainer(BaseModule):
 
         warning_rank_0(f"MaxText Pre-Trainer: Applying override_args: {override_args}")
 
-        # --- Step 1. Flatten any nested dict under 'model'
+        # --- Step 1. Flatten any nested dict under 'override_model'
         flat_overrides = {}
         for k, v in override_args.items():
-            if k != "model":
-                raise ValueError(f"Only the 'model' key is supported for overrides, found: {k}")
+            if k != "override_model":
+                raise ValueError(f"Only the 'override_model' key is supported for overrides, found: {k}")
             if not isinstance(v, dict):
                 raise ValueError(
-                    f"MaxText Pre-Trainer: The value for 'model' must be a dict, got {type(v).__name__}."
+                    f"MaxText Pre-Trainer: The value for 'override_model' must be a dict, got {type(v).__name__}."
                 )
             for subk, subv in v.items():
                 if isinstance(subv, dict):
