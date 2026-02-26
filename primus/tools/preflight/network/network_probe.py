@@ -52,8 +52,8 @@ def detect_distributed_intent() -> Dict[str, Any]:
     )
 
     nnodes = 1
-    if slurm_nnodes is not None:
-        nnodes = slurm_nnodes
+    if slurm_nnodes_i is not None:
+        nnodes = slurm_nnodes_i
     elif ompi_size_i is not None and ompi_local_size_i is not None and ompi_size_i > 1 and ompi_local_size_i > 0:
         nnodes = ompi_size_i // ompi_local_size_i
     elif world_size > 1 and local_world_size > 0:
