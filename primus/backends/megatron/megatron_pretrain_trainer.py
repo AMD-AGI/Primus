@@ -42,11 +42,9 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
 
             log_rank_0("Using GPT model provider and training components")
 
-        # Upstream pretrain entrypoints set this in their __main__ blocks, but Primus imports the
-        # provider directly and calls pretrain() programmatically. Without restoring this flag,
-        # only TP rank 0 enters dataset construction while the core dataset builder still issues
-        # distributed barriers, which deadlocks for TP>1.
-        train_valid_test_datasets_provider.is_distributed = True
+        # Configure training components
+        if hasattr(train_valid_test_datasets_provider, "is_distributed"):
+            train_valid_test_datasets_provider.is_distributed = True
 
         # Handle Megatron version differences (v0.12.0 vs newer with inprocess_restart)
         wrapped_pretrain = pretrain
