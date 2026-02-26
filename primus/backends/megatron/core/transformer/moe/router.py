@@ -33,12 +33,24 @@ class PrimusTopKRouter(TopKRouter):
         # Apply Z-Loss
         logits = self.apply_z_loss(logits)
 
+        score_function = self.config.moe_router_score_function
+        pre_softmax = getattr(self.config, "moe_router_pre_softmax", False)
+
+        # For softmax with pre_softmax=True (e.g. Qwen3, DeepSeek-V2):
+        # Apply softmax before the fused topk OP, then pass "none" as score_function
+        # so the OP treats the scores as already-computed probabilities.
+        if score_function == "softmax" and pre_softmax:
+            logits = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(logits)
+            fused_score_function = "none"
+        else:
+            fused_score_function = score_function
+
         scores_for_aux_loss, probs, routing_map = pt.ops.fused_group_topk_routing_with_aux_score(
             logits,
             self.config.moe_router_topk,
             self.config.moe_router_num_groups,
             self.config.moe_router_group_topk,
-            self.config.moe_router_score_function,
+            fused_score_function,
             self.config.moe_router_topk_scaling_factor,
         )
 

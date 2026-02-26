@@ -88,22 +88,43 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
     def grouped_mlp_modules(
         self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: bool
     ) -> Tuple[type, Optional[MLPSubmodules]]:
-        """Which module and submodules to use for grouped mlp"""
+        """Which module and submodules to use for grouped mlp.
+
+        Path selection:
+          1. New TE path (moe_use_legacy_grouped_gemm=False):
+             → TEGroupedMLP with TE's grouped linear modules.
+             PrimusTurbo not yet supported here (TE owns the GEMM kernels).
+          2. Legacy path (moe_use_legacy_grouped_gemm=True):
+             → PrimusTurboGroupedMLP (if use_turbo_grouped_mlp=True):
+               Uses pt.ops.grouped_gemm / grouped_gemm_fp8 + fused activation.
+               **Recommended for Qwen3 MoE and DeepSeek models.**
+             → GroupedMLP (default, uses Megatron's own grouped GEMM)
+          3. Sequential MLP (no grouped gemm):
+             → SequentialMLP with per-expert linear modules.
+        """
         if (
             moe_use_grouped_gemm
             and TEColumnParallelGroupedLinear is not None
             and not moe_use_legacy_grouped_gemm
         ):
-            assert not self.cfg.use_turbo_grouped_mlp, "PrimusTurbo not support RowParallelGroupedLinear"
+            if self.cfg.use_turbo_grouped_mlp:
+                # PrimusTurbo does not yet support TE's new RowParallelGroupedLinear interface.
+                # To use PrimusTurbo grouped MLP, set moe_use_legacy_grouped_gemm=True.
+                warnings.warn(
+                    "use_turbo_grouped_mlp=True requires moe_use_legacy_grouped_gemm=True. "
+                    "Falling back to TEGroupedMLP. To use PrimusTurbo grouped MLP with "
+                    "models like Qwen3 MoE, add 'moe_use_legacy_grouped_gemm: true' to your config."
+                )
 
             return TEGroupedMLP, MLPSubmodules(
                 linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
             )
         elif moe_use_grouped_gemm:
-            warnings.warn(
-                "The legacy GroupedMLP will be deprecated in Megatron-Core v0.12.0. "
-                "Please update the TransformerEngine to version>=1.7.0 and use TEGroupedMLP."
-            )
+            if not self.cfg.use_turbo_grouped_mlp:
+                warnings.warn(
+                    "The legacy GroupedMLP will be deprecated in Megatron-Core v0.12.0. "
+                    "Please update the TransformerEngine to version>=1.7.0 and use TEGroupedMLP."
+                )
             return PrimusTurboGroupedMLP if self.cfg.use_turbo_grouped_mlp else GroupedMLP, None
         else:
             if not is_te_min_version("1.7.0.dev0"):
