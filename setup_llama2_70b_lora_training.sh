@@ -120,11 +120,11 @@ docker exec "${CONTAINER_NAME}" bash -c "
         echo 'rocmProfileData already installed'
     fi
 "
-# Step 5: Patch Megatron-Bridge for llama2_70b_lora training
+# Step 5: Patch Megatron-Bridge for llama2_70b_lora training. Fix consumed samples in Megtron-Bridge.
 echo_info "Step 5: Patching Megatron-Bridge for llama2_70b_lora training..."
 docker exec "${CONTAINER_NAME}" bash -c "
     cd /workspace/Primus/third_party/Megatron-Bridge
-    git apply /workspace/Primus/patches/megatron_bridge_validation_consumed_samples.patch"
+    git apply /workspace/Primus/megatron_bridge_validation_consumed_samples.patch"
 
 # Step 6: Start training
 echo_info "Step 6: Starting llama2_70b_lora training..."
