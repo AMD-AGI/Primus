@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:qwen3_1.7B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_8B-pretrain}
 workspace: ./output
 
 modules:
@@ -9,11 +9,8 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: qwen3_1.7b.yaml
+    model: qwen3_8b.yaml
     overrides:
-
-      metrics:
-        log_freq: 1
 
       optimizer:
         name: "AdamW"
@@ -21,7 +18,10 @@ modules:
         eps: 1.0e-8
 
       lr_scheduler:
-        warmup_steps: 20  # lr scheduler warm up, 20% total steps
+        warmup_steps: 10  # lr scheduler warm up, 20% total steps
+
+      metrics:
+        log_freq: 1
 
       training:
         local_batch_size: 4
