@@ -19,6 +19,10 @@ turbo_deepep_use_comm_stream: false
 # sync-free moe
 turbo_sync_free_moe_stage: 0
 
+# expert computation ↔ communication overlap (requires use_turbo_deepep)
+turbo_moe_expert_comm_overlap: false
+turbo_moe_overlap_num_chunks: 2
+
 # use turbo fused activation_with_probs to optmize redundant computation
 use_turbo_fused_act_with_probs: false
 
