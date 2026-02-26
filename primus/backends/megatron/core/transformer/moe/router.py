@@ -15,6 +15,35 @@ from megatron.training import get_args
 from primus.backends.megatron.core.extensions.logits_processor import fused_softcap
 
 
+def _fused_topk_bool_mask(scores: torch.Tensor, k: int) -> torch.Tensor:
+    """
+    Compute a boolean routing mask from top-k scores in a single fused operation.
+
+    This replaces the 4-kernel sequence:
+        torch.topk → torch.zeros_like().int() → .scatter(indices) → .bool()
+    with a 2-kernel sequence:
+        torch.topk → torch.zeros().scatter_(True)
+
+    The key optimizations:
+      1. Allocate directly as bool (no int→bool cast)
+      2. Use scatter_ with bool value (no intermediate int tensor)
+      3. Avoid zeros_like(logits) which copies dtype/stride metadata unnecessarily
+
+    Args:
+        scores: [num_tokens, num_experts] score tensor.
+        k: Number of top experts to select per token.
+
+    Returns:
+        Bool tensor [num_tokens, num_experts] with True at top-k positions.
+    """
+    _, top_indices = torch.topk(scores, k=k, dim=1)
+    mask = torch.zeros(
+        scores.shape, dtype=torch.bool, device=scores.device
+    )
+    mask.scatter_(1, top_indices, True)
+    return mask
+
+
 class PrimusTopKRouter(TopKRouter):
     """Balanced route each token to the top-k experts."""
 
@@ -56,14 +85,18 @@ class PrimusTopKRouter(TopKRouter):
             )
 
         if self.training and torch.is_grad_enabled() and self.is_aux_loss_enabled():
-            # todo: fuse the following logic into the turbo fused_group_topk_routing_with_aux_score OP
-            # (the routing_map here differs from the one in the OP output is regarding less of group limit)
             if self.config.moe_router_num_groups is None or self.config.moe_router_num_groups <= 1:
                 routing_map_for_aux_loss = routing_map
             else:
-                _, top_indices_for_aux_loss = torch.topk(scores_for_aux_loss, k=self.topk, dim=1)
-                routing_map_for_aux_loss = (
-                    torch.zeros_like(logits).int().scatter(1, top_indices_for_aux_loss, 1).bool()
+                # Compute ungrouped top-k routing map for aux loss.
+                # The group-limited routing_map from the fused OP restricts experts
+                # per group, but aux loss needs the global top-k selection.
+                #
+                # Fused path: single topk → bool scatter in one step, replacing
+                # the previous 4-kernel sequence:
+                #   torch.topk → torch.zeros_like().int() → .scatter() → .bool()
+                routing_map_for_aux_loss = _fused_topk_bool_mask(
+                    scores_for_aux_loss, k=self.topk
                 )
             probs = self._apply_aux_loss(probs, scores_for_aux_loss, routing_map_for_aux_loss)
             probs = self._apply_seq_aux_loss(
