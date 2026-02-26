@@ -42,8 +42,10 @@ def set_cuda_device_max_connections(ctx: PatchContext):
     module_config = ctx.extra.get("module_config", {})
 
     # Determine CUDA_DEVICE_MAX_CONNECTIONS based on FSDP usage
-    use_fsdp = getattr(module_config.params, "use_torch_fsdp2", False) or getattr(
-        module_config.params, "use_custom_fsdp", False
+    use_fsdp = (
+        getattr(module_config.params, "use_torch_fsdp2", False)
+        or getattr(module_config.params, "use_custom_fsdp", False)
+        or getattr(module_config.params, "use_megatron_fsdp", False)
     )
 
     if use_fsdp:
