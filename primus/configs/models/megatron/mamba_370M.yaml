@@ -3,9 +3,8 @@ bases:
 
 # Mamba 370M configuration
 model_type: mamba  # CRITICAL: Mamba models must use mamba model type
-tokenizer_type: HuggingFaceTokenizer
-tokenizer_model: meta-llama/Llama-3.2-1B
-vocab_size: 128256
+tokenizer_type: GPT2BPETokenizer
+vocab_size: 50257
 
 # Model size parameters
 num_layers: 48
