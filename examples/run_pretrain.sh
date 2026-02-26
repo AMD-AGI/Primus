@@ -490,10 +490,12 @@ handle_hipblaslt_tuning() {
     fi
 }
 
-# Disable HipBLASLT tuning in deterministic mode
-if [ "${PRIMUS_DETERMINISTIC:-}" != "1" ]; then
+# NOTE: Disable HipBLASLT tuning in deterministic mode
+# NOTE: If you need to enable torch profiler, do NOT enable HipBLASLT tuning.
+if [ "${PRIMUS_DETERMINISTIC:-}" != "1" ] && [ "${PRIMUS_HIPBLASLT_TUNING:-0}" = "1" ]; then
     handle_hipblaslt_tuning
 else
+    LOG_INFO "disable hipblaslt tuning to fix torch profiler issue in TE"
     export TE_HIPBLASLT_TUNING_RUN_COUNT=0
     export TE_HIPBLASLT_TUNING_ALGO_COUNT=0
 fi

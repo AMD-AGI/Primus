@@ -1,7 +1,8 @@
 #!/bin/bash
 
 export HF_TOKEN="your_hf_token"
-export DOCKER_IMAGE="docker.io/tasimage/primus:pr-556-ainic"
+# export DOCKER_IMAGE="docker.io/tasimage/primus:pr-556-ainic"
+export DOCKER_IMAGE="docker.io/tasimage/primus:pr-563-ainic"
 
 export NNODES=2
 # export NCCL_DEBUG=INFO
