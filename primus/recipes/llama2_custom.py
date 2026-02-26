@@ -399,6 +399,8 @@ def _llama2_lora(
             data_sharding=True,
             dataloader_type="batch",
             num_workers=1,
+            do_test=False,
+            do_validation=True,
         )
     else:
         raise ValueError(f"Unknown dataset_type: {dataset_type!r}. Expected 'squad' or 'mlperf_dataset'.")
