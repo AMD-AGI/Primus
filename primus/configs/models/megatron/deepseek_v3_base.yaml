@@ -37,6 +37,7 @@ moe_aux_loss_coeff: 0.001 # aux_loss_alpha
 # rotary
 rotary_base: 10000
 rotary_scaling_factor: 40.0 # float
+original_max_position_embeddings: 4096 # int, original context length before YaRN scaling
 mscale: 1.0 # float
 mscale_all_dim: 1.0 # float
 
