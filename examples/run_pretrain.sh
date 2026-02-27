@@ -208,7 +208,15 @@ if [ "$USING_AINIC" == "1" ]; then
         export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
         export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
         export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi"}
-        export NCCL_NET_PLUGIN=librccl-anp.so
+        # Check which NCCL net plugin library is present under ${ANP_HOME_DIR}/build and set accordingly
+        if [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
+            export NCCL_NET_PLUGIN=librccl-anp.so
+        elif [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
+            export NCCL_NET_PLUGIN=librccl-net.so
+        else
+            LOG_ERROR "Error: Neither librccl-anp.so nor librccl-net.so found in ${ANP_HOME_DIR}/build."
+            exit 1
+        fi
 
         LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
         LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
@@ -516,10 +524,16 @@ handle_hipblaslt_tuning() {
     fi
 }
 
-# Disable HipBLASLT tuning in deterministic mode
-if [ "${PRIMUS_DETERMINISTIC:-}" != "1" ]; then
+# NOTE: Disable HipBLASLT tuning in deterministic mode
+# NOTE: If you need to enable torch profiler, do NOT enable HipBLASLT tuning.
+if [ "${PRIMUS_DETERMINISTIC:-}" != "1" ] && [ "${PRIMUS_HIPBLASLT_TUNING:-0}" = "1" ]; then
     handle_hipblaslt_tuning
+else
+    LOG_INFO "disable hipblaslt tuning by default to fix torch profiler issue in TE"
+    export TE_HIPBLASLT_TUNING_RUN_COUNT=0
+    export TE_HIPBLASLT_TUNING_ALGO_COUNT=0
 fi
+
 
 # -------------------- Python Path Setup --------------------
 setup_pythonpath() {
