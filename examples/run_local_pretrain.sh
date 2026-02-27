@@ -125,6 +125,13 @@ if [ "$USING_AINIC" == "1" ]; then
     ENV_ARGS+=("--env" "ANP_HOME_DIR")
     ENV_ARGS+=("--env" "MPI_HOME_DIR")
 
+    TC_RESULTS=$(bash "${PRIMUS_PATH}/examples/scripts/detect_nccl_ib_tc.sh")
+    if [ -z "$TC_RESULTS" ]; then
+        echo "TC_RESULTS: $TC_RESULTS"
+        ENV_ARGS+=("--env" "TC_RESULTS")
+    else
+        echo "Failed to detect NCCL_IB_TC and NCCL_IB_FIFO_TC"
+    fi
     # VOLUME_ARGS+=(-v /mnt/shared:/mnt/shared)
     # VOLUME_ARGS+=(-v /etc/libibverbs.d/:/etc/libibverbs.d:ro)
     # VOLUME_ARGS+=(-v /usr/lib/x86_64-linux-gnu/libibverbs/:/usr/lib/x86_64-linux-gnu/libibverbs/:ro)

@@ -176,21 +176,33 @@ export NCCL_CHECKS_DISABLE=1
 # Set InfiniBand GID index for NCCL communication
 if [ "$USING_AINIC" == "1" ]; then
     LOG_INFO_RANK0 "Using AINIC"
+    # unset NCCL_IB_GID_INDEX
+    export NCCL_IB_GID_INDEX=1
+    # export NCCL_IB_ROCE_VERSION_NUM=2
+    if [ -z "${TC_RESULTS:-}" ]; then
+        export NCCL_IB_TC=${NCCL_IB_TC:-104}
+        export NCCL_IB_FIFO_TC=${NCCL_IB_FIFO_TC:-192}
+    else
+        read -r NCCL_IB_TC NCCL_IB_FIFO_TC <<< "$TC_RESULTS"
+        export NCCL_IB_TC
+        export NCCL_IB_FIFO_TC
+    fi
+    export NET_OPTIONAL_RECV_COMPLETION=1
+    export NCCL_IB_USE_INLINE=1
+    export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
+    export NCCL_GDR_FLUSH_DISABLE=1
+    export NCCL_IGNORE_CPU_AFFINITY=1
+    LOG_INFO_RANK0 "NCCL_IB_TC: $NCCL_IB_TC"
+    LOG_INFO_RANK0 "NCCL_IB_FIFO_TC: $NCCL_IB_FIFO_TC"
+
     if [ "${BACKEND:-}" == "MaxText" ]; then
         # ------- RCCL/NCCL IB Tuning -------
         export IONIC_LOCKFREE=all
         export NCCL_GDR_COPY_ENABLE=1
-        export NCCL_GDR_FLUSH_DISABLE=1
         export NCCL_IB_ECE_ENABLE=0
-        export NCCL_IB_FIFO_TC=184
-        export NCCL_IB_GID_INDEX=1
         export NCCL_IB_PCI_RELAXED_ORDERING=1
-        export NCCL_IB_TC=96
-        export NCCL_IB_USE_INLINE=1
-        export NCCL_IGNORE_CPU_AFFINITY=1
+
         export NCCL_PXN_DISABLE=0
-        export NET_OPTIONAL_RECV_COMPLETION=1
-        export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
         export RCCL_LL128_FORCE_ENABLE=1
     else
         export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
@@ -202,18 +214,8 @@ if [ "$USING_AINIC" == "1" ]; then
         LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
         LOG_INFO_RANK0 "MPI_HOME_DIR: $MPI_HOME_DIR"
 
-        # unset NCCL_IB_GID_INDEX
-        export NCCL_IB_GID_INDEX=1
-        # export NCCL_IB_ROCE_VERSION_NUM=2
         export NCCL_MAX_P2P_CHANNELS=56
-        export NCCL_IB_TC=104
-        export NCCL_IB_FIFO_TC=192
-        export NET_OPTIONAL_RECV_COMPLETION=1
-        export NCCL_IB_USE_INLINE=1
-        export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
-        export NCCL_GDR_FLUSH_DISABLE=1
         export NCCL_DMABUF_ENABLE=0
-        export NCCL_IGNORE_CPU_AFFINITY=1
         export NCCL_IB_QPS_PER_CONNECTION=1
 
         export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib:$LD_LIBRARY_PATH
