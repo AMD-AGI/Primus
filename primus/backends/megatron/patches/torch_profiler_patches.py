@@ -5,7 +5,7 @@
 ###############################################################################
 
 """
-Torch Profiler Patchers
+Torch Profiler Patches
 
 Patches torch.profiler.profile to apply Primus-specific options when called
 from Megatron's training.train(). Logic mirrors trainer.py L1277-1298.
