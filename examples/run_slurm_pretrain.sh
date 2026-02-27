@@ -42,6 +42,8 @@ srun -N "${NNODES}" \
      --exclusive \
      --export ALL \
      --ntasks-per-node=1 \
+     --time="${SLURM_TIME:-07:00:00}" \
+     --partition="${SLURM_PARTITION:-amd-aig}" \
      --cpus-per-task="${CPUS_PER_TASK:-128}" \
      bash -c "
           readarray -t node_array < <(scontrol show hostnames \"\$SLURM_JOB_NODELIST\")
