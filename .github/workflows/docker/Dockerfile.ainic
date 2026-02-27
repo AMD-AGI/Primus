@@ -39,7 +39,7 @@ RUN cd ${WORKDIR} && \
     cd host_sw_pkg && \
     ./install.sh --domain=user -y 2>&1 | tee log_install.txt && \
     cd ${WORKDIR} && \
-    dpkg -i ./amd/ainic/deb-repo/libionic*
+    apt-get install -y ./amd/ainic/deb-repo/libionic*.deb
 
 # ---------------------------------------------------------------------------
 # Build rccl
