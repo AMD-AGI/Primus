@@ -197,12 +197,26 @@ class MemoryStatsExtension:
                 local_rank = torch.cuda.current_device()
                 r_total, r_used, r_free = get_rocm_smi_mem_info(local_rank)
                 r_ratio = r_used / r_total
+
+                # get the max rocm_mem_usage
+                usage_tensor = torch.tensor([r_used], device="cuda", dtype=torch.float32)
+                world_size = torch.distributed.get_world_size()
+                gathered_usage = [torch.zeros_like(usage_tensor) for _ in range(world_size)]
+                torch.distributed.all_gather(gathered_usage, usage_tensor)
+
+                rocm_mem_usages = [t.item() for t in gathered_usage]
+                max_usage = max(rocm_mem_usages)
+                max_rank = rocm_mem_usages.index(max_usage)
+
                 rocm_mem_str = (
                     f" | rocm mem usage/free/total/usage_ratio: "
                     f"{r_used / 1024 ** 3:.2f}GB/"
                     f"{r_free / 1024 ** 3:.2f}GB/"
                     f"{r_total / 1024 ** 3:.2f}GB/"
                     f"{r_ratio * 100:.2f}%"
+                    f" | rank-{max_rank} rocm max mem usage/usage_ratio: "
+                    f"{max_usage / 1024 ** 3:.2f}GB/"
+                    f"{max_usage / r_total * 100:.2f}%"
                 )
                 # Cache for reuse on non-sampled iterations
                 self._last_rocm_mem_str = rocm_mem_str
