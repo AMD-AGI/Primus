@@ -18,16 +18,16 @@ export CLEAN_DOCKER_CONTAINER=1
 export MBS=12
 export GBS=$((96 * NNODES))
 export PROFILE=False
-export TURBO_GROUPED_MLP=True
+export TURBO_GROUPED_MLP=False
 export TURBO_DEEPEEP=True
 export LEGACY_GG=True
+export PRIMUS_DETERMINISTIC=0
 
 # export EXP=examples/megatron/configs/MI355X/llama3.1_8B-BF16-pretrain.yaml
 export EXP=examples/megatron/configs/MI355X/deepseek_v2_lite-BF16-pretrain.yaml
 export PRIMUS_TEAM=amd
 export PRIMUS_USER=tas
 export PRIMUS_EXP_NAME=dsv2_lite-pretrain-mbs_$MBS-gbs_$GBS-turbogg_$TURBO_GROUPED_MLP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-profile_$PROFILE
-export PRIMUS_EXP_NAME=debug
 
 mkdir -p output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
 bash ./examples/run_slurm_pretrain.sh \
@@ -41,6 +41,8 @@ bash ./examples/run_slurm_pretrain.sh \
   --use_turbo_grouped_mlp $TURBO_GROUPED_MLP \
   --use_turbo_deepep $TURBO_DEEPEEP \
   --moe_use_legacy_grouped_gemm $LEGACY_GG \
+  --cross_entropy_fusion_impl "te" \
+  --cross_entropy_loss_fusion True \
   --profile $PROFILE \
   --use_pytorch_profiler $PROFILE \
   --profile_step_end 7 \

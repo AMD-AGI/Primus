@@ -38,6 +38,7 @@ export LOG_DIR=${LOG_DIR:-"./output"}
 LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
 mkdir -p "$LOG_DIR"
 
+    #  --nodelist="uswslocpm2m-106-[273,297,310,319,687,732,836,892]" \
 srun -N "${NNODES}" \
      --exclusive \
      --export ALL \
