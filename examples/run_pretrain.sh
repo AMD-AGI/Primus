@@ -197,8 +197,10 @@ if [ "$USING_AINIC" == "1" ]; then
     export NCCL_IB_GID_INDEX=1
     # export NCCL_IB_ROCE_VERSION_NUM=2
     export NCCL_MAX_P2P_CHANNELS=56
-    export NCCL_IB_TC=104
-    export NCCL_IB_FIFO_TC=192
+    # export NCCL_IB_TC=104
+    # export NCCL_IB_FIFO_TC=192
+    export NCCL_IB_TC=41
+    export NCCL_IB_FIFO_TC=185
     export NET_OPTIONAL_RECV_COMPLETION=1
     export NCCL_IB_USE_INLINE=1
     export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
