@@ -128,7 +128,8 @@ if [ "$USING_AINIC" == "1" ]; then
     ENV_ARGS+=("--env" "ANP_HOME_DIR")
     ENV_ARGS+=("--env" "MPI_HOME_DIR")
 
-    export TC_RESULTS=$(bash "${PRIMUS_PATH}/examples/scripts/detect_nccl_ib_tc.sh")
+    TC_RESULTS=$(bash "${PRIMUS_PATH}/examples/scripts/detect_nccl_ib_tc.sh")
+    export TC_RESULTS
     if [ -n "$TC_RESULTS" ]; then
         echo "TC_RESULTS: $TC_RESULTS"
         ENV_ARGS+=("--env" "TC_RESULTS")
@@ -144,10 +145,10 @@ export CLEAN_DOCKER_CONTAINER=${CLEAN_DOCKER_CONTAINER:-0}
 
 # ------------------ Optional Container Cleanup ------------------
 docker_podman_proxy() {
-    if command -v podman &>/dev/null; then
-        podman "$@"
-    elif command -v docker &>/dev/null; then
+    if command -v docker &>/dev/null; then
         docker "$@"
+    elif command -v podman &>/dev/null; then
+        podman "$@"
     else
         echo "Neither Docker nor Podman found!" >&2
         return 1
@@ -173,6 +174,8 @@ if [[ "${SKIP_TRAIN:-0}" == "1" ]]; then
 else
     echo "Node-${NODE_RANK}: Launching training container."
 fi
+
+docker_podman_proxy pull "$DOCKER_IMAGE"
 
 # ------------------ Launch Training Container ------------------
 docker_podman_proxy run --rm \
@@ -202,7 +205,7 @@ docker_podman_proxy run --rm \
     --cap-add=SYS_PTRACE --cap-add=CAP_SYS_ADMIN \
     --security-opt seccomp=unconfined --group-add video \
     --privileged --device=/dev/infiniband \
-    --name ${CONTAINER_NAME:-primus-training} \
+    --name "${CONTAINER_NAME:-primus-training}" \
     "${VOLUME_ARGS[@]}" \
     "$DOCKER_IMAGE" /bin/bash -c "\
         echo '[NODE-${NODE_RANK}(${HOSTNAME})]: begin, time=$(date +"%Y.%m.%d %H:%M:%S")' && \
