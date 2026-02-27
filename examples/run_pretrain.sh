@@ -184,7 +184,7 @@ if [ "$USING_AINIC" == "1" ]; then
     elif [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
         export NCCL_NET_PLUGIN=librccl-net.so
     else
-        echo "Error: Neither librccl-anp.so nor librccl-net.so found in ${ANP_HOME_DIR}/build."
+        LOG_ERROR "Error: Neither librccl-anp.so nor librccl-net.so found in ${ANP_HOME_DIR}/build."
         exit 1
     fi
 
