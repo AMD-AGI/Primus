@@ -254,6 +254,8 @@ jobs:
         run: |
           echo "Running Primus Core tests..."
           # Note: The tests `test_fp8_te_linear` and `test_te_linear` are temporarily skipped due to intermittent failures.
+          # Note HSA_NO_SCRATCH_RECLAIM=1 must be set to avoid RCCL perf hit (TAS-8N Node), rocm ver:70125424
+          export HSA_NO_SCRATCH_RECLAIM=1
           pytest --maxfail=1 -s ./tests/unit_tests/ \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_te_linear
@@ -264,7 +266,8 @@ jobs:
           echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
-          MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
+          # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
+          MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
           pytest  --maxfail=1 -s ./tests/trainer/test_megatron_trainer.py
       - name: Run Primus Model Tests -- TorchTitan
         env:
@@ -273,7 +276,8 @@ jobs:
           echo "Set UT_LOG_PATH: ${{ env.UT_LOG_PATH }}"
           rm -rf "${{ env.UT_LOG_PATH }}"
           mkdir -p "${{ env.UT_LOG_PATH }}"
-          MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
+          # MASTER_PORT=10009 DATA_PATH=/wekafs/primus-data \
+          MASTER_PORT=10009 DATA_PATH=/mnt/apps_proxy/tas/0_public/data HSA_NO_SCRATCH_RECLAIM=1 \
           pytest  --maxfail=1 -s ./tests/trainer/test_torchtitan_trainer.py
       - name: Clean
         run: |
