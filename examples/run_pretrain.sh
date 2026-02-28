@@ -386,14 +386,14 @@ fi
 # ----------------- Rebuild UCCL -----------------
 export REBUILD_UCCL=${REBUILD_UCCL:-0}
 if [ "$REBUILD_UCCL" == "1" ]; then
-    LOG_INFO "Rebuilding UCCL from source..."
+    LOG_INFO_RANK0 "Rebuilding UCCL from source..."
     apt update && apt install -y rdma-core libibverbs-dev libnuma-dev libgoogle-glog-dev
     mkdir -p "/workspace/"
     cd "/workspace" || exit
 
     # Clean up old directory if exists to avoid git clone conflicts
     if [ -d "uccl" ]; then
-        LOG_INFO "Removing existing uccl directory..."
+        LOG_INFO_RANK0 "Removing existing uccl directory..."
         rm -rf uccl
     fi
 
@@ -404,28 +404,28 @@ if [ "$REBUILD_UCCL" == "1" ]; then
     pip3 install --no-build-isolation .
     cd ep/deep_ep_wrapper && pip3 install --no-build-isolation . -v
     cd "${PRIMUS_PATH}" || exit
-    LOG_INFO "Rebuilding UCCL from source done."
+    LOG_INFO_RANK0 "Rebuilding UCCL from source done."
 else
-    LOG_INFO "Skip UCCL rebuild. REBUILD_UCCL=$REBUILD_UCCL"
+    LOG_INFO_RANK0 "Skip UCCL rebuild. REBUILD_UCCL=$REBUILD_UCCL"
 fi
 
 # ----------------- Using UCCL-EP -----------------
 if [ "$USING_UEP" == "1" ]; then
-    LOG_INFO "USING_UEP is enabled, checking required packages..."
+    LOG_INFO_RANK0 "USING_UEP is enabled, checking required packages..."
 
     if ! python3 -m pip show uccl &>/dev/null || ! python3 -m pip show deep_ep &>/dev/null; then
         LOG_ERROR "uccl is not installed! Please use pre-installed primus image or set REBUILD_UCCL=1."
         exit 1
     fi
-    LOG_INFO "uccl package is installed: $(python3 -m pip show uccl | grep Version)"
-    LOG_INFO "deep_ep package is installed: $(python3 -m pip show deep_ep | grep Version)"
+    LOG_INFO_RANK0 "uccl package is installed: $(python3 -m pip show uccl | grep Version)"
+    LOG_INFO_RANK0 "deep_ep package is installed: $(python3 -m pip show deep_ep | grep Version)"
 
     if [ "$ENABLE_NUMA_BINDING" != "1" ]; then
-        LOG_INFO "ENABLE_NUMA_BINDING is not enabled! Please set ENABLE_NUMA_BINDING=1 to avoid dataloader worker exited unexpectedly."
+        LOG_INFO_RANK0 "ENABLE_NUMA_BINDING is not enabled! Please set ENABLE_NUMA_BINDING=1 to avoid dataloader worker exited unexpectedly."
     fi
 
     export PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND=DEEP_EP
-    LOG_INFO "PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND set to DEEP_EP"
+    LOG_INFO_RANK0 "PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND set to DEEP_EP"
 
 
     # network settings for UCCL
@@ -446,17 +446,17 @@ if [ "$USING_UEP" == "1" ]; then
     fi
 
 
-    LOG_INFO "==========UCCL Network Settings=========="
-    LOG_INFO "UCCL_IB_GID_INDEX: $UCCL_IB_GID_INDEX"
-    LOG_INFO "UCCL_IB_HCA: $UCCL_IB_HCA"
-    LOG_INFO "UCCL_SOCKET_IFNAME: $UCCL_SOCKET_IFNAME"
-    LOG_INFO "UCCL_IB_MAX_INFLIGHT_NORMAL: $UCCL_IB_MAX_INFLIGHT_NORMAL"
-    LOG_INFO "UCCL_IB_MAX_INFLIGHT_LOW_LATENCY: $UCCL_IB_MAX_INFLIGHT_LOW_LATENCY"
-    LOG_INFO "UCCL_IB_MAX_INFLIGHT_BYTES: $UCCL_IB_MAX_INFLIGHT_BYTES"
-    LOG_INFO ""
+    LOG_INFO_RANK0 "==========UCCL Network Settings=========="
+    LOG_INFO_RANK0 "UCCL_IB_GID_INDEX: $UCCL_IB_GID_INDEX"
+    LOG_INFO_RANK0 "UCCL_IB_HCA: $UCCL_IB_HCA"
+    LOG_INFO_RANK0 "UCCL_SOCKET_IFNAME: $UCCL_SOCKET_IFNAME"
+    LOG_INFO_RANK0 "UCCL_IB_MAX_INFLIGHT_NORMAL: $UCCL_IB_MAX_INFLIGHT_NORMAL"
+    LOG_INFO_RANK0 "UCCL_IB_MAX_INFLIGHT_LOW_LATENCY: $UCCL_IB_MAX_INFLIGHT_LOW_LATENCY"
+    LOG_INFO_RANK0 "UCCL_IB_MAX_INFLIGHT_BYTES: $UCCL_IB_MAX_INFLIGHT_BYTES"
+    LOG_INFO_RANK0 ""
 else
     export PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND=TURBO
-    LOG_INFO "USING_UEP is disabled. PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND set to TURBO"
+    LOG_INFO_RANK0 "USING_UEP is disabled. PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND set to TURBO"
 fi
 
 # nvte debug envs
