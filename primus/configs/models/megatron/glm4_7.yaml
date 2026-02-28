@@ -1,0 +1,44 @@
+extends:
+  - language_model.yaml
+
+# GLM4.7 Model (GLM-4-Plus MoE)
+# 345.78B total params, 21.01B active params
+
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: THUDM/glm-4-9b  # Use appropriate tokenizer
+
+# model architecture
+num_layers: 90
+hidden_size: 5120
+ffn_hidden_size: 12288
+num_attention_heads: 96
+
+# attention (GQA)
+group_query_attention: true
+num_query_groups: 8
+kv_channels: 128
+
+# moe - all layers are MoE
+moe_layer_freq: "1"
+num_experts: 160
+moe_router_topk: 8
+# num_shared_experts: 1  # Calculated as moe_shared_expert_intermediate_size // moe_ffn_hidden_size
+moe_ffn_hidden_size: 1536
+moe_shared_expert_intermediate_size: 1536
+
+# other settings
+swiglu: true
+bias_swiglu_fusion: false
+add_bias_linear: false
+attention_softmax_in_fp32: true
+untie_embeddings_and_output_weights: true
+hidden_dropout: 0.0
+attention_dropout: 0.0
+
+position_embedding_type: rope
+normalization: RMSNorm
+norm_epsilon: 1.0e-6
+init_method_std: 0.008
+
+apply_rope_fusion: true
+masked_softmax_fusion: false

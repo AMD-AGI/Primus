@@ -1,3 +1,9 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
 import argparse
 import importlib
 import json
@@ -77,7 +83,7 @@ class SchedulerSimulationRunner:
         if duration is not None and duration > 0:
             return float(duration)
         else:
-            raise ValueError(f"Duration is not found.")
+            raise ValueError("Duration is not found.")
 
     def _chunk_activation(self, rank: int, chunk: int | None, vpp_size: int | None) -> float:
         if self.chunk_time_ms is None:
@@ -98,12 +104,22 @@ class SchedulerSimulationRunner:
         plt.subplots(1, 2)
         plt.subplot(1, 1)
 
-        plt.bar(ranks, [r["memory"] for r in simulation_result], width=0.3, color=(15, 163, 64))
+        plt.bar(
+            ranks,
+            [r["memory"] for r in simulation_result],
+            width=0.3,
+            color=(15, 163, 64),
+        )
         plt.title("max memory")
         plt.xlabel("rank")
 
         plt.subplot(1, 2)
-        plt.bar(ranks, [r["total"] for r in simulation_result], width=0.3, color=(255, 99, 32))
+        plt.bar(
+            ranks,
+            [r["total"] for r in simulation_result],
+            width=0.3,
+            color=(255, 99, 32),
+        )
         plt.title("execution time")
         plt.xlabel("rank")
         plt.show()
@@ -122,13 +138,19 @@ class SchedulerSimulationRunner:
         plt.subplots(1, 2)
         plt.subplot(1, 1)
         plt.bar(
-            exp_names, [r["summary"]["max_memory"] for r in run_summaries], width=0.3, color=(210, 96, 94)
+            exp_names,
+            [r["summary"]["max_memory"] for r in run_summaries],
+            width=0.3,
+            color=(210, 96, 94),
         )
         plt.title("algorithm max memory")
 
         plt.subplot(1, 2)
         plt.bar(
-            exp_names, [r["summary"]["step_time_ms"] for r in run_summaries], width=0.3, color=(159, 160, 192)
+            exp_names,
+            [r["summary"]["step_time_ms"] for r in run_summaries],
+            width=0.3,
+            color=(159, 160, 192),
         )
         plt.title("algorithm execution time")
         plt.show()
@@ -206,7 +228,7 @@ class SchedulerSimulationRunner:
         while True:
             max_retry -= 1
             if max_retry <= 0:
-                print(f"Max retry reached, May have bugs in the schedule table")
+                print("Max retry reached, May have bugs in the schedule table")
                 print(communication_map)
                 break
 
@@ -238,7 +260,10 @@ class SchedulerSimulationRunner:
 
                         # merge the send op behind
                         for i in range(merge_comm_index, len(schedule_table[current_rank])):
-                            if schedule_table[current_rank][i].func_type in [FuncType.SF, FuncType.SB]:
+                            if schedule_table[current_rank][i].func_type in [
+                                FuncType.SF,
+                                FuncType.SB,
+                            ]:
                                 send_node = schedule_table[current_rank][i]
                                 send_key = f"{send_node.args['from_pp_rank']}_{send_node.args['to_pp_rank']}_{send_node.func_type}_{send_node.mini_batch}_{send_node.args['send_to_chunk']}"
                                 communication_map[send_key] = rank_clock[current_rank]
@@ -253,7 +278,13 @@ class SchedulerSimulationRunner:
 
                     recv_time_map[f"{node.mini_batch}_{node.chunk}_{node.func_type}"] = send_time
 
-                if node.func_type in [FuncType.F, FuncType.B, FuncType.W, FuncType.BW, FuncType.FB]:
+                if node.func_type in [
+                    FuncType.F,
+                    FuncType.B,
+                    FuncType.W,
+                    FuncType.BW,
+                    FuncType.FB,
+                ]:
                     if node.func_type in [FuncType.F, FuncType.B, FuncType.BW]:
                         recv_node_type = FuncType.RF if node.func_type == FuncType.F else FuncType.RB
                         recv_key = f"{node.mini_batch}_{node.chunk}_{recv_node_type}"
@@ -267,7 +298,10 @@ class SchedulerSimulationRunner:
                         rank_clock[current_rank]
                     )
                     duration = self._chunk_duration(
-                        current_rank, getattr(node, "chunk", 0), node.func_type, scheduler_config
+                        current_rank,
+                        getattr(node, "chunk", 0),
+                        node.func_type,
+                        scheduler_config,
                     )
                     rank_clock[current_rank] += duration
                     simulation_result[current_rank][f"{self._result_key_dict[node.func_type]}_end"].append(
@@ -281,18 +315,23 @@ class SchedulerSimulationRunner:
                     )
                     if node.func_type == FuncType.F:
                         act_gb = self._chunk_activation(
-                            current_rank, getattr(node, "chunk", 0), scheduler_config["vpp_size"]
+                            current_rank,
+                            getattr(node, "chunk", 0),
+                            scheduler_config["vpp_size"],
                         )
                         rank_memory[current_rank] += act_gb
                         simulation_result[current_rank]["memory"] = max(
-                            simulation_result[current_rank]["memory"], rank_memory[current_rank]
+                            simulation_result[current_rank]["memory"],
+                            rank_memory[current_rank],
                         )
                         simulation_result[current_rank]["activation_memory_usage"].append(
                             rank_memory[current_rank]
                         )
                     elif node.func_type in [FuncType.BW, FuncType.W]:
                         act_gb = self._chunk_activation(
-                            current_rank, getattr(node, "chunk", 0), scheduler_config["vpp_size"]
+                            current_rank,
+                            getattr(node, "chunk", 0),
+                            scheduler_config["vpp_size"],
                         )
                         rank_memory[current_rank] = rank_memory[current_rank] - act_gb
                         simulation_result[current_rank]["activation_memory_usage"].append(
@@ -326,7 +365,11 @@ class SchedulerSimulationRunner:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="primus/core/projection/configs/pp_simulation.yaml")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="primus/core/projection/configs/pp_simulation.yaml",
+    )
     args = parser.parse_args()
 
     config_dict = None

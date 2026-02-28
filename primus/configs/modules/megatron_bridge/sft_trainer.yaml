@@ -12,7 +12,7 @@ stage: "sft"
 
 
 # main control flag
-enable_primus_turbo: false
+enable_primus_turbo: true
 
 # feature control flags
 use_turbo_attention: false
