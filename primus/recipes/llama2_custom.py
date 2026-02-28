@@ -442,6 +442,9 @@ def _llama2_lora(
         logger=LoggerConfig(
             log_interval=10,
             tensorboard_dir=tensorboard_dir,
+            wandb_project="mlperf",
+            wandb_exp_name="my_experiment",
+            wandb_save_dir="/workspace/checkpoints/wandb", 
         ),
         tokenizer=TokenizerConfig(
             tokenizer_type="NullTokenizer" if use_null_tokenizer else "HuggingFaceTokenizer",
