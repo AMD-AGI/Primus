@@ -177,7 +177,8 @@ jobs:
 
   run-unittest-torch:
     env:
-      PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
+      PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_ci/actions-runner-torch
+      # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
     needs: [code-lint]
     # runs-on: [primus-lm-cicd-torch-j8knc]
     runs-on: [primus-lm-cicd-torch-tas8n-a16-40]
