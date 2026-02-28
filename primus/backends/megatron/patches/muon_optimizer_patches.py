@@ -7,10 +7,11 @@
 """
 Megatron Muon Optimizer patches.
 
-This module patches megatron.core.optimizer.get_megatron_optimizer to
+This module patches megatron.training.training.get_megatron_optimizer to
 automatically dispatch to get_megatron_muon_optimizer when args.optimizer
-contains "muon", enabling muon optimizer support in the backends workflow
-without maintaining a separate branch in MegatronTrainer.
+contains "muon". Since training.py uses `from megatron.core.optimizer import
+get_megatron_optimizer`, we must patch the training module's namespace where
+the function is actually used, not megatron.core.optimizer.
 """
 
 import dataclasses
@@ -27,12 +28,21 @@ from primus.modules.module_utils import log_rank_0
 )
 def patch_get_megatron_optimizer_muon(ctx: PatchContext) -> None:
     """
-    Patch megatron.core.optimizer.get_megatron_optimizer to delegate to
+    Patch megatron.training.training.get_megatron_optimizer to delegate to
     get_megatron_muon_optimizer when config.optimizer contains "muon".
-    """
-    import megatron.core.optimizer as optimizer_module
 
-    original_get_megatron_optimizer = optimizer_module.get_megatron_optimizer
+    We patch the training module (not megatron.core.optimizer) because
+    training.py imports get_megatron_optimizer into its namespace at import
+    time; patching the optimizer module would not affect the training module's
+    local reference.
+    """
+    try:
+        import megatron.training.training as training_module
+    except ImportError as e:
+        log_rank_0(f"[Patch:megatron.optimizer.muon] Skip patch (Megatron not available): {e}")
+        return
+
+    original_get_megatron_optimizer = training_module.get_megatron_optimizer
 
     if getattr(original_get_megatron_optimizer, "_primus_muon_wrapper", False):
         return
@@ -87,7 +97,8 @@ def patch_get_megatron_optimizer_muon(ctx: PatchContext) -> None:
         )
 
     setattr(_patched_get_megatron_optimizer, "_primus_muon_wrapper", True)
-    optimizer_module.get_megatron_optimizer = _patched_get_megatron_optimizer
+    training_module.get_megatron_optimizer = _patched_get_megatron_optimizer
     log_rank_0(
-        "[Patch:megatron.optimizer.muon] Patched get_megatron_optimizer to dispatch to muon when optimizer contains 'muon'"
+        "[Patch:megatron.optimizer.muon] Patched get_megatron_optimizer in megatron.training.training "
+        "to dispatch to muon when optimizer contains 'muon'."
     )
