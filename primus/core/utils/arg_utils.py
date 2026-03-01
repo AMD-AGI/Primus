@@ -15,6 +15,7 @@ def parse_cli_overrides(overrides: list) -> dict:
 
     Supported formats:
         - "key=value"
+        - "--key=value"
         - "nested.key=value"
         - "--key value" (common CLI style, converted internally to "key=value")
 
@@ -55,7 +56,10 @@ def parse_cli_overrides(overrides: list) -> dict:
 
         # Already in key=value form (including "--key=value")
         if "=" in item:
-            normalized.append(item)
+            key, value = item.split("=", 1)
+            key = key.lstrip("-").strip()
+            value = value.strip()
+            normalized.append(f"{key}={value}")
             i += 1
             continue
 
