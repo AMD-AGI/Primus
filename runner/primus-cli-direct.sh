@@ -361,7 +361,14 @@ source "${RUNNER_DIR}/helpers/envs/primus-env.sh"
 # shellcheck disable=SC1091
 source "${RUNNER_DIR}/helpers/execute_hooks.sh"
 HOOK_EXTRA_PRIMUS_ARGS=()
-if ! execute_hooks "${1:-}" "${2:-}" "$@"; then
+hook_group="${1:-}"
+hook_name="${2:-}"
+# preflight has no mandatory subcommand, so force a stable hook path:
+# runner/helpers/hooks/preflight/preflight/
+if [[ "$hook_group" == "preflight" ]]; then
+    hook_name="preflight"
+fi
+if ! execute_hooks "$hook_group" "$hook_name" "$@"; then
     LOG_ERROR "[direct] Hooks execution failed"
     exit 1
 fi
