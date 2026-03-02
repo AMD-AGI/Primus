@@ -44,6 +44,7 @@ srun -N "${NNODES}" \
      --export ALL \
      --ntasks-per-node=1 \
      --time="${SLURM_TIME:-07:00:00}" \
+     --nodelist="${SLURM_NODELIST:-}" \
      --partition="${SLURM_PARTITION:-amd-aig}" \
      --cpus-per-task="${CPUS_PER_TASK:-128}" \
      bash -c "

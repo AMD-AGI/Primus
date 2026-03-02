@@ -113,7 +113,7 @@ echo "ENV_ARGS: ${ENV_ARGS[*]}"
 HOSTNAME=$(hostname)
 ARGS=("$@")
 
-VOLUME_ARGS=(-v "$PRIMUS_PATH":"$PRIMUS_PATH" -v "$DATA_PATH":"$DATA_PATH")
+VOLUME_ARGS=(-v "$PRIMUS_PATH":"$PRIMUS_PATH" -v "$DATA_PATH":"$DATA_PATH" -v "/shared_aig/c4:/shared_aig/c4")
 if [[ -f "$PATH_TO_BNXT_TAR_PACKAGE" ]]; then
     VOLUME_ARGS+=(-v "$PATH_TO_BNXT_TAR_PACKAGE":"$PATH_TO_BNXT_TAR_PACKAGE")
 fi
@@ -164,7 +164,12 @@ else
     echo "Node-${NODE_RANK}: Launching training container."
 fi
 
-docker_podman_proxy pull "$DOCKER_IMAGE"
+if ! docker_podman_proxy image inspect "$DOCKER_IMAGE" &>/dev/null; then
+    echo "Node-${NODE_RANK}: Image not found locally, pulling $DOCKER_IMAGE..."
+    docker_podman_proxy pull "$DOCKER_IMAGE"
+else
+    echo "Node-${NODE_RANK}: Image $DOCKER_IMAGE already exists, skipping pull."
+fi
 
 # ------------------ Launch Training Container ------------------
 docker_podman_proxy run --rm \
