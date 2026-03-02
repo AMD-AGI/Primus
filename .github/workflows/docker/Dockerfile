@@ -67,7 +67,8 @@ RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
     git clone https://github.com/uccl-project/uccl.git && \
     cd uccl && \
     git checkout ${UCCL_COMMIT} && \
-    cd ep && TORCH_CUDA_ARCH_LIST="gfx942,gfx950" python3 setup.py build && cd .. && \
+    cd ep && \
+    DISABLE_AGGRESSIVE_ATOMIC=0 TORCH_CUDA_ARCH_LIST="${HCC_AMDGPU_TARGET}" python3 setup.py build && cd .. && \
     cp ep/build/**/*.so uccl && \
     pip3 install --no-build-isolation . -v && \
     cd ep/deep_ep_wrapper && pip3 install --no-build-isolation . -v && \
