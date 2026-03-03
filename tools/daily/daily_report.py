@@ -138,14 +138,14 @@ def parse_last_metrics_from_log(file_path: str) -> Dict[str, float]:
     if not last_m:
         raise ValueError(f"No valid iteration metrics found in {file_path}")
     metric = last_m.groupdict()
-    step_time_s = float(metric["elapsed_ms"]) / 1000.0
+    step_time_s_avg = float(metric["elapsed_ms_avg"]) / 1000.0
     mem_usage = float(metric["hip_used"])
     tflops_avg = float(metric["tflops_avg"])
     tokens_avg = float(metric["tokens_avg"])
 
     return {
         "TFLOP/s/GPU": round(tflops_avg, 2),
-        "Step Time (s)": round(step_time_s, 3),
+        "Step Time (s)": round(step_time_s_avg, 3),
         "Tokens/s/GPU": round(tokens_avg, 1),
         "Mem Usage": round(mem_usage, 2),
     }
