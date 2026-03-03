@@ -35,6 +35,4 @@ RUN cd ${WORKDIR} && \
     cd ainic_bundle_1.117.5-a-56 && \
     tar zxf host_sw_pkg.tar.gz && \
     cd host_sw_pkg && \
-    ./install.sh --domain=user -y 2>&1 | tee log_install.txt && \
-    cd ${WORKDIR} && \
-    apt-get install -y ./amd/ainic/deb-repo/libionic*.deb
+    ./install.sh --domain=user -y 2>&1 | tee log_install.txt
