@@ -524,76 +524,6 @@ def hierarchical_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     return t_total
 
 
-def pxn_alltoall(args, msg_size, gpus, groups=None, protocol=None):
-    """
-    PXN All-to-All - pipelined implementation for DeepEP.
-
-    Based on DeepEP implementation of pipelined PXN-A2A with pipelined
-    scale-up (intra-node) and scale-out (inter-node) communication.
-
-    Key features:
-    - Overlaps scale-up and scale-out communication
-    - Scale-out doesn't start until 4MB is accumulated for dispatch
-    - Falls back to regular alltoall for single-node configurations
-    """
-    if gpus == 1 or msg_size == 0:
-        return 0
-
-    original_msg_size = msg_size
-
-    # Account for TP striding: with TP (hp) > 1, each EP rank occupies
-    # hp GPUs, so only node_size/hp EP ranks fit on a single node.
-    hp = getattr(args, "hp", 1)
-    effective_gpus_per_node = min(gpus, args.node_size // max(hp, 1))
-    num_nodes = ceil(gpus / max(effective_gpus_per_node, 1))
-
-    # If A2A is not crossing node boundaries, fall back to regular alltoall
-    if num_nodes <= 1:
-        return min(
-            single_shot_alltoall(args, msg_size, gpus, groups, protocol),
-            run_alltoall(args, msg_size, gpus, groups, protocol),
-        )
-
-    # PXN - AlltoAll - pipeline implementation
-    chunk_size = 4194304  # 4MB - DeepEP waits until 4MB is accumulated
-
-    # Scale-out message size (inter-node communication)
-    scale_out_msg_size = int(original_msg_size * (num_nodes - 1) / num_nodes)
-
-    # Scale-up delay: time to accumulate 4MB before scale-out starts
-    if scale_out_msg_size < chunk_size:
-        # If total scale-out msg size is less than 4MB,
-        # total time = scaleup_delay + scaleout_time
-        node_lat, _ = node_latency_and_volume_protocol(args, scale_out_msg_size, protocol)
-        scaleup_delay = node_lat + scale_out_msg_size / args.node_bw * 1.0e-3
-    else:
-        # Scale-out comm doesn't start until 4MB is accumulated
-        node_lat, _ = node_latency_and_volume_protocol(args, chunk_size, protocol)
-        scaleup_delay = node_lat + chunk_size / args.node_bw * 1.0e-3
-
-    # Assume PXN style alltoall with overlapped scale-up and scale-out
-    node_msg_size = int(original_msg_size * (effective_gpus_per_node - 1) / effective_gpus_per_node)
-    scale_out_msg_size = int(original_msg_size * (num_nodes - 1) / num_nodes)
-
-    # Calculate latencies with protocol inflation
-    node_lat, node_msg_size_adj = node_latency_and_volume_protocol(args, node_msg_size, protocol)
-    pod_lat, scale_out_msg_size_adj = pod_latency_and_volume_protocol(args, scale_out_msg_size, protocol)
-
-    # Scale-up (intra-node) time
-    node_bw = args.bw_eff * args.node_bw
-    t_a2a_node = node_lat + node_msg_size_adj / node_bw * 1.0e-3
-
-    # Scale-out (inter-node) time with scaleup delay
-    pod_bw = args.bw_eff * args.pod_bw
-    t_a2a_scale_out = pod_lat + scale_out_msg_size_adj / pod_bw * 1.0e-3 + scaleup_delay
-
-    # Total time is max of scale-up and scale-out (they overlap)
-    t_total = max(t_a2a_node, t_a2a_scale_out)
-    t_total += args.kernel_launch_latency
-
-    return t_total
-
-
 def single_shot_allgather(args, msg_size, gpus, groups=None, protocol=None):
     """
     Single shot allgather with max fanout and overlap.
@@ -705,25 +635,13 @@ def alltoall(args, msg_size, gpus, groups=["ep"]):
     Select best alltoall algorithm among several options.
     Tries multiple protocols and algorithms, returns fastest.
     Applies per-peer latency overhead and minimum latency floor.
-
-    If DeepEP is enabled (moe_enable_deepep=True), uses PXN All-to-All
-    which pipelines scale-up and scale-out communication.
     """
-    # Check if DeepEP is enabled
-    use_deepep = getattr(args, "moe_enable_deepep", False) or getattr(args, "use_turbo_deepep", False)
-
     min_a2a_time = float("inf")
     for p in ["simple", "ll", "ll64", "ll128"]:
-        if use_deepep:
-            # Use PXN All-to-All for DeepEP
-            pxn_a2a_time = pxn_alltoall(args, msg_size, gpus, protocol=p)
-            a2a_time = pxn_a2a_time
-        else:
-            # Use regular All-to-All algorithms
-            direct_a2a_time = run_alltoall(args, msg_size, gpus, protocol=p)
-            single_shot_a2a_time = single_shot_alltoall(args, msg_size, gpus, protocol=p)
-            hierarchical_a2a_time = hierarchical_alltoall(args, msg_size, gpus, protocol=p)
-            a2a_time = min(direct_a2a_time, single_shot_a2a_time, hierarchical_a2a_time)
+        direct_a2a_time = run_alltoall(args, msg_size, gpus, protocol=p)
+        single_shot_a2a_time = single_shot_alltoall(args, msg_size, gpus, protocol=p)
+        hierarchical_a2a_time = hierarchical_alltoall(args, msg_size, gpus, protocol=p)
+        a2a_time = min(direct_a2a_time, single_shot_a2a_time, hierarchical_a2a_time)
 
         if a2a_time < min_a2a_time:
             min_a2a_time = a2a_time

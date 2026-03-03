@@ -86,6 +86,8 @@ _KNOWN_PROFILES: Dict[str, _HardwareProfile] = {
     "gfx950": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000, 8000.0),
     # MI300A
     "mi300a": _HardwareProfile("gfx942", 228, 65536, 4_194_304, 2_100_000, 4000.0),
+    # Experimental
+    "experimental": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 3_057_000, 20100.0),
 }
 
 # ---------------------------------------------------------------------------
@@ -279,13 +281,6 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
         latency_cycles = result.latency
         time_ms = latency_cycles / (self._clock_ghz * 1e6)
 
-        # FP8 speedup heuristic: we simulated in BF16 because Origami could
-        # not use a native FP8 matrix instruction.  FP8 MFMA throughput is 2×
-        # that of BF16 on both gfx942 and gfx950, so halving the BF16 time is
-        # a reasonable first-order approximation for compute-bound GEMMs.
-        if fp8_fallback:
-            time_ms /= 2.0
-
         # Compute achieved TFLOPS for metadata
         flops = 2.0 * m * n * k * batch
         time_s = time_ms / 1e3
@@ -349,8 +344,8 @@ class OrigamiGEMMBackend(GEMMSimulationBackend):
                 is_rank_0 = int(os.getenv("RANK", "0")) == 0
                 if is_rank_0:
                     print(
-                        f"[Primus:Origami] FP8 matrix instruction not available "
-                        f"for this hardware; will use BF16 with 2x speedup factor"
+                        "[Primus:Origami] FP8 matrix instruction not available "
+                        "for this hardware; will use BF16 with 2x speedup factor"
                     )
             return
 

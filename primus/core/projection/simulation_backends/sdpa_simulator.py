@@ -156,6 +156,14 @@ _HW_PROFILES: Dict[str, GPUHardwareSpec] = {
         n_cu=256,
         n_xcd=4,
     ),
+    "experimental": GPUHardwareSpec(  # Experimental
+        peak_tflops_bf16=3470.0,
+        peak_tflops_fp16=3470.0,
+        peak_tflops_fp8=10710.0,
+        hbm_bandwidth_gbps=20100.0,
+        n_cu=256,
+        n_xcd=4,
+    ),
 }
 
 
@@ -183,6 +191,7 @@ def _get_hardware_spec(
             "mi355x": 2100,
             "gfx950": 2100,
             "mi300a": 2100,
+            "experimental": 3057,
         }
         base_clock = _PROFILE_CLOCK_MHZ.get(arch, 2100)
         scale = clock_override / base_clock
