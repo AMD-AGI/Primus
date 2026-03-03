@@ -78,16 +78,24 @@ def patch_v_schedule_support(ctx: PatchContext):
     )
 
     # Patch finalize_model_grads
+    import megatron.core.distributed as distributed_mod
     import megatron.core.distributed.finalize_model_grads as ori_finalize_model_grads
+    import megatron.training.training as training_module
 
     from primus.backends.megatron.core.distributed.finalize_model_grad import (
         finalize_model_grads,
     )
 
     ori_finalize_model_grads.finalize_model_grads = finalize_model_grads
+    distributed_mod.finalize_model_grads = finalize_model_grads
+    training_module.finalize_model_grads = finalize_model_grads
     log_rank_0(
         f"[Patch:megatron.pp.v_schedule]   Patched megatron.core.distributed.finalize_model_grads.finalize_model_grads "
         f"-> {finalize_model_grads.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.pp.v_schedule]   Patched megatron.core.distributed / megatron.training.training.finalize_model_grads "
+        f"(direct import target)"
     )
 
     # Patch get_transformer_layer_offset

@@ -31,13 +31,19 @@ def patch_pipeline_schedule(ctx: PatchContext):
     """
 
     import megatron.core.pipeline_parallel as ori_pp
+    import megatron.training.training as training_module
 
     from primus.backends.megatron.core.pipeline_parallel.schedules import (
         get_primus_pipeline_parallel_fwd_backward_func,
     )
 
     ori_pp.get_forward_backward_func = get_primus_pipeline_parallel_fwd_backward_func
+    training_module.get_forward_backward_func = get_primus_pipeline_parallel_fwd_backward_func
     log_rank_0(
         f"[Patch:megatron.pp.schedule]   Patched megatron.core.pipeline_parallel.get_forward_backward_func "
         f"-> {get_primus_pipeline_parallel_fwd_backward_func.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.pp.schedule]   Patched megatron.training.training.get_forward_backward_func "
+        f"-> {get_primus_pipeline_parallel_fwd_backward_func.__name__} (direct import target)"
     )

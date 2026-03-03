@@ -67,6 +67,7 @@ def _make_guarded_schedule_wrapper(original_schedule_wrapper):
 def patch_pp_dump_data_before_train(ctx: PatchContext):
     """Apply schedule_wrapper to get_forward_backward_func; for Megatron native only, patch forward_step/backward_step."""
     import megatron.core.pipeline_parallel as pp_module
+    import megatron.training.training as training_module
 
     import primus.modules.trainer.megatron.utils as utils
 
@@ -78,8 +79,11 @@ def patch_pp_dump_data_before_train(ctx: PatchContext):
     utils.schedule_wrapper = _make_guarded_schedule_wrapper(utils.schedule_wrapper)
 
     # 2. Always wrap get_forward_backward_func with schedule_wrapper when dump_pp_data
+    #    Patch both pipeline_parallel and training.training (training.py uses direct import)
     original_get_fwd_bwd = pp_module.get_forward_backward_func
-    pp_module.get_forward_backward_func = _make_wrapped_get_forward_backward_func(original_get_fwd_bwd)
+    wrapped = _make_wrapped_get_forward_backward_func(original_get_fwd_bwd)
+    pp_module.get_forward_backward_func = wrapped
+    training_module.get_forward_backward_func = wrapped
 
     # 3. Megatron native only: patch forward_step and backward_step (Primus pipeline / ZeroBubble handlers already use fwd_bwd_wrapper)
     if not is_primus_pipeline and not is_zero_bubble:
