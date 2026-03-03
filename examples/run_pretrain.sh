@@ -196,6 +196,14 @@ if [ "$USING_AINIC" == "1" ]; then
     LOG_INFO_RANK0 "NCCL_IB_FIFO_TC: $NCCL_IB_FIFO_TC"
 
     if [ "${BACKEND:-}" == "MaxText" ]; then
+        if ! command -v ibv_devinfo &>/dev/null || ! ibv_devinfo &>/dev/null; then
+            LOG_ERROR "Error: ibv_devinfo not found. Please upgrade driver or use tasimage image."
+            exit 1
+        fi
+
+        export ANP_HOME_DIR=${ANP_HOME_DIR:-"/workspace/amd-anp"}
+        export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/workspace/rccl"}
+        export MPI_HOME_DIR=${MPI_HOME_DIR:-"/ompi-4.1.6/install/"}
         # ------- RCCL/NCCL IB Tuning -------
         export IONIC_LOCKFREE=all
         export NCCL_GDR_COPY_ENABLE=1
@@ -204,23 +212,12 @@ if [ "$USING_AINIC" == "1" ]; then
 
         export NCCL_PXN_DISABLE=0
         export RCCL_LL128_FORCE_ENABLE=1
+
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib
     else
         export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
         export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
         export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi"}
-        # Check which NCCL net plugin library is present under ${ANP_HOME_DIR}/build and set accordingly
-        if [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
-            export NCCL_NET_PLUGIN=librccl-anp.so
-        elif [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
-            export NCCL_NET_PLUGIN=librccl-net.so
-        else
-            LOG_ERROR "Error: Neither librccl-anp.so nor librccl-net.so found in ${ANP_HOME_DIR}/build."
-            exit 1
-        fi
-
-        LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
-        LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
-        LOG_INFO_RANK0 "MPI_HOME_DIR: $MPI_HOME_DIR"
 
         export NCCL_MAX_P2P_CHANNELS=56
         export NCCL_DMABUF_ENABLE=0
@@ -228,6 +225,20 @@ if [ "$USING_AINIC" == "1" ]; then
 
         export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib:$LD_LIBRARY_PATH
     fi
+    # Check which NCCL net plugin library is present under ${ANP_HOME_DIR}/build and set accordingly
+    if [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
+        export NCCL_NET_PLUGIN=librccl-anp.so
+    elif [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
+        export NCCL_NET_PLUGIN=librccl-net.so
+    else
+        LOG_ERROR "Error: Neither librccl-anp.so nor librccl-net.so found in ${ANP_HOME_DIR}/build."
+        exit 1
+    fi
+
+    LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
+    LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
+    LOG_INFO_RANK0 "MPI_HOME_DIR: $MPI_HOME_DIR"
+    LOG_INFO_RANK0 "NCCL_NET_PLUGIN: $NCCL_NET_PLUGIN"
 else
     export NCCL_IB_GID_INDEX=3
 fi

@@ -333,53 +333,8 @@ if [[ -z "${direct_config[log_file]:-}" ]]; then
 fi
 mkdir -p "$(dirname "${direct_config[log_file]:-}")"
 
-
 ###############################################################################
-# STEP 5: Install dependencies
-###############################################################################
-# Detect the backend framework from the experiment YAML (--config in PRIMUS_ARGS)
-# so we can install the correct requirements file:
-#   maxtext -> requirements-jax.txt
-#   others  -> requirements.txt
-_detect_framework() {
-    local cfg_path=""
-    local args=("${primus_args[@]}")
-    for ((i=0; i<${#args[@]}; i++)); do
-        if [[ "${args[$i]}" == "--config" && -n "${args[$((i+1))]:-}" ]]; then
-            cfg_path="${args[$((i+1))]}"
-            break
-        fi
-    done
-    if [[ -z "$cfg_path" || ! -f "$cfg_path" ]]; then
-        echo ""
-        return
-    fi
-    python3 -c "
-import yaml, sys
-try:
-    cfg = yaml.safe_load(open('$cfg_path'))
-    print(cfg.get('modules',{}).get('pre_trainer',{}).get('framework',''))
-except Exception:
-    print('')
-" 2>/dev/null
-}
-
-DETECTED_FRAMEWORK="$(_detect_framework)"
-LOG_INFO_RANK0 "[direct] Detected framework: ${DETECTED_FRAMEWORK:-unknown}"
-
-# Skip pip install in dry-run mode
-if [[ "$DRY_RUN_MODE" != "1" ]]; then
-    if [[ "$DETECTED_FRAMEWORK" == "maxtext" ]]; then
-        LOG_INFO_RANK0 "[direct] Installing JAX dependencies (requirements-jax.txt)"
-        pip install -qq -r requirements-jax.txt
-    else
-        LOG_INFO_RANK0 "[direct] Installing PyTorch dependencies (requirements.txt)"
-        pip install -qq -r requirements.txt
-    fi
-fi
-
-###############################################################################
-# STEP 6: Source GPU environment and helper modules
+# STEP 5: Source GPU environment and helper modules
 ###############################################################################
 
 # Source primus-env.sh (it will set its own SCRIPT_DIR, which is fine)
@@ -387,7 +342,7 @@ fi
 source "${RUNNER_DIR}/helpers/envs/primus-env.sh"
 
 ###############################################################################
-# STEP 7: Execute hooks and capture extra arguments / env
+# STEP 6: Execute hooks and capture extra arguments / env
 ###############################################################################
 # Hooks can return:
 #   - Extra Primus CLI arguments by printing lines:  extra.<name>=<value>
@@ -409,7 +364,7 @@ if [[ ${#HOOK_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
 fi
 
 ###############################################################################
-# STEP 8: Execute patch scripts
+# STEP 7: Execute patch scripts
 ###############################################################################
 # Execute patch scripts from config + CLI.
 # Note: direct_config[patch] is stored as a newline-separated list.
@@ -427,7 +382,7 @@ if [[ -n "${direct_config[patch]:-}" ]]; then
 fi
 
 ###############################################################################
-# STEP 8.5: Apply extra Primus args from patches (extra.* protocol)
+# STEP 7.5: Apply extra Primus args from patches (extra.* protocol)
 ###############################################################################
 if [[ ${#PATCH_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
     set -- "$@" "${PATCH_EXTRA_PRIMUS_ARGS[@]}"
@@ -435,7 +390,7 @@ if [[ ${#PATCH_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
 fi
 
 ###############################################################################
-# STEP 9: Build and export environment variables (highest priority)
+# STEP 8: Build and export environment variables (highest priority)
 ###############################################################################
 
 # First, source any env files specified via --env <file> (tracked as env_file).
@@ -472,7 +427,7 @@ if [[ -n "${direct_config[env]:-}" ]]; then
 fi
 
 ###############################################################################
-# STEP 10: Build launch command
+# STEP 9: Build launch command
 ###############################################################################
 
 # Allow RUN_MODE to be overridden by environment variable
@@ -523,7 +478,7 @@ elif [[ "$RUN_MODE" == "torchrun" ]]; then
 fi
 
 ###############################################################################
-# STEP 11: Display configuration (always)
+# STEP 10: Display configuration (always)
 ###############################################################################
 if [[ "$DRY_RUN_MODE" == "1" ]]; then
     print_section "[DRY RUN] Direct Launch Configuration"
@@ -581,7 +536,7 @@ fi
 print_section ""
 
 ###############################################################################
-# STEP 12: Execute command
+# STEP 11: Execute command
 ###############################################################################
 # Temporarily allow pipeline to fail so we can capture PIPESTATUS and log it
 eval "$CMD"

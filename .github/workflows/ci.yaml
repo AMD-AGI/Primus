@@ -168,6 +168,25 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
           docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
+          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax-ainic"
+          start_time=$(date +%s)
+          mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
+          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-56.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_jax.ainic \
+               --network=host \
+               -t tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic \
+               --build-arg BASE_IMAGE=${MAXTEXT_BASE_IMAGE} \
+               --build-arg AINIC_BUNDLE_PATH=ainic \
+               $GITHUB_WORKSPACE/.github/workflows/docker
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build primus docker-jax-ainic] Total elapsed time: ${elapsed} seconds"
+
+          docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic
+          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic
+          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+
           # echo "> Docker cleanup local images"
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-v25.09-ainic

@@ -72,6 +72,7 @@ container:
       - "USING_AINIC=1"
       - "NCCL_PXN_DISABLE=0"
       - "NCCL_IB_GID_INDEX=1"
+      - "NCCL_NET_PLUGIN=librccl-anp.so"  # Only applicable for new AINIC images (with librccl-anp.so)
 # Direct mode settings
 direct:
   debug: false
