@@ -21,6 +21,65 @@ from .residual_add import ResidualAddProfiler
 from .router import RouterProfiler
 from .utils import benchmark_layer
 
+# ── Fallback HBM bandwidth for elementwise overhead estimation ──
+_FALLBACK_HBM_BW_GBPS = 5300.0  # MI300X default
+
+
+def _estimate_layernorm_residual_time_ms(
+    config, batch_size: int, seq_len: int, gemm_backend=None
+) -> tuple[float, float]:
+    """
+    Estimate the combined LayerNorm (×2) and Residual Add (×2) time per
+    transformer layer, returning ``(fwd_ms, bwd_ms)``.
+
+    Each transformer layer has:
+    - 2 LayerNorm ops  (input LN, pre-MLP LN)
+    - 2 Residual Adds  (post-attention, post-MLP)
+
+    These are element-wise, memory-bandwidth-bound operations.  Each reads
+    and writes a tensor of shape ``[batch_tokens, hidden_size]`` in BF16.
+
+    We use the same HBM bandwidth efficiency as the activation function
+    model (``_ACTIVATION_BW_FRACTION``) since these are similar sequential
+    element-wise streaming operations over contiguous buffers.
+
+    **Forward memory passes**:
+      - 2× RMSNorm fwd: read input + write output + write variance ≈ 3 passes each → 6
+      - 2× Residual Add fwd: read 2 inputs + write output ≈ 3 passes each → 6
+      - Total: 12 passes
+
+    **Backward memory passes**:
+      - 2× RMSNorm bwd: read grad_output + read input + read variance +
+        write grad_input + reduction for grad_scale ≈ 5 passes each → 10
+      - 2× Residual Add bwd: read grad + write grad ≈ 2 passes each → 4
+      - Total: 14 passes
+    """
+    from .moe_mlp import _ACTIVATION_BW_FRACTION
+
+    tp = config.model_parallel_config.tensor_model_parallel_size
+    cp = getattr(config.model_parallel_config, "context_parallel_size", 1) or 1
+    hidden = config.model_config.hidden_size
+    batch_tokens = batch_size * seq_len // tp // cp
+    bytes_per_el = 2  # BF16
+
+    # Get peak HBM bandwidth from the GEMM backend if available
+    peak_hbm = _FALLBACK_HBM_BW_GBPS
+    if gemm_backend is not None:
+        bw = getattr(gemm_backend, "hbm_bandwidth_gbps", None)
+        if bw is not None:
+            peak_hbm = bw
+
+    tensor_bytes = batch_tokens * hidden * bytes_per_el
+    eff_bw = peak_hbm * _ACTIVATION_BW_FRACTION  # GB/s
+
+    # Forward: 12 memory passes
+    fwd_ms = 12 * tensor_bytes / (eff_bw * 1e6)
+
+    # Backward: 14 memory passes
+    bwd_ms = 14 * tensor_bytes / (eff_bw * 1e6)
+
+    return fwd_ms, bwd_ms
+
 
 def _estimate_tp_allreduce_time_ms(config, batch_size: int, seq_len: int) -> float:
     """
@@ -65,7 +124,7 @@ def _estimate_tp_allreduce_time_ms(config, batch_size: int, seq_len: int) -> flo
     return ar_time_us / 1000.0  # Convert microseconds → milliseconds
 
 
-def _estimate_moe_a2a_time_ms(config, batch_size: int, seq_len: int) -> float:
+def _estimate_moe_a2a_time_ms(config, batch_size: int, seq_len: int, gemm_backend=None) -> float:
     """
     Estimate MoE All-to-All time (dispatch + combine) per layer per direction (in ms).
 
@@ -76,6 +135,10 @@ def _estimate_moe_a2a_time_ms(config, batch_size: int, seq_len: int) -> float:
     In benchmark mode this cost is captured inside the measured layer time.
     In simulation mode we must add it explicitly because the layer profiler
     only simulates GEMM / SDPA compute and TP AllReduce.
+
+    This function returns the analytical A2A communication time only. Routing
+    overhead (token permutation) is kept separate and not included here. The
+    analytical model provides the base communication time for scaling purposes.
 
     Returns 0.0 when EP <= 1 (all experts are local, no A2A needed).
     """
@@ -107,11 +170,12 @@ def _estimate_moe_a2a_time_ms(config, batch_size: int, seq_len: int) -> float:
         cp=cp,
     )
 
-    # Dispatch A2A + Combine A2A (same message size, same time)
+    # Analytical A2A communication time (base model only)
     a2a_dispatch_us = cm.alltoall(coll_args, dispatch_size_bytes, ep, groups=["ep"])
     a2a_combine_us = cm.alltoall(coll_args, dispatch_size_bytes, ep, groups=["ep"])
+    a2a_ms = (a2a_dispatch_us + a2a_combine_us) / 1000.0
 
-    return (a2a_dispatch_us + a2a_combine_us) / 1000.0  # Convert us → ms
+    return a2a_ms
 
 
 # Transformer Layer Data Flow
@@ -230,8 +294,14 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
         # (With sequence parallelism these become RS+AG pairs with equal volume.)
         tp_ar_ms = _estimate_tp_allreduce_time_ms(self.config, batch_size, seq_len)
 
-        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms
-        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms
+        # Add LayerNorm + Residual Add overhead (simulation only).
+        # These element-wise ops are missing from GEMM/SDPA simulation.
+        ln_res_fwd_ms, ln_res_bwd_ms = _estimate_layernorm_residual_time_ms(
+            self.config, batch_size, seq_len, self._gemm_backend
+        )
+
+        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + ln_res_fwd_ms
+        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + ln_res_bwd_ms
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 
@@ -328,9 +398,10 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
     def _get_simulated_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
         """Aggregate simulated results from sub-profilers.
 
-        Includes TP AllReduce and MoE All-to-All communication overhead that
-        would be captured in the measured layer time during benchmark mode but
-        must be added explicitly in simulation mode.
+        Includes TP AllReduce, MoE All-to-All communication overhead, and
+        LayerNorm / Residual Add element-wise overhead that would be captured
+        in the measured layer time during benchmark mode but must be added
+        explicitly in simulation mode.
         """
         attn_fwd = self.sub_profilers["self_attention"].measured_forward_time(batch_size, seq_len)
         attn_bwd = self.sub_profilers["self_attention"].measured_backward_time(batch_size, seq_len)
@@ -349,10 +420,16 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         # In benchmark mode this is captured in the measured layer time;
         # in simulation mode the layer profiler only computes GEMM / SDPA
         # so we must add it here.
-        moe_a2a_ms = _estimate_moe_a2a_time_ms(self.config, batch_size, seq_len)
+        moe_a2a_ms = _estimate_moe_a2a_time_ms(self.config, batch_size, seq_len, self._gemm_backend)
 
-        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + moe_a2a_ms
-        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + moe_a2a_ms
+        # Add LayerNorm + Residual Add overhead (simulation only).
+        # These element-wise ops are missing from GEMM/SDPA simulation.
+        ln_res_fwd_ms, ln_res_bwd_ms = _estimate_layernorm_residual_time_ms(
+            self.config, batch_size, seq_len, self._gemm_backend
+        )
+
+        fwd_time = attn_fwd + mlp_fwd + 2 * tp_ar_ms + moe_a2a_ms + ln_res_fwd_ms
+        bwd_time = attn_bwd + mlp_bwd + 2 * tp_ar_ms + moe_a2a_ms + ln_res_bwd_ms
         activation_memory = self.estimated_activation_memory(batch_size, seq_len)
         return (fwd_time, bwd_time, activation_memory)
 
