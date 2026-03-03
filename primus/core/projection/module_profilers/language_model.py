@@ -652,6 +652,13 @@ class LanguageModelProfiler(BaseModuleProfiler):
             mlp_backward = mlp_profiler.measured_backward_time(batch_size, seq_len)
             mlp_mem = mlp_profiler.measured_activation_memory(batch_size, seq_len)
 
+            # Get decomposed A2A timings for MoE layers (0 for dense layers)
+            mlp_a2a_fwd = 0.0
+            mlp_a2a_bwd = 0.0
+            if is_moe and hasattr(mlp_profiler, "measured_a2a_forward_time"):
+                mlp_a2a_fwd = mlp_profiler.measured_a2a_forward_time(batch_size, seq_len)
+                mlp_a2a_bwd = mlp_profiler.measured_a2a_backward_time(batch_size, seq_len)
+
             results[layer_type] = {
                 "type": layer_type,
                 "forward_time_ms": forward_time,
@@ -666,6 +673,8 @@ class LanguageModelProfiler(BaseModuleProfiler):
                     "forward_time_ms": mlp_forward,
                     "backward_time_ms": mlp_backward,
                     "activation_memory_bytes": mlp_mem,
+                    "a2a_forward_time_ms": mlp_a2a_fwd,
+                    "a2a_backward_time_ms": mlp_a2a_bwd,
                 },
             }
 
@@ -680,6 +689,11 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 print(f"  Activation memory: {activation_memory / (1024**2):.2f} MB")
                 print(f"  Attention: fwd={attn_forward:.2f} ms, bwd={attn_backward:.2f} ms")
                 print(f"  MLP: fwd={mlp_forward:.2f} ms, bwd={mlp_backward:.2f} ms")
+                if is_moe and (mlp_a2a_fwd > 0 or mlp_a2a_bwd > 0):
+                    compute_fwd = mlp_forward - mlp_a2a_fwd
+                    compute_bwd = mlp_backward - mlp_a2a_bwd
+                    print(f"  MLP A2A: fwd={mlp_a2a_fwd:.2f} ms, bwd(est)={mlp_a2a_bwd:.2f} ms")
+                    print(f"  MLP Compute (excl A2A): fwd={compute_fwd:.2f} ms, bwd={compute_bwd:.2f} ms")
 
         # Expand results to all layers
         final_results = {}

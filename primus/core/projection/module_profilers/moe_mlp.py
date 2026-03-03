@@ -11,7 +11,7 @@ from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import TrainingConfig
 
-from .utils import benchmark_layer
+from .utils import benchmark_moe_layer_decomposed
 
 # Efficiency fractions for non-GEMM MoE overhead estimation.
 # These express achievable bandwidth as a fraction of peak HBM bandwidth.
@@ -38,6 +38,9 @@ class MoEMLPProfiler(BaseModuleProfiler):
         self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
         self._cache_key = None  # Cache key (batch_size, seq_len)
         self._gemm_backend = None  # Optional: GEMM simulation backend
+        # Decomposed A2A timings (populated during benchmarking)
+        self._a2a_fwd_ms = 0.0  # Measured A2A dispatch+combine forward time
+        self._a2a_bwd_ms = 0.0  # Measured A2A dispatch+combine backward time (estimated)
 
     def set_module(self, module):
         """Set the actual MoE MLP module for benchmarking."""
@@ -258,6 +261,14 @@ class MoEMLPProfiler(BaseModuleProfiler):
             expert_fwd = expert_fwd_ms * num_local_experts
             expert_bwd = expert_bwd_ms * num_local_experts
 
+            # NOTE: Legacy grouped GEMM is not properly modelled. Origami
+            # simulates ideal single-kernel execution
+            if is_rank_0:
+                print(
+                    "  [MoE MLP] WARNING: Legacy grouped GEMM not properly modelled. "
+                    "Estimates may be inaccurate."
+                )
+
         fwd_time = expert_fwd
         bwd_time = expert_bwd
 
@@ -323,16 +334,28 @@ class MoEMLPProfiler(BaseModuleProfiler):
         return (fwd_time, bwd_time, activation_memory)
 
     def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
-        """Get or compute benchmark results (cached)."""
+        """Get or compute benchmark results (cached).
+
+        When benchmarking (not simulating), uses decomposed MoE benchmarking
+        to separately measure A2A communication time.  The A2A times are
+        stored in ``self._a2a_fwd_ms`` / ``self._a2a_bwd_ms`` and can be
+        retrieved via :meth:`measured_a2a_forward_time` /
+        :meth:`measured_a2a_backward_time`.
+        """
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
             if self._gemm_backend is not None:
                 self._cached_results = self._get_simulated_results(batch_size, seq_len)
+                self._a2a_fwd_ms = 0.0
+                self._a2a_bwd_ms = 0.0
             else:
-                self._cached_results = benchmark_layer(
+                fwd, bwd, act_mem, a2a_fwd, a2a_bwd = benchmark_moe_layer_decomposed(
                     self.module,
                     [(seq_len, batch_size, self.config.model_config.hidden_size)],
                 )
+                self._cached_results = (fwd, bwd, act_mem)
+                self._a2a_fwd_ms = a2a_fwd
+                self._a2a_bwd_ms = a2a_bwd
             self._cache_key = cache_key
         return self._cached_results
 
@@ -347,6 +370,24 @@ class MoEMLPProfiler(BaseModuleProfiler):
     def measured_activation_memory(self, batch_size: int, seq_len: int) -> int:
         _, _, activation_memory = self._get_benchmark_results(batch_size, seq_len)
         return activation_memory
+
+    def measured_a2a_forward_time(self, batch_size: int, seq_len: int) -> float:
+        """Return the measured A2A (dispatch+combine) forward time in ms.
+
+        Must be called after :meth:`measured_forward_time` so that the cache
+        is populated.  Returns 0.0 in simulation mode.
+        """
+        self._get_benchmark_results(batch_size, seq_len)  # ensure cache
+        return self._a2a_fwd_ms
+
+    def measured_a2a_backward_time(self, batch_size: int, seq_len: int) -> float:
+        """Return the estimated A2A backward time in ms (≈ forward A2A).
+
+        Must be called after :meth:`measured_backward_time` so that the cache
+        is populated.  Returns 0.0 in simulation mode.
+        """
+        self._get_benchmark_results(batch_size, seq_len)  # ensure cache
+        return self._a2a_bwd_ms
 
 
 def get_moe_mlp_profiler_spec(config: TrainingConfig) -> ModuleProfilerSpec:
