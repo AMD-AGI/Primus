@@ -27,6 +27,7 @@ def get_gemm_simulation_backend(
     backend_name: Optional[str] = None,
     gpu_arch: Optional[str] = None,
     gpu_clock_mhz: Optional[int] = None,
+    require_simulation: bool = True,
 ) -> GEMMSimulationBackend:
     """
     Create and return the GEMM simulation backend (origami).
@@ -36,12 +37,17 @@ def get_gemm_simulation_backend(
                       If None, defaults to origami.
         gpu_arch: GPU architecture override (e.g. "gfx942", "mi300x", "mi325x").
         gpu_clock_mhz: Override the GPU compute clock frequency in MHz.
+        require_simulation: If True (default), raise RuntimeError when the
+            origami library is not installed.  Set to False when only
+            hardware-profile metadata (e.g. ``hbm_bandwidth_gbps``) is
+            needed — this avoids a hard dependency on origami in benchmark
+            mode.
 
     Returns:
         A GEMMSimulationBackend instance.
 
     Raises:
-        RuntimeError: If the backend is not available.
+        RuntimeError: If require_simulation is True and the backend is not available.
     """
     name = backend_name or os.getenv("PRIMUS_GEMM_BACKEND", None)
 
@@ -58,12 +64,12 @@ def get_gemm_simulation_backend(
     )
 
     backend = OrigamiGEMMBackend(gpu_arch=gpu_arch, gpu_clock_mhz=gpu_clock_mhz)
-    if not backend.is_available():
+    if require_simulation and not backend.is_available():
         raise RuntimeError(
             "Origami GEMM simulation backend is not available.\n" "Install it with: pip install origami"
         )
 
-    if is_rank_0:
+    if is_rank_0 and require_simulation:
         print("[Primus:Simulation] Using GEMM backend: origami")
     return backend
 

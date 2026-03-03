@@ -142,7 +142,7 @@ def get_default_args(
             if hasattr(args, key):
                 setattr(args, key, value)
             else:
-                raise ValueError(f"Unknown hardware parameter: {key}")
+                print(f"[Primus:WARNING] Unknown hardware parameter '{key}' in config. Skipping.")
 
     # Set nics_per_node to gpus_per_node if not explicitly set
     if args.nics_per_node is None:

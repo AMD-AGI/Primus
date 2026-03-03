@@ -107,12 +107,6 @@ def _estimate_moe_a2a_time_ms(config, batch_size: int, seq_len: int) -> float:
         cp=cp,
     )
 
-    # Propagate DeepEP setting if present (affects A2A algorithm selection)
-    moe_enable_deepep = getattr(config.model_parallel_config, "moe_enable_deepep", False)
-    use_turbo_deepep = getattr(config.model_parallel_config, "use_turbo_deepep", False)
-    coll_args.moe_enable_deepep = moe_enable_deepep
-    coll_args.use_turbo_deepep = use_turbo_deepep
-
     # Dispatch A2A + Combine A2A (same message size, same time)
     a2a_dispatch_us = cm.alltoall(coll_args, dispatch_size_bytes, ep, groups=["ep"])
     a2a_combine_us = cm.alltoall(coll_args, dispatch_size_bytes, ep, groups=["ep"])

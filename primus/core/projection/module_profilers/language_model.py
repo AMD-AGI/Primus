@@ -517,7 +517,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
             if model is not None:
                 print(f"\n[Primus:Performance Projection] Found {len(all_layers)} transformer layers")
             else:
-                print(f"\n[Primus:Performance Projection] Pure simulation mode (no model)")
+                print("\n[Primus:Performance Projection] Pure simulation mode (no model)")
             print(f"[Primus:Performance Projection] This rank is responsible for layers: {self.layers}")
             if is_simulation_mode:
                 backends = []
