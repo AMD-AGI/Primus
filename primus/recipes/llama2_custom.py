@@ -443,8 +443,8 @@ def _llama2_lora(
             log_interval=10,
             tensorboard_dir=tensorboard_dir,
             wandb_project="mlperf",
-            wandb_exp_name="my_experiment",
-            wandb_save_dir="/workspace/checkpoints/wandb", 
+            wandb_exp_name="llama2_lora_primus_ci_1146b7a_20260225",
+            wandb_save_dir="/workspace/Primus/wandb",
         ),
         tokenizer=TokenizerConfig(
             tokenizer_type="NullTokenizer" if use_null_tokenizer else "HuggingFaceTokenizer",
@@ -516,6 +516,8 @@ def evaluate_and_print_results_custom(
         writer = state.tensorboard_logger
     else:
         writer = None
+
+    wandb_writer = state.wandb_logger
         
     eval_start = time.time()
     total_loss_dict, collected_non_loss_data, timelimit = eval.evaluate(
@@ -543,6 +545,11 @@ def evaluate_and_print_results_custom(
                     "{} validation ppl vs samples".format(key), ppl, state.train_state.consumed_train_samples
                 )
 
+        if wandb_writer and is_last_rank():
+            wandb_writer.log({"{} validation".format(key): total_loss_dict[key].item()}, state.train_state.step)
+            if state.cfg.logger.log_validation_ppl_to_tensorboard:
+                wandb_writer.log({"{} validation ppl".format(key): ppl}, state.train_state.step)
+
     if process_non_loss_data_func is not None and writer and is_last_rank():
         process_non_loss_data_func(collected_non_loss_data, state.train_state.step, writer)
 
@@ -551,6 +558,9 @@ def evaluate_and_print_results_custom(
     if writer:
         writer.add_scalar("throughput samples/sec", throughput, state.train_state.step)
         writer.add_scalar("throughput samples/sec vs samples", throughput, state.train_state.consumed_train_samples)
+
+    if wandb_writer and is_last_rank():
+        wandb_writer.log({"throughput samples/sec": throughput}, state.train_state.step)
 
     length = len(string) + 1
     log_rank_last("-" * length)
