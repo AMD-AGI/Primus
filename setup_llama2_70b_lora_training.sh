@@ -100,6 +100,8 @@ docker exec "${CONTAINER_NAME}" bash -c "
         cd /tmp
         git clone https://github.com/ROCmSoftwarePlatform/rocmProfileData
         cd rocmProfileData
+        # rpd stable commit
+        git checkout 13e7600ca75b34078927bbc5a9f9191882e7048e
 
         # Build and install rocpd_python
         cd rocpd_python
