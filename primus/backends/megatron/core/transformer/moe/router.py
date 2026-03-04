@@ -13,6 +13,9 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training import get_args
 
 from primus.backends.megatron.core.extensions.logits_processor import fused_softcap
+from primus.backends.megatron.moe_adapter.config_bridge import (
+    build_router_runtime_config,
+)
 
 
 class PrimusTopKRouter(TopKRouter):
@@ -33,13 +36,14 @@ class PrimusTopKRouter(TopKRouter):
         # Apply Z-Loss
         logits = self.apply_z_loss(logits)
 
+        router_cfg = build_router_runtime_config(self.config)
         scores_for_aux_loss, probs, routing_map = pt.ops.fused_group_topk_routing_with_aux_score(
             logits,
-            self.config.moe_router_topk,
-            self.config.moe_router_num_groups,
-            self.config.moe_router_group_topk,
-            self.config.moe_router_score_function,
-            self.config.moe_router_topk_scaling_factor,
+            router_cfg.router_topk,
+            router_cfg.router_num_groups,
+            router_cfg.router_group_topk,
+            router_cfg.router_score_function,
+            router_cfg.router_topk_scaling_factor,
         )
 
         routing_map = routing_map.bool()

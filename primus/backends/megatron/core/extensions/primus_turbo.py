@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 import functools
+import os
 from contextlib import contextmanager
 from typing import Callable, List, Optional, Tuple
 
@@ -54,6 +55,9 @@ from transformer_engine.pytorch.fp8 import (
     dist_group_type,
 )
 
+from primus.backends.megatron.moe_adapter.config_bridge import (
+    build_dispatch_runtime_config,
+)
 from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
 
 
@@ -1358,36 +1362,37 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
 
         args = get_args()
 
-        # enable sync-free moe to elimiate deepep cpu busy-wait
-        num_worst_tokens, permute_max_token_num = 0, 0
-        if args.turbo_sync_free_moe_stage > 1:
-            if args.sequence_parallel:
-                seq_length = args.seq_length // self.tp_size
-            else:
-                seq_length = args.seq_length
-            num_tokens = seq_length // args.context_parallel_size * args.micro_batch_size
-            num_worst_tokens = num_tokens * self.tp_ep_group.size()
-            if args.turbo_sync_free_moe_stage > 2:
-                # fully sync-free moe
-                permute_max_token_num = num_worst_tokens * config.moe_router_topk
+        dispatch_cfg = build_dispatch_runtime_config(
+            args,
+            config,
+            tp_size=self.tp_size,
+            tp_ep_group_size=self.tp_ep_group.size(),
+        )
+        if str(os.environ.get("PRIMUS_MOE_AUTOTUNE", "0")).lower() in ("1", "true", "yes", "on"):
+            from primus.modules.module_utils import log_rank_0
+
+            log_rank_0(
+                "[MoE-Autotune] DeepEP selected "
+                f"num_cu={dispatch_cfg.num_cu}, "
+                f"use_comm_stream={dispatch_cfg.use_comm_stream}, "
+                f"sync_free_stage={getattr(args, 'turbo_sync_free_moe_stage', 0)}"
+            )
 
         self.deepep_dispatcher = pt.modules.DeepEPTokenDispatcher(
-            num_experts=config.num_moe_experts,
-            router_topk=config.moe_router_topk,
+            num_experts=dispatch_cfg.num_experts,
+            router_topk=dispatch_cfg.router_topk,
             ep_group=self.ep_group,
             tp_group=self.tp_group,
             tp_ep_group=self.tp_ep_group,
-            expert_capacity_factor=config.moe_expert_capacity_factor,
-            permute_fusion=config.moe_permute_fusion,
-            permute_max_token_num=permute_max_token_num,
-            deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
-            deepep_num_use_cu=args.turbo_deepep_num_cu,
-            deepep_num_worst_tokens=num_worst_tokens,
-            deepep_use_cuda_num_tokens_per_expert=(
-                args.use_turbo_grouped_mlp and args.moe_use_legacy_grouped_gemm
-            ),
-            deepep_async_finish=True,
-            deepep_allocate_on_comm_stream=True,
+            expert_capacity_factor=dispatch_cfg.expert_capacity_factor,
+            permute_fusion=dispatch_cfg.permute_fusion,
+            permute_max_token_num=dispatch_cfg.permute_max_token_num,
+            deepep_use_comm_stream=dispatch_cfg.use_comm_stream,
+            deepep_num_use_cu=dispatch_cfg.num_cu,
+            deepep_num_worst_tokens=dispatch_cfg.num_worst_tokens,
+            deepep_use_cuda_num_tokens_per_expert=dispatch_cfg.use_cuda_num_tokens_per_expert,
+            deepep_async_finish=dispatch_cfg.async_finish,
+            deepep_allocate_on_comm_stream=dispatch_cfg.allocate_on_comm_stream,
         )
         # This is just a place holder.
         # The communication manager class is not used in Primus Turbo's DeepEP dispatcher.

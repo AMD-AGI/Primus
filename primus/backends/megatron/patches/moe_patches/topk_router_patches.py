@@ -10,8 +10,7 @@ Megatron MoE TopKRouter Patches
 Patches for replacing Megatron's TopKRouter with PrimusTopKRouter.
 """
 
-import sys
-
+from primus.backends.megatron.moe_adapter.patching import patch_megatron_topk_router
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
 
@@ -33,29 +32,9 @@ def patch_primus_topk_router(ctx: PatchContext):
     """
     from primus.backends.megatron.core.transformer.moe.router import PrimusTopKRouter
 
-    # Patch sys.modules for core megatron router
-    sys.modules["megatron.core.transformer.moe.router"].TopKRouter = PrimusTopKRouter
-    log_rank_0(
-        f"[Patch:megatron.moe.primus_topk_router]   Patched megatron.core.transformer.moe.router.TopKRouter "
-        f"-> {PrimusTopKRouter.__name__}"
-    )
-
-    # Patch imported moe_layer module
-    from megatron.core.transformer.moe import moe_layer
-
-    moe_layer.TopKRouter = PrimusTopKRouter
-    log_rank_0(
-        f"[Patch:megatron.moe.primus_topk_router]   Patched megatron.core.transformer.moe.moe_layer.TopKRouter "
-        f"-> {PrimusTopKRouter.__name__}"
-    )
-
-    # If deprecated MoE is enabled, also patch the deprecated module
     use_deprecated_moe = getattr(get_args(ctx), "use_deprecated_20241209_moe_layer", False)
-    if use_deprecated_moe:
-        from primus.backends.megatron.core.transformer.moe import deprecated_20251209
-
-        deprecated_20251209.moe_layer.TopKRouter = PrimusTopKRouter
-        log_rank_0(
-            f"[Patch:megatron.moe.primus_topk_router]   Patched megatron.core.transformer.moe.deprecated_20251209.moe_layer.TopKRouter "
-            f"-> {PrimusTopKRouter.__name__}"
-        )
+    patch_megatron_topk_router(PrimusTopKRouter, use_deprecated_moe=use_deprecated_moe)
+    log_rank_0(
+        f"[Patch:megatron.moe.primus_topk_router] Patched TopKRouter -> {PrimusTopKRouter.__name__} "
+        f"(deprecated_moe={use_deprecated_moe})"
+    )
