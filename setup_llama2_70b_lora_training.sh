@@ -31,6 +31,10 @@ if [ -z "$HF_TOKEN" ]; then
     echo -e "${RED}[ERROR]${NC} HF_TOKEN is not set or is empty. Please set your Hugging Face token in the environment or in this script."
     exit 1
 fi
+WANDB_API_KEY="${WANDB_API_KEY:-}"
+if [ -z "$WANDB_API_KEY" ]; then
+    echo -e "${RED}[WARNING]${NC} WANDB_API_KEY is not set or is empty."
+fi
 
 # Docker configuration (for start_container.sh)
 export DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/mad-private:primus_ci_1146b7a_20260225}"
@@ -129,4 +133,4 @@ docker exec "${CONTAINER_NAME}" bash -c "
 # Step 6: Start training
 echo_info "Step 6: Starting llama2_70b_lora training..."
 echo_info "Training configuration: examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml"
-docker exec -it "${CONTAINER_NAME}" bash -c "cd /workspace/Primus && HF_TOKEN=${HF_TOKEN} MEGATRON_BRIDGE_LOGGING_LEVEL=10 ./runner/primus-cli direct train posttrain --config examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml"
+docker exec -it "${CONTAINER_NAME}" bash -c "cd /workspace/Primus && HF_TOKEN=${HF_TOKEN} WANDB_API_KEY=${WANDB_API_KEY} MEGATRON_BRIDGE_LOGGING_LEVEL=10 ./runner/primus-cli direct train posttrain --config examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml"
