@@ -1,0 +1,75 @@
+# FSDP2 Benchmark: LLaMA 3.1 8B
+# Compares standard FSDP2 vs veScale RaggedShard FSDP
+#
+# Activation:
+#   Baseline:   PRIMUS_VESCALE_RAGGED_SHARD_FSDP=0 (default)
+#   veScale:    PRIMUS_VESCALE_RAGGED_SHARD_FSDP=1
+#
+# Run via:  tests/fsdp_bench/run_fsdp_benchmark.sh
+
+work_group: amd
+user_name: root
+exp_name: fsdp-bench-llama31-8b
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: llama3_8B.yaml
+    overrides:
+      # ---------- logging ----------
+      disable_wandb: true
+      stderr_sink_level: WARNING
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 5
+
+      # ---------- hyper parameters ----------
+      train_iters: 15          # 3 warmup + 12 measured
+      micro_batch_size: 2
+      global_batch_size: 16
+      seq_length: 4096
+      max_position_embeddings: 8192
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 3
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.02
+
+      # ---------- parallelism (DP=8, TP=1, PP=1) ----------
+      # Pure data-parallel to maximally stress FSDP all-gather / reduce-scatter
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 1
+
+      # FSDP2 — RaggedShard variant activated via env PRIMUS_VESCALE_RAGGED_SHARD_FSDP=1
+      use_torch_fsdp2: true
+      # Disable overlap: isolate pure FSDP communication cost
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+
+      # ---------- data (mock, no tokenizer needed) ----------
+      mock_data: true
+      num_workers: 1
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # ---------- fusions ----------
+      moe_permute_fusion: false
+      gradient_accumulation_fusion: false
+      apply_rope_fusion: true
+
+      # ---------- checkpoint ----------
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 99999
+      disable_last_saving: true
+      ckpt_format: torch
