@@ -55,18 +55,32 @@ Preflight will run performance tests for the intra-node and inter-node communica
 # set the environment variable VENV_PATH to the path of the virtual environment activate script
 export VENV_PATH=/mnt/vast/fuyuan/envs/test/.venv/bin/activate
 
-# set other environment variables for cluster
-# these are for the vultr cluster. They are cluster specific.
+# set cluster-specific environment variables
+# the following are for a cluster that uses AINIC.
 export USING_AINIC=1
 export NCCL_PXN_DISABLE=0
 export NCCL_IB_GID_INDEX=1
 
 # run preflight with slurm
 # it will collect basic information and performance tests on the cluster.
-srun -N 4 --nodelist chi2874,chi2875,chi2810,chi2812 runner/primus-cli-direct-preflight.sh -- preflight --report-file-name preflight-report-4N-0226
+srun -N 4 --nodelist chi2874,chi2875,chi2810,chi2812 runner/primus-cli-direct-preflight.sh -- preflight --report-file-name preflight-report-4N
 ```
 
 ## Troubleshooting
+### Using other virtual environment tools
+Currently, our script uses this pattern `source <env_name>/bin/activate` to activate the virtual environment across all nodes. Specifically it picks up the `VENV_PATH` to run `source "$VENV_PATH"`.
+
+However, if you use `conda`, the command is `conda activate <env_name>`. As a result, you may need to replace this [line](https://github.com/AMD-AGI/Primus/blob/dev/fuyuajin/preflight-without-container/runner/primus-cli-direct-preflight.sh#L375) to have something like this
+```
+source "$HOME/miniconda3/etc/profile.d/conda.sh"
+conda activate py_3.11
+```
+instead of 
+```
+source "$VENV_PATH"
+```
+
+### Can't detect GPUs
 You may see
 ```bash
 [Primus:Preflight] FAIL: No GPUs detected (torch.cuda.is_available/device_count)
