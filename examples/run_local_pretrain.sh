@@ -42,7 +42,7 @@ EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
 
 # Default docker image
 if [ "${BACKEND:-}" = "MaxText" ]; then
-    DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/jax-training:maxtext-v25.9"}
+    DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/jax-training:maxtext-v26.1"}
 else
     DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v26.1"}
 fi
@@ -125,6 +125,13 @@ if [ "$USING_AINIC" == "1" ]; then
     ENV_ARGS+=("--env" "ANP_HOME_DIR")
     ENV_ARGS+=("--env" "MPI_HOME_DIR")
 
+    TC_RESULTS=$(bash "${PRIMUS_PATH}/examples/scripts/detect_nccl_ib_tc.sh")
+    if [ -z "$TC_RESULTS" ]; then
+        echo "TC_RESULTS: $TC_RESULTS"
+        ENV_ARGS+=("--env" "TC_RESULTS")
+    else
+        echo "Failed to detect NCCL_IB_TC and NCCL_IB_FIFO_TC"
+    fi
     # VOLUME_ARGS+=(-v /mnt/shared:/mnt/shared)
     # VOLUME_ARGS+=(-v /etc/libibverbs.d/:/etc/libibverbs.d:ro)
     # VOLUME_ARGS+=(-v /usr/lib/x86_64-linux-gnu/libibverbs/:/usr/lib/x86_64-linux-gnu/libibverbs/:ro)

@@ -19,6 +19,7 @@ Optional Environment Variables:
   NNODES          Number of nodes to use [default: 1]
   MASTER_PORT     Master port [default: 12345]
   LOG_DIR         Directory for log output [default: ./output]
+  NODE_LIST       Comma-separated list of nodes for srun --nodelist [default: unset]
 
 Example:
   export DATA_PATH=/mnt/data
@@ -35,12 +36,13 @@ export NNODES=${NNODES:-1}
 SCRIPT_DIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
 
 export LOG_DIR=${LOG_DIR:-"./output"}
-LOG_FILE="${LOG_DIR}/log_slurm_pretrain.txt"
+LOG_FILE="${LOG_DIR}/log_slurm_pretrain_$(date +%Y%m%d_%H%M%S).txt"
 mkdir -p "$LOG_DIR"
 
 srun -N "${NNODES}" \
      --exclusive \
      --export ALL \
+     ${NODE_LIST:+--nodelist="${NODE_LIST}"} \
      --ntasks-per-node=1 \
      --cpus-per-task="${CPUS_PER_TASK:-128}" \
      bash -c "
@@ -58,5 +60,5 @@ srun -N "${NNODES}" \
           export NODE_RANK=\${SLURM_PROCID}
           export GPUS_PER_NODE=\${SLURM_GPUS_ON_NODE}
           export REBUILD_PRIMUS_TURBO=\${REBUILD_PRIMUS_TURBO}
-          bash ${SCRIPT_DIR}/run_local_pretrain.sh \"\$@\" 2>&1 | tee ${LOG_FILE}
-     " bash "$@"
+          bash ${SCRIPT_DIR}/run_local_pretrain.sh \"\$@\"
+     " bash "$@" 2>&1 | tee "${LOG_FILE}"

@@ -333,17 +333,8 @@ if [[ -z "${direct_config[log_file]:-}" ]]; then
 fi
 mkdir -p "$(dirname "${direct_config[log_file]:-}")"
 
-
 ###############################################################################
-# STEP 5: Install dependencies
-###############################################################################
-# Skip pip install in dry-run mode
-if [[ "$DRY_RUN_MODE" != "1" ]]; then
-    pip install -qq -r requirements.txt
-fi
-
-###############################################################################
-# STEP 6: Source GPU environment and helper modules
+# STEP 5: Source GPU environment and helper modules
 ###############################################################################
 
 # Source primus-env.sh (it will set its own SCRIPT_DIR, which is fine)
@@ -351,7 +342,7 @@ fi
 source "${RUNNER_DIR}/helpers/envs/primus-env.sh"
 
 ###############################################################################
-# STEP 7: Execute hooks and capture extra arguments / env
+# STEP 6: Execute hooks and capture extra arguments / env
 ###############################################################################
 # Hooks can return:
 #   - Extra Primus CLI arguments by printing lines:  extra.<name>=<value>
@@ -373,7 +364,7 @@ if [[ ${#HOOK_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
 fi
 
 ###############################################################################
-# STEP 8: Execute patch scripts
+# STEP 7: Execute patch scripts
 ###############################################################################
 # Execute patch scripts from config + CLI.
 # Note: direct_config[patch] is stored as a newline-separated list.
@@ -391,7 +382,7 @@ if [[ -n "${direct_config[patch]:-}" ]]; then
 fi
 
 ###############################################################################
-# STEP 8.5: Apply extra Primus args from patches (extra.* protocol)
+# STEP 7.5: Apply extra Primus args from patches (extra.* protocol)
 ###############################################################################
 if [[ ${#PATCH_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
     set -- "$@" "${PATCH_EXTRA_PRIMUS_ARGS[@]}"
@@ -399,7 +390,7 @@ if [[ ${#PATCH_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
 fi
 
 ###############################################################################
-# STEP 9: Build and export environment variables (highest priority)
+# STEP 8: Build and export environment variables (highest priority)
 ###############################################################################
 
 # First, source any env files specified via --env <file> (tracked as env_file).
@@ -436,7 +427,7 @@ if [[ -n "${direct_config[env]:-}" ]]; then
 fi
 
 ###############################################################################
-# STEP 10: Build launch command
+# STEP 9: Build launch command
 ###############################################################################
 
 # Allow RUN_MODE to be overridden by environment variable
@@ -487,7 +478,7 @@ elif [[ "$RUN_MODE" == "torchrun" ]]; then
 fi
 
 ###############################################################################
-# STEP 11: Display configuration (always)
+# STEP 10: Display configuration (always)
 ###############################################################################
 if [[ "$DRY_RUN_MODE" == "1" ]]; then
     print_section "[DRY RUN] Direct Launch Configuration"
@@ -545,7 +536,7 @@ fi
 print_section ""
 
 ###############################################################################
-# STEP 12: Execute command
+# STEP 11: Execute command
 ###############################################################################
 # Temporarily allow pipeline to fail so we can capture PIPESTATUS and log it
 eval "$CMD"
