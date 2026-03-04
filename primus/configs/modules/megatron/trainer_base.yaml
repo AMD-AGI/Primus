@@ -191,6 +191,12 @@ suggested_communication_unit_size: 400000000 # int
 keep_fp8_transpose_cache_when_using_custom_fsdp: false
 num_distributed_optimizer_instances: 1 # int
 use_torch_fsdp2: false
+# veScale RaggedShard FSDP (requires use_torch_fsdp2: true AND env PRIMUS_VESCALE_RAGGED_SHARD_FSDP=1)
+# When enabled, replaces PyTorch FSDP2's per-param Shard(0) with a single contiguous flat-buffer
+# sharded via RaggedShard DTensor — zero-copy batched all-gather / reduce-scatter.
+# See: primus/backends/megatron/core/distributed/vescale_ragged_shard_fsdp.py
+#      primus/backends/megatron/patches/vescale_fsdp_patches.py
+# vescale_ragged_shard_fsdp is activated via PRIMUS_VESCALE_RAGGED_SHARD_FSDP=1 (not a YAML field)
 nccl_communicator_config_path: null
 use_tp_pp_dp_mapping: false
 replication: false

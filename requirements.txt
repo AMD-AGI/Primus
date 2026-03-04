@@ -1,5 +1,7 @@
 loguru
 wandb
+# veScale RaggedShard FSDP integration (optional, needed for PRIMUS_VESCALE_RAGGED_SHARD_FSDP=1)
+# Install with: pip install --ignore-requires-python -e third_party/veScale/
 expecttest
 pre-commit
 nltk
