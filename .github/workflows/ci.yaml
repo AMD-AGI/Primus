@@ -13,7 +13,7 @@ env:
   PRIMUS_TURBO_COMMIT: 79373eb781a54fd49aed9430c8718489409d1dd0 # chore(aiter): update aiter to fix FA asm kernel bug (#237)
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   BASE_IMAGE: docker.io/rocm/primus:v26.1
-  MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v25.9
+  MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.1
 
 jobs:
   code-lint:
@@ -168,6 +168,25 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
           docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
+          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax-ainic"
+          start_time=$(date +%s)
+          mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
+          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-56.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile_jax.ainic \
+               --network=host \
+               -t tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic \
+               --build-arg BASE_IMAGE=${MAXTEXT_BASE_IMAGE} \
+               --build-arg AINIC_BUNDLE_PATH=ainic \
+               $GITHUB_WORKSPACE/.github/workflows/docker
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "⏱️ [build primus docker-jax-ainic] Total elapsed time: ${elapsed} seconds"
+
+          docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic
+          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic
+          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+
           # echo "> Docker cleanup local images"
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}-v25.09-ainic
@@ -288,7 +307,7 @@ jobs:
     env:
       PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/jax
     needs: [code-lint]
-    runs-on: [primus-lm-cicd-jax-8t8mh]
+    runs-on: [primus-lm-cicd-jax-m42vb]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Set commit hash to env
@@ -311,19 +330,16 @@ jobs:
           echo "✅ [Pip install requirements] started at: $(date)"
           mkdir -p  ${PRIMUS_WORKDIR}/primus-cache
           python3 -m pip install --upgrade pip setuptools
-          pip3 install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm7.0
-          MAX_JOBS=128 pip3 install --cache-dir=${PRIMUS_WORKDIR}/primus-cache --no-build-isolation --no-clean -r requirements.txt
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "✅ [Pip install requirements] ended at: $(date)"
           echo "⏱️ [Pip install requirements] Total elapsed time: ${elapsed} seconds"
           start_time=$(date +%s)
           echo "✅ [build primus-turbo] started at: $(date)"
-          PRIMUS_TURBO_FRAMEWORK="JAX" pip3 install --no-build-isolation -e . -v
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "✅ [build primus-turbo] ended at: $(date)"
-          echo "⏱️ [build primus-turbo] Total elapsed time: ${elapsed} seconds"
+          echo "⏱️ [build primus-turbo] Torch installation causes segfault, so we skip it and actually not install turbo. Total elapsed time: ${elapsed} seconds"
       - run: echo "🎉 Begin Primus Unit Test."
       - uses: actions/checkout@v4
         with:
