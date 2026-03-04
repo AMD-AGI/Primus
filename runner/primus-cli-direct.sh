@@ -426,6 +426,12 @@ if [[ -n "${direct_config[env]:-}" ]]; then
     done <<< "${direct_config[env]:-}"
 fi
 
+# HipBLASLt stage-2 offline tuning may request skipping main training launch.
+if [[ "${PRIMUS_SKIP_MAIN_LAUNCH:-0}" == "1" ]]; then
+    LOG_INFO_RANK0 "[direct] PRIMUS_SKIP_MAIN_LAUNCH=1, skip main training launch."
+    exit 0
+fi
+
 ###############################################################################
 # STEP 9: Build launch command
 ###############################################################################
