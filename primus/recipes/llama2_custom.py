@@ -1003,6 +1003,8 @@ def megatron_bridge_train_override(
                 non_loss_data_func=non_loss_data_func,
                 throughput=timer.get_throughput(),
             )
+            if should_exit:
+                exit_code = 0
             eval_duration += timers("eval-time").elapsed()
             eval_iterations += train_config.eval_iters
             timers("eval-time").stop()
@@ -1094,8 +1096,9 @@ def megatron_bridge_train_override(
         wandb_writer = global_state.wandb_logger
         if wandb_writer:
             wandb_writer.finish()
-        fault_tolerance.shutdown(global_state)
-        sys.exit(exit_code)
+            fault_tolerance.shutdown(global_state)
+        if exit_code != 0:
+            sys.exit(exit_code)
 
     # Close NVIDIA DLFw Inspect at clean finish
     tensor_inspect_end_if_enabled(config.tensor_inspect)
