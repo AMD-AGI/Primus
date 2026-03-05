@@ -1,4 +1,4 @@
-# Run Primus preflight without docker container
+<img width="276" height="23" alt="image" src="https://github.com/user-attachments/assets/3c8c5bbe-cec5-49b8-8778-4231aeaeff48" /># Run Primus preflight without docker container
 
 ## clone the Primus repository
 
@@ -79,6 +79,7 @@ instead of
 ```
 source "$VENV_PATH"
 ```
+NOTE: you may still need to export `VENV_PATH` (`export VENV_PATH=conda`) so the script can enter the `if` statement in the conditional to be able to run `conda activate py_3.11`.
 
 ### Can't detect GPUs
 You may see
