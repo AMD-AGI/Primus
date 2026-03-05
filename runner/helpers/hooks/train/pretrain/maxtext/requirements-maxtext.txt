@@ -1,0 +1,6 @@
+# Add MaxText pretrain hook private Python deps here when needed.
+
+# JAX Python dependencies
+loguru
+wandb
+pre-commit

@@ -116,6 +116,25 @@ case "$FRAMEWORK" in
 esac
 
 FRAMEWORK_SCRIPT="${SCRIPT_DIR}/${FRAMEWORK_DIR}/prepare.py"
+FRAMEWORK_HOOK_DIR="${SCRIPT_DIR}/${FRAMEWORK_DIR}"
+
+# Execute framework-local shell hooks in lexical order before prepare.py.
+# This is used for per-framework dependency installation
+if [[ -d "$FRAMEWORK_HOOK_DIR" ]]; then
+    mapfile -t SH_HOOK_FILES < <(find "$FRAMEWORK_HOOK_DIR" -maxdepth 1 -type f -name "*.sh" | sort)
+    exit_code=0
+    set +e
+    for hook_file in "${SH_HOOK_FILES[@]}"; do
+        echo "[INFO] prepare_experiment.sh: executing shell hook $(basename "$hook_file")" >&2
+        bash "$hook_file" "$@"    
+        exit_code=$?
+        if [[ $exit_code -ne 0 ]]; then
+            echo "[ERROR] prepare_experiment.sh: shell hook failed: $hook_file (exit code: $exit_code)" >&2
+            exit $exit_code
+        fi
+    done
+    set -e
+fi
 
 if [[ ! -f "$FRAMEWORK_SCRIPT" ]]; then
     echo "[WARNING] prepare_experiment.sh: backend prepare script not found: $FRAMEWORK_SCRIPT" >&2
