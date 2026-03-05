@@ -143,6 +143,7 @@ from megatron.training.yaml_arguments import validate_yaml
 from primus.backends.megatron.argument_builder import _load_megatron_defaults
 from primus.backends.megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from primus.backends.megatron.training.global_vars import (
+    end_mlflow_run,
     get_mlflow_writer,
     get_train_start_time,
     set_primus_global_variables,
@@ -1015,122 +1016,153 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         one_logger = get_one_logger()
         args = get_args()
 
-        if args.pp_warmup:
-            from .utils import pp_warmup
+        mlflow_status = None
+        termination_reason = None
 
-            log_rank_0(
-                "warmup on each rank in parallel to decrease "
-                "the first iter time, especially when pp degree is large"
-            )
-            timers = get_timers()
-            timers("pp-warmup", log_level=0).start(barrier=True)
-            pp_warmup(args, self.config, self.model, self.optimizer)
-            timers("pp-warmup").stop()
-            timers.log(["pp-warmup"], barrier=True)
+        try:
+            if args.pp_warmup:
+                from .utils import pp_warmup
 
-        process_non_loss_data_func = None
-        non_loss_data_func = None
-        if not args.skip_train:
-            log_rank_0("training ...")
+                log_rank_0(
+                    "warmup on each rank in parallel to decrease "
+                    "the first iter time, especially when pp degree is large"
+                )
+                timers = get_timers()
+                timers("pp-warmup", log_level=0).start(barrier=True)
+                pp_warmup(args, self.config, self.model, self.optimizer)
+                timers("pp-warmup").stop()
+                timers.log(["pp-warmup"], barrier=True)
 
-            if args.dataloader_type == "cyclic" and args.retro_project_dir:
-                assert args.retro_cyclic_train_iters is not None
-                args.train_iters = args.retro_cyclic_train_iters
-                log_rank_0("retro cyclic train iters : %d" % args.train_iters)
+            process_non_loss_data_func = None
+            non_loss_data_func = None
+            if not args.skip_train:
+                log_rank_0("training ...")
 
-            iteration = 0
-            if args.do_train and args.train_iters > 0:
-                iteration, num_floating_point_operations_so_far = self.train(
+                if args.dataloader_type == "cyclic" and args.retro_project_dir:
+                    assert args.retro_cyclic_train_iters is not None
+                    args.train_iters = args.retro_cyclic_train_iters
+                    log_rank_0("retro cyclic train iters : %d" % args.train_iters)
+
+                iteration = 0
+                if args.do_train and args.train_iters > 0:
+                    iteration, num_floating_point_operations_so_far = self.train(
+                        self.forward_step,
+                        self.model,
+                        self.optimizer,
+                        self.opt_param_scheduler,
+                        self.train_data_iterator,
+                        self.valid_data_iterator,
+                        process_non_loss_data_func,
+                        self.config,
+                        self.checkpointing_context,
+                        non_loss_data_func,
+                    )
+
+                print_datetime("after training is done")
+
+                if (
+                    args.save
+                    and iteration != 0
+                    and iteration % args.save_interval != 0
+                    and not args.disable_last_saving
+                ):
+                    save_checkpoint(
+                        iteration,
+                        self.model,
+                        self.optimizer,
+                        self.opt_param_scheduler,
+                        num_floating_point_operations_so_far,
+                        self.checkpointing_context,
+                        train_data_iterator=self.train_data_iterator,
+                        preprocess_common_state_dict_fn=preprocess_common_state_dict,
+                    )
+
+                one_logger and one_logger.log_metrics(
+                    {"app_train_loop_finish_time": one_logger_utils.get_timestamp_in_ms()}
+                )
+
+            else:
+                log_rank_0("skipping training (--skip-train is on) ...")
+
+                iteration = args.iteration
+
+            if args.do_valid:
+                prefix = f"iteration {iteration} on validation set"
+                evaluate_and_print_results(
+                    prefix,
                     self.forward_step,
-                    self.model,
-                    self.optimizer,
-                    self.opt_param_scheduler,
-                    self.train_data_iterator,
                     self.valid_data_iterator,
+                    self.model,
+                    iteration,
                     process_non_loss_data_func,
                     self.config,
-                    self.checkpointing_context,
-                    non_loss_data_func,
+                    verbose=True,
+                    write_to_tensorboard=not args.skip_train,
+                    non_loss_data_func=non_loss_data_func,
                 )
 
-            print_datetime("after training is done")
-
-            if (
-                args.save
-                and iteration != 0
-                and iteration % args.save_interval != 0
-                and not args.disable_last_saving
-            ):
-                save_checkpoint(
-                    iteration,
+            if args.do_test:
+                prefix = f"iteration {iteration} on test set"
+                evaluate_and_print_results(
+                    prefix,
+                    self.forward_step,
+                    self.test_data_iterator,
                     self.model,
-                    self.optimizer,
-                    self.opt_param_scheduler,
-                    num_floating_point_operations_so_far,
-                    self.checkpointing_context,
-                    train_data_iterator=self.train_data_iterator,
-                    preprocess_common_state_dict_fn=preprocess_common_state_dict,
+                    iteration,
+                    process_non_loss_data_func,
+                    self.config,
+                    verbose=True,
+                    write_to_tensorboard=not args.skip_train,
+                    non_loss_data_func=non_loss_data_func,
                 )
 
-            one_logger and one_logger.log_metrics(
-                {"app_train_loop_finish_time": one_logger_utils.get_timestamp_in_ms()}
-            )
+            wandb_writer = get_wandb_writer()
+            if wandb_writer:
+                wandb_writer.finish()
 
-        else:
-            log_rank_0("skipping training (--skip-train is on) ...")
+            ft_integration.on_checkpointing_start()
+            maybe_finalize_async_save(blocking=True, terminate=True)
+            ft_integration.on_checkpointing_end(is_async_finalization=True)
 
-            iteration = args.iteration
+            mlflow_status = "FINISHED"
+            termination_reason = "clean_finish"
 
-        if args.do_valid:
-            prefix = f"iteration {iteration} on validation set"
-            evaluate_and_print_results(
-                prefix,
-                self.forward_step,
-                self.valid_data_iterator,
-                self.model,
-                iteration,
-                process_non_loss_data_func,
-                self.config,
-                verbose=True,
-                write_to_tensorboard=not args.skip_train,
-                non_loss_data_func=non_loss_data_func,
-            )
+            one_logger and one_logger.log_metrics({"app_finish_time": one_logger_utils.get_timestamp_in_ms()})
 
-        if args.do_test:
-            prefix = f"iteration {iteration} on test set"
-            evaluate_and_print_results(
-                prefix,
-                self.forward_step,
-                self.test_data_iterator,
-                self.model,
-                iteration,
-                process_non_loss_data_func,
-                self.config,
-                verbose=True,
-                write_to_tensorboard=not args.skip_train,
-                non_loss_data_func=non_loss_data_func,
-            )
+            ft_integration.shutdown()
+            one_logger_utils.finish()
 
-        wandb_writer = get_wandb_writer()
-        if wandb_writer:
-            wandb_writer.finish()
+        except KeyboardInterrupt:
+            mlflow_status = "KILLED"
+            termination_reason = "keyboard_interrupt"
+            raise
+        except SystemExit as e:
+            # sys.exit() raises SystemExit (not an Exception). Preserve behavior, but
+            # still mark MLflow run with a meaningful terminal status in `finally`.
+            exit_code = e.code if isinstance(e.code, int) else 0
+            mlflow_status = "FINISHED" if exit_code == 0 else "FAILED"
+            termination_reason = f"system_exit_{exit_code}"
+            raise
+        except Exception as e:
+            mlflow_status = "FAILED"
+            termination_reason = type(e).__name__ or "unknown_exception"
+            raise
+        finally:
+            # Best-effort finalization. Never mask the original exception.
+            try:
+                if args.rank == (args.world_size - 1) and mlflow_status is not None:
+                    end_mlflow_run(status=mlflow_status, termination_reason=termination_reason)
+            except Exception:
+                # Best-effort: MLflow finalization must never mask the original training error.
+                pass
 
-        ft_integration.on_checkpointing_start()
-        maybe_finalize_async_save(blocking=True, terminate=True)
-        ft_integration.on_checkpointing_end(is_async_finalization=True)
-
-        mlflow_writer = get_mlflow_writer()
-        if mlflow_writer:
-            mlflow_writer.end_run()
-
-        one_logger and one_logger.log_metrics({"app_finish_time": one_logger_utils.get_timestamp_in_ms()})
-
-        ft_integration.shutdown()
-        one_logger_utils.finish()
-
-        # clean up torch pg resources on exit
-        if dist.is_initialized():
-            dist.destroy_process_group()
+            try:
+                # clean up torch pg resources on exit
+                if dist.is_initialized():
+                    dist.destroy_process_group()
+            except Exception:
+                # Best-effort cleanup: ignore teardown errors to avoid masking the original failure.
+                pass
 
     def train(
         self,
@@ -1563,9 +1595,9 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             wandb_writer = get_wandb_writer()
             if wandb_writer:
                 wandb_writer.finish()
-            mlflow_writer = get_mlflow_writer()
-            if mlflow_writer:
-                mlflow_writer.end_run()
+            # Mark run as finished if exit code is 0; otherwise failed.
+            mlflow_status = "FINISHED" if exit_code == 0 else "FAILED"
+            end_mlflow_run(status=mlflow_status, termination_reason=f"exit_condition")
             ft_integration.shutdown()
             sys.exit(exit_code)
 
