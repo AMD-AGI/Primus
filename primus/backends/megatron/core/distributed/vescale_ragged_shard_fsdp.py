@@ -54,6 +54,16 @@ Lifecycle
     optimizer step (external)
       └─ optimizer sees flat_shard_param (local shard, with .grad set)
 
+Activation
+----------
+Enable via environment variable (opt-in, does not affect default FSDP2 path):
+
+.. code-block:: bash
+
+    export PRIMUS_VESCALE_RAGGED_SHARD_FSDP=1
+
+and ensure ``use_torch_fsdp2: true`` in the trainer YAML config.
+
 References
 ----------
 - veScale-FSDP paper: https://arxiv.org/abs/2602.22437
@@ -68,11 +78,43 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple, Type
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
-from primus.modules.module_utils import log_rank_0, warning_rank_0
-
 logger = logging.getLogger(__name__)
+
+
+def _log_rank0(msg: str) -> None:
+    """Log a message only from rank 0 (uses standard logging + Primus when available)."""
+    try:
+        rank = dist.get_rank() if dist.is_initialized() else 0
+    except Exception:
+        rank = 0
+    if rank != 0:
+        return
+    # Try Primus log_rank_0 first; fall back to standard logging
+    try:
+        from primus.modules.module_utils import log_rank_0
+
+        log_rank_0(msg)
+    except Exception:
+        logger.info(msg)
+
+
+def _warn_rank0(msg: str) -> None:
+    """Warn only from rank 0."""
+    try:
+        rank = dist.get_rank() if dist.is_initialized() else 0
+    except Exception:
+        rank = 0
+    if rank != 0:
+        return
+    try:
+        from primus.modules.module_utils import warning_rank_0
+
+        warning_rank_0(msg)
+    except Exception:
+        logger.warning(msg)
 
 # ---------------------------------------------------------------------------
 # Lazy veScale import guard
@@ -96,6 +138,15 @@ def _check_vescale() -> None:
             "Install it with:\n"
             "  pip install --ignore-requires-python -e third_party/veScale/"
         )
+
+
+def is_vescale_available() -> bool:
+    """Return ``True`` if ``vescale`` package can be imported."""
+    try:
+        _check_vescale()
+        return True
+    except ImportError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -178,12 +229,6 @@ class _RaggedShardFSDPUnit:
         # Equal split: local_units = (1, 1, ..., 1) means each rank gets
         # total_numel // world_size elements.  If total_numel % world_size != 0,
         # the last rank gets the remainder.
-        #
-        # Example: total_numel=2536, world_size=4 → each shard ≈634 elements
-        # local_units = (1, 1, 1, 1) after GCD normalization.
-        #
-        # For uneven sizes: e.g. 1000 elements on 3 ranks:
-        #   base=333, last_extra=1  → raw=(333, 333, 334) → GCD=1 → same
         base = self.total_numel // world_size
         remainder = self.total_numel % world_size
         raw_units: Tuple[int, ...] = tuple(
@@ -203,10 +248,6 @@ class _RaggedShardFSDPUnit:
         )
 
         # ---- Replace param data with local shard slices -------------------
-        # Each param initially holds its own storage; after distribution, the
-        # true storage is the local shard.  We keep params functional by storing
-        # local shard data back into them (as contiguous chunks that may cross
-        # param boundaries — handled via the flat buffer in all_gather).
         self._store_local_shard_in_params()
 
         num_params = len(self.param_metas)
@@ -215,7 +256,7 @@ class _RaggedShardFSDPUnit:
             f"[RaggedShardFSDP] Wrapped {type(module).__name__}: "
             f"{num_params} params, total_numel={self.total_numel}, "
             f"local_shard_numel={local_numel}, "
-            f"local_units={local_units}, RaggedShard={self.ragged_shard}"
+            f"local_units={local_units}"
         )
 
     # ------------------------------------------------------------------
@@ -230,34 +271,23 @@ class _RaggedShardFSDPUnit:
             obj = getattr(obj, part)
         return obj  # type: ignore[return-value]
 
-    def _get_param_dict(self) -> Dict[str, nn.Parameter]:
-        return {fqn: self._get_param(fqn) for meta in self.param_metas for fqn in [meta.fqn]}
-
     def _store_local_shard_in_params(self) -> None:
         """
         After initial distribution, replace each param's .data with a slice of
         the **local shard**.
 
-        NOTE: Since the local shard is a contiguous slice of the flat buffer and
-        individual params may straddle shard boundaries, we cannot always give each
-        param its full storage from the shard.  Instead, we allocate per-param
-        contiguous storage that holds the local portion, and populate it.
-
         The authoritative storage for training is ``flat_dtensor.to_local()``.
         Parameters are restored from the flat buffer on each all_gather call.
         """
         local_shard = self.flat_dtensor.to_local()  # 1D tensor (local numel)
-        self.device_mesh.size()
         rank = self.device_mesh.get_local_rank()
 
         # Determine the global offset range covered by this rank's shard.
-        # RaggedShard local_units are proportional; total maps to total_numel.
         lu = self.ragged_shard.local_units
         total_units = sum(lu)
         rank_start = sum(lu[:rank]) * self.total_numel // total_units
         rank_end = sum(lu[: rank + 1]) * self.total_numel // total_units
 
-        # For each param, fill in whatever portion overlaps [rank_start, rank_end].
         for meta in self.param_metas:
             param = self._get_param(meta.fqn)
             p_start = meta.offset
@@ -267,11 +297,8 @@ class _RaggedShardFSDPUnit:
             overlap_end = min(p_end, rank_end)
 
             if overlap_start < overlap_end:
-                # This rank has some of this param — keep its current data.
-                # (The full param will be restored via all_gather before forward.)
+                # This rank has some of this param — keep current data.
                 pass
-            # Param data is left intact (from original initialization).
-            # We detach it so it doesn't interfere with autograd on the flat buffer.
             param.data = param.data.detach()
 
     # ------------------------------------------------------------------
@@ -282,18 +309,19 @@ class _RaggedShardFSDPUnit:
         """
         All-gather the flat buffer (RaggedShard → Replicate).
 
+        This is a SINGLE collective for ALL parameters in this FSDP unit
+        (as opposed to PyTorch FSDP2's per-parameter collectives).
+
         After this call:
           - ``self._flat_full`` holds the replicated full flat tensor.
           - Each parameter's ``.data`` is set to its corresponding slice.
-
-        This is called as a *pre-forward hook* on each wrapped module.
         """
         if self.flat_dtensor is None:
             return
 
         from vescale.dtensor.placement_types import Replicate
 
-        # Redistribute: each rank gets the complete flat tensor.
+        # ONE redistribute call = ONE all-gather for ALL params in this unit.
         full_dtensor = self.flat_dtensor.redistribute(
             placements=[Replicate()],
             async_op=False,
@@ -312,7 +340,6 @@ class _RaggedShardFSDPUnit:
         for meta in self.param_metas:
             param = self._get_param(meta.fqn)
             chunk = flat_full[meta.offset : meta.offset + meta.numel]
-            # Use view + to(dtype) for original dtype compatibility.
             with torch.no_grad():
                 param.data = chunk.view(meta.shape).to(meta.dtype)
 
@@ -321,13 +348,12 @@ class _RaggedShardFSDPUnit:
         Free the all-gathered flat tensor and restore parameter data to
         independent (contiguous) storage.
 
-        Called after forward (or after backward) to release GPU memory.
+        Called after backward to release GPU memory.
         """
         if self._flat_full is None:
             return
         for meta in self.param_metas:
             param = self._get_param(meta.fqn)
-            # Copy current data into a fresh tensor so it survives flat_full release.
             with torch.no_grad():
                 param.data = param.data.clone()
         del self._flat_full
@@ -344,12 +370,9 @@ class _RaggedShardFSDPUnit:
         Steps:
           1. Pack per-param gradients into a single ``grad_full`` tensor.
           2. Wrap as a ``DTensor`` with ``[Replicate()]`` placement.
-          3. Redistribute to ``[RaggedShard]`` — triggers reduce-scatter.
-          4. Store the resulting shard gradient as
-             ``flat_dtensor._local_tensor.grad``.
-
-        After this, the optimizer can update the local shard via the
-        ``.grad`` attribute of the flat shard tensor.
+          3. Redistribute to ``[RaggedShard]`` — triggers ONE reduce-scatter
+             for ALL parameters in this FSDP unit.
+          4. Store the resulting shard gradient on flat_dtensor._local_tensor.grad.
         """
         if self.flat_dtensor is None:
             return
@@ -372,15 +395,20 @@ class _RaggedShardFSDPUnit:
         if not has_any_grad:
             return
 
-        # 2. Create replicated DTensor from full gradient
+        # 2. Wrap as Partial (= local contribution needing all-reduce / reduce-scatter)
+        #    Each rank has computed its own local gradient; we need to SUM across
+        #    ranks and SCATTER to give each rank its shard → Partial → RaggedShard.
+        from vescale.dtensor.placement_types import Partial as _Partial
+
         grad_dtensor = DTensor.from_local(
             grad_full,
             self.device_mesh,
-            [Replicate()],
+            [_Partial()],
             run_check=False,
         )
 
-        # 3. Reduce-scatter: Replicate → RaggedShard
+        # 3. ONE reduce-scatter for ALL gradients in this unit
+        #    Partial → RaggedShard triggers sum+scatter (correct data-parallel reduce-scatter)
         shard_grad_dtensor = grad_dtensor.redistribute(
             placements=[self.ragged_shard],
             async_op=False,
@@ -393,11 +421,6 @@ class _RaggedShardFSDPUnit:
             local.grad = shard_grad.clone()
         else:
             local.grad.add_(shard_grad)
-
-        logger.debug(
-            "[RaggedShardFSDP] reduce_scatter_grads: shard_grad.shape=%s",
-            shard_grad.shape,
-        )
 
     def zero_shard_grad(self) -> None:
         """Zero the local shard gradient (called before each training step)."""
@@ -415,30 +438,21 @@ class PrimusVeScaleRaggedShardFSDP:
     FSDP-like wrapper using veScale ``RaggedShard`` DTensor for zero-copy
     batched parameter communication.
 
-    Usage
-    -----
-    Activated via the patch ``"megatron.fsdp.vescale_ragged_shard"`` when::
+    Key advantage over PyTorch FSDP2
+    ---------------------------------
+    PyTorch FSDP2 issues one collective per parameter (or per small group).
+    This class issues **ONE collective per FSDP unit** regardless of how many
+    parameters are in it.  For a TransformerLayer with ~100M parameters split
+    into dozens of tensors, this means 1 all-gather instead of N all-gathers.
 
-        use_torch_fsdp2 = True
-        PRIMUS_VESCALE_RAGGED_SHARD_FSDP = 1   (env var)
-
-    Constructor arguments mirror ``PrimusTorchFullyShardedDataParallel`` so the
-    patch can swap them transparently.
-
-    Parameters
+    Activation
     ----------
-    config : TransformerConfig
-    ddp_config : DistributedDataParallelConfig
-    module : nn.Module
-        The root model module (e.g. ``GPTModel``).
-    sub_modules_to_wrap : optional list of module types
-        Same default as Megatron's FSDP:
-        ``[TransformerLayer, LanguageModelEmbedding, RotaryEmbedding,
-           ColumnParallelLinear]``.
-    process_group : optional ProcessGroup
-        If None, uses ``parallel_state.get_data_parallel_group(with_context_parallel=True)``.
-    flat_dtype : torch.dtype
-        Dtype for the flat parameter buffer.  Defaults to ``bfloat16``.
+    Set environment variable before launching::
+
+        export PRIMUS_VESCALE_RAGGED_SHARD_FSDP=1
+
+    Constructor signature mirrors ``PrimusTorchFullyShardedDataParallel``
+    so the patch can swap them transparently.
     """
 
     def __init__(
@@ -466,7 +480,6 @@ class PrimusVeScaleRaggedShardFSDP:
         if kwargs:
             warning_rank_0(f"[PrimusVeScaleRaggedShardFSDP] ignoring unknown kwargs: {kwargs}")
 
-        # Store module (preserves existing attribute access patterns)
         self.module = module
         self.config = config
         self.ddp_config = ddp_config
@@ -492,25 +505,17 @@ class PrimusVeScaleRaggedShardFSDP:
         self.device_mesh = DeviceMesh.from_group(process_group, "cuda")
 
         # ---- Identify and wrap FSDP units ---------------------------------
-        #
-        # Strategy: traverse module tree, collect modules that match
-        # sub_modules_to_wrap.  Track which parameters have been claimed so
-        # that each param belongs to exactly ONE flat-param group.
-        #
         self._fsdp_units: List[_RaggedShardFSDPUnit] = []
         claimed_param_ids: Set[int] = set()
 
         for submod in module.modules():
             if not any(isinstance(submod, cls) for cls in sub_modules_to_wrap):
                 continue
-            # Also check user-annotated _fsdp_modules
             extra: List[Type] = list(getattr(submod, "_fsdp_modules", []))
             is_target = any(isinstance(submod, cls) for cls in sub_modules_to_wrap + extra)
             if not is_target:
                 continue
 
-            # Collect unclaimed parameters (recursive within this sub-module,
-            # but NOT params already claimed by a deeper unit).
             param_list: List[Tuple[str, nn.Parameter]] = [
                 (fqn, p)
                 for fqn, p in submod.named_parameters()
@@ -529,7 +534,6 @@ class PrimusVeScaleRaggedShardFSDP:
             for _, p in param_list:
                 claimed_param_ids.add(id(p))
 
-            # Register hooks on this sub-module
             self._register_hooks(submod, unit)
 
         # ---- Handle root-module params not claimed by any child unit ------
@@ -551,7 +555,9 @@ class PrimusVeScaleRaggedShardFSDP:
         log_rank_0(
             f"[PrimusVeScaleRaggedShardFSDP] Initialized with "
             f"{len(self._fsdp_units)} FSDP units, "
-            f"device_mesh={self.device_mesh}."
+            f"device_mesh={self.device_mesh}. "
+            f"Each FSDP unit uses 1 all-gather + 1 reduce-scatter "
+            f"(vs N collectives in vanilla FSDP2)."
         )
 
     # ------------------------------------------------------------------
@@ -566,10 +572,8 @@ class PrimusVeScaleRaggedShardFSDP:
             unit.all_gather()
 
         def _post_forward_hook(mod, args, output):
-            """After forward: release the all-gathered buffer."""
-            # NOTE: We keep flat_full until AFTER backward so that autograd
-            # can compute gradients w.r.t. param views.  The backward hook
-            # will release it.
+            """Post-forward: keep flat_full alive until after backward."""
+            pass  # flat_full released in _post_backward_hook
 
         def _post_backward_hook(mod, grad_input, grad_output):
             """After backward: reduce-scatter gradients + release flat_full."""
@@ -591,10 +595,7 @@ class PrimusVeScaleRaggedShardFSDP:
     def __call__(self, *inputs, **kwargs):
         return self.forward(*inputs, **kwargs)
 
-    # Expose attributes that Megatron's training loop accesses on the DDP wrapper
     def __getattr__(self, name: str):
-        # Fallback: delegate to the wrapped module so that model.language_model,
-        # model.state_dict(), etc. work transparently.
         try:
             return super().__getattribute__(name)
         except AttributeError:
@@ -620,7 +621,7 @@ class PrimusVeScaleRaggedShardFSDP:
             unit.reduce_scatter_grads()
 
     def finish_grad_sync(self) -> None:
-        """Wait for all async reduce-scatter operations to complete (no-op for sync path)."""
+        """Wait for async reduce-scatter ops to complete (no-op for sync path)."""
 
     def zero_grad_buffer(self) -> None:
         """Zero gradient buffers at the start of each training step."""
@@ -636,7 +637,7 @@ class PrimusVeScaleRaggedShardFSDP:
                     local.grad.mul_(scaling_factor)
 
     def broadcast_params(self) -> None:
-        """Broadcast parameters from rank 0 to all ranks (used after checkpoint load)."""
+        """Broadcast parameters from rank 0 to all ranks (after checkpoint load)."""
         for unit in self._fsdp_units:
             if unit.flat_dtensor is None:
                 continue
@@ -646,10 +647,8 @@ class PrimusVeScaleRaggedShardFSDP:
     def no_sync(self):
         """Context manager that disables gradient sync (compatible stub)."""
         import contextlib
-
         return contextlib.nullcontext()
 
-    # Expose training() / eval() so wrappers work correctly
     def train(self, mode: bool = True):
         self.module.train(mode)
         return self
