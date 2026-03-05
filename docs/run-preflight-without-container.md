@@ -79,7 +79,7 @@ instead of
 ```
 source "$VENV_PATH"
 ```
-NOTE: you may still need to export `VENV_PATH` (`export VENV_PATH=conda`) so the script can enter the `if` statement in the conditional to be able to run `conda activate py_3.11`.
+NOTE: you may still need to export `VENV_PATH` (by running `export VENV_PATH=conda`) so the script can enter the `if` statement in the conditional to be able to run `conda activate py_3.11`.
 
 ### Can't detect GPUs
 You may see
