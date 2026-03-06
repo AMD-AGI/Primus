@@ -11,6 +11,7 @@ This module contains a focused patch for ``megatron.training.training.print_rank
 to inject additional information into Megatron training logs:
 
     - ROCm/HIP memory stats.
+    - Running average elapsed time per iteration (ms).
     - Running average throughput per GPU (TFLOP/s/GPU).
     - Running average token throughput per GPU (tokens/s/GPU).
 
@@ -40,6 +41,8 @@ class TrainingLogInfo:
     train_iters: Optional[int] = None
     consumed_samples: Optional[int] = None
     elapsed_ms: Optional[float] = None
+    # Index of the elapsed segment within ``segments``, if present.
+    elapsed_index: Optional[int] = None
     throughput_tflops: Optional[float] = None
     # Index of the throughput segment within ``segments``, if present.
     throughput_index: Optional[int] = None
@@ -94,6 +97,7 @@ def parse_training_log_line(log_string: str) -> TrainingLogInfo:
                 elapsed_match = re.search(r"elapsed time per iteration \(ms\):\s*([0-9.+-eE]+)", seg)
                 if elapsed_match:
                     info.elapsed_ms = float(elapsed_match.group(1))
+                    info.elapsed_index = idx
                 continue
 
             # throughput per GPU (TFLOP/s/GPU): {throughput}
@@ -236,6 +240,66 @@ class MemoryStatsExtension:
         parsed.segments.append(combined.strip())
         # String result is ignored by the main patch when parsed is provided.
         return log_string
+
+
+class ElapsedAverageExtension:
+    """
+    Helper extension to compute and inject running average of elapsed time per
+    iteration (ms) into Megatron training logs.
+
+    Semantics mirror Primus MegatronTrainer (same as ThroughputAverageExtension):
+        - Ignore the first `log_avg_skip_iterations` iterations for averaging.
+        - Maintain a sliding window up to `log_avg_reset_interval` entries.
+    """
+
+    def __init__(self, args: Any):
+        self._args = args
+        self._recent_elapsed_ms: list[float] = []
+        self._log_avg_skip_iterations: int = int(getattr(args, "log_avg_skip_iterations", 0))
+        self._log_avg_reset_interval: int = int(getattr(args, "log_avg_reset_interval", 1000))
+
+        log_rank_0(
+            f"[Patch:megatron.training_log] ElapsedAverageExtension initialized with "
+            f"log_avg_skip_iterations: {self._log_avg_skip_iterations} "
+            f"log_avg_reset_interval: {self._log_avg_reset_interval}"
+        )
+
+    def inject(self, log_string: str, parsed: Optional[TrainingLogInfo] = None) -> str:
+        """
+        Update ``parsed`` with running-average elapsed time per iteration.
+
+        Elapsed time is rendered inline as:
+            elapsed time per iteration (ms): inst/avg
+        """
+        try:
+            if parsed is None or parsed.elapsed_ms is None:
+                return log_string
+
+            iteration = parsed.iteration
+            elapsed_value = float(parsed.elapsed_ms)
+
+            if iteration is not None and (
+                iteration == self._log_avg_skip_iterations + 1
+                or len(self._recent_elapsed_ms) >= self._log_avg_reset_interval
+            ):
+                self._recent_elapsed_ms.clear()
+
+            if iteration is None or iteration > self._log_avg_skip_iterations:
+                self._recent_elapsed_ms.append(elapsed_value)
+
+            if not self._recent_elapsed_ms:
+                return log_string
+
+            avg_elapsed_ms = sum(self._recent_elapsed_ms) / len(self._recent_elapsed_ms)
+            idx = parsed.elapsed_index
+            if idx is not None and 0 <= idx < len(parsed.segments):
+                parsed.segments[idx] = (
+                    f"elapsed time per iteration (ms): " f"{elapsed_value:.1f}/{avg_elapsed_ms:.1f}"
+                )
+
+            return log_string
+        except Exception:
+            return log_string
 
 
 class ThroughputAverageExtension:
@@ -416,6 +480,7 @@ def patch_training_log_unified(ctx: PatchContext):
         # Create helper extensions once so they keep state (ROCm cache, avg windows)
         # across all training_log invocations.
         mem_ext = MemoryStatsExtension(config)
+        elapsed_ext = ElapsedAverageExtension(config)
         throughput_ext = ThroughputAverageExtension(config)
         call_count = 0
         # Capture the original ``print_rank_last`` so we can delegate actual
@@ -438,10 +503,11 @@ def patch_training_log_unified(ctx: PatchContext):
                 # Parse the original log string once and share across extensions.
                 parsed = parse_training_log_line(log_string)
 
-                # Inject memory statistics, throughput, and token throughput by
-                # mutating the parsed structure. These calls ignore their string
-                # return value when `parsed` is provided.
+                # Inject memory statistics, elapsed avg, throughput, and token
+                # throughput by mutating the parsed structure. These calls ignore
+                # their string return value when `parsed` is provided.
                 mem_ext.inject(log_string, call_count, parsed)
+                elapsed_ext.inject(log_string, parsed)
                 throughput_ext.inject(log_string, parsed)
 
                 # Render the final line from the parsed structure.

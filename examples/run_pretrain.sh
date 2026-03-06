@@ -175,9 +175,56 @@ export NCCL_CHECKS_DISABLE=1
 
 # Set InfiniBand GID index for NCCL communication
 if [ "$USING_AINIC" == "1" ]; then
-    export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
-    export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
-    export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi"}
+    LOG_INFO_RANK0 "Using AINIC"
+    # unset NCCL_IB_GID_INDEX
+    export NCCL_IB_GID_INDEX=1
+    # export NCCL_IB_ROCE_VERSION_NUM=2
+    if [ -z "${TC_RESULTS:-}" ]; then
+        export NCCL_IB_TC=${NCCL_IB_TC:-104}
+        export NCCL_IB_FIFO_TC=${NCCL_IB_FIFO_TC:-192}
+    else
+        read -r NCCL_IB_TC NCCL_IB_FIFO_TC <<< "$TC_RESULTS"
+        export NCCL_IB_TC
+        export NCCL_IB_FIFO_TC
+    fi
+    export NET_OPTIONAL_RECV_COMPLETION=1
+    export NCCL_IB_USE_INLINE=1
+    export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
+    export NCCL_GDR_FLUSH_DISABLE=1
+    export NCCL_IGNORE_CPU_AFFINITY=1
+    LOG_INFO_RANK0 "NCCL_IB_TC: $NCCL_IB_TC"
+    LOG_INFO_RANK0 "NCCL_IB_FIFO_TC: $NCCL_IB_FIFO_TC"
+
+    if [ "${BACKEND:-}" == "MaxText" ]; then
+        if ! command -v ibv_devinfo &>/dev/null || ! ibv_devinfo &>/dev/null; then
+            LOG_ERROR "Error: ibv_devinfo not found. Please upgrade driver or use tasimage image."
+            exit 1
+        fi
+
+        export ANP_HOME_DIR=${ANP_HOME_DIR:-"/workspace/amd-anp"}
+        export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/workspace/rccl"}
+        export MPI_HOME_DIR=${MPI_HOME_DIR:-"/ompi-4.1.6/install/"}
+        # ------- RCCL/NCCL IB Tuning -------
+        export IONIC_LOCKFREE=all
+        export NCCL_GDR_COPY_ENABLE=1
+        export NCCL_IB_ECE_ENABLE=0
+        export NCCL_IB_PCI_RELAXED_ORDERING=1
+
+        export NCCL_PXN_DISABLE=0
+        export RCCL_LL128_FORCE_ENABLE=1
+
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib
+    else
+        export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
+        export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
+        export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi"}
+
+        export NCCL_MAX_P2P_CHANNELS=56
+        export NCCL_DMABUF_ENABLE=0
+        export NCCL_IB_QPS_PER_CONNECTION=1
+
+        export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib:$LD_LIBRARY_PATH
+    fi
     # Check which NCCL net plugin library is present under ${ANP_HOME_DIR}/build and set accordingly
     if [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
         export NCCL_NET_PLUGIN=librccl-anp.so
@@ -188,7 +235,6 @@ if [ "$USING_AINIC" == "1" ]; then
         exit 1
     fi
 
-    LOG_INFO_RANK0 "Using AINIC"
     LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
     LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
     LOG_INFO_RANK0 "MPI_HOME_DIR: $MPI_HOME_DIR"
@@ -282,9 +328,15 @@ if [ "${BACKEND:-}" == "MaxText" ]; then
     export DUMP_HLO_DIR=${DUMP_HLO_DIR:-"${PRIMUS_PATH}/output/xla_dump_hlo"}
     export DUMP_HLO=${DUMP_HLO:-0}
     export NVTE_ALLOW_NONDETERMINISTIC_ALGO=1
-    export XLA_PYTHON_CLIENT_MEM_FRACTION=.97
+    if [ "${NNODES}" -gt 1 ]; then
+        export XLA_PYTHON_CLIENT_MEM_FRACTION=.93
+        export JAX_HIP_GRAPH_LOWERING=false
+    else
+        export XLA_PYTHON_CLIENT_MEM_FRACTION=.97
+    fi
+    export TF_CPP_MIN_LOG_LEVEL=2 # this env var is used to suppress the error logs at the end of training
+    export XLA_FLAGS="--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_enable_command_buffer='' --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=false --xla_gpu_enable_cublaslt=true --xla_gpu_autotune_level=4 --xla_gpu_enable_all_gather_combine_by_dim=false"
     export NVTE_USE_HIPBLASLT=1
-    export XLA_FLAGS="--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_graph_level=0 --xla_gpu_enable_latency_hiding_scheduler=True --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=False --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=FALSE"
     if [ "${DUMP_HLO}" = "1" ]; then
         mkdir -p "${DUMP_HLO_DIR}"
         export XLA_FLAGS="$XLA_FLAGS --xla_dump_to=$DUMP_HLO_DIR"
@@ -413,6 +465,21 @@ if [[ "$PATCH_TE_FLASH_ATTN" == "1" ]]; then
 fi
 LOG_INFO_RANK0 ""
 
+# -------------------- Install required packages for Jax --------------------
+install_pkgs_for_maxtext() {
+    LOG_INFO_RANK0 "========== Install IB required packages for Jax/MaxText =========="
+    apt update
+    apt install autoconf automake libtool pkg-config -y
+    apt install jq dpkg-dev kmod xz-utils -y
+    apt install libibverbs-dev ibverbs-utils infiniband-diags -y
+    apt install rdma-core librdmacm-dev libibverbs-dev libibumad-dev -y
+    LOG_INFO_RANK0 "========== Install IB required packages for Jax/MaxText Done =========="
+}
+
+if [[ "$NNODES" -gt 1 ]] && [[ "${BACKEND:-}" == "MaxText" ]]; then
+    install_pkgs_for_maxtext
+fi
+
 # ----------------- Rebuild nbxt -----------------
 export REBUILD_BNXT=${REBUILD_BNXT:-0}
 export PATH_TO_BNXT_TAR_PACKAGE=${PATH_TO_BNXT_TAR_PACKAGE}
@@ -431,20 +498,6 @@ if [[ "$REBUILD_BNXT" == "1" && -f "$PATH_TO_BNXT_TAR_PACKAGE" ]]; then
     LOG_INFO "Rebuilding libbnxt done."
 else
   LOG_INFO "Skip bnxt rebuild. REBUILD_BNXT=$REBUILD_BNXT, PATH_TO_BNXT_TAR_PACKAGE=$PATH_TO_BNXT_TAR_PACKAGE"
-fi
-
-# -------------------- Install required packages for Jax --------------------
-install_pkgs_for_maxtext() {
-    LOG_INFO_RANK0 "========== Install required packages for Jax/MaxText =========="
-    apt install iproute2 -y
-    apt install -y linux-headers-"$(uname -r)" libelf-dev
-    apt install -y gcc make libtool autoconf librdmacm-dev rdmacm-utils infiniband-diags ibverbs-utils perftest ethtool libibverbs-dev \
-        rdma-core strace libibmad5 libibnetdisc5 ibverbs-providers libibumad-dev libibumad3 libibverbs1 libnl-3-dev libnl-route-3-dev
-    LOG_INFO_RANK0 "========== Install required packages for Jax/MaxText Done =========="
-}
-
-if [[ "$NNODES" -gt 1 ]] && [[ "${BACKEND:-}" == "MaxText" ]]; then
-    install_pkgs_for_maxtext
 fi
 
 # -------------------- HipBLASLt Tuning --------------------
