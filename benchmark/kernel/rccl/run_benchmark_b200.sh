@@ -1,7 +1,4 @@
 #!/bin/bash
-sbatch -w  GPUA7DD,GPUA817 run_benchmark_gb200.sh
-joyzhang@GPUA7DD:/mnt/shared/joyzhang/Primus_Lorri/Primus/benchmark/kernel/rccl$ cat run_benchmark_b200.sh 
-#!/bin/bash
 ###############################################################################
 # Slurm launcher for NCCL benchmarks on GB200 via enroot/pyxis.
 #
@@ -62,7 +59,8 @@ REDUCESCATTER_CSV="${OUTPUT_DIR}/reducescatter_${NODE_TAG}.csv"
 # ---- Export env vars BEFORE srun ----
 # pyxis --container-env only accepts variable NAMES (not NAME=VALUE).
 # Variables must be exported in the host environment first.
-export NCCL_MNNVL_ENABLE=1
+export NCCL_IB_DISABLE=0
+export NCCL_MNNVL_ENABLE=0
 export TORCH_NCCL_AVOID_RECORD_STREAMS=0
 export NCCL_NVLS_ENABLE=0
 export NCCL_DEBUG=INFO
@@ -70,14 +68,18 @@ export TORCH_NCCL_HIGH_PRIORITY=1
 export GLOO_SOCKET_IFNAME=bond0
 export NCCL_SOCKET_IFNAME=bond0
 export MELLANOX_VISIBLE_DEVICES=all
-export UCX_NET_DEVICES=all
-export NCCL_IB_HCA=ibs
+export UCX_TLS=tcp,self,sm
+export UCX_NET_DEVICES=bond0
+export NCCL_NET=IB
+#export NCCL_IB_HCA=ibs
+export NCCL_IB_HCA=ibp
+
 export PYTHONPATH="${SCRIPT_DIR}"
 
 srun --container-image="${DOCKER_IMAGE}" \
      --container-mounts="${SCRIPT_DIR}:${SCRIPT_DIR},${HOME}:${HOME},/dev/infiniband:/dev/infiniband" \
      --container-workdir="${SCRIPT_DIR}" \
-     --container-env=NCCL_MNNVL_ENABLE,TORCH_NCCL_AVOID_RECORD_STREAMS,NCCL_NVLS_ENABLE,NCCL_DEBUG,TORCH_NCCL_HIGH_PRIORITY,GLOO_SOCKET_IFNAME,NCCL_SOCKET_IFNAME,PYTHONPATH,MELLANOX_VISIBLE_DEVICES,UCX_NET_DEVICES,NCCL_IB_HCA \
+     --container-env=NCCL_MNNVL_ENABLE,TORCH_NCCL_AVOID_RECORD_STREAMS,NCCL_NVLS_ENABLE,NCCL_DEBUG,TORCH_NCCL_HIGH_PRIORITY,GLOO_SOCKET_IFNAME,NCCL_SOCKET_IFNAME,PYTHONPATH,MELLANOX_VISIBLE_DEVICES,UCX_NET_DEVICES,UCX_TLS,NCCL_NET,NCCL_IB_HCA,NCCL_IB_DISABLE \
      torchrun \
        --nnodes=${SLURM_JOB_NUM_NODES} \
        --nproc_per_node=${GPUS_PER_NODE} \
