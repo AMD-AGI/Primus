@@ -32,7 +32,8 @@ modules:
         global_batch_size: 96
         seq_len: 8192
         mock_data: false
-        steps: 10
+        steps: 50
+        gc_freq: 100
 
       optimizer:
         lr: 1.5e-4

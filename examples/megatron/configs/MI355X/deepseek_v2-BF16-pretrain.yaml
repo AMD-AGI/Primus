@@ -93,6 +93,10 @@ modules:
       # stage 2 is recommended for better performance
       turbo_sync_free_moe_stage: 1
 
+      # remove once super flag is functional again
+      moe_use_fused_router_with_aux_score: true
+      moe_permute_fusion: true
+
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
