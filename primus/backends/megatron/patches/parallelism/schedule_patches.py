@@ -41,3 +41,11 @@ def patch_pipeline_schedule(ctx: PatchContext):
         f"[Patch:megatron.pp.schedule]   Patched megatron.core.pipeline_parallel.get_forward_backward_func "
         f"-> {get_primus_pipeline_parallel_fwd_backward_func.__name__}"
     )
+
+    import megatron.training.training as megatron_training
+
+    megatron_training.get_forward_backward_func = get_primus_pipeline_parallel_fwd_backward_func
+    log_rank_0(
+        f"[Patch:megatron.pp.schedule]   Patched megatron.training.training.get_forward_backward_func "
+        f"-> {get_primus_pipeline_parallel_fwd_backward_func.__name__}"
+    )
