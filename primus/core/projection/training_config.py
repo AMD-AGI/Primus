@@ -30,6 +30,7 @@ class ModelParallelConfig:
     # Pipeline stage layer distribution
     decoder_first_pipeline_num_layers: int = None
     decoder_last_pipeline_num_layers: int = None
+    pipeline_model_parallel_layout: str = None
     # Recomputation settings
     recompute_granularity: str = None  # "full" or "selective"
     recompute_num_layers: int = 0

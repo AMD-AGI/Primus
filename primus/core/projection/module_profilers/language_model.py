@@ -5,6 +5,7 @@
 ###############################################################################
 
 import os
+import re
 from typing import List, Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
@@ -143,6 +144,51 @@ def _get_explicit_layer_distribution(
     return layers_per_stage
 
 
+def _parse_layout_stage_layer_counts(layout: Optional[str], total_stages: int, n_layers: int) -> Optional[List[int]]:
+    """
+    Parse Megatron-style pipeline layout into decoder-layer counts per virtual stage.
+
+    Example layout:
+      'Et*4|t*4|...|t*3,L'
+    """
+    if not layout:
+        return None
+
+    normalized = str(layout).strip()
+    # Handle extra shell quoting, e.g. "'Et*4|...|t*3,L'"
+    if (
+        len(normalized) >= 2
+        and normalized[0] == normalized[-1]
+        and normalized[0] in ("'", '"')
+    ):
+        normalized = normalized[1:-1].strip()
+
+    # Split virtual stages by '|'; strip trailing non-decoder markers like ",L".
+    stage_specs = [part.strip() for part in normalized.split("|") if part.strip()]
+    if len(stage_specs) != total_stages:
+        raise ValueError(
+            f"pipeline_model_parallel_layout has {len(stage_specs)} stages, "
+            f"but PP*VPP expects {total_stages} stages."
+        )
+
+    layers_per_stage: List[int] = []
+    for spec in stage_specs:
+        spec = spec.split(",", 1)[0].strip()
+        matches = re.findall(r"[tT](?:\*(\d+))?", spec)
+        if not matches:
+            raise ValueError(f"Invalid pipeline stage spec '{spec}' in pipeline_model_parallel_layout.")
+        layer_count = sum(int(m) if m else 1 for m in matches)
+        layers_per_stage.append(layer_count)
+
+    if sum(layers_per_stage) != n_layers:
+        raise ValueError(
+            "pipeline_model_parallel_layout decoder layer count mismatch: "
+            f"layout has {sum(layers_per_stage)} decoder layers, model has {n_layers}."
+        )
+
+    return layers_per_stage
+
+
 # language profiler spec -> build_profiler() -> language profiler -> run profiling methods
 class LanguageModelProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
@@ -156,6 +202,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
             cp_size=self.config.model_parallel_config.context_model_parallel_size,
             ep_size=self.config.model_parallel_config.expert_model_parallel_size,
             num_virtual_pipeline_stages=self.config.model_parallel_config.virtual_pipeline_model_parallel_size,
+            pipeline_model_parallel_layout=self.config.model_parallel_config.pipeline_model_parallel_layout,
         )
         self._gemm_backend = None
         self._sdpa_backend = None
@@ -196,6 +243,7 @@ class LanguageModelProfiler(BaseModuleProfiler):
         num_virtual_pipeline_stages: Optional[int] = None,
         decoder_first_pipeline_num_layers: Optional[int] = None,
         decoder_last_pipeline_num_layers: Optional[int] = None,
+        pipeline_model_parallel_layout: Optional[str] = None,
     ) -> List[int]:
         """
         Get layers assigned to a specific rank, handling imbalanced layer distribution.
@@ -203,7 +251,41 @@ class LanguageModelProfiler(BaseModuleProfiler):
         When layers aren't evenly divisible by PP*VPP, distribute remainder layers
         to the first virtual stages (or use decoder_first/last_pipeline_num_layers if set).
         """
-        total_stages = pp_size
+        vpp_size = num_virtual_pipeline_stages if num_virtual_pipeline_stages is not None else 1
+        total_stages = pp_size * vpp_size
+
+        chunks = LanguageModelProfiler.get_virtual_stage_layers_for_rank(
+            self,
+            global_rank=global_rank,
+            n_layers=n_layers,
+            pp_size=pp_size,
+            tp_size=tp_size,
+            cp_size=cp_size,
+            ep_size=ep_size,
+            num_virtual_pipeline_stages=vpp_size,
+            decoder_first_pipeline_num_layers=decoder_first_pipeline_num_layers,
+            decoder_last_pipeline_num_layers=decoder_last_pipeline_num_layers,
+            pipeline_model_parallel_layout=pipeline_model_parallel_layout,
+        )
+        return [layer for chunk in chunks for layer in chunk]
+
+    @staticmethod
+    def get_virtual_stage_layers_for_rank(
+        self,
+        global_rank: int,
+        n_layers: int,
+        pp_size: int,
+        tp_size: int,
+        cp_size: int,
+        ep_size: int,
+        num_virtual_pipeline_stages: Optional[int] = None,
+        decoder_first_pipeline_num_layers: Optional[int] = None,
+        decoder_last_pipeline_num_layers: Optional[int] = None,
+        pipeline_model_parallel_layout: Optional[str] = None,
+    ) -> List[List[int]]:
+        """
+        Get per-virtual-stage decoder layers assigned to a rank.
+        """
         vpp_size = num_virtual_pipeline_stages if num_virtual_pipeline_stages is not None else 1
         total_stages = pp_size * vpp_size
 
@@ -221,9 +303,15 @@ class LanguageModelProfiler(BaseModuleProfiler):
                 decoder_first = getattr(mp_config, "decoder_first_pipeline_num_layers", None)
             if decoder_last is None:
                 decoder_last = getattr(mp_config, "decoder_last_pipeline_num_layers", None)
+            if pipeline_model_parallel_layout is None:
+                pipeline_model_parallel_layout = getattr(mp_config, "pipeline_model_parallel_layout", None)
 
         # Build layer counts per virtual stage
-        if decoder_first is not None or decoder_last is not None:
+        if pipeline_model_parallel_layout:
+            layers_per_stage = _parse_layout_stage_layer_counts(
+                pipeline_model_parallel_layout, total_stages, n_layers
+            )
+        elif decoder_first is not None or decoder_last is not None:
             # Use explicit layer distribution
             layers_per_stage = _get_explicit_layer_distribution(
                 n_layers, total_stages, decoder_first, decoder_last
@@ -237,15 +325,14 @@ class LanguageModelProfiler(BaseModuleProfiler):
         # pp_rank 1 gets virtual stages: 1, pp_size+1, 2*pp_size+1, ...
         my_virtual_stages = range(pp_rank, total_stages, pp_size)
 
-        assigned_layers = []
+        assigned_chunks: List[List[int]] = []
         for vs_index in my_virtual_stages:
             # Calculate start layer by summing layers in all previous stages
             start_layer = sum(layers_per_stage[:vs_index])
-            end_layer = start_layer + layers_per_stage[vs_index] - 1
-            for layer in range(start_layer, end_layer + 1):
-                assigned_layers.append(layer)
+            count = layers_per_stage[vs_index]
+            assigned_chunks.append(list(range(start_layer, start_layer + count)))
 
-        return assigned_layers
+        return assigned_chunks
 
     def _estimate_layer_communication(self, layer_idx: int, layer_type: str):
         """
@@ -382,9 +469,17 @@ class LanguageModelProfiler(BaseModuleProfiler):
         recompute_granularity = self.config.model_parallel_config.recompute_granularity
         recompute_num_layers = self.config.model_parallel_config.recompute_num_layers
 
-        # Calculate number of layers per virtual pipeline stage on this rank
-        layers_per_rank = len(self.layers)
-        layers_per_vpp_stage = layers_per_rank // vpp_size if vpp_size > 0 else layers_per_rank
+        layer_chunks = self.get_virtual_stage_layers_for_rank(
+            self,
+            global_rank=int(os.getenv("RANK", "0")),
+            n_layers=self.config.model_config.num_layers,
+            pp_size=self.config.model_parallel_config.pipeline_model_parallel_size,
+            tp_size=self.config.model_parallel_config.tensor_model_parallel_size,
+            cp_size=self.config.model_parallel_config.context_model_parallel_size,
+            ep_size=self.config.model_parallel_config.expert_model_parallel_size,
+            num_virtual_pipeline_stages=vpp_size,
+            pipeline_model_parallel_layout=self.config.model_parallel_config.pipeline_model_parallel_layout,
+        )
 
         # Input activation size per layer (only thing stored for recomputed layers)
         # hidden_size * batch_size * seq_len * dtype_bytes (bf16 = 2 bytes)
@@ -399,29 +494,29 @@ class LanguageModelProfiler(BaseModuleProfiler):
 
         # Calculate full layer activation for non-recomputed layers
         layer_act = 0
-        for i, layer in enumerate(self.layers):
-            # Determine if this layer is recomputed
-            local_layer_idx = i % layers_per_vpp_stage if layers_per_vpp_stage > 0 else i
-            is_recomputed = (
-                recompute_granularity == "full"
-                and recompute_num_layers is not None
-                and local_layer_idx < recompute_num_layers
-            )
+        for chunk_layers in layer_chunks:
+            for local_idx, layer in enumerate(chunk_layers):
+                # Determine if this layer is recomputed
+                is_recomputed = (
+                    recompute_granularity == "full"
+                    and recompute_num_layers is not None
+                    and local_idx < recompute_num_layers
+                )
 
-            if is_recomputed:
-                # Recomputed layer: only store input activation
-                layer_act += input_act_per_layer
-            else:
-                # Non-recomputed layer: store full activations
-                is_moe = self.config.model_config.moe_pattern[layer]
-                if is_moe:
-                    layer_act += self.sub_profilers["moe_transformer_layer"].estimated_activation_memory(
-                        batch_size, seq_len
-                    )
+                if is_recomputed:
+                    # Recomputed layer: only store input activation
+                    layer_act += input_act_per_layer
                 else:
-                    layer_act += self.sub_profilers["dense_transformer_layer"].estimated_activation_memory(
-                        batch_size, seq_len
-                    )
+                    # Non-recomputed layer: store full activations
+                    is_moe = self.config.model_config.moe_pattern[layer]
+                    if is_moe:
+                        layer_act += self.sub_profilers["moe_transformer_layer"].estimated_activation_memory(
+                            batch_size, seq_len
+                        )
+                    else:
+                        layer_act += self.sub_profilers["dense_transformer_layer"].estimated_activation_memory(
+                            batch_size, seq_len
+                        )
 
         total_act = layer_act
 
