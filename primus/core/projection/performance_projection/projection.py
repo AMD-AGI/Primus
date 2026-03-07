@@ -540,8 +540,14 @@ def _limit_layers_for_projection(module_config):
     else:
         module_config.moe_layer_freq = [0] * target_layers
 
-    # disable pipeline model parallelism
+    # disable pipeline model parallelism for single-node layer benchmarking
     module_config.pipeline_model_parallel_size = 1
+    # PP=1 cannot use interleaved schedule (VPP>1)
+    if hasattr(module_config, "virtual_pipeline_model_parallel_size"):
+        module_config.virtual_pipeline_model_parallel_size = 1
+    # Explicit layout is only meaningful with PP>1/VPP mapping.
+    if hasattr(module_config, "pipeline_model_parallel_layout"):
+        module_config.pipeline_model_parallel_layout = None
     for attr in (
         "num_layers_per_virtual_pipeline_stage",
         "num_virtual_stages_per_pipeline_rank",
@@ -771,6 +777,13 @@ def _calculate_single_node_config(original_config, gpus_per_node=8, benchmark_gp
 
     # Modify the config for benchmarking
     original_config.pipeline_model_parallel_size = benchmark_pp
+    # If benchmarking collapses PP to 1, force VPP/layout off to avoid
+    # Megatron interleaved-schedule assertions.
+    if benchmark_pp <= 1:
+        if hasattr(original_config, "virtual_pipeline_model_parallel_size"):
+            original_config.virtual_pipeline_model_parallel_size = 1
+        if hasattr(original_config, "pipeline_model_parallel_layout"):
+            original_config.pipeline_model_parallel_layout = None
     if benchmark_tp != tp:
         original_config.tensor_model_parallel_size = benchmark_tp
 
@@ -1332,11 +1345,12 @@ def _build_chunk_time_matrix(training_config, layer_results: dict) -> Optional[L
 
     decoder_first = getattr(mp_cfg, "decoder_first_pipeline_num_layers", None)
     decoder_last = getattr(mp_cfg, "decoder_last_pipeline_num_layers", None)
+    pipeline_layout = getattr(mp_cfg, "pipeline_model_parallel_layout", None)
 
     mp_group = tp_size * cp_size * ep_size
     chunk_timings: List[list[dict]] = []
     for pp_rank in range(pp_size):
-        layers = LanguageModelProfiler.get_layers_for_rank(
+        stage_chunks = LanguageModelProfiler.get_virtual_stage_layers_for_rank(
             None,
             global_rank=pp_rank * mp_group,
             n_layers=total_layers,
@@ -1347,15 +1361,15 @@ def _build_chunk_time_matrix(training_config, layer_results: dict) -> Optional[L
             num_virtual_pipeline_stages=vpp_size,
             decoder_first_pipeline_num_layers=decoder_first,
             decoder_last_pipeline_num_layers=decoder_last,
+            pipeline_model_parallel_layout=pipeline_layout,
         )
-        if not layers:
+        if not stage_chunks:
             chunk_timings.append(
                 [{"fwd": 0.0, "bwd": 0.0, "wgrad": 0.0, "activation": 0.0} for _ in range(vpp_size)]
             )
             continue
 
-        layers_per_chunk = len(layers) // vpp_size if vpp_size else len(layers)
-        if layers_per_chunk == 0:
+        if len(stage_chunks) != vpp_size:
             chunk_timings.append(
                 [{"fwd": 0.0, "bwd": 0.0, "wgrad": 0.0, "activation": 0.0} for _ in range(vpp_size)]
             )
@@ -1366,10 +1380,7 @@ def _build_chunk_time_matrix(training_config, layer_results: dict) -> Optional[L
         recompute_num_layers = getattr(mp_cfg, "recompute_num_layers", 0) or 0
 
         rank_chunks = []
-        for chunk_idx in range(vpp_size):
-            start = chunk_idx * layers_per_chunk
-            end = start + layers_per_chunk
-            chunk_layers = layers[start:end]
+        for chunk_layers in stage_chunks:
             chunk_entry = {"fwd": 0.0, "bwd": 0.0, "wgrad": 0.0, "activation": 0.0}
             for local_idx, layer_idx in enumerate(chunk_layers):
                 layer_type = "moe" if layer_type_pattern[layer_idx] else "dense"
@@ -2001,6 +2012,7 @@ def _get_parameter_memory(training_config, pp_rank: int) -> float:
     ep_size = getattr(mp_cfg, "expert_model_parallel_size", 1) or 1
     vpp_size = getattr(mp_cfg, "virtual_pipeline_model_parallel_size", 1) or 1
     pp_size = getattr(mp_cfg, "pipeline_model_parallel_size", 1) or 1
+    pipeline_layout = getattr(mp_cfg, "pipeline_model_parallel_layout", None)
 
     total_layers = getattr(training_config.model_config, "num_layers", 0) or 0
     mp_group = tp_size * cp_size * ep_size
@@ -2017,6 +2029,7 @@ def _get_parameter_memory(training_config, pp_rank: int) -> float:
         cp_size=cp_size,
         ep_size=ep_size,
         num_virtual_pipeline_stages=vpp_size,
+        pipeline_model_parallel_layout=pipeline_layout,
     )
 
     param_profiler.layers = layers
@@ -2513,6 +2526,11 @@ def launch_projection_from_cli(args, overrides):
         primus_config.get_module_config("pre_trainer").pipeline_model_parallel_size = reduction_info[
             "benchmark_pp"
         ]
+        if reduction_info["benchmark_pp"] <= 1:
+            if hasattr(primus_config.get_module_config("pre_trainer"), "virtual_pipeline_model_parallel_size"):
+                primus_config.get_module_config("pre_trainer").virtual_pipeline_model_parallel_size = 1
+            if hasattr(primus_config.get_module_config("pre_trainer"), "pipeline_model_parallel_layout"):
+                primus_config.get_module_config("pre_trainer").pipeline_model_parallel_layout = None
         primus_config.get_module_config("pre_trainer").expert_model_parallel_size = reduction_info[
             "benchmark_ep"
         ]
