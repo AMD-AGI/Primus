@@ -443,7 +443,10 @@ def single_shot_alltoall(args, msg_size, gpus, groups=None, protocol=None):
         return 0
     intra_node_fanout, inter_node_fanout = get_max_fanout(args)
     msg_size_per_peer = ceil(msg_size / gpus)
-    gpus_per_node = min(gpus, args.node_size)
+    # Account for TP striding: with TP (hp) > 1, each EP rank occupies
+    # hp GPUs, so only node_size/hp EP ranks fit on a single node.
+    hp = getattr(args, "hp", 1)
+    gpus_per_node = min(gpus, args.node_size // max(hp, 1))
     nics_per_node = args.nics_per_node if args.nics_per_node else gpus_per_node
     intra_node_gpus = gpus_per_node - 1
     inter_node_gpus = max(0, gpus - gpus_per_node)
@@ -487,8 +490,11 @@ def hierarchical_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     if gpus == 1 or msg_size == 0:
         return 0
 
-    gpus_per_node = min(gpus, args.node_size)
-    num_nodes = ceil(gpus / args.node_size)
+    # Account for TP striding: with TP (hp) > 1, each EP rank occupies
+    # hp GPUs, so only node_size/hp EP ranks fit on a single node.
+    hp = getattr(args, "hp", 1)
+    gpus_per_node = min(gpus, args.node_size // max(hp, 1))
+    num_nodes = ceil(gpus / max(gpus_per_node, 1))
     nics_per_node = args.nics_per_node if args.nics_per_node else gpus_per_node
 
     if num_nodes == 1:
@@ -636,16 +642,32 @@ def alltoall(args, msg_size, gpus, groups=["ep"]):
         single_shot_a2a_time = single_shot_alltoall(args, msg_size, gpus, protocol=p)
         hierarchical_a2a_time = hierarchical_alltoall(args, msg_size, gpus, protocol=p)
         a2a_time = min(direct_a2a_time, single_shot_a2a_time, hierarchical_a2a_time)
+
         if a2a_time < min_a2a_time:
             min_a2a_time = a2a_time
 
-    # Add per-peer latency overhead for inter-node communication
-    # This accounts for RDMA QP setup, work request posting, completion polling, etc.
-    if hasattr(args, "a2a_peer_lat") and args.a2a_peer_lat > 0:
-        gpus_per_node = args.node_size
-        inter_node_peers = max(0, gpus - gpus_per_node)
-        peer_overhead = args.a2a_peer_lat * inter_node_peers
-        min_a2a_time += peer_overhead
+    # Add per-peer latency overhead for ALL A2A communication (both intra and inter-node)
+    # This accounts for:
+    # - P2P scatter/gather scheduling overhead
+    # - RCCL internal synchronization barriers
+    # - Memory copy and buffer management
+    # - RDMA QP setup, work request posting, completion polling (for inter-node)
+    # For intra-node A2A, overhead is significant due to synchronization and scheduling
+    # Measured overhead: ~50 us per peer for intra-node (vs ~0.45 us for inter-node)
+    gpus_per_node = args.node_size
+    intra_node_peers = min(gpus - 1, gpus_per_node - 1)  # Peers within same node
+    inter_node_peers = max(0, gpus - gpus_per_node)  # Peers on other nodes
+
+    # Intra-node overhead is much higher due to synchronization and scheduling
+    # Based on preflight measurements: EP=8 intra-node A2A needs ~19-28 us per peer
+    # Inter-node overhead is lower (~0.45 us per peer) due to RDMA efficiency
+    intra_node_overhead_per_peer = getattr(args, "a2a_intra_node_peer_lat", 28.0)  # Default 28 us
+    inter_node_overhead_per_peer = getattr(args, "a2a_peer_lat", 0.45)  # Default 0.45 us
+
+    peer_overhead = (
+        intra_node_overhead_per_peer * intra_node_peers + inter_node_overhead_per_peer * inter_node_peers
+    )
+    min_a2a_time += peer_overhead
 
     return min_a2a_time
 

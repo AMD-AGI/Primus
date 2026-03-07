@@ -30,6 +30,7 @@ class ModelParallelConfig:
     # Pipeline stage layer distribution
     decoder_first_pipeline_num_layers: int = None
     decoder_last_pipeline_num_layers: int = None
+    pipeline_model_parallel_layout: str = None
     # Recomputation settings
     recompute_granularity: str = None  # "full" or "selective"
     recompute_num_layers: int = 0
@@ -63,6 +64,13 @@ class ModelConfig:
     moe_shared_expert_intermediate_size: int = 0
     # Misc
     share_embeddings_and_output_weights: bool = False
+    # Precision – None means bf16, "hybrid" means FP8-hybrid (linear GEMMs in FP8)
+    fp8: str = None
+
+    # Primus Turbo flags — used to select the grouped-GEMM performance model
+    enable_primus_turbo: bool = False
+    use_turbo_grouped_mlp: bool = False
+    use_turbo_deepep: bool = False  # DeepEP enables async A2A with compute overlap
 
 
 @dataclass
