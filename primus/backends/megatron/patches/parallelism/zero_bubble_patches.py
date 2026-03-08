@@ -53,3 +53,11 @@ def patch_zero_bubble_pp(ctx: PatchContext):
         f"[Patch:megatron.pp.zero_bubble_optimizer]   Patched megatron.core.pipeline_parallel.get_forward_backward_func "
         f"-> {get_forward_backward_func_zbpp.__name__}"
     )
+
+    import megatron.training.training as megatron_training
+
+    megatron_training.get_forward_backward_func = get_forward_backward_func_zbpp
+    log_rank_0(
+        f"[Patch:megatron.pp.zero_bubble_optimizer]   Patched megatron.training.training.get_forward_backward_func "
+        f"-> {get_forward_backward_func_zbpp.__name__}"
+    )
