@@ -45,6 +45,7 @@ modules:
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 8
+      expert_tensor_parallel_size: 1
       overlap_grad_reduce: true
       overlap_param_gather: true
       gradient_accumulation_fusion: false
