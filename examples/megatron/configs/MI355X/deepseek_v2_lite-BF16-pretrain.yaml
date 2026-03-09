@@ -92,8 +92,13 @@ modules:
       # cross_entropy_fusion_impl: "te"
       # cross_entropy_loss_fusion: true
 
-
-      # moe_fsep_sharding_degree: 8
-      # moe_log_expert_load: true
-      moe_router_force_load_balancing: false # 关闭均匀路由，暴露真实不均衡
+      # ── FSEP test params (uncomment to enable) ──
+      # NOTE: moe_router_force_load_balancing must stay true on DSv2-Lite
+      # because natural routing causes DeepEP sync-free deadlock at step 1
+      # when num_experts=64 with no capacity limit (tokens overflow DeepEP buffer).
+      # To test FSEP load balancing: use a model with capacity_factor set,
+      # or use moe_proxy_single_node (128 experts, more stable routing).
+      # moe_fsep_sharding_degree: 8    # enable FSEP with S=EP=8
+      # moe_log_expert_load: true      # log max/avg ratio to TensorBoard
+      # moe_router_force_load_balancing: false  # natural routing (deadlocks on this model!)
       moe_pad_expert_input_to_capacity: false
