@@ -50,7 +50,7 @@ Preflight will run performance tests for the intra-node and inter-node communica
 
 
 ## Run preflight on the cluster
-### With cluster that does use Pensando Pollara (AINIC) for RDMA
+### With cluster that does not use Pensando Pollara (AINIC) for RDMA
 If you're using Broadcom NICs, you can use a command like this
 ```bash
 # set the environment variable VENV_PATH to the path of the virtual environment activate script
@@ -64,7 +64,7 @@ srun -t 00:45:00 -N 4 -c 128 --gpus-per-node=8 --nodelist <nodes> \
   -- preflight --perf-test --report-file-name preflight-report-4N
 ```
 
-### With cluster that does not use Pensando Pollara (AINIC) for RDMA
+### With cluster that does use Pensando Pollara (AINIC) for RDMA
 ```bash
 # set the environment variable VENV_PATH to the path of the virtual environment activate script
 export VENV_PATH=/mnt/vast/fuyuan/envs/test/.venv/bin/activate
