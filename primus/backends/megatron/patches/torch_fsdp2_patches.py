@@ -59,3 +59,27 @@ def patch_torch_fsdp(ctx: PatchContext):
         f"[Patch:megatron.fsdp.torch_fsdp2]   Patched megatron.training.training.torch_FSDP "
         f"-> {PrimusTorchFullyShardedDataParallel.__name__}"
     )
+    # Megatron Core 0.16 may pass new kwargs (e.g., force_all_reduce) into
+    # model_chunk.finish_grad_sync(). Keep FSDP2 path forward-compatible by
+    from megatron.core.distributed import data_parallel_base
+
+    original_start_grad_sync = data_parallel_base._BaseDataParallel.start_grad_sync
+    original_finish_grad_sync = data_parallel_base._BaseDataParallel.finish_grad_sync
+
+    if not getattr(original_start_grad_sync, "_primus_grad_sync_compat", False):
+
+        def _patched_start_grad_sync(self, *unused, **unused_kwargs):
+            return original_start_grad_sync(self, *unused)
+
+        def _patched_finish_grad_sync(self, *unused, **unused_kwargs):
+            return original_finish_grad_sync(self)
+
+        setattr(_patched_start_grad_sync, "_primus_grad_sync_compat", True)
+        setattr(_patched_finish_grad_sync, "_primus_grad_sync_compat", True)
+        data_parallel_base._BaseDataParallel.start_grad_sync = _patched_start_grad_sync
+        data_parallel_base._BaseDataParallel.finish_grad_sync = _patched_finish_grad_sync
+
+        log_rank_0(
+            "[Patch:megatron.fsdp.torch_fsdp2]   Patched _BaseDataParallel "
+            "start_grad_sync/finish_grad_sync to accept extra kwargs "
+        )
