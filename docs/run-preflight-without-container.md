@@ -22,16 +22,16 @@ Based on the imports across all files in primus/tools/preflight/, here are the t
 | markdown2  | utility.py                                                     | Converting the Markdown report to HTML            |
 | weasyprint | utility.py                                                     | Converting HTML to PDF for the final report       |
 
-There are a list of package in the project's top-level `requirements.txt`.
+There is a list of package in the project's top-level `requirements.txt`.
 
 ### Create virtual environment and install packages
 
 The environment is shared between all nodes in the cluster. So we need to create a virtual environment and install packages on a shared file system. Python venv or uv is recommended to create a virtual environment and install packages. Here is an example of creating a virtual environment and installing packages using uv: 
 
 ```bash
-# /mnt/vast is a shared file system. All nodes in the cluster can access this directory.
-mkdir -p /mnt/vast/fuyuan/envs/test
-cd /mnt/vast/fuyuan/envs/test
+# Use a shared file system accessible from all nodes (e.g. NFS home, /shared)
+mkdir -p ~/envs/preflight
+cd ~/envs/preflight
 
 uv venv --python 3.12
 source .venv/bin/activate
@@ -40,7 +40,7 @@ source .venv/bin/activate
 uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.1
 
 # install other packages
-cd /mnt/vast/fuyuan/Primus
+cd /path/to/Primus
 uv pip install -r requirements.txt
 ```
 
@@ -54,7 +54,7 @@ Preflight will run performance tests for the intra-node and inter-node communica
 If you're using Broadcom NICs, you can use a command like this
 ```bash
 # set the environment variable VENV_PATH to the path of the virtual environment activate script
-export VENV_PATH=/mnt/vast/fuyuan/envs/test/.venv/bin/activate
+export VENV_PATH=~/envs/preflight/.venv/bin/activate
 
 # run preflight with slurm
 # it will collect basic information and performance tests on the cluster.
@@ -67,7 +67,7 @@ srun -t 00:45:00 -N 4 -c 128 --gpus-per-node=8 --nodelist <nodes> \
 ### With cluster that does use Pensando Pollara (AINIC) for RDMA
 ```bash
 # set the environment variable VENV_PATH to the path of the virtual environment activate script
-export VENV_PATH=/mnt/vast/fuyuan/envs/test/.venv/bin/activate
+export VENV_PATH=~/envs/preflight/.venv/bin/activate
 
 # run preflight with slurm
 # it will collect basic information and performance tests on the cluster.
@@ -77,6 +77,17 @@ srun -t 00:45:00 -N 4 -c 128 --gpus-per-node=8 --nodelist <nodes> \
   --env USING_AINIC=1 --env NCCL_IB_GID_INDEX=1 --env NCCL_PXN_DISABLE=0 \
   -- preflight --report-file-name preflight-report-4N
 ```
+
+### Key srun flags explained
+
+| Flag | Why it is necessary |
+|------|-----|
+| `-c 128` | Allocates all CPU cores per task — without this, Slurm may default to 1 core, starving RCCL network proxy threads and causing 35x slowdown |
+| `--gpus-per-node=8` | Grants GPU device access (`/dev/kfd`, `/dev/dri`) — required for non-container mode |
+| `--env NCCL_CROSS_NIC=1` | Enables cross-NIC traffic for multi-rail IB fabrics — the runner default (`=0`) restricts to single-NIC paths |
+| `--env NCCL_PXN_DISABLE=0` | Enables PXN (peer exchange over NIC) for multi-hop NIC sharing |
+
+> **Note:** Set `-c` to the number of CPU cores per node on your cluster (e.g. `-c 128` for 128-core nodes). You can check with: `srun -N 1 --gpus-per-node=8 bash -c 'nproc'`
 
 ## Troubleshooting
 ### Using other virtual environment tools
@@ -108,7 +119,7 @@ echo $LD_LIBRARY_PATH
 echo "=== rocm-smi ==="
 rocm-smi --showid 2>&1
 echo "=== Python torch check ==="
-source /mnt/vast/fuyuan/envs/test/.venv/bin/activate
+source ~/envs/preflight/.venv/bin/activate
 python3 -c "import torch; print(\"hip:\", torch.version.hip); print(\"available:\", torch.cuda.is_available()); print(\"count:\", torch.cuda.device_count())"
 '
 ```
@@ -119,5 +130,8 @@ export LD_LIBRARY_PATH=/opt/rocm/lib:$LD_LIBRARY_PATH
 ```
 If you still have issue, try
 ```bash
-srun -t 00:30:00 -p gpus -N 4 --gpus-per-node=8  --nodelist <nodes> runner/primus-cli-direct-preflight.sh -- preflight  --report-file-name preflight-report-4N 2>&1 | tee preflight_32N_gpu-per-node.log
+srun -t 00:30:00 -N 4 -c 128 --gpus-per-node=8 --nodelist <nodes> \
+  runner/primus-cli-direct-preflight.sh \
+  -- preflight --report-file-name preflight-report-4N \
+  2>&1 | tee preflight-report-4N.log
 ```
