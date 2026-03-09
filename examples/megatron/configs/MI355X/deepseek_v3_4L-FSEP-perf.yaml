@@ -21,7 +21,7 @@ modules:
       mtp_num_layers: 0          # disable MTP
 
       # ── Training schedule ──
-      train_iters: 20
+      train_iters: 100
       micro_batch_size: 1
       global_batch_size: 8
       seq_length: 4096
@@ -38,8 +38,8 @@ modules:
       init_method_std: 0.008
       norm_epsilon: 1.0e-6
       log_interval: 1
-      log_avg_skip_iterations: 0
-      log_avg_reset_interval: 20
+      log_avg_skip_iterations: 5    # skip warmup steps in average
+      log_avg_reset_interval: 100
 
       # ── Parallelism ──
       tensor_model_parallel_size: 1
@@ -92,7 +92,7 @@ modules:
       #   → F=2048 per GPU shard, much larger than moe_proxy (F=256/shard)
       #   → FSEP benefit expected when r > 3
       #
-      moe_fsep_sharding_degree: 8      # FSEP ON: S=EP=8, Mode B (EP-group)
+      moe_fsep_sharding_degree: 8      # FSEP ON: S=EP=8
 
       # ── Load monitoring ──
       moe_log_expert_load: true
