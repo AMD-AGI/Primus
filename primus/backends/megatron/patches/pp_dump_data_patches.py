@@ -53,6 +53,18 @@ def _make_guarded_schedule_wrapper(original_schedule_wrapper):
     return guarded_schedule_wrapper
 
 
+def _make_guarded_set_dump_pp_data_patch(original_set_dump_pp_data_patch, utils_module):
+    """Avoid applying forward/backward patch multiple times (e.g. legacy MegatronTrainer calls it from both patch and trainer)."""
+
+    def guarded_set_dump_pp_data_patch():
+        if getattr(utils_module, "_pp_dump_data_patch_applied", False):
+            return
+        original_set_dump_pp_data_patch()
+        utils_module._pp_dump_data_patch_applied = True  # noqa: B010
+
+    return guarded_set_dump_pp_data_patch
+
+
 @register_patch(
     "megatron.pp.dump_pp_data.before_train",
     backend="megatron",
@@ -86,7 +98,11 @@ def patch_pp_dump_data_before_train(ctx: PatchContext):
     training_module.get_forward_backward_func = wrapped
 
     # 3. Megatron native only: patch forward_step and backward_step (Primus pipeline / ZeroBubble handlers already use fwd_bwd_wrapper)
+    #    Replace with guarded version to avoid double-patch when legacy MegatronTrainer also calls it
     if not is_primus_pipeline and not is_zero_bubble:
+        utils.set_dump_pp_data_patch = _make_guarded_set_dump_pp_data_patch(
+            utils.set_dump_pp_data_patch, utils
+        )
         utils.set_dump_pp_data_patch()
 
     log_rank_0(
