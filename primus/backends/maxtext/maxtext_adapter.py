@@ -111,12 +111,5 @@ class MaxTextAdapter(BackendAdapter):
 
         MaxText typically doesn't have a version number, so we return a placeholder.
         """
-        try:
-            import MaxText
-
-            if hasattr(MaxText, "__version__"):
-                return MaxText.__version__
-        except Exception:
-            pass
-
-        return "unknown"
+        TrainerClass = self.load_trainer_class()
+        return TrainerClass.detect_version()

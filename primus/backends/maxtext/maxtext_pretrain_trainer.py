@@ -21,9 +21,11 @@ This class only needs to implement:
     - run_train(): call into MaxText's training loop
 """
 
+import os
 from typing import Any, Dict, Optional
 
 from primus.backends.maxtext.maxtext_base_trainer import MaxTextBaseTrainer
+from primus.core.utils.yaml_utils import dump_namespace_to_yaml
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
@@ -49,8 +51,12 @@ class MaxTextPretrainTrainer(MaxTextBaseTrainer):
 
         # Store config path for MaxText
         self.primus_cfg = primus_config
-        self.primus_cfg.export_module_config("pre_trainer")
-        self.pre_trainer_cfg_path = self.primus_cfg.module_config_path("pre_trainer")
+        # Export module config to YAML so MaxText can consume it.
+        # primus_config is a SimpleNamespace in the new runtime, so we
+        # replicate the legacy PrimusConfig.export_module_config / module_config_path
+        # logic directly.
+        self.pre_trainer_cfg_path = os.path.join(primus_config.exp_root_path, "pre_trainer.yaml")
+        dump_namespace_to_yaml(module_config.params, self.pre_trainer_cfg_path)
 
         # Training state
         self.train_config: Optional[Any] = None

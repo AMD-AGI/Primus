@@ -21,7 +21,7 @@ from primus.modules.module_utils import error_rank_0, log_rank_0, warning_rank_0
 @register_patch(
     patch_id="maxtext.logger",
     backend="maxtext",
-    phase="before_train",
+    phase="setup",
     description="Redirect MaxText logger to Primus unified logger",
     condition=lambda ctx: True,  # Always enabled
 )
