@@ -17,7 +17,9 @@ def _resolve_pretrain_runtime(args) -> str:
 
     Priority:
       1) Explicit env override via PRIMUS_TRAIN_RUNTIME
-      2) Auto-detect by backend framework (TorchTitan Megatron -> core, others -> legacy)
+      2) Auto-detect from config: features requiring the legacy training loop
+         (patch_primus_pipeline, patch_zero_bubble) force legacy runtime.
+      3) Framework-based default (MaxText -> legacy, others -> core)
     """
     runtime_entry = getenv("PRIMUS_TRAIN_RUNTIME", "").strip().lower()
     if runtime_entry in ("legacy", "core"):
@@ -37,10 +39,28 @@ def _resolve_pretrain_runtime(args) -> str:
         framework = getattr(pre_trainer_cfg, "framework", None) if pre_trainer_cfg is not None else None
     except Exception:
         framework = None
+        pre_trainer_cfg = None
 
-    # Default: use the new core runtime for all frameworks except MaxText.
-    # MaxText still uses the legacy path (examples/run_pretrain.sh integration).
-    return "legacy" if framework == "maxtext" else "core"
+    if framework == "maxtext":
+        return "legacy"
+
+    # Primus pipeline / zero-bubble features require the legacy training loop
+    # because the core runtime delegates to vanilla megatron.training.pretrain()
+    # whose train_step is incompatible with these custom pipeline schedules.
+    if pre_trainer_cfg is not None:
+        overrides = getattr(pre_trainer_cfg, "overrides", None)
+        if overrides is not None:
+            if getattr(overrides, "patch_primus_pipeline", False) or getattr(
+                overrides, "patch_zero_bubble", False
+            ):
+                print(
+                    "[Primus:Train] Auto-selected legacy runtime "
+                    "(patch_primus_pipeline or patch_zero_bubble detected).",
+                    file=sys.stderr,
+                )
+                return "legacy"
+
+    return "core"
 
 
 def run(args, overrides: List[str]):
