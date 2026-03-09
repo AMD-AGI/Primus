@@ -24,7 +24,18 @@ from primus.backends.megatron.core.transformer.moe.fsep_parallel_state import (
     FSEPState,
     get_fsep_state,
 )
-from primus.modules.module_utils import log_rank_0
+def _log(msg):
+    """Safe log that works with or without initialized Primus logger."""
+    try:
+        from primus.modules.module_utils import log_rank_0
+        log_rank_0(msg)
+    except Exception:
+        try:
+            import torch.distributed as dist
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                print(msg)
+        except Exception:
+            print(msg)
 
 
 class FSEPLoadPlanner:
@@ -120,7 +131,7 @@ class FSEPLoadPlanner:
         ratio = max_val / mean
 
         if ratio > self.imbalance_threshold:
-            log_rank_0(
+            _log(
                 f"[FSEP LoadPlanner] Imbalance detected: "
                 f"max/avg = {ratio:.2f} > threshold {self.imbalance_threshold:.2f} "
                 f"(step {self.step_count})"
@@ -198,13 +209,13 @@ class FSEPLoadPlanner:
 
         improvement = (current_ratio - expected_ratio) / current_ratio
         if improvement < self.min_improvement:
-            log_rank_0(
+            _log(
                 f"[FSEP LoadPlanner] Improvement too small: "
                 f"{improvement:.1%} < {self.min_improvement:.1%}. Skipping relayout."
             )
             return None
 
-        log_rank_0(
+        _log(
             f"[FSEP LoadPlanner] Relayout planned: "
             f"expected improvement {improvement:.1%} "
             f"(ratio {current_ratio:.2f} → {expected_ratio:.2f})"
@@ -238,4 +249,4 @@ class FSEPLoadPlanner:
     def ack_relayout(self) -> None:
         """Acknowledge that the pending relayout has been applied."""
         self.pending_placement = None
-        log_rank_0(f"[FSEP LoadPlanner] Relayout applied at step {self.step_count}")
+        _log(f"[FSEP LoadPlanner] Relayout applied at step {self.step_count}")
