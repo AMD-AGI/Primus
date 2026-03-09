@@ -94,7 +94,7 @@ modules:
       # Get fsep_group == ep_group, no extra process group needed
       #
       # expert_tensor_parallel_size: 1  # keep ETP=1 (default); FSEP uses EP group when S==EP
-      moe_fsep_sharding_degree: 8      # S=EP=8: FSEP uses the full EP group for ReduceScatter
+      moe_fsep_sharding_degree: 8      # FSEP ON: S=EP=8, uses EP group for ReduceScatter
 
       # Load monitoring (always-on for profiling)
       moe_log_expert_load: true
