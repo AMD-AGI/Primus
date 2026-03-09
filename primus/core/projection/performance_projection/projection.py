@@ -163,10 +163,8 @@ def calculate_collective_communication_time(
             # These GPUs span different nodes → use inter-node bandwidth
             # Ring allreduce: 2 * (N-1)/N * msg / BW
             pod_bw = getattr(coll_args, "pod_bw", 50.0)
-            bw_eff = getattr(coll_args, "bw_eff", 0.91)
-            inter_bw = pod_bw * bw_eff  # GB/s per link
             msg_scale = (dp_replicas - 1) / dp_replicas
-            expert_ar_time_ms = 2 * expert_grad_size * msg_scale / (inter_bw * 1e9) * 1e3
+            expert_ar_time_ms = 2 * expert_grad_size * msg_scale / (pod_bw * 1e9) * 1e3
 
             # Non-expert gradient allreduce: across full DP group
             non_expert_per_rank = non_expert_params // (tp * pp)
@@ -2149,6 +2147,18 @@ def _run_multinode_projection(
     # computed later as: per_microbatch_time × target_microbatches.
     projected_compute_time_ms = benchmarked_time_ms
 
+    # Apply scale overhead factor to account for real-world overhead at scale
+    # This accounts for: straggler effects, network congestion, synchronization,
+    # system noise, and inter-node P2P overhead that increases with node count
+    if target_nodes > 8:
+        scale_overhead_factor = 1.0 + (0.05 * math.log2(target_nodes / 8))
+        projected_compute_time_ms = projected_compute_time_ms * scale_overhead_factor
+        if is_rank_0:
+            print(f"  Scale overhead factor (for {target_nodes} nodes): {scale_overhead_factor:.4f}")
+            print(
+                f"  Adjusted compute time: {projected_compute_time_ms:.2f} ms (was {benchmarked_time_ms:.2f} ms)"
+            )
+
     # 2. Handle gradient all-reduce based on overlap setting
     # NOTE: Gradient allreduce happens ONCE per iteration (after the last
     # microbatch), not once per microbatch. We track the exposed (non-overlapped)
@@ -2527,7 +2537,9 @@ def launch_projection_from_cli(args, overrides):
             "benchmark_pp"
         ]
         if reduction_info["benchmark_pp"] <= 1:
-            if hasattr(primus_config.get_module_config("pre_trainer"), "virtual_pipeline_model_parallel_size"):
+            if hasattr(
+                primus_config.get_module_config("pre_trainer"), "virtual_pipeline_model_parallel_size"
+            ):
                 primus_config.get_module_config("pre_trainer").virtual_pipeline_model_parallel_size = 1
             if hasattr(primus_config.get_module_config("pre_trainer"), "pipeline_model_parallel_layout"):
                 primus_config.get_module_config("pre_trainer").pipeline_model_parallel_layout = None

@@ -32,7 +32,7 @@ class CollectiveArgs:
     node_bw: float = 1024.0  # Intra-node bandwidth per GPU
     pod_bw: float = 50.0  # Inter-node bandwidth per NIC
     cluster_bw: float = 25.0  # Cluster-level bandwidth
-    bw_eff: float = 0.91  # Bandwidth efficiency factor
+    bw_eff: float = 0.90  # Bandwidth efficiency factor
 
     # Latency in microseconds
     node_lat: float = 0.45  # Intra-node latency
@@ -48,6 +48,7 @@ class CollectiveArgs:
 
     # Network topology
     switch_topology: bool = True  # Whether using switch-based topology
+    node_topology: str = "switch"  # Node topology: "switch" or "mesh" (for mesh derate)
     nics_per_node: Optional[int] = 8  # NICs per node (None = gpus_per_node)
 
     # All-to-all specific
@@ -105,6 +106,7 @@ def get_default_args(
                         - kernel_launch_latency: Kernel launch overhead (us)
                         - vector_flops: Vector FLOPS for compute
                         - switch_topology: Whether using switch-based topology (bool)
+                        - node_topology: Node topology type ("switch" or "mesh") for mesh derate
                         - nics_per_node: Number of NICs per node (int)
                         - a2a_peer_lat: Per-peer latency for all-to-all (us)
 
@@ -140,6 +142,31 @@ def get_default_args(
     if hardware_config:
         for key, value in hardware_config.items():
             if hasattr(args, key):
+                # Get the expected type from the dataclass field
+                field_type = type(getattr(args, key))
+
+                # Convert value to the expected type if it's a string representation of a number
+                if isinstance(value, str) and field_type in (int, float):
+                    try:
+                        if field_type == int:
+                            # Handle scientific notation for int (e.g., "1e3" -> 1000)
+                            if "e" in value.lower() or "E" in value.lower():
+                                value = int(float(value))
+                            else:
+                                value = int(value)
+                        elif field_type == float:
+                            # Handle scientific notation for float (e.g., "3.2e12" -> 3.2e12)
+                            value = float(value)
+                    except (ValueError, TypeError):
+                        # If conversion fails, keep original value and let it fail later
+                        pass
+                elif field_type == bool and isinstance(value, str):
+                    # Convert string booleans to actual booleans
+                    if value.lower() in ("true", "1", "yes", "on"):
+                        value = True
+                    elif value.lower() in ("false", "0", "no", "off"):
+                        value = False
+
                 setattr(args, key, value)
             else:
                 print(f"[Primus:WARNING] Unknown hardware parameter '{key}' in config. Skipping.")
@@ -147,5 +174,10 @@ def get_default_args(
     # Set nics_per_node to gpus_per_node if not explicitly set
     if args.nics_per_node is None:
         args.nics_per_node = gpus_per_node
+
+    # Apply bw_eff to bandwidth values once at initialization
+    args.node_bw = args.node_bw * args.bw_eff
+    args.pod_bw = args.pod_bw * args.bw_eff
+    args.cluster_bw = args.cluster_bw * args.bw_eff
 
     return args

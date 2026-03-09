@@ -13,6 +13,34 @@ import numpy as np
 # ---------------------------
 
 
+def get_effective_node_bw(args):
+    """
+    Get effective intra-node bandwidth, applying mesh topology derate.
+
+    Note: bw_eff is already applied to args.node_bw at initialization.
+
+    Mesh topology derate: When TP (hp) uses fewer GPUs than node_size on mesh topology,
+    the effective bandwidth is reduced because only (hp-1) links are used out of (node_size-1) available.
+
+    Formula: effective_node_bw = node_bw × (hp - 1) / (node_size - 1)
+    Only applies when: hp > 1 AND hp < node_size AND node_topology == "mesh"
+
+    Args:
+        args: CollectiveArgs instance (node_bw already has bw_eff applied)
+
+    Returns:
+        Effective node bandwidth in GB/s (after mesh derate)
+    """
+    # Apply mesh topology derate if applicable
+    if args.node_topology == "mesh" and args.hp > 1 and args.hp < args.node_size:
+        # Mesh derate: only (hp-1) links are useful out of (node_size-1) available
+        derate_factor = (args.hp - 1) / (args.node_size - 1)
+        return args.node_bw * derate_factor
+    else:
+        # No derate: full bandwidth (switch topology or hp == node_size)
+        return args.node_bw
+
+
 def get_bandwidth_and_latency(args, domain_size):
     """
     Determine bandwidth and latency for a given communication domain size.
@@ -20,15 +48,15 @@ def get_bandwidth_and_latency(args, domain_size):
     """
     if domain_size <= args.node_size:
         # Communication fits within a node
-        bw = args.bw_eff * args.node_bw
+        bw = get_effective_node_bw(args)
         lat = args.node_lat
     elif domain_size <= args.pod_size:
         # Communication fits within a pod (multiple nodes)
-        bw = args.bw_eff * args.pod_bw
+        bw = args.pod_bw
         lat = args.pod_lat
     else:
         # Communication spans the cluster (multiple pods)
-        bw = args.bw_eff * args.cluster_bw
+        bw = args.cluster_bw
         lat = args.cluster_lat
     return bw, lat
 
@@ -143,18 +171,20 @@ def direct_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None, original
     pod_lat = args.pod_lat
 
     # Intra-node time
-    t_intra = intra_vol_adj / (args.bw_eff * args.node_bw) * 1.0e-3 + node_lat
+    t_intra = intra_vol_adj / get_effective_node_bw(args) * 1.0e-3 + node_lat
 
     # Inter-node time with all NICs
     if args.switch_topology:
         # Total inter-node volume from the node
         total_inter_volume = inter_node_volume_per_gpu * gpus_per_node
         # Aggregate bandwidth using all NICs
-        aggregate_inter_bw = args.bw_eff * args.pod_bw * nics_per_node
+        effective_pod_bw = args.pod_bw
+        aggregate_inter_bw = effective_pod_bw * nics_per_node
         t_inter = total_inter_volume / aggregate_inter_bw * 1.0e-3 + pod_lat
     else:
         remote_nodes = num_nodes - 1
-        t_inter = inter_node_volume_per_gpu / (args.bw_eff * args.pod_bw) * 1.0e-3 + pod_lat * remote_nodes
+        effective_pod_bw = args.pod_bw
+        t_inter = inter_node_volume_per_gpu / effective_pod_bw * 1.0e-3 + pod_lat * remote_nodes
 
     # Overlap intra and inter
     t_a2a = max(t_intra, t_inter)
@@ -190,17 +220,17 @@ def run_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None):
     # tensor parallelism groups will require alltoall across hp dimension
     if (args.hp * gpus) <= args.node_size:
         # Alltoall fits within node
-        bw = args.bw_eff * args.node_bw
+        bw = get_effective_node_bw(args)
         lat = node_lat
     elif (args.hp * gpus > args.node_size) and (args.hp * gpus) <= args.pod_size:
         # Alltoall fits within pod
         if args.hp == 1:
             return direct_alltoall(args, msg_size, gpus, groups, protocol, original_msg_size)
-        bw = args.bw_eff * args.pod_bw
+        bw = args.pod_bw
         lat = args.pod_lat
     else:
         # Alltoall spans cluster
-        bw = args.bw_eff * args.cluster_bw
+        bw = args.cluster_bw
         lat = args.cluster_lat
     t = msg_size / bw * 1.0e-3 + lat + args.kernel_launch_latency
     return t
@@ -220,15 +250,15 @@ def cp_allgather(args, msg_size, gpus, protocol=None):
     cpxhp = args.cp * args.hp
     if cpxhp > args.node_size and cpxhp <= args.pod_size:
         # CP domain fits within pod
-        bw = args.pod_bw * args.bw_eff
+        bw = args.pod_bw
         lat = pod_lat
     elif cpxhp <= args.node_size:
         # CP domain fits within node
-        bw = args.node_bw * args.bw_eff
+        bw = get_effective_node_bw(args)
         lat = node_lat
     else:
         # CP domain spans cluster
-        bw = args.cluster_bw * args.bw_eff
+        bw = args.cluster_bw
         lat = args.cluster_lat
     # Logarithmic steps for tree allgather
     t = msg_size / bw * 1.0e-3 + lat * np.ceil(np.log2(gpus)) + args.kernel_launch_latency
@@ -253,17 +283,17 @@ def run_allgather(args, msg_size, gpus, groups=["hp"], protocol=None):
     lat = 0
     if gpus > args.node_size:
         # Communication spans node and pod
-        bw = args.bw_eff * args.node_bw
+        bw = get_effective_node_bw(args)
         node_msg_volume = msg_size * (args.node_size - 1) / args.node_size
         t = node_msg_volume / bw * 1.0e-3
         lat += node_lat * np.ceil(np.log2(args.node_size))
-        bw = args.bw_eff * args.pod_bw
+        bw = args.pod_bw
         pod_msg_volume = msg_size - node_msg_volume
         t += pod_msg_volume / bw * 1.0e-3
         lat += pod_lat * np.ceil(np.log2(gpus / args.node_size))
     else:
         # Allgather fits within node
-        bw = args.bw_eff * args.node_bw
+        bw = get_effective_node_bw(args)
         t = msg_size / bw * 1.0e-3
         lat += node_lat * np.ceil(np.log2(gpus))
     t += lat + args.kernel_launch_latency
@@ -284,18 +314,18 @@ def run_reduce_scatter(args, msg_size, gpus, groups=["hp"], protocol=None):
     lat = 0
     if gpus > args.node_size:
         # Communication spans node and pod
-        bw = args.bw_eff * args.node_bw
+        bw = get_effective_node_bw(args)
         node_msg_volume = msg_size * (args.node_size - 1) / args.node_size
         t = node_msg_volume / bw * 1.0e-3
         lat += node_lat * np.ceil(np.log2(args.node_size))
-        bw = args.bw_eff * args.pod_bw
+        bw = args.pod_bw
         pod_msg_volume = msg_size - node_msg_volume
         pod_lat = args.pod_lat
         t += pod_msg_volume / bw * 1.0e-3
         lat += pod_lat * np.ceil(np.log2(gpus / args.node_size))
     else:
         # Reduce scatter fits within node
-        bw = args.bw_eff * args.node_bw
+        bw = get_effective_node_bw(args)
         t = msg_size / bw * 1.0e-3
         lat += node_lat * np.ceil(np.log2(gpus))
     t += lat
@@ -321,7 +351,7 @@ def RingAllreduce(args, msg_size, gpus, groups=["dp"], protocol=None):
     if gpus <= args.node_size:
         # Ring fits within node
         t += node_lat * (gpus - 1)
-        t += msg_size / args.node_bw * 1.0e-3
+        t += msg_size / get_effective_node_bw(args) * 1.0e-3
     elif gpus <= args.pod_size:
         # Ring fits within pod
         t += pod_lat * (gpus - 1)
@@ -353,7 +383,7 @@ def RingAllgather(args, msg_size, gpus, groups=["dp"], protocol=None):
     t = 0
     if gpus <= args.node_size:
         t += node_lat * (gpus - 1)
-        t += msg_size / args.node_bw * 1.0e-3
+        t += msg_size / get_effective_node_bw(args) * 1.0e-3
     elif gpus <= args.pod_size:
         t += pod_lat * (gpus - 1)
         bw = min(args.node_bw, args.node_size * args.pod_bw)
@@ -380,7 +410,7 @@ def RingRS(args, msg_size, gpus, groups=["hp"], protocol=None):
     t = 0
     if gpus <= args.node_size:
         t += node_lat * (gpus - 1)
-        t += msg_size / args.node_bw * 1.0e-3
+        t += msg_size / get_effective_node_bw(args) * 1.0e-3
     elif gpus <= args.pod_size:
         t += pod_lat * (gpus - 1)
         bw = min(args.node_bw, args.node_size * args.pod_bw)
@@ -408,17 +438,17 @@ def oneshotHCallreduce(args, msg_size, gpus, groups=["dp"], protocol=None):
     lat = 0
     if gpus > args.node_size:
         # Communication spans node and pod
-        bw = args.bw_eff * args.node_bw
+        bw = get_effective_node_bw(args)
         node_msg_volume = msg_size * (args.node_size - 1)
         t = node_msg_volume / bw * 1.0e-3
         lat += node_lat * np.ceil(np.log2(args.node_size))
-        bw = args.bw_eff * args.pod_bw
+        bw = args.pod_bw
         pod_msg_volume = msg_size * np.ceil(np.log2((gpus - args.node_size)))
         t += pod_msg_volume / bw * 1.0e-3
         lat += pod_lat * np.ceil(np.log2(gpus / args.node_size))
     else:
         # Allreduce fits within node
-        bw = args.bw_eff * args.node_bw
+        bw = get_effective_node_bw(args)
         node_msg_volume = msg_size * (gpus - 1)
         t = node_msg_volume / bw * 1.0e-3
         lat += node_lat * np.ceil(np.log2(gpus))
@@ -455,7 +485,7 @@ def single_shot_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     t_inter_node = 0
     if intra_node_gpus > 0:
         node_lat, msg_size_per_peer_adj = node_latency_and_volume_protocol(args, msg_size_per_peer, protocol)
-        node_bw = args.bw_eff * args.node_bw
+        node_bw = get_effective_node_bw(args)
         intra_node_rounds = ceil(intra_node_gpus / intra_node_fanout)
         t_intra_node = intra_node_rounds * node_lat
         intra_node_msg_size = msg_size_per_peer_adj * intra_node_gpus
@@ -466,12 +496,12 @@ def single_shot_alltoall(args, msg_size, gpus, groups=None, protocol=None):
         if args.switch_topology:
             # With switch topology, use all NICs
             total_inter_volume = inter_node_msg_size_per_gpu * gpus_per_node
-            aggregate_bw = args.bw_eff * args.pod_bw * nics_per_node
+            aggregate_bw = args.pod_bw * nics_per_node
             inter_node_rounds = ceil(inter_node_gpus / inter_node_fanout)
             t_inter_node = inter_node_rounds * pod_lat
             t_inter_node += total_inter_volume / aggregate_bw * 1.0e-3
         else:
-            pod_bw = args.bw_eff * args.pod_bw
+            pod_bw = args.pod_bw
             inter_node_rounds = ceil(inter_node_gpus / inter_node_fanout)
             t_inter_node = inter_node_rounds * pod_lat
             t_inter_node += inter_node_msg_size_per_gpu / pod_bw * 1.0e-3
@@ -506,16 +536,16 @@ def hierarchical_alltoall(args, msg_size, gpus, groups=None, protocol=None):
 
     # Intra-node time
     node_lat, intra_vol_adj = node_latency_and_volume_protocol(args, intra_node_volume, protocol)
-    node_bw = args.bw_eff * args.node_bw
+    node_bw = get_effective_node_bw(args)
     t_intra = node_lat + intra_vol_adj / node_bw * 1.0e-3
 
-    # Inter-node time with all NICs
+    # Inter-node time with all NICs (All-to-All specific efficiency)
     if args.switch_topology:
         total_inter_volume = inter_node_volume_per_gpu * gpus_per_node
-        aggregate_inter_bw = args.bw_eff * args.pod_bw * nics_per_node
+        aggregate_inter_bw = args.pod_bw * nics_per_node
         t_inter = args.pod_lat + total_inter_volume / aggregate_inter_bw * 1.0e-3
     else:
-        effective_pod_bw = args.bw_eff * args.pod_bw
+        effective_pod_bw = args.pod_bw
         t_inter = args.pod_lat * num_nodes + inter_node_volume_per_gpu / effective_pod_bw * 1.0e-3
 
     t_total = max(t_intra, t_inter)
@@ -540,14 +570,14 @@ def single_shot_allgather(args, msg_size, gpus, groups=None, protocol=None):
     t_inter_node = 0
     if intra_node_gpus > 0:
         node_lat, msg_size_per_peer_node = node_latency_and_volume_protocol(args, msg_size_per_peer, protocol)
-        node_bw = args.bw_eff * args.node_bw
+        node_bw = get_effective_node_bw(args)
         intra_node_rounds = ceil(intra_node_gpus / intra_node_fanout)
         t_intra_node = intra_node_rounds * node_lat
         intra_node_msg_size = msg_size_per_peer_node * intra_node_gpus
         t_intra_node += intra_node_msg_size / node_bw * 1.0e-3
     if inter_node_gpus > 0:
         pod_lat = args.pod_lat
-        pod_bw = args.bw_eff * args.pod_bw
+        pod_bw = args.pod_bw
         inter_node_rounds = ceil(inter_node_gpus / inter_node_fanout)
         t_inter_node = inter_node_rounds * pod_lat
         inter_node_msg_size = msg_size_per_peer * inter_node_gpus
@@ -573,14 +603,14 @@ def single_shot_reduce_scatter(args, msg_size, gpus, groups=["hp"], protocol=Non
     t_inter_node = 0
     if intra_node_gpus > 0:
         node_lat, msg_size_per_peer_node = node_latency_and_volume_protocol(args, msg_size_per_peer, protocol)
-        node_bw = args.bw_eff * args.node_bw
+        node_bw = get_effective_node_bw(args)
         intra_node_rounds = ceil(intra_node_gpus / intra_node_fanout)
         t_intra_node = intra_node_rounds * node_lat
         intra_node_msg_size = msg_size_per_peer_node * intra_node_gpus
         t_intra_node += intra_node_msg_size / node_bw * 1.0e-3
     if inter_node_gpus > 0:
         pod_lat = args.pod_lat
-        pod_bw = args.bw_eff * args.pod_bw
+        pod_bw = args.pod_bw
         inter_node_rounds = ceil(inter_node_gpus / inter_node_fanout)
         t_inter_node = inter_node_rounds * pod_lat
         inter_node_msg_size = msg_size_per_peer * inter_node_gpus

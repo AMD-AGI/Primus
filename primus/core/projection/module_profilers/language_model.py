@@ -144,7 +144,9 @@ def _get_explicit_layer_distribution(
     return layers_per_stage
 
 
-def _parse_layout_stage_layer_counts(layout: Optional[str], total_stages: int, n_layers: int) -> Optional[List[int]]:
+def _parse_layout_stage_layer_counts(
+    layout: Optional[str], total_stages: int, n_layers: int
+) -> Optional[List[int]]:
     """
     Parse Megatron-style pipeline layout into decoder-layer counts per virtual stage.
 
@@ -156,11 +158,7 @@ def _parse_layout_stage_layer_counts(layout: Optional[str], total_stages: int, n
 
     normalized = str(layout).strip()
     # Handle extra shell quoting, e.g. "'Et*4|...|t*3,L'"
-    if (
-        len(normalized) >= 2
-        and normalized[0] == normalized[-1]
-        and normalized[0] in ("'", '"')
-    ):
+    if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in ("'", '"'):
         normalized = normalized[1:-1].strip()
 
     # Split virtual stages by '|'; strip trailing non-decoder markers like ",L".
@@ -252,7 +250,6 @@ class LanguageModelProfiler(BaseModuleProfiler):
         to the first virtual stages (or use decoder_first/last_pipeline_num_layers if set).
         """
         vpp_size = num_virtual_pipeline_stages if num_virtual_pipeline_stages is not None else 1
-        total_stages = pp_size * vpp_size
 
         chunks = LanguageModelProfiler.get_virtual_stage_layers_for_rank(
             self,
@@ -514,9 +511,9 @@ class LanguageModelProfiler(BaseModuleProfiler):
                             batch_size, seq_len
                         )
                     else:
-                        layer_act += self.sub_profilers["dense_transformer_layer"].estimated_activation_memory(
-                            batch_size, seq_len
-                        )
+                        layer_act += self.sub_profilers[
+                            "dense_transformer_layer"
+                        ].estimated_activation_memory(batch_size, seq_len)
 
         total_act = layer_act
 
