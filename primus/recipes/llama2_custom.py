@@ -351,7 +351,7 @@ def _llama2_lora(
     model_cfg.cpu_offloading = False
     model_cfg.cpu_offloading_num_layers = 0
     model_cfg.empty_unused_memory_level = 0 # 0: No empty, 1: Empty at end of eval, 2: Empty at end of eval and train.
-    model_cfg.num_query_groups = None
+    # model_cfg.num_query_groups = None
 
     opt_config, scheduler = distributed_fused_adam_with_cosine_annealing(
         lr_warmup_iters=lr_warmup_iters,
