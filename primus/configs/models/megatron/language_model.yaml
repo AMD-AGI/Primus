@@ -162,6 +162,16 @@ moe_log_expert_load: false
 # Valid values: 0, 2, 4, 8 (must be power of 2 and <= expert_model_parallel_size)
 moe_fsep_sharding_degree: 0
 
+# Full FSEP (Phase 1-3): smart routing + Load Planner + Re-layout
+# Requires moe_fsep_sharding_degree > 1 to have any effect
+# false = static FSEP only (Phase 0, already implemented)
+# true  = full FSEP with dynamic dispatch + load-adaptive relayout
+moe_fsep_full_mode: false
+
+# Load Planner configuration (used when moe_fsep_full_mode: true)
+moe_fsep_relayout_interval: 50   # check every N steps
+moe_fsep_imbalance_threshold: 1.5  # trigger relayout if max/avg > threshold
+
 # Model parallelism
 model_parallel_size: null
 tensor_model_parallel_size: 1

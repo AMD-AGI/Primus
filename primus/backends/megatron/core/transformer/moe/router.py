@@ -107,6 +107,7 @@ class PrimusTopKRouter(TopKRouter):
             )
 
         # [FSEP] Expert load monitoring: track max/avg ratio for load imbalance profiling
+        # Also feed load data to the FSEPLoadPlanner for dynamic Re-layout decisions
         if getattr(args, "moe_log_expert_load", False) and torch.is_grad_enabled():
             with torch.no_grad():
                 load = routing_map.float().sum(dim=0)  # [N_experts]
@@ -130,5 +131,17 @@ class PrimusTopKRouter(TopKRouter):
                         tracker["expert_load_max_avg_ratio"]["values"][layer_idx] = (
                             load.max() / avg_load
                         )
+
+                    # [Full FSEP] Feed load to Load Planner if active
+                    if getattr(args, "moe_fsep_sharding_degree", 0) > 1:
+                        try:
+                            from primus.backends.megatron.core.transformer.moe.fsep_parallel_state import (
+                                get_fsep_state,
+                            )
+                            fsep_state = get_fsep_state()
+                            if fsep_state is not None and hasattr(fsep_state, "load_planner"):
+                                fsep_state.load_planner.update(load)
+                        except Exception:
+                            pass  # Non-critical: don't break training if planner fails
 
         return scores, routing_map

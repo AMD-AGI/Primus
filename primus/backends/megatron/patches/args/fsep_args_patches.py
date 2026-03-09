@@ -47,6 +47,16 @@ def patch_fsep_args_defaults(ctx: PatchContext):
     backend_args.moe_log_expert_load = (
         getattr(raw_params, "moe_log_expert_load", False) if raw_params else False
     )
+    # Full FSEP args (Phase 1-3)
+    backend_args.moe_fsep_full_mode = (
+        getattr(raw_params, "moe_fsep_full_mode", False) if raw_params else False
+    )
+    backend_args.moe_fsep_relayout_interval = (
+        getattr(raw_params, "moe_fsep_relayout_interval", 50) if raw_params else 50
+    )
+    backend_args.moe_fsep_imbalance_threshold = (
+        getattr(raw_params, "moe_fsep_imbalance_threshold", 1.5) if raw_params else 1.5
+    )
 
 
 @register_patch(
