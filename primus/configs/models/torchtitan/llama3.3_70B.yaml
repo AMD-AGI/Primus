@@ -6,3 +6,5 @@ model:
   name: "llama3"
   flavor: "70B"
   hf_assets_path: "meta-llama/Llama-3.3-70B-Instruct"
+  converters:
+    - primus_turbo

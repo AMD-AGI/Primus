@@ -6,20 +6,22 @@ This benchmark focuses on evaluating the performance of key operators in large m
 ## How to run
 
 ### GEMM
-Run the following command to benchmark GEMM operators. All GEMM-related information and performance data for each model will be automatically saved as separate CSV files under `/PATH/TO/DIR`.
-```
-python3 benchmark_gemm.py                               \
-    --model-config-path /PATH/TO/model_configs.json     \
-    --report-dir-path   /PATH/TO/DIR
+GEMM benchmarks are now provided via the **Primus CLI benchmark suites** (see `docs/benchmark.md`):
 
+```bash
+# Single-shape GEMM
+primus-cli direct -- benchmark gemm --M 4096 --N 4096 --K 4096 --dtype bf16 --duration 10
+
+# Model-shape GEMM (dense / DeepSeek)
+primus-cli direct -- benchmark gemm-dense --model Llama3.1_8B --dtype bf16
+primus-cli direct -- benchmark gemm-deepseek --model Deepseek_V3 --dtype bf16
 ```
 
 ### Attention
-Run the following command to generate benchmark data for Attention operators:
-```
-python3 benchmark_attention.py                         \
-    --shapes-json-path /PATH/TO/attention_shapes.json  \
-    --report-csv-path  /PATH/TO/attention_benchmark.csv
+Attention benchmarks are now provided via the **Primus CLI benchmark suite**:
+
+```bash
+primus-cli direct -- benchmark attention --backend flash --dtype bf16 --report-csv-path ./attention_benchmark.csv
 ```
 
 

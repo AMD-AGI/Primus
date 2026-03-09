@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from typing import Optional
 
 import torch
 
@@ -26,7 +27,7 @@ class AttentionProfiler(BaseModuleProfiler):
         self._cached_results = None
         self._cache_key = None
 
-    def estimated_num_params(self, rank: int | None = None) -> int:
+    def estimated_num_params(self, rank: Optional[int] = None) -> int:
         args = self.config.model_config
         # Group-query & multi-latent attention support.
         # If GQA not enabled, fall back to per-head queries.
@@ -103,6 +104,7 @@ class AttentionProfiler(BaseModuleProfiler):
             k_width = q_width  # key stores the same latent + positional dims
             v_width = heads * v_head_dim
             context_width = v_width  # attention output before the final projection
+            query_projection_size = q_width  # For softmax width calculation
 
             if args.qk_layernorm:
                 ln_width += q_width

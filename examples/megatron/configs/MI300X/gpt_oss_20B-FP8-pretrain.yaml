@@ -21,7 +21,7 @@ modules:
       log_avg_reset_interval: 50
 
       # profile
-      profile: true
+      profile: false
       use_pytorch_profiler: true
       profile_step_end: 7
       profile_step_start: 6
@@ -100,4 +100,6 @@ modules:
 
       # enable fp8 training
       fp8: hybrid
-      moe_use_legacy_grouped_gemm: false
+      moe_use_legacy_grouped_gemm: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: "fp32"

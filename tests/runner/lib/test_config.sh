@@ -100,10 +100,10 @@ print_section() {
 test_config_functions_exist() {
     print_section "Test 1: Config Functions Existence"
 
-    if type load_config &>/dev/null; then
-        assert_pass "load_config function exists"
+    if type load_yaml_config &>/dev/null; then
+        assert_pass "load_yaml_config function exists"
     else
-        assert_fail "load_config function exists"
+        assert_fail "load_yaml_config function exists"
     fi
 
     if type load_config_auto &>/dev/null; then

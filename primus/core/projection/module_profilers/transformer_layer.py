@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
@@ -82,7 +83,7 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
         self._cached_results = None
         self._cache_key = None
 
-    def estimated_num_params(self, rank: int | None = None) -> int:
+    def estimated_num_params(self, rank: Optional[int] = None) -> int:
         return (
             self.sub_profilers["layer_norm"].estimated_num_params(rank) * 3
             + self.sub_profilers["self_attention"].estimated_num_params(rank)
@@ -102,9 +103,12 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
+            # Get TransformerConfig from the layer module itself (has fp8 setting)
+            transformer_config = getattr(self.layer_module, "config", None)
             self._cached_results = benchmark_layer(
                 self.layer_module,
                 [(seq_len, batch_size, self.config.model_config.hidden_size)],
+                transformer_config=transformer_config,
             )
             self._cache_key = cache_key
         return self._cached_results
@@ -142,7 +146,7 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         self._cached_results = None
         self._cache_key = None
 
-    def estimated_num_params(self, rank: int | None = None) -> int:
+    def estimated_num_params(self, rank: Optional[int] = None) -> int:
         return (
             self.sub_profilers["layer_norm"].estimated_num_params(rank) * 3
             + self.sub_profilers["self_attention"].estimated_num_params(rank)
@@ -164,9 +168,12 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
+            # Get TransformerConfig from the layer module itself (has fp8 setting)
+            transformer_config = getattr(self.layer_module, "config", None)
             self._cached_results = benchmark_layer(
                 self.layer_module,
                 [(seq_len, batch_size, self.config.model_config.hidden_size)],
+                transformer_config=transformer_config,
             )
             self._cache_key = cache_key
         return self._cached_results
@@ -184,7 +191,9 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
         return activation_memory
 
 
-def get_dense_transformer_layer_profiler_spec(config: TrainingConfig) -> "ModuleProfilerSpec":
+def get_dense_transformer_layer_profiler_spec(
+    config: TrainingConfig,
+) -> "ModuleProfilerSpec":
     return ModuleProfilerSpec(
         profiler=DenseTransformerLayerProfiler,
         config=config,
@@ -197,7 +206,9 @@ def get_dense_transformer_layer_profiler_spec(config: TrainingConfig) -> "Module
     )
 
 
-def get_moe_transformer_layer_profiler_spec(config: TrainingConfig) -> "ModuleProfilerSpec":
+def get_moe_transformer_layer_profiler_spec(
+    config: TrainingConfig,
+) -> "ModuleProfilerSpec":
     return ModuleProfilerSpec(
         profiler=MoETransformerLayerProfiler,
         config=config,

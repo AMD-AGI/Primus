@@ -18,13 +18,60 @@ confusion with `primus.core.launcher.config.PrimusConfig`.
 
 from __future__ import annotations
 
+from copy import copy, deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from primus.core.launcher.parser import PrimusParser
 from primus.core.utils import constant_vars
-from primus.core.utils.yaml_utils import dict_to_nested_namespace
+from primus.core.utils.yaml_utils import (
+    dict_to_nested_namespace,
+    nested_namespace_to_dict,
+)
+
+
+def _to_plain_dict(value: Any) -> dict:
+    if value is None:
+        return {}
+    if isinstance(value, SimpleNamespace):
+        return nested_namespace_to_dict(value)
+    return dict(value)
+
+
+def _normalize_module_for_runtime(module_cfg: SimpleNamespace, module_name: str) -> SimpleNamespace:
+    """
+    Normalize a legacy module namespace into the runtime shape:
+       - Keep a small set of reserved top-level attributes:
+           * name, framework, config, model
+           * (and any existing 'params' if present)
+       - Move all other public attributes into a `params` dict:
+           module_cfg.params[key] = <original value>
+    """
+    normalized = deepcopy(module_cfg)
+    # Ensure each module has a stable `.name` attribute.
+    if not getattr(normalized, "name", None):
+        setattr(normalized, "name", module_name)
+
+    reserved_keys = {"name", "framework", "config", "model", "params"}
+    # Start from any existing params dict/namespace if provided.
+    existing_params = getattr(normalized, "params", {})
+    params = _to_plain_dict(existing_params)
+
+    for key, value in list(vars(normalized).items()):
+        # Skip reserved and private attributes.
+        if key in reserved_keys or key.startswith("_"):
+            continue
+        # Move this attribute into params and remove it from the namespace.
+        params[key] = value
+        delattr(normalized, key)
+
+    # Convert params dict to nested namespace for attribute-style access.
+    normalized.params = dict_to_nested_namespace(params)
+    # Duplicate `model` under `params.model` for downstream compatibility.
+    if hasattr(normalized, "model"):
+        normalized.params.model = normalized.model
+    return normalized
 
 
 def load_primus_config(config_path: Path, cli_args: Any | None = None) -> SimpleNamespace:
@@ -44,15 +91,12 @@ def load_primus_config(config_path: Path, cli_args: Any | None = None) -> Simple
     # PrimusParser.parse() only requires a `.config` attribute.
     if cli_args is None:
         args_for_parser = SimpleNamespace(config=config_path_str)
-    else:
+    elif getattr(cli_args, "config", None) != config_path_str:
         # Avoid mutating the original args object.
-        if getattr(cli_args, "config", None) != config_path_str:
-            from copy import copy
-
-            args_for_parser = copy(cli_args)
-            setattr(args_for_parser, "config", config_path_str)
-        else:
-            args_for_parser = cli_args
+        args_for_parser = copy(cli_args)
+        setattr(args_for_parser, "config", config_path_str)
+    else:
+        args_for_parser = cli_args
 
     # Use legacy PrimusParser to build a PrimusConfig instance.
     legacy_cfg = PrimusParser().parse(args_for_parser)
@@ -78,47 +122,10 @@ def load_primus_config(config_path: Path, cli_args: Any | None = None) -> Simple
     cfg.platform = platform_config
 
     # Build modules list from legacy PrimusConfig.module_keys/get_module_config.
-    modules: list[SimpleNamespace] = []
-    for module_name in getattr(legacy_cfg, "module_keys", []):
-        module_cfg = legacy_cfg.get_module_config(module_name)
-
-        # Ensure each module has a stable `.name` attribute.
-        if not getattr(module_cfg, "name", None):
-            setattr(module_cfg, "name", module_name)
-
-        # Normalize module configuration layout for the new core runtime:
-        #
-        #   - Keep a small set of reserved top-level attributes:
-        #       * name, framework, config, model
-        #       * (and any existing 'params' if present)
-        #   - Move all other public attributes into a `params` dict:
-        #       module_cfg.params[key] = <original value>
-        #
-        # This matches the expectation of downstream components which
-        # treat `module_cfg.params` as the flat parameter dictionary.
-        reserved_keys = {"name", "framework", "config", "model", "params"}
-
-        # Start from any existing params dict if present.
-        params = dict(getattr(module_cfg, "params", {}))
-
-        for key, value in list(vars(module_cfg).items()):
-            # Skip reserved and private attributes.
-            if key in reserved_keys or key.startswith("_"):
-                continue
-
-            # Move this attribute into params and remove it from the namespace.
-            params[key] = value
-            delattr(module_cfg, key)
-
-        # Convert params dict to a SimpleNamespace tree for attribute-style access
-        module_cfg.params = dict_to_nested_namespace(params)
-        # Duplicate `model` under `params.model` because some downstream components
-        # expect the model configuration to be available via `params.model`.
-        module_cfg.params.model = module_cfg.model
-
-        modules.append(module_cfg)
-
-    cfg.modules = modules
+    cfg.modules = [
+        _normalize_module_for_runtime(legacy_cfg.get_module_config(module_name), module_name)
+        for module_name in getattr(legacy_cfg, "module_keys", [])
+    ]
 
     return cfg
 

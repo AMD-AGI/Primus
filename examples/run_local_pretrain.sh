@@ -16,7 +16,7 @@ Usage: bash run_local_pretrain.sh
 This script launches a Primus pretraining task inside a Docker/Podman container.
 
 Environment Variables:
-    DOCKER_IMAGE   Docker image to use [Default: docker.io/rocm/primus:v25.10]
+    DOCKER_IMAGE   Docker image to use [Default: docker.io/rocm/primus:v26.1]
     MASTER_ADDR    Master node IP or hostname [Default: localhost]
     MASTER_PORT    Master node port [Default: 1234]
     NNODES         Total number of nodes [Default: 1]
@@ -42,9 +42,9 @@ EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
 
 # Default docker image
 if [ "${BACKEND:-}" = "MaxText" ]; then
-    DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/jax-training:maxtext-v25.9"}
+    DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/jax-training:maxtext-v26.1"}
 else
-    DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v25.10"}
+    DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v26.1"}
 fi
 
 # Project root
@@ -73,15 +73,24 @@ if [ "$NODE_RANK" = "0" ]; then
     echo ""
 fi
 
-# Pass all PRIMUS_ and NCCL_ environment variables into the container
+# Pass all PRIMUS_, NCCL_, RCCL_, HIPBLASLT_, and IONIC_ environment variables into the container
 ENV_ARGS=()
 
+while IFS='=' read -r name _; do
+    ENV_ARGS+=("--env" "$name")
+done < <(env | grep "^HIPBLASLT_")
 while IFS='=' read -r name _; do
     ENV_ARGS+=("--env" "$name")
 done < <(env | grep "^PRIMUS_")
 while IFS='=' read -r name _; do
     ENV_ARGS+=("--env" "$name")
 done < <(env | grep "^NCCL_")
+while IFS='=' read -r name _; do
+    ENV_ARGS+=("--env" "$name")
+done < <(env | grep "^RCCL_")
+while IFS='=' read -r name _; do
+    ENV_ARGS+=("--env" "$name")
+done < <(env | grep "^IONIC_")
 while IFS='=' read -r name _; do
     ENV_ARGS+=("--env" "$name")
 done < <(env | grep "^PRIMUS_TURBO_")
@@ -94,6 +103,11 @@ ENV_ARGS+=("--env" "HF_TOKEN")
 ENV_ARGS+=("--env" "WANDB_API_KEY")
 ENV_ARGS+=("--env" "ENABLE_NUMA_BINDING")
 ENV_ARGS+=("--env" "HSA_KERNARG_POOL_SIZE")
+ENV_ARGS+=("--env" "DATABRICKS_TOKEN")
+ENV_ARGS+=("--env" "DATABRICKS_HOST")
+ENV_ARGS+=("--env" "MLFLOW_TRACKING_URI")
+ENV_ARGS+=("--env" "MLFLOW_REGISTRY_URI")
+ENV_ARGS+=("--env" "MLFLOW_ENABLE_SYSTEM_METRICS_LOGGING")
 echo "ENV_ARGS: ${ENV_ARGS[*]}"
 
 HOSTNAME=$(hostname)
@@ -111,6 +125,13 @@ if [ "$USING_AINIC" == "1" ]; then
     ENV_ARGS+=("--env" "ANP_HOME_DIR")
     ENV_ARGS+=("--env" "MPI_HOME_DIR")
 
+    TC_RESULTS=$(bash "${PRIMUS_PATH}/examples/scripts/detect_nccl_ib_tc.sh")
+    if [ -z "$TC_RESULTS" ]; then
+        echo "TC_RESULTS: $TC_RESULTS"
+        ENV_ARGS+=("--env" "TC_RESULTS")
+    else
+        echo "Failed to detect NCCL_IB_TC and NCCL_IB_FIFO_TC"
+    fi
     # VOLUME_ARGS+=(-v /mnt/shared:/mnt/shared)
     # VOLUME_ARGS+=(-v /etc/libibverbs.d/:/etc/libibverbs.d:ro)
     # VOLUME_ARGS+=(-v /usr/lib/x86_64-linux-gnu/libibverbs/:/usr/lib/x86_64-linux-gnu/libibverbs/:ro)

@@ -17,7 +17,7 @@ __all__ = [
 class ScheduleZBVGreedy(VFoldScheduleAlgo):
     """ZBV Greedy Pipeline Schedule"""
 
-    def __init__(self, pp_size, vpp_size, micro_batches, memory_config):
+    def __init__(self, pp_size, vpp_size, micro_batches, memory_config, offload=False):
         assert vpp_size == 2, "ZBV Greedy requires vpp_size == 2"
         assert memory_config in ["min", "half"], "Memory config must be 'min' or 'half'"
         super().__init__(pp_size, vpp_size, micro_batches)
@@ -28,6 +28,8 @@ class ScheduleZBVGreedy(VFoldScheduleAlgo):
             FuncType.B: 0,
             FuncType.W: -1,
         }
+
+        self.offload = offload
 
     def stable_pattern_v_half(self) -> List[List[int]]:
         interval = 3 if self.pp_size % 2 == 0 else 0
@@ -276,6 +278,9 @@ class ScheduleZBVGreedy(VFoldScheduleAlgo):
                 )
 
         schedule_table = self._calculate_schedule_table_by_time_step_nodes()
+
+        if self.offload:
+            schedule_table = self.add_offload_nodes_to_schedule_table(schedule_table)
 
         return schedule_table
 

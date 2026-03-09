@@ -8,5 +8,6 @@ model:
   name: "deepseek_v3"
   flavor: "16B"
   hf_assets_path: "deepseek-ai/deepseek-moe-16b-base"
-  converters: ["turbo_fp8_linear"]
-  # converters: ["float8"]
+  converters:
+    - primus_turbo
+    - quantize.linear.float8

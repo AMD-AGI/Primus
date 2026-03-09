@@ -269,64 +269,65 @@ load_yaml_config() {
 }
 
 # ---------------------------------------------------------------------------
-# Load All Config Files (with priority)
-# Priority: CLI args > System defaults (runner/.primus.yaml) > User config (~/.primus.yaml)
-# Note: Later loads override earlier ones
+# Resolve Config File Path
+# Priority:
+#   1) Explicit CLI config file (argument to load_config_auto)
+#   2) User global config (~/.primus.yaml)
+#   3) System default config (runner/.primus.yaml)
+#
+# Returns the first candidate path via stdout; non-zero exit code if none found.
+# Note: Existence of the CLI path is validated later by load_yaml_config.
 # ---------------------------------------------------------------------------
-load_config() {
-    LOG_DEBUG_RANK0 "  Loading configuration files..."
-    LOG_DEBUG_RANK0 "Config loading order: 1) user global config, 2) system default config"
-
-    # 1. Load user global config (~/.primus.yaml) first - lowest priority
+resolve_config_file() {
+    local cli_config_file="${1:-}"
     local global_config="$HOME/.primus.yaml"
-    if [[ -f "$global_config" ]]; then
-        LOG_DEBUG_RANK0 "  Loading user config: $global_config"
-        load_yaml_config "$global_config" || LOG_ERROR "Failed to load user config"
-    else
-        LOG_DEBUG_RANK0 "User global config not found: $global_config"
-    fi
-
-    # 2. Load system default config (runner/.primus.yaml) last - highest priority (overrides user config)
     local system_config="${PRIMUS_RUNNER_DIR}/.primus.yaml"
-    if [[ -f "$system_config" ]]; then
-        LOG_DEBUG_RANK0 "  Loading system default config: $system_config"
-        load_yaml_config "$system_config" ||  {
-            LOG_ERROR "Failed to load system default config"
-            exit 1
-        }
-    else
-        LOG_DEBUG_RANK0 "System default config not found: $system_config"
+
+    # 1) Explicit CLI override (may or may not exist; load_yaml_config will validate)
+    if [[ -n "$cli_config_file" ]]; then
+        echo "$cli_config_file"
+        return 0
     fi
 
-    LOG_DEBUG_RANK0 "  Configuration loading complete"
-    LOG_DEBUG_RANK0 "Total config entries: ${#PRIMUS_CONFIG[@]}"
+    # 2) User-global config
+    if [[ -f "$global_config" ]]; then
+        echo "$global_config"
+        return 0
+    fi
+
+    # 3) System default config
+    if [[ -f "$system_config" ]]; then
+        echo "$system_config"
+        return 0
+    fi
+
+    # No config file found
+    return 1
 }
 
 # ---------------------------------------------------------------------------
 # Load Config Automatically (with CLI override support)
 # Usage: load_config_auto [config_file] [log_prefix]
 #
-# If config_file is provided and non-empty:
-#   - Load the specified config file (must succeed)
-# Otherwise:
-#   - Load default configuration files via load_config()
+# If a config file is resolved (CLI/user/system), it will be loaded; otherwise
+# the function returns successfully without loading any config.
 # ---------------------------------------------------------------------------
 load_config_auto() {
     local config_file="${1:-}"
     local log_prefix="${2:-main}"
 
-    if [[ -n "$config_file" ]]; then
-        # Load specified config file (must succeed)
-        LOG_DEBUG_RANK0 "[$log_prefix] Loading config: $config_file"
-        load_yaml_config "$config_file" || {
-            LOG_ERROR "[$log_prefix] Failed to load config: $config_file"
-            return 1
-        }
-    else
-        # Load default configuration files (global and project)
-        LOG_DEBUG_RANK0 "[$log_prefix] Loading default configuration files"
-        load_config
+    local resolved_cfg
+    if ! resolved_cfg="$(resolve_config_file "$config_file")"; then
+        LOG_INFO_RANK0 "[$log_prefix] No configuration file found (CLI/user/system), continuing with defaults."
+        return 0
     fi
+
+    load_yaml_config "$resolved_cfg" || {
+        LOG_ERROR "[$log_prefix] Failed to load config: $resolved_cfg"
+        return 1
+    }
+
+    LOG_INFO_RANK0 "[$log_prefix] Loaded config: $resolved_cfg"
 
     return 0
 }
@@ -409,7 +410,7 @@ export -f print_config_section
 # ---------------------------------------------------------------------------
 # Export all functions
 # ---------------------------------------------------------------------------
-export -f load_yaml_config load_config load_config_auto
+export -f load_yaml_config load_config_auto resolve_config_file
 export -f get_config set_config
 
 LOG_DEBUG_RANK0 "Primus config library loaded successfully"

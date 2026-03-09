@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import os
 from pathlib import Path
@@ -7,21 +9,30 @@ from typing import Any, Dict, List, Tuple
 from primus.core.config.preset_loader import PresetLoader
 from primus.core.launcher.config import PrimusConfig
 from primus.core.utils import constant_vars, yaml_utils
+from primus.core.utils.arg_utils import parse_cli_overrides
 
 
-def add_pretrain_parser(parser: argparse.ArgumentParser):
+def _add_common_train_args(
+    parser: argparse.ArgumentParser, include_data_path: bool
+) -> argparse.ArgumentParser:
+    """
+    Register shared train CLI arguments.
+    """
     parser.add_argument(
         "--config",
+        "--exp",
+        dest="config",
         type=str,
         required=True,
         help="Path to experiment YAML config file (alias: --exp)",
     )
-    parser.add_argument(
-        "--data_path",
-        type=str,
-        default="./data",
-        help="Path to data directory [default: ./data]",
-    )
+    if include_data_path:
+        parser.add_argument(
+            "--data_path",
+            type=str,
+            default="./data",
+            help="Path to data directory [default: ./data]",
+        )
     parser.add_argument(
         "--backend_path",
         nargs="?",
@@ -39,31 +50,23 @@ def add_pretrain_parser(parser: argparse.ArgumentParser):
     return parser
 
 
-def _parse_args(extra_args_provider=None, ignore_unknown_args=False) -> tuple[argparse.Namespace, List[str]]:
-    parser = argparse.ArgumentParser(description="Primus Arguments", allow_abbrev=False)
+def add_pretrain_parser(parser: argparse.ArgumentParser):
+    return _add_common_train_args(parser, include_data_path=True)
 
-    parser.add_argument(
-        "--config",
-        "--exp",
-        dest="exp",
-        type=str,
-        required=True,
-        help="Path to experiment YAML config file (alias: --exp)",
-    )
-    parser.add_argument(
-        "--backend_path",
-        nargs="?",
-        default=None,
-        help=(
-            "Optional backend import path for Megatron or TorchTitan. "
-            "If provided, it will be appended to PYTHONPATH dynamically."
-        ),
-    )
-    parser.add_argument(
-        "--export_config",
-        type=str,
-        help="Optional path to export the final merged config to a file.",
-    )
+
+def add_posttrain_parser(parser: argparse.ArgumentParser):
+    """
+    Post-training (SFT / alignment) workflow parser.
+
+    For now, posttrain shares the same top-level CLI arguments as pretrain
+    (config path, data path, optional backend path, export config).
+    """
+    return add_pretrain_parser(parser)
+
+
+def _parse_args(extra_args_provider=None, ignore_unknown_args=False) -> Tuple[argparse.Namespace, List[str]]:
+    parser = argparse.ArgumentParser(description="Primus Arguments", allow_abbrev=False)
+    parser = _add_common_train_args(parser, include_data_path=False)
 
     # Custom arguments.
     if extra_args_provider is not None:
@@ -74,69 +77,18 @@ def _parse_args(extra_args_provider=None, ignore_unknown_args=False) -> tuple[ar
 
 def _parse_kv_overrides(args: list[str]) -> dict:
     """
-    Parse CLI arguments of the form:
-      --key=value
-      --key value
-      --flag (boolean True)
-    into a nested dictionary structure.
+    Backward-compatible wrapper around the shared CLI override parser.
 
-    Supports nested keys using dot notation, e.g., --a.b.c=1.
+    Keep this symbol for existing callers/tests in legacy paths.
     """
-    overrides = {}
-    i = 0
-    while i < len(args):
-        arg = args[i]
-        # Ignore non-option arguments (not starting with "--")
-        if not arg.startswith("--"):
-            i += 1
-            continue
-
-        # Strip the "--" prefix
-        key = arg[2:]
-
-        if "=" in key:
-            # Format: --key=value
-            key, val = key.split("=", 1)
-        elif i + 1 < len(args) and not args[i + 1].startswith("--"):
-            # Format: --key value
-            val = args[i + 1]
-            i += 1
-        else:
-            # Format: --flag (boolean True)
-            val = True
-
-        # Normalize common lowercase booleans before eval, e.g. "true"/"false".
-        if isinstance(val, str):
-            lower_val = val.lower()
-            if lower_val == "true":
-                val = True
-            elif lower_val == "false":
-                val = False
-            else:
-                # Try to evaluate the value to correct type (int, float, etc.)
-                try:
-                    val = eval(val, {}, {})
-                except Exception:
-                    pass  # Leave as string if evaluation fails
-
-        # Handle nested keys, e.g., modules.pre_trainer.lr
-        d = overrides
-        keys = key.split(".")
-        for k in keys[:-1]:
-            d = d.setdefault(k, {})
-        d[keys[-1]] = val
-
-        i += 1
-
-    return overrides
+    return parse_cli_overrides(args, type_mode="legacy")
 
 
 def _deep_merge_namespace(ns, override_dict):
-    for k, v in override_dict.items():
-        if hasattr(ns, k) and isinstance(getattr(ns, k), SimpleNamespace) and isinstance(v, dict):
-            _deep_merge_namespace(getattr(ns, k), v)
-        else:
-            setattr(ns, k, v)
+    """
+    Merge overrides into SimpleNamespace via unified yaml merge path.
+    """
+    yaml_utils.deep_merge_namespace(ns, override_dict)
 
 
 def _check_keys_exist(ns: SimpleNamespace, overrides: dict, prefix=""):
@@ -181,7 +133,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     config_parser = PrimusParser()
     primus_config = config_parser.parse(args)
 
-    overrides = _parse_kv_overrides(unknown_args)
+    overrides = parse_cli_overrides(unknown_args, type_mode="legacy")
     pre_trainer_cfg = primus_config.get_module_config("pre_trainer")
     _check_keys_exist(pre_trainer_cfg, overrides)
     _deep_merge_namespace(pre_trainer_cfg, overrides)
@@ -189,7 +141,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     return primus_config
 
 
-def load_primus_config(args: argparse.Namespace, overrides: List[str]) -> Tuple[Any, Dict[str, Any]]:
+def _load_legacy_primus_config(args: argparse.Namespace, overrides: List[str]) -> Tuple[Any, Dict[str, Any]]:
     """
     Build the Primus configuration with optional command-line overrides.
 
@@ -206,7 +158,7 @@ def load_primus_config(args: argparse.Namespace, overrides: List[str]) -> Tuple[
     primus_config = config_parser.parse(args)
 
     # 2 Parse overrides from flat list to dict/namespace
-    override_ns = _parse_kv_overrides(overrides)
+    override_ns = parse_cli_overrides(overrides, type_mode="legacy")
 
     # 3 Apply overrides to pre_trainer module config
     pre_trainer_cfg = primus_config.get_module_config("pre_trainer")
@@ -223,6 +175,15 @@ def load_primus_config(args: argparse.Namespace, overrides: List[str]) -> Tuple[
         print(f"[PrimusConfig] Detected unknown override keys: {list(unknown_overrides.keys())}")
 
     return primus_config, unknown_overrides
+
+
+def load_primus_config(args: argparse.Namespace, overrides: List[str]) -> Tuple[Any, Dict[str, Any]]:
+    """
+    Legacy compatibility API.
+
+    Prefer `primus.core.config.primus_config.load_primus_config` in new code.
+    """
+    return _load_legacy_primus_config(args, overrides)
 
 
 class PrimusParser(object):
@@ -283,12 +244,13 @@ class PrimusParser(object):
     def get_model_format(self, framework: str):
         map = {
             "megatron": "megatron",
+            "megatron_bridge": "megatron_bridge",
             "light-megatron": "megatron",
             "torchtitan": "torchtitan",
             "maxtext": "maxtext",
         }
-        assert framework in map, f"Invalid module framework: {framework}."
-        return map[framework]
+        # If framework not in map, return framework itself as fallback
+        return map.get(framework, framework)
 
     def parse_trainer_module(self, module_name: str):
         module = yaml_utils.get_value_by_key(self.exp.modules, module_name)

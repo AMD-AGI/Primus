@@ -22,6 +22,10 @@ def run(args, extra_args):
         from primus.tools.benchmark.gemm_bench import run_gemm_benchmark
 
         run_gemm_benchmark(args)
+    elif suite == "attention":
+        from primus.tools.benchmark.attention_bench import run_attention_benchmark
+
+        run_attention_benchmark(args)
     elif suite == "gemm-dense":
         from primus.tools.benchmark.dense_gemm_bench import run_gemm_benchmark
 
@@ -49,7 +53,7 @@ def run(args, extra_args):
 def register_subcommand(subparsers):
     """
     primus-cli benchmark <suite> [suite-specific-args]
-    suites: gemm | attention | rccl
+    suites: gemm | attention | gemm-dense | gemm-deepseek | strided-allgather | rccl
     """
     parser = subparsers.add_parser("benchmark", help="Run performance benchmarks (GEMM / Attention / RCCL).")
     suite_parsers = parser.add_subparsers(dest="suite", required=True)
@@ -59,6 +63,12 @@ def register_subcommand(subparsers):
     from primus.tools.benchmark.gemm_bench_args import add_gemm_parser
 
     add_gemm_parser(gemm)
+
+    # ---------- ATTENTION ----------
+    attention = suite_parsers.add_parser("attention", help="Attention microbench.")
+    from primus.tools.benchmark.attention_bench_args import add_attention_parser
+
+    add_attention_parser(attention)
 
     # ---------- DENSE-GEMM ----------
     dense_gemm = suite_parsers.add_parser("gemm-dense", help="GEMM-DENSE microbench.")

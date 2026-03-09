@@ -6,7 +6,12 @@
 ###############################################################################
 #
 # Execute patch scripts
-# Usage: execute_patches <patch_script1> [patch_script2] ...
+# Usage:
+#   execute_patches <patch_script1> [patch_script2] ...
+#
+#   Or pass a single "patch list" string with one patch per line:
+#     execute_patches "$PATCH_LIST"
+#   (This is convenient when patches are stored in config as a newline-separated list.)
 #
 # Exit codes from patch scripts:
 #   0   - Success, continue to next patch
@@ -61,7 +66,22 @@ execute_patches() {
         return 0
     fi
 
-    local patch_scripts=("$@")
+    # Support both:
+    # - multiple patch script args
+    # - a single newline-separated list (or any arg containing newlines)
+    local patch_scripts=()
+    local arg
+    for arg in "$@"; do
+        while IFS= read -r patch_entry; do
+            [[ -n "$patch_entry" ]] || continue
+            patch_scripts+=("$patch_entry")
+        done <<< "$arg"
+    done
+
+    if [[ ${#patch_scripts[@]} -eq 0 ]]; then
+        LOG_INFO_RANK0 "[Execute Patches] No patch scripts specified"
+        return 0
+    fi
 
     LOG_INFO_RANK0 "[Execute Patches] Detected patch scripts: ${patch_scripts[*]}"
 
@@ -79,16 +99,12 @@ execute_patches() {
         LOG_INFO_RANK0 "[Execute Patches] Running patch: bash $patch"
 
         # Run the patch script in a child shell and capture its output so that we can
-        # process special lines (e.g., PATCH_ENV KEY=VALUE) while still preserving
-        # the original logs.
+        # process special lines (e.g., env.* and extra.*) while still displaying
+        # the output in real-time.
+        # Use set -o pipefail to propagate exit code through pipe
         local patch_output
-        patch_output="$(bash "$patch" 2>&1)"
+        patch_output="$(set -o pipefail; bash "$patch" 2>&1 | tee /dev/stderr)"
         local exit_code=$?
-
-        # Re-echo patch output so users see the same logs as before.
-        if [[ -n "$patch_output" ]]; then
-            printf '%s\n' "$patch_output"
-        fi
 
         # Allow patches to:
         #   1) Export environment variables back to the caller by printing lines:

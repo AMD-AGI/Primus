@@ -21,9 +21,7 @@ def test_iter_subcommand_modules_includes_builtin():
 
 def test_load_subcommands_invokes_register(monkeypatch):
     captured = []
-
-    def fake_iter():
-        return ["x.alpha", "x.beta"]
+    module_paths = ["x.alpha", "x.beta"]
 
     def fake_import(name):
         parser = argparse.ArgumentParser()
@@ -37,20 +35,18 @@ def test_load_subcommands_invokes_register(monkeypatch):
         module.register_subcommand = register
         return module
 
-    monkeypatch.setattr(cli_main, "_iter_subcommand_modules", fake_iter)
     monkeypatch.setattr(cli_main.importlib, "import_module", fake_import)
 
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="cmd")
 
-    cli_main._load_subcommands(subparsers)
+    cli_main._load_subcommands(subparsers, module_paths)
 
     assert captured == [("x.alpha", subparsers), ("x.beta", subparsers)]
 
 
 def test_load_subcommands_requires_func(monkeypatch):
-    def fake_iter():
-        return ["x.alpha"]
+    module_paths = ["x.alpha"]
 
     def fake_import(name):
         parser = argparse.ArgumentParser()
@@ -63,11 +59,10 @@ def test_load_subcommands_requires_func(monkeypatch):
         module.register_subcommand = register
         return module
 
-    monkeypatch.setattr(cli_main, "_iter_subcommand_modules", fake_iter)
     monkeypatch.setattr(cli_main.importlib, "import_module", fake_import)
 
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="cmd")
 
     with pytest.raises(RuntimeError, match="set_defaults"):
-        cli_main._load_subcommands(subparsers)
+        cli_main._load_subcommands(subparsers, module_paths)

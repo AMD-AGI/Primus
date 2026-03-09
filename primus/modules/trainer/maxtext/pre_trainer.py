@@ -22,6 +22,7 @@ class MaxTextPretrainTrainer(BaseModule):
         self.patch_max_utils()
         self.patch_checkpoint()
         self.patch_input_pipeline()
+        self.patch_config_types()
         self.patch_layers()
 
         self.primus_cfg = kwargs.pop("primus_config", None)
@@ -59,7 +60,7 @@ class MaxTextPretrainTrainer(BaseModule):
         """
         Monkey patch maxtext cli args to override model args dynamically.
         Supports nested overrides like:
-            {"model": {"num_experts": 16, "base_num_decoder_layers": 4}}
+            {"override_model": {"num_experts": 16, "base_num_decoder_layers": 4}}
 
         All override keys MUST be under the "model" key.
         """
@@ -70,14 +71,14 @@ class MaxTextPretrainTrainer(BaseModule):
 
         warning_rank_0(f"MaxText Pre-Trainer: Applying override_args: {override_args}")
 
-        # --- Step 1. Flatten any nested dict under 'model'
+        # --- Step 1. Flatten any nested dict under 'override_model'
         flat_overrides = {}
         for k, v in override_args.items():
-            if k != "model":
-                raise ValueError(f"Only the 'model' key is supported for overrides, found: {k}")
+            if k != "override_model":
+                raise ValueError(f"Only the 'override_model' key is supported for overrides, found: {k}")
             if not isinstance(v, dict):
                 raise ValueError(
-                    f"MaxText Pre-Trainer: The value for 'model' must be a dict, got {type(v).__name__}."
+                    f"MaxText Pre-Trainer: The value for 'override_model' must be a dict, got {type(v).__name__}."
                 )
             for subk, subv in v.items():
                 if isinstance(subv, dict):
@@ -121,22 +122,37 @@ class MaxTextPretrainTrainer(BaseModule):
         import MaxText.max_utils as orig_max_utils
 
         from primus.backends.maxtext.max_utils import (
+            initialize_jax_for_cpu,
+            initialize_jax_for_gpu,
+            initialize_jax_for_tpu_with_emergency_checkpointing,
+            maybe_initialize_jax_distributed_system,
             print_system_information,
             save_device_information,
         )
 
+        orig_max_utils.maybe_initialize_jax_distributed_system = maybe_initialize_jax_distributed_system
+        orig_max_utils.initialize_jax_for_gpu = initialize_jax_for_gpu
+        orig_max_utils.initialize_jax_for_cpu = initialize_jax_for_cpu
+        orig_max_utils.initialize_jax_for_tpu_with_emergency_checkpointing = (
+            initialize_jax_for_tpu_with_emergency_checkpointing
+        )
         orig_max_utils.print_system_information = print_system_information
         orig_max_utils.save_device_information = save_device_information
         warning_rank_0("MaxText Pre-Trainer: patch max_utils successfully.")
 
     def patch_checkpoint(self):
         import MaxText.checkpointing as orig_checkpointing
+        import MaxText.train_utils as orig_train_utils
 
         from primus.backends.maxtext.checkpointing import (
             create_orbax_checkpoint_manager,
+            load_state_if_possible,
         )
+        from primus.backends.maxtext.train_utils import create_training_tools
 
+        orig_checkpointing.load_state_if_possible = load_state_if_possible
         orig_checkpointing.create_orbax_checkpoint_manager = create_orbax_checkpoint_manager
+        orig_train_utils.create_training_tools = create_training_tools
         warning_rank_0("MaxText Pre-Trainer: patch checkpointing successfully.")
 
     def patch_wandb(self):
@@ -177,6 +193,14 @@ class MaxTextPretrainTrainer(BaseModule):
 
         warning_rank_0("MaxText Pre-Trainer: patch _hf_data_processing successfully.")
 
+    def patch_config_types(self):
+        import MaxText.configs.types as orig_config_types
+
+        from primus.backends.maxtext.configs.types import PrimusMaxTextConfig
+
+        orig_config_types.MaxTextConfig = PrimusMaxTextConfig
+        warning_rank_0("MaxText Pre-Trainer: patch config types successfully.")
+
     def patch_layers(self):
         def patch_quantization():
             import MaxText.layers.quantizations as orig_quantizations
@@ -191,18 +215,14 @@ class MaxTextPretrainTrainer(BaseModule):
         patch_quantization()
 
         def patch_attn():
-            import MaxText.layers.attention_mla as orig_attention_mla
             import MaxText.layers.attention_op as orig_attention_op
             import MaxText.layers.attentions as orig_attentions
 
             from primus.backends.maxtext.layers.attention_op import PrimusAttentionOp
-            from primus.backends.maxtext.layers.attentions import PrimusAttention
 
             orig_attention_op.AttentionOp = PrimusAttentionOp
             orig_attentions.AttentionOp = PrimusAttentionOp
 
-            orig_attentions.Attention = PrimusAttention
-            orig_attention_mla.Attention = PrimusAttention
             warning_rank_0("MaxText Pre-Trainer: patch Attention successfully.")
 
         patch_attn()
@@ -216,3 +236,25 @@ class MaxTextPretrainTrainer(BaseModule):
             warning_rank_0("MaxText Pre-Trainer: patch RoutedMoE successfully.")
 
         patch_moe()
+
+        def patch_decoder_layer():
+            import MaxText.layers.gemma as orig_gemma
+            import MaxText.layers.gemma2 as orig_gemma2
+            import MaxText.layers.llama2 as orig_llama2
+            import MaxText.layers.mistral as orig_mistral
+            import MaxText.layers.mixtral as orig_mixtral
+
+            from primus.backends.maxtext.layers.gemma import PrimusGemmaDecoderLayer
+            from primus.backends.maxtext.layers.gemma2 import PrimusGemma2DecoderLayer
+            from primus.backends.maxtext.layers.llama2 import PrimusLlamaDecoderLayer
+            from primus.backends.maxtext.layers.mistral import PrimusMistralDecoderLayer
+            from primus.backends.maxtext.layers.mixtral import PrimusMixtralDecoderLayer
+
+            orig_gemma.GemmaDecoderLayer = PrimusGemmaDecoderLayer
+            orig_gemma2.Gemma2DecoderLayer = PrimusGemma2DecoderLayer
+            orig_llama2.LlamaDecoderLayer = PrimusLlamaDecoderLayer
+            orig_mistral.MistralDecoderLayer = PrimusMistralDecoderLayer
+            orig_mixtral.MixtralDecoderLayer = PrimusMixtralDecoderLayer
+            warning_rank_0("MaxText Pre-Trainer: patch decoder layer successfully.")
+
+        patch_decoder_layer()

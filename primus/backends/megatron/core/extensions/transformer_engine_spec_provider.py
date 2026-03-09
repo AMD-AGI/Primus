@@ -29,33 +29,21 @@ from megatron.core.transformer.moe.experts import (
 )
 from megatron.core.utils import get_te_version, is_te_min_version
 
+from primus.backends.megatron.core.extensions.primus_turbo import (
+    PrimusTurboAttention,
+    PrimusTurboColumnParallelLinear,
+    PrimusTurboGroupedMLP,
+    PrimusTurboLayerNormColumnParallelLinear,
+    PrimusTurboLinear,
+    PrimusTurboRowParallelLinear,
+)
 from primus.backends.megatron.training.global_vars import get_primus_args
-
-try:
-    from primus.backends.megatron.core.extensions.primus_turbo import (
-        PrimusTurboAttention,
-        PrimusTurboColumnParallelLinear,
-        PrimusTurboGroupedMLP,
-        PrimusTurboLayerNormColumnParallelLinear,
-        PrimusTurboLinear,
-        PrimusTurboRowParallelLinear,
-    )
-
-    HAVE_PRIMUS_TURBO = True
-except ImportError:
-
-    HAVE_PRIMUS_TURBO = False
 
 
 class PrimusTurboSpecProvider(BackendSpecProvider):
     """A protocol for providing the submodules used in Spec building."""
 
     def __init__(self):
-        if not HAVE_PRIMUS_TURBO:
-            raise ImportError(
-                "PrimusTurbo extension requires the primus_Turbo package. " "Please install it."
-            )
-
         self.cfg = get_primus_args()
 
     def linear(self) -> type:

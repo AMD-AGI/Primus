@@ -23,7 +23,7 @@ def run_script(
     env_override: dict = None,
     extra_args: list[str] = None,
 ):
-    shell_entry = "examples/run_pretrain.sh"
+    shell_entry = "./runner/primus-cli"
     env = os.environ.copy()
     if env_override:
         env.update(env_override)
@@ -33,18 +33,32 @@ def run_script(
     train_log_path = os.path.join(ut_log_path, f"log.test_megatron_trainer-{tag}.txt")
     env["TRAIN_LOG"] = train_log_path
 
+    # Follow the same UT pattern as TorchTitan trainer tests:
+    # - print logs at runtime to the console
+    # - read final output from TRAIN_LOG if present
     do_print_at_runtime = True
     run_stdout = subprocess.PIPE if not do_print_at_runtime else sys.stdout
     run_stderr = subprocess.PIPE if not do_print_at_runtime else sys.stderr
 
-    cmd = ["bash", shell_entry]
+    cmd = [
+        "bash",
+        shell_entry,
+        "direct",
+        "--log_file",
+        train_log_path,
+        "--",
+        "train",
+        "pretrain",
+        "--config",
+        exp_path,
+    ]
     if extra_args:
         cmd.extend(extra_args)
 
     try:
         logger.info(f"Begin run {tag}...")
         start = time.time()
-        result = subprocess.run(
+        subprocess.run(
             cmd,
             check=True,
             stdout=run_stdout,
@@ -56,12 +70,12 @@ def run_script(
 
         logger.info(f"Training log path: {ut_log_path}/logs/UT-{ut_name}")
 
-        with open(train_log_path, "r") as f:
-            stdout_output = f.read()
+        stdout_output = ""
+        if os.path.exists(train_log_path):
+            with open(train_log_path, "r") as f:
+                stdout_output = f.read()
 
-        stderr_output = ""
-
-        return stdout_output, stderr_output
+        return stdout_output, ""
 
     except subprocess.CalledProcessError as e:
         stderr_output = e.stderr or ""
@@ -74,7 +88,7 @@ def run_script(
             except Exception as log_err:
                 logger.warning(f"[{tag}] Failed to read train log: {log_err}")
 
-        if "after training is done" in stdout_output:
+        if "Training completed." in stdout_output:
             logger.warning(f"[{tag}] Training likely succeeded despite return code != 0.")
             logger.warning(f"stderr excerpt:\n{stderr_output[:1000]}")
         else:
@@ -349,6 +363,10 @@ class TestMegatronTrainerDeterministic(PrimusUT):
             "PRIMUS_NUM_LAYERS": "4",
             # deterministic vars
             "PRIMUS_DETERMINISTIC": "1",
+            "NCCL_ALGO": "Ring",
+            "TORCH_COMPILE_DISABLE": "1",
+            "ROCBLAS_DEFAULT_ATOMICS_MODE": "0",
+            "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
         }
         stdout, _ = run_script(
             self.__class__.__name__,
@@ -376,6 +394,10 @@ class TestMegatronTrainerDeterministic(PrimusUT):
             "PRIMUS_NUM_LAYERS": "4",
             # deterministic vars
             "PRIMUS_DETERMINISTIC": "1",
+            "NCCL_ALGO": "Ring",
+            "TORCH_COMPILE_DISABLE": "1",
+            "ROCBLAS_DEFAULT_ATOMICS_MODE": "0",
+            "NVTE_ALLOW_NONDETERMINISTIC_ALGO": "0",
         }
         stdout, _ = run_script(
             self.__class__.__name__,
