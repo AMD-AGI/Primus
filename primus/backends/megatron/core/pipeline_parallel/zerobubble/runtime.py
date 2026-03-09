@@ -497,9 +497,11 @@ class TrainingIteration:
         if multi_chunks:
             vp_stage = scheduled_node.chunk
             assert vp_stage == parallel_state.get_virtual_pipeline_model_parallel_rank()
-            is_last_stage = parallel_state.is_pipeline_last_stage(ignore_virtual=False, vp_stage=vp_stage)
+            is_last_stage = parallel_state.is_pipeline_last_stage(
+                ignore_virtual=False, vp_stage=vp_stage, in_zero_bubble=True
+            )
         else:
-            is_last_stage = parallel_state.is_pipeline_last_stage(ignore_virtual=True)
+            is_last_stage = parallel_state.is_pipeline_last_stage(ignore_virtual=True, in_zero_bubble=True)
         bufs = self.buffers
 
         if parallel_state.is_pipeline_first_stage(ignore_virtual=(not multi_chunks), vp_stage=vp_stage):
@@ -508,7 +510,7 @@ class TrainingIteration:
         elif scheduled_node.recv_peer_stage is None or scheduled_node.recv_peer_stage == scheduled_node.stage:
             assert multi_chunks
             assert scheduled_node.chunk % 2 == 1
-            assert parallel_state.is_pipeline_last_stage(ignore_virtual=True)
+            assert parallel_state.is_pipeline_last_stage(ignore_virtual=True, in_zero_bubble=True)
             input_tensor = bufs.local_send_forward_buffer[scheduled_node.seq_split_idx].pop(0)
         else:
             input_tensor, handles = bufs.recv_forward_buffer[scheduled_node.chunk][
@@ -567,14 +569,14 @@ class TrainingIteration:
         if get_args().profile:
             torch.cuda.nvtx.range_pop()
 
-        if not parallel_state.is_pipeline_last_stage():
+        if not parallel_state.is_pipeline_last_stage(in_zero_bubble=True):
             if (
                 scheduled_node.send_peer_stage is None
                 or scheduled_node.send_peer_stage == scheduled_node.stage
             ):
                 assert multi_chunks
                 assert scheduled_node.chunk % 2 == 0
-                assert parallel_state.is_pipeline_last_stage(ignore_virtual=True)
+                assert parallel_state.is_pipeline_last_stage(ignore_virtual=True, in_zero_bubble=True)
                 detached_output_tensor = [t.detach().requires_grad_() for t in output_tensor]
                 bufs.local_send_forward_buffer[scheduled_node.seq_split_idx].append(detached_output_tensor)
                 deallocate_output_tensor(output_tensor[0], conf.config.deallocate_pipeline_outputs)
@@ -594,7 +596,7 @@ class TrainingIteration:
                 clear_input_tensor(input_tensor)
             bufs.input_tensors[scheduled_node.chunk].push(input_tensor)
             bufs.output_tensors[scheduled_node.chunk].push(output_tensor)
-            if parallel_state.is_pipeline_last_stage():
+            if parallel_state.is_pipeline_last_stage(in_zero_bubble=True):
                 deallocate_output_tensor(output_tensor[0], conf.config.deallocate_pipeline_outputs)
 
     def schedule_b_impl(self, scheduled_node: ScheduledNode):
@@ -613,7 +615,7 @@ class TrainingIteration:
         assert isinstance(input_tensor, list), "input_tensor should be list of tensor"
         assert isinstance(output_tensor, list), "output_tensor should be list of tensor"
 
-        if parallel_state.is_pipeline_last_stage():
+        if parallel_state.is_pipeline_last_stage(in_zero_bubble=True):
             # Keep the original behavior when we do a dummy communication
             assert len(conf.send_tensor_shapes) > 0
             output_tensor_grad = [None] * len(conf.send_tensor_shapes)
@@ -621,7 +623,7 @@ class TrainingIteration:
             assert multi_chunks
             assert scheduled_node.recv_peer_stage is None
             assert scheduled_node.chunk % 2 == 0
-            assert parallel_state.is_pipeline_last_stage(ignore_virtual=True)
+            assert parallel_state.is_pipeline_last_stage(ignore_virtual=True, in_zero_bubble=True)
             output_tensor_grad = bufs.local_send_backward_buffer[scheduled_node.seq_split_idx].pop(0)
         else:
             output_tensor_grad, handles = bufs.recv_backward_buffer[scheduled_node.chunk][
@@ -672,7 +674,7 @@ class TrainingIteration:
             ):
                 assert multi_chunks
                 assert scheduled_node.chunk % 2 == 1
-                assert parallel_state.is_pipeline_last_stage(ignore_virtual=True)
+                assert parallel_state.is_pipeline_last_stage(ignore_virtual=True, in_zero_bubble=True)
                 bufs.local_send_backward_buffer[scheduled_node.seq_split_idx].append(input_tensor_grad)
             else:
                 bufs.send_backward_buffer[scheduled_node.chunk][scheduled_node.seq_split_idx].append(
@@ -1407,7 +1409,7 @@ def bootstrap_and_profile_p2p_communication(config, send_tensor_shapes, recv_ten
             parallel_state.set_virtual_pipeline_model_parallel_rank(0)
         if not parallel_state.is_pipeline_first_stage(ignore_virtual=True):
             p2p_communicator.recv_forward(shape, False)
-        if not parallel_state.is_pipeline_last_stage(ignore_virtual=True):
+        if not parallel_state.is_pipeline_last_stage(ignore_virtual=True, in_zero_bubble=True):
             p2p_communicator.send_forward(nccl_init_tensor, False)
             p2p_communicator.recv_backward(shape, False)
         if not parallel_state.is_pipeline_first_stage(ignore_virtual=True):
@@ -1428,7 +1430,7 @@ def bootstrap_and_profile_p2p_communication(config, send_tensor_shapes, recv_ten
                 recv_next=False,
                 tensor_shape=None,
             )
-        if parallel_state.is_pipeline_last_stage(ignore_virtual=True):
+        if parallel_state.is_pipeline_last_stage(ignore_virtual=True, in_zero_bubble=True):
             p2p_communicator._communicate(
                 tensor_send_next=nccl_init_tensor[0],
                 tensor_send_prev=None,
@@ -1454,7 +1456,7 @@ def bootstrap_and_profile_p2p_communication(config, send_tensor_shapes, recv_ten
         for _ in range(10):
             if not parallel_state.is_pipeline_first_stage(ignore_virtual=True):
                 p2p_communicator.recv_forward(recv_tensor_shapes, False)
-            if not parallel_state.is_pipeline_last_stage(ignore_virtual=True):
+            if not parallel_state.is_pipeline_last_stage(ignore_virtual=True, in_zero_bubble=True):
                 p2p_communicator.send_forward(send_data, False)
                 p2p_communicator.recv_backward(send_tensor_shapes, False)
             if not parallel_state.is_pipeline_first_stage(ignore_virtual=True):
