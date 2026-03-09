@@ -130,7 +130,7 @@ docker exec "${CONTAINER_NAME}" bash -c "
 echo_info "Step 5: Patching Megatron-Bridge for llama2_70b_lora training..."
 docker exec "${CONTAINER_NAME}" bash -c "
     cd /workspace/Primus/third_party/Megatron-Bridge
-    git apply /workspace/Primus/megatron_bridge_validation_consumed_samples.patch"
+    git apply /workspace/Primus/megatron_bridge_validation_consumed_samples.patch || true"
 
 # Step 6: Start training
 echo_info "Step 6: Starting llama2_70b_lora training..."
