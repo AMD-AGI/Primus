@@ -58,7 +58,7 @@ export VENV_PATH=/mnt/vast/fuyuan/envs/test/.venv/bin/activate
 
 # run preflight with slurm
 # it will collect basic information and performance tests on the cluster.
-srun -t 00:45:00 -p gpus -N 4 -c 128 --gpus-per-node=8 --nodelist <nodes> \
+srun -t 00:45:00 -N 4 -c 128 --gpus-per-node=8 --nodelist <nodes> \
   runner/primus-cli-direct-preflight.sh \
   --env NCCL_CROSS_NIC=1 --env NCCL_PXN_DISABLE=0 \
   -- preflight --perf-test --report-file-name preflight-report-4N
