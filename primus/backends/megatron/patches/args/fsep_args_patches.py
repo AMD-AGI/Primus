@@ -84,10 +84,16 @@ def patch_fsep_args_validation(ctx: PatchContext):
         f"moe_fsep_sharding_degree ({S}) cannot exceed "
         f"expert_model_parallel_size ({ep})"
     )
-    assert etp == S, (
-        f"expert_tensor_parallel_size ({etp}) must equal "
-        f"moe_fsep_sharding_degree ({S}) for checkpoint compatibility. "
-        f"Set expert_tensor_parallel_size: {S} in your config."
+    # Two valid modes:
+    #   Mode A (ETP-based): S == ETP → FSEP uses expert_tensor_parallel_group
+    #                       Requires ETP*EP <= world_size
+    #   Mode B (EP-based):  S == EP, ETP == 1 → FSEP uses expert_model_parallel_group
+    #                       No extra world_size constraint
+    assert etp == S or (S == ep and etp == 1), (
+        f"FSEP requires either:\n"
+        f"  (A) expert_tensor_parallel_size ({etp}) == moe_fsep_sharding_degree ({S}), or\n"
+        f"  (B) moe_fsep_sharding_degree ({S}) == expert_model_parallel_size ({ep}) "
+        f"and expert_tensor_parallel_size == 1 (uses EP group)"
     )
     assert not getattr(args, "moe_pad_expert_input_to_capacity", False), (
         "FSEP does not support moe_pad_expert_input_to_capacity=True"
@@ -99,7 +105,8 @@ def patch_fsep_args_validation(ctx: PatchContext):
         "FSEP requires use_turbo_deepep: true"
     )
 
+    mode = "EP-group" if (S == ep and etp == 1) else "ETP-group"
     log_rank_0(
         f"[FSEP] Validation passed: "
-        f"sharding_degree={S}, EP={ep}, ETP={etp}"
+        f"sharding_degree={S}, EP={ep}, ETP={etp}, mode={mode}"
     )
