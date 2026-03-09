@@ -1,0 +1,88 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:dsv3-4L-FSEP-S2}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: deepseek_v3.yaml
+    overrides:
+      stderr_sink_level: DEBUG
+
+      # ── Reduce to 4 MoE layers ──
+      num_layers: 4
+      moe_layer_freq: 1
+      mtp_num_layers: 0
+
+      # ── Training ──
+      train_iters: 100
+      micro_batch_size: 2
+      global_batch_size: 128
+      seq_length: 4096
+      max_position_embeddings: 4096
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+      log_interval: 1
+      log_avg_skip_iterations: 5
+      log_avg_reset_interval: 100
+
+      # ── S=2 Parallelism: EP=4, ETP=2 → EP×ETP=8=world_size ──
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 4
+      expert_tensor_parallel_size: 2
+      # moe_router_num_groups scales with EP (4 groups, pick 2)
+      moe_router_num_groups: 4
+      moe_router_group_topk: 2
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # ── Data ──
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # ── Model ──
+      multi_latent_attention: true
+      moe_use_legacy_grouped_gemm: false
+      moe_router_force_load_balancing: false
+
+      # ── Checkpoint ──
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # ── Turbo / DeepEP ──
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      turbo_deepep_num_cu: 64
+      turbo_deepep_use_comm_stream: false
+      turbo_sync_free_moe_stage: 1
+
+      # ── FSEP S=2 (Mode A: S==ETP=2) ──
+      # Baseline: comment out; FSEP on: uncomment
+      moe_fsep_sharding_degree: 2      # FSEP ON: S=ETP=2
+
+      moe_log_expert_load: true
