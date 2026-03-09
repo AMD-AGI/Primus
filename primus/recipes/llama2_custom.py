@@ -402,6 +402,7 @@ def _llama2_lora(
             num_workers=1,
             do_test=False,
             do_validation=True,
+            dataset_kwargs={"return_cu_seqlen": False},
         )
     else:
         raise ValueError(f"Unknown dataset_type: {dataset_type!r}. Expected 'squad' or 'mlperf_dataset'.")
