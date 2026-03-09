@@ -1,0 +1,38 @@
+# Base image
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG AINIC_BUNDLE_PATH
+
+# Non-interactive APT
+ENV DEBIAN_FRONTEND=noninteractive
+
+
+# ---------------------------------------------------------------------------
+# Install build dependencies
+# ---------------------------------------------------------------------------
+RUN rm /etc/apt/sources.list.d/*radeon* && \
+    apt update && \
+    apt install initramfs-tools -y
+
+# ---------------------------------------------------------------------------
+# Enviroment variables
+# ---------------------------------------------------------------------------
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib
+ENV WORKDIR=/workspace
+
+# =============================== Build AINIC Driver ===============================
+# WARNING: Please ensure the following environment variables are correctly set:
+# WARNING:     1. PATH: /usr/sbin must be included.
+# WARNING:     2. LD_LIBRARY_PATH: /usr/lib must be included.
+# WARNING: If these paths are missing, tools and libraries may not function correctly.
+# INFO: Installation completed successfully
+
+COPY ${AINIC_BUNDLE_PATH}/ainic_bundle_1.117.5-a-56.tar.gz ${WORKDIR}
+RUN cd ${WORKDIR} && \
+    echo "Building ainic bundle... current directory: ${WORKDIR}" && \
+    tar zxf ainic_bundle_1.117.5-a-56.tar.gz && \
+    cd ainic_bundle_1.117.5-a-56 && \
+    tar zxf host_sw_pkg.tar.gz && \
+    cd host_sw_pkg && \
+    ./install.sh --domain=user -y 2>&1 | tee log_install.txt
