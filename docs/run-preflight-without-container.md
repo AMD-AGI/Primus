@@ -1,4 +1,4 @@
-<img width="276" height="23" alt="image" src="https://github.com/user-attachments/assets/3c8c5bbe-cec5-49b8-8778-4231aeaeff48" /># Run Primus preflight without docker container
+# Run Primus preflight without docker container
 
 ## clone the Primus repository
 
@@ -50,20 +50,32 @@ Preflight will run performance tests for the intra-node and inter-node communica
 
 
 ## Run preflight on the cluster
-
+### With cluster that does use Pensando Pollara (AINIC) for RDMA
+If you're using Broadcom NICs, you can use a command like this
 ```bash
 # set the environment variable VENV_PATH to the path of the virtual environment activate script
 export VENV_PATH=/mnt/vast/fuyuan/envs/test/.venv/bin/activate
 
-# set cluster-specific environment variables
-# the following are for a cluster that uses AINIC.
-export USING_AINIC=1
-export NCCL_PXN_DISABLE=0
-export NCCL_IB_GID_INDEX=1
+# run preflight with slurm
+# it will collect basic information and performance tests on the cluster.
+srun -t 00:45:00 -p gpus -N 4 -c 128 --gpus-per-node=8 --nodelist <nodes> \
+  runner/primus-cli-direct-preflight.sh \
+  --env NCCL_CROSS_NIC=1 --env NCCL_PXN_DISABLE=0 \
+  -- preflight --perf-test --report-file-name preflight-report-4N
+```
+
+### With cluster that does not use Pensando Pollara (AINIC) for RDMA
+```bash
+# set the environment variable VENV_PATH to the path of the virtual environment activate script
+export VENV_PATH=/mnt/vast/fuyuan/envs/test/.venv/bin/activate
 
 # run preflight with slurm
 # it will collect basic information and performance tests on the cluster.
-srun -N 4 --nodelist chi2874,chi2875,chi2810,chi2812 runner/primus-cli-direct-preflight.sh -- preflight --report-file-name preflight-report-4N
+# note that these are setting cluster-specific environment variables for a cluster that uses AINIC.
+srun -t 00:45:00 -N 4 -c 128 --gpus-per-node=8 --nodelist <nodes> \
+  runner/primus-cli-direct-preflight.sh \
+  --env USING_AINIC=1 --env NCCL_IB_GID_INDEX=1 --env NCCL_PXN_DISABLE=0 \
+  -- preflight --report-file-name preflight-report-4N
 ```
 
 ## Troubleshooting
