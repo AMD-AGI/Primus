@@ -57,6 +57,7 @@ def patch_forward_step_zero_bubble(ctx: PatchContext):
 
             timers = get_timers()
         except Exception:
+            # Timers are an optional optimization; ignore any errors when obtaining them.
             pass
 
         if timers:
