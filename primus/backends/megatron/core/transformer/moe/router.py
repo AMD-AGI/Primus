@@ -7,6 +7,8 @@
 from typing import Tuple
 
 import torch
+import torch.distributed as dist
+from megatron.core import parallel_state
 from megatron.core.transformer.moe.moe_utils import apply_router_token_dropping
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -103,5 +105,30 @@ class PrimusTopKRouter(TopKRouter):
             routing_map = torch.zeros_like(routing_map, dtype=torch.bool).index_put_(
                 (row, col), torch.ones(1, device=routing_map.device, dtype=torch.bool)
             )
+
+        # [FSEP] Expert load monitoring: track max/avg ratio for load imbalance profiling
+        if getattr(args, "moe_log_expert_load", False) and torch.is_grad_enabled():
+            with torch.no_grad():
+                load = routing_map.float().sum(dim=0)  # [N_experts]
+                # Aggregate across EP group to get global expert load
+                if self.config.expert_model_parallel_size > 1:
+                    dist.all_reduce(load, group=parallel_state.get_expert_model_parallel_group())
+                avg_load = load.mean()
+                if avg_load > 0:
+                    from megatron.core.transformer.moe.moe_utils import (
+                        get_moe_layer_wise_logging_tracker,
+                    )
+                    tracker = get_moe_layer_wise_logging_tracker()
+                    if "expert_load_max_avg_ratio" not in tracker:
+                        tracker["expert_load_max_avg_ratio"] = {
+                            "values": torch.zeros(self.config.num_layers, device="cuda"),
+                            "reduce_group": None,
+                            "avg_group": None,
+                        }
+                    layer_idx = getattr(self, "_layer_number", 0)
+                    if layer_idx < self.config.num_layers:
+                        tracker["expert_load_max_avg_ratio"]["values"][layer_idx] = (
+                            load.max() / avg_load
+                        )
 
         return scores, routing_map

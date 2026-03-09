@@ -1325,6 +1325,39 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         return fc2_output, None
 
 
+class _FSEPAllGather(torch.autograd.Function):
+    """
+    Differentiable AllGather along the token dimension for FSEP.
+
+    Forward:  [T/S, H] → AllGather → [T, H]
+    Backward: [T, H] grad → ReduceScatter → [T/S, H] grad
+
+    This pair is the inverse of FSEPGroupedMLP._fsep_reduce_scatter() which does:
+    Forward:  [T, H] partial → ReduceScatter → [T/S, H]
+    Backward: [T/S, H] grad → AllGather → [T, H] grad
+    """
+
+    @staticmethod
+    def forward(ctx, shard: torch.Tensor, group, world_size: int) -> torch.Tensor:
+        ctx.group = group
+        ctx.world_size = world_size
+        T_shard, H = shard.shape
+        output = torch.empty(T_shard * world_size, H, dtype=shard.dtype, device=shard.device)
+        dist.all_gather_into_tensor(output, shard.contiguous(), group=group)
+        return output  # [T, H]
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        group = ctx.group
+        world_size = ctx.world_size
+        T = grad_output.shape[0]
+        H = grad_output.shape[1]
+        assert T % world_size == 0
+        grad_shard = torch.empty(T // world_size, H, dtype=grad_output.dtype, device=grad_output.device)
+        dist.reduce_scatter_tensor(grad_shard, grad_output.contiguous(), group=group)
+        return grad_shard, None, None  # gradients for (shard, group, world_size)
+
+
 class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
     """
     PrimusTurbo token dispatcher using DeepEP.
@@ -1396,6 +1429,23 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
 
         self.moe_router_force_load_balancing = args.moe_router_force_load_balancing
 
+        # [FSEP] Detect FSEP mode and cache group info
+        self.fsep_sharding_degree = getattr(args, "moe_fsep_sharding_degree", 0)
+        self.fsep_group = None
+        self.fsep_world_size = 1
+        if self.fsep_sharding_degree > 1:
+            from primus.backends.megatron.core.transformer.moe.fsep_experts import (
+                get_fsep_group,
+                get_fsep_world_size,
+            )
+            self.fsep_group = get_fsep_group()
+            self.fsep_world_size = get_fsep_world_size()
+            if dist.get_rank() == 0:
+                print(
+                    f"[FSEP] DeepEP dispatcher: FSEP mode enabled, "
+                    f"S={self.fsep_sharding_degree}"
+                )
+
     def dispatch_preprocess(
         self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
     ):
@@ -1414,8 +1464,8 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             A tuple of reshaped hidden states and token probabilities.
         """
         self.hidden_shape = hidden_states.shape
-        # view as [num_tokens, hidden_size]
-        hidden_states = hidden_states.view(-1, self.config.hidden_size)
+        # view as [num_tokens, hidden_size] — ensure contiguous for DeepEP
+        hidden_states = hidden_states.view(-1, self.config.hidden_size).contiguous()
         num_tokens = hidden_states.shape[0]
 
         # when force_load_balancing, we use even token_indices to make sure each expert get same number of tokens
@@ -1431,6 +1481,9 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         hidden_states, probs = self.deepep_dispatcher._pre_dispatch(
             hidden_states, probs, routing_map, token_indices
         )
+        # Ensure output is contiguous for DeepEP intranode_dispatch
+        if not hidden_states.is_contiguous():
+            hidden_states = hidden_states.contiguous()
         return hidden_states, probs
 
     def token_dispatch(
@@ -1483,11 +1536,35 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
     def combine_preprocess(self, hidden_states: torch.Tensor):
         """Pre-processes hidden states before combining them after expert processing.
 
-        This method restores the hidden states to their original ordering before expert processing
-        by using the communication manager's restoration function.
+        In standard mode: restores the hidden states to their original ordering
+        using the communication manager's restoration function.
+
+        In FSEP mode: FSEPGroupedMLP outputs [T/S, H] shards. We AllGather
+        back to [T, H] within the fsep_group before calling _pre_combine,
+        since DeepEP expects the full [T, H] tensor.
         """
-        hidden_states = self.deepep_dispatcher._pre_combine(hidden_states)
+        # [FSEP] AllGather [T/S, H] → [T, H] before DeepEP combine
+        if self.fsep_sharding_degree > 1:
+            hidden_states = self._fsep_all_gather(hidden_states)
+
+        hidden_states = self.deepep_dispatcher._pre_combine(hidden_states.contiguous())
         return hidden_states
+
+    def _fsep_all_gather(self, shard: torch.Tensor) -> torch.Tensor:
+        """
+        Differentiable AllGather along the token dimension within fsep_group.
+
+        This is the forward-pass inverse of FSEPGroupedMLP._fsep_reduce_scatter().
+        Uses a custom autograd Function so that the backward pass correctly
+        computes ReduceScatter(gradient) → grad_shard.
+
+        Args:
+            shard: [T/S, H] — this GPU's token shard (output of ReduceScatter)
+
+        Returns:
+            [T, H] — full token sequence ordered by fsep rank
+        """
+        return _FSEPAllGather.apply(shard, self.fsep_group, self.fsep_world_size)
 
     def token_combine(
         self,
@@ -1507,8 +1584,9 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         Returns:
             Combined tokens after fused un-permutation and communication.
         """
-        combined_tokens = self.deepep_dispatcher._exec_combine(hidden_states)
-        return combined_tokens
+        combined_tokens = self.deepep_dispatcher._exec_combine(hidden_states.contiguous())
+        # Ensure contiguous so backward gradients through _pre_combine are contiguous
+        return combined_tokens.contiguous() if not combined_tokens.is_contiguous() else combined_tokens
 
     def combine_postprocess(self, hidden_states: torch.Tensor):
         """
@@ -1524,7 +1602,8 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             The final MoE layer output reshaped to its original dimensions.
         """
         hidden_states = self.deepep_dispatcher._post_combine(hidden_states)
-        return hidden_states.view(self.hidden_shape)
+        # Ensure contiguous so backward pass gradients are contiguous for intranode_dispatch
+        return hidden_states.view(self.hidden_shape).contiguous()
 
 
 class PrimusTurboRMSNorm(te.pytorch.RMSNorm):

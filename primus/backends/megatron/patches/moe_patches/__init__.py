@@ -11,6 +11,7 @@ This package groups patches for Megatron's Mixture-of-Experts (MoE) components:
     - Deprecated MoE layer implementations
     - Primus TopKRouter
     - MoE permutation fusion with Transformer Engine
+    - FSEP (Fully Sharded Expert Parallel) for load-balanced expert computation
 
 Patch modules are discovered and imported automatically by
 ``primus.backends.megatron.patches``; no explicit imports are required here.

@@ -146,6 +146,22 @@ moe_use_upcycling: false
 moe_permute_fusion: false
 delay_wgrad_compute: false
 
+# Expert Load Monitoring (Task 1 - FSEP prerequisite)
+# Enable per-step expert token load ratio logging to TensorBoard
+# Records max_load / avg_load per MoE layer for imbalance profiling
+moe_log_expert_load: false
+
+# FSEP (Fully Sharded Expert Parallel) - Static Sharding
+# Reference: LAER-MoE (ASPLOS '26, arXiv:2602.11686)
+# 0 = disabled; S > 1 means each Expert is sharded across S GPUs within EP group
+# Prerequisites:
+#   - enable_primus_turbo: true
+#   - use_turbo_deepep: true
+#   - expert_tensor_parallel_size must equal moe_fsep_sharding_degree
+#   - moe_fsep_sharding_degree must divide expert_model_parallel_size
+# Valid values: 0, 2, 4, 8 (must be power of 2 and <= expert_model_parallel_size)
+moe_fsep_sharding_degree: 0
+
 # Model parallelism
 model_parallel_size: null
 tensor_model_parallel_size: 1
