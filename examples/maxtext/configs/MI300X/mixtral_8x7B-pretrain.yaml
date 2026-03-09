@@ -39,4 +39,4 @@ modules:
       capacity_factor: 1
       max_target_length: 4096
       per_device_batch_size: 12
-      remat_policy: "minimal"
+      remat_policy: "save_dot_with_context_except_mlp"
