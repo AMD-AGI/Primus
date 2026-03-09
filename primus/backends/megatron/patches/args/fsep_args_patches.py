@@ -23,18 +23,30 @@ from primus.modules.module_utils import log_rank_0
 )
 def patch_fsep_args_defaults(ctx: PatchContext):
     """
-    Inject default values for FSEP-related args that Megatron's argparse
-    does not define. This prevents AttributeError when get_args() is called.
+    Inject FSEP-related args into the Megatron args namespace.
+
+    These args are Primus-specific (not in Megatron's argparse), so
+    MegatronArgBuilder.update() silently drops them from backend_args.
+
+    We read from module_config.params (raw yaml values, accessible via
+    get_args(ctx)) and inject into backend_args (the Megatron args namespace).
     """
-    args = ctx.extra.get("backend_args", {})
-    if not args:
+    # backend_args: Megatron-filtered args namespace (target for injection)
+    backend_args = ctx.extra.get("backend_args", {})
+    if not backend_args:
         return
 
-    if not hasattr(args, "moe_fsep_sharding_degree"):
-        args.moe_fsep_sharding_degree = 0
+    # module_config.params: raw yaml namespace (has our custom keys)
+    module_config = ctx.extra.get("module_config")
+    raw_params = getattr(module_config, "params", None) if module_config else None
 
-    if not hasattr(args, "moe_log_expert_load"):
-        args.moe_log_expert_load = False
+    # Read from raw yaml with fallback, inject into Megatron args
+    backend_args.moe_fsep_sharding_degree = (
+        getattr(raw_params, "moe_fsep_sharding_degree", 0) if raw_params else 0
+    )
+    backend_args.moe_log_expert_load = (
+        getattr(raw_params, "moe_log_expert_load", False) if raw_params else False
+    )
 
 
 @register_patch(

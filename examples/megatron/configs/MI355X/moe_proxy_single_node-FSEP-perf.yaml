@@ -1,0 +1,96 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:moe_proxy-fsep-perf}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    # moe_proxy_single_node: 128 experts, TopK=2, H=2048, F=2048
+    # Reduce num_layers to 8 (from 64) for single-node memory budget
+    # No MLA, no MTP — minimal complexity for FSEP validation
+    model: moe_proxy_single_node.yaml
+    overrides:
+      stderr_sink_level: INFO
+
+      # ── Reduce model size to fit 8x MI355X ──
+      num_layers: 8          # original 64 → OOM on single node; 8 layers fits
+
+      # ── Training schedule ──
+      train_iters: 50
+      micro_batch_size: 4
+      global_batch_size: 32
+      seq_length: 4096
+      max_position_embeddings: 4096
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # ── Parallelism ──
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      expert_model_parallel_size: 8
+      overlap_grad_reduce: true
+      overlap_param_gather: true
+      gradient_accumulation_fusion: false
+
+      # ── Data ──
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # ── Model ──
+      moe_use_legacy_grouped_gemm: false
+      moe_router_force_load_balancing: false   # natural routing, TopK=2/128 is balanced enough
+      ffn_hidden_size: 8192   # required by Megatron validate_args (dense FFN fallback)
+      multi_latent_attention: false
+
+      # ── Checkpoint ──
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # ── Turbo ──
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
+
+      # ── DeepEP ──
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      turbo_deepep_num_cu: 64
+      turbo_deepep_use_comm_stream: false
+      turbo_sync_free_moe_stage: 1
+
+      # ── FSEP Performance Test ──
+      # Baseline (FSEP off):  comment out the two lines below
+      # FSEP enabled (S=EP):  uncomment both lines
+      #
+      # FSEP constraint: expert_tensor_parallel_size == moe_fsep_sharding_degree
+      # With EP=8, S=8: every Expert is sharded across all 8 GPUs
+      # Get fsep_group == ep_group, no extra process group needed
+      #
+      expert_tensor_parallel_size: 8   # must equal moe_fsep_sharding_degree
+      moe_fsep_sharding_degree: 8      # S=EP=8: maximum load balancing
+
+      # Load monitoring (always-on for profiling)
+      moe_log_expert_load: true
