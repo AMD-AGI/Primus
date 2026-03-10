@@ -34,7 +34,7 @@ modules:
       packed_metadata_path: /data/packed_metadata.jsonl
 
       # Training configuration
-      train_iters: 1000
+      train_iters: 1024
       global_batch_size: 8
       micro_batch_size: 1
       seq_length: 8192
