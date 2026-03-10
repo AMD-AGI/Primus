@@ -135,4 +135,25 @@ docker exec "${CONTAINER_NAME}" bash -c "
 # Step 6: Start training
 echo_info "Step 6: Starting llama2_70b_lora training..."
 echo_info "Training configuration: examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml"
-docker exec -it "${CONTAINER_NAME}" bash -c "cd /workspace/Primus && HF_TOKEN=${HF_TOKEN} WANDB_API_KEY=${WANDB_API_KEY} MEGATRON_BRIDGE_LOGGING_LEVEL=10 ./runner/primus-cli direct train posttrain --config examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml"
+docker exec -it "${CONTAINER_NAME}" bash -c "
+    cd /workspace/Primus && \
+    HF_TOKEN=${HF_TOKEN} \
+    WANDB_API_KEY=${WANDB_API_KEY} \
+    MEGATRON_BRIDGE_LOGGING_LEVEL=10 \
+    NVTE_DEBUG=1 \
+    NVTE_DEBUG_LEVEL=2 \
+    NVTE_FUSED_ATTN_LOG_CONFIG=1 \
+    NVTE_RS_STRIDED_ATOMIC=2 \
+    NVTE_FP8_DPA_BWD=1
+    NVTE_FUSED_ATTN=1 && \
+    NVTE_FUSED_ATTN_CK=1 && \
+    NVTE_FUSED_ATTN_AOTRITON=1 && \
+    NVTE_USE_HIPBLASLT=1 && \
+    NVTE_USE_CAST_TRANSPOSE_TRITON=1 && \
+    NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=0 && \
+    NVTE_CK_USES_BWD_V3=1 && \
+    NVTE_CK_USES_FWD_V3=1 && \
+    NVTE_CK_IS_V3_ATOMIC_FP32=0 && \
+    ./runner/primus-cli direct train posttrain --config examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml"
+
+    #TODO: TE_SWIGLU
