@@ -140,10 +140,22 @@ def megatron_derive_default_args(args):
                     # Every Nth layer is MoE
                     args.moe_pattern = [1 if (i % parsed == 0) else 0 for i in range(args.num_layers)]
             elif isinstance(parsed, list):
-                args.moe_pattern = parsed
-                assert (
-                    len(args.moe_pattern) == args.num_layers
-                ), f"Invalid moe_layer_freq length: {len(args.moe_pattern)} (expected {args.num_layers})"
+                # Handle list-based moe_layer_freq pattern
+                if len(parsed) > args.num_layers:
+                    # Truncate to first num_layers elements (for proxy models with fewer layers)
+                    # This is safe: we're using a subset of the pattern for faster profiling
+                    args.moe_pattern = parsed[: args.num_layers]
+                elif len(parsed) < args.num_layers:
+                    # If the pattern is shorter than num_layers, this is likely an error
+                    # (config specifies fewer layers than requested)
+                    raise ValueError(
+                        f"moe_layer_freq pattern has {len(parsed)} elements but num_layers={args.num_layers}. "
+                        f"The pattern length must match or exceed num_layers. "
+                        f"Pattern: {parsed}"
+                    )
+                else:
+                    # Exact match - use as-is (normal case for full model)
+                    args.moe_pattern = parsed
             else:
                 raise ValueError(f"Invalid moe_layer_freq format after eval: {type(parsed)}")
 
