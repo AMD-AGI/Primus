@@ -22,7 +22,7 @@ modules:
       moe_router_force_load_balancing: true
 
       train_iters: 50
-      micro_batch_size: 4
+      micro_batch_size: 1
       global_batch_size: 32
 
       seq_length: ${PRIMUS_SEQ_LENGTH:2048}
@@ -43,7 +43,7 @@ modules:
       # parallel
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
-      expert_model_parallel_size: 1
+      expert_model_parallel_size: 8
       sequence_parallel: 1
       overlap_grad_reduce: true
 
