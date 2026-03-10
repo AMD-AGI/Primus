@@ -445,7 +445,7 @@ def _llama2_lora(
             log_interval=10,
             tensorboard_dir=tensorboard_dir,
             wandb_project="mlperf",
-            wandb_exp_name="llama2_lora_primus_ci_1146b7a_20260225",
+            wandb_exp_name="llama2_lora_primus_bshd",
             wandb_save_dir="/workspace/Primus/wandb",
         ),
         tokenizer=TokenizerConfig(
