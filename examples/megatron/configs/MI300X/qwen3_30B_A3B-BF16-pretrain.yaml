@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:qwen3_235B_A22B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_30B_A3B-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
@@ -9,31 +9,29 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: qwen3_235B_A22B.yaml
+    model: ${PRIMUS_MODEL:qwen3_30B_A3B}.yaml
     overrides:
       # log
-      wandb_project: "Primus_Qwen3_235B_A22B_Pretrain"
-      # disable_wandb: false
-      # disable_tensorboard: false
+      wandb_project: "Primus_Qwen3_30B_A3B_Pretrain"
       stderr_sink_level: DEBUG
 
+      # debug
+      moe_router_force_load_balancing: true
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
-      moe_router_force_load_balancing: true
 
+      # hyper parameters
       train_iters: 50
       micro_batch_size: 4
-      global_batch_size: 32
-
-      seq_length: ${PRIMUS_SEQ_LENGTH:2048}
-      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:131072}
-
-      lr: 1.0e-4
-      min_lr: 1.0e-5
+      global_batch_size: 256
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
       lr_warmup_iters: 2
-      lr_decay_iters: 320000
+      lr_decay_iters: null
       lr_decay_style: cosine
-      weight_decay: 1.0e-1
+      weight_decay: 0.1
       adam_beta1: 0.9
       adam_beta2: 0.95
       eod_mask_loss: true
@@ -41,23 +39,20 @@ modules:
       norm_epsilon: 1.0e-6
 
       # parallel
-      tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 1
-      expert_model_parallel_size: 1
-      sequence_parallel: 1
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
       overlap_grad_reduce: true
-
       overlap_param_gather: true
-      use_torch_fsdp2: false
-      use_distributed_optimizer: true
-      gradient_accumulation_fusion: true
-      ckpt_format: torch
 
       # data
       mock_data: true
-      train_data_path: null
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
+
+      gradient_accumulation_fusion: true
+      moe_use_legacy_grouped_gemm: true
 
       # ckpt
       finetune: false
@@ -70,18 +65,13 @@ modules:
       no_save_optim: null
       no_save_rng: null
       disable_last_saving: true
-
-      # recompute
-      # recompute_granularity: full # full, selective
-      # recompute_method: block # uniform, block
-      # recompute_num_layers: 80 # int
-
-      moe_use_legacy_grouped_gemm: true
+      ckpt_format: torch
+      eval_iters: 0
 
       # Turbo
       enable_primus_turbo: true
-      use_turbo_attention: false
-      use_turbo_grouped_mlp: false
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: true
 
       # deepep
       use_turbo_deepep: true
@@ -92,9 +82,10 @@ modules:
       turbo_deepep_num_cu: 64
       turbo_deepep_use_comm_stream: false
 
-      # sync-free moe support stage 1-2, 0 means not use sync-free moe
+      # sync-free moe support stage 0-3, 0 means not use sync-free moe
+      # stage 3 is completely no gpu-cpu sync in MoE, but cost more memory
       # stage 2 is recommended for better performance
-      turbo_sync_free_moe_stage: 1
+      turbo_sync_free_moe_stage: 2
 
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"
