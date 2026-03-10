@@ -142,6 +142,12 @@ class TestMegatronTrainer(PrimusUT):
                 "8",
                 "--expert_model_parallel_size",
                 "8",
+                "--recompute_granularity",
+                "full",
+                "--recompute_method",
+                "block",
+                "--recompute_num_layers",
+                "0",
             ],
         )
 
@@ -166,6 +172,12 @@ class TestMegatronTrainer(PrimusUT):
                 "8",
                 "--pipeline_model_parallel_size",
                 "1",
+                "--recompute_granularity",
+                "full",
+                "--recompute_method",
+                "block",
+                "--recompute_num_layers",
+                "0",
             ],
         )
 
