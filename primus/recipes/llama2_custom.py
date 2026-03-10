@@ -375,7 +375,7 @@ def _llama2_lora(
         alpha=32,
         dropout=0.1,
         dropout_position="pre",
-        lora_A_init_method="kaiming",
+        lora_A_init_method="xavier",
         lora_B_init_method="zero",
         a2a_experimental=True,
         target_modules=["linear_qkv", "linear_proj"],
@@ -448,7 +448,7 @@ def _llama2_lora(
             log_interval=10,
             tensorboard_dir=tensorboard_dir,
             wandb_project="mlperf",
-            wandb_exp_name="llama2_lora_primus_deterministic_eval",
+            wandb_exp_name="llama2_lora_primus_deterministic_eval_xavier_init",
             wandb_save_dir="/workspace/Primus/wandb",
         ),
         tokenizer=TokenizerConfig(
