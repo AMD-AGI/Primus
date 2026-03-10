@@ -63,6 +63,7 @@ from megatron.bridge.training.config import (
     DistributedDataParallelConfig,
     FinetuningDatasetConfig,
     LoggerConfig,
+    RerunStateMachineConfig,
     RNGConfig,
     TokenizerConfig,
     TrainingConfig,
@@ -200,6 +201,7 @@ class Llama2CustomKwargs(TypedDict, total=False):
     packed_metadata_path: str | None
     dataset_type: str
     seed: int
+    check_for_nan_in_loss: bool
 
 
 def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigContainer:
@@ -266,6 +268,7 @@ def _llama2_lora(
     precision_config: Optional[Union[MixedPrecisionConfig, str]] = "bf16_with_fp8_hybrid",
     comm_overlap_config: Optional[CommOverlapConfig] = None,
     seed: int = 1234,
+    check_for_nan_in_loss: bool = True,
 ) -> ConfigContainer:
     """
     Create a custom pre-training configuration for Llama2 models.
@@ -469,6 +472,9 @@ def _llama2_lora(
             load_rng=False,
         ),
         rng=RNGConfig(seed=seed),
+        rerun_state_machine=RerunStateMachineConfig(
+            check_for_nan_in_loss=check_for_nan_in_loss,
+        ),
         comm_overlap=comm_overlap_config,
         mixed_precision=precision_config,
         peft=peft_config,
