@@ -1,0 +1,39 @@
+diff --git a/megatron/core/extensions/transformer_engine.py b/megatron/core/extensions/transformer_engine.py
+index acb93ef78..5378b001b 100644
+--- a/megatron/core/extensions/transformer_engine.py
++++ b/megatron/core/extensions/transformer_engine.py
+@@ -889,7 +889,7 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
+ 
+         self.config = config
+         self.te_forward_mask_type = False
+-        self.qkv_format: str = "sbhd"
++        self.qkv_format: str = "bshd"
+ 
+         if self.config.apply_query_key_layer_scaling != bool(
+             int(os.getenv("NVTE_APPLY_QK_LAYER_SCALING", "0"))
+@@ -1082,6 +1082,15 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
+         )
+         qkv_format = packed_seq_kwargs.get('qkv_format', self.qkv_format)
+ 
++        # Megatron produces tensors in SBHD [seq, batch, heads, dim].
++        # When qkv_format is "bshd", transpose to [batch, seq, heads, dim] for TE,
++        # and transpose the output back after the TE call.
++        _needs_sbhd_to_bshd = qkv_format == "bshd"
++        if _needs_sbhd_to_bshd:
++            query = query.transpose(0, 1).contiguous()
++            key = key.transpose(0, 1).contiguous()
++            value = value.transpose(0, 1).contiguous()
++
+         attention_bias_kwargs = {}
+         if attention_bias is not None:
+             assert is_te_min_version("1.2.0"), (
+@@ -1137,6 +1146,9 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
+                 query, key, value, attention_mask, **attention_bias_kwargs, **packed_seq_kwargs
+             )
+ 
++        if _needs_sbhd_to_bshd:
++            core_attn_out = core_attn_out.transpose(0, 1).contiguous()
++
+         return core_attn_out
+ 
+     def sharded_state_dict(
