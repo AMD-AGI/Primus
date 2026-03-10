@@ -169,7 +169,7 @@ def patch_primus_topk_router(ctx: PatchContext):
     # submodules.router before it's used, regardless of when MoESubmodules was created
     original_moelayer_init = moe_layer.MoELayer.__init__
 
-    def patched_moelayer_init(self, config, submodules=None, layer_number=None, pg_collection=None):
+    def patched_moelayer_init(self, config, submodules=None, layer_number=None, pg_collection=None, **kwargs):
         """Wrapped MoELayer.__init__ that ensures submodules.router is PrimusTopKRouter."""
         # Fix submodules.router before calling original __init__
         if submodules is not None and hasattr(submodules, "router"):
@@ -189,8 +189,8 @@ def patch_primus_topk_router(ctx: PatchContext):
                             f"{router_module_name}.{router_class_name} -> {PrimusTopKRouter.__name__}"
                         )
 
-        # Call original __init__
-        return original_moelayer_init(self, config, submodules, layer_number, pg_collection)
+        # Call original __init__ (forward all kwargs like is_mtp_layer, etc.)
+        return original_moelayer_init(self, config, submodules, layer_number, pg_collection, **kwargs)
 
     moe_layer.MoELayer.__init__ = patched_moelayer_init
     log_rank_0(
