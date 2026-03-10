@@ -132,6 +132,13 @@ docker exec "${CONTAINER_NAME}" bash -c "
     cd /workspace/Primus/third_party/Megatron-Bridge
     git apply /workspace/Primus/megatron_bridge_validation_consumed_samples.patch || true"
 
+# Step 5b: Patch Megatron-Bridge for deterministic evaluation. Resets validation data iterator
+# before each evaluation so every eval pass sees the exact same data in the same order.
+echo_info "Step 5b: Patching Megatron-Bridge for deterministic evaluation..."
+docker exec "${CONTAINER_NAME}" bash -c "
+    cd /workspace/Primus/third_party/Megatron-Bridge
+    git apply /workspace/Primus/megatron_bridge_deterministic_eval.patch || true"
+
 # Step 6: Start training
 echo_info "Step 6: Starting llama2_70b_lora training..."
 echo_info "Training configuration: examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml"

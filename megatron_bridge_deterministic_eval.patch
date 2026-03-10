@@ -1,0 +1,101 @@
+diff --git a/src/megatron/bridge/data/loaders.py b/src/megatron/bridge/data/loaders.py
+index b8b3a4a6..d14891f9 100644
+--- a/src/megatron/bridge/data/loaders.py
++++ b/src/megatron/bridge/data/loaders.py
+@@ -106,6 +106,34 @@ def cyclic_iter(iter: Iterable) -> Iterator:
+             yield x
+ 
+ 
++class ResettableDataIterator:
++    """Iterator wrapper that restarts from the beginning of the dataloader on reset().
++
++    Unlike cyclic_iter which continuously cycles, this iterator explicitly resets
++    to produce the exact same sequence of batches on each reset(). This guarantees
++    deterministic validation: every evaluation pass sees identical data in identical
++    order, regardless of how many evaluations have occurred.
++    """
++
++    def __init__(self, dataloader):
++        self._dataloader = dataloader
++        self._iterator = iter(dataloader)
++
++    def __iter__(self):
++        return self
++
++    def __next__(self):
++        try:
++            return next(self._iterator)
++        except StopIteration:
++            self._iterator = iter(self._dataloader)
++            return next(self._iterator)
++
++    def reset(self):
++        """Reset to the beginning of the dataloader for deterministic iteration."""
++        self._iterator = iter(self._dataloader)
++
++
+ def get_train_valid_test_num_samples(cfg: ConfigContainer) -> tuple[int, int, int]:
+     """Calculate the number of samples for train, validation, and test sets.
+ 
+@@ -328,8 +356,7 @@ def build_train_valid_test_data_iterators(
+         train_data_iterator = None
+ 
+     if valid_dataloader is not None:
+-        val_dataloader_type = "cyclic" if isinstance(cfg.dataset, GPTDatasetConfig) else cfg.dataset.dataloader_type
+-        valid_data_iterator = _get_iterator(val_dataloader_type, valid_dataloader)
++        valid_data_iterator = RerunDataIterator(ResettableDataIterator(valid_dataloader))
+     else:
+         valid_data_iterator = None
+ 
+diff --git a/src/megatron/bridge/training/eval.py b/src/megatron/bridge/training/eval.py
+index a8a89537..de7a06d5 100644
+--- a/src/megatron/bridge/training/eval.py
++++ b/src/megatron/bridge/training/eval.py
+@@ -26,6 +26,7 @@ from megatron.core.transformer import MegatronModule
+ 
+ from megatron.bridge.data.finetuning import prepare_finetuning_batch
+ from megatron.bridge.data.iterator_utils import make_data_iterator_list
++from megatron.bridge.data.loaders import ResettableDataIterator
+ from megatron.bridge.training import fault_tolerance
+ from megatron.bridge.training.config import ConfigContainer
+ from megatron.bridge.training.forward_step_func_types import ForwardStepCallable
+@@ -35,6 +36,30 @@ from megatron.bridge.training.utils.train_utils import prepare_forward_step_func
+ from megatron.bridge.utils.common_utils import is_last_rank, print_rank_0, print_rank_last
+ 
+ 
++def _reset_data_iterator(data_iterator):
++    """Reset data iterator to the beginning for deterministic evaluation.
++
++    Traverses through RerunDataIterator wrappers to find and reset any
++    ResettableDataIterator, ensuring evaluation always starts from the
++    same data point.
++    """
++    if data_iterator is None:
++        return
++    if isinstance(data_iterator, list):
++        for it in data_iterator:
++            _reset_data_iterator(it)
++        return
++    if isinstance(data_iterator, RerunDataIterator):
++        inner = data_iterator.iterable
++        if isinstance(inner, ResettableDataIterator):
++            inner.reset()
++            data_iterator.saved_microbatches.clear()
++            data_iterator.replaying = False
++            data_iterator.replay_pos = 0
++    elif isinstance(data_iterator, ResettableDataIterator):
++        data_iterator.reset()
++
++
+ def evaluate(
+     state: GlobalState,
+     forward_step_func: ForwardStepCallable,
+@@ -63,6 +88,8 @@ def evaluate(
+             - collected_non_loss_data: Data collected by non_loss_data_func.
+             - timelimit_hit: Boolean indicating if the time limit was reached.
+     """
++    _reset_data_iterator(data_iterator)
++
+     # Prepare forward_step_func (check signature and inject state if needed)
+     # This is done once to prevent creating new partial objects every eval iteration
+     wrapped_forward_step = prepare_forward_step_func(forward_step_func, state)
