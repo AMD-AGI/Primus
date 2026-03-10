@@ -589,8 +589,17 @@ def warmup_eval(
     log_rank_0(f"Starting warmup eval...")
     for i in range(num_warmup_iters):
         log_rank_0(f"Warmup eval iteration {i} running...")
-        eval.evaluate(
-            state, forward_step_func, data_iterator, model, process_non_loss_data_func, config, verbose, non_loss_data_func
+        evaluate_and_print_results_custom(
+            state,
+            f"warmup iteration {i}",
+            forward_step_func,
+            data_iterator,
+            model,
+            config,
+            verbose=verbose,
+            write_to_tensorboard=True,
+            process_non_loss_data_func=process_non_loss_data_func,
+            non_loss_data_func=non_loss_data_func,
         )
         log_rank_0(f"Warmup eval iteration {i} completed")
     log_rank_0(f"Warmup eval completed")
