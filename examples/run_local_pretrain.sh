@@ -199,6 +199,7 @@ docker_podman_proxy run --rm \
     --env BACKEND_PATH \
     --env REBUILD_PRIMUS_TURBO \
     "${ENV_ARGS[@]}" \
+    --ulimit core=0:0 \
     --ipc=host --network=host \
     --device=/dev/kfd --device=/dev/dri \
     --cap-add=SYS_PTRACE --cap-add=CAP_SYS_ADMIN \
