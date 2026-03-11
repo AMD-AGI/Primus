@@ -72,6 +72,8 @@ modules:
       ckpt_format: torch
       eval_iters: 0
 
+      moe_token_dispatcher_type: alltoall
+
       # Turbo
       enable_primus_turbo: true
       use_turbo_attention: false
@@ -91,8 +93,8 @@ modules:
       turbo_sync_free_moe_stage: 1
 
       # Cross entropy flags
-      # cross_entropy_fusion_impl: "te"
-      # cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
 
       # enable fp8 training
       fp8: hybrid
