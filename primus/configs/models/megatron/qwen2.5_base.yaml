@@ -23,5 +23,8 @@ max_position_embeddings: 131072
 norm_epsilon: 1.0e-6
 init_method_std: 0.008
 
+moe_token_dispatcher_type: alltoall
+
+moe_grouped_gemm: true
 apply_rope_fusion: true
 masked_softmax_fusion: false
