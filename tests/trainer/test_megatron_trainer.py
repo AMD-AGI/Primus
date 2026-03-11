@@ -190,6 +190,8 @@ class TestMegatronTrainer(PrimusUT):
             extra_args=[
                 "--num_layers",
                 "4",
+                "--moe_layer_freq",
+                "[0]*1+[1]*3",
                 "--train_iters",
                 "3",
                 "--micro_batch_size",
