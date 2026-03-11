@@ -334,6 +334,7 @@ def calculate_collective_communication_time(
 
             # Overlap factor applied uniformly to all FSDP
             # communication - (AllGather fwd, AllGather recompute, ReduceScatter).
+            # This number is based on observed overlap in the benchmarked run of llama3-70b.
             FSDP_OVERLAP = 0.93
 
             total_fsdp = total_fsdp_ag + total_fsdp_rs
@@ -2146,18 +2147,6 @@ def _run_multinode_projection(
     # per-microbatch compute time is constant; total iteration time is
     # computed later as: per_microbatch_time × target_microbatches.
     projected_compute_time_ms = benchmarked_time_ms
-
-    # Apply scale overhead factor to account for real-world overhead at scale
-    # This accounts for: straggler effects, network congestion, synchronization,
-    # system noise, and inter-node P2P overhead that increases with node count
-    if target_nodes > 8:
-        scale_overhead_factor = 1.0 + (0.05 * math.log2(target_nodes / 8))
-        projected_compute_time_ms = projected_compute_time_ms * scale_overhead_factor
-        if is_rank_0:
-            print(f"  Scale overhead factor (for {target_nodes} nodes): {scale_overhead_factor:.4f}")
-            print(
-                f"  Adjusted compute time: {projected_compute_time_ms:.2f} ms (was {benchmarked_time_ms:.2f} ms)"
-            )
 
     # 2. Handle gradient all-reduce based on overlap setting
     # NOTE: Gradient allreduce happens ONCE per iteration (after the last

@@ -86,8 +86,6 @@ _KNOWN_PROFILES: Dict[str, _HardwareProfile] = {
     "gfx950": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 2_100_000, 8000.0),
     # MI300A
     "mi300a": _HardwareProfile("gfx942", 228, 65536, 4_194_304, 2_100_000, 4000.0),
-    # Experimental
-    "experimental": _HardwareProfile("gfx950", 256, 65536, 4_194_304, 3_057_000, 20100.0),
 }
 
 # ---------------------------------------------------------------------------
