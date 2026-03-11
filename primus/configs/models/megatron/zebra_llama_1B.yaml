@@ -11,12 +11,19 @@ num_layers: 32
 hidden_size: 2048
 ffn_hidden_size: 8192 
 
-# Mamba parameters
+# Hybrid model parameters
 is_hybrid_model: true
 hybrid_attention_ratio: 0.25
 mamba_state_dim: 64
 mamba_head_dim: 64
 mamba_num_groups: 8
+
+# Gated Delta Net parameters
+linear_conv_kernel_dim: 4
+linear_key_head_dim: 64
+linear_value_head_dim: 64
+linear_num_key_heads: 8
+linear_num_value_heads: 16
 
 # MLA parameters
 # Disable standard GQA - MLA uses its own compression via LoRA

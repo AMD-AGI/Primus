@@ -14,6 +14,10 @@ from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
 from megatron.core.ssm.mamba_block import MambaStack, MambaStackSubmodules
 from megatron.core.ssm.mamba_layer import MambaLayer, MambaLayerSubmodules
 from megatron.core.ssm.mamba_mixer import MambaMixer, MambaMixerSubmodules
+from primus.backends.megatron.core.models.hybrid.gated_delta_net import GatedDeltaNet, GatedDeltaNetSubmodules
+from primus.backends.megatron.core.models.hybrid.gated_delta_net_layer import GatedDeltaNetLayer, GatedDeltaNetLayerSubmodules
+from primus.backends.megatron.core.models.hybrid.kimi_delta_attention import KimiDeltaAttention, KimiDeltaAttentionSubmodules
+from primus.backends.megatron.core.models.hybrid.kimi_delta_attention_layer import KimiDeltaAttentionLayer, KimiDeltaAttentionLayerSubmodules
 from megatron.core.ssm.mlp_layer import MLPLayer
 # Import HybridStack from relative path
 from primus.backends.megatron.core.models.hybrid.hybrid_block import (
@@ -52,6 +56,7 @@ moe = get_moe_module_spec(
     moe_use_legacy_grouped_gemm=False,
 )
 
+
 hybrid_stack_spec = ModuleSpec(
     module=HybridStack,
     submodules=HybridStackSubmodules(
@@ -60,7 +65,7 @@ hybrid_stack_spec = ModuleSpec(
             submodules=MambaLayerSubmodules(
                 mixer=ModuleSpec(
                     module=MambaMixer,
-                     params={
+                    params={
                         "expand": 1,
                         "d_conv": 4,
                     },
@@ -105,12 +110,119 @@ hybrid_stack_spec = ModuleSpec(
                 mlp_bda=get_bias_dropout_add,
             ),
         ),
-        moe_layer=ModuleSpec(
-            # TODO (rwaleffe): change this to be an "MoELayer" to work with CudaGraphs?
-            module=TransformerLayer,
-            submodules=TransformerLayerSubmodules(
-                pre_mlp_layernorm=TENorm, mlp=moe, mlp_bda=get_bias_dropout_add
+        moe_layer=moe,
+    ),
+)
+
+
+gdn_hybrid_stack_spec = ModuleSpec(
+    module=HybridStack,
+    submodules=HybridStackSubmodules(
+        mamba_layer=ModuleSpec(
+            module=GatedDeltaNetLayer,
+            submodules=GatedDeltaNetLayerSubmodules(
+                mixer=ModuleSpec(
+                    module=GatedDeltaNet,
+                    submodules=GatedDeltaNetSubmodules(
+                        in_proj=TELayerNormColumnParallelLinear, out_norm=TENorm, out_proj=TERowParallelLinear
+                    ),
+                ),
+                gdn_bda=get_bias_dropout_add,
             ),
         ),
+        attention_layer = ModuleSpec(
+            module=TransformerLayer,
+            submodules=TransformerLayerSubmodules(
+                input_layernorm=TENorm,
+                self_attention=ModuleSpec(
+                    module=MLASelfAttention,
+                    params={"attn_mask_type": AttnMaskType.causal},
+                    submodules=MLASelfAttentionSubmodules(
+                        linear_q_proj=TEColumnParallelLinear,
+                        linear_q_down_proj=TELinear,
+                        linear_q_up_proj=TELayerNormColumnParallelLinear,
+                        linear_kv_down_proj=TELinear,
+                        linear_kv_up_proj=TELayerNormColumnParallelLinear,
+                        core_attention=TEDotProductAttention,
+                        linear_proj=TERowParallelLinear,
+                        q_layernorm=IdentityOp,
+                        kv_layernorm=IdentityOp,
+                    ),
+                ),
+                self_attn_bda=get_bias_dropout_add,
+            ),
+        ),
+        mlp_layer=ModuleSpec(
+            module=MLPLayer,
+            submodules=TransformerLayerSubmodules(
+                mlp=ModuleSpec(
+                    module=MLP,
+                    submodules=MLPSubmodules(
+                        linear_fc1=TELayerNormColumnParallelLinear, linear_fc2=TERowParallelLinear
+                    ),
+                ),
+                mlp_bda=get_bias_dropout_add,
+            ),
+        ),
+        moe_layer=moe,
+    ),
+)
+
+# KDA (Kimi Delta Attention) variant: uses fused Q/K/V in_proj with
+# TELayerNormColumnParallelLinear (matching GDN), combined depthwise conv1d,
+# and low-rank gate factorization. Requires fla-core (fla.ops.kda).
+kda_hybrid_stack_spec = ModuleSpec(
+    module=HybridStack,
+    submodules=HybridStackSubmodules(
+        mamba_layer=ModuleSpec(
+            module=KimiDeltaAttentionLayer,
+            submodules=KimiDeltaAttentionLayerSubmodules(
+                mixer=ModuleSpec(
+                    module=KimiDeltaAttention,
+                    submodules=KimiDeltaAttentionSubmodules(
+                        in_proj=TELayerNormColumnParallelLinear,
+                        gate_norm=TENorm,
+                        out_norm=TENorm,
+                        out_proj=TERowParallelLinear,
+                    ),
+                ),
+                kda_bda=get_bias_dropout_add,
+            ),
+        ),
+        attention_layer=ModuleSpec(
+            module=TransformerLayer,
+            submodules=TransformerLayerSubmodules(
+                input_layernorm=TENorm,
+                self_attention=ModuleSpec(
+                    module=MLASelfAttention,
+                    params={"attn_mask_type": AttnMaskType.causal},
+                    submodules=MLASelfAttentionSubmodules(
+                        linear_q_proj=TEColumnParallelLinear,
+                        linear_q_down_proj=TELinear,
+                        linear_q_up_proj=TELayerNormColumnParallelLinear,
+                        linear_kv_down_proj=TELinear,
+                        linear_kv_up_proj=TELayerNormColumnParallelLinear,
+                        core_attention=TEDotProductAttention,
+                        linear_proj=TERowParallelLinear,
+                        q_layernorm=IdentityOp,
+                        kv_layernorm=IdentityOp,
+                    ),
+                ),
+                self_attn_bda=get_bias_dropout_add,
+            ),
+        ),
+        mlp_layer=ModuleSpec(
+            module=MLPLayer,
+            submodules=TransformerLayerSubmodules(
+                mlp=ModuleSpec(
+                    module=MLP,
+                    submodules=MLPSubmodules(
+                        linear_fc1=TELayerNormColumnParallelLinear, linear_fc2=TERowParallelLinear
+                    ),
+                ),
+                mlp_bda=get_bias_dropout_add,
+            ),
+        ),
+        moe_layer=moe,
     ),
 )
