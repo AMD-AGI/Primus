@@ -8,21 +8,21 @@
 # System hook: enable build uccl settings.
 #
 # Trigger:
-#   export REBUILD_UCCL=1
+#   export REBUILD_UEP=1
 #
 ###############################################################################
 
 set -euo pipefail
 
-if [[ "${REBUILD_UCCL:-0}" != "1" ]]; then
+if [[ "${REBUILD_UEP:-0}" != "1" ]]; then
     exit 0
 fi
 
 UCCL_DIR="/tmp/uccl"
 UCCL_BUILD_DIR="${UCCL_BUILD_DIR:-/tmp/uccl_${HOSTNAME:-$(hostname)}}"
-UCCL_REF="${UCCL_REF:-}"
+UCCL_REF="${UCCL_REF:-92d5cea88f1f8add3d3cb54ae8487c97b63c1d16}" # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
 
-LOG_INFO_RANK0 "[hook system] REBUILD_UCCL=1 → Building uccl in /tmp "
+LOG_INFO_RANK0 "[hook system] REBUILD_UEP=1 → Building uccl in /tmp "
 LOG_INFO_RANK0 "  Build directory : ${UCCL_BUILD_DIR}"
 
 if [ -d "$UCCL_DIR" ]; then
