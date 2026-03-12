@@ -40,14 +40,22 @@ export PRIMUS_EP=8
 export PRIMUS_VPP=1
 export PROFILE=True
 export TURBO_DEEPEEP=True
-export LEGACY_GG=True # True: legacy GG, False: TE GG
 export PRIMUS_DETERMINISTIC=0
 # Enable NUMA binding for better memory locality (increase stability for large models)
 # export ENABLE_NUMA_BINDING=1
 # export HSA_KERNARG_POOL_SIZE=12582912
 
 
-export PRETRAIN_TYPE=BF16 # BF16 # FP8
+export PRETRAIN_TYPE=BF16 # BF16 or FP8
+
+if [ "$PRETRAIN_TYPE" = "BF16" ]; then
+  export LEGACY_GG=True
+elif [ "$PRETRAIN_TYPE" = "FP8" ]; then
+  export LEGACY_GG=False
+else
+  echo "Error: PRETRAIN_TYPE must be BF16 or FP8, got '$PRETRAIN_TYPE'" >&2
+  exit 1
+fi
 export EXP=examples/megatron/configs/MI355X/deepseek_v3-${PRETRAIN_TYPE}-pretrain.yaml
 export PRIMUS_TEAM=amd
 export PRIMUS_USER=tas
