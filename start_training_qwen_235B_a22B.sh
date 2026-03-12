@@ -14,8 +14,10 @@ export USING_AINIC=1
 export NCCL_IB_HCA="ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,ionic_8:1,ionic_9:1"
 export GLOO_SOCKET_IFNAME=ens9np0
 export NCCL_SOCKET_IFNAME=ens9np0
+export HSA_NO_SCRATCH_RECLAIM=1
+export NVTE_CK_USES_BWD_V3=1
+export GPU_MAX_HW_QUEUES=4
 export CLEAN_DOCKER_CONTAINER=1
-export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-4}
 
 export MBS=4
 export GBS=8192

@@ -42,11 +42,10 @@ mkdir -p "$LOG_DIR"
 srun -N "${NNODES}" \
      --exclusive \
      --export ALL \
-     ${NODE_LIST:+--nodelist="${NODE_LIST}"} \
      --ntasks-per-node=1 \
-     --time="${SLURM_TIME:-07:00:00}" \
-     --nodelist="${SLURM_NODELIST:-}" \
-     --partition="${SLURM_PARTITION:-amd-aig}" \
+     ${SLURM_TIME:+--time="${SLURM_TIME}"} \
+     ${SLURM_NODELIST:+--nodelist="${SLURM_NODELIST}"} \
+     ${SLURM_PARTITION:+--partition="${SLURM_PARTITION}"} \
      --cpus-per-task="${CPUS_PER_TASK:-128}" \
      bash -c "
           readarray -t node_array < <(scontrol show hostnames \"\$SLURM_JOB_NODELIST\")

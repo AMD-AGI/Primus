@@ -3,7 +3,7 @@
 export HF_TOKEN="your_hf_token"  # make it your own hf token
 export WANDB_API_KEY="your_wandb_api_key"  # make it your own wandb api key
 export DOCKER_IMAGE="docker.io/tasimage/primus:pr-563-ainic"
-#export SLURM_TREE_WIDTH=128 
+#export SLURM_TREE_WIDTH=128
 
 export NNODES=128
 export SLURM_TIME=07:00:00
@@ -12,8 +12,11 @@ export SLURM_PARTITION=amd-aig
 # export NCCL_DEBUG=INFO
 export USING_AINIC=1
 export NCCL_IB_HCA="ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,ionic_8:1,ionic_9:1"
-export GLOO_SOCKET_IFNAME=ens9np0 
-export NCCL_SOCKET_IFNAME=ens9np0 
+export GLOO_SOCKET_IFNAME=ens9np0
+export NCCL_SOCKET_IFNAME=ens9np0
+export HSA_NO_SCRATCH_RECLAIM=1
+export NVTE_CK_USES_BWD_V3=1
+export GPU_MAX_HW_QUEUES=4
 export CLEAN_DOCKER_CONTAINER=1
 
 export MBS=12
