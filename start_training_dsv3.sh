@@ -18,6 +18,9 @@ export USING_AINIC=1
 export NCCL_IB_HCA="ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,ionic_8:1,ionic_9:1"
 export GLOO_SOCKET_IFNAME=ens9np0
 export NCCL_SOCKET_IFNAME=ens9np0
+export HSA_NO_SCRATCH_RECLAIM=1
+export NVTE_CK_USES_BWD_V3=1
+export GPU_MAX_HW_QUEUES=4
 export CLEAN_DOCKER_CONTAINER=1
 
 export MBS=2
@@ -113,7 +116,6 @@ bash ./examples/run_slurm_pretrain.sh \
   --micro_batch_size $MBS \
   --global_batch_size $GBS \
   --use_turbo_deepep $TURBO_DEEPEEP \
-  --turbo_sync_free_moe_stage 0 \
   --lr 2.2e-4 \
   --min_lr 2.2e-5 \
   --lr_warmup_iters 200 \
