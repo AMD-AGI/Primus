@@ -13,6 +13,8 @@ Primus includes projection tools that estimate **memory requirements** and **tra
   - Memory: `primus/core/projection/memory_projection/projection.py`
   - Performance: `primus/core/projection/performance_projection/projection.py`
 
+This allows you to estimate training performance on larger clusters without actually running on them.
+
 ---
 
 ## Table of Contents
@@ -30,6 +32,8 @@ Primus includes projection tools that estimate **memory requirements** and **tra
    - [Memory Formulas Reference](#memory-formulas-reference)
 4. [Performance Projection](#performance-projection)
    - [Overview](#performance-overview)
+   - [Profiling Modes](#profiling-modes)
+   - [Simulation Backends](#simulation-backends)
    - [How It Works](#how-it-works)
    - [Scaling Mechanisms](#scaling-mechanisms)
    - [Communication Modeling](#communication-modeling)
@@ -56,9 +60,20 @@ bash runner/primus-cli direct --script primus/cli/main.py -- \
     --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
 ```
 
-### Performance Projection
+### Training Projection (default)
 
-Benchmark on 1 node and project to a target cluster:
+Run a basic training performance projection for the minimum required nodes:
+
+```bash
+export NNODES=1
+export HSA_NO_SCRATCH_RECLAIM=1
+
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection performance \
+    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
+```
+
+Project training performance to a specific number of nodes:
 
 ```bash
 export NNODES=1
@@ -90,12 +105,14 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 |--------|------|-------------|
 | `--target-nodes` | int | Target number of nodes for projection. Defaults to minimum required by parallelism config |
 | `--hardware-config` | string | Path to YAML file with custom hardware parameters for communication modeling |
+| `--profiling-mode` | string | `benchmark` (default), `simulate` for pure analytical (no GPU), or `both` for side-by-side comparison |
 
 ### Parallelism Overrides
 
-You can override parallelism settings from the config file:
+You can override parallelism settings from the config file using environment variables or CLI overrides:
 
 ```bash
+# Using environment variables
 export PRIMUS_TP=1
 export PRIMUS_PP=3
 export PRIMUS_EP=8
@@ -459,11 +476,83 @@ The performance projection tool:
 2. **Simulates** pipeline parallelism scheduling (including zero-bubble optimization)
 3. **Projects** performance to multi-node configurations by modeling:
    - Data Parallelism (DP) scaling
-   - Gradient AllReduce communication overhead
+   - Gradient AllReduce communication overhead (training only)
    - Expert Parallelism (EP) All-to-All communication overhead
    - Inter-node vs intra-node communication differences
 
-This allows you to estimate training performance on larger clusters without actually running on them.
+### Profiling Modes
+
+The `--profiling-mode` flag controls how per-layer compute times are obtained:
+
+| Mode | GPU Required | What it does |
+|------|-------------|--------------|
+| `benchmark` (default) | **Yes** | Runs real GPU kernels on 1 node and measures forward/backward times with CUDA events |
+| `simulate` | **No** | Uses **Origami** (GEMM) and **SDPA Simulator** (attention) analytical backends to predict layer times — no GPU or model instantiation needed |
+| `both` | **Yes** | Runs both benchmark and simulation side-by-side, prints a comparison table, and uses benchmark results for the actual projection |
+
+When you **don't have access to a GPU** (e.g., capacity planning on a laptop), use `--profiling-mode simulate`. The simulation backends analytically predict kernel execution times based on matrix dimensions, data types, and hardware characteristics.
+
+### Simulation Backends
+
+When `--profiling-mode simulate` is selected, layer compute times are predicted analytically using two simulation backends:
+
+#### Origami (GEMM Backend)
+
+[Origami](https://github.com/ROCm/rocm-libraries/tree/develop/shared/origami/python) is an open-source tool (part of the ROCm ecosystem) that provides a fast, analytical, deterministic methodology to select optimal GEMM configurations (such as tile size) for out-of-the-box GEMM performance on AMD GPUs. It also provides an analytical performance model for GEMM kernels — Primus uses this analytical modeling capability to predict GEMM execution times without running on actual hardware.
+
+- **Used for**: All GEMM operations — attention projections (Q, K, V, O), MLP (gate, up, down), MoE expert GEMMs, embedding, and output layers
+- **How it works**: Models the GPU's Compute Units (CUs), memory hierarchy, and tile-level execution to predict GEMM duration given matrix dimensions, data type, and hardware characteristics
+- **Built-in hardware profiles**: Supports architectures like MI300X, MI325X, MI355X, etc. with pre-configured CU counts, HBM bandwidth, and peak TFLOPS
+- **GPU arch override**: Use `--gpu-arch` (or `PRIMUS_GPU_ARCH` env var) to select a target architecture
+- **Clock override**: Use `--gpu-clock-mhz` to scale compute throughput for different clock frequencies
+
+Installation:
+```bash
+pip install git+https://github.com/ROCm/rocm-libraries.git#subdirectory=shared/origami/python
+```
+
+#### SDPA Simulator (Attention Backend)
+
+The SDPA simulator models Flash Attention v3 (FAv3) kernel execution analytically using Origami's 1-CU tile-level model.
+
+- **Used for**: Scaled Dot-Product Attention (SDPA) — both forward and backward passes
+- **How it works**: Models FAv3 as a fused kernel where QKᵀ, softmax, and PV are sequential within each workgroup. Total time = (per-tile-QKᵀ + per-tile-PV) × num_waves. This captures wave quantization and per-tile efficiency without needing an empirical `compute_efficiency` parameter.
+- **Backward pass**: Also models the dQ atomic overhead from `buffer_atomic_add_f32` accumulation across KV-workgroups
+- **Built-in hardware profiles**: Same architecture support as Origami (e.g. MI300X, MI325X, MI355X)
+- **Requires Origami**: The SDPA simulator uses Origami internally for tile-level GEMM simulation
+
+#### Simulation Quick Start
+
+Run a full training projection without any GPU:
+
+```bash
+# No GPU required — runs entirely on CPU
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection performance \
+    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --profiling-mode simulate \
+    --target-nodes 4
+```
+
+Target a specific GPU architecture:
+
+```bash
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection performance \
+    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --profiling-mode simulate --gpu-arch mi355x \
+    --target-nodes 4
+```
+
+Compare simulation accuracy against projection with single node benchmarking:
+
+```bash
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection performance \
+    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --profiling-mode both \
+    --target-nodes 4
+```
 
 ### How It Works
 
@@ -552,6 +641,22 @@ Gradient AllReduce Size = num_params × 4 (FP32 gradients)
 
 **What it does**: Splits sequence length across GPUs for long-context training.
 
+**How it interacts with other dimensions**: CP behaves differently for dense and MoE models:
+
+- **Dense models**: CP is an independent parallelism axis. It directly multiplies the GPU count:
+  ```
+  Total GPUs = TP × PP × CP × DP
+  ```
+  Each CP rank holds a different chunk of the sequence and they communicate via AllGather/AllToAll during attention.
+
+- **MoE models (with Parallel Folding)**: CP is **folded into** EP — the CP ranks are a subset of the EP ranks. The constraints are `CP ≤ EP` and `EP % CP == 0`. CP does **not** add extra GPUs beyond EP:
+  ```
+  Total GPUs = TP × PP × EP × DP
+  ```
+  Within the EP group, CP determines how many of the EP ranks share context-parallel work on attention. The remaining `EP / CP` factor provides inner data-parallel streams for the attention layers. For the MoE FFN layers, all EP ranks participate in expert parallelism as usual.
+
+  For example, with EP=8 and CP=4: the 8 EP ranks form 2 groups of 4 for context-parallel attention, giving 2 inner-DP streams. Traditional (unfolded) parallelism would require `EP × CP = 32` GPUs; with folding it requires only `EP = 8`.
+
 **How it's modeled**: CP affects the GPU topology for communication routing. Currently included in minimum GPU requirements calculation.
 
 ### Communication Modeling
@@ -574,15 +679,25 @@ Custom hardware parameters can be provided via `--hardware-config <yaml>`.
 
 ##### Minimum Nodes Required
 
+The minimum nodes required depends on the model type:
+
+**Dense models** (no expert parallelism):
 ```
-Min Nodes = ceil(TP × PP × EP × CP / GPUs_per_node)
+Min GPUs  = TP × PP × CP
+Min Nodes = ceil(Min GPUs / GPUs_per_node)
+```
+
+**MoE models** (with MoE Parallel Folding, where CP is folded into EP):
+```
+Min GPUs  = TP × PP × EP          (CP ≤ EP, folded in)
+Min Nodes = ceil(Min GPUs / GPUs_per_node)
 ```
 
 ##### Scaling Behavior
 
 - **DP scaling**: Linear speedup. Doubling DP halves iteration time (minus communication overhead).
 - **PP scaling**: Happens in multiples of pipeline replicas. With PP=3, you need 3, 6, 9... nodes to increase scaling.
-- **EP scaling**: Divides the experts across EP nodes.
+- **EP scaling**: Divides the experts across EP ranks. For MoE models, EP also subsumes the CP dimension.
 
 ### Pipeline Schedule Simulator
 
@@ -733,9 +848,15 @@ Step 3: Projected Time
 ====================================================================================================
 ```
 
-### Performance Projection
+### Performance Projection (Training)
 
 ```
+====================================================================================================
+[Primus:Performance Projection] Configuration Summary:
+  Benchmark Config: PP=1, EP=8, TP=1, CP=1, DP=1 (1 node)
+  Target Config: PP=1, EP=8, TP=1, CP=1, DP=4 (4 nodes)
+  Benchmark Microbatches: 160 (global_batch=640, micro_batch=4, benchmark_dp=1)
+
 ====================================================================================================
 Multinode Scaling Projection Results
 ====================================================================================================
@@ -789,6 +910,8 @@ Multinode Scaling Projection Results
 - **Pipeline scaling**: With PP > 1, you can only scale in multiples of the pipeline replica size.
 - **Recomputation trade-off**: Full recompute dramatically reduces activation memory (e.g., 18 GB → 0.25 GB per MoE layer) at the cost of ~33% more compute.
 - **MoE activation dominance**: For MoE models, the MoE MLP activation (scaled by `topk`) typically dominates the per-layer activation budget. Consider recomputation if memory is tight.
+- **No GPU? Use simulation**: With `--profiling-mode simulate`, you can run performance projection entirely on CPU using the Origami GEMM and SDPA analytical backends. This is useful for capacity planning without GPU access.
+- **Validate simulation accuracy**: Use `--profiling-mode both` to run projection via single node benchmarking and simulation side-by-side and compare the results.
 
 ## Related Documentation
 
