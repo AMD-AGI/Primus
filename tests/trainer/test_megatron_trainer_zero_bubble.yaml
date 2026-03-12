@@ -71,6 +71,7 @@ modules:
       enable_primus_turbo: true
       use_turbo_attention: true
       use_turbo_grouped_mlp: true
+      use_turbo_parallel_linear: true
 
       # transformer_impl: local
       overlap_grad_reduce: false
@@ -79,6 +80,9 @@ modules:
       create_attention_mask_in_dataloader: false
       gradient_accumulation_fusion: true
 
-      patch_zero_bubble: true
-      enable_zero_bubble: true
-      zero_bubble_v_schedule: true
+      # patch_zero_bubble: true
+      # enable_zero_bubble: true
+      # zero_bubble_v_schedule: true
+      patch_primus_pipeline: true
+      pp_algorithm: "v-half"
+      debug_scheduler_table: true

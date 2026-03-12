@@ -28,3 +28,8 @@ moe_token_dispatcher_type: alltoall
 moe_grouped_gemm: true
 apply_rope_fusion: true
 masked_softmax_fusion: false
+
+moe_token_dispatcher_type: alltoall
+moe_grouped_gemm: true
+moe_use_legacy_grouped_gemm: false
+moe_permute_fusion: true

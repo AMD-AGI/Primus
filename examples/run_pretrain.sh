@@ -398,8 +398,8 @@ export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_
 # enable mxfp8 on ROCm Transformer Engine
 export NVTE_ROCM_ENABLE_MXFP8=1
 
-# Note: Disable v3 due to accuracy issues. Will fix after TE version 2.1.
-export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
+# Note: Enable v3 since TE >= 2.6, accuracy issues have been resolved.
+export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 
 # Note: Disable fp32 atomic due if you find any accuracy issue.
 export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:-0}
