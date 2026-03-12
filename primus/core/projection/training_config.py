@@ -30,6 +30,7 @@ class ModelParallelConfig:
     # Pipeline stage layer distribution
     decoder_first_pipeline_num_layers: int = None
     decoder_last_pipeline_num_layers: int = None
+    pipeline_model_parallel_layout: str = None
     # Recomputation settings
     recompute_granularity: str = None  # "full" or "selective"
     recompute_num_layers: int = 0
@@ -63,6 +64,13 @@ class ModelConfig:
     moe_shared_expert_intermediate_size: int = 0
     # Misc
     share_embeddings_and_output_weights: bool = False
+    # Precision – None means bf16, "hybrid" means FP8-hybrid (linear GEMMs in FP8)
+    fp8: str = None
+
+    # Primus Turbo flags — used to select the grouped-GEMM performance model
+    enable_primus_turbo: bool = False
+    use_turbo_grouped_mlp: bool = False
+    use_turbo_deepep: bool = False  # DeepEP enables async A2A with compute overlap
 
 
 @dataclass
@@ -132,10 +140,22 @@ def megatron_derive_default_args(args):
                     # Every Nth layer is MoE
                     args.moe_pattern = [1 if (i % parsed == 0) else 0 for i in range(args.num_layers)]
             elif isinstance(parsed, list):
-                args.moe_pattern = parsed
-                assert (
-                    len(args.moe_pattern) == args.num_layers
-                ), f"Invalid moe_layer_freq length: {len(args.moe_pattern)} (expected {args.num_layers})"
+                # Handle list-based moe_layer_freq pattern
+                if len(parsed) > args.num_layers:
+                    # Truncate to first num_layers elements (for proxy models with fewer layers)
+                    # This is safe: we're using a subset of the pattern for faster profiling
+                    args.moe_pattern = parsed[: args.num_layers]
+                elif len(parsed) < args.num_layers:
+                    # If the pattern is shorter than num_layers, this is likely an error
+                    # (config specifies fewer layers than requested)
+                    raise ValueError(
+                        f"moe_layer_freq pattern has {len(parsed)} elements but num_layers={args.num_layers}. "
+                        f"The pattern length must match or exceed num_layers. "
+                        f"Pattern: {parsed}"
+                    )
+                else:
+                    # Exact match - use as-is (normal case for full model)
+                    args.moe_pattern = parsed
             else:
                 raise ValueError(f"Invalid moe_layer_freq format after eval: {type(parsed)}")
 
