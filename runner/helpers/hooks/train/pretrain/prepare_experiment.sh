@@ -30,6 +30,7 @@ CONFIG_FILE=""
 DATA_PATH="./data/"
 PATCH_ARGS="/tmp/primus_patch_args.txt"
 BACKEND_PATH=""
+BACKEND_OVERRIDE=""
 EXTRA_ARGS=()
 
 # Parse CLI args (after hook group/name)
@@ -49,6 +50,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --backend_path)
             BACKEND_PATH="$2"
+            shift 2
+            ;;
+        --backend)
+            BACKEND_OVERRIDE="$2"
             shift 2
             ;;
         *)
@@ -75,8 +80,10 @@ mkdir -p "$PATCH_DIR"
 : > "$PATCH_ARGS"
 echo "[INFO] prepare_experiment.sh: patch args file: $PATCH_ARGS" >&2
 
-# Extract framework from config (pre_trainer module), mirroring dispatch_framework.sh
-FRAMEWORK="$(python3 -c "
+# Route priority:
+#   1) --backend (explicit override)
+#   2) pre_trainer.framework from --config
+FRAMEWORK_FROM_CONFIG="$(python3 -c "
 import sys
 from pathlib import Path
 
@@ -104,8 +111,20 @@ print(f'[DEBUG] pre_trainer.framework: {pre_trainer.framework}', file=sys.stderr
 print(pre_trainer.framework)
 " 2> >(tee /dev/stderr >&2) | tail -n 1 | tr -d '\r' || true)"
 
+if [[ -n "$BACKEND_OVERRIDE" ]]; then
+    FRAMEWORK="$BACKEND_OVERRIDE"
+    if [[ -n "$FRAMEWORK_FROM_CONFIG" ]]; then
+        if [[ "$BACKEND_OVERRIDE" != "$FRAMEWORK_FROM_CONFIG" ]]; then
+            echo "[ERROR] prepare_experiment.sh: --backend=$BACKEND_OVERRIDE conflicts with framework=$FRAMEWORK_FROM_CONFIG from config" >&2
+            exit 1
+        fi
+    fi
+else
+    FRAMEWORK="$FRAMEWORK_FROM_CONFIG"
+fi
+
 if [[ -z "$FRAMEWORK" ]]; then
-    echo "[WARNING] prepare_experiment.sh: no framework found in pre_trainer, skipping dispatch" >&2
+    echo "[WARNING] prepare_experiment.sh: no framework found (provide --backend or --config with pre_trainer.framework), skipping dispatch" >&2
     exit 0
 fi
 
@@ -116,6 +135,36 @@ case "$FRAMEWORK" in
 esac
 
 FRAMEWORK_SCRIPT="${SCRIPT_DIR}/${FRAMEWORK_DIR}/prepare.py"
+FRAMEWORK_HOOK_DIR="${SCRIPT_DIR}/${FRAMEWORK_DIR}"
+
+# Execute framework-local shell hooks in lexical order before prepare.py.
+# This is used for per-framework dependency installation
+if [[ -d "$FRAMEWORK_HOOK_DIR" ]]; then
+    mapfile -t SH_HOOK_FILES < <(find "$FRAMEWORK_HOOK_DIR" -maxdepth 1 -type f -name "*.sh" | sort)
+    HOOK_ARGS=(--config "$CONFIG_FILE"
+               --data_path "$DATA_PATH"
+               --primus_path "$PRIMUS_ROOT"
+               --patch_args "$PATCH_ARGS")
+    if [[ -n "$BACKEND_PATH" ]]; then
+        HOOK_ARGS+=(--backend_path "$BACKEND_PATH")
+    fi
+    if [[ -n "$BACKEND_OVERRIDE" ]]; then
+        HOOK_ARGS+=(--backend "$BACKEND_OVERRIDE")
+    fi
+    HOOK_ARGS+=("${EXTRA_ARGS[@]}")
+    exit_code=0
+    set +e
+    for hook_file in "${SH_HOOK_FILES[@]}"; do
+        echo "[INFO] prepare_experiment.sh: executing shell hook $(basename "$hook_file")" >&2
+        bash "$hook_file" "${HOOK_ARGS[@]}"
+        exit_code=$?
+        if [[ $exit_code -ne 0 ]]; then
+            echo "[ERROR] prepare_experiment.sh: shell hook failed: $hook_file (exit code: $exit_code)" >&2
+            exit $exit_code
+        fi
+    done
+    set -e
+fi
 
 if [[ ! -f "$FRAMEWORK_SCRIPT" ]]; then
     echo "[WARNING] prepare_experiment.sh: backend prepare script not found: $FRAMEWORK_SCRIPT" >&2
@@ -132,6 +181,9 @@ CMD=(python3 "$FRAMEWORK_SCRIPT"
 
 if [[ -n "$BACKEND_PATH" ]]; then
     CMD+=(--backend_path "$BACKEND_PATH")
+fi
+if [[ -n "$BACKEND_OVERRIDE" ]]; then
+    CMD+=(--backend "$BACKEND_OVERRIDE")
 fi
 
 CMD+=("${EXTRA_ARGS[@]}")
