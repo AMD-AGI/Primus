@@ -51,7 +51,7 @@ export PRETRAIN_TYPE=BF16 # BF16 # FP8
 export EXP=examples/megatron/configs/MI355X/deepseek_v3-${PRETRAIN_TYPE}-pretrain.yaml
 export PRIMUS_TEAM=amd
 export PRIMUS_USER=tas
-export PRIMUS_EXP_NAME=dsv3-pretrain-platform_$PLATFORM-layers_$PRIMUS_TOTAL_LAYERS-type_$PRETRAIN_TYPE-mbs_$MBS-gbs_$GBS
+export PRIMUS_EXP_NAME=dsv3-pretrain-platform_$PLATFORM-layers_$PRIMUS_TOTAL_LAYERS-type_$PRETRAIN_TYPE-mbs_$MBS-gbs_$GBS-legacygg_$LEGACY_GG
 # export PRIMUS_EXP_NAME=debug
 
 
