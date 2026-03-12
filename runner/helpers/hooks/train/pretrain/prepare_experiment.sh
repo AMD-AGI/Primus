@@ -136,5 +136,77 @@ fi
 
 CMD+=("${EXTRA_ARGS[@]}")
 
+# env sync for Megatron pretrain:
+#   - PRIMUS_HIPBLASLT_TUNING
+#   - PRIMUS_HIPBLASLT_TUNING_STAGE
+#   - TE_HIPBLASLT_TUNING_*
+#   - HIPBLASLT_*
+#
+# Emit env.* lines for execute_hooks.sh to export.
+emit_env() {
+    local k="$1"
+    local v="${2:-}"
+    echo "env.${k}=${v}"
+}
+
+if [[ "$FRAMEWORK_DIR" == "megatron" ]]; then
+    # Deterministic mode: keep old behavior (disable hipblaslt tuning counters)
+    if [[ "${PRIMUS_DETERMINISTIC:-0}" == "1" ]]; then
+        emit_env "TE_HIPBLASLT_TUNING_RUN_COUNT" "0"
+        emit_env "TE_HIPBLASLT_TUNING_ALGO_COUNT" "0"
+    elif [[ "${PRIMUS_HIPBLASLT_TUNING:-0}" == "1" ]]; then
+        STAGE="${PRIMUS_HIPBLASLT_TUNING_STAGE:-0}"
+
+        # Try to derive a stable model tag for tune output dir
+        MODEL_TAG="${PRIMUS_MODEL:-$(basename "${CONFIG_FILE}" .yaml)}"
+        TUNE_ROOT="${PRIMUS_ROOT}/output/tune_hipblaslt/${MODEL_TAG}"
+        RESULT_FILE="tune_hipblas_gemm_results.txt"
+        NODE_RANK_VAL="${NODE_RANK:-0}"
+        NUM_DEVICES="${GPUS_PER_NODE:-8}"
+
+        case "$STAGE" in
+            0)
+                emit_env "TE_HIPBLASLT_TUNING_RUN_COUNT" "${TE_HIPBLASLT_TUNING_RUN_COUNT:-10}"
+                emit_env "TE_HIPBLASLT_TUNING_ALGO_COUNT" "${TE_HIPBLASLT_TUNING_ALGO_COUNT:-50}"
+                ;;
+            1)
+                mkdir -p "${TUNE_ROOT}/gemm_shape"
+                emit_env "HIPBLASLT_LOG_MASK" "${HIPBLASLT_LOG_MASK:-32}"
+                emit_env "HIPBLASLT_LOG_FILE" "${HIPBLASLT_LOG_FILE:-${TUNE_ROOT}/gemm_shape/dump_hipblaslt_gemm_shape_${NODE_RANK_VAL}.txt}"
+                # Explicitly clear override in stage-1
+                emit_env "HIPBLASLT_TUNING_OVERRIDE_FILE" ""
+                ;;
+            2)
+                mkdir -p "${TUNE_ROOT}/gemm_tune"
+                # Usually stage-2 is single-node. Guard by rank for safety.
+                if [[ "${NODE_RANK_VAL}" == "0" ]]; then
+                    python "${PRIMUS_ROOT}/examples/offline_tune/offline_tune_gemm.py" \
+                        --dump-shape-path-or-file "${TUNE_ROOT}/gemm_shape" \
+                        --tune-result-path "${TUNE_ROOT}/gemm_tune/${RESULT_FILE}" \
+                        --num-devices "${NUM_DEVICES}"
+                fi
+                # Ask direct launcher to skip main training launch after tuning.
+                emit_env "PRIMUS_SKIP_MAIN_LAUNCH" "1"
+                ;;
+            3)
+                TUNE_FILE="${HIPBLASLT_TUNING_OVERRIDE_FILE:-${TUNE_ROOT}/gemm_tune/${RESULT_FILE}}"
+                if [[ ! -f "$TUNE_FILE" ]]; then
+                    echo "[ERROR] prepare_experiment.sh: Missing tuning result file: $TUNE_FILE" >&2
+                    exit 1
+                fi
+                emit_env "HIPBLASLT_TUNING_OVERRIDE_FILE" "$TUNE_FILE"
+                ;;
+            *)
+                echo "[ERROR] prepare_experiment.sh: Invalid PRIMUS_HIPBLASLT_TUNING_STAGE=$STAGE (expected 0/1/2/3)" >&2
+                exit 1
+                ;;
+        esac
+    else
+        # Default: tuning disabled
+        emit_env "TE_HIPBLASLT_TUNING_RUN_COUNT" "0"
+        emit_env "TE_HIPBLASLT_TUNING_ALGO_COUNT" "0"
+    fi
+fi
+
 exec "${CMD[@]}"
 
