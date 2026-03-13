@@ -3,6 +3,7 @@ bases:
 
 # Mamba 370M configuration
 model_type: mamba  # CRITICAL: Mamba models must use mamba model type
+is_mamba_model: true
 tokenizer_type: GPT2BPETokenizer
 vocab_size: 50257
 
