@@ -28,16 +28,6 @@ def _resolve_pretrain_runtime(args) -> str:
             file=sys.stderr,
         )
 
-    try:
-        from primus.core.utils import yaml_utils
-
-        exp_cfg = yaml_utils.parse_yaml_to_namespace(args.config)
-        modules_cfg = getattr(exp_cfg, "modules", None)
-        pre_trainer_cfg = getattr(modules_cfg, "pre_trainer", None) if modules_cfg is not None else None
-        getattr(pre_trainer_cfg, "framework", None) if pre_trainer_cfg is not None else None
-    except Exception:
-        pass
-
     # Default: use the new core runtime for all supported frameworks.
     return "core"
 

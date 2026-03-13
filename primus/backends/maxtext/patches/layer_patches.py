@@ -91,9 +91,8 @@ def patch_quantization(ctx: PatchContext) -> None:
 )
 def patch_attention(ctx: PatchContext) -> None:
     """
-    Replace MaxText attention classes with Primus versions:
+    Replace MaxText attention op classes with Primus versions:
         - ``AttentionOp`` → ``PrimusAttentionOp``
-        - ``Attention`` → ``PrimusAttention``
     """
     log_rank_0("[Patch:maxtext.layers.attention] Patching Attention layers...")
 
@@ -193,8 +192,8 @@ def patch_decoder_layer(ctx: PatchContext) -> None:
 def patch_attention_legacy(ctx: PatchContext) -> None:
     """
     Replace MaxText attention classes with legacy Primus versions:
-        - ``AttentionOp`` → ``PrimusAttentionOpLegacy`` (no nnx_wrappers/lazy_init)
-        - ``Attention`` → ``PrimusAttentionLegacy`` (query_w init override)
+        - ``AttentionOp`` → ``PrimusAttentionOp`` (no nnx_wrappers/lazy_init)
+        - ``Attention`` → ``PrimusAttention`` (query_w init override)
     """
     log_rank_0("[Patch:maxtext.layers.attention.legacy] Patching Attention layers (legacy)...")
     import MaxText.layers.attention_mla as orig_attention_mla
