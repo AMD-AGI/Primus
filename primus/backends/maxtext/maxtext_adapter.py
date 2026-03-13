@@ -21,10 +21,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Trigger registration of all MaxText patches (logger, wandb, etc.)
+import primus.backends.maxtext.patches  # noqa: F401  # Register patches
 from primus.backends.maxtext.argument_builder import MaxTextConfigBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
-from primus.modules.module_utils import log_rank_0
+from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
 class MaxTextAdapter(BackendAdapter):
@@ -113,7 +113,7 @@ class MaxTextAdapter(BackendAdapter):
 
             if hasattr(MaxText, "__version__"):
                 return MaxText.__version__
-        except Exception:
-            pass
+        except Exception as exec:
+            warning_rank_0(f"MaxTextAdapter: Failed to detect MaxText version: {exec}")
 
         return "unknown"

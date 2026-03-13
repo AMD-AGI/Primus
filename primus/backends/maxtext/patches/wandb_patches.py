@@ -41,7 +41,7 @@ def patch_wandb(ctx: PatchContext) -> None:
         if exp_meta_info:
             work_group = exp_meta_info.get("work_group", "")
             user_name = exp_meta_info.get("user_name", "")
-            if work_group and user_name:
+            if work_group and user_name and os.getenv("WANDB_PROJECT") is None:
                 os.environ["WANDB_PROJECT"] = f"Primus-MaxText-Pretrain-{work_group}_{user_name}"
                 log_rank_0(f"[Patch:maxtext.wandb] WANDB_PROJECT set to: {os.environ['WANDB_PROJECT']}")
 

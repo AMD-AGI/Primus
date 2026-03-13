@@ -253,4 +253,8 @@ def run(config, recorder, diagnostic_config):
         max_utils.maybe_get_transformer_engine_context(config),
         maybe_monitor_goodput(config),
     ):
-        train_loop(config, recorder)
+        try:
+            train_loop(config, recorder)
+        except Exception as e:
+            print(f"Error in train loop: {e}")
+            raise e

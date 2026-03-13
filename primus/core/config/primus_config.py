@@ -84,7 +84,6 @@ def load_primus_config(config_path: Path, cli_args: Any | None = None) -> Simple
         - `cfg.modules` is a **list** of module namespaces
           (each module namespace has a `.name` field)
     """
-    print("-----------config_path:", config_path, " cli_args:", cli_args)
     config_path_str = str(config_path)
 
     # Build an argparse-like namespace for PrimusParser.

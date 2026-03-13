@@ -28,7 +28,7 @@ import os
 from typing import Any, Dict, Optional
 
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.modules.module_utils import log_rank_0, warning_rank_0
+from primus.modules.module_utils import error_rank_0, log_rank_0, warning_rank_0
 
 
 class MaxTextPretrainTrainer(BaseTrainer):
@@ -85,8 +85,8 @@ class MaxTextPretrainTrainer(BaseTrainer):
         finally:
             try:
                 os.unlink(yaml_path)
-            except OSError:
-                pass
+            except OSError as e:
+                error_rank_0(f"MaxTextPretrainTrainer: Failed to delete temporary YAML at {yaml_path}: {e}")
 
         log_rank_0("MaxText training components initialized successfully")
 

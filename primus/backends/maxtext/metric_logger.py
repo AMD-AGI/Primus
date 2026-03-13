@@ -36,7 +36,7 @@ except ImportError:
 def _safe_get_config(config, key, default=None):
     try:
         return getattr(config, key)
-    except KeyError:
+    except (KeyError, AttributeError):
         return default
 
 
