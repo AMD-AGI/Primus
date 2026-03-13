@@ -85,6 +85,20 @@ bash runner/primus-cli direct --script primus/cli/main.py -- \
     --target-nodes 4
 ```
 
+Benchmark on a single GPU and project to multi-node (sub-node benchmarking):
+
+```bash
+export NNODES=1
+export GPUS_PER_NODE=8
+export HSA_NO_SCRATCH_RECLAIM=1
+
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection performance \
+    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --benchmark-gpus 1 \
+    --target-nodes 4
+```
+
 ---
 
 ## Command Syntax
@@ -104,6 +118,7 @@ primus-cli [global-options] <mode> [mode-args] -- projection {memory,performance
 | Option | Type | Description |
 |--------|------|-------------|
 | `--target-nodes` | int | Target number of nodes for projection. Defaults to minimum required by parallelism config |
+| `--benchmark-gpus` | int | Number of GPUs to use for benchmarking. Enables sub-node benchmarking when set lower than `GPUS_PER_NODE`. Parallelism dimensions (PP, EP, TP) are automatically reduced to fit and restored analytically during projection. Defaults to `GPUS_PER_NODE` |
 | `--hardware-config` | string | Path to YAML file with custom hardware parameters for communication modeling |
 | `--profiling-mode` | string | `benchmark` (default), `simulate` for pure analytical (no GPU), or `both` for side-by-side comparison |
 
@@ -470,15 +485,36 @@ Summary of all memory components for one GPU:
 <a name="performance-overview"></a>
 ### Overview
 
-The performance projection tool:
+The performance projection tool uses a **hybrid benchmark-then-project** approach:
 
-1. **Benchmarks** transformer layers on a single node to measure forward/backward pass times
+1. **Benchmarks** transformer layers on a configurable number of GPUs (from a single GPU up to a full node) to measure forward/backward pass times
 2. **Simulates** pipeline parallelism scheduling (including zero-bubble optimization)
 3. **Projects** performance to multi-node configurations by modeling:
    - Data Parallelism (DP) scaling
    - Gradient AllReduce communication overhead (training only)
    - Expert Parallelism (EP) All-to-All communication overhead
    - Inter-node vs intra-node communication differences
+
+#### Why Hybrid? Measure What You Can, Simulate What You Can't
+
+The core design principle is: **measure what you can, simulate what you can't**. When the benchmark configuration can accommodate a parallelism dimension, both its compute and communication are captured in real measurements. Only communication that falls outside the benchmark scope — inter-node traffic, or overhead from parallelism dimensions that were reduced to fit — is estimated analytically. This hybrid approach yields more accurate results than pure analytical modeling for several reasons:
+
+- **Immunity to the Peak-vs-MAF gap**: Modern GPUs throttle clock frequency under sustained workloads. The gap between peak FLOPs and Max-Achievable FLOPs (MAF) can be 44–70% on current hardware (see [Understanding Peak, Max-Achievable & Delivered FLOPs](https://rocm.blogs.amd.com/software-tools-optimization/Understanding_Peak_and_Max-Achievable_FLOPS/README.html)). Benchmarking captures the actual operating frequency; analytical models must assume or estimate it.
+- **Robustness to software stack changes**: Each ROCm update (hipBLASLt GEMM improvements, CK attention kernels, Triton retiling) shifts achievable performance. Benchmarking automatically reflects the current stack; analytical models require recalibration.
+- **Accurate grouped GEMM for MoE**: Grouped GEMM performance depends on expert count, topk routing, token distribution, and kernel implementation — factors that are difficult to model analytically. Benchmarking measures actual execution directly.
+- **Framework overhead included**: PyTorch dispatch latency, memory allocator behavior, kernel launch overhead, and stream synchronization are captured in benchmarks but absent from analytical models.
+- **Communication is measured when possible**: When a parallelism dimension fits within the benchmark GPUs (e.g., TP AllReduce within a node, EP All-to-All within the benchmark config), its communication is captured in the benchmark. Only communication outside the benchmark scope falls back to analytical models. For those cases, collectives are more analytically tractable than compute — dominated by bandwidth and latency with predictable message sizes. Pipeline scheduling follows deterministic rules that can be simulated exactly.
+- **Transparent validation**: `--profiling-mode both` runs benchmark and simulation side by side, letting users quantify the analytical accuracy gap and decide when pure simulation (for no-GPU capacity planning) can be trusted.
+
+| Factor | Pure Analytical | Hybrid (Primus) |
+|--------|----------------|-----------------|
+| GPU frequency under load | Must assume or estimate | Captured via real measurement |
+| Software stack changes | Requires recalibration | Automatically reflects current performance |
+| Grouped GEMM for MoE | Difficult to model | Measured directly |
+| Framework overhead | Not captured | Included in benchmarks |
+| Communication modeling | Must model analytically | Measured when within benchmark scope; analytical fallback for the rest |
+| No-GPU capacity planning | Supported | Supported via `--profiling-mode simulate` |
+| Cross-validation | Not available | `--profiling-mode both` |
 
 ### Profiling Modes
 
@@ -554,18 +590,42 @@ bash runner/primus-cli direct --script primus/cli/main.py -- \
     --target-nodes 4
 ```
 
+#### Sub-Node Benchmarking
+
+Benchmark on fewer GPUs than a full node and project to multi-node. For example, benchmark on 1 GPU and project to 4 nodes:
+
+```bash
+export NNODES=1
+export GPUS_PER_NODE=8
+
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection performance \
+    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --benchmark-gpus 1 \
+    --target-nodes 4
+```
+
+The tool automatically reduces PP, EP, and if necessary TP to fit on the benchmark GPU count, then restores the full target configuration analytically during projection. This is useful when only a fraction of a node is available for profiling.
+
 ### How It Works
 
 #### 1. Configuration Reduction
 
-If the parallelism configuration requires multiple nodes (e.g., PP=3 needs 3 nodes), the tool automatically reduces the config for single-node benchmarking:
+If the target parallelism configuration requires more GPUs than are available for benchmarking, the tool automatically reduces the config to fit. The number of benchmark GPUs defaults to `GPUS_PER_NODE` (full-node benchmarking), but can be set to any value via `--benchmark-gpus` — including as low as a single GPU — to enable **sub-node benchmarking**.
 
-- **Pipeline Parallelism (PP)**: Reduced to fit on 1 node, PP overhead estimated analytically
-- **Expert Parallelism (EP)**: Reduced if needed, All-to-All overhead added back
+Parallelism dimensions are reduced in a fixed priority order:
+
+1. **Pipeline Parallelism (PP)**: Reduced to 1 first (easiest to add back — PP overhead is estimated analytically via the pipeline schedule simulator)
+2. **Expert Parallelism (EP)**: Reduced next if the config still doesn't fit (MoE compute stays accurate because experts-per-rank is preserved; only All-to-All communication is replaced analytically for the target EP)
+3. **Tensor Parallelism (TP)**: Reduced last if PP=1 and EP reduction were not sufficient (compute is scaled by `benchmark_tp / target_tp` and TP AllReduce overhead is added analytically)
+
+CP is kept unchanged throughout. After benchmarking, all reduced dimensions are restored analytically during projection.
+
+For example, with `--benchmark-gpus 1` on a config that requires TP=8, PP=4, EP=8, the tool would benchmark on a single GPU with PP=1, EP=1, TP=1, then analytically reconstruct the full target configuration's performance.
 
 #### 2. Layer Benchmarking
 
-The tool benchmarks each transformer layer type:
+The tool benchmarks each transformer layer type on the available benchmark GPUs:
 - Dense attention layers
 - MoE (Mixture of Experts) layers
 - Measures forward and backward pass times separately
@@ -592,7 +652,9 @@ Projected Time = (Base Time / DP_scaling_factor) + Communication Overheads
 
 **What it does**: Splits individual layer weights across GPUs within a node.
 
-**How it's modeled**: TP communication (AllReduce after each layer) is **already captured** in the single-node benchmark because benchmarking runs with the target TP configuration. No additional modeling needed.
+**How it's modeled**: When benchmarking runs with the **same** TP as the target configuration, TP communication (AllReduce after each layer) is already captured in the benchmark — no additional modeling is needed. However, if the benchmark GPU count is too small to accommodate the target TP (e.g., benchmarking on 1 GPU for a TP=8 config), TP is reduced during benchmarking and the projection analytically compensates:
+1. **Compute scaling**: Per-GPU compute is scaled by `benchmark_tp / target_tp` (each GPU processes a proportionally smaller slice with higher TP).
+2. **TP AllReduce delta**: The AllReduce overhead difference between benchmark TP and target TP is estimated analytically and added to each layer's time. When GPU-measured AllReduce data is available, it is used to anchor the analytical model for better accuracy.
 
 **Communication**: AllReduce within TP group (typically intra-node, fast).
 
@@ -601,8 +663,8 @@ Projected Time = (Base Time / DP_scaling_factor) + Communication Overheads
 **What it does**: Distributes layers across pipeline stages. Each stage processes microbatches in sequence.
 
 **How it's modeled**: 
-- If PP > 1 but only 1 node available for benchmarking, PP is reduced to 1 for benchmarking
-- A **pipeline scheduler simulator** (`simulator.py`) reconstructs the full pipeline schedule
+- PP is the first dimension reduced during configuration reduction — it is always set to 1 for benchmarking when the config doesn't fit on the available GPUs
+- A **pipeline scheduler simulator** (`simulator.py`) reconstructs the full pipeline schedule for the target PP
 - Simulates the actual 1F1B or zero-bubble schedule with proper send/receive synchronization
 - Accounts for pipeline bubble overhead and microbatch interleaving
 
@@ -661,7 +723,7 @@ Gradient AllReduce Size = num_params × 4 (FP32 gradients)
 
 ### Communication Modeling
 
-The tool uses analytical models to estimate collective communication times:
+When a parallelism dimension fits within the benchmark GPU count, its communication is **measured** as part of the benchmark — no analytical modeling needed. For communication that falls outside the benchmark scope (e.g., inter-node collectives, or overhead from parallelism dimensions that were reduced to fit the benchmark), the tool uses analytical models to estimate collective communication times:
 
 | Collective | Used By | Model |
 |------------|---------|-------|
@@ -744,25 +806,31 @@ P2P communication becomes significant when PP stages span nodes (inter-node P2P 
 1. Load Configuration
    └── Parse YAML config, extract parallelism settings
 
-2. Single-Node Benchmarking
-   ├── If config requires multiple nodes:
-   │   └── Reduce PP to 1, possibly rescale EP to fit on 1 node
+2. Configuration Reduction (if config doesn't fit on benchmark GPUs)
+   ├── Reduce PP to 1
+   ├── If still doesn't fit, reduce EP (preserving experts-per-rank)
+   ├── If still doesn't fit, reduce TP (last resort)
+   └── Benchmark GPU count controlled by --benchmark-gpus (default: GPUS_PER_NODE)
+
+3. Layer Benchmarking (on available benchmark GPUs)
    ├── Limit layers (1 dense + 1 MoE for efficiency)
    └── Benchmark forward + backward times
 
-3. Extrapolate to Full Model
-   └── Multiply per-layer times by total layer count
+4. Extrapolate to Full Model
+   ├── Multiply per-layer times by total layer count
+   └── If TP was reduced: scale compute by benchmark_tp/target_tp, add TP AllReduce delta
 
-4. Pipeline Schedule Simulation (if PP > 1)
+5. Pipeline Schedule Simulation (if PP > 1)
    ├── Build chunk time matrix (per-rank, per-chunk)
    ├── Select scheduler (1F1B, Interleaved, Zero-Bubble)
    └── Simulate to get step_time_ms and bubble_ratio
 
-5. Add Communication Overhead (if config was reduced)
+6. Add Communication Overhead (if config was reduced)
    ├── PP overhead: P2P communication between stages
-   └── EP overhead: Additional All-to-All for larger EP
+   ├── EP overhead: Additional All-to-All for larger EP
+   └── TP overhead: AllReduce delta (if TP was reduced)
 
-6. Multinode Scaling Projection
+7. Multinode Scaling Projection
    ├── Calculate DP scaling factor
    ├── Scale compute time: projected = base × (min_dp / target_dp)
    ├── Add gradient AllReduce (if not overlapped)
@@ -894,7 +962,7 @@ Multinode Scaling Projection Results
 
 ### Limitations
 
-1. **Single-Node Benchmark Accuracy** — Benchmarking with reduced PP/EP may not capture all behaviors; layer timing variance is assumed uniform
+1. **Benchmark Accuracy with Reduced Parallelism** — Benchmarking with reduced PP/EP/TP may not capture all behaviors (e.g., GEMM efficiency differences at different TP levels); layer timing variance is assumed uniform
 2. **Communication Contention** — Model doesn't account for network contention; assumes dedicated bandwidth per collective
 3. **Memory Pressure** — Memory impact on performance not fully modeled; activation recomputation overhead not considered in performance
 4. **Hardware Heterogeneity** — Assumes homogeneous nodes; GPU frequency variations not modeled
@@ -904,7 +972,7 @@ Multinode Scaling Projection Results
 ## Tips
 
 - **Start with memory projection**: Run `projection memory` first to verify your model fits in GPU memory before benchmarking.
-- **Start with 1 node**: Always benchmark on 1 node first to establish baseline performance.
+- **Benchmark with what you have**: Use `--benchmark-gpus` to run benchmarks on any number of GPUs (even 1) and project to multi-node. The tool handles parallelism downscaling (PP → EP → TP) and analytical upscaling automatically.
 - **Understand scaling limits**: DP scaling is limited by `global_batch_size / micro_batch_size`. If you run out of microbatches, adding more nodes won't help.
 - **Check minimum nodes**: If your config requires multiple nodes (e.g., PP=4 with 8 GPUs/node), the performance projection will automatically reduce PP for benchmarking.
 - **Pipeline scaling**: With PP > 1, you can only scale in multiples of the pipeline replica size.
