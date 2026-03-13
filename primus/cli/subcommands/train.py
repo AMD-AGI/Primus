@@ -17,7 +17,7 @@ def _resolve_pretrain_runtime(args) -> str:
 
     Priority:
       1) Explicit env override via PRIMUS_TRAIN_RUNTIME
-      2) Auto-detect by backend framework (TorchTitan Megatron -> core, others -> legacy)
+      2) Framework-based default (MaxText -> legacy, others -> core)
     """
     runtime_entry = getenv("PRIMUS_TRAIN_RUNTIME", "").strip().lower()
     if runtime_entry in ("legacy", "core"):
