@@ -47,7 +47,7 @@ container:
     device:
       - "/dev/kfd"
       - "/dev/dri"
-      # - "/dev/infiniband"
+      - "/dev/infiniband"
 
     # Linux capabilities (each passed as --cap-add)
     # NOTE: Do not modify these capabilities - they are required for proper container operation
