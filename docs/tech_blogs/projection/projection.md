@@ -220,7 +220,7 @@ When a parallelism dimension fits within the benchmark GPU count, its communicat
 | All-to-All | EP (MoE dispatch/combine) | Pairwise exchange, accounts for topology |
 | P2P Send/Recv | PP (activations) | Point-to-point latency + bandwidth |
 
-Communication times differ significantly based on whether they are **intra-node** (fast, e.g., xGMI/NVLink) or **inter-node** (slower, e.g., InfiniBand/RoCE). Custom hardware parameters can be provided via `--hardware-config`.
+Communication times differ significantly based on whether they are **intra-node** (fast, e.g., xGMI/NVLink) or **inter-node** (slower, e.g., InfiniBand/RoCE). These hardware parameters are customizable — users can provide a hardware configuration file via `--hardware-config` to match their specific cluster topology. See [`custom_hardware_example.yaml`](../../examples/hardware_configs/custom_hardware_example.yaml) for the format.
 
 #### Pipeline Schedule Simulator
 
@@ -408,6 +408,30 @@ Multinode Scaling Projection Results
 
 ====================================================================================================
 ```
+
+
+## Validation: Projected vs. Measured Results
+
+To validate the projection tool's accuracy, we compared projected performance against measured results published on the [AMD ROCm Performance Results](https://www.amd.com/en/developer/resources/rocm-hub/dev-ai/performance-results.html#ai-training) page. The workflow is straightforward: benchmark on a single node, then project to 8 nodes and compare against the published multi-node measurements. The projections were obtained by providing the corresponding hardware configuration files via `--hardware-config`.
+
+### MI325X — Dense Models (Llama 3.1)
+
+| Model | Precision | Batch | SeqLen | FSDP | TP | PP | CP | EP | 1-Node (tok/s/GPU) | Measured 8-Node (tok/s/GPU) | Projected 8-Node (tok/s/GPU) | Error |
+|-------|-----------|-------|--------|------|----|----|----|----|--------------------|-----------------------------|------------------------------|-------|
+| Llama 3.1 8B | FP8 | 2 | 8192 | No | 1 | 1 | 1 | 1 | 16,224 | 16,186 | 17,351 | +7.20% |
+| Llama 3.1 70B | FP8 | 4 | 8192 | Yes | 1 | 1 | 1 | 1 | 1,135 | 1,726 | 1,818 | +5.33% |
+| Llama 3.1 70B | BF16 | 1 | 8192 | Yes | 1 | 1 | 1 | 1 | 1,135 | 1,174 | 1,066 | -9.20% |
+
+### MI355X — MoE Models (Mixtral 8×22B)
+
+| Model | Precision | Batch | SeqLen | TP | PP | CP | EP | Measured 8-Node (tok/s/GPU) | Projected 8-Node (tok/s/GPU) | Error |
+|-------|-----------|-------|--------|----|----|----|----|-----------------------------|-----------------------------|-------|
+| Mixtral 8×22B | BF16 | 2 | 8192 | 1 | 4 | 1 | 8 | 3,534 | 3,232 | -8.5% |
+
+### Key Takeaways
+
+- **All projections are within 10% of measured results**, spanning both dense (Llama) and MoE (Mixtral) architectures, FP8 and BF16 precision, and two different GPU generations (MI325X, MI355X).
+- The Mixtral result exercises the full projection pipeline: PP reduction (benchmark PP=1, target PP=4), EP All-to-All modeling (with DeepEP), and pipeline schedule simulation — yet still achieves <10% error.
 
 
 ## Assumptions and Limitations

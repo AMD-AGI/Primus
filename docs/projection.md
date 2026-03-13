@@ -735,7 +735,12 @@ Communication times differ significantly based on:
 - **Intra-node**: Fast (e.g., NVLink, UALink, xGMI)
 - **Inter-node**: Slower (e.g., InfiniBand, RoCE)
 
-Custom hardware parameters can be provided via `--hardware-config <yaml>`.
+Custom hardware parameters can be provided via `--hardware-config <yaml>`. See [`custom_hardware_example.yaml`](../examples/hardware_configs/custom_hardware_example.yaml) for the format.
+
+Example usage:
+```bash
+primus projection performance --config <model_config> --hardware-config <hardware_config.yaml>
+```
 
 #### Key Concepts
 
