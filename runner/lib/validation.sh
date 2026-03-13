@@ -77,7 +77,7 @@ validate_gpus_per_node() {
         return 0
     fi
 
-    validate_integer_range "$gpus" 1 8 "GPUS_PER_NODE"
+    validate_integer_range "$gpus" 1 72 "GPUS_PER_NODE"
 
     LOG_DEBUG "Validated GPUS_PER_NODE: $gpus"
 }
