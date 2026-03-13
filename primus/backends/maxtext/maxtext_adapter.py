@@ -17,13 +17,14 @@ This is the MaxText counterpart of ``TorchTitanAdapter``. It is responsible for:
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from typing import Any
 
 # Trigger registration of all MaxText patches (logger, wandb, etc.)
 import primus.backends.maxtext.patches  # noqa: F401
 from primus.backends.maxtext.argument_builder import MaxTextConfigBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
-from primus.core.backend.backend_registry import BackendRegistry
 from primus.modules.module_utils import log_rank_0
 
 
@@ -39,70 +40,67 @@ class MaxTextAdapter(BackendAdapter):
 
     def __init__(self, framework: str = "maxtext"):
         super().__init__(framework)
+        self.third_party_dir_name = "maxtext"
 
-    # Backend Setup & Patches
-    def prepare_backend(self, config: Any):
+    def setup_backend_path(self, backend_path=None) -> str:
         """
-        MaxText-specific environment preparation.
+        Set up MaxText backend path.
 
-        Steps:
-            - Run Primus setup hooks
-            - (Future) add any MaxText-specific env setup if needed
-
-        Note: Patches are already registered at module import time (top of this file).
-        Setup patches are applied automatically by the base class before this method is called.
+        MaxText requires the 'src' subdirectory in sys.path after Dec Version.
         """
-        # Run setup hooks from BackendRegistry
-        BackendRegistry.run_setup("maxtext")
+        # Call parent to set up the main backend path
+        resolved = super().setup_backend_path(backend_path)
+        src_path = Path(resolved) / "src"
+        if src_path.exists() and str(src_path) not in sys.path:
+            sys.path.insert(0, str(src_path))
+            log_rank_0(f"sys.path.insert → {src_path}")
 
-        log_rank_0("[Primus:MaxTextAdapter] Backend prepared")
+        return resolved
 
     # Config → MaxText PyConfig
-    def convert_config(self, module_config: Any):
+    def convert_config(self, params: Any):
         """
-        Convert Primus ModuleConfig → MaxText configuration.
+        Convert Primus params → MaxText configuration namespace.
 
         This layer:
-            - Takes module_config.params (which already includes CLI overrides)
-            - Produces MaxText PyConfig format
+            - Takes params (SimpleNamespace, which is module_config.params)
+            - Produces a MaxText-compatible SimpleNamespace
 
-        Note: build_args patches are applied automatically by the base class
+        Note: build_args patches are applied automatically by the runtime
         after this method returns.
 
         Args:
-            module_config: ModuleConfig instance with params dict
+            params: module_config.params (SimpleNamespace with all merged params)
 
         Returns:
-            MaxText configuration object
+            MaxText configuration SimpleNamespace
         """
         # Instantiate the builder
         builder = MaxTextConfigBuilder()
 
-        # Feed in config params (already merged with CLI overrides in train_launcher)
-        builder.update(module_config.params)
+        # Feed in config params (already merged with CLI overrides in train_runtime)
+        builder.update(params)
 
         # Produce the final MaxText config
         maxtext_config = builder.finalize()
 
-        log_rank_0(f"[Primus:MaxTextAdapter] Converted Primus module params → MaxText config")
+        log_rank_0("[Primus:MaxTextAdapter] Converted Primus module params → MaxText config")
         return maxtext_config
 
     # Load Trainer Class
-    def load_trainer_class(self):
+    def load_trainer_class(self, stage: str = "pretrain"):
         """
-        Load MaxText trainer class registered via BackendRegistry.
-
         This allows Primus runtime to remain agnostic to the actual trainer
         implementation (pretrain, sft, etc.).
         """
-        try:
-            return BackendRegistry.get_trainer_class(self.framework)
-        except AssertionError as exc:
-            raise RuntimeError(
-                "[Primus:MaxTextAdapter] 'maxtext' backend trainer not registered. "
-                "Ensure primus.backends.maxtext.trainers (or equivalent) registers "
-                "the trainer class via BackendRegistry."
-            ) from exc
+        if stage == "pretrain":
+            from primus.backends.maxtext.maxtext_pretrain_trainer import (
+                MaxTextPretrainTrainer,
+            )
+
+            return MaxTextPretrainTrainer
+        else:
+            raise ValueError(f"Invalid stage: {stage}")
 
     # Version Detection
     def detect_backend_version(self) -> str:
@@ -111,5 +109,12 @@ class MaxTextAdapter(BackendAdapter):
 
         MaxText typically doesn't have a version number, so we return a placeholder.
         """
-        TrainerClass = self.load_trainer_class()
-        return TrainerClass.detect_version()
+        try:
+            import MaxText
+
+            if hasattr(MaxText, "__version__"):
+                return MaxText.__version__
+        except Exception:
+            pass
+
+        return "unknown"

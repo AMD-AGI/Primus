@@ -11,14 +11,7 @@ Register MaxText backend adapter and trainer classes.
 """
 
 from primus.backends.maxtext.maxtext_adapter import MaxTextAdapter
-from primus.backends.maxtext.maxtext_pretrain_trainer import MaxTextPretrainTrainer
 from primus.core.backend.backend_registry import BackendRegistry
-
-# Register MaxText backend path name
-BackendRegistry.register_path_name("maxtext", "maxtext")
 
 # Register MaxText backend adapter
 BackendRegistry.register_adapter("maxtext", MaxTextAdapter)
-
-# Register MaxText pretrain trainer
-BackendRegistry.register_trainer_class("maxtext", MaxTextPretrainTrainer)

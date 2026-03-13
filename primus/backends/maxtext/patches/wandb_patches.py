@@ -7,9 +7,6 @@
 """
 MaxText Weights & Biases (wandb) Patch
 
-This patch mirrors the legacy ``MaxTextPretrainTrainer.patch_wandb`` using
-the generic Primus patch system.
-
 Behavior:
     - Derives ``WANDB_PROJECT`` from Primus ``exp_meta_info`` if not already set.
     - Replaces ``MetricLogger`` in MaxText and Primus train modules with
@@ -19,6 +16,7 @@ Behavior:
 import os
 
 from primus.core.patches import PatchContext, register_patch
+from primus.core.patches.context import get_param
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
@@ -27,7 +25,7 @@ from primus.modules.module_utils import log_rank_0, warning_rank_0
     backend="maxtext",
     phase="setup",
     description="Initialize WANDB_PROJECT and replace MetricLogger with PrimusMetricLogger",
-    condition=lambda ctx: True,  # Always enabled
+    condition=lambda ctx: get_param(ctx, "enable_wandb", False),
 )
 def patch_wandb(ctx: PatchContext) -> None:
     """
@@ -45,19 +43,15 @@ def patch_wandb(ctx: PatchContext) -> None:
             user_name = exp_meta_info.get("user_name", "")
             if work_group and user_name:
                 os.environ["WANDB_PROJECT"] = f"Primus-MaxText-Pretrain-{work_group}_{user_name}"
-                log_rank_0(
-                    f"[Patch:maxtext.wandb] WANDB_PROJECT set to: {os.environ['WANDB_PROJECT']}"
-                )
+                log_rank_0(f"[Patch:maxtext.wandb] WANDB_PROJECT set to: {os.environ['WANDB_PROJECT']}")
 
     # --- Replace MetricLogger with PrimusMetricLogger ---
     import MaxText.metric_logger as orig_metric_logger
     import MaxText.train as orig_train
 
-    import primus.backends.maxtext.train as primus_train
     from primus.backends.maxtext.metric_logger import PrimusMetricLogger
 
     orig_metric_logger.MetricLogger = PrimusMetricLogger
     orig_train.MetricLogger = PrimusMetricLogger
-    primus_train.MetricLogger = PrimusMetricLogger
 
     warning_rank_0("[Patch:maxtext.wandb] wandb / MetricLogger patched successfully.")

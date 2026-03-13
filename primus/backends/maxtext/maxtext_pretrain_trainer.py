@@ -11,59 +11,40 @@ This trainer bridges Primus's configuration system with MaxText's training
 loop, following the same pattern as ``TorchTitanPretrainTrainer`` does for
 TorchTitan.
 
-The trainer inherits from ``MaxTextBaseTrainer`` which handles:
-    - Integration with the unified BaseTrainer workflow (run_patches)
-    - Version detection and common logging
+Flow:
+    backend_args → flat dict → temp YAML → ``pyconfig.initialize(argv)``
 
-This class only needs to implement:
-    - setup(): optional pre-initialization
-    - init(): construct the underlying MaxText training components
-    - run_train(): call into MaxText's training loop
+By delegating config parsing entirely to MaxText's ``pyconfig.initialize``,
+this trainer works with both new (Pydantic-based, >= 0.1.1) and old
+(dict-based, 2025.x.x) MaxText versions without version-specific patches.
+
+The trainer inherits from ``BaseTrainer`` which provides:
+    - Access to ``backend_args`` (a ``SimpleNamespace``)
+    - Distributed context (rank, world_size …)
+    - Standard lifecycle (setup → init → train → cleanup)
 """
 
 import os
 from typing import Any, Dict, Optional
 
-from primus.backends.maxtext.maxtext_base_trainer import MaxTextBaseTrainer
-from primus.core.utils.yaml_utils import dump_namespace_to_yaml
+from primus.core.trainer.base_trainer import BaseTrainer
 from primus.modules.module_utils import log_rank_0, warning_rank_0
 
 
-class MaxTextPretrainTrainer(MaxTextBaseTrainer):
+class MaxTextPretrainTrainer(BaseTrainer):
     """
     Trainer class for MaxText pre-training.
     """
 
-    def __init__(self, primus_config: Any, module_config: Any, backend_args: Any):
-        """
-        Initialize MaxText pretrain trainer.
+    def __init__(self, backend_args: Any):
+        super().__init__(backend_args=backend_args)
 
-        Args:
-            primus_config: Full Primus configuration
-            module_config: Module-specific configuration
-            backend_args: MaxText configuration (from MaxTextAdapter)
-        """
-        super().__init__(
-            primus_config=primus_config,
-            module_config=module_config,
-            backend_args=backend_args,
-        )
-
-        # Store config path for MaxText
-        self.primus_cfg = primus_config
-        # Export module config to YAML so MaxText can consume it.
-        # primus_config is a SimpleNamespace in the new runtime, so we
-        # replicate the legacy PrimusConfig.export_module_config / module_config_path
-        # logic directly.
-        self.pre_trainer_cfg_path = os.path.join(primus_config.exp_root_path, "pre_trainer.yaml")
-        dump_namespace_to_yaml(module_config.params, self.pre_trainer_cfg_path)
-
-        # Training state
+        # Training state (populated in init())
         self.train_config: Optional[Any] = None
         self.recorder: Optional[Any] = None
         self.diagnostic_config: Optional[Any] = None
 
-        log_rank_0(f"Initialized MaxTextPretrainTrainer for model: {module_config.model or 'custom'}")
+        log_rank_0("Initialized MaxTextPretrainTrainer")
 
     # --------------------------------------------------------------------- #
     # Lifecycle hooks
@@ -78,58 +59,77 @@ class MaxTextPretrainTrainer(MaxTextBaseTrainer):
     def init(self):
         """
         Construct the underlying MaxText training components.
+
+        Converts ``backend_args`` to a flat dict, writes it to a temporary YAML
+        file, and calls ``initialize(argv)`` which delegates config parsing
+        entirely to MaxText's ``pyconfig.initialize``.  This works for both
+        Pydantic-based (Dec) and dict-based (Aug) MaxText versions.
         """
         log_rank_0("MaxTextPretrainTrainer.init() - initializing MaxText training")
 
-        from primus.backends.maxtext.train import initialize
+        from MaxText.train import initialize
 
-        # Prepare model overrides from extra_args if present
-        override_model_args = self.prepare_model_overrides()
+        from primus.backends.maxtext.argument_builder import (
+            export_params_to_yaml,
+            namespace_to_dict,
+        )
 
-        # Build argv for MaxText initialization
-        argv = ["MaxText.train", self.pre_trainer_cfg_path]
-        log_rank_0(f"Initializing MaxText with argv: {argv}")
+        override_model_args = self._prepare_model_overrides()
+        params_dict = namespace_to_dict(self.backend_args)
+        params_dict.pop("override_model", None)
 
-        # Initialize MaxText training components
-        self.train_config, self.recorder, self.diagnostic_config = initialize(argv, **override_model_args)
+        yaml_path = export_params_to_yaml(params_dict)
+        try:
+            argv = ["MaxText.train", yaml_path]
+            self.train_config, self.recorder, self.diagnostic_config = initialize(argv, **override_model_args)
+        finally:
+            try:
+                os.unlink(yaml_path)
+            except OSError:
+                pass
 
         log_rank_0("MaxText training components initialized successfully")
 
-    def prepare_model_overrides(self) -> Dict[str, Any]:
+    def _prepare_model_overrides(self) -> Dict[str, Any]:
         """
-        Prepare model overrides from extra_args.
+        Prepare model overrides from ``backend_args.override_model``.
 
-        Supports nested overrides like:
-            {"model": {"num_experts": 16, "base_num_decoder_layers": 4}}
+        In the core runtime flow, CLI args like
+        ``--override_model.base_num_decoder_layers 4`` are parsed into
+        ``backend_args.override_model.base_num_decoder_layers = 4``
+        (a nested SimpleNamespace attribute).
 
-        All override keys MUST be under the "model" key.
+        This method extracts and flattens those overrides into a plain dict
+        suitable for passing as ``**kwargs`` to ``pyconfig.initialize``.
 
         Returns:
-            Dictionary of flat overrides for MaxText
+            Dictionary of flat overrides for MaxText, e.g.
+            ``{"base_num_decoder_layers": 4}``
         """
-        # Get extra_args from module_config if available
-        override_args = getattr(self.module_config, "extra_args", None)
+        override_model = getattr(self.backend_args, "override_model", None)
 
-        if not override_args:
+        if not override_model:
+            warning_rank_0("MaxText Pre-Trainer: No override_model provided, skip patch.")
             return {}
 
-        warning_rank_0(f"MaxText Pre-Trainer: Applying override_args: {override_args}")
+        if isinstance(override_model, dict):
+            override_dict = override_model
+        else:
+            override_dict = vars(override_model) if hasattr(override_model, "__dict__") else {}
 
-        # Flatten any nested dict under 'model'
-        flat_overrides = {}
-        for k, v in override_args.items():
-            if k != "model":
-                raise ValueError(f"Only the 'model' key is supported for overrides, found: {k}")
-            if not isinstance(v, dict):
+        if not override_dict:
+            warning_rank_0("MaxText Pre-Trainer: override_model is empty, skip patch.")
+            return {}
+
+        warning_rank_0(f"MaxText Pre-Trainer: Applying override_model: {override_dict}")
+
+        flat_overrides: Dict[str, Any] = {}
+        for k, v in override_dict.items():
+            if isinstance(v, dict) or hasattr(v, "__dict__") and not isinstance(v, type):
                 raise ValueError(
-                    f"MaxText Pre-Trainer: The value for 'model' must be a dict, got {type(v).__name__}."
+                    f"MaxText Pre-Trainer: Nested override not supported: override_model.{k}={v}"
                 )
-            for subk, subv in v.items():
-                if isinstance(subv, dict):
-                    raise ValueError(
-                        f"MaxText Pre-Trainer: Invalid override key-value detected: {k}.{subk}-{subv}"
-                    )
-                flat_overrides[subk] = subv
+            flat_overrides[k] = v
 
         return flat_overrides
 
@@ -137,18 +137,18 @@ class MaxTextPretrainTrainer(MaxTextBaseTrainer):
     # Training entrypoint
     # --------------------------------------------------------------------- #
 
-    def run_train(self):
+    def train(self):
         """
         Execute MaxText pre-training.
 
-        This method is called by BaseTrainer.run() after applying patches.
+        This method is called by the runtime lifecycle after setup() and init().
         """
         if self.train_config is None:
-            raise RuntimeError("MaxTextPretrainTrainer.init() must be called before run_train().")
+            raise RuntimeError("MaxTextPretrainTrainer.init() must be called before train().")
 
         log_rank_0("Executing MaxText pretrain...")
 
-        from primus.backends.maxtext.train import run
+        from MaxText.train import run
 
         run(self.train_config, self.recorder, self.diagnostic_config)
 
