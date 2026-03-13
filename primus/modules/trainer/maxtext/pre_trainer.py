@@ -119,23 +119,27 @@ class MaxTextPretrainTrainer(BaseModule):
         )
 
     def patch_max_utils(self):
+        import functools
+
+        import jax
         import MaxText.max_utils as orig_max_utils
 
         from primus.backends.maxtext.max_utils import (
-            initialize_jax_for_cpu,
-            initialize_jax_for_gpu,
-            initialize_jax_for_tpu_with_emergency_checkpointing,
-            maybe_initialize_jax_distributed_system,
             print_system_information,
             save_device_information,
         )
 
-        orig_max_utils.maybe_initialize_jax_distributed_system = maybe_initialize_jax_distributed_system
-        orig_max_utils.initialize_jax_for_gpu = initialize_jax_for_gpu
-        orig_max_utils.initialize_jax_for_cpu = initialize_jax_for_cpu
-        orig_max_utils.initialize_jax_for_tpu_with_emergency_checkpointing = (
-            initialize_jax_for_tpu_with_emergency_checkpointing
-        )
+        # Wrap jax.distributed.initialize to inject heartbeat_timeout_seconds
+        heartbeat_timeout = getattr(self.module_config, "jax_distributed_heartbeat_timeout_seconds", 100)
+        _orig_jax_init = jax.distributed.initialize
+
+        @functools.wraps(_orig_jax_init)
+        def _jax_init_with_heartbeat(*args, **kwargs):
+            kwargs.setdefault("heartbeat_timeout_seconds", heartbeat_timeout)
+            return _orig_jax_init(*args, **kwargs)
+
+        jax.distributed.initialize = _jax_init_with_heartbeat
+
         orig_max_utils.print_system_information = print_system_information
         orig_max_utils.save_device_information = save_device_information
         warning_rank_0("MaxText Pre-Trainer: patch max_utils successfully.")
@@ -144,15 +148,22 @@ class MaxTextPretrainTrainer(BaseModule):
         import MaxText.checkpointing as orig_checkpointing
         import MaxText.train_utils as orig_train_utils
 
-        from primus.backends.maxtext.checkpointing import (
-            create_orbax_checkpoint_manager,
-            load_state_if_possible,
+        from primus.backends.maxtext.checkpointing import load_state_if_possible
+        from primus.backends.maxtext.patches.checkpoint_patches import (
+            _PRIMUS_DEFAULT_MAX_TO_KEEP,
+            _make_opts_wrapper,
+            _wrap_create_training_tools,
         )
-        from primus.backends.maxtext.train_utils import create_training_tools
+
+        orig_opts = orig_checkpointing.CheckpointManagerOptions
+        orig_checkpointing.CheckpointManagerOptions = _make_opts_wrapper(
+            orig_opts, _PRIMUS_DEFAULT_MAX_TO_KEEP
+        )
 
         orig_checkpointing.load_state_if_possible = load_state_if_possible
-        orig_checkpointing.create_orbax_checkpoint_manager = create_orbax_checkpoint_manager
-        orig_train_utils.create_training_tools = create_training_tools
+        orig_train_utils.create_training_tools = _wrap_create_training_tools(
+            orig_train_utils.create_training_tools, orig_checkpointing, orig_opts
+        )
         warning_rank_0("MaxText Pre-Trainer: patch checkpointing successfully.")
 
     def patch_wandb(self):
@@ -238,23 +249,31 @@ class MaxTextPretrainTrainer(BaseModule):
         patch_moe()
 
         def patch_decoder_layer():
-            import MaxText.layers.gemma as orig_gemma
-            import MaxText.layers.gemma2 as orig_gemma2
-            import MaxText.layers.llama2 as orig_llama2
-            import MaxText.layers.mistral as orig_mistral
-            import MaxText.layers.mixtral as orig_mixtral
+            import functools
 
-            from primus.backends.maxtext.layers.gemma import PrimusGemmaDecoderLayer
-            from primus.backends.maxtext.layers.gemma2 import PrimusGemma2DecoderLayer
-            from primus.backends.maxtext.layers.llama2 import PrimusLlamaDecoderLayer
-            from primus.backends.maxtext.layers.mistral import PrimusMistralDecoderLayer
-            from primus.backends.maxtext.layers.mixtral import PrimusMixtralDecoderLayer
+            from MaxText.layers.gemma import GemmaDecoderLayer
+            from MaxText.layers.gemma2 import Gemma2DecoderLayer
+            from MaxText.layers.llama2 import LlamaDecoderLayer
+            from MaxText.layers.mistral import MistralDecoderLayer
+            from MaxText.layers.mixtral import MixtralDecoderLayer
 
-            orig_gemma.GemmaDecoderLayer = PrimusGemmaDecoderLayer
-            orig_gemma2.Gemma2DecoderLayer = PrimusGemma2DecoderLayer
-            orig_llama2.LlamaDecoderLayer = PrimusLlamaDecoderLayer
-            orig_mistral.MistralDecoderLayer = PrimusMistralDecoderLayer
-            orig_mixtral.MixtralDecoderLayer = PrimusMixtralDecoderLayer
+            def _patch_init(cls, attention_attrs):
+                _orig = cls.__init__
+
+                @functools.wraps(_orig)
+                def _new_init(self, *args, **kwargs):
+                    _orig(self, *args, **kwargs)
+                    scalar = self.config.head_dim**-0.5
+                    for name in attention_attrs:
+                        getattr(self, name).query_pre_attn_scalar = scalar
+
+                cls.__init__ = _new_init
+
+            _patch_init(GemmaDecoderLayer, ["self_attention"])
+            _patch_init(Gemma2DecoderLayer, ["self_attention_local", "self_attention_global"])
+            _patch_init(LlamaDecoderLayer, ["self_attention"])
+            _patch_init(MistralDecoderLayer, ["self_attention"])
+            _patch_init(MixtralDecoderLayer, ["self_attention"])
             warning_rank_0("MaxText Pre-Trainer: patch decoder layer successfully.")
 
         patch_decoder_layer()
