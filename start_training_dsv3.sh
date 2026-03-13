@@ -2,97 +2,57 @@
 
 export HF_TOKEN="your_hf_token"  # make it your own hf token
 export WANDB_API_KEY="your_wandb_api_key"  # make it your own wandb api key
-export DOCKER_IMAGE="docker.io/tasimage/primus:pr-563-ainic"
-# export SLURM_TREE_WIDTH=128
+
 export NNODES=32
-export TRAIN_ITERS=10
 export SLURM_TIME=48:00:00
 export SLURM_PARTITION=amd-aig
-# export SLURM_NODELIST="uswslocpm2m-106-[005,015,021,030-031,038-039,042,050,056-057,063,069,077,079-080,082,084-086,091-092,122,125,138,142,145,151,176,179-180,185,190,194,196-197,199,212-215,218,220-221,224-226,273,275,281,285,297,310,319,340,346,359-360,362,373,387,392,395,399,419,423,433,442,444-445,448-450,452,454,456-457,472-475,479-481,629,631,635,640,646,656,658,663-664,667,678,681,687,695,103,700,723,732,735,740-741,757,760-761,766,772,781,784,833,841-842,851,857,865,868,883,889,895,899-900,905,1066,1070,1177]"
-# export SLURM_NODELIST="uswslocpm2m-106-[005,015,021,030-031,038-039,042,050,056-057,063,069,077,079-080,082,084-086,091-092,122,125,138,142,145,151,176,179-180,185,190,194,196-197,199,212-215,218,220-221,224-226,273,275,281,285,297,310,319,340,346,359-360,362,373,387,392,395,399,419,423,433,442,444-445,448-450,452,454,456-457,472-475,479-481,629,631,635,640,646,656,658,663-664,667,678,681,687,695-696,700,723,732,735,740-741,757,760-761,766,772,781,784,833,841-842,851,857,865,868,883,889,895,899-900,905,1066,1070,1177]"
-# export SLURM_NODELIST="uswslocpm2m-106-[005,015,021,030-031,038-039,042,050,056-057,063,069,077,079-080,082,084-086,091-092,122,125,138,142,145,151,176,179-180,185,190,194,196-197,199,212-215,218,220-221,224-226,273,275,281,285,297,310,319,340,346,359-360,362,373,387,392,395,399,419,423,433,442,444-445,448-450,452,454,456-457,472-475,479-481,629,631,635,640,646,628,658,663-664,667,678,681,687,695,103,700,723,732,735,740-741,757,760-761,766,772,781,784,833,841-842,851,857,865,868,883,889,895,899-900,905,1066,1070,1177]"
-# export SLURM_NODELIST="uswslocpm2m-106-[015,021,030-031,038-039,042,050,056-057,063,069,077,079-080,082,084-086,091-092,103,122,125,138,142,145,151,176,179-180,185,190,194,196-197,199,212-215,218,220-221,224-226,273,275,281,285,297,310,319,340,346,359,362,373,392,395,399,419,423,430,433,442,444-445,448-450,452,454,456-457,472-475,479-481,628-629,631,635,640,646,658,663-664,667,678,681,687,695,700,723,732,735,740-741,757,760-761,766,772,781,784,833,836,841-842,851,857,865,868,883,889,892,895,899-900,905,1066,1070,1177]"
-export SLURM_NODELIST="uswslocpm2m-106-[079,084-085,092,138,179,190,218,220,340,362,395,419,423,433,449-450,456,479-480,667,741,757,760,781,784,857,1882,1898,1907,1924,1956]"
+export SLURM_NODELIST="uswslocpm2m-106-[030-031,038-039,050,063,069,225,942,1531-1532,1536,1547,1549,1554,1556-1557,1561,1579,1583,1585,1588,1592,1596,1606,1627-1629,1650,1659-1660,1678]"
+export SLURM_NODELIST="uswslocpm2m-106-[030-031,038-039,050,063,069,225,942,1531-1532,1536,1547,1549,1554,1556]" # -1557,1561,1579,1583,1585,1588,1592,1596,1606,1627-1629,1650,1659-1660,1678]"
+export SLURM_NODELIST="uswslocpm2m-106-[030-031,038-039,050,063,069,225,942,1531-1532,1536,-1557,1561,1579,1583]" #1585,1588,1592,1596,1606,1627-1629,1650,1659-1660,1678]"
+export SLURM_NODELIST="uswslocpm2m-106-[030-031,038-039,050,063,069,225,942,1531-1532,1536,1547,1549,1554,1556-1557,1561,1579,1583,1585,1588,1592,1596,1606,1627-1629,1683-1684,1691,1697]"
+
+export TRAIN_ITERS=10
+
 # export NCCL_DEBUG=INFO
 export USING_AINIC=1
 export NCCL_IB_HCA="ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,ionic_8:1,ionic_9:1"
 export GLOO_SOCKET_IFNAME=ens9np0
 export NCCL_SOCKET_IFNAME=ens9np0
-export HSA_NO_SCRATCH_RECLAIM=1
-export NVTE_CK_USES_BWD_V3=1
-export GPU_MAX_HW_QUEUES=4
-export CLEAN_DOCKER_CONTAINER=1
 
 export MBS=2
 export GBS=$((128 * NNODES))
 export PRIMUS_TOTAL_LAYERS=61
-export PRIMUS_RECOMPUTE_LAYERS=3
 export PRIMUS_MOE_LAYER_FREQ=1
-export PRIMUS_PP=8
 export PRIMUS_EP=8
+export PRIMUS_PP=16
 export PRIMUS_VPP=2
+export PRIMUS_RECOMPUTE_LAYERS=1
+
 export PROFILE=False
 export TURBO_DEEPEEP=True
 export LEGACY_GG=True
-export PRIMUS_DETERMINISTIC=0
+
 # Enable NUMA binding for better memory locality (increase stability for large models)
 export ENABLE_NUMA_BINDING=1
 export HSA_KERNARG_POOL_SIZE=12582912
-# export SLURM_NODELIST="uswslocpm2m-106-[273,297,310,319,687,732,836,892]"
-# export EXP=examples/megatron/configs/MI355X/llama3.1_8B-BF16-pretrain.yaml
 
-
+STAGE=$((PRIMUS_PP * PRIMUS_VPP))
 FEATURE_ARGS=()
-PIPELINE_ARGS=()
-if [ "$PRIMUS_VPP" -gt 1 ]; then
-  case "$PRIMUS_VPP" in
-    2)
-      if [ "$PRIMUS_PP" -eq 4 ]; then
-        # DeepSeek-V3 has 61 decoder layers. For PP4+VPP2 (8 pipeline chunks),
-        # use a balanced split: 8,8,8,8,8,7,7,7.
-        FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*7|t*8|t*8|t*8|t*8|t*8|t*7|t*7,L'")
-      elif [ "$PRIMUS_PP" -eq 8 ]; then
-        # DeepSeek-V3 has 61 decoder layers. For PP8+VPP2 (16 pipeline chunks),
-        # use a balanced split: 4x13 + 3x3 = 61 (13 stages with 4 layers, 3 stages with 3 layers).
-        FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*3|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*3|t*3,L'")
-      else
-        echo "Unsupported PRIMUS_PP=${PRIMUS_PP} for PRIMUS_VPP=2. Supported PP values: 4, 8." >&2
-        exit 1
-      fi
-      ;;
-    4)
-      # DeepSeek-V3 has 61 decoder layers. For PP4+VPP4 (16 pipeline chunks),
-      # use a balanced split: 4x13 + 3x3 = 61 (13 stages with 4 layers, 3 stages with 3 layers).
-      FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*3|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*3|t*3,L'")
-      ;;
-    *)
-      echo "Unsupported PRIMUS_VPP=${PRIMUS_VPP}. Supported values in this script: 1, 2, 4." >&2
-      exit 1
-      ;;
-  esac
-else
-  if [ -z "${DECODER_LAST_PIPELINE_NUM_LAYERS:-}" ]; then
-    if [ "$PRIMUS_PP" -eq 4 ]; then
-      DECODER_LAST_PIPELINE_NUM_LAYERS=13
-    elif [ "$PRIMUS_PP" -eq 8 ]; then
-      DECODER_LAST_PIPELINE_NUM_LAYERS=12
-    else
-      DECODER_LAST_PIPELINE_NUM_LAYERS=13
-    fi
-  fi
-  export DECODER_LAST_PIPELINE_NUM_LAYERS
-  MIDDLE_PP_SIZE=$((PRIMUS_PP - 1))
-  if [ "$MIDDLE_PP_SIZE" -le 0 ]; then
-    echo "Invalid PRIMUS_PP=${PRIMUS_PP}. PRIMUS_PP must be >= 2 when PRIMUS_VPP <= 1." >&2
+case $STAGE in
+  8)
+    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*7|t*8|t*8|t*8|t*8|t*8|t*7|t*7,L'")
+    ;;
+  16)
+    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*3|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*3|t*3,L'")
+    ;;
+  32)
+    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*1|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*1|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*1,L'")
+    ;;
+  *)
+    echo "Unsupported STAGE=${STAGE} (PRIMUS_PP=${PRIMUS_PP}, PRIMUS_VPP=${PRIMUS_VPP}). Supported stages: 8, 16, 32." >&2
     exit 1
-  fi
-  MIDDLE_STAGE_LAYERS=$((PRIMUS_TOTAL_LAYERS - DECODER_LAST_PIPELINE_NUM_LAYERS))
-  if [ $((MIDDLE_STAGE_LAYERS % MIDDLE_PP_SIZE)) -ne 0 ]; then
-    echo "Invalid split: PRIMUS_TOTAL_LAYERS=${PRIMUS_TOTAL_LAYERS}, DECODER_LAST_PIPELINE_NUM_LAYERS=${DECODER_LAST_PIPELINE_NUM_LAYERS}, PRIMUS_PP=${PRIMUS_PP}. (PRIMUS_TOTAL_LAYERS - DECODER_LAST_PIPELINE_NUM_LAYERS) must be divisible by (PRIMUS_PP - 1)." >&2
-    exit 1
-  fi
-  PIPELINE_ARGS+=("--decoder_last_pipeline_num_layers" "$DECODER_LAST_PIPELINE_NUM_LAYERS")
-fi
+    ;;
+esac
 
 export PRETRAIN_TYPE=BF16
 # export PRETRAIN_TYPE=FP8
@@ -101,21 +61,19 @@ export EXP=examples/megatron/configs/MI355X/deepseek_v3-${PRETRAIN_TYPE}-pretrai
 export PRIMUS_TEAM=amd
 export PRIMUS_USER=tas
 export PRIMUS_TOKENIZED_DATA_PATH=/shared_aig/c4/tokenized/c4_en_train_text_document # this is the tokenized data path for the training
-export PRIMUS_EXP_NAME=dsv3-pretrain-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-profile_$PROFILE
-# export PRIMUS_EXP_NAME=dsv3-${PRETRAIN_TYPE}-node_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-recompute_$PRIMUS_RECOMPUTE_LAYERS
-# export PRIMUS_EXP_NAME=debug
-
-#CKPT_DIR=output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/checkpoints
+export PRIMUS_EXP_NAME=dsv3-pretrain-nnodes_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-profile_$PROFILE
 
 
 mkdir -p output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
-# mkdir -p "$CKPT_DIR"
-bash ./examples/run_slurm_pretrain.sh \
+./primus-cli slurm -N $NNODES --nodelist "$SLURM_NODELIST" \
+  -- --image "docker.io/tasimage/primus:pr-563-ainic" --clean \
+  -- train pretrain --config $EXP \
   --num_layers $PRIMUS_TOTAL_LAYERS \
   --train_iters $TRAIN_ITERS \
   --micro_batch_size $MBS \
   --global_batch_size $GBS \
   --use_turbo_deepep $TURBO_DEEPEEP \
+  --turbo_sync_free_moe_stage 0 \
   --lr 2.2e-4 \
   --min_lr 2.2e-5 \
   --lr_warmup_iters 200 \
@@ -124,7 +82,6 @@ bash ./examples/run_slurm_pretrain.sh \
   --moe_use_legacy_grouped_gemm $LEGACY_GG \
   --pipeline_model_parallel_size $PRIMUS_PP \
   --expert_model_parallel_size $PRIMUS_EP \
-  "${PIPELINE_ARGS[@]}" \
   "${FEATURE_ARGS[@]}" \
   --cross_entropy_fusion_impl "te" \
   --cross_entropy_loss_fusion True \
@@ -133,7 +90,7 @@ bash ./examples/run_slurm_pretrain.sh \
   --recompute_method block \
   --disable_last_saving True \
   --moe_layer_freq $PRIMUS_MOE_LAYER_FREQ \
-  --mock_data False \
+  --mock_data True \
   --manual_gc True \
   --manual_gc_interval 1 \
   --pp_warmup True  \

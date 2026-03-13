@@ -27,14 +27,14 @@ RCCL_HOME_DIR="${RCCL_HOME_DIR:-/workspace/rccl}"
 MPI_HOME_DIR="${MPI_HOME_DIR:-/opt/ompi}"
 
 # NCCL_NET_PLUGIN: ANP libraray has different names in different containers: librccl-anp.so or librccl-net.so.
-if [ -n "${NCCL_NET_PLUGIN:-}" ]; then
-    NCCL_NET_PLUGIN="${NCCL_NET_PLUGIN}"
-elif [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
-    NCCL_NET_PLUGIN="librccl-anp.so"
-elif [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
-    NCCL_NET_PLUGIN="librccl-net.so"
-else
-    NCCL_NET_PLUGIN="librccl-anp.so"
+if [ -z "${NCCL_NET_PLUGIN:-}" ]; then
+    if [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
+        NCCL_NET_PLUGIN="librccl-anp.so"
+    elif [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
+        NCCL_NET_PLUGIN="librccl-net.so"
+    else
+        NCCL_NET_PLUGIN="librccl-anp.so"
+    fi
 fi
 NCCL_IB_TC="${NCCL_IB_TC:-104}"
 NCCL_IB_FIFO_TC="${NCCL_IB_FIFO_TC:-192}"
@@ -50,10 +50,9 @@ NCCL_IGNORE_CPU_AFFINITY="${NCCL_IGNORE_CPU_AFFINITY:-1}"
 NCCL_IB_QPS_PER_CONNECTION="${NCCL_IB_QPS_PER_CONNECTION:-1}"
 
 # LD_LIBRARY_PATH: prepend AINIC/RCCL/MPI paths while preserving existing.
-_ld_base="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib"
-# Need to append AINIC/RCCL/MPI paths to the existing LD_LIBRARY_PATH. Otherwise,
-# JAX MaxText will not find the appropriate ROCm libraries.
-LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}${_ld_base}"
+_ld_base="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib"
+LD_LIBRARY_PATH="${_ld_base}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+
 LOG_INFO_RANK0 "Using AINIC"
 LOG_INFO_RANK0 "RCCL_HOME_DIR: ${RCCL_HOME_DIR}"
 LOG_INFO_RANK0 "ANP_HOME_DIR: ${ANP_HOME_DIR}"
@@ -65,9 +64,6 @@ echo "env.MPI_HOME_DIR=${MPI_HOME_DIR}"
 echo "env.NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN}"
 echo "env.NCCL_IB_TC=${NCCL_IB_TC}"
 echo "env.NCCL_IB_FIFO_TC=${NCCL_IB_FIFO_TC}"
-echo "env.NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX}"
-echo "env.NCCL_IB_ROCE_VERSION_NUM=${NCCL_IB_ROCE_VERSION_NUM}"
-echo "env.NCCL_MAX_P2P_CHANNELS=${NCCL_MAX_P2P_CHANNELS}"
 echo "env.NET_OPTIONAL_RECV_COMPLETION=${NET_OPTIONAL_RECV_COMPLETION}"
 echo "env.NCCL_IB_USE_INLINE=${NCCL_IB_USE_INLINE}"
 echo "env.RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=${RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING}"
