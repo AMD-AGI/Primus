@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 # Trigger registration of all MaxText patches (logger, wandb, etc.)
-import primus.backends.maxtext.patches  # noqa: F401
 from primus.backends.maxtext.argument_builder import MaxTextConfigBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.modules.module_utils import log_rank_0
