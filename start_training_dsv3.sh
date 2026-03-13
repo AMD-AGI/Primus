@@ -73,7 +73,6 @@ mkdir -p output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
   --micro_batch_size $MBS \
   --global_batch_size $GBS \
   --use_turbo_deepep $TURBO_DEEPEEP \
-  --turbo_sync_free_moe_stage 0 \
   --lr 2.2e-4 \
   --min_lr 2.2e-5 \
   --lr_warmup_iters 200 \
