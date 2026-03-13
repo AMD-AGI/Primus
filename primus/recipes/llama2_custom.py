@@ -32,8 +32,9 @@ from megatron.core.optimizer import MegatronOptimizer
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from megatron.core.parallel_state import update_pg_timeout
 from megatron.core.pipeline_parallel import get_forward_backward_func
+from megatron.core.pipeline_parallel.utils import is_pp_last_stage
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.rerun_state_machine import RerunDataIterator, get_rerun_state_machine
+from megatron.core.rerun_state_machine import RerunDataIterator, RerunMode, get_rerun_state_machine
 from megatron.core.transformer import MegatronModule
 from megatron.core.transformer.cuda_graphs import TECudaGraphHelper
 from megatron.core.utils import check_param_hashes_across_dp_replicas, get_model_config
@@ -48,6 +49,9 @@ common_utils.warn_rank_0 = log_rank_0
 common_utils.warn_rank_last = log_rank_last
 
 from megatron.bridge import AutoBridge
+from megatron.bridge.data.finetuning import prepare_finetuning_batch
+from megatron.bridge.data.iterator_utils import make_data_iterator_list
+from megatron.bridge.data.loaders import ResettableDataIterator
 from megatron.bridge.data.datasets.packed_sequence import PackedSequenceSpecs
 from megatron.bridge.recipes.utils.finetune_utils import default_squad_config
 from megatron.bridge.peft.base import PEFT
@@ -82,6 +86,7 @@ from megatron.bridge.training.profiling import (
     should_profile_rank,
 )
 from megatron.bridge.training.state import GlobalState
+from megatron.bridge.training.utils.pg_utils import get_pg_collection
 from megatron.bridge.training.tensor_inspect import (
     tensor_inspect_end_if_enabled,
     tensor_inspect_step_if_enabled,
@@ -92,6 +97,7 @@ from megatron.bridge.training.utils.train_utils import (
     prepare_forward_step_func,
     training_log,
 )
+from megatron.bridge.utils.common_utils import is_last_rank
 from megatron.bridge.training.train import (
     train_step,
     should_disable_forward_pre_hook,
@@ -486,6 +492,190 @@ def _llama2_lora(
         )
 
     return cfg
+
+def _reset_data_iterator(data_iterator):
+    """Reset data iterator to the beginning for deterministic evaluation.
+    Traverses through RerunDataIterator wrappers to find and reset any
+    ResettableDataIterator, ensuring evaluation always starts from the
+    same data point.
+    """
+    if data_iterator is None:
+        return
+    if isinstance(data_iterator, list):
+        for it in data_iterator:
+            _reset_data_iterator(it)
+        return
+    if isinstance(data_iterator, RerunDataIterator):
+        inner = data_iterator.iterable
+        if isinstance(inner, ResettableDataIterator):
+            inner.reset()
+            data_iterator.saved_microbatches.clear()
+            data_iterator.replaying = False
+            data_iterator.replay_pos = 0
+    elif isinstance(data_iterator, ResettableDataIterator):
+        data_iterator.reset()
+def evaluate(
+    state: GlobalState,
+    forward_step_func: ForwardStepCallable,
+    data_iterator: Optional[Union[RerunDataIterator, list[RerunDataIterator]]],
+    model: list[MegatronModule],
+    process_non_loss_data_func: Optional[Callable],
+    config: ConfigContainer,
+    verbose: bool = False,
+    non_loss_data_func: Optional[Callable] = None,
+) -> tuple[Optional[dict[str, torch.Tensor]], Optional[Any], bool]:
+    """Evaluation function (from eval_m.py).
+    Validation loss aggregation matches NeMo: mean of per-microbatch means
+    (same as NeMo MaskedTokenLossReduction with validation_step=True, val_drop_last=True).
+    """
+    _reset_data_iterator(data_iterator)
+    wrapped_forward_step = prepare_forward_step_func(forward_step_func, state)
+    timers = state.timers
+    timers("evaluate", log_level=0).start(barrier=True)
+    for model_module in model:
+        model_module.eval()
+    pg_collection = get_pg_collection(model)
+    rerun_state_machine = get_rerun_state_machine()
+    rerun_mode = rerun_state_machine.get_mode()
+    rerun_state_machine.set_mode(RerunMode.DISABLED)
+    total_loss_dict = {}
+    eval_batch_size = state.cfg.train.global_batch_size
+    eval_num_microbatches = eval_batch_size // (
+        state.cfg.train.micro_batch_size * state.cfg.data_parallel_size
+    )
+    with torch.no_grad():
+        if verbose:
+            log_rank_0(f"Evaluating on {state.cfg.train.eval_iters * eval_batch_size} samples")
+        if state.cfg.model.cuda_graph_impl == "local" and "full_iteration" in state.cfg.model.cuda_graph_scope:
+            forward_backward_func = FullCudaGraphWrapper(
+                get_forward_backward_func(),
+                cuda_graph_warmup_steps=state.cfg.model.cuda_graph_warmup_steps,
+            )
+        else:
+            forward_backward_func = get_forward_backward_func()
+        iteration = 0
+        while iteration < state.cfg.train.eval_iters:
+            iteration += 1
+            if verbose:
+                log_rank_0(f"Evaluating iter {iteration}/{state.cfg.train.eval_iters}")
+            seq_length = state.cfg.model.seq_length
+            eval_data_iterator = data_iterator
+            if state.cfg.dataset.dataloader_type == "batch":
+                eval_microbatch_iterator, seq_length = prepare_finetuning_batch(
+                    data_iterator=data_iterator,
+                    num_microbatches=eval_num_microbatches,
+                    default_seq_length=state.cfg.model.seq_length,
+                    seq_key="tokens",
+                )
+                eval_data_iterator = make_data_iterator_list(
+                    model=model,
+                    data_iterator=eval_microbatch_iterator,
+                )
+            config.timers = None
+            fault_tolerance.on_eval_step_start(state)
+            loss_dicts = forward_backward_func(
+                forward_step_func=wrapped_forward_step,
+                data_iterator=eval_data_iterator,
+                model=model,
+                num_microbatches=eval_num_microbatches,
+                seq_length=seq_length,
+                micro_batch_size=state.cfg.train.micro_batch_size,
+                forward_only=True,
+            )
+            fault_tolerance.on_eval_step_end(state)
+            config.timers = state.timers
+            if state.cfg.train.empty_unused_memory_level >= 1:
+                torch.cuda.empty_cache()
+            if is_pp_last_stage(pg_collection.pp):
+                # NeMo-style: mean of per-microbatch means (matches NeMo validation loss).
+                for key in loss_dicts[0].keys():
+                    if key not in total_loss_dict:
+                        total_loss_dict[key] = torch.tensor([0.0, 0.0], dtype=torch.float).cuda()
+                    val = [x[key].view(-1) for x in loss_dicts]
+                    if val[0].numel() == 2:
+                        device = val[0].device
+                        sum_means_this_rank = 0.0
+                        count_this_rank = 0
+                        for v in val:
+                            loss_sum = v[0].float().item()
+                            num_tokens = v[1].float().item()
+                            if num_tokens > 0:
+                                sum_means_this_rank += loss_sum / num_tokens
+                                count_this_rank += 1
+                        sum_means_this_rank = torch.tensor(
+                            sum_means_this_rank, device=device, dtype=torch.float
+                        )
+                        count_this_rank_t = torch.tensor(
+                            float(count_this_rank), device=device, dtype=torch.float
+                        )
+                        torch.distributed.all_reduce(
+                            sum_means_this_rank, group=pg_collection.dp_cp
+                        )
+                        torch.distributed.all_reduce(count_this_rank_t, group=pg_collection.dp_cp)
+                        total_loss_dict[key][0] += sum_means_this_rank
+                        total_loss_dict[key][1] += count_this_rank_t
+                    elif val[0].numel() == 1:
+                        val = torch.cat(val).sum()
+                        total_loss_dict[key][0] += val
+                        total_loss_dict[key][1] += len(loss_dicts)
+                    else:
+                        raise ValueError(
+                            f"Invalid value shape: {val[0].shape} for key {key}"
+                        )
+            state.train_state.consumed_valid_samples += eval_batch_size
+            if state.cfg.train.exit_duration_in_mins:
+                train_time = (time.time() - state.start_time) / 60.0
+                done_cuda = torch.tensor(
+                    [train_time > state.cfg.train.exit_duration_in_mins],
+                    dtype=torch.int,
+                    device="cuda",
+                )
+                torch.distributed.all_reduce(done_cuda, op=torch.distributed.ReduceOp.MAX)
+                done = done_cuda.item()
+                if done:
+                    rerun_state_machine.set_mode(rerun_mode)
+                    log_rank_0("Exiting during evaluation, timelimit reached")
+                    return None, None, True
+        collected_non_loss_data = None
+        if non_loss_data_func is not None:
+            collected_non_loss_data = non_loss_data_func(model)
+        elif process_non_loss_data_func is not None and is_last_rank():
+            non_loss_data_iterator = data_iterator
+            non_loss_seq_length = state.cfg.model.seq_length
+            if state.cfg.dataset.dataloader_type == "batch":
+                non_loss_microbatch_iterator, non_loss_seq_length = prepare_finetuning_batch(
+                    data_iterator=data_iterator,
+                    num_microbatches=get_num_microbatches(),
+                    default_seq_length=state.cfg.model.seq_length,
+                    seq_key="tokens",
+                )
+                non_loss_data_iterator = make_data_iterator_list(
+                    model=model,
+                    data_iterator=non_loss_microbatch_iterator,
+                )
+            collected_non_loss_data = forward_backward_func(
+                forward_step_func=wrapped_forward_step,
+                data_iterator=non_loss_data_iterator,
+                model=model,
+                num_microbatches=get_num_microbatches(),
+                seq_length=non_loss_seq_length,
+                micro_batch_size=state.cfg.train.micro_batch_size,
+                forward_only=True,
+                collect_non_loss_data=True,
+            )
+    for model_module in model:
+        model_module.train()
+    for key in total_loss_dict:
+        sum_of_means, count = total_loss_dict[key]
+        if count > 0:
+            total_loss_dict[key] = sum_of_means / count
+        else:
+            total_loss_dict[key] = sum_of_means
+    timers("evaluate").stop()
+    timers.log(["evaluate"])
+    rerun_state_machine.set_mode(rerun_mode)
+    return total_loss_dict, collected_non_loss_data, False
+
 
 from megatron.bridge.training import eval 
 def evaluate_and_print_results_custom(
