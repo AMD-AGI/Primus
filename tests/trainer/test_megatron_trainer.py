@@ -357,6 +357,34 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def test_zebra_llama_1B(self):
+        run_script(
+            self.__class__.__name__,
+            "zebra_llama_1B",
+            exp_path="examples/megatron/configs/MI300X/zebra_llama_1B-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+            ],
+        )
+
+    def test_mamba_370M(self):
+        run_script(
+            self.__class__.__name__,
+            "mamba_370M",
+            exp_path="examples/megatron/configs/MI300X/mamba_370M-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+            ],
+        )
+
 
 class TestMegatronTrainerDeterministic(PrimusUT):
     def __init__(self, *args, **kwargs):
