@@ -438,8 +438,8 @@ To validate the projection tool's accuracy, we compared projected performance ag
 
 ### Assumptions
 
-1. **Linear DP Scaling** — Compute time scales linearly with 1/DP (ideal weak scaling)
-2. **Communication Model** — Bandwidth efficiency is constant (default 91%); all NICs are used in parallel for inter-node traffic
+1. **DP Weak Scaling** — DP scaling assumes weak scaling (constant micro-batch size per GPU); the DP gradient AllReduce overhead is modeled analytically
+2. **Communication Model** — Bandwidth efficiency uses a constant factor; all NICs are used in parallel for inter-node traffic
 3. **Pipeline Bubbles** — B/W split is 50/50 for zero-bubble scheduling; P2P communication time is small relative to compute
 4. **Gradient AllReduce** — By default overlapped with compute; if disabled, added to critical path
 5. **MoE All-to-All** — All-to-All time scales with EP size; per-peer latency overhead is constant
@@ -459,7 +459,7 @@ To validate the projection tool's accuracy, we compared projected performance ag
 - **No GPU? Use simulation**: With `--profiling-mode simulate`, you can run performance projection entirely on CPU. This is useful for capacity planning without GPU access.
 - **Validate simulation accuracy**: Use `--profiling-mode both` to compare simulation against real benchmarks.
 - **Understand scaling limits**: DP scaling is limited by `global_batch_size / micro_batch_size`. If you run out of microbatches, adding more nodes won't help.
-- **Pipeline scaling**: With PP > 1, you can only scale in multiples of the pipeline replica size.
+- **Pipeline scaling**: With PP > 1, layers don't need to divide evenly across stages. The tool distributes remainder layers to the first stages (e.g., 61 layers with PP=4 → [16, 15, 15, 15]). You can also supply explicit per-stage layer counts via `decoder_first_pipeline_num_layers`, `decoder_last_pipeline_num_layers`, or `pipeline_model_parallel_layout`.
 - **Recomputation trade-off**: Full recompute dramatically reduces activation memory (e.g., 18 GB → 0.25 GB per MoE layer) at the cost of ~33% more compute.
 - **MoE activation dominance**: For MoE models, the MoE MLP activation (scaled by `topk`) typically dominates the per-layer activation budget.
 
