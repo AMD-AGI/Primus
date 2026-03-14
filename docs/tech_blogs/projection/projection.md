@@ -26,6 +26,164 @@ Planning a large-scale distributed training run is expensive — both in time an
 
 This blog covers the design and capabilities of the Primus projection tool, which provides analytical **memory estimation** and **performance projection** for large-scale LLM training across multi-node GPU clusters.
 
+## Quick Start
+
+### Memory Projection
+
+Estimate per-GPU memory for a model configuration:
+
+```bash
+export NNODES=1
+export HSA_NO_SCRATCH_RECLAIM=1
+
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection memory \
+    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
+```
+
+### Performance Projection (Benchmark Mode)
+
+Run a training performance projection using single-node GPU benchmarking:
+
+```bash
+export NNODES=1
+export HSA_NO_SCRATCH_RECLAIM=1
+
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection performance \
+    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --target-nodes 4
+```
+
+### Performance Projection (Simulation Mode — No GPU Required)
+
+Run a full training projection entirely on CPU using analytical backends:
+
+```bash
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection performance \
+    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --profiling-mode simulate \
+    --target-nodes 4
+```
+
+Target a specific GPU architecture for simulation:
+
+```bash
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection performance \
+    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --profiling-mode simulate --gpu-arch mi355x \
+    --target-nodes 4
+```
+
+### Sub-Node Benchmarking (Benchmark on Fewer GPUs)
+
+Benchmark on a single GPU and project to multi-node:
+
+```bash
+export NNODES=1
+export GPUS_PER_NODE=8
+
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection performance \
+    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --benchmark-gpus 1 \
+    --target-nodes 4
+```
+
+The tool automatically reduces PP, EP, and if necessary TP to fit on the benchmark GPU count, then restores the full target configuration analytically during projection. This is useful when only a fraction of a node is available for profiling.
+
+### Compare Benchmark vs. Simulation
+
+Validate simulation accuracy against real hardware:
+
+```bash
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection performance \
+    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --profiling-mode both \
+    --target-nodes 4
+```
+
+### Parallelism Overrides
+
+Override parallelism settings from the config file:
+
+```bash
+export PRIMUS_TP=1
+export PRIMUS_PP=3
+export PRIMUS_EP=8
+
+bash runner/primus-cli direct --script primus/cli/main.py -- \
+    projection performance \
+    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --target-nodes 6
+```
+
+## Example Output
+
+### Memory Projection
+
+```
+====================================================================================================
+[Primus:Projection] Component-wise Profiling Results (Rank 0):
+====================================================================================================
+
+  Total Number of Parameters: 15.654321 Billion (15,654,321,024)
+
+  [embedding]
+    Params: 0.819200 Billion (819,200,000)
+    Activation Memory: 0.2500 GB
+
+    [dense_transformer_layer]
+      Params: 0.302000 Billion (302,000,000)
+      Activation Memory: 2.1250 GB
+
+    [moe_transformer_layer]
+      Params: 1.001400 Billion (1,001,400,000)
+      Activation Memory: 18.2000 GB
+
+====================================================================================================
+[Primus:Projection] Memory Projection Summary on Rank 0:
+  Params: 20.850000 Billion (20,850,000,000)
+  Param+Optimizer Memory: 83.7400 GB
+  Activation Memory (per batch size 4, seq len 16384): 36.7500 GB
+  Projected Total Memory: 120.4900 GB
+====================================================================================================
+```
+
+### Performance Projection
+
+```
+====================================================================================================
+[Primus:Performance Projection] Configuration Summary:
+  Benchmark Config: PP=1, EP=8, TP=1, CP=1, DP=1 (1 node)
+  Target Config: PP=1, EP=8, TP=1, CP=1, DP=4 (4 nodes)
+
+====================================================================================================
+Multinode Scaling Projection Results
+====================================================================================================
+
+📊 Parallelism: TP=1, PP=1, EP=8, CP=1
+
+🎯 Target Configuration (4 nodes):
+   Nodes: 4, GPUs: 32
+   TP=1, PP=1, EP=8, CP=1, DP=4
+   DP Scaling Factor: 4.0x
+   Iteration Time: 4012.456 ms
+   Tokens/s: 649,123
+
+📡 Communication Breakdown:
+   gradient_allreduce: 45.123 ms (message: 1024.00 MB) [OVERLAPPED]
+   moe_a2a_fwd: 230.500 ms (message: 64.00 MB, 26 layers × 8.866 ms/layer)
+   moe_a2a_bwd: 230.500 ms (message: 64.00 MB, 26 layers × 8.866 ms/layer)
+
+   Total Communication (critical path): 461.000 ms
+
+====================================================================================================
+```
+
 ## Background
 
 Training large language models (LLMs) requires careful orchestration of multiple parallelism strategies — Tensor Parallelism (TP), Pipeline Parallelism (PP), Expert Parallelism (EP), Context Parallelism (CP), and Data Parallelism (DP). Each strategy trades off memory, compute, and communication differently. The combinatorial space of possible configurations makes it impractical to try every setup on actual hardware.
@@ -250,166 +408,6 @@ The projection tool models how each parallelism dimension affects performance:
 **Data Parallelism (DP)** — Provides linear speedup by processing more batches in parallel. Gradient AllReduce is overlapped with backward computation by default.
 
 
-## Quick Start
-
-### Memory Projection
-
-Estimate per-GPU memory for a model configuration:
-
-```bash
-export NNODES=1
-export HSA_NO_SCRATCH_RECLAIM=1
-
-bash runner/primus-cli direct --script primus/cli/main.py -- \
-    projection memory \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
-```
-
-### Performance Projection (Benchmark Mode)
-
-Run a training performance projection using single-node GPU benchmarking:
-
-```bash
-export NNODES=1
-export HSA_NO_SCRATCH_RECLAIM=1
-
-bash runner/primus-cli direct --script primus/cli/main.py -- \
-    projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
-    --target-nodes 4
-```
-
-### Performance Projection (Simulation Mode — No GPU Required)
-
-Run a full training projection entirely on CPU using analytical backends:
-
-```bash
-bash runner/primus-cli direct --script primus/cli/main.py -- \
-    projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
-    --profiling-mode simulate \
-    --target-nodes 4
-```
-
-Target a specific GPU architecture for simulation:
-
-```bash
-bash runner/primus-cli direct --script primus/cli/main.py -- \
-    projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
-    --profiling-mode simulate --gpu-arch mi355x \
-    --target-nodes 4
-```
-
-### Sub-Node Benchmarking (Benchmark on Fewer GPUs)
-
-Benchmark on a single GPU and project to multi-node:
-
-```bash
-export NNODES=1
-export GPUS_PER_NODE=8
-
-bash runner/primus-cli direct --script primus/cli/main.py -- \
-    projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
-    --benchmark-gpus 1 \
-    --target-nodes 4
-```
-
-The tool automatically reduces PP, EP, and if necessary TP to fit on the benchmark GPU count, then restores the full target configuration analytically during projection. This is useful when only a fraction of a node is available for profiling.
-
-### Compare Benchmark vs. Simulation
-
-Validate simulation accuracy against real hardware:
-
-```bash
-bash runner/primus-cli direct --script primus/cli/main.py -- \
-    projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
-    --profiling-mode both \
-    --target-nodes 4
-```
-
-### Parallelism Overrides
-
-Override parallelism settings from the config file:
-
-```bash
-export PRIMUS_TP=1
-export PRIMUS_PP=3
-export PRIMUS_EP=8
-
-bash runner/primus-cli direct --script primus/cli/main.py -- \
-    projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
-    --target-nodes 6
-```
-
-
-## Example Output
-
-### Memory Projection
-
-```
-====================================================================================================
-[Primus:Projection] Component-wise Profiling Results (Rank 0):
-====================================================================================================
-
-  Total Number of Parameters: 15.654321 Billion (15,654,321,024)
-
-  [embedding]
-    Params: 0.819200 Billion (819,200,000)
-    Activation Memory: 0.2500 GB
-
-    [dense_transformer_layer]
-      Params: 0.302000 Billion (302,000,000)
-      Activation Memory: 2.1250 GB
-
-    [moe_transformer_layer]
-      Params: 1.001400 Billion (1,001,400,000)
-      Activation Memory: 18.2000 GB
-
-====================================================================================================
-[Primus:Projection] Memory Projection Summary on Rank 0:
-  Params: 20.850000 Billion (20,850,000,000)
-  Param+Optimizer Memory: 83.7400 GB
-  Activation Memory (per batch size 4, seq len 16384): 36.7500 GB
-  Projected Total Memory: 120.4900 GB
-====================================================================================================
-```
-
-### Performance Projection
-
-```
-====================================================================================================
-[Primus:Performance Projection] Configuration Summary:
-  Benchmark Config: PP=1, EP=8, TP=1, CP=1, DP=1 (1 node)
-  Target Config: PP=1, EP=8, TP=1, CP=1, DP=4 (4 nodes)
-
-====================================================================================================
-Multinode Scaling Projection Results
-====================================================================================================
-
-📊 Parallelism: TP=1, PP=1, EP=8, CP=1
-
-🎯 Target Configuration (4 nodes):
-   Nodes: 4, GPUs: 32
-   TP=1, PP=1, EP=8, CP=1, DP=4
-   DP Scaling Factor: 4.0x
-   Iteration Time: 4012.456 ms
-   Tokens/s: 649,123
-
-📡 Communication Breakdown:
-   gradient_allreduce: 45.123 ms (message: 1024.00 MB) [OVERLAPPED]
-   moe_a2a_fwd: 230.500 ms (message: 64.00 MB, 26 layers × 8.866 ms/layer)
-   moe_a2a_bwd: 230.500 ms (message: 64.00 MB, 26 layers × 8.866 ms/layer)
-
-   Total Communication (critical path): 461.000 ms
-
-====================================================================================================
-```
-
-
 ## Validation: Projected vs. Measured Results
 
 To validate the projection tool's accuracy, we compared projected performance against measured results published on the [AMD ROCm Performance Results](https://www.amd.com/en/developer/resources/rocm-hub/dev-ai/performance-results.html#ai-training) page. The workflow is straightforward: benchmark on a single node, then project to 8 nodes and compare against the published multi-node measurements. The projections were obtained by providing the corresponding hardware configuration files via `--hardware-config`.
@@ -462,19 +460,6 @@ To validate the projection tool's accuracy, we compared projected performance ag
 - **Pipeline scaling**: With PP > 1, layers don't need to divide evenly across stages. The tool distributes remainder layers to the first stages (e.g., 61 layers with PP=4 → [16, 15, 15, 15]). You can also supply explicit per-stage layer counts via `decoder_first_pipeline_num_layers`, `decoder_last_pipeline_num_layers`, or `pipeline_model_parallel_layout`.
 - **Recomputation trade-off**: Full recompute dramatically reduces activation memory (e.g., 18 GB → 0.25 GB per MoE layer) at the cost of ~33% more compute.
 - **MoE activation dominance**: For MoE models, the MoE MLP activation (scaled by `topk`) typically dominates the per-layer activation budget.
-
-
-## Future Works
-
-The Primus projection tool provides a foundation for pre-training analysis. Here are some directions we are exploring, and we welcome contributions:
-
-1. **Inference projection**: Extend the projection framework to estimate inference throughput and latency for serving scenarios, including batched decoding and speculative decoding.
-
-2. **Automated parallelism search**: Use memory and performance projections to automatically recommend optimal parallelism configurations for a given model and cluster.
-
-3. **Refined communication modeling**: Incorporate network contention models and real topology-aware routing to improve multi-node scaling predictions.
-
-4. **Training cost estimation**: Combine projected throughput with cluster pricing to estimate training cost in GPU-hours or dollars for end-to-end training runs.
 
 
 ## Disclaimers
