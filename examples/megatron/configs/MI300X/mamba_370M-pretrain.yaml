@@ -46,7 +46,7 @@ modules:
 
       # Tokenizer
       tokenizer_type: HuggingFaceTokenizer
-      tokenizer_model: EleutherAI/gpt-neox-20b
+      tokenizer_model: meta-llama/Llama-3.2-1B
 
       # parallel
       tensor_model_parallel_size: 1
