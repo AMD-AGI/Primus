@@ -62,6 +62,14 @@ def run_preflight_info(args: Any, expect_distributed: bool = True) -> int:
             - dump_path (str)
             - report_file_name (str)
             - save_pdf (bool)
+        expect_distributed: Whether the run is expected to be in a distributed
+            (multi-rank) context. When True (default), the network portion of
+            preflight assumes multiple ranks may participate and will emit
+            warnings if it detects conditions that look like a misconfigured
+            or partially initialized distributed environment. When False, the
+            run is treated as local-only: distributed-related network warnings
+            are suppressed, which is appropriate for single-node or
+            non-distributed preflight invocations.
 
     Return codes:
       0: success (WARN does not change rc)
