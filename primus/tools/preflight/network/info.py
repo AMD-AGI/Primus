@@ -26,7 +26,19 @@ class Finding:
 
 
 def collect_network_info(expect_distributed: bool = True) -> List[Finding]:
-    """Collect all network info (basic + standard + runtime)."""
+    """
+    Run a sequence of network diagnostic checks (basic, standard, and full)
+    and aggregate their findings into a single list. The checks include status
+    of network interfaces, distributed environment detection, IP routes, and
+    runtime compatibility for distributed training. The `expect_distributed`
+    flag influences checks that are relevant to distributed setups.
+
+    Args:
+        expect_distributed (bool): Whether distributed execution is expected.
+
+    Returns:
+        List[Finding]: All findings from the three network checks.
+    """
     out: List[Finding] = []
 
     nb = run_network_basic_checks()
