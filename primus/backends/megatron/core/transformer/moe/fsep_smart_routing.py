@@ -6,21 +6,16 @@
 """
 FSEP Smart Routing: token assignment across expert replicas.
 
-Ports key functions from laer_moe/galvatron/core/runtime/moe/fused_kernel.py:
-  - smart_routing_map_gpu   → compute per-slot token allocation (load-balanced)
-  - new_routing_map_with_gradients → create differentiable routing for dispatch
+Provides GPU-accelerated (Triton) and Python-fallback implementations of:
+  1. smart_routing_map  — per-slot token allocation with intra-node priority (Algorithm 3)
+  2. compute_smart_routing — token→slot assignment with capacity-aware allocation
+  3. new_routing_map_with_gradients — differentiable routing with Triton backward
 
-These functions implement the core of LAER-MoE's FSEP dispatch:
-  1. Given the original routing_map [T, N_E] and expert_locations [N_E, max_S],
-     compute how many tokens should go to each slot (load-balanced by intra/inter node).
-  2. Re-assign each token to exactly ONE slot of its target expert (not all replicas).
-  3. The resulting new_routing_map [T, N_slots] guides the A2A dispatch.
+Triton kernels ported from:
+  laer_moe/galvatron/core/runtime/moe/fused_kernel.py
+    _smart_routing_kernel, _token_assignment_kernel, _gradient_mapping_kernel
 
-After dispatch and Expert GEMM:
-  - ReduceScatter across the FSEP group combines partial results.
-  - Load is balanced because hot experts have multiple replicas accepting tokens.
-
-Reference: laer_moe/galvatron/core/runtime/moe/fused_kernel.py
+Reference: LAER-MoE (ASPLOS '26), Algorithms 3 & 4
 """
 
 from typing import Tuple, Optional
@@ -28,143 +23,631 @@ from typing import Tuple, Optional
 import torch
 import torch.distributed as dist
 
+# ---------------------------------------------------------------------------
+# Triton import with graceful fallback
+# ---------------------------------------------------------------------------
+_TRITON_AVAILABLE = False
+try:
+    import triton
+    import triton.language as tl
+    _TRITON_AVAILABLE = True
+except ImportError:
+    pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Section 1: Triton Kernels
+# ═══════════════════════════════════════════════════════════════════════════
+
+if _TRITON_AVAILABLE:
+
+    # -------------------------------------------------------------------
+    # Kernel 1: Smart Routing Map (Algorithm 3 — Lite Routing)
+    # Reference: fused_kernel.py::_smart_routing_kernel
+    # -------------------------------------------------------------------
+    @triton.jit
+    def _smart_routing_kernel(
+        # Input tensors
+        tokens_per_expert_ptr,   # [tp_size, ep_size, num_global_experts]
+        expert_locations_ptr,    # [origin_expert_num, max_locations]
+        # Output tensors
+        output_ptr,              # [tp_size, ep_size, ep_size * num_local_experts]
+        # Configuration (compile-time constants)
+        tp_size: tl.constexpr,
+        ep_size: tl.constexpr,
+        num_global_experts: tl.constexpr,
+        num_local_experts: tl.constexpr,
+        max_locations: tl.constexpr,
+        gpus_per_node: tl.constexpr,
+        # Meta parameters
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        """
+        Triton kernel: compute per-slot token allocation with intra-node priority.
+
+        Each (tp_idx, src_ep_rank) program processes all experts, distributing
+        tokens to replica slots. Intra-node replicas are preferred to minimize
+        cross-node bandwidth.
+
+        Grid: (tp_size, ep_size)
+        """
+        tp_idx = tl.program_id(0)
+        src_ep_rank = tl.program_id(1)
+
+        src_node = src_ep_rank // gpus_per_node
+
+        # Base pointers for this (tp_idx, src_ep_rank)
+        tokens_offset = tp_idx * ep_size * num_global_experts + src_ep_rank * num_global_experts
+        tokens_base = tokens_per_expert_ptr + tokens_offset
+        output_base = (
+            output_ptr
+            + tp_idx * ep_size * ep_size * num_local_experts
+            + src_ep_rank * ep_size * num_local_experts
+        )
+
+        # Process each expert
+        for expert_id in range(num_global_experts):
+            tokens_for_expert = tl.load(tokens_base + expert_id)
+            if tokens_for_expert != 0:
+                expert_locations_base = expert_locations_ptr + expert_id * max_locations
+
+                # Phase 1: Count intra-node and inter-node replicas
+                intra_count = 0
+                inter_count = 0
+                for loc_idx in range(max_locations):
+                    location = tl.load(expert_locations_base + loc_idx)
+                    if location >= 0:
+                        target_node = location // gpus_per_node // num_local_experts
+                        if target_node == src_node:
+                            intra_count += 1
+                        else:
+                            inter_count += 1
+
+                remaining_tokens = tokens_for_expert
+
+                # Phase 2: Distribute to intra-node replicas first
+                if intra_count > 0:
+                    tokens_per_location = remaining_tokens // intra_count
+                    extra_tokens = remaining_tokens % intra_count
+
+                    assigned = 0
+                    for loc_idx in range(max_locations):
+                        location = tl.load(expert_locations_base + loc_idx)
+                        if location >= 0:
+                            target_node = location // gpus_per_node // num_local_experts
+                            if target_node == src_node:
+                                tokens_to_assign = tokens_per_location
+                                if assigned < extra_tokens:
+                                    tokens_to_assign += 1
+                                tl.atomic_add(output_base + location, tokens_to_assign)
+                                assigned += 1
+                    remaining_tokens = 0
+
+                # Phase 3: Distribute remaining to inter-node replicas
+                if remaining_tokens > 0 and inter_count > 0:
+                    tokens_per_location = remaining_tokens // inter_count
+                    extra_tokens = remaining_tokens % inter_count
+
+                    assigned = 0
+                    for loc_idx in range(max_locations):
+                        location = tl.load(expert_locations_base + loc_idx)
+                        if location >= 0:
+                            tokens_to_assign = tokens_per_location
+                            if assigned < extra_tokens:
+                                tokens_to_assign += 1
+                            tl.atomic_add(output_base + location, tokens_to_assign)
+                            assigned += 1
+
+    # -------------------------------------------------------------------
+    # Kernel 2: Token Assignment (capacity-aware, atomic)
+    # Reference: fused_kernel.py::_token_assignment_kernel
+    # -------------------------------------------------------------------
+    @triton.jit
+    def _token_assignment_kernel(
+        # Input tensors
+        routing_map_ptr,         # [token_num, origin_expert_num]
+        probs_ptr,               # [token_num, origin_expert_num]
+        expert_locations_ptr,    # [origin_expert_num, max_locations]
+        copy_num_ptr,            # [num_global_experts] — mutable capacity (atomic)
+        # Output tensors
+        new_routing_map_ptr,     # [token_num, num_global_experts]
+        new_probs_ptr,           # [token_num, num_global_experts]
+        # Dimension parameters (compile-time constants)
+        token_num: tl.constexpr,
+        origin_expert_num: tl.constexpr,
+        num_global_experts: tl.constexpr,
+        max_locations: tl.constexpr,
+        # Block size
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        """
+        Triton kernel: assign each token to exactly one replica slot per expert.
+
+        Each program processes one token. For each expert the token is routed to,
+        it tries each replica slot in order. Uses atomic_add(-1) on copy_num to
+        claim capacity; if old_count > 0, allocation succeeds. Otherwise, the
+        counter is restored and the next slot is tried.
+
+        Grid: (token_num,)
+        """
+        token_id = tl.program_id(0)
+
+        if token_id >= token_num:
+            return
+
+        routing_base = routing_map_ptr + token_id * origin_expert_num
+        probs_base = probs_ptr + token_id * origin_expert_num
+        new_routing_base = new_routing_map_ptr + token_id * num_global_experts
+        new_probs_base = new_probs_ptr + token_id * num_global_experts
+
+        for expert_idx in range(origin_expert_num):
+            is_routed = tl.load(routing_base + expert_idx)
+            if is_routed:
+                prob_val = tl.load(probs_base + expert_idx)
+
+                expert_locations_base = expert_locations_ptr + expert_idx * max_locations
+
+                allocated = 0
+                for loc_idx in range(max_locations):
+                    if allocated == 0:
+                        location = tl.load(expert_locations_base + loc_idx)
+                        if location >= 0:
+                            # Atomic allocation attempt
+                            old_count = tl.atomic_add(copy_num_ptr + location, -1)
+                            if old_count > 0:
+                                # Success: claim this slot
+                                tl.store(new_routing_base + location, 1)
+                                tl.store(new_probs_base + location, prob_val)
+                                allocated = 1
+                            else:
+                                # Slot full: restore counter
+                                tl.atomic_add(copy_num_ptr + location, 1)
+
+    # -------------------------------------------------------------------
+    # Kernel 3: Gradient Mapping (backward pass)
+    # Reference: fused_kernel.py::_gradient_mapping_kernel
+    # -------------------------------------------------------------------
+    @triton.jit
+    def _gradient_mapping_kernel(
+        # Input tensors
+        grad_new_probs_ptr,        # [token_num, num_global_experts]
+        new_routing_map_ptr,       # [token_num, num_global_experts]
+        inverse_expert_map_ptr,    # [num_global_experts]
+        # Output tensors
+        grad_probs_ptr,            # [token_num, origin_expert_num]
+        # Dimensions (compile-time constants)
+        token_num: tl.constexpr,
+        origin_expert_num: tl.constexpr,
+        num_global_experts: tl.constexpr,
+        # Block size
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        """
+        Triton kernel: map gradients from new_probs back to original probs.
+
+        For each active (token, slot) pair, looks up the original expert index
+        via inverse_expert_map and writes the gradient.
+
+        Grid: (token_num,)
+        """
+        token_idx = tl.program_id(0)
+
+        if token_idx >= token_num:
+            return
+
+        for location in range(num_global_experts):
+            map_value = tl.load(
+                new_routing_map_ptr + token_idx * num_global_experts + location
+            )
+            grad_value = tl.load(
+                grad_new_probs_ptr + token_idx * num_global_experts + location
+            )
+
+            if map_value != 0:
+                expert_idx = tl.load(inverse_expert_map_ptr + location)
+                tl.store(
+                    grad_probs_ptr + token_idx * origin_expert_num + expert_idx,
+                    grad_value,
+                )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Section 2: GPU wrapper functions (dispatch to Triton or Python fallback)
+# ═══════════════════════════════════════════════════════════════════════════
 
 # ---------------------------------------------------------------------------
-# Smart Routing Map (token-count level)
+# smart_routing_map — public API
 # ---------------------------------------------------------------------------
 
 def smart_routing_map(
-    num_global_tokens_per_expert: torch.Tensor,  # [T, ep_size, N_E] or [N_E]
-    expert_locations: torch.Tensor,              # [N_E, max_S]
+    num_global_tokens_per_expert: torch.Tensor,
+    expert_locations: torch.Tensor,
     num_local_experts: int,
+    ep_size: int = 0,
+    ep_rank: int = 0,
     gpus_per_node: int = 8,
 ) -> torch.Tensor:
     """
-    Compute the balanced per-slot token allocation.
+    Compute balanced per-slot token allocation (Algorithm 3: Lite Routing).
 
-    Given the number of tokens destined for each expert from each source EP rank,
-    distribute those tokens across the expert's replicas (slots), preferring
-    intra-node replicas to minimize cross-node bandwidth.
+    Dispatches to Triton kernel on CUDA tensors, Python fallback otherwise.
 
     Args:
-        num_global_tokens_per_expert: Token counts per expert per source rank.
-            Shape can be [N_E] (simplified) or [tp_size, ep_size, N_E].
-        expert_locations: [N_E, max_S] tensor. expert_locations[e, j] = slot index
-            for the j-th replica of expert e. -1 means unused.
-        num_local_experts: Number of experts per GPU.
-        gpus_per_node: GPUs per physical node (for intra-node preference).
+        num_global_tokens_per_expert: [tp_size, ep_size, N_E] or [N_E]
+        expert_locations: [N_E, max_S], -1 for invalid
+        num_local_experts: experts per GPU
+        ep_size / ep_rank / gpus_per_node: topology info
 
     Returns:
-        Slot allocation tensor [ep_size, N_slots] indicating how many tokens
-        each source EP rank should send to each slot.
+        3D input → [tp_size, ep_size, N_slots]
+        1D input → [N_slots]
     """
-    device = num_global_tokens_per_expert.device
-
-    # Flatten to [N_E] if needed
-    if num_global_tokens_per_expert.dim() > 1:
-        tokens_per_expert = num_global_tokens_per_expert.sum(dim=tuple(range(num_global_tokens_per_expert.dim() - 1)))
+    if num_global_tokens_per_expert.dim() == 3:
+        return _smart_routing_map_3d(
+            num_global_tokens_per_expert, expert_locations,
+            num_local_experts, gpus_per_node,
+        )
     else:
-        tokens_per_expert = num_global_tokens_per_expert
+        return _smart_routing_map_1d(
+            num_global_tokens_per_expert, expert_locations,
+            num_local_experts, ep_rank, gpus_per_node,
+        )
 
+
+@torch.no_grad()
+def _smart_routing_map_3d(
+    tokens_per_expert: torch.Tensor,    # [tp_size, ep_size, N_E]
+    expert_locations: torch.Tensor,     # [N_E, max_S]
+    num_local_experts: int,
+    gpus_per_node: int = 8,
+) -> torch.Tensor:
+    """3D smart routing: Triton kernel on CUDA, Python fallback on CPU."""
+    tp_size, ep_size, N_E = tokens_per_expert.shape
+    max_S = expert_locations.shape[1]
+    N_slots = ep_size * num_local_experts
+    device = tokens_per_expert.device
+
+    # Use Triton kernel if available and tensors are on CUDA
+    if _TRITON_AVAILABLE and device.type == "cuda":
+        output = torch.zeros(
+            (tp_size, ep_size, N_slots),
+            dtype=tokens_per_expert.dtype, device=device,
+        )
+        tokens_tensor = tokens_per_expert.contiguous()
+        locations_tensor = expert_locations.contiguous()
+        grid = (tp_size, ep_size)
+        _smart_routing_kernel[grid](
+            tokens_tensor,
+            locations_tensor,
+            output,
+            tp_size=tp_size,
+            ep_size=ep_size,
+            num_global_experts=N_E,
+            num_local_experts=num_local_experts,
+            max_locations=max_S,
+            gpus_per_node=gpus_per_node,
+            BLOCK_SIZE=1,
+        )
+        return output
+
+    # ── Python fallback ──
+    return _smart_routing_map_3d_python(
+        tokens_per_expert, expert_locations, num_local_experts, gpus_per_node,
+    )
+
+
+def _smart_routing_map_3d_python(
+    tokens_per_expert: torch.Tensor,
+    expert_locations: torch.Tensor,
+    num_local_experts: int,
+    gpus_per_node: int = 8,
+) -> torch.Tensor:
+    """Pure-Python 3D smart routing (CPU fallback)."""
+    tp_size, ep_size, N_E = tokens_per_expert.shape
+    max_S = expert_locations.shape[1]
+    N_slots = ep_size * num_local_experts
+    device = tokens_per_expert.device
+
+    output = torch.zeros(
+        (tp_size, ep_size, N_slots), dtype=tokens_per_expert.dtype, device=device,
+    )
+
+    for tp_idx in range(tp_size):
+        for src_rank in range(ep_size):
+            src_node = src_rank // gpus_per_node
+
+            for expert_id in range(N_E):
+                tokens = tokens_per_expert[tp_idx, src_rank, expert_id].item()
+                if tokens == 0:
+                    continue
+
+                intra_slots = []
+                inter_slots = []
+                for loc_idx in range(max_S):
+                    location = expert_locations[expert_id, loc_idx].item()
+                    if location < 0:
+                        continue
+                    target_node = (location // num_local_experts) // gpus_per_node
+                    if target_node == src_node:
+                        intra_slots.append(location)
+                    else:
+                        inter_slots.append(location)
+
+                remaining = tokens
+                if intra_slots:
+                    n = len(intra_slots)
+                    per_slot = remaining // n
+                    extra = remaining % n
+                    for idx, slot in enumerate(intra_slots):
+                        output[tp_idx, src_rank, slot] += per_slot + (1 if idx < extra else 0)
+                    remaining = 0
+
+                if remaining > 0 and inter_slots:
+                    n = len(inter_slots)
+                    per_slot = remaining // n
+                    extra = remaining % n
+                    for idx, slot in enumerate(inter_slots):
+                        output[tp_idx, src_rank, slot] += per_slot + (1 if idx < extra else 0)
+
+    return output
+
+
+def _smart_routing_map_1d(
+    tokens_per_expert: torch.Tensor,
+    expert_locations: torch.Tensor,
+    num_local_experts: int,
+    ep_rank: int = 0,
+    gpus_per_node: int = 8,
+) -> torch.Tensor:
+    """
+    1D smart routing: allocates tokens across slots for a single source rank.
+
+    Infers N_slots from the max valid slot index in expert_locations,
+    then uses the Python fallback (since 1D is typically small-scale / CPU).
+    """
+    device = tokens_per_expert.device
     N_E = tokens_per_expert.shape[0]
-    N_slots = expert_locations.shape[0]  # typically N_E for Mode B
     max_S = expert_locations.shape[1]
 
-    # Compute slot allocation with intra-node priority
+    # Infer N_slots from expert_locations content
+    valid_mask = expert_locations >= 0
+    if valid_mask.any():
+        N_slots = int(expert_locations[valid_mask].max().item()) + 1
+    else:
+        N_slots = N_E
+
     slot_allocation = torch.zeros(N_slots, dtype=tokens_per_expert.dtype, device=device)
+    src_node = ep_rank // gpus_per_node
 
     for e in range(N_E):
         tokens = tokens_per_expert[e].item()
         if tokens == 0:
             continue
 
-        # Get valid slots for this expert
-        valid_slots = expert_locations[e][expert_locations[e] >= 0]
-        if len(valid_slots) == 0:
-            continue
+        intra_slots = []
+        inter_slots = []
+        for j in range(max_S):
+            slot = expert_locations[e, j].item()
+            if slot < 0:
+                continue
+            target_node = (slot // num_local_experts) // gpus_per_node
+            if target_node == src_node:
+                intra_slots.append(slot)
+            else:
+                inter_slots.append(slot)
 
-        n_replicas = len(valid_slots)
+        remaining = tokens
+        if intra_slots:
+            n = len(intra_slots)
+            per_slot = remaining // n
+            extra = remaining % n
+            for idx, slot in enumerate(intra_slots):
+                slot_allocation[slot] += per_slot + (1 if idx < extra else 0)
+            remaining = 0
 
-        # Distribute tokens evenly across replicas (simplified: uniform split)
-        # Full implementation: intra-node first, then inter-node (like _smart_routing_kernel)
-        tokens_per_replica = tokens // n_replicas
-        extra = tokens % n_replicas
-
-        for idx, slot in enumerate(valid_slots):
-            allocation = tokens_per_replica + (1 if idx < extra else 0)
-            slot_allocation[slot.item()] += allocation
+        if remaining > 0 and inter_slots:
+            n = len(inter_slots)
+            per_slot = remaining // n
+            extra = remaining % n
+            for idx, slot in enumerate(inter_slots):
+                slot_allocation[slot] += per_slot + (1 if idx < extra else 0)
 
     return slot_allocation
 
 
 # ---------------------------------------------------------------------------
-# New Routing Map (token-level, differentiable)
+# compute_smart_routing — public API (token-level assignment)
 # ---------------------------------------------------------------------------
+
+def compute_smart_routing(
+    routing_map: torch.Tensor,            # [T, N_E] bool
+    probs: torch.Tensor,                  # [T, N_E] float
+    expert_locations: torch.Tensor,       # [N_E, max_S]
+    inverse_expert_map: torch.Tensor,     # [N_slots]
+    tokens_per_slot: torch.Tensor,        # [N_slots] — capacity from smart_routing_map
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Assign tokens to expert replica slots with capacity-aware allocation.
+
+    Dispatches to Triton kernel on CUDA, Python fallback otherwise.
+
+    Args:
+        routing_map: [T, N_E] bool — original expert assignments
+        probs: [T, N_E] float — routing probabilities
+        expert_locations: [N_E, max_S] — replica slot indices (-1 = invalid)
+        inverse_expert_map: [N_slots] — slot→expert mapping
+        tokens_per_slot: [N_slots] — per-slot capacity budget
+
+    Returns:
+        new_routing_map: [T, N_slots] bool
+        new_probs: [T, N_slots] float
+    """
+    T, N_E = routing_map.shape
+    N_slots = tokens_per_slot.shape[0]
+    max_S = expert_locations.shape[1]
+    device = routing_map.device
+
+    if _TRITON_AVAILABLE and device.type == "cuda":
+        return _compute_smart_routing_triton(
+            routing_map, probs, expert_locations, tokens_per_slot,
+            T, N_E, N_slots, max_S,
+        )
+
+    return _compute_smart_routing_python(
+        routing_map, probs, expert_locations, tokens_per_slot,
+        T, N_E, N_slots, max_S,
+    )
+
+
+def _compute_smart_routing_triton(
+    routing_map: torch.Tensor,
+    probs: torch.Tensor,
+    expert_locations: torch.Tensor,
+    tokens_per_slot: torch.Tensor,
+    T: int, N_E: int, N_slots: int, max_S: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Triton-accelerated token→slot assignment."""
+    device = routing_map.device
+
+    new_routing_map = torch.zeros((T, N_slots), dtype=routing_map.dtype, device=device)
+    new_probs = torch.zeros((T, N_slots), dtype=probs.dtype, device=device)
+
+    # Mutable capacity — cloned so atomic decrements don't corrupt the input
+    copy_num = tokens_per_slot.clone().to(dtype=torch.int32, device=device)
+
+    # Ensure int32 routing_map for Triton (bool not supported for arithmetic)
+    routing_int = routing_map.to(dtype=torch.int32).contiguous()
+
+    grid = (T,)
+    _token_assignment_kernel[grid](
+        routing_int,
+        probs.contiguous(),
+        expert_locations.contiguous(),
+        copy_num.contiguous(),
+        new_routing_map,
+        new_probs,
+        token_num=T,
+        origin_expert_num=N_E,
+        num_global_experts=N_slots,
+        max_locations=max_S,
+        BLOCK_SIZE=1,
+    )
+    return new_routing_map, new_probs
+
+
+def _compute_smart_routing_python(
+    routing_map: torch.Tensor,
+    probs: torch.Tensor,
+    expert_locations: torch.Tensor,
+    tokens_per_slot: torch.Tensor,
+    T: int, N_E: int, N_slots: int, max_S: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Pure-Python token→slot assignment (CPU fallback)."""
+    device = routing_map.device
+
+    new_routing_map = torch.zeros((T, N_slots), dtype=torch.bool, device=device)
+    new_probs = torch.zeros((T, N_slots), dtype=probs.dtype, device=device)
+
+    cap = tokens_per_slot.clone().long().to(device)
+
+    for e in range(N_E):
+        token_mask = routing_map[:, e]
+        if not token_mask.any():
+            continue
+
+        token_ids = token_mask.nonzero(as_tuple=True)[0]
+        token_probs = probs[token_ids, e]
+
+        valid_mask = expert_locations[e] >= 0
+        if not valid_mask.any():
+            continue
+        valid_slot_indices = expert_locations[e][valid_mask]
+
+        slot_ptr = 0
+        n_slots = len(valid_slot_indices)
+
+        for i in range(len(token_ids)):
+            if slot_ptr >= n_slots:
+                break
+            tid = token_ids[i].item()
+            while slot_ptr < n_slots:
+                slot = valid_slot_indices[slot_ptr].item()
+                if cap[slot].item() > 0:
+                    cap[slot] -= 1
+                    new_routing_map[tid, slot] = True
+                    new_probs[tid, slot] = token_probs[i]
+                    break
+                slot_ptr += 1
+
+    return new_routing_map, new_probs
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Section 3: Differentiable routing (autograd.Function with Triton backward)
+# ═══════════════════════════════════════════════════════════════════════════
 
 class _NewRoutingMapFunction(torch.autograd.Function):
     """
-    Create a new routing map that assigns each token to exactly ONE slot
-    of its target expert, based on the capacity allocation from smart_routing_map.
+    Differentiable token→slot routing with Triton-accelerated backward.
 
-    Forward:
-        routing_map [T, N_E] + probs [T, N_E] + expert_locations [N_E, max_S]
-        → new_routing_map [T, N_slots], new_probs [T, N_slots]
+    Forward: uses _token_assignment_kernel (Triton) for capacity-aware assignment
+    Backward: uses _gradient_mapping_kernel (Triton) for fast gradient routing
 
-    The new_routing_map assigns each token-expert pair to a specific slot
-    (the slot with available capacity, chosen greedily).
-
-    Backward:
-        Gradient of new_probs → gradient of probs via inverse_expert_map.
-
-    Reference: laer_moe/galvatron/core/runtime/moe/fused_kernel.py::NewRoutingMapWithGradients
+    Reference: fused_kernel.py::NewRoutingMapWithGradients
     """
 
     @staticmethod
     def forward(
         ctx,
-        routing_map: torch.Tensor,       # [T, N_E] bool
-        probs: torch.Tensor,             # [T, N_E] float
-        expert_locations: torch.Tensor, # [N_E, max_S] long
-        inverse_expert_map: torch.Tensor,  # [N_slots] long
-        slot_capacity: torch.Tensor,    # [N_slots] long (mutable, decremented)
+        routing_map: torch.Tensor,          # [T, N_E] bool
+        probs: torch.Tensor,                # [T, N_E] float
+        expert_locations: torch.Tensor,      # [N_E, max_S] long
+        inverse_expert_map: torch.Tensor,    # [N_slots] long
+        slot_capacity: torch.Tensor,         # [N_slots] long
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         T, N_E = routing_map.shape
-        N_slots = expert_locations.shape[0]
+        N_slots = slot_capacity.shape[0]
         max_S = expert_locations.shape[1]
         device = routing_map.device
 
         new_routing_map = torch.zeros((T, N_slots), dtype=routing_map.dtype, device=device)
         new_probs = torch.zeros((T, N_slots), dtype=probs.dtype, device=device)
 
-        # Mutable capacity (decremented as slots fill up)
-        cap = slot_capacity.clone().long()
+        if _TRITON_AVAILABLE and device.type == "cuda":
+            copy_num = slot_capacity.clone().to(dtype=torch.int32, device=device)
+            routing_int = routing_map.to(dtype=torch.int32).contiguous()
 
-        # Assign each token to exactly one slot per expert
-        for t in range(T):
-            for e in range(N_E):
-                if not routing_map[t, e]:
-                    continue
-
-                prob_val = probs[t, e].item()
-
-                # Try valid slots for expert e in order
-                for j in range(max_S):
-                    slot = expert_locations[e, j].item()
-                    if slot < 0:
+            grid = (T,)
+            _token_assignment_kernel[grid](
+                routing_int,
+                probs.contiguous(),
+                expert_locations.contiguous(),
+                copy_num.contiguous(),
+                new_routing_map,
+                new_probs,
+                token_num=T,
+                origin_expert_num=N_E,
+                num_global_experts=N_slots,
+                max_locations=max_S,
+                BLOCK_SIZE=1,
+            )
+        else:
+            # Python fallback
+            cap = slot_capacity.clone().long()
+            for t in range(T):
+                for e in range(N_E):
+                    if not routing_map[t, e]:
                         continue
-                    if cap[slot].item() > 0:
-                        cap[slot] -= 1
-                        new_routing_map[t, slot] = 1
-                        new_probs[t, slot] = prob_val
-                        break
-                    # If capacity exhausted, try next replica
-                    # (fallback: if no capacity, assign to first valid slot anyway)
-                else:
-                    # All replicas at capacity: fallback to first valid slot
-                    slot = expert_locations[e, 0].item()
-                    if slot >= 0:
-                        new_routing_map[t, slot] = 1
-                        new_probs[t, slot] = prob_val
+                    prob_val = probs[t, e]
+                    for j in range(max_S):
+                        slot = expert_locations[e, j].item()
+                        if slot < 0:
+                            continue
+                        if cap[slot].item() > 0:
+                            cap[slot] -= 1
+                            new_routing_map[t, slot] = 1
+                            new_probs[t, slot] = prob_val
+                            break
 
         ctx.save_for_backward(new_routing_map, inverse_expert_map)
         ctx.T = T
@@ -174,7 +657,7 @@ class _NewRoutingMapFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_new_routing_map, grad_new_probs):
-        """Map gradients from new_probs back to original probs."""
+        """Map gradients from new_probs → probs via inverse_expert_map."""
         new_routing_map, inverse_expert_map = ctx.saved_tensors
         T, N_E = ctx.T, ctx.N_E
 
@@ -182,15 +665,38 @@ class _NewRoutingMapFunction(torch.autograd.Function):
             return None, None, None, None, None
 
         N_slots = grad_new_probs.shape[1]
+        device = grad_new_probs.device
+
         grad_probs = torch.zeros(
-            (T, N_E), dtype=grad_new_probs.dtype, device=grad_new_probs.device
+            (T, N_E), dtype=grad_new_probs.dtype, device=device,
         )
 
-        for t in range(T):
-            for slot in range(N_slots):
-                if new_routing_map[t, slot]:
-                    expert_idx = inverse_expert_map[slot].item()
-                    grad_probs[t, expert_idx] += grad_new_probs[t, slot]
+        if _TRITON_AVAILABLE and device.type == "cuda":
+            # Triton-accelerated gradient mapping
+            # Convert new_routing_map to int32 for Triton
+            routing_int = new_routing_map.to(dtype=torch.int32).contiguous()
+
+            grid = (T,)
+            _gradient_mapping_kernel[grid](
+                grad_new_probs.contiguous(),
+                routing_int,
+                inverse_expert_map.contiguous(),
+                grad_probs,
+                token_num=T,
+                origin_expert_num=N_E,
+                num_global_experts=N_slots,
+                BLOCK_SIZE=1,
+            )
+        else:
+            # Vectorized Python fallback
+            active_mask = new_routing_map.bool()
+            if active_mask.any():
+                t_indices, slot_indices = active_mask.nonzero(as_tuple=True)
+                expert_indices = inverse_expert_map[slot_indices]
+                grad_values = grad_new_probs[t_indices, slot_indices]
+                grad_probs.index_put_(
+                    (t_indices, expert_indices), grad_values, accumulate=True,
+                )
 
         return None, grad_probs, None, None, None
 
@@ -203,107 +709,64 @@ def new_routing_map_with_gradients(
     slot_capacity: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Compute the new token routing map for FSEP dispatch.
+    Compute new token routing map for FSEP dispatch (differentiable).
 
-    This is the differentiable version that supports gradient flow through
-    the routing probabilities.
+    Uses Triton kernels for both forward (token assignment) and
+    backward (gradient mapping) when available.
 
     Args:
-        routing_map: [T, N_E] bool tensor (original expert assignments)
-        probs: [T, N_E] float tensor (routing probabilities)
-        expert_locations: [N_E, max_S] long tensor (expert replica slots)
-        inverse_expert_map: [N_slots] long tensor (slot → expert mapping)
-        slot_capacity: [N_slots] long tensor (available capacity per slot)
+        routing_map: [T, N_E] bool
+        probs: [T, N_E] float
+        expert_locations: [N_E, max_S] long
+        inverse_expert_map: [N_slots] long
+        slot_capacity: [N_slots] long
 
     Returns:
-        new_routing_map: [T, N_slots] bool tensor
-        new_probs: [T, N_slots] float tensor
-
-    Reference: laer_moe/galvatron/core/runtime/moe/fused_kernel.py::new_routing_map_with_gradients
+        new_routing_map: [T, N_slots]
+        new_probs: [T, N_slots]
     """
     return _NewRoutingMapFunction.apply(
-        routing_map,
-        probs,
-        expert_locations,
-        inverse_expert_map,
-        slot_capacity,
+        routing_map, probs, expert_locations, inverse_expert_map, slot_capacity,
     )
 
 
-# ---------------------------------------------------------------------------
-# Simplified Python version for large-scale use (vectorized)
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════════════
+# Section 4: Fast vectorized path (no capacity tracking)
+# ═══════════════════════════════════════════════════════════════════════════
 
-def compute_smart_routing(
-    routing_map: torch.Tensor,            # [T, N_E] bool
-    probs: torch.Tensor,                  # [T, N_E] float
-    expert_locations: torch.Tensor,       # [N_E, max_S]
-    inverse_expert_map: torch.Tensor,     # [N_slots]
-    tokens_per_slot: torch.Tensor,        # [N_slots] - ignored (kept for API compat)
+def compute_smart_routing_fast(
+    routing_map: torch.Tensor,
+    probs: torch.Tensor,
+    expert_locations: torch.Tensor,
+    inverse_expert_map: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Fully vectorized smart routing: assign tokens to expert replica slots.
+    Fast scatter-based routing without capacity tracking.
+    Assigns each token to the FIRST valid replica of its target expert.
 
-    Avoids all Python loops for production performance at DSv3 scale
-    (T=4096, N_E=256, topk=8).
-
-    Algorithm:
-      For each expert e:
-        1. Find all tokens routed to e (via routing_map[:, e])
-        2. Get valid replica slots: expert_locations[e, expert_locations[e]>=0]
-        3. Round-robin assign tokens → slots using modulo
-        4. Write to new_routing_map and new_probs
-
-    Uses gather/scatter to avoid Python-level expert loops.
-
-    Returns:
-        new_routing_map: [T, N_slots] bool
-        new_probs: [T, N_slots] float
+    Useful for static FSEP (uniform sharding, no dynamic rebalancing).
+    No Python loops — pure gather/scatter.
     """
     T, N_E = routing_map.shape
-    N_slots = expert_locations.shape[0]
-    max_S = expert_locations.shape[1]
+    N_slots = inverse_expert_map.shape[0]
     device = routing_map.device
 
     new_routing_map = torch.zeros((T, N_slots), dtype=torch.bool, device=device)
     new_probs = torch.zeros((T, N_slots), dtype=probs.dtype, device=device)
 
-    # ── Fast vectorized path ──────────────────────────────────────────────────
-    # For each expert e, find primary slot (first valid replica)
-    # primary_slot[e] = first valid slot index for expert e (-1 if none)
-    primary_slot = expert_locations[:, 0]  # [N_E] first replica slot
-
-    # For experts with at least one valid slot:
-    valid_experts = (primary_slot >= 0)  # [N_E]
+    primary_slot = expert_locations[:, 0]
+    valid_experts = (primary_slot >= 0)
 
     if valid_experts.any():
-        # routing_map[:, valid_experts]: [T, n_valid_experts]
-        valid_e_idx = valid_experts.nonzero(as_tuple=True)[0]  # [n_valid]
-        valid_slots = primary_slot[valid_e_idx]                  # [n_valid]
+        valid_e_idx = valid_experts.nonzero(as_tuple=True)[0]
+        valid_slots = primary_slot[valid_e_idx]
 
-        # Tokens routed to each valid expert: routing_map[:, valid_e_idx] [T, n_valid]
-        sub_map = routing_map[:, valid_e_idx]   # [T, n_valid] bool
-        sub_probs = probs[:, valid_e_idx]        # [T, n_valid] float
+        sub_map = routing_map[:, valid_e_idx]
+        sub_probs = probs[:, valid_e_idx]
 
-        # For each (token, expert) pair that is active, assign to the expert's slot
-        # This is equivalent to: new_routing_map[t, valid_slots[e]] |= sub_map[t, e]
-        # Use advanced indexing via scatter
+        slots_expanded = valid_slots.unsqueeze(0).expand(T, -1)
 
-        # Expand valid_slots to [T, n_valid] for scatter
-        slots_expanded = valid_slots.unsqueeze(0).expand(T, -1)  # [T, n_valid]
-
-        # Scatter: for each active (t, e) pair, set new_routing_map[t, slot_e] = True
-        # and new_probs[t, slot_e] = probs[t, e]
         new_routing_map.scatter_(1, slots_expanded, sub_map)
         new_probs.scatter_(1, slots_expanded, sub_probs * sub_map.float())
-
-    # Fallback for experts with no valid slot: assign to expert index directly
-    no_slot_experts = (~valid_experts).nonzero(as_tuple=True)[0]
-    if len(no_slot_experts) > 0 and N_slots >= N_E:
-        for e in no_slot_experts:
-            e = e.item()
-            if e < N_slots:
-                new_routing_map[:, e] |= routing_map[:, e]
-                new_probs[:, e] = torch.where(routing_map[:, e], probs[:, e], new_probs[:, e])
 
     return new_routing_map, new_probs

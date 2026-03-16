@@ -21,7 +21,7 @@ Reference: laer_moe/galvatron/core/runtime/moe/smart_routing.py
   - inverse_expert_map: [N_slots]
 """
 
-from typing import Optional
+from typing import List, Optional, Tuple
 import torch
 import torch.distributed as dist
 
@@ -45,6 +45,7 @@ def init_fsep_state(
     ep_size: int,
     sharding_degree: int,
     ep_group: dist.ProcessGroup,
+    gpus_per_node: int = 8,
 ) -> "FSEPState":
     """
     Initialize the FSEP state with uniform expert placement.
@@ -65,6 +66,7 @@ def init_fsep_state(
         ep_size: Expert parallel group size
         sharding_degree: FSEP sharding degree S (S == EP for Mode B)
         ep_group: The expert parallel process group
+        gpus_per_node: GPUs per physical node
     """
     global _FSEP_STATE
 
@@ -73,6 +75,7 @@ def init_fsep_state(
         ep_size=ep_size,
         sharding_degree=sharding_degree,
         ep_group=ep_group,
+        gpus_per_node=gpus_per_node,
     )
     _FSEP_STATE = state
     return state
@@ -101,12 +104,14 @@ class FSEPState:
         ep_size: int,
         sharding_degree: int,
         ep_group: dist.ProcessGroup,
+        gpus_per_node: int = 8,
     ):
         self.num_experts = num_experts
         self.ep_size = ep_size
         self.sharding_degree = sharding_degree  # S
         self.ep_group = ep_group
         self.ep_rank = dist.get_rank(group=ep_group)
+        self.gpus_per_node = gpus_per_node
 
         # Number of local experts per GPU (traditional EP assignment)
         assert num_experts % ep_size == 0, (
@@ -116,8 +121,7 @@ class FSEPState:
 
         # Total slots = N_E (Mode B uniform: each expert has one slot per GPU,
         # but all GPUs participate via ReduceScatter)
-        # For Mode B with S=EP, the "slots" are identified with the original
-        # expert indices (no replication in terms of routing slots).
+        # For dynamic FSEP: N_slots = ep_size * num_local_experts
         self.num_slots = num_experts  # N_E in traditional EP view
 
         # ── global_expert_locations[e, j] ──────────────────────────────
@@ -159,6 +163,12 @@ class FSEPState:
             device=device,
         )
 
+        # ── Load Planner (attached by fsep_full_patches) ──────────────
+        self.load_planner = None
+
+        # ── Relayout Executor (attached by fsep_full_patches) ─────────
+        self.relayout_executor = None
+
     def expand_to_full_fsep(self) -> None:
         """
         Expand placement to full FSEP: each expert replicated on all S=EP GPUs.
@@ -192,14 +202,36 @@ class FSEPState:
         Atomically update the placement state after a Re-layout.
 
         Called by FSEPRelayoutExecutor after parameter migration completes.
+        Handles size changes when max_replicas changes.
         """
-        self.global_expert_locations.copy_(new_global_expert_locations)
-        self.inverse_expert_map.copy_(new_inverse_expert_map)
+        device = self.global_expert_locations.device
 
-    def get_local_expert_indices(self):
+        # Handle potential size change in max_replicas dimension
+        if new_global_expert_locations.shape != self.global_expert_locations.shape:
+            self.global_expert_locations = new_global_expert_locations.to(device)
+        else:
+            self.global_expert_locations.copy_(new_global_expert_locations.to(device))
+
+        if new_inverse_expert_map.shape != self.inverse_expert_map.shape:
+            self.inverse_expert_map = new_inverse_expert_map.to(device)
+        else:
+            self.inverse_expert_map.copy_(new_inverse_expert_map.to(device))
+
+        # Update num_slots if inverse map size changed
+        self.num_slots = self.inverse_expert_map.shape[0]
+
+    def get_local_expert_indices(self) -> List[int]:
         """
         Return the list of expert indices that this EP rank owns.
         Same as traditional EP: [rank * num_local, (rank+1) * num_local)
         """
         start = self.ep_rank * self.num_local_experts
         return list(range(start, start + self.num_local_experts))
+
+    def get_local_slot_range(self) -> Tuple:
+        """
+        Return the (start, end) slot range for this EP rank.
+        """
+        start = self.ep_rank * self.num_local_experts
+        end = start + self.num_local_experts
+        return start, end

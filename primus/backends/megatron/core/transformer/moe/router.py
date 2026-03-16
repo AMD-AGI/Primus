@@ -139,7 +139,13 @@ class PrimusTopKRouter(TopKRouter):
                                 get_fsep_state,
                             )
                             fsep_state = get_fsep_state()
-                            if fsep_state is not None and hasattr(fsep_state, "load_planner"):
+                            if (
+                                fsep_state is not None
+                                and fsep_state.load_planner is not None
+                                and not getattr(args, "moe_fsep_full_mode", False)
+                            ):
+                                # Only feed here when NOT in full mode
+                                # (full mode feeds from dispatch_preprocess patch)
                                 fsep_state.load_planner.update(load)
                         except Exception:
                             pass  # Non-critical: don't break training if planner fails

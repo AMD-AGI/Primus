@@ -57,6 +57,9 @@ def patch_fsep_args_defaults(ctx: PatchContext):
     backend_args.moe_fsep_imbalance_threshold = (
         getattr(raw_params, "moe_fsep_imbalance_threshold", 1.5) if raw_params else 1.5
     )
+    backend_args.moe_fsep_gpus_per_node = (
+        getattr(raw_params, "moe_fsep_gpus_per_node", 8) if raw_params else 8
+    )
 
 
 @register_patch(

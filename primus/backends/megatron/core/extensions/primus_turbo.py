@@ -1536,13 +1536,17 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         In standard mode: restores the hidden states to their original ordering
         using the communication manager's restoration function.
 
-        In FSEP mode: FSEPGroupedMLP outputs [T/S, H] shards. We AllGather
-        back to [T, H] within the fsep_group before calling _pre_combine,
-        since DeepEP expects the full [T, H] tensor.
+        In FSEP Phase 1 (current): FSEPGroupedMLP uses All-Reduce, so expert
+        output is already [T, H]. No AllGather needed.
+
+        In FSEP Phase 2 (future): FSEPGroupedMLP will use ReduceScatter to
+        produce [T/S, H]. Then we AllGather back to [T, H] here before calling
+        _pre_combine. Uncomment the AllGather below when ReduceScatter is enabled.
         """
-        # [FSEP] AllGather [T/S, H] → [T, H] before DeepEP combine
-        if self.fsep_sharding_degree > 1:
-            hidden_states = self._fsep_all_gather(hidden_states)
+        # [FSEP Phase 2] AllGather [T/S, H] → [T, H] before DeepEP combine
+        # Currently disabled: FSEPGroupedMLP uses All-Reduce (output is [T, H])
+        # if self.fsep_sharding_degree > 1:
+        #     hidden_states = self._fsep_all_gather(hidden_states)
 
         hidden_states = self.deepep_dispatcher._pre_combine(hidden_states)
         return hidden_states

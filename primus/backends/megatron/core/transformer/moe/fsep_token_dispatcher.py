@@ -30,10 +30,13 @@ import torch.distributed as dist
 from megatron.core import parallel_state
 from megatron.core.tensor_parallel import (
     all_to_all,
-    gather_from_sequence_parallel_region,
-    reduce_scatter_to_sequence_parallel_region,
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.transformer.moe.moe_utils import (
+    permute,
+    unpermute,
+    sort_chunks_by_idxs,
+)
 
 from primus.backends.megatron.core.transformer.moe.fsep_parallel_state import (
     FSEPState,
@@ -43,7 +46,18 @@ from primus.backends.megatron.core.transformer.moe.fsep_smart_routing import (
     compute_smart_routing,
     smart_routing_map,
 )
-from primus.modules.module_utils import log_rank_0
+
+
+def _log(msg):
+    try:
+        from primus.modules.module_utils import log_rank_0
+        log_rank_0(msg)
+    except Exception:
+        try:
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                print(msg)
+        except Exception:
+            print(msg)
 
 
 class FSEPAlltoAllTokenDispatcher:
@@ -53,16 +67,20 @@ class FSEPAlltoAllTokenDispatcher:
     Replaces the traditional EP A2A with smart-routing-aware dispatch:
     tokens are redistributed across expert replicas to balance GPU load.
 
-    Workflow:
+    The workflow follows the reference implementation in
+    laer_moe/galvatron/core/runtime/moe/smart_routing.py::MoEAlltoAllSmartTokenDispatcher:
+
       token_permutation():
         1. Collect global token stats → compute smart routing allocation
         2. Remap routing_map from [T, N_E] to [T, N_slots] (via compute_smart_routing)
-        3. A2A dispatch with new routing map
-        4. Return permuted tokens for Expert GEMM
+        3. Permute tokens based on new_routing_map
+        4. A2A dispatch with computed splits
+        5. Sort received tokens by local expert
 
       token_unpermutation():
-        1. Reverse A2A (tokens go back to original GPU)
-        2. Unpermute and weight-sum by probs
+        1. Unsort tokens by local expert
+        2. A2A reverse (tokens go back to original GPU)
+        3. Unpermute tokens and weight-sum by probs
     """
 
     def __init__(
@@ -85,110 +103,86 @@ class FSEPAlltoAllTokenDispatcher:
 
         self.num_experts = config.num_moe_experts
 
-        # Cached metadata from preprocess
+        # N_slots = ep_size * num_local_experts
+        self.num_slots = self.ep_size * self.num_local_experts
+
+        # Cached metadata
         self.input_splits = None
         self.output_splits = None
         self.hidden_shape = None
         self.hidden_shape_before_permute = None
         self.probs = None
+        self.routing_map = None
         self.new_routing_map = None
         self.new_probs = None
         self.reversed_local_input_permutation_mapping = None
+        self.num_out_tokens = 0
+        self.num_global_tokens_per_local_expert = None
 
-        log_rank_0(
+        # Pre-compute sort indices for local expert reordering
+        expert_capacity = self.num_local_experts * self.ep_size
+        input_chunk_idxs = torch.arange(expert_capacity)
+        self.sort_input_by_local_experts = input_chunk_idxs.reshape(
+            -1, self.num_local_experts
+        ).T.ravel()
+        self.restore_output_by_local_experts = input_chunk_idxs.reshape(
+            self.num_local_experts, -1
+        ).T.ravel()
+
+        _log(
             f"[FSEP] FSEPAlltoAllTokenDispatcher initialized: "
             f"num_experts={self.num_experts}, EP={self.ep_size}, "
+            f"num_local_experts={self.num_local_experts}, "
             f"sharding_degree={fsep_state.sharding_degree}"
         )
-
-    def _compute_splits(
-        self,
-        new_routing_map: torch.Tensor,  # [T, N_slots]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute input_splits and output_splits for A2A communication.
-
-        In FSEP, N_slots == N_E (Mode B), so the split computation is similar
-        to traditional EP but uses the NEW routing map (smart-routed).
-
-        Returns:
-            input_splits: [ep_size] tokens sent to each EP rank
-            output_splits: [ep_size] tokens received from each EP rank
-        """
-        T = new_routing_map.shape[0]
-        N_slots = new_routing_map.shape[1]
-
-        # Count tokens going to each slot → aggregate to EP rank
-        tokens_per_slot = new_routing_map.long().sum(dim=0)  # [N_slots]
-
-        # Each slot maps to an EP rank: slot s → rank = s // num_local_experts
-        num_local_experts = self.num_experts // self.ep_size
-        tokens_per_rank = torch.zeros(self.ep_size, dtype=torch.long, device=tokens_per_slot.device)
-        for s in range(N_slots):
-            rank = s // num_local_experts
-            tokens_per_rank[rank] += tokens_per_slot[s]
-
-        input_splits = tokens_per_rank.cpu().numpy()
-
-        # Gather output splits (how many tokens we receive from each rank)
-        input_splits_tensor = tokens_per_rank.unsqueeze(0)  # [1, ep_size]
-        gathered = torch.zeros(self.ep_size, self.ep_size, dtype=torch.long,
-                               device=tokens_per_slot.device)
-        dist.all_gather_into_tensor(
-            gathered, input_splits_tensor.expand(self.ep_size, -1),
-            group=self.ep_group
-        )
-        output_splits_tensor = gathered[:, self.ep_rank]
-        output_splits = output_splits_tensor.cpu().numpy()
-
-        return input_splits, output_splits
 
     def preprocess(
         self,
         routing_map: torch.Tensor,  # [T, N_E] bool
         probs: torch.Tensor,        # [T, N_E] float
-    ) -> Tuple[torch.Tensor, torch.Tensor, int]:
+    ) -> torch.Tensor:
         """
-        Preprocess routing map: compute smart routing allocation.
+        Preprocess: compute smart routing and A2A metadata.
 
         Steps:
-          1. Gather global token-per-expert distribution
-          2. Compute smart routing: how many tokens each slot should receive
-          3. Remap routing_map → new_routing_map via compute_smart_routing
-          4. Compute A2A splits
+          1. Gather global token distribution across EP ranks
+          2. Apply smart routing (Algorithm 3: Lite Routing) to get per-slot allocation
+          3. Remap routing_map → new_routing_map using capacity-aware assignment
+          4. Compute A2A input_splits and output_splits
 
         Returns:
-            new_routing_map: [T, N_slots] bool
-            new_probs: [T, N_slots] float
-            num_out_tokens: total tokens to dispatch
+            tokens_per_local_expert: [num_local_experts] token counts
         """
-        T, N_E = routing_map.shape
         fsep = self.fsep_state
+        T, N_E = routing_map.shape
 
-        # ── Step 1: Global token-per-expert stats ──
-        num_local_tokens_per_expert = routing_map.long().sum(dim=0)  # [N_E]
+        # ── Step 1: Global token distribution ──
+        num_local_tokens_per_expert = routing_map.sum(dim=0).int()  # [N_E]
 
-        # Gather from all EP ranks → global distribution
-        num_global_tokens_per_expert = num_local_tokens_per_expert.clone()
-        dist.all_reduce(
-            num_global_tokens_per_expert,
-            group=self.ep_group,
+        # AllGather → [ep_size, N_E]
+        from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
+        num_global_tokens_per_expert = (
+            gather_from_sequence_parallel_region(
+                num_local_tokens_per_expert, group=self.ep_group
+            )
+            .reshape(self.ep_size, N_E)
         )
-        # num_global_tokens_per_expert: [N_E] total tokens per expert across all ranks
+        # num_global_tokens_per_expert: [ep_size, N_E]
 
-        # ── Step 2: Smart routing allocation ──
-        tokens_per_slot = smart_routing_map(
-            num_global_tokens_per_expert,
+        # ── Step 2: Smart routing allocation (Algorithm 3) ──
+        # Expand to [1, ep_size, N_E] for 3D API
+        tokens_3d = num_global_tokens_per_expert.unsqueeze(0)
+        slot_allocation = smart_routing_map(
+            tokens_3d,
             fsep.global_expert_locations,
             self.num_local_experts,
+            gpus_per_node=fsep.gpus_per_node,
         )
-        # tokens_per_slot[slot] = how many tokens (from this rank) should go to slot
+        # slot_allocation: [1, ep_size, N_slots]
 
-        # Scale down: we care about tokens FROM THIS RANK only
-        # (smart_routing_map currently returns global counts; divide by ep_size)
-        tokens_per_slot_local = (tokens_per_slot // self.ep_size).long()
+        # ── Step 3: Remap routing → new routing ──
+        tokens_per_slot_local = slot_allocation[0, self.ep_rank, :].long()
 
-        # ── Step 3: Remap routing → new_routing_map ──
         new_routing_map, new_probs = compute_smart_routing(
             routing_map,
             probs,
@@ -196,13 +190,37 @@ class FSEPAlltoAllTokenDispatcher:
             fsep.inverse_expert_map,
             tokens_per_slot_local,
         )
+        self.new_routing_map = new_routing_map
+        self.new_probs = new_probs
+        self.num_out_tokens = routing_map.size(0) * self.config.moe_router_topk
 
         # ── Step 4: Compute A2A splits ──
-        self.input_splits, self.output_splits = self._compute_splits(new_routing_map)
+        # input_splits[r] = tokens sent from this rank to rank r
+        self.input_splits = num_global_tokens_per_expert[self.ep_rank].reshape(
+            self.ep_size, self.num_local_experts
+        ).sum(dim=1)
 
-        num_out_tokens = int(new_routing_map.long().sum().item())
+        # output_splits[r] = tokens received by this rank from rank r
+        # = num_global_tokens_per_expert[r, local_expert_indices].sum()
+        local_start = self.local_expert_indices[0]
+        local_end = self.local_expert_indices[-1] + 1
+        num_global_tokens_per_local_expert = num_global_tokens_per_expert[
+            :, local_start:local_end
+        ].contiguous()
+        self.output_splits = num_global_tokens_per_local_expert.sum(dim=1)
 
-        return new_routing_map, new_probs, num_out_tokens
+        # Save for sort in token_permutation
+        self.num_global_tokens_per_local_expert = num_global_tokens_per_local_expert
+
+        # tokens_per_local_expert = sum over all source ranks
+        tokens_per_local_expert = num_global_tokens_per_local_expert.sum(dim=0)
+
+        # Feed load to planner
+        if fsep.load_planner is not None:
+            global_load = num_global_tokens_per_expert.sum(dim=0).float()
+            fsep.load_planner.update(global_load, num_global_tokens_per_expert)
+
+        return tokens_per_local_expert
 
     def token_permutation(
         self,
@@ -213,99 +231,52 @@ class FSEPAlltoAllTokenDispatcher:
         """
         Dispatch tokens to expert slots using smart-routed A2A.
 
-        Args:
-            hidden_states: Input tokens [B, S, H] or [T, H]
-            probs: Routing probabilities [T, N_E]
-            routing_map: Token-expert assignment [T, N_E] bool
+        Follows the reference: MoEAlltoAllSmartTokenDispatcher.token_permutation
+
+        Steps:
+          1. Preprocess → compute smart routing and splits
+          2. Permutation 1: group tokens by target EP rank
+          3. EP AlltoAll: send tokens to destination GPUs
+          4. Permutation 2: sort received tokens by local expert
 
         Returns:
-            permuted_tokens: Tokens grouped by local expert [T_local, H]
+            global_input_tokens: [T_local, H] tokens grouped by local expert
             tokens_per_expert: [num_local_experts] token counts
         """
         self.hidden_shape = hidden_states.shape
         self.probs = probs
-        hidden_states = hidden_states.view(-1, self.hidden_shape[-1])  # [T, H]
+        self.routing_map = routing_map
+        hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
 
-        # ── Preprocess: compute smart routing ──
-        new_routing_map, new_probs, num_out_tokens = self.preprocess(
-            routing_map, probs
-        )
-        self.new_routing_map = new_routing_map
-        self.new_probs = new_probs
+        # Preprocess
+        tokens_per_expert = self.preprocess(routing_map, probs)
 
-        # ── Permutation 1: group tokens by target EP rank ──
+        # Permutation 1: permute tokens for A2A
         self.hidden_shape_before_permute = hidden_states.shape
-        T, H = hidden_states.shape
-        N_slots = new_routing_map.shape[1]
+        permuted_local, self.reversed_local_input_permutation_mapping = permute(
+            hidden_states,
+            self.new_routing_map,
+            num_out_tokens=self.num_out_tokens,
+        )
 
-        # Permute: each token that goes to a slot is ordered by slot index
-        # (similar to traditional EP permute but using new_routing_map)
-        permutation_indices = []
-        slot_assignments = []  # which slot each permuted token goes to
+        # Move splits to CPU for A2A
+        input_splits_cpu = self.input_splits.cpu().numpy()
+        output_splits_cpu = self.output_splits.cpu().numpy()
 
-        for slot in range(N_slots):
-            token_ids = new_routing_map[:, slot].nonzero(as_tuple=True)[0]
-            for tid in token_ids:
-                permutation_indices.append(tid.item())
-                slot_assignments.append(slot)
-
-        if len(permutation_indices) > 0:
-            perm_idx = torch.tensor(permutation_indices, dtype=torch.long,
-                                    device=hidden_states.device)
-            permuted = hidden_states[perm_idx]  # [num_out_tokens, H]
-        else:
-            permuted = hidden_states.new_zeros((0, H))
-
-        self.slot_assignments = slot_assignments
-        self.permutation_indices = permutation_indices
-
-        # ── A2A dispatch ──
-        torch.cuda.current_stream().synchronize()
+        # EP AlltoAll
         global_input_tokens = all_to_all(
-            self.ep_group,
-            permuted,
-            self.output_splits,
-            self.input_splits,
+            self.ep_group, permuted_local, output_splits_cpu, input_splits_cpu,
         )
 
-        # ── Sort by local expert ──
-        # global_input_tokens contains tokens for our local experts,
-        # sorted by source EP rank. Re-sort by local expert index.
-        num_local = self.num_local_experts
-        num_global_tokens_per_local_expert = torch.zeros(
-            num_local, dtype=torch.long, device=hidden_states.device
-        )
+        # Permutation 2: sort by local expert
+        if self.num_local_experts > 1:
+            global_input_tokens = sort_chunks_by_idxs(
+                global_input_tokens,
+                self.num_global_tokens_per_local_expert.ravel(),
+                self.sort_input_by_local_experts,
+            )
 
-        # Count tokens received per local expert
-        # (from output_splits, we know how many tokens came from each source rank;
-        # each source rank sent tokens grouped by our local experts)
-        # Simple approach: count using the routing info from all_gather
-        local_start = self.ep_rank * num_local
-        local_end = local_start + num_local
-
-        # Get global token counts per expert from preprocess
-        # Use a gather to get full picture
-        num_local_tokens_per_expert = self.new_routing_map.long().sum(dim=0)  # [N_slots]
-        local_slots = list(range(local_start, local_end))
-        tokens_per_expert_local = torch.zeros(
-            num_local, dtype=torch.long, device=hidden_states.device
-        )
-        for i, slot in enumerate(local_slots):
-            if slot < N_slots:
-                tokens_per_expert_local[i] = num_local_tokens_per_expert[slot]
-
-        # Gather from all ranks to get complete picture
-        gathered = torch.zeros(
-            self.ep_size * num_local, dtype=torch.long, device=hidden_states.device
-        )
-        dist.all_gather_into_tensor(
-            gathered.view(self.ep_size, num_local),
-            tokens_per_expert_local.unsqueeze(0),
-            group=self.ep_group,
-        )
-        # gathered[rank, local_expert] = tokens from rank going to local_expert
-        tokens_per_expert = gathered.view(self.ep_size, num_local).sum(dim=0).cpu()
-
+        tokens_per_expert = tokens_per_expert.cpu()
         return global_input_tokens, tokens_per_expert
 
     def token_unpermutation(
@@ -316,43 +287,40 @@ class FSEPAlltoAllTokenDispatcher:
         """
         Reverse the FSEP dispatch: gather expert outputs back to original tokens.
 
-        Note: In full FSEP, the expert outputs from FSEPGroupedMLP are already
-        [T/S, H] shards (after ReduceScatter). The AllGather in
-        PrimusTurboDeepEPTokenDispatcher.combine_preprocess restores [T, H].
-        Here we use a simpler AlltoAll-based unpermutation.
+        Steps:
+          1. Unpermutation 2: unsort by local expert
+          2. EP AlltoAll reverse: send outputs back to source GPUs
+          3. Unpermutation 1: restore original token order and weight by probs
 
         Returns:
             output: [B, S, H] final output
         """
         assert bias is None, "Bias not supported in FSEPAlltoAllTokenDispatcher"
 
-        # ── Reverse A2A: send expert outputs back to token origins ──
-        permutated_local = all_to_all(
-            self.ep_group,
-            hidden_states,
-            self.input_splits,
-            self.output_splits,
+        # Unpermutation 2: unsort by local expert
+        if self.num_local_experts > 1:
+            hidden_states = sort_chunks_by_idxs(
+                hidden_states,
+                self.num_global_tokens_per_local_expert.T.ravel(),
+                self.restore_output_by_local_experts,
+            )
+
+        # Reverse A2A
+        input_splits_cpu = self.input_splits.cpu().numpy()
+        output_splits_cpu = self.output_splits.cpu().numpy()
+
+        permuted_local = all_to_all(
+            self.ep_group, hidden_states, input_splits_cpu, output_splits_cpu,
         )
 
-        # ── Unpermute: scatter results back to original token positions ──
-        T, H = self.hidden_shape[0] * (self.hidden_shape[1] if len(self.hidden_shape) > 2 else 1), self.hidden_shape[-1]
-        T = 1
-        for d in self.hidden_shape[:-1]:
-            T *= d
-
-        output = torch.zeros((T, H), dtype=hidden_states.dtype,
-                             device=hidden_states.device)
-
-        if len(self.permutation_indices) > 0:
-            # new_probs[token_id, slot] = routing probability
-            N_slots = self.new_routing_map.shape[1]
-            # Map permuted token index back to original token id
-            for perm_idx, (orig_tid, slot) in enumerate(
-                zip(self.permutation_indices, self.slot_assignments)
-            ):
-                if perm_idx < permutated_local.shape[0]:
-                    prob = self.new_probs[orig_tid, slot].item()
-                    output[orig_tid] += prob * permutated_local[perm_idx]
+        # Unpermutation 1: restore original order and apply probs
+        output = unpermute(
+            permuted_local,
+            self.reversed_local_input_permutation_mapping,
+            restore_shape=self.hidden_shape_before_permute,
+            probs=self.new_probs,
+            routing_map=self.new_routing_map,
+        )
 
         output = output.view(self.hidden_shape)
         return output, None

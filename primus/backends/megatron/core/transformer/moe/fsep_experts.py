@@ -114,7 +114,12 @@ class FSEPGroupedMLP(PrimusTurboGroupedMLP):
         permuted_probs: torch.Tensor,
     ):
         """
-        Forward pass with ReduceScatter output aggregation.
+        Forward pass with FSEP output aggregation.
+
+        Currently uses All-Reduce (equivalent to Expert TP) to produce [T, H]
+        output compatible with the existing token dispatcher. The ReduceScatter
+        optimization (which produces [T/S, H] and requires dispatcher changes)
+        will be enabled once the dispatcher integration is complete.
 
         Args:
             permuted_local_hidden_states: [T_local, H]
@@ -122,8 +127,7 @@ class FSEPGroupedMLP(PrimusTurboGroupedMLP):
             permuted_probs: [T_local] routing probabilities
 
         Returns:
-            (output, None) where output has shape [T_local/S, H].
-            T_local must be divisible by S (enforced by dispatcher padding).
+            (output, None) where output has shape [T_local, H].
         """
         # Step 1: Run fc1 → activation → fc2 without any collective.
         # Since weights are sharded along F (same as Expert TP), each GPU
@@ -132,9 +136,18 @@ class FSEPGroupedMLP(PrimusTurboGroupedMLP):
             permuted_local_hidden_states, tokens_per_expert, permuted_probs
         )
 
-        # Step 2: ReduceScatter to sum partial outputs and scatter tokens.
-        # partial_output: [T_local, H]  → output: [T_local/S, H]
-        output = self._fsep_reduce_scatter(partial_output)
+        # Step 2: Aggregate partial outputs across FSEP group.
+        #
+        # Phase 1 (current): Use All-Reduce to produce [T, H].
+        #   - Identical to Expert TP semantics
+        #   - Compatible with existing DeepEP token dispatcher
+        #   - FSEP benefit: weights are sharded so each GPU computes less
+        #
+        # Phase 2 (future): Use ReduceScatter → [T/S, H], then modify
+        #   dispatcher combine_preprocess to AllGather back to [T, H].
+        #   - Reduces A2A gather bandwidth by S×
+        #   - Requires dispatcher to handle [T/S, H] intermediate
+        output = self._fsep_all_reduce(partial_output)
 
         return output, None
 
@@ -263,6 +276,27 @@ class FSEPGroupedMLP(PrimusTurboGroupedMLP):
 
         return partial_output  # [T_local, H], partial sum across F-shard
 
+    def _fsep_all_reduce(self, partial: torch.Tensor) -> torch.Tensor:
+        """
+        All-Reduce partial outputs across the FSEP group.
+
+        This is the conservative aggregation strategy: each GPU gets the full
+        [T, H] output after summing partial sums from all F-shard GPUs.
+        Functionally identical to Expert TP's All-Reduce.
+
+        Input:  partial [T, H]  — partial sum from this GPU's F-shard
+        Output: [T, H]          — fully reduced output
+        """
+        S = self.fsep_world_size
+        if S == 1:
+            return partial
+
+        if partial.nelement() == 0:
+            return partial
+
+        dist.all_reduce(partial, group=self.fsep_group)
+        return partial
+
     def _fsep_reduce_scatter(self, partial: torch.Tensor) -> torch.Tensor:
         """
         ReduceScatter along the token dimension within fsep_group.
@@ -275,6 +309,14 @@ class FSEPGroupedMLP(PrimusTurboGroupedMLP):
         Input:  partial [T, H]  — each GPU holds a different partial sum
         Output: [T/S, H]        — this GPU's share of the fully-reduced output
 
+        Communication overlap: The ReduceScatter runs on the FSEP group which
+        is intra-node (XGMI/NVLink), so it overlaps well with the subsequent
+        inter-node A2A gather. The dispatcher can pipeline:
+          Step 1: Expert GEMM → partial [T, H]    (compute stream)
+          Step 2: ReduceScatter → [T/S, H]        (FSEP comm, intra-node)
+          Step 3: A2A Gather → original tokens     (EP comm, inter-node)
+        Steps 2 and 3 can overlap on different communication channels.
+
         Requires T % S == 0. The dispatcher pads tokens to multiples of S.
         """
         S = self.fsep_world_size
@@ -283,10 +325,14 @@ class FSEPGroupedMLP(PrimusTurboGroupedMLP):
         if S == 1:
             return partial  # degenerate: no sharding
 
-        assert T % S == 0, (
-            f"[FSEP] ReduceScatter: T={T} must be divisible by S={S}. "
-            f"Dispatcher must pad tokens to multiples of {S} before Expert GEMM."
-        )
+        if T == 0:
+            return partial.new_zeros((0, partial.shape[1]))
+
+        # Pad to multiple of S if needed (handles edge cases)
+        if T % S != 0:
+            pad_size = S - (T % S)
+            partial = torch.nn.functional.pad(partial, (0, 0, 0, pad_size))
+            T = partial.shape[0]
 
         output = torch.empty(
             T // S,
