@@ -21,9 +21,9 @@ modules:
       log_avg_reset_interval: 50
 
       # hyper parameters
-      train_iters: 50
-      micro_batch_size: 4
-      global_batch_size: 256
+      train_iters: 10
+      micro_batch_size: 8
+      global_batch_size: 512
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
       lr: 1.0e-5
@@ -37,6 +37,11 @@ modules:
       eod_mask_loss: true
       init_method_std: 0.008
       norm_epsilon: 1.0e-6
+
+      # recompute
+      recompute_granularity: full # full, selective
+      recompute_method: block # uniform, block
+      recompute_num_layers: 5 # int
 
       # parallel
       tensor_model_parallel_size: ${PRIMUS_TP:1}
@@ -52,7 +57,7 @@ modules:
       test_data_path: null
 
       gradient_accumulation_fusion: true
-      moe_use_legacy_grouped_gemm: false
+      moe_use_legacy_grouped_gemm: true
 
       # ckpt
       finetune: false
@@ -69,9 +74,22 @@ modules:
       eval_iters: 0
 
       # Turbo
-      enable_primus_turbo: false
+      enable_primus_turbo: true
       use_turbo_attention: false
       use_turbo_grouped_mlp: false
+
+      # deepep
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+
+      # 64 or 80 for ep8, 32 for ep16-64 is best practice
+      turbo_deepep_num_cu: 64
+      turbo_deepep_use_comm_stream: false
+
+      # sync-free moe support stage 1-2, 0 means not use sync-free moe
+      # stage 2 is recommended for better performance
+      turbo_sync_free_moe_stage: 1
 
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"

@@ -305,17 +305,17 @@ rerun_mode: disabled # str: 'disabled', 'validate_results', 'report_stats'
 # Experimental features
 enable_experimental: false
 
-# Hybrid model configuration
-hybrid_attention_ratio: 0.0 # float range [0,0, 1.0]
-hybrid_mlp_ratio: 0.0 # float range [0,0, 1.0]
-hybrid_override_pattern: null # str
+# # Hybrid model configuration
+# hybrid_attention_ratio: 0.0 # float range [0,0, 1.0]
+# hybrid_mlp_ratio: 0.0 # float range [0,0, 1.0]
+# hybrid_override_pattern: null # str
 
-# Mamba layer configuration
-mamba_state_dim: 128
-mamba_head_dim: 64
-mamba_num_groups: 8
-mamba_num_heads: null
-disable_mamba_mem_eff_path: false
+# # Mamba layer configuration
+# mamba_state_dim: 128
+# mamba_head_dim: 64
+# mamba_num_groups: 8
+# mamba_num_heads: null
+# disable_mamba_mem_eff_path: false
 
 # Args of precision-aware optimizer
 use_precision_aware_optimizer: false
@@ -405,7 +405,6 @@ indexer_log_interval: 1000
 enable_ft_package: false
 calc_ft_timeouts: false
 run_workload_inspector_server: false
-is_hybrid_model: false
 
 heterogeneous_layers_config_path: null
 heterogeneous_layers_config_encoded_json: null
