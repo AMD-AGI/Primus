@@ -218,19 +218,13 @@ if [[ "$DRY_RUN_MODE" == "false" ]]; then
 fi
 
 # Validate container runtime (docker/podman)
-# In dry-run mode, allow mock runtime if docker/podman not available
-if [[ "$DRY_RUN_MODE" == "true" ]]; then
-    if command -v podman >/dev/null 2>&1; then
-        export CONTAINER_RUNTIME="podman"
-    elif command -v docker >/dev/null 2>&1; then
-        export CONTAINER_RUNTIME="docker"
-    else
-        # Mock runtime for dry-run testing
-        export CONTAINER_RUNTIME="docker"
-        LOG_INFO_RANK0 "[container] Using mock container runtime for dry-run (no docker/podman found)"
-    fi
+if command -v docker >/dev/null 2>&1; then
+    export CONTAINER_RUNTIME="docker"
+elif command -v podman >/dev/null 2>&1; then
+    export CONTAINER_RUNTIME="podman"
 else
-    validate_container_runtime
+    LOG_ERROR "[container] Neither docker nor podman is available in PATH."
+    exit 1
 fi
 
 ###############################################################################
