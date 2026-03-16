@@ -21,7 +21,7 @@ modules:
       mtp_num_layers: 0          # disable MTP
 
       # ── Training schedule ──
-      train_iters: 100
+      train_iters: 20
       micro_batch_size: 2
       global_batch_size: 128
       seq_length: 4096

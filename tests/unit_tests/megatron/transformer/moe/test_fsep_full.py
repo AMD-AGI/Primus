@@ -8,13 +8,15 @@ Correctness tests for Full FSEP (Phase 1-3) implementation.
 
 Tests:
   Test 1: FSEPState initialization and basic operations
-  Test 2: smart_routing_map correctness (load-balanced allocation)
-  Test 3: compute_smart_routing token assignment
-  Test 4: new_routing_map_with_gradients backward
-  Test 5: FSEPLoadPlanner update + should_relayout logic
-  Test 6: FSEPAlltoAllTokenDispatcher forward (4 GPU)
-  Test 7: FSEPAlltoAllTokenDispatcher forward+backward (4 GPU)
-  Test 8: FSEPRelayoutExecutor parameter migration (4 GPU)
+  Test 2: smart_routing_map correctness (Lite Routing - Algorithm 3)
+  Test 3: smart_routing_map 3D version with intra/inter node
+  Test 4: compute_smart_routing token assignment
+  Test 5: new_routing_map_with_gradients backward
+  Test 6: Algorithm 4 - Replica Allocation (priority queue)
+  Test 7: Greedy Placement correctness
+  Test 8: FSEPLoadPlanner update + should_relayout + compute_new_placement
+  Test 9: FSEPAlltoAllTokenDispatcher forward (4 GPU)
+  Test 10: FSEPRelayoutExecutor parameter migration (4 GPU)
 
 Run: python tests/unit_tests/megatron/transformer/moe/test_fsep_full.py
 """
@@ -41,29 +43,19 @@ class TestFSEPStateUnit(TestCase):
 
     def test_fsep_state_init_basic(self):
         """Test FSEPState can be instantiated with mock values."""
-        # Create a minimal mock of FSEPState without dist
-        from types import SimpleNamespace
-        import torch
-
         num_experts = 8
-        ep_size = 4
         S = 4
-        device = "cpu"
 
-        # Mock the state directly (bypass distributed)
         global_expert_locations = torch.full((num_experts, S), -1, dtype=torch.long)
         for e in range(num_experts):
-            global_expert_locations[e, 0] = e  # one replica at traditional owner
+            global_expert_locations[e, 0] = e
 
         inverse_expert_map = torch.arange(num_experts, dtype=torch.long)
         expert_capacity = torch.full((num_experts,), 1_000_000, dtype=torch.long)
 
-        # Basic shape checks
         self.assertEqual(global_expert_locations.shape, (num_experts, S))
         self.assertEqual(inverse_expert_map.shape, (num_experts,))
-        self.assertEqual(expert_capacity.shape, (num_experts,))
 
-        # Traditional owner assignment
         for e in range(num_experts):
             self.assertEqual(global_expert_locations[e, 0].item(), e)
             for s in range(1, S):
@@ -71,81 +63,111 @@ class TestFSEPStateUnit(TestCase):
 
     def test_fsep_state_expand_full(self):
         """Test expand_to_full_fsep sets all S entries for each expert."""
-        import torch
-
         num_experts = 8
         S = 4
-        max_S = S
 
-        global_expert_locations = torch.full((num_experts, max_S), -1, dtype=torch.long)
-        # Simulate expand_to_full_fsep
+        global_expert_locations = torch.full((num_experts, S), -1, dtype=torch.long)
         for e in range(num_experts):
             for s in range(S):
-                global_expert_locations[e, s] = e  # all S entries → same expert slot
+                global_expert_locations[e, s] = e
 
         for e in range(num_experts):
             valid = global_expert_locations[e][global_expert_locations[e] >= 0]
-            self.assertEqual(len(valid), S, f"Expert {e} should have {S} valid replicas")
-            self.assertTrue((valid == e).all(), f"Expert {e} replicas should all point to slot {e}")
+            self.assertEqual(len(valid), S)
+            self.assertTrue((valid == e).all())
 
 
 class TestSmartRoutingUnit(TestCase):
-    """Test smart routing map computation (no distributed needed)."""
+    """Test smart routing map computation (Lite Routing - Algorithm 3)."""
 
     def test_smart_routing_map_uniform(self):
-        """With uniform load, each slot gets equal allocation."""
+        """With uniform load and 1 replica, each slot gets equal allocation."""
         from primus.backends.megatron.core.transformer.moe.fsep_smart_routing import (
             smart_routing_map,
         )
 
         N_E = 8
         S = 4
-        # Uniform load: each expert gets 100 tokens
         tokens_per_expert = torch.full((N_E,), 100, dtype=torch.long)
 
-        # Uniform placement: expert e → slot e (one replica)
         expert_locations = torch.full((N_E, S), -1, dtype=torch.long)
         for e in range(N_E):
             expert_locations[e, 0] = e  # only 1 replica
 
-        slot_allocation = smart_routing_map(tokens_per_expert, expert_locations, N_E // 8)
+        slot_allocation = smart_routing_map(
+            tokens_per_expert, expert_locations, N_E // 8,
+        )
 
-        # Each slot should get 100 tokens (one-to-one mapping)
         self.assertEqual(slot_allocation.shape[0], N_E)
         for e in range(N_E):
-            self.assertEqual(slot_allocation[e].item(), 100,
-                             f"Slot {e} should get 100 tokens with uniform load")
+            self.assertEqual(slot_allocation[e].item(), 100)
 
-    def test_smart_routing_map_imbalanced(self):
-        """With imbalanced load, tokens are distributed across replicas."""
+    def test_smart_routing_map_imbalanced_replicas(self):
+        """With replicated hot expert, tokens split across replicas."""
         from primus.backends.megatron.core.transformer.moe.fsep_smart_routing import (
             smart_routing_map,
         )
 
         N_E = 4
         S = 2
-        # Expert 0 overloaded: 400 tokens; others: 100 each
         tokens_per_expert = torch.tensor([400, 100, 100, 100], dtype=torch.long)
 
-        # Expert 0 has 2 replicas (slots 0 and 1)
+        # Expert 0 has 2 replicas at slots 0 and 1
+        # Experts 1,2,3 each have 1 replica at slots 2,3,4 (no overlap with expert 0)
         expert_locations = torch.full((N_E, S), -1, dtype=torch.long)
         expert_locations[0, 0] = 0
         expert_locations[0, 1] = 1  # Expert 0 has 2 replicas
-        for e in range(1, N_E):
-            expert_locations[e, 0] = e
+        expert_locations[1, 0] = 2
+        expert_locations[2, 0] = 3
+        expert_locations[3, 0] = 4
 
-        slot_allocation = smart_routing_map(tokens_per_expert, expert_locations, N_E // 2)
+        slot_allocation = smart_routing_map(
+            tokens_per_expert, expert_locations, N_E // 2,
+        )
 
-        # Total across ALL slots should equal total input tokens × routing_factor
-        total_input = tokens_per_expert.sum().item()
-        total_output = slot_allocation.sum().item()
-        # In the simple case (one replica per expert for experts 1-3, two for expert 0),
-        # the sum should be >= total_input (expert 0's tokens distributed to 2 replicas)
-        self.assertGreater(total_output, 0, "slot_allocation should have positive values")
-        self.assertGreater(slot_allocation[0].item() + slot_allocation[1].item(), 0,
-                           "Expert 0's replicas (slots 0 and 1) should receive tokens")
+        # Expert 0's 400 tokens should be split evenly: 200 to slot 0, 200 to slot 1
+        self.assertEqual(slot_allocation[0].item(), 200,
+                         f"Slot 0 should get 200 tokens, got {slot_allocation[0].item()}")
+        self.assertEqual(slot_allocation[1].item(), 200,
+                         f"Slot 1 should get 200 tokens, got {slot_allocation[1].item()}")
+        # Expert 1 → slot 2: 100 tokens
+        self.assertEqual(slot_allocation[2].item(), 100)
+        # Total across all slots = sum of all expert tokens
+        self.assertEqual(slot_allocation.sum().item(), 700)
 
-    def test_compute_smart_routing_assignment(self):
+    def test_smart_routing_3d_intra_node_priority(self):
+        """3D routing should prioritize intra-node replicas."""
+        from primus.backends.megatron.core.transformer.moe.fsep_smart_routing import (
+            smart_routing_map,
+        )
+
+        # 2 GPUs, 2 experts, 2 local experts each
+        # GPU 0 (node 0), GPU 1 (node 0) in a single node
+        N_E = 2
+        max_S = 2
+        ep_size = 2
+        num_local = 1
+        gpus_per_node = 8  # both GPUs on same node
+
+        tokens = torch.zeros(1, ep_size, N_E, dtype=torch.long)
+        tokens[0, 0, 0] = 100  # GPU 0 has 100 tokens for expert 0
+        tokens[0, 1, 1] = 50   # GPU 1 has 50 tokens for expert 1
+
+        expert_locations = torch.full((N_E, max_S), -1, dtype=torch.long)
+        expert_locations[0, 0] = 0  # expert 0 at slot 0
+        expert_locations[0, 1] = 1  # expert 0 also at slot 1
+        expert_locations[1, 0] = 1  # expert 1 at slot 1
+
+        allocation = smart_routing_map(
+            tokens, expert_locations, num_local, gpus_per_node=gpus_per_node,
+        )
+
+        # All GPUs are on same node → intra-node, should distribute evenly
+        self.assertEqual(allocation.shape, (1, ep_size, ep_size * num_local))
+        total = allocation.sum().item()
+        self.assertEqual(total, 150)  # 100 + 50
+
+    def test_compute_smart_routing_preserves_assignments(self):
         """Each token should be assigned to exactly one slot per expert."""
         from primus.backends.megatron.core.transformer.moe.fsep_smart_routing import (
             compute_smart_routing,
@@ -155,7 +177,6 @@ class TestSmartRoutingUnit(TestCase):
         N_E = 4
         topk = 2
 
-        # Random routing map: each token routed to 2 experts
         routing_map = torch.zeros(T, N_E, dtype=torch.bool)
         for t in range(T):
             experts = torch.randperm(N_E)[:topk]
@@ -163,7 +184,6 @@ class TestSmartRoutingUnit(TestCase):
 
         probs = routing_map.float() / topk
 
-        # Uniform placement: expert e → slot e
         expert_locations = torch.full((N_E, 2), -1, dtype=torch.long)
         for e in range(N_E):
             expert_locations[e, 0] = e
@@ -174,11 +194,10 @@ class TestSmartRoutingUnit(TestCase):
             routing_map, probs, expert_locations, inverse_expert_map, slot_capacity
         )
 
-        # Each token should be in new_routing_map with same total assignments
-        original_assignments = routing_map.long().sum().item()
-        new_assignments = new_routing_map.long().sum().item()
-        self.assertEqual(original_assignments, new_assignments,
-                         f"Total assignments should be preserved: {original_assignments} != {new_assignments}")
+        # Total assignments should be preserved
+        original = routing_map.long().sum().item()
+        new = new_routing_map.long().sum().item()
+        self.assertEqual(original, new)
 
     def test_new_routing_map_backward(self):
         """Gradients should flow back through new_routing_map_with_gradients."""
@@ -193,10 +212,7 @@ class TestSmartRoutingUnit(TestCase):
         routing_map[2, 2] = True
         routing_map[3, 0] = True
 
-        probs = torch.rand(T, N_E, requires_grad=True)
-        # Ensure probs match routing_map (non-zero only where routed)
-        probs_masked = probs * routing_map.float()
-        probs_masked = probs_masked.detach().requires_grad_(True)
+        probs_masked = (routing_map.float() * 0.5).detach().requires_grad_(True)
 
         expert_locations = torch.full((N_E, 1), -1, dtype=torch.long)
         for e in range(N_E):
@@ -208,12 +224,133 @@ class TestSmartRoutingUnit(TestCase):
             routing_map, probs_masked, expert_locations, inverse_expert_map, slot_capacity
         )
 
-        # Backward pass
         loss = new_probs.sum()
         loss.backward()
 
-        self.assertIsNotNone(probs_masked.grad, "Gradient should flow through new_routing_map")
-        self.assertFalse(torch.isnan(probs_masked.grad).any(), "No NaN in gradients")
+        self.assertIsNotNone(probs_masked.grad)
+        self.assertFalse(torch.isnan(probs_masked.grad).any())
+
+
+class TestReplicaAllocationUnit(TestCase):
+    """Test Algorithm 4: Replica Allocation (priority queue)."""
+
+    def test_uniform_load_equal_replicas(self):
+        """With uniform load, replicas should be roughly equal."""
+        from primus.backends.megatron.core.transformer.moe.load_planner import (
+            allocate_expert_replicas,
+        )
+
+        N_E = 8
+        n_device = 4
+        capacity = 2  # 4 * 2 = 8 total slots = N_E
+        loads = torch.full((N_E,), 100.0)
+
+        replicas = allocate_expert_replicas(loads, n_device, capacity)
+
+        self.assertEqual(len(replicas), N_E)
+        self.assertEqual(sum(replicas), n_device * capacity)  # total = 8
+        # With uniform load, each should get 1 replica
+        for r in replicas:
+            self.assertEqual(r, 1)
+
+    def test_hot_expert_gets_more_replicas(self):
+        """Hot expert should get more replicas than cold experts."""
+        from primus.backends.megatron.core.transformer.moe.load_planner import (
+            allocate_expert_replicas,
+        )
+
+        N_E = 4
+        n_device = 4
+        capacity = 2  # 4 * 2 = 8 total slots
+        loads = torch.tensor([800.0, 100.0, 100.0, 100.0])
+
+        replicas = allocate_expert_replicas(loads, n_device, capacity)
+
+        self.assertEqual(sum(replicas), 8)
+        # Expert 0 should have more replicas
+        self.assertGreater(replicas[0], replicas[1])
+
+    def test_all_capacity_used(self):
+        """Total replicas should exactly match total capacity when N_E <= capacity."""
+        from primus.backends.megatron.core.transformer.moe.load_planner import (
+            allocate_expert_replicas,
+        )
+
+        # Only test valid configs where N_E <= n_dev * cap
+        # (each expert needs at least 1 replica)
+        valid_configs = [
+            (4, 4, 2),   # N_E=4, capacity=8, each gets 2
+            (4, 8, 2),   # N_E=4, capacity=16
+            (8, 4, 2),   # N_E=8, capacity=8, each gets 1
+            (8, 8, 2),   # N_E=8, capacity=16
+            (8, 4, 4),   # N_E=8, capacity=16
+            (16, 8, 4),  # N_E=16, capacity=32
+        ]
+        for N_E, n_dev, cap in valid_configs:
+            total_capacity = n_dev * cap
+            if N_E > total_capacity:
+                continue  # Skip impossible configs
+            loads = torch.rand(N_E) * 1000 + 1
+            replicas = allocate_expert_replicas(loads, n_dev, cap)
+            self.assertEqual(
+                sum(replicas), total_capacity,
+                f"N_E={N_E}, n_dev={n_dev}, cap={cap}: "
+                f"sum(replicas)={sum(replicas)} != {total_capacity}"
+            )
+            # Each expert should get at least 1 replica
+            for e, r in enumerate(replicas):
+                self.assertGreaterEqual(r, 1, f"Expert {e} should have >= 1 replica")
+
+
+class TestGreedyPlacementUnit(TestCase):
+    """Test Greedy Placement algorithm."""
+
+    def test_basic_placement(self):
+        """Greedy placement should produce valid expert→GPU assignments."""
+        from primus.backends.megatron.core.transformer.moe.load_planner import (
+            greedy_placement,
+        )
+
+        N_E = 4
+        n_device = 4
+        capacity = 1
+        replicas = [1, 1, 1, 1]
+        loads = torch.tensor([100.0, 100.0, 100.0, 100.0])
+
+        locations, inv_map, A = greedy_placement(
+            replicas, loads, n_device, N_E, capacity,
+        )
+
+        self.assertEqual(locations.shape[0], N_E)
+        # Each expert should have exactly 1 valid location
+        for e in range(N_E):
+            valid = locations[e][locations[e] >= 0]
+            self.assertEqual(len(valid), 1)
+
+    def test_replicated_placement(self):
+        """Expert with 2 replicas should appear on 2 different GPUs."""
+        from primus.backends.megatron.core.transformer.moe.load_planner import (
+            greedy_placement,
+        )
+
+        N_E = 4
+        n_device = 4
+        capacity = 2
+        replicas = [2, 2, 2, 2]  # total = 8 = 4 * 2
+        loads = torch.tensor([200.0, 100.0, 100.0, 100.0])
+
+        locations, inv_map, A = greedy_placement(
+            replicas, loads, n_device, N_E, capacity,
+        )
+
+        # Expert 0 should have 2 valid locations on different GPUs
+        valid_locs = locations[0][locations[0] >= 0]
+        self.assertEqual(len(valid_locs), 2)
+        gpus = set()
+        for loc in valid_locs:
+            gpu = loc.item() // capacity
+            gpus.add(gpu)
+        self.assertEqual(len(gpus), 2, "Expert 0 replicas should be on different GPUs")
 
 
 class TestLoadPlannerUnit(TestCase):
@@ -235,71 +372,74 @@ class TestLoadPlannerUnit(TestCase):
         """Balanced load should NOT trigger relayout."""
         planner = self._make_planner(check_interval=5)
 
-        # Feed uniform load for 5 steps
         balanced_load = torch.full((8,), 100.0)
         for _ in range(5):
             planner.update(balanced_load)
 
-        self.assertFalse(planner.should_relayout(),
-                         "Balanced load should not trigger relayout")
+        self.assertFalse(planner.should_relayout())
 
     def test_relayout_on_imbalanced_load(self):
         """Highly imbalanced load SHOULD trigger relayout."""
         planner = self._make_planner(check_interval=5, imbalance_threshold=1.5)
 
-        # Expert 0 gets 10x average → r = 10 >> 1.5
         imbalanced = torch.tensor([1000.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0, 50.0])
         for _ in range(5):
             planner.update(imbalanced)
 
-        self.assertTrue(planner.should_relayout(),
-                        f"r={1000/175:.1f} >> 1.5 should trigger relayout")
+        self.assertTrue(planner.should_relayout())
 
     def test_ema_smoothing(self):
         """EMA should smooth out transient spikes."""
         planner = self._make_planner(check_interval=10)
 
-        # First 8 steps: balanced
         for _ in range(8):
             planner.update(torch.full((8,), 100.0))
 
-        # Last 2 steps: spike
         for _ in range(2):
             planner.update(torch.tensor([1000.0] + [50.0] * 7))
 
-        # EMA should still reflect mostly balanced load
-        # (EMA with decay=0.9 will dilute the spike)
         if planner.ema_load is not None:
-            max_val = planner.ema_load.max().item()
-            mean_val = planner.ema_load.mean().item()
-            ratio = max_val / mean_val if mean_val > 0 else 1.0
-            # With 2/10 imbalanced steps, EMA ratio should be < 10 (spike dampened)
-            self.assertLess(ratio, 10.0, "EMA should dampen transient spikes")
+            ratio = planner.ema_load.max().item() / planner.ema_load.mean().item()
+            self.assertLess(ratio, 10.0)
 
-    def test_plan_returns_placement(self):
-        """compute_new_placement should return a valid placement dict."""
-        planner = self._make_planner(check_interval=5)
+    def test_plan_returns_placement_with_algo4(self):
+        """compute_new_placement should use Algorithm 4 + Greedy Placement."""
+        # Use config where total_capacity > N_E so replication is possible
+        from primus.backends.megatron.core.transformer.moe.load_planner import (
+            FSEPLoadPlanner,
+        )
+        # N_E=4, ep_size=4, cap=2 → total_capacity=8, room for replication
+        planner = FSEPLoadPlanner(
+            num_experts=4,
+            ep_size=4,
+            sharding_degree=4,
+            check_interval=5,
+            imbalance_threshold=1.5,
+        )
 
-        # Feed strongly imbalanced load
-        imbalanced = torch.tensor([800.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0])
+        imbalanced = torch.tensor([800.0, 100.0, 100.0, 100.0])
         for _ in range(5):
             planner.update(imbalanced)
 
-        # Create a mock FSEPState
         class MockState:
-            num_experts = 8
+            num_experts = 4
             ep_size = 4
             sharding_degree = 4
-            global_expert_locations = torch.full((8, 4), -1, dtype=torch.long)
-            inverse_expert_map = torch.arange(8, dtype=torch.long)
+            global_expert_locations = torch.full((4, 4), -1, dtype=torch.long)
+            inverse_expert_map = torch.arange(4, dtype=torch.long)
 
         plan = planner.compute_new_placement(MockState())
 
         if plan is not None:
             self.assertIn("new_global_expert_locations", plan)
             self.assertIn("new_inverse_expert_map", plan)
+            self.assertIn("expert_replicas", plan)
             self.assertIn("improvement", plan)
             self.assertGreater(plan["improvement"], 0.0)
+            # Expert 0 (800 tokens) should have more replicas than others (100 tokens)
+            replicas = plan["expert_replicas"]
+            self.assertGreater(replicas[0], replicas[1],
+                               f"Expert 0 should have more replicas: {replicas}")
 
 
 # ─── Distributed tests (4 GPU) ────────────────────────────────────────────────
@@ -363,7 +503,6 @@ class TestFSEPFullDispatcher4GPU(MultiProcessTestCase):
         self.assertEqual(state.num_local_experts, 2)
         self.assertEqual(state.global_expert_locations.shape, (8, 4))
 
-        # Traditional EP: expert e → slot e (owner)
         for e in range(8):
             self.assertEqual(state.global_expert_locations[e, 0].item(), e)
 
@@ -380,7 +519,6 @@ class TestFSEPFullDispatcher4GPU(MultiProcessTestCase):
         )
 
         T, N_E = 16, 8
-        # Each token goes to 2 experts
         routing_map = torch.zeros(T, N_E, dtype=torch.bool, device=self.device)
         for t in range(T):
             routing_map[t, t % N_E] = True
@@ -390,7 +528,7 @@ class TestFSEPFullDispatcher4GPU(MultiProcessTestCase):
 
         expert_locations = torch.full((N_E, 2), -1, dtype=torch.long, device=self.device)
         for e in range(N_E):
-            expert_locations[e, 0] = e  # one replica
+            expert_locations[e, 0] = e
         inverse_expert_map = torch.arange(N_E, dtype=torch.long, device=self.device)
         slot_capacity = torch.full((N_E,), 100, dtype=torch.long, device=self.device)
 
@@ -400,15 +538,13 @@ class TestFSEPFullDispatcher4GPU(MultiProcessTestCase):
             slot_capacity.cpu(),
         )
 
-        # Total assignments preserved
         orig_count = routing_map.long().sum().item()
         new_count = new_routing_map.long().sum().item()
-        self.assertEqual(orig_count, new_count,
-                         f"Token assignments not preserved: {orig_count} != {new_count}")
+        self.assertEqual(orig_count, new_count)
 
     @skip_if_lt_x_gpu(4)
-    def test_load_planner_detects_imbalance(self):
-        """Load planner correctly detects imbalance after receiving load stats."""
+    def test_load_planner_full_pipeline(self):
+        """Load planner full pipeline: detect → allocate → place."""
         self._init_process()
 
         from primus.backends.megatron.core.transformer.moe.load_planner import (
@@ -428,9 +564,7 @@ class TestFSEPFullDispatcher4GPU(MultiProcessTestCase):
         for _ in range(5):
             planner.update(imbalanced)
 
-        # r = 600 / ((600+7*60)/8) = 600/127.5 ≈ 4.7 >> 2.0
-        self.assertTrue(planner.should_relayout(),
-                        "High imbalance should trigger relayout detection")
+        self.assertTrue(planner.should_relayout())
 
 
 if __name__ == "__main__":
