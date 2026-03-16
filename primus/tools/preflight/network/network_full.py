@@ -31,7 +31,8 @@ def run_network_full_checks(expect_distributed: bool = True) -> Dict[str, Any]:
             runtime["pg_backend"] = dist.get_backend()
             runtime["pg_init_ok"] = True
         else:
-            # If distributed intent is detected but PG is not initialized, treat as WARN.
+            # If distributed intent is detected but PG is not initialized, log WARN when
+            # distributed runtime is expected, otherwise log as INFO.
             if bool(probe.intent.get("is_distributed")):
                 runtime["pg_init_ok"] = False
                 runtime["pg_error"] = "Process group not initialized"
