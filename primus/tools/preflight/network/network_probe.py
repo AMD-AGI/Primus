@@ -46,15 +46,18 @@ def detect_distributed_intent() -> Dict[str, Any]:
     ompi_local_size_i = int(ompi_local_size) if ompi_local_size and ompi_local_size.isdigit() else None
 
     is_distributed = (
-        world_size > 1
-        or (slurm_ntasks_i and slurm_ntasks_i > 1)
-        or (ompi_size_i and ompi_size_i > 1)
+        world_size > 1 or (slurm_ntasks_i and slurm_ntasks_i > 1) or (ompi_size_i and ompi_size_i > 1)
     )
 
     nnodes = 1
     if slurm_nnodes_i is not None and slurm_nnodes_i > 0:
         nnodes = slurm_nnodes_i
-    elif ompi_size_i is not None and ompi_local_size_i is not None and ompi_size_i > 1 and ompi_local_size_i > 0:
+    elif (
+        ompi_size_i is not None
+        and ompi_local_size_i is not None
+        and ompi_size_i > 1
+        and ompi_local_size_i > 0
+    ):
         nnodes = (ompi_size_i + ompi_local_size_i - 1) // ompi_local_size_i
     elif world_size > 1 and local_world_size > 0:
         nnodes = (world_size + local_world_size - 1) // local_world_size
