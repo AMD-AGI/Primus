@@ -5,7 +5,7 @@ description: Check available idle nodes in a SLURM cluster. Use when the user wa
 
 # SLURM Idle Node Health Check
 
-Diagnose idle nodes in a SLURM cluster: verify SSH access, check Docker service, and report usable vs problematic nodes.
+Diagnose idle nodes in a SLURM cluster: verify SSH access, check Docker service, verify workspace directory accessibility, and report usable vs problematic nodes.
 
 ## Workflow
 
@@ -46,12 +46,29 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no <node> bas
   docker ps -aq --filter status=exited | head -1 | xargs -r docker rm > /dev/null 2>&1
   DOCKER_RM_OK=$?
 
-  if [ $DOCKER_OK -ne 0 ]; then
-    echo "FAIL|Docker service not available"
-  elif [ $DOCKER_RM_OK -ne 0 ]; then
-    echo "FAIL|Cannot remove containers"
+  # Check 3: Workspace directory accessible
+  WORKSPACE_DIR="<workspace_path>"
+  if [ -d "$WORKSPACE_DIR" ] && [ -r "$WORKSPACE_DIR" ]; then
+    WORKSPACE_OK=0
   else
+    WORKSPACE_OK=1
+  fi
+
+  ERRORS=""
+  if [ $DOCKER_OK -ne 0 ]; then
+    ERRORS="${ERRORS}Docker service not available; "
+  fi
+  if [ $DOCKER_RM_OK -ne 0 ]; then
+    ERRORS="${ERRORS}Cannot remove containers; "
+  fi
+  if [ $WORKSPACE_OK -ne 0 ]; then
+    ERRORS="${ERRORS}Workspace directory not accessible ($WORKSPACE_DIR); "
+  fi
+
+  if [ -z "$ERRORS" ]; then
     echo "PASS|"
+  else
+    echo "FAIL|${ERRORS}"
   fi
 '
 ```
@@ -64,6 +81,9 @@ If SSH itself fails, mark the node as `FAIL|SSH connection failed`.
 |---|-------|---------|-----------------|
 | 1 | Docker service is running | `docker info` | Docker daemon not started or user has no permission |
 | 2 | Can remove existing containers | `docker ps -aq --filter status=exited \| xargs -r docker rm` | Cannot clean up containers |
+| 3 | Workspace directory accessible | `[ -d "$WORKSPACE_DIR" ] && [ -r "$WORKSPACE_DIR" ]` | Shared filesystem not mounted or path unreachable on this node |
+
+`<workspace_path>` is the **absolute path of the current repository root** (i.e. the workspace directory where the agent is operating). Determine it at runtime via `pwd` or from the workspace context, then substitute into the script.
 
 > **To add more checks later**: append new check logic inside the `bash -c '...'` block above and update the table.
 
@@ -86,6 +106,8 @@ Table format (markdown):
 Show the healthy-node table first, then the problematic-node table.
 
 ### Step 5: Summary
+
+**Always write the summary in English**, regardless of the conversation language.
 
 Provide a summary block:
 
