@@ -13,9 +13,12 @@ Diagnose idle nodes in a SLURM cluster: verify SSH access, check Docker service,
 
 If the user provides a nodelist, use it directly. Otherwise:
 
-1. Run `sinfo -t idle -h -o "%P %N"` to get idle nodes per partition.
-2. If multiple partitions have idle nodes, use **AskQuestion** to let the user pick one partition.
-3. Expand the nodelist with `scontrol show hostnames <nodelist>` to get individual hostnames.
+1. Run `sinfo -h -o "%P %T %N"` to get all nodes with their **exact state**.
+2. Filter to keep **only rows where the state is exactly `idle`** — exclude `drained`, `drain`, `idle*`, `down`, `mixed`, etc.
+   - Recommended: `sinfo -h -o "%P %T %N" | awk '$2 == "idle"'`
+   - Do **NOT** use `sinfo -t idle` alone — it also matches `drained` nodes whose base state contains `idle`.
+3. If multiple partitions have idle nodes, use **AskQuestion** to let the user pick one partition.
+4. Expand the nodelist with `scontrol show hostnames <nodelist>` to get individual hostnames.
 
 ### Step 2: Ensure SSH Access
 
