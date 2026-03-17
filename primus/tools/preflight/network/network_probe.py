@@ -32,18 +32,37 @@ def _env_int(name: str, default: int) -> int:
 
 def detect_distributed_intent() -> Dict[str, Any]:
     world_size = _env_int("WORLD_SIZE", 1)
-    slurm_ntasks = _env_get("SLURM_NTASKS")
-    ompi_size = _env_get("OMPI_COMM_WORLD_SIZE")
+    local_world_size = _env_int("LOCAL_WORLD_SIZE", 1)
 
+    slurm_nnodes = _env_get("SLURM_NNODES")
+    slurm_ntasks = _env_get("SLURM_NTASKS")
+
+    ompi_size = _env_get("OMPI_COMM_WORLD_SIZE")
+    ompi_local_size = _env_get("OMPI_COMM_WORLD_LOCAL_SIZE")
+
+    slurm_nnodes_i = int(slurm_nnodes) if slurm_nnodes and slurm_nnodes.isdigit() else None
     slurm_ntasks_i = int(slurm_ntasks) if slurm_ntasks and slurm_ntasks.isdigit() else None
     ompi_size_i = int(ompi_size) if ompi_size and ompi_size.isdigit() else None
+    ompi_local_size_i = int(ompi_local_size) if ompi_local_size and ompi_local_size.isdigit() else None
 
     is_distributed = (
-        bool(world_size and world_size > 1)
-        or bool(slurm_ntasks_i and slurm_ntasks_i > 1)
-        or bool(ompi_size_i and ompi_size_i > 1)
+        world_size > 1 or (slurm_ntasks_i and slurm_ntasks_i > 1) or (ompi_size_i and ompi_size_i > 1)
     )
-    network_mode = "multi-node" if is_distributed else "single-node"
+
+    nnodes = 1
+    if slurm_nnodes_i is not None and slurm_nnodes_i > 0:
+        nnodes = slurm_nnodes_i
+    elif (
+        ompi_size_i is not None
+        and ompi_local_size_i is not None
+        and ompi_size_i > 1
+        and ompi_local_size_i > 0
+    ):
+        nnodes = (ompi_size_i + ompi_local_size_i - 1) // ompi_local_size_i
+    elif world_size > 1 and local_world_size > 0:
+        nnodes = (world_size + local_world_size - 1) // local_world_size
+
+    network_mode = "multi-node" if nnodes > 1 else "single-node"
 
     return {
         "is_distributed": is_distributed,
@@ -97,10 +116,34 @@ def list_ipv4_addrs() -> Dict[str, List[str]]:
     return out
 
 
+def _device_for_local_ip(host_ip: str) -> Optional[str]:
+    """Resolve the interface that has the given local IP from `ip -o addr show`."""
+    try:
+        r = subprocess.run(
+            ["ip", "-o", "addr", "show"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=2,
+        )
+        if r.returncode != 0:
+            return None
+        for line in r.stdout.strip().splitlines():
+            if host_ip in line:
+                parts = line.split()
+                if len(parts) > 1:
+                    return parts[1]
+        return None
+    except Exception:
+        return None
+
+
 def route_to_master() -> Dict[str, Any]:
     """
     Best-effort: determine which interface would be used to reach MASTER_ADDR.
     Uses `ip -o route get <master_ip>` and extracts `dev` and `src`.
+    For local routes (master is this host), resolves dev from `ip addr show`.
     """
     master_addr = os.environ.get("MASTER_ADDR") or ""
     if not master_addr:
@@ -130,12 +173,28 @@ def route_to_master() -> Dict[str, Any]:
         # Typical: "<ip> via <gw> dev <if> src <srcip> ..."
         m_dev = re.search(r"\bdev\s+(\S+)", s)
         m_src = re.search(r"\bsrc\s+(\d+\.\d+\.\d+\.\d+)", s)
+        dev = m_dev.group(1) if m_dev else None
+        src_ip = m_src.group(1) if m_src else None
+
+        if s.startswith("local "):
+            try:
+                host_ip = socket.gethostbyname(socket.gethostname())
+            except Exception as e:
+                return {
+                    "ok": False,
+                    "master_addr": master_addr,
+                    "master_ip": master_ip,
+                    "error": f"resolve local IP failed: {e}",
+                }
+
+            dev = _device_for_local_ip(host_ip) or dev
+
         return {
             "ok": True,
             "master_addr": master_addr,
             "master_ip": master_ip,
-            "dev": m_dev.group(1) if m_dev else None,
-            "src_ip": m_src.group(1) if m_src else None,
+            "dev": dev,
+            "src_ip": src_ip,
             "raw": s,
         }
     except Exception as e:

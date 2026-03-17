@@ -4,236 +4,157 @@
 #
 # See LICENSE for license information.
 ###############################################################################
+
+"""
+Primus extension of MaxText's Pydantic configuration.
+
+``PrimusMaxTextConfig`` directly inherits from ``MaxTextConfig`` and adds a
+small number of Primus-specific fields.  Any future upstream additions to
+``MaxTextConfig`` (new mixin base classes, new fields, etc.) are automatically
+inherited — **no manual synchronization required**.
+
+For **legacy MaxText versions** (date-versioned, e.g. ``2025.07.24``) that
+pre-date the Pydantic config system, ``PrimusMaxTextConfig`` is ``None`` and
+all config handling falls back to the legacy ``_HyperParameters`` dict path
+via the ``maxtext.pyconfig_compat`` patch.
+
+Changes relative to ``MaxTextConfig`` (new-version only):
+
+* **New fields** (MoE):        ``expert_balance``
+* **New fields** (Debug):      ``jax_distributed_heartbeat_timeout_seconds``
+* **New fields** (Turbo):      ``enable_primus_turbo``, ``use_turbo_grouped_gemm``
+* **New fields** (WandB):      ``enable_wandb``, ``wandb_project``, ``wandb_exp_name``, ``wandb_save_dir``
+"""
+
 import os
 from typing import Any
 
-from MaxText.configs.types import (  # Run and Checkpointing; Data Types and Quantization; Core Model Architecture; Attention Mechanisms; Mixture of Experts; Parallelism and Layout; Training, Optimization, and Fine-Tuning; Reinforcement Learning; Positional Embeddings; Dataset Loading and Tokenization; Inference; Development and Debugging; Metrics and Monitoring; Multimodal; Derived
-    AOT,
-    GRPO,
-    MTP,
-    VLLM,
-    AdamW,
-    Attention,
-    Checkpointing,
-    DatasetGeneral,
-    DataTypes,
-    DcnParallelism,
-    Debug,
-    Decoding,
-    DeepSeekMoE,
-    DerivedValues,
-    DevelopmentAndDebugging,
-    EmergencyCheckpointing,
-    FineTuning,
-    GcpMonitoring,
-    Goodput,
-    GrainDataset,
-    HardwareAndMesh,
-    HfDataset,
-    HloDump,
-    IciParallelism,
-    InferenceBenchmark,
-    InferenceGeneral,
-    InferenceLayout,
-    InferenceServer,
-    LayoutAndSharding,
-    Llama4Attention,
-    Logits,
-    MaxTextConfig,
-    Metrics,
-    MlaAttention,
-    MoBa,
-    ModelArchitecture,
-    MoEGeneral,
-    MoEKernels,
-    MultimodalGeneral,
-    Optimizer,
-    OrbaxStorage,
-    PagedAttention,
-    PipelineParallelism,
-    PositionalEmbedding,
-    PrefixCaching,
-    Profiling,
-    Quantization,
-    Qwen3Next,
-    RematAndOffload,
-    Reward,
-    RLDataset,
-    RLEvaluation,
-    RLHardware,
-    Rope,
-    RunInfo,
-    SpecialTokens,
-    SplashAttention,
-    StackTrace,
-    Tensorboard,
-    TfdsDataset,
-    Tokenizer,
-    TrainingLoop,
-    VisionProjector,
-    VisionTower,
-    YarnRope,
-)
-from pydantic import BaseModel, ConfigDict, model_validator
-from pydantic.fields import Field
+# ---------------------------------------------------------------------------
+# Version detection: new MaxText (>= 0.1.1) has configs.types with Pydantic,
+# old MaxText (2025.x.x) does not.
+# ---------------------------------------------------------------------------
+try:
+    from MaxText.configs.types import MaxTextConfig  # noqa: F401
+
+    MAXTEXT_HAS_PYDANTIC_CONFIG = True
+except (ImportError, ModuleNotFoundError):
+    MaxTextConfig = None  # type: ignore[assignment,misc]
+    MAXTEXT_HAS_PYDANTIC_CONFIG = False
 
 
-class PrimusMoEGeneral(MoEGeneral):
-    expert_balance: bool = Field(False, description="Whether to use expert balancing.")
+# ---------------------------------------------------------------------------
+# Primus-specific field names and defaults (shared by both code paths)
+# ---------------------------------------------------------------------------
+PRIMUS_EXTRA_FIELDS: dict[str, Any] = {
+    "expert_balance": False,
+    "jax_distributed_heartbeat_timeout_seconds": 100,
+    "enable_primus_turbo": False,
+    "use_turbo_grouped_gemm": False,
+    "enable_wandb": False,
+    "wandb_project": None,
+    "wandb_exp_name": None,
+    "wandb_save_dir": None,
+}
 
 
-class PrimusDevelopmentAndDebugging(DevelopmentAndDebugging):
-    jax_distributed_heartbeat_timeout_seconds: int = Field(
-        100,
-        description="How long before a missing heartbeat marks a task as dead. Increase for slow NFS checkpoint restores.",
-    )
-
-
-class PrimusTurboConfig(BaseModel):
-    enable_primus_turbo: bool = Field(False, description="Whether to enable Primus Turbo.")
-    use_turbo_grouped_gemm: bool = Field(False, description="Whether to use turbo grouped gemm.")
-
-
-class PrimusWandbConfig(BaseModel):
-    enable_wandb: bool = Field(False, description="Whether to enable WandB.")
-    wandb_project: None | str = Field(None, description="The name of the WandB project.")
-    wandb_exp_name: None | str = Field(
-        None, description="The name of the WandB experiment, derived from the run_name if not set."
-    )
-    wandb_save_dir: None | str = Field(None, description="The directory to save the WandB logs.")
-
-
-class PrimusMaxTextConfig(
-    # Run and Checkpointing
-    RunInfo,
-    Checkpointing,
-    OrbaxStorage,
-    EmergencyCheckpointing,
-    # Data Types and Quantization
-    DataTypes,
-    Quantization,
-    # Core Model Architecture
-    ModelArchitecture,
-    MTP,
-    Logits,
-    # Attention Mechanisms
-    Attention,
-    MlaAttention,
-    MoBa,
-    Llama4Attention,
-    SplashAttention,
-    PagedAttention,
-    # Mixture of Experts - REPLACED with PrimusMoEGeneral
-    PrimusMoEGeneral,  # Replaces MoEGeneral
-    MoEKernels,
-    DeepSeekMoE,
-    Qwen3Next,
-    # Parallelism and Layout
-    HardwareAndMesh,
-    LayoutAndSharding,
-    DcnParallelism,
-    IciParallelism,
-    PipelineParallelism,
-    # Training, Optimization, and Fine-Tuning
-    RematAndOffload,
-    TrainingLoop,
-    Optimizer,
-    AdamW,
-    FineTuning,
-    # Reinforcement Learning
-    RLHardware,
-    VLLM,
-    GRPO,
-    RLDataset,
-    RLEvaluation,
-    Reward,
-    SpecialTokens,
-    # Positional Embeddings
-    PositionalEmbedding,
-    Rope,
-    YarnRope,
-    # Dataset Loading and Tokenization
-    DatasetGeneral,
-    TfdsDataset,
-    HfDataset,
-    GrainDataset,
-    Tokenizer,
-    # Inference
-    InferenceGeneral,
-    Decoding,
-    InferenceLayout,
-    InferenceServer,
-    InferenceBenchmark,
-    PrefixCaching,
-    # Development and Debugging - REPLACED with PrimusDevelopmentAndDebugging
-    AOT,
-    PrimusDevelopmentAndDebugging,  # Replaces DevelopmentAndDebugging
-    Profiling,
-    HloDump,
-    StackTrace,
-    # Metrics and Monitoring
-    Metrics,
-    Goodput,
-    GcpMonitoring,
-    Tensorboard,
-    # Multimodal
-    MultimodalGeneral,
-    VisionTower,
-    VisionProjector,
-    # Primus-specific configs - ADDED
-    PrimusTurboConfig,
-    PrimusWandbConfig,
-    # Derived
-    DerivedValues,
-):
+def apply_primus_validations(keys: dict[str, Any]) -> None:
     """
-    The main configuration object for Primus MaxText.
+    Apply Primus-specific cross-field validations on a raw config dict.
 
-    This class extends MaxTextConfig with Primus-specific configurations:
-    - Replaces MoEGeneral with PrimusMoEGeneral (adds expert_balance)
-    - Replaces DevelopmentAndDebugging with PrimusDevelopmentAndDebugging (adds jax_distributed_heartbeat_timeout_seconds)
-    - Adds PrimusTurboConfig (Primus Turbo optimizations)
-    - Adds PrimusWandbConfig (WandB integration)
-
-    All other functionality from MaxTextConfig is preserved.
+    This is used by **both** the Pydantic path (inside
+    ``PrimusMaxTextConfig.set_derived_and_validate_values``) and the legacy
+    dict path (inside ``post_initialize``).
     """
+    if (not keys.get("wandb_save_dir")) and keys.get("base_output_directory"):
+        keys["wandb_save_dir"] = os.path.join(keys["base_output_directory"], "wandb")
 
-    debug: Debug = Field(default_factory=Debug)
-    model_config = ConfigDict(extra="forbid", protected_namespaces=())
+    if not keys.get("wandb_project"):
+        keys["wandb_project"] = os.getenv("WANDB_PROJECT", "Primus-MaxText-Pretrain")
 
-    @model_validator(mode="before")
-    @classmethod
-    def load_model_specific_defaults(cls, values: dict[str, Any]) -> dict[str, Any]:
-        """This method is a no-op because `pyconfig` handles model-specific config loading."""
-        return values
+    if (not keys.get("wandb_exp_name")) and keys.get("run_name"):
+        keys["wandb_exp_name"] = keys["run_name"]
 
-    @model_validator(mode="after")
-    def set_derived_and_validate_values(self) -> "PrimusMaxTextConfig":
+    if keys.get("enable_wandb") and "WANDB_API_KEY" not in os.environ:
+        raise ValueError("WANDB_API_KEY is not set. Please set it or login wandb before proceeding")
+
+    if not keys.get("enable_primus_turbo"):
+        keys["use_turbo_grouped_gemm"] = False
+
+
+# ---------------------------------------------------------------------------
+# PrimusMaxTextConfig — only defined when the Pydantic config system exists
+# ---------------------------------------------------------------------------
+if MAXTEXT_HAS_PYDANTIC_CONFIG:
+    from pydantic import ConfigDict, model_validator
+    from pydantic.fields import Field
+
+    class PrimusMaxTextConfig(MaxTextConfig):  # type: ignore[misc]
         """
-        Computes all derived values and runs all cross-field validations after initial parsing.
-        This calls the MaxTextConfig's validation logic and then adds any Primus-specific validations.
+        The main configuration object for Primus MaxText.
+
+        Directly inherits from ``MaxTextConfig`` so that all upstream fields,
+        validators, and future additions are automatically available.
+
+        Only Primus-specific fields and validations are declared here.
         """
-        # Call MaxTextConfig's validation logic directly since we're using composition via multiple inheritance
-        # rather than direct inheritance. MaxTextConfig.set_derived_and_validate_values expects a MaxTextConfig
-        # instance, but since we have all the same base classes, we can call it on self.
-        # We need to temporarily cast self to MaxTextConfig for the method call, or call the method directly.
-        # Actually, since MaxTextConfig's method works on the same fields we have, we can call it directly.
-        MaxTextConfig.set_derived_and_validate_values(self)
 
-        # Add any Primus-specific validations here if needed
-        if (self.wandb_save_dir is None or self.wandb_save_dir == "") and self.base_output_directory:
-            self.wandb_save_dir = os.path.join(self.base_output_directory, "wandb")
+        # ---- MoE extension ----
+        expert_balance: bool = Field(False, description="Whether to use expert balancing.")
 
-        if self.wandb_project is None or self.wandb_project == "":
-            self.wandb_project = os.getenv("WANDB_PROJECT", "Primus-MaxText-Pretrain")
+        # ---- Debug extension ----
+        jax_distributed_heartbeat_timeout_seconds: int = Field(
+            100,
+            description=(
+                "How long before a missing heartbeat marks a task as dead. "
+                "Increase for slow NFS checkpoint restores."
+            ),
+        )
 
-        if (self.wandb_exp_name is None or self.wandb_exp_name == "") and self.run_name:
-            self.wandb_exp_name = self.run_name
+        # ---- Primus Turbo ----
+        enable_primus_turbo: bool = Field(False, description="Whether to enable Primus Turbo.")
+        use_turbo_grouped_gemm: bool = Field(False, description="Whether to use turbo grouped gemm.")
 
-        if self.enable_wandb and "WANDB_API_KEY" not in os.environ:
-            raise ValueError("WANDB_API_KEY is not set. Please set it or login wandb before proceeding")
+        # ---- WandB integration ----
+        enable_wandb: bool = Field(False, description="Whether to enable WandB.")
+        wandb_project: None | str = Field(None, description="The name of the WandB project.")
+        wandb_exp_name: None | str = Field(
+            None, description="The name of the WandB experiment, derived from the run_name if not set."
+        )
+        wandb_save_dir: None | str = Field(None, description="The directory to save the WandB logs.")
 
-        if not self.enable_primus_turbo:
-            self.use_turbo_grouped_gemm = False
+        # Keep extra="forbid" to catch typos in YAML.
+        model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
-        return self
+        @model_validator(mode="before")
+        @classmethod
+        def load_model_specific_defaults(cls, values: dict[str, Any]) -> dict[str, Any]:
+            """No-op: ``pyconfig.initialize`` handles model-specific config loading."""
+            return values
+
+        @model_validator(mode="after")
+        def set_derived_and_validate_values(self) -> "PrimusMaxTextConfig":
+            """
+            Run MaxTextConfig's derived-value computation, then apply Primus-specific validations.
+            """
+            # Invoke upstream MaxTextConfig validator (sets run_name, paths, derived dims, etc.)
+            super().set_derived_and_validate_values()
+
+            # ---- Primus-specific validations (reuse shared logic) ----
+            # model_dump() returns a mutable dict view; apply_primus_validations mutates it
+            # but since we're inside a model_validator(mode="after"), we mutate self directly.
+            _d: dict[str, Any] = {}
+            for k in PRIMUS_EXTRA_FIELDS:
+                _d[k] = getattr(self, k)
+            _d["base_output_directory"] = self.base_output_directory
+            _d["run_name"] = self.run_name
+            apply_primus_validations(_d)
+            for k in PRIMUS_EXTRA_FIELDS:
+                setattr(self, k, _d[k])
+
+            return self
+
+else:
+    # Legacy MaxText — PrimusMaxTextConfig not available.
+    # Config building falls back to the dict-based path; Primus-specific
+    # fields are injected by ``apply_primus_validations`` in ``post_initialize``.
+    PrimusMaxTextConfig = None  # type: ignore[assignment,misc]

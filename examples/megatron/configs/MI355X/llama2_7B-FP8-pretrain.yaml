@@ -47,7 +47,7 @@ modules:
       expert_model_parallel_size: 1
       overlap_grad_reduce: true
       overlap_param_gather: true
-      gradient_accumulation_fusion: false
+      gradient_accumulation_fusion: true
 
       # data
       mock_data: true
@@ -80,8 +80,8 @@ modules:
       # sequence_parallel: 1
 
       # Cross entropy flags
-      # cross_entropy_fusion_impl: "te"
-      # cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
 
       # enable fp8 training
       fp8: hybrid
