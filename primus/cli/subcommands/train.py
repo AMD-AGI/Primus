@@ -28,19 +28,7 @@ def _resolve_pretrain_runtime(args) -> str:
             file=sys.stderr,
         )
 
-    try:
-        from primus.core.utils import yaml_utils
-
-        exp_cfg = yaml_utils.parse_yaml_to_namespace(args.config)
-        modules_cfg = getattr(exp_cfg, "modules", None)
-        pre_trainer_cfg = getattr(modules_cfg, "pre_trainer", None) if modules_cfg is not None else None
-        framework = getattr(pre_trainer_cfg, "framework", None) if pre_trainer_cfg is not None else None
-    except Exception:
-        framework = None
-
-    if framework == "maxtext":
-        return "legacy"
-
+    # Default: use the new core runtime for all supported frameworks.
     return "core"
 
 
@@ -82,13 +70,13 @@ def register_subcommand(subparsers):
     Register the 'train' subcommand to the main CLI parser.
 
     Supported suites (training workflows):
-        - pretrain: Pre-training workflow (Megatron, TorchTitan, etc.)
+        - pretrain: Pre-training workflow (Megatron, TorchTitan, MaxText, etc.)
 
     Future extensions:
         - posttrain: Post-training workflow (alignment, preference tuning, etc.)
 
     Example:
-        primus train pretrain --config exp.yaml --backend-path /path/to/megatron
+        primus train pretrain --config exp.yaml --backend-path /path/to/backend
 
     Args:
         subparsers: argparse subparsers object from main.py
@@ -99,7 +87,7 @@ def register_subcommand(subparsers):
 
     parser = subparsers.add_parser(
         "train",
-        help="Launch Primus pretrain with Megatron or TorchTitan",
+        help="Launch Primus pretrain with Megatron, TorchTitan, or MaxText",
         description="Primus training entry. Supports pretrain and posttrain (SFT); finetune/evaluate reserved for future use.",
     )
     suite_parsers = parser.add_subparsers(dest="suite", required=True)
