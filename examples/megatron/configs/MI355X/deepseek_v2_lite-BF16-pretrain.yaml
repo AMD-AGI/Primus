@@ -52,7 +52,7 @@ modules:
       valid_data_path: null
       test_data_path: null
 
-      moe_use_legacy_grouped_gemm: false
+      moe_use_legacy_grouped_gemm: true
       # MLA
       multi_latent_attention: true
 
@@ -87,6 +87,10 @@ modules:
       # sync-free moe support stage 1-2, 0 means not use sync-free moe
       # stage 2 is recommended for better performance
       turbo_sync_free_moe_stage: 1
+
+      # remove once super flag is functional again
+      moe_use_fused_router_with_aux_score: true
+      moe_permute_fusion: true
 
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"
