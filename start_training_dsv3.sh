@@ -31,12 +31,13 @@ export PRIMUS_RECOMPUTE_LAYERS=1
 export PROFILE=False
 export TURBO_DEEPEEP=True
 export LEGACY_GG=True
+export APPLY_ROPE_FUSION=False
 
 # Enable NUMA binding for better memory locality (increase stability for large models)
 export ENABLE_NUMA_BINDING=1
 export HSA_KERNARG_POOL_SIZE=12582912
 
-STAGE=$(($PRIMUS_PP * $PRIMUS_VPP))
+STAGE=$(( PRIMUS_PP *  PRIMUS_VPP))
 FEATURE_ARGS=()
 case $STAGE in
   8)
@@ -61,7 +62,7 @@ export EXP=examples/megatron/configs/MI355X/deepseek_v3-${PRETRAIN_TYPE}-pretrai
 export PRIMUS_TEAM=amd
 export PRIMUS_USER=tas
 export PRIMUS_TOKENIZED_DATA_PATH=/shared_aig/c4/tokenized/c4_en_train_text_document # this is the tokenized data path for the training
-export PRIMUS_EXP_NAME=dsv3-pretrain-nnodes_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-profile_$PROFILE
+export PRIMUS_EXP_NAME=dsv3-pretrain-nnodes_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-ropefusion_$APPLY_ROPE_FUSION-profile_$PROFILE
 
 
 mkdir -p output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
@@ -79,6 +80,8 @@ mkdir -p output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
   --lr_decay_iters 5000 \
   --lr_decay_style cosine \
   --moe_use_legacy_grouped_gemm $LEGACY_GG \
+  --enable_experimental $APPLY_ROPE_FUSION \
+  --apply_rope_fusion $APPLY_ROPE_FUSION \
   --pipeline_model_parallel_size $PRIMUS_PP \
   --expert_model_parallel_size $PRIMUS_EP \
   "${FEATURE_ARGS[@]}" \
