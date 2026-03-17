@@ -194,7 +194,7 @@ docker_podman_proxy run --rm \
     --env MAXTEXT_PATH \
     --env BACKEND_PATH \
     --env REBUILD_PRIMUS_TURBO \
-    --env REBUILD_UCCL \
+    --env REBUILD_UEP \
     --env USING_UEP \
     "${ENV_ARGS[@]}" \
     --ipc=host --network=host \
