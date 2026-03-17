@@ -60,12 +60,11 @@ export EXP=examples/megatron/configs/MI355X/deepseek_v3-${PRETRAIN_TYPE}-pretrai
 export PRIMUS_TEAM=amd
 export PRIMUS_USER=tas
 export PRIMUS_EXP_NAME=dsv3-pretrain-platform_$PLATFORM-layers_$PRIMUS_TOTAL_LAYERS-type_$PRETRAIN_TYPE-mbs_$MBS-gbs_$GBS-legacygg_$LEGACY_GG
-# export PRIMUS_EXP_NAME=debug
 
 
 mkdir -p output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
-# bash ./examples/run_pretrain.sh \
-bash ./examples/run_slurm_pretrain.sh \
+./primus-cli direct \
+  -- train pretrain --config $EXP \
   --num_layers $PRIMUS_TOTAL_LAYERS \
   --train_iters $TRAIN_ITERS \
   --micro_batch_size $MBS \

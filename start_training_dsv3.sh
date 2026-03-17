@@ -1,7 +1,7 @@
 #!/bin/bash
 
-export HF_TOKEN="your_hf_token"  # make it your own hf token
-export WANDB_API_KEY="your_wandb_api_key"  # make it your own wandb api key
+export HF_TOKEN="${HF_TOKEN:-'your_hf_token'}"  # make it your own hf token
+export WANDB_API_KEY="${WANDB_API_KEY:-'your_wandb_api_key'}"  # make it your own wandb api key
 
 export NNODES=32
 export SLURM_TIME=48:00:00
@@ -31,7 +31,10 @@ export PRIMUS_RECOMPUTE_LAYERS=1
 export PROFILE=False
 export TURBO_DEEPEEP=True
 export LEGACY_GG=True
-export APPLY_ROPE_FUSION=False
+export APPLY_ROPE_FUSION=True
+export HSA_NO_SCRATCH_RECLAIM=1
+export NVTE_CK_USES_BWD_V3=1
+export GPU_MAX_HW_QUEUES=4
 
 # Enable NUMA binding for better memory locality (increase stability for large models)
 export ENABLE_NUMA_BINDING=1
@@ -66,6 +69,7 @@ export PRIMUS_EXP_NAME=dsv3-pretrain-nnodes_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS
 
 
 mkdir -p output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
+# ./primus-cli direct \
 ./primus-cli slurm -N $NNODES --nodelist "$SLURM_NODELIST" \
   -- --image "docker.io/tasimage/primus:pr-563-ainic" --clean \
   -- train pretrain --config $EXP \
