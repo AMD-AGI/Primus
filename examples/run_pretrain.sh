@@ -437,6 +437,11 @@ if [ "$REBUILD_UEP" == "1" ]; then
 
     git clone https://github.com/uccl-project/uccl.git
     cd uccl || exit
+    if [[ -n "$UCCL_REF" ]]; then
+        LOG_INFO_RANK0 "Checking out UCCL ref: ${UCCL_REF}"
+        git fetch --all --tags
+        git checkout "${UCCL_REF}"
+    fi
     cd ep && python3 setup.py build && cd ..
     cp ep/build/**/*.so uccl
     pip3 install --no-build-isolation .
