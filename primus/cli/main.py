@@ -175,11 +175,9 @@ def main():
         except Exception:
             # Torchrun/elastic can sometimes suppress worker tracebacks.
             # Print here so users can see the real root cause.
-            if getattr(args, "debug", False):
-                traceback.print_exc()
-            else:
-                print(f"[Primus] Error: {traceback.format_exc().splitlines()[-1]}", file=sys.stderr)
-                print("[Primus] Re-run with --debug for full stack trace.", file=sys.stderr)
+            traceback.print_exc()
+            print(f"[Primus] Error: {traceback.format_exc().splitlines()[-1]}", file=sys.stderr)
+            print("[Primus] Re-run with --debug for full stack trace.", file=sys.stderr)
             raise SystemExit(1)
     else:
         parser.print_help()
