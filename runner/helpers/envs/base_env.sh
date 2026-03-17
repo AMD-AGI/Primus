@@ -179,7 +179,7 @@ export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-1}
 # Prevent scratch memory from being reclaimed to stabilize large memory usage
 # NOTE: Must disable scratch reclaim to avoid MoE training crash on AMD GPUs
 # Setting this to 0 prevents core dumps when using Mixture-of-Experts (MoE) models
-export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-0}
+export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 
 log_exported_vars "AMD GPU Optimizations" \
     HSA_ENABLE_SDMA HSA_NO_SCRATCH_RECLAIM
@@ -208,7 +208,7 @@ export NCCL_PXN_DISABLE=${NCCL_PXN_DISABLE:-1}
 export NCCL_P2P_NET_CHUNKSIZE=${NCCL_P2P_NET_CHUNKSIZE:-524288}
 
 log_exported_vars "General Performance Tuning" \
-    GPU_MAX_HW_QUEUES ENABLE_NUMA_BINDING CUDA_DEVICE_MAX_CONNECTIONS \
+    GPU_MAX_HW_QUEUES ENABLE_NUMA_BINDING HSA_KERNARG_POOL_SIZE CUDA_DEVICE_MAX_CONNECTIONS \
     TORCH_NCCL_HIGH_PRIORITY NCCL_PXN_DISABLE NCCL_P2P_NET_CHUNKSIZE
 
 # ----------------- Transformer Engine Optimizations -----------------
@@ -220,7 +220,7 @@ export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_
 export NVTE_ROCM_ENABLE_MXFP8=1
 
 # Note: Disable v3 due to accuracy issues. Will fix after TE version 2.1.
-export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
+export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 
 # Note: Disable fp32 atomic if you find any accuracy issue
 export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:-0}
