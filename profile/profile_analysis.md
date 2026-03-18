@@ -38,25 +38,25 @@
 ```
 TransformerLayer
 ├── _forward_attention
-│   ├── #1   RMSNorm(Attn)                       0.10 ms
+│   ├── #1   RMSNorm(Attn)                                97 us
 │   └── MLASelfAttention
-│       ├── #2   MLASelfAttention(QKV proj)          0.80 ms   8 kernels
-│       ├── #3   MLASelfAttention(RoPE)              0.30 ms   2 kernels
-│       ├── #4   MLASelfAttention(FlashAttn)         1.28 ms   ★
-│       └── #5   MLASelfAttention(O proj)            0.73 ms   2 kernels
+│       ├── #2   MLASelfAttention(QKV proj)                  802 us   8 kernels
+│       ├── #3   MLASelfAttention(RoPE)                      297 us   2 kernels
+│       ├── #4   MLASelfAttention(FlashAttn)                1278 us   ★
+│       └── #5   MLASelfAttention(O proj)                    727 us   2 kernels
 └── _forward_mlp
-    ├── #6   RMSNorm(MoE)                        0.10 ms
+    ├── #6   RMSNorm(MoE)                                 97 us
     └── MoELayer
-        ├── #7   MoELayer(TopKRouter)                1.02 ms   67 kernels
-        ├── #8   MoELayer(dispatch)                  0.78 ms   3 kernels
-        │           [gap 0.76ms — cross-node all-to-all]
-        ├── #9   MoELayer(token_permute)             0.17 ms
+        ├── #7   MoELayer(TopKRouter)                       1016 us   67 kernels
+        ├── #8   MoELayer(dispatch)                          785 us   3 kernels
+        │           [gap 756us — cross-node all-to-all]
+        ├── #9   MoELayer(token_permute)                     173 us
         ├── GroupedMLP
-        │      ├── #10  MoELayer(GroupedMLP FFN1×32)        6.30 ms   ★  1.97× overlap  32 kernels
-        │      ├── #11  MoELayer(GroupedMLP SwiGLU)         0.12 ms
-        │      └── #12  MoELayer(GroupedMLP FFN2×32)        2.69 ms   ★  1.97× overlap  32 kernels
-        ├── #13  MoELayer(token_unpermute)           0.18 ms
-        └── #14  MoELayer(combine)                   0.77 ms   2 kernels
+        │      ├── #10  MoELayer(GroupedMLP FFN1×32)               6302 us   ★  1.97× overlap  32 kernels
+        │      ├── #11  MoELayer(GroupedMLP SwiGLU)                 121 us
+        │      └── #12  MoELayer(GroupedMLP FFN2×32)               2692 us   ★  1.97× overlap  32 kernels
+        ├── #13  MoELayer(token_unpermute)                   183 us
+        └── #14  MoELayer(combine)                           770 us   2 kernels
 ```
 
 ## Per-Operator Statistics (execution order)
@@ -112,26 +112,26 @@ Expert GEMM shows multi-stream kernel overlap:
 TransformerLayer BWD
 ├── _forward_mlp BWD
 │   └── MoELayer
-│       ├── #1   MoELayer(dispatch)                  0.67 ms   2 kernels
-│       ├── #2   MoELayer(token_permute)             0.18 ms
+│       ├── #1   MoELayer(dispatch)                          674 us   2 kernels
+│       ├── #2   MoELayer(token_permute)                     183 us
 │       ├── GroupedMLP
-│       │      ├── #3   MoELayer(GroupedMLP dFFN2×64)       6.10 ms   ★  1.97× overlap  64 kernels
-│       │      ├── #4   MoELayer(GroupedMLP SwiGLU BWD)     0.59 ms   2 kernels
-│       │      └── #5   MoELayer(GroupedMLP dFFN1×64)       9.55 ms   ★  1.96× overlap  64 kernels
-│       ├── #6   MoELayer(grad_acc)                  2.65 ms   4 kernels
-│       ├── #7   MoELayer(token_unpermute)           0.23 ms
-│       │           [gap 0.79ms — scheduling gap]
-│       ├── #8   MoELayer(combine)                   1.15 ms   2 kernels
-│       ├── #9   MoELayer(Router wgrad)              0.25 ms
-│       └── #10  RMSNorm-BWD(MoE)                    0.99 ms   2 kernels
+│       │      ├── #3   MoELayer(GroupedMLP dFFN2×64)              6103 us   ★  1.97× overlap  64 kernels
+│       │      ├── #4   MoELayer(GroupedMLP SwiGLU BWD)             590 us   2 kernels
+│       │      └── #5   MoELayer(GroupedMLP dFFN1×64)              9551 us   ★  1.96× overlap  64 kernels
+│       ├── #6   MoELayer(grad_acc)                         2647 us   4 kernels
+│       ├── #7   MoELayer(token_unpermute)                   231 us
+│       │           [gap 790us — scheduling gap]
+│       ├── #8   MoELayer(combine)                          1154 us   2 kernels
+│       ├── #9   MoELayer(Router wgrad)                      252 us
+│       └── #10  RMSNorm-BWD(MoE)                            987 us   2 kernels
 └── _forward_attention BWD
     ├── MLASelfAttention
-    │   ├── #11  MLASelfAttention(O wgrad)           1.20 ms   2 kernels
-    │   ├── #12  MLASelfAttention(FlashAttn BWD)     5.32 ms   ★  3 kernels
-    │   ├── #13  MLASelfAttention(RoPE BWD)          0.31 ms   2 kernels
-    │   └── #14  MLASelfAttention(QKV wgrad)         1.76 ms   12 kernels
-    │   │        [gap 1.98ms — scheduling gap]
-    └── #15  RMSNorm-BWD(Attn)                   0.97 ms   2 kernels
+    │   ├── #11  MLASelfAttention(O wgrad)                  1204 us   2 kernels
+    │   ├── #12  MLASelfAttention(FlashAttn BWD)            5321 us   ★  3 kernels
+    │   ├── #13  MLASelfAttention(RoPE BWD)                  312 us   2 kernels
+    │   └── #14  MLASelfAttention(QKV wgrad)                1756 us   12 kernels
+    │   │        [gap 1981us — scheduling gap]
+    └── #15  RMSNorm-BWD(Attn)                           967 us   2 kernels
 ```
 
 ## Per-Operator Statistics (execution order)

@@ -346,21 +346,21 @@ def gen_layer_report(title, ops):
     top3 = set(sorted_by_k[:3])
 
     def fmt_leaf(idx, o, prefix_pad):
-        """Format one leaf line: #N  label  time  [extras]"""
-        t = o["ksum"]/1000
+        """Format one leaf line: #N  label  time(us, right-aligned)  [extras]"""
+        t_us = o["ksum"]
         extras = []
         if idx in top3: extras.append("★")
         ovlp = o["ksum"]/o["wall"] if o["wall"]>0 else 0
         if ovlp > 1.1: extras.append(f"{ovlp:.2f}× overlap")
         if o["n"] > 1: extras.append(f"{o['n']} kernels")
-        time_s = f"{t:.2f} ms"
+        time_s = f"{t_us:>8.0f} us"
         extra_s = f"   {'  '.join(extras)}" if extras else ""
-        return f"#{idx+1:<3} {o['label']:<35s} {time_s}{extra_s}"
+        return f"#{idx+1:<3} {o['label']:<38s} {time_s}{extra_s}"
 
     def gap_line(idx, prefix):
         if idx in gaps:
             g_ms, cause = gaps[idx]
-            return f"{prefix}        [gap {g_ms:.2f}ms — {cause}]"
+            return f"{prefix}        [gap {g_ms*1000:.0f}us — {cause}]"
         return None
 
     # Build tree based on label prefixes
