@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DSV3 Layer Timeline</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0e17;color:#e0e6f0;font-family:'DM Sans',sans-serif;padding:32px;min-height:100vh}
+h1{font-family:'JetBrains Mono',monospace;font-size:22px;font-weight:700;color:#7dd3fc;margin-bottom:4px}
+.sub{font-size:13px;color:#64748b;margin-bottom:28px;font-family:'JetBrains Mono',monospace}
+.tabs{display:flex;gap:0;margin-bottom:24px}
+.tab{padding:10px 28px;cursor:pointer;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:600;background:transparent;color:#64748b;border:none;border-bottom:2px solid transparent;transition:all .15s}
+.tab.active{background:#1e293b;color:#7dd3fc;border-bottom:2px solid #7dd3fc;border-radius:6px 6px 0 0}
+.tab:hover:not(.active){color:#94a3b8}
+.tab-content{display:none}.tab-content.active{display:block}
+.row{display:flex;align-items:center;margin-bottom:3px;height:34px}
+.lbl{width:210px;min-width:210px;font-family:'JetBrains Mono',monospace;font-size:11px;text-align:right;padding-right:14px;color:#94a3b8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bc{flex:1;position:relative;height:26px}
+.bar{position:absolute;height:26px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:600;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.6);min-width:3px;cursor:default;transition:filter .1s}
+.bar:hover{filter:brightness(1.3);outline:2px solid #fff4}
+.gap{position:absolute;height:26px;background:repeating-linear-gradient(90deg,transparent,transparent 4px,#ffffff06 4px,#ffffff06 8px);border-radius:3px}
+.axis{display:flex;margin-top:10px;padding-left:210px;height:22px;position:relative}
+.tick{position:absolute;font-family:'JetBrains Mono',monospace;font-size:10px;color:#475569;transform:translateX(-50%)}
+.grid{position:absolute;width:1px;background:#1e293b;bottom:0;transform:translateX(-50%);pointer-events:none;z-index:-1}
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:24px;padding-left:210px}
+.li{display:flex;align-items:center;gap:6px;font-size:12px;color:#94a3b8}
+.ld{width:14px;height:14px;border-radius:3px}
+table{margin-top:32px;border-collapse:collapse;width:100%;max-width:1000px;font-family:'JetBrains Mono',monospace;font-size:11px}
+th{text-align:left;color:#7dd3fc;font-weight:600;padding:7px 10px;border-bottom:2px solid #1e293b}
+td{padding:5px 10px;border-bottom:1px solid #1e293b;color:#cbd5e1}
+tr:hover td{background:#1e293b44}
+.bi{height:16px;border-radius:3px;min-width:1px}
+.note{margin-top:20px;font-size:12px;color:#64748b;line-height:1.6;max-width:900px;padding-left:210px}
+.note b{color:#94a3b8}.hl{color:#f59e0b;font-weight:600}
+.tooltip{display:none;position:fixed;background:#0f172a;border:1px solid #334155;border-radius:6px;padding:8px 12px;font-family:'JetBrains Mono',monospace;font-size:11px;z-index:1000;pointer-events:none;color:#e0e6f0;box-shadow:0 4px 12px rgba(0,0,0,.5)}
+</style></head><body>
+<h1>DSV3 Single Transformer Layer Timeline</h1>
+<div class="sub">dsv3-pretrain-mbs_2-gbs_512-PP_4-EP_8-VPP_1-turbodeepep_True-legacygg_True-profile_True-recompute_num_layers_0<br>PP=4 EP=8 MBS=2 | LegacyGG=True TurboDeepEP=True</div>
+<div class="tabs"><div class="tab active" onclick="switchTab('fwd',this)">Forward</div><div class="tab" onclick="switchTab('bwd',this)">Backward</div></div>
+<div id="fwd" class="tab-content active"></div><div id="bwd" class="tab-content"></div>
+<div id="tooltip" class="tooltip"></div>
+<script>
+const C={norm:"#6366f1",cast:"#8b5cf6",fp8:"#06b6d4",rope:"#f59e0b",attn:"#ef4444",bf16:"#10b981",moe:"#f97316",ep:"#ec4899",tri:"#a3e635",nccl:"#e74c3c",opt:"#7f8c8d",elem:"#f1c40f",mem:"#64748b",other:"#94a3b8"};
+const legendMap={"norm":"RMSNorm","cast":"FP8 Cast","fp8":"GEMM FP8","rope":"RoPE","attn":"Flash Attention","bf16":"GEMM BF16 (Expert)","moe":"MoE Control","ep":"DeepEP","tri":"Triton Fused","elem":"Elementwise","other":"Other"};
+const fwdData=[{"l": "RMSNorm(Attn)", "s": 0.0, "e": 0.0968, "w": 0.0968, "k": 0.0968, "n": 1, "g": "norm", "c": "#6366f1", "pct": 0.6, "ovlp": 1.0}, {"l": "MLASelfAttention(QKV proj)", "s": 0.0968, "e": 0.9258, "w": 0.8016, "k": 0.8016, "n": 8, "g": "fp8", "c": "#06b6d4", "pct": 5.2, "ovlp": 1.0}, {"l": "MLASelfAttention(RoPE)", "s": 0.9258, "e": 1.2226, "w": 0.2968, "k": 0.2968, "n": 2, "g": "rope", "c": "#f59e0b", "pct": 1.9, "ovlp": 1.0}, {"l": "MLASelfAttention(FlashAttn)", "s": 1.2267, "e": 2.5045, "w": 1.2778, "k": 1.2778, "n": 1, "g": "attn", "c": "#ef4444", "pct": 8.3, "ovlp": 1.0}, {"l": "MLASelfAttention(O proj)", "s": 2.5045, "e": 3.2311, "w": 0.7267, "k": 0.7267, "n": 2, "g": "fp8", "c": "#06b6d4", "pct": 4.7, "ovlp": 1.0}, {"l": "RMSNorm(MoE)", "s": 3.2834, "e": 3.3805, "w": 0.0971, "k": 0.0971, "n": 1, "g": "norm", "c": "#6366f1", "pct": 0.6, "ovlp": 1.0}, {"l": "MoELayer(TopKRouter)", "s": 3.3805, "e": 4.5808, "w": 1.2003, "k": 1.016, "n": 67, "g": "moe", "c": "#f97316", "pct": 6.6, "ovlp": 0.85}, {"l": "MoELayer(dispatch)", "s": 4.6603, "e": 5.4699, "w": 0.8096, "k": 0.7849, "n": 3, "g": "ep", "c": "#ec4899", "pct": 5.1, "ovlp": 0.97}, {"l": "MoELayer(token_permute)", "s": 6.2263, "e": 6.3997, "w": 0.1734, "k": 0.1734, "n": 1, "g": "moe", "c": "#f97316", "pct": 1.1, "ovlp": 1.0}, {"l": "MoELayer(GroupedMLP FFN1\u00d732)", "s": 6.4173, "e": 9.6202, "w": 3.2029, "k": 6.3021, "n": 32, "g": "bf16", "c": "#10b981", "pct": 41.1, "ovlp": 1.97}, {"l": "MoELayer(GroupedMLP SwiGLU)", "s": 9.652, "e": 9.7727, "w": 0.1207, "k": 0.1207, "n": 1, "g": "tri", "c": "#a3e635", "pct": 0.8, "ovlp": 1.0}, {"l": "MoELayer(GroupedMLP FFN2\u00d732)", "s": 9.7898, "e": 11.1558, "w": 1.3661, "k": 2.6915, "n": 32, "g": "bf16", "c": "#10b981", "pct": 17.5, "ovlp": 1.97}, {"l": "MoELayer(token_unpermute)", "s": 11.1808, "e": 11.3641, "w": 0.1833, "k": 0.1833, "n": 1, "g": "moe", "c": "#f97316", "pct": 1.2, "ovlp": 1.0}, {"l": "MoELayer(combine)", "s": 11.3696, "e": 12.1391, "w": 0.7696, "k": 0.7696, "n": 2, "g": "ep", "c": "#ec4899", "pct": 5.0, "ovlp": 1.0}];const bwdData=[{"l": "MoELayer(dispatch)", "s": 0.0, "e": 0.6742, "w": 0.6742, "k": 0.6742, "n": 2, "g": "ep", "c": "#ec4899", "pct": 2.1, "ovlp": 1.0}, {"l": "MoELayer(token_permute)", "s": 0.6798, "e": 0.8633, "w": 0.1834, "k": 0.1834, "n": 1, "g": "moe", "c": "#f97316", "pct": 0.6, "ovlp": 1.0}, {"l": "MoELayer(GroupedMLP dFFN2\u00d764)", "s": 0.8798, "e": 3.9782, "w": 3.0984, "k": 6.1029, "n": 64, "g": "bf16", "c": "#10b981", "pct": 19.1, "ovlp": 1.97}, {"l": "MoELayer(GroupedMLP SwiGLU BWD)", "s": 4.0092, "e": 4.5994, "w": 0.5902, "k": 0.5902, "n": 2, "g": "tri", "c": "#a3e635", "pct": 1.8, "ovlp": 1.0}, {"l": "MoELayer(GroupedMLP dFFN1\u00d764)", "s": 4.617, "e": 9.4919, "w": 4.8749, "k": 9.5511, "n": 64, "g": "bf16", "c": "#10b981", "pct": 29.9, "ovlp": 1.96}, {"l": "MoELayer(grad_acc)", "s": 9.5206, "e": 12.1678, "w": 2.6472, "k": 2.6472, "n": 4, "g": "elem", "c": "#f1c40f", "pct": 8.3, "ovlp": 1.0}, {"l": "MoELayer(token_unpermute)", "s": 12.1678, "e": 12.3987, "w": 0.2309, "k": 0.2309, "n": 1, "g": "moe", "c": "#f97316", "pct": 0.7, "ovlp": 1.0}, {"l": "MoELayer(combine)", "s": 13.1883, "e": 14.3424, "w": 1.1541, "k": 1.1541, "n": 2, "g": "ep", "c": "#ec4899", "pct": 3.6, "ovlp": 1.0}, {"l": "MoELayer(Router wgrad)", "s": 14.5968, "e": 14.8487, "w": 0.2519, "k": 0.2519, "n": 1, "g": "bf16", "c": "#10b981", "pct": 0.8, "ovlp": 1.0}, {"l": "RMSNorm-BWD(MoE)", "s": 15.2882, "e": 16.2863, "w": 0.9981, "k": 0.9866, "n": 2, "g": "norm", "c": "#6366f1", "pct": 3.1, "ovlp": 0.99}, {"l": "MLASelfAttention(O wgrad)", "s": 16.4544, "e": 17.6587, "w": 1.2043, "k": 1.2043, "n": 2, "g": "fp8", "c": "#06b6d4", "pct": 3.8, "ovlp": 1.0}, {"l": "MLASelfAttention(FlashAttn BWD)", "s": 18.0187, "e": 23.34, "w": 5.3212, "k": 5.3212, "n": 3, "g": "attn", "c": "#ef4444", "pct": 16.7, "ovlp": 1.0}, {"l": "MLASelfAttention(RoPE BWD)", "s": 23.34, "e": 23.6525, "w": 0.3125, "k": 0.3125, "n": 2, "g": "rope", "c": "#f59e0b", "pct": 1.0, "ovlp": 1.0}, {"l": "MLASelfAttention(QKV wgrad)", "s": 23.8801, "e": 40.2478, "w": 1.7562, "k": 1.7562, "n": 12, "g": "fp8", "c": "#06b6d4", "pct": 5.5, "ovlp": 1.0}, {"l": "RMSNorm-BWD(Attn)", "s": 42.2287, "e": 43.2068, "w": 0.9781, "k": 0.9672, "n": 2, "g": "norm", "c": "#6366f1", "pct": 3.0, "ovlp": 0.99}];
+const fwdTotalK=15.338,bwdTotalK=31.934,fwdTotalW=12.139,bwdTotalW=43.207;
+function switchTab(id,el){document.querySelectorAll('.tab-content').forEach(e=>e.classList.remove('active'));document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));document.getElementById(id).classList.add('active');el.classList.add('active');}
+function renderTimeline(cid,data,totalK,totalW){
+  const ct=document.getElementById(cid);if(!data.length){ct.innerHTML='<p style="color:#64748b">No data</p>';return;}
+  const tMax=Math.max(...data.map(d=>d.e)),chartW=750,scale=chartW/tMax,rowH=data.length*37+40;
+  let h='<div style="display:flex;gap:24px;padding-left:210px;font-family:JetBrains Mono,monospace;font-size:12px;margin-bottom:16px">';
+  h+=`<span>Kernel: <span class="hl">${totalK.toFixed(2)} ms</span></span><span>Wall: <span class="hl">${totalW.toFixed(2)} ms</span></span><span>Operators: <span class="hl">${data.length}</span></span></div>`;
+  h+='<div style="position:relative">';
+  const tickStep=Math.max(0.5,Math.ceil(tMax/8*2)/2);
+  for(let t=0;t<=tMax+0.01;t+=tickStep){const x=210+t*scale;h+=`<div class="grid" style="left:${x}px;height:${rowH}px;top:0"></div>`;}
+  data.forEach((d,i)=>{const left=d.s*scale,width=Math.max(3,(d.e-d.s)*scale),txt=width>50?d.k.toFixed(2):'';
+    h+=`<div class="row"><div class="lbl">${d.l}</div><div class="bc">`;
+    if(i>0){const gap=d.s-data[i-1].e;if(gap>0.02){const gL=data[i-1].e*scale,gW=Math.max(2,gap*scale);h+=`<div class="gap" style="left:${gL}px;width:${gW}px"></div>`;}}
+    h+=`<div class="bar" style="left:${left}px;width:${width}px;background:${d.c}" onmousemove="showTip(event,'${d.l.replace(/'/g,"\\'")}',{'w':${d.w},'k':${d.k},'n':${d.n},'o':${d.ovlp}})" onmouseout="hideTip()">${txt}</div></div></div>`;
+  });
+  h+=`<div class="axis">`;for(let t=0;t<=tMax+0.01;t+=tickStep){h+=`<div class="tick" style="left:${t*scale}px">${t.toFixed(1)}ms</div>`;}h+=`</div></div>`;
+  const usedGroups=new Set(data.map(d=>d.g));h+=`<div class="legend">`;
+  Object.entries(C).forEach(([g,c])=>{if(usedGroups.has(g))h+=`<div class="li"><div class="ld" style="background:${c}"></div>${legendMap[g]||g}</div>`;});h+=`</div>`;
+  h+=`<table><tr><th>#</th><th>Operator</th><th>Cnt</th><th>Wall(ms)</th><th>Kernel(ms)</th><th>%</th><th>Overlap</th><th style="width:120px"></th></tr>`;
+  data.forEach((d,i)=>{const barW=Math.max(1,d.pct*1.2),isBold=d.pct>=5,s=isBold?'font-weight:700':'';
+    h+=`<tr><td>${i+1}</td><td style="color:${d.c};${s}">${d.l}</td><td>${d.n}</td><td>${d.w.toFixed(3)}</td><td>${d.k.toFixed(3)}</td><td>${d.pct}%</td><td>${d.ovlp>1.1?d.ovlp+'×':'-'}</td><td><div class="bi" style="width:${barW}px;background:${d.c}"></div></td></tr>`;
+  });
+  h+=`<tr style="font-weight:700"><td></td><td style="color:#7dd3fc">Total</td><td></td><td>${totalW.toFixed(3)}</td><td>${totalK.toFixed(3)}</td><td>100%</td><td></td><td></td></tr></table>`;
+  const expertOps=data.filter(d=>d.g==='bf16'&&d.n>=32);h+=`<div class="note"><b>Notes:</b><br>`;
+  if(expertOps.length){const mo=Math.max(...expertOps.map(d=>d.ovlp));h+=`• Expert GEMM overlap: <span class="hl">${mo.toFixed(2)}×</span> (2-stream parallel)<br>`;}
+  h+=`• <span class="hl">Overlap > 1.0</span> = multi-stream parallelism</div>`;ct.innerHTML=h;
+}
+function showTip(ev,name,d){const t=document.getElementById('tooltip');t.style.display='block';t.style.left=(ev.clientX+15)+'px';t.style.top=(ev.clientY+15)+'px';t.innerHTML=`<b>${name}</b><br>Wall: ${d.w.toFixed(3)} ms<br>Kernel: ${d.k.toFixed(3)} ms<br>Count: ${d.n}<br>Overlap: ${d.o}×`;}
+function hideTip(){document.getElementById('tooltip').style.display='none';}
+renderTimeline('fwd',fwdData,fwdTotalK,fwdTotalW);renderTimeline('bwd',bwdData,bwdTotalK,bwdTotalW);
+</script></body></html>
