@@ -348,16 +348,17 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         # Reference: Primus-Turbo/primus_turbo/pytorch/ops/attention/flash_attn_interface.py
         # Note: We store config here but create self.sinks AFTER super().__init__()
         # because PyTorch requires Module.__init__() to be called before assigning parameters
-        _use_sink_attention = getattr(args, 'use_sink_attention', False)
+        _use_sink_attention = getattr(args, "use_sink_attention", False)
         # Sliding window size (gpt-oss uses 128, applied to even layers only)
-        self.sink_sliding_window = getattr(args, 'sink_sliding_window', 0)
+        self.sink_sliding_window = getattr(args, "sink_sliding_window", 0)
         # Whether to apply sliding window only to even layers (gpt-oss pattern)
-        self.sink_window_even_layers_only = getattr(args, 'sink_window_even_layers_only', True)
+        self.sink_window_even_layers_only = getattr(args, "sink_window_even_layers_only", True)
 
         # Note: Sink attention is currently only supported in non-CP mode
         # (flash_attn_usp_func does not support sink parameter yet)
         if _use_sink_attention and self.config.context_parallel_size > 1:
             import warnings
+
             warnings.warn(
                 "Sink attention is not supported with Context Parallel (CP > 1). "
                 "Disabling sink attention for this configuration."
@@ -438,9 +439,7 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         # This matches gpt-oss model: self.sinks = torch.nn.Parameter(torch.empty(num_attention_heads))
         self.use_sink_attention = self._init_sink_attention
         if self.use_sink_attention:
-            self.sinks = torch.nn.Parameter(
-                torch.zeros(self._num_heads_for_sinks, dtype=torch.bfloat16)
-            )
+            self.sinks = torch.nn.Parameter(torch.zeros(self._num_heads_for_sinks, dtype=torch.bfloat16))
         else:
             self.sinks = None
         # Clean up temporary attributes
