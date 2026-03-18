@@ -225,21 +225,23 @@ TransformerLayer
 Rules:
 - Tree structure uses `├──` / `└──` / `│` box-drawing characters
 - Each leaf node is a merged operator with `#N` referencing the statistics table
-- Show kernel time (ms) right-aligned, `★` marks top-3 by time
+- Show kernel time in **us** (microseconds) right-aligned, `★` marks top-3 by time
 - Module-level nodes (MLASelfAttention, MoELayer, GroupedMLP) are non-leaf groupings without `#N`
 - `[gap X.XXms — cause]` inline after the operator that precedes the gap
 
 **2. Per-Operator Statistics table:**
 
 ```markdown
-| # | Operator | Kernels | Wall (ms) | Kernel (ms) | % | Overlap |
-|---|----------|---------|-----------|-------------|---|---------|
+| # | Operator | Kernels | Wall (us) | Kernel (us) | % | Overlap | Top Kernel |
+|---|----------|---------|-----------|-------------|---|---------|------------|
 ```
 
 Rules:
+- **All times in us (microseconds)**, integer format (no decimals)
 - Operator column uses semantic names from merging rules above
 - Rows with ≥5% share: use **bold** for the entire row
 - Overlap = kernel_sum / wall_time. Show as `X.XX×` if > 1.0, otherwise `-`
+- **Top Kernel** column: show the raw kernel function name (truncated to ~50 chars) of the longest-running kernel in this merged operator — this helps verify correctness (e.g. `_ZN5aiter32fmha_fwd_hd192_hd128_bf16_causalE`)
 - Total row at bottom with **bold**
 - ~15-20 rows max per layer
 

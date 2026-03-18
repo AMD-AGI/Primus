@@ -73,10 +73,14 @@ def group_adjacent(kernels):
             cur.append(k)
         else:
             ws = cur[0]["ts"]; we = max(x["ts"]+x["dur"] for x in cur)
-            groups.append({"cat": cur_cat, "n": len(cur), "ksum": sum(x["dur"] for x in cur), "ws": ws, "we": we, "wall": we-ws})
+            top = max(cur, key=lambda x: x["dur"])
+            groups.append({"cat": cur_cat, "n": len(cur), "ksum": sum(x["dur"] for x in cur),
+                           "ws": ws, "we": we, "wall": we-ws, "topk": top["name"]})
             cur_cat, cur = k["cat"], [k]
     ws = cur[0]["ts"]; we = max(x["ts"]+x["dur"] for x in cur)
-    groups.append({"cat": cur_cat, "n": len(cur), "ksum": sum(x["dur"] for x in cur), "ws": ws, "we": we, "wall": we-ws})
+    top = max(cur, key=lambda x: x["dur"])
+    groups.append({"cat": cur_cat, "n": len(cur), "ksum": sum(x["dur"] for x in cur),
+                   "ws": ws, "we": we, "wall": we-ws, "topk": top["name"]})
     return groups
 
 def detect_fwd_layers(groups):
@@ -138,15 +142,17 @@ def _find(layer, cat, start=0, n_min=None):
 
 def _collect(layer, indices):
     gs = [layer[i] for i in indices]
+    top = max(gs, key=lambda g: g["ksum"])
     return {"n": sum(g["n"] for g in gs), "ksum": sum(g["ksum"] for g in gs),
-            "ws": min(g["ws"] for g in gs), "we": max(g["we"] for g in gs)}
+            "ws": min(g["ws"] for g in gs), "we": max(g["we"] for g in gs),
+            "topk": top.get("topk", "")}
 
-def _op(label, cat, n, ksum, ws, we, wall=None):
+def _op(label, cat, n, ksum, ws, we, wall=None, topk=""):
     w = wall if wall is not None else ksum
-    return {"label": label, "cat": cat, "n": n, "ksum": ksum, "ws": ws, "we": we, "wall": w}
+    return {"label": label, "cat": cat, "n": n, "ksum": ksum, "ws": ws, "we": we, "wall": w, "topk": topk}
 
 def _single(label, cat, g):
-    return _op(label, cat, g["n"], g["ksum"], g["ws"], g["we"], g["wall"])
+    return _op(label, cat, g["n"], g["ksum"], g["ws"], g["we"], g["wall"], g.get("topk", ""))
 
 
 def merge_fwd(groups, layer_range):
@@ -168,13 +174,13 @@ def merge_fwd(groups, layer_range):
                    if L[i]["cat"] in ("FP8-CastTranspose","GEMM-FP8","RMSNorm-FWD")]
     if qkv_indices:
         c = _collect(L, qkv_indices)
-        ops.append(_op("MLASelfAttention(QKV proj)", "GEMM-FP8", c["n"], c["ksum"], c["ws"], c["we"]))
+        ops.append(_op("MLASelfAttention(QKV proj)", "GEMM-FP8", c["n"], c["ksum"], c["ws"], c["we"], topk=c["topk"]))
 
     # MLASelfAttention(RoPE)
     rp = [i for i in range(0, attn) if L[i]["cat"]=="RoPE-FWD"]
     if rp:
         c = _collect(L, rp)
-        ops.append(_op("MLASelfAttention(RoPE)", "RoPE-FWD", c["n"], c["ksum"], c["ws"], c["we"]))
+        ops.append(_op("MLASelfAttention(RoPE)", "RoPE-FWD", c["n"], c["ksum"], c["ws"], c["we"], topk=c["topk"]))
 
     # MLASelfAttention(FlashAttn)
     ops.append(_single("MLASelfAttention(FlashAttn)", "Attn-FWD", L[attn]))
@@ -185,7 +191,7 @@ def merge_fwd(groups, layer_range):
                  if L[i]["cat"] in ("FP8-CastTranspose","GEMM-FP8")]
     if o_indices:
         c = _collect(L, o_indices)
-        ops.append(_op("MLASelfAttention(O proj)", "GEMM-FP8", c["n"], c["ksum"], c["ws"], c["we"]))
+        ops.append(_op("MLASelfAttention(O proj)", "GEMM-FP8", c["n"], c["ksum"], c["ws"], c["we"], topk=c["topk"]))
 
     # ── _forward_mlp ──
     # RMSNorm(MoE)
@@ -199,7 +205,7 @@ def merge_fwd(groups, layer_range):
         router_range = list(range(router, dispatch))
         if router_range:
             c = _collect(L, router_range)
-            ops.append(_op("MoELayer(TopKRouter)", "MoE-TopK", c["n"], c["ksum"], c["ws"], c["we"], c["we"]-c["ws"]))
+            ops.append(_op("MoELayer(TopKRouter)", "MoE-TopK", c["n"], c["ksum"], c["ws"], c["we"], c["we"]-c["ws"], c["topk"]))
 
     # MoELayer(dispatch)
     if dispatch is not None:
@@ -214,7 +220,7 @@ def merge_fwd(groups, layer_range):
     ffn1 = _find(L, "GEMM-BF16", (permute or attn)+1, n_min=32)
     if ffn1 is not None:
         g = L[ffn1]
-        ops.append(_op(f"MoELayer(GroupedMLP FFN1×{g['n']})", "GEMM-BF16", g["n"], g["ksum"], g["ws"], g["we"], g["wall"]))
+        ops.append(_op(f"MoELayer(GroupedMLP FFN1×{g['n']})", "GEMM-BF16", g["n"], g["ksum"], g["ws"], g["we"], g["wall"], g.get("topk","")))
 
     # MoELayer(GroupedMLP SwiGLU)
     swiglu = _find(L, "Triton-Fused", (ffn1 or attn)+1)
@@ -225,7 +231,7 @@ def merge_fwd(groups, layer_range):
     ffn2 = _find(L, "GEMM-BF16", (swiglu or attn)+1, n_min=32)
     if ffn2 is not None:
         g = L[ffn2]
-        ops.append(_op(f"MoELayer(GroupedMLP FFN2×{g['n']})", "GEMM-BF16", g["n"], g["ksum"], g["ws"], g["we"], g["wall"]))
+        ops.append(_op(f"MoELayer(GroupedMLP FFN2×{g['n']})", "GEMM-BF16", g["n"], g["ksum"], g["ws"], g["we"], g["wall"], g.get("topk","")))
 
     # MoELayer(token_unpermute)
     unpermute = _find(L, "MoE-Unpermute", (ffn2 or attn)+1)
@@ -260,7 +266,7 @@ def merge_bwd(groups, layer_range):
     dffn2 = _find(L, "GEMM-BF16", (permute or 0)+1, n_min=64)
     if dffn2 is not None and dffn2 < attn:
         g = L[dffn2]
-        ops.append(_op(f"MoELayer(GroupedMLP dFFN2×{g['n']})", "GEMM-BF16", g["n"], g["ksum"], g["ws"], g["we"], g["wall"]))
+        ops.append(_op(f"MoELayer(GroupedMLP dFFN2×{g['n']})", "GEMM-BF16", g["n"], g["ksum"], g["ws"], g["we"], g["wall"], g.get("topk","")))
 
     swiglu = _find(L, "Triton-Fused", (dffn2 or 0)+1)
     if swiglu is not None and dffn2 is not None and swiglu < attn:
@@ -269,7 +275,7 @@ def merge_bwd(groups, layer_range):
     dffn1 = _find(L, "GEMM-BF16", (swiglu or 0)+1, n_min=64)
     if dffn1 is not None and dffn1 < attn:
         g = L[dffn1]
-        ops.append(_op(f"MoELayer(GroupedMLP dFFN1×{g['n']})", "GEMM-BF16", g["n"], g["ksum"], g["ws"], g["we"], g["wall"]))
+        ops.append(_op(f"MoELayer(GroupedMLP dFFN1×{g['n']})", "GEMM-BF16", g["n"], g["ksum"], g["ws"], g["we"], g["wall"], g.get("topk","")))
 
     for i in range((dffn1 or 0)+1, attn):
         if L[i]["cat"]=="Elementwise" and L[i]["n"]>=4 and L[i]["ksum"]>1000:
@@ -295,7 +301,7 @@ def merge_bwd(groups, layer_range):
     o_fp8 = [i for i in range(max(0, attn-10), attn) if L[i]["cat"]=="GEMM-FP8"]
     if o_fp8:
         c = _collect(L, o_fp8)
-        ops.append(_op("MLASelfAttention(O wgrad)", "GEMM-FP8", c["n"], c["ksum"], c["ws"], c["we"]))
+        ops.append(_op("MLASelfAttention(O wgrad)", "GEMM-FP8", c["n"], c["ksum"], c["ws"], c["we"], topk=c["topk"]))
 
     ops.append(_single("MLASelfAttention(FlashAttn BWD)", "Attn-BWD", L[attn]))
 
@@ -306,7 +312,7 @@ def merge_bwd(groups, layer_range):
     post_fp8 = [i for i in range(attn+1, len(L)) if L[i]["cat"]=="GEMM-FP8"]
     if post_fp8:
         c = _collect(L, post_fp8)
-        ops.append(_op("MLASelfAttention(QKV wgrad)", "GEMM-FP8", c["n"], c["ksum"], c["ws"], c["we"]))
+        ops.append(_op("MLASelfAttention(QKV wgrad)", "GEMM-FP8", c["n"], c["ksum"], c["ws"], c["we"], topk=c["topk"]))
 
     for i in range(len(L)-1, attn, -1):
         if L[i]["cat"]=="RMSNorm-BWD" and L[i]["ksum"]>500:
@@ -482,19 +488,21 @@ def gen_layer_report(title, ops):
 
     # Per-operator table
     lines.append("## Per-Operator Statistics (execution order)\n")
-    lines.append("| # | Operator | Kernels | Wall (ms) | Kernel (ms) | % | Overlap |")
-    lines.append("|---|----------|---------|-----------|-------------|---|---------|")
+    lines.append("| # | Operator | Kernels | Wall (us) | Kernel (us) | % | Overlap | Top Kernel |")
+    lines.append("|---|----------|---------|-----------|-------------|---|---------|------------|")
     for i, o in enumerate(ops):
         pct = o["ksum"]/total_k*100 if total_k>0 else 0
         ovlp = o["ksum"]/o["wall"] if o["wall"]>0 else 0
         ovlp_s = f"**{ovlp:.2f}×**" if ovlp > 1.1 else "-"
         bold = pct >= 5
         lb = f"**{o['label']}**" if bold else o["label"]
-        wall_s = f"**{o['wall']/1000:.3f}**" if bold else f"{o['wall']/1000:.3f}"
-        ksum_s = f"**{o['ksum']/1000:.3f}**" if bold else f"{o['ksum']/1000:.3f}"
+        wall_s = f"**{o['wall']:.0f}**" if bold else f"{o['wall']:.0f}"
+        ksum_s = f"**{o['ksum']:.0f}**" if bold else f"{o['ksum']:.0f}"
         pct_s = f"**{pct:.1f}%**" if bold else f"{pct:.1f}%"
-        lines.append(f"| {i+1} | {lb} | {o['n']} | {wall_s} | {ksum_s} | {pct_s} | {ovlp_s} |")
-    lines.append(f"| | **Total** | **{sum(o['n'] for o in ops)}** | **{total_w/1000:.2f}** | **{total_k/1000:.2f}** | **100%** | |")
+        topk = o.get("topk", "")
+        topk_s = f"`{topk[:55]}`" if topk else ""
+        lines.append(f"| {i+1} | {lb} | {o['n']} | {wall_s} | {ksum_s} | {pct_s} | {ovlp_s} | {topk_s} |")
+    lines.append(f"| | **Total** | **{sum(o['n'] for o in ops)}** | **{total_w:.0f}** | **{total_k:.0f}** | **100%** | | |")
     lines.append("")
 
     # Overlap analysis
