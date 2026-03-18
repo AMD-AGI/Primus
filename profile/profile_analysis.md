@@ -61,23 +61,23 @@ TransformerLayer
 
 ## Per-Operator Statistics (execution order)
 
-| # | Operator | Kernels | Wall (us) | Kernel (us) | % | Overlap | Top Kernel |
-|---|----------|---------|-----------|-------------|---|---------|------------|
-| 1 | RMSNorm(Attn) | 1 | 97 | 97 | 0.6% | - | `void transformer_engine::normalization::rmsnorm_fwd_gen` |
-| 2 | **MLASelfAttention(QKV proj)** | 8 | **802** | **802** | **5.2%** | - | `Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SAB_SAV_UserArgs_MT256` |
-| 3 | MLASelfAttention(RoPE) | 2 | 297 | 297 | 1.9% | - | `rotary_fwd_kv_kernel.kd` |
-| 4 | **MLASelfAttention(FlashAttn)** | 1 | **1278** | **1278** | **8.3%** | - | `_ZN5aiter32fmha_fwd_hd192_hd128_bf16_causalE.kd` |
-| 5 | MLASelfAttention(O proj) | 2 | 727 | 727 | 4.7% | - | `Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SAB_SAV_UserArgs_MT256` |
-| 6 | RMSNorm(MoE) | 1 | 97 | 97 | 0.6% | - | `void transformer_engine::normalization::rmsnorm_fwd_gen` |
-| 7 | **MoELayer(TopKRouter)** | 67 | **1200** | **1016** | **6.6%** | - | `void at::native::sbtopk::gatherTopK<float, unsigned int` |
-| 8 | **MoELayer(dispatch)** | 3 | **810** | **785** | **5.1%** | - | `void primus_turbo::deep_ep::intranode::dispatch<8, 1024` |
-| 9 | MoELayer(token_permute) | 1 | 173 | 173 | 1.1% | - | `_permute_kernel.kd` |
-| 10 | **MoELayer(GroupedMLP FFN1×32)** | 32 | **3203** | **6302** | **41.1%** | **1.97×** | `Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x` |
-| 11 | MoELayer(GroupedMLP SwiGLU) | 1 | 121 | 121 | 0.8% | - | `triton_poi_fused__to_copy_mul_silu_split_0.kd` |
-| 12 | **MoELayer(GroupedMLP FFN2×32)** | 32 | **1366** | **2692** | **17.5%** | **1.97×** | `Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x` |
-| 13 | MoELayer(token_unpermute) | 1 | 183 | 183 | 1.2% | - | `_unpermute_kernel.kd` |
-| 14 | **MoELayer(combine)** | 2 | **770** | **770** | **5.0%** | - | `void primus_turbo::deep_ep::intranode::combine<hip_bflo` |
-| | **Total** | **154** | **12139** | **15338** | **100%** | | |
+| # | Operator | Kernels | Wall (us) | Kernel (us) | % | Overlap | Top Kernel | Input Shape |
+|---|----------|---------|-----------|-------------|---|---------|------------|-------------|
+| 1 | RMSNorm(Attn) | 1 | 97 | 97 | 0.6% | - | `void transformer_engine::normalization::rmsnorm_fwd_gen` | bfloat16[4096×2×7168] bfloat16[7168] |
+| 2 | **MLASelfAttention(QKV proj)** | 8 | **802** | **802** | **5.2%** | - | `Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SAB_SAV_UserArgs_MT256` | bfloat16[4096×2×1536] bfloat16[1536] |
+| 3 | MLASelfAttention(RoPE) | 2 | 297 | 297 | 1.9% | - | `rotary_fwd_kv_kernel.kd` | bfloat16[4096×2×128×256] bfloat16[4096×2×1×64] |
+| 4 | **MLASelfAttention(FlashAttn)** | 1 | **1278** | **1278** | **8.3%** | - | `_ZN5aiter32fmha_fwd_hd192_hd128_bf16_causalE.kd` | int[3] int[3] |
+| 5 | MLASelfAttention(O proj) | 2 | 727 | 727 | 4.7% | - | `Cijk_Alik_Bljk_F8BS_BH_Bias_HA_S_SAB_SAV_UserArgs_MT256` | bfloat16[7168×16384] bfloat16[4096×2×16384] |
+| 6 | RMSNorm(MoE) | 1 | 97 | 97 | 0.6% | - | `void transformer_engine::normalization::rmsnorm_fwd_gen` | bfloat16[4096×2×7168] bfloat16[7168] |
+| 7 | **MoELayer(TopKRouter)** | 67 | **1200** | **1016** | **6.6%** | - | `void at::native::sbtopk::gatherTopK<float, unsigned int` | float[8192×8×32] |
+| 8 | **MoELayer(dispatch)** | 3 | **810** | **785** | **5.1%** | - | `void primus_turbo::deep_ep::intranode::dispatch<8, 1024` | bfloat16[8192×7168] long int[8192×8] |
+| 9 | MoELayer(token_permute) | 1 | 173 | 173 | 1.1% | - | `_permute_kernel.kd` | bfloat16[8192×7168] bool[8192×32] |
+| 10 | **MoELayer(GroupedMLP FFN1×32)** | 32 | **3203** | **6302** | **41.1%** | **1.97×** | `Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x` | bfloat16[65536×7168] bfloat16[32×7168×4096] |
+| 11 | MoELayer(GroupedMLP SwiGLU) | 1 | 121 | 121 | 0.8% | - | `triton_poi_fused__to_copy_mul_silu_split_0.kd` | bfloat16[65536×4096] float[65536×1] |
+| 12 | **MoELayer(GroupedMLP FFN2×32)** | 32 | **1366** | **2692** | **17.5%** | **1.97×** | `Cijk_Ailk_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x` | bfloat16[65536×2048] bfloat16[32×2048×7168] |
+| 13 | MoELayer(token_unpermute) | 1 | 183 | 183 | 1.2% | - | `_unpermute_kernel.kd` | bfloat16[65536×7168] int[8192×65] |
+| 14 | **MoELayer(combine)** | 2 | **770** | **770** | **5.0%** | - | `void primus_turbo::deep_ep::intranode::combine<hip_bflo` | bfloat16[8192×7168] |
+| | **Total** | **154** | **12139** | **15338** | **100%** | | | |
 
 ## Overlap Analysis
 
@@ -136,24 +136,24 @@ TransformerLayer BWD
 
 ## Per-Operator Statistics (execution order)
 
-| # | Operator | Kernels | Wall (us) | Kernel (us) | % | Overlap | Top Kernel |
-|---|----------|---------|-----------|-------------|---|---------|------------|
-| 1 | MoELayer(dispatch) | 2 | 674 | 674 | 2.1% | - | `void primus_turbo::deep_ep::intranode::dispatch<8, 1024` |
-| 2 | MoELayer(token_permute) | 1 | 183 | 183 | 0.6% | - | `_permute_kernel.kd` |
-| 3 | **MoELayer(GroupedMLP dFFN2×64)** | 64 | **3098** | **6103** | **19.1%** | **1.97×** | `Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x` |
-| 4 | MoELayer(GroupedMLP SwiGLU BWD) | 2 | 590 | 590 | 1.8% | - | `triton_poi_fused__to_copy_cat_mul_silu_silu_backward_sp` |
-| 5 | **MoELayer(GroupedMLP dFFN1×64)** | 64 | **4875** | **9551** | **29.9%** | **1.96×** | `Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x` |
-| 6 | **MoELayer(grad_acc)** | 4 | **2647** | **2647** | **8.3%** | - | `void at::native::vectorized_templated_elementwise_kerne` |
-| 7 | MoELayer(token_unpermute) | 1 | 231 | 231 | 0.7% | - | `_unpermute_kernel.kd` |
-| 8 | MoELayer(combine) | 2 | 1154 | 1154 | 3.6% | - | `void primus_turbo::deep_ep::intranode::combine<hip_bflo` |
-| 9 | MoELayer(Router wgrad) | 1 | 252 | 252 | 0.8% | - | `Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT256x128x16_` |
-| 10 | RMSNorm-BWD(MoE) | 2 | 998 | 987 | 3.1% | - | `void transformer_engine::normalization::rmsnorm_bwd_gen` |
-| 11 | MLASelfAttention(O wgrad) | 2 | 1204 | 1204 | 3.8% | - | `Cijk_Alik_Bljk_F8B8BS_BH_Bias_HA_S_SAB_SAV_UserArgs_MT2` |
-| 12 | **MLASelfAttention(FlashAttn BWD)** | 3 | **5321** | **5321** | **16.7%** | - | `_ZN5aiter41fmha_bwd_hd192_hd128_bf16_causal_a16_psskE.k` |
-| 13 | MLASelfAttention(RoPE BWD) | 2 | 312 | 312 | 1.0% | - | `rotary_bwd_kv_kernel.kd` |
-| 14 | **MLASelfAttention(QKV wgrad)** | 12 | **1756** | **1756** | **5.5%** | - | `Cijk_Alik_Bljk_F8B8BS_BH_Bias_HA_S_SAB_SAV_UserArgs_MT2` |
-| 15 | RMSNorm-BWD(Attn) | 2 | 978 | 967 | 3.0% | - | `void transformer_engine::normalization::rmsnorm_bwd_gen` |
-| | **Total** | **164** | **43207** | **31934** | **100%** | | |
+| # | Operator | Kernels | Wall (us) | Kernel (us) | % | Overlap | Top Kernel | Input Shape |
+|---|----------|---------|-----------|-------------|---|---------|------------|-------------|
+| 1 | MoELayer(dispatch) | 2 | 674 | 674 | 2.1% | - | `void primus_turbo::deep_ep::intranode::dispatch<8, 1024` | bfloat16[8192×7168] |
+| 2 | MoELayer(token_permute) | 1 | 183 | 183 | 0.6% | - | `_permute_kernel.kd` | bfloat16[8192×7168] |
+| 3 | **MoELayer(GroupedMLP dFFN2×64)** | 64 | **3098** | **6103** | **19.1%** | **1.97×** | `Cijk_Alik_Bljk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x128x` | bfloat16[65536×7168] |
+| 4 | MoELayer(GroupedMLP SwiGLU BWD) | 2 | 590 | 590 | 1.8% | - | `triton_poi_fused__to_copy_cat_mul_silu_silu_backward_sp` | bfloat16[65536×2048] float[65536×1] |
+| 5 | **MoELayer(GroupedMLP dFFN1×64)** | 64 | **4875** | **9551** | **29.9%** | **1.96×** | `Cijk_Ailk_Bjlk_BBS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x` | bfloat16[65536×4096] |
+| 6 | **MoELayer(grad_acc)** | 4 | **2647** | **2647** | **8.3%** | - | `void at::native::vectorized_templated_elementwise_kerne` | float[7168×131072] bfloat16[7168×131072] |
+| 7 | MoELayer(token_unpermute) | 1 | 231 | 231 | 0.7% | - | `_unpermute_kernel.kd` | bfloat16[65536×7168] float[65536] |
+| 8 | MoELayer(combine) | 2 | 1154 | 1154 | 3.6% | - | `void primus_turbo::deep_ep::intranode::combine<hip_bflo` | bfloat16[8192×7168] float[8192×8] |
+| 9 | MoELayer(Router wgrad) | 1 | 252 | 252 | 0.8% | - | `Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT256x128x16_` | float[4096×2×256] |
+| 10 | RMSNorm-BWD(MoE) | 2 | 998 | 987 | 3.1% | - | `void transformer_engine::normalization::rmsnorm_bwd_gen` | bfloat16[4096×2×7168] |
+| 11 | MLASelfAttention(O wgrad) | 2 | 1204 | 1204 | 3.8% | - | `Cijk_Alik_Bljk_F8B8BS_BH_Bias_HA_S_SAB_SAV_UserArgs_MT2` | bfloat16[4096×2×7168] |
+| 12 | **MLASelfAttention(FlashAttn BWD)** | 3 | **5321** | **5321** | **16.7%** | - | `_ZN5aiter41fmha_bwd_hd192_hd128_bf16_causal_a16_psskE.k` | bfloat16[4096×2×128×128] |
+| 13 | MLASelfAttention(RoPE BWD) | 2 | 312 | 312 | 1.0% | - | `rotary_bwd_kv_kernel.kd` | bfloat16[4096×2×128×192] bfloat16[4096×2×128×128] |
+| 14 | **MLASelfAttention(QKV wgrad)** | 12 | **1756** | **1756** | **5.5%** | - | `Cijk_Alik_Bljk_F8B8BS_BH_Bias_HA_S_SAB_SAV_UserArgs_MT2` | bfloat16[4096×2×24576] |
+| 15 | RMSNorm-BWD(Attn) | 2 | 978 | 967 | 3.0% | - | `void transformer_engine::normalization::rmsnorm_bwd_gen` | bfloat16[4096×2×7168] |
+| | **Total** | **164** | **43207** | **31934** | **100%** | | | |
 
 ## Overlap Analysis
 

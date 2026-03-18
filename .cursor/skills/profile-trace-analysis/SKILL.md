@@ -232,8 +232,8 @@ Rules:
 **2. Per-Operator Statistics table:**
 
 ```markdown
-| # | Operator | Kernels | Wall (us) | Kernel (us) | % | Overlap | Top Kernel |
-|---|----------|---------|-----------|-------------|---|---------|------------|
+| # | Operator | Kernels | Wall (us) | Kernel (us) | % | Overlap | Top Kernel | Input Shape |
+|---|----------|---------|-----------|-------------|---|---------|------------|-------------|
 ```
 
 Rules:
@@ -241,7 +241,8 @@ Rules:
 - Operator column uses semantic names from merging rules above
 - Rows with ≥5% share: use **bold** for the entire row
 - Overlap = kernel_sum / wall_time. Show as `X.XX×` if > 1.0, otherwise `-`
-- **Top Kernel** column: show the raw kernel function name (truncated to ~50 chars) of the longest-running kernel in this merged operator — this helps verify correctness (e.g. `_ZN5aiter32fmha_fwd_hd192_hd128_bf16_causalE`)
+- **Top Kernel** column: raw kernel function name (truncated ~55 chars) of the longest kernel in this merged op — for verification (e.g. `_ZN5aiter32fmha_fwd_hd192_hd128_bf16_causalE`)
+- **Input Shape** column: dtype and shape of input tensors from the parent `cpu_op` event (linked via `External id`). Format: `dtype[dim0×dim1×...]`. Show first 1-2 tensor inputs. Use the trace's `record_shapes` data — cpu_op events have `Input Dims` and `Input type` in args.
 - Total row at bottom with **bold**
 - ~15-20 rows max per layer
 
