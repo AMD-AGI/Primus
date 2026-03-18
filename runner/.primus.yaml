@@ -84,6 +84,7 @@ container:
       - "NVTE_CK_USES_BWD_V3"
       - "GPU_MAX_HW_QUEUES"
       - "HSA_KERNARG_POOL_SIZE"
+      - "PRIMUS_TURBO_DEEPEP_TIMEOUT"
       - "NCCL_IB_HCA"
       - "NCCL_SOCKET_IFNAME"
       - "GLOO_SOCKET_IFNAME"
