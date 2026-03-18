@@ -8,6 +8,7 @@ from megatron.core.pipeline_parallel.combined_1f1b import combined_forward_backw
 from megatron.core.pipeline_parallel.schedules import backward_step
 from megatron.training.global_vars import get_args
 
+from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
 from primus.core.pipeline_parallel.handler.wgrad_handler import WGRAD_RUNNING_CACHE
 from primus.core.pipeline_parallel.scheduler.scheduler_node import (
     FuncType,
@@ -34,6 +35,10 @@ def megatron_bwd_handler(node: SchedulerNode, idx: int, scheduler_table: list[Sc
 
     assert fwd_node_idx is not None
     outputs = scheduler_table[fwd_node_idx].args["outputs"]
+
+    if "should_offload" in fwd_node.args and fwd_node.args["should_offload"]:
+        OFFLOAD_BUFFER.wait_reload_done(fwd_node.mini_batch, fwd_node.chunk)
+
     input_tensors = scheduler_table[fwd_node_idx].args["inputs"]
 
     recv_node_idx = find_prev_node_with_type(scheduler_table, idx, [FuncType.RB])

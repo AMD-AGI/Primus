@@ -1,0 +1,14 @@
+#!/bin/bash
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+set -euo pipefail
+
+# Root-level convenience wrapper so users can run `primus-cli ...` directly
+# from the Primus repository root. The real implementation lives in runner/.
+
+REPO_ROOT="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+exec bash "${REPO_ROOT}/runner/primus-cli" "$@"

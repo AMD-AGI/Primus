@@ -5,6 +5,17 @@
 # See LICENSE for license information.
 ###############################################################################
 
+"""
+Primus RoutedMoE override.
+
+Uses ``*args, **kwargs`` for ``dense_matmul`` / ``sparse_matmul`` so that the
+same class works with both the Dec version (9-param signature with bias) and
+the Aug version (6-param signature without bias).  Primus-specific logic
+(expert_balance, turbo grouped_gemm) only touches ``gate_logits`` and
+``jax.lax.ragged_dot`` — bias parameters are transparently forwarded to
+``super()``.
+"""
+
 from typing import Optional, Tuple
 
 import jax
@@ -51,16 +62,12 @@ class PrimusRoutedMoE(RoutedMoE):
             einsum_op = jnp.einsum
         return einsum_op
 
-    def dense_matmul(
-        self,
-        inputs,
-        gate_logits,
-        pre_bias_logits,
-        w0_kernel,
-        w1_kernel,
-        wo_kernel,
-    ) -> tuple[jax.Array, Optional[jax.Array]]:
-        """Dense matrix multiplication."""
+    def dense_matmul(self, inputs, gate_logits, pre_bias_logits, *args, **kwargs):
+        """Dense matrix multiplication.
+
+        Accepts ``*args, **kwargs`` to transparently support both the 6-param
+        (Aug-version) and 9-param (Dec-version, with bias) upstream signatures.
+        """
         if self.config.expert_balance:
             ######################################################################################################
             ############################## start hard code for uniform expert ####################################
@@ -82,22 +89,16 @@ class PrimusRoutedMoE(RoutedMoE):
             gate_logits = jnp.broadcast_to(rotated_weights[None, :, :], (batch_size, seq_len, num_experts))
             ############################################# end ####################################################
             ##########################################
-        return super().dense_matmul(inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel)
+        return super().dense_matmul(inputs, gate_logits, pre_bias_logits, *args, **kwargs)
 
-    def sparse_matmul(
-        self,
-        inputs,
-        gate_logits,
-        pre_bias_logits,
-        w0_kernel,
-        w1_kernel,
-        wo_kernel,
-    ):
-        """Perform sparse matrix multiplication with optional Primus Turbo backend."""
+    def sparse_matmul(self, inputs, gate_logits, pre_bias_logits, *args, **kwargs):
+        """Sparse matrix multiplication with optional Primus Turbo backend.
+
+        Accepts ``*args, **kwargs`` to transparently support both the 6-param
+        (Aug-version) and 9-param (Dec-version, with bias) upstream signatures.
+        """
         if not self.config.use_turbo_grouped_gemm:
-            return super().sparse_matmul(
-                inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
-            )
+            return super().sparse_matmul(inputs, gate_logits, pre_bias_logits, *args, **kwargs)
         assert not (
             self.config.megablox and self.config.use_turbo_grouped_gemm
         ), "primus_turbo grouped_gemm cannot be enabled together with megablox"
@@ -108,9 +109,7 @@ class PrimusRoutedMoE(RoutedMoE):
         except ImportError:
             # Fallback to original implementation if primus_turbo is not available
             max_logging.log("WARNING: primus_turbo not available, using default ragged_dot in MoE")
-            return super().sparse_matmul(
-                inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
-            )
+            return super().sparse_matmul(inputs, gate_logits, pre_bias_logits, *args, **kwargs)
 
         max_logging.log("Using primus_turbo grouped_gemm in MoE")
         _orig_ragged_dot = jax.lax.ragged_dot
@@ -128,8 +127,6 @@ class PrimusRoutedMoE(RoutedMoE):
 
         jax.lax.ragged_dot = _turbo_ragged_dot
         try:
-            return super().sparse_matmul(
-                inputs, gate_logits, pre_bias_logits, w0_kernel, w1_kernel, wo_kernel
-            )
+            return super().sparse_matmul(inputs, gate_logits, pre_bias_logits, *args, **kwargs)
         finally:
             jax.lax.ragged_dot = _orig_ragged_dot

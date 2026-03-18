@@ -99,16 +99,12 @@ execute_patches() {
         LOG_INFO_RANK0 "[Execute Patches] Running patch: bash $patch"
 
         # Run the patch script in a child shell and capture its output so that we can
-        # process special lines (e.g., PATCH_ENV KEY=VALUE) while still preserving
-        # the original logs.
+        # process special lines (e.g., env.* and extra.*) while still displaying
+        # the output in real-time.
+        # Use set -o pipefail to propagate exit code through pipe
         local patch_output
-        patch_output="$(bash "$patch" 2>&1)"
+        patch_output="$(set -o pipefail; bash "$patch" 2>&1 | tee /dev/stderr)"
         local exit_code=$?
-
-        # Re-echo patch output so users see the same logs as before.
-        if [[ -n "$patch_output" ]]; then
-            printf '%s\n' "$patch_output"
-        fi
 
         # Allow patches to:
         #   1) Export environment variables back to the caller by printing lines:

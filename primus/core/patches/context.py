@@ -20,7 +20,7 @@ from typing import Any, Dict, Optional
 # Core lifecycle phases used by Primus
 # NOTE:
 #   These should stay in sync with the phases used by:
-#     - BackendAdapter._apply_setup_patches() / _apply_build_args_patches()
+#     - PrimusRuntime (setup / build_args / before_train / after_train)
 #     - BaseTrainer.run() (before_train / after_train)
 PHASES = [
     "setup",  # Before building args or trainer construction

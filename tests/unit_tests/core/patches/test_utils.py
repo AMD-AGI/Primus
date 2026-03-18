@@ -99,11 +99,17 @@ class TestVersionInRange:
     def test_invalid_semver_in_comparators_and_ranges(self):
         # Non-numeric versions with comparator or range should return False
         assert not version_in_range("commit:abc123", ">=0.8.0")
-        assert not version_in_range("1.0.0-rc1", ">=1.0.0")
-        assert not version_in_range("1.0.0-rc1", "1.0.0~1.0.1")
+        # Prerelease/build suffixes are allowed and parsed as numeric core.
+        assert version_in_range("1.0.0-rc1+build", ">=1.0.0")
+        assert version_in_range("1.0.0-rc1+build", "1.0.0~1.0.1")
 
         # But the same non-semver should still work with wildcard-only pattern
         assert version_in_range("1.0.0-rc1", "1.0.0-*")
+
+    def test_prerelease_semver_in_comparators(self):
+        assert version_in_range("0.15.0rc8", "<0.16")
+        assert version_in_range("1.0.0-rc1", ">=1.0.0")
+        assert version_in_range("1.0.0-rc1", "1.0.0~1.0.1")
 
     def test_edge_cases(self):
         # Empty or None version should be rejected

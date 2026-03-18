@@ -4,12 +4,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 
 
 class LayerNormProfiler(BaseModuleProfiler):
-    def estimated_num_params(self, rank: int | None = None) -> int:
+    def estimated_num_params(self, rank: Optional[int] = None) -> int:
         return self.config.model_config.hidden_size * 2  # gamma and beta
 
     def estimated_activation_memory(self, batch_size: int, seq_len: int) -> int:

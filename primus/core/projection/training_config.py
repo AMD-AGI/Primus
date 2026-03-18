@@ -25,6 +25,15 @@ class ModelParallelConfig:
     expert_model_parallel_size: int = 1
     use_torch_fsdp2: bool = False
     use_distributed_optimizer: bool = False
+    overlap_grad_reduce: bool = True
+    overlap_param_gather: bool = False
+    # Pipeline stage layer distribution
+    decoder_first_pipeline_num_layers: int = None
+    decoder_last_pipeline_num_layers: int = None
+    pipeline_model_parallel_layout: str = None
+    # Recomputation settings
+    recompute_granularity: str = None  # "full" or "selective"
+    recompute_num_layers: int = 0
 
 
 @dataclass
@@ -55,6 +64,13 @@ class ModelConfig:
     moe_shared_expert_intermediate_size: int = 0
     # Misc
     share_embeddings_and_output_weights: bool = False
+    # Precision – None means bf16, "hybrid" means FP8-hybrid (linear GEMMs in FP8)
+    fp8: str = None
+
+    # Primus Turbo flags — used to select the grouped-GEMM performance model
+    enable_primus_turbo: bool = False
+    use_turbo_grouped_mlp: bool = False
+    use_turbo_deepep: bool = False  # DeepEP enables async A2A with compute overlap
 
 
 @dataclass
@@ -111,19 +127,45 @@ def megatron_derive_default_args(args):
             args.moe_pattern = args.moe_layer_freq
         elif isinstance(args.moe_layer_freq, str):
             try:
-                args.moe_pattern = eval(args.moe_layer_freq)
+                parsed = eval(args.moe_layer_freq)
             except Exception:
                 raise ValueError(f"Invalid moe_layer_freq format: {args.moe_layer_freq}")
-            assert (
-                len(args.moe_pattern) == args.num_layers
-            ), f"Invalid moe_layer_freq length: {len(args.moe_pattern)} (expected {args.num_layers})"
+
+            # Handle case where eval returns an int (e.g., "1" -> 1 means all layers are MoE)
+            if isinstance(parsed, int):
+                if parsed == 1:
+                    # All layers are MoE
+                    args.moe_pattern = [1] * args.num_layers
+                else:
+                    # Every Nth layer is MoE
+                    args.moe_pattern = [1 if (i % parsed == 0) else 0 for i in range(args.num_layers)]
+            elif isinstance(parsed, list):
+                # Handle list-based moe_layer_freq pattern
+                if len(parsed) > args.num_layers:
+                    # Truncate to first num_layers elements (for proxy models with fewer layers)
+                    # This is safe: we're using a subset of the pattern for faster profiling
+                    args.moe_pattern = parsed[: args.num_layers]
+                elif len(parsed) < args.num_layers:
+                    # If the pattern is shorter than num_layers, this is likely an error
+                    # (config specifies fewer layers than requested)
+                    raise ValueError(
+                        f"moe_layer_freq pattern has {len(parsed)} elements but num_layers={args.num_layers}. "
+                        f"The pattern length must match or exceed num_layers. "
+                        f"Pattern: {parsed}"
+                    )
+                else:
+                    # Exact match - use as-is (normal case for full model)
+                    args.moe_pattern = parsed
+            else:
+                raise ValueError(f"Invalid moe_layer_freq format after eval: {type(parsed)}")
 
     # naming conversion
     args.sequence_length = args.seq_length
     args.context_model_parallel_size = args.context_parallel_size
 
-    # TODO: set this number right
-    args.padded_vocab_size = 100352
+    # Use model's vocab size if set, otherwise default to 100352
+    if not hasattr(args, "padded_vocab_size") or args.padded_vocab_size is None:
+        args.padded_vocab_size = 100352
 
     return args
 

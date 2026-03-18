@@ -5,6 +5,13 @@
 # See LICENSE for license information.
 ###############################################################################
 
+"""
+Legacy PrimusAttention for Aug-version MaxText (date-versioned, e.g. ``2025.07.24``).
+
+The Dec version removed PrimusAttention entirely; this module keeps it available
+for legacy MaxText which expects the Attention class override.
+"""
+
 from typing import Tuple
 
 from flax import nnx

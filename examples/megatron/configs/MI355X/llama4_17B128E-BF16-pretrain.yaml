@@ -72,11 +72,8 @@ modules:
       enable_primus_turbo: false
       use_turbo_attention: false
       use_turbo_grouped_mlp: false
+      use_turbo_parallel_linear: false
       enable_turbo_attention_float8 : false
-      enable_turbo_gemm_float8 : false
-
-      # fp8
-      # fp8: hybrid
 
       # recompute
       # recompute_granularity: full # full, selective

@@ -15,10 +15,11 @@ __all__ = [
 class ScheduleZBVFormatted(VFoldScheduleAlgo):
     """ZBV Formatted Pipeline Schedule"""
 
-    def __init__(self, pp_size, vpp_size, micro_batches, combined_forward_backward=False):
+    def __init__(self, pp_size, vpp_size, micro_batches, combined_forward_backward=False, offload=False):
         assert vpp_size == 2, "VFold1F1B requires vpp_size == 2"
         super().__init__(pp_size, vpp_size, micro_batches)
         self.combined_forward_backward = combined_forward_backward
+        self.offload = offload
 
     def generate_schedule_table(self):
         # max(2 * self.pp_size - 1, ...) ensure the number of microbatches is at least
@@ -120,10 +121,21 @@ class ScheduleZBVFormatted(VFoldScheduleAlgo):
         if self.combined_forward_backward:
             schedule_table = self.add_combine_1f1b_info_for_schedule_table(schedule_table)
 
+        if self.offload:
+            assert (
+                not self.combined_forward_backward
+            ), "combined_forward_backward and offload cannot be True at the same time"
+            schedule_table = self.add_offload_nodes_to_schedule_table(schedule_table)
+
         return schedule_table
 
 
 if __name__ == "__main__":
-    schedule = ScheduleZBVFormatted(pp_size=4, vpp_size=2, micro_batches=16, combined_forward_backward=True)
+    schedule = ScheduleZBVFormatted(
+        pp_size=4, vpp_size=2, micro_batches=16, combined_forward_backward=False, offload=True
+    )
     schedule_table = schedule.generate_schedule_table()
     schedule.print_schedule_table(schedule_table)
+
+    for rank in range(schedule.pp_size):
+        print(f"rank {rank}: {len(schedule_table[rank])}")

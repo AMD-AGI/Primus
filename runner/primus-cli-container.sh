@@ -45,7 +45,7 @@ Docker/Podman Options:
         --cap-add <CAPABILITY>       Add Linux capabilities (e.g., SYS_PTRACE)
 
     Container Configuration:
-        --image <DOCKER_IMAGE>       Docker image [default: rocm/primus:v25.10]
+        --image <DOCKER_IMAGE>       Docker image [default: rocm/primus:v26.1]
         --name <NAME>                Container name
         --user <UID:GID>             Run as specific user (e.g., 1000:1000)
         --network <NET>              Network mode (e.g., host, bridge)
@@ -356,7 +356,7 @@ fi
 # This keeps container runs closer to direct-mode behavior without requiring users
 # to manually list every env var in config/CLI.
 while IFS= read -r env_key; do
-    [[ "$env_key" =~ ^(PRIMUS_|NCCL_|RCCL_|GLOO_|IONIC_) ]] || continue
+    [[ "$env_key" =~ ^(PRIMUS_|NCCL_|RCCL_|GLOO_|IONIC_|HIPBLASLT_) ]] || continue
     [[ -n "${env_keys_seen[$env_key]:-}" ]] && continue
 
     env_val="${!env_key-}"

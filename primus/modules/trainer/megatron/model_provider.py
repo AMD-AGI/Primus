@@ -31,7 +31,6 @@ def wrapped_compute_language_model_loss(self, labels: torch.Tensor, logits: torc
     return original_compute_language_model_loss(labels, logits)
 
 
-# def primus_gpt_builder(args, pre_process, post_process, vp_stage=None, config=None):
 def primus_model_provider(
     model_provider: Callable, pre_process=True, post_process=True, vp_stage: Optional[int] = None
 ) -> Union[GPTModel, megatron.legacy.model.GPTModel, MambaModel]:

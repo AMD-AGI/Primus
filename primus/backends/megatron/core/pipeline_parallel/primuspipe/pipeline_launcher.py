@@ -154,6 +154,13 @@ class PrimusPipelineParallelLauncher:
         kwargs = {}
         if self.pp_algorithm == "zbv-formatted":
             kwargs["combined_forward_backward"] = get_args().overlap_moe_expert_parallel_comm
+
+        offload = get_args().offload
+        if self.pp_algorithm in ("zbv-formatted", "v-half", "v-min"):
+            kwargs["offload"] = offload
+        else:
+            assert not offload, f"offload is not supported for {self.pp_algorithm} pp algorithm"
+
         self.schedule_instance = produce_schedule_instance(
             self.pp_algorithm, self.pp_size, self.vpp_size, num_microbatches, **kwargs
         )

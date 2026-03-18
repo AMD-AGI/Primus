@@ -110,7 +110,7 @@ def te_linear(
     ub_bulk_wgrad=False,
     ub_bulk_dgrad=False,
     enable_fp8=False,
-    **cfg
+    **cfg,
 ):
     torch.manual_seed(seed)
     tp_size = cfg["tp_size"]
@@ -137,7 +137,7 @@ def te_linear(
             ub_overlap_rs_dgrad=ub_overlap_rs_dgrad,
             ub_bulk_wgrad=ub_bulk_wgrad,
             ub_bulk_dgrad=ub_bulk_dgrad,
-            **cfg
+            **cfg,
         )
     else:
         inp_shape = (batch_size * seqlen, in_features // tp_size)
@@ -239,7 +239,7 @@ class TPOverlapTestCase(MultiProcessTestCase):
             out_features,
             ub_overlap_ag=False,
             ub_overlap_rs=False,
-            **cfg
+            **cfg,
         )
 
         with custom_te_patch():
@@ -254,7 +254,7 @@ class TPOverlapTestCase(MultiProcessTestCase):
                 ub_overlap_rs_dgrad=ub_overlap_rs_dgrad,
                 ub_bulk_wgrad=ub_bulk_wgrad,
                 ub_bulk_dgrad=ub_bulk_dgrad,
-                **cfg
+                **cfg,
             )
 
         for base_out, patch_out in zip(base_outputs, patch_outputs):
@@ -305,7 +305,7 @@ class TPOverlapTestCase(MultiProcessTestCase):
                 ub_overlap_ag=False,
                 ub_overlap_rs=False,
                 enable_fp8=True,
-                **cfg
+                **cfg,
             )
 
         with custom_te_patch(), fp8_autocast(enabled=True):
@@ -318,7 +318,7 @@ class TPOverlapTestCase(MultiProcessTestCase):
                 ub_overlap_ag=ub_overlap_ag,
                 ub_overlap_rs=ub_overlap_rs,
                 enable_fp8=True,
-                **cfg
+                **cfg,
             )
 
         for base_out, patch_out in zip(base_outputs, patch_outputs):

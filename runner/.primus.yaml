@@ -26,13 +26,13 @@ container:
   # All keys directly map to CLI arguments (--key value)
   options:
     # Container image
-    image: "rocm/primus:v25.10"
+    image: "rocm/primus:v26.1"
 
     # Single-value options
     ipc: "host"
     network: "host"
-    cpus: "32"
-    memory: "256G"
+    # cpus: "96"
+    # memory: "256G"
     name: "primus-training"
     privileged: "true"
     security-opt: "seccomp=unconfined"

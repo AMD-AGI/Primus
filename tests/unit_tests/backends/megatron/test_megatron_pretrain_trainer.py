@@ -9,7 +9,7 @@ Unit tests for MegatronPretrainTrainer.
 
 Focus:
     - Construction behavior (delegates to MegatronBaseTrainer and initializes fields)
-    - run_train wiring to Megatron pretrain entrypoint
+    - train wiring to Megatron pretrain entrypoint
 """
 
 import sys
@@ -26,9 +26,7 @@ def _build_trainer(monkeypatch: pytest.MonkeyPatch) -> MegatronPretrainTrainer:
     """Helper to build MegatronPretrainTrainer with a stubbed MegatronBaseTrainer."""
 
     # Stub out MegatronBaseTrainer.__init__ to avoid real Megatron imports/patching.
-    def dummy_init(self, primus_config: Any, module_config: Any, backend_args: Any):
-        self.primus_config = primus_config
-        self.module_config = module_config
+    def dummy_init(self, backend_args: Any = None):
         self.backend_args = backend_args
 
     monkeypatch.setattr(
@@ -42,11 +40,9 @@ def _build_trainer(monkeypatch: pytest.MonkeyPatch) -> MegatronPretrainTrainer:
         lambda *args, **kwargs: None,
     )
 
-    primus_config = SimpleNamespace()
-    module_config = SimpleNamespace(model="gpt2", framework="megatron")
     backend_args = SimpleNamespace()
 
-    return MegatronPretrainTrainer(primus_config, module_config, backend_args)
+    return MegatronPretrainTrainer(backend_args=backend_args)
 
 
 class TestMegatronPretrainTrainer:
@@ -55,26 +51,16 @@ class TestMegatronPretrainTrainer:
     def test_init_sets_expected_attributes(self, monkeypatch: pytest.MonkeyPatch):
         trainer = _build_trainer(monkeypatch)
 
-        # MegatronBaseTrainer stub should have stored these attributes.
-        assert trainer.primus_config is not None
-        assert trainer.module_config is not None
+        # MegatronBaseTrainer stub should have stored backend_args.
         assert trainer.backend_args is not None
 
-        # Pretrain trainer adds training components placeholders.
-        assert hasattr(trainer, "model")
-        assert hasattr(trainer, "optimizer")
-        assert hasattr(trainer, "opt_param_scheduler")
-        assert trainer.model is None
-        assert trainer.optimizer is None
-        assert trainer.opt_param_scheduler is None
-
-    def test_run_train_invokes_megatron_pretrain_with_expected_arguments(
+    def test_train_invokes_megatron_pretrain_with_expected_arguments(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ):
         trainer = _build_trainer(monkeypatch)
 
-        # Prepare fake Megatron and helper modules used inside run_train().
+        # Prepare fake Megatron and helper modules used inside train().
         calls: List[Tuple[tuple, dict]] = []
 
         # 1) megatron.core.enums.ModelType
@@ -121,7 +107,7 @@ class TestMegatronPretrainTrainer:
         monkeypatch.setitem(sys.modules, "primus.core.utils.import_utils", import_utils_mod)
 
         # Execute training wiring.
-        trainer.run_train()
+        trainer.train()
 
         # Train datasets provider should be marked distributed.
         assert train_valid_test_datasets_provider.is_distributed is True

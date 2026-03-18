@@ -106,7 +106,7 @@ test_gpus_per_node_validation() {
         assert_fail "Valid GPUS_PER_NODE=8 accepted"
     fi
 
-    export GPUS_PER_NODE=10
+    export GPUS_PER_NODE=73
     local output
     output=$(validate_gpus_per_node 2>&1)
     assert_contains "$output" "must be between" "Invalid GPUS_PER_NODE rejected"
