@@ -859,7 +859,7 @@ function renderTimeline(cid,data,totalK,totalW){{
   h+='<div style="position:relative">';
   const tickStep=Math.max(0.5,Math.ceil(tMax/8*2)/2);
   for(let t=0;t<=tMax+0.01;t+=tickStep){{const x=210+t*scale;h+=`<div class="grid" style="left:${{x}}px;height:${{rowH}}px;top:0"></div>`;}}
-  data.forEach((d,i)=>{{const left=d.s*scale,width=Math.max(3,(d.e-d.s)*scale),txt=width>50?d.k.toFixed(2):'';
+  data.forEach((d,i)=>{{const left=d.s*scale,width=Math.max(3,(d.e-d.s)*scale),txt=width>50?d.w.toFixed(0)+'us':'';
     h+=`<div class="row"><div class="lbl">${{d.l}}</div><div class="bc">`;
     if(i>0){{const gap=d.s-data[i-1].e;if(gap>0.02){{const gL=data[i-1].e*scale,gW=Math.max(2,gap*scale);h+=`<div class="gap" style="left:${{gL}}px;width:${{gW}}px"></div>`;}}}}
     h+=`<div class="bar" style="left:${{left}}px;width:${{width}}px;background:${{d.c}}" onmousemove="showTip(event,'${{d.l.replace(/'/g,"\\\\'")}}',{{'w':${{d.w}},'k':${{d.k}},'n':${{d.n}},'o':${{d.ovlp}}}})" onmouseout="hideTip()">${{txt}}</div></div></div>`;
