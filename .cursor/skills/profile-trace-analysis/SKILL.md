@@ -266,7 +266,14 @@ Rules:
 | DeepEP(dispatch) → MoE-Permute | X.XX | Cross-node all-to-all comm wait |
 ```
 
-**5. Key Takeaways** — 3-5 numbered insights with percentages and actionable recommendations.
+**5. Overlap Explanation** — always include this note after the tables:
+
+```markdown
+> **Overlap 说明：** 当 Kernel(us) > Wall(us) 时，表示有多个 kernel 在 GPU 上并行执行（stream overlap）。
+> 例如 Expert GEMM 的 32 个 expert 在 2 个 stream 上流水线并行，kernel 总时间约为 wall 时间的 2×。
+```
+
+**6. Key Takeaways** — 3-5 numbered insights with percentages and actionable recommendations.
 
 ### Report C: Backward Layer Analysis
 

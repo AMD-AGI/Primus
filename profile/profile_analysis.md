@@ -86,6 +86,9 @@ Expert GEMM shows multi-stream kernel overlap:
 - **MoELayer(GroupedMLP FFN1×32)**: kernel sum = 6.30ms, wall = 3.20ms → **1.97× overlap**
 - **MoELayer(GroupedMLP FFN2×32)**: kernel sum = 2.69ms, wall = 1.37ms → **1.97× overlap**
 
+> **Overlap 说明：** 当 Kernel(us) > Wall(us) 时，表示有多个 kernel 在 GPU 上并行执行（stream overlap）。
+> 例如 Expert GEMM 的 32 个 expert 在 2 个 stream 上流水线并行，kernel 总时间约为 wall 时间的 2×。
+
 ## Idle Gaps
 
 | Between | Gap (ms) | Cause |
@@ -161,6 +164,9 @@ Expert GEMM shows multi-stream kernel overlap:
 
 - **MoELayer(GroupedMLP dFFN2×64)**: kernel sum = 6.10ms, wall = 3.10ms → **1.97× overlap**
 - **MoELayer(GroupedMLP dFFN1×64)**: kernel sum = 9.55ms, wall = 4.87ms → **1.96× overlap**
+
+> **Overlap 说明：** 当 Kernel(us) > Wall(us) 时，表示有多个 kernel 在 GPU 上并行执行（stream overlap）。
+> 例如 Expert GEMM 的 32 个 expert 在 2 个 stream 上流水线并行，kernel 总时间约为 wall 时间的 2×。
 
 ## Idle Gaps
 

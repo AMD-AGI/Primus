@@ -521,6 +521,9 @@ def gen_layer_report(title, ops):
                          f"wall = {o['wall']/1000:.2f}ms → **{ovlp:.2f}× overlap**")
         lines.append("")
 
+    lines.append("> **Overlap 说明：** 当 Kernel(us) > Wall(us) 时，表示有多个 kernel 在 GPU 上并行执行（stream overlap）。")
+    lines.append("> 例如 Expert GEMM 的 32 个 expert 在 2 个 stream 上流水线并行，kernel 总时间约为 wall 时间的 2×。\n")
+
     # Idle gaps
     gaps = []
     for i in range(len(ops)-1):
@@ -871,7 +874,7 @@ function renderTimeline(cid,data,totalK,totalW){{
   h+=`<tr style="font-weight:700"><td></td><td style="color:#7dd3fc">Total</td><td></td><td>${{totalW.toFixed(3)}}</td><td>${{totalK.toFixed(3)}}</td><td>100%</td><td></td><td></td></tr></table>`;
   const expertOps=data.filter(d=>d.g==='bf16'&&d.n>=32);h+=`<div class="note"><b>Notes:</b><br>`;
   if(expertOps.length){{const mo=Math.max(...expertOps.map(d=>d.ovlp));h+=`• Expert GEMM overlap: <span class="hl">${{mo.toFixed(2)}}×</span> (2-stream parallel)<br>`;}}
-  h+=`• <span class="hl">Overlap > 1.0</span> = multi-stream parallelism</div>`;ct.innerHTML=h;
+  h+=`• <span class="hl">Overlap 说明：</span> 当 Kernel(us) > Wall(us) 时，表示有多个 kernel 在 GPU 上并行执行（stream overlap）。例如 Expert GEMM 的 N 个 expert 在 2 个 stream 上流水线并行，kernel 总时间约为 wall 时间的 2×。</div>`;ct.innerHTML=h;
 }}
 function showTip(ev,name,d){{const t=document.getElementById('tooltip');t.style.display='block';t.style.left=(ev.clientX+15)+'px';t.style.top=(ev.clientY+15)+'px';t.innerHTML=`<b>${{name}}</b><br>Wall: ${{d.w.toFixed(3)}} ms<br>Kernel: ${{d.k.toFixed(3)}} ms<br>Count: ${{d.n}}<br>Overlap: ${{d.o}}×`;}}
 function hideTip(){{document.getElementById('tooltip').style.display='none';}}
