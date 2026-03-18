@@ -4,7 +4,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import os
 from typing import Any, Dict
 
 from primus.core.utils import checker
