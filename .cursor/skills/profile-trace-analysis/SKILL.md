@@ -196,15 +196,38 @@ TransformerLayer
 
 #### Output Format (exact)
 
-**1. Pipeline diagram** (one line per wrap, `→` separator, `[gap]` for idle gaps > 0.5ms):
+**1. Pipeline diagram** — use **tree format** mirroring the Megatron module hierarchy. Each row shows `#N` referencing the table below, and timing. Mark `[gap X.XXms]` for idle gaps > 0.5ms:
 
 ```
-RMSNorm(Attn) → MLASelfAttention(QKV proj) → MLASelfAttention(RoPE)
-→ MLASelfAttention(FlashAttn) → MLASelfAttention(O proj)
-→ RMSNorm(MoE) → MoELayer(TopKRouter) → [gap] → MoELayer(dispatch) → [gap]
-→ MoELayer(token_permute) → MoELayer(GroupedMLP FFN1×N) → MoELayer(GroupedMLP SwiGLU)
-→ MoELayer(GroupedMLP FFN2×N) → MoELayer(token_unpermute) → MoELayer(combine)
+TransformerLayer
+├── _forward_attention
+│   ├── #1  RMSNorm(Attn)                     0.10 ms
+│   └── MLASelfAttention
+│       ├── #2  QKV proj                       0.80 ms   (8 kernels)
+│       ├── #3  RoPE                           0.30 ms
+│       ├── #4  FlashAttn                      1.28 ms   ★
+│       └── #5  O proj                         0.73 ms
+├── _forward_mlp
+│   ├── #6  RMSNorm(MoE)                      0.10 ms
+│   └── MoELayer
+│       ├── #7  TopKRouter                     1.02 ms
+│       ├── #8  dispatch (DeepEP)              0.79 ms
+│       │       [gap 0.76ms — cross-node all-to-all]
+│       ├── #9  token_permute                  0.17 ms
+│       ├── GroupedMLP
+│       │   ├── #10  FFN1×N                    6.30 ms   ★ 1.97× overlap
+│       │   ├── #11  SwiGLU                    0.12 ms
+│       │   └── #12  FFN2×N                    2.69 ms   ★ 1.97× overlap
+│       ├── #13 token_unpermute                0.18 ms
+│       └── #14 combine (DeepEP)               0.77 ms
 ```
+
+Rules:
+- Tree structure uses `├──` / `└──` / `│` box-drawing characters
+- Each leaf node is a merged operator with `#N` referencing the statistics table
+- Show kernel time (ms) right-aligned, `★` marks top-3 by time
+- Module-level nodes (MLASelfAttention, MoELayer, GroupedMLP) are non-leaf groupings without `#N`
+- `[gap X.XXms — cause]` inline after the operator that precedes the gap
 
 **2. Per-Operator Statistics table:**
 

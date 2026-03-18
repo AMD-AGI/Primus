@@ -328,31 +328,156 @@ def gen_layer_report(title, ops):
 
     lines = [f"# {title}\n"]
 
-    # Pipeline diagram
-    labels = []
-    for o in ops:
-        labels.append(o["label"])
-    # Insert [gap] for idle gaps > 0.5ms
-    diagram_parts = []
-    for i, o in enumerate(ops):
-        if i > 0:
-            gap = o["ws"] - ops[i-1]["we"]
-            if gap > 500:
-                diagram_parts.append("[gap]")
-        diagram_parts.append(o["label"])
+    # Compute gaps between ops
+    gaps = {}
+    for i in range(len(ops)-1):
+        g = ops[i+1]["ws"] - ops[i]["we"]
+        if g > 500:
+            cause = ""
+            a = ops[i]["label"]
+            if "dispatch" in a: cause = "cross-node all-to-all"
+            elif "combine" in a: cause = "EP combine return"
+            elif "TopK" in a: cause = "CPU scheduling"
+            else: cause = "scheduling gap"
+            gaps[i] = (g/1000, cause)
 
-    wrapped = []
-    cur = ""
-    for seg in diagram_parts:
-        test = (cur + " → " + seg) if cur else seg
-        if len(test) > 90 and cur:
-            wrapped.append(cur)
-            cur = "→ " + seg
-        else:
-            cur = test
-    if cur: wrapped.append(cur)
+    # Top-3 by kernel time for ★ markers
+    sorted_by_k = sorted(range(len(ops)), key=lambda i: -ops[i]["ksum"])
+    top3 = set(sorted_by_k[:3])
+
+    def fmt_leaf(idx, o, prefix_pad):
+        """Format one leaf line: #N  label  time  [extras]"""
+        t = o["ksum"]/1000
+        extras = []
+        if idx in top3: extras.append("★")
+        ovlp = o["ksum"]/o["wall"] if o["wall"]>0 else 0
+        if ovlp > 1.1: extras.append(f"{ovlp:.2f}× overlap")
+        if o["n"] > 1: extras.append(f"{o['n']} kernels")
+        time_s = f"{t:.2f} ms"
+        extra_s = f"   {'  '.join(extras)}" if extras else ""
+        return f"#{idx+1:<3} {o['label']:<35s} {time_s}{extra_s}"
+
+    def gap_line(idx, prefix):
+        if idx in gaps:
+            g_ms, cause = gaps[idx]
+            return f"{prefix}        [gap {g_ms:.2f}ms — {cause}]"
+        return None
+
+    # Build tree based on label prefixes
+    is_fwd = "Forward" in title
     lines.append("```")
-    lines.extend(wrapped)
+
+    if is_fwd:
+        lines.append("TransformerLayer")
+        lines.append("├── _forward_attention")
+        # RMSNorm(Attn) = ops with "RMSNorm(Attn)"
+        # MLA ops = ops with "MLASelfAttention"
+        attn_norm = [i for i,o in enumerate(ops) if "RMSNorm(Attn)" in o["label"]]
+        mla_ops = [i for i,o in enumerate(ops) if "MLASelfAttention" in o["label"]]
+        moe_norm = [i for i,o in enumerate(ops) if "RMSNorm(MoE)" in o["label"]]
+        moe_ops = [i for i,o in enumerate(ops) if "MoELayer" in o["label"]]
+
+        for ai in attn_norm:
+            lines.append(f"│   ├── {fmt_leaf(ai, ops[ai], '│   │')}")
+            gl = gap_line(ai, "│   │")
+            if gl: lines.append(gl)
+
+        if mla_ops:
+            lines.append("│   └── MLASelfAttention")
+            for j, mi in enumerate(mla_ops):
+                branch = "└──" if j == len(mla_ops)-1 else "├──"
+                lines.append(f"│       {branch} {fmt_leaf(mi, ops[mi], '│       │')}")
+                gl = gap_line(mi, "│       │")
+                if gl: lines.append(gl)
+
+        lines.append("└── _forward_mlp")
+        for ni in moe_norm:
+            lines.append(f"    ├── {fmt_leaf(ni, ops[ni], '    │')}")
+
+        if moe_ops:
+            lines.append("    └── MoELayer")
+            # Sub-group: GroupedMLP ops
+            gmlp_ops = [i for i in moe_ops if "GroupedMLP" in ops[i]["label"]]
+            non_gmlp = [i for i in moe_ops if "GroupedMLP" not in ops[i]["label"]]
+
+            all_moe_items = []
+            gmlp_inserted = False
+            for mi in moe_ops:
+                if mi in gmlp_ops and not gmlp_inserted:
+                    all_moe_items.append(("gmlp_group", gmlp_ops))
+                    gmlp_inserted = True
+                elif mi not in gmlp_ops:
+                    all_moe_items.append(("leaf", mi))
+
+            for j, item in enumerate(all_moe_items):
+                is_last = j == len(all_moe_items)-1
+                branch = "└──" if is_last else "├──"
+                cont = "    " if is_last else "│   "
+
+                if item[0] == "leaf":
+                    mi = item[1]
+                    lines.append(f"        {branch} {fmt_leaf(mi, ops[mi], '        '+cont)}")
+                    gl = gap_line(mi, "        "+cont)
+                    if gl: lines.append(gl)
+                else:
+                    lines.append(f"        {branch} GroupedMLP")
+                    gops = item[1]
+                    for k, gi in enumerate(gops):
+                        gb = "└──" if k == len(gops)-1 else "├──"
+                        lines.append(f"        {cont}   {gb} {fmt_leaf(gi, ops[gi], '        '+cont+'   │')}")
+                        gl = gap_line(gi, "        "+cont+"   │")
+                        if gl: lines.append(gl)
+    else:
+        lines.append("TransformerLayer BWD")
+        moe_ops = [i for i,o in enumerate(ops) if "MoELayer" in o["label"] or "RMSNorm-BWD(MoE)" in o["label"]]
+        attn_ops = [i for i,o in enumerate(ops) if "MLASelfAttention" in o["label"] or "RMSNorm-BWD(Attn)" in o["label"]]
+
+        lines.append("├── _forward_mlp BWD")
+        if moe_ops:
+            gmlp_ops = [i for i in moe_ops if "GroupedMLP" in ops[i]["label"]]
+            non_gmlp = [i for i in moe_ops if "GroupedMLP" not in ops[i]["label"]]
+
+            all_items = []
+            gmlp_inserted = False
+            for mi in moe_ops:
+                if mi in gmlp_ops and not gmlp_inserted:
+                    all_items.append(("gmlp_group", gmlp_ops))
+                    gmlp_inserted = True
+                elif mi not in gmlp_ops:
+                    all_items.append(("leaf", mi))
+
+            lines.append("│   └── MoELayer")
+            for j, item in enumerate(all_items):
+                is_last = j == len(all_items)-1
+                branch = "└──" if is_last else "├──"
+                cont = "    " if is_last else "│   "
+                if item[0] == "leaf":
+                    mi = item[1]
+                    lines.append(f"│       {branch} {fmt_leaf(mi, ops[mi], '│       '+cont)}")
+                    gl = gap_line(mi, "│       "+cont)
+                    if gl: lines.append(gl)
+                else:
+                    lines.append(f"│       {branch} GroupedMLP")
+                    gops = item[1]
+                    for k, gi in enumerate(gops):
+                        gb = "└──" if k == len(gops)-1 else "├──"
+                        lines.append(f"│       {cont}   {gb} {fmt_leaf(gi, ops[gi], '│       '+cont+'   │')}")
+
+        lines.append("└── _forward_attention BWD")
+        if attn_ops:
+            mla_ops = [i for i in attn_ops if "MLASelfAttention" in ops[i]["label"]]
+            norm_ops = [i for i in attn_ops if "RMSNorm-BWD(Attn)" in ops[i]["label"]]
+
+            if mla_ops:
+                lines.append("    ├── MLASelfAttention")
+                for j, mi in enumerate(mla_ops):
+                    branch = "└──" if j == len(mla_ops)-1 else "├──"
+                    lines.append(f"    │   {branch} {fmt_leaf(mi, ops[mi], '    │   │')}")
+                    gl = gap_line(mi, "    │   │")
+                    if gl: lines.append(gl)
+            for ni in norm_ops:
+                lines.append(f"    └── {fmt_leaf(ni, ops[ni], '        ')}")
+
     lines.append("```\n")
 
     # Per-operator table
