@@ -1,11 +1,11 @@
 ---
 name: slurm-idle-node-check
-description: Check available idle nodes in a SLURM cluster. Use when the user wants to find usable idle nodes, verify node health, check docker status on SLURM nodes, or troubleshoot cluster node availability.
+description: Check available idle nodes in a SLURM cluster. Use when the user wants to find usable idle nodes, verify node health, check docker status on SLURM nodes, check NIC QoS/DCQCN configuration, or troubleshoot cluster node availability.
 ---
 
 # SLURM Idle Node Health Check
 
-Diagnose idle nodes in a SLURM cluster: verify SSH access, check Docker service, verify workspace directory accessibility, and report usable vs problematic nodes.
+Diagnose idle nodes in a SLURM cluster: verify SSH access, check Docker service, verify workspace directory accessibility, validate NIC QoS/DCQCN configuration consistency, and report usable vs problematic nodes.
 
 ## Workflow
 
@@ -42,7 +42,6 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no <node> bas
   DOCKER_OK=$?
 
   # Check 2: Can remove existing containers
-  # Try to list and remove stopped containers (dry-safe: only removes stopped ones)
   docker ps -aq --filter status=exited | head -1 | xargs -r docker rm > /dev/null 2>&1
   DOCKER_RM_OK=$?
 
@@ -52,6 +51,28 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no <node> bas
     WORKSPACE_OK=0
   else
     WORKSPACE_OK=1
+  fi
+
+  # Check 4: nicctl QoS configuration
+  QOS_OUTPUT=$(sudo nicctl show qos 2>&1)
+  QOS_RC=$?
+  QOS_HASH=""
+  QOS_REQUIRED_OK=1
+  if [ $QOS_RC -eq 0 ]; then
+    QOS_HASH=$(echo "$QOS_OUTPUT" | md5sum | awk "{print \$1}")
+    if echo "$QOS_OUTPUT" | grep -q "Classification type[[:space:]]*:[[:space:]]*DSCP" && \
+       echo "$QOS_OUTPUT" | grep -q "DSCP[[:space:]]*:[[:space:]]*10[[:space:]]*==>[[:space:]]*priority[[:space:]]*:[[:space:]]*0" && \
+       echo "$QOS_OUTPUT" | grep -q "PFC no-drop priorities[[:space:]]*:[[:space:]]*0"; then
+      QOS_REQUIRED_OK=0
+    fi
+  fi
+
+  # Check 5: nicctl DCQCN configuration
+  DCQCN_OUTPUT=$(sudo nicctl show dcqcn 2>&1)
+  DCQCN_RC=$?
+  DCQCN_HASH=""
+  if [ $DCQCN_RC -eq 0 ]; then
+    DCQCN_HASH=$(echo "$DCQCN_OUTPUT" | md5sum | awk "{print \$1}")
   fi
 
   ERRORS=""
@@ -64,16 +85,26 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no <node> bas
   if [ $WORKSPACE_OK -ne 0 ]; then
     ERRORS="${ERRORS}Workspace directory not accessible ($WORKSPACE_DIR); "
   fi
+  if [ $QOS_RC -ne 0 ]; then
+    ERRORS="${ERRORS}nicctl show qos failed; "
+  elif [ $QOS_REQUIRED_OK -ne 0 ]; then
+    ERRORS="${ERRORS}QoS config missing required settings (need: Classification type=DSCP, DSCP 10==>priority 0, PFC no-drop priorities=0); "
+  fi
+  if [ $DCQCN_RC -ne 0 ]; then
+    ERRORS="${ERRORS}nicctl show dcqcn failed; "
+  fi
 
   if [ -z "$ERRORS" ]; then
-    echo "PASS|"
+    echo "PASS||${QOS_HASH}|${DCQCN_HASH}"
   else
-    echo "FAIL|${ERRORS}"
+    echo "FAIL|${ERRORS}|${QOS_HASH}|${DCQCN_HASH}"
   fi
 '
 ```
 
-If SSH itself fails, mark the node as `FAIL|SSH connection failed`.
+If SSH itself fails, mark the node as `FAIL|SSH connection failed|||`.
+
+**Output format**: `STATUS|errors|qos_hash|dcqcn_hash` — fields separated by `|`. The `qos_hash` and `dcqcn_hash` are md5 hashes of the full `nicctl show qos` and `nicctl show dcqcn` output respectively, used for cross-node consistency comparison in Step 3b.
 
 #### Current Checks
 
@@ -82,10 +113,22 @@ If SSH itself fails, mark the node as `FAIL|SSH connection failed`.
 | 1 | Docker service is running | `docker info` | Docker daemon not started or user has no permission |
 | 2 | Can remove existing containers | `docker ps -aq --filter status=exited \| xargs -r docker rm` | Cannot clean up containers |
 | 3 | Workspace directory accessible | `[ -d "$WORKSPACE_DIR" ] && [ -r "$WORKSPACE_DIR" ]` | Shared filesystem not mounted or path unreachable on this node |
+| 4 | NIC QoS config valid | `sudo nicctl show qos` | QoS not configured or missing required settings (DSCP classification, DSCP 10→priority 0, PFC no-drop priorities 0) |
+| 5 | NIC DCQCN config present | `sudo nicctl show dcqcn` | DCQCN not configured on this node |
 
 `<workspace_path>` is the **absolute path of the current repository root** (i.e. the workspace directory where the agent is operating). Determine it at runtime via `pwd` or from the workspace context, then substitute into the script.
 
 > **To add more checks later**: append new check logic inside the `bash -c '...'` block above and update the table.
+
+### Step 3b: Cross-Node NIC Configuration Consistency Check
+
+After collecting results from all nodes, perform a **cross-node consistency comparison** for the NIC configuration checks (QoS and DCQCN).
+
+1. Parse the `qos_hash` and `dcqcn_hash` fields from each node's output.
+2. For **QoS**: group nodes by their `qos_hash`. If more than one distinct hash exists (ignoring empty hashes from failed nodes), the QoS configuration is **inconsistent**. The group with the most nodes is treated as the "majority" (expected) configuration; nodes in other groups are marked as inconsistent.
+3. For **DCQCN**: apply the same majority-based grouping logic on `dcqcn_hash`.
+4. For any node flagged as inconsistent, append to its error string: `QoS config inconsistent with majority;` or `DCQCN config inconsistent with majority;` and change its status to FAIL.
+5. If you need to show the user what differs, SSH into one representative node from each group and re-run the relevant `sudo nicctl show` command to display the actual output side by side.
 
 ### Step 4: Display Results
 
@@ -104,6 +147,10 @@ Table format (markdown):
 - Column 3: Issue description (or `-` if PASS)
 
 Show the healthy-node table first, then the problematic-node table.
+
+If any NIC configuration inconsistency was detected in Step 3b, add a separate **NIC Configuration Consistency** section after the tables:
+- State whether QoS and DCQCN configs are consistent across all nodes.
+- If inconsistent, list which nodes belong to which configuration group (by hash), and show the differing output for each group so the user can compare.
 
 ### Step 5: Summary
 
@@ -129,6 +176,58 @@ To generate compressed nodelists, use: `scontrol show hostlistctrl <node1,node2,
 (or `echo "node1,node2,..." | tr ',' '\n' | scontrol show hostlistctrl`)
 
 If `scontrol show hostlistctrl` is not available, fall back to: `scontrol show hostnames` for verification and manually compress contiguous ranges.
+
+### Step 6: Save Report to File
+
+After displaying results to the user, save the full report as a Markdown file under the **repo root** at:
+
+```
+output/skills/slurm-idle-node-check-YYYYMMDD.HHMM.md
+```
+
+- `YYYYMMDD.HHMM` is the **current date and time** when the check finishes (e.g. `20260318.1107`).
+- Create the `output/skills/` directory if it does not exist (`mkdir -p`).
+- The file should contain the **complete report in English**, structured as follows:
+
+```markdown
+# SLURM Idle Node Health Check Report
+
+- **Date**: YYYY-MM-DD HH:MM
+- **Partition**: <partition name>
+- **Total idle nodes**: <N>
+- **Healthy**: <H>
+- **Problematic**: <P>
+
+## Healthy Nodes
+
+| Node | Status | Issue |
+|------|--------|-------|
+| ... | PASS | - |
+
+### Healthy NODELIST (srun-ready)
+
+<compressed nodelist>
+
+## Problematic Nodes
+
+| Node | Status | Issue |
+|------|--------|-------|
+| ... | FAIL | <issue description> |
+
+### Problematic NODELIST
+
+<compressed nodelist>
+
+## NIC Configuration Consistency
+
+- **QoS**: consistent / inconsistent (details if inconsistent)
+- **DCQCN**: consistent / inconsistent (details if inconsistent)
+
+<If inconsistent, include group details and differing output>
+```
+
+- Use the **Write** tool (or shell `cat > file`) to create the file.
+- After saving, print the file path so the user knows where to find it.
 
 ## Important Notes
 

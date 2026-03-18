@@ -11,8 +11,19 @@ import math
 from megatron.training.arguments import (
     _add_tokenizer_args as megatron_add_tokenizer_args,
 )
-from megatron.training.tokenizer import build_tokenizer as megatron_build_tokenizer
-from megatron.training.tokenizer.tokenizer import _HuggingFaceTokenizer
+
+# Handle both old (megatron.training.tokenizer) and new (megatron.core.tokenizers)
+# Megatron-LM module structures.
+try:
+    from megatron.training.tokenizer import build_tokenizer as megatron_build_tokenizer
+    from megatron.training.tokenizer.tokenizer import _HuggingFaceTokenizer
+except ImportError:
+    from megatron.core.tokenizers.utils.build_tokenizer import (
+        build_tokenizer as megatron_build_tokenizer,
+    )
+    from megatron.core.tokenizers.text.libraries.huggingface_tokenizer import (
+        HuggingFaceTokenizer as _HuggingFaceTokenizer,
+    )
 
 from primus.modules.module_utils import log_rank_0
 
