@@ -44,7 +44,7 @@ modules:
       expert_model_parallel_size: ${PRIMUS_EP:8}
       overlap_grad_reduce: true
       overlap_param_gather: true
-      gradient_accumulation_fusion: false
+      gradient_accumulation_fusion: true
 
       # data
       mock_data: true
@@ -89,4 +89,5 @@ modules:
 
       # enable fp8 training
       fp8: hybrid
+      # fp8_recipe: tensorwise # tensorwise, delayed, mxfp8, blockwise
       moe_use_legacy_grouped_gemm: false

@@ -24,17 +24,20 @@ export GBS=$((128 * NNODES))
 export PRIMUS_TOTAL_LAYERS=61
 export PRIMUS_MOE_LAYER_FREQ=1
 export PRIMUS_EP=8
-export PRIMUS_PP=16
+export PRIMUS_PP=8
 export PRIMUS_VPP=2
-export PRIMUS_RECOMPUTE_LAYERS=1
+export PRIMUS_RECOMPUTE_LAYERS=3
 
 export PROFILE=False
-export TURBO_DEEPEEP=True
-export LEGACY_GG=True
+export TURBO_ATTENTION=${TURBO_ATTENTION:-True}
+export TURBO_DEEPEEP=${TURBO_DEEPEEP:-True}
+export LEGACY_GG=${LEGACY_GG:-True}
+export TURBO_GROUPED_MLP=${TURBO_GROUPED_MLP:-True}
 export APPLY_ROPE_FUSION=True
 export HSA_NO_SCRATCH_RECLAIM=1
 export NVTE_CK_USES_BWD_V3=1
 export GPU_MAX_HW_QUEUES=4
+export PRIMUS_TURBO_DEEPEP_TIMEOUT=600
 
 # Enable NUMA binding for better memory locality (increase stability for large models)
 export ENABLE_NUMA_BINDING=1
@@ -58,33 +61,35 @@ case $STAGE in
     ;;
 esac
 
-export PRETRAIN_TYPE=BF16
-# export PRETRAIN_TYPE=FP8
+export PRETRAIN_TYPE=${PRETRAIN_TYPE:-BF16}
 
 export EXP=examples/megatron/configs/MI355X/deepseek_v3-${PRETRAIN_TYPE}-pretrain.yaml
 export PRIMUS_TEAM=amd
-export PRIMUS_USER=tas
+PRIMUS_USER="tas-$(date +%Y%m%d)"
+export PRIMUS_USER
 export PRIMUS_TOKENIZED_DATA_PATH=/shared_aig/c4/tokenized/c4_en_train_text_document # this is the tokenized data path for the training
-export PRIMUS_EXP_NAME=dsv3-pretrain-nnodes_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-ropefusion_$APPLY_ROPE_FUSION-profile_$PROFILE
+export PRIMUS_EXP_NAME=dsv3-pretrain-nnodes_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turboattn_$TURBO_ATTENTION-ropefusion_$APPLY_ROPE_FUSION-profile_$PROFILE
+export PRIMUS_EXP_NAME=debug_dsv3-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turbodeepep_$TURBO_DEEPEEP-turboattn_$TURBO_ATTENTION
 
 
-
-mkdir -p output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
-# ./primus-cli direct \
-./primus-cli slurm -N $NNODES --nodelist "$SLURM_NODELIST" \
-  -- --image "docker.io/tasimage/primus:pr-563-ainic" --clean \
-  -- train pretrain --config $EXP \
+mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
+# ./primus-cli slurm -N $NNODES --nodelist "$SLURM_NODELIST" \
+#   -- --image "docker.io/tasimage/primus:pr-563-ainic" --clean \
+./primus-cli direct --numa \
+  -- train pretrain --config "$EXP" \
   --num_layers $PRIMUS_TOTAL_LAYERS \
   --train_iters $TRAIN_ITERS \
   --micro_batch_size $MBS \
   --global_batch_size $GBS \
-  --use_turbo_deepep $TURBO_DEEPEEP \
+  --use_turbo_attention "$TURBO_ATTENTION" \
+  --use_turbo_deepep "$TURBO_DEEPEEP" \
+  --use_turbo_grouped_mlp "$TURBO_GROUPED_MLP" \
   --lr 2.2e-4 \
   --min_lr 2.2e-5 \
   --lr_warmup_iters 200 \
   --lr_decay_iters 5000 \
   --lr_decay_style cosine \
-  --moe_use_legacy_grouped_gemm $LEGACY_GG \
+  --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
   --enable_experimental $APPLY_ROPE_FUSION \
   --apply_rope_fusion $APPLY_ROPE_FUSION \
   --pipeline_model_parallel_size $PRIMUS_PP \
@@ -108,4 +113,4 @@ mkdir -p output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
   --profile_step_start 6 \
   --disable_wandb True \
   --disable_tensorboard True \
-  2>&1 | tee output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log.txt
+  2>&1 | tee "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK}.txt"

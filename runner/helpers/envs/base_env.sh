@@ -243,6 +243,8 @@ if [[ "${PRIMUS_DETERMINISTIC:-0}" == "1" ]]; then
     # Disable torch compile to avoid race issues in some triton versions.
     export TORCH_COMPILE_DISABLE=1
 fi
+# turbo deepep timeout
+export PRIMUS_TURBO_DEEPEP_TIMEOUT=${PRIMUS_TURBO_DEEPEP_TIMEOUT:-600}
 
 log_exported_vars "Transformer Engine Optimizations" \
     NVTE_USE_CAST_TRANSPOSE_TRITON NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE \
@@ -250,3 +252,4 @@ log_exported_vars "Transformer Engine Optimizations" \
     NVTE_DEBUG NVTE_DEBUG_LEVEL NVTE_FUSED_ATTN_LOG_CONFIG PATCH_TE_FLASH_ATTN \
     PRIMUS_DETERMINISTIC NCCL_ALGO NVTE_ALLOW_NONDETERMINISTIC_ALGO \
     ROCBLAS_DEFAULT_ATOMICS_MODE TORCH_COMPILE_DISABLE
+    PRIMUS_TURBO_DEEPEP_TIMEOUT

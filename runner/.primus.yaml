@@ -84,13 +84,14 @@ container:
       - "NVTE_CK_USES_BWD_V3"
       - "GPU_MAX_HW_QUEUES"
       - "HSA_KERNARG_POOL_SIZE"
+      - "PRIMUS_TURBO_DEEPEP_TIMEOUT"
       - "NCCL_IB_HCA"
       - "NCCL_SOCKET_IFNAME"
       - "GLOO_SOCKET_IFNAME"
       - "NCCL_IB_GID_INDEX"
       - "PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32"
       - "NVTE_CK_IS_V3_ATOMIC_FP32"
-      
+
       - "PATH_TO_BNXT_TAR_PACKAGE"
       - "ANP_HOME_DIR"
       - "RCCL_HOME_DIR"
