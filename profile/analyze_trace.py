@@ -855,11 +855,11 @@ function renderTimeline(cid,data,totalK,totalW){{
   const ct=document.getElementById(cid);if(!data.length){{ct.innerHTML='<p style="color:#64748b">No data</p>';return;}}
   const tMax=Math.max(...data.map(d=>d.e)),chartW=750,scale=chartW/tMax,rowH=data.length*37+40;
   let h='<div style="display:flex;gap:24px;padding-left:210px;font-family:JetBrains Mono,monospace;font-size:12px;margin-bottom:16px">';
-  h+=`<span>Kernel: <span class="hl">${{totalK.toFixed(2)}} ms</span></span><span>Wall: <span class="hl">${{totalW.toFixed(2)}} ms</span></span><span>Operators: <span class="hl">${{data.length}}</span></span></div>`;
+  h+=`<span>Kernel: <span class="hl">${{(totalK*1000).toFixed(0)}} us</span></span><span>Wall: <span class="hl">${{(totalW*1000).toFixed(0)}} us</span></span><span>Operators: <span class="hl">${{data.length}}</span></span></div>`;
   h+='<div style="position:relative">';
   const tickStep=Math.max(0.5,Math.ceil(tMax/8*2)/2);
   for(let t=0;t<=tMax+0.01;t+=tickStep){{const x=210+t*scale;h+=`<div class="grid" style="left:${{x}}px;height:${{rowH}}px;top:0"></div>`;}}
-  data.forEach((d,i)=>{{const left=d.s*scale,width=Math.max(3,(d.e-d.s)*scale),txt=width>50?d.w.toFixed(0)+'us':'';
+  data.forEach((d,i)=>{{const left=d.s*scale,width=Math.max(3,(d.e-d.s)*scale),txt=width>50?(d.w*1000).toFixed(0)+'us':'';
     h+=`<div class="row"><div class="lbl">${{d.l}}</div><div class="bc">`;
     if(i>0){{const gap=d.s-data[i-1].e;if(gap>0.02){{const gL=data[i-1].e*scale,gW=Math.max(2,gap*scale);h+=`<div class="gap" style="left:${{gL}}px;width:${{gW}}px"></div>`;}}}}
     h+=`<div class="bar" style="left:${{left}}px;width:${{width}}px;background:${{d.c}}" onmousemove="showTip(event,'${{d.l.replace(/'/g,"\\\\'")}}',{{'w':${{d.w}},'k':${{d.k}},'n':${{d.n}},'o':${{d.ovlp}}}})" onmouseout="hideTip()">${{txt}}</div></div></div>`;
@@ -867,16 +867,16 @@ function renderTimeline(cid,data,totalK,totalW){{
   h+=`<div class="axis">`;for(let t=0;t<=tMax+0.01;t+=tickStep){{h+=`<div class="tick" style="left:${{t*scale}}px">${{t.toFixed(1)}}ms</div>`;}}h+=`</div></div>`;
   const usedGroups=new Set(data.map(d=>d.g));h+=`<div class="legend">`;
   Object.entries(C).forEach(([g,c])=>{{if(usedGroups.has(g))h+=`<div class="li"><div class="ld" style="background:${{c}}"></div>${{legendMap[g]||g}}</div>`;}});h+=`</div>`;
-  h+=`<table><tr><th>#</th><th>Operator</th><th>Cnt</th><th>Wall(ms)</th><th>Kernel(ms)</th><th>%</th><th>Overlap</th><th style="width:120px"></th></tr>`;
+  h+=`<table><tr><th>#</th><th>Operator</th><th>Cnt</th><th>Wall(us)</th><th>Kernel(us)</th><th>%</th><th>Overlap</th><th style="width:120px"></th></tr>`;
   data.forEach((d,i)=>{{const barW=Math.max(1,d.pct*1.2),isBold=d.pct>=5,s=isBold?'font-weight:700':'';
-    h+=`<tr><td>${{i+1}}</td><td style="color:${{d.c}};${{s}}">${{d.l}}</td><td>${{d.n}}</td><td>${{d.w.toFixed(3)}}</td><td>${{d.k.toFixed(3)}}</td><td>${{d.pct}}%</td><td>${{d.ovlp>1.1?d.ovlp+'×':'-'}}</td><td><div class="bi" style="width:${{barW}}px;background:${{d.c}}"></div></td></tr>`;
+    h+=`<tr><td>${{i+1}}</td><td style="color:${{d.c}};${{s}}">${{d.l}}</td><td>${{d.n}}</td><td>${{(d.w*1000).toFixed(0)}}</td><td>${{(d.k*1000).toFixed(0)}}</td><td>${{d.pct}}%</td><td>${{d.ovlp>1.1?d.ovlp+'×':'-'}}</td><td><div class="bi" style="width:${{barW}}px;background:${{d.c}}"></div></td></tr>`;
   }});
-  h+=`<tr style="font-weight:700"><td></td><td style="color:#7dd3fc">Total</td><td></td><td>${{totalW.toFixed(3)}}</td><td>${{totalK.toFixed(3)}}</td><td>100%</td><td></td><td></td></tr></table>`;
+  h+=`<tr style="font-weight:700"><td></td><td style="color:#7dd3fc">Total</td><td></td><td>${{(totalW*1000).toFixed(0)}}</td><td>${{(totalK*1000).toFixed(0)}}</td><td>100%</td><td></td><td></td></tr></table>`;
   const expertOps=data.filter(d=>d.g==='bf16'&&d.n>=32);h+=`<div class="note"><b>Notes:</b><br>`;
   if(expertOps.length){{const mo=Math.max(...expertOps.map(d=>d.ovlp));h+=`• Expert GEMM overlap: <span class="hl">${{mo.toFixed(2)}}×</span> (2-stream parallel)<br>`;}}
   h+=`• <span class="hl">Overlap 说明：</span> 当 Kernel(us) > Wall(us) 时，表示有多个 kernel 在 GPU 上并行执行（stream overlap）。例如 Expert GEMM 的 N 个 expert 在 2 个 stream 上流水线并行，kernel 总时间约为 wall 时间的 2×。</div>`;ct.innerHTML=h;
 }}
-function showTip(ev,name,d){{const t=document.getElementById('tooltip');t.style.display='block';t.style.left=(ev.clientX+15)+'px';t.style.top=(ev.clientY+15)+'px';t.innerHTML=`<b>${{name}}</b><br>Wall: ${{d.w.toFixed(3)}} ms<br>Kernel: ${{d.k.toFixed(3)}} ms<br>Count: ${{d.n}}<br>Overlap: ${{d.o}}×`;}}
+function showTip(ev,name,d){{const t=document.getElementById('tooltip');t.style.display='block';t.style.left=(ev.clientX+15)+'px';t.style.top=(ev.clientY+15)+'px';t.innerHTML=`<b>${{name}}</b><br>Wall: ${{(d.w*1000).toFixed(0)}} us<br>Kernel: ${{(d.k*1000).toFixed(0)}} us<br>Count: ${{d.n}}<br>Overlap: ${{d.o}}×`;}}
 function hideTip(){{document.getElementById('tooltip').style.display='none';}}
 renderTimeline('fwd',fwdData,fwdTotalK,fwdTotalW);renderTimeline('bwd',bwdData,bwdTotalK,bwdTotalW);
 </script></body></html>"""
