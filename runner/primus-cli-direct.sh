@@ -311,6 +311,10 @@ while [[ $# -gt 0 ]]; do
 done
 set -- "${primus_args[@]}"
 
+# Prepend --debug to Python CLI args when debug mode is enabled (CLI or config).
+# Done here so it flows through hooks/patches and matches container/slurm pattern.
+[[ "$DEBUG_MODE" == "1" ]] && set -- --debug "$@"
+
 ###############################################################################
 # STEP 4.5: Process non-cumulative parameters (use last value only)
 ###############################################################################
