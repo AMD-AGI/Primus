@@ -88,6 +88,7 @@ modules:
       cross_entropy_loss_fusion: true
 
       # enable fp8 training
-      fp8: hybrid
+      fp8: hybrid # hybrid
+      # fp8: e4m3 # hybrid
       # fp8_recipe: tensorwise # tensorwise, delayed, mxfp8, blockwise
       moe_use_legacy_grouped_gemm: false
