@@ -456,6 +456,27 @@ if [[ "$CLEAN_DOCKER_CONTAINER" == "true" ]]; then
 fi
 
 ###############################################################################
+# STEP 6.5: Docker registry login (if credentials provided)
+###############################################################################
+
+if [[ -n "${DOCKER_LOGIN_USER:-}" && -n "${DOCKER_LOGIN_TOKEN:-}" ]]; then
+    DOCKER_LOGIN_SERVER="${DOCKER_LOGIN_SERVER:-}"
+    if [[ -n "$DOCKER_LOGIN_SERVER" ]]; then
+        LOG_INFO_RANK0 "[container] Logging into Docker registry: $DOCKER_LOGIN_SERVER"
+        echo "$DOCKER_LOGIN_TOKEN" | "$CONTAINER_RUNTIME" login "$DOCKER_LOGIN_SERVER" -u "$DOCKER_LOGIN_USER" --password-stdin
+    else
+        LOG_INFO_RANK0 "[container] Logging into Docker Hub"
+        echo "$DOCKER_LOGIN_TOKEN" | "$CONTAINER_RUNTIME" login -u "$DOCKER_LOGIN_USER" --password-stdin
+    fi
+    if [[ $? -eq 0 ]]; then
+        LOG_INFO_RANK0 "[container] Docker login successful"
+    else
+        LOG_ERROR "[container] Docker login failed for user: $DOCKER_LOGIN_USER"
+        exit 1
+    fi
+fi
+
+###############################################################################
 # STEP 7: Prepare launch arguments
 ###############################################################################
 
