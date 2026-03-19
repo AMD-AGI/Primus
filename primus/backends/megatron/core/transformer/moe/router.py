@@ -11,6 +11,7 @@ from megatron.core.transformer.moe.moe_utils import apply_router_token_dropping
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.training import get_args
+from primus.modules.module_utils import log_rank_0
 
 from primus.backends.megatron.core.extensions.logits_processor import fused_softcap
 
@@ -79,6 +80,8 @@ class PrimusTopKRouter(TopKRouter):
 
     def routing(self, logits: torch.Tensor, **kwargs):
         args = get_args()
+
+        log_rank_0("----------------------------------------------------------------")
 
         if args.router_logit_softcapping is not None and args.router_logit_softcapping > 0.0:
             # grok2 router logit softcapping

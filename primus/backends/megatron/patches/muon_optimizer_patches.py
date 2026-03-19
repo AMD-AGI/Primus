@@ -16,8 +16,15 @@ the function is actually used, not megatron.core.optimizer.
 
 import dataclasses
 
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
+
+
+def _is_muon_optimizer_enabled(ctx: PatchContext) -> bool:
+    """Only enable this patch when optimizer name contains 'muon'."""
+    args = get_args(ctx)
+    optimizer = str(getattr(args, "optimizer", "") or "")
+    return "muon" in optimizer.lower()
 
 
 @register_patch(
@@ -25,6 +32,7 @@ from primus.modules.module_utils import log_rank_0
     backend="megatron",
     phase="before_train",
     description="Patch get_megatron_optimizer to dispatch to muon optimizer when optimizer name contains 'muon'.",
+    condition=_is_muon_optimizer_enabled,
 )
 def patch_get_megatron_optimizer_muon(ctx: PatchContext) -> None:
     """

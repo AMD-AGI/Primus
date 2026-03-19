@@ -12,6 +12,8 @@ This module patches ``megatron.training.training.train`` so that when
 PP warmup runs once immediately before the first call to ``train()``.
 """
 
+import inspect
+
 import torch
 
 from primus.core.patches import PatchContext, register_patch
@@ -69,35 +71,32 @@ def patch_train_with_pp_warmup(ctx: PatchContext) -> None:
     if getattr(original_train, "_primus_pp_warmup_wrapped", False):
         return
 
-    def _train_with_pp_warmup(
-        forward_step_func,
-        model,
-        optimizer,
-        opt_param_scheduler,
-        train_data_iterator,
-        valid_data_iterator,
-        process_non_loss_data_func,
-        config,
-        checkpointing_context,
-        non_loss_data_func,
-        inference_model=None,
-    ):
-        args = get_megatron_args()
-        if getattr(args, "pp_warmup", True):
-            run_pp_warmup(model, config, args, optimizer, get_timers())
-        return original_train(
-            forward_step_func,
-            model,
-            optimizer,
-            opt_param_scheduler,
-            train_data_iterator,
-            valid_data_iterator,
-            process_non_loss_data_func,
-            config,
-            checkpointing_context,
-            non_loss_data_func,
-            inference_model,
-        )
+    train_signature = inspect.signature(original_train)
+
+    def _train_with_pp_warmup(*call_args, **call_kwargs):
+        megatron_args = get_megatron_args()
+        if getattr(megatron_args, "pp_warmup", True):
+            bound = None
+            try:
+                bound = train_signature.bind_partial(*call_args, **call_kwargs)
+            except TypeError:
+                # Fall through and call the original train; signature mismatch can
+                # happen across Megatron versions.
+                pass
+
+            model = bound.arguments.get("model") if bound else None
+            config = bound.arguments.get("config") if bound else None
+            optimizer = bound.arguments.get("optimizer") if bound else None
+
+            if model is not None and config is not None and optimizer is not None:
+                run_pp_warmup(model, config, megatron_args, optimizer, get_timers())
+            else:
+                log_rank_0(
+                    "[Patch:megatron.pp_warmup] Skip warmup for this train() call: "
+                    "failed to resolve model/config/optimizer from current train signature."
+                )
+
+        return original_train(*call_args, **call_kwargs)
 
     setattr(_train_with_pp_warmup, "_primus_pp_warmup_wrapped", True)
     training.train = _train_with_pp_warmup
