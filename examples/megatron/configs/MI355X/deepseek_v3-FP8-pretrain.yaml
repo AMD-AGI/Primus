@@ -42,6 +42,9 @@ modules:
       tensor_model_parallel_size: ${PRIMUS_TP:1}
       pipeline_model_parallel_size: ${PRIMUS_PP:1}
       expert_model_parallel_size: ${PRIMUS_EP:8}
+      # pipeline_model_parallel_layout: "Et*7|t*8|t*8|t*8|t*8|t*8|t*7|t*7,L"
+      pipeline_model_parallel_layout: "Et*3|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*3|t*3,L"
+      # pipeline_model_parallel_layout: "Et*1|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*1|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*1,L"
       overlap_grad_reduce: true
       overlap_param_gather: true
       gradient_accumulation_fusion: true
@@ -52,9 +55,16 @@ modules:
       valid_data_path: null
       test_data_path: null
 
-      # MLA
-      multi_latent_attention: true
+      # Manual GC and PP warmup
+      manual_gc: true
+      manual_gc_interval: 1
+      pp_warmup: true
 
+      # MoE arguments
+      moe_layer_freq: 1
+      mtp_num_layers: 0
+      multi_latent_attention: true
+      moe_use_legacy_grouped_gemm: true
 
       # ckpt
       finetune: false
@@ -69,6 +79,12 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
       eval_iters: 0
+
+      # # Profiler
+      # profile: true
+      # use_pytorch_profiler: true
+      # profile_step_end: 7
+      # profile_step_start: 6
 
       # Turbo
       enable_primus_turbo: true
@@ -92,8 +108,11 @@ modules:
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
 
+      # Rope fusion
+      enable_experimental: true
+      apply_rope_fusion: true
+
       # enable fp8 training
       fp8: hybrid # hybrid
       # fp8: e4m3 # hybrid
       # fp8_recipe: tensorwise # tensorwise, delayed, mxfp8, blockwise
-      moe_use_legacy_grouped_gemm: false
