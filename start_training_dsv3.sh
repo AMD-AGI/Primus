@@ -24,7 +24,7 @@ if [ "$LAUNCHER" = "slurm" ]; then
   [ -n "$SLURM_TIME" ] && LAUNCH_CMD+=(--time "$SLURM_TIME")
   [ -n "$SLURM_PARTITION" ] && LAUNCH_CMD+=(--partition "$SLURM_PARTITION")
   [ -n "$SLURM_NODELIST" ] && LAUNCH_CMD+=(--nodelist "$SLURM_NODELIST")
-  LAUNCH_CMD+=(-- --image "$DOCKER_IMAGE" --clean)
+  LAUNCH_CMD+=(-- --image "$DOCKER_IMAGE" --clean -- --numa)
 elif [ "$LAUNCHER" = "direct" ]; then
   # direct launcher mean the job is running inside the container
   export MASTER_ADDR=${MASTER_ADDR:-localhost}
@@ -84,5 +84,4 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --recompute_num_layers $PRIMUS_RECOMPUTE_LAYERS \
   --recompute_granularity full \
   --recompute_method block \
-  --attention_softmax_in_fp32 False \
   2>&1 | tee "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK}.txt"
