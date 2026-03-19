@@ -2,10 +2,13 @@
 
 #======================================ENV CONFIG======================================
 export HF_TOKEN="${HF_TOKEN:-'your_hf_token'}"  # make it your own hf token
-export WANDB_API_KEY="${WANDB_API_KEY:-'your_wandb_api_key'}"  # make it your own wandb api key
+export LAUNCHER="${LAUNCHER:-direct}"
+export PRETRAIN_TYPE="${PRETRAIN_TYPE:-FP8}"
 
-export LAUNCHER=${LAUNCHER:-direct}
-export PRETRAIN_TYPE=${PRETRAIN_TYPE:-FP8}
+# the slurm launcher handles image pull automatically when these two variables are exported.
+# Set the following environment variables (obtain `token_from_amd` from the AMD TAS team):
+export DOCKER_LOGIN_USER="${DOCKER_LOGIN_USER:-tasimage}"
+export DOCKER_LOGIN_TOKEN="${DOCKER_LOGIN_TOKEN:-'token_from_amd'}"
 
 #======================================LAUNCHER CONFIG======================================
 LAUNCH_CMD=()
@@ -13,9 +16,9 @@ if [ "$LAUNCHER" = "slurm" ]; then
   # slurm launcher mean the job is running on the slurm cluster.
   export NNODES=${NNODES:-8}
   export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/tasimage/primus:pr-609-ainic"}
-  export SLURM_TIME=1:00:00
-  export SLURM_PARTITION=amd-aig
-  export SLURM_NODELIST="uswslocpm2m-106-[030-031,038-039,050,063,069,225]"
+  # export SLURM_TIME=1:00:00
+  # export SLURM_PARTITION=amd-aig
+  # export SLURM_NODELIST="uswslocpm2m-106-[030-031,038-039,050,063,069,225]"
 
   LAUNCH_CMD=(./primus-cli slurm -N "$NNODES")
   [ -n "$SLURM_TIME" ] && LAUNCH_CMD+=(--time "$SLURM_TIME")
