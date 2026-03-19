@@ -5,7 +5,7 @@ export HF_TOKEN="${HF_TOKEN:-'your_hf_token'}"  # make it your own hf token
 export WANDB_API_KEY="${WANDB_API_KEY:-'your_wandb_api_key'}"  # make it your own wandb api key
 
 export LAUNCHER=${LAUNCHER:-direct}
-export PRETRAIN_TYPE=${PRETRAIN_TYPE:-BF16}
+export PRETRAIN_TYPE=${PRETRAIN_TYPE:-FP8}
 
 #======================================LAUNCHER CONFIG======================================
 LAUNCH_CMD=()
@@ -38,12 +38,12 @@ fi
 
 #======================================TRAIN CONFIG======================================
 export TRAIN_ITERS=10
-export MBS=2
-export GBS=1024
+export MBS=4
+export GBS=2048
 export PRIMUS_EP=8
 export PRIMUS_PP=8
 export PRIMUS_VPP=2
-export PRIMUS_RECOMPUTE_LAYERS=3
+export PRIMUS_RECOMPUTE_LAYERS=4
 
 #======================================ENV CONFIG======================================
 # export NCCL_DEBUG=INFO
