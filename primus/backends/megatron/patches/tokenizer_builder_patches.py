@@ -87,6 +87,21 @@ def patch_build_tokenizer_override(ctx: PatchContext):
     megatron_global_vars.build_tokenizer = primus_build_tokenizer
     pretrain_gpt.build_tokenizer = primus_build_tokenizer
 
+    # Also patch the new MCore tokenizer module path (Megatron-LM dev branch
+    # moved tokenizer from megatron.training.tokenizer to megatron.core.tokenizers)
+    try:
+        import megatron.core.tokenizers.utils.build_tokenizer as mcore_build_tokenizer_mod
+
+        if not hasattr(mcore_build_tokenizer_mod, "_original_build_tokenizer"):
+            mcore_build_tokenizer_mod._original_build_tokenizer = mcore_build_tokenizer_mod.build_tokenizer
+        mcore_build_tokenizer_mod.build_tokenizer = primus_build_tokenizer
+        log_rank_0(
+            "[Patch:megatron.tokenizer.build_tokenizer_override] "
+            "✓ Also patched megatron.core.tokenizers.utils.build_tokenizer"
+        )
+    except ImportError:
+        pass  # Old Megatron-LM without MCore tokenizer module
+
     log_rank_0(
         "[Patch:megatron.tokenizer.build_tokenizer_override] "
         "✓ Replaced Megatron build_tokenizer with Primus version"

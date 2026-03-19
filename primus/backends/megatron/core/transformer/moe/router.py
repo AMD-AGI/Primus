@@ -77,7 +77,7 @@ class PrimusTopKRouter(TopKRouter):
                 self.local_tokens_per_expert += routing_map.sum(dim=0)
         return probs, routing_map
 
-    def routing(self, logits: torch.Tensor):
+    def routing(self, logits: torch.Tensor, **kwargs):
         args = get_args()
 
         if args.router_logit_softcapping is not None and args.router_logit_softcapping > 0.0:
@@ -87,7 +87,7 @@ class PrimusTopKRouter(TopKRouter):
         if args.enable_primus_turbo and args.moe_use_fused_router_with_aux_score:
             scores, routing_map = self.fused_router_and_auxiliary_loss(logits)
         else:
-            scores, routing_map = super().routing(logits)
+            scores, routing_map = super().routing(logits, **kwargs)
 
         assert routing_map.dtype == torch.bool, "routing_map should be boolean"
         # profile for moe
