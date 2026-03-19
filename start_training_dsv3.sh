@@ -11,7 +11,7 @@ export PRETRAIN_TYPE=${PRETRAIN_TYPE:-FP8}
 LAUNCH_CMD=()
 if [ "$LAUNCHER" = "slurm" ]; then
   # slurm launcher mean the job is running on the slurm cluster.
-  export NNODES=8
+  export NNODES=${NNODES:-8}
   export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/tasimage/primus:pr-609-ainic"}
   export SLURM_TIME=1:00:00
   export SLURM_PARTITION=amd-aig
@@ -26,7 +26,7 @@ elif [ "$LAUNCHER" = "direct" ]; then
   # direct launcher mean the job is running inside the container
   export MASTER_ADDR=${MASTER_ADDR:-localhost}
   export MASTER_PORT=${MASTER_PORT:-1234}
-  export NNODES=${NNODES:-1}
+  export NNODES=${NNODES:-8}
   export NODE_RANK=${NODE_RANK:-0}
   export GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 
