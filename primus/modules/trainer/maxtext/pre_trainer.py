@@ -49,6 +49,8 @@ class MaxTextPretrainTrainer(BaseModule):
         else:
             self.train_config, self.recorder, self.diagnostic_config = initialize(argv)
 
+        self._update_logger_rank()
+
     def run(self, *args, **kwargs):
         log_rank_0(f"MaxText Pre-Trainer: begin training...")
 
@@ -88,6 +90,28 @@ class MaxTextPretrainTrainer(BaseModule):
                     )
                 flat_overrides[subk] = subv
         return flat_overrides
+
+    def _update_logger_rank(self):
+        """Refresh Primus logger rank/world_size from JAX distributed state.
+
+        The logger is created before ``jax.distributed.initialize()`` runs,
+        so it defaults to rank=0, world_size=1.  After JAX init we have the
+        real values and can patch them in.
+        """
+        import jax
+
+        rank = jax.process_index()
+        world_size = jax.process_count()
+
+        from primus.core.utils.logger import update_rank_info
+        from primus.modules.module_utils import set_logging_rank
+
+        update_rank_info(rank, world_size)
+        set_logging_rank(rank, world_size)
+        log_rank_0(
+            f"JAX distributed ready: rank={rank}, world_size={world_size}, "
+            f"devices={jax.device_count()}, local_devices={jax.local_device_count()}"
+        )
 
     def patch_maxtext_logger(self):
         import logging

@@ -249,6 +249,19 @@ def setup_logger(
     _logger = loguru_logger
 
 
+def update_rank_info(rank: int, world_size: int):
+    """Re-bind rank/world_size on the global logger after distributed init.
+
+    This is needed for JAX/MaxText where ``jax.distributed.initialize()``
+    happens *after* the logger is first created.  Call this once you have
+    the authoritative rank and world_size (e.g. from ``jax.process_index``
+    and ``jax.process_count``).
+    """
+    global _logger
+    if _logger is not None:
+        _logger = _logger.bind(rank=rank, world_size=world_size)
+
+
 def module_format(module_name: str, line: int):
     """
     Format module location with dynamic width adjustment.
