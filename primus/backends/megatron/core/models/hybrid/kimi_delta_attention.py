@@ -48,184 +48,138 @@ from torch.utils.checkpoint import checkpoint as _grad_checkpoint
 logger = logging.getLogger(__name__)
 
 
-# def torch_kda_gate(g, A_log, dt_bias=None):
-#     """Pure-PyTorch replacement for ``fused_kda_gate``.
-
-#     Computes  g_out = -exp(A_log) * softplus(g + dt_bias)  per head/dim.
-
-#     Args:
-#         g: Gate tensor of shape ``[..., H, K]``.
-#         A_log: Per-head log-decay parameter of shape ``[H]``.
-#         dt_bias: Optional bias of shape ``[H*K]``.
-
-#     Returns:
-#         Gated output in float32 with the same shape as *g*.
-#     """
-#     H = g.shape[-2]
-#     g = g.float()
-#     if dt_bias is not None:
-#         g = g + dt_bias.view(H, -1)
-#     return -A_log.view(H, 1).float().exp() * F.softplus(g)
+def torch_kda_gate(g, A_log, dt_bias=None):
+    """Pure-PyTorch KDA gate (used for backward pass on ROCm)."""
+    H = g.shape[-2]
+    g = g.float()
+    if dt_bias is not None:
+        g = g + dt_bias.view(H, -1)
+    return -A_log.view(H, 1).float().exp() * F.softplus(g)
 
 
-# def torch_chunk_kda(
-#     q,
-#     k,
-#     v,
-#     g,
-#     beta,
-#     scale=None,
-#     chunk_size=64,
-#     initial_state=None,
-#     output_final_state=False,
-#     use_qk_l2norm_in_kernel=False,
-# ):
-#     """Pure-PyTorch chunked KDA (Kimi Delta Attention).
+def _torch_chunk_kda_fwd(q, k, v, g, beta, scale=None, chunk_size=64,
+                          use_qk_l2norm_in_kernel=False):
+    """Pure-PyTorch chunked KDA forward -- used for backward recomputation
+    on ROCm where FLA Triton backward kernels hang."""
+    initial_dtype = q.dtype
+    B, T, H, K = q.shape
+    V = v.shape[-1]
+    BT = chunk_size
 
-#     Drop-in replacement for ``chunk_kda`` from ``fla.ops.kda`` for platforms
-#     where Triton backward kernels are unavailable (e.g. AMD MI300X / ROCm).
+    if scale is None:
+        scale = K ** -0.5
 
-#     The algorithm follows the naive chunked delta-rule formulation from the FLA
-#     library with per-key-dimension gating specific to KDA.
+    if use_qk_l2norm_in_kernel:
+        q = F.normalize(q.float(), p=2, dim=-1, eps=1e-6)
+        k = F.normalize(k.float(), p=2, dim=-1, eps=1e-6)
 
-#     Args:
-#         q: Queries  ``[B, T, H, K]``.
-#         k: Keys     ``[B, T, H, K]``.
-#         v: Values   ``[B, T, H, V]``.
-#         g: Per-dim gate in log-decay space ``[B, T, H, K]`` (output of
-#            ``torch_kda_gate`` / ``fused_kda_gate``).
-#         beta: Per-head importance weights ``[B, T, H]`` (already sigmoided).
-#         scale: Query scaling factor; defaults to ``K ** -0.5``.
-#         chunk_size: Chunk size for the tiled processing.
-#         initial_state: Optional initial recurrent state ``[B, H, K, V]``.
-#         output_final_state: Whether to return the final state.
-#         use_qk_l2norm_in_kernel: Apply L2-norm to Q/K before attention.
+    pad_size = (BT - T % BT) % BT
+    if pad_size > 0:
+        q = F.pad(q, (0, 0, 0, 0, 0, pad_size))
+        k = F.pad(k, (0, 0, 0, 0, 0, pad_size))
+        v = F.pad(v, (0, 0, 0, 0, 0, pad_size))
+        g = F.pad(g, (0, 0, 0, 0, 0, pad_size))
+        beta = F.pad(beta, (0, 0, 0, pad_size))
 
-#     Returns:
-#         ``(output, final_state)`` where *output* is ``[B, T, H, V]`` and
-#         *final_state* is ``None`` unless *output_final_state* is ``True``.
-#     """
-#     initial_dtype = q.dtype
-#     B, T, H, K = q.shape
-#     V = v.shape[-1]
-#     BT = chunk_size
+    total_T = T + pad_size
+    NT = total_T // BT
 
-#     if scale is None:
-#         scale = K ** -0.5
+    q, k, v, g, beta = [
+        x.transpose(1, 2).contiguous().float() for x in (q, k, v, g, beta)
+    ]
+    q = q * scale
 
-#     if use_qk_l2norm_in_kernel:
-#         q = F.normalize(q.float(), p=2, dim=-1, eps=1e-6)
-#         k = F.normalize(k.float(), p=2, dim=-1, eps=1e-6)
+    q = q.reshape(B, H, NT, BT, K)
+    k = k.reshape(B, H, NT, BT, K)
+    v = v.reshape(B, H, NT, BT, V)
+    g = g.reshape(B, H, NT, BT, K)
+    beta = beta.reshape(B, H, NT, BT)
 
-#     pad_size = (BT - T % BT) % BT
-#     if pad_size > 0:
-#         q = F.pad(q, (0, 0, 0, 0, 0, pad_size))
-#         k = F.pad(k, (0, 0, 0, 0, 0, pad_size))
-#         v = F.pad(v, (0, 0, 0, 0, 0, pad_size))
-#         g = F.pad(g, (0, 0, 0, 0, 0, pad_size))
-#         beta = F.pad(beta, (0, 0, 0, pad_size))
+    g = g.cumsum(dim=-2)
+    k_eg = k * g.exp()
 
-#     total_T = T + pad_size
-#     NT = total_T // BT
+    A = torch.zeros(B, H, NT, BT, BT, dtype=torch.float, device=q.device)
+    for j in range(BT):
+        k_j = k[..., j, :]
+        g_j = g[..., j : j + 1, :]
+        decay = (g - g_j).clamp(max=0).exp()
+        A[..., j] = (k * decay * k_j.unsqueeze(-2)).sum(-1)
 
-#     q, k, v, g, beta = [
-#         x.transpose(1, 2).contiguous().float() for x in (q, k, v, g, beta)
-#     ]
-#     q = q * scale
+    A = A * beta.unsqueeze(-1)
+    mask_upper = torch.triu(torch.ones(BT, BT, dtype=torch.bool, device=q.device), diagonal=0)
+    A = -A.masked_fill(mask_upper, 0)
 
-#     q = q.reshape(B, H, NT, BT, K)
-#     k = k.reshape(B, H, NT, BT, K)
-#     v = v.reshape(B, H, NT, BT, V)
-#     g = g.reshape(B, H, NT, BT, K)
-#     beta = beta.reshape(B, H, NT, BT)
+    for i in range(1, BT):
+        A[..., i, :i] = A[..., i, :i].clone() + (
+            A[..., i, :, None].clone() * A[..., :, :i].clone()
+        ).sum(-2)
 
-#     g = g.cumsum(dim=-2)
+    A = (A + torch.eye(BT, dtype=torch.float, device=q.device)) * beta.unsqueeze(-2)
+    w = A @ k_eg
+    u = A @ v
 
-#     k_eg = k * g.exp()
+    mask_causal = torch.triu(torch.ones(BT, BT, dtype=torch.bool, device=q.device), diagonal=1)
+    S = q.new_zeros(B, H, K, V)
+    o = torch.zeros_like(v)
 
-#     # --- WY A-matrix (per-dim stable) ---
-#     # A[c1,c2] = Σ_d k[c1,d]·exp(g[c1,d]-g[c2,d])·k[c2,d]
-#     # We compute exp(g-g_j) per column j to stay numerically stable
-#     # (g[c1]-g[j] <= 0 for c1 >= j, so exp never overflows).
-#     A = torch.zeros(B, H, NT, BT, BT, dtype=torch.float, device=q.device)
-#     for j in range(BT):
-#         k_j = k[..., j, :]
-#         g_j = g[..., j : j + 1, :]
-#         decay = (g - g_j).clamp(max=0).exp()
-#         A[..., j] = (k * decay * k_j.unsqueeze(-2)).sum(-1)
+    for i in range(NT):
+        q_i, k_i, u_i, g_i, w_i = q[:,:,i], k[:,:,i], u[:,:,i], g[:,:,i], w[:,:,i]
+        A_qk = torch.zeros(B, H, BT, BT, dtype=torch.float, device=q.device)
+        for j in range(BT):
+            k_j = k_i[..., j, :]
+            g_j = g_i[..., j : j + 1, :]
+            decay = (g_i - g_j).clamp(max=0).exp()
+            A_qk[..., j] = (q_i * decay * k_j.unsqueeze(-2)).sum(-1)
+        A_qk = A_qk.masked_fill(mask_causal, 0)
+        v_i = u_i - w_i @ S
+        o[:, :, i] = (q_i * g_i.exp()) @ S + A_qk @ v_i
+        g_last = g_i[:, :, -1]
+        S = S * g_last.unsqueeze(-1).exp()
+        k_dec = (g_last.unsqueeze(-2) - g_i).exp() * k_i
+        S = S + k_dec.transpose(-1, -2) @ v_i
 
-#     A = A * beta.unsqueeze(-1)
-
-#     mask_upper = torch.triu(
-#         torch.ones(BT, BT, dtype=torch.bool, device=q.device), diagonal=0
-#     )
-#     A = -A.masked_fill(mask_upper, 0)
-
-#     for i in range(1, BT):
-#         A[..., i, :i] = A[..., i, :i].clone() + (
-#             A[..., i, :, None].clone() * A[..., :, :i].clone()
-#         ).sum(-2)
-
-#     A = (A + torch.eye(BT, dtype=torch.float, device=q.device)) * beta.unsqueeze(-2)
-
-#     w = A @ k_eg
-#     u = A @ v
-
-#     mask_causal = torch.triu(
-#         torch.ones(BT, BT, dtype=torch.bool, device=q.device), diagonal=1
-#     )
-
-#     S = q.new_zeros(B, H, K, V)
-#     if initial_state is not None:
-#         S = S + initial_state.float()
-
-#     o = torch.zeros_like(v)
-
-#     for i in range(NT):
-#         q_i = q[:, :, i]
-#         k_i = k[:, :, i]
-#         u_i = u[:, :, i]
-#         g_i = g[:, :, i]
-#         w_i = w[:, :, i]
-
-#         # Intra-chunk QK attention (per-column loop for stability)
-#         A_qk = torch.zeros(B, H, BT, BT, dtype=torch.float, device=q.device)
-#         for j in range(BT):
-#             k_j = k_i[..., j, :]
-#             g_j = g_i[..., j : j + 1, :]
-#             decay = (g_i - g_j).clamp(max=0).exp()
-#             A_qk[..., j] = (q_i * decay * k_j.unsqueeze(-2)).sum(-1)
-#         A_qk = A_qk.masked_fill(mask_causal, 0)
-
-#         v_i = u_i - w_i @ S
-#         o[:, :, i] = (q_i * g_i.exp()) @ S + A_qk @ v_i
-
-#         g_last = g_i[:, :, -1]
-#         S = S * g_last.unsqueeze(-1).exp()
-#         k_dec = (g_last.unsqueeze(-2) - g_i).exp() * k_i
-#         S = S + k_dec.transpose(-1, -2) @ v_i
-
-#     if not output_final_state:
-#         S = None
-
-#     o = o.reshape(B, H, -1, V)[:, :, :T]
-#     o = o.transpose(1, 2).contiguous().to(initial_dtype)
-#     return o, S
+    o = o.reshape(B, H, -1, V)[:, :, :T]
+    o = o.transpose(1, 2).contiguous().to(initial_dtype)
+    return o
 
 
-# def _torch_chunk_kda_ckpt(q, k, v, g, beta):
-#     """Thin wrapper for ``torch_chunk_kda`` used with gradient checkpointing.
+class _HybridChunkKDA(torch.autograd.Function):
+    """Triton forward + PyTorch backward for chunk_kda on ROCm MI300X.
 
-#     Returns only the output tensor so that ``torch.utils.checkpoint`` does not
-#     need to handle ``None`` as the second tuple element.
-#     """
-#     o, _ = torch_chunk_kda(
-#         q=q, k=k, v=v, g=g, beta=beta,
-#         initial_state=None,
-#         output_final_state=False,
-#         use_qk_l2norm_in_kernel=True,
-#     )
-#     return o
+    FLA Triton forward kernels work on ROCm but the backward kernels hang.
+    This uses Triton for the fast forward pass and recomputes with PyTorch
+    for the backward pass.
+    """
+
+    @staticmethod
+    def forward(ctx, q, k, v, g, beta):
+        ctx.save_for_backward(q, k, v, g, beta)
+        with torch.no_grad():
+            o, _ = chunk_kda(q, k, v, g, beta, use_qk_l2norm_in_kernel=True)
+        return o
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        q, k, v, g, beta = ctx.saved_tensors
+        with torch.enable_grad():
+            q = q.detach().requires_grad_(True)
+            k = k.detach().requires_grad_(True)
+            v = v.detach().requires_grad_(True)
+            g = g.detach().requires_grad_(True)
+            beta = beta.detach().requires_grad_(True)
+            o = _torch_chunk_kda_fwd(q, k, v, g, beta, use_qk_l2norm_in_kernel=True)
+            o.backward(grad_output)
+        return q.grad, k.grad, v.grad, g.grad, beta.grad
+
+
+def hybrid_chunk_kda(q, k, v, g, beta):
+    """chunk_kda: Triton forward, PyTorch backward (for ROCm MI300X)."""
+    return _HybridChunkKDA.apply(q, k, v, g, beta)
+
+
+def _torch_chunk_kda_ckpt(q, k, v, g, beta):
+    """PyTorch-only fallback with gradient checkpointing."""
+    return _torch_chunk_kda_fwd(q, k, v, g, beta, use_qk_l2norm_in_kernel=True)
 
 
 @dataclass
@@ -447,7 +401,22 @@ class KimiDeltaAttention(MegatronModule):
 
         local_seq_len, batch, _ = hidden_states.shape
         seq_len = local_seq_len * self.sp_size
-        use_fla_triton = True #(not self.config.deterministic_mode) and HAVE_FLA_KDA and getattr(self.config, 'use_fla_triton_kda', False)
+        use_fla_triton = (not self.config.deterministic_mode) and HAVE_FLA_KDA and getattr(self.config, 'use_fla_triton_kda', False)
+
+        if not hasattr(self, '_kda_kernel_logged'):
+            self._kda_kernel_logged = True
+            use_hybrid = getattr(self.config, 'use_fla_triton_kda_hybrid', False)
+            if use_fla_triton and not use_hybrid:
+                mode = "FLA Triton (fwd+bwd)"
+            elif use_fla_triton and use_hybrid:
+                mode = "Hybrid (Triton fwd, PyTorch bwd)"
+            else:
+                mode = "Pure PyTorch fallback (gradient checkpointed)"
+            logger.warning(
+                f"[KDA layer {self.layer_number}] kernel={mode} | "
+                f"HAVE_FLA_KDA={HAVE_FLA_KDA} use_fla_triton_kda={getattr(self.config, 'use_fla_triton_kda', False)} "
+                f"deterministic={self.config.deterministic_mode}"
+            )
 
         if inference_context is not None:
             raise NotImplementedError("KDA does not support inference yet.")
@@ -507,7 +476,8 @@ class KimiDeltaAttention(MegatronModule):
         if use_fla_triton:
             g = fused_kda_gate(g, self.A_log.view(-1), dt_bias=self.dt_bias)
         else:
-            g = torch_kda_gate(g, self.A_log.view(-1), dt_bias=self.dt_bias)
+            raise RuntimeError("[KDA] PyTorch fallback gate was reached — Triton kernels are NOT active!")
+            # g = torch_kda_gate(g, self.A_log.view(-1), dt_bias=self.dt_bias)
 
         beta = self.b_proj(h_bsh).float().sigmoid()
         nvtx_range_pop(suffix="kda_gate")
@@ -518,18 +488,17 @@ class KimiDeltaAttention(MegatronModule):
         v = v.contiguous()
 
         nvtx_range_push(suffix="kda_attn")
-        if use_fla_triton:
-            core_attn_out, _ = chunk_kda(
-                q=q, k=k, v=v, g=g, beta=beta,
-                initial_state=None,
-                output_final_state=False,
-                use_qk_l2norm_in_kernel=True,
-            )
+        use_hybrid = getattr(self.config, 'use_fla_triton_kda_hybrid', False)
+        if use_fla_triton and not use_hybrid:
+            core_attn_out, _ = chunk_kda(q, k, v, g, beta, use_qk_l2norm_in_kernel=True)
+        elif use_fla_triton and use_hybrid:
+            core_attn_out = hybrid_chunk_kda(q, k, v, g, beta)
         else:
-            core_attn_out = _grad_checkpoint(
-                _torch_chunk_kda_ckpt, q, k, v, g, beta,
-                use_reentrant=False,
-            )
+            raise RuntimeError("[KDA] PyTorch fallback attention was reached — Triton kernels are NOT active!")
+            # core_attn_out = _grad_checkpoint(
+            #     _torch_chunk_kda_ckpt, q, k, v, g, beta,
+            #     use_reentrant=False,
+            # )
         nvtx_range_pop(suffix="kda_attn")
 
         # --- Output gate (g_a -> g_b) + gated norm ---
