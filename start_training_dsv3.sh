@@ -17,7 +17,7 @@ if [ "$LAUNCHER" = "slurm" ]; then
   export SLURM_PARTITION=amd-aig
   export SLURM_NODELIST="uswslocpm2m-106-[030-031,038-039,050,063,069,225]"
 
-  LAUNCH_CMD=(./primus-cli slurm --numa -N "$NNODES")
+  LAUNCH_CMD=(./primus-cli slurm -N "$NNODES")
   [ -n "$SLURM_TIME" ] && LAUNCH_CMD+=(--time "$SLURM_TIME")
   [ -n "$SLURM_PARTITION" ] && LAUNCH_CMD+=(--partition "$SLURM_PARTITION")
   [ -n "$SLURM_NODELIST" ] && LAUNCH_CMD+=(--nodelist "$SLURM_NODELIST")
