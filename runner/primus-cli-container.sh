@@ -439,9 +439,36 @@ for key in "${!container_config[@]}"; do
     fi
 done
 
+###############################################################################
+# STEP 6: Docker registry login (if credentials provided)
+###############################################################################
+
+DOCKER_LOGIN_TIMEOUT="${DOCKER_LOGIN_TIMEOUT:-30}"
+
+if [[ -n "${DOCKER_LOGIN_USER:-}" && -n "${DOCKER_LOGIN_TOKEN:-}" ]]; then
+    DOCKER_LOGIN_SERVER="${DOCKER_LOGIN_SERVER:-}"
+    if [[ -n "$DOCKER_LOGIN_SERVER" ]]; then
+        LOG_INFO_RANK0 "[container] Logging into Docker registry: $DOCKER_LOGIN_SERVER (timeout=${DOCKER_LOGIN_TIMEOUT}s)"
+        echo "$DOCKER_LOGIN_TOKEN" | timeout "$DOCKER_LOGIN_TIMEOUT" "$CONTAINER_RUNTIME" login "$DOCKER_LOGIN_SERVER" -u "$DOCKER_LOGIN_USER" --password-stdin
+    else
+        LOG_INFO_RANK0 "[container] Logging into Docker Hub (timeout=${DOCKER_LOGIN_TIMEOUT}s)"
+        echo "$DOCKER_LOGIN_TOKEN" | timeout "$DOCKER_LOGIN_TIMEOUT" "$CONTAINER_RUNTIME" login -u "$DOCKER_LOGIN_USER" --password-stdin
+    fi
+    LOGIN_EXIT_CODE=$?
+    if [[ $LOGIN_EXIT_CODE -eq 0 ]]; then
+        LOG_INFO_RANK0 "[container] Docker login successful"
+    elif [[ $LOGIN_EXIT_CODE -eq 124 ]]; then
+        LOG_ERROR "[container] Docker login timed out after ${DOCKER_LOGIN_TIMEOUT}s (possible network issue on compute node)"
+        LOG_ERROR "[container] Check: 1) compute node internet access  2) DNS resolution  3) ~/.docker/config.json credsStore setting"
+        exit 1
+    else
+        LOG_ERROR "[container] Docker login failed for user: $DOCKER_LOGIN_USER (exit code: $LOGIN_EXIT_CODE)"
+        exit 1
+    fi
+fi
 
 ###############################################################################
-# STEP 6: Optional container cleanup
+# STEP 6.5: Optional container cleanup
 ###############################################################################
 
 if [[ "$CLEAN_DOCKER_CONTAINER" == "true" ]]; then
@@ -455,26 +482,6 @@ if [[ "$CLEAN_DOCKER_CONTAINER" == "true" ]]; then
     fi
 fi
 
-###############################################################################
-# STEP 6.5: Docker registry login (if credentials provided)
-###############################################################################
-
-if [[ -n "${DOCKER_LOGIN_USER:-}" && -n "${DOCKER_LOGIN_TOKEN:-}" ]]; then
-    DOCKER_LOGIN_SERVER="${DOCKER_LOGIN_SERVER:-}"
-    if [[ -n "$DOCKER_LOGIN_SERVER" ]]; then
-        LOG_INFO_RANK0 "[container] Logging into Docker registry: $DOCKER_LOGIN_SERVER"
-        echo "$DOCKER_LOGIN_TOKEN" | "$CONTAINER_RUNTIME" login "$DOCKER_LOGIN_SERVER" -u "$DOCKER_LOGIN_USER" --password-stdin
-    else
-        LOG_INFO_RANK0 "[container] Logging into Docker Hub"
-        echo "$DOCKER_LOGIN_TOKEN" | "$CONTAINER_RUNTIME" login -u "$DOCKER_LOGIN_USER" --password-stdin
-    fi
-    if [[ $? -eq 0 ]]; then
-        LOG_INFO_RANK0 "[container] Docker login successful"
-    else
-        LOG_ERROR "[container] Docker login failed for user: $DOCKER_LOGIN_USER"
-        exit 1
-    fi
-fi
 
 ###############################################################################
 # STEP 7: Prepare launch arguments
