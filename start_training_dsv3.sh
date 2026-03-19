@@ -5,10 +5,10 @@ export HF_TOKEN="${HF_TOKEN:-'your_hf_token'}"  # make it your own hf token
 export LAUNCHER="${LAUNCHER:-direct}"
 export PRETRAIN_TYPE="${PRETRAIN_TYPE:-FP8}"
 
-# the slurm launcher handles image pull automatically when these two variables are exported.
-# Set the following environment variables (obtain `token_from_amd` from the AMD TAS team):
-export DOCKER_LOGIN_USER="${DOCKER_LOGIN_USER:-tasimage}"
-export DOCKER_LOGIN_TOKEN="${DOCKER_LOGIN_TOKEN:-'token_from_amd'}"
+# Optional: Set these to perform `docker login` on compute nodes before pulling the image.
+# Usage: DOCKER_LOGIN_USER=tasimage DOCKER_LOGIN_TOKEN=<token_from_amd> bash start_training_dsv3.sh
+export DOCKER_LOGIN_USER="${DOCKER_LOGIN_USER:-}"
+export DOCKER_LOGIN_TOKEN="${DOCKER_LOGIN_TOKEN:-}"
 
 #======================================LAUNCHER CONFIG======================================
 LAUNCH_CMD=()
