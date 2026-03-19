@@ -81,4 +81,5 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --recompute_num_layers $PRIMUS_RECOMPUTE_LAYERS \
   --recompute_granularity full \
   --recompute_method block \
+  --attention_softmax_in_fp32 False \
   2>&1 | tee "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK}.txt"
