@@ -5,7 +5,7 @@ This guide walks through running DeepSeek-V3 pretraining across 8 nodes (64 GPUs
 ## 1. Repository Setup
 
 ```bash
-git clone --recurse-submodules git@github.com:AMD-AGI/Primus.git
+git clone git@github.com:AMD-AGI/Primus.git
 cd Primus
 git checkout dev/benchmark_20260318
 git submodule update --init --recursive
