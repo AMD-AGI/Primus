@@ -360,7 +360,7 @@ class TestMegatronTrainer(PrimusUT):
     def test_deepseekv2_lite_uep(self):
         run_script(
             self.__class__.__name__,
-            "deepseekv2_lite_uep",
+            "deepseek_v2_lite_uep",
             exp_path="examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml",
             env_override={"USING_UEP": "1", "REBUILD_UEP": "1"},
             extra_args=[

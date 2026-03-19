@@ -12,8 +12,9 @@
 #
 ###############################################################################
 
+set -euo pipefail
 
-if [ "$USING_UEP" == "1" ]; then
+if [[ "${USING_UEP:-0}" == "1" ]]; then
     LOG_INFO "USING_UEP is enabled, checking required packages..."
 
     if ! python3 -m pip show uccl &>/dev/null || ! python3 -m pip show deep_ep &>/dev/null; then
@@ -34,11 +35,11 @@ if [ "$USING_UEP" == "1" ]; then
 
 
     # set low latency and normal inflight and bytes to avoid hang on AMD Pollara AI NIC and Broadcom Thor-2
-    if [ "$USING_AINIC" == "1" ]; then
+    if [[ "${USING_AINIC:-0}" == "1" ]]; then
         UCCL_IB_MAX_INFLIGHT_NORMAL=${UCCL_IB_MAX_INFLIGHT_NORMAL:-1}
         UCCL_IB_MAX_INFLIGHT_LOW_LATENCY=${UCCL_IB_MAX_INFLIGHT_LOW_LATENCY:-1}
         UCCL_IB_MAX_INFLIGHT_BYTES=${UCCL_IB_MAX_INFLIGHT_BYTES:-4194304} # 4MB
-    elif [ "$REBUILD_BNXT" == "1" ]; then # Broadcom Thor-2
+    elif [[ "${REBUILD_BNXT:-0}" == "1" ]]; then # Broadcom Thor-2
         # FIXME(zhuang12): use `USING_BNXT` for Broadcom Thor-2 maybe better than `REBUILD_BNXT`
         UCCL_IB_MAX_INFLIGHT_NORMAL=${UCCL_IB_MAX_INFLIGHT_NORMAL:-1}
         UCCL_IB_MAX_INFLIGHT_LOW_LATENCY=${UCCL_IB_MAX_INFLIGHT_LOW_LATENCY:-1}
