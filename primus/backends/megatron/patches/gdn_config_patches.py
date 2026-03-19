@@ -21,6 +21,8 @@ _GDN_CONFIG_FIELDS = {
     "linear_value_head_dim": None,
     "linear_num_key_heads": None,
     "linear_num_value_heads": None,
+    "use_fla_triton_kda": False,
+    "use_fla_triton_kda_hybrid": False,
 }
 
 
@@ -36,8 +38,8 @@ def _has_any_gdn_field(args) -> bool:
     phase="before_train",
     description=(
         "Monkey-patch TransformerConfig with linear-attention fields "
-        "(linear_conv_kernel_dim, linear_key_head_dim, etc.) required by "
-        "GatedDeltaNet and KimiDeltaAttention without modifying third-party code."
+        "(linear_conv_kernel_dim, linear_key_head_dim, etc.) and FLA Triton flags "
+        "required by GatedDeltaNet and KimiDeltaAttention without modifying third-party code."
     ),
     condition=lambda ctx: _has_any_gdn_field(get_args(ctx)),
 )
