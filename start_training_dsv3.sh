@@ -38,6 +38,7 @@ export HSA_NO_SCRATCH_RECLAIM=1
 export NVTE_CK_USES_BWD_V3=1
 export GPU_MAX_HW_QUEUES=4
 export PRIMUS_TURBO_DEEPEP_TIMEOUT=600
+export PRIMUS_TURBO_AUTO_TUNE=${PRIMUS_TURBO_AUTO_TUNE:-0}
 
 # Enable NUMA binding for better memory locality (increase stability for large models)
 export ENABLE_NUMA_BINDING=1
@@ -69,7 +70,8 @@ PRIMUS_USER="tas-$(date +%Y%m%d)"
 export PRIMUS_USER
 export PRIMUS_TOKENIZED_DATA_PATH=/shared_aig/c4/tokenized/c4_en_train_text_document # this is the tokenized data path for the training
 export PRIMUS_EXP_NAME=dsv3-pretrain-nnodes_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turboattn_$TURBO_ATTENTION-ropefusion_$APPLY_ROPE_FUSION-profile_$PROFILE
-export PRIMUS_EXP_NAME=debug_dsv3-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turbodeepep_$TURBO_DEEPEEP-turboattn_$TURBO_ATTENTION
+export PRIMUS_EXP_NAME=debug_dsv3-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turbodeepep_$TURBO_DEEPEEP-turboattn_$TURBO_ATTENTION-autotune_$PRIMUS_TURBO_AUTO_TUNE
+# export PRIMUS_EXP_NAME=${PRIMUS_EXP_NAME:-debug_dsv3-type_$PRETRAIN_TYPE}
 
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
