@@ -437,7 +437,7 @@ fi
 # Allow RUN_MODE to be overridden by environment variable
 RUN_MODE="${RUN_MODE:-${direct_config[run_mode]:-torchrun}}"
 
-CMD="${direct_config[script]:-} $* 2>&1 | stdbuf -oL tee ${direct_config[log_file]:-}"
+CMD="${direct_config[script]:-} $* 2>&1 | tee ${direct_config[log_file]:-}"
 if [[ "$RUN_MODE" == "single" ]]; then
     CMD="python3 ${CMD}"
     LOG_INFO_RANK0 "[direct] Using python launcher (single mode)"

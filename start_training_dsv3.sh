@@ -26,13 +26,13 @@ export PRIMUS_MOE_LAYER_FREQ=1
 export PRIMUS_EP=8
 export PRIMUS_PP=8
 export PRIMUS_VPP=2
-export PRIMUS_RECOMPUTE_LAYERS=3
+export PRIMUS_RECOMPUTE_LAYERS=2
 
 export PROFILE=False
 export TURBO_ATTENTION=${TURBO_ATTENTION:-True}
 export TURBO_DEEPEEP=${TURBO_DEEPEEP:-True}
 export LEGACY_GG=${LEGACY_GG:-True}
-export TURBO_GROUPED_MLP=${TURBO_GROUPED_MLP:-True}
+export TURBO_GROUPED_MLP=${TURBO_GROUPED_MLP:-False}
 export APPLY_ROPE_FUSION=True
 export HSA_NO_SCRATCH_RECLAIM=1
 export NVTE_CK_USES_BWD_V3=1
@@ -61,7 +61,7 @@ case $STAGE in
     ;;
 esac
 
-export PRETRAIN_TYPE=${PRETRAIN_TYPE:-BF16}
+export PRETRAIN_TYPE=${PRETRAIN_TYPE:-FP8}
 
 export EXP=examples/megatron/configs/MI355X/deepseek_v3-${PRETRAIN_TYPE}-pretrain.yaml
 export PRIMUS_TEAM=amd

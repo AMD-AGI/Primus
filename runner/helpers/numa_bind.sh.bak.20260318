@@ -35,6 +35,4 @@ if [[ $# -gt 0 && "${1}" == *.py ]]; then
     set -- python3 "$@"
 fi
 
-# [Lens-fix] Merge child stderr into stdout so torchrun forwards loguru output
-exec 2>&1
 numactl --cpunodebind="$NODE" --membind="$NODE" "$@"
