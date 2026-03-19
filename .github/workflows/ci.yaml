@@ -10,7 +10,8 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 3ac579fd5dfc2ea6de766b6240aa78edcb701439 # add PRIMUS_TURBO_DEEPEP_TIMEOUT and PRIMUS_TURBO_DEEPEP_DISABLE_CHEAP_FENCE environment variable
+  PRIMUS_TURBO_COMMIT: a4488f6cdb15cfff4383c61af7922bb50803f0ea # feat: update triton impl for mi300 & mi355 (#252)
+  PRIMUS_TURBO_AITER_COMMIT: e83f9903c07001a0ec29e85d223f6e6cdbe00859
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   BASE_IMAGE: docker.io/rocm/primus:v26.1
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.1

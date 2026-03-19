@@ -2,6 +2,7 @@ ARG BASE_IMAGE=docker.io/rocm/primus:v26.1
 FROM ${BASE_IMAGE}
 
 ARG PRIMUS_TURBO_COMMIT
+ARG PRIMUS_TURBO_AITER_COMMIT
 ARG PRIMUS_TURBO_FRAMEWORK
 ARG ROCSHMEM_COMMIT
 
@@ -49,6 +50,15 @@ RUN rm -rf /opt/rocSHMEM
 # ---------------------------------------------------------------------------
 # Install Primus-Turbo
 # ---------------------------------------------------------------------------
+
+RUN pip3 uninstall aiter amd-aiter -y || true && \
+    cd /opt && \
+    git clone --recursive https://github.com/ROCm/aiter.git && \
+    cd aiter && \
+    git checkout ${PRIMUS_TURBO_AITER_COMMIT} && \
+    git submodule update --init --recursive && \
+    PREBUILD_KERNELS=3 python3 setup.py develop
+
 RUN cd /opt && \
     git clone https://github.com/AMD-AGI/Primus-Turbo.git && \
     cd Primus-Turbo && \
