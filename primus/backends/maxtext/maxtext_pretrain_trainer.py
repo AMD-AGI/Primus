@@ -28,7 +28,12 @@ import os
 from typing import Any, Dict, Optional
 
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.modules.module_utils import error_rank_0, log_rank_0, set_logging_rank, warning_rank_0
+from primus.modules.module_utils import (
+    error_rank_0,
+    log_rank_0,
+    set_logging_rank,
+    warning_rank_0,
+)
 
 
 class MaxTextPretrainTrainer(BaseTrainer):

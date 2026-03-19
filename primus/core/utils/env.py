@@ -15,12 +15,8 @@ def get_torchrun_env():
     Supports both torchrun (RANK/WORLD_SIZE) and JAX/MaxText (NODE_RANK/NNODES)
     environment variables. Torchrun vars take precedence when both are present.
     """
-    rank = int(
-        os.getenv("RANK", os.getenv("NODE_RANK", const.LOCAL_NODE_RANK))
-    )
-    world_size = int(
-        os.getenv("WORLD_SIZE", os.getenv("NNODES", const.LOCAL_WORLD_SIZE))
-    )
+    rank = int(os.getenv("RANK", os.getenv("NODE_RANK", const.LOCAL_NODE_RANK)))
+    world_size = int(os.getenv("WORLD_SIZE", os.getenv("NNODES", const.LOCAL_WORLD_SIZE)))
     return {
         "rank": rank,
         "world_size": world_size,
