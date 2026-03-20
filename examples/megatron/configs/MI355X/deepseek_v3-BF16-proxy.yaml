@@ -1,0 +1,108 @@
+###############################################################################
+# DeepSeek V3-671B BF16 Proxy Model for MI355X (single GPU)
+#
+# Proxy design: keep GroupedGEMM shapes identical to full-rack training.
+# Full model: 256 experts, hidden=7168, moe_ffn=2048, shared_expert=2048
+#
+# Configure PROXY_NUM_EXPERTS to match experts/GPU in full-rack EP scenario:
+#   EP8  -> 32 experts/GPU  (default)
+#   EP16 -> 16 experts/GPU
+#   EP32 ->  8 experts/GPU
+#   EP64 ->  4 experts/GPU
+#
+# Router group params must be adjusted together with num_experts.
+# See the preset blocks below.
+###############################################################################
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:deepseek_v3-proxy}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: deepseek_v3.yaml
+    overrides:
+      stderr_sink_level: DEBUG
+      moe_router_force_load_balancing: true
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # --- Training ---
+      train_iters: ${PROXY_TRAIN_ITERS:4}
+      micro_batch_size: 1
+      global_batch_size: 1
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # --- Proxy: reduce layers to fit single-GPU HBM ---
+      num_layers: ${PROXY_NUM_LAYERS:2}
+      moe_layer_freq: "([0]*1+[1]*1)"
+
+      # --- Proxy: match experts/GPU in full-rack EP scenario ---
+      # Default: EP8 full-rack -> 32 experts/GPU
+      num_experts: ${PROXY_NUM_EXPERTS:32}
+      expert_model_parallel_size: 1
+
+      # Router group params (must match num_experts)
+      # EP8  (32 experts): num_groups=4, group_topk=2, topk=8
+      # EP16 (16 experts): num_groups=4, group_topk=2, topk=8
+      # EP32 ( 8 experts): num_groups=2, group_topk=2, topk=4
+      # EP64 ( 4 experts): num_groups=1, group_topk=1, topk=4
+      moe_router_num_groups: ${PROXY_ROUTER_NUM_GROUPS:4}
+      moe_router_group_topk: ${PROXY_ROUTER_GROUP_TOPK:2}
+      moe_router_topk: ${PROXY_ROUTER_TOPK:8}
+
+      # --- Parallelism: single GPU ---
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+      use_distributed_optimizer: false
+
+      # --- MLA (keep as full model) ---
+      multi_latent_attention: true
+
+      # --- MTP: disable for proxy to reduce complexity ---
+      mtp_num_layers: 0
+
+      # --- ROCm workarounds ---
+      apply_rope_fusion: false
+      no_persist_layer_norm: true
+      disable_compile_dependencies: true
+
+      # --- Activation recompute ---
+      recompute_granularity: full
+      recompute_method: block
+      recompute_num_layers: ${PROXY_NUM_LAYERS:2}
+
+      # --- Data ---
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # --- Checkpoint ---
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0

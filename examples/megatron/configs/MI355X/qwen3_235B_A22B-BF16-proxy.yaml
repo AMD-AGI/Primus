@@ -1,0 +1,97 @@
+###############################################################################
+# Qwen3-235B-A22B BF16 Proxy Model for MI355X (single GPU)
+#
+# Proxy design: keep GroupedGEMM shapes identical to full-rack training.
+# Full model: 128 experts, hidden=4096, moe_ffn=1536
+#
+# Configure PROXY_NUM_EXPERTS to match experts/GPU in full-rack EP scenario:
+#   EP8  -> 16 experts/GPU  (default)
+#   EP16 ->  8 experts/GPU
+#   EP32 ->  4 experts/GPU
+#   EP64 ->  2 experts/GPU
+#
+# Qwen3 uses simple top-k routing (no group routing).
+# topk must be <= num_experts.
+###############################################################################
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:qwen3_235B_A22B-proxy}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: qwen3_235B_A22B.yaml
+    overrides:
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # --- Training ---
+      train_iters: ${PROXY_TRAIN_ITERS:4}
+      micro_batch_size: 1
+      global_batch_size: 1
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+
+      # --- Proxy: reduce layers to fit single-GPU HBM ---
+      num_layers: ${PROXY_NUM_LAYERS:2}
+      moe_layer_freq: "1"
+
+      # --- Proxy: match experts/GPU in full-rack EP scenario ---
+      # Default: EP8 full-rack -> 16 experts/GPU
+      num_experts: ${PROXY_NUM_EXPERTS:16}
+      expert_model_parallel_size: 1
+
+      # Router topk (no group routing for Qwen3)
+      # EP8  (16 experts): topk=8
+      # EP16 ( 8 experts): topk=8
+      # EP32 ( 4 experts): topk=4
+      # EP64 ( 2 experts): topk=2
+      moe_router_topk: ${PROXY_ROUTER_TOPK:8}
+
+      # --- Parallelism: single GPU ---
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+      use_distributed_optimizer: false
+
+      # --- ROCm workarounds ---
+      apply_rope_fusion: false
+      no_persist_layer_norm: true
+      disable_compile_dependencies: true
+
+      # --- Activation recompute ---
+      recompute_granularity: full
+      recompute_method: block
+      recompute_num_layers: ${PROXY_NUM_LAYERS:2}
+
+      # --- Data ---
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # --- Checkpoint ---
+      finetune: false
+      auto_continue_train: false
+      load: null
+      save: null
+      save_interval: 20000
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
