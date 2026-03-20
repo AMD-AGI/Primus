@@ -740,6 +740,7 @@ class PrimusTurboColumnParallelLinear(TELinear):
         skip_weight_param_allocation: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        stride: int = 1,  # TODO(ruibin): compatible with Megatron-LM. Not used.
     ):
         if gather_output:
             raise ValueError(f"{__class__.__name__} layers do not support gather_output = True")
@@ -996,6 +997,7 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         skip_weight_param_allocation: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        stride: int = 1,  # TODO(ruibin): compatible with Megatron-LM. Not used.
     ):
         args = get_args()
         self.config = config
