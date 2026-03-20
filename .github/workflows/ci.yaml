@@ -213,7 +213,24 @@ jobs:
           submodules: "recursive"
           path: Primus-Turbo
           ref: ${{ env.PRIMUS_TURBO_COMMIT }}
-      - run: echo "Begin Primus-Turbo Install."
+      - run: echo "Begin AITER + Primus-Turbo Install."
+      - name: Install AITER
+        run: |
+          echo "✅ [Uninstall old aiter] started at: $(date)"
+          pip3 uninstall aiter amd-aiter -y || true
+          rm -rf /tmp/aiter || true
+          cd /tmp
+          git clone --recursive https://github.com/ROCm/aiter.git
+          cd aiter
+          git checkout ${PRIMUS_TURBO_AITER_COMMIT}
+          git submodule update --init --recursive
+          start_time=$(date +%s)
+          echo "✅ [Build aiter] started at: $(date)"
+          PREBUILD_KERNELS=3 python3 setup.py develop
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "✅ [Build aiter] ended at: $(date)"
+          echo "⏱️ [Build aiter] Total elapsed time: ${elapsed} seconds"
       - name: Install Primus-Turbo
         run: |
           rm -rf /tmp/Primus-Turbo || true
