@@ -400,7 +400,7 @@ class TestMegatronTrainer(PrimusUT):
     def test_turbo_grouped_gemm(self):
         run_script(
             self.__class__.__name__,
-            "deepseek_v2_lite",
+            "deepseek_v2_lite_turbo_grouped_gemm",
             exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/deepseek_v2_lite-BF16-pretrain.yaml",
             env_override={
                 "PRIMUS_TURBO_AUTO_TUNE": "1",
