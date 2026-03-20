@@ -543,9 +543,10 @@ print_section ""
 # STEP 11: Execute command
 ###############################################################################
 # Temporarily allow pipeline to fail so we can capture PIPESTATUS and log it
+set +e
 eval "$CMD"
 exit_code=$?
-
+set -e
 # Print result based on exit code
 if [[ $exit_code -ge 128 ]]; then
     LOG_ERROR "[direct] torchrun crashed due to signal $((exit_code - 128))"
