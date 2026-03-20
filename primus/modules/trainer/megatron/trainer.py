@@ -183,6 +183,12 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         self.app_metrics = {}
 
+        # Cache for GPU utilization sampling to avoid rocm-smi overhead on every rank
+        # See: https://github.com/AMD-AGI/Primus/pull/439 (Copilot review)
+        self._last_rocm_gpu_util = None
+        self._last_rocm_gpu_util_time = 0.0
+        self._rocm_gpu_util_sample_interval = 5.0  # seconds
+
         # disable all logging handlers
         import logging
 
@@ -2044,11 +2050,35 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                         self.module_local_rank
                     )
                 # Collect GPU utilization for performance metrics
+                # Optimization: Sample only on DP rank 0 to avoid per-rank subprocess overhead,
+                # and rate-limit to avoid rocm-smi jitter at every log_interval.
+                # See: https://github.com/AMD-AGI/Primus/pull/439 (Copilot review)
                 if getattr(args, "mlflow_upload_performance_metrics", False):
                     try:
-                        rocm_gpu_util = get_rocm_smi_gpu_util(self.module_local_rank)
+                        from megatron.core.parallel_state import get_data_parallel_rank
+
+                        is_dp_rank0 = get_data_parallel_rank() == 0
                     except Exception:
-                        rocm_gpu_util = None
+                        is_dp_rank0 = args.rank == 0
+
+                    if is_dp_rank0:
+                        import time
+
+                        now = time.time()
+                        should_sample = (
+                            self._last_rocm_gpu_util is None
+                            or (now - self._last_rocm_gpu_util_time) >= self._rocm_gpu_util_sample_interval
+                        )
+                        if should_sample:
+                            try:
+                                self._last_rocm_gpu_util = get_rocm_smi_gpu_util(self.module_local_rank)
+                                self._last_rocm_gpu_util_time = now
+                            except Exception:
+                                pass  # Keep previous cached value if any
+                    # Non-DP-rank-0 ranks use the cached/last-known value (or None initially)
+                    rocm_gpu_util = self._last_rocm_gpu_util
+                else:
+                    rocm_gpu_util = None
 
             elapsed_time = timers("interval-time").elapsed(barrier=True)
             elapsed_time_per_iteration = elapsed_time / total_iterations

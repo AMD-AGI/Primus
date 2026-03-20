@@ -864,10 +864,15 @@ def generate_tracelens_reports_locally(
         >>> generate_tracelens_reports_locally(
         ...     tensorboard_dir="/path/to/tensorboard",
         ...     exp_root_path="/path/to/experiment",
-        ...     ranks=[0, 8],  # Only 2 ranks = 2 reports
+        ...     ranks=[0, 8],  # Only 2 ranks
         ...     output_format="all"
         ... )
-        26  # Generated 26 report files (XLSX + CSVs for 2 ranks)
+        2  # Generated 2 report items (XLSX file + CSV directory for 2 ranks)
+
+    Note:
+        Returns count of report "items" (files or directories), not individual CSV
+        files within directories. For output_format="all", each rank produces 2 items:
+        one XLSX file and one CSV subdirectory.
     """
     # Create output directory for reports
     reports_dir = os.path.join(exp_root_path, "tracelens_reports")
