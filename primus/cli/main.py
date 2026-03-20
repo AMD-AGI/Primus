@@ -178,7 +178,15 @@ def main():
             if getattr(args, "debug", False):
                 traceback.print_exc()
             else:
-                print(f"[Primus] Error: {traceback.format_exc().splitlines()[-1]}", file=sys.stderr)
+                exc_type, exc_value, exc_tb = sys.exc_info()
+                err_msg = traceback.format_exc().splitlines()[-1]
+                loc = ""
+                if exc_tb is not None:
+                    frames = traceback.extract_tb(exc_tb)
+                    if frames:
+                        last = frames[-1]
+                        loc = f" ({last.filename}:{last.lineno})"
+                print(f"[Primus] Error: {err_msg}{loc}", file=sys.stderr)
                 print("[Primus] Re-run with --debug for full stack trace.", file=sys.stderr)
             raise SystemExit(1)
     else:
