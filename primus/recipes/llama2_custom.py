@@ -67,6 +67,7 @@ from megatron.bridge.training.config import (
     DistributedDataParallelConfig,
     FinetuningDatasetConfig,
     LoggerConfig,
+    ProfilingConfig,
     RerunStateMachineConfig,
     RNGConfig,
     TokenizerConfig,
@@ -333,7 +334,7 @@ def _llama2_lora(
     tensorboard_dir = os.path.join(run_output_dir, "tb_logs")
     from transformers import AutoConfig
 
-    config = AutoConfig.from_pretrained("/data/huggingface/hub/models--meta-llama--Llama-2-70b-hf/snapshots/3aba440b59558f995867ba6e1f58f21d0336b5bb/")
+    config = AutoConfig.from_pretrained("meta-llama/Llama-2-70b-hf")
     bridge = AutoBridge.from_hf_config(config)
     model_cfg = bridge.to_megatron_provider(load_weights=False) #GPTProvider
     model_cfg.tensor_model_parallel_size = tensor_model_parallel_size
@@ -484,6 +485,13 @@ def _llama2_lora(
         comm_overlap=comm_overlap_config,
         mixed_precision=precision_config,
         peft=peft_config,
+        profiling=ProfilingConfig(
+            use_pytorch_profiler=True,
+            profile_step_start=140,
+            profile_step_end=142,
+            profile_ranks=list(range(8)),  # 1 node × 8 GPUs
+            record_shapes=True,
+        ),
     )
 
     if cfg.comm_overlap is None:
