@@ -8,24 +8,22 @@
 # System hook: enable build uccl settings.
 #
 # Trigger:
-#   export REBUILD_UCCL=1
+#   export REBUILD_UEP=1
 #
 ###############################################################################
 
 set -euo pipefail
 
-if [[ "${REBUILD_UCCL:-0}" != "1" ]]; then
+if [[ "${REBUILD_UEP:-0}" != "1" ]]; then
     exit 0
 fi
 
 UCCL_DIR="/tmp/uccl"
 UCCL_BUILD_DIR="${UCCL_BUILD_DIR:-/tmp/uccl_${HOSTNAME:-$(hostname)}}"
-UCCL_REF="${UCCL_REF:-}"
-GPU_ARCHS="${GPU_ARCHS:-gfx942;gfx950}"
+UCCL_REF="${UCCL_REF:-5afb4117893c58cc0c8557d9286336141a301053}" # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
 
-LOG_INFO_RANK0 "[hook system] REBUILD_UCCL=1 → Building uccl in /tmp "
+LOG_INFO_RANK0 "[hook system] REBUILD_UEP=1 → Building uccl in /tmp "
 LOG_INFO_RANK0 "  Build directory : ${UCCL_BUILD_DIR}"
-LOG_INFO_RANK0 "  GPU_ARCHS       : ${GPU_ARCHS}"
 
 if [ -d "$UCCL_DIR" ]; then
 	LOG_INFO_RANK0 "[hook system] Found existed uccl in /tmp, remove it"
@@ -47,7 +45,7 @@ if [[ -n "$UCCL_REF" ]]; then
 fi
 
 LOG_INFO_RANK0 "[hook system] Building uccl ep"
-cd ep && PYTORCH_ROCM_ARCH="${GPU_ARCHS}" python3 setup.py build && cd ..
+cd ep && python3 setup.py build && cd ..
 
 LOG_INFO_RANK0 "[hook system] Building uccl ep done"
 
