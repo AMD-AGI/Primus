@@ -50,23 +50,19 @@ def patch_get_megatron_optimizer_muon(ctx: PatchContext) -> None:
     def _patched_get_megatron_optimizer(
         config,
         model_chunks,
-        no_weight_decay_cond=None,
-        scale_lr_cond=None,
-        lr_mult=1.0,
+        config_overrides=None,
         use_gloo_process_groups=True,
-        default_skip_embedding_weight_decay=False,
         pg_collection=None,
+        dump_param_to_param_group_map=None,
     ):
         if not config.optimizer or "muon" not in config.optimizer:
             return original_get_megatron_optimizer(
                 config,
                 model_chunks,
-                no_weight_decay_cond=no_weight_decay_cond,
-                scale_lr_cond=scale_lr_cond,
-                lr_mult=lr_mult,
+                config_overrides=config_overrides,
                 use_gloo_process_groups=use_gloo_process_groups,
-                default_skip_embedding_weight_decay=default_skip_embedding_weight_decay,
                 pg_collection=pg_collection,
+                dump_param_to_param_group_map=dump_param_to_param_group_map,
             )
 
         from primus.backends.megatron.core.optimizer.moun import (
@@ -88,12 +84,11 @@ def patch_get_megatron_optimizer_muon(ctx: PatchContext) -> None:
         return get_megatron_muon_optimizer(
             moun_config,
             model_chunks,
-            no_weight_decay_cond=no_weight_decay_cond,
-            scale_lr_cond=scale_lr_cond,
-            lr_mult=lr_mult,
+            config_overrides=config_overrides,
             use_gloo_process_groups=use_gloo_process_groups,
             layer_wise_distributed_optimizer="dist" in config.optimizer,
             pg_collection=pg_collection,
+            dump_param_to_param_group_map=dump_param_to_param_group_map,
         )
 
     setattr(_patched_get_megatron_optimizer, "_primus_muon_wrapper", True)

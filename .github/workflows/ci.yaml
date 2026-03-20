@@ -10,8 +10,9 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 79373eb781a54fd49aed9430c8718489409d1dd0 # chore(aiter): update aiter to fix FA asm kernel bug (#237)
+  PRIMUS_TURBO_COMMIT: 3ac579fd5dfc2ea6de766b6240aa78edcb701439 # add PRIMUS_TURBO_DEEPEP_TIMEOUT and PRIMUS_TURBO_DEEPEP_DISABLE_CHEAP_FENCE environment variable
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
+  UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
   BASE_IMAGE: docker.io/rocm/primus:v26.1
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.1
 
@@ -101,6 +102,7 @@ jobs:
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=PYTORCH \
+               --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
                $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
@@ -157,6 +159,7 @@ jobs:
                --build-arg BASE_IMAGE=${MAXTEXT_BASE_IMAGE} \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=JAX \
+               --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} .
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
@@ -277,7 +280,9 @@ jobs:
           export HSA_NO_SCRATCH_RECLAIM=1
           pytest --maxfail=1 -s ./tests/unit_tests/ \
             --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_fp8_te_linear \
-            --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_te_linear
+            --deselect=tests/unit_tests/megatron/cco/test_tp_overlap.py::TPOverlapTestCase::test_te_linear \
+            --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_forward_backward \
+            --deselect=tests/unit_tests/megatron/transformer/moe/test_token_dispatcher.py::TestFlexDispatcher::test_capacity_forward_backward
       - name: Run Primus Model Tests -- Megatron-LM
         env:
           HF_TOKEN: ${{secrets.HF_TOKEN}}

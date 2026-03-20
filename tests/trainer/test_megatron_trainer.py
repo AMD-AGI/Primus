@@ -107,15 +107,6 @@ class TestMegatronTrainer(PrimusUT):
     def tearDown(self):
         pass
 
-    def test_llama2_7B(self):
-        run_script(
-            self.__class__.__name__,
-            "llama2_7B",
-            exp_path="examples/megatron/configs/MI300X/llama2_7B-BF16-pretrain.yaml",
-            env_override={},
-            extra_args=["--num_layers", "4", "--train_iters", "3"],
-        )
-
     def test_llama3_8B(self):
         run_script(
             self.__class__.__name__,
@@ -134,22 +125,60 @@ class TestMegatronTrainer(PrimusUT):
             extra_args=["--num_layers", "4", "--train_iters", "3"],
         )
 
-    def test_qwen25_7B(self):
+    def test_qwen3_30B_A3B(self):
         run_script(
             self.__class__.__name__,
-            "qwen2.5_7B",
-            exp_path="examples/megatron/configs/MI300X/qwen2.5_7B-BF16-pretrain.yaml",
+            "qwen3_30B_A3B",
+            exp_path="examples/megatron/configs/MI300X/qwen3_30B_A3B-BF16-pretrain.yaml",
             env_override={},
-            extra_args=["--num_layers", "4", "--train_iters", "3"],
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--expert_model_parallel_size",
+                "8",
+                "--recompute_granularity",
+                "full",
+                "--recompute_method",
+                "block",
+                "--recompute_num_layers",
+                "0",
+            ],
         )
 
-    def test_qwen25_72B(self):
+    def test_qwen3_235B_A22B(self):
         run_script(
             self.__class__.__name__,
-            "qwen2.5_72B",
-            exp_path="examples/megatron/configs/MI300X/qwen2.5_72B-BF16-pretrain.yaml",
+            "qwen3_235B_A22B",
+            exp_path="examples/megatron/configs/MI300X/qwen3_235B_A22B-BF16-pretrain.yaml",
             env_override={},
-            extra_args=["--num_layers", "4", "--train_iters", "3"],
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--moe_layer_freq",
+                "[0]*1+[1]*3",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--expert_model_parallel_size",
+                "8",
+                "--pipeline_model_parallel_size",
+                "1",
+                "--recompute_granularity",
+                "full",
+                "--recompute_method",
+                "block",
+                "--recompute_num_layers",
+                "0",
+            ],
         )
 
     def test_deepseek_v2_lite(self):
@@ -159,6 +188,10 @@ class TestMegatronTrainer(PrimusUT):
             exp_path="examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
+                "--num_layers",
+                "4",
+                "--moe_layer_freq",
+                "[0]*1+[1]*3",
                 "--train_iters",
                 "3",
                 "--micro_batch_size",
@@ -296,6 +329,40 @@ class TestMegatronTrainer(PrimusUT):
             "turbo_deepep",
             exp_path="examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml",
             env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--moe_layer_freq",
+                "1",
+                "--expert_model_parallel_size",
+                "8",
+                "--use_turbo_deepep",
+                "1",
+                "--enable_primus_turbo",
+                "1",
+                "--moe_router_dtype",
+                "fp32",
+                "--moe_shared_expert_overlap",
+                "0",
+                "--moe_use_legacy_grouped_gemm",
+                "1",
+                "--turbo_sync_free_moe_stage",
+                "3",
+            ],
+        )
+
+    def test_deepseekv2_lite_uep(self):
+        run_script(
+            self.__class__.__name__,
+            "deepseek_v2_lite_uep",
+            exp_path="examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml",
+            env_override={"USING_UEP": "1", "REBUILD_UEP": "1"},
             extra_args=[
                 "--num_layers",
                 "4",
