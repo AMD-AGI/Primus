@@ -14,7 +14,6 @@ modules:
       run_name: "deepseek_v2_16b_training"
       base_output_directory: "./output"
       steps: 50
-      log_period: 10
       profiler: ""
 
       # data

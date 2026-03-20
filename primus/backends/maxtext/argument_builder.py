@@ -15,9 +15,8 @@ MaxText Configuration Builder.
 
 - ``export_params_to_yaml()``
   Writes a flat config dict to a temporary YAML file so that MaxText's
-  ``pyconfig.initialize(argv)`` can load it.  Config parsing is entirely
-  delegated to MaxText, ensuring version compatibility with both the
-  Pydantic-based (Dec) and dict-based (Aug) config systems.
+  ``pyconfig.initialize(argv)`` can load it.  Primus-private keys are
+  left in; MaxText's ``_prepare_for_pydantic`` ignores unknown fields.
 
 - ``namespace_to_dict()``
   Recursively converts ``SimpleNamespace`` to plain dicts.
@@ -80,6 +79,10 @@ def namespace_to_dict(obj: Any) -> Any:
 def export_params_to_yaml(params_dict: Dict[str, Any]) -> str:
     """
     Write a flat config dict to a temporary YAML file for ``pyconfig.initialize``.
+
+    Primus-private keys (``trainable``, ``framework``, …) are passed through
+    as-is; MaxText's ``_prepare_for_pydantic`` silently ignores any fields
+    it does not recognise.
 
     Parameters
     ----------
