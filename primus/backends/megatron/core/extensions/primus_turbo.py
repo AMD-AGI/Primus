@@ -539,9 +539,7 @@ class PrimusTurboLinear(TELinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.block_scaling():
-                fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
+            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -693,9 +691,7 @@ class PrimusTurboRowParallelLinear(TELinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.block_scaling():
-                fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
+            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -839,9 +835,7 @@ class PrimusTurboColumnParallelLinear(TELinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.block_scaling():
-                fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
+            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -948,9 +942,7 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.block_scaling():
-                fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
+            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -1117,9 +1109,7 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.block_scaling():
-                fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
+            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
