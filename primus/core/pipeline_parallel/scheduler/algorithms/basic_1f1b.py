@@ -15,8 +15,9 @@ __all__ = [
 
 
 class Schedule1F1B(PipelineScheduleAlgo):
-    def __init__(self, pp_size, vpp_size, micro_batches):
+    def __init__(self, pp_size, vpp_size, micro_batches, combined_forward_backward=False):
         super().__init__(pp_size, vpp_size, micro_batches)
+        self.combined_forward_backward = combined_forward_backward
 
     def direction_map(self, rank: int, chunk: int, func_type: FuncType) -> dict[str, Any]:
         assert chunk == 0
@@ -89,6 +90,9 @@ class Schedule1F1B(PipelineScheduleAlgo):
                 )
                 if send_node is not None:
                     schedule_table[rank].append(send_node)
+
+        if self.combined_forward_backward:
+            schedule_table = self.add_combine_1f1b_info_for_schedule_table(schedule_table)
 
         return schedule_table
 

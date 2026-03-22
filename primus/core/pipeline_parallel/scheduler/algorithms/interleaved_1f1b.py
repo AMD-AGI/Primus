@@ -26,9 +26,10 @@ class ScheduleInterleaved1F1B(PipelineScheduleAlgo):
     - Chunks are interleaved based on their stage IDs to minimize bubbles
     """
 
-    def __init__(self, pp_size, vpp_size, micro_batches):
+    def __init__(self, pp_size, vpp_size, micro_batches, combined_forward_backward=False):
         super().__init__(pp_size, vpp_size, micro_batches)
         assert vpp_size > 1, "Interleaved 1F1B requires vpp_size > 1"
+        self.combined_forward_backward = combined_forward_backward
 
     def direction_map(self, rank: int, chunk: int, func_type: FuncType) -> dict[str, Any]:
         """Map communication directions for interleaved schedule
@@ -205,6 +206,9 @@ class ScheduleInterleaved1F1B(PipelineScheduleAlgo):
 
                 if bwd_send_node is not None:
                     rank_schedule.append(bwd_send_node)
+
+        if self.combined_forward_backward:
+            schedule_table = self.add_combine_1f1b_info_for_schedule_table(schedule_table)
 
         return schedule_table
 

@@ -33,6 +33,12 @@ decoder_pipeline_manual_split_list: null # int list
 # MoE comm & comp Overlap
 patch_moe_overlap: false
 
+# MoE A2A timing instrumentation
+# When true, instruments MoELayer with CUDA event timers and logs per-layer
+# dispatch/expert/combine timing each step. Used to quantify overlap benefit.
+# See primus/backends/megatron/patches/moe_patches/moe_timing_patches.py
+moe_timing_enabled: false
+
 # perf
 pp_warmup: false # set to true to decrease iter-1 time when using pp
 

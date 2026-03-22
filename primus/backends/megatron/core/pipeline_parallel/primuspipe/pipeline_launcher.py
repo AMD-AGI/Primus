@@ -152,7 +152,11 @@ class PrimusPipelineParallelLauncher:
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
         kwargs = {}
-        if self.pp_algorithm == "zbv-formatted":
+        # Enable combined F/B overlap for all PP algorithms when
+        # overlap_moe_expert_parallel_comm is set. This allows the scheduler to
+        # pair consecutive F→B nodes so combined_fwd_bkwd_handler can run them
+        # together, hiding MoE EP A2A communication behind compute.
+        if self.pp_algorithm in ("1f1b", "1f1b-interleaved", "zbv-formatted"):
             kwargs["combined_forward_backward"] = get_args().overlap_moe_expert_parallel_comm
 
         offload = get_args().offload
