@@ -311,6 +311,10 @@ while [[ $# -gt 0 ]]; do
 done
 set -- "${primus_args[@]}"
 
+# Prepend --debug to Python CLI args when debug mode is enabled (CLI or config).
+# Done here so it flows through hooks/patches and matches container/slurm pattern.
+[[ "$DEBUG_MODE" == "1" ]] && set -- --debug "$@"
+
 ###############################################################################
 # STEP 4.5: Process non-cumulative parameters (use last value only)
 ###############################################################################
@@ -539,9 +543,10 @@ print_section ""
 # STEP 11: Execute command
 ###############################################################################
 # Temporarily allow pipeline to fail so we can capture PIPESTATUS and log it
+set +e
 eval "$CMD"
 exit_code=$?
-
+set -e
 # Print result based on exit code
 if [[ $exit_code -ge 128 ]]; then
     LOG_ERROR "[direct] torchrun crashed due to signal $((exit_code - 128))"
