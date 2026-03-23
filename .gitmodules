@@ -3,8 +3,8 @@
 	url = https://github.com/pytorch/torchtitan.git
 [submodule "third_party/Megatron-LM"]
 	path = third_party/Megatron-LM
-	url = https://github.com/NVIDIA/Megatron-LM.git
-	branch = main
+	url = https://github.com/zhenhuang12/Megatron-LM.git
+	branch = zhenhuang12/core_v0.16.0/paged_stashing
 [submodule "third_party/maxtext"]
 	path = third_party/maxtext
 	url = https://github.com/ROCm/maxtext.git
