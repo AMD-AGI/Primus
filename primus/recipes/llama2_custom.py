@@ -726,7 +726,7 @@ def evaluate_and_print_results_custom(
     wandb_writer = state.wandb_logger
         
     eval_start = time.time()
-    total_loss_dict, collected_non_loss_data, timelimit = eval.evaluate(
+    total_loss_dict, collected_non_loss_data, timelimit = evaluate(
         state, forward_step_func, data_iterator, model, process_non_loss_data_func, config, verbose, non_loss_data_func
     )
     eval_duration = time.time() - eval_start
