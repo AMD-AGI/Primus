@@ -281,7 +281,7 @@ export HSA_NO_SCRATCH_RECLAIM=1
 
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection memory \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml
 ```
 
 ### Performance Projection (Benchmark Mode)
@@ -294,7 +294,7 @@ export HSA_NO_SCRATCH_RECLAIM=1
 
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
     --target-nodes 4
 ```
 
@@ -305,7 +305,7 @@ Run a full training projection entirely on CPU using analytical backends:
 ```bash
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
     --profiling-mode simulate \
     --target-nodes 4
 ```
@@ -315,7 +315,7 @@ Target a specific GPU architecture for simulation:
 ```bash
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
     --profiling-mode simulate --gpu-arch mi355x \
     --target-nodes 4
 ```
@@ -330,7 +330,7 @@ export GPUS_PER_NODE=8
 
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
     --benchmark-gpus 1 \
     --target-nodes 4
 ```
@@ -344,7 +344,7 @@ Validate simulation accuracy against real hardware:
 ```bash
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
     --profiling-mode both \
     --target-nodes 4
 ```
@@ -360,7 +360,7 @@ export PRIMUS_EP=8
 
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
     --target-nodes 6
 ```
 
@@ -417,14 +417,14 @@ The following is representative output from a Mixtral 8×22B BF16 projection on 
 ```
 ====================================================================================================
 [Primus:Performance Projection] Configuration Summary:
-  Benchmark Config: TP=1, PP=1, EP=8, CP=1, DP=8 (1 node)
-  Target Config: TP=1, PP=4, EP=8, CP=1, DP=16 (8 nodes)
+  Benchmark Config: TP=1, PP=1, VPP=2, EP=8, CP=1, DP=8 (1 node)
+  Target Config: TP=1, PP=4, VPP=2, EP=8, CP=1, DP=16 (8 nodes)
 
 ====================================================================================================
 Multinode Scaling Projection Results
 ====================================================================================================
 
-📊 Parallelism: TP=1, PP=4, EP=8, CP=1
+📊 Parallelism: TP=1, PP=4, VPP=2, EP=8, CP=1
 
 📡 Communication Breakdown:
    gradient_allreduce: 540.274 ms (message: 24192.00 MB)
@@ -436,7 +436,7 @@ Multinode Scaling Projection Results
 
 🎯 Target Configuration (8 nodes):
    Nodes: 8, GPUs: 64
-   TP=1, PP=4, EP=8, CP=1, DP=16
+   TP=1, PP=4, VPP=2, EP=8, CP=1, DP=16
    Iteration Time: 10,052 ms
    Tokens/s/GPU: 3,260
 ====================================================================================================
@@ -464,7 +464,7 @@ To validate the projection tool's accuracy, we compared projected performance ag
 ### Key Takeaways
 
 - **All projections are within 10% of measured results**, spanning both dense (Llama) and MoE (Mixtral) architectures, FP8 and BF16 precision, and two different GPU generations (MI325X, MI355X).
-- The Mixtral result exercises the full projection pipeline: PP reduction (benchmark PP=1, target PP=4), EP All-to-All modeling (with DeepEP), and pipeline schedule simulation — yet still achieves <10% error.
+- The Mixtral result exercises the full projection pipeline: PP reduction (benchmark PP=1, target PP=4), EP All-to-All modeling, and pipeline schedule simulation with VPP=2 — yet still achieves <10% error.
 
 
 ## Assumptions and Limitations

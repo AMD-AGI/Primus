@@ -57,7 +57,7 @@ export HSA_NO_SCRATCH_RECLAIM=1
 
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection memory \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml
 ```
 
 ### Training Projection (default)
@@ -70,7 +70,7 @@ export HSA_NO_SCRATCH_RECLAIM=1
 
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml
 ```
 
 Project training performance to a specific number of nodes:
@@ -81,7 +81,7 @@ export HSA_NO_SCRATCH_RECLAIM=1
 
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
     --target-nodes 4
 ```
 
@@ -94,7 +94,7 @@ export HSA_NO_SCRATCH_RECLAIM=1
 
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
     --benchmark-gpus 1 \
     --target-nodes 4
 ```
@@ -134,7 +134,7 @@ export PRIMUS_EP=8
 
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
     --target-nodes 6
 ```
 
@@ -565,7 +565,7 @@ Run a full training projection without any GPU:
 # No GPU required — runs entirely on CPU
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
     --profiling-mode simulate \
     --target-nodes 4
 ```
@@ -575,7 +575,7 @@ Target a specific GPU architecture:
 ```bash
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
     --profiling-mode simulate --gpu-arch mi355x \
     --target-nodes 4
 ```
@@ -585,7 +585,7 @@ Compare simulation accuracy against projection with single node benchmarking:
 ```bash
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
     --profiling-mode both \
     --target-nodes 4
 ```
@@ -600,7 +600,7 @@ export GPUS_PER_NODE=8
 
 bash runner/primus-cli direct --script primus/cli/main.py -- \
     projection performance \
-    --config examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml \
+    --config examples/megatron/configs/MI355X/mixtral_8x22B_v0.1-BF16-pretrain.yaml \
     --benchmark-gpus 1 \
     --target-nodes 4
 ```
@@ -866,22 +866,22 @@ Where:
 
 #### Example Calculation
 
-**Configuration:** DeepSeek V2 Lite — TP=1, PP=3, EP=8, CP=1 — GBS=640, MBS=4, Seq=4096
+**Configuration:** Mixtral 8×22B — TP=1, PP=4, VPP=2, EP=8, CP=1 — GBS=128, MBS=2, Seq=8192
 
 ```
 Step 1: Minimum Nodes
-  GPUs required = 1 × 3 × 8 × 1 = 24 GPUs = 3 nodes
-  Min DP = 24 / (1 × 3 × 1) = 8
+  GPUs required = 1 × 4 × 8 × 1 = 32 GPUs = 4 nodes
+  Min DP = 32 / (1 × 4 × 1) = 8
 
-Step 2: Target Configuration (6 nodes)
-  Total GPUs = 48
-  Target DP = 48 / (1 × 3 × 1) = 16
+Step 2: Target Configuration (8 nodes)
+  Total GPUs = 64
+  Target DP = 64 / (1 × 4 × 1) = 16
   DP Scaling = 16 / 8 = 2×
 
 Step 3: Projected Time
-  Base_Time (from pipeline simulation) = 5500 ms
-  Projected_Time = 5500 × (8 / 16) = 2750 ms
-  Tokens/s = (640 × 4096) / 2.750 = 953,018 tokens/s
+  Base_Time (from pipeline simulation) = 10,052 ms
+  Projected_Time = 10,052 × (8 / 16) = 5,026 ms
+  Tokens/s/GPU = (128 × 8192) / (5.026 × 64) = 3,260 tokens/s/GPU
 ```
 
 ---
@@ -939,14 +939,14 @@ The following is representative output from a Mixtral 8×22B BF16 projection on 
 ```
 ====================================================================================================
 [Primus:Performance Projection] Configuration Summary:
-  Benchmark Config: TP=1, PP=1, EP=8, CP=1, DP=8 (1 node)
-  Target Config: TP=1, PP=4, EP=8, CP=1, DP=16 (8 nodes)
+  Benchmark Config: TP=1, PP=1, VPP=2, EP=8, CP=1, DP=8 (1 node)
+  Target Config: TP=1, PP=4, VPP=2, EP=8, CP=1, DP=16 (8 nodes)
 
 ====================================================================================================
 Multinode Scaling Projection Results
 ====================================================================================================
 
-📊 Parallelism: TP=1, PP=4, EP=8, CP=1
+📊 Parallelism: TP=1, PP=4, VPP=2, EP=8, CP=1
 
 📡 Communication Breakdown:
    gradient_allreduce: 540.274 ms (message: 24192.00 MB)
@@ -958,7 +958,7 @@ Multinode Scaling Projection Results
 
 🎯 Target Configuration (8 nodes):
    Nodes: 8, GPUs: 64
-   TP=1, PP=4, EP=8, CP=1, DP=16
+   TP=1, PP=4, VPP=2, EP=8, CP=1, DP=16
    Iteration Time: 10,052 ms
    Tokens/s/GPU: 3,260
 ====================================================================================================
