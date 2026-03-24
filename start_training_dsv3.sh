@@ -33,6 +33,7 @@ export TURBO_ATTENTION=${TURBO_ATTENTION:-False}
 export TURBO_DEEPEEP=${TURBO_DEEPEEP:-True}
 export LEGACY_GG=${LEGACY_GG:-True}
 export TURBO_GROUPED_MLP=${TURBO_GROUPED_MLP:-False}
+export TURBO_RMS_NORM=${TURBO_RMS_NORM:-False}
 export APPLY_ROPE_FUSION=True
 export HSA_NO_SCRATCH_RECLAIM=1
 export NVTE_CK_USES_BWD_V3=1
@@ -92,6 +93,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --use_turbo_attention "$TURBO_ATTENTION" \
   --use_turbo_deepep "$TURBO_DEEPEEP" \
   --use_turbo_grouped_mlp "$TURBO_GROUPED_MLP" \
+  --use_turbo_rms_norm "$TURBO_RMS_NORM" \
   --lr 2.2e-4 \
   --min_lr 2.2e-5 \
   --lr_warmup_iters 200 \
