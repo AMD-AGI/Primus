@@ -311,10 +311,10 @@ if [ "${BACKEND:-}" == "MaxText" ]; then
     export DUMP_HLO=${DUMP_HLO:-0}
     export NVTE_ALLOW_NONDETERMINISTIC_ALGO=1
     if [ "${NNODES}" -gt 1 ]; then
-        export XLA_PYTHON_CLIENT_MEM_FRACTION=.93
+        export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-.93}
         export JAX_HIP_GRAPH_LOWERING=false
     else
-        export XLA_PYTHON_CLIENT_MEM_FRACTION=.97
+        export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-.97}
     fi
     export TF_CPP_MIN_LOG_LEVEL=2 # this env var is used to suppress the error logs at the end of training
     export XLA_FLAGS="--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_enable_command_buffer='' --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=false --xla_gpu_enable_cublaslt=true --xla_gpu_autotune_level=4 --xla_gpu_enable_all_gather_combine_by_dim=false"
@@ -398,6 +398,7 @@ fi
 # install primus turbo from source
 export REBUILD_PRIMUS_TURBO=${REBUILD_PRIMUS_TURBO:-0}
 if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
+    # pip3 install  --extra-index-url https://test.pypi.org/simple primus_turbo-0.2.0+69d2386-cp310-cp310-linux_x86_64.whl
     LOG_INFO "Rebuilding Primus Turbo from source..."
     mkdir -p "/workspace/turbo"
     cd "/workspace/turbo" || exit

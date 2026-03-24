@@ -245,7 +245,6 @@ class PrimusParser(object):
         map = {
             "megatron": "megatron",
             "megatron_bridge": "megatron_bridge",
-            "light-megatron": "megatron",
             "torchtitan": "torchtitan",
             "maxtext": "maxtext",
         }
