@@ -14,7 +14,6 @@ modules:
       run_name: "grok1_training"
       base_output_directory: "./output"
       steps: 50
-      log_period: 10
 
       # data
       dataset_type: "synthetic"
@@ -58,5 +57,3 @@ modules:
       megablox: false
       max_target_length: 8192           # Increased from 4096
       capacity_factor: 1
-
-      expert_balance: true

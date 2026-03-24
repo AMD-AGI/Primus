@@ -212,7 +212,8 @@ def main():
     print("env.NVTE_ALLOW_NONDETERMINISTIC_ALGO=1")
     # set XLA_PYTHON_CLIENT_MEM_FRACTION to 0.93
     # to avoid HSA_STATUS_ERROR_OUT_OF_RESOURCES error during multi-node training
-    print("env.XLA_PYTHON_CLIENT_MEM_FRACTION=.93")
+    xla_python_client_mem_fraction = os.getenv("XLA_PYTHON_CLIENT_MEM_FRACTION", ".97")
+    print(f"env.XLA_PYTHON_CLIENT_MEM_FRACTION={xla_python_client_mem_fraction}")
     print("env.NVTE_USE_HIPBLASLT=1")
 
     xla_flags = "--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_enable_command_buffer='' --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=false --xla_gpu_enable_cublaslt=true --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=false"

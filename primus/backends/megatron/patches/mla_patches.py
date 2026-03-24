@@ -20,7 +20,7 @@ from primus.modules.module_utils import log_rank_0
     backend="megatron",
     phase="before_train",
     description=(
-        "Monkey patch MLA attention to use Primus PaddedMLASelfAttention "
+        "Monkey patch MLA attention to use PrimusMLASelfAttention "
         "when use_turbo_parallel_linear is enabled."
     ),
     condition=lambda ctx: getattr(get_args(ctx), "use_turbo_parallel_linear", False),
@@ -32,7 +32,7 @@ def patch_mla_attention(ctx: PatchContext):
     Behavior (moved from MegatronTrainer.patch_mla_attention):
         - If module_config.fused_padded_mla_attention is True, replace
           multi_latent_attention.MLASelfAttention and
-          gpt_layer_specs.MLASelfAttention with PaddedMLASelfAttention.
+          gpt_layer_specs.MLASelfAttention with PrimusMLASelfAttention.
     """
     log_rank_0("MegatronPatches: monkey patch MLA attention to support padded fusion...")
 
