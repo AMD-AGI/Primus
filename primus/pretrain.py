@@ -58,12 +58,6 @@ def load_backend_trainer(framework: str):
         from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
 
         return MegatronPretrainTrainer
-    elif framework == "light-megatron":
-        from primus.modules.trainer.lightmegatron.pre_trainer import (
-            LightMegatronPretrainTrainer,
-        )
-
-        return LightMegatronPretrainTrainer
     elif framework == "torchtitan":
         from primus.modules.trainer.torchtitan.pre_trainer import (
             TorchTitanPretrainTrainer,
@@ -106,7 +100,6 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
     # 3) Fallback to source tree under third_party
     fallback_name_map = {
         "megatron": "Megatron-LM",
-        "light-megatron": "Megatron-LM",
         "torchtitan": "torchtitan",
         "maxtext": "maxtext",
     }

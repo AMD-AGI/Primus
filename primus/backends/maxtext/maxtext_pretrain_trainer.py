@@ -28,7 +28,12 @@ import os
 from typing import Any, Dict, Optional
 
 from primus.core.trainer.base_trainer import BaseTrainer
-from primus.modules.module_utils import error_rank_0, log_rank_0, warning_rank_0
+from primus.modules.module_utils import (
+    error_rank_0,
+    log_rank_0,
+    set_logging_rank,
+    warning_rank_0,
+)
 
 
 class MaxTextPretrainTrainer(BaseTrainer):
@@ -88,7 +93,24 @@ class MaxTextPretrainTrainer(BaseTrainer):
             except OSError as e:
                 error_rank_0(f"MaxTextPretrainTrainer: Failed to delete temporary YAML at {yaml_path}: {e}")
 
+        self._update_logger_rank()
         log_rank_0("MaxText training components initialized successfully")
+
+    def _update_logger_rank(self):
+        """Refresh Primus logger rank/world_size from JAX distributed state."""
+        import jax
+
+        rank = jax.process_index()
+        world_size = jax.process_count()
+
+        from primus.core.utils.logger import update_rank_info
+
+        update_rank_info(rank, world_size)
+        set_logging_rank(rank, world_size)
+        log_rank_0(
+            f"JAX distributed ready: rank={rank}, world_size={world_size}, "
+            f"devices={jax.device_count()}, local_devices={jax.local_device_count()}"
+        )
 
     def _prepare_model_overrides(self) -> Dict[str, Any]:
         """

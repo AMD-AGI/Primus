@@ -3,7 +3,7 @@ extends:
 
 hardware: "gpu"
 steps: 1000
-log_period: 10
+log_period: 100
 enable_checkpointing: false
 async_checkpointing: false
 profiler: "xplane"
@@ -15,6 +15,7 @@ dataset_type: "hf"
 hf_path: "allenai/c4"  # for using https://huggingface.co/datasets/allenai/c4
 hf_data_dir: "en"
 hf_train_files: ""
+packing: true
 
 shardy: false
 
