@@ -84,6 +84,9 @@ while IFS='=' read -r name _; do
 done < <(env | grep "^PRIMUS_")
 while IFS='=' read -r name _; do
     ENV_ARGS+=("--env" "$name")
+done < <(env | grep "^UCCL_")
+while IFS='=' read -r name _; do
+    ENV_ARGS+=("--env" "$name")
 done < <(env | grep "^NCCL_")
 while IFS='=' read -r name _; do
     ENV_ARGS+=("--env" "$name")
@@ -198,6 +201,8 @@ docker_podman_proxy run --rm \
     --env MAXTEXT_PATH \
     --env BACKEND_PATH \
     --env REBUILD_PRIMUS_TURBO \
+    --env REBUILD_UEP \
+    --env USING_UEP \
     "${ENV_ARGS[@]}" \
     --ulimit core=0:0 \
     --ipc=host --network=host \

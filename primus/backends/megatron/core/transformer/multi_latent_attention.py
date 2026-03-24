@@ -59,7 +59,13 @@ class PrimusMLASelfAttention(MLASelfAttention):
         cp_comm_type: Optional[str] = None,
         pg_collection: ProcessGroupCollection = None,
     ):
-        super().__init__(
+        if pg_collection is None:
+            pg_collection = ProcessGroupCollection.use_mpu_process_groups()
+
+        # Skip MLASelfAttention.__init__ which has hardcoded type checks
+        # that don't recognize PrimusTurbo types. Call MultiLatentAttention
+        # directly since we rebuild all MLA-specific modules below.
+        super(MLASelfAttention, self).__init__(
             config=config,
             submodules=submodules,
             layer_number=layer_number,
