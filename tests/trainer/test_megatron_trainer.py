@@ -7,13 +7,33 @@
 
 import os
 import re
-import subprocess
-import sys
-import time
 import unittest
 
-from primus.core.utils import logger
-from tests.utils import PrimusUT
+from tests.utils import PrimusUT, run_training_script
+
+_GFX_TO_PLATFORM = {
+    "gfx942": "MI300X",
+    "gfx950": "MI355X",
+}
+
+
+def detect_gpu_platform() -> str:
+    """Map hardware GFX arch to platform config directory: gfx942 → MI300X, gfx950 → MI355X."""
+    try:
+        import torch
+
+        if torch.cuda.is_available() and torch.cuda.device_count() > 0:
+            props = torch.cuda.get_device_properties(0)
+            arch_raw = getattr(props, "gcnArchName", "") or ""
+            arch = arch_raw.split(":")[0].strip()
+            if arch in _GFX_TO_PLATFORM:
+                return _GFX_TO_PLATFORM[arch]
+    except Exception:
+        pass
+    raise RuntimeError(f"Unable to detect GPU platform. Ensure ROCm GPU (gfx942/gfx950) is available.")
+
+
+GPU_PLATFORM = detect_gpu_platform()
 
 
 def run_script(
@@ -33,13 +53,6 @@ def run_script(
     train_log_path = os.path.join(ut_log_path, f"log.test_megatron_trainer-{tag}.txt")
     env["TRAIN_LOG"] = train_log_path
 
-    # Follow the same UT pattern as TorchTitan trainer tests:
-    # - print logs at runtime to the console
-    # - read final output from TRAIN_LOG if present
-    do_print_at_runtime = True
-    run_stdout = subprocess.PIPE if not do_print_at_runtime else sys.stdout
-    run_stderr = subprocess.PIPE if not do_print_at_runtime else sys.stderr
-
     cmd = [
         "bash",
         shell_entry,
@@ -55,46 +68,7 @@ def run_script(
     if extra_args:
         cmd.extend(extra_args)
 
-    try:
-        logger.info(f"Begin run {tag}...")
-        start = time.time()
-        subprocess.run(
-            cmd,
-            check=True,
-            stdout=run_stdout,
-            stderr=run_stderr,
-            text=True,
-            env=env,
-        )
-        logger.info(f"End run {tag}, time={time.time()-start:.3f} s")
-
-        logger.info(f"Training log path: {ut_log_path}/logs/UT-{ut_name}")
-
-        stdout_output = ""
-        if os.path.exists(train_log_path):
-            with open(train_log_path, "r") as f:
-                stdout_output = f.read()
-
-        return stdout_output, ""
-
-    except subprocess.CalledProcessError as e:
-        stderr_output = e.stderr or ""
-        stdout_output = e.stdout or ""
-
-        if os.path.exists(train_log_path):
-            try:
-                with open(train_log_path, "r") as f:
-                    stdout_output = f.read()
-            except Exception as log_err:
-                logger.warning(f"[{tag}] Failed to read train log: {log_err}")
-
-        if "Training completed." in stdout_output:
-            logger.warning(f"[{tag}] Training likely succeeded despite return code != 0.")
-            logger.warning(f"stderr excerpt:\n{stderr_output[:1000]}")
-        else:
-            raise AssertionError(f"Shell script failed: {stderr_output.strip()}")
-
-    return stdout_output, stderr_output
+    return run_training_script(tag=tag, cmd=cmd, train_log_path=train_log_path, env=env)
 
 
 class TestMegatronTrainer(PrimusUT):
@@ -111,25 +85,43 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "llama3_8B",
-            exp_path="examples/megatron/configs/MI300X/llama3_8B-BF16-pretrain.yaml",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/llama3_8B-BF16-pretrain.yaml",
             env_override={},
-            extra_args=["--num_layers", "4", "--train_iters", "3"],
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
+            ],
         )
 
     def test_llama3_70B(self):
         run_script(
             self.__class__.__name__,
             "llama3_70B",
-            exp_path="examples/megatron/configs/MI300X/llama3_70B-BF16-pretrain.yaml",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/llama3_70B-BF16-pretrain.yaml",
             env_override={},
-            extra_args=["--num_layers", "4", "--train_iters", "3"],
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
+            ],
         )
 
     def test_qwen3_30B_A3B(self):
         run_script(
             self.__class__.__name__,
             "qwen3_30B_A3B",
-            exp_path="examples/megatron/configs/MI300X/qwen3_30B_A3B-BF16-pretrain.yaml",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/qwen3_30B_A3B-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -148,6 +140,10 @@ class TestMegatronTrainer(PrimusUT):
                 "block",
                 "--recompute_num_layers",
                 "0",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
             ],
         )
 
@@ -155,7 +151,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "qwen3_235B_A22B",
-            exp_path="examples/megatron/configs/MI300X/qwen3_235B_A22B-BF16-pretrain.yaml",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/qwen3_235B_A22B-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -178,6 +174,10 @@ class TestMegatronTrainer(PrimusUT):
                 "block",
                 "--recompute_num_layers",
                 "0",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
             ],
         )
 
@@ -185,7 +185,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "deepseek_v2_lite",
-            exp_path="examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/deepseek_v2_lite-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -200,6 +200,10 @@ class TestMegatronTrainer(PrimusUT):
                 "8",
                 "--expert_model_parallel_size",
                 "8",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
             ],
         )
 
@@ -207,7 +211,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "mixtral_8x7B_v0.1",
-            exp_path="examples/megatron/configs/MI300X/mixtral_8x7B_v0.1-BF16-pretrain.yaml",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/mixtral_8x7B_v0.1-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -222,6 +226,10 @@ class TestMegatronTrainer(PrimusUT):
                 "1",
                 "--expert_model_parallel_size",
                 "8",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
             ],
         )
 
@@ -229,7 +237,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "mixtral_8x22B_v0.1",
-            exp_path="examples/megatron/configs/MI300X/mixtral_8x22B_v0.1-BF16-pretrain.yaml",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/mixtral_8x22B_v0.1-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -245,6 +253,10 @@ class TestMegatronTrainer(PrimusUT):
                 "--expert_model_parallel_size",
                 "8",
                 "--pipeline_model_parallel_size",
+                "1",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
                 "1",
             ],
         )
@@ -253,7 +265,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "grok2",
-            exp_path="examples/megatron/configs/MI300X/grok2-BF16-pretrain.yaml",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/grok2-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -270,6 +282,10 @@ class TestMegatronTrainer(PrimusUT):
                 "1",
                 "--num_virtual_stages_per_pipeline_rank",
                 "1",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
             ],
         )
 
@@ -277,7 +293,7 @@ class TestMegatronTrainer(PrimusUT):
         run_script(
             self.__class__.__name__,
             "deepseek_v3",
-            exp_path="examples/megatron/configs/MI300X/deepseek_v3-BF16-pretrain.yaml",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/deepseek_v3-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -293,6 +309,10 @@ class TestMegatronTrainer(PrimusUT):
                 "--expert_model_parallel_size",
                 "8",
                 "--pipeline_model_parallel_size",
+                "1",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
                 "1",
             ],
         )
@@ -312,6 +332,10 @@ class TestMegatronTrainer(PrimusUT):
                 "16",
                 "--moe_layer_freq",
                 "[0]*1+[1]*7",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
             ],
         )
 
@@ -323,11 +347,75 @@ class TestMegatronTrainer(PrimusUT):
     #         env_override={},
     #     )
 
+    def test_turbo_grouped_gemm(self):
+        run_script(
+            self.__class__.__name__,
+            "deepseek_v2_lite_turbo_grouped_gemm",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/deepseek_v2_lite-BF16-pretrain.yaml",
+            env_override={
+                "PRIMUS_TURBO_AUTO_TUNE": "1",
+            },
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--moe_layer_freq",
+                "[0]*1+[1]*3",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--expert_model_parallel_size",
+                "8",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
+                "--use_turbo_grouped_mlp",
+                "1",
+            ],
+        )
+
+    def test_turbo_fp8_grouped_gemm(self):
+        run_script(
+            self.__class__.__name__,
+            "deepseek_v2_lite_turbo_fp8_grouped_gemm",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/deepseek_v2_lite-FP8-pretrain.yaml",
+            env_override={
+                "PRIMUS_TURBO_AUTO_TUNE": "1",
+            },
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--moe_layer_freq",
+                "[0]*1+[1]*3",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--expert_model_parallel_size",
+                "8",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
+                "--use_turbo_grouped_mlp",
+                "1",
+                "--fp8",
+                "e4m3",
+                "--fp8_recipe",
+                "tensorwise",
+            ],
+        )
+
     def test_turbo_deepep(self):
         run_script(
             self.__class__.__name__,
             "turbo_deepep",
-            exp_path="examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/deepseek_v2_lite-BF16-pretrain.yaml",
             env_override={},
             extra_args=[
                 "--num_layers",
@@ -354,6 +442,8 @@ class TestMegatronTrainer(PrimusUT):
                 "1",
                 "--turbo_sync_free_moe_stage",
                 "3",
+                "--use_turbo_attention",
+                "1",
             ],
         )
 
