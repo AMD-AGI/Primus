@@ -128,7 +128,7 @@ Activation recomputation trades compute for memory. With full recompute, a MoE l
 
 ### Performance Projection
 
-The performance projection tool estimates training throughput on multi-node clusters by benchmarking on a configurable number of GPUs — measuring both compute and communication where possible — and using analytical models only for what falls outside the benchmark scope. A key design goal is flexibility: you can benchmark on as few GPUs as you have available — even a single GPU — and project performance to arbitrary multi-node target configurations.
+The performance projection tool estimates training throughput on multi-node clusters using two complementary approaches: **GPU benchmarking** (measuring real compute and communication on available hardware) and **analytical simulation** (modeling performance entirely on CPU without any GPUs). When GPUs are available, the default hybrid mode benchmarks representative layers and analytically models only the components that fall outside the benchmark scope. When no GPUs are available, the pure simulation mode provides estimates using analytical backends. A key design goal is flexibility: you can benchmark on as few GPUs as you have available — even a single GPU — project performance to arbitrary multi-node target configurations, or skip the GPU entirely and run the full projection analytically.
 
 #### Flexible Benchmarking
 
@@ -136,36 +136,50 @@ The `--benchmark-gpus` flag controls how many GPUs are used for the benchmarking
 
 This means you can benchmark on 1 GPU and project to hundreds of nodes — the tool handles the parallelism rescaling and communication overhead modeling automatically.
 
-#### Why a Hybrid Approach?
+#### Two Approaches to Performance Projection
 
-A natural question is: why not model everything analytically? The key insight behind Primus's design is that **the hardest part of performance prediction — what FLOPs the hardware actually delivers under a real workload — is precisely the part that is easiest to measure and hardest to model**. The guiding principle is simple: **measure what you can, simulate what you can't**. When the benchmark GPUs can accommodate a parallelism dimension (e.g., TP AllReduce within a node, EP All-to-All within the benchmark config), the communication is measured alongside compute. Only communication that falls outside the benchmark scope — inter-node traffic, or overhead from parallelism dimensions that had to be reduced — is estimated analytically. This hybrid approach achieves higher accuracy with less calibration effort than a purely analytical methodology.
+Primus supports two complementary approaches to performance projection — **benchmark-based** and **analytical simulation** — each with distinct strengths. Rather than prescribing one over the other, Primus lets users choose the right tool for their situation, and even run both side by side.
 
-Here are the main reasons the hybrid approach outperforms pure analytical modeling:
+**When Analytical Simulation Shines**
 
-**1. Immunity to the Peak-vs-MAF Gap.** Modern GPUs dynamically adjust clock frequency during kernel execution to stay within their power envelope. The theoretical peak FLOPs use the maximum boost clock, but under sustained dense matrix workloads (which dominate LLM training), the GPU throttles to a lower operating frequency. The resulting Max-Achievable FLOPs (MAF) can be significantly lower than the peak — preliminary estimates suggest a 44–70% gap on current-generation hardware (see [Understanding Peak, Max-Achievable & Delivered FLOPs](https://rocm.blogs.amd.com/software-tools-optimization/Understanding_Peak_and_Max-Achievable_FLOPS/README.html)). A pure analytical or roofline-based model typically uses peak FLOPs (or a manually tuned efficiency factor) in its denominator, leading to systematically inflated predictions. By benchmarking real layers, Primus captures the actual operating frequency under the specific workload's power profile. Crucially, this frequency behavior is workload-dependent — different layer types (attention vs. MLP vs. MoE expert GEMMs) have different compute densities and therefore different sustained frequencies. Benchmarking captures this per-layer variation automatically.
+The biggest advantage of analytical modeling is that **it doesn't require hardware**. When silicon isn't available — during capacity planning for a new cluster, evaluating a next-generation GPU architecture, or simply working from a laptop — simulation is the only option. Primus's `--profiling-mode simulate` mode enables full training projections entirely on CPU, using [Origami](https://github.com/ROCm/rocm-libraries/tree/develop/shared/origami/python) for GEMM modeling and an SDPA simulator for attention kernels. Analytical models are also **fast and reproducible**: they produce deterministic results without the variance inherent in GPU measurements, making them ideal for sweeping large configuration spaces or comparing parallelism strategies quickly. When the analytical backends are well-correlated with the target hardware, the accuracy can be quite close to real measurements, especially for compute-bound GEMM operations where the models capture tile-level execution, CU utilization, and memory hierarchy behavior in detail.
 
-**2. Measure What You Can, Simulate What You Can't.** The hybrid approach maximizes measurement coverage: when the benchmark configuration can accommodate a parallelism dimension, its communication is captured in the benchmark alongside compute. For example, if you benchmark on 8 GPUs with TP=8, the TP AllReduce is measured on real hardware. If you benchmark with EP=4, the EP All-to-All dispatch/combine is measured. Only the communication that *cannot* be captured — because the target configuration requires more GPUs than the benchmark (e.g., inter-node DP AllReduce, PP P2P across nodes, or communication for parallelism dimensions that were reduced to fit the benchmark) — is estimated analytically. Communication modeling itself is not trivial: real collective performance depends on topology, congestion, message sizes, and protocol choices. But for the components that must be modeled, communication collectives are more analytically tractable than compute kernels — their performance is dominated by bandwidth and latency with predictable message sizes. Pipeline scheduling follows deterministic rules that can be simulated exactly given per-stage compute times. Per-layer compute, on the other hand, depends on kernel implementation quality, memory system behavior, frequency throttling, operator fusion, and framework overhead — factors that are difficult to model analytically with high fidelity.
+Beyond current hardware, analytical simulation is uniquely valuable for **pre-silicon performance estimation**. Given the architectural specifications of a future GPU, the simulation backends can project training performance on hardware that doesn't physically exist yet. This enables a range of pre-silicon experiments: estimating how a next-generation accelerator will perform on specific model architectures, comparing the impact of different hardware design choices (e.g., more CUs vs. higher memory bandwidth) on end-to-end training throughput, and identifying potential bottlenecks (compute-bound vs. memory-bound vs. communication-bound) before silicon tapeout. This capability also helps inform **hardware definition** itself — by running projections across a matrix of hypothetical hardware specs and target workloads, architects can quantify which hardware parameters matter most for the workloads they care about, guiding investment in the features that deliver the greatest real-world training performance. Primus supports this workflow through its `--gpu-arch` flag and customizable hardware configuration files, allowing users to define arbitrary hardware profiles and project performance against them.
 
-**3. Robustness to Software Stack Variations.** Every update to the ROCm software stack — a new hipBLASLt release with improved GEMM kernels, a CK attention kernel update, a Triton recompile with different tiling — shifts the achievable performance for each operation. A pure analytical model would require recalibration against each software version. The benchmark approach is inherently version-aware: it runs the actual kernels installed on the system and measures what they deliver, automatically reflecting the current software stack's performance.
+**When Benchmarking Shines**
 
-**4. Captures Real Grouped GEMM Behavior for MoE Models.** For MoE models, the routed expert computation uses grouped GEMMs, whose performance is significantly harder to model analytically. The achieved efficiency depends on the number of experts and topk routing, token-to-expert distribution (affecting padding and load imbalance), the specific grouped GEMM kernel implementation (CK, hipBLASLt, AITER), and wave quantization effects from non-uniform sub-problem sizes. Grouped GEMMs often operate well below the roofline due to the overhead of managing many small sub-problems. Benchmarking sidesteps this by measuring actual grouped GEMM execution on representative problem shapes.
+Benchmarking on real hardware captures effects that are difficult to model analytically with high fidelity:
 
-**5. Accounts for Framework and Runtime Overhead.** Real training iterations include overhead beyond raw kernel execution: PyTorch dispatch latency, memory allocator behavior, kernel launch overhead, CUDA/HIP stream synchronization, and torch.compile optimization effects. These overheads are present in benchmark measurements but absent from an analytical model that only considers the mathematical operations. For large models with many layers, these per-kernel overheads accumulate and can represent a non-trivial fraction of iteration time.
+1. **Actual GPU frequency under load.** Modern GPUs dynamically adjust clock frequency during kernel execution to stay within their power envelope. The theoretical peak FLOPs use the maximum boost clock, but under sustained dense matrix workloads (which dominate LLM training), the GPU throttles to a lower operating frequency. The resulting Max-Achievable FLOPs (MAF) can be significantly lower than the peak — preliminary estimates suggest a 44–70% gap on current-generation hardware (see [Understanding Peak, Max-Achievable & Delivered FLOPs](https://rocm.blogs.amd.com/software-tools-optimization/Understanding_Peak_and_Max-Achievable_FLOPS/README.html)). A pure analytical or roofline-based model typically uses peak FLOPs (or a manually tuned efficiency factor) in its denominator, which can lead to overestimated predictions. Crucially, this frequency behavior is workload-dependent — different layer types (attention vs. MLP vs. MoE expert GEMMs) have different compute densities and therefore sustain different frequencies. Benchmarking captures this per-layer variation automatically.
 
-**6. Transparent Validation via Side-by-Side Comparison.** Primus offers a `--profiling-mode both` option that runs the benchmark and the pure analytical simulation (Origami + SDPA simulator) side by side and prints a comparison table. This allows users to quantify exactly how much accuracy the analytical path sacrifices, validate that the analytical backends remain calibrated as hardware and software evolve, and make informed decisions about when the pure simulation mode can be trusted for capacity planning.
+2. **Robustness to software stack variations.** Every update to the ROCm software stack — a new hipBLASLt release with improved GEMM kernels, a CK attention kernel update, a Triton recompile with different tiling — shifts the achievable performance for each operation. An analytical model needs periodic recorrelation against the latest software version. The benchmark approach is inherently version-aware: it runs the actual kernels installed on the system and measures what they deliver, automatically reflecting the current software stack's performance.
 
-The following table summarizes the comparison:
+3. **Real grouped GEMM behavior for MoE models.** For MoE models, the routed expert computation uses grouped GEMMs, whose performance is harder to model analytically. The achieved efficiency depends on the number of experts and topk routing, token-to-expert distribution (affecting padding and load imbalance), the specific grouped GEMM kernel implementation (CK, hipBLASLt, AITER), and wave quantization effects from non-uniform sub-problem sizes. Grouped GEMMs often operate well below the roofline due to the overhead of managing many small sub-problems. Benchmarking sidesteps this by measuring actual grouped GEMM execution on representative problem shapes.
 
-| Factor | Pure Analytical | Hybrid (Primus) |
-|--------|----------------|-----------------|
-| GPU frequency under load | Must assume or estimate; prone to overestimation | Captured automatically via real measurement |
-| Software stack changes | Requires manual recalibration | Automatically reflects current kernel performance |
-| Grouped GEMM for MoE | Difficult to model accurately | Measured directly with real kernels |
-| Framework overhead | Not captured | Included in benchmark measurements |
-| Communication modeling | Must model analytically | Measured when within benchmark scope; analytical fallback for the rest |
-| Pipeline scheduling | Can simulate well | Same — uses pipeline schedule simulator |
-| No-GPU capacity planning | Supported | Supported via `--profiling-mode simulate` fallback |
-| Cross-validation | Not available | `--profiling-mode both` for side-by-side comparison |
+4. **Framework and runtime overhead.** Real training iterations include overhead beyond raw kernel execution: PyTorch dispatch latency, memory allocator behavior, kernel launch overhead, CUDA/HIP stream synchronization, and torch.compile optimization effects. These overheads are present in benchmark measurements but absent from an analytical model that only considers the mathematical operations. For large models with many layers, these per-kernel overheads accumulate and can represent a non-trivial fraction of iteration time.
+
+**The Hybrid Approach: Measure What You Can, Simulate What You Can't**
+
+Primus's default mode combines both approaches. The guiding principle is: **measure what you can, simulate what you can't**. When the benchmark GPUs can accommodate a parallelism dimension (e.g., TP AllReduce within a node, EP All-to-All within the benchmark config), the communication is measured alongside compute. Only communication that falls outside the benchmark scope — inter-node traffic, or overhead from reduced parallelism dimensions — is estimated analytically. Communication collectives are generally more analytically tractable than compute kernels, as their performance is dominated by bandwidth and latency with predictable message sizes. Pipeline scheduling follows deterministic rules that can be simulated exactly given per-stage compute times.
+
+**Side-by-Side Validation**
+
+Primus offers a `--profiling-mode both` option that runs benchmark and simulation side by side and prints a comparison table. This lets users quantify how closely the analytical path tracks real hardware, validate that simulation backends remain calibrated as hardware and software evolve, and make informed decisions about when simulation alone is sufficient.
+
+The following table summarizes when each approach is most useful:
+
+| Factor | Analytical Simulation | GPU Benchmarking |
+|--------|-----------------------|------------------|
+| Hardware availability | **No GPU required** — works on CPU | Requires access to target GPUs |
+| Speed and reproducibility | **Fast, deterministic** — ideal for config sweeps | Slower, with measurement variance |
+| Pre-silicon / capacity planning | **Primary use case** — estimates before hardware exists | Not possible without hardware |
+| GPU frequency under load | Estimates based on hardware model | **Captures actual frequency throttling** per workload |
+| Software stack sensitivity | Requires periodic correlation | **Automatically reflects** current kernel performance |
+| Grouped GEMM for MoE | Depends on model fidelity | **Measured directly** with real kernels |
+| Framework / runtime overhead | Not captured | **Included** in benchmark measurements |
+| Communication modeling | Analytical models for all collectives | **Measured** when within benchmark scope; analytical fallback otherwise |
+| Pipeline scheduling | Simulated exactly | Simulated exactly (same simulator) |
+| Cross-validation | Available via `--profiling-mode both` | Available via `--profiling-mode both` |
 
 #### Profiling Modes
 
@@ -222,19 +236,22 @@ When a parallelism dimension fits within the benchmark GPU count, its communicat
 | All-to-All | EP (MoE dispatch/combine) | Pairwise exchange, accounts for topology |
 | P2P Send/Recv | PP (activations) | Point-to-point latency + bandwidth |
 
-Communication times differ significantly based on whether they are **intra-node** (fast, e.g., xGMI/NVLink) or **inter-node** (slower, e.g., InfiniBand/RoCE). These hardware parameters are customizable — users can provide a hardware configuration file via `--hardware-config` to match their specific cluster topology. See [`mi300x.yaml`](../../examples/hardware_configs/mi300x.yaml) for the format.
+Communication times differ significantly based on whether they are **intra-node** (fast, e.g., xGMI/NVLink) or **inter-node** (slower, e.g., InfiniBand/RoCE). These hardware parameters are customizable — users can provide a hardware configuration file via `--hardware-config` to match their specific cluster topology.
 
 #### Pipeline Schedule Simulator
 
 The pipeline simulator supports multiple scheduling algorithms:
 
-| Algorithm | Description |
-|-----------|-------------|
-| **1F1B** | Standard one-forward-one-backward schedule |
-| **Interleaved 1F1B** | Multiple virtual chunks per rank (VPP > 1) for reduced bubble ratio |
-| **Zero-Bubble** | Separates backward into B (input gradient) + W (weight gradient) for minimal bubbles |
+| Algorithm | VPP | Description |
+|-----------|-----|-------------|
+| **1F1B** | 1 | Standard one-forward-one-backward schedule |
+| **Interleaved 1F1B** | >1 | Multiple virtual chunks per rank for reduced bubble ratio |
+| **Zero-Bubble** | 1 | Splits backward into B (input gradient) + W (weight gradient) with F-B-W steady-state pattern to minimize bubbles |
+| **ZBV Formatted** | 2 | Zero-Bubble V-shape schedule with structured warm-up/stable/cool-down phases across two virtual chunks |
+| **ZBV Greedy** | 2 | Zero-Bubble V-shape schedule using greedy placement with configurable memory modes (`min` or `half`) |
+| **Megatron ILP** | 1 | ILP-based memory-aware scheduler (from Sea AI Lab) that optimally fills pipeline bubbles with W operations |
 
-Zero-bubble scheduling minimizes pipeline bubbles by splitting the backward pass. B computes gradients w.r.t. input activations and W computes gradients w.r.t. weights. Since W doesn't depend on receiving gradients from the next stage, it enables more flexible scheduling. The Primus pipeline simulator supports both a simple F-B-W pattern and Megatron's ILP-based memory-aware scheduler. For a deep dive into how these pipeline scheduling algorithms are designed and implemented in Primus, see the [Primus-pipeline blog](../primus_pipeline/primus_pipeline.md).
+Zero-bubble scheduling minimizes pipeline bubbles by splitting the backward pass into B (input gradient) and W (weight gradient). Since W doesn't depend on receiving gradients from the next stage, it can be scheduled more flexibly to fill pipeline bubbles. For VPP=1, the basic zero-bubble scheduler uses a fixed F-B-W steady-state pattern, while Megatron's ILP-based scheduler optimally places W operations using integer linear programming. For VPP=2, the ZBV (Zero-Bubble V-shape) family of schedulers extends this idea across two virtual pipeline chunks — **ZBV Formatted** uses a structured pattern with deterministic phase transitions, while **ZBV Greedy** uses a greedy placement algorithm with memory-aware scheduling. Users can compare all algorithms at once using `--pipeline-schedule-algorithm all`, which runs all applicable schedulers and selects the best. For a deep dive into how these pipeline scheduling algorithms are designed and implemented in Primus, see the [Primus-pipeline blog](https://rocm.blogs.amd.com/software-tools-optimization/primus-pipeline/README.html).
 
 
 ### Parallelism Modeling
@@ -349,6 +366,8 @@ bash runner/primus-cli direct --script primus/cli/main.py -- \
 
 ## Example Output
 
+The following is representative output from a Mixtral 8×22B BF16 projection on MI355X (benchmarked on 1 node, projected to 8 nodes).
+
 ### Memory Projection
 
 ```
@@ -356,26 +375,40 @@ bash runner/primus-cli direct --script primus/cli/main.py -- \
 [Primus:Projection] Component-wise Profiling Results (Rank 0):
 ====================================================================================================
 
-  Total Number of Parameters: 15.654321 Billion (15,654,321,024)
+  Total Number of Parameters: 140.845 Billion (140,845,350,912)
 
   [embedding]
-    Params: 0.819200 Billion (819,200,000)
-    Activation Memory: 0.2500 GB
+    Params: 0.617 Billion (616,562,688)
+    Activation Memory: 0.1875 GB
 
-    [dense_transformer_layer]
-      Params: 0.302000 Billion (302,000,000)
-      Activation Memory: 2.1250 GB
+  [dense_transformer_layer]
+    Params: 0.390 Billion (390,107,136)
+    Activation Memory: 3.2500 GB
 
-    [moe_transformer_layer]
-      Params: 1.001400 Billion (1,001,400,000)
-      Activation Memory: 18.2000 GB
+    [layer_norm]       Params: 0.000 Billion       Activation Memory: 0.1875 GB
+    [self_attention]   Params: 0.088 Billion       Activation Memory: 0.6250 GB
+    [residual_add]     Params: 0.000 Billion       Activation Memory: 0.1875 GB
+    [mlp]              Params: 0.302 Billion       Activation Memory: 1.6875 GB
+
+  [moe_transformer_layer]
+    Params: 0.390 Billion (390,156,288)
+    Activation Memory: 5.1250 GB
+
+    [layer_norm]       Params: 0.000 Billion       Activation Memory: 0.1875 GB
+    [self_attention]   Params: 0.088 Billion       Activation Memory: 0.6250 GB
+    [residual_add]     Params: 0.000 Billion       Activation Memory: 0.1875 GB
+    [router]           Params: 0.000 Billion       Activation Memory: 0.1875 GB
+    [mlp]              Params: 0.302 Billion       Activation Memory: 3.3750 GB
+
+  [final_layernorm]    Params: 0.000 Billion       Activation Memory: 0.1875 GB
+  [output_layer]       Params: 0.617 Billion       Activation Memory: 3.0625 GB
 
 ====================================================================================================
 [Primus:Projection] Memory Projection Summary on Rank 0:
-  Params: 20.850000 Billion (20,850,000,000)
-  Param+Optimizer Memory: 83.7400 GB
-  Activation Memory (per batch size 4, seq len 16384): 36.7500 GB
-  Projected Total Memory: 120.4900 GB
+  Params: 6.079 Billion (6,078,750,720) [per-rank with PP=4, EP=8]
+  Param+Optimizer Memory: 79.26 GB
+  Activation Memory (per batch size 2, seq len 8192): 503.56 GB
+  Projected Total Memory: 582.82 GB
 ====================================================================================================
 ```
 
@@ -384,29 +417,28 @@ bash runner/primus-cli direct --script primus/cli/main.py -- \
 ```
 ====================================================================================================
 [Primus:Performance Projection] Configuration Summary:
-  Benchmark Config: PP=1, EP=8, TP=1, CP=1, DP=1 (1 node)
-  Target Config: PP=1, EP=8, TP=1, CP=1, DP=4 (4 nodes)
+  Benchmark Config: TP=1, PP=1, EP=8, CP=1, DP=8 (1 node)
+  Target Config: TP=1, PP=4, EP=8, CP=1, DP=16 (8 nodes)
 
 ====================================================================================================
 Multinode Scaling Projection Results
 ====================================================================================================
 
-📊 Parallelism: TP=1, PP=1, EP=8, CP=1
-
-🎯 Target Configuration (4 nodes):
-   Nodes: 4, GPUs: 32
-   TP=1, PP=1, EP=8, CP=1, DP=4
-   DP Scaling Factor: 4.0x
-   Iteration Time: 4012.456 ms
-   Tokens/s: 649,123
+📊 Parallelism: TP=1, PP=4, EP=8, CP=1
 
 📡 Communication Breakdown:
-   gradient_allreduce: 45.123 ms (message: 1024.00 MB) [OVERLAPPED]
-   moe_a2a_fwd: 230.500 ms (message: 64.00 MB, 26 layers × 8.866 ms/layer)
-   moe_a2a_bwd: 230.500 ms (message: 64.00 MB, 26 layers × 8.866 ms/layer)
+   gradient_allreduce: 540.274 ms (message: 24192.00 MB)
+     Expert AR: 483.2 ms (across 2 nodes) | Non-expert AR: 57.1 ms
+   moe_a2a_fwd: 219.110 ms (message: 384.00 MB, 56 layers × 3.913 ms/layer)
+   moe_a2a_bwd: 219.110 ms (message: 384.00 MB, 56 layers × 3.913 ms/layer)
 
-   Total Communication (critical path): 461.000 ms
+   Total Communication (critical path): 978.494 ms
 
+🎯 Target Configuration (8 nodes):
+   Nodes: 8, GPUs: 64
+   TP=1, PP=4, EP=8, CP=1, DP=16
+   Iteration Time: 10,052 ms
+   Tokens/s/GPU: 3,260
 ====================================================================================================
 ```
 
@@ -425,9 +457,9 @@ To validate the projection tool's accuracy, we compared projected performance ag
 
 ### MI355X — MoE Models (Mixtral 8×22B)
 
-| Model | Precision | Batch | SeqLen | TP | PP | CP | EP | Measured 8-Node (tok/s/GPU) | Projected 8-Node (tok/s/GPU) | Error |
-|-------|-----------|-------|--------|----|----|----|----|-----------------------------|-----------------------------|-------|
-| Mixtral 8×22B | BF16 | 2 | 8192 | 1 | 4 | 1 | 8 | 3,534 | 3,260 | -7.8% |
+| Model | Precision | Batch | SeqLen | TP | PP | VPP | CP | EP | Measured 8-Node (tok/s/GPU) | Projected 8-Node (tok/s/GPU) | Error |
+|-------|-----------|-------|--------|----|----|-----|----|----|-----------------------------|-----------------------------|-------|
+| Mixtral 8×22B | BF16 | 2 | 8192 | 1 | 4 | 2 | 1 | 8 | 3,534 | 3,260 | -7.8% |
 
 ### Key Takeaways
 

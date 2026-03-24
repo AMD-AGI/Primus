@@ -772,11 +772,14 @@ The pipeline simulator (`simulator.py`) simulates the execution of pipeline para
 
 #### Schedule Algorithms
 
-| Algorithm | Description | Use Case |
-|-----------|-------------|----------|
-| **1F1B** | Standard one-forward-one-backward | Default pipeline schedule |
-| **Interleaved 1F1B** | Multiple chunks per rank (VPP > 1) | Reduced bubble ratio |
-| **Zero-Bubble** | Splits backward into B + W | Minimal bubble overhead |
+| Algorithm | VPP | Description |
+|-----------|-----|-------------|
+| **1F1B** | 1 | Standard one-forward-one-backward schedule |
+| **Interleaved 1F1B** | >1 | Multiple virtual chunks per rank for reduced bubble ratio |
+| **Zero-Bubble** | 1 | Splits backward into B + W with F-B-W steady-state pattern |
+| **ZBV Formatted** | 2 | Zero-Bubble V-shape schedule with structured warm-up/stable/cool-down phases across two virtual chunks |
+| **ZBV Greedy** | 2 | Zero-Bubble V-shape schedule using greedy placement with configurable memory modes (`min` or `half`) |
+| **Megatron ILP** | 1 | ILP-based memory-aware scheduler (from Sea AI Lab) that optimally fills pipeline bubbles with W operations |
 
 #### Zero-Bubble Scheduling
 
@@ -786,9 +789,15 @@ Zero-bubble minimizes pipeline bubbles by separating the backward pass:
 
 This allows more flexible scheduling because W doesn't depend on receiving gradients from the next stage. By default, backward time is split 50/50 between B and W.
 
-Two implementations are available:
+For VPP=1, two implementations are available:
 1. **Simple Zero-Bubble Simulator** — basic F-B-W pattern with warmup/steady/cooldown phases
 2. **Megatron ILP-Based Scheduler** — graph-based schedule optimization with memory-aware scheduling using Megatron's actual zero-bubble scheduler
+
+For VPP=2, the ZBV (Zero-Bubble V-shape) family extends zero-bubble across two virtual pipeline chunks:
+3. **ZBV Formatted** — structured pattern with deterministic phase transitions (warm-up/stable/cool-down)
+4. **ZBV Greedy** — greedy placement algorithm with memory-aware scheduling (modes: `min` or `half`)
+
+Users can compare all applicable schedulers at once using `--pipeline-schedule-algorithm all`, which runs every scheduler valid for the configured VPP and selects the best.
 
 #### P2P Communication in Pipeline Simulation
 
@@ -879,6 +888,8 @@ Step 3: Projected Time
 
 ## Example Output
 
+The following is representative output from a Mixtral 8×22B BF16 projection on MI355X (benchmarked on 1 node, projected to 8 nodes).
+
 ### Memory Projection
 
 ```
@@ -886,38 +897,40 @@ Step 3: Projected Time
 [Primus:Projection] Component-wise Profiling Results (Rank 0):
 ====================================================================================================
 
-  Total Number of Parameters: 15.654321 Billion (15,654,321,024)
+  Total Number of Parameters: 140.845 Billion (140,845,350,912)
 
   [embedding]
-    Params: 0.819200 Billion (819,200,000)
-    Activation Memory: 0.2500 GB
+    Params: 0.617 Billion (616,562,688)
+    Activation Memory: 0.1875 GB
 
-    [dense_transformer_layer]
-      Params: 0.302000 Billion (302,000,000)
-      Activation Memory: 2.1250 GB
+  [dense_transformer_layer]
+    Params: 0.390 Billion (390,107,136)
+    Activation Memory: 3.2500 GB
 
-      [layer_norm]
-        Params: 0.000016 Billion (16,384)
-        Activation Memory: 0.2500 GB
+    [layer_norm]       Params: 0.000 Billion       Activation Memory: 0.1875 GB
+    [self_attention]   Params: 0.088 Billion       Activation Memory: 0.6250 GB
+    [residual_add]     Params: 0.000 Billion       Activation Memory: 0.1875 GB
+    [mlp]              Params: 0.302 Billion       Activation Memory: 1.6875 GB
 
-      [self_attention]
-        Params: 0.134218 Billion (134,217,728)
-        Activation Memory: 0.5100 GB
+  [moe_transformer_layer]
+    Params: 0.390 Billion (390,156,288)
+    Activation Memory: 5.1250 GB
 
-      [mlp]
-        Params: 0.167772 Billion (167,772,160)
-        Activation Memory: 0.8650 GB
+    [layer_norm]       Params: 0.000 Billion       Activation Memory: 0.1875 GB
+    [self_attention]   Params: 0.088 Billion       Activation Memory: 0.6250 GB
+    [residual_add]     Params: 0.000 Billion       Activation Memory: 0.1875 GB
+    [router]           Params: 0.000 Billion       Activation Memory: 0.1875 GB
+    [mlp]              Params: 0.302 Billion       Activation Memory: 3.3750 GB
 
-    [moe_transformer_layer]
-      Params: 1.001400 Billion (1,001,400,000)
-      Activation Memory: 18.2000 GB
+  [final_layernorm]    Params: 0.000 Billion       Activation Memory: 0.1875 GB
+  [output_layer]       Params: 0.617 Billion       Activation Memory: 3.0625 GB
 
 ====================================================================================================
 [Primus:Projection] Memory Projection Summary on Rank 0:
-  Params: 20.850000 Billion (20,850,000,000)
-  Param+Optimizer Memory: 83.7400 GB
-  Activation Memory (per batch size 4, seq len 16384): 36.7500 GB
-  Projected Total Memory: 120.4900 GB
+  Params: 6.079 Billion (6,078,750,720) [per-rank with PP=4, EP=8]
+  Param+Optimizer Memory: 79.26 GB
+  Activation Memory (per batch size 2, seq len 8192): 503.56 GB
+  Projected Total Memory: 582.82 GB
 ====================================================================================================
 ```
 
@@ -926,30 +939,28 @@ Step 3: Projected Time
 ```
 ====================================================================================================
 [Primus:Performance Projection] Configuration Summary:
-  Benchmark Config: PP=1, EP=8, TP=1, CP=1, DP=1 (1 node)
-  Target Config: PP=1, EP=8, TP=1, CP=1, DP=4 (4 nodes)
-  Benchmark Microbatches: 160 (global_batch=640, micro_batch=4, benchmark_dp=1)
+  Benchmark Config: TP=1, PP=1, EP=8, CP=1, DP=8 (1 node)
+  Target Config: TP=1, PP=4, EP=8, CP=1, DP=16 (8 nodes)
 
 ====================================================================================================
 Multinode Scaling Projection Results
 ====================================================================================================
 
-📊 Parallelism: TP=1, PP=1, EP=8, CP=1
-
-🎯 Target Configuration (4 nodes):
-   Nodes: 4, GPUs: 32
-   TP=1, PP=1, EP=8, CP=1, DP=4
-   DP Scaling Factor: 4.0x
-   Iteration Time: 4012.456 ms
-   Tokens/s: 649,123
+📊 Parallelism: TP=1, PP=4, EP=8, CP=1
 
 📡 Communication Breakdown:
-   gradient_allreduce: 45.123 ms (message: 1024.00 MB) [OVERLAPPED]
-   moe_a2a_fwd: 230.500 ms (message: 64.00 MB, 26 layers × 8.866 ms/layer)
-   moe_a2a_bwd: 230.500 ms (message: 64.00 MB, 26 layers × 8.866 ms/layer)
+   gradient_allreduce: 540.274 ms (message: 24192.00 MB)
+     Expert AR: 483.2 ms (across 2 nodes) | Non-expert AR: 57.1 ms
+   moe_a2a_fwd: 219.110 ms (message: 384.00 MB, 56 layers × 3.913 ms/layer)
+   moe_a2a_bwd: 219.110 ms (message: 384.00 MB, 56 layers × 3.913 ms/layer)
 
-   Total Communication (critical path): 461.000 ms
+   Total Communication (critical path): 978.494 ms
 
+🎯 Target Configuration (8 nodes):
+   Nodes: 8, GPUs: 64
+   TP=1, PP=4, EP=8, CP=1, DP=16
+   Iteration Time: 10,052 ms
+   Tokens/s/GPU: 3,260
 ====================================================================================================
 ```
 
