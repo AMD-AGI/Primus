@@ -1,11 +1,11 @@
 ---
 name: slurm-idle-node-check
-description: Check available idle nodes in a SLURM cluster. Use when the user wants to find usable idle nodes, verify node health, check docker status on SLURM nodes, check NIC QoS/DCQCN configuration, or troubleshoot cluster node availability.
+description: Check available idle nodes in a SLURM cluster. Use when the user wants to find usable idle nodes, verify node health, check docker status on SLURM nodes, check NIC QoS/DCQCN configuration, check RDMA link status, validate GID table, or troubleshoot cluster node availability.
 ---
 
 # SLURM Idle Node Health Check
 
-Diagnose idle nodes in a SLURM cluster: verify SSH access, check Docker service, verify workspace directory accessibility, validate NIC QoS/DCQCN configuration consistency, and report usable vs problematic nodes.
+Diagnose idle nodes in a SLURM cluster: verify SSH access, check Docker service, verify workspace directory accessibility, validate NIC QoS/DCQCN configuration consistency, check RDMA link status, validate GID table, and report usable vs problematic nodes.
 
 ## Workflow
 
@@ -75,6 +75,49 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no <node> bas
     DCQCN_HASH=$(echo "$DCQCN_OUTPUT" | md5sum | awk "{print \$1}")
   fi
 
+  # Check 6: RDMA link status — all links must be state ACTIVE, physical_state LINK_UP
+  RDMA_OUTPUT=$(rdma link 2>&1)
+  RDMA_RC=$?
+  RDMA_OK=0
+  RDMA_BAD_DETAIL=""
+  if [ $RDMA_RC -eq 0 ]; then
+    BAD_LINKS=$(echo "$RDMA_OUTPUT" | grep "^link " | grep -v "state ACTIVE physical_state LINK_UP")
+    if [ -n "$BAD_LINKS" ]; then
+      RDMA_OK=1
+      RDMA_BAD_DETAIL=$(echo "$BAD_LINKS" | awk "{print \$2, \$4, \$6}" | head -5 | tr "\n" ", ")
+    fi
+  else
+    RDMA_OK=1
+  fi
+
+  # Check 7: show_gid — each device must have at least index 0 and 1;
+  #   ionic-prefixed devices must have exactly index 0 and 1 (no other indices)
+  GID_OUTPUT=$(show_gid 2>&1)
+  GID_RC=$?
+  GID_OK=0
+  GID_ERRORS=""
+  if [ $GID_RC -eq 0 ]; then
+    DEVICES=$(echo "$GID_OUTPUT" | awk "NR>2 && NF>=6 {print \$1}" | sort -u)
+    for DEV in $DEVICES; do
+      INDICES=$(echo "$GID_OUTPUT" | awk -v dev="$DEV" "NF>=6 && \$1 == dev {print \$3}" | sort -n -u)
+      HAS_0=$(echo "$INDICES" | grep -c "^0$")
+      HAS_1=$(echo "$INDICES" | grep -c "^1$")
+      if [ "$HAS_0" -eq 0 ] || [ "$HAS_1" -eq 0 ]; then
+        GID_ERRORS="${GID_ERRORS}${DEV} missing index 0 or 1; "
+        GID_OK=1
+      fi
+      if echo "$DEV" | grep -q "^ionic"; then
+        INDEX_COUNT=$(echo "$INDICES" | wc -l)
+        if [ "$INDEX_COUNT" -ne 2 ]; then
+          GID_ERRORS="${GID_ERRORS}${DEV} has unexpected indices (expected only 0,1, got: $(echo $INDICES | tr "\n" ",")); "
+          GID_OK=1
+        fi
+      fi
+    done
+  else
+    GID_OK=1
+  fi
+
   ERRORS=""
   if [ $DOCKER_OK -ne 0 ]; then
     ERRORS="${ERRORS}Docker service not available; "
@@ -92,6 +135,16 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=no <node> bas
   fi
   if [ $DCQCN_RC -ne 0 ]; then
     ERRORS="${ERRORS}nicctl show dcqcn failed; "
+  fi
+  if [ $RDMA_RC -ne 0 ]; then
+    ERRORS="${ERRORS}rdma link command failed; "
+  elif [ $RDMA_OK -ne 0 ]; then
+    ERRORS="${ERRORS}RDMA links not all ACTIVE/LINK_UP (${RDMA_BAD_DETAIL}); "
+  fi
+  if [ $GID_RC -ne 0 ]; then
+    ERRORS="${ERRORS}show_gid command failed; "
+  elif [ $GID_OK -ne 0 ]; then
+    ERRORS="${ERRORS}GID table invalid (${GID_ERRORS}); "
   fi
 
   if [ -z "$ERRORS" ]; then
@@ -115,6 +168,8 @@ If SSH itself fails, mark the node as `FAIL|SSH connection failed|||`.
 | 3 | Workspace directory accessible | `[ -d "$WORKSPACE_DIR" ] && [ -r "$WORKSPACE_DIR" ]` | Shared filesystem not mounted or path unreachable on this node |
 | 4 | NIC QoS config valid | `sudo nicctl show qos` | QoS not configured or missing required settings (DSCP classification, DSCP 10→priority 0, PFC no-drop priorities 0) |
 | 5 | NIC DCQCN config present | `sudo nicctl show dcqcn` | DCQCN not configured on this node |
+| 6 | RDMA links all active | `rdma link` | One or more RDMA links not in state ACTIVE / physical_state LINK_UP |
+| 7 | GID table valid | `show_gid` | Device missing required GID indices (all devices need index 0 & 1; ionic devices must have exactly 0 & 1, no extra indices) |
 
 `<workspace_path>` is the **absolute path of the current repository root** (i.e. the workspace directory where the agent is operating). Determine it at runtime via `pwd` or from the workspace context, then substitute into the script.
 
