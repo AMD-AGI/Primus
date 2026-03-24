@@ -32,6 +32,7 @@ export TURBO_DEEPEEP=True
 export TURBO_ATTENTION=${TURBO_ATTENTION:-False}
 export PRIMUS_TURBO_DEEPEP_TIMEOUT=600
 export TURBO_GROUPED_MLP=${TURBO_GROUPED_MLP:-False}
+export TURBO_RMS_NORM=${TURBO_RMS_NORM:-False}
 export PRIMUS_TURBO_AUTO_TUNE=${PRIMUS_TURBO_AUTO_TUNE:-0}
 export APPLY_ROPE_FUSION=True
 export LEGACY_GG=${LEGACY_GG:-True}
@@ -145,6 +146,7 @@ mkdir -p output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
   --disable_tensorboard True \
   --enable_experimental "$APPLY_ROPE_FUSION" \
   --apply_rope_fusion "$APPLY_ROPE_FUSION" \
+  --use_turbo_rms_norm "$TURBO_RMS_NORM" \
   --turbo_deepep_num_cu 80 \
   --use_precision_aware_optimizer True \
   --main_grads_dtype bf16 \
