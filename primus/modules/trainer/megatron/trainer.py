@@ -1461,11 +1461,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             else:
                 assert num_skipped_samples_in_batch == 0
             args.skipped_train_samples += num_skipped_samples_in_batch
-            flops_calc = (
-                num_floating_point_operations
-                if not args.multi_latent_attention
-                else self.num_floating_point_operations_mla_moe
-            )
+            if args.multi_latent_attention and not getattr(args, "is_hybrid_model", False):
+                flops_calc = self.num_floating_point_operations_mla_moe
+            else:
+                flops_calc = num_floating_point_operations
             num_floating_point_operations_in_batch = flops_calc(args, batch_size)
             num_floating_point_operations_so_far += num_floating_point_operations_in_batch
             num_floating_point_operations_since_last_log_event += num_floating_point_operations_in_batch
@@ -2000,11 +1999,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             elapsed_time = timers("interval-time").elapsed(barrier=True)
             elapsed_time_per_iteration = elapsed_time / total_iterations
 
-            flops_calc = (
-                num_floating_point_operations
-                if not args.multi_latent_attention
-                else self.num_floating_point_operations_mla_moe
-            )
+            if args.multi_latent_attention and not getattr(args, "is_hybrid_model", False):
+                flops_calc = self.num_floating_point_operations_mla_moe
+            else:
+                flops_calc = num_floating_point_operations
             throughput = flops_calc(args, batch_size) / (
                 elapsed_time_per_iteration * 10**12 * args.world_size
             )

@@ -19,8 +19,7 @@
 set -euo pipefail
 
 # First two args are the hook group/name injected by execute_hooks.sh (e.g. train pretrain)
-HOOK_GROUP="$1"
-HOOK_NAME="$2"
+# $1 = HOOK_GROUP, $2 = HOOK_NAME — consumed but not used by this script.
 shift 2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -109,11 +108,8 @@ if [[ -z "$FRAMEWORK" ]]; then
     exit 0
 fi
 
-# Normalize framework aliases (e.g. light-megatron → megatron)
-case "$FRAMEWORK" in
-    light-megatron) FRAMEWORK_DIR="megatron" ;;
-    *)              FRAMEWORK_DIR="$FRAMEWORK" ;;
-esac
+# No legacy alias light-megatron mapping
+FRAMEWORK_DIR="$FRAMEWORK"
 
 FRAMEWORK_SCRIPT="${SCRIPT_DIR}/${FRAMEWORK_DIR}/prepare.py"
 
@@ -137,4 +133,3 @@ fi
 CMD+=("${EXTRA_ARGS[@]}")
 
 exec "${CMD[@]}"
-
