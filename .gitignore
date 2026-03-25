@@ -13,3 +13,4 @@ output
 experiment
 /data/*
 pp_simulation_result
+.cursor/
