@@ -6,6 +6,7 @@
 ###############################################################################
 
 from contextlib import nullcontext
+from typing import Optional
 
 from megatron.core import tensor_parallel
 from megatron.core.fp4_utils import get_fp4_context
@@ -44,11 +45,19 @@ class PrimusTransformerBlock(TransformerBlock):
         attention_bias: Tensor,
         packed_seq_params: PackedSeqParams,
         use_inner_quantization_context: bool,
+        padding_mask: Optional[Tensor] = None,
     ):
         """Forward method with activation checkpointing."""
 
         def custom(start: int, end: int):
-            def custom_forward(hidden_states, attention_mask, context, context_mask, rotary_pos_emb):
+            def custom_forward(
+                hidden_states,
+                attention_mask,
+                context,
+                context_mask,
+                rotary_pos_emb,
+                padding_mask=None,
+            ):
                 for index in range(start, end):
                     layer = self._get_layer(index)
 
@@ -74,6 +83,7 @@ class PrimusTransformerBlock(TransformerBlock):
                             attention_bias=attention_bias,
                             inference_context=None,
                             packed_seq_params=packed_seq_params,
+                            padding_mask=padding_mask,
                         )
                 return hidden_states, context
 
@@ -93,6 +103,7 @@ class PrimusTransformerBlock(TransformerBlock):
                     context,
                     context_mask,
                     rotary_pos_emb,
+                    padding_mask,
                 )
             else:
                 return tensor_parallel.checkpoint(
@@ -103,6 +114,7 @@ class PrimusTransformerBlock(TransformerBlock):
                     context,
                     context_mask,
                     rotary_pos_emb,
+                    padding_mask,
                 )
 
         recompute_layer_ids = getattr(self.config, "recompute_layer_ids", None)
