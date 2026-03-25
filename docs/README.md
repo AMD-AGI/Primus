@@ -2,9 +2,11 @@
 
 Welcome to the Primus documentation! This guide will help you get started with training large-scale foundation models on AMD GPUs.
 
-## 📚 Documentation Structure
+> **Comprehensive Documentation**: For the complete production documentation set, see [`production_docs/`](../production_docs/README.md). It includes configuration references, parallelism guides, environment variable documentation, and more.
 
-### 🚀 Getting Started
+## Documentation Structure
+
+### Getting Started
 
 Start here if you're new to Primus:
 
@@ -12,15 +14,14 @@ Start here if you're new to Primus:
 - **[CLI User Guide](./cli/PRIMUS-CLI-GUIDE.md)** - Complete command-line reference
 - **[CLI Architecture](./cli/CLI-ARCHITECTURE.md)** - Design philosophy and deep dive
 
-### 📖 User Guides
+### User Guides
 
 Guides for common workflows and features:
 
-- **[Configuration Guide](./configuration.md)** - YAML/TOML configuration, recommended patterns, and examples
-- **[Slurm & Container Usage](./slurm-container.md)** - Distributed training and containerization workflows
-- **[Experiment Management](./experiments.md)** - Organizing and tracking your training runs
+- **[Configuration System](../production_docs/02-user-guide/configuration-system.md)** - YAML configuration, presets, overrides, and inheritance
+- **[Deployment Guide](../production_docs/05-operations/deployment.md)** - Container, Slurm, and Kubernetes deployment
 
-### 🔧 Technical References
+### Technical References
 
 In-depth technical documentation:
 
@@ -29,39 +30,48 @@ In-depth technical documentation:
 - **[Preflight](./preflight.md)** - Cluster diagnostics (host/GPU/network info + perf tests)
 - **[Benchmark Suite](./benchmark.md)** - GEMM, RCCL, end-to-end benchmarks and profiling
 - **[Supported Models](./backends/overview.md#supported-models)** - Supported LLM architectures and feature compatibility matrix
-- **[Advanced Features](./advanced.md)** - Mixed precision, parallelism strategies, optimization techniques
 - **[Backend Patch Notes](./backends/overview.md)** - Primus-specific arguments for Megatron, TorchTitan, etc.
-- **[Backend Extension Guide](./backends/extending-backends.md)** - How to add a new backend using the current adapter/trainer architecture
- - **[Megatron Model Extension Guide](./backends/adding-megatron-models.md)** - How to add a new Megatron model config
- - **[TorchTitan Model Extension Guide](./backends/adding-torchtitan-models.md)** - How to add a new TorchTitan model config
+- **[Backend Extension Guide](./backends/extending-backends.md)** - How to add a new backend
+  - **[Megatron Model Extension Guide](./backends/adding-megatron-models.md)** - How to add a new Megatron model config
+  - **[TorchTitan Model Extension Guide](./backends/adding-torchtitan-models.md)** - How to add a new TorchTitan model config
 
-### 💡 Help & Support
+### Production Documentation
 
-Get help and find answers:
+For comprehensive coverage, see the [Production Documentation](../production_docs/README.md):
 
-- **[FAQ](./faq.md)** - Frequently asked questions and troubleshooting
+- **[Configuration References](../production_docs/03-configuration-reference/megatron-parameters.md)** - Per-backend YAML parameter documentation
+- **[Environment Variables](../production_docs/03-configuration-reference/environment-variables.md)** - Complete environment variable reference
+- **[Parallelism Strategies](../production_docs/04-technical-guides/parallelism-strategies.md)** - Distributed training parallelism explained
+- **[Performance Tuning](../production_docs/04-technical-guides/performance-tuning.md)** - HipBLASLt, Primus-Turbo, FP8, MoE optimization
+- **[Troubleshooting](../production_docs/05-operations/troubleshooting.md)** - Common issues and solutions
+- **[Architecture](../production_docs/06-developer-guide/architecture.md)** - System design and code architecture
+
+### Help and Support
+
+- **[Troubleshooting Guide](../production_docs/05-operations/troubleshooting.md)** - Common issues and solutions
 - **[Examples](../examples/README.md)** - Real-world training examples and templates
 - **[Preflight Tool](../primus/tools/preflight/README.md)** - Cluster sanity checker to verify environment readiness
 
-## 🎯 Quick Navigation by Use Case
+## Quick Navigation by Use Case
 
 ### I want to...
 
-- **Train a model locally** → [Quick Start](./quickstart.md) + [CLI User Guide](./cli/PRIMUS-CLI-GUIDE.md)
-- **Run distributed training on Slurm** → [Slurm & Container Usage](./slurm-container.md)
-- **Configure my training run** → [Configuration Guide](./configuration.md)
-- **Project performance to multi-node** → [Performance Projection](./projection.md)
-- **Benchmark performance** → [Benchmark Suite](./benchmark.md)
-- **Understand the CLI design** → [CLI Architecture](./cli/CLI-ARCHITECTURE.md)
-- **Troubleshoot issues** → [FAQ](./faq.md)
+- **Train a model locally** -- [Quick Start](./quickstart.md) + [CLI User Guide](./cli/PRIMUS-CLI-GUIDE.md)
+- **Run distributed training on Slurm** -- [Deployment Guide](../production_docs/05-operations/deployment.md)
+- **Configure my training run** -- [Configuration System](../production_docs/02-user-guide/configuration-system.md)
+- **Look up YAML parameters** -- [Configuration References](../production_docs/03-configuration-reference/megatron-parameters.md)
+- **Project performance to multi-node** -- [Performance Projection](./projection.md)
+- **Benchmark performance** -- [Benchmark Suite](./benchmark.md)
+- **Understand the CLI design** -- [CLI Architecture](./cli/CLI-ARCHITECTURE.md)
+- **Troubleshoot issues** -- [Troubleshooting](../production_docs/05-operations/troubleshooting.md)
 
-## 🔗 External Resources
+## External Resources
 
-- [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) - High-performance operators & modules
-- [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE) - Stability & platform layer
+- [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) - High-performance operators and modules
+- [Primus-SaFE](https://github.com/AMD-AGI/Primus-SaFE) - Stability and platform layer
 - [AMD ROCm Documentation](https://rocm.docs.amd.com/)
 - [TorchTitan Documentation](https://github.com/pytorch/torchtitan)
 
 ---
 
-**Need help?** Check the [FAQ](./faq.md) or open an issue on [GitHub](https://github.com/AMD-AIG-AIMA/Primus/issues).
+**Need help?** Open an issue on [GitHub](https://github.com/AMD-AIG-AIMA/Primus/issues).
