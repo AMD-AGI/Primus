@@ -5,7 +5,7 @@ export WANDB_API_KEY="your_wandb_api_key"  # make it your own wandb api key
 export DOCKER_IMAGE="docker.io/tasimage/primus:pr-563-ainic"
 # export SLURM_TREE_WIDTH=128
 export NNODES=32
-export TRAIN_ITERS=5
+export TRAIN_ITERS=10
 export SLURM_TIME=48:00:00
 export SLURM_PARTITION=amd-aig-2
 export SLURM_NODELIST="uswslocpm2m-106-[1627,1629,1659-1660,1678,1683-1684,1698,1722,1727,1741,1755,1779,1791,1795,1805,1819,1841,1858,1876-1877,1880,1902,1916,1921-1922,1947,1965,1968,1973,1995,2006]"
@@ -19,17 +19,23 @@ export NVTE_CK_USES_BWD_V3=1
 export GPU_MAX_HW_QUEUES=4
 export CLEAN_DOCKER_CONTAINER=1
 
-export MBS=4
+export MBS=${MBS:-4}
 export GBS=8192
 export PRIMUS_TOTAL_LAYERS=94
-export PRIMUS_RECOMPUTE_LAYERS=3
+export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-3}
 export PRIMUS_MOE_LAYER_FREQ=1
-export PRIMUS_PP=4
-export PRIMUS_EP=8
-export PRIMUS_VPP=4
+export PRIMUS_PP=${PRIMUS_PP:-4}
+export PRIMUS_EP=${PRIMUS_EP:-8}
+export PRIMUS_VPP=${PRIMUS_VPP:-4}
 export PROFILE=False
 export TURBO_DEEPEEP=True
-export LEGACY_GG=True
+export TURBO_ATTENTION=${TURBO_ATTENTION:-False}
+export PRIMUS_TURBO_DEEPEP_TIMEOUT=600
+export TURBO_GROUPED_MLP=${TURBO_GROUPED_MLP:-False}
+export TURBO_RMS_NORM=${TURBO_RMS_NORM:-False}
+export PRIMUS_TURBO_AUTO_TUNE=${PRIMUS_TURBO_AUTO_TUNE:-0}
+export APPLY_ROPE_FUSION=True
+export LEGACY_GG=${LEGACY_GG:-True}
 export PRIMUS_DETERMINISTIC=0
 # Enable NUMA binding for better memory locality (increase stability for large models)
 export ENABLE_NUMA_BINDING=1
@@ -90,12 +96,11 @@ else
 fi
 
 
-export PRETRAIN_TYPE=BF16
-# export PRETRAIN_TYPE=FP8
+export PRETRAIN_TYPE=${PRETRAIN_TYPE:-BF16}
 
 export EXP=examples/megatron/configs/MI355X/qwen3_235B_A22B-${PRETRAIN_TYPE}-pretrain.yaml
 export PRIMUS_TEAM=amd
-export PRIMUS_USER=tas-0310
+export PRIMUS_USER=tas
 export PRIMUS_TOKENIZED_DATA_PATH=/shared_aig/c4/tokenized/c4_en_train_text_document # this is the tokenized data path for the training
 export PRIMUS_EXP_NAME=qwen3_235B_A22B-pretrain-${PRETRAIN_TYPE}-node_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-profile_$PROFILE-recompute_$PRIMUS_RECOMPUTE_LAYERS
 # export PRIMUS_EXP_NAME=qwen3_235B_A22B-${PRETRAIN_TYPE}-node_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP
@@ -106,12 +111,16 @@ export PRIMUS_EXP_NAME=qwen3_235B_A22B-pretrain-${PRETRAIN_TYPE}-node_$NNODES-mb
 
 mkdir -p output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
 # mkdir -p "$CKPT_DIR"
-bash ./examples/run_slurm_pretrain.sh \
+#bash ./examples/run_slurm_pretrain.sh \
+./primus-cli direct --numa \
+  -- train pretrain --config "$EXP" \
   --num_layers $PRIMUS_TOTAL_LAYERS \
   --train_iters $TRAIN_ITERS \
   --micro_batch_size $MBS \
   --global_batch_size $GBS \
-  --use_turbo_deepep $TURBO_DEEPEEP \
+  --use_turbo_attention "$TURBO_ATTENTION" \
+  --use_turbo_deepep "$TURBO_DEEPEEP" \
+  --use_turbo_grouped_mlp "$TURBO_GROUPED_MLP" \
   --moe_use_legacy_grouped_gemm $LEGACY_GG \
   --pipeline_model_parallel_size $PRIMUS_PP \
   --expert_model_parallel_size $PRIMUS_EP \
@@ -135,4 +144,12 @@ bash ./examples/run_slurm_pretrain.sh \
   --profile_step_start 6 \
   --disable_wandb True \
   --disable_tensorboard True \
+  --enable_experimental "$APPLY_ROPE_FUSION" \
+  --apply_rope_fusion "$APPLY_ROPE_FUSION" \
+  --use_turbo_rms_norm "$TURBO_RMS_NORM" \
+  --turbo_deepep_num_cu 80 \
+  --use_precision_aware_optimizer True \
+  --main_grads_dtype bf16 \
+  --exp_avg_dtype bf16 \
+  --exp_avg_sq_dtype bf16 \
   2>&1 | tee output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log.txt
