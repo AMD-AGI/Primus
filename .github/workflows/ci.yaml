@@ -101,6 +101,7 @@ jobs:
                -t tasimage/primus:${{env.IMAGE_TAG}} \
                --build-arg BASE_IMAGE=${BASE_IMAGE} \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+               --build-arg PRIMUS_TURBO_AITER_COMMIT=${PRIMUS_TURBO_AITER_COMMIT} \
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=PYTORCH \
                --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
@@ -159,6 +160,7 @@ jobs:
                -t tasimage/primus:${{env.IMAGE_TAG}}-jax \
                --build-arg BASE_IMAGE=${MAXTEXT_BASE_IMAGE} \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+               --build-arg PRIMUS_TURBO_AITER_COMMIT=${PRIMUS_TURBO_AITER_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=JAX \
                --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} .
