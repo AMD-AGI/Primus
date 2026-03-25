@@ -1,0 +1,5 @@
+extends:
+  - model_base.yaml
+
+model_name: "qwen3-30b-a3b"
+tokenizer_path: "Qwen/Qwen3-30B-A3B"

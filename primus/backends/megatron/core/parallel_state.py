@@ -36,8 +36,14 @@ def default_embedding_ranks(pp_ranks, split_rank=None):
         return [pp_ranks[0], pp_ranks[-1]]
 
 
-def is_pipeline_last_stage(ignore_virtual=False, vp_stage=None):
-    """Return True if in the last pipeline model-parallel stage, False otherwise."""
+def is_pipeline_last_stage(ignore_virtual=False, vp_stage=None, in_zero_bubble=False):
+    """Return True if in the last pipeline model-parallel stage, False otherwise.
+    If in_zero_bubble patch, this function will return last PP rank when ignore_virtual is True.
+
+    In newest Megatron code train_step function(megatron/training/training.py),
+    is_pipeline_last_stage is supposed to return True at rank 0 when (ignore_virtual is True and is_v_schedule_enabled() is True).
+
+    """
 
     if not ignore_virtual and get_virtual_pipeline_model_parallel_world_size() is not None:
 
@@ -56,6 +62,11 @@ def is_pipeline_last_stage(ignore_virtual=False, vp_stage=None):
 
         if vp_stage != (get_virtual_pipeline_model_parallel_world_size() - 1):
             return False
+
+    # V-schedule: rank 0 hosts the final virtual stage (loss computation),
+    # regardless of the ignore_virtual flag.
+    if is_v_schedule_enabled() and not in_zero_bubble:
+        return get_pipeline_model_parallel_rank() == 0
 
     return get_pipeline_model_parallel_rank() == (get_pipeline_model_parallel_world_size() - 1)
 
