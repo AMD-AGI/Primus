@@ -23,8 +23,8 @@ modules:
 
       # hyper parameters
       train_iters: 50
-      micro_batch_size: 4
-      global_batch_size: 256
+      micro_batch_size: 1
+      global_batch_size: 32
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
       lr: 1.0e-5
@@ -82,3 +82,18 @@ modules:
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
+
+      # deepep
+      moe_deepep_num_sms: 64
+      moe_flex_dispatcher_backend: hybridep
+      moe_token_dispatcher_type: flex
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+
+      moe_paged_stash: true
+      stash_modules:
+        - expert_fc1
+        - expert_fc2
+        - moe_act
+
+      moe_expert_rank_capacity_factor: 2

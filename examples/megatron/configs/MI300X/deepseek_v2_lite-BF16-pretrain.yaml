@@ -76,7 +76,11 @@ modules:
       use_turbo_grouped_mlp: true
 
       # deepep
-      use_turbo_deepep: true
+      use_turbo_deepep: false
+      moe_flex_dispatcher_backend: hybridep
+      moe_token_dispatcher_type: flex
+      moe_deepep_num_sms: 64
+   
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
 
@@ -87,7 +91,7 @@ modules:
       # sync-free moe support stage 0-3, 0 means not use sync-free moe
       # stage 3 is completely no gpu-cpu sync in MoE, but cost more memory
       # stage 2 is recommended for better performance
-      turbo_sync_free_moe_stage: 2
+      turbo_sync_free_moe_stage: 0
       
       # remove once super flag is functional again
       moe_use_fused_router_with_aux_score: true
@@ -96,3 +100,11 @@ modules:
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
+
+
+      stash_modules:
+        - expert_fc1
+        # - expert_fc2
+        # - moe_act
+
+      moe_expert_rank_capacity_factor: 1.5
