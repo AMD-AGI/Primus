@@ -61,6 +61,7 @@ def use_split_wgrad_op():
     args = get_args()
     if args.patch_primus_pipeline and args.pp_algorithm in [
         "zero-bubble",
+        "zero-bubble-heuristic",
         "zbv-formatted",
         "v-half",
         "v-min",
