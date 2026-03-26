@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -x
+
 export HF_TOKEN="${HF_TOKEN:-'your_hf_token'}"  # make it your own hf token
 export WANDB_API_KEY="${WANDB_API_KEY:-'your_wandb_api_key'}"  # make it your own wandb api key
 
@@ -53,7 +55,7 @@ case $STAGE in
     FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*7|t*8|t*8|t*8|t*8|t*8|t*7|t*7,L'")
     ;;
   16)
-    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*3|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*3|t*3,L'")
+    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*3|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*2,L'")
     ;;
   32)
     FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*1|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*1|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*1,L'")
@@ -63,6 +65,13 @@ case $STAGE in
     exit 1
     ;;
 esac
+
+if [ -n "$RECOMP_IDS" ]; then
+  export RECOMP_IDS
+  RECOMP_ARGS=(--recompute_layer_ids "$RECOMP_IDS" --recompute_granularity full)
+else
+  RECOMP_ARGS=(--recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS" --recompute_granularity full --recompute_method block)
+fi
 
 export PRETRAIN_TYPE=${PRETRAIN_TYPE:-BF16}
 
@@ -76,6 +85,12 @@ export PRIMUS_TOKENIZED_DATA_PATH=/shared_aig/c4/tokenized/c4_en_train_text_docu
 export PRIMUS_EXP_NAME=dsv3-pretrain-nnodes_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turboattn_$TURBO_ATTENTION-ropefusion_$APPLY_ROPE_FUSION-profile_$PROFILE
 export PRIMUS_EXP_NAME=debug_dsv3-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turbodeepep_$TURBO_DEEPEEP-turboattn_$TURBO_ATTENTION-autotune_$PRIMUS_TURBO_AUTO_TUNE
 
+if [ -n "$DUMP_PP_DATA" ]; then
+  export DUMP_PP_DIR=output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/pp_data
+  DUMP_PP_ARGS=(--dump_pp_data True)
+else
+  DUMP_PP_ARGS=(--dump_pp_data False)
+fi
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
 # ./primus-cli slurm -N $NNODES \
@@ -107,9 +122,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   "${FEATURE_ARGS[@]}" \
   --cross_entropy_fusion_impl "te" \
   --cross_entropy_loss_fusion True \
-  --recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS" \
-  --recompute_granularity full \
-  --recompute_method block \
+  "${RECOMP_ARGS[@]}" \
+  "${DUMP_PP_ARGS[@]}" \
   --disable_last_saving True \
   --moe_layer_freq "$PRIMUS_MOE_LAYER_FREQ" \
   --mock_data True \
