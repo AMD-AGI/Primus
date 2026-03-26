@@ -73,6 +73,11 @@ bash ./examples/run_slurm_pretrain.sh \
   --use_pytorch_profiler $PROFILE \
   --profile_step_end 7 \
   --profile_step_start 6 \
+  --use_precision_aware_optimizer True \
+  --main_grads_dtype bf16 \
+  --exp_avg_dtype bf16 \
+  --exp_avg_sq_dtype bf16 \
+  --turbo_deepep_num_cu 80 \
   --disable_wandb True \
   --disable_tensorboard True \
   2>&1 | tee output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log.txt
