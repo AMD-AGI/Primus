@@ -233,6 +233,8 @@ else
     validate_container_runtime
 fi
 
+export CONTAINER_RUNTIME="docker"
+
 ###############################################################################
 # STEP 4: Parse container-specific CLI arguments
 # Process Docker/Podman runtime options (--image, --volume, --memory, etc.)
@@ -460,6 +462,12 @@ if [[ "$CLEAN_DOCKER_CONTAINER" == "true" ]]; then
         LOG_INFO_RANK0 "[container] No containers to remove."
     fi
 fi
+
+
+# LOG_INFO "[container] Pulling Docker image: $DOCKER_IMAGE"
+# $CONTAINER_RUNTIME pull $DOCKER_IMAGE
+# LOG_INFO "[container] Docker image pulled: $DOCKER_IMAGE"
+# exit 0
 
 ###############################################################################
 # STEP 7: Prepare launch arguments

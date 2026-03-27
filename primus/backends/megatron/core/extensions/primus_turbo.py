@@ -340,7 +340,9 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
     ):
         self.config = config
         self.qkv_format: str = "sbhd"
-        self.softmax_scale = softmax_scale
+        # TODO: turbo flash usp need float softmax scale (CP)
+        # self.softmax_scale = softmax_scale
+        self.softmax_scale = 0.088
         self.layer_number = layer_number
 
         args = get_args()
@@ -486,11 +488,10 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         #   - When sink is provided, Triton backend is automatically used
         #
         # Reference: gpt-oss/gpt_oss/triton/attention.py
-        sink_tensor = None
         window_size = (-1, -1)
 
         if self.use_sink_attention and self.sinks is not None:
-            sink_tensor = self.sinks
+            self.sinks
 
             # Apply sliding window based on layer pattern (gpt-oss: even layers only)
             # gpt-oss pattern: self.sliding_window = config.sliding_window if layer_idx % 2 == 0 else 0
@@ -519,9 +520,9 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             deterministic=False,
             return_lse=False,
             return_attn_probs=False,
-            sink=sink_tensor,  # PR 208: pass sink tensor to Primus-Turbo
             **self.attn_kwargs,
         )
+        # sink=sink_tensor,  # PR 208: pass sink tensor to Primus-Turbo
 
         o = o.reshape(o.shape[0], o.shape[1], -1).transpose(0, 1)
         if not o.is_contiguous():
