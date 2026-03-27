@@ -2,9 +2,10 @@ ARG BASE_IMAGE=docker.io/rocm/primus:v26.1
 FROM ${BASE_IMAGE}
 
 ARG PRIMUS_TURBO_COMMIT
+ARG PRIMUS_TURBO_AITER_COMMIT
 ARG PRIMUS_TURBO_FRAMEWORK
 ARG ROCSHMEM_COMMIT
-
+ARG UCCL_COMMIT
 # Non-interactive APT
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -12,7 +13,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Install build dependencies
 # ---------------------------------------------------------------------------
 RUN apt-get update && \
-    apt-get install -y rdma-core libibverbs-dev libnuma-dev numactl&& \
+    apt-get install -y rdma-core libibverbs-dev libnuma-dev numactl libgoogle-glog-dev && \
     apt-get install -y --reinstall binutils
 
 RUN rm -rf /var/lib/apt/lists/*
@@ -49,6 +50,15 @@ RUN rm -rf /opt/rocSHMEM
 # ---------------------------------------------------------------------------
 # Install Primus-Turbo
 # ---------------------------------------------------------------------------
+
+RUN pip3 uninstall aiter amd-aiter -y || true && \
+    cd /opt && \
+    git clone --recursive https://github.com/ROCm/aiter.git && \
+    cd aiter && \
+    git checkout ${PRIMUS_TURBO_AITER_COMMIT} && \
+    git submodule update --init --recursive && \
+    PREBUILD_KERNELS=3 python3 setup.py develop
+
 RUN cd /opt && \
     git clone https://github.com/AMD-AGI/Primus-Turbo.git && \
     cd Primus-Turbo && \
@@ -58,6 +68,21 @@ RUN cd /opt && \
     pip3 install --no-build-isolation . -v
 
 RUN rm -rf /opt/Primus-Turbo
+
+# ---------------------------------------------------------------------------
+# Install UCCL-EP (skip for JAX framework)
+# ---------------------------------------------------------------------------
+RUN if [ "$PRIMUS_TURBO_FRAMEWORK" != "JAX" ]; then \
+    cd /opt && \
+    git clone https://github.com/uccl-project/uccl.git && \
+    cd uccl && \
+    git checkout ${UCCL_COMMIT} && \
+    cd ep && TORCH_CUDA_ARCH_LIST="gfx942,gfx950" python3 setup.py build && cd .. && \
+    cp ep/build/**/*.so uccl && \
+    pip3 install --no-build-isolation . -v && \
+    cd ep/deep_ep_wrapper && pip3 install --no-build-isolation . -v && \
+    rm -rf /opt/uccl; \
+    fi
 
 # Set the default working directory
 WORKDIR /opt

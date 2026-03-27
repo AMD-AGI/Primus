@@ -10,8 +10,10 @@ on:
   pull_request:
 
 env:
-  PRIMUS_TURBO_COMMIT: 3ac579fd5dfc2ea6de766b6240aa78edcb701439 # add PRIMUS_TURBO_DEEPEP_TIMEOUT and PRIMUS_TURBO_DEEPEP_DISABLE_CHEAP_FENCE environment variable
+  PRIMUS_TURBO_COMMIT: a4488f6cdb15cfff4383c61af7922bb50803f0ea # feat: update triton impl for mi300 & mi355 (#252)
+  PRIMUS_TURBO_AITER_COMMIT: e83f9903c07001a0ec29e85d223f6e6cdbe00859
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
+  UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
   BASE_IMAGE: docker.io/rocm/primus:v26.1
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.1
 
@@ -99,8 +101,10 @@ jobs:
                -t tasimage/primus:${{env.IMAGE_TAG}} \
                --build-arg BASE_IMAGE=${BASE_IMAGE} \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+               --build-arg PRIMUS_TURBO_AITER_COMMIT=${PRIMUS_TURBO_AITER_COMMIT} \
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=PYTORCH \
+               --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
                $GITHUB_WORKSPACE/.github/workflows/docker
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
@@ -156,7 +160,9 @@ jobs:
                -t tasimage/primus:${{env.IMAGE_TAG}}-jax \
                --build-arg BASE_IMAGE=${MAXTEXT_BASE_IMAGE} \
                --build-arg PRIMUS_TURBO_COMMIT=${PRIMUS_TURBO_COMMIT} \
+               --build-arg PRIMUS_TURBO_AITER_COMMIT=${PRIMUS_TURBO_AITER_COMMIT} \
                --build-arg PRIMUS_TURBO_FRAMEWORK=JAX \
+               --build-arg UCCL_COMMIT=${UCCL_COMMIT} \
                --build-arg ROCSHMEM_COMMIT=${ROCSHMEM_COMMIT} .
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
@@ -212,7 +218,24 @@ jobs:
           submodules: "recursive"
           path: Primus-Turbo
           ref: ${{ env.PRIMUS_TURBO_COMMIT }}
-      - run: echo "Begin Primus-Turbo Install."
+      - run: echo "Begin AITER + Primus-Turbo Install."
+      - name: Install AITER
+        run: |
+          echo "✅ [Uninstall old aiter] started at: $(date)"
+          pip3 uninstall aiter amd-aiter -y || true
+          rm -rf /tmp/aiter || true
+          cd /tmp
+          git clone --recursive https://github.com/ROCm/aiter.git
+          cd aiter
+          git checkout ${PRIMUS_TURBO_AITER_COMMIT}
+          git submodule update --init --recursive
+          start_time=$(date +%s)
+          echo "✅ [Build aiter] started at: $(date)"
+          PREBUILD_KERNELS=3 python3 setup.py develop
+          end_time=$(date +%s)
+          elapsed=$((end_time - start_time))
+          echo "✅ [Build aiter] ended at: $(date)"
+          echo "⏱️ [Build aiter] Total elapsed time: ${elapsed} seconds"
       - name: Install Primus-Turbo
         run: |
           rm -rf /tmp/Primus-Turbo || true

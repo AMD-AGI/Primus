@@ -1418,7 +1418,9 @@ def _compute_micro_batches(runtime_cfg, model_parallel_config) -> int:
     return max(1, math.ceil(global_batch / denominator))
 
 
-def _build_scheduler_sim_config(training_config, profiling_results, enable_zero_bubble=False):
+def _build_scheduler_sim_config(
+    training_config, profiling_results, enable_zero_bubble=False, scheduler_algorithm="auto"
+):
     chunk_time_matrix = _build_chunk_time_matrix(training_config, profiling_results)
     assert chunk_time_matrix is not None
 
@@ -1461,38 +1463,142 @@ def _build_scheduler_sim_config(training_config, profiling_results, enable_zero_
 
     micro_batches = _compute_micro_batches(training_config.runtime_config, mp_cfg)
 
-    # Select scheduler based on configuration
-    if enable_zero_bubble and vpp_size == 1:
+    schedulers_to_run = []
+
+    if scheduler_algorithm == "all":
+        # Run all available Primus schedulers for comparison.
+        # basic_1f1b is only valid for VPP=1; interleaved_1f1b requires VPP>1.
+        if vpp_size == 1:
+            schedulers_to_run.append(
+                {
+                    "name": "basic_1f1b",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.basic_1f1b.Schedule1F1B",
+                    "pp_size": pp_size,
+                    "vpp_size": 1,
+                    "micro_batches": micro_batches,
+                }
+            )
+            schedulers_to_run.append(
+                {
+                    "name": "zerobubble",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.zerobubble.ScheduleZeroBubble",
+                    "pp_size": pp_size,
+                    "vpp_size": 1,
+                    "micro_batches": micro_batches,
+                }
+            )
+        else:
+            # VPP > 1: interleaved schedule is the baseline
+            schedulers_to_run.append(
+                {
+                    "name": "interleaved_1f1b",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
+                    "pp_size": pp_size,
+                    "vpp_size": vpp_size,
+                    "micro_batches": micro_batches,
+                }
+            )
+        if vpp_size == 2:
+            # ZBV (Zero-Bubble V-shape) schedulers — designed for VPP == 2
+            schedulers_to_run.append(
+                {
+                    "name": "zbv_formatted",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.zbv_formatted.ScheduleZBVFormatted",
+                    "pp_size": pp_size,
+                    "vpp_size": vpp_size,
+                    "micro_batches": micro_batches,
+                }
+            )
+            schedulers_to_run.append(
+                {
+                    "name": "zbv_greedy_min",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.zbv_greedy.ScheduleZBVGreedy",
+                    "pp_size": pp_size,
+                    "vpp_size": vpp_size,
+                    "micro_batches": micro_batches,
+                    "memory_config": "min",
+                }
+            )
+            schedulers_to_run.append(
+                {
+                    "name": "zbv_greedy_half",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.zbv_greedy.ScheduleZBVGreedy",
+                    "pp_size": pp_size,
+                    "vpp_size": vpp_size,
+                    "micro_batches": micro_batches,
+                    "memory_config": "half",
+                }
+            )
+    elif scheduler_algorithm == "zerobubble" and vpp_size == 1:
+        schedulers_to_run.append(
+            {
+                "name": "zerobubble",
+                "class": "primus.core.pipeline_parallel.scheduler.algorithms.zerobubble.ScheduleZeroBubble",
+                "pp_size": pp_size,
+                "vpp_size": 1,
+                "micro_batches": micro_batches,
+            }
+        )
+    elif scheduler_algorithm == "zbv-formatted" and vpp_size == 2:
+        schedulers_to_run.append(
+            {
+                "name": "zbv_formatted",
+                "class": "primus.core.pipeline_parallel.scheduler.algorithms.zbv_formatted.ScheduleZBVFormatted",
+                "pp_size": pp_size,
+                "vpp_size": vpp_size,
+                "micro_batches": micro_batches,
+            }
+        )
+    elif scheduler_algorithm == "zbv-greedy" and vpp_size == 2:
+        schedulers_to_run.append(
+            {
+                "name": "zbv_greedy_half",
+                "class": "primus.core.pipeline_parallel.scheduler.algorithms.zbv_greedy.ScheduleZBVGreedy",
+                "pp_size": pp_size,
+                "vpp_size": vpp_size,
+                "micro_batches": micro_batches,
+                "memory_config": "half",
+            }
+        )
+    elif enable_zero_bubble and vpp_size == 1:
         # Zero-bubble schedule minimizes pipeline bubbles by separating B and W
-        scheduler = {
-            "name": "zerobubble",
-            "class": "primus.core.pipeline_parallel.scheduler.algorithms.zerobubble.ScheduleZeroBubble",
-            "pp_size": pp_size,
-            "vpp_size": 1,
-            "micro_batches": micro_batches,
-        }
-        print("[Primus:Performance Projection] Using zero-bubble scheduler (enable_zero_bubble=True)")
+        schedulers_to_run.append(
+            {
+                "name": "zerobubble",
+                "class": "primus.core.pipeline_parallel.scheduler.algorithms.zerobubble.ScheduleZeroBubble",
+                "pp_size": pp_size,
+                "vpp_size": 1,
+                "micro_batches": micro_batches,
+            }
+        )
+        print(
+            "[Primus:Performance Projection] Using Primus zero-bubble scheduler (fallback from Megatron ILP)"
+        )
     elif vpp_size > 1:
-        scheduler = {
-            "name": "interleaved_1f1b",
-            "class": "primus.core.pipeline_parallel.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
-            "pp_size": pp_size,
-            "vpp_size": vpp_size,
-            "micro_batches": micro_batches,
-        }
-    else:
-        scheduler = {
-            "name": "basic_1f1b",
-            "class": "primus.core.pipeline_parallel.scheduler.algorithms.basic_1f1b.Schedule1F1B",
-            "pp_size": pp_size,
-            "vpp_size": 1,
-            "micro_batches": micro_batches,
-        }
+        schedulers_to_run.append(
+            {
+                "name": "interleaved_1f1b",
+                "class": "primus.core.pipeline_parallel.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
+                "pp_size": pp_size,
+                "vpp_size": vpp_size,
+                "micro_batches": micro_batches,
+            }
+        )
+    else:  # Default to basic_1f1b
+        schedulers_to_run.append(
+            {
+                "name": "basic_1f1b",
+                "class": "primus.core.pipeline_parallel.scheduler.algorithms.basic_1f1b.Schedule1F1B",
+                "pp_size": pp_size,
+                "vpp_size": 1,
+                "micro_batches": micro_batches,
+            }
+        )
 
     return {
         "chunk_time_ms": chunk_time_matrix,
         "output_dir": str(Path.cwd() / "pp_simulation_result"),
-        "schedulers": [scheduler],
+        "schedulers": schedulers_to_run,
     }
 
 
@@ -1894,7 +2000,7 @@ def _run_pipeline_simulation_megatron_zb(training_config, profiling_results):
     mem_b = []
     mem_w = []
 
-    print("[Primus:Performance Projection] Using Megatron zero-bubble scheduler (ILP-based)")
+    print("[Primus:Performance Projection] Using Megatron ILP zero-bubble scheduler (SeaAI lab)")
     print(f"  PP size: {pp_size}, VPP size: {vpp_size}, Microbatches: {micro_batches}")
     if vpp_size > 1:
         print(f"  NOTE: Aggregating {vpp_size} VPP chunks per rank for ZB scheduler (VPP>1)")
@@ -1948,7 +2054,7 @@ def _run_pipeline_simulation_megatron_zb(training_config, profiling_results):
     )
 
     # Run the Megatron ZB scheduler
-    print("[Primus:Performance Projection] Running Megatron ZB schedule generation...")
+    print("[Primus:Performance Projection] Running Megatron ILP schedule generation (SeaAI lab)...")
 
     # Build graph and run initial_solution which explores multiple heuristics
     graph = zb.Graph.build_graph(pp_size, micro_batches, config)
@@ -1962,7 +2068,7 @@ def _run_pipeline_simulation_megatron_zb(training_config, profiling_results):
     bubble_time = step_time_ms - ideal_time
     bubble_ratio = bubble_time / step_time_ms if step_time_ms > 0 else 0
 
-    print("[Primus:Performance Projection] Megatron ZB Schedule Results:")
+    print("[Primus:Performance Projection] Megatron ILP Schedule Results (SeaAI lab):")
     print(f"  Step time: {step_time_ms:.2f} ms")
     print(f"  Ideal time (no bubble): {ideal_time:.2f} ms")
     print(f"  Bubble time: {bubble_time:.2f} ms ({bubble_ratio:.1%})")
@@ -1970,34 +2076,213 @@ def _run_pipeline_simulation_megatron_zb(training_config, profiling_results):
     return step_time_ms
 
 
-def _run_pipeline_simulation(training_config, profiling_results, enable_zero_bubble=False):
+def _print_scheduler_comparison(all_results, training_config):
+    """Print a comparison table of all scheduler results."""
+    runtime_config = training_config.runtime_config
+    seq_len = getattr(runtime_config, "sequence_length", None) or 0
+    micro_batch_size = getattr(runtime_config, "micro_batch_size", None) or 0
+    mp_cfg = training_config.model_parallel_config
+    pp_size = getattr(mp_cfg, "pipeline_model_parallel_size", 1) or 1
+    micro_batches = _compute_micro_batches(runtime_config, mp_cfg)
+
+    print("\n" + "=" * 100)
+    print("  PIPELINE SCHEDULER COMPARISON")
+    print("=" * 100)
+    print(f"  {'Scheduler':<40} {'Step Time (ms)':>15} {'Tokens/GPU/s':>14} {'Max Bubble %':>13}")
+    print("  " + "-" * 79)
+
+    best_name = None
+    best_time = float("inf")
+    for name, result in all_results.items():
+        step_time = result.get("step_time_ms")
+        bubble = result.get("max_bubble_ratio", 0.0)
+        if step_time is not None:
+            tokens_per_step = seq_len * micro_batch_size * micro_batches
+            tokens_per_gpu_sec = tokens_per_step * 1000 / step_time / pp_size if step_time > 0 else 0
+            print(f"  {name:<40} {step_time:>15.2f} {tokens_per_gpu_sec:>13,.0f} {bubble:>12.2%}")
+            if step_time < best_time:
+                best_time = step_time
+                best_name = name
+        else:
+            print(f"  {name:<40} {'FAILED':>15} {'N/A':>14} {'N/A':>13}")
+
+    print("  " + "-" * 79)
+    if best_name:
+        print(f"  ✓ Best scheduler: {best_name} ({best_time:.2f} ms)")
+    print("=" * 100 + "\n")
+
+
+def _run_pipeline_simulation(
+    training_config, profiling_results, enable_zero_bubble=False, scheduler_algorithm="auto"
+):
     """
     Run pipeline simulation and return the step time.
+
+    When scheduler_algorithm is "all":
+        Runs all available Primus schedulers + Megatron ILP and compares results.
+    When scheduler_algorithm is "auto" (default):
+        When enable_zero_bubble is OFF: Uses Primus pipeline scheduler (basic 1F1B or interleaved 1F1B).
+        When enable_zero_bubble is ON AND VPP == 1: Uses Megatron ILP scheduler (SeaAI lab).
+        When enable_zero_bubble is ON AND VPP > 1: Falls back to Primus pipeline scheduler.
+    Other values: "zerobubble", "zbv-formatted", "zbv-greedy", "megatron-ilp" run specific schedulers.
 
     Args:
         training_config: Training configuration
         profiling_results: Layer profiling results
-        enable_zero_bubble: Whether to use zero-bubble scheduling (reduces pipeline bubbles)
+        enable_zero_bubble: Whether to use Megatron ILP zero-bubble scheduling.
+        scheduler_algorithm: Which scheduler(s) to run ("auto", "zerobubble",
+            "zbv-formatted", "zbv-greedy", "megatron-ilp", or "all").
 
     Returns:
         float: Step time in ms from pipeline simulation, or None if simulation failed
     """
-    # Use Megatron's actual ZB scheduler for more accurate simulation
-    if enable_zero_bubble:
-        try:
-            return _run_pipeline_simulation_megatron_zb(training_config, profiling_results)
-        except Exception as e:
-            print(f"[Primus:Performance Projection] Megatron ZB scheduler failed: {e}")
-            print("[Primus:Performance Projection] Falling back to simple simulator...")
+    is_compare_mode = scheduler_algorithm == "all"
 
-    sim_config = _build_scheduler_sim_config(training_config, profiling_results, enable_zero_bubble)
-    if sim_config is None:
+    mp_cfg = training_config.model_parallel_config
+    vpp_size = getattr(mp_cfg, "virtual_pipeline_model_parallel_size", 1) or 1
+
+    # Megatron ILP scheduler only supports VPP=1
+    run_megatron_ilp = scheduler_algorithm == "megatron-ilp" and vpp_size == 1
+    if scheduler_algorithm == "all" and vpp_size == 1:
+        run_megatron_ilp = True
+
+    if is_compare_mode:
+        print("[Primus:Performance Projection] Running ALL schedulers for comparison...")
+    elif scheduler_algorithm == "megatron-ilp":
+        if vpp_size > 1:
+            print(
+                f"[Primus:Performance Projection] WARNING: Megatron ILP scheduler only supports VPP=1, "
+                f"but VPP={vpp_size}. Skipping megatron-ilp."
+            )
+        else:
+            print("[Primus:Performance Projection] Running Megatron ILP scheduler only...")
+    elif scheduler_algorithm == "zerobubble":
+        print("[Primus:Performance Projection] Running zerobubble scheduler...")
+    elif scheduler_algorithm == "zbv-formatted":
+        print("[Primus:Performance Projection] Running ZBV Formatted scheduler (VPP=2)...")
+    elif scheduler_algorithm == "zbv-greedy":
+        print("[Primus:Performance Projection] Running ZBV Greedy scheduler (VPP=2)...")
+    elif enable_zero_bubble and vpp_size == 1:
+        print(
+            "[Primus:Performance Projection] Zero-bubble enabled (VPP=1) → using Megatron ILP scheduler (SeaAI lab)"
+        )
+        run_megatron_ilp = True
+    elif enable_zero_bubble and vpp_size > 1:
+        print(
+            f"[Primus:Performance Projection] Zero-bubble enabled but VPP={vpp_size} > 1 "
+            f"→ Megatron ILP scheduler only supports VPP=1, using Primus pipeline scheduler instead"
+        )
+    else:
+        print("[Primus:Performance Projection] Zero-bubble disabled → using Primus pipeline scheduler")
+
+    all_results: Dict[str, dict] = {}
+    primus_step_time_ms = None
+
+    # Run Primus schedulers (unless only running megatron-ilp)
+    if scheduler_algorithm != "megatron-ilp":
+        sim_config = _build_scheduler_sim_config(
+            training_config, profiling_results, enable_zero_bubble, scheduler_algorithm
+        )
+        if sim_config is not None:
+            print("[Primus:Performance Projection] Running Primus pipeline schedule simulator...")
+            runner = SchedulerSimulationRunner(sim_config)
+            simulation_runs = runner.run()
+            _report_simulation_results(simulation_runs, training_config)
+
+            # Collect results from each scheduler run
+            if simulation_runs:
+                for sim in simulation_runs:
+                    summary = (sim or {}).get("summary") or {}
+                    sched_name = sim.get("name", "unknown")
+                    sched_step_time = summary.get("step_time_ms")
+                    # Calculate max bubble ratio across ranks
+                    per_rank = sim.get("per_rank") or []
+                    max_bubble = 0.0
+                    for scheduled_layers in per_rank:
+                        fwd_time = sum(
+                            end - start
+                            for start, end in zip(
+                                scheduled_layers.get("fwd_start", []),
+                                scheduled_layers.get("fwd_end", []),
+                            )
+                        )
+                        bwd_time = sum(
+                            end - start
+                            for start, end in zip(
+                                scheduled_layers.get("bwd_start", []),
+                                scheduled_layers.get("bwd_end", []),
+                            )
+                        )
+                        wgrad_time = sum(
+                            end - start
+                            for start, end in zip(
+                                scheduled_layers.get("wgrad_start", []),
+                                scheduled_layers.get("wgrad_end", []),
+                            )
+                        )
+                        total_compute = fwd_time + bwd_time + wgrad_time
+                        if sched_step_time and sched_step_time > 0:
+                            bubble = max(0.0, sched_step_time - total_compute) / sched_step_time
+                            max_bubble = max(max_bubble, bubble)
+                    all_results[sched_name] = {
+                        "step_time_ms": sched_step_time,
+                        "max_bubble_ratio": max_bubble,
+                    }
+                    if primus_step_time_ms is None and sched_step_time is not None:
+                        primus_step_time_ms = sched_step_time
+
+    # Run Megatron ILP scheduler
+    if run_megatron_ilp:
+        try:
+            megatron_time = _run_pipeline_simulation_megatron_zb(
+                training_config, copy.deepcopy(profiling_results)
+            )
+            if megatron_time is not None:
+                # Recalculate bubble ratio for megatron-ilp from its own output
+                # We already printed it in _run_pipeline_simulation_megatron_zb
+                # Just estimate from the step time vs ideal
+                pp_size = getattr(mp_cfg, "pipeline_model_parallel_size", 1) or 1
+                micro_batches = _compute_micro_batches(training_config.runtime_config, mp_cfg)
+                # Build chunk times to estimate ideal time
+                chunk_times = _build_chunk_time_matrix(training_config, profiling_results)
+                if chunk_times:
+                    ideal_per_mb = 0.0
+                    for rank_chunks in chunk_times:
+                        rank_total = sum(c.get("fwd", 0) + c.get("bwd", 0) for c in rank_chunks)
+                        ideal_per_mb = max(ideal_per_mb, rank_total)
+                    ideal_per_mb /= pp_size if pp_size > 1 else 1
+                    ideal_time = ideal_per_mb * micro_batches
+                    bubble_ratio = (
+                        max(0.0, megatron_time - ideal_time) / megatron_time if megatron_time > 0 else 0
+                    )
+                else:
+                    bubble_ratio = 0.0
+                all_results["megatron-ilp"] = {
+                    "step_time_ms": megatron_time,
+                    "max_bubble_ratio": bubble_ratio,
+                }
+        except Exception as e:
+            print(f"[WARNING] Megatron ILP scheduler failed: {e}")
+            all_results["megatron-ilp"] = {"step_time_ms": None, "max_bubble_ratio": 0.0}
+
+    # Print comparison table if multiple schedulers were run
+    if len(all_results) > 1:
+        _print_scheduler_comparison(all_results, training_config)
+
+    # Return best step time
+    valid_times = [r["step_time_ms"] for r in all_results.values() if r.get("step_time_ms") is not None]
+    if valid_times:
+        best_time = min(valid_times)
+        if is_compare_mode:
+            best_name = [n for n, r in all_results.items() if r.get("step_time_ms") == best_time][0]
+            print(
+                f"[Primus:Performance Projection] Using best scheduler '{best_name}' step time: {best_time:.2f} ms"
+            )
+        return best_time
+    elif primus_step_time_ms is not None:
+        return primus_step_time_ms
+    else:
         return None
-    print("[Primus:Performance Projection] Running pipeline schedule simulator...")
-    runner = SchedulerSimulationRunner(sim_config)
-    simulation_runs = runner.run()
-    step_time_ms = _report_simulation_results(simulation_runs, training_config)
-    return step_time_ms
 
 
 def _get_parameter_memory(training_config, pp_rank: int) -> float:
@@ -2113,7 +2398,9 @@ def _run_multinode_projection(
             print(f"  Using custom hardware config from: {args.hardware_config}")
     else:
         if is_rank_0:
-            print("  Using default hardware parameters from custom_hardware_example.yaml")
+            print(
+                "  Using default hardware parameters (see examples/hardware_configs/mi300x.yaml for reference)"
+            )
 
     # Calculate communication times
     total_comm_time_ms, breakdown, message_info, per_layer_info = calculate_collective_communication_time(
@@ -3021,9 +3308,11 @@ def launch_projection_from_cli(args, overrides):
                         mlp_info["backward_time_ms"] = new_mlp_bwd
                     moe_layers_adjusted += 1
 
-    # Check if zero-bubble scheduling is enabled in the original config
+    # Check if zero-bubble scheduling is enabled in the original config.
+    # Default is OFF (Primus pipeline). When ON, uses Megatron ILP scheduler (SeaAI lab).
     original_module_config = primus_config_original.get_module_config("pre_trainer")
-    enable_zero_bubble = getattr(original_module_config, "enable_zero_bubble", False)
+    enable_zero_bubble = getattr(original_module_config, "enable_zero_bubble", True)
+    scheduler_algorithm = getattr(args, "pipeline_schedule_algorithm", "auto")
 
     # Use ORIGINAL PP for pipeline simulation decision, not benchmark PP
     # If original PP > 1, we should run pipeline simulation even if we benchmarked with PP=1
@@ -3046,7 +3335,7 @@ def launch_projection_from_cli(args, overrides):
                 f"(benchmarked with PP={pp})"
             )
         pipeline_simulation_time_ms = _run_pipeline_simulation(
-            training_config, profiling_results, enable_zero_bubble
+            training_config, profiling_results, enable_zero_bubble, scheduler_algorithm
         )
 
     # Restore training_config PP to benchmark value for consistency
