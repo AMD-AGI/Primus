@@ -206,6 +206,7 @@ class MemoryStatsExtension:
                 torch.distributed.all_gather(gathered_r_used, r_used_tensor)
 
                 total_r_used = [t.item() for t in gathered_r_used]
+                log_rank_0(f"total_r_used: {[round(r_used / 1024 ** 3, 2) for r_used in total_r_used]}")
                 max_r_used = max(total_r_used)
                 max_rank = total_r_used.index(max_r_used)
 
