@@ -32,9 +32,7 @@ modules:
       # Sink attention (PR 208) - GPT-OSS style learned sinks
       # Reference: gpt-oss/gpt_oss/triton/attention.py
       use_sink_attention: true
-      # Note: sliding window not yet supported by aiter Triton backend
-      # Set to 0 to disable, or wait for backend support
-      sink_sliding_window: 0  # gpt-oss default is 128, but disabled for now
+      sink_sliding_window: 128  # gpt-oss default
       sink_window_even_layers_only: true  # apply sliding window only to even layers
 
       apply_rope_fusion: true
