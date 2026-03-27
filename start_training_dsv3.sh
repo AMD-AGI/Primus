@@ -66,6 +66,9 @@ case $STAGE in
     ;;
 esac
 
+# 32N best recompute config
+# RECOMP_IDS="0,3,4,7,8,11,12,15,19,23,31,32,35,36,39,40,43,44,47,48,51"
+
 if [ -n "$RECOMP_IDS" ]; then
   export RECOMP_IDS
   RECOMP_ARGS=(--recompute_layer_ids "$RECOMP_IDS" --recompute_granularity full)
