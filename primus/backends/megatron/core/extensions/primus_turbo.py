@@ -1552,12 +1552,18 @@ class PrimusTurboFlowMoETokenDispatcher(PrimusTurboDeepEPTokenDispatcher):
         args = get_args()
         self.flowmoe_enable_chunking = bool(getattr(args, "turbo_flowmoe_enable_chunking", True))
         self.flowmoe_chunk_tokens = int(getattr(args, "turbo_flowmoe_chunk_tokens", 0))
+        self.flowmoe_min_chunk_tokens = int(getattr(args, "turbo_flowmoe_min_chunk_tokens", 0))
+        self.flowmoe_recompute_mode = str(getattr(args, "turbo_flowmoe_recompute_mode", "none")).lower()
         self.flowmoe_prefetch_dispatch = bool(getattr(args, "turbo_flowmoe_prefetch_dispatch", False))
         self.flowmoe_prefetch_combine = bool(getattr(args, "turbo_flowmoe_prefetch_combine", False))
         self.flowmoe_debug = bool(getattr(args, "turbo_flowmoe_debug", False))
         self.flowmoe_log_interval = int(getattr(args, "turbo_flowmoe_log_interval", 100))
         if self.flowmoe_chunk_tokens < 0:
             raise ValueError("turbo_flowmoe_chunk_tokens must be >= 0")
+        if self.flowmoe_min_chunk_tokens < 0:
+            raise ValueError("turbo_flowmoe_min_chunk_tokens must be >= 0")
+        if self.flowmoe_recompute_mode not in {"none", "expert_only"}:
+            raise ValueError("turbo_flowmoe_recompute_mode must be one of: none, expert_only")
         if self.flowmoe_log_interval < 0:
             raise ValueError("turbo_flowmoe_log_interval must be >= 0")
 
@@ -1568,6 +1574,8 @@ class PrimusTurboFlowMoETokenDispatcher(PrimusTurboDeepEPTokenDispatcher):
         self._flowmoe_combine_calls = 0
         self._flowmoe_combine_chunk_hits = 0
         self._flowmoe_combine_fallbacks = 0
+        self._flowmoe_dispatch_cache = None
+        self._flowmoe_combine_cache = None
 
     def _debug_log(self, message: str):
         if not self.flowmoe_debug:
@@ -1608,18 +1616,117 @@ class PrimusTurboFlowMoETokenDispatcher(PrimusTurboDeepEPTokenDispatcher):
             return True, True
         return async_finish, allocate_on_comm_stream
 
-    def _chunk_enabled(self, hidden_states: torch.Tensor) -> bool:
+    def _chunk_enabled(self, num_tokens: int) -> bool:
+        # If the workload only forms one tiny chunk, chunking overhead dominates.
+        min_tokens = (
+            self.flowmoe_min_chunk_tokens
+            if self.flowmoe_min_chunk_tokens > 0
+            else self.flowmoe_chunk_tokens * 2
+        )
         return (
             self.flowmoe_enable_chunking
             and self.flowmoe_chunk_tokens > 0
-            and hidden_states.ndim > 0
-            and hidden_states.shape[0] > self.flowmoe_chunk_tokens
+            and num_tokens >= max(self.flowmoe_chunk_tokens, min_tokens)
         )
+
+    def _memfine_enabled(self) -> bool:
+        return self.flowmoe_recompute_mode == "expert_only"
+
+    def _snapshot_deepep_state(self) -> dict:
+        return {
+            "hidden_shape": self.deepep_dispatcher.hidden_shape,
+            "dispatched_routing_map": self.deepep_dispatcher.dispatched_routing_map,
+            "hidden_shape_before_permute": self.deepep_dispatcher.hidden_shape_before_permute,
+            "reversed_mapping_for_combine": self.deepep_dispatcher.reversed_mapping_for_combine,
+            "handle": self.deepep_dispatcher.handle,
+        }
+
+    def _restore_deepep_state(self, state: dict):
+        self.deepep_dispatcher.hidden_shape = state["hidden_shape"]
+        self.deepep_dispatcher.dispatched_routing_map = state["dispatched_routing_map"]
+        self.deepep_dispatcher.hidden_shape_before_permute = state["hidden_shape_before_permute"]
+        self.deepep_dispatcher.reversed_mapping_for_combine = state["reversed_mapping_for_combine"]
+        self.deepep_dispatcher.handle = state["handle"]
 
     def dispatch_preprocess(
         self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
     ):
-        return super().dispatch_preprocess(hidden_states, routing_map, probs)
+        num_tokens = hidden_states.view(-1, self.config.hidden_size).shape[0]
+
+        if not self._chunk_enabled(num_tokens):
+            self._flowmoe_dispatch_cache = None
+            return super().dispatch_preprocess(hidden_states, routing_map, probs)
+
+        self.hidden_shape = hidden_states.shape
+        hidden_states = hidden_states.view(-1, self.config.hidden_size)
+        self._flowmoe_dispatch_chunk_hits += 1
+        try:
+            token_indices = None
+            if self.moe_router_force_load_balancing:
+                token_indices = (
+                    torch.arange(num_tokens * self.config.moe_router_topk, device=hidden_states.device).view(
+                        num_tokens, self.config.moe_router_topk
+                    )
+                    % self.config.num_moe_experts
+                )
+
+            hidden_chunks = hidden_states.split(self.flowmoe_chunk_tokens, dim=0)
+            probs_chunks = probs.split(self.flowmoe_chunk_tokens, dim=0)
+            routing_chunks = routing_map.split(self.flowmoe_chunk_tokens, dim=0)
+            if token_indices is not None:
+                token_index_chunks = token_indices.split(self.flowmoe_chunk_tokens, dim=0)
+            else:
+                token_index_chunks = [None] * len(hidden_chunks)
+
+            permuted_input_chunks = []
+            permuted_probs_chunks = []
+            tokens_per_expert_sum = None
+            chunk_states = []
+            chunk_token_sizes = []
+
+            for hidden_chunk, probs_chunk, routing_chunk, token_index_chunk in zip(
+                hidden_chunks, probs_chunks, routing_chunks, token_index_chunks
+            ):
+                pre_hidden, pre_probs = self.deepep_dispatcher._pre_dispatch(
+                    hidden_chunk, probs_chunk, routing_chunk, token_index_chunk
+                )
+                dispatched_hidden, dispatched_probs = self.deepep_dispatcher._exec_dispatch(
+                    pre_hidden, pre_probs
+                )
+                permuted_input, tokens_per_expert, permuted_probs = self.deepep_dispatcher._post_dispatch(
+                    dispatched_hidden, dispatched_probs
+                )
+
+                if self.config.moe_router_dtype == "fp64":
+                    permuted_probs = permuted_probs.to(torch.float64)
+
+                if tokens_per_expert_sum is None:
+                    tokens_per_expert_sum = tokens_per_expert.clone()
+                else:
+                    tokens_per_expert_sum = tokens_per_expert_sum + tokens_per_expert.to(
+                        tokens_per_expert_sum.device
+                    )
+
+                permuted_input_chunks.append(permuted_input)
+                permuted_probs_chunks.append(permuted_probs)
+                chunk_states.append(self._snapshot_deepep_state())
+                chunk_token_sizes.append(int(permuted_input.shape[0]))
+
+            self._flowmoe_dispatch_cache = {
+                "chunk_states": chunk_states,
+                "chunk_token_sizes": chunk_token_sizes,
+                "post_dispatch_output": (
+                    torch.cat(permuted_input_chunks, dim=0),
+                    tokens_per_expert_sum,
+                    torch.cat(permuted_probs_chunks, dim=0),
+                ),
+            }
+            return hidden_states, probs
+        except Exception as exc:
+            self._flowmoe_dispatch_fallbacks += 1
+            self._flowmoe_dispatch_cache = None
+            self._debug_log(f"chunked dispatch_preprocess fallback: {type(exc).__name__}: {exc}")
+            return super().dispatch_preprocess(hidden_states.view(self.hidden_shape), routing_map, probs)
 
     def token_dispatch(
         self,
@@ -1632,45 +1739,36 @@ class PrimusTurboFlowMoETokenDispatcher(PrimusTurboDeepEPTokenDispatcher):
             async_finish, allocate_on_comm_stream, is_dispatch=True
         )
         self._flowmoe_dispatch_calls += 1
-        if not self._chunk_enabled(hidden_states):
+        if self._flowmoe_dispatch_cache is not None:
             self._log_flowmoe_stats("dispatch")
-            return super().token_dispatch(hidden_states, probs, runtime_async, runtime_allocate)
-
-        try:
-            self._flowmoe_dispatch_chunk_hits += 1
-            hidden_chunks = hidden_states.split(self.flowmoe_chunk_tokens, dim=0)
-            if probs is not None:
-                probs_chunks = probs.split(self.flowmoe_chunk_tokens, dim=0)
-            else:
-                probs_chunks = [None] * len(hidden_chunks)
-
-            dispatched_tokens_chunks = []
-            dispatched_probs_chunks = []
-            for hidden_chunk, probs_chunk in zip(hidden_chunks, probs_chunks):
-                dispatched_tokens, dispatched_probs = super().token_dispatch(
-                    hidden_chunk, probs_chunk, runtime_async, runtime_allocate
-                )
-                dispatched_tokens_chunks.append(dispatched_tokens)
-                dispatched_probs_chunks.append(dispatched_probs)
-
-            dispatched_tokens = torch.cat(dispatched_tokens_chunks, dim=0)
-            if dispatched_probs_chunks and dispatched_probs_chunks[0] is not None:
-                dispatched_probs = torch.cat(dispatched_probs_chunks, dim=0)
-            else:
-                dispatched_probs = None
-            self._log_flowmoe_stats("dispatch")
-            return dispatched_tokens, dispatched_probs
-        except Exception as exc:
-            # Safety net: never block training due to adapter-level chunking.
-            self._flowmoe_dispatch_fallbacks += 1
-            self._debug_log(f"chunked token_dispatch fallback: {type(exc).__name__}: {exc}")
-            self._log_flowmoe_stats("dispatch")
-            return super().token_dispatch(hidden_states, probs, runtime_async, runtime_allocate)
+            # dispatch already executed in dispatch_preprocess for chunk mode.
+            return hidden_states, probs
+        self._log_flowmoe_stats("dispatch")
+        return super().token_dispatch(hidden_states, probs, runtime_async, runtime_allocate)
 
     def dispatch_postprocess(self, hidden_states: torch.Tensor, probs: torch.Tensor):
+        if self._flowmoe_dispatch_cache is not None:
+            output = self._flowmoe_dispatch_cache["post_dispatch_output"]
+            # Release extra references early; downstream already owns returned tensors.
+            self._flowmoe_dispatch_cache["post_dispatch_output"] = None
+            return output
         return super().dispatch_postprocess(hidden_states, probs)
 
     def combine_preprocess(self, hidden_states: torch.Tensor):
+        if self._flowmoe_dispatch_cache is not None:
+            self._flowmoe_combine_chunk_hits += 1
+            chunk_states = self._flowmoe_dispatch_cache["chunk_states"]
+            chunk_token_sizes = self._flowmoe_dispatch_cache["chunk_token_sizes"]
+            hidden_chunks = hidden_states.split(chunk_token_sizes, dim=0)
+            combined_pre_chunks = []
+            for hidden_chunk, chunk_state in zip(hidden_chunks, chunk_states):
+                self._restore_deepep_state(chunk_state)
+                combined_pre_chunks.append(self.deepep_dispatcher._pre_combine(hidden_chunk))
+            self._flowmoe_combine_cache = {
+                "chunk_states": chunk_states,
+                "chunk_token_sizes": [int(x.shape[0]) for x in combined_pre_chunks],
+            }
+            return torch.cat(combined_pre_chunks, dim=0)
         return super().combine_preprocess(hidden_states)
 
     def token_combine(
@@ -1683,26 +1781,35 @@ class PrimusTurboFlowMoETokenDispatcher(PrimusTurboDeepEPTokenDispatcher):
             async_finish, allocate_on_comm_stream, is_dispatch=False
         )
         self._flowmoe_combine_calls += 1
-        if not self._chunk_enabled(hidden_states):
-            self._log_flowmoe_stats("combine")
-            return super().token_combine(hidden_states, runtime_async, runtime_allocate)
-
-        try:
-            self._flowmoe_combine_chunk_hits += 1
-            hidden_chunks = hidden_states.split(self.flowmoe_chunk_tokens, dim=0)
+        if self._flowmoe_combine_cache is not None:
+            chunk_states = self._flowmoe_combine_cache["chunk_states"]
+            chunk_token_sizes = self._flowmoe_combine_cache["chunk_token_sizes"]
+            hidden_chunks = hidden_states.split(chunk_token_sizes, dim=0)
             combined_chunks = []
-            for hidden_chunk in hidden_chunks:
-                combined_chunks.append(super().token_combine(hidden_chunk, runtime_async, runtime_allocate))
+            for hidden_chunk, chunk_state in zip(hidden_chunks, chunk_states):
+                self._restore_deepep_state(chunk_state)
+                combined_chunks.append(self.deepep_dispatcher._exec_combine(hidden_chunk))
+                if self._memfine_enabled():
+                    # handle is no longer needed after _exec_combine.
+                    chunk_state["handle"] = None
+            self._flowmoe_combine_cache["post_chunk_sizes"] = [int(x.shape[0]) for x in combined_chunks]
             self._log_flowmoe_stats("combine")
             return torch.cat(combined_chunks, dim=0)
-        except Exception as exc:
-            # Safety net: keep behavior equivalent to baseline dispatcher.
-            self._flowmoe_combine_fallbacks += 1
-            self._debug_log(f"chunked token_combine fallback: {type(exc).__name__}: {exc}")
-            self._log_flowmoe_stats("combine")
-            return super().token_combine(hidden_states, runtime_async, runtime_allocate)
+        self._log_flowmoe_stats("combine")
+        return super().token_combine(hidden_states, runtime_async, runtime_allocate)
 
     def combine_postprocess(self, hidden_states: torch.Tensor):
+        if self._flowmoe_combine_cache is not None:
+            chunk_states = self._flowmoe_combine_cache["chunk_states"]
+            post_chunk_sizes = self._flowmoe_combine_cache["post_chunk_sizes"]
+            hidden_chunks = hidden_states.split(post_chunk_sizes, dim=0)
+            post_chunks = []
+            for hidden_chunk, chunk_state in zip(hidden_chunks, chunk_states):
+                self._restore_deepep_state(chunk_state)
+                post_chunks.append(self.deepep_dispatcher._post_combine(hidden_chunk))
+            self._flowmoe_dispatch_cache = None
+            self._flowmoe_combine_cache = None
+            return torch.cat(post_chunks, dim=0).view(self.hidden_shape)
         return super().combine_postprocess(hidden_states)
 
 

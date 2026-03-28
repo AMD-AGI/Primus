@@ -20,6 +20,8 @@ turbo_deepep_use_comm_stream: false
 use_turbo_flowmoe: false
 turbo_flowmoe_enable_chunking: true
 turbo_flowmoe_chunk_tokens: 0
+turbo_flowmoe_min_chunk_tokens: 0
+turbo_flowmoe_recompute_mode: none
 turbo_flowmoe_prefetch_dispatch: false
 turbo_flowmoe_prefetch_combine: false
 turbo_flowmoe_debug: false

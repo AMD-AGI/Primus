@@ -47,23 +47,34 @@ def patch_get_megatron_optimizer_muon(ctx: PatchContext) -> None:
     if getattr(original_get_megatron_optimizer, "_primus_muon_wrapper", False):
         return
 
-    def _patched_get_megatron_optimizer(
-        config,
-        model_chunks,
-        config_overrides=None,
-        use_gloo_process_groups=True,
-        pg_collection=None,
-        dump_param_to_param_group_map=None,
-    ):
+    def _patched_get_megatron_optimizer(*func_args, **func_kwargs):
+        if len(func_args) >= 2:
+            config = func_args[0]
+            model_chunks = func_args[1]
+        else:
+            config = func_kwargs.get("config")
+            model_chunks = func_kwargs.get("model_chunks")
+
+        config_overrides = func_kwargs.get("config_overrides")
+        if config_overrides is None and len(func_args) > 2:
+            config_overrides = func_args[2]
+
+        use_gloo_process_groups = func_kwargs.get("use_gloo_process_groups")
+        if use_gloo_process_groups is None and len(func_args) > 3:
+            use_gloo_process_groups = func_args[3]
+        if use_gloo_process_groups is None:
+            use_gloo_process_groups = True
+
+        pg_collection = func_kwargs.get("pg_collection")
+        if pg_collection is None and len(func_args) > 4:
+            pg_collection = func_args[4]
+
+        dump_param_to_param_group_map = func_kwargs.get("dump_param_to_param_group_map")
+        if dump_param_to_param_group_map is None and len(func_args) > 5:
+            dump_param_to_param_group_map = func_args[5]
+
         if not config.optimizer or "muon" not in config.optimizer:
-            return original_get_megatron_optimizer(
-                config,
-                model_chunks,
-                config_overrides=config_overrides,
-                use_gloo_process_groups=use_gloo_process_groups,
-                pg_collection=pg_collection,
-                dump_param_to_param_group_map=dump_param_to_param_group_map,
-            )
+            return original_get_megatron_optimizer(*func_args, **func_kwargs)
 
         from primus.backends.megatron.core.optimizer.moun import (
             get_megatron_muon_optimizer,

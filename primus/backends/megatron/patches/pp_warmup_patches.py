@@ -69,35 +69,15 @@ def patch_train_with_pp_warmup(ctx: PatchContext) -> None:
     if getattr(original_train, "_primus_pp_warmup_wrapped", False):
         return
 
-    def _train_with_pp_warmup(
-        forward_step_func,
-        model,
-        optimizer,
-        opt_param_scheduler,
-        train_data_iterator,
-        valid_data_iterator,
-        process_non_loss_data_func,
-        config,
-        checkpointing_context,
-        non_loss_data_func,
-        inference_model=None,
-    ):
+    def _train_with_pp_warmup(*train_args, **train_kwargs):
         args = get_megatron_args()
         if getattr(args, "pp_warmup", True):
-            run_pp_warmup(model, config, args, optimizer, get_timers())
-        return original_train(
-            forward_step_func,
-            model,
-            optimizer,
-            opt_param_scheduler,
-            train_data_iterator,
-            valid_data_iterator,
-            process_non_loss_data_func,
-            config,
-            checkpointing_context,
-            non_loss_data_func,
-            inference_model,
-        )
+            model = train_kwargs.get("model", train_args[1] if len(train_args) > 1 else None)
+            optimizer = train_kwargs.get("optimizer", train_args[2] if len(train_args) > 2 else None)
+            config = train_kwargs.get("config", train_args[7] if len(train_args) > 7 else None)
+            if model is not None and optimizer is not None and config is not None:
+                run_pp_warmup(model, config, args, optimizer, get_timers())
+        return original_train(*train_args, **train_kwargs)
 
     setattr(_train_with_pp_warmup, "_primus_pp_warmup_wrapped", True)
     training.train = _train_with_pp_warmup
