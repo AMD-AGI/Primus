@@ -13,7 +13,7 @@ Each patch is organized in its own file for better maintainability.
 Patches included:
   - te_spec_provider_patches: Replace TESpecProvider with PrimusTurboSpecProvider
   - gpt_output_layer_patches: Replace GPT ColumnParallelLinear with PrimusTurbo implementation
-  - moe_dispatcher_patches: Replace MoE token dispatcher with PrimusTurbo DeepEP implementation
+  - moe_dispatcher_patches: Replace MoE token dispatcher with PrimusTurbo DeepEP/FlowMoE implementation
   - rms_norm_patches: Replace RMSNorm with PrimusTurbo implementation
 
 Patch modules are discovered and imported automatically by

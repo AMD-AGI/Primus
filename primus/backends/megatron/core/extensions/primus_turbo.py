@@ -1527,6 +1527,185 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         return hidden_states.view(self.hidden_shape)
 
 
+class PrimusTurboFlowMoETokenDispatcher(PrimusTurboDeepEPTokenDispatcher):
+    """
+    FlowMoE-style adapter on top of PrimusTurbo DeepEP dispatcher.
+
+    This adapter intentionally keeps dispatch/combine semantics identical to
+    PrimusTurboDeepEPTokenDispatcher so it can be enabled safely in existing
+    training jobs while exposing FlowMoE-oriented tuning knobs.
+    """
+
+    def __init__(
+        self,
+        num_local_experts: int,
+        local_expert_indices: List[int],
+        config: TransformerConfig,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        super().__init__(
+            num_local_experts=num_local_experts,
+            local_expert_indices=local_expert_indices,
+            config=config,
+            pg_collection=pg_collection,
+        )
+        args = get_args()
+        self.flowmoe_enable_chunking = bool(getattr(args, "turbo_flowmoe_enable_chunking", True))
+        self.flowmoe_chunk_tokens = int(getattr(args, "turbo_flowmoe_chunk_tokens", 0))
+        self.flowmoe_prefetch_dispatch = bool(getattr(args, "turbo_flowmoe_prefetch_dispatch", False))
+        self.flowmoe_prefetch_combine = bool(getattr(args, "turbo_flowmoe_prefetch_combine", False))
+        self.flowmoe_debug = bool(getattr(args, "turbo_flowmoe_debug", False))
+        self.flowmoe_log_interval = int(getattr(args, "turbo_flowmoe_log_interval", 100))
+        if self.flowmoe_chunk_tokens < 0:
+            raise ValueError("turbo_flowmoe_chunk_tokens must be >= 0")
+        if self.flowmoe_log_interval < 0:
+            raise ValueError("turbo_flowmoe_log_interval must be >= 0")
+
+        # Runtime counters for chunk hit-rate and fallback visibility.
+        self._flowmoe_dispatch_calls = 0
+        self._flowmoe_dispatch_chunk_hits = 0
+        self._flowmoe_dispatch_fallbacks = 0
+        self._flowmoe_combine_calls = 0
+        self._flowmoe_combine_chunk_hits = 0
+        self._flowmoe_combine_fallbacks = 0
+
+    def _debug_log(self, message: str):
+        if not self.flowmoe_debug:
+            return
+        if not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0:
+            print(f"[FlowMoEAdapter] {message}")
+
+    def _rank0(self) -> bool:
+        return not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
+
+    def _log_flowmoe_stats(self, stage: str):
+        if self.flowmoe_log_interval == 0 or not self._rank0():
+            return
+        if stage == "dispatch":
+            total_calls = self._flowmoe_dispatch_calls
+            chunk_hits = self._flowmoe_dispatch_chunk_hits
+            fallbacks = self._flowmoe_dispatch_fallbacks
+        else:
+            total_calls = self._flowmoe_combine_calls
+            chunk_hits = self._flowmoe_combine_chunk_hits
+            fallbacks = self._flowmoe_combine_fallbacks
+        if total_calls == 0 or total_calls % self.flowmoe_log_interval != 0:
+            return
+        hit_rate = 100.0 * chunk_hits / total_calls
+        print(
+            "[FlowMoEAdapter] "
+            f"stage={stage} dispatcher={hex(id(self))} "
+            f"calls={total_calls} chunk_hits={chunk_hits} "
+            f"hit_rate={hit_rate:.2f}% fallbacks={fallbacks}"
+        )
+
+    def _resolve_runtime_flags(
+        self, async_finish: bool, allocate_on_comm_stream: bool, is_dispatch: bool
+    ) -> Tuple[bool, bool]:
+        prefetch_enabled = self.flowmoe_prefetch_dispatch if is_dispatch else self.flowmoe_prefetch_combine
+        # Prefetch mode forces async/comm-stream allocation to maximize overlap opportunities.
+        if prefetch_enabled:
+            return True, True
+        return async_finish, allocate_on_comm_stream
+
+    def _chunk_enabled(self, hidden_states: torch.Tensor) -> bool:
+        return (
+            self.flowmoe_enable_chunking
+            and self.flowmoe_chunk_tokens > 0
+            and hidden_states.ndim > 0
+            and hidden_states.shape[0] > self.flowmoe_chunk_tokens
+        )
+
+    def dispatch_preprocess(
+        self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
+    ):
+        return super().dispatch_preprocess(hidden_states, routing_map, probs)
+
+    def token_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        probs: torch.Tensor = None,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
+    ):
+        runtime_async, runtime_allocate = self._resolve_runtime_flags(
+            async_finish, allocate_on_comm_stream, is_dispatch=True
+        )
+        self._flowmoe_dispatch_calls += 1
+        if not self._chunk_enabled(hidden_states):
+            self._log_flowmoe_stats("dispatch")
+            return super().token_dispatch(hidden_states, probs, runtime_async, runtime_allocate)
+
+        try:
+            self._flowmoe_dispatch_chunk_hits += 1
+            hidden_chunks = hidden_states.split(self.flowmoe_chunk_tokens, dim=0)
+            if probs is not None:
+                probs_chunks = probs.split(self.flowmoe_chunk_tokens, dim=0)
+            else:
+                probs_chunks = [None] * len(hidden_chunks)
+
+            dispatched_tokens_chunks = []
+            dispatched_probs_chunks = []
+            for hidden_chunk, probs_chunk in zip(hidden_chunks, probs_chunks):
+                dispatched_tokens, dispatched_probs = super().token_dispatch(
+                    hidden_chunk, probs_chunk, runtime_async, runtime_allocate
+                )
+                dispatched_tokens_chunks.append(dispatched_tokens)
+                dispatched_probs_chunks.append(dispatched_probs)
+
+            dispatched_tokens = torch.cat(dispatched_tokens_chunks, dim=0)
+            if dispatched_probs_chunks and dispatched_probs_chunks[0] is not None:
+                dispatched_probs = torch.cat(dispatched_probs_chunks, dim=0)
+            else:
+                dispatched_probs = None
+            self._log_flowmoe_stats("dispatch")
+            return dispatched_tokens, dispatched_probs
+        except Exception as exc:
+            # Safety net: never block training due to adapter-level chunking.
+            self._flowmoe_dispatch_fallbacks += 1
+            self._debug_log(f"chunked token_dispatch fallback: {type(exc).__name__}: {exc}")
+            self._log_flowmoe_stats("dispatch")
+            return super().token_dispatch(hidden_states, probs, runtime_async, runtime_allocate)
+
+    def dispatch_postprocess(self, hidden_states: torch.Tensor, probs: torch.Tensor):
+        return super().dispatch_postprocess(hidden_states, probs)
+
+    def combine_preprocess(self, hidden_states: torch.Tensor):
+        return super().combine_preprocess(hidden_states)
+
+    def token_combine(
+        self,
+        hidden_states: torch.Tensor,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
+    ):
+        runtime_async, runtime_allocate = self._resolve_runtime_flags(
+            async_finish, allocate_on_comm_stream, is_dispatch=False
+        )
+        self._flowmoe_combine_calls += 1
+        if not self._chunk_enabled(hidden_states):
+            self._log_flowmoe_stats("combine")
+            return super().token_combine(hidden_states, runtime_async, runtime_allocate)
+
+        try:
+            self._flowmoe_combine_chunk_hits += 1
+            hidden_chunks = hidden_states.split(self.flowmoe_chunk_tokens, dim=0)
+            combined_chunks = []
+            for hidden_chunk in hidden_chunks:
+                combined_chunks.append(super().token_combine(hidden_chunk, runtime_async, runtime_allocate))
+            self._log_flowmoe_stats("combine")
+            return torch.cat(combined_chunks, dim=0)
+        except Exception as exc:
+            # Safety net: keep behavior equivalent to baseline dispatcher.
+            self._flowmoe_combine_fallbacks += 1
+            self._debug_log(f"chunked token_combine fallback: {type(exc).__name__}: {exc}")
+            self._log_flowmoe_stats("combine")
+            return super().token_combine(hidden_states, runtime_async, runtime_allocate)
+
+    def combine_postprocess(self, hidden_states: torch.Tensor):
+        return super().combine_postprocess(hidden_states)
+
+
 class PrimusTurboRMSNorm(te.pytorch.RMSNorm):
     def __init__(self, *args, **kwargs):
         assert "device" in kwargs

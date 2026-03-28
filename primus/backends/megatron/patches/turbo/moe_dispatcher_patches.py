@@ -7,7 +7,7 @@
 """
 Primus Turbo MoE Dispatcher Patches
 
-Patches for replacing MoE token dispatcher with PrimusTurbo DeepEP implementation.
+Patches for replacing MoE token dispatcher with PrimusTurbo DeepEP/FlowMoE implementation.
 """
 
 import importlib.util
@@ -47,15 +47,17 @@ def _is_turbo_deepep_enabled(ctx: PatchContext) -> bool:
 )
 def patch_moe_dispatcher(ctx: PatchContext):
     """
-    Patch MoE token dispatcher to use PrimusTurbo DeepEP implementation.
+    Patch MoE token dispatcher to use PrimusTurbo DeepEP/FlowMoE implementation.
 
     This replaces MoEFlexTokenDispatcher with PrimusTurboDeepEPTokenDispatcher
+    or PrimusTurboFlowMoETokenDispatcher (when enabled),
     and automatically enables moe_enable_deepep and sets moe_token_dispatcher_type to 'flex'.
     """
     from megatron.core.transformer.moe import moe_layer, token_dispatcher
 
     from primus.backends.megatron.core.extensions.primus_turbo import (
         PrimusTurboDeepEPTokenDispatcher,
+        PrimusTurboFlowMoETokenDispatcher,
     )
 
     log_rank_0("[Patch:megatron.turbo.moe_dispatcher] Patching MoE token dispatcher...")
@@ -69,16 +71,26 @@ def patch_moe_dispatcher(ctx: PatchContext):
         "[Patch:megatron.turbo.moe_dispatcher]   Set moe_enable_deepep=True, moe_token_dispatcher_type='flex'"
     )
 
-    token_dispatcher.MoEFlexTokenDispatcher = PrimusTurboDeepEPTokenDispatcher
+    use_turbo_flowmoe = bool(getattr(args, "use_turbo_flowmoe", False))
+    dispatcher_cls = (
+        PrimusTurboFlowMoETokenDispatcher if use_turbo_flowmoe else PrimusTurboDeepEPTokenDispatcher
+    )
+    if use_turbo_flowmoe:
+        log_rank_0(
+            "[Patch:megatron.turbo.moe_dispatcher]   use_turbo_flowmoe=True, "
+            "using PrimusTurboFlowMoETokenDispatcher"
+        )
+
+    token_dispatcher.MoEFlexTokenDispatcher = dispatcher_cls
     log_rank_0(
         "[Patch:megatron.turbo.moe_dispatcher]   Patched "
         f"megatron.core.transformer.moe.token_dispatcher.MoEFlexTokenDispatcher "
-        f"-> {PrimusTurboDeepEPTokenDispatcher.__name__}"
+        f"-> {dispatcher_cls.__name__}"
     )
 
-    moe_layer.MoEFlexTokenDispatcher = PrimusTurboDeepEPTokenDispatcher
+    moe_layer.MoEFlexTokenDispatcher = dispatcher_cls
     log_rank_0(
         "[Patch:megatron.turbo.moe_dispatcher]   Patched "
         f"megatron.core.transformer.moe.moe_layer.MoEFlexTokenDispatcher "
-        f"-> {PrimusTurboDeepEPTokenDispatcher.__name__}"
+        f"-> {dispatcher_cls.__name__}"
     )
