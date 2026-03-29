@@ -35,7 +35,7 @@ export TURBO_ATTENTION=${TURBO_ATTENTION:-False}
 export TURBO_DEEPEEP=${TURBO_DEEPEEP:-True}
 export LEGACY_GG=${LEGACY_GG:-True}
 export TURBO_GROUPED_MLP=${TURBO_GROUPED_MLP:-False}
-export TURBO_RMS_NORM=${TURBO_RMS_NORM:-False}
+export TURBO_RMS_NORM=${TURBO_RMS_NORM:-True}
 export APPLY_ROPE_FUSION=True
 export HSA_NO_SCRATCH_RECLAIM=1
 export NVTE_CK_USES_BWD_V3=1
@@ -82,7 +82,7 @@ export EXP=examples/megatron/configs/MI355X/deepseek_v3-${PRETRAIN_TYPE}-pretrai
 PRIMUS_TEAM="amd-$(date +%Y%m%d)"
 export PRIMUS_TEAM
 
-PRIMUS_USER="${WORKLOAD_ID}"
+PRIMUS_USER="${WORKLOAD_ID:-tas}"
 export PRIMUS_USER
 export PRIMUS_TOKENIZED_DATA_PATH=/shared_aig/c4/tokenized/c4_en_train_text_document # this is the tokenized data path for the training
 export PRIMUS_EXP_NAME=dsv3-pretrain-nnodes_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turboattn_$TURBO_ATTENTION-ropefusion_$APPLY_ROPE_FUSION-profile_$PROFILE
@@ -100,7 +100,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
 #   ${SLURM_TIME:+--time="${SLURM_TIME}"} \
 #   ${SLURM_PARTITION:+--partition="${SLURM_PARTITION}"} \
 #   ${SLURM_NODELIST:+--nodelist="${SLURM_NODELIST}"} \
-#   -- --image "docker.io/tasimage/primus:pr-609-ainic" --clean -- --numa \
+#   -- --image "docker.io/tasimage/primus:pr-563-ainic" --clean -- --numa \
 
 ./primus-cli direct --numa \
   -- train pretrain --config "$EXP" \
