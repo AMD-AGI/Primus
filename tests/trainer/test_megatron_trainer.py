@@ -481,6 +481,82 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def _run_deepseek_v2_lite_zbv_fp8_case(self, tag: str, env_override: dict):
+        base_env = {
+            "BACKEND": "megatron",
+            "REBUILD_PRIMUS_TURBO": "0",
+            "MASTER_ADDR": "localhost",
+            "NCCL_SOCKET_IFNAME": "lo",
+            "GLOO_SOCKET_IFNAME": "lo",
+            "IP_INTERFACE": "lo",
+            "AITER_META_DIR": "/opt/venv/lib/python3.10/site-packages/aiter_meta",
+            "PRIMUS_MODEL": "deepseek_v2_lite",
+            "PRIMUS_PP": "4",
+            "PRIMUS_VPP": "2",
+            "PRIMUS_EP": "2",
+            "PRIMUS_NUM_LAYERS": "8",
+            "PRIMUS_MOE_LAYER_FREQ": "[0]*1+[1]*7",
+            "PRIMUS_GLOBAL_BATCH_SIZE": "16",
+            "PRIMUS_PP_ALGO": "zbv-formatted",
+            "PRIMUS_FP8": "hybrid",
+            "PRIMUS_ENABLE_TURBO": "1",
+        }
+        base_env.update(env_override)
+        stdout, _ = run_script(
+            self.__class__.__name__,
+            tag,
+            exp_path="tests/trainer/test_megatron_trainer_zbv_fp8.yaml",
+            env_override=base_env,
+        )
+        self.assertIn("Training completed.", stdout)
+        return stdout
+
+    def test_deepseek_v2_lite_te_fp8_zbv_formatted(self):
+        stdout = self._run_deepseek_v2_lite_zbv_fp8_case(
+            "deepseek_v2_lite_te_fp8_zbv_formatted",
+            {
+                "MASTER_PORT": "12451",
+                "PRIMUS_ENABLE_TURBO": "0",
+                "PRIMUS_FP8_RECIPE": "delayed",
+                "PRIMUS_USE_LEGACY_GG": "0",
+                "PRIMUS_USE_TURBO_ATTENTION": "0",
+                "PRIMUS_USE_TURBO_GROUPED_MLP": "0",
+                "PRIMUS_USE_TURBO_PARALLEL_LINEAR": "0",
+            },
+        )
+        self.assertIn("[Patch:megatron.pp.te_wgrad_split]", stdout)
+        self.assertNotIn("[Patch:megatron.pp.legacy_grouped_mlp_wgrad_split]", stdout)
+
+    def test_deepseek_v2_lite_turbo_fp8_zbv_formatted(self):
+        stdout = self._run_deepseek_v2_lite_zbv_fp8_case(
+            "deepseek_v2_lite_turbo_fp8_zbv_formatted",
+            {
+                "MASTER_PORT": "12452",
+                "PRIMUS_FP8_RECIPE": "blockwise",
+                "PRIMUS_USE_LEGACY_GG": "1",
+                "PRIMUS_USE_TURBO_ATTENTION": "1",
+                "PRIMUS_USE_TURBO_GROUPED_MLP": "1",
+                "PRIMUS_USE_TURBO_PARALLEL_LINEAR": "0",
+            },
+        )
+        self.assertIn("use split wgrad op for zbv-formatted", stdout)
+        self.assertNotIn("[Patch:megatron.pp.legacy_grouped_mlp_wgrad_split]", stdout)
+
+    def test_deepseek_v2_lite_te_fp8_legacy_gg_zbv_formatted(self):
+        stdout = self._run_deepseek_v2_lite_zbv_fp8_case(
+            "deepseek_v2_lite_te_fp8_legacy_gg_zbv_formatted",
+            {
+                "MASTER_PORT": "12453",
+                "PRIMUS_ENABLE_TURBO": "0",
+                "PRIMUS_FP8_RECIPE": "delayed",
+                "PRIMUS_USE_LEGACY_GG": "1",
+                "PRIMUS_USE_TURBO_ATTENTION": "0",
+                "PRIMUS_USE_TURBO_GROUPED_MLP": "0",
+                "PRIMUS_USE_TURBO_PARALLEL_LINEAR": "0",
+            },
+        )
+        self.assertIn("[Patch:megatron.pp.legacy_grouped_mlp_wgrad_split]", stdout)
+
 
 class TestMegatronTrainerDeterministic(PrimusUT):
     def __init__(self, *args, **kwargs):

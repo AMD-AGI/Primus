@@ -59,6 +59,7 @@ from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
 
 def use_split_wgrad_op():
     args = get_args()
+
     if args.patch_primus_pipeline and args.pp_algorithm in [
         "zero-bubble",
         "zero-bubble-heuristic",
@@ -66,10 +67,21 @@ def use_split_wgrad_op():
         "v-half",
         "v-min",
     ]:
+        print(f"use split wgrad op for {args.pp_algorithm}")
         return True
     elif args.patch_zero_bubble and args.enable_zero_bubble:
         return True
     return False
+
+
+def _get_fp8_gemm_func(quant_config):
+    """Select the appropriate FP8 GEMM function based on quantization config."""
+    if quant_config.block_scaling():
+        return pt.ops.gemm_fp8_blockwise
+    elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
+        return pt.ops.gemm_fp8
+    else:
+        raise ValueError("Unsupported FP8 quant config.")
 
 
 class PrimusTurboQuantConfig:
@@ -561,13 +573,18 @@ class PrimusTurboLinear(TELinear):
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
         if use_split_wgrad_op():
-            from .zbpp_gemm import gemm_with_weight_gradient_store
+            from .zbpp_gemm import (
+                gemm_fp8_with_weight_gradient_store,
+                gemm_with_weight_gradient_store,
+            )
 
             self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+            self._gemm_fp8_split_wgrad = gemm_fp8_with_weight_gradient_store
         else:
             self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
                 a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
             )
+            self._gemm_fp8_split_wgrad = None
 
         args = get_args()
         self.offload = args.offload and "basic_gemm" in args.offload_ops
@@ -623,14 +640,14 @@ class PrimusTurboLinear(TELinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
-                fp8_gemm = pt.ops.gemm_fp8
-            else:
-                raise ValueError("Not support quant config.")
+            fp8_gemm = _get_fp8_gemm_func(quant_config)
 
-            out = fp8_gemm(
-                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
+            if self._gemm_fp8_split_wgrad is not None:
+                out = self._gemm_fp8_split_wgrad(input_, weights, fp8_gemm, quant_config.data())
+            else:
+                out = fp8_gemm(
+                    input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+                )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
             if quant_config.mxfp4_scaling():
@@ -682,13 +699,18 @@ class PrimusTurboRowParallelLinear(TELinear):
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
 
         if use_split_wgrad_op():
-            from .zbpp_gemm import gemm_with_weight_gradient_store
+            from .zbpp_gemm import (
+                gemm_fp8_with_weight_gradient_store,
+                gemm_with_weight_gradient_store,
+            )
 
             self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+            self._gemm_fp8_split_wgrad = gemm_fp8_with_weight_gradient_store
         else:
             self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
                 a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
             )
+            self._gemm_fp8_split_wgrad = None
 
         super().__init__(
             input_size=input_size,
@@ -775,14 +797,14 @@ class PrimusTurboRowParallelLinear(TELinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
-                fp8_gemm = pt.ops.gemm_fp8
-            else:
-                raise ValueError("Not support quant config.")
+            fp8_gemm = _get_fp8_gemm_func(quant_config)
 
-            out = fp8_gemm(
-                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
+            if self._gemm_fp8_split_wgrad is not None:
+                out = self._gemm_fp8_split_wgrad(input_, weights, fp8_gemm, quant_config.data())
+            else:
+                out = fp8_gemm(
+                    input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+                )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
             if quant_config.mxfp4_scaling():
@@ -830,13 +852,18 @@ class PrimusTurboColumnParallelLinear(TELinear):
         assert not self.offload, "gemm offload still have some problems"
 
         if use_split_wgrad_op():
-            from .zbpp_gemm import gemm_with_weight_gradient_store
+            from .zbpp_gemm import (
+                gemm_fp8_with_weight_gradient_store,
+                gemm_with_weight_gradient_store,
+            )
 
             self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+            self._gemm_fp8_split_wgrad = gemm_fp8_with_weight_gradient_store
         else:
             self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
                 a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
             )
+            self._gemm_fp8_split_wgrad = None
 
         super().__init__(
             input_size=input_size,
@@ -920,14 +947,14 @@ class PrimusTurboColumnParallelLinear(TELinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
-                fp8_gemm = pt.ops.gemm_fp8
-            else:
-                raise ValueError("Not support quant config.")
+            fp8_gemm = _get_fp8_gemm_func(quant_config)
 
-            out = fp8_gemm(
-                input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
+            if self._gemm_fp8_split_wgrad is not None:
+                out = self._gemm_fp8_split_wgrad(input_, weights, fp8_gemm, quant_config.data())
+            else:
+                out = fp8_gemm(
+                    input_, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+                )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
             if quant_config.mxfp4_scaling():
@@ -980,13 +1007,18 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
         assert not self.offload, "gemm offload still have some problems"
 
         if use_split_wgrad_op():
-            from .zbpp_gemm import gemm_with_weight_gradient_store
+            from .zbpp_gemm import (
+                gemm_fp8_with_weight_gradient_store,
+                gemm_with_weight_gradient_store,
+            )
 
             self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+            self._gemm_fp8_split_wgrad = gemm_fp8_with_weight_gradient_store
         else:
             self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
                 a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
             )
+            self._gemm_fp8_split_wgrad = None
 
         super().__init__(
             input_size,
@@ -1027,14 +1059,14 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
-                fp8_gemm = pt.ops.gemm_fp8
-            else:
-                raise ValueError("Not support quant config.")
+            fp8_gemm = _get_fp8_gemm_func(quant_config)
 
-            out = fp8_gemm(
-                input_, weight, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
+            if self._gemm_fp8_split_wgrad is not None:
+                out = self._gemm_fp8_split_wgrad(input_, weight, fp8_gemm, quant_config.data())
+            else:
+                out = fp8_gemm(
+                    input_, weight, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+                )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
             if quant_config.mxfp4_scaling():
@@ -1076,6 +1108,7 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
     ):
         args = get_args()
         self.config = config
+        self.stride = stride
         self.offload = args.offload and "column_parallel_gemm" in args.offload_ops
         assert not self.offload, "gemm offload still have some problems"
 
@@ -1099,14 +1132,18 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         self.te_return_bias = skip_bias_add and bias
 
         if use_split_wgrad_op():
-
-            from .zbpp_gemm import gemm_with_weight_gradient_store
+            from .zbpp_gemm import (
+                gemm_fp8_with_weight_gradient_store,
+                gemm_with_weight_gradient_store,
+            )
 
             self.gemm = lambda a, b, bias=None: gemm_with_weight_gradient_store(a, b, bias=bias)
+            self._gemm_fp8_split_wgrad = gemm_fp8_with_weight_gradient_store
         else:
             self.gemm = lambda a, b, trans_a=False, trans_b=True, out_dtype=None: pt.ops.gemm(
                 a, b, trans_a=trans_a, trans_b=trans_b, out_dtype=out_dtype
             )
+            self._gemm_fp8_split_wgrad = None
 
         super().__init__(
             in_features=input_size,
@@ -1195,14 +1232,14 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
-                fp8_gemm = pt.ops.gemm_fp8
-            else:
-                raise ValueError("Not support quant config.")
+            fp8_gemm = _get_fp8_gemm_func(quant_config)
 
-            out = fp8_gemm(
-                inp, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
-            )
+            if self._gemm_fp8_split_wgrad is not None:
+                out = self._gemm_fp8_split_wgrad(inp, weights, fp8_gemm, quant_config.data())
+            else:
+                out = fp8_gemm(
+                    inp, weights, trans_a=False, trans_b=True, out_dtype=None, config=quant_config.data()
+                )
         elif PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp4_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
             if quant_config.mxfp4_scaling():
@@ -1247,13 +1284,18 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         self.patch_primus_pipeline = args.patch_primus_pipeline
 
         if self.use_split_wgrad_op or (args.patch_moe_overlap and args.overlap_moe_expert_parallel_comm):
-            from .zbpp_gemm import grouped_gemm_with_weight_gradient_store
+            from .zbpp_gemm import (
+                grouped_gemm_fp8_with_weight_gradient_store,
+                grouped_gemm_with_weight_gradient_store,
+            )
 
             self.grouped_gemm = functools.partial(
                 grouped_gemm_with_weight_gradient_store, gg_backend="turbo-gg"
             )
+            self._grouped_gemm_fp8_split_wgrad = grouped_gemm_fp8_with_weight_gradient_store
         else:
             self.grouped_gemm = pt.ops.grouped_gemm
+            self._grouped_gemm_fp8_split_wgrad = None
 
         if self.use_turbo_fused_act_with_probs:
             assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
@@ -1318,13 +1360,23 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             assert w2.is_contiguous(), "w2 must be contiguous"
             if use_grouped_gemm_low_precision:
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-                fc1_output = pt.ops.grouped_gemm_fp8(
-                    permuted_local_hidden_states,
-                    w1,
-                    tokens_per_expert,
-                    trans_b=False,
-                    config=quant_config.data(),
-                )
+                if self._grouped_gemm_fp8_split_wgrad is not None:
+                    fc1_output = self._grouped_gemm_fp8_split_wgrad(
+                        permuted_local_hidden_states,
+                        w1,
+                        tokens_per_expert,
+                        trans_b=False,
+                        weight_reshape_size=gemm_kargs[0].get("weight_reshape_size"),
+                        quant_config_data=quant_config.data(),
+                    )
+                else:
+                    fc1_output = pt.ops.grouped_gemm_fp8(
+                        permuted_local_hidden_states,
+                        w1,
+                        tokens_per_expert,
+                        trans_b=False,
+                        config=quant_config.data(),
+                    )
             else:
                 fc1_output = self.grouped_gemm(
                     permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, **(gemm_kargs[0])
@@ -1343,13 +1395,23 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     )
                 if use_grouped_gemm_low_precision:
                     quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-                    fc2_output = pt.ops.grouped_gemm_fp8(
-                        intermediate_parallel,
-                        w2,
-                        tokens_per_expert,
-                        trans_b=False,
-                        config=quant_config.data(),
-                    )
+                    if self._grouped_gemm_fp8_split_wgrad is not None:
+                        fc2_output = self._grouped_gemm_fp8_split_wgrad(
+                            intermediate_parallel,
+                            w2,
+                            tokens_per_expert,
+                            trans_b=False,
+                            weight_reshape_size=gemm_kargs[1].get("weight_reshape_size"),
+                            quant_config_data=quant_config.data(),
+                        )
+                    else:
+                        fc2_output = pt.ops.grouped_gemm_fp8(
+                            intermediate_parallel,
+                            w2,
+                            tokens_per_expert,
+                            trans_b=False,
+                            config=quant_config.data(),
+                        )
                 else:
                     fc2_output = self.grouped_gemm(
                         intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
@@ -1366,13 +1428,23 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     )
                 if use_grouped_gemm_low_precision:
                     quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-                    fc2_output = pt.ops.grouped_gemm_fp8(
-                        intermediate_parallel,
-                        w2,
-                        tokens_per_expert,
-                        trans_b=False,
-                        config=quant_config.data(),
-                    )
+                    if self._grouped_gemm_fp8_split_wgrad is not None:
+                        fc2_output = self._grouped_gemm_fp8_split_wgrad(
+                            intermediate_parallel,
+                            w2,
+                            tokens_per_expert,
+                            trans_b=False,
+                            weight_reshape_size=gemm_kargs[1].get("weight_reshape_size"),
+                            quant_config_data=quant_config.data(),
+                        )
+                    else:
+                        fc2_output = pt.ops.grouped_gemm_fp8(
+                            intermediate_parallel,
+                            w2,
+                            tokens_per_expert,
+                            trans_b=False,
+                            config=quant_config.data(),
+                        )
                 else:
                     fc2_output = self.grouped_gemm(
                         intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
