@@ -1,34 +1,44 @@
+# ===== Global =====
 # main control flag
 enable_primus_turbo: false
 
-# feature control flags
+# ===== Attention =====
+# operator switch
 use_turbo_attention: false
+# sink attention settings (PR 208) - GPT-OSS style learned sinks
+# reference: gpt-oss/gpt_oss/triton/attention.py
+use_sink_attention: false
+# sliding window size for sink attention (gpt-oss uses 128)
+sink_sliding_window: 0
+# apply sliding window only to even layers (gpt-oss pattern)
+sink_window_even_layers_only: true
+# attention float8 path
+enable_turbo_attention_float8: false
+
+# ===== Parallel Linear =====
+# operator switch
 use_turbo_parallel_linear: false
+
+# ===== Grouped MLP =====
+# operator switch
 use_turbo_grouped_mlp: false
+# temporary switch: disable Turbo GroupedMLP low-precision grouped_gemm path
+disable_turbo_grouped_mlp_low_precision: false
+# fused activation_with_probs to reduce redundant computation
+use_turbo_fused_act_with_probs: false
+
+# ===== MoE Router =====
 moe_use_fused_router_with_aux_score: false
 
-# Sink attention settings (PR 208) - GPT-OSS style learned sinks
-# Reference: gpt-oss/gpt_oss/triton/attention.py
-use_sink_attention: false
-# Sliding window size for sink attention (gpt-oss uses 128)
-sink_sliding_window: 0
-# Whether to apply sliding window only to even layers (gpt-oss pattern)
-sink_window_even_layers_only: true
-
-# inner features flags
-enable_turbo_attention_float8 : false
-
-
-# deepep
+# ===== DeepEP =====
+# operator switch
 use_turbo_deepep: false
 turbo_deepep_num_cu: 32
 turbo_deepep_use_comm_stream: false
 
-# sync-free moe
+# ===== Sync-Free MoE =====
 turbo_sync_free_moe_stage: 0
 
-# use turbo fused activation_with_probs to optmize redundant computation
-use_turbo_fused_act_with_probs: false
-
-# layer norm
+# ===== Layer Norm =====
+# operator switch
 use_turbo_rms_norm: false
