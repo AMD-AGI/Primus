@@ -42,15 +42,18 @@ def set_cuda_device_max_connections(ctx: PatchContext):
     module_config = ctx.extra.get("module_config", {})
 
     # Determine CUDA_DEVICE_MAX_CONNECTIONS based on FSDP usage
-    use_fsdp = getattr(module_config.params, "use_torch_fsdp2", False) or getattr(
-        module_config.params, "use_custom_fsdp", False
+    use_fsdp = (
+        getattr(module_config.params, "use_torch_fsdp2", False)
+        or getattr(module_config.params, "use_custom_fsdp", False)
+        or getattr(module_config.params, "use_megatron_fsdp", False)
     )
 
     if use_fsdp:
         cuda_connections = "8"
         log_kv_rank_0(f"[Patch:megatron.env.cuda_device_max_connections]   -use_fsdp", f"True")
     else:
-        cuda_connections = "1"
+        # Use the environment variable if it is set, default to 1
+        cuda_connections = os.getenv("CUDA_DEVICE_MAX_CONNECTIONS", "1")
         log_kv_rank_0(f"[Patch:megatron.env.cuda_device_max_connections]   -use_fsdp", f"False")
 
     # Set environment variable

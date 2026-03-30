@@ -20,15 +20,19 @@ The patch IDs and behavior are preserved; only the code organization changes.
 """
 
 from primus.backends.megatron.patches.parallelism import (  # noqa: F401
+    forward_step_patches,
     linear_grad_split_patches,
     pipeline_parallel_layout_patches,
     schedule_patches,
     te_wgrad_split_patches,
+    train_step_patches,
     v_schedule_patches,
     zero_bubble_patches,
 )
 
 __all__ = [
+    "forward_step_patches",
+    "train_step_patches",
     "zero_bubble_patches",
     "schedule_patches",
     "linear_grad_split_patches",

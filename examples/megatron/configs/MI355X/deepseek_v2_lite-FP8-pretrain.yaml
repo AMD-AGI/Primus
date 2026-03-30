@@ -71,8 +71,8 @@ modules:
 
       # Turbo
       enable_primus_turbo: true
-      use_turbo_attention: false
-      use_turbo_grouped_mlp: false
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: true
 
       # deepep
       use_turbo_deepep: true
@@ -85,12 +85,13 @@ modules:
 
       # sync-free moe support stage 1-2, 0 means not use sync-free moe
       # stage 2 is recommended for better performance
-      turbo_sync_free_moe_stage: 1
+      turbo_sync_free_moe_stage: 2
 
       # Cross entropy flags
-      # cross_entropy_fusion_impl: "te"
-      # cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
 
       # enable fp8 training
-      fp8: hybrid
-      moe_use_legacy_grouped_gemm: false
+      fp8: e4m3
+      fp8_recipe: tensorwise
+      moe_use_legacy_grouped_gemm: true

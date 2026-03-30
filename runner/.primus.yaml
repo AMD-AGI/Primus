@@ -26,7 +26,7 @@ container:
   # All keys directly map to CLI arguments (--key value)
   options:
     # Container image
-    image: "rocm/primus:v25.10"
+    image: "rocm/primus:v26.1"
 
     # Single-value options
     ipc: "host"
@@ -47,7 +47,7 @@ container:
     device:
       - "/dev/kfd"
       - "/dev/dri"
-      # - "/dev/infiniband"
+      - "/dev/infiniband"
 
     # Linux capabilities (each passed as --cap-add)
     # NOTE: Do not modify these capabilities - they are required for proper container operation

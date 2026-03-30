@@ -9,7 +9,7 @@ MaxText pre-train preparation hook for primus-cli direct.
 
 This script is invoked by:
 
-    runner/helpers/hooks/train/pretrain/prepare_experiment.py
+    runner/helpers/hooks/train/pretrain/prepare_experiment.sh
 
 via:
 
@@ -141,7 +141,6 @@ def install_maxtext_dependencies() -> None:
     cmd = (
         "apt install iproute2 -y && "
         "apt install -y "
-        'linux-headers-"$(uname -r)" '
         "libelf-dev "
         "gcc make libtool autoconf "
         "librdmacm-dev rdmacm-utils infiniband-diags ibverbs-utils perftest ethtool "
@@ -237,14 +236,19 @@ def main():
     print(f"env.DUMP_HLO_DIR={dump_hlo_dir}")
     print(f"env.DUMP_HLO={dump_hlo}")
     print("env.NVTE_ALLOW_NONDETERMINISTIC_ALGO=1")
-    print("env.XLA_PYTHON_CLIENT_MEM_FRACTION=.97")
+    # set XLA_PYTHON_CLIENT_MEM_FRACTION to 0.93
+    # to avoid HSA_STATUS_ERROR_OUT_OF_RESOURCES error during multi-node training
+    xla_python_client_mem_fraction = os.getenv("XLA_PYTHON_CLIENT_MEM_FRACTION", ".97")
+    print(f"env.XLA_PYTHON_CLIENT_MEM_FRACTION={xla_python_client_mem_fraction}")
     print("env.NVTE_USE_HIPBLASLT=1")
 
-    xla_flags = "--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_graph_level=0 --xla_gpu_enable_latency_hiding_scheduler=True --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=False --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=FALSE"
+    xla_flags = "--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_enable_command_buffer='' --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=false --xla_gpu_enable_cublaslt=true --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=false"
     if dump_hlo == "1":
         xla_flags += f" --xla_dump_to={dump_hlo_dir}"
         log_info(f"XLA HLO dumping enabled, output directory: {dump_hlo_dir}")
     print(f"env.XLA_FLAGS={xla_flags}")
+    # set TF_CPP_MIN_LOG_LEVEL=2 to suppress the error messages at the end of JAX/MaxText training
+    print(f"env.TF_CPP_MIN_LOG_LEVEL=2")
 
     # AMD GPU optimizations
     print("env.HIP_FORCE_DEV_KERNARG=1")

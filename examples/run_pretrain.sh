@@ -175,32 +175,70 @@ export NCCL_CHECKS_DISABLE=1
 
 # Set InfiniBand GID index for NCCL communication
 if [ "$USING_AINIC" == "1" ]; then
-    export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
-    export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
-    export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi"}
-    export NCCL_NET_PLUGIN=librccl-anp.so
-
     LOG_INFO_RANK0 "Using AINIC"
-    LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
-    LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
-    LOG_INFO_RANK0 "MPI_HOME_DIR: $MPI_HOME_DIR"
-
     # unset NCCL_IB_GID_INDEX
     export NCCL_IB_GID_INDEX=1
     # export NCCL_IB_ROCE_VERSION_NUM=2
-    export NCCL_MAX_P2P_CHANNELS=56
-    export NCCL_IB_TC=104
-    export NCCL_IB_FIFO_TC=192
+    if [ -z "${TC_RESULTS:-}" ]; then
+        export NCCL_IB_TC=${NCCL_IB_TC:-104}
+        export NCCL_IB_FIFO_TC=${NCCL_IB_FIFO_TC:-192}
+    else
+        read -r NCCL_IB_TC NCCL_IB_FIFO_TC <<< "$TC_RESULTS"
+        export NCCL_IB_TC
+        export NCCL_IB_FIFO_TC
+    fi
     export NET_OPTIONAL_RECV_COMPLETION=1
     export NCCL_IB_USE_INLINE=1
     export RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
     export NCCL_GDR_FLUSH_DISABLE=1
-    export NCCL_DMABUF_ENABLE=0
     export NCCL_IGNORE_CPU_AFFINITY=1
-    export NCCL_IB_QPS_PER_CONNECTION=1
+    LOG_INFO_RANK0 "NCCL_IB_TC: $NCCL_IB_TC"
+    LOG_INFO_RANK0 "NCCL_IB_FIFO_TC: $NCCL_IB_FIFO_TC"
 
-    export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib:$LD_LIBRARY_PATH
+    if [ "${BACKEND:-}" == "MaxText" ]; then
+        if ! command -v ibv_devinfo &>/dev/null || ! ibv_devinfo &>/dev/null; then
+            LOG_ERROR "Error: ibv_devinfo not found. Please upgrade driver or use tasimage image."
+            exit 1
+        fi
 
+        export ANP_HOME_DIR=${ANP_HOME_DIR:-"/workspace/amd-anp"}
+        export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/workspace/rccl"}
+        export MPI_HOME_DIR=${MPI_HOME_DIR:-"/ompi-4.1.6/install/"}
+        # ------- RCCL/NCCL IB Tuning -------
+        export IONIC_LOCKFREE=all
+        export NCCL_GDR_COPY_ENABLE=1
+        export NCCL_IB_ECE_ENABLE=0
+        export NCCL_IB_PCI_RELAXED_ORDERING=1
+
+        export NCCL_PXN_DISABLE=0
+        export RCCL_LL128_FORCE_ENABLE=1
+
+        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib
+    else
+        export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
+        export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
+        export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi"}
+
+        export NCCL_MAX_P2P_CHANNELS=56
+        export NCCL_DMABUF_ENABLE=0
+        export NCCL_IB_QPS_PER_CONNECTION=1
+
+        export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib:$LD_LIBRARY_PATH
+    fi
+    # Check which NCCL net plugin library is present under ${ANP_HOME_DIR}/build and set accordingly
+    if [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
+        export NCCL_NET_PLUGIN=librccl-anp.so
+    elif [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
+        export NCCL_NET_PLUGIN=librccl-net.so
+    else
+        LOG_ERROR "Error: Neither librccl-anp.so nor librccl-net.so found in ${ANP_HOME_DIR}/build."
+        exit 1
+    fi
+
+    LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
+    LOG_INFO_RANK0 "ANP_HOME_DIR: $ANP_HOME_DIR"
+    LOG_INFO_RANK0 "MPI_HOME_DIR: $MPI_HOME_DIR"
+    LOG_INFO_RANK0 "NCCL_NET_PLUGIN: $NCCL_NET_PLUGIN"
 else
     export NCCL_IB_GID_INDEX=3
 fi
@@ -272,9 +310,15 @@ if [ "${BACKEND:-}" == "MaxText" ]; then
     export DUMP_HLO_DIR=${DUMP_HLO_DIR:-"${PRIMUS_PATH}/output/xla_dump_hlo"}
     export DUMP_HLO=${DUMP_HLO:-0}
     export NVTE_ALLOW_NONDETERMINISTIC_ALGO=1
-    export XLA_PYTHON_CLIENT_MEM_FRACTION=.97
+    if [ "${NNODES}" -gt 1 ]; then
+        export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-.93}
+        export JAX_HIP_GRAPH_LOWERING=false
+    else
+        export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-.97}
+    fi
+    export TF_CPP_MIN_LOG_LEVEL=2 # this env var is used to suppress the error logs at the end of training
+    export XLA_FLAGS="--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_enable_command_buffer='' --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=false --xla_gpu_enable_cublaslt=true --xla_gpu_autotune_level=4 --xla_gpu_enable_all_gather_combine_by_dim=false"
     export NVTE_USE_HIPBLASLT=1
-    export XLA_FLAGS="--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_graph_level=0 --xla_gpu_enable_latency_hiding_scheduler=True --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=False --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=FALSE"
     if [ "${DUMP_HLO}" = "1" ]; then
         mkdir -p "${DUMP_HLO_DIR}"
         export XLA_FLAGS="$XLA_FLAGS --xla_dump_to=$DUMP_HLO_DIR"
@@ -336,8 +380,8 @@ export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_
 # enable mxfp8 on ROCm Transformer Engine
 export NVTE_ROCM_ENABLE_MXFP8=1
 
-# Note: Disable v3 due to accuracy issues. Will fix after TE version 2.1.
-export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}
+# Note: Enable v3 since TE >= 2.6, accuracy issues have been resolved.
+export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-1}
 
 # Note: Disable fp32 atomic due if you find any accuracy issue.
 export PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32=${PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32:-0}
@@ -354,6 +398,7 @@ fi
 # install primus turbo from source
 export REBUILD_PRIMUS_TURBO=${REBUILD_PRIMUS_TURBO:-0}
 if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
+    # pip3 install  --extra-index-url https://test.pypi.org/simple primus_turbo-0.2.0+69d2386-cp310-cp310-linux_x86_64.whl
     LOG_INFO "Rebuilding Primus Turbo from source..."
     mkdir -p "/workspace/turbo"
     cd "/workspace/turbo" || exit
@@ -373,6 +418,89 @@ if [ "$REBUILD_PRIMUS_TURBO" == "1" ]; then
     LOG_INFO "Rebuilding Primus Turbo from source done."
 else
     LOG_INFO "Skip Primus Turbo rebuild. REBUILD_PRIMUS_TURBO=$REBUILD_PRIMUS_TURBO"
+fi
+
+# ----------------- Rebuild UCCL -----------------
+export REBUILD_UEP=${REBUILD_UEP:-0}
+export UCCL_REF="${UCCL_REF:-5afb4117893c58cc0c8557d9286336141a301053}" # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
+
+if [ "$REBUILD_UEP" == "1" ]; then
+    LOG_INFO "Rebuilding UCCL from source..."
+    apt update && apt install -y rdma-core libibverbs-dev libnuma-dev libgoogle-glog-dev
+    mkdir -p "/workspace/"
+    cd "/workspace" || exit
+
+    # Clean up old directory if exists to avoid git clone conflicts
+    if [ -d "uccl" ]; then
+        LOG_INFO "Removing existing uccl directory..."
+        rm -rf uccl
+    fi
+
+    git clone https://github.com/uccl-project/uccl.git
+    cd uccl || exit
+    if [[ -n "$UCCL_REF" ]]; then
+        LOG_INFO_RANK0 "Checking out UCCL ref: ${UCCL_REF}"
+        git fetch --all --tags
+        git checkout "${UCCL_REF}"
+    fi
+    cd ep && python3 setup.py build && cd ..
+    cp ep/build/**/*.so uccl
+    pip3 install --no-build-isolation .
+    cd ep/deep_ep_wrapper && pip3 install --no-build-isolation . -v
+    cd "${PRIMUS_PATH}" || exit
+    LOG_INFO "Rebuilding UCCL from source done."
+else
+    LOG_INFO "Skip UCCL rebuild. REBUILD_UEP=$REBUILD_UEP"
+fi
+
+# ----------------- Using UCCL-EP -----------------
+if [ "$USING_UEP" == "1" ]; then
+    LOG_INFO "USING_UEP is enabled, checking required packages..."
+
+    if ! python3 -m pip show uccl &>/dev/null || ! python3 -m pip show deep_ep &>/dev/null; then
+        LOG_ERROR "uccl is not installed! Please use pre-installed primus image or set REBUILD_UEP=1."
+        exit 1
+    fi
+    LOG_INFO "uccl package is installed: $(python3 -m pip show uccl | grep Version)"
+    LOG_INFO "deep_ep package is installed: $(python3 -m pip show deep_ep | grep Version)"
+
+    export PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND=DEEP_EP
+    LOG_INFO "PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND set to DEEP_EP"
+
+
+    # network settings for UCCL
+    export UCCL_IB_GID_INDEX=${UCCL_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
+    export UCCL_IB_HCA=${UCCL_IB_HCA:-$NCCL_IB_HCA}
+    export UCCL_SOCKET_IFNAME=${UCCL_SOCKET_IFNAME:-$NCCL_SOCKET_IFNAME}
+    export UCCL_IB_TC=${UCCL_IB_TC:-$NCCL_IB_TC}
+    export UCCL_IB_SL=${UCCL_IB_SL:-$NCCL_IB_SL}
+
+    # set low latency and normal inflight and bytes to avoid hang on AMD Pollara AI NIC and Broadcom Thor-2
+    if [ "$USING_AINIC" == "1" ]; then
+        export UCCL_IB_MAX_INFLIGHT_NORMAL=${UCCL_IB_MAX_INFLIGHT_NORMAL:-1}
+        export UCCL_IB_MAX_INFLIGHT_LOW_LATENCY=${UCCL_IB_MAX_INFLIGHT_LOW_LATENCY:-1}
+        export UCCL_IB_MAX_INFLIGHT_BYTES=${UCCL_IB_MAX_INFLIGHT_BYTES:-4194304} # 4MB
+    elif [ "$REBUILD_BNXT" == "1" ]; then # Broadcom Thor-2
+        # FIXME(zhuang12): use `USING_BNXT` for Broadcom Thor-2 maybe better than `REBUILD_BNXT`
+        export UCCL_IB_MAX_INFLIGHT_NORMAL=${UCCL_IB_MAX_INFLIGHT_NORMAL:-1}
+        export UCCL_IB_MAX_INFLIGHT_LOW_LATENCY=${UCCL_IB_MAX_INFLIGHT_LOW_LATENCY:-1}
+        export UCCL_IB_MAX_INFLIGHT_BYTES=${UCCL_IB_MAX_INFLIGHT_BYTES:-1572864}
+    fi
+
+
+    LOG_INFO "==========UCCL Network Settings=========="
+    LOG_INFO "UCCL_IB_GID_INDEX: $UCCL_IB_GID_INDEX"
+    LOG_INFO "UCCL_IB_HCA: $UCCL_IB_HCA"
+    LOG_INFO "UCCL_SOCKET_IFNAME: $UCCL_SOCKET_IFNAME"
+    LOG_INFO "UCCL_IB_MAX_INFLIGHT_NORMAL: $UCCL_IB_MAX_INFLIGHT_NORMAL"
+    LOG_INFO "UCCL_IB_MAX_INFLIGHT_LOW_LATENCY: $UCCL_IB_MAX_INFLIGHT_LOW_LATENCY"
+    LOG_INFO "UCCL_IB_MAX_INFLIGHT_BYTES: $UCCL_IB_MAX_INFLIGHT_BYTES"
+    LOG_INFO "UCCL_IB_TC: $UCCL_IB_TC"
+    LOG_INFO "UCCL_IB_SL: $UCCL_IB_SL"
+    LOG_INFO ""
+else
+    export PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND=TURBO
+    LOG_INFO "USING_UEP is disabled. PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND set to TURBO"
 fi
 
 # nvte debug envs
@@ -403,6 +531,21 @@ if [[ "$PATCH_TE_FLASH_ATTN" == "1" ]]; then
 fi
 LOG_INFO_RANK0 ""
 
+# -------------------- Install required packages for Jax --------------------
+install_pkgs_for_maxtext() {
+    LOG_INFO_RANK0 "========== Install IB required packages for Jax/MaxText =========="
+    apt update
+    apt install autoconf automake libtool pkg-config -y
+    apt install jq dpkg-dev kmod xz-utils -y
+    apt install libibverbs-dev ibverbs-utils infiniband-diags -y
+    apt install rdma-core librdmacm-dev libibverbs-dev libibumad-dev -y
+    LOG_INFO_RANK0 "========== Install IB required packages for Jax/MaxText Done =========="
+}
+
+if [[ "$NNODES" -gt 1 ]] && [[ "${BACKEND:-}" == "MaxText" ]]; then
+    install_pkgs_for_maxtext
+fi
+
 # ----------------- Rebuild nbxt -----------------
 export REBUILD_BNXT=${REBUILD_BNXT:-0}
 export PATH_TO_BNXT_TAR_PACKAGE=${PATH_TO_BNXT_TAR_PACKAGE}
@@ -421,20 +564,6 @@ if [[ "$REBUILD_BNXT" == "1" && -f "$PATH_TO_BNXT_TAR_PACKAGE" ]]; then
     LOG_INFO "Rebuilding libbnxt done."
 else
   LOG_INFO "Skip bnxt rebuild. REBUILD_BNXT=$REBUILD_BNXT, PATH_TO_BNXT_TAR_PACKAGE=$PATH_TO_BNXT_TAR_PACKAGE"
-fi
-
-# -------------------- Install required packages for Jax --------------------
-install_pkgs_for_maxtext() {
-    LOG_INFO_RANK0 "========== Install required packages for Jax/MaxText =========="
-    apt install iproute2 -y
-    apt install -y linux-headers-"$(uname -r)" libelf-dev
-    apt install -y gcc make libtool autoconf librdmacm-dev rdmacm-utils infiniband-diags ibverbs-utils perftest ethtool libibverbs-dev \
-        rdma-core strace libibmad5 libibnetdisc5 ibverbs-providers libibumad-dev libibumad3 libibverbs1 libnl-3-dev libnl-route-3-dev
-    LOG_INFO_RANK0 "========== Install required packages for Jax/MaxText Done =========="
-}
-
-if [[ "$NNODES" -gt 1 ]] && [[ "${BACKEND:-}" == "MaxText" ]]; then
-    install_pkgs_for_maxtext
 fi
 
 # -------------------- HipBLASLt Tuning --------------------
@@ -490,10 +619,16 @@ handle_hipblaslt_tuning() {
     fi
 }
 
-# Disable HipBLASLT tuning in deterministic mode
-if [ "${PRIMUS_DETERMINISTIC:-}" != "1" ]; then
+# NOTE: Disable HipBLASLT tuning in deterministic mode
+# NOTE: If you need to enable torch profiler, do NOT enable HipBLASLT tuning.
+if [ "${PRIMUS_DETERMINISTIC:-}" != "1" ] && [ "${PRIMUS_HIPBLASLT_TUNING:-0}" = "1" ]; then
     handle_hipblaslt_tuning
+else
+    LOG_INFO "disable hipblaslt tuning by default to fix torch profiler issue in TE"
+    export TE_HIPBLASLT_TUNING_RUN_COUNT=0
+    export TE_HIPBLASLT_TUNING_ALGO_COUNT=0
 fi
+
 
 # -------------------- Python Path Setup --------------------
 setup_pythonpath() {

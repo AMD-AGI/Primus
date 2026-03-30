@@ -14,7 +14,6 @@ modules:
       run_name: "mixtral_8x7b_training"
       base_output_directory: "./output"
       steps: 50
-      log_period: 10
       profiler: ""
 
       # data
@@ -38,5 +37,5 @@ modules:
       megablox: false
       capacity_factor: 1
       max_target_length: 4096
-      per_device_batch_size: 12
+      per_device_batch_size: 11
       remat_policy: "minimal"

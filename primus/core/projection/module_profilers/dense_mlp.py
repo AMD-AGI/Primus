@@ -4,6 +4,7 @@
 # See LICENSE for license information.
 ###############################################################################
 
+from typing import Optional, Tuple
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
@@ -18,6 +19,7 @@ class DenseMLPProfiler(BaseModuleProfiler):
         self.module = None  # Will be set during benchmarking
         self._cached_results = None  # Cache for (forward_time, backward_time, activation_memory)
         self._cache_key = None  # Cache key (batch_size, seq_len)
+        self._gemm_backend = None  # Optional: GEMM simulation backend
 
     def set_module(self, module):
         """Set the actual Dense MLP module for benchmarking."""
@@ -26,7 +28,14 @@ class DenseMLPProfiler(BaseModuleProfiler):
         self._cached_results = None
         self._cache_key = None
 
-    def estimated_num_params(self, rank: int | None = None) -> int:
+    def set_gemm_backend(self, backend):
+        """Set a GEMM simulation backend for simulated profiling."""
+        self._gemm_backend = backend
+        # Invalidate cache when backend changes
+        self._cached_results = None
+        self._cache_key = None
+
+    def estimated_num_params(self, rank: Optional[int] = None) -> int:
         # For SwiGLU: 3 projections (gate, up, down)
         # For standard FFN: 2 projections (up, down)
         num_ffn_projections = 3 if self.config.model_config.swiglu else 2
@@ -57,14 +66,39 @@ class DenseMLPProfiler(BaseModuleProfiler):
         # Peak memory is input + intermediate (both needed for backward)
         return intermediate_memory + activation_memory + output_memory
 
-    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> tuple[float, float, int]:
+    def _get_simulated_results(self, batch_size: int, seq_len: int) -> Tuple[float, float, int]:
+        """Get simulated results from the GEMM simulation backend."""
+        tp_size = self.config.model_parallel_config.tensor_model_parallel_size
+        cp_size = self.config.model_parallel_config.context_model_parallel_size
+        batch_tokens = batch_size * seq_len // tp_size // cp_size
+
+        # FP8-hybrid: MLP projections (gate, up, down) run in FP8
+        gemm_dtype = "fp8" if getattr(self.config.model_config, "fp8", None) else "bf16"
+        sim_result = self._gemm_backend.simulate_mlp_gemms(
+            batch_tokens=batch_tokens,
+            hidden_size=self.config.model_config.hidden_size,
+            ffn_hidden_size=self.config.model_config.ffn_hidden_size,
+            dtype=gemm_dtype,
+            swiglu=self.config.model_config.swiglu,
+        )
+        activation_memory = self.estimated_activation_memory(batch_size, seq_len)
+        return (
+            sim_result.forward_time_ms,
+            sim_result.backward_time_ms,
+            activation_memory,
+        )
+
+    def _get_benchmark_results(self, batch_size: int, seq_len: int) -> Tuple[float, float, int]:
         """Get or compute benchmark results (cached)."""
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
-            self._cached_results = benchmark_layer(
-                self.module,
-                [(seq_len, batch_size, self.config.model_config.hidden_size)],
-            )
+            if self._gemm_backend is not None:
+                self._cached_results = self._get_simulated_results(batch_size, seq_len)
+            else:
+                self._cached_results = benchmark_layer(
+                    self.module,
+                    [(seq_len, batch_size, self.config.model_config.hidden_size)],
+                )
             self._cache_key = cache_key
         return self._cached_results
 
