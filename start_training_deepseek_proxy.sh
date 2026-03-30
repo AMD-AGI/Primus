@@ -7,7 +7,9 @@ export DOCKER_IMAGE="docker.io/tasimage/primus:pr-624-ainic"
 export NNODES=${NNODES:-4}
 export SLURM_TIME=48:00:00
 export SLURM_PARTITION=amd-aig
-export SLURM_NODELIST="uswslocpm2m-106-[2184,2194,2215,2230]"
+# export SLURM_NODELIST="uswslocpm2m-106-[2184,2194,2215,2230]"
+# export SLURM_NODELIST="uswslocpm2m-106-[2185,2194,2215,2230]"
+export SLURM_NODELIST="uswslocpm2m-106-[2185,2195,2215,2230]"
 
 export TRAIN_ITERS=10
 
@@ -28,7 +30,7 @@ export PRIMUS_CP=${PRIMUS_CP:-4}
 export PRIMUS_ETP=${PRIMUS_ETP:-1}
 export TURBO_DEEPEEP=${TURBO_DEEPEEP:-False}
 export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-0}
-export DISABLE_PROFILER_ACTIVITY_CPU=${DISABLE_PROFILER_ACTIVITY_CPU:-False}
+export DISABLE_PROFILER_ACTIVITY_CPU=${DISABLE_PROFILER_ACTIVITY_CPU:-True}
 
 export PROFILE=False
 export HSA_NO_SCRATCH_RECLAIM=1
@@ -42,13 +44,32 @@ export PRIMUS_TURBO_AUTO_TUNE=${PRIMUS_TURBO_AUTO_TUNE:-0}
 export ENABLE_NUMA_BINDING=1
 export HSA_KERNARG_POOL_SIZE=12582912
 
+export USE_MEGATRON_FSDP=False
+export MEGATRON_FSDP_ZERO_LEVEL=2 # 2, 3
 export PRETRAIN_TYPE=${PRETRAIN_TYPE:-BF16}
+if [ "$USE_MEGATRON_FSDP" = "True" ]; then
+  export EXP=examples/megatron/configs/MI355X/deepseek_proxy-${PRETRAIN_TYPE}-FSDP-pretrain.yaml
+  if [ "$MEGATRON_FSDP_ZERO_LEVEL" = "2" ]; then
+      export DATA_PARALLEL_SHARDING_STRATEGY="optim_grads"
+  elif [ "$MEGATRON_FSDP_ZERO_LEVEL" = "3" ]; then
+      export DATA_PARALLEL_SHARDING_STRATEGY="optim_grads_params"
+  else
+    echo "Invalid MEGATRON_FSDP_ZERO_LEVEL: $MEGATRON_FSDP_ZERO_LEVEL"
+    exit 1
+  fi
+else
+  export EXP=examples/megatron/configs/MI355X/deepseek_proxy-${PRETRAIN_TYPE}-pretrain.yaml
+  OPTIMIZER_FEATURES="--use_precision_aware_optimizer True \
+    --main_grads_dtype bf16 \
+    --exp_avg_dtype bf16 \
+    --exp_avg_sq_dtype bf16"
+fi
 
-export EXP=examples/megatron/configs/MI355X/deepseek_proxy-${PRETRAIN_TYPE}-pretrain.yaml
 PRIMUS_TEAM="amd-$(date +%Y%m%d)"
 export PRIMUS_TEAM
 export PRIMUS_USER=tas
-export PRIMUS_EXP_NAME=deepseek_proxy-type_$PRETRAIN_TYPE-mbs_$MBS-gbs_$GBS-seq_length_$SEQ_LENGTH-cp_$PRIMUS_CP-etp_$PRIMUS_ETP-ep_$PRIMUS_EP-pp_$PRIMUS_PP-turbodeepep_$TURBO_DEEPEEP
+# export PRIMUS_EXP_NAME=deepseek_proxy-type_$PRETRAIN_TYPE-mbs_$MBS-gbs_$GBS-seq_length_$SEQ_LENGTH-cp_$PRIMUS_CP-etp_$PRIMUS_ETP-ep_$PRIMUS_EP-pp_$PRIMUS_PP-turbodeepep_$TURBO_DEEPEEP
+export PRIMUS_EXP_NAME=deepseek_proxy-type_$PRETRAIN_TYPE-FSDP_${USE_MEGATRON_FSDP}-zero${MEGATRON_FSDP_ZERO_LEVEL}-mbs_$MBS-gbs_$GBS-seq_length_$SEQ_LENGTH-cp_$PRIMUS_CP-etp_$PRIMUS_ETP-ep_$PRIMUS_EP-pp_$PRIMUS_PP-turbodeepep_$TURBO_DEEPEEP
 
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
@@ -76,13 +97,11 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --manual_gc True \
   --manual_gc_interval 1 \
   --pp_warmup True  \
+  --data_parallel_sharding_strategy "$DATA_PARALLEL_SHARDING_STRATEGY" \
   --profile "$PROFILE" \
   --use_pytorch_profiler "$PROFILE" \
   --profile_step_end 7 \
   --profile_step_start 6 \
   --disable_profiler_activity_cpu "$DISABLE_PROFILER_ACTIVITY_CPU" \
-  --use_precision_aware_optimizer True \
-  --main_grads_dtype bf16 \
-  --exp_avg_dtype bf16 \
-  --exp_avg_sq_dtype bf16 \
+  "$OPTIMIZER_FEATURES" \
   2>&1 | tee "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK}.txt"
