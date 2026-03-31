@@ -1,0 +1,96 @@
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${EXP:exp-deepseek-v2-lite-zbv-fp8}
+workspace: ./output
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+    model: ${PRIMUS_MODEL:deepseek_v2_lite}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_test_Pretrain"
+      disable_wandb: true
+      stderr_sink_level: DEBUG
+
+      # debug
+      num_layers: ${PRIMUS_NUM_LAYERS:8}
+      moe_layer_freq: ${PRIMUS_MOE_LAYER_FREQ:[0]*1+[1]*7}
+      eval_iters: 0
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 5
+
+      # optimizer / router
+      moe_router_force_load_balancing: true
+      moe_router_dtype: ${PRIMUS_MOE_ROUTER_DTYPE:fp32}
+
+      # hyper parameters
+      train_iters: ${PRIMUS_TRAIN_ITERS:3}
+      micro_batch_size: ${PRIMUS_MICRO_BATCH_SIZE:1}
+      global_batch_size: ${PRIMUS_GLOBAL_BATCH_SIZE:16}
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 1.0e-5
+      min_lr: 0.0
+      lr_warmup_iters: 2
+      lr_decay_iters: null
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-6
+
+      # parallel
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:4}
+      num_virtual_stages_per_pipeline_rank: ${PRIMUS_VPP:2}
+      expert_model_parallel_size: ${PRIMUS_EP:2}
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: false
+
+      # data
+      num_workers: 1
+      mock_data: true
+      train_data_path: null
+      valid_data_path: null
+      test_data_path: null
+
+      # model features
+      multi_latent_attention: false
+      moe_permute_fusion: false
+      moe_use_legacy_grouped_gemm: false
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+
+      # Turbo
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
+      use_turbo_parallel_linear: false
+      use_turbo_deepep: false
+      moe_shared_expert_overlap: false
+
+      # Primus pipeline
+      patch_primus_pipeline: true
+      pp_algorithm: ${PRIMUS_PP_ALGO:zbv-formatted}
+
+      # FP8
+      fp8: ${PRIMUS_FP8:hybrid}
+      fp8_recipe: ${PRIMUS_FP8_RECIPE:delayed}
+
+      debug: true
