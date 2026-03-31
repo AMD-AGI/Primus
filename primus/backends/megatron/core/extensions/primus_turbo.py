@@ -1224,6 +1224,25 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             )
         else:
             self.grouped_gemm = pt.ops.grouped_gemm
+            
+        if self.config.moe_paged_stash:
+            assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
+
+            if self.config.activation_func == F.silu:
+                turbo_fused_act_with_probs = pt.ops.swiglu_with_probs
+            elif self.config.activation_func == F.gelu:
+                turbo_fused_act_with_probs = pt.ops.geglu_with_probs
+            else:
+                raise ValueError("Activation function must be silu or gelu when using GroupedMLP.")
+
+            def _activation_func_with_probs(x, probs, tokens_per_experts):
+                assert x.ndim == 2
+                probs = probs.squeeze(-1)
+                num_tokens = x.shape[0]
+                row_mask = pt.ops.tokens_per_expert_to_mask(tokens_per_experts, num_tokens)
+                return turbo_fused_act_with_probs(x, probs, row_mask)
+
+            self._activation_func_with_probs = _activation_func_with_probs
 
     def forward(
         self,
@@ -1232,6 +1251,10 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         permuted_probs: torch.Tensor,
     ):
         """Forward step of the GroupedMLP."""
+        
+        if self.config.moe_paged_stash:
+            self.activation_func_with_probs = functools.partial(self._activation_func_with_probs, tokens_per_experts=tokens_per_expert)
+
 
         # TODO(zhenhuang12)
         # if self.config.moe_expert_rank_capacity_factor is not None:
@@ -1299,8 +1322,6 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 )
             else:
                 offload_context = nullcontext()
-                
-            assert not isinstance(offload_context, nullcontext)
 
             with offload_context:
                 if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():

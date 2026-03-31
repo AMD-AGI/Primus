@@ -17,5 +17,5 @@ export REBUILD_BNXT=${REBUILD_BNXT:-0}
 export USING_AINIC=${USING_AINIC:-0}
 
 # Scenario 1: Use default config (Llama3.1 8B BF16)
-bash "$PRIMUS_PATH/runner/primus-cli" direct \
+bash "$PRIMUS_PATH/runner/primus-cli" direct  --debug \
     -- train pretrain --config "$EXP" "$@"

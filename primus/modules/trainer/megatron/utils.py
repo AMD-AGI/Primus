@@ -459,6 +459,7 @@ def _get_sync_free_moe_options(stage: int) -> dict:
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
             "use_turbo_grouped_mlp": True,
+            "moe_dispatcher_backend": "deepep",
         },
         3: {
             "moe_use_fused_router_with_aux_score": True,
@@ -466,6 +467,7 @@ def _get_sync_free_moe_options(stage: int) -> dict:
             "moe_permute_fusion": True,
             "use_turbo_grouped_mlp": True,
             "use_turbo_fused_act_with_probs": True,
+            "moe_dispatcher_backend": "deepep",
         },
     }
 

@@ -31,12 +31,10 @@ from megatron.core.utils import get_te_version, is_te_min_version
 
 from primus.backends.megatron.core.extensions.primus_turbo import (
     PrimusTurboAttention,
-    PrimusTurboColumnParallelGroupedLinear,
     PrimusTurboColumnParallelLinear,
     PrimusTurboGroupedMLP,
     PrimusTurboLayerNormColumnParallelLinear,
     PrimusTurboLinear,
-    PrimusTurboRowParallelGroupedLinear,
     PrimusTurboRowParallelLinear,
 )
 from primus.backends.megatron.training.global_vars import get_primus_args

@@ -61,6 +61,6 @@ __all__ = [
     "FunctionPatch",
     "PatchRegistry",
     "register_patch",
-    "run_patches",
+    "",
     "version_matches",
 ]

@@ -377,12 +377,13 @@ def bridge_hybrid_ep_dispatch(
     probs,
     group,
     num_local_experts,
-    num_sms_dispatch_api=24,
-    num_sms_combine_api=24,
+    num_sms_dispatch_api=32,
+    num_sms_combine_api=32,
     num_permuted_tokens=None,
     pad_multiple=None,
     num_experts=None,
-    router_topk=None,
+    moe_router_topk=None,
+    moe_router_force_load_balancing=False,
 ):
     '''
     Perform fused dispatch for "permute + dispatch a2a + permute" using the
@@ -411,11 +412,22 @@ def bridge_hybrid_ep_dispatch(
             Alignment multiple required for FP8 GEMM. If not provided, no padding
             is performed.
     '''
+    num_sms = max(num_sms_dispatch_api, num_sms_combine_api)
+    Buffer.set_num_sms(num_sms)
     num_tokens = x.size(0)
     num_worst_tokens = num_tokens * group.size()
     probs = probs.reshape(num_tokens, num_experts)
 
-    probs, token_indices = torch.topk(probs, router_topk, dim=-1)
+    if moe_router_force_load_balancing:
+        token_indices = (
+            torch.arange(num_tokens * moe_router_topk, device=x.device).view(
+                num_tokens, moe_router_topk
+            )
+            % num_experts
+        )
+        probs = probs.gather(1, token_indices)
+    else:
+        probs, token_indices = torch.topk(probs, moe_router_topk, dim=-1)
 
     recv_x, recv_token_indices, recv_token_probs, handle = FusedDispatch.apply(
         x.contiguous(), token_indices, probs, num_experts, group, num_worst_tokens)
@@ -499,11 +511,15 @@ def patch_fused_a2a(ctx: PatchContext):
     from megatron.core.transformer.moe import token_dispatcher
 
     # step1: replace the hybrid_ep_dispatch and hybrid_ep_combine with the primus implementations
-    router_topk = get_args(ctx).moe_router_topk
+    moe_router_topk = get_args(ctx).moe_router_topk
+    moe_router_force_load_balancing = get_args(
+        ctx).moe_router_force_load_balancing
     num_experts = get_args(ctx).num_experts
 
-    new_bridge_hybrid_ep_dispatch = partial(
-        bridge_hybrid_ep_dispatch, num_experts=num_experts, router_topk=router_topk)
+    new_bridge_hybrid_ep_dispatch = partial(bridge_hybrid_ep_dispatch,
+                                            num_experts=num_experts,
+                                            moe_router_topk=moe_router_topk,
+                                            moe_router_force_load_balancing=moe_router_force_load_balancing)
     fused_a2a.hybrid_ep_dispatch = new_bridge_hybrid_ep_dispatch
     fused_a2a.hybrid_ep_combine = bridge_hybrid_ep_combine
     log_rank_0(

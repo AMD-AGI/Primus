@@ -1,17 +1,215 @@
+from collections import deque
+from typing import Callable, Deque, Optional, Sequence, Tuple, Union
+
+from megatron.core.model_parallel_config import ModelParallelConfig
+from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.tensor_parallel.random import (
+    get_cuda_rng_tracker,
+    get_data_parallel_rng_tracker_name,
+    get_expert_parallel_rng_tracker_name,
+)
+from megatron.core.extensions.transformer_engine import condition_init_method, _get_extra_te_kwargs
 import torch
-import functools
 import torch.distributed as dist
-from typing import Callable, Optional, Union, Tuple, List
-
-from megatron.core.utils import experimental_api
-import transformer_engine as te
-
 import primus_turbo.pytorch as turbo
+import transformer_engine as te
+from transformer_engine.pytorch.module._common import WeightGradStore as TEWeightGradStore
+from megatron.core.utils import experimental_api
+from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 
-from primus.backends.megatron.core.extensions.primus_turbo import PrimusTurboLowPrecisionGlobalStateManager
-from primus.backends.megatron.core.extensions.experimental.utils import divide, init_method_constant
+from megatron.core.utils import (
+    get_pg_rank,
+    get_pg_size,
+    get_te_version,
+    get_tensor_model_parallel_group_if_none,
+    is_te_min_version,
+    is_torch_min_version,
+)
+from primus_turbo.pytorch.core.backend import BackendType
+from primus_turbo.pytorch.kernels.gemm.gemm_impl import gemm_impl
+from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
+    grouped_gemm_compute_offs,
+)
+from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_impl import (
+    grouped_gemm_impl,
+    grouped_gemm_variable_k_impl,
+)
+from primus_turbo.pytorch.ops import grouped_gemm, grouped_gemm_fp8
 
-from transformer_engine.pytorch.cpu_offload import is_cpu_offload_enabled, mark_not_offload, start_offload
+from primus.backends.megatron.core.extensions.experimental.utils import (
+    divide,
+    init_method_constant,
+)
+from primus.backends.megatron.core.extensions.primus_turbo import (
+    PrimusTurboLowPrecisionGlobalStateManager,
+)
+
+
+def _ensure_group_lens(
+    num_tokens_per_expert: Union[torch.Tensor, Sequence[int]],
+    device: torch.device,
+) -> torch.Tensor:
+    if isinstance(num_tokens_per_expert, torch.Tensor):
+        return num_tokens_per_expert.to(device=device, dtype=torch.long)
+    return torch.tensor(list(num_tokens_per_expert), device=device, dtype=torch.long)
+
+
+def _validate_runtime_shapes(
+    inp_view: torch.Tensor,
+    weight: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+    num_tokens_prefix_sum: torch.Tensor,
+) -> None:
+    if weight.ndim != 3:
+        raise ValueError(
+            f"Expected stacked weight with shape [G, N, K], got {tuple(weight.shape)}."
+        )
+    if num_tokens_per_expert.ndim != 1:
+        raise ValueError(
+            "num_tokens_per_expert must be a 1D tensor of expert token counts."
+        )
+    if num_tokens_prefix_sum.ndim != 1 or (
+        num_tokens_prefix_sum.numel() != num_tokens_per_expert.numel() + 1
+    ):
+        raise ValueError(
+            "num_tokens_prefix_sum must be a 1D exclusive prefix sum with length G + 1."
+        )
+    if weight.size(0) != num_tokens_per_expert.numel():
+        raise ValueError(
+            f"Expected weight.size(0) == number of experts, got {weight.size(0)} "
+            f"and {num_tokens_per_expert.numel()}."
+        )
+    if inp_view.size(-1) != weight.size(-1):
+        raise ValueError(
+            f"Input tensor (shape={tuple(inp_view.shape)}) is not compatible with "
+            f"weight tensor (shape={tuple(weight.shape)})."
+        )
+    total_tokens = int(num_tokens_per_expert.sum().item())
+    if inp_view.size(0) != total_tokens:
+        raise ValueError(
+            f"Input contains {inp_view.size(0)} rows, but num_tokens_per_expert sums to "
+            f"{total_tokens}."
+        )
+
+
+def _apply_grouped_bias(
+    out: torch.Tensor,
+    bias: torch.Tensor,
+    num_tokens_prefix_sum: torch.Tensor,
+) -> torch.Tensor:
+    if bias.numel() == 0:
+        return out
+    if bias.ndim != 2:
+        raise ValueError(
+            f"Expected bias shape [G, N], got {tuple(bias.shape)}.")
+
+    if bias.size(0) == 1:
+        return out + bias[0].to(dtype=out.dtype)
+
+    out = out.clone()
+    for expert_idx in range(bias.size(0)):
+        start = int(num_tokens_prefix_sum[expert_idx].item())
+        end = int(num_tokens_prefix_sum[expert_idx + 1].item())
+        if start == end:
+            continue
+        out[start:end] = out[start:end] + bias[expert_idx].to(dtype=out.dtype)
+    return out
+
+
+def _grouped_linear_forward_kernel(
+    inp_view: torch.Tensor,
+    weight: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+    num_tokens_prefix_sum: torch.Tensor,
+    num_sms: Optional[int],
+) -> torch.Tensor:
+    if num_tokens_per_expert.numel() == 1:
+        if weight.size(0) != 1:
+            raise ValueError(
+                f"Expected single-expert weight shape [1, N, K], got {tuple(weight.shape)}."
+            )
+        return gemm_impl(
+            inp_view,
+            False,
+            weight.squeeze(0),
+            True,
+            inp_view.dtype,
+            False,
+            default_backend=BackendType.HIPBLASLT.value,
+        )
+
+    return grouped_gemm_impl(
+        inp_view,
+        weight,
+        num_tokens_per_expert,
+        num_tokens_prefix_sum,
+        trans_a=False,
+        trans_b=True,
+        num_cu=num_sms,
+        default_backend=BackendType.CK.value,
+        maybe_pre_sync=True,
+    )
+
+
+def _grouped_linear_dgrad_kernel(
+    grad_output: torch.Tensor,
+    weight: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+    num_tokens_prefix_sum: torch.Tensor,
+    num_sms: Optional[int],
+) -> torch.Tensor:
+    if num_tokens_per_expert.numel() == 1:
+        return gemm_impl(
+            grad_output,
+            False,
+            weight.squeeze(0),
+            False,
+            grad_output.dtype,
+            False,
+            default_backend=BackendType.HIPBLASLT.value,
+        )
+
+    return grouped_gemm_impl(
+        grad_output,
+        weight,
+        num_tokens_per_expert,
+        num_tokens_prefix_sum,
+        trans_a=False,
+        trans_b=False,
+        num_cu=num_sms,
+        default_backend=BackendType.CK.value,
+    )
+
+
+def _grouped_linear_wgrad_kernel(
+    inp_view: torch.Tensor,
+    grad_output: torch.Tensor,
+    num_tokens_per_expert: torch.Tensor,
+    num_tokens_prefix_sum: torch.Tensor,
+    num_sms: Optional[int],
+) -> torch.Tensor:
+    if num_tokens_per_expert.numel() == 1:
+        return gemm_impl(
+            grad_output,
+            True,
+            inp_view,
+            False,
+            grad_output.dtype,
+            False,
+            default_backend=BackendType.HIPBLASLT.value,
+        ).unsqueeze(0)
+
+    return grouped_gemm_variable_k_impl(
+        inp_view,
+        grad_output,
+        num_tokens_per_expert,
+        num_tokens_prefix_sum,
+        trans_a=True,
+        trans_b=False,
+        trans_c=True,
+        num_cu=num_sms,
+        default_backend=BackendType.CK.value,
+    )
 
 
 class _GroupedLinear(torch.autograd.Function):
@@ -277,170 +475,314 @@ class _GroupedLinear(torch.autograd.Function):
 
 
 @experimental_api
-class GroupedLinear(torch.nn.Module):
-    """Legacy grouped-linear wrapper with TE-style behavior.
+class GroupedLinear(te.pytorch.GroupedLinear):
+    """Experimental Primus-Turbo backed GroupedLinear.
 
-    Supported features:
-    - legacy `weight1`/`weight2` big-tensor parameter layout
-    - grouped GEMM dispatch via turbo kernels
-    - direct FP8 grouped GEMM execution without primary FP8 weights
-    - `delay_wgrad_compute` with `backward_dw()`
-    - `fuse_wgrad_accumulation` into `main_grad`
-    - CPU offload hooks through TE offload helpers
-    - explicit exclusion of TP/SP-internal handling
+    Unlike TE's default per-GEMM `weight{i}` layout, this module stores a single
+    stacked weight tensor with shape `[num_gemms, out_features, in_features]` so it
+    maps directly to Primus-Turbo's grouped GEMM operator.
     """
 
     def __init__(
         self,
-        num_lcal_experts: int,
-        in_features: int,
-        out_features: int,
-        sequence_parallel: bool = False,
-        fuse_wgrad_accumulation: bool = False,
-        tp_group: Optional[dist.ProcessGroup] = None,
-        tp_size: int = 1,
-        get_rng_state_tracker: Optional[Callable] = None,
-        rng_tracker_name: Optional[str] = None,
-        init_method: Optional[Callable] = None,
-        bias: bool = True,
-        return_bias: bool = False,
-        params_dtype: Optional[torch.dtype] = None,
-        parallel_mode: Optional[str] = None,
-        device: Union[torch.device, str] = "cuda",
-        ub_overlap_rs: bool = False,
-        ub_overlap_ag: bool = False,
-        ub_name: Optional[str] = None,
-        delay_wgrad_compute: bool = False,
-        name: Optional[str] = None,
-        num_sms: int = None,
-    ) -> None:
+        num_gemms: int,
+        input_size: int,
+        output_size: int,
+        *,
+        parallel_mode: Optional[str],
+        config: ModelParallelConfig,
+        init_method: Callable,
+        bias: bool,
+        skip_bias_add: bool,
+        is_expert: bool = False,
+        tp_comm_buffer_name: Optional[str] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+        num_sms: Optional[int] = None,
+    ):
 
-        #  check common arguments
-        if device != "cuda":
-            raise ValueError(
-                "PrimusTurboGroupedLinear only supports device=cuda")
+        self.config = config
 
-        self.use_bias = bias
-        self.return_bias = return_bias
-        self.apply_bias = bias and not return_bias
-        self.num_sms = num_sms
+        self.is_first_microbatch = True
+        self.disable_parameter_transpose_cache = self.config.disable_parameter_transpose_cache
 
-        if self.use_bias:
-            raise NotImplementedError(
-                "PrimusTurboGroupedLinear does not support bias")
+        extra_kwargs = _get_extra_te_kwargs(config)
 
-        # ===================================
-        # == features 1:TP/SP/TP overlap ====
-        # ===================================
-        # TODO(zhenhuang12): not support
-        if tp_group is None:
-            self.tp_size = tp_size
+        if self.config.delay_wgrad_compute:
+            if is_te_min_version("2.3.0"):
+                extra_kwargs["delay_wgrad_compute"] = self.config.delay_wgrad_compute
+            else:
+                raise RuntimeError(
+                    "Only TE with version >=2.3.0 supports delay_wgrad_compute now."
+                )
 
-        else:
-            self.tp_size = tp_group.size() if tp_group.is_initialized() else 1
+        extra_kwargs["ub_name"] = tp_comm_buffer_name
 
-        self.sequence_parallel = (self.tp_size > 1) and sequence_parallel
+        self.expert_parallel = self.config.expert_model_parallel_size > 1
+        if is_expert:
+            extra_kwargs["rng_tracker_name"] = get_expert_parallel_rng_tracker_name()
 
-        if self.tp_size > 1 or self.sequence_parallel \
-                or ub_overlap_rs or ub_overlap_ag:
-            raise ValueError(
-                "PrimusTurboGroupedLinear does not support TP/SP/TP overlap")
+        # The comms between TP and EP group is explicitly handled by MoE token dispatcher.
+        # So we disable comms by making TE agnostic of model parallel.
+        if pg_collection is None:
+            pg_collection = ProcessGroupCollection.use_mpu_process_groups()
+        self._pg_collection = pg_collection
+        assert is_expert, "TEGroupedLinear only supports expert parallelism"
+        tp_group = pg_collection.expt_tp
+        self._tp_group = tp_group
+        tp_size = get_pg_size(tp_group)
+        tp_group_for_te = tp_group
 
-        if self.parallel_mode == "column":
-            self.out_features = divide(self.out_features, self.tp_size)
-        elif self.parallel_mode == "row":
-            self.in_features = divide(self.in_features, self.tp_size)
-        elif self.parallel_mode is not None:
-            raise ValueError(
-                f"parallel_mode {parallel_mode!r} not supported."
-            )
+        self.explicit_expert_comm = is_expert and (
+            tp_size > 1 or self.expert_parallel)
 
-        # ===================================
-        # == features 2: primary weights
-        # ===================================
-        # TODO(zhenhuang12): not support
-        self.primary_weights_in_fp8 = PrimusTurboLowPrecisionGlobalStateManager.with_fp8_parameters()
-        if self.primary_weights_in_fp8:
-            raise ValueError(
-                "PrimusTurboGroupedLinear does not support primary weights in FP8")
+        if self.explicit_expert_comm:
+            if parallel_mode == "column":
+                output_size = divide(output_size, tp_size)
+            elif parallel_mode == "row":
+                input_size = divide(input_size, tp_size)
+            parallel_mode = None
+            tp_size = 1
+            tp_group_for_te = None
+            
+        self.single_grouped_parameter = True
 
-        # ===================================
-        # == features 3: fuse_wgrad_accumulation
-        # ===================================
-        # TODO(zhenhuang12): not support
-        if fuse_wgrad_accumulation:
-            raise ValueError(
-                "PrimusTurboGroupedLinear does not support fuse_wgrad_accumulation")
-        self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
-
-        # N * K
-        self.register_parameter(
-            f"weight",
-            torch.nn.Parameter(
-                torch.empty(
-                    self.out_features * self.num_local_experts,
-                    self.in_features,
-                    device=device,
-                    dtype=self.params_dtype,
-                ),
+        super().__init__(
+            num_gemms=num_gemms,
+            in_features=input_size,
+            out_features=output_size,
+            sequence_parallel=self.config.sequence_parallel,
+            fuse_wgrad_accumulation=self.config.gradient_accumulation_fusion,
+            tp_group=tp_group_for_te if torch.distributed.is_initialized() else None,
+            tp_size=tp_size,
+            get_rng_state_tracker=(
+                get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
             ),
-            init_fn=init_method,
-            get_rng_state_tracker=get_rng_state_tracker,
+            init_method=condition_init_method(config, init_method),
+            bias=bias,
+            return_bias=skip_bias_add and bias,
+            parallel_mode=parallel_mode,
+            **extra_kwargs,
         )
-        if self.use_bias:
-            self.register_parameter(
-                f"bias",
-                torch.nn.Parameter(
-                    torch.empty(
-                        self.out_features,
-                        device=device,
-                        dtype=self.params_dtype,
-                    ),
-                ),
-                init_fn=init_method_constant(0.0),
-            )
-        else:
-            bias = torch.Tensor().to(dtype=self.params_dtype, device=device)
-            setattr(self, f"bias", bias)
 
-        if self.primary_weights_in_fp8:
+        # check unsupported features
+        self._check_unsupported_features()
+
+        self.te_quant_params = None
+        for param in self.parameters():
+            setattr(param, "allreduce", not (
+                is_expert and self.expert_parallel))
+
+        def merge_extra_states(
+            self,
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        ):
+            """
+            Merge multiple "_extra_state" into one.
+            """
+            self.init_fp8_metadata(num_gemms=self.num_gemms)
+            # When resume training, loading ckpt is out of fp8_autocast context.
+            # So we need to manually detect from the state_dict.
+            fp8_checkpoint = any("_extra_state" in str(key)
+                                 for key in state_dict.keys())
+
+            if not fp8_checkpoint:
+                return
+
+            try:
+                state_list = [
+                    state_dict.pop(f"{prefix}_extra_state{i}") for i in range(1, self.num_gemms)
+                ]
+            except KeyError:
+                # "_extra_state{i}" only exists for dist-ckpt. Return for torch native ckpt.
+                return
+
+            # Early return conditions:
+            # 1. Empty state_dict
+            # 2. Empty state_list
+            # 3. _extra_state is None
+            # 4. _extra_state does not contain any information
+            if (
+                not state_dict
+                or not state_list
+                or state_dict.get(f"{prefix}_extra_state") is None
+                or self._decode_extra_state(state_dict[f"{prefix}_extra_state"]) is None
+            ):
+                return
+
+            state_list = [state_dict.pop(f"{prefix}_extra_state")] + state_list
+            state_list = [self._decode_extra_state(
+                state) for state in state_list]
+            extra_fp8_variables = state_list[0]["extra_fp8_variables"]
+            extra_fp8_variables["num_gemms"] = self.num_gemms
+            extra_state = {"extra_fp8_variables": extra_fp8_variables}
+            # TE 2.0 adds recipe in extra_state
+            if is_te_min_version("2.0.0"):
+                self.fp8_meta["recipe"] = state_list[0]["recipe"]
+                extra_state["recipe"] = self.fp8_meta["recipe"]
+            # Only delayed scaling has global fp8 meta tensors. We're not using
+            # self.fp8_meta["recipe"].delayed() because it's available in TE 2.0 and later.
+            if isinstance(self.fp8_meta["recipe"], te.common.recipe.DelayedScaling):
+                extra_state.update(
+                    {
+                        "scale_fwd": torch.cat(
+                            [state["scale_fwd"].view(-1, 1) for state in state_list], dim=1
+                        ).view(-1),
+                        "amax_history_fwd": torch.cat(
+                            [state["amax_history_fwd"].view(-1, 1)
+                             for state in state_list],
+                            dim=1,
+                        ).view(self.fp8_meta["recipe"].amax_history_len, -1),
+                        "scale_bwd": torch.cat(
+                            [state["scale_bwd"].view(-1, 1) for state in state_list], dim=1
+                        ).view(-1),
+                        "amax_history_bwd": torch.cat(
+                            [state["amax_history_bwd"].view(-1, 1)
+                             for state in state_list],
+                            dim=1,
+                        ).view(self.fp8_meta["recipe"].amax_history_len, -1),
+                    }
+                )
+                # TE 2.0 removes scale_inv_fwd and scale_inv_bwd
+                if not is_te_min_version("2.0.0"):
+                    extra_state.update(
+                        {
+                            "scale_inv_fwd": torch.cat(
+                                [state["scale_inv_fwd"].view(-1, 1)
+                                 for state in state_list],
+                                dim=1,
+                            ).view(-1),
+                            "scale_inv_bwd": torch.cat(
+                                [state["scale_inv_bwd"].view(-1, 1)
+                                 for state in state_list],
+                                dim=1,
+                            ).view(-1),
+                        }
+                    )
+            state_dict[f"{prefix}_extra_state"] = self._encode_extra_state(
+                extra_state)
+
+        self._register_load_state_dict_pre_hook(
+            merge_extra_states, with_module=True)
+
+    def _check_unsupported_features(self) -> None:
+        if self.fuse_wgrad_accumulation:
             raise ValueError(
-                "PrimusTurboGroupedLinear does not support primary weights in FP8")
+                "PrimusTurboGroupedLinear does not yet support fuse_wgrad_accumulation."
+            )
+        if self.ub_overlap_rs or self.ub_overlap_ag:
+            raise ValueError(
+                "PrimusTurboGroupedLinear does not support UserBuffer overlap."
+            )
+            
+    def make_grouped_weights(self, defer_init=False) -> None:
+        """
+        Convert parameters into a GroupedTensor and re-register them as parameters.
+        """
 
-    @te.jit.no_torch_dynamo()
+        if defer_init:
+            return
+
+        weight_quantizers = self._get_weight_quantizers()
+        recipe = (
+            weight_quantizers[0]._get_compatible_recipe()
+            if weight_quantizers and weight_quantizers[0] is not None
+            else None
+        )
+        if recipe is not None and (recipe.delayed() or recipe.float8_current_scaling()):
+            self.set_tensor_parallel_attributes(defer_init=defer_init)
+            return
+
+        weights = [getattr(self, f"weight{i}") for i in range(self.num_gemms)]
+
+        # Create the weight storage.
+        grouped_weights = GroupedTensor.make_grouped_tensor_with_shapes(
+            num_tensors=self.num_gemms,
+            shapes=[(self.out_features, self.in_features)] * self.num_gemms,
+            quantizer=weight_quantizers[0],
+            dtype=self.params_dtype,
+            device=weights[0].device,
+        )
+
+        # Copy existing params into storage.
+        with torch.no_grad():
+            for i in range(self.num_gemms):
+                if self.primary_weights_in_fp8:
+                    grouped_weights.quantized_tensors[i].copy_from_storage(weights[i])
+                else:
+                    grouped_weights.quantized_tensors[i].copy_(weights[i])
+
+        # Re-register as a single grouped weight parameter.
+        # Re-register as a single grouped weight parameter.
+        if not (
+            isinstance(grouped_weights, torch.Tensor)
+            and (weight_quantizers[0] is None or not weight_quantizers[0].internal)
+        ):
+            raise RuntimeError("Found internal quantizer with `single_grouped_parameter=True`.")
+        self.register_parameter(
+            "weight",
+            torch.nn.Parameter(grouped_weights),
+            init_fn=self.init_method,
+            get_rng_state_tracker=self.get_rng_state_tracker,
+            fp8_meta_index=self._offsets["weight"],
+        )
+        for i in range(self.num_gemms):
+            self.register_parameter(f"weight{i}", None)
+
+        self.set_tensor_parallel_attributes(defer_init=defer_init)
+
+    def reset_parameters(self, defer_init=False):
+        super().reset_parameters(defer_init=defer_init)
+        # Grouped tensor weights is an opt-in feature.
+        if self.single_grouped_parameter:
+            self.make_grouped_weights(defer_init=defer_init)
+
+    def _get_weight_tensor(self) -> torch.Tensor:
+        """Get the weight tensors of the module."""
+        grouped_weight = getattr(self, "weight", None)
+        assert grouped_weight is not None, "Weight is not found"
+        weight_tensors = grouped_weight.quantized_tensors
+        if weight_tensors is None:
+            # TODO(ksivaman): Remove this after GEMM integration.
+            weight_tensors = grouped_weight.split_into_quantized_tensors()
+        return weight_tensors[0]
+    
     def forward(
         self,
         inp: torch.Tensor,
-        num_tokens_per_expert: torch.Tensor,
-        is_first_microbatch: Optional[bool] = None,
+        m_splits: Union[list, torch.Tensor],
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
-        """
-        Apply the linear transformation to the input.
+        """Forward."""
+        _is_first_microbatch = (
+            None if self.disable_parameter_transpose_cache else self.is_first_microbatch
+        )
+        # quant_context = _get_fp8_autocast_for_quant_params(
+        #     self.te_quant_params, self.training)
 
-        Parameters
-        ----------
-        inp : torch.Tensor
-             Input tensor.
-        num_tokens_per_expert : List[int]
-                 List of integers representing the split of the input tensor.
-        is_first_microbatch : {True, False, None}, default = None
-                             During training using either gradient accumulation or
-                             pipeline parallelism a minibatch of data is further split
-                             into microbatches. Between the microbatches of the same minibatch
-                             the model weights are not updated. Setting this parameter indicates
-                             whether the current microbatch is the first in a minibatch or not.
-                             When set, this parameter enables additional optimizations:
+        # with quant_context:
+        #     out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch)
 
-                             * during FP8 training, it allows caching of the FP8 versions of
-                               the weights
-                             * it also allows skipping gradient accumulation during the
-                               first microbatch (since it is the first gradient being
-                               produced)
-        """
+        if isinstance(m_splits, list):
+            m_splits = torch.tensor(
+                m_splits, device=inp.device, dtype=torch.long)
+
+        if len(m_splits) != self.num_gemms:
+            raise ValueError(
+                f"Number of splits ({len(m_splits)}) should match number of"
+                f" GEMMs ({self.num_gemms})."
+            )
 
         is_grad_enabled = torch.is_grad_enabled()
 
         try:
+            weight_tensors = self._get_weight_tensors()
+            # bias_tensors = [getattr(self, f"bias{i}")
+            #                 for i in range(self.num_gemms)]
 
             if is_grad_enabled:
                 linear_fn = _GroupedLinear.apply
@@ -449,17 +791,16 @@ class GroupedLinear(torch.nn.Module):
                 linear_fn = _GroupedLinear.forward
                 autograd_ctx = [None]
 
-            num_tokens_prefix_sum = turbo.ops.grouped_gemm_compute_offs(
-                num_tokens_per_expert)
+            m_offs = turbo.ops.grouped_gemm_compute_offs(m_splits)
 
             non_tensor_args = (
-                num_tokens_per_expert,  # need
-                num_tokens_prefix_sum,
+                m_splits,  # need
+                m_offs,
                 self.apply_bias,  # need
-                is_first_microbatch,  # ?
+                _is_first_microbatch,  # ?
                 self.wgrad_store,  # need
                 self.fuse_wgrad_accumulation,  # need
-                is_cpu_offload_enabled(),  # need
+                te.pytorch.cpu_offload.is_cpu_offload_enabled(),  # need
                 self.sequence_parallel,  # need
                 self.activation_dtype,  # need
                 is_grad_enabled,  # need
@@ -470,6 +811,100 @@ class GroupedLinear(torch.nn.Module):
         finally:
             self.end_forward()
 
-        if self.return_bias:
-            return out, None
-        return out
+        self.is_first_microbatch = False
+
+        return out,  [cast_if_needed(b, self.activation_dtype) for b in bias_tensors] if self.return_bias else None
+
+
+class ColumnParallelGroupedLinear(GroupedLinear):
+    """
+    Wrapper for the Transformer-Engine's `GroupedLinear` layer but specialized
+    to column-parallel style.
+    """
+
+    def __init__(
+        self,
+        num_gemms: int,
+        input_size: int,
+        output_size: int,
+        *,
+        config: ModelParallelConfig,
+        init_method: Callable,
+        bias: bool,
+        skip_bias_add: bool,
+        is_expert: bool,
+        tp_comm_buffer_name: Optional[str] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        super().__init__(
+            num_gemms=num_gemms,
+            input_size=input_size,
+            output_size=output_size,
+            parallel_mode="column",
+            config=config,
+            init_method=condition_init_method(config, init_method),
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            is_expert=is_expert,
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            pg_collection=pg_collection,
+        )
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """
+        For each gemm, sharding along axis 0, bias sharded.
+        Assume sharded_offsets[-1] is the expert parallel offset.
+        """
+        tp_axis_map = {}
+        for gemm_idx in range(self.num_gemms):
+            tp_axis_map.update(
+                {f"{gemm_idx}.weight": 0, f"{gemm_idx}.bias": 0})
+        return super()._sharded_state_dict_grouped(
+            tp_axis_map, prefix, sharded_offsets, metadata
+        )
+
+
+class RowParallelGroupedLinear(GroupedLinear):
+    """
+    Wrapper for the Transformer-Engine's `GroupedLinear` layer but specialized
+    to row-parallel style.
+    """
+
+    def __init__(
+        self,
+        num_gemms: int,
+        input_size: int,
+        output_size: int,
+        *,
+        config: ModelParallelConfig,
+        init_method: Callable,
+        bias: bool,
+        skip_bias_add: bool,
+        is_expert: bool,
+        tp_comm_buffer_name: Optional[str] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        super().__init__(
+            num_gemms=num_gemms,
+            input_size=input_size,
+            output_size=output_size,
+            parallel_mode="row",
+            config=config,
+            init_method=condition_init_method(config, init_method),
+            bias=bias,
+            skip_bias_add=skip_bias_add,
+            is_expert=is_expert,
+            tp_comm_buffer_name=tp_comm_buffer_name,
+            pg_collection=pg_collection,
+        )
+
+    def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+        """
+        For each gemm, sharding along axis 1, bias not sharded.
+        Assume sharded_offsets[-1] is the expert parallel offset.
+        """
+        tp_axis_map = {
+            f"{gemm_idx}.weight": 1 for gemm_idx in range(self.num_gemms)}
+        return super()._sharded_state_dict_grouped(
+            tp_axis_map, prefix, sharded_offsets, metadata
+        )
