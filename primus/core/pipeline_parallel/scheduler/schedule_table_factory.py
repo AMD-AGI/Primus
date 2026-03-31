@@ -4,8 +4,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-from functools import lru_cache
-
 from .algorithms import *
 from .algorithms.base import PipelineScheduleAlgo
 
@@ -17,13 +15,16 @@ pp_algorithm_map = {
     "1f1b": Schedule1F1B,
     "1f1b-interleaved": ScheduleInterleaved1F1B,
     "zero-bubble": ScheduleZeroBubble,
+    "zero-bubble-heuristic": ScheduleZeroBubbleHeuristic,
     "zbv-formatted": ScheduleZBVFormatted,
     "v-half": ScheduleZBVGreedy,
     "v-min": ScheduleZBVGreedy,
 }
 
 
-@lru_cache
+_schedule_instance_cache: dict = {}
+
+
 def produce_schedule_instance(
     algorithm: str, pp_size: int, vpp_size: int, micro_batches: int, *args, **kwargs
 ) -> PipelineScheduleAlgo:
@@ -33,4 +34,23 @@ def produce_schedule_instance(
         kwargs["memory_config"] = "half"
     elif algorithm == "v-min":
         kwargs["memory_config"] = "min"
-    return pp_algorithm_map[algorithm](pp_size, vpp_size, micro_batches, *args, **kwargs)
+
+    def _make_hashable(v):
+        if isinstance(v, list):
+            return tuple(v)
+        return v
+
+    cache_key = (
+        algorithm,
+        pp_size,
+        vpp_size,
+        micro_batches,
+        tuple(_make_hashable(a) for a in args),
+        tuple(sorted((k, _make_hashable(v)) for k, v in kwargs.items())),
+    )
+    if cache_key in _schedule_instance_cache:
+        return _schedule_instance_cache[cache_key]
+
+    instance = pp_algorithm_map[algorithm](pp_size, vpp_size, micro_batches, *args, **kwargs)
+    _schedule_instance_cache[cache_key] = instance
+    return instance

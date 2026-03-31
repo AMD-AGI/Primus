@@ -61,6 +61,7 @@ def use_split_wgrad_op():
     args = get_args()
     if args.patch_primus_pipeline and args.pp_algorithm in [
         "zero-bubble",
+        "zero-bubble-heuristic",
         "zbv-formatted",
         "v-half",
         "v-min",
@@ -1239,9 +1240,13 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             config,
             pg_collection,
         )
-        args = get_args()
+        self.use_split_wgrad_op = use_split_wgrad_op()
+        self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
+        self.disable_turbo_grouped_mlp_low_precision = args.disable_turbo_grouped_mlp_low_precision
+        self.patch_zero_bubble = args.patch_zero_bubble
+        self.patch_primus_pipeline = args.patch_primus_pipeline
 
-        if use_split_wgrad_op() or (args.patch_moe_overlap and args.overlap_moe_expert_parallel_comm):
+        if self.use_split_wgrad_op or (args.patch_moe_overlap and args.overlap_moe_expert_parallel_comm):
             from .zbpp_gemm import grouped_gemm_with_weight_gradient_store
 
             self.grouped_gemm = functools.partial(
@@ -1250,7 +1255,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         else:
             self.grouped_gemm = pt.ops.grouped_gemm
 
-        if args.use_turbo_fused_act_with_probs:
+        if self.use_turbo_fused_act_with_probs:
             assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
 
             if self.config.activation_func == F.silu:
@@ -1289,12 +1294,15 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
-        args = get_args()
         gemm_kargs = [dict(), dict()]
+        use_grouped_gemm_low_precision = (
+            PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
+            and not self.disable_turbo_grouped_mlp_low_precision
+        )
         if permuted_local_hidden_states.nelement() != 0:
 
             # Reshape the weights for the grouped GEMMs.
-            if use_split_wgrad_op():
+            if self.use_split_wgrad_op:
 
                 w1 = self.weight1
                 w2 = self.weight2
@@ -1308,7 +1316,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             tokens_per_expert = tokens_per_expert.to(w1.device)
             assert w1.is_contiguous(), "w1 must be contiguous"
             assert w2.is_contiguous(), "w2 must be contiguous"
-            if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+            if use_grouped_gemm_low_precision:
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                 fc1_output = pt.ops.grouped_gemm_fp8(
                     permuted_local_hidden_states,
@@ -1322,7 +1330,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, **(gemm_kargs[0])
                 )
             if self.activation_recompute:
-                if args.use_turbo_fused_act_with_probs:
+                if self.use_turbo_fused_act_with_probs:
                     intermediate_parallel = self.activation_checkpoint.checkpoint(
                         self.activation_func_with_probs,
                         fc1_output,
@@ -1333,7 +1341,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     intermediate_parallel = self.activation_checkpoint.checkpoint(
                         self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
                     )
-                if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+                if use_grouped_gemm_low_precision:
                     quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                     fc2_output = pt.ops.grouped_gemm_fp8(
                         intermediate_parallel,
@@ -1348,7 +1356,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     )
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
-                if args.use_turbo_fused_act_with_probs:
+                if self.use_turbo_fused_act_with_probs:
                     intermediate_parallel = self.activation_func_with_probs(
                         fc1_output, permuted_probs, tokens_per_expert
                     )
@@ -1356,7 +1364,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     intermediate_parallel = self.activation_func_with_probs(
                         fc1_output, permuted_probs.unsqueeze(-1)
                     )
-                if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+                if use_grouped_gemm_low_precision:
                     quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                     fc2_output = pt.ops.grouped_gemm_fp8(
                         intermediate_parallel,
@@ -1374,13 +1382,13 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             assert torch.count_nonzero(tokens_per_expert) == 0
             # Make sure params of experts still have gradients even given zero tokens.
             assert (
-                not args.patch_zero_bubble and not args.patch_primus_pipeline
+                not self.patch_zero_bubble and not self.patch_primus_pipeline
             ), "Zero bubble or primus pipeline not support torch.matmul backend yet"
             w1 = self.weight1.view(self.config.hidden_size, -1)
             w2 = self.weight2.view(-1, self.config.hidden_size)
             h = torch.matmul(permuted_local_hidden_states, w1)
             if self.activation_recompute:
-                if args.use_turbo_fused_act_with_probs:
+                if self.use_turbo_fused_act_with_probs:
                     h = self.activation_checkpoint.checkpoint(
                         self.activation_func_with_probs, h, permuted_probs, tokens_per_expert
                     )
@@ -1391,7 +1399,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 fc2_output = torch.matmul(h, w2)
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
-                if args.use_turbo_fused_act_with_probs:
+                if self.use_turbo_fused_act_with_probs:
                     h = self.activation_func_with_probs(h, permuted_probs, tokens_per_expert)
                 else:
                     h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
