@@ -12,7 +12,7 @@ from .network_probe import probe_network
 from .utils import Finding
 
 
-def run_network_full_checks() -> Dict[str, Any]:
+def run_network_full_checks(expect_distributed: bool = True) -> Dict[str, Any]:
     """
     Level: full
 
@@ -31,11 +31,15 @@ def run_network_full_checks() -> Dict[str, Any]:
             runtime["pg_backend"] = dist.get_backend()
             runtime["pg_init_ok"] = True
         else:
-            # If distributed intent is detected but PG is not initialized, treat as WARN.
+            # If distributed intent is detected but PG is not initialized, log WARN when
+            # distributed runtime is expected, otherwise log as INFO.
             if bool(probe.intent.get("is_distributed")):
                 runtime["pg_init_ok"] = False
                 runtime["pg_error"] = "Process group not initialized"
-                findings.append(Finding("warn", "Runtime process group not initialized", runtime))
+                if expect_distributed:
+                    findings.append(Finding("warn", "Runtime process group not initialized", runtime))
+                else:
+                    findings.append(Finding("info", "Runtime process group not initialized", runtime))
     except Exception as e:
         # torch not available or dist import failed
         runtime["pg_init_ok"] = False

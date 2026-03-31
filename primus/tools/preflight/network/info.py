@@ -25,8 +25,20 @@ class Finding:
     details: Dict[str, Any]
 
 
-def collect_network_info() -> List[Finding]:
-    """Collect all network info (basic + standard + runtime)."""
+def collect_network_info(expect_distributed: bool = True) -> List[Finding]:
+    """
+    Run a sequence of network diagnostic checks (basic, standard, and full)
+    and aggregate their findings into a single list. The checks include status
+    of network interfaces, distributed environment detection, IP routes, and
+    runtime compatibility for distributed training. The `expect_distributed`
+    flag influences checks that are relevant to distributed setups.
+
+    Args:
+        expect_distributed (bool): Whether distributed execution is expected.
+
+    Returns:
+        List[Finding]: All findings from the three network checks.
+    """
     out: List[Finding] = []
 
     nb = run_network_basic_checks()
@@ -37,7 +49,7 @@ def collect_network_info() -> List[Finding]:
     for f in ns["findings"]:
         out.append(Finding(level=f.level, message=f.message, details=f.details))
 
-    nf = run_network_full_checks()
+    nf = run_network_full_checks(expect_distributed=expect_distributed)
     for f in nf["findings"]:
         out.append(Finding(level=f.level, message=f.message, details=f.details))
 
