@@ -8,11 +8,33 @@
 Forward step function for Megatron SFT training.
 
 This module contains the forward_step function used in supervised fine-tuning,
-following the Megatron-Bridge pattern for loss computation.
+following the Megatron-Bridge pattern for loss computation while staying
+compatible with newer Megatron-LM forward-step entrypoints.
 """
 
-import torch
+from functools import partial
 from typing import Callable, Iterator, Tuple
+
+import torch
+
+
+def _move_to_runtime_device(tensor: torch.Tensor) -> torch.Tensor:
+    """Move tensors to CUDA when available, keep CPU for unit tests."""
+    if torch.cuda.is_available():
+        return tensor.cuda()
+    return tensor
+
+
+def _empty_loss_result(device: torch.device | None = None) -> Tuple[torch.Tensor, torch.Tensor, dict]:
+    """Build a no-op loss tuple with the expected Megatron shape."""
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    return (
+        torch.tensor(0.0, device=device),
+        torch.tensor(0, device=device, dtype=torch.int),
+        {},
+    )
 
 
 def create_sft_forward_step() -> Callable:
@@ -28,13 +50,15 @@ def create_sft_forward_step() -> Callable:
         forward_step function compatible with Megatron's pretrain loop
     """
     
-    def forward_step(data_iterator: Iterator, model) -> Tuple:
+    def forward_step(data_iterator: Iterator, model, return_schedule_plan: bool = False) -> Tuple:
         """
         Forward step for SFT training.
         
         Args:
             data_iterator: Iterator over training data batches
             model: Megatron GPT model
+            return_schedule_plan: Whether to return a schedule plan for
+                newer Megatron pipeline schedulers
             
         Returns:
             Tuple of (output_tensor, loss_function)
@@ -42,32 +66,25 @@ def create_sft_forward_step() -> Callable:
             - loss_function: Lambda that computes final loss with masking
         """
         from megatron.training import get_args
-        
+
         args = get_args()
-        
+
         # Handle case where data_iterator is None (e.g., during eval without valid dataset)
         if data_iterator is None:
-            return None, lambda output: (
-                torch.tensor(0.0, device='cuda'),
-                torch.tensor(0, device='cuda'),
-                {}
-            )
+            return None, lambda output: _empty_loss_result()
         
         # Get batch from iterator
         try:
             batch = next(data_iterator)
         except StopIteration:
             # Return None and a no-op loss function for iteration completion
-            return None, lambda output: (
-                torch.tensor(0.0, device='cuda'),
-                torch.tensor(0, device='cuda'),
-                {}
-            )
+            return None, lambda output: _empty_loss_result()
         
         # Extract tensors from batch
-        tokens = batch['input_ids'].long().cuda()
-        labels = batch['labels'].long().cuda()
-        loss_mask = batch['loss_mask'].float().cuda()
+        tokens = _move_to_runtime_device(batch["input_ids"]).long()
+        labels = _move_to_runtime_device(batch["labels"]).long()
+        loss_mask = _move_to_runtime_device(batch["loss_mask"]).float()
+        packed_seq_params = batch.get("packed_seq_params")
         
         # Ensure proper shapes [batch, seq]
         if tokens.dim() == 1:
@@ -86,12 +103,8 @@ def create_sft_forward_step() -> Callable:
         # attention_mask: None for causal mask (standard GPT autoregressive)
         attention_mask = None
         
-        # Forward pass through model with labels
-        # When labels are provided, model computes and returns per-token losses
-        output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
-        
         # Create loss function following Megatron-Bridge pattern
-        def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor) -> Tuple:
+        def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor, model=None) -> Tuple:
             """
             Masked next-token loss function.
             
@@ -136,9 +149,36 @@ def create_sft_forward_step() -> Callable:
             # Return standard Megatron loss function signature
             # (loss, num_tokens, metrics_dict)
             return (loss, num_tokens, {"lm loss": reporting_loss})
-        
-        # Return output and loss function
-        # The lambda captures loss_mask in its closure
-        return output_tensor, lambda output: loss_func(loss_mask, output)
+
+        if getattr(args, "use_legacy_models", False):
+            output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
+            return output_tensor, partial(loss_func, loss_mask, model=model)
+
+        if return_schedule_plan:
+            if not hasattr(model, "build_schedule_plan"):
+                raise AttributeError(
+                    "Megatron SFT forward_step received return_schedule_plan=True, "
+                    "but the model does not implement build_schedule_plan()."
+                )
+
+            schedule_plan = model.build_schedule_plan(
+                tokens,
+                position_ids,
+                attention_mask,
+                labels=labels,
+                loss_mask=loss_mask,
+            )
+            return schedule_plan, partial(loss_func, loss_mask, model=model)
+
+        model_kwargs = {
+            "labels": labels,
+            "loss_mask": loss_mask,
+        }
+        if packed_seq_params is not None:
+            model_kwargs["packed_seq_params"] = packed_seq_params
+
+        output_tensor = model(tokens, position_ids, attention_mask, **model_kwargs)
+
+        return output_tensor, partial(loss_func, loss_mask, model=model)
     
     return forward_step

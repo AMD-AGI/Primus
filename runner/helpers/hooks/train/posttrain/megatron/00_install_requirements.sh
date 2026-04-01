@@ -23,6 +23,13 @@ mkdir -p "${PIP_CACHE_DIR}"
 # Install minimal dependencies for Megatron-Bridge checkpoint conversion
 # Note: We only need the conversion utilities, not the full training stack
 pip install --cache-dir="${PIP_CACHE_DIR}" -U "datasets>=2.14.0"
+
+# Minimal bridge conversion set for AutoBridge.import_ckpt().
+# `nvidia-modelopt` is still a hard dependency today because Megatron-Bridge
+# imports it at module import time from GPT provider/checkpoint save modules.
+pip install --cache-dir="${PIP_CACHE_DIR}" "onnx==1.20.0rc1"
+pip install --cache-dir="${PIP_CACHE_DIR}" "transformers==4.57.6"
 pip install --cache-dir="${PIP_CACHE_DIR}" -U "safetensors>=0.4.0"
+pip install --cache-dir="${PIP_CACHE_DIR}" -U nvidia-modelopt
 
 echo "[OK] Megatron SFT dependencies installed"

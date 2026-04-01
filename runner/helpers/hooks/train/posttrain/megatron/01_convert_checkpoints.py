@@ -5,21 +5,18 @@
 # See LICENSE for license information.
 ###############################################################################
 """
-Convert HuggingFace checkpoint to Megatron format using Megatron-Bridge.
+Convert HuggingFace checkpoints for native Megatron SFT using Megatron-Bridge.
 
 This hook runs before Megatron SFT training to prepare pretrained checkpoints.
-Uses Megatron-Bridge's AutoBridge for HF → Megatron conversion.
-
-The workflow is simple:
-1. Convert HF checkpoint to Megatron torch_dist format using AutoBridge
-2. Set pretrained_checkpoint path in config
-3. Megatron-LM's finetune mode handles the rest automatically
+It calls ``AutoBridge.import_ckpt()`` directly and then normalizes the produced
+checkpoint layout so native Megatron-LM finetune loading can consume it.
 """
 
 import os
 import sys
 import time
 import argparse
+from contextlib import contextmanager
 from pathlib import Path
 
 # Add primus to path
@@ -51,58 +48,58 @@ def log_success(msg: str):
         print(f"[OK] {msg}")
 
 
+def _first_config_value(obj, *names: str) -> str | None:
+    """Return the first non-empty attribute value found on an object."""
+    if obj is None:
+        return None
+
+    for name in names:
+        if hasattr(obj, name):
+            value = getattr(obj, name)
+            if value not in (None, ""):
+                return value
+    return None
+
+
 def get_checkpoint_config(config_file: str) -> tuple[str | None, str | None]:
     """
-    Extract hf_path and pretrained_checkpoint path from config file.
+    Extract HF source path and any already-configured checkpoint path.
 
     Returns:
-        tuple: (hf_path, pretrained_checkpoint)
+        tuple: (hf_path, checkpoint_path)
             - hf_path: HuggingFace model path to convert
-            - pretrained_checkpoint: Existing Megatron checkpoint path (if configured)
+            - checkpoint_path: Existing Megatron checkpoint path (if configured)
     """
     cfg = load_primus_config(Path(config_file), None)
 
     hf_path = None
-    pretrained_checkpoint = None
+    checkpoint_path = None
 
     # Try different module names that might contain the paths
     for module_name in ["sft_trainer", "post_trainer"]:
         module = get_module_config(cfg, module_name)
         if module is not None:
-            # Check for hf_path in params or directly in module
-            if hasattr(module, "params") and hasattr(module.params, "tokenizer_model"):
-                hf_path = module.params.tokenizer_model
-            elif hasattr(module, "tokenizer_model"):
-                hf_path = module.tokenizer_model
+            params = getattr(module, "params", None)
 
-            # Check for pretrained_checkpoint
-            if hasattr(module, "params") and hasattr(module.params, "pretrained_checkpoint"):
-                pretrained_checkpoint = module.params.pretrained_checkpoint
-            elif hasattr(module, "pretrained_checkpoint"):
-                pretrained_checkpoint = module.pretrained_checkpoint
+            # Old Megatron-Bridge SFT configs used hf_path, while native Megatron
+            # configs typically reuse tokenizer_model as the HF source identifier.
+            hf_path = _first_config_value(params, "hf_path", "tokenizer_model") or _first_config_value(
+                module, "hf_path", "tokenizer_model"
+            )
+
+            # If the user already configured a Megatron-format checkpoint via either
+            # pretrained_checkpoint or load, the conversion hook should be skipped.
+            checkpoint_path = _first_config_value(
+                params, "pretrained_checkpoint", "load"
+            ) or _first_config_value(module, "pretrained_checkpoint", "load")
 
             break
 
-    return hf_path, pretrained_checkpoint
+    return hf_path, checkpoint_path
 
 
-def convert_checkpoint(hf_path: str, megatron_path: str):
-    """
-    Convert HuggingFace checkpoint to Megatron torch_dist format.
-    
-    Uses Megatron-Bridge's AutoBridge which supports a wide range of models:
-    - LLaMA family (2, 3, 3.1, 3.2, Nemotron)
-    - Qwen family (2, 2.5, 3, 3-Next, MoE)
-    - Gemma family (2, 3, 3 VL)
-    - DeepSeek family (V2, V3)
-    - Mistral, Moonlight, Nemotron-H, GLM-4.5
-    - MoE models (Qwen 3 MoE, DeepSeek V2/V3, OLMoE)
-    - Vision-Language models (Gemma 3 VL, Qwen 2.5/3 VL, Nemotron Nano V2 VL)
-    
-    The converted checkpoint is in torch_dist format and can be directly loaded
-    by Megatron-LM's finetune mode without any post-processing.
-    """
-    # Add Megatron-Bridge to path
+def _resolve_bridge_paths() -> tuple[Path, Path]:
+    """Resolve Megatron-Bridge source paths for direct AutoBridge import."""
     bridge_root = os.environ.get("MEGATRON_BRIDGE_PATH")
     if bridge_root:
         bridge_root = Path(bridge_root)
@@ -112,26 +109,44 @@ def convert_checkpoint(hf_path: str, megatron_path: str):
 
     bridge_path = bridge_root / "src"
     bridge_megatron_path = bridge_root / "3rdparty" / "Megatron-LM"
-    
-    # Add Bridge paths to sys.path
-    sys.path.insert(0, str(bridge_path))
-    sys.path.insert(0, str(bridge_megatron_path))
+    return bridge_path, bridge_megatron_path
 
+
+@contextmanager
+def _prepend_sys_path(*paths: Path):
+    """Temporarily prepend import paths needed by Megatron-Bridge."""
+    original_sys_path = list(sys.path)
+    for path in reversed([str(path) for path in paths if path]):
+        if path in sys.path:
+            sys.path.remove(path)
+        sys.path.insert(0, path)
+    try:
+        yield
+    finally:
+        sys.path[:] = original_sys_path
+
+
+def convert_checkpoint(hf_path: str, megatron_path: str):
+    """
+    Convert HuggingFace checkpoint to Megatron torch_dist format.
+    """
+    bridge_path, bridge_megatron_path = _resolve_bridge_paths()
     log_info(f"Megatron-Bridge path: {bridge_path}")
     log_info(f"Using Megatron-LM from: {bridge_megatron_path}")
-
-    from megatron.bridge import AutoBridge
 
     log_info(f"Converting HF → Megatron checkpoint...")
     log_info(f"  Source: {hf_path}")
     log_info(f"  Target: {megatron_path}")
 
-    # Convert using AutoBridge - creates torch_dist format checkpoint
-    AutoBridge.import_ckpt(
-        hf_model_id=hf_path,
-        megatron_path=megatron_path,
-        trust_remote_code=True,
-    )
+    with _prepend_sys_path(bridge_path, bridge_megatron_path):
+        from megatron.bridge import AutoBridge
+
+        # Convert using AutoBridge - creates torch_dist format checkpoint
+        AutoBridge.import_ckpt(
+            hf_model_id=hf_path,
+            megatron_path=megatron_path,
+            trust_remote_code=True,
+        )
 
     log_success("Checkpoint conversion completed")
 
