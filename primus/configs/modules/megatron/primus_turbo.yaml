@@ -5,6 +5,11 @@ enable_primus_turbo: false
 use_turbo_attention: false
 use_turbo_parallel_linear: false
 use_turbo_grouped_mlp: false
+# Triton FP8 expert GEMM (requires moe_use_legacy_grouped_gemm: false, fp8: hybrid)
+# Replaces TEGroupedMLP with a custom Triton FP8 kernel tuned for AMD MI355X.
+# Expected gain: ~40-50% on Expert GEMM (FC1/FC2 of MoE experts).
+# BWD: dA vs dB use dual CUDA streams by default; PRIMUS_MOE_EXPERT_GEMM_BWD_DUAL_STREAM=0 disables.
+use_triton_fp8_expert_gemm: false
 moe_use_fused_router_with_aux_score: false
 
 # inner features flags

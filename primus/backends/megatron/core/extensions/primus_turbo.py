@@ -1325,6 +1325,96 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         return fc2_output, None
 
 
+class PrimusFP8GroupedMLP(GroupedMLP):
+    """Expert GroupedMLP with Triton FP8 forward pass on AMD MI355X.
+
+    Drop-in replacement for GroupedMLP (legacy weight layout: weight1, weight2)
+    that replaces the BF16 grouped GEMM calls with a custom Triton FP8 kernel.
+
+    Forward:  fc1 = fp8_grouped_gemm(x,  W1, tpe)
+              intermediate = activation(fc1) * probs
+              fc2 = fp8_grouped_gemm(mid, W2, tpe)
+
+    Backward: computed with standard BF16 grouped GEMM (correct gradients).
+
+    Speedup target on gfx950: ~40-50% on Expert GEMM vs BF16 (compute-bound).
+
+    Enabled via: use_triton_fp8_expert_gemm=True in primus_turbo.yaml
+                 moe_use_legacy_grouped_gemm=False in the training config
+    """
+
+    def __init__(
+        self,
+        num_local_experts: int,
+        config: TransformerConfig,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        super().__init__(num_local_experts, config, pg_collection)
+        from primus.backends.megatron.core.fusions.fp8_grouped_gemm import (
+            HAVE_TRITON,
+            fp8_grouped_gemm,
+        )
+        if not HAVE_TRITON:
+            raise RuntimeError(
+                "PrimusFP8GroupedMLP requires Triton. "
+                "Install ROCm Triton or set use_triton_fp8_expert_gemm=False."
+            )
+        self._fp8_gg = fp8_grouped_gemm
+
+    def forward(
+        self,
+        permuted_local_hidden_states: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        permuted_probs: torch.Tensor,
+    ):
+        """Forward with Triton FP8 grouped GEMM."""
+        if permuted_local_hidden_states.nelement() == 0:
+            # no tokens allocated for local experts
+            assert torch.count_nonzero(tokens_per_expert) == 0
+            w1 = self.weight1.view(self.config.hidden_size, -1)
+            w2 = self.weight2.view(-1, self.config.hidden_size)
+            h = torch.matmul(permuted_local_hidden_states, w1)
+            h = self.activation_func(h)
+            return torch.matmul(h, w2), None
+
+        # ── reshape weights to [E, K, N] ──────────────────────────────────
+        w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
+        w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
+
+        # ensure contiguity (required by Triton kernel)
+        if not permuted_local_hidden_states.is_contiguous():
+            permuted_local_hidden_states = permuted_local_hidden_states.contiguous()
+        if not w1.is_contiguous():
+            w1 = w1.contiguous()
+        if not w2.is_contiguous():
+            w2 = w2.contiguous()
+
+        tokens_per_expert = tokens_per_expert.to(w1.device)
+
+        # ── FC1: x @ W1  [total_M, K] × [E, K, ffn_hidden] ──────────────
+        fc1_output = self._fp8_gg(
+            permuted_local_hidden_states,
+            w1,
+            tokens_per_expert,
+            trans_b=False,
+        )
+
+        # ── activation + prob weighting ──────────────────────────────────
+        intermediate_parallel = self.activation_func_with_probs(
+            fc1_output, permuted_probs.unsqueeze(-1)
+        )
+
+        # ── FC2: intermediate @ W2  [total_M, ffn/2] × [E, ffn/2, K] ────
+        fc2_output = self._fp8_gg(
+            intermediate_parallel,
+            w2,
+            tokens_per_expert,
+            trans_b=False,
+        )
+
+        return fc2_output, None
+
+
 class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
     """
     PrimusTurbo token dispatcher using DeepEP.

@@ -5,7 +5,8 @@ set -x
 export HF_TOKEN="${HF_TOKEN:-'your_hf_token'}"  # make it your own hf token
 export WANDB_API_KEY="${WANDB_API_KEY:-'your_wandb_api_key'}"  # make it your own wandb api key
 
-export NNODES=${NNODES:-32}
+export MASTER_PORT=${MASTER_PORT:-29500}
+export NNODES=${NNODES:-1}
 export SLURM_TIME=48:00:00
 export SLURM_PARTITION=amd-aig
 export SLURM_NODELIST="uswslocpm2m-106-[030-031,038-039,050,063,069,225,942,1531-1532,1536,1547,1549,1554,1556-1557,1561,1579,1583,1585,1588,1592,1596,1606,1627-1629,1650,1659-1660,1678]"
@@ -17,24 +18,27 @@ export TRAIN_ITERS=10
 
 # export NCCL_DEBUG=INFO
 export USING_AINIC=1
-export NCCL_IB_HCA="ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,ionic_8:1,ionic_9:1"
-export GLOO_SOCKET_IFNAME=ens9np0
-export NCCL_SOCKET_IFNAME=ens9np0
+# export NCCL_IB_HCA="ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,ionic_8:1,ionic_9:1"
+# export GLOO_SOCKET_IFNAME=ens9np0
+# export NCCL_SOCKET_IFNAME=ens9np0
 
 export MBS=${MBS:-2}
 export GBS=$((128 * NNODES))
-export PRIMUS_TOTAL_LAYERS=61
+export PRIMUS_TOTAL_LAYERS=${PRIMUS_TOTAL_LAYERS:-4}
 export PRIMUS_MOE_LAYER_FREQ=1
 export PRIMUS_EP=${PRIMUS_EP:-8}
-export PRIMUS_PP=${PRIMUS_PP:-8}
-export PRIMUS_VPP=${PRIMUS_VPP:-2}
+export PRIMUS_PP=${PRIMUS_PP:-1}
+export PRIMUS_VPP=${PRIMUS_VPP:-1}
 export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-2}
 
-export PROFILE=False
+export PROFILE=True
 export TURBO_ATTENTION=${TURBO_ATTENTION:-False}
 export TURBO_DEEPEEP=${TURBO_DEEPEEP:-True}
+# legacygg=False → enables FP8 expert GEMM (TEGroupedMLP or Triton FP8 path)
 export LEGACY_GG=${LEGACY_GG:-True}
 export TURBO_GROUPED_MLP=${TURBO_GROUPED_MLP:-False}
+# Triton FP8 expert GEMM — requires LEGACY_GG=False + FP8 config
+export TRITON_FP8_EXPERT_GEMM=${TRITON_FP8_EXPERT_GEMM:-False}
 export TURBO_RMS_NORM=${TURBO_RMS_NORM:-True}
 export APPLY_ROPE_FUSION=True
 export HSA_NO_SCRATCH_RECLAIM=1
@@ -62,7 +66,7 @@ case $STAGE in
     ;;
   *)
     echo "Unsupported STAGE=${STAGE} (PRIMUS_PP=${PRIMUS_PP}, PRIMUS_VPP=${PRIMUS_VPP}). Supported stages: 8, 16, 32." >&2
-    exit 1
+    # exit 1
     ;;
 esac
 
@@ -76,7 +80,7 @@ else
   RECOMP_ARGS=(--recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS" --recompute_granularity full --recompute_method block)
 fi
 
-export PRETRAIN_TYPE=${PRETRAIN_TYPE:-BF16}
+export PRETRAIN_TYPE=${PRETRAIN_TYPE:-FP8}
 
 export EXP=examples/megatron/configs/MI355X/deepseek_v3-${PRETRAIN_TYPE}-pretrain.yaml
 PRIMUS_TEAM="amd-$(date +%Y%m%d)"
@@ -86,7 +90,7 @@ PRIMUS_USER="${WORKLOAD_ID:-tas}"
 export PRIMUS_USER
 export PRIMUS_TOKENIZED_DATA_PATH=/shared_aig/c4/tokenized/c4_en_train_text_document # this is the tokenized data path for the training
 export PRIMUS_EXP_NAME=dsv3-pretrain-nnodes_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turboattn_$TURBO_ATTENTION-ropefusion_$APPLY_ROPE_FUSION-profile_$PROFILE
-export PRIMUS_EXP_NAME=debug_dsv3-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turbodeepep_$TURBO_DEEPEEP-turboattn_$TURBO_ATTENTION-autotune_$PRIMUS_TURBO_AUTO_TUNE
+export PRIMUS_EXP_NAME=dsv3-pretrain-nnodes_$NNODES-mbs_$MBS-gbs_$GBS-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-tritonFP8gg_$TRITON_FP8_EXPERT_GEMM-turbodeepep_$TURBO_DEEPEEP-turboattn_$TURBO_ATTENTION-autotune_$PRIMUS_TURBO_AUTO_TUNE
 
 if [ -n "$DUMP_PP_DATA" ]; then
   export DUMP_PP_DIR=output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/pp_data
@@ -111,6 +115,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --use_turbo_attention "$TURBO_ATTENTION" \
   --use_turbo_deepep "$TURBO_DEEPEEP" \
   --use_turbo_grouped_mlp "$TURBO_GROUPED_MLP" \
+  --use_triton_fp8_expert_gemm "$TRITON_FP8_EXPERT_GEMM" \
   --use_turbo_rms_norm "$TURBO_RMS_NORM" \
   --lr 2.2e-4 \
   --min_lr 2.2e-5 \
@@ -145,4 +150,5 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --main_grads_dtype bf16 \
   --exp_avg_dtype bf16 \
   --exp_avg_sq_dtype bf16 \
+  "$@" \
   2>&1 | tee "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK}.txt"

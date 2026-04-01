@@ -30,6 +30,7 @@ from megatron.core.transformer.moe.experts import (
 from megatron.core.utils import get_te_version, is_te_min_version
 
 from primus.backends.megatron.core.extensions.primus_turbo import (
+    PrimusFP8GroupedMLP,
     PrimusTurboAttention,
     PrimusTurboColumnParallelLinear,
     PrimusTurboGroupedMLP,
@@ -89,6 +90,17 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
         self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: bool
     ) -> Tuple[type, Optional[MLPSubmodules]]:
         """Which module and submodules to use for grouped mlp"""
+        use_triton_fp8 = getattr(self.cfg, "use_triton_fp8_expert_gemm", False)
+
+        if (
+            moe_use_grouped_gemm
+            and not moe_use_legacy_grouped_gemm
+            and use_triton_fp8
+        ):
+            # Triton FP8 path: custom AMD FP8 kernel, GroupedMLP-style weights.
+            # Requires moe_use_legacy_grouped_gemm=False and use_triton_fp8_expert_gemm=True.
+            return PrimusFP8GroupedMLP, None
+
         if (
             moe_use_grouped_gemm
             and TEColumnParallelGroupedLinear is not None

@@ -71,6 +71,8 @@ class ModelConfig:
     enable_primus_turbo: bool = False
     use_turbo_grouped_mlp: bool = False
     use_turbo_deepep: bool = False  # DeepEP enables async A2A with compute overlap
+    # Triton FP8 expert GEMM: custom AMD kernel, requires legacygg=False + fp8=hybrid
+    use_triton_fp8_expert_gemm: bool = False
 
 
 @dataclass
