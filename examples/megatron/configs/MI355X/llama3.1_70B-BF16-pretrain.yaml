@@ -17,7 +17,7 @@ modules:
       log_avg_reset_interval: 50
 
       train_iters: 50
-      micro_batch_size: 8
+      micro_batch_size: 1
       global_batch_size: 128
 
       seq_length: 8192
@@ -69,7 +69,7 @@ modules:
       # recompute
       recompute_granularity: full # full, selective
       recompute_method: block # uniform, block
-      recompute_num_layers: 80 # int
+      recompute_num_layers: 30 # int
 
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"
