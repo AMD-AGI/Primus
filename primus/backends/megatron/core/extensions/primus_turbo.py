@@ -465,9 +465,6 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         )
 
         qkv_format = packed_seq_kwargs.get("qkv_format", self.qkv_format)
-        assert qkv_format in ("sbhd", "bhsd"), "qkv_format only support bshd, but got {qkv_format}"
-        if qkv_format == "sbhd":
-            query, key, value = [x.transpose(0, 1).contiguous() for x in (query, key, value)]
         mask_type = attn_mask_type.name
         if mask_type == AttnMaskType.causal.name:
             causal = True
@@ -520,12 +517,12 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             return_lse=False,
             return_attn_probs=False,
             sink=sink_tensor,  # PR 208: pass sink tensor to Primus-Turbo
+            qkv_format=qkv_format,
             **self.attn_kwargs,
         )
 
-        o = o.reshape(o.shape[0], o.shape[1], -1).transpose(0, 1)
-        if not o.is_contiguous():
-            o = o.contiguous()
+        o = o.reshape(o.shape[0], o.shape[1], -1)
+
         return o
 
 
