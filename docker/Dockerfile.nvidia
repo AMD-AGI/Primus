@@ -1,0 +1,28 @@
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.01-py3
+FROM ${BASE_IMAGE}
+
+# Install Megatron-LM from source (not available on PyPI)
+COPY third_party/Megatron-LM /opt/Megatron-LM
+RUN pip install --no-build-isolation /opt/Megatron-LM && rm -rf /opt/Megatron-LM
+
+# Install TorchTitan dependencies
+COPY third_party/torchtitan /opt/torchtitan
+RUN pip install --no-build-isolation /opt/torchtitan && rm -rf /opt/torchtitan
+
+# Install Primus dependencies (skip AMD-only packages: pyrsmi, torchao ROCm build)
+RUN pip install \
+    loguru \
+    wandb \
+    expecttest \
+    nltk \
+    matplotlib \
+    markdown2 \
+    tyro \
+    blobfile \
+    transformers \
+    "torchdata>=0.8.0" \
+    "datasets>=3.6.0" \
+    "mlflow==3.4.0" \
+    plotext
+
+WORKDIR /opt

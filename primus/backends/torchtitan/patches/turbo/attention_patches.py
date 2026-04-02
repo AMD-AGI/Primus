@@ -15,6 +15,8 @@ The original logic lives inside ``TorchTitanPretrainTrainer``. It is now also
 expressed as a backend patch so it can be managed via the Primus patch system.
 """
 
+import importlib.util
+
 from primus.core.patches import PatchContext, get_param, register_patch
 from primus.modules.module_utils import log_rank_0
 
@@ -25,7 +27,8 @@ from primus.modules.module_utils import log_rank_0
     phase="setup",
     description="Use Primus-Turbo Attention kernels for supported models",
     condition=lambda ctx: (
-        get_param(ctx, "primus_turbo.enable_primus_turbo", False)
+        importlib.util.find_spec("primus_turbo") is not None
+        and get_param(ctx, "primus_turbo.enable_primus_turbo", False)
         and get_param(ctx, "primus_turbo.use_turbo_attention", False)
     ),
 )

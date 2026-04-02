@@ -11,8 +11,17 @@ These patches are applied early (priority=0) to ensure Megatron runtime
 behaves correctly on ROCm / AMD GPUs.
 """
 
-from primus.core.patches import PatchContext, register_patch
+from primus.core.patches import PatchContext, get_param, register_patch
 from primus.modules.module_utils import log_rank_0
+
+
+def _is_amd_target(ctx: PatchContext) -> bool:
+    import torch
+
+    target = get_param(ctx, "target_gpu", "auto")
+    if target == "auto":
+        return getattr(torch.version, "hip", None) is not None
+    return target == "amd"
 
 
 @register_patch(
@@ -21,6 +30,7 @@ from primus.modules.module_utils import log_rank_0
     phase="before_train",
     priority=0,
     description="Skip Megatron CUDA fused kernel compilation (ROCm compatibility)",
+    condition=_is_amd_target,
 )
 def patch_skip_compile_dependencies(ctx: PatchContext) -> None:
     """

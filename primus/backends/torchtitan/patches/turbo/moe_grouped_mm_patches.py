@@ -20,6 +20,7 @@ Behavior:
 """
 
 import functools
+import importlib.util
 
 from primus.core.patches import PatchContext, get_param, register_patch
 from primus.modules.module_utils import log_rank_0
@@ -31,7 +32,8 @@ from primus.modules.module_utils import log_rank_0
     phase="setup",
     description="Use Primus-Turbo grouped_mm for TorchTitan MoE experts",
     condition=lambda ctx: (
-        get_param(ctx, "primus_turbo.enable_primus_turbo", False)
+        importlib.util.find_spec("primus_turbo") is not None
+        and get_param(ctx, "primus_turbo.enable_primus_turbo", False)
         and get_param(ctx, "primus_turbo.use_turbo_grouped_mm", False)
     ),
 )

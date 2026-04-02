@@ -40,9 +40,12 @@ detect_gpu_model() {
     local gpu_model
     gpu_model="unknown"
 
-    # Check if rocm-smi is available
+    # Check if rocm-smi is available; fall back to nvidia-smi for NVIDIA GPUs
     if ! command -v rocm-smi &> /dev/null; then
-        echo "Error: rocm-smi not found. Is ROCm installed?" >&2
+        if command -v nvidia-smi &> /dev/null; then
+            echo "NVIDIA"
+            return 0
+        fi
         echo "unknown"
         return 1
     fi

@@ -24,6 +24,7 @@ Guides for common workflows and features:
 
 In-depth technical documentation:
 
+- **[NVIDIA GPU Support](./nvidia-gpu-support.md)** - Running Primus on NVIDIA GPUs (Megatron-LM, TorchTitan)
 - **[Post-Training Guide](./posttraining.md)** - Fine-tuning with SFT and LoRA using Primus CLI
 - **[Performance Projection](./projection.md)** - Project training performance to multi-node configurations
 - **[Preflight](./preflight.md)** - Cluster diagnostics (host/GPU/network info + perf tests)

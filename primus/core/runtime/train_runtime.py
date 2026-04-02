@@ -294,6 +294,11 @@ class PrimusRuntime:
         merge_namespace(backend_args, module_config.params, allow_override=False, excepts=[])
         module_config.params = backend_args
 
+        # Propagate top-level target_gpu into backend_args for use by trainers
+        target_gpu = getattr(self.ctx.primus_config, "target_gpu", "auto")
+        if not getattr(backend_args, "target_gpu", None):
+            backend_args.target_gpu = target_gpu
+
         # Load trainer class and instantiate
         stage = getattr(module_config.params, "stage", "pretrain") or "pretrain"
         TrainerClass = adapter.load_trainer_class(stage=stage)

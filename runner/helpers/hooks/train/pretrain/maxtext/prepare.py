@@ -201,20 +201,24 @@ def main():
     print(f"env.JAX_COORDINATOR_PORT={master_port}")
 
     # Expose MaxText/JAX performance tuning environment variables
-    # These mirror the settings from examples/run_pretrain.sh
     log_info("Exposing MaxText performance tuning environment variables")
 
-    # XLA/JAX settings
+    # Determine target GPU (AMD vs NVIDIA)
+    target_gpu = getattr(primus_config, "target_gpu", "auto")
+    if target_gpu == "auto":
+        import torch
+
+        target_gpu = "amd" if getattr(torch.version, "hip", None) else "nvidia"
+    log_info(f"Target GPU: {target_gpu}")
+
+    # XLA/JAX settings (common to both AMD and NVIDIA)
     dump_hlo_dir = os.getenv("DUMP_HLO_DIR", f"{primus_path}/output/xla_dump_hlo")
     dump_hlo = os.getenv("DUMP_HLO", "0")
     print(f"env.DUMP_HLO_DIR={dump_hlo_dir}")
     print(f"env.DUMP_HLO={dump_hlo}")
     print("env.NVTE_ALLOW_NONDETERMINISTIC_ALGO=1")
-    # set XLA_PYTHON_CLIENT_MEM_FRACTION to 0.93
-    # to avoid HSA_STATUS_ERROR_OUT_OF_RESOURCES error during multi-node training
     xla_python_client_mem_fraction = os.getenv("XLA_PYTHON_CLIENT_MEM_FRACTION", ".97")
     print(f"env.XLA_PYTHON_CLIENT_MEM_FRACTION={xla_python_client_mem_fraction}")
-    print("env.NVTE_USE_HIPBLASLT=1")
 
     xla_flags = "--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_enable_command_buffer='' --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=false --xla_gpu_enable_cublaslt=true --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=false"
     if dump_hlo == "1":
@@ -222,20 +226,24 @@ def main():
         log_info(f"XLA HLO dumping enabled, output directory: {dump_hlo_dir}")
     print(f"env.XLA_FLAGS={xla_flags}")
     # set TF_CPP_MIN_LOG_LEVEL=2 to suppress the error messages at the end of JAX/MaxText training
-    print(f"env.TF_CPP_MIN_LOG_LEVEL=2")
+    print("env.TF_CPP_MIN_LOG_LEVEL=2")
 
-    # AMD GPU optimizations
-    print("env.HIP_FORCE_DEV_KERNARG=1")
-    print("env.HSA_FORCE_FINE_GRAIN_PCIE=1")
-
-    # Transformer Engine settings for MaxText
+    # GPU-specific Transformer Engine and hardware settings
     print("env.NVTE_FUSED_ATTN=1")
-    print("env.NVTE_CK_USES_BWD_V3=1")
-    print("env.NVTE_CK_USES_FWD_V3=1")
-    print("env.NVTE_CK_IS_V3_ATOMIC_FP32=0")
-    print("env.NVTE_CK_HOW_V3_BF16_CVT=2")
-    print("env.NVTE_FUSED_ATTN_CK=1")
-    print("env.NVTE_FUSED_ATTN_AOTRITON=0")
+    if target_gpu == "amd":
+        log_info("Exposing AMD/ROCm-specific environment variables")
+        print("env.NVTE_USE_HIPBLASLT=1")
+        print("env.HIP_FORCE_DEV_KERNARG=1")
+        print("env.HSA_FORCE_FINE_GRAIN_PCIE=1")
+        print("env.NVTE_CK_USES_BWD_V3=1")
+        print("env.NVTE_CK_USES_FWD_V3=1")
+        print("env.NVTE_CK_IS_V3_ATOMIC_FP32=0")
+        print("env.NVTE_CK_HOW_V3_BF16_CVT=2")
+        print("env.NVTE_FUSED_ATTN_CK=1")
+        print("env.NVTE_FUSED_ATTN_AOTRITON=0")
+    else:
+        log_info("Exposing NVIDIA/CUDA-specific environment variables")
+        print("env.NVTE_FUSED_ATTN_AOTRITON=0")
 
     # Expose run mode: MaxText uses single mode (plain python instead of torchrun)
     # This will be exported as RUN_MODE env var by execute_hooks.sh

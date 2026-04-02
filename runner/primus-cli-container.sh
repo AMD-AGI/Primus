@@ -289,17 +289,21 @@ validate_positional_args \
     POSITIONAL_ARGS \
     "[container] Missing Primus commands after '--'. Usage: primus-cli container [options] -- <primus-commands>"
 
-validate_device_paths \
-    "${container_config[options.device]:-}" \
-    "[container]" \
-    "[container] No GPU devices configured. Specify via CLI (--device /dev/kfd --device /dev/dri) or config file:
+if [[ -n "${container_config[options.gpus]:-}" ]]; then
+    LOG_INFO_RANK0 "[container] NVIDIA GPU mode (--gpus) — skipping ROCm device validation"
+else
+    validate_device_paths \
+        "${container_config[options.device]:-}" \
+        "[container]" \
+        "[container] No GPU devices configured. Specify via CLI (--device /dev/kfd --device /dev/dri) or config file:
   container:
     options:
       device:
         - \"/dev/kfd\"
         - \"/dev/dri\"
         - \"/dev/infiniband\"" \
-    "[container] Device validation failed. Ensure ROCm drivers are installed on host. Check: ls -la /dev/kfd /dev/dri /dev/infiniband"
+        "[container] Device validation failed. Ensure ROCm drivers are installed on host. Check: ls -la /dev/kfd /dev/dri /dev/infiniband"
+fi
 
 # Validate parameter formats (if specified)
 validate_memory_format \
