@@ -115,6 +115,9 @@ log_exported_vars "Python Path and Data Paths" \
 HIP_VISIBLE_DEVICES=$(seq -s, 0 $((GPUS_PER_NODE - 1)))
 export HIP_VISIBLE_DEVICES
 
+# set LD_LIBRARY_PATH for ROCm in case it is not set in the container
+export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-/opt/rocm/lib}
+
 # ----------------- NCCL and Network Settings -----------------
 
 # NCCL logging level: VERSION, WARN, INFO, DEBUG, TRACE
@@ -122,13 +125,13 @@ export HIP_VISIBLE_DEVICES
 export NCCL_DEBUG=${NCCL_DEBUG:-}
 
 # Disable NCCL internal checks to reduce overhead
-export NCCL_CHECKS_DISABLE=1
+export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
 
 # Set InfiniBand GID index for NCCL communication
 export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
 
 # Disable cross NIC communication for NCCL
-export NCCL_CROSS_NIC=0
+export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}
 
 # Dynamically get InfiniBand Host Channel Adapter index for NCCL if not set
 if [ -z "${NCCL_IB_HCA:-}" ]; then
