@@ -231,7 +231,7 @@ jobs:
           git submodule update --init --recursive
           start_time=$(date +%s)
           echo "✅ [Build aiter] started at: $(date)"
-          PREBUILD_KERNELS=3 python3 setup.py develop
+          PREBUILD_KERNELS=3 pip install --no-cache-dir --use-pep517 .
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "✅ [Build aiter] ended at: $(date)"

@@ -57,7 +57,7 @@ RUN pip3 uninstall aiter amd-aiter -y || true && \
     cd aiter && \
     git checkout ${PRIMUS_TURBO_AITER_COMMIT} && \
     git submodule update --init --recursive && \
-    PREBUILD_KERNELS=3 python3 setup.py develop
+    PREBUILD_KERNELS=3 pip install --no-cache-dir --use-pep517 .
 
 RUN cd /opt && \
     git clone https://github.com/AMD-AGI/Primus-Turbo.git && \
