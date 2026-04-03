@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DOCKER_IMAGE="rocm/primus:v26.1"
+DOCKER_IMAGE="rocm/primus:v26.2"
 #DOCKER_IMAGE="docker.gpuperf:5000/aai_2026_training/rocm/primus_megatron:v25.11_gpt_oss_sink"
 #DOCKER_IMAGE="docker.gpuperf:5000/gpuperf/primus:v26.1_sinkfa"
 NNODES=2

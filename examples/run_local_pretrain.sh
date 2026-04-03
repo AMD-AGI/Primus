@@ -16,7 +16,7 @@ Usage: bash run_local_pretrain.sh
 This script launches a Primus pretraining task inside a Docker/Podman container.
 
 Environment Variables:
-    DOCKER_IMAGE   Docker image to use [Default: docker.io/rocm/primus:v26.1]
+    DOCKER_IMAGE   Docker image to use [Default: docker.io/rocm/primus:v26.2]
     MASTER_ADDR    Master node IP or hostname [Default: localhost]
     MASTER_PORT    Master node port [Default: 1234]
     NNODES         Total number of nodes [Default: 1]
@@ -44,7 +44,7 @@ export EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
 if [ "${BACKEND:-}" = "MaxText" ]; then
     DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/jax-training:maxtext-v26.1"}
 else
-    DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v26.1"}
+    DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v26.2"}
 fi
 
 # Project root
