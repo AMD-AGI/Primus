@@ -94,8 +94,8 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
 
                     set_dump_pp_data_patch()
                     return schedule_wrapper(func)
-            except Exception:
-                pass
+            except Exception as e:
+                log_rank_0(f"[Primus] Warning: failed to apply dump_pp_data patch: {e}")
             return func
 
         mpp.get_forward_backward_func = patched_get_forward_backward_func
