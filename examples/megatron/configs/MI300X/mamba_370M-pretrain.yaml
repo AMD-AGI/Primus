@@ -16,6 +16,7 @@ modules:
       # disable_wandb: false
       # disable_tensorboard: false
       stderr_sink_level: DEBUG
+      enable_one_logger: false
 
       eval_iters: 0
 
@@ -23,7 +24,7 @@ modules:
       log_avg_reset_interval: 50
 
       train_iters: 50
-      micro_batch_size: 4
+      micro_batch_size: 16
       global_batch_size: 256
 
       seq_length: 2048
@@ -50,6 +51,7 @@ modules:
       expert_model_parallel_size: 1
       overlap_grad_reduce: true
       overlap_param_gather: true
+      use_distributed_optimizer: true
       gradient_accumulation_fusion: false
 
       # data
@@ -79,3 +81,10 @@ modules:
       # Cross entropy flags
       # cross_entropy_fusion_impl: "native"
       # cross_entropy_loss_fusion: false
+      disable_compile_dependencies: false
+
+      # enable profiling
+      profile: true
+      use_pytorch_profiler: true
+      profile_step_start: 5
+      profile_step_end: 8

@@ -48,10 +48,11 @@ modules:
 
       # parallel
       tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 1
+      pipeline_model_parallel_size: 2
       expert_model_parallel_size: 1
       overlap_grad_reduce: true
       overlap_param_gather: true
+      use_distributed_optimizer: true
       gradient_accumulation_fusion: false
 
       # data

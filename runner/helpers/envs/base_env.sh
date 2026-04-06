@@ -114,6 +114,7 @@ log_exported_vars "Python Path and Data Paths" \
 # Set visible GPUs for the current node (0 to GPUS_PER_NODE-1)
 HIP_VISIBLE_DEVICES=$(seq -s, 0 $((GPUS_PER_NODE - 1)))
 export HIP_VISIBLE_DEVICES
+export CUDA_VISIBLE_DEVICES=$(seq -s, 0 $((GPUS_PER_NODE - 1)))
 
 # ----------------- NCCL and Network Settings -----------------
 
@@ -146,16 +147,16 @@ export IP_INTERFACE="${IP_INTERFACE:-}"
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-$IP_INTERFACE}
 export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-$IP_INTERFACE}
 
-# ----------------- RCCL Settings (AMD ROCm Communication Library) -----------------
+# # ----------------- RCCL Settings (AMD ROCm Communication Library) -----------------
 
-# Disable MSCCL (RCCL multi-connection feature) for better stability
-export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
-export RCCL_MSCCLPP_ENABLE=${RCCL_MSCCLPP_ENABLE:-0}
-export RCCL_MSCCLPP_FORCE_ENABLE=${RCCL_MSCCLPP_FORCE_ENABLE:-0}
-export RCCL_MSCCLPP_THRESHOLD=${RCCL_MSCCLPP_THRESHOLD:-$((1*1024*1024*1024))} # default 1GB
+# # Disable MSCCL (RCCL multi-connection feature) for better stability
+# export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
+# export RCCL_MSCCLPP_ENABLE=${RCCL_MSCCLPP_ENABLE:-0}
+# export RCCL_MSCCLPP_FORCE_ENABLE=${RCCL_MSCCLPP_FORCE_ENABLE:-0}
+# export RCCL_MSCCLPP_THRESHOLD=${RCCL_MSCCLPP_THRESHOLD:-$((1*1024*1024*1024))} # default 1GB
 
-# https://github.com/microsoft/mscclpp/blob/main/include/mscclpp/env.hpp#L82-L87
-export MSCCLPP_DISABLE_CHANNEL_CACHE=${MSCCLPP_DISABLE_CHANNEL_CACHE:-FALSE}
+# # https://github.com/microsoft/mscclpp/blob/main/include/mscclpp/env.hpp#L82-L87
+# export MSCCLPP_DISABLE_CHANNEL_CACHE=${MSCCLPP_DISABLE_CHANNEL_CACHE:-FALSE}
 
 # PyTorch needs this env to enable register comm
 export TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK=${TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK:-0}
@@ -174,19 +175,19 @@ log_exported_vars "RCCL Settings" \
 
 # ----------------- AMD-specific GPU optimizations -----------------
 # Enable system DMA engine (SDMA) on AMD GPUs for better IO throughput
-export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-1}
+# export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-1}
 
 # Prevent scratch memory from being reclaimed to stabilize large memory usage
 # NOTE: Must disable scratch reclaim to avoid MoE training crash on AMD GPUs
 # Setting this to 0 prevents core dumps when using Mixture-of-Experts (MoE) models
-export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-0}
+# export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-0}
 
 log_exported_vars "AMD GPU Optimizations" \
     HSA_ENABLE_SDMA HSA_NO_SCRATCH_RECLAIM
 
 # ----------------- General Performance Tuning -----------------
 # Limit GPU hardware queues to 2 for performance stability
-export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+# export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 
 # Increase HSA kernarg pool size to 12MB for models with many kernels (optional, can be set by GPU-specific configs)
 # export HSA_KERNARG_POOL_SIZE=${HSA_KERNARG_POOL_SIZE:-12582912}
@@ -217,7 +218,7 @@ export NVTE_USE_CAST_TRANSPOSE_TRITON=${NVTE_USE_CAST_TRANSPOSE_TRITON:-1}
 export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=${NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE:-0}
 
 # enable mxfp8 on ROCm Transformer Engine
-export NVTE_ROCM_ENABLE_MXFP8=1
+# export NVTE_ROCM_ENABLE_MXFP8=1
 
 # Note: Disable v3 due to accuracy issues. Will fix after TE version 2.1.
 export NVTE_CK_USES_BWD_V3=${NVTE_CK_USES_BWD_V3:-0}

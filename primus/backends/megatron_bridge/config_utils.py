@@ -185,6 +185,43 @@ def _merge_dict_to_dataclass(target: Any, source_dict: dict, path: str = "") -> 
                 )
 
 
+def _resolve_recipe(recipe: str, flavor: str):
+    """
+    Resolve a recipe module and function by searching multiple namespaces.
+
+    Search order:
+        1. primus.backends.megatron_bridge.recipes.{recipe}  (Primus-side extensions)
+        2. megatron.bridge.recipes.{recipe}                   (upstream Megatron-Bridge)
+
+    Returns:
+        Tuple of (module, full_module_path) for the first namespace that
+        contains the requested *flavor* function.
+
+    Raises:
+        AssertionError if the recipe cannot be found in any namespace.
+    """
+    search_prefixes = [
+        "primus.backends.megatron_bridge.recipes",
+        "megatron.bridge.recipes",
+    ]
+
+    for prefix in search_prefixes:
+        full_module_path = f"{prefix}.{recipe}"
+        try:
+            module = importlib.import_module(full_module_path)
+        except ImportError:
+            continue
+        if hasattr(module, flavor):
+            return module, full_module_path
+
+    # Build a helpful error message listing all paths that were tried.
+    tried = [f"{p}.{recipe}" for p in search_prefixes]
+    assert False, (
+        f"Recipe loading failed: Function '{flavor}' not found. "
+        f"Searched modules: {tried}"
+    )
+
+
 def load_recipe_config(backend_args: SimpleNamespace) -> Any:
     recipe = backend_args.recipe
     flavor = backend_args.flavor
@@ -193,21 +230,13 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
     assert recipe, "Recipe must be specified for Megatron-Bridge backend"
     assert flavor, "Flavor must be specified for Megatron-Bridge backend"
 
-    # Construct full module path and function name
-    full_module_path = f"megatron.bridge.recipes.{recipe}"
     function_name = flavor
+
+    # Resolve recipe module from Primus-side extensions or upstream Megatron-Bridge
+    module, full_module_path = _resolve_recipe(recipe, function_name)
 
     log_rank_0(f"Loading recipe: {full_module_path}.{function_name}()")
 
-    # Import module and get function
-    try:
-        module = importlib.import_module(full_module_path)
-    except ImportError as e:
-        assert False, f"Recipe loading failed: Cannot import '{full_module_path}': {e}"
-
-    assert hasattr(
-        module, function_name
-    ), f"Recipe loading failed: Function '{function_name}' not found in '{full_module_path}'"
     recipe_func = getattr(module, function_name)
 
     # Convert backend_args to dict once (used for both recipe call and config override)

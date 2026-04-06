@@ -5,12 +5,12 @@
 
 # Main settings (apply to all modes)
 main:
-  debug: false
+  debug: true
   dry_run: false
 
 # Slurm-specific settings
 slurm:
-  debug: false
+  debug: true
   dry_run: false
   # partition: ""
   nodes: 1
@@ -19,7 +19,7 @@ slurm:
 
 # Container-specific settings
 container:
-  debug: false
+  debug: true
   dry_run: false
 
   # Docker/Podman runtime options

@@ -9,7 +9,7 @@ tokenizer_model: meta-llama/Llama-3.2-1B
 # Model size parameters
 num_layers: 64
 hidden_size: 4096
-ffn_hidden_size: 14436
+ffn_hidden_size: 14336
 normalization: "RMSNorm"
 
 # Mamba parameters

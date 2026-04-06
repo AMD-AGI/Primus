@@ -502,9 +502,12 @@ def patch_training_log_unified(ctx: PatchContext):
                 warning_rank_0(f"[Patch:megatron.training_log] Failed to append training stats: {e}")
                 updated = log_string
 
-            # Delegate actual printing to Megatron's original implementation so
-            # that rank filtering and any other side effects remain unchanged.
-            original_print_rank_last(updated)
+            # Log the enriched iteration metrics at INFO level via Primus's
+            # logger so they appear in stderr and info.log. The original
+            # print_rank_last delegates to builtins.print which Primus
+            # monkey-patches to debug_rank_all (DEBUG level), making the
+            # output invisible on the INFO-filtered stderr sink.
+            log_rank_0(updated)
 
         def primus_training_log(*args, **kwargs):
             """

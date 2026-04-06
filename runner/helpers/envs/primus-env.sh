@@ -64,7 +64,8 @@ detect_gpu_model() {
     echo "$gpu_model"
 }
 
-GPU_MODEL=$(detect_gpu_model)
+# GPU_MODEL=$(detect_gpu_model)
+GPU_MODEL="unknown"
 if [[ "$GPU_MODEL" == "unknown" ]]; then
     LOG_WARN "Unable to detect GPU model. Using default configuration."
 fi

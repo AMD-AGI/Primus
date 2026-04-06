@@ -12,3 +12,6 @@ output
 experiment
 data
 pp_simulation_result
+nemo_experiments/
+benchmark_results/
+/*.csv

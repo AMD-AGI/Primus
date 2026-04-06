@@ -107,7 +107,9 @@ class MegatronBridgePosttrainTrainer(MegatronBridgeBaseTrainer):
             finetune(self.cfg_container, forward_step_func=forward_step)
 
         except Exception as e:
+            import traceback
             log_rank_0(f"Error during post-training: {e}")
+            log_rank_0(traceback.format_exc())
             raise
 
         log_rank_0("Megatron-Bridge post-train execution completed.")

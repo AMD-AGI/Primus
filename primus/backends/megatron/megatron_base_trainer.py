@@ -30,6 +30,8 @@ class MegatronBaseTrainer(BaseTrainer):
         import megatron.training.arguments as megatron_args  # type: ignore
         import megatron.training.initialize as megatron_init  # type: ignore
 
+        import torch
+
         from primus.modules.trainer.megatron.utils import validate_args_on_rocm
 
         log_rank_0("Patching Megatron-LM parse_args()")
@@ -39,13 +41,15 @@ class MegatronBaseTrainer(BaseTrainer):
         )
 
         original_validate_args = megatron_args.validate_args
+        _is_rocm = getattr(torch.version, "hip", None) is not None
 
         def patched_validate_args(*args, **kwargs):
             validated_args = original_validate_args(*args, **kwargs)
-            parsed_args = args[0] if args else kwargs.get("args", None)
-            if parsed_args is not None:
-                log_rank_0("validate_args() called; validating on ROCM")
-                validate_args_on_rocm(parsed_args)
+            if _is_rocm:
+                parsed_args = args[0] if args else kwargs.get("args", None)
+                if parsed_args is not None:
+                    log_rank_0("validate_args() called; validating on ROCM")
+                    validate_args_on_rocm(parsed_args)
             return validated_args
 
         megatron_args.parse_args = patched_parse_args

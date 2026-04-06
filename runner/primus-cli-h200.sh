@@ -455,18 +455,16 @@ elif [[ "$RUN_MODE" == "torchrun" ]]; then
     )
 
     LAST_NODE=$((${NNODES:-1} - 1))
-    # NOTE: FILTERS emptied to show all rank output for debugging.
-    # Restore the original logic below once the issue is resolved.
     FILTERS=()
-    # # Add local rank 0 on the first node
-    # if [ "${NODE_RANK:-0}" -eq 0 ]; then
-    #     FILTERS+=(0)
-    # fi
-    #
-    # # Add the last local rank on the last node
-    # if [ "${NODE_RANK:-0}" -eq "$LAST_NODE" ]; then
-    #     FILTERS+=($((${GPUS_PER_NODE:-8} - 1)))
-    # fi
+    # Add local rank 0 on the first node
+    if [ "${NODE_RANK:-0}" -eq 0 ]; then
+        FILTERS+=(0)
+    fi
+
+    # Add the last local rank on the last node
+    if [ "${NODE_RANK:-0}" -eq "$LAST_NODE" ]; then
+        FILTERS+=($((${GPUS_PER_NODE:-8} - 1)))
+    fi
 
     # Build filter argument (only if FILTERS is non-empty)
     if [ "${#FILTERS[@]}" -gt 0 ]; then

@@ -74,12 +74,23 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             model_provider = get_model_provider()
         log_rank_0(f"-model_provider: {model_provider}")
 
-        wrapped_pretrain(
-            train_valid_test_datasets_provider,
-            model_provider,
-            ModelType.encoder_or_decoder,
-            forward_step,
-            **kwargs,
-        )
+        try:
+            wrapped_pretrain(
+                train_valid_test_datasets_provider,
+                model_provider,
+                ModelType.encoder_or_decoder,
+                forward_step,
+                **kwargs,
+            )
+        except BaseException:
+            import os, traceback as _tb
+            rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK", "unknown"))
+            log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            crash_file = os.path.join(log_dir, f"primus_crash_rank{rank}.log")
+            with open(crash_file, "w") as f:
+                _tb.print_exc(file=f)
+            _tb.print_exc()
+            raise
 
         log_rank_0("Megatron pretrain execution completed.")

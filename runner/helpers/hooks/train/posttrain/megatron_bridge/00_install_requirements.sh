@@ -18,9 +18,9 @@ PIP_CACHE_DIR="${PIP_CACHE_DIR:-${DATA_PATH}/pip_cache}"
 echo "[INFO] Using pip cache: ${PIP_CACHE_DIR}"
 mkdir -p "${PIP_CACHE_DIR}"
 
-pip install --cache-dir="${PIP_CACHE_DIR}" "onnx==1.20.0rc1"
-pip install --cache-dir="${PIP_CACHE_DIR}" -U nvidia-modelopt
-pip install --cache-dir="${PIP_CACHE_DIR}" -U nvidia_resiliency_ext
+# pip install --cache-dir="${PIP_CACHE_DIR}" "onnx==1.20.0rc1"
+# pip install --cache-dir="${PIP_CACHE_DIR}" -U nvidia-modelopt
+# pip install --cache-dir="${PIP_CACHE_DIR}" -U nvidia_resiliency_ext
 
 pip install --cache-dir="${PIP_CACHE_DIR}" -U "datasets>=2.14.0"
 

@@ -17,8 +17,15 @@ Current patch:
       the original ``get_model``.
 """
 
+import torch
+
 from primus.core.patches import PatchContext, register_patch
 from primus.modules.module_utils import log_rank_0
+
+
+def _is_rocm(ctx: PatchContext) -> bool:
+    """Return True when running on an AMD ROCm platform."""
+    return getattr(torch.version, "hip", None) is not None
 
 
 @register_patch(
@@ -29,6 +36,7 @@ from primus.modules.module_utils import log_rank_0
         "Monkey patch megatron.training.training.get_model to disable the "
         "second DDP construction inside torch.cuda.stream()."
     ),
+    condition=_is_rocm,
 )
 def patch_megatron_get_model_disable_second_ddp(ctx: PatchContext) -> None:
     """
