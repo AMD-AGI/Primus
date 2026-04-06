@@ -9,7 +9,9 @@
 #
 # Single node, 8 GPUs: TP=1 → DP=8. (Fallback: tensor_model_parallel_size: 2 → DP=4.)
 #
-# Data prep (steps 1–3): see header in examples/megatron_bridge/scripts/download_mlperf_flux1_datasets.sh
+# Data prep: one-shot automation lives under examples/diffusion/mlperf_flux1/:
+#   bash examples/diffusion/mlperf_flux1/setup_mlperf_flux1_automated.sh minimal
+#   (download / export scripts are in that folder; prepare_energon_dataset_flux.py stays in recipes/flux/)
 #
 # 4) Dataset root for training = Energon-prepared FLUX shards (not cc12m_disk / cc12m_for_prepare).
 #    Container example layout under /data/mlperf_flux1:

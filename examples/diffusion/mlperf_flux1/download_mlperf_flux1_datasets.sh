@@ -2,9 +2,14 @@
 # Download MLPerf Training v5.1 FLUX.1 (text-to-image) datasets per MLCommons instructions.
 # Source: https://github.com/mlcommons/training/blob/master/text_to_image/README.md
 #
+# Location: examples/diffusion/mlperf_flux1/ (with setup_mlperf_flux1_automated.sh and export script).
+#
 # Usage:
 #   export MLPERF_FLUX1_ROOT=/data/mlperf_flux1   # optional; default: ./mlperf_flux1_data
-#   bash examples/megatron_bridge/scripts/download_mlperf_flux1_datasets.sh [minimal|preprocessed|all]
+#   bash examples/diffusion/mlperf_flux1/download_mlperf_flux1_datasets.sh [minimal|preprocessed|all]
+#
+# Full pipeline (download + export + Energon prepare): see
+#   bash examples/diffusion/mlperf_flux1/setup_mlperf_flux1_automated.sh minimal
 #
 # Phases:
 #   minimal       — CC12M training subset on disk + COCO-2014 val subset + val TSV (~recommended start).
@@ -15,11 +20,11 @@
 #
 # 1) Download MLPerf assets (this script)
 #    export MLPERF_FLUX1_ROOT=/data/mlperf_flux1
-#    bash examples/megatron_bridge/scripts/download_mlperf_flux1_datasets.sh minimal
+#    bash examples/diffusion/mlperf_flux1/download_mlperf_flux1_datasets.sh minimal
 #
 # 2) Export WebDataset shards → flat images + sidecar .txt (fix --input-glob to your layout)
 #    find "${MLPERF_FLUX1_ROOT}" -name '*.tar' | head   # locate shard paths
-#    python examples/megatron_bridge/scripts/export_wds_to_flux_prepare_folder.py \
+#    python examples/diffusion/mlperf_flux1/export_wds_to_flux_prepare_folder.py \
 #      --input-glob "${MLPERF_FLUX1_ROOT}/**/*.tar" \
 #      --output-dir "${MLPERF_FLUX1_ROOT}/cc12m_for_prepare"
 #
@@ -49,12 +54,19 @@
 # Optional encoders (only if you train from pixels inside TorchTitan, not for precomputed above):
 #   export HF_TOKEN=...   # Hugging Face token with FLUX.1-schnell access
 #   python "${TORCHTITAN_ROOT}/experiments/flux/scripts/download_encoders.py" --local_dir "${MLPERF_FLUX1_ROOT}/models" --hf_token "${HF_TOKEN}"
+#
+# Skip behavior (mlc-r2-downloader defaults: cc12m_disk/, coco/ under the data root):
+#   If minimal assets already exist (val2014_30k.tsv + WebDataset .tar under cc12m_disk and coco),
+#   the minimal downloads are skipped. Same for preprocessed dirs (cc12m_preprocessed,
+#   coco_preprocessed, empty_encodings) with at least one file each.
+#   Set FORCE_REDOWNLOAD=1 to always run the downloader / wget.
 
 set -euo pipefail
 
 PHASE="${1:-minimal}"
 ROOT="${MLPERF_FLUX1_ROOT:-${PWD}/mlperf_flux1_data}"
 DOWNLOADER='bash <(curl -fsSL https://raw.githubusercontent.com/mlcommons/r2-downloader/refs/heads/main/mlc-r2-downloader.sh)'
+FORCE_REDOWNLOAD="${FORCE_REDOWNLOAD:-}"
 
 mkdir -p "${ROOT}"
 cd "${ROOT}"
@@ -67,25 +79,60 @@ run_dl() {
   eval "${DOWNLOADER} ${uri}"
 }
 
+# True if dir contains at least one WebDataset-style shard (or resume target).
+_has_wds_shard() {
+  local dir="$1"
+  [[ -d "${dir}" ]] || return 1
+  find "${dir}" -type f \( -name '*.tar' -o -name '*.tgz' \) -print -quit 2>/dev/null | grep -q .
+}
+
+# Matches MLCommons R2 layout for flux-1-cc12m-disk / flux-1-coco (see text_to_image README).
+minimal_datasets_present() {
+  [[ -f "${ROOT}/val2014_30k.tsv" ]] || return 1
+  _has_wds_shard "${ROOT}/cc12m_disk" || return 1
+  _has_wds_shard "${ROOT}/coco" || return 1
+  return 0
+}
+
+# Matches R2 paths from flux-1-*-preprocessed.uri and flux-1-empty-encodings.uri.
+preprocessed_datasets_present() {
+  local d
+  for d in cc12m_preprocessed coco_preprocessed empty_encodings; do
+    [[ -d "${ROOT}/${d}" ]] || return 1
+    find "${ROOT}/${d}" -type f -print -quit 2>/dev/null | grep -q . || return 1
+  done
+  return 0
+}
+
 if [[ "${PHASE}" == "minimal" || "${PHASE}" == "all" ]]; then
-  # CC12M subset (~1.1M samples), 256×256 bicubic — training images on disk
-  run_dl "https://training.mlcommons-storage.org/metadata/flux-1-cc12m-disk.uri"
-  # COCO-2014 validation subset for benchmark eval protocol
-  run_dl "https://training.mlcommons-storage.org/metadata/flux-1-coco.uri"
-  if [[ ! -f "${ROOT}/val2014_30k.tsv" ]]; then
-    echo ">>> wget val2014_30k.tsv"
-    wget -q --show-progress -O "${ROOT}/val2014_30k.tsv" \
-      "https://training.mlcommons-storage.org/flux_1/datasets/val2014_30k.tsv"
+  if [[ -n "${FORCE_REDOWNLOAD}" ]] || ! minimal_datasets_present; then
+    # CC12M subset (~1.1M samples), 256×256 bicubic — training images on disk
+    run_dl "https://training.mlcommons-storage.org/metadata/flux-1-cc12m-disk.uri"
+    # COCO-2014 validation subset for benchmark eval protocol
+    run_dl "https://training.mlcommons-storage.org/metadata/flux-1-coco.uri"
+    if [[ ! -f "${ROOT}/val2014_30k.tsv" ]]; then
+      echo ">>> wget val2014_30k.tsv"
+      wget -q --show-progress -O "${ROOT}/val2014_30k.tsv" \
+        "https://training.mlcommons-storage.org/flux_1/datasets/val2014_30k.tsv"
+    else
+      echo ">>> val2014_30k.tsv already present, skip wget"
+    fi
   else
-    echo ">>> val2014_30k.tsv already present, skip"
+    echo ">>> Minimal FLUX.1 datasets already present under ${ROOT} (cc12m_disk + coco + val2014_30k.tsv). Skip download."
+    echo "    Set FORCE_REDOWNLOAD=1 to re-download."
   fi
 fi
 
 if [[ "${PHASE}" == "preprocessed" || "${PHASE}" == "all" ]]; then
-  echo ">>> Preprocessed packs are very large (~2.5 TB total). Ensure sufficient space."
-  run_dl "https://training.mlcommons-storage.org/metadata/flux-1-cc12m-preprocessed.uri"
-  run_dl "https://training.mlcommons-storage.org/metadata/flux-1-coco-preprocessed.uri"
-  run_dl "https://training.mlcommons-storage.org/metadata/flux-1-empty-encodings.uri"
+  if [[ -n "${FORCE_REDOWNLOAD}" ]] || ! preprocessed_datasets_present; then
+    echo ">>> Preprocessed packs are very large (~2.5 TB total). Ensure sufficient space."
+    run_dl "https://training.mlcommons-storage.org/metadata/flux-1-cc12m-preprocessed.uri"
+    run_dl "https://training.mlcommons-storage.org/metadata/flux-1-coco-preprocessed.uri"
+    run_dl "https://training.mlcommons-storage.org/metadata/flux-1-empty-encodings.uri"
+  else
+    echo ">>> Preprocessed FLUX.1 datasets already present (cc12m_preprocessed, coco_preprocessed, empty_encodings). Skip download."
+    echo "    Set FORCE_REDOWNLOAD=1 to re-download."
+  fi
 fi
 
 if [[ "${PHASE}" != "minimal" && "${PHASE}" != "preprocessed" && "${PHASE}" != "all" ]]; then

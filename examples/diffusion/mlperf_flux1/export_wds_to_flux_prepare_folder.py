@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Export MLPerf CC12M-on-disk WebDataset shards into a directory layout suitable for
-examples/diffusion/recipes/flux/prepare_energon_dataset_flux.py (recursive images + sidecar .txt captions).
+``examples/diffusion/recipes/flux/prepare_energon_dataset_flux.py`` (recursive images + sidecar .txt captions).
 
 Typical shard sample keys vary; this script picks the first image-like key and caption from json/txt/json.gz.
 """
