@@ -47,11 +47,11 @@ from primus_turbo.pytorch.core.low_precision import (
     check_mxfp8_support,
 )
 from torch import Tensor
+from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.fp8 import (
     DelayedScaling,
     FP8GlobalStateManager,
     Recipe,
-    dist_group_type,
 )
 
 from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
