@@ -29,7 +29,7 @@ source "${MLPERF_FLUX1_ROOT}/mlperf_flux1_energon.env"
 # or: export MLPERF_FLUX1_ENERGON="${MLPERF_FLUX1_ROOT}/cc12m_flux_wds"
 
 ./primus-cli direct -- train pretrain \
-  --config examples/megatron_bridge/configs/MI300X/flux_12b_pretrain_mlperf_flux1.yaml@Primus/examples/diffusion/mlperf_flux1/setup_mlperf_flux1_automated.sh
+  --config examples/megatron_bridge/configs/MI300X/flux_12b_pretrain_mlperf_flux1.yaml
 ```
 
 The `@Primus/examples/diffusion/mlperf_flux1/setup_mlperf_flux1_automated.sh` suffix attaches this setup script to the YAML in the Primus CLI config resolution path you use.
