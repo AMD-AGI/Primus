@@ -53,7 +53,9 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             from megatron.training import inprocess_restart  # type: ignore
 
             if hasattr(inprocess_restart, "maybe_wrap_for_inprocess_restart"):
-                wrapped_pretrain, store = inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
+                wrapped_pretrain, store = (
+                    inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
+                )
         except Exception:
             pass
 
