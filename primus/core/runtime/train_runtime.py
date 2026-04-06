@@ -107,7 +107,8 @@ class PrimusRuntime:
         except BaseException as e:
             # Best-effort cleanup; wrap into RuntimeError for caller.
             self._safe_cleanup(error=e)
-            raise RuntimeError(f"Training execution failed: {e}") from e
+            msg = str(e).strip() or repr(e) or type(e).__name__
+            raise RuntimeError(f"Training execution failed: {type(e).__name__}: {msg}") from e
 
     # --------------------------- Internal Steps --------------------------- #
 

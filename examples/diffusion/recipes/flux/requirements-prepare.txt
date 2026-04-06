@@ -1,0 +1,2 @@
+# For prepare_energon_dataset_flux.py (image resize/load + optional debug JPEG writes)
+opencv-python-headless>=4.8.0

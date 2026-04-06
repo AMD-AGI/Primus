@@ -1,0 +1,29 @@
+# Megatron-Bridge pretrain (diffusion / FLUX) — base module preset.
+# Use with a model preset that sets recipe_module, flavor, and step_func.
+
+extends:
+  - ../module_base.yaml
+
+trainable: true
+
+stage: "pretrain"
+
+enable_primus_turbo: true
+
+use_turbo_attention: false
+use_turbo_parallel_linear: false
+use_turbo_grouped_mlp: false
+disable_turbo_grouped_mlp_low_precision: false
+moe_use_fused_router_with_aux_score: false
+
+enable_turbo_attention_float8: false
+
+use_turbo_deepep: false
+turbo_deepep_num_cu: 32
+turbo_deepep_use_comm_stream: false
+
+turbo_sync_free_moe_stage: 0
+
+use_turbo_fused_act_with_probs: false
+
+use_turbo_rms_norm: false

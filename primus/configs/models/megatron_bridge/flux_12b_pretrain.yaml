@@ -1,0 +1,8 @@
+# FLUX ~12B DiT pretrain recipe (Primus diffusion package + Megatron-Bridge training).
+# Override dataset.path in experiment YAML or CLI for real Energon/WebDataset data.
+
+recipe_module: primus.diffusion.recipes.flux.flux
+flavor: flux_12b_pretrain_config
+step_func: flux_step
+
+# Optional: for WAN use step_func: wan_step and step_func_mode: pretrain

@@ -44,7 +44,7 @@ class MegatronBridgeAdapter(BackendAdapter):
         Return the Megatron-Bridge Trainer class for the specified training stage.
 
         Args:
-            stage: Training stage ("sft" for supervised fine-tuning)
+            stage: ``"pretrain"`` for diffusion (FLUX/WAN) pretraining, or ``"sft"`` for SFT/post-training.
 
         Returns:
             Trainer class for the specified stage
@@ -52,14 +52,19 @@ class MegatronBridgeAdapter(BackendAdapter):
         Raises:
             ValueError: If stage is not supported
         """
+        if stage == "pretrain":
+            from primus.backends.megatron_bridge.megatron_bridge_pretrain_trainer import (
+                MegatronBridgePretrainTrainer,
+            )
+
+            return MegatronBridgePretrainTrainer
         if stage == "sft":
             from primus.backends.megatron_bridge.megatron_bridge_posttrain_trainer import (
                 MegatronBridgePosttrainTrainer,
             )
 
             return MegatronBridgePosttrainTrainer
-        else:
-            raise ValueError(f"Invalid stage: {stage}")
+        raise ValueError(f"Invalid stage: {stage}")
 
     def setup_backend_path(self, backend_path=None) -> str:
         """
@@ -97,6 +102,14 @@ class MegatronBridgeAdapter(BackendAdapter):
         if os.path.isdir(megatron_lm_path) and megatron_lm_path not in sys.path:
             sys.path.insert(0, megatron_lm_path)
             log_rank_0(f"sys.path.insert → {megatron_lm_path}")
+
+        from primus.backends.megatron_bridge.modelopt_shim import install_modelopt_stub_if_needed
+        from primus.backends.megatron_bridge.training_log_mirror import (
+            install_megatron_bridge_training_log_mirror_to_rank0,
+        )
+
+        install_modelopt_stub_if_needed()
+        install_megatron_bridge_training_log_mirror_to_rank0()
 
         return resolved
 
