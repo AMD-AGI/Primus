@@ -168,7 +168,7 @@ class PrimusTurboLowPrecisionGlobalStateManager(FP8GlobalStateManager):
         cls.PRIMUS_TURBO_QUANT_CONFIG = None
 
     @classmethod
-    def fp8_autocast_enter(
+    def autocast_enter(
         cls,
         enabled: bool = False,
         calibrating: bool = False,
@@ -178,7 +178,7 @@ class PrimusTurboLowPrecisionGlobalStateManager(FP8GlobalStateManager):
         enabled_turbo: bool = False,
         turbo_quant_config: Optional[PrimusTurboQuantConfig] = None,
     ) -> None:
-        FP8GlobalStateManager.fp8_autocast_enter(
+        FP8GlobalStateManager.autocast_enter(
             enabled=enabled,
             calibrating=calibrating,
             fp8_recipe=fp8_recipe,
@@ -255,7 +255,7 @@ def primus_turbo_fp8_autocast(
     turbo_quant_config: Optional[PrimusTurboQuantConfig] = None,
 ) -> None:  # type: ignore
     fp8_state = PrimusTurboLowPrecisionGlobalStateManager.get_fp8_autocast_state()
-    PrimusTurboLowPrecisionGlobalStateManager.fp8_autocast_enter(
+    PrimusTurboLowPrecisionGlobalStateManager.autocast_enter(
         enabled=enabled,
         calibrating=calibrating,
         fp8_recipe=fp8_recipe,
@@ -286,7 +286,7 @@ def primus_turbo_fp4_autocast(
 ) -> None:  # type: ignore
     # TE currently uses fp8_autocast for fp8 and fp4 quantization.
     fp8_state = PrimusTurboLowPrecisionGlobalStateManager.get_fp8_autocast_state()
-    PrimusTurboLowPrecisionGlobalStateManager.fp8_autocast_enter(
+    PrimusTurboLowPrecisionGlobalStateManager.autocast_enter(
         enabled=enabled,
         calibrating=calibrating,
         fp8_recipe=fp4_recipe,
