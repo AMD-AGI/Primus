@@ -23,7 +23,6 @@ from megatron.core.models.backends import BackendSpecProvider
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.transformer.mlp import MLPSubmodules
 from megatron.core.transformer.moe.experts import (
-    GroupedMLP,
     SequentialMLP,
     TEGroupedMLP,
 )
@@ -32,7 +31,6 @@ from megatron.core.utils import get_te_version, is_te_min_version
 from primus.backends.megatron.core.extensions.primus_turbo import (
     PrimusTurboAttention,
     PrimusTurboColumnParallelLinear,
-    PrimusTurboGroupedMLP,
     PrimusTurboLayerNormColumnParallelLinear,
     PrimusTurboLinear,
     PrimusTurboRowParallelLinear,
@@ -99,12 +97,6 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             return TEGroupedMLP, MLPSubmodules(
                 linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
             )
-        elif moe_use_grouped_gemm:
-            warnings.warn(
-                "The legacy GroupedMLP will be deprecated in Megatron-Core v0.12.0. "
-                "Please update the TransformerEngine to version>=1.7.0 and use TEGroupedMLP."
-            )
-            return PrimusTurboGroupedMLP if self.cfg.use_turbo_grouped_mlp else GroupedMLP, None
         else:
             if not is_te_min_version("1.7.0.dev0"):
                 warnings.warn(
