@@ -10,7 +10,7 @@
 # Usage:
 #   DOCKER_IMAGE=<image> sbatch run_slurm.sh
 #   DOCKER_IMAGE=<image> NNODES=2 PARTITION=my-gpu sbatch run_slurm.sh
-#   DOCKER_IMAGE=rocm/primus:v26.1 NNODES=2 sbatch -N2 -w smci355-ccs-aus-n04-[25,29] -p Compute-DCPT ./run_slurm.sh
+#   DOCKER_IMAGE=rocm/primus:v26.2 NNODES=2 sbatch -N2 -w smci355-ccs-aus-n04-[25,29] -p Compute-DCPT ./run_slurm.sh
 #
 # Environment variables (all optional except DOCKER_IMAGE):
 #   DOCKER_IMAGE        Docker image to use (required)

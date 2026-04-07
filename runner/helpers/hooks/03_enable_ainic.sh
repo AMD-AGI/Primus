@@ -22,10 +22,20 @@ if [[ "${USING_AINIC:-0}" != "1" ]]; then
     exit 0
 fi
 
-ANP_HOME_DIR="${ANP_HOME_DIR:-/opt/amd-anp}"
-RCCL_HOME_DIR="${RCCL_HOME_DIR:-/opt/rccl}"
-MPI_HOME_DIR="${MPI_HOME_DIR:-/opt/ompi-4.1.6}"
+ANP_HOME_DIR="${ANP_HOME_DIR:-/workspace/amd-anp}"
+RCCL_HOME_DIR="${RCCL_HOME_DIR:-/workspace/rccl}"
+MPI_HOME_DIR="${MPI_HOME_DIR:-/opt/ompi}"
 
+# NCCL_NET_PLUGIN: ANP libraray has different names in different containers: librccl-anp.so or librccl-net.so.
+if [ -n "${NCCL_NET_PLUGIN:-}" ]; then
+    NCCL_NET_PLUGIN="${NCCL_NET_PLUGIN}"
+elif [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
+    NCCL_NET_PLUGIN="librccl-anp.so"
+elif [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
+    NCCL_NET_PLUGIN="librccl-net.so"
+else
+    NCCL_NET_PLUGIN="librccl-anp.so"
+fi
 NCCL_IB_TC="${NCCL_IB_TC:-104}"
 NCCL_IB_FIFO_TC="${NCCL_IB_FIFO_TC:-192}"
 NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-1}"
@@ -52,7 +62,7 @@ LOG_INFO_RANK0 "MPI_HOME_DIR: ${MPI_HOME_DIR}"
 echo "env.ANP_HOME_DIR=${ANP_HOME_DIR}"
 echo "env.RCCL_HOME_DIR=${RCCL_HOME_DIR}"
 echo "env.MPI_HOME_DIR=${MPI_HOME_DIR}"
-
+echo "env.NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN}"
 echo "env.NCCL_IB_TC=${NCCL_IB_TC}"
 echo "env.NCCL_IB_FIFO_TC=${NCCL_IB_FIFO_TC}"
 echo "env.NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX}"

@@ -26,7 +26,7 @@ container:
   # All keys directly map to CLI arguments (--key value)
   options:
     # Container image
-    image: "rocm/primus:v26.1"
+    image: "rocm/primus:v26.2"
 
     # Single-value options
     ipc: "host"
@@ -88,6 +88,24 @@ container:
       - "NCCL_IB_GID_INDEX"
       - "PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32"
       - "NVTE_CK_IS_V3_ATOMIC_FP32"
+      
+      - "PATH_TO_BNXT_TAR_PACKAGE"
+      - "ANP_HOME_DIR"
+      - "RCCL_HOME_DIR"
+      - "MPI_HOME_DIR"
+      - "DUMP_HLO"
+      - "DUMP_HLO_DIR"
+      - "HSA_KERNARG_POOL_SIZE"
+
+      - "PRIMUS_DETERMINISTIC"
+      - "PRIMUS_HIPBLASLT_TUNING"
+      - "PRIMUS_HIPBLASLT_TUNING_STAGE"
+      - "TE_HIPBLASLT_TUNING_RUN_COUNT"
+      - "TE_HIPBLASLT_TUNING_ALGO_COUNT"
+      - "HIPBLASLT_LOG_MASK"
+      - "HIPBLASLT_LOG_FILE"
+      - "HIPBLASLT_LOG_LEVEL"
+      - "HIPBLASLT_TUNING_OVERRIDE_FILE"
 # Direct mode settings
 direct:
   debug: false

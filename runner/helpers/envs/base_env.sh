@@ -115,6 +115,9 @@ log_exported_vars "Python Path and Data Paths" \
 HIP_VISIBLE_DEVICES=$(seq -s, 0 $((GPUS_PER_NODE - 1)))
 export HIP_VISIBLE_DEVICES
 
+# set LD_LIBRARY_PATH for ROCm in case it is not set in the container
+export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-/opt/rocm/lib}
+
 # ----------------- NCCL and Network Settings -----------------
 
 # NCCL logging level: VERSION, WARN, INFO, DEBUG, TRACE
@@ -122,13 +125,13 @@ export HIP_VISIBLE_DEVICES
 export NCCL_DEBUG=${NCCL_DEBUG:-}
 
 # Disable NCCL internal checks to reduce overhead
-export NCCL_CHECKS_DISABLE=1
+export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
 
 # Set InfiniBand GID index for NCCL communication
 export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
 
 # Disable cross NIC communication for NCCL
-export NCCL_CROSS_NIC=0
+export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}
 
 # Dynamically get InfiniBand Host Channel Adapter index for NCCL if not set
 if [ -z "${NCCL_IB_HCA:-}" ]; then
@@ -231,7 +234,19 @@ export NVTE_DEBUG_LEVEL=${NVTE_DEBUG_LEVEL:-0}  # 0, 1, 2
 export NVTE_FUSED_ATTN_LOG_CONFIG=${NVTE_FUSED_ATTN_LOG_CONFIG:-0}  # 0, 1
 export PATCH_TE_FLASH_ATTN=${PATCH_TE_FLASH_ATTN:-0}
 
+# ----------------- Deterministic Mode -----------------
+# PRIMUS_DETERMINISTIC=1 forces deterministic-related envs.
+if [[ "${PRIMUS_DETERMINISTIC:-0}" == "1" ]]; then
+    export NCCL_ALGO="Ring"
+    export NVTE_ALLOW_NONDETERMINISTIC_ALGO=0
+    export ROCBLAS_DEFAULT_ATOMICS_MODE=0
+    # Disable torch compile to avoid race issues in some triton versions.
+    export TORCH_COMPILE_DISABLE=1
+fi
+
 log_exported_vars "Transformer Engine Optimizations" \
     NVTE_USE_CAST_TRANSPOSE_TRITON NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE \
     NVTE_CK_USES_BWD_V3 PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32 \
-    NVTE_DEBUG NVTE_DEBUG_LEVEL NVTE_FUSED_ATTN_LOG_CONFIG PATCH_TE_FLASH_ATTN
+    NVTE_DEBUG NVTE_DEBUG_LEVEL NVTE_FUSED_ATTN_LOG_CONFIG PATCH_TE_FLASH_ATTN \
+    PRIMUS_DETERMINISTIC NCCL_ALGO NVTE_ALLOW_NONDETERMINISTIC_ALGO \
+    ROCBLAS_DEFAULT_ATOMICS_MODE TORCH_COMPILE_DISABLE
