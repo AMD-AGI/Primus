@@ -22,32 +22,32 @@ if [[ "${USING_AINIC:-0}" != "1" ]]; then
     exit 0
 fi
 
-ANP_HOME_DIR="${ANP_HOME_DIR:-/opt/amd-anp}"
-RCCL_HOME_DIR="${RCCL_HOME_DIR:-/opt/rccl}"
-MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi"}
+ANP_HOME_DIR="${ANP_HOME_DIR:-/workspace/amd-anp}"
+RCCL_HOME_DIR="${RCCL_HOME_DIR:-/workspace/rccl}"
+MPI_HOME_DIR="${MPI_HOME_DIR:-/opt/ompi}"
 
-# Check which NCCL net plugin library is present under ${ANP_HOME_DIR}/build and set accordingly
-if [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
-    NCCL_NET_PLUGIN=librccl-anp.so
-elif [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
-    NCCL_NET_PLUGIN=librccl-net.so
-else
-    LOG_ERROR "Error: Neither librccl-anp.so nor librccl-net.so found in ${ANP_HOME_DIR}/build."
-    exit 1
+# NCCL_NET_PLUGIN: ANP libraray has different names in different containers: librccl-anp.so or librccl-net.so.
+if [ -z "${NCCL_NET_PLUGIN:-}" ]; then
+    if [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
+        NCCL_NET_PLUGIN="librccl-anp.so"
+    elif [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
+        NCCL_NET_PLUGIN="librccl-net.so"
+    else
+        NCCL_NET_PLUGIN="librccl-anp.so"
+    fi
 fi
-
-NCCL_IB_GID_INDEX=1
-NCCL_MAX_P2P_CHANNELS=56
-NCCL_IB_TC=41
-NCCL_IB_FIFO_TC=185
-NCCL_IB_SL=0
-NET_OPTIONAL_RECV_COMPLETION=1
-NCCL_IB_USE_INLINE=1
-RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=0
-NCCL_GDR_FLUSH_DISABLE=1
-NCCL_DMABUF_ENABLE=0
-NCCL_IGNORE_CPU_AFFINITY=1
-NCCL_IB_QPS_PER_CONNECTION=1
+NCCL_IB_TC="${NCCL_IB_TC:-104}"
+NCCL_IB_FIFO_TC="${NCCL_IB_FIFO_TC:-192}"
+NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-1}"
+NCCL_IB_ROCE_VERSION_NUM="${NCCL_IB_ROCE_VERSION_NUM:-2}"
+NCCL_MAX_P2P_CHANNELS="${NCCL_MAX_P2P_CHANNELS:-56}"
+NET_OPTIONAL_RECV_COMPLETION="${NET_OPTIONAL_RECV_COMPLETION:-1}"
+NCCL_IB_USE_INLINE="${NCCL_IB_USE_INLINE:-1}"
+RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING="${RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING:-0}"
+NCCL_GDR_FLUSH_DISABLE="${NCCL_GDR_FLUSH_DISABLE:-1}"
+NCCL_DMABUF_ENABLE="${NCCL_DMABUF_ENABLE:-0}"
+NCCL_IGNORE_CPU_AFFINITY="${NCCL_IGNORE_CPU_AFFINITY:-1}"
+NCCL_IB_QPS_PER_CONNECTION="${NCCL_IB_QPS_PER_CONNECTION:-1}"
 
 # LD_LIBRARY_PATH: prepend AINIC/RCCL/MPI paths while preserving existing.
 _ld_base="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib"
@@ -62,12 +62,8 @@ echo "env.ANP_HOME_DIR=${ANP_HOME_DIR}"
 echo "env.RCCL_HOME_DIR=${RCCL_HOME_DIR}"
 echo "env.MPI_HOME_DIR=${MPI_HOME_DIR}"
 echo "env.NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN}"
-
-echo "env.NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX}"
-echo "env.NCCL_MAX_P2P_CHANNELS=${NCCL_MAX_P2P_CHANNELS}"
 echo "env.NCCL_IB_TC=${NCCL_IB_TC}"
 echo "env.NCCL_IB_FIFO_TC=${NCCL_IB_FIFO_TC}"
-echo "env.NCCL_IB_SL=${NCCL_IB_SL}"
 echo "env.NET_OPTIONAL_RECV_COMPLETION=${NET_OPTIONAL_RECV_COMPLETION}"
 echo "env.NCCL_IB_USE_INLINE=${NCCL_IB_USE_INLINE}"
 echo "env.RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING=${RCCL_GDR_FLUSH_GPU_MEM_NO_RELAXED_ORDERING}"

@@ -62,10 +62,8 @@ def main():
             f"The backend {args.backend} set in env is different with {framework} set in the config"
         )
 
-    # Normalize alias: map "light-megatron" to actual folder name
     framework_map = {
         "megatron": "megatron",
-        "light-megatron": "megatron",
         "torchtitan": "torchtitan",
         "maxtext": "maxtext",
         # Add more aliases here if needed

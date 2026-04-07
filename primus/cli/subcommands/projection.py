@@ -157,6 +157,22 @@ def register_subcommand(subparsers):
             "Example: --gpu-clock-mhz 1500\n"
         ),
     )
+    performance.add_argument(
+        "--pipeline-schedule-algorithm",
+        type=str,
+        required=False,
+        default="auto",
+        choices=["auto", "zerobubble", "zbv-formatted", "zbv-greedy", "megatron-ilp", "all"],
+        help=(
+            "Pipeline scheduling algorithm to use for simulation:\n"
+            "  auto          - Default Primus behavior (zerobubble if enabled, else 1f1b)\n"
+            "  zerobubble    - Primus zero-bubble scheduler (VPP=1 only)\n"
+            "  zbv-formatted - ZBV Formatted scheduler (VPP=2 only)\n"
+            "  zbv-greedy    - ZBV Greedy scheduler with half mem config (VPP=2 only)\n"
+            "  megatron-ilp  - Megatron ILP-based zero-bubble scheduler\n"
+            "  all           - Run all available schedulers and compare results\n"
+        ),
+    )
     parser.set_defaults(func=run)
 
     return parser

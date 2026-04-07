@@ -32,7 +32,7 @@ class CollectiveArgs:
     node_bw: float = 1024.0  # Intra-node bandwidth per GPU
     pod_bw: float = 50.0  # Inter-node bandwidth per NIC
     cluster_bw: float = 25.0  # Cluster-level bandwidth
-    bw_eff: float = 0.90  # Bandwidth efficiency factor
+    bw_eff: float = 0.70  # Bandwidth efficiency factor
 
     # Latency in microseconds
     node_lat: float = 0.45  # Intra-node latency

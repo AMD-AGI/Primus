@@ -45,7 +45,7 @@ Docker/Podman Options:
         --cap-add <CAPABILITY>       Add Linux capabilities (e.g., SYS_PTRACE)
 
     Container Configuration:
-        --image <DOCKER_IMAGE>       Docker image [default: rocm/primus:v26.1]
+        --image <DOCKER_IMAGE>       Docker image [default: rocm/primus:v26.2]
         --name <NAME>                Container name
         --user <UID:GID>             Run as specific user (e.g., 1000:1000)
         --network <NET>              Network mode (e.g., host, bridge)
@@ -378,8 +378,11 @@ LOG_INFO_RANK0 "[container] Parameter validation passed"
 LOG_INFO_RANK0 "[container] Converting configuration to container options..."
 
 # 1. Image (required, validated above)
-# For single-value options like image, take the last value (CLI overrides config)
-DOCKER_IMAGE=$(echo "${container_config[options.image]}" | tail -n1)
+# Allow users to override the image using the environment variable DOCKER_IMAGE.
+if [ -z "${DOCKER_IMAGE:-}" ]; then
+    # For single-value options like image, take the last value (CLI overrides config)
+    DOCKER_IMAGE=$(echo "${container_config[options.image]}" | tail -n1)
+fi
 LOG_INFO_RANK0 "[container] Final image: $DOCKER_IMAGE"
 
 # 2. Build CONTAINER_OPTS from configuration

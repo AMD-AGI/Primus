@@ -466,7 +466,7 @@ elif [[ "$RUN_MODE" == "torchrun" ]]; then
     fi
 
     # Add the last local rank on the last node
-    if [ "${NODE_RANK:-0}" -eq "$LAST_NODE" ]; then
+    if [ "${NODE_RANK:-0}" -eq "$LAST_NODE" ] && [ "${NNODES:-1}" -ne 1 ]; then
         FILTERS+=($((${GPUS_PER_NODE:-8} - 1)))
     fi
 
@@ -543,9 +543,10 @@ print_section ""
 # STEP 11: Execute command
 ###############################################################################
 # Temporarily allow pipeline to fail so we can capture PIPESTATUS and log it
+set +e
 eval "$CMD"
 exit_code=$?
-
+set -e
 # Print result based on exit code
 if [[ $exit_code -ge 128 ]]; then
     LOG_ERROR "[direct] torchrun crashed due to signal $((exit_code - 128))"

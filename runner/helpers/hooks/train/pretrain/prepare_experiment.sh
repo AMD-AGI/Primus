@@ -109,11 +109,8 @@ if [[ -z "$FRAMEWORK" ]]; then
     exit 0
 fi
 
-# Normalize framework aliases (e.g. light-megatron → megatron)
-case "$FRAMEWORK" in
-    light-megatron) FRAMEWORK_DIR="megatron" ;;
-    *)              FRAMEWORK_DIR="$FRAMEWORK" ;;
-esac
+# No legacy alias light-megatron mapping
+FRAMEWORK_DIR="$FRAMEWORK"
 
 FRAMEWORK_SCRIPT="${SCRIPT_DIR}/${FRAMEWORK_DIR}/prepare.py"
 

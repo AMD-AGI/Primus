@@ -61,6 +61,7 @@ def use_split_wgrad_op():
     args = get_args()
     if args.patch_primus_pipeline and args.pp_algorithm in [
         "zero-bubble",
+        "zero-bubble-heuristic",
         "zbv-formatted",
         "v-half",
         "v-min",
@@ -309,6 +310,19 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
     Note that if Megatron's parallel_state has not been initialized yet, the
     tp_group and cp_group passed to TE will be None and must be set later
     via set_tensor_parallel_group() and set_context_parallel_group().
+
+    Supports sink attention (PR 208) when use_sink_attention is enabled.
+    GPT-OSS style sink attention uses learned sink parameters per attention head,
+    which act as virtual attention targets that help stabilize attention patterns
+    especially with sliding window attention.
+
+    Primus-Turbo API (flash_attn_interface.py):
+        flash_attn_func(..., sink: Optional[torch.Tensor] = None)
+        - sink: learned sink parameters, shape (num_attention_heads,)
+        - When sink is provided, the Triton backend is automatically used
+          (C++ backend does not support sink attention)
+
+    Reference: gpt-oss/gpt_oss/triton/attention.py
     """
 
     def __init__(
@@ -327,8 +341,35 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         self.config = config
         self.qkv_format: str = "sbhd"
         self.softmax_scale = softmax_scale
+        self.layer_number = layer_number
 
         args = get_args()
+
+        # Sink attention configuration (PR 208) - GPT-OSS style learned sinks
+        # Reference: Primus-Turbo/primus_turbo/pytorch/ops/attention/flash_attn_interface.py
+        # Note: We store config here but create self.sinks AFTER super().__init__()
+        # because PyTorch requires Module.__init__() to be called before assigning parameters
+        _use_sink_attention = getattr(args, "use_sink_attention", False)
+        # Sliding window size (gpt-oss uses 128, applied to even layers only)
+        self.sink_sliding_window = getattr(args, "sink_sliding_window", 0)
+        # Whether to apply sliding window only to even layers (gpt-oss pattern)
+        self.sink_window_even_layers_only = getattr(args, "sink_window_even_layers_only", True)
+
+        # Note: Sink attention is currently only supported in non-CP mode
+        # (flash_attn_usp_func does not support sink parameter yet)
+        if _use_sink_attention and self.config.context_parallel_size > 1:
+            import warnings
+
+            warnings.warn(
+                "Sink attention is not supported with Context Parallel (CP > 1). "
+                "Disabling sink attention for this configuration."
+            )
+            _use_sink_attention = False
+
+        # Store for later use after super().__init__()
+        self._init_sink_attention = _use_sink_attention
+        self._num_heads_for_sinks = self.config.num_attention_heads
+
         self.offload = args.offload and "attn" in args.offload_ops
         if args.enable_turbo_attention_float8:
             self.attn = (
@@ -394,6 +435,18 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             softmax_scale=softmax_scale,
         )
 
+        # Initialize learned sink parameters AFTER super().__init__()
+        # Shape: (num_attention_heads,) - one sink value per head
+        # This matches gpt-oss model: self.sinks = torch.nn.Parameter(torch.empty(num_attention_heads))
+        self.use_sink_attention = self._init_sink_attention
+        if self.use_sink_attention:
+            self.sinks = torch.nn.Parameter(torch.zeros(self._num_heads_for_sinks, dtype=torch.bfloat16))
+        else:
+            self.sinks = None
+        # Clean up temporary attributes
+        del self._init_sink_attention
+        del self._num_heads_for_sinks
+
     def forward(
         self,
         query: Tensor,
@@ -423,6 +476,31 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         else:
             raise ValueError(f"Unsupported mask type: {mask_type}")
 
+        # Sink attention support (PR 208) - GPT-OSS style
+        # Learned sinks act as virtual attention targets that help stabilize
+        # attention patterns, especially with sliding window attention.
+        #
+        # Primus-Turbo API (flash_attn_interface.py line 316-348):
+        #   flash_attn_func(..., sink: Optional[torch.Tensor] = None)
+        #   - sink: learned sink parameters, shape (num_attention_heads,)
+        #   - When sink is provided, Triton backend is automatically used
+        #
+        # Reference: gpt-oss/gpt_oss/triton/attention.py
+        sink_tensor = None
+        window_size = (-1, -1)
+
+        if self.use_sink_attention and self.sinks is not None:
+            sink_tensor = self.sinks
+
+            # Apply sliding window based on layer pattern (gpt-oss: even layers only)
+            # gpt-oss pattern: self.sliding_window = config.sliding_window if layer_idx % 2 == 0 else 0
+            if self.sink_sliding_window > 0:
+                if self.sink_window_even_layers_only:
+                    # Only apply sliding window to even layers (layer_number is 1-indexed in Megatron)
+                    if (self.layer_number - 1) % 2 == 0:
+                        window_size = (self.sink_sliding_window, 0)
+                else:
+                    window_size = (self.sink_sliding_window, 0)
         if self.offload:
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_q", query)
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_k", key)
@@ -435,12 +513,13 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             dropout_p=0.0,
             softmax_scale=self.softmax_scale,
             causal=causal,
-            window_size=(-1, -1),
+            window_size=window_size,
             bias=None,
             alibi_slopes=None,
             deterministic=False,
             return_lse=False,
             return_attn_probs=False,
+            sink=sink_tensor,  # PR 208: pass sink tensor to Primus-Turbo
             **self.attn_kwargs,
         )
 
@@ -539,9 +618,7 @@ class PrimusTurboLinear(TELinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.block_scaling():
-                fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
+            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -693,9 +770,7 @@ class PrimusTurboRowParallelLinear(TELinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.block_scaling():
-                fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
+            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -739,6 +814,7 @@ class PrimusTurboColumnParallelLinear(TELinear):
         skip_weight_param_allocation: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        stride: int = 1,  # TODO(ruibin): compatible with Megatron-LM. Not used.
     ):
         if gather_output:
             raise ValueError(f"{__class__.__name__} layers do not support gather_output = True")
@@ -839,9 +915,7 @@ class PrimusTurboColumnParallelLinear(TELinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.block_scaling():
-                fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
+            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -948,9 +1022,7 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.block_scaling():
-                fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
+            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -995,6 +1067,7 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         skip_weight_param_allocation: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        stride: int = 1,  # TODO(ruibin): compatible with Megatron-LM. Not used.
     ):
         args = get_args()
         self.config = config
@@ -1117,9 +1190,7 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
 
         if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
             quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-            if quant_config.block_scaling():
-                fp8_gemm = pt.ops.gemm_fp8_blockwise
-            elif quant_config.current_scaling() or quant_config.mxfp8_scaling():
+            if quant_config.current_scaling() or quant_config.block_scaling() or quant_config.mxfp8_scaling():
                 fp8_gemm = pt.ops.gemm_fp8
             else:
                 raise ValueError("Not support quant config.")
@@ -1164,9 +1235,13 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             config,
             pg_collection,
         )
-        args = get_args()
+        self.use_split_wgrad_op = use_split_wgrad_op()
+        self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
+        self.disable_turbo_grouped_mlp_low_precision = args.disable_turbo_grouped_mlp_low_precision
+        self.patch_zero_bubble = args.patch_zero_bubble
+        self.patch_primus_pipeline = args.patch_primus_pipeline
 
-        if use_split_wgrad_op() or (args.patch_moe_overlap and args.overlap_moe_expert_parallel_comm):
+        if self.use_split_wgrad_op or (args.patch_moe_overlap and args.overlap_moe_expert_parallel_comm):
             from .zbpp_gemm import grouped_gemm_with_weight_gradient_store
 
             self.grouped_gemm = functools.partial(
@@ -1175,7 +1250,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
         else:
             self.grouped_gemm = pt.ops.grouped_gemm
 
-        if args.use_turbo_fused_act_with_probs:
+        if self.use_turbo_fused_act_with_probs:
             assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
 
             if self.config.activation_func == F.silu:
@@ -1214,12 +1289,15 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
-        args = get_args()
         gemm_kargs = [dict(), dict()]
+        use_grouped_gemm_low_precision = (
+            PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
+            and not self.disable_turbo_grouped_mlp_low_precision
+        )
         if permuted_local_hidden_states.nelement() != 0:
 
             # Reshape the weights for the grouped GEMMs.
-            if use_split_wgrad_op():
+            if self.use_split_wgrad_op:
 
                 w1 = self.weight1
                 w2 = self.weight2
@@ -1233,7 +1311,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             tokens_per_expert = tokens_per_expert.to(w1.device)
             assert w1.is_contiguous(), "w1 must be contiguous"
             assert w2.is_contiguous(), "w2 must be contiguous"
-            if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+            if use_grouped_gemm_low_precision:
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                 fc1_output = pt.ops.grouped_gemm_fp8(
                     permuted_local_hidden_states,
@@ -1247,7 +1325,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, **(gemm_kargs[0])
                 )
             if self.activation_recompute:
-                if args.use_turbo_fused_act_with_probs:
+                if self.use_turbo_fused_act_with_probs:
                     intermediate_parallel = self.activation_checkpoint.checkpoint(
                         self.activation_func_with_probs,
                         fc1_output,
@@ -1258,7 +1336,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     intermediate_parallel = self.activation_checkpoint.checkpoint(
                         self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
                     )
-                if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+                if use_grouped_gemm_low_precision:
                     quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                     fc2_output = pt.ops.grouped_gemm_fp8(
                         intermediate_parallel,
@@ -1273,7 +1351,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     )
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
-                if args.use_turbo_fused_act_with_probs:
+                if self.use_turbo_fused_act_with_probs:
                     intermediate_parallel = self.activation_func_with_probs(
                         fc1_output, permuted_probs, tokens_per_expert
                     )
@@ -1281,7 +1359,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     intermediate_parallel = self.activation_func_with_probs(
                         fc1_output, permuted_probs.unsqueeze(-1)
                     )
-                if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+                if use_grouped_gemm_low_precision:
                     quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                     fc2_output = pt.ops.grouped_gemm_fp8(
                         intermediate_parallel,
@@ -1299,13 +1377,13 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             assert torch.count_nonzero(tokens_per_expert) == 0
             # Make sure params of experts still have gradients even given zero tokens.
             assert (
-                not args.patch_zero_bubble and not args.patch_primus_pipeline
+                not self.patch_zero_bubble and not self.patch_primus_pipeline
             ), "Zero bubble or primus pipeline not support torch.matmul backend yet"
             w1 = self.weight1.view(self.config.hidden_size, -1)
             w2 = self.weight2.view(-1, self.config.hidden_size)
             h = torch.matmul(permuted_local_hidden_states, w1)
             if self.activation_recompute:
-                if args.use_turbo_fused_act_with_probs:
+                if self.use_turbo_fused_act_with_probs:
                     h = self.activation_checkpoint.checkpoint(
                         self.activation_func_with_probs, h, permuted_probs, tokens_per_expert
                     )
@@ -1316,7 +1394,7 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                 fc2_output = torch.matmul(h, w2)
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
-                if args.use_turbo_fused_act_with_probs:
+                if self.use_turbo_fused_act_with_probs:
                     h = self.activation_func_with_probs(h, permuted_probs, tokens_per_expert)
                 else:
                     h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
