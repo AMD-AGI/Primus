@@ -16,7 +16,7 @@ Usage: bash run_local_pretrain.sh
 This script launches a Primus pretraining task inside a Docker/Podman container.
 
 Environment Variables:
-    DOCKER_IMAGE   Docker image to use [Default: docker.io/rocm/primus:v26.1]
+    DOCKER_IMAGE   Docker image to use [Default: docker.io/rocm/primus:v26.2]
     MASTER_ADDR    Master node IP or hostname [Default: localhost]
     MASTER_PORT    Master node port [Default: 1234]
     NNODES         Total number of nodes [Default: 1]
@@ -38,13 +38,13 @@ if [[ "$1" == "--help" || "$1" == "-h" ]]; then
 fi
 
 # Path to experiment configuration YAML
-EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
+export EXP=${EXP:-"examples/megatron/exp_pretrain.yaml"}
 
 # Default docker image
 if [ "${BACKEND:-}" = "MaxText" ]; then
     DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/jax-training:maxtext-v26.1"}
 else
-    DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v26.1"}
+    DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/primus:v26.2"}
 fi
 
 # Project root
@@ -128,8 +128,8 @@ if [ "$USING_AINIC" == "1" ]; then
     ENV_ARGS+=("--env" "ANP_HOME_DIR")
     ENV_ARGS+=("--env" "MPI_HOME_DIR")
 
-    TC_RESULTS=$(bash "${PRIMUS_PATH}/examples/scripts/detect_nccl_ib_tc.sh")
-    if [ -z "$TC_RESULTS" ]; then
+    export TC_RESULTS=$(bash "${PRIMUS_PATH}/examples/scripts/detect_nccl_ib_tc.sh")
+    if [ -n "$TC_RESULTS" ]; then
         echo "TC_RESULTS: $TC_RESULTS"
         ENV_ARGS+=("--env" "TC_RESULTS")
     else
@@ -202,6 +202,7 @@ docker_podman_proxy run --rm \
     --cap-add=SYS_PTRACE --cap-add=CAP_SYS_ADMIN \
     --security-opt seccomp=unconfined --group-add video \
     --privileged --device=/dev/infiniband \
+    --name ${CONTAINER_NAME:-primus-training} \
     "${VOLUME_ARGS[@]}" \
     "$DOCKER_IMAGE" /bin/bash -c "\
         echo '[NODE-${NODE_RANK}(${HOSTNAME})]: begin, time=$(date +"%Y.%m.%d %H:%M:%S")' && \

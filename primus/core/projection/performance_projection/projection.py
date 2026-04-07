@@ -2398,7 +2398,9 @@ def _run_multinode_projection(
             print(f"  Using custom hardware config from: {args.hardware_config}")
     else:
         if is_rank_0:
-            print("  Using default hardware parameters from custom_hardware_example.yaml")
+            print(
+                "  Using default hardware parameters (see examples/hardware_configs/mi300x.yaml for reference)"
+            )
 
     # Calculate communication times
     total_comm_time_ms, breakdown, message_info, per_layer_info = calculate_collective_communication_time(

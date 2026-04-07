@@ -1,0 +1,10 @@
+job:
+  dump_folder: "./outputs"
+  description: "Qwen 3 4B training"
+
+model:
+  name: "qwen3"
+  flavor: "4B"
+  hf_assets_path: "Qwen/Qwen3-4B"
+  converters:
+    - primus_turbo
