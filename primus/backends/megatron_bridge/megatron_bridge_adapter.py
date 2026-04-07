@@ -20,6 +20,9 @@ from __future__ import annotations
 from typing import Any
 
 from primus.backends.megatron_bridge.argument_builder import MegatronBridgeArgBuilder
+from primus.backends.megatron_bridge.config_utils import (
+    normalize_megatron_bridge_dataset_args,
+)
 from primus.core.backend.backend_adapter import BackendAdapter
 from primus.modules.module_utils import log_dict_aligned, log_rank_0
 
@@ -52,7 +55,13 @@ class MegatronBridgeAdapter(BackendAdapter):
         Raises:
             ValueError: If stage is not supported
         """
-        if stage == "sft":
+        if stage == "pretrain":
+            from primus.backends.megatron_bridge.megatron_bridge_pretrain_trainer import (
+                MegatronBridgePretrainTrainer,
+            )
+
+            return MegatronBridgePretrainTrainer
+        elif stage == "sft":
             from primus.backends.megatron_bridge.megatron_bridge_posttrain_trainer import (
                 MegatronBridgePosttrainTrainer,
             )
@@ -107,6 +116,7 @@ class MegatronBridgeAdapter(BackendAdapter):
 
         # Produce the final Megatron-Bridge Namespace
         bridge_args = builder.finalize()
+        normalize_megatron_bridge_dataset_args(bridge_args)
 
         log_rank_0(
             f"[Primus:MegatronBridgeAdapter] Converted config → {len(vars(bridge_args))} Megatron-Bridge args"
