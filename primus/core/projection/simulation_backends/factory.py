@@ -66,7 +66,11 @@ def get_gemm_simulation_backend(
     backend = OrigamiGEMMBackend(gpu_arch=gpu_arch, gpu_clock_mhz=gpu_clock_mhz)
     if require_simulation and not backend.is_available():
         raise RuntimeError(
-            "Origami GEMM simulation backend is not available.\n" "Install it with: pip install origami"
+            "Origami GEMM simulation backend is not available.\n"
+            "Install the ROCm Origami Python package, for example:\n"
+            "  pip install "
+            "git+https://github.com/ROCm/rocm-libraries.git#subdirectory=shared/origami/python\n"
+            "(See docs/projection.md — Simulation Backends — for details.)"
         )
 
     if is_rank_0 and require_simulation:

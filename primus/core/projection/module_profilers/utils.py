@@ -7,9 +7,72 @@
 
 import os
 from contextlib import nullcontext
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import torch
+
+
+def _backward_autograd_debug_enabled() -> bool:
+    if int(os.getenv("RANK", "0")) != 0:
+        return False
+    v = os.getenv("PRIMUS_PROJECTION_BACKWARD_AUTOGRAD_DEBUG", "1").lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _print_backward_autograd_enter(
+    label: str,
+    args_line: Optional[str],
+    module: torch.nn.Module,
+) -> None:
+    if not _backward_autograd_debug_enabled() or not label:
+        return
+    print(f"  [autograd.backward] {label}  (nn.Module: {module.__class__.__name__})")
+    if args_line:
+        print(f"    config: {args_line}")
+
+
+def _maybe_cuda_backward_kernel_table(
+    layer_module: torch.nn.Module,
+    inputs: list,
+    output_indices: list,
+    grad_outputs: list,
+    fp8_context,
+) -> None:
+    """Optional one-shot torch.profiler after timed benchmark (does not affect reported ms)."""
+    if os.getenv("PRIMUS_PROJECTION_BACKWARD_CUDA_PROFILER", "").lower() not in ("1", "true", "yes"):
+        return
+    if int(os.getenv("RANK", "0")) != 0:
+        return
+    try:
+        _dev = next(layer_module.parameters()).device
+    except StopIteration:
+        return
+    if _dev.type != "cuda":
+        return
+    try:
+        from torch.profiler import ProfilerActivity, profile
+    except ImportError:
+        print("  [autograd.backward] torch.profiler unavailable; skipping CUDA kernel table.")
+        return
+    device = next(layer_module.parameters()).device
+    print("  [autograd.backward] CUDA kernel summary (one untimed fwd+bwd, PRIMUS_PROJECTION_BACKWARD_CUDA_PROFILER=1):")
+    with fp8_context:
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=False) as prof:
+            outputs = layer_module(*inputs)
+            if not isinstance(outputs, (tuple, list)):
+                outputs = (outputs,)
+            valid_outputs = [outputs[i] for i in output_indices]
+            if valid_outputs:
+                torch.autograd.backward(valid_outputs, grad_outputs)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    layer_module.zero_grad(set_to_none=True)
+    for inp in inputs:
+        if getattr(inp, "requires_grad", False) and inp.grad is not None:
+            inp.grad = None
+    print(
+        prof.key_averages().table(sort_by="cuda_time_total", row_limit=40)
+    )
 
 
 class _FP8ContextFactory:
@@ -60,6 +123,8 @@ def benchmark_layer(
     input_shapes: List[Union[Tuple[int, ...], Tuple[Tuple[int, ...], torch.dtype]]],
     num_iterations: int = 64,  # Match typical microbatch count
     transformer_config=None,  # Optional: pass config to enable FP8 context
+    backward_autograd_label: Optional[str] = None,
+    backward_autograd_args: Optional[str] = None,
 ) -> tuple[float, float, int]:
     """
     Benchmark both forward and backward passes of a transformer layer using CUDA events.
@@ -78,6 +143,11 @@ def benchmark_layer(
                       - A tuple of ((shape), dtype), defaults to requires_grad=True if float, False otherwise
         num_iterations: Number of iterations to average over
         transformer_config: Optional TransformerConfig to enable FP8 autocast
+        backward_autograd_label: If set (rank 0), print this label when ``torch.autograd.backward``
+            runs in the timed loop (first iteration only).  Disable prints with
+            ``PRIMUS_PROJECTION_BACKWARD_AUTOGRAD_DEBUG=0``.
+        backward_autograd_args: Optional one-line config string (e.g. from
+            :func:`training_config_debug_one_line`).
 
     Returns:
         Tuple of (average forward time in ms, average backward time in ms, activation memory in bytes)
@@ -176,6 +246,7 @@ def benchmark_layer(
     # ===========================================================================
     forward_times = []
     backward_times = []
+    _first_timed_backward = True
 
     with fp8_context:
         for _ in range(num_iterations):
@@ -195,6 +266,12 @@ def benchmark_layer(
                 outputs = (outputs,)
             valid_outputs = [outputs[i] for i in output_indices]
 
+            if _first_timed_backward and backward_autograd_label:
+                _print_backward_autograd_enter(
+                    backward_autograd_label, backward_autograd_args, layer_module
+                )
+                _first_timed_backward = False
+
             backward_start.record()
             if valid_outputs:
                 torch.autograd.backward(valid_outputs, grad_outputs)
@@ -213,6 +290,10 @@ def benchmark_layer(
     avg_forward_time = sum(forward_times) / len(forward_times)
     avg_backward_time = sum(backward_times) / len(backward_times)
 
+    _maybe_cuda_backward_kernel_table(
+        layer_module, inputs, output_indices, grad_outputs, fp8_context
+    )
+
     return avg_forward_time, avg_backward_time, int(activation_memory)
 
 
@@ -221,6 +302,8 @@ def benchmark_moe_layer_decomposed(
     input_shapes: List[Union[Tuple[int, ...], Tuple[Tuple[int, ...], torch.dtype]]],
     num_iterations: int = 64,
     transformer_config=None,
+    backward_autograd_label: Optional[str] = None,
+    backward_autograd_args: Optional[str] = None,
 ) -> tuple[float, float, int, float, float]:
     """
     Benchmark an MoE layer with decomposed A2A timing.
@@ -363,6 +446,7 @@ def benchmark_moe_layer_decomposed(
 
     forward_times = []
     backward_times = []
+    _first_timed_backward = True
 
     try:
         with fp8_context:
@@ -383,6 +467,12 @@ def benchmark_moe_layer_decomposed(
                     outputs = (outputs,)
                 valid_outputs = [outputs[i] for i in output_indices]
 
+                if _first_timed_backward and backward_autograd_label:
+                    _print_backward_autograd_enter(
+                        backward_autograd_label, backward_autograd_args, moe_module
+                    )
+                    _first_timed_backward = False
+
                 backward_start.record()
                 if valid_outputs:
                     torch.autograd.backward(valid_outputs, grad_outputs)
@@ -401,6 +491,10 @@ def benchmark_moe_layer_decomposed(
         # Always restore original methods
         moe_module.dispatch = original_dispatch
         moe_module.combine = original_combine
+
+    _maybe_cuda_backward_kernel_table(
+        moe_module, inputs, output_indices, grad_outputs, fp8_context
+    )
 
     avg_forward_time = sum(forward_times) / len(forward_times)
     avg_backward_time = sum(backward_times) / len(backward_times)

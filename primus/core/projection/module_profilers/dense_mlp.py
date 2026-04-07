@@ -7,6 +7,7 @@
 from typing import Optional, Tuple
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
+from primus.core.projection.training_config import training_config_debug_one_line
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
 from primus.core.projection.training_config import TrainingConfig
 
@@ -98,6 +99,8 @@ class DenseMLPProfiler(BaseModuleProfiler):
                 self._cached_results = benchmark_layer(
                     self.module,
                     [(seq_len, batch_size, self.config.model_config.hidden_size)],
+                    backward_autograd_label=self.__class__.__name__,
+                    backward_autograd_args=training_config_debug_one_line(self.config),
                 )
             self._cache_key = cache_key
         return self._cached_results

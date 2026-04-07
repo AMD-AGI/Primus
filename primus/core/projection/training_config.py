@@ -62,6 +62,9 @@ class ModelConfig:
     moe_pattern: list = None
     moe_router_topk: int = 0
     moe_shared_expert_intermediate_size: int = 0
+    # Megatron MoE execution (mirrors language_model.yaml; used for logs / projection hints)
+    moe_grouped_gemm: bool = False
+    moe_use_legacy_grouped_gemm: bool = False
     # Misc
     share_embeddings_and_output_weights: bool = False
     # Precision – None means bf16, "hybrid" means FP8-hybrid (linear GEMMs in FP8)
@@ -82,6 +85,49 @@ class TrainingConfig:
     model_config: ModelConfig
     runtime_config: RuntimeConfig
     model_parallel_config: ModelParallelConfig
+
+
+def training_config_debug_one_line(config: TrainingConfig) -> str:
+    """Compact one-line ``TrainingConfig`` for projection / autograd debug logs."""
+    mc = config.model_config
+    rc = config.runtime_config
+    mp = config.model_parallel_config
+    parts = [
+        f"seq_len={rc.sequence_length}",
+        f"micro_batch={rc.micro_batch_size}",
+        f"gbs={rc.global_batch_size}",
+        f"hidden={mc.hidden_size}",
+        f"layers={mc.num_layers}",
+        f"heads={mc.num_attention_heads}",
+        f"kv_ch={mc.kv_channels}",
+        f"ffn={mc.ffn_hidden_size}",
+        f"swiglu={mc.swiglu}",
+        f"TP={mp.tensor_model_parallel_size}",
+        f"PP={mp.pipeline_model_parallel_size}",
+        f"VPP={mp.virtual_pipeline_model_parallel_size}",
+        f"EP={mp.expert_model_parallel_size}",
+        f"CP={mp.context_model_parallel_size}",
+        f"fp8={mc.fp8!r}",
+    ]
+    if mc.num_experts:
+        parts.extend(
+            [
+                f"num_experts={mc.num_experts}",
+                f"moe_ffn={mc.moe_ffn_hidden_size}",
+                f"topk={mc.moe_router_topk}",
+                f"moe_grouped_gemm={getattr(mc, 'moe_grouped_gemm', False)}",
+                f"moe_use_legacy_grouped_gemm={getattr(mc, 'moe_use_legacy_grouped_gemm', False)}",
+                f"enable_primus_turbo={getattr(mc, 'enable_primus_turbo', False)}",
+                f"use_turbo_grouped_mlp={getattr(mc, 'use_turbo_grouped_mlp', False)}",
+            ]
+        )
+    pat = mc.moe_pattern
+    if pat is not None:
+        if len(pat) > 24:
+            parts.append(f"moe_pattern=len={len(pat)} head={list(pat[:12])}...")
+        else:
+            parts.append(f"moe_pattern={list(pat)}")
+    return ", ".join(parts)
 
 
 def update_config_from_args(config, args):
