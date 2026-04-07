@@ -95,7 +95,7 @@ if is_te_min_version("2.0"):
     )
     from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
     from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
-    from transformer_engine.pytorch.tensor.quantized_tensor import (
+    from transformer_engine.pytorch.quantized_tensor import (
         QuantizedTensor,
         Quantizer,
     )

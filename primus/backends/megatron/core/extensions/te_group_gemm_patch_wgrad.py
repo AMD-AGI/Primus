@@ -23,7 +23,7 @@ from transformer_engine.pytorch.module.base import (
     _2X_ACC_WGRAD,
     get_multi_stream_cublas_workspace,
 )
-from transformer_engine.pytorch.tensor.quantized_tensor import (
+from transformer_engine.pytorch.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
     prepare_for_saving,

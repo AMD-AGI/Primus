@@ -43,7 +43,7 @@ from transformer_engine.pytorch.rocm_utils import (
 from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import (
     MXFP8TensorBase,
 )
-from transformer_engine.pytorch.tensor.quantized_tensor import (
+from transformer_engine.pytorch.quantized_tensor import (
     QuantizedTensor,
     Quantizer,
     prepare_for_saving,

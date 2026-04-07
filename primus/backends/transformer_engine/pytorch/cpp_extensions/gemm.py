@@ -30,7 +30,7 @@ if is_te_min_version("2.0"):
             reset_swizzled_inputs,
             swizzle_inputs,
         )
-    from transformer_engine.pytorch.tensor.quantized_tensor import Quantizer
+    from transformer_engine.pytorch.quantized_tensor import Quantizer
 
     def general_gemm(
         A: torch.Tensor,
