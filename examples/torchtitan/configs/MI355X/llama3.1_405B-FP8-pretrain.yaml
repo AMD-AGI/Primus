@@ -16,8 +16,10 @@ modules:
       stderr_sink_level: INFO
 
       training:
-        local_batch_size: 2
-        steps: 10
+        local_batch_size: 3
+        global_batch_size: 192
+        steps: 50
+        seq_len: 8192
 
       # profiling:
       #   enable_profiling: false
@@ -37,7 +39,17 @@ modules:
         tensor_parallel_degree: 1
 
       activation_checkpoint:
-        mode: full
+        mode: "selective"
+        selective_ac_option: "op"
+        per_op_sac_force_recompute_mm_shapes_by_fqns:
+          - attention.wq
+          - attention.wk
+          - attention.wv
+          - attention.wo
+          - feed_forward.w1
+          - feed_forward.w2
+          - feed_forward.w3
+          - output
 
       quantize:
         linear:
