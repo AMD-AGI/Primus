@@ -84,7 +84,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
         return PrimusTurboAttention if self.cfg.use_turbo_attention else TEDotProductAttention
 
     def grouped_mlp_modules(
-        self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: bool
+        self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: bool = True
     ) -> Tuple[type, Optional[MLPSubmodules]]:
         """Which module and submodules to use for grouped mlp"""
         if (
