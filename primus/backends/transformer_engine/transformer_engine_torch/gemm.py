@@ -21,12 +21,19 @@ if is_te_min_version("2.0"):
         MXFP8TensorBase,
     )
     from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
-    from transformer_engine.pytorch.quantized_tensor import (
-        QuantizedTensor,
-        Quantizer,
-    )
 
     import primus.backends.transformer_engine.transformer_engine_torch as ptex
+
+    try:
+        from transformer_engine.pytorch.tensor.quantized_tensor import (
+            QuantizedTensor,
+            Quantizer,
+        )
+    except ModuleNotFoundError:
+        from transformer_engine.pytorch.quantized_tensor import (
+            QuantizedTensor,
+            Quantizer,
+        )
 
     def product(shape: Tuple[int], start: int, end: int) -> int:
         """Product of shape[start:end]"""

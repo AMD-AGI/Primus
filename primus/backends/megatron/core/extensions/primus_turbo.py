@@ -56,6 +56,39 @@ from transformer_engine.pytorch.fp8 import (
 from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
 
 
+def _call_fp8_autocast_enter(
+    *,
+    enabled: bool,
+    calibrating: bool,
+    fp8_recipe: Optional[Recipe],
+    fp8_group: Optional[dist_group_type],
+    _graph: bool,
+) -> None:
+    """Dispatch to whichever FP8 enter API the installed TE exposes."""
+    enter_fn = getattr(FP8GlobalStateManager, "autocast_enter", None)
+    if enter_fn is None:
+        enter_fn = getattr(FP8GlobalStateManager, "fp8_autocast_enter", None)
+    if enter_fn is None:
+        raise AttributeError("FP8GlobalStateManager has no autocast enter API")
+    enter_fn(
+        enabled=enabled,
+        calibrating=calibrating,
+        fp8_recipe=fp8_recipe,
+        fp8_group=fp8_group,
+        _graph=_graph,
+    )
+
+
+def _call_fp8_autocast_exit(enabled: bool, *, _graph: bool) -> None:
+    """Dispatch to whichever FP8 exit API the installed TE exposes."""
+    exit_fn = getattr(FP8GlobalStateManager, "autocast_exit", None)
+    if exit_fn is None:
+        exit_fn = getattr(FP8GlobalStateManager, "fp8_autocast_exit", None)
+    if exit_fn is None:
+        raise AttributeError("FP8GlobalStateManager has no autocast exit API")
+    exit_fn(enabled, _graph=_graph)
+
+
 def use_split_wgrad_op():
     args = get_args()
     if args.patch_primus_pipeline and args.pp_algorithm in [
@@ -177,7 +210,7 @@ class PrimusTurboLowPrecisionGlobalStateManager(FP8GlobalStateManager):
         enabled_turbo: bool = False,
         turbo_quant_config: Optional[PrimusTurboQuantConfig] = None,
     ) -> None:
-        FP8GlobalStateManager.autocast_enter(
+        _call_fp8_autocast_enter(
             enabled=enabled,
             calibrating=calibrating,
             fp8_recipe=fp8_recipe,
@@ -267,10 +300,9 @@ def primus_turbo_fp8_autocast(
         yield
     finally:
         PrimusTurboLowPrecisionGlobalStateManager.set_fp8_autocast_state(fp8_state)
-        # NOTE(ruibin): use FP8GlobalStateManager.fp8_autocast_exit instead of
-        # PrimusTurboLowPrecisionGlobalStateManager.fp8_autocast_exit to make sure
-        # FP8GlobalStateManager.FP8_AUTOCAST_DEPTH is updated correctly.
-        FP8GlobalStateManager.fp8_autocast_exit(enabled, _graph=_graph)
+        # Use the base TE state manager so depth accounting stays in sync
+        # across both old and new TE autocast APIs.
+        _call_fp8_autocast_exit(enabled, _graph=_graph)
 
 
 @contextmanager
@@ -298,7 +330,7 @@ def primus_turbo_fp4_autocast(
         yield
     finally:
         PrimusTurboLowPrecisionGlobalStateManager.set_fp8_autocast_state(fp8_state)
-        PrimusTurboLowPrecisionGlobalStateManager.fp8_autocast_exit(enabled, _graph=_graph)
+        _call_fp8_autocast_exit(enabled, _graph=_graph)
 
 
 class PrimusTurboAttention(te.pytorch.DotProductAttention):

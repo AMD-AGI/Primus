@@ -43,12 +43,6 @@ from transformer_engine.pytorch.rocm_utils import (
 from transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base import (
     MXFP8TensorBase,
 )
-from transformer_engine.pytorch.quantized_tensor import (
-    QuantizedTensor,
-    Quantizer,
-    prepare_for_saving,
-    restore_from_saved,
-)
 from transformer_engine.pytorch.utils import (
     assert_dim_for_fp8_exec,
     cast_if_needed,
@@ -62,6 +56,21 @@ from transformer_engine.pytorch.utils import (
 from primus.backends.megatron.core.pipeline_parallel.wgrad_adapter import (
     insert_wgrad_func_into_cache,
 )
+
+try:
+    from transformer_engine.pytorch.tensor.quantized_tensor import (
+        QuantizedTensor,
+        Quantizer,
+        prepare_for_saving,
+        restore_from_saved,
+    )
+except ModuleNotFoundError:
+    from transformer_engine.pytorch.quantized_tensor import (
+        QuantizedTensor,
+        Quantizer,
+        prepare_for_saving,
+        restore_from_saved,
+    )
 
 
 class _LinearWithWGradSplit(torch.autograd.Function):

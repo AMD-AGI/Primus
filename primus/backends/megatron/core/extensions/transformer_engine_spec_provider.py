@@ -25,6 +25,7 @@ from megatron.core.transformer.mlp import MLPSubmodules
 from megatron.core.transformer.moe.experts import (
     SequentialMLP,
     TEGroupedMLP,
+    TEGroupedMLPSubmodules,
 )
 from megatron.core.utils import get_te_version, is_te_min_version
 
@@ -84,9 +85,12 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
         return PrimusTurboAttention if self.cfg.use_turbo_attention else TEDotProductAttention
 
     def grouped_mlp_modules(
-        self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: bool = True
-    ) -> Tuple[type, Optional[MLPSubmodules]]:
+        self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: Optional[bool] = None
+    ) -> Tuple[type, Optional[MLPSubmodules | TEGroupedMLPSubmodules]]:
         """Which module and submodules to use for grouped mlp"""
+        if moe_use_legacy_grouped_gemm is None:
+            moe_use_legacy_grouped_gemm = getattr(self.cfg, "moe_use_legacy_grouped_gemm", True)
+
         if (
             moe_use_grouped_gemm
             and TEColumnParallelGroupedLinear is not None
@@ -94,7 +98,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
         ):
             assert not self.cfg.use_turbo_grouped_mlp, "PrimusTurbo not support RowParallelGroupedLinear"
 
-            return TEGroupedMLP, MLPSubmodules(
+            return TEGroupedMLP, TEGroupedMLPSubmodules(
                 linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
             )
         else:
