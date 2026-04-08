@@ -100,6 +100,12 @@ class TorchTitanJobConfigBuilder:
 
         # Directly merge into the working configuration
         self.config = deep_merge(self.config, values_dict)
+
+        # Force all Primus-Turbo flags to False when target_gpu is nvidia
+        # (Primus-Turbo is AMD-only; NVIDIA GPUs don't support these features)
+        if self.config.get("target_gpu") == "nvidia":
+            self._disable_primus_turbo_for_nvidia()
+
         return self
 
     # ------------------------------------------------------------------
@@ -141,3 +147,28 @@ class TorchTitanJobConfigBuilder:
     # Alias for usage style consistency with MegatronArgBuilder:
     # builder.finalize()
     finalize = to_namespace
+
+    # ------------------------------------------------------------------
+    # GPU-specific configuration handling
+    # ------------------------------------------------------------------
+    def _disable_primus_turbo_for_nvidia(self) -> None:
+        """
+        Disable all Primus-Turbo features when running on NVIDIA GPUs.
+
+        Primus-Turbo optimizations are AMD-specific and not compatible with NVIDIA.
+        This method ensures all turbo-related flags are forced to False regardless
+        of user configuration, preventing misconfiguration and runtime errors.
+        """
+        if "primus_turbo" not in self.config:
+            return
+
+        primus_turbo_config = self.config["primus_turbo"]
+
+        # Force all turbo-related flags to False
+        primus_turbo_config["enable_primus_turbo"] = False
+        primus_turbo_config["use_turbo_attention"] = False
+        primus_turbo_config["use_turbo_async_tp"] = False
+        primus_turbo_config["use_turbo_mx_linear"] = False
+        primus_turbo_config["use_turbo_float8_linear"] = False
+        primus_turbo_config["use_turbo_grouped_mm"] = False
+        primus_turbo_config["enable_attention_float8"] = False

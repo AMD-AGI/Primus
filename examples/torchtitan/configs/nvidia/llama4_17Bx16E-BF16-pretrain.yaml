@@ -1,7 +1,7 @@
 target_gpu: nvidia
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:llama3.1_8B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:llama4_17Bx16E-pretrain}
 workspace: ./output
 
 modules:
@@ -10,7 +10,7 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: llama3.1_8B.yaml
+    model: llama4_17Bx16E.yaml
     overrides:
       sink_level: null
       file_sink_level: DEBUG
@@ -25,12 +25,16 @@ modules:
         warmup_steps: 10
 
       training:
-        local_batch_size: 6
+        local_batch_size: 4
         seq_len: 8192
         mock_data: false
         steps: 50
-        gc_freq: 100
 
       activation_checkpoint:
-        mode: "none" # ["none", "selective", "full"]
+        mode: "full" # ["none", "selective", "full"]
         selective_ac_option: "op" # "int" = ac every positive int layer or 'op', ac based on ops policy
+
+      primus_turbo:
+        enable_primus_turbo: true
+        enable_attention_float8: false
+        use_turbo_grouped_mm: true
