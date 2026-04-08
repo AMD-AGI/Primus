@@ -7,3 +7,34 @@ use_deprecated_20241209_moe_layer: false
 final_logit_softcapping: null # float
 attn_logit_softcapping: null # float
 router_logit_softcapping: null # float
+
+# LFM2 model configuration
+# "layer_types": [
+#   "conv",
+#   "conv",
+#   "full_attention",
+#   "conv",
+#   "conv",
+#   "conv",
+#   "full_attention",
+#   "conv",
+#   "conv",
+#   "conv",
+#   "full_attention",
+#   "conv",
+#   "conv",
+#   "conv",
+#   "full_attention",
+#   "conv",
+#   "conv",
+#   "conv",
+#   "full_attention",
+#   "conv",
+#   "conv",
+#   "full_attention",
+#   "conv",
+#   "conv"
+# ],
+lfm_layer_types: null # list[str]
+conv_L_cache: 3 # int
+conv_bias: false # bool
