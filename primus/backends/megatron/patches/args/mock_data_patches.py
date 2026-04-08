@@ -33,6 +33,9 @@ def patch_mock_data(ctx: PatchContext):
         args.train_data_path = None
         args.valid_data_path = None
         args.test_data_path = None
+        args.tokenizer_type = "NullTokenizer"
+        args.vocab_size = 131072
+
         log_rank_0("[Patch:megatron.args.mock_data] Mock data enabled; all data paths set to None")
 
     log_kv_rank_0(f"[Patch:megatron.args.mock_data] -mock_data", f"{mock_data}")
