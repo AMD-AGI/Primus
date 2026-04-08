@@ -19,11 +19,8 @@ from megatron.core.transformer.multi_latent_attention import (
     MLASelfAttentionSubmodules,
 )
 
-# Import HybridStack from relative path
-from primus.backends.megatron.core.models.hybrid.hybrid_block import (
-    HybridStack,
-    HybridStackSubmodules,
-)
+# Import MambaStack from relative path
+from megatron.core.ssm.mamba_block import MambaStack, MambaStackSubmodules
 
 # Inference layers may not be available in older Megatron versions
 # They're only used in hybrid_inference_stack_spec, not the training spec
@@ -52,12 +49,11 @@ moe = get_moe_module_spec(
     use_te=True,
     num_experts=8,  # Can be any positive integer (must not be None).
     moe_grouped_gemm=True,
-    moe_use_legacy_grouped_gemm=False,
 )
 
 hybrid_stack_spec = ModuleSpec(
-    module=HybridStack,
-    submodules=HybridStackSubmodules(
+    module=MambaStack,
+    submodules=MambaStackSubmodules(
         mamba_layer=ModuleSpec(
             module=MambaLayer,
             submodules=MambaLayerSubmodules(
