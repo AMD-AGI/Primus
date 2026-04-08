@@ -75,6 +75,10 @@ else
     }
 fi
 
+# Load path helpers so ROCm libraries keep highest priority.
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/path_utils.sh"
+
 # ---------------------------------------------------------------------------
 # Distributed Training Cluster Configuration
 # ---------------------------------------------------------------------------
@@ -115,8 +119,8 @@ log_exported_vars "Python Path and Data Paths" \
 HIP_VISIBLE_DEVICES=$(seq -s, 0 $((GPUS_PER_NODE - 1)))
 export HIP_VISIBLE_DEVICES
 
-# set LD_LIBRARY_PATH for ROCm in case it is not set in the container
-export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-/opt/rocm/lib}
+# Keep ROCm libraries ahead of any system-provided HSA runtime.
+ensure_rocm_ld_library_path
 
 # ----------------- NCCL and Network Settings -----------------
 

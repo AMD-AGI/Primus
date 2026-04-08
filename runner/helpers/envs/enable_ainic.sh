@@ -5,6 +5,10 @@
 # See LICENSE for license information.
 ###############################################################################
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/path_utils.sh"
+
 export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
 export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
 export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi-4.1.6"}
@@ -28,4 +32,10 @@ export NCCL_DMABUF_ENABLE=0
 export NCCL_IGNORE_CPU_AFFINITY=1
 export NCCL_IB_QPS_PER_CONNECTION=1
 
-export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib:$LD_LIBRARY_PATH
+ensure_rocm_ld_library_path
+path_append_unique LD_LIBRARY_PATH \
+    /usr/lib/x86_64-linux-gnu \
+    /usr/lib/x86_64-linux-gnu/libibverbs \
+    "${RCCL_HOME_DIR}/build/release" \
+    "${ANP_HOME_DIR}/build" \
+    "${MPI_HOME_DIR}/install/lib"
