@@ -62,7 +62,7 @@ modules:
       # model features
       multi_latent_attention: false
       moe_permute_fusion: false
-      moe_use_legacy_grouped_gemm: false
+      moe_use_legacy_grouped_gemm: ${PRIMUS_USE_LEGACY_GG:1}
 
       # ckpt
       finetune: false
@@ -78,10 +78,10 @@ modules:
       ckpt_format: torch
 
       # Turbo
-      enable_primus_turbo: true
-      use_turbo_attention: false
-      use_turbo_grouped_mlp: false
-      use_turbo_parallel_linear: false
+      enable_primus_turbo: ${PRIMUS_ENABLE_TURBO:1}
+      use_turbo_attention: ${PRIMUS_USE_TURBO_ATTENTION:0}
+      use_turbo_grouped_mlp: ${PRIMUS_USE_TURBO_GROUPED_MLP:0}
+      use_turbo_parallel_linear: ${PRIMUS_USE_TURBO_PARALLEL_LINEAR:0}
       use_turbo_deepep: false
       moe_shared_expert_overlap: false
 

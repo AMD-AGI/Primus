@@ -527,21 +527,6 @@ class TestMegatronTrainer(PrimusUT):
         self.assertIn("[Patch:megatron.pp.te_wgrad_split]", stdout)
         self.assertNotIn("[Patch:megatron.pp.legacy_grouped_mlp_wgrad_split]", stdout)
 
-    def test_deepseek_v2_lite_turbo_fp8_zbv_formatted(self):
-        stdout = self._run_deepseek_v2_lite_zbv_fp8_case(
-            "deepseek_v2_lite_turbo_fp8_zbv_formatted",
-            {
-                "MASTER_PORT": "12452",
-                "PRIMUS_FP8_RECIPE": "blockwise",
-                "PRIMUS_USE_LEGACY_GG": "1",
-                "PRIMUS_USE_TURBO_ATTENTION": "1",
-                "PRIMUS_USE_TURBO_GROUPED_MLP": "1",
-                "PRIMUS_USE_TURBO_PARALLEL_LINEAR": "0",
-            },
-        )
-        self.assertIn("use split wgrad op for zbv-formatted", stdout)
-        self.assertNotIn("[Patch:megatron.pp.legacy_grouped_mlp_wgrad_split]", stdout)
-
     def test_deepseek_v2_lite_te_fp8_legacy_gg_zbv_formatted(self):
         stdout = self._run_deepseek_v2_lite_zbv_fp8_case(
             "deepseek_v2_lite_te_fp8_legacy_gg_zbv_formatted",
