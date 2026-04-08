@@ -9,6 +9,7 @@ from typing import Optional
 import torch
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
+from primus.core.projection.training_config import training_config_debug_one_line
 
 from .utils import benchmark_layer
 
@@ -81,6 +82,8 @@ class EmbeddingProfiler(BaseModuleProfiler):
                     [
                         ((batch_size, slen_per_cp), torch.int64),
                     ],
+                    backward_autograd_label=self.__class__.__name__,
+                    backward_autograd_args=training_config_debug_one_line(self.config),
                 )
             self._cache_key = cache_key
         return self._cached_results

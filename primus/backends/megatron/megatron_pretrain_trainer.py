@@ -53,7 +53,9 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             from megatron.training import inprocess_restart  # type: ignore
 
             if hasattr(inprocess_restart, "maybe_wrap_for_inprocess_restart"):
-                wrapped_pretrain, store = inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
+                wrapped_pretrain, store = (
+                    inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
+                )
         except Exception:
             pass
 
@@ -73,6 +75,34 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
         else:
             model_provider = get_model_provider()
         log_rank_0(f"-model_provider: {model_provider}")
+
+        # Patch Megatron's get_forward_backward_func to support dump_pp_data
+        import megatron.core.pipeline_parallel as mpp
+        import megatron.training.training as mt_training
+
+        orig_get_forward_backward_func = mpp.get_forward_backward_func
+
+        def patched_get_forward_backward_func(*args, **kwargs):
+            func = orig_get_forward_backward_func(*args, **kwargs)
+            from megatron.training import get_args as get_megatron_args
+
+            try:
+                m_args = get_megatron_args()
+                if getattr(m_args, "dump_pp_data", False):
+                    from primus.modules.trainer.megatron.utils import (
+                        schedule_wrapper,
+                        set_dump_pp_data_patch,
+                    )
+
+                    set_dump_pp_data_patch()
+                    return schedule_wrapper(func)
+            except Exception as e:
+                log_rank_0(f"[Primus] Warning: failed to apply dump_pp_data patch: {e}")
+            return func
+
+        mpp.get_forward_backward_func = patched_get_forward_backward_func
+        if hasattr(mt_training, "get_forward_backward_func"):
+            mt_training.get_forward_backward_func = patched_get_forward_backward_func
 
         wrapped_pretrain(
             train_valid_test_datasets_provider,

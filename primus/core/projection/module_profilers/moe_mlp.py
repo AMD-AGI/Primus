@@ -5,11 +5,13 @@
 ###############################################################################
 
 import os
-from typing import Optional
+import sys
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
-from primus.core.projection.training_config import TrainingConfig
+from primus.core.projection.training_config import TrainingConfig, training_config_debug_one_line
 
 from .utils import benchmark_moe_layer_decomposed
 
@@ -30,6 +32,38 @@ _ACTIVATION_BW_FRACTION = 0.566
 # Fallback absolute values used when the backend cannot report HBM bandwidth.
 _FALLBACK_HBM_BW_GBPS = 5300.0  # MI300X default
 
+# Origami simulate_gemm(m,n,k): C=A@B with A [m,k], B [k,n], C [m,n].
+
+
+def _projection_rank0() -> bool:
+    """True for global rank 0.
+
+    Prefer ``RANK`` when set (correct on multi-node). If only ``LOCAL_RANK`` is
+    set (some single-process launchers), use that. Otherwise treat as rank 0.
+    """
+    if os.getenv("RANK") is not None:
+        return int(os.getenv("RANK", "0")) == 0
+    if os.getenv("LOCAL_RANK") is not None:
+        return int(os.getenv("LOCAL_RANK", "0")) == 0
+    return True
+
+
+@dataclass
+class ExpertGemmOrigamiBreakdown:
+    """Per-op Origami expert routed GEMM (grouped-GEMM model) — simulation only."""
+
+    expert_fwd: float
+    expert_bwd: float
+    use_turbo: bool
+    M: int
+    H: int
+    F: int
+    num_local_experts: int
+    gemm_dtype: str
+    forward_ops: List[Tuple[str, float, int, int, int, int]] = field(default_factory=list)
+    backward_ops: List[Tuple[str, float, int, int, int, int]] = field(default_factory=list)
+    # Each tuple: (name, ms, m, n, k, batch) — ms from SimulationResult.forward_time_ms
+
 
 class MoEMLPProfiler(BaseModuleProfiler):
     def __init__(self, config, sub_profilers=None):
@@ -41,6 +75,247 @@ class MoEMLPProfiler(BaseModuleProfiler):
         # Decomposed A2A timings (populated during benchmarking)
         self._a2a_fwd_ms = 0.0  # Measured A2A dispatch+combine forward time
         self._a2a_bwd_ms = 0.0  # Measured A2A dispatch+combine backward time (estimated)
+
+    def _expert_gemm_origami_breakdown(
+        self, batch_size: int, seq_len: int, gemm_backend
+    ) -> ExpertGemmOrigamiBreakdown:
+        """Routed expert GEMM: Origami times plus per-op (m,n,k,batch) for forward and backward."""
+        tp_size = self.config.model_parallel_config.tensor_model_parallel_size or 1
+        cp_size = self.config.model_parallel_config.context_model_parallel_size or 1
+        ep_size = self.config.model_parallel_config.expert_model_parallel_size or 1
+
+        hidden_size = self.config.model_config.hidden_size
+        batch_tokens = batch_size * seq_len // tp_size // cp_size
+        topk_tokens = batch_tokens * self.config.model_config.moe_router_topk
+
+        if self.config.model_config.moe_ffn_hidden_size is not None:
+            moe_ffn = self.config.model_config.moe_ffn_hidden_size
+        else:
+            moe_ffn = self.config.model_config.ffn_hidden_size
+
+        num_experts = self.config.model_config.num_experts or 1
+        num_local_experts = max(1, num_experts // max(ep_size, 1))
+        tokens_per_expert = topk_tokens // max(num_local_experts, 1)
+
+        gemm_dtype = "fp8" if getattr(self.config.model_config, "fp8", None) else "bf16"
+
+        M = tokens_per_expert
+        H = hidden_size
+        F = moe_ffn
+
+        use_turbo = getattr(self.config.model_config, "enable_primus_turbo", False) and getattr(
+            self.config.model_config, "use_turbo_grouped_mlp", False
+        )
+
+        fwd_ops: List[Tuple[str, float, int, int, int, int]] = []
+        bwd_ops: List[Tuple[str, float, int, int, int, int]] = []
+
+        def _add_fwd(name: str, r, m: int, n: int, k: int, batch: int) -> float:
+            ms = float(r.forward_time_ms)
+            fwd_ops.append((name, ms, m, n, k, batch))
+            return ms
+
+        def _add_bwd(name: str, r, m: int, n: int, k: int, batch: int) -> float:
+            ms = float(r.forward_time_ms)
+            bwd_ops.append((name, ms, m, n, k, batch))
+            return ms
+
+        if use_turbo:
+            B = num_local_experts
+            if self.config.model_config.swiglu:
+                gate_fwd = gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
+                up_fwd = gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
+                down_fwd = gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                expert_fwd_ms = _add_fwd("gate_fwd", gate_fwd, M, F, H, B)
+                expert_fwd_ms += _add_fwd("up_fwd", up_fwd, M, F, H, B)
+                expert_fwd_ms += _add_fwd("down_fwd", down_fwd, M, H, F, B)
+                gate_dg = gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                gate_wg = gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
+                up_dg = gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                up_wg = gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
+                down_dg = gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
+                down_wg = gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=B)
+                expert_bwd_ms = _add_bwd("gate_dgrad", gate_dg, M, H, F, B)
+                expert_bwd_ms += _add_bwd("gate_wgrad", gate_wg, H, F, M, B)
+                expert_bwd_ms += _add_bwd("up_dgrad", up_dg, M, H, F, B)
+                expert_bwd_ms += _add_bwd("up_wgrad", up_wg, H, F, M, B)
+                expert_bwd_ms += _add_bwd("down_dgrad", down_dg, M, F, H, B)
+                expert_bwd_ms += _add_bwd("down_wgrad", down_wg, F, H, M, B)
+            else:
+                up_fwd = gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
+                down_fwd = gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                expert_fwd_ms = _add_fwd("up_fwd", up_fwd, M, F, H, B)
+                expert_fwd_ms += _add_fwd("down_fwd", down_fwd, M, H, F, B)
+                up_dg = gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
+                up_wg = gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
+                down_dg = gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
+                down_wg = gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=B)
+                expert_bwd_ms = _add_bwd("up_dgrad", up_dg, M, H, F, B)
+                expert_bwd_ms += _add_bwd("up_wgrad", up_wg, H, F, M, B)
+                expert_bwd_ms += _add_bwd("down_dgrad", down_dg, M, F, H, B)
+                expert_bwd_ms += _add_bwd("down_wgrad", down_wg, F, H, M, B)
+
+            expert_fwd = expert_fwd_ms
+            expert_bwd = expert_bwd_ms
+        else:
+            B1 = 1
+            if self.config.model_config.swiglu:
+                gate_fwd = gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B1)
+                up_fwd = gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B1)
+                down_fwd = gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B1)
+                expert_fwd_ms = _add_fwd("gate_fwd", gate_fwd, M, F, H, B1)
+                expert_fwd_ms += _add_fwd("up_fwd", up_fwd, M, F, H, B1)
+                expert_fwd_ms += _add_fwd("down_fwd", down_fwd, M, H, F, B1)
+                gate_dg = gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B1)
+                gate_wg = gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B1)
+                up_dg = gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B1)
+                up_wg = gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B1)
+                down_dg = gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B1)
+                down_wg = gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=B1)
+                expert_bwd_ms = _add_bwd("gate_dgrad", gate_dg, M, H, F, B1)
+                expert_bwd_ms += _add_bwd("gate_wgrad", gate_wg, H, F, M, B1)
+                expert_bwd_ms += _add_bwd("up_dgrad", up_dg, M, H, F, B1)
+                expert_bwd_ms += _add_bwd("up_wgrad", up_wg, H, F, M, B1)
+                expert_bwd_ms += _add_bwd("down_dgrad", down_dg, M, F, H, B1)
+                expert_bwd_ms += _add_bwd("down_wgrad", down_wg, F, H, M, B1)
+            else:
+                up_fwd = gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B1)
+                down_fwd = gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B1)
+                expert_fwd_ms = _add_fwd("up_fwd", up_fwd, M, F, H, B1)
+                expert_fwd_ms += _add_fwd("down_fwd", down_fwd, M, H, F, B1)
+                up_dg = gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B1)
+                up_wg = gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B1)
+                down_dg = gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B1)
+                down_wg = gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=B1)
+                expert_bwd_ms = _add_bwd("up_dgrad", up_dg, M, H, F, B1)
+                expert_bwd_ms += _add_bwd("up_wgrad", up_wg, H, F, M, B1)
+                expert_bwd_ms += _add_bwd("down_dgrad", down_dg, M, F, H, B1)
+                expert_bwd_ms += _add_bwd("down_wgrad", down_wg, F, H, M, B1)
+
+            expert_fwd = expert_fwd_ms * num_local_experts
+            expert_bwd = expert_bwd_ms * num_local_experts
+
+        return ExpertGemmOrigamiBreakdown(
+            expert_fwd=expert_fwd,
+            expert_bwd=expert_bwd,
+            use_turbo=use_turbo,
+            M=M,
+            H=H,
+            F=F,
+            num_local_experts=num_local_experts,
+            gemm_dtype=gemm_dtype,
+            forward_ops=fwd_ops,
+            backward_ops=bwd_ops,
+        )
+
+    def _print_origami_expert_grouped_gemm_simulation(
+        self, bd: ExpertGemmOrigamiBreakdown, batch_size: int, seq_len: int
+    ) -> None:
+        """Simulation-only: full config + per-op forward/backward Origami GEMM lines (rank 0)."""
+        if not _projection_rank0():
+            return
+        cfg_line = training_config_debug_one_line(self.config)
+        gg_mode = "Turbo_batched" if bd.use_turbo else "Legacy_sequential"
+        shape_line = self._grouped_gemm_shape_args_line(batch_size, seq_len)
+
+        print(
+            "  ========== [MoE MLP] Origami expert grouped-GEMM FORWARD =========="
+        )
+        print(
+            f"    (simulate_gemm m,n,k per op; {gg_mode}; "
+            f"legacy scales x{bd.num_local_experts} local experts)"
+        )
+        print(shape_line)
+        print(f"    training_config: {cfg_line}")
+        for name, ms, m, n, k, batch in bd.forward_ops:
+            print(
+                f"    [fwd] {name}: time_ms={ms:.4f}  simulate_gemm(m,n,k)=({m},{n},{k})  "
+                f"batch={batch}  dtype={bd.gemm_dtype}"
+            )
+        print(f"    [fwd] expert_routed_GEMM_forward_total_ms: {bd.expert_fwd:.4f}")
+        sys.stdout.flush()
+
+        print(
+            "  ========== [MoE MLP] Origami expert grouped-GEMM BACKWARD =========="
+        )
+        print(
+            f"    (dgrad+wgrad as separate simulate_gemm calls; {gg_mode}; same scaling as forward)"
+        )
+        print(shape_line)
+        print(f"    training_config: {cfg_line}")
+        if not bd.backward_ops:
+            print(
+                "    [bwd] ERROR: backward_ops is empty (unexpected); "
+                "expert_routed_GEMM_backward_total_ms may be wrong."
+            )
+        for name, ms, m, n, k, batch in bd.backward_ops:
+            print(
+                f"    [bwd] {name}: time_ms={ms:.4f}  simulate_gemm(m,n,k)=({m},{n},{k})  "
+                f"batch={batch}  dtype={bd.gemm_dtype}"
+            )
+        print(f"    [bwd] expert_routed_GEMM_backward_total_ms: {bd.expert_bwd:.4f}")
+        print(
+            "  [MoE MLP] Origami note: legacy path multiplies per-expert ms by num_local_experts; "
+            "totals above include that scaling where applicable."
+        )
+        sys.stdout.flush()
+
+    def _grouped_gemm_shape_args_line(self, batch_size: int, seq_len: int) -> str:
+        """Single log line: M/H/F, grouped_batch, token counts, dtype, layer GEMM pattern."""
+        mc = self.config.model_config
+        mp = self.config.model_parallel_config
+        num_experts = mc.num_experts or 1
+        ep = mp.expert_model_parallel_size or 1
+        tp = mp.tensor_model_parallel_size or 1
+        cp = mp.context_model_parallel_size or 1
+        num_local = max(1, num_experts // max(ep, 1))
+        use_turbo = getattr(mc, "enable_primus_turbo", False) and getattr(mc, "use_turbo_grouped_mlp", False)
+        batch_tokens = batch_size * seq_len // tp // cp
+        topk_tokens = batch_tokens * mc.moe_router_topk
+        if mc.moe_ffn_hidden_size is not None:
+            moe_ffn = mc.moe_ffn_hidden_size
+        else:
+            moe_ffn = mc.ffn_hidden_size
+        tokens_per_expert = topk_tokens // max(num_local, 1)
+        m_tokens = tokens_per_expert
+        h = mc.hidden_size
+        f_ffn = moe_ffn
+        grouped_batch = num_local if use_turbo else 1
+        gemm_dtype = "fp8" if getattr(mc, "fp8", None) else "bf16"
+        if mc.swiglu:
+            layer_pat = "SwiGLU 3xGEMM: gate+up (MxFxH), down (MxHxF)"
+        else:
+            layer_pat = "2xGEMM: up (MxFxH), down (MxHxF)"
+        return (
+            "  [MoE MLP] Grouped GEMM args from MoE block (config; whole-module GPU time is not split): "
+            f"M={m_tokens}, H={h}, F={f_ffn}, grouped_batch={grouped_batch}, TP={tp}, CP={cp}, "
+            f"batch_tokens={batch_tokens}, topk_tokens={topk_tokens}, router_topk={mc.moe_router_topk}, "
+            f"dtype={gemm_dtype}; {layer_pat}"
+        )
+
+    def _log_grouped_gemm_context(self, batch_size: int, seq_len: int, source: str) -> None:
+        """Rank-0: grouped-GEMM / MoE kernel flags (benchmark and simulation)."""
+        if not _projection_rank0():
+            return
+        mc = self.config.model_config
+        mp = self.config.model_parallel_config
+        num_experts = mc.num_experts or 0
+        if num_experts <= 0:
+            return
+        ep = mp.expert_model_parallel_size or 1
+        num_local = max(1, num_experts // max(ep, 1))
+        use_turbo = getattr(mc, "enable_primus_turbo", False) and getattr(mc, "use_turbo_grouped_mlp", False)
+        sim_label = "Turbo_batched_origami" if use_turbo else "Legacy_sequential_origami"
+        mgg = getattr(mc, "moe_grouped_gemm", False)
+        legacy_gg = getattr(mc, "moe_use_legacy_grouped_gemm", False)
+        print(
+            f"  [MoE MLP] Grouped GEMM ({source}): Megatron moe_grouped_gemm={mgg}, "
+            f"moe_use_legacy_grouped_gemm={legacy_gg}; "
+            f"simulation expert-GEMM model={sim_label}; "
+            f"local_experts={num_local}, EP={ep}, experts_total={num_experts} "
+            f"(batch={batch_size}, seq_len={seq_len})"
+        )
+        print(self._grouped_gemm_shape_args_line(batch_size, seq_len))
 
     def set_module(self, module):
         """Set the actual MoE MLP module for benchmarking."""
@@ -141,7 +416,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
         """
         tp_size = self.config.model_parallel_config.tensor_model_parallel_size
         cp_size = self.config.model_parallel_config.context_model_parallel_size
-        ep_size = self.config.model_parallel_config.expert_model_parallel_size
+        ep_size = self.config.model_parallel_config.expert_model_parallel_size or 1
 
         hidden_size = self.config.model_config.hidden_size
         batch_tokens = batch_size * seq_len // tp_size // cp_size
@@ -154,7 +429,7 @@ class MoEMLPProfiler(BaseModuleProfiler):
             moe_ffn = self.config.model_config.ffn_hidden_size
 
         num_experts = self.config.model_config.num_experts or 1
-        num_local_experts = num_experts // ep_size
+        num_local_experts = max(1, num_experts // ep_size)
         tokens_per_expert = topk_tokens // max(num_local_experts, 1)
 
         # FP8-hybrid: MoE expert MLP projections run in FP8
@@ -166,108 +441,29 @@ class MoEMLPProfiler(BaseModuleProfiler):
         H = hidden_size
         F = moe_ffn
 
-        # Determine grouped-GEMM performance model.
-        # Primus Turbo's grouped-GEMM kernel achieves near-ideal batched
-        # execution → model as Origami batched GEMM (batch=num_local_experts).
-        # Legacy grouped_gemm executes experts more sequentially → model as
-        # individual GEMM (batch=1) × num_local_experts.
-        use_turbo = getattr(self.config.model_config, "enable_primus_turbo", False) and getattr(
-            self.config.model_config, "use_turbo_grouped_mlp", False
-        )
+        is_rank_0 = _projection_rank0()
+        if is_rank_0:
+            self._log_grouped_gemm_context(batch_size, seq_len, "simulation")
 
-        is_rank_0 = int(os.getenv("RANK", "0")) == 0
-        if is_rank_0 and num_local_experts > 1:
+        bd = self._expert_gemm_origami_breakdown(batch_size, seq_len, self._gemm_backend)
+        expert_fwd, expert_bwd, use_turbo = bd.expert_fwd, bd.expert_bwd, bd.use_turbo
+
+        if is_rank_0:
             mode = "Turbo (batched)" if use_turbo else "Legacy (sequential)"
             print(
-                f"  [MoE MLP] Grouped-GEMM model: {mode}"
-                f"  ({num_local_experts} local experts, M={M}, H={H}, F={F})"
+                f"  [MoE MLP] Origami expert-GEMM layout: {mode} "
+                f"(local_experts={num_local_experts}, M={M}, H={H}, F={F})"
             )
+            sys.stdout.flush()
 
-        if use_turbo:
-            # ── Turbo model: batched GEMM (all experts in parallel) ──
-            B = num_local_experts
-            if self.config.model_config.swiglu:
-                gate_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
-                expert_fwd_ms = gate_fwd.forward_time_ms + up_fwd.forward_time_ms + down_fwd.forward_time_ms
-                gate_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
-                gate_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
-                up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
-                up_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
-                down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=B)
-                expert_bwd_ms = (
-                    gate_dg.forward_time_ms
-                    + gate_wg.forward_time_ms
-                    + up_dg.forward_time_ms
-                    + up_wg.forward_time_ms
-                    + down_dg.forward_time_ms
-                    + down_wg.forward_time_ms
-                )
-            else:
-                up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
-                expert_fwd_ms = up_fwd.forward_time_ms + down_fwd.forward_time_ms
-                up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=B)
-                up_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=B)
-                down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=B)
-                down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=B)
-                expert_bwd_ms = (
-                    up_dg.forward_time_ms
-                    + up_wg.forward_time_ms
-                    + down_dg.forward_time_ms
-                    + down_wg.forward_time_ms
-                )
+        if not use_turbo and is_rank_0:
+            print(
+                "  [MoE MLP] WARNING: Legacy grouped GEMM not properly modelled. "
+                "Estimates may be inaccurate."
+            )
+            sys.stdout.flush()
 
-            expert_fwd = expert_fwd_ms
-            expert_bwd = expert_bwd_ms
-        else:
-            # ── Legacy model: individual GEMM × num_local_experts ──
-            if self.config.model_config.swiglu:
-                gate_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
-                expert_fwd_ms = gate_fwd.forward_time_ms + up_fwd.forward_time_ms + down_fwd.forward_time_ms
-                gate_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
-                gate_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
-                up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
-                up_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
-                down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=1)
-                expert_bwd_ms = (
-                    gate_dg.forward_time_ms
-                    + gate_wg.forward_time_ms
-                    + up_dg.forward_time_ms
-                    + up_wg.forward_time_ms
-                    + down_dg.forward_time_ms
-                    + down_wg.forward_time_ms
-                )
-            else:
-                up_fwd = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                down_fwd = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
-                expert_fwd_ms = up_fwd.forward_time_ms + down_fwd.forward_time_ms
-                up_dg = self._gemm_backend.simulate_gemm(M, H, F, gemm_dtype, batch=1)
-                up_wg = self._gemm_backend.simulate_gemm(H, F, M, gemm_dtype, batch=1)
-                down_dg = self._gemm_backend.simulate_gemm(M, F, H, gemm_dtype, batch=1)
-                down_wg = self._gemm_backend.simulate_gemm(F, H, M, gemm_dtype, batch=1)
-                expert_bwd_ms = (
-                    up_dg.forward_time_ms
-                    + up_wg.forward_time_ms
-                    + down_dg.forward_time_ms
-                    + down_wg.forward_time_ms
-                )
-
-            expert_fwd = expert_fwd_ms * num_local_experts
-            expert_bwd = expert_bwd_ms * num_local_experts
-
-            # NOTE: Legacy grouped GEMM is not properly modelled. Origami
-            # simulates ideal single-kernel execution
-            if is_rank_0:
-                print(
-                    "  [MoE MLP] WARNING: Legacy grouped GEMM not properly modelled. "
-                    "Estimates may be inaccurate."
-                )
+        self._print_origami_expert_grouped_gemm_simulation(bd, batch_size, seq_len)
 
         fwd_time = expert_fwd
         bwd_time = expert_bwd
@@ -341,6 +537,9 @@ class MoEMLPProfiler(BaseModuleProfiler):
         stored in ``self._a2a_fwd_ms`` / ``self._a2a_bwd_ms`` and can be
         retrieved via :meth:`measured_a2a_forward_time` /
         :meth:`measured_a2a_backward_time`.
+
+        GPU benchmark mode does not emit MoE grouped-GEMM / Origami diagnostic
+        prints (those are simulation-only).
         """
         cache_key = (batch_size, seq_len)
         if self._cached_results is None or self._cache_key != cache_key:
@@ -352,6 +551,8 @@ class MoEMLPProfiler(BaseModuleProfiler):
                 fwd, bwd, act_mem, a2a_fwd, a2a_bwd = benchmark_moe_layer_decomposed(
                     self.module,
                     [(seq_len, batch_size, self.config.model_config.hidden_size)],
+                    backward_autograd_label=self.__class__.__name__,
+                    backward_autograd_args=training_config_debug_one_line(self.config),
                 )
                 self._cached_results = (fwd, bwd, act_mem)
                 self._a2a_fwd_ms = a2a_fwd

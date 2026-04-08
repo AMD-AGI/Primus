@@ -9,7 +9,7 @@ from typing import Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
-from primus.core.projection.training_config import TrainingConfig
+from primus.core.projection.training_config import TrainingConfig, training_config_debug_one_line
 
 from . import collective_model as cm
 from .attention import AttentionProfiler
@@ -319,6 +319,8 @@ class DenseTransformerLayerProfiler(BaseModuleProfiler):
                     self.layer_module,
                     [(seq_len, batch_size, self.config.model_config.hidden_size)],
                     transformer_config=transformer_config,
+                    backward_autograd_label=self.__class__.__name__,
+                    backward_autograd_args=training_config_debug_one_line(self.config),
                 )
             self._cache_key = cache_key
         return self._cached_results
@@ -447,6 +449,8 @@ class MoETransformerLayerProfiler(BaseModuleProfiler):
                     self.layer_module,
                     [(seq_len, batch_size, self.config.model_config.hidden_size)],
                     transformer_config=transformer_config,
+                    backward_autograd_label=self.__class__.__name__,
+                    backward_autograd_args=training_config_debug_one_line(self.config),
                 )
             self._cache_key = cache_key
         return self._cached_results

@@ -10,7 +10,7 @@ from typing import List, Optional
 
 from primus.core.projection.base_module_profiler import BaseModuleProfiler
 from primus.core.projection.profiler_spec import ModuleProfilerSpec
-from primus.core.projection.training_config import TrainingConfig
+from primus.core.projection.training_config import TrainingConfig, training_config_debug_one_line
 
 from .embedding import EmbeddingProfiler
 from .layer_norm import LayerNormProfiler
@@ -22,17 +22,26 @@ from .transformer_layer import (
 )
 
 
-def build_profiler(spec: ModuleProfilerSpec, depth=0) -> BaseModuleProfiler:
+def _profiler_node_arg_summary(config: TrainingConfig) -> str:
+    """Compact TrainingConfig line for profiler build debug output."""
+    return training_config_debug_one_line(config)
+
+
+def build_profiler(spec: ModuleProfilerSpec, depth=0, slot: Optional[str] = None) -> BaseModuleProfiler:
     """
     Recursively build a profiler instance from a ModuleProfilerSpec.
     """
     if not issubclass(spec.profiler, BaseModuleProfiler):
         raise TypeError(f"spec.profiler must be subclass of BaseModuleProfiler, got {spec.profiler}")
 
+    prefix = "--" * (depth + 1)
+    slot_part = f" ({slot})" if slot else ""
+
     if depth == 0:
         print(f"Begin build profiler: {spec.profiler.__name__}")
 
-    print(f"{'--'*(depth+1)}[{spec.profiler.__name__}]")
+    print(f"{prefix}[{spec.profiler.__name__}]{slot_part}")
+    print(f"{prefix}  args: {_profiler_node_arg_summary(spec.config)}")
 
     sub_profilers = {}
     if spec.sub_profiler_specs:
@@ -42,10 +51,11 @@ def build_profiler(spec: ModuleProfilerSpec, depth=0) -> BaseModuleProfiler:
                 sub_profilers[name] = None
             elif isinstance(sub_spec, ModuleProfilerSpec):
                 # build sub profiler with spec
-                sub_profilers[name] = build_profiler(sub_spec, depth)
+                sub_profilers[name] = build_profiler(sub_spec, depth, slot=name)
             elif issubclass(sub_spec, BaseModuleProfiler):
                 # init sub profile
-                print(f"{'--'*(depth+1)}[{sub_spec.__name__}]({name})")
+                print(f"{prefix}--[{sub_spec.__name__}]({name})")
+                print(f"{prefix}--  args: {_profiler_node_arg_summary(spec.config)}")
                 sub_profilers[name] = sub_spec(spec.config, sub_profilers=None)
             else:
                 raise TypeError(f"Invalid type for sub_profiler_specs['{name}']: {type(sub_spec)}")
