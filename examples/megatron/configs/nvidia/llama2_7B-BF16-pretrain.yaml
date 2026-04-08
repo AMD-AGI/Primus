@@ -1,33 +1,34 @@
 target_gpu: nvidia
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:llama3.2_1B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:llama2_7B-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
   pre_trainer:
     framework: megatron
     config: pre_trainer.yaml
-    # data_path: ./data
 
     # model to run
-    model: llama3.2_1B.yaml
+    model: llama2_7B.yaml
     overrides:
       # log
-      wandb_project: "Primus_Pretrain"
+      wandb_project: "Primus_DeepSeek_Pretrain"
       # disable_wandb: false
       # disable_tensorboard: false
       stderr_sink_level: DEBUG
+
+      eval_iters: 0
 
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
       train_iters: 50
-      micro_batch_size: 4
-      global_batch_size: 32
+      micro_batch_size: 10
+      global_batch_size: 640
 
-      seq_length: 8192
-      max_position_embeddings: 8192
+      seq_length: 4096
+      max_position_embeddings: 4096
 
       lr: 1e-5
       min_lr: 0.0
@@ -68,16 +69,17 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
-      # Turbo (AMD-only; disabled for NVIDIA)
-      enable_primus_turbo: false
+      # Turbo
+      enable_primus_turbo: true
       use_turbo_attention: false
       use_turbo_grouped_mlp: false
 
-      # TransformerEngine / Apex: available in container (nvcr.io/nvidia/pytorch:26.01-py3)
-      # but not in bare Python environments. Use local transformer impl for direct mode
-      # compatibility; switch to transformer_engine in container for best performance.
-      apply_rope_fusion: true
-      transformer_impl: transformer_engine
+      # use_torch_fsdp2: true
+      # use_distributed_optimizer: false
+      # overlap_param_gather: false
+      # ckpt_format: torch
+      # sequence_parallel: 1
+
       # Cross entropy flags
-      # cross_entropy_fusion_impl: "te"
-      # cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true

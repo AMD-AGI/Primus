@@ -68,16 +68,15 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
-      # Turbo (AMD-only; disabled for NVIDIA)
-      enable_primus_turbo: false
+      # Turbo
+      enable_primus_turbo: true
       use_turbo_attention: false
       use_turbo_grouped_mlp: false
 
-      # TransformerEngine / Apex: available in container (nvcr.io/nvidia/pytorch:26.01-py3)
-      # but not in bare Python environments. Use local transformer impl for direct mode
-      # compatibility; switch to transformer_engine in container for best performance.
-      apply_rope_fusion: true
-      transformer_impl: transformer_engine
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"
       # cross_entropy_loss_fusion: true
+
+      # enable fp8 training
+      fp8: hybrid
+      moe_use_legacy_grouped_gemm: false

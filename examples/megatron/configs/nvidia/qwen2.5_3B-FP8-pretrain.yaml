@@ -1,7 +1,7 @@
 target_gpu: nvidia
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:llama3.2_1B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:qwen2.5_3B-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
@@ -11,10 +11,10 @@ modules:
     # data_path: ./data
 
     # model to run
-    model: llama3.2_1B.yaml
+    model: qwen2.5_3B.yaml
     overrides:
       # log
-      wandb_project: "Primus_Pretrain"
+      wandb_project: "Primus_Qwen2.5_3B_Pretrain"
       # disable_wandb: false
       # disable_tensorboard: false
       stderr_sink_level: DEBUG
@@ -23,16 +23,16 @@ modules:
       log_avg_reset_interval: 50
 
       train_iters: 50
-      micro_batch_size: 4
-      global_batch_size: 32
+      micro_batch_size: 10
+      global_batch_size: 640
 
-      seq_length: 8192
-      max_position_embeddings: 8192
+      seq_length: ${PRIMUS_SEQ_LENGTH:2048}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:32768}
 
       lr: 1e-5
       min_lr: 0.0
       lr_warmup_iters: 2
-      lr_decay_iters: null
+      lr_decay_iters: 320000
       lr_decay_style: cosine
       weight_decay: 0.1
       adam_beta1: 0.9
@@ -57,7 +57,7 @@ modules:
 
       # ckpt
       finetune: false
-      auto_continue_train: false
+      auto_continue_train: ${CONTI_PARAMS:0}
       load: null
       no_load_optim: null
       no_load_rng: null
@@ -68,16 +68,15 @@ modules:
       disable_last_saving: true
       ckpt_format: torch
 
-      # Turbo (AMD-only; disabled for NVIDIA)
-      enable_primus_turbo: false
-      use_turbo_attention: false
-      use_turbo_grouped_mlp: false
+      # Turbo
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: true
 
-      # TransformerEngine / Apex: available in container (nvcr.io/nvidia/pytorch:26.01-py3)
-      # but not in bare Python environments. Use local transformer impl for direct mode
-      # compatibility; switch to transformer_engine in container for best performance.
-      apply_rope_fusion: true
-      transformer_impl: transformer_engine
       # Cross entropy flags
-      # cross_entropy_fusion_impl: "te"
-      # cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # enable fp8 training
+      fp8: hybrid
+      moe_use_legacy_grouped_gemm: false
