@@ -23,11 +23,17 @@ from primus.modules.module_utils import log_rank_0
         "when lfm_layer_types is configured for LFM model."
     ),
     condition=lambda ctx: getattr(get_args(ctx), "lfm_layer_types", None) is not None,
+    priority=42,  # must patch after te_spec_provider_patches
 )
 def patch_gpt_decoder_layer_specs(ctx: PatchContext):
     """
     Patch Megatron GPT decoder layer spec builder to use Primus implementation.
     """
+    import megatron.core.extensions as meg_ext
+
+    assert (
+        meg_ext.transformer_engine.HAVE_TE
+    ), "patch_gpt_decoder_layer_specs patch failed, can't find transformer_engine"
 
     from megatron.core.models.gpt import gpt_layer_specs as megatron_gpt_layer_specs
 

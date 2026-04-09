@@ -13,29 +13,9 @@ Primus implementation of Megatron GPT layer specs.
 import warnings
 from typing import Optional
 
-from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
-from megatron.core.models.gpt.gpt_layer_specs import (
-    get_gpt_layer_with_transformer_engine_spec,
-    get_mlp_module_spec_for_backend,
-)
-from megatron.core.transformer.enums import AttnMaskType
-from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.transformer.transformer_layer import (
-    TransformerLayer,
-    TransformerLayerSubmodules,
-)
-from megatron.training import get_args
-
-try:
-    import transformer_engine as te  # type: ignore[import-untyped]  # pylint: disable=unused-import
-    from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
-
-    HAVE_TE = True
-except ImportError:
-    HAVE_TE = False
 
 from primus.backends.megatron.core.transformer.attention import (
     Lfm2ShortConv,
@@ -53,6 +33,8 @@ def get_gpt_decoder_layer_specs(
 ) -> TransformerBlockSubmodules:
     """GPT block spec."""
     assert use_transformer_engine, "use_transformer_engine must be True"
+
+    from megatron.training import get_args
 
     args = get_args()
 
@@ -82,6 +64,10 @@ def get_gpt_decoder_layer_specs(
     assert len(lfm_layer_types) == args.num_layers, (
         f"Invalid lfm_layer_types length: {len(lfm_layer_types)}, "
         f"expected {args.num_layers} (args.num_layers)."
+    )
+
+    from megatron.core.models.gpt.gpt_layer_specs import (
+        get_gpt_layer_with_transformer_engine_spec,
     )
 
     dense_layer_spec = get_gpt_layer_with_transformer_engine_spec(
@@ -210,7 +196,19 @@ def get_lfm_layer_with_transformer_engine_spec(
         )
 
     assert not use_kitchen, "use_kitchen is not supported with LFM model."
+    # Note: patch_gpt_decoder_layer_specs must be applied bafter te_spec_provider_patches
+    from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
+
     backend = TESpecProvider()
+
+    from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
+    from megatron.core.models.gpt.gpt_layer_specs import get_mlp_module_spec_for_backend
+    from megatron.core.transformer.enums import AttnMaskType
+    from megatron.core.transformer.identity_op import IdentityOp
+    from megatron.core.transformer.transformer_layer import (
+        TransformerLayer,
+        TransformerLayerSubmodules,
+    )
 
     mlp = get_mlp_module_spec_for_backend(
         backend=backend,

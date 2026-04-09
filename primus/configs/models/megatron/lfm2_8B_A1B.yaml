@@ -1,5 +1,5 @@
 extends:
-  - qwen2.5_base.yaml
+  - lfm_base.yaml
 
 # https://huggingface.co/LiquidAI/LFM2-8B-A1B
 tokenizer_type: Lfm2Tokenizer
