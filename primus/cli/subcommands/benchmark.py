@@ -44,6 +44,12 @@ def run(args, extra_args):
         from primus.tools.benchmark.rccl_bench import run_rccl_benchmark
 
         run_rccl_benchmark(args)
+    elif suite == "moe-dispatch-compare":
+        from primus.tools.benchmark.moe_dispatch_compare_bench import (
+            run_moe_dispatch_compare_benchmark,
+        )
+
+        run_moe_dispatch_compare_benchmark(args)
     else:
         raise ValueError(f"Unknown benchmark suite: {suite}")
 
@@ -53,7 +59,7 @@ def run(args, extra_args):
 def register_subcommand(subparsers):
     """
     primus-cli benchmark <suite> [suite-specific-args]
-    suites: gemm | attention | gemm-dense | gemm-deepseek | strided-allgather | rccl
+    suites: gemm | attention | gemm-dense | gemm-deepseek | strided-allgather | rccl | moe-dispatch-compare
     """
     parser = subparsers.add_parser("benchmark", help="Run performance benchmarks (GEMM / Attention / RCCL).")
     suite_parsers = parser.add_subparsers(dest="suite", required=True)
@@ -99,6 +105,17 @@ def register_subcommand(subparsers):
     from primus.tools.benchmark.rccl_bench_args import add_rccl_parser
 
     add_rccl_parser(rccl)
+
+    # ---------- MoE-Dispatcher-Compare ----------
+    moe_dispatch_compare = suite_parsers.add_parser(
+        "moe-dispatch-compare",
+        help="Compare MoE dispatcher latency (DeepEP vs Comet-LL).",
+    )
+    from primus.tools.benchmark.moe_dispatch_compare_bench_args import (
+        add_moe_dispatch_compare_parser,
+    )
+
+    add_moe_dispatch_compare_parser(moe_dispatch_compare)
 
     parser.set_defaults(func=run)
 
