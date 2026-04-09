@@ -1,0 +1,71 @@
+#!/bin/bash
+# MLPerf LLama3.1 8B Configuration for MI355X (1x8x1)
+
+export DGXSYSTEM=MI355X_1x8x1
+export GPUS_PER_NODE=8
+export NNODES=1
+export NODE_RANK=0
+export MASTER_ADDR=localhost
+export MASTER_PORT=29502
+
+export PRIMUS_PATH=/home/vidgoyal/Primus-dev/Primus/
+export PRIMUS_MLPERF=1
+export PYTHONPATH="${PRIMUS_PATH}:${PRIMUS_PATH}/third_party/Megatron-LM:${PYTHONPATH}"
+export EXP=/home/vidgoyal/Primus-dev/Primus/examples/mlperf/configs/MI355X/llama3.1_8B-pretrain-FP8.yaml
+export DATA_PATH=/data
+
+export PRIMUS_MICRO_BATCH_SIZE=2
+export PRIMUS_GLOBAL_BATCH_SIZE=32
+export PRIMUS_LR=8e-4
+export PRIMUS_TRAIN_ITERS=1200000
+export EVAL_SAMPLES_INTERVAL=12288          #12288   # Evaluate every 12,288 samples
+export PRIMUS_EVAL_INTERVAL=$((EVAL_SAMPLES_INTERVAL / PRIMUS_GLOBAL_BATCH_SIZE))  # Auto-computed
+export SEED=31952
+
+export ROCTRACER_LOG=1
+export ROCTRACER_LOG_LEVEL=5
+
+export HSA_ENABLE_INTERRUPT=0
+export HSA_TOOLS_LIB=/opt/rocm/lib/libroctracer64.so
+
+
+export PRIMUS_APPLY_ROPE_FUSION=True
+export PRIMUS_FP8_RECIPE=hybrid
+
+export HSA_NO_SCRATCH_RECLAIM=1
+export HSA_ENABLE_SDMA=1
+export GPU_MAX_HW_QUEUES=2
+export CUDA_DEVICE_MAX_CONNECTIONS=1
+export NVTE_FUSED_ATTN=1
+export NVTE_FUSED_ATTN_CK=1
+export NVTE_FUSED_ATTN_AOTRITON=1
+export NVTE_CK_USES_FWD_V3=1
+export NVTE_CK_USES_BWD_V3=1
+export NVTE_CK_IS_V3_ATOMIC_FP32=0
+export USE_TE_SWIGLU=1
+
+export NCCL_CHECKS_DISABLE=1
+export TORCH_NCCL_HIGH_PRIORITY=1
+
+export NVTE_ASYNC_AMAX_REDUCTION=1 
+export NVTE_DP_AMAX_REDUCE_INTERVAL=0
+
+export ENABLE_MLLOG=1
+export MLLOG_OUTPUT_FILE=/results/mlperf_output.log
+export MLLOG_TRAIN_LOSS_LOG_FREQ=100
+export MLLOG_TARGET_EVAL_LOSS=3.3
+export MLLOG_SUBMISSION_BENCHMARK=llama31_8b
+export MLLOG_SUBMISSION_DIVISION=closed
+export MLLOG_SUBMISSION_ORG=AMD
+export MLLOG_SUBMISSION_PLATFORM=MI355X
+
+export TORCHPROF_OUTPUT_DIR=/home/vidgoyal/small_llm_pretraining/primus/outputs/
+export TORCHPROF_VERBOSE=0
+export TORCHPROF_MAXROWS=100
+export TORCHPROF_PROFILE_MEMORY=0
+export TORCHPROF_WITH_STACK=0
+export TORCHPROF_RECORD_SHAPES=0
+export TORCHPROF_WITH_FLOPS=0
+export PROF_WARMUP_STEPS=10 #128
+export PROF_ACTIVE_STEPS=6372
+# export HIPBLASLT_TUNING_OVERRIDE_FILE=tuning.txt
