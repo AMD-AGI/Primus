@@ -15,8 +15,21 @@ from megatron.core.parallel_state import (
     get_virtual_pipeline_model_parallel_world_size,
     is_pipeline_first_stage,
 )
+from megatron.core.utils import get_pg_rank, get_pg_size
 
 from primus.modules.trainer.megatron.utils import is_v_schedule_enabled
+
+
+def is_pp_first_stage(pp_group: torch.distributed.ProcessGroup):
+    """Return True if in the first pipeline model-parallel stage, False otherwise."""
+    return get_pg_rank(pp_group) == 0
+
+
+def is_pp_last_stage(pp_group: torch.distributed.ProcessGroup):
+    """Return True if in the last pipeline-model-parallel stage, False otherwise."""
+    if is_v_schedule_enabled():
+        return get_pg_rank(pp_group) == 0
+    return get_pg_rank(pp_group) == (get_pg_size(pp_group) - 1)
 
 
 def default_embedding_ranks(pp_ranks, split_rank=None):
