@@ -22,7 +22,6 @@ from megatron.core.transformer.multi_latent_attention import (
     MLASelfAttentionSubmodules,
 )
 
-
 # Inference layers may not be available in older Megatron versions
 # They're only used in hybrid_inference_stack_spec, not the training spec
 try:

@@ -3,7 +3,6 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-import functools
 from contextlib import contextmanager
 from typing import Callable, List, Optional, Tuple
 
