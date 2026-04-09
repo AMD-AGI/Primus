@@ -12,6 +12,10 @@ untie_embeddings_and_output_weights: true
 hidden_dropout: 0.0
 attention_dropout: 0.0
 
+lfm_layer_types: null # list[str]
+conv_L_cache: 3 # int
+conv_bias: false # bool
+
 position_embedding_type: rope
 rotary_base: 1000000
 rotary_percent: 1.0
