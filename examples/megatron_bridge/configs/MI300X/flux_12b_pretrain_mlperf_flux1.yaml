@@ -1,10 +1,11 @@
-# FLUX ~12B diffusion pretrain — aligned with MLPerf Training v5.1 FLUX.1 table:
+# FLUX ~12B diffusion pretrain — aligned with MLPerf Training v6.0 FLUX.1 MI300X reference:
+#   Source: mlperf-training-6-0/flux1/nemo/config_MI300X_01x08x16.sh + config_common.sh
 #   Architecture: text-to-image, ~12B trainable, 19 double-stream + 38 single-stream blocks,
 #   resolution 256×256 (prepare data with prepare_energon_dataset_flux.py --height 256 --width 256).
 #   MLPerf: eval quality target loss 0.586; eval every 262,144 samples; train CC12M subset; val COCO-2014;
 #   metric RCP mean / validation loss protocol (see MLCommons text_to_image README).
-#   Parallelism (table): data parallel — TP=1 below (8-way DP on one node). If you OOM, set TP=2.
-#   Precision (table): FP8-style — bf16_with_fp8_delayed_scaling_mixed (Transformer Engine).
+#   Parallelism: data parallel — TP=1, 8-way DP on one node (1×8 config).
+#   Precision: FP8 delayed scaling — bf16_with_fp8_delayed_scaling_mixed (Transformer Engine).
 #   If TE/HW errors, use precision_config: bf16_mixed.
 #
 # Single node, 8 GPUs: TP=1 → DP=8. (Fallback: tensor_model_parallel_size: 2 → DP=4.)
@@ -20,13 +21,11 @@
 #    Override if needed: export MLPERF_FLUX1_ENERGON=/other/cc12m_flux_wds
 #    huggingface-cli login   # if required for black-forest-labs/FLUX.1-dev
 #
-# 5) Run training — from Primus repo root, 8 GPUs on one node:
-#    export MEGATRON_BRIDGE=/path/to/Megatron-Bridge
-#    torchrun --nproc_per_node=8 -m primus.cli.main train pretrain \
-#      --config examples/megatron_bridge/configs/MI300X/flux_12b_pretrain_mlperf_flux1.yaml \
-#      --backend-path "${MEGATRON_BRIDGE}"
+# 5) Run training — source MI300X env vars, then launch from Primus repo root:
+#    source examples/diffusion/mlperf_flux1/MI300X_env_vars.sh
+#    EXP=examples/megatron_bridge/configs/MI300X/flux_12b_pretrain_mlperf_flux1.yaml \
+#      bash examples/run_pretrain.sh
 #
-#    Optional: CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 #    If FP8 fails, set precision_config to bf16_mixed in this file (or tensor_model_parallel_size: 2 if OOM).
 #
 # Validation: enabled with skip_train: false, eval_iters > 0, and eval_interval (see overrides).
@@ -54,32 +53,32 @@ modules:
       use_megatron_fsdp: false
       torch_compile: false
 
-      # ~1.1M-sample CC12M subset → order of 70k steps at GBS=16 (scale train_iters to your goal).
-      train_iters: 1024 #70000
-      global_batch_size: 16
-      micro_batch_size: 1
+      # MLPerf 6.0 MI300X: MAX_STEPS=-1 (run to convergence via val_stop_loss).
+      # ~1.1M-sample CC12M subset → ~2148 steps/epoch at GBS=512.
+      train_iters: 10000
+      global_batch_size: 512
+      micro_batch_size: 32
 
       # Validation (Megatron-Bridge): keep skip_train false; eval_iters must be > 0 or no val dataloader.
       skip_train: false
-      # Run val every eval_interval steps (step counts completed train steps). MLPerf table uses
-      # 262144 samples → 16384 iters at GBS=16; use 256 here so short runs still hit eval.
-      eval_interval: 256 #16384
-      eval_iters: 8 #32
+      # MLPerf 6.0: VAL_CHECK_INTERVAL=262144 samples → 262144/512 = 512 steps at GBS=512.
+      eval_interval: 512
+      eval_iters: 59
       # false = quiet eval (no "Evaluating iter k/N"); true = Megatron per-iter eval prints.
       eval_verbose: false
       # Post-train: Megatron always re-runs validation then test. Primus skips extra validation when the last
       # training step already ran eval (train_iters % eval_interval == 0). Skip test when val/test share data:
       eval_skip_posttrain_test: true
-      save_interval: null #16384
+      save_interval: null
 
       # Stop training from scratch once validation matches MLPerf quality target (RCP mean / val loss).
       val_stop_loss: 0.586
       val_stop_loss_key: "lm loss"
       val_stop_mode: le
 
-      lr: 1.0e-4
+      lr: 2.0e-4
       min_lr: 0.0
-      lr_warmup_iters: 100 #1000
+      lr_warmup_iters: 1600
       lr_decay_iters: null
 
       wandb_project: null
