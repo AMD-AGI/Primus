@@ -119,6 +119,10 @@ class PrimusRuntime:
 
     def _initialize_backend_and_execute(self) -> None:
         """Load backend adapter, create trainer and execute its lifecycle."""
+        from primus.core.compat import apply_inductor_compat
+
+        apply_inductor_compat()
+
         self._initialize_adapter()
         self._initialize_trainer()
         self._run_trainer_lifecycle()
