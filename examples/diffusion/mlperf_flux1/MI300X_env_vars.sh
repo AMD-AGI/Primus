@@ -49,19 +49,6 @@ export HSA_NO_SCRATCH_RECLAIM=1
 # ── CUDA graph disabled for MI300X FLUX ──────────────────────────────────────
 export USE_CUDA_GRAPH=False
 
-# ── PyTorch memory ────────────────────────────────────────────────────────────
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
-# ── HuggingFace offline (weights already downloaded) ─────────────────────────
-export HF_HUB_OFFLINE=1
-
-# ── NCCL / RCCL for AMD GPUs ─────────────────────────────────────────────────
-export NCCL_NVLS_ENABLE=0
-export NCCL_GRAPH_REGISTER=0
-export NCCL_LOCAL_REGISTER=0
-export NCCL_MIN_P2P_NCHANNELS=32
-export NCCL_MIN_CTAS=32
-export NCCL_NCHANNELS_PER_NET_PEER=32
-
-# ── Throughput reference (TFLOP per sample for FLUX) ─────────────────────────
-export MODEL_TFLOP_PER_SAMPLE=20.3
+# Walltime
+export WALLTIME_RUNANDTIME=200
+export WALLTIME=$((5 + ${NEXP:-1} * ($WALLTIME_RUNANDTIME + 5)))
