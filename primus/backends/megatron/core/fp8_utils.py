@@ -24,14 +24,14 @@ except (ImportError, ModuleNotFoundError):
     # Transformer Engine not found
     pass
 
-# Check if Primus-Turbo is installed
+# Check if Primus-Turbo is installed (use importlib to avoid triggering
+# the full import chain which pulls in aiter→csrc at module load time).
 HAVE_TURBO = False
 try:
-    import primus_turbo  # pylint: disable=W0611
+    import importlib.util
 
-    HAVE_TURBO = True
-except (ImportError, ModuleNotFoundError):
-    # Primus-Turbo not found
+    HAVE_TURBO = importlib.util.find_spec("primus_turbo") is not None
+except Exception:
     pass
 
 
@@ -45,11 +45,21 @@ if HAVE_TE and HAVE_TURBO:
     from megatron.core import parallel_state
     from megatron.core.enums import Fp8Recipe
     from megatron.core.extensions.transformer_engine import TEDelayedScaling
-    from primus_turbo.pytorch.core.low_precision import ScaleDtype, ScalingGranularity
 
-    from primus.backends.megatron.core.extensions.primus_turbo import (
-        PrimusTurboQuantConfig,
-    )
+    def _import_turbo_low_precision():
+        from primus_turbo.pytorch.core.low_precision import (
+            ScaleDtype,
+            ScalingGranularity,
+        )
+
+        return ScaleDtype, ScalingGranularity
+
+    def _import_turbo_quant_config():
+        from primus.backends.megatron.core.extensions.primus_turbo import (
+            PrimusTurboQuantConfig,
+        )
+
+        return PrimusTurboQuantConfig
 
     def te_fp8_format_mapping(te_format):
         from primus_turbo.pytorch.core.low_precision import Format as TurboFormat
@@ -133,19 +143,24 @@ if HAVE_TE and HAVE_TURBO:
         fp8_quant_config = None
         fp8_quant_config_none_reason = ""
         if config.fp8_recipe == Fp8Recipe.delayed:
-            # NOTE: Primus-Turbo not support delayed scaling.
             fp8_quant_config_none_reason = "Primus-Turbo not support delayed scaling."
         elif config.fp8_recipe == Fp8Recipe.tensorwise:
+            ScaleDtype, ScalingGranularity = _import_turbo_low_precision()
+            PrimusTurboQuantConfig = _import_turbo_quant_config()
             fp8_quant_config = PrimusTurboQuantConfig(
                 granularity=ScalingGranularity.TENSORWISE, format=te_fp8_format_mapping(fp8_format)
             )
         elif config.fp8_recipe == Fp8Recipe.blockwise:
+            ScaleDtype, ScalingGranularity = _import_turbo_low_precision()
+            PrimusTurboQuantConfig = _import_turbo_quant_config()
             fp8_quant_config = PrimusTurboQuantConfig(
                 granularity=ScalingGranularity.BLOCKWISE,
                 format=te_fp8_format_mapping(fp8_format),
                 block_size=SCALING_BLOCK_SIZE,
             )
         elif config.fp8_recipe == Fp8Recipe.mxfp8:
+            ScaleDtype, ScalingGranularity = _import_turbo_low_precision()
+            PrimusTurboQuantConfig = _import_turbo_quant_config()
             fp8_quant_config = PrimusTurboQuantConfig(
                 granularity=ScalingGranularity.MX_BLOCKWISE,
                 format=te_fp8_format_mapping(fp8_format),
@@ -204,17 +219,24 @@ if HAVE_TE and HAVE_TURBO:
                 )
 
             if not is_init:
-                from primus.backends.megatron.core.extensions.primus_turbo import (
-                    primus_turbo_fp8_autocast,
-                )
+                if fp8_quant_config is not None:
+                    from primus.backends.megatron.core.extensions.primus_turbo import (
+                        primus_turbo_fp8_autocast,
+                    )
 
-                fp8_context = primus_turbo_fp8_autocast(
-                    enabled=True if fp8_recipe is not None else False,
-                    fp8_recipe=fp8_recipe,
-                    fp8_group=fp8_group,
-                    enabled_turbo=True if fp8_quant_config is not None else False,
-                    turbo_quant_config=fp8_quant_config,
-                )
+                    fp8_context = primus_turbo_fp8_autocast(
+                        enabled=True if fp8_recipe is not None else False,
+                        fp8_recipe=fp8_recipe,
+                        fp8_group=fp8_group,
+                        enabled_turbo=True,
+                        turbo_quant_config=fp8_quant_config,
+                    )
+                else:
+                    fp8_context = transformer_engine.pytorch.fp8_autocast(
+                        enabled=fp8_recipe is not None,
+                        fp8_recipe=fp8_recipe,
+                        fp8_group=fp8_group,
+                    )
             else:
                 import inspect
 

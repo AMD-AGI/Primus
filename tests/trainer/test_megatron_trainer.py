@@ -489,7 +489,6 @@ class TestMegatronTrainer(PrimusUT):
             "NCCL_SOCKET_IFNAME": "lo",
             "GLOO_SOCKET_IFNAME": "lo",
             "IP_INTERFACE": "lo",
-            "AITER_META_DIR": "/opt/venv/lib/python3.10/site-packages/aiter_meta",
             "PRIMUS_MODEL": "deepseek_v2_lite",
             "PRIMUS_PP": "4",
             "PRIMUS_VPP": "2",

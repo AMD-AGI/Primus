@@ -12,42 +12,57 @@ from typing import Callable, Tuple
 
 import grouped_gemm
 import torch
-from primus_turbo.pytorch.core.backend import BackendType
-from primus_turbo.pytorch.core.low_precision import (
-    Format,
-    ScalingGranularity,
-    float8_e4m3,
-    float8_e5m2,
-)
-from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
-from primus_turbo.pytorch.kernels.gemm.gemm_impl import gemm_impl
-from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
-    grouped_gemm_compute_offs,
-)
-from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
-    grouped_gemm_fp8_impl as _grouped_gemm_fp8_impl,
-)
-from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
-    grouped_gemm_fp8_variable_k_impl,
-)
-from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_impl import (
-    grouped_gemm_impl,
-    grouped_gemm_variable_k_impl,
-)
-from primus_turbo.pytorch.kernels.quantization.quantization_impl import (
-    quant_fp8_blockwise_for_weight_impl,
-    quant_fp8_blockwise_impl,
-    quant_fp8_blockwise_segment_m_impl,
-)
-from primus_turbo.pytorch.ops.quantization import quantize_fp8
 
 from primus.backends.megatron.core.pipeline_parallel.wgrad_adapter import (
     insert_wgrad_func_into_cache,
 )
 
 
-def _get_fp8_dtype(format: Format, is_fwd: bool):
+def _lazy_turbo_imports():
+    """Lazily import primus_turbo symbols to avoid triggering the aiter→csrc
+    import chain at module load time.  This allows the ``lagacy-gg`` backend
+    (which only needs ``grouped_gemm``) to work even when ``csrc`` is absent."""
+    import primus_turbo.pytorch.core.backend as _backend
+    import primus_turbo.pytorch.core.low_precision as _lp
+    import primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl as _gemm_fp8
+    import primus_turbo.pytorch.kernels.gemm.gemm_impl as _gemm
+    import primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl as _gg_fp8
+    import primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_impl as _gg
+    import primus_turbo.pytorch.kernels.quantization.quantization_impl as _quant
+    import primus_turbo.pytorch.ops.quantization as _ops_quant
+
+    g = globals()
+    g["BackendType"] = _backend.BackendType
+    g["Format"] = _lp.Format
+    g["ScalingGranularity"] = _lp.ScalingGranularity
+    g["float8_e4m3"] = _lp.float8_e4m3
+    g["float8_e5m2"] = _lp.float8_e5m2
+    g["gemm_fp8_impl"] = _gemm_fp8.gemm_fp8_impl
+    g["gemm_impl"] = _gemm.gemm_impl
+    g["grouped_gemm_compute_offs"] = _gg_fp8.grouped_gemm_compute_offs
+    g["_grouped_gemm_fp8_impl"] = _gg_fp8.grouped_gemm_fp8_impl
+    g["grouped_gemm_fp8_variable_k_impl"] = _gg_fp8.grouped_gemm_fp8_variable_k_impl
+    g["grouped_gemm_impl"] = _gg.grouped_gemm_impl
+    g["grouped_gemm_variable_k_impl"] = _gg.grouped_gemm_variable_k_impl
+    g["quant_fp8_blockwise_for_weight_impl"] = _quant.quant_fp8_blockwise_for_weight_impl
+    g["quant_fp8_blockwise_impl"] = _quant.quant_fp8_blockwise_impl
+    g["quant_fp8_blockwise_segment_m_impl"] = _quant.quant_fp8_blockwise_segment_m_impl
+    g["quantize_fp8"] = _ops_quant.quantize_fp8
+
+
+_turbo_loaded = False
+
+
+def _ensure_turbo():
+    global _turbo_loaded
+    if not _turbo_loaded:
+        _lazy_turbo_imports()
+        _turbo_loaded = True
+
+
+def _get_fp8_dtype(format, is_fwd: bool):
     """Map FP8 format + stage to the concrete torch dtype."""
+    _ensure_turbo()
     if format == Format.E4M3:
         return float8_e4m3
     elif format == Format.E5M2:
@@ -68,6 +83,7 @@ class LinearWithWeightGradientStore(torch.autograd.Function):
         weight: torch.Tensor,
         bias: torch.Tensor,
     ):
+        _ensure_turbo()
         ctx.use_bias = bias is not None
         ctx.save_for_backward(input, weight)
         ctx.weight_main_grad = weight.main_grad
@@ -87,6 +103,7 @@ class LinearWithWeightGradientStore(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
+        _ensure_turbo()
         input, weight = ctx.saved_tensors
         use_bias = ctx.use_bias
         weight.main_grad = ctx.weight_main_grad
@@ -225,6 +242,7 @@ def grouped_gemm_with_weight_gradient_store(
     gg_backend: str = "turbo-gg",
 ):
     if gg_backend == "turbo-gg":
+        _ensure_turbo()
         if group_offs is None:
             group_offs = grouped_gemm_compute_offs(group_lens)
         group_gemm_backend_func = functools.partial(
@@ -274,6 +292,7 @@ class LinearFP8WithWeightGradientStore(torch.autograd.Function):
         weight: torch.Tensor,
         quant_config,
     ):
+        _ensure_turbo()
         granularity = quant_config.granularity
         fwd_dtype = _get_fp8_dtype(quant_config.format, True)
         out_dtype = input.dtype
@@ -337,6 +356,7 @@ class LinearFP8WithWeightGradientStore(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_out):
+        _ensure_turbo()
         if not grad_out.is_contiguous():
             grad_out = grad_out.contiguous()
 
@@ -495,6 +515,7 @@ class GroupedLinearFP8WithWeightGradientStore(torch.autograd.Function):
         weight_reshape_size: Tuple | None,
         quant_config,
     ):
+        _ensure_turbo()
         granularity = quant_config.granularity
         fwd_dtype = _get_fp8_dtype(quant_config.format, True)
         out_dtype = input.dtype
@@ -585,6 +606,7 @@ class GroupedLinearFP8WithWeightGradientStore(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_out):
+        _ensure_turbo()
         if not grad_out.is_contiguous():
             grad_out = grad_out.contiguous()
 

@@ -39,8 +39,26 @@ def _primus_init(self, delay_wgrad_compute=False, ub_bulk_wgrad=False):
 
 
 def _primus_put(self, tensor_list, func):
-    """Redirect wgrad closure to Primus pipeline scheduling."""
+    """Redirect wgrad closure to Primus pipeline scheduling.
+
+    TE GroupedLinear passes tensor_list=[inputmats, grad_output, wgrad_list]
+    where wgrad_list contains uninitialized torch.empty() tensors that will be
+    returned to autograd as weight gradients.  When we defer the actual wgrad
+    GEMM, those tensors still get returned by backward() and accumulated into
+    weight.grad — producing NaN from uninitialised memory.
+
+    Fix: zero out any output-buffer tensors in tensor_list so that the
+    autograd return value is harmless (all zeros) until the real wgrad is
+    computed later by the pipeline scheduler.
+    """
+    import torch
+
     args = get_args()
+
+    if len(tensor_list) >= 3 and isinstance(tensor_list[2], list):
+        for t in tensor_list[2]:
+            if isinstance(t, torch.Tensor):
+                t.zero_()
 
     def wgrad_func():
         func(*tensor_list)
