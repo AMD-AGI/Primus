@@ -55,7 +55,7 @@ modules:
 
       # MLPerf 6.0 MI300X: MAX_STEPS=-1 (run to convergence via val_stop_loss).
       # ~1.1M-sample CC12M subset → ~2148 steps/epoch at GBS=512.
-      train_iters: 10000
+      train_iters: 22000
       global_batch_size: 512
       micro_batch_size: 32
 
