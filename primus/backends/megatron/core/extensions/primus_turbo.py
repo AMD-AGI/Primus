@@ -10,9 +10,7 @@ from typing import Callable, List, Optional, Tuple
 import primus_turbo.pytorch as pt
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import transformer_engine as te
-from megatron.core import tensor_parallel
 from megatron.core.extensions.transformer_engine import TELinear, condition_init_method
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -47,11 +45,7 @@ from primus_turbo.pytorch.core.low_precision import (
 )
 from torch import Tensor
 from transformer_engine.pytorch.constants import dist_group_type
-from transformer_engine.pytorch.fp8 import (
-    DelayedScaling,
-    FP8GlobalStateManager,
-    Recipe,
-)
+from transformer_engine.pytorch.fp8 import DelayedScaling, FP8GlobalStateManager, Recipe
 
 from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
 

@@ -10,6 +10,9 @@ from megatron.core.extensions.transformer_engine import (
 )
 from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec
+
+# Import MambaStack from relative path
+from megatron.core.ssm.mamba_block import MambaStack, MambaStackSubmodules
 from megatron.core.ssm.mamba_layer import MambaLayer, MambaLayerSubmodules
 from megatron.core.ssm.mamba_mixer import MambaMixer, MambaMixerSubmodules
 from megatron.core.ssm.mlp_layer import MLPLayer
@@ -19,8 +22,6 @@ from megatron.core.transformer.multi_latent_attention import (
     MLASelfAttentionSubmodules,
 )
 
-# Import MambaStack from relative path
-from megatron.core.ssm.mamba_block import MambaStack, MambaStackSubmodules
 
 # Inference layers may not be available in older Megatron versions
 # They're only used in hybrid_inference_stack_spec, not the training spec
