@@ -10,10 +10,12 @@ set -euo pipefail
 echo "[+] Installing Megatron-Bridge dependencies..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Set up pip cache directory
-PRIMUS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-DATA_PATH="${DATA_PATH:-${PRIMUS_ROOT}/data}"
-PIP_CACHE_DIR="${PIP_CACHE_DIR:-${DATA_PATH}/pip_cache}"
+# Repo root: .../megatron_bridge -> posttrain -> train -> hooks -> helpers -> runner -> Primus
+PRIMUS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../../../" && pwd)"
+# Pip cache must live on a path that exists inside THIS environment (e.g. Docker). Schedulers often set
+# DATA_PATH to a *host* path (e.g. /home/.../data/mlperf_llama2) for dataset mounts; that path is not
+# writable or may not exist in the container, so do not derive PIP_CACHE_DIR from DATA_PATH by default.
+PIP_CACHE_DIR="${PIP_CACHE_DIR:-${PRIMUS_ROOT}/.pip_cache}"
 
 echo "[INFO] Using pip cache: ${PIP_CACHE_DIR}"
 mkdir -p "${PIP_CACHE_DIR}"
