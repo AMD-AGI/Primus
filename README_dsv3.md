@@ -86,7 +86,7 @@ Key model properties in `deepseek_v3.yaml`:
 | `--pipeline_model_parallel_size` | `16` | Default from `PRIMUS_PP`. |
 | `--expert_model_parallel_size` | `8` | Default from `PRIMUS_EP`. |
 | `--pipeline_model_parallel_layout` | `Et*1\|t*1\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*2\|t*1,L` | Required layout for `PP16_VPP2` tuning profile. |
-| `--recompute_layer_ids` | `RECOMP_IDS` best values for different Node Number:<br>`32N_PP16_VPP2`: `0,1,2,4,6,8,10,12,14,16,34,36,38,40,50`<br>`64N_PP16_VPP2`: `0,1,2,4,6,8,10,12,14,16,34,36`<br>`128N_PP16_VPP2`: `0,1,2,4,6,8,10,12,14` | Recommended explicit recompute layers by node count. |
+| `--recompute_layer_ids` | `RECOMP_IDS` best values for different Node Number:<br>`32N_PP16_VPP2`: `0,1,2,4,6,8,10,12,14,16,34,36,38,40,50`<br>`64N_PP16_VPP2`: `0,1,2,4,6,8,10,12,14,16,34,36`<br>`128N_PP16_VPP2`: `0,1,2,4,6,8,10,12,14`<br>`176N_PP16_VPP2`: `0,1,2,4,6,8,10,12,14` | Recommended explicit recompute layers by node count. |
 | `--cross_entropy_fusion_impl` | `te` | Fused TE backend selection. |
 | `--cross_entropy_loss_fusion` | `True` | Enables TE fusion for performance. |
 | `--manual_gc` | `True` | Enables manual garbage collection control. |
