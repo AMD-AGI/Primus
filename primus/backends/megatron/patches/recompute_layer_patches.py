@@ -27,15 +27,15 @@ def validate_specified_recompute_layers(config, args):
         config.recompute_layer_ids = [int(x) for x in config.recompute_layer_ids]
 
     config.recompute_layer_ids = list(set(config.recompute_layer_ids))
-    assert len(config.recompute_layer_ids) > 0, "recompute layer ids is null"
+    if len(config.recompute_layer_ids) == 0:
+        raise ValueError("recompute_layer_ids must not be empty.")
     for layer_id in config.recompute_layer_ids:
-        assert (
-            layer_id >= 0 and layer_id < args.num_layers
-        ), f"recompute layer id must be between 0 and {args.num_layers - 1}"
+        if layer_id < 0 or layer_id >= args.num_layers:
+            raise ValueError(f"recompute layer id must be between 0 and {args.num_layers - 1}")
 
     if args.recompute_granularity != "full":
         raise ValueError(
-            f'When using recompute_layer_ids, recompute_granuarlity: {args.recompute_granularity} must be "full"'
+            f'When using recompute_layer_ids, recompute_granularity: {args.recompute_granularity} must be "full"'
         )
 
     if args.recompute_method is not None:

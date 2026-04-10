@@ -51,8 +51,13 @@ NCCL_IGNORE_CPU_AFFINITY="${NCCL_IGNORE_CPU_AFFINITY:-1}"
 NCCL_IB_QPS_PER_CONNECTION="${NCCL_IB_QPS_PER_CONNECTION:-1}"
 
 # LD_LIBRARY_PATH: prepend AINIC/RCCL/MPI paths while preserving existing.
-_ld_base="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib"
-LD_LIBRARY_PATH="${_ld_base}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+_ld_base="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib"
+# Need to append AINIC/RCCL/MPI paths to the existing LD_LIBRARY_PATH. Otherwise,
+# JAX MaxText will not find the appropriate ROCm libraries.
+LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}${_ld_base}"
+
+# _ld_base="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib"
+# LD_LIBRARY_PATH="${_ld_base}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
 LOG_INFO_RANK0 "Using AINIC"
 LOG_INFO_RANK0 "RCCL_HOME_DIR: ${RCCL_HOME_DIR}"
@@ -65,6 +70,9 @@ echo "env.MPI_HOME_DIR=${MPI_HOME_DIR}"
 echo "env.NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN}"
 echo "env.NCCL_IB_TC=${NCCL_IB_TC}"
 echo "env.NCCL_IB_FIFO_TC=${NCCL_IB_FIFO_TC}"
+echo "env.NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX}"
+echo "env.NCCL_IB_ROCE_VERSION_NUM=${NCCL_IB_ROCE_VERSION_NUM}"
+echo "env.NCCL_MAX_P2P_CHANNELS=${NCCL_MAX_P2P_CHANNELS}"
 echo "env.NCCL_IB_SL=${NCCL_IB_SL}"
 echo "env.NET_OPTIONAL_RECV_COMPLETION=${NET_OPTIONAL_RECV_COMPLETION}"
 echo "env.NCCL_IB_USE_INLINE=${NCCL_IB_USE_INLINE}"

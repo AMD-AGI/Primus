@@ -83,7 +83,7 @@ def patch_train_with_pp_warmup(ctx: PatchContext) -> None:
         inference_model=None,
     ):
         args = get_megatron_args()
-        if getattr(args, "pp_warmup", True):
+        if getattr(args, "pp_warmup", False):
             run_pp_warmup(model, config, args, optimizer, get_timers())
         return original_train(
             forward_step_func,
