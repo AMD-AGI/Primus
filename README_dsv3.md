@@ -1,4 +1,4 @@
-# DeepSeek V3 Training Configuration (English)
+# DeepSeek V3 Training Configuration on MI355X
 
 ## 1) Launch Script
 
