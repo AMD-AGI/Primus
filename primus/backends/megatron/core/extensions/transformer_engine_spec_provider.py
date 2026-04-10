@@ -89,7 +89,10 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
     ) -> Tuple[type, Optional[MLPSubmodules | TEGroupedMLPSubmodules]]:
         """Which module and submodules to use for grouped mlp"""
         if moe_use_legacy_grouped_gemm is None:
-            moe_use_legacy_grouped_gemm = getattr(self.cfg, "moe_use_legacy_grouped_gemm", True)
+            # Megatron callers only pass ``moe_use_grouped_gemm`` here, so when Primus
+            # args do not expose the legacy switch we must match upstream TESpecProvider
+            # and prefer TEGroupedMLP by default.
+            moe_use_legacy_grouped_gemm = getattr(self.cfg, "moe_use_legacy_grouped_gemm", False)
 
         if (
             moe_use_grouped_gemm
