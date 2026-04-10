@@ -256,12 +256,28 @@ class MemoryStatsExtension:
                 local_rank = torch.cuda.current_device()
                 r_total, r_used, r_free = get_rocm_smi_mem_info(local_rank)
                 r_ratio = r_used / r_total
+
+                # When pipeline parallelism (PP) is enabled, memory usage can vary across ranks.
+                # Therefore, we report the maximum ROCm memory usage across all ranks.
+                r_used_tensor = torch.tensor([r_used], device="cuda", dtype=torch.int64)
+                world_size = torch.distributed.get_world_size()
+                gathered_r_used = [torch.zeros_like(r_used_tensor) for _ in range(world_size)]
+                torch.distributed.all_gather(gathered_r_used, r_used_tensor)
+
+                total_r_used = [t.item() for t in gathered_r_used]
+                log_rank_0(f"total_r_used: {[round(r_used / 1024 ** 3, 2) for r_used in total_r_used]}")
+                max_r_used = max(total_r_used)
+                max_rank = total_r_used.index(max_r_used)
+
                 rocm_mem_str = (
                     f" | rocm mem usage/free/total/usage_ratio: "
                     f"{r_used / 1024 ** 3:.2f}GB/"
                     f"{r_free / 1024 ** 3:.2f}GB/"
                     f"{r_total / 1024 ** 3:.2f}GB/"
                     f"{r_ratio * 100:.2f}%"
+                    f" | rank-{max_rank} rocm max mem usage/usage_ratio: "
+                    f"{max_r_used / 1024 ** 3:.2f}GB/"
+                    f"{max_r_used / r_total * 100:.2f}%"
                 )
                 # Cache for reuse on non-sampled iterations
                 self._last_rocm_mem_str = rocm_mem_str
