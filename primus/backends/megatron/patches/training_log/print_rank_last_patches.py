@@ -22,6 +22,7 @@ Design:
       and return updated log strings.
 """
 
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -29,6 +30,7 @@ from typing import Any, List, Optional
 import torch
 
 from primus.core.patches import PatchContext, get_args, register_patch
+from primus.core.utils import logger as primus_logger
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
 from primus.modules.module_utils import log_rank_0, log_rank_all, warning_rank_0
 
@@ -132,6 +134,63 @@ def render_training_log_line(info: TrainingLogInfo) -> str:
     if not segments:
         return ""
     return " | ".join(segments)
+
+
+def _should_forward_training_log_to_rank_0() -> bool:
+    """
+    Keep single-node training progress visible on the console when torchrun only
+    exposes local rank 0 via ``--local-ranks-filter``.
+    """
+    nnodes = os.getenv("NNODES")
+    if nnodes is not None:
+        try:
+            return int(nnodes) == 1
+        except ValueError:
+            return False
+
+    world_size = os.getenv("WORLD_SIZE")
+    local_world_size = os.getenv("LOCAL_WORLD_SIZE")
+    if world_size is None or local_world_size is None:
+        return False
+    try:
+        return int(world_size) == int(local_world_size)
+    except ValueError:
+        return False
+
+
+def _forward_single_node_training_log(message: str) -> None:
+    """
+    Broadcast the last-rank training log line to rank 0 on single-node runs so
+    the console still shows the progress line while keeping its last-rank label.
+    """
+    dist = getattr(torch, "distributed", None)
+    if dist is None or not hasattr(dist, "is_initialized") or not dist.is_initialized():
+        return
+
+    try:
+        if hasattr(dist, "get_backend") and dist.get_backend() == "fake":
+            return
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+    except Exception:
+        return
+
+    if world_size <= 1:
+        return
+
+    last_rank = world_size - 1
+    payload = [message if rank == last_rank else None]
+
+    try:
+        dist.broadcast_object_list(payload, src=last_rank)
+    except Exception:
+        return
+
+    if rank == 0 and payload[0]:
+        sink_logger = getattr(primus_logger, "_logger", None)
+        if sink_logger is None:
+            return
+        sink_logger.bind(rank=last_rank, world_size=world_size, console_only=True).debug(payload[0])
 
 
 def _touch_log_rank_all_for_tests() -> None:  # pragma: no cover
@@ -487,6 +546,15 @@ def patch_training_log_unified(ctx: PatchContext):
         # Capture the original ``print_rank_last`` so we can delegate actual
         # printing back to Megatron after mutating the log string.
         original_print_rank_last = megatron_training.print_rank_last
+        should_forward_to_rank_0 = _should_forward_training_log_to_rank_0()
+        source_prefix = ""
+        if should_forward_to_rank_0:
+            source_prefix = "{}: ".format(
+                primus_logger.module_format(
+                    getattr(original_print_rank_last, "__module__", __name__).split(".")[-1],
+                    getattr(getattr(original_print_rank_last, "__code__", None), "co_firstlineno", 0),
+                )
+            )
 
         def primus_print_rank_last(log_string: str) -> None:
             """
@@ -518,8 +586,13 @@ def patch_training_log_unified(ctx: PatchContext):
                 warning_rank_0(f"[Patch:megatron.training_log] Failed to append training stats: {e}")
                 updated = log_string
 
-            # Delegate actual printing to Megatron's original implementation so
-            # that rank filtering and any other side effects remain unchanged.
+            # Keep the runner's console filtering behavior unchanged for all
+            # other worker output. On single-node runs we additionally forward
+            # the last-rank progress line to rank 0 for console visibility,
+            # while still letting the real last rank emit its original log.
+            if should_forward_to_rank_0:
+                _forward_single_node_training_log(f"{source_prefix}{updated}")
+
             original_print_rank_last(updated)
 
         def primus_training_log(*args, **kwargs):
