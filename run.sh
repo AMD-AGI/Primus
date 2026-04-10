@@ -25,6 +25,7 @@ export PRIMUS_RECOMPUTE_LAYERS=0
 export PRIMUS_EP=8
 export PROFILE=False
 export PRIMUS_DETERMINISTIC=0
+export LEGACY_GG=False
 export TURBO_USE_GROUPED_MLP=False
 # Enable NUMA binding for better memory locality (increase stability for large models)
 # export ENABLE_NUMA_BINDING=1
@@ -36,12 +37,14 @@ if [ "$TURBO_USE_GROUPED_MLP" = "True" ]; then
 #   export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=HIPBLASLT
 fi
 
-
-export EXP=examples/megatron/configs/MI355X/lfm2_8B_A1B-BF16-pretrain.yaml
+export PRECISION_TYPE=FP8 # BF16
+export EXP=examples/megatron/configs/MI355X/lfm2_8B_A1B-${PRECISION_TYPE}-pretrain.yaml
+# export EXP=examples/megatron/configs/MI355X/qwen3_30B_A3B-BF16-pretrain.yaml
 export PRIMUS_TEAM=amd
 PRIMUS_USER="tas-mi325x-$(date +%Y%m%d)"
 export PRIMUS_USER
-export PRIMUS_EXP_NAME=lfm2_8B_A1B_MBS${MBS}_GBS${GBS}_EP${PRIMUS_EP}_turbogg${TURBO_USE_GROUPED_MLP}_${PRIMUS_TURBO_GROUPED_GEMM_BACKEND}
+export PRIMUS_EXP_NAME=lfm2_8B_A1B_${PRECISION_TYPE}_MBS${MBS}_GBS${GBS}_EP${PRIMUS_EP}_legacygg${LEGACY_GG}_turbogg${TURBO_USE_GROUPED_MLP}_${PRIMUS_TURBO_GROUPED_GEMM_BACKEND}
+# export PRIMUS_EXP_NAME=debug
 
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
@@ -53,6 +56,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --global_batch_size $GBS \
   --expert_model_parallel_size $PRIMUS_EP \
   --use_turbo_grouped_mlp $TURBO_USE_GROUPED_MLP \
+  --moe_use_legacy_grouped_gemm $LEGACY_GG \
   --recompute_num_layers $PRIMUS_RECOMPUTE_LAYERS \
   --recompute_granularity full \
   --recompute_method block \
