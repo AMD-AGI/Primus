@@ -26,7 +26,7 @@ export GBS=$((128 * NNODES))
 export PRIMUS_TOTAL_LAYERS=61
 export PRIMUS_MOE_LAYER_FREQ=1
 export PRIMUS_EP=${PRIMUS_EP:-8}
-export PRIMUS_PP=${PRIMUS_PP:-8}
+export PRIMUS_PP=${PRIMUS_PP:-16}
 export PRIMUS_VPP=${PRIMUS_VPP:-2}
 export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-2}
 
@@ -58,7 +58,7 @@ case $STAGE in
     FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*3|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*2,L'")
     ;;
   32)
-    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*1|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*1|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*1,L'")
+    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*1|t*1|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*1,L'")
     ;;
   *)
     echo "Unsupported STAGE=${STAGE} (PRIMUS_PP=${PRIMUS_PP}, PRIMUS_VPP=${PRIMUS_VPP}). Supported stages: 8, 16, 32." >&2
@@ -66,8 +66,13 @@ case $STAGE in
     ;;
 esac
 
-# 32N best recompute config
-# RECOMP_IDS="0,3,4,7,8,11,12,15,19,23,31,32,35,36,39,40,43,44,47,48,51"
+# Best recompute config
+# 32N_PP16_VPP2
+RECOMP_IDS="0,1,2,4,6,8,10,12,14,16,34,36,38,40,50"
+# 64N_PP16_VPP2
+# RECOMP_IDS="0,1,2,4,6,8,10,12,14,16,34,36"
+# 128N_PP16_VPP2
+# RECOMP_IDS="0,1,2,4,6,8,10,12,14"
 
 if [ -n "$RECOMP_IDS" ]; then
   export RECOMP_IDS
