@@ -54,7 +54,7 @@ Key model properties in `deepseek_v3.yaml`:
 
 ---
 
-## 5) DSV3 Training Parameters (from `start_training_dsv3.sh`)
+## 4) DSV3 Training Parameters
 
 ### Environment Variables
 
