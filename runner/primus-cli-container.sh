@@ -218,19 +218,14 @@ if [[ "$DRY_RUN_MODE" == "false" ]]; then
 fi
 
 # Validate container runtime (docker/podman)
-# In dry-run mode, allow mock runtime if docker/podman not available
-if [[ "$DRY_RUN_MODE" == "true" ]]; then
-    if command -v podman >/dev/null 2>&1; then
-        export CONTAINER_RUNTIME="podman"
-    elif command -v docker >/dev/null 2>&1; then
-        export CONTAINER_RUNTIME="docker"
-    else
-        # Mock runtime for dry-run testing
-        export CONTAINER_RUNTIME="docker"
-        LOG_INFO_RANK0 "[container] Using mock container runtime for dry-run (no docker/podman found)"
-    fi
+if command -v docker >/dev/null 2>&1; then
+    export CONTAINER_RUNTIME="docker"
+elif command -v podman >/dev/null 2>&1; then
+    export CONTAINER_RUNTIME="podman"
 else
-    validate_container_runtime
+    # Mock runtime for dry-run testing
+    export CONTAINER_RUNTIME="docker"
+    LOG_INFO_RANK0 "[container] Using mock container runtime for dry-run (no docker/podman found)"
 fi
 
 ###############################################################################
@@ -385,9 +380,7 @@ LOG_INFO_RANK0 "[container] Converting configuration to container options..."
 
 # 1. Image (required, validated above)
 # Allow users to override the image using the environment variable DOCKER_IMAGE.
-if [ -n "${DOCKER_IMAGE:-}" ]; then
-    DOCKER_IMAGE="${DOCKER_IMAGE}"
-else
+if [ -z "${DOCKER_IMAGE:-}" ]; then
     # For single-value options like image, take the last value (CLI overrides config)
     DOCKER_IMAGE=$(echo "${container_config[options.image]}" | tail -n1)
 fi
