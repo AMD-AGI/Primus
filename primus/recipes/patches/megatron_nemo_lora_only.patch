@@ -1,0 +1,148 @@
+diff --git a/src/megatron/bridge/peft/lora.py b/src/megatron/bridge/peft/lora.py
+index b1f8b55d..7daedb41 100644
+--- a/src/megatron/bridge/peft/lora.py
++++ b/src/megatron/bridge/peft/lora.py
+@@ -33,11 +33,34 @@ from megatron.bridge.peft.lora_layers import (
+     patch_linear_module,
+ )
+ from megatron.bridge.peft.module_matcher import ModuleMatcher
+-from megatron.bridge.peft.utils import ParallelLinearAdapter, get_adapter_attributes_from_linear, is_expert_linear
++from megatron.bridge.peft.utils import (
++    ParallelLinearAdapter,
++    get_adapter_attributes_from_linear,
++    is_expert_linear,
++    wildcard_match,
++)
+ 
+ 
+ logger = logging.getLogger(__name__)
+ 
++
++def _te_fused_lora_allowed_for_module(
++    full_name: str,
++    module_name: Optional[str],
++    include_modules: Optional[List[str]],
++    exclude_modules: List[str],
++) -> bool:
++    """Return True if this FQN may use :class:`TEFusedLoRALinear` (include/exclude patterns)."""
++    for pattern in exclude_modules:
++        if module_name == pattern or wildcard_match(pattern, full_name):
++            return False
++    if include_modules is None:
++        return True
++    for pattern in include_modules:
++        if module_name == pattern or wildcard_match(pattern, full_name):
++            return True
++    return False
++
+ try:
+     import bitsandbytes
+ 
+@@ -77,6 +100,17 @@ class LoRA(PEFT, ModuleMatcher):
+         lora_A_init_method (str): Initialization method for the low-rank matrix A. Defaults to "xavier".
+         lora_B_init_method (str): Initialization method for the low-rank matrix B. Defaults to "zero".
+         lora_dtype (torch.dtype): Parameter data type for LoRA weights. Default None (will use model's dtype).
++        use_te_fused_lora (bool): If True (and TP world size is 1, and the base layer's config enables
++            ``use_transformer_engine_op_fuser``), eligible modules may use :class:`TEFusedLoRALinear`.
++            Default False: use :class:`LoRALinear` everywhere for stable loss.
++        te_fused_lora_include_modules (Optional[List[str]]): If ``use_te_fused_lora`` is True, only
++            module paths matching one of these patterns (same wildcard rules as ``target_modules``)
++            may use fused LoRA. If None, any eligible layer can use fused LoRA (subject to excludes).
++            If ``[]``, no module uses fused LoRA even when ``use_te_fused_lora`` is True.
++        te_fused_lora_exclude_modules (List[str]): Substrings / wildcard patterns; matching modules
++            always use :class:`LoRALinear` even when fused LoRA is otherwise enabled. Use to keep
++            attention projections on the unfused path (e.g. ``linear_qkv``, ``linear_proj``) while
++            optionally fusing MLP adapters only.
+     """
+ 
+     target_modules: List[str] = field(
+@@ -90,6 +124,9 @@ class LoRA(PEFT, ModuleMatcher):
+     lora_B_init_method: str = "zero"
+     a2a_experimental: bool = False
+     lora_dtype: torch.dtype = None
++    use_te_fused_lora: bool = False
++    te_fused_lora_include_modules: Optional[List[str]] = None
++    te_fused_lora_exclude_modules: List[str] = field(default_factory=list)
+ 
+     def transform(self, module: nn.Module, name: Optional[str] = None, prefix: Optional[str] = None) -> nn.Module:
+         """
+@@ -140,10 +177,17 @@ class LoRA(PEFT, ModuleMatcher):
+             attrs = get_adapter_attributes_from_linear(module, is_expert=is_expert)
+ 
+             enable_op_fuser = (
+-                hasattr(module, "config")
++                self.use_te_fused_lora
++                and hasattr(module, "config")
+                 and getattr(module.config, "use_transformer_engine_op_fuser", False)
+-                # TP not yet supported
++                # TP not yet supported for TEFusedLoRALinear
+                 and parallel_state.get_tensor_model_parallel_world_size() == 1
++                and _te_fused_lora_allowed_for_module(
++                    full_name,
++                    name,
++                    self.te_fused_lora_include_modules,
++                    self.te_fused_lora_exclude_modules,
++                )
+             )
+ 
+             logging.info(f"Adding lora to: {full_name}")
+diff --git a/src/megatron/bridge/training/utils/train_utils.py b/src/megatron/bridge/training/utils/train_utils.py
+index 777242b3..9548964a 100644
+--- a/src/megatron/bridge/training/utils/train_utils.py
++++ b/src/megatron/bridge/training/utils/train_utils.py
+@@ -336,6 +336,7 @@ def training_log(
+     history_wct: list,
+     model: list[MegatronModule],
+     log_max_attention_logit: Optional[float] = None,
++    nemo_elapsed_time_per_iter_sec: Optional[float] = None,
+ ) -> bool:
+     """Log training stats (losses, learning rate, timings, etc.).
+ 
+@@ -359,6 +360,10 @@ def training_log(
+         history_wct (list): list of elapsed time per each iteration.
+         model (list[MegatronModule]): megatron model state.
+         log_max_attention_logit (Optional[float]): Maximum attention logit if available, None otherwise.
++        nemo_elapsed_time_per_iter_sec (Optional[float]): If set on a log-interval step, used as the
++            reported ``elapsed time per iteration`` and for Step Time / TFLOP/s (e.g. NeMo-style
++            ``time.time()`` over ``train_step`` only). Megatron ``interval-time`` is still read for
++            comparison and appended to the log line when this is set.
+     Returns:
+         bool: The updated report_memory_flag.
+     """
+@@ -581,13 +586,16 @@ def training_log(
+ 
+     if iteration % logger_config.log_interval == 0:
+         elapsed_time = timers("interval-time").elapsed(barrier=True)
+-        elapsed_time_per_iteration = elapsed_time / total_iterations
++        interval_time_per_iteration = elapsed_time / total_iterations
++        elapsed_time_per_iteration = interval_time_per_iteration
++        if nemo_elapsed_time_per_iter_sec is not None:
++            elapsed_time_per_iteration = nemo_elapsed_time_per_iter_sec
+ 
+         # Calculate GPU utilization
+         num_flops = num_floating_point_operations(config, batch_size)
+         per_gpu_tf = num_flops / elapsed_time_per_iteration / get_world_size_safe() / 1e12
+         print_rank_0(
+-            f"Step Time : {elapsed_time_per_iteration:.2f}s GPU utilization: {per_gpu_tf:.1f}MODEL_TFLOP/s/GPU"
++            f"Step Time : {elapsed_time_per_iteration:.2f}s | model TFLOP/s/GPU: {per_gpu_tf:.1f}"
+         )
+ 
+         if logger_config.log_throughput_to_tensorboard:
+@@ -609,6 +617,8 @@ def training_log(
+         if global_state.train_state.skipped_train_samples > 0:
+             log_string += " skipped samples: {:12d} |".format(global_state.train_state.skipped_train_samples)
+         log_string += " elapsed time per iteration (ms): {:.1f} |".format(elapsed_time_per_iteration * 1000.0)
++        if nemo_elapsed_time_per_iter_sec is not None:
++            log_string += " interval-time (ms): {:.1f} |".format(interval_time_per_iteration * 1000.0)
+ 
+         if logger_config.log_throughput:
+             log_string += f" throughput per GPU (TFLOP/s/GPU): {per_gpu_tf:.1f} |"
+@@ -648,7 +658,7 @@ def training_log(
+         total_loss_dict[advanced_iters_key] = 0
+         total_loss_dict[skipped_iters_key] = 0
+         total_loss_dict[nan_iters_key] = 0
+-        print_rank_last(log_string)
++        print_rank_0(log_string)
+         if report_memory_flag:
+             # Report memory after optimizer state has been initialized.
+             if torch.distributed.get_rank() == 0:

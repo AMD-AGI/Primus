@@ -193,17 +193,59 @@ def load_recipe_config(backend_args: SimpleNamespace) -> Any:
     assert recipe, "Recipe must be specified for Megatron-Bridge backend"
     assert flavor, "Flavor must be specified for Megatron-Bridge backend"
 
-    # Construct full module path and function name
-    full_module_path = f"megatron.bridge.recipes.{recipe}"
+    # Determine if this is a custom recipe or standard Megatron-Bridge recipe
+    # Custom recipes can be specified as:
+    # 1. Python module path (e.g., "primus.recipes.llama2_custom")
+    # 2. Standard Megatron-Bridge recipe (e.g., "llama.llama2")
+    #
+    # We detect custom recipes by checking if they start with known custom prefixes
+    # or if they don't match the standard megatron.bridge.recipes structure
+    is_custom_recipe = False
+    full_module_path = recipe
+
+    # Check if this is a custom recipe (starts with known custom module prefixes)
+    custom_prefixes = ["primus.recipes.", "primus."]
+    for prefix in custom_prefixes:
+        if recipe.startswith(prefix):
+            is_custom_recipe = True
+            break
+
+    # If not explicitly custom, check if it looks like a standard megatron recipe
+    # Standard recipes are in the form "model.variant" (e.g., "llama.llama2")
+    if not is_custom_recipe:
+        # If it doesn't contain dots or looks like a relative path, treat as standard
+        if "." in recipe and not recipe.startswith("/") and not recipe.startswith("."):
+            # Could be either standard or custom. Try standard first.
+            full_module_path = f"megatron.bridge.recipes.{recipe}"
+        else:
+            # Assume it's a standard recipe
+            full_module_path = f"megatron.bridge.recipes.{recipe}"
+
     function_name = flavor
 
     log_rank_0(f"Loading recipe: {full_module_path}.{function_name}()")
+    if is_custom_recipe:
+        log_rank_0(f"  ℹ️  Using custom recipe from: {full_module_path}")
 
     # Import module and get function
     try:
         module = importlib.import_module(full_module_path)
     except ImportError as e:
-        assert False, f"Recipe loading failed: Cannot import '{full_module_path}': {e}"
+        # If standard recipe failed and we haven't tried custom yet, try as custom
+        if not is_custom_recipe and "." in recipe:
+            try:
+                log_rank_0(f"  ⚠️  Standard recipe import failed, trying as custom module...")
+                module = importlib.import_module(recipe)
+                full_module_path = recipe
+                is_custom_recipe = True
+                log_rank_0(f"  ✅ Successfully loaded custom recipe: {recipe}")
+            except ImportError as e2:
+                assert False, (
+                    f"Recipe loading failed: Cannot import as standard '{full_module_path}' "
+                    f"or custom '{recipe}': {e2}"
+                )
+        else:
+            assert False, f"Recipe loading failed: Cannot import '{full_module_path}': {e}"
 
     assert hasattr(
         module, function_name
