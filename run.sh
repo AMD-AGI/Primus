@@ -31,10 +31,13 @@ export TURBO_USE_GROUPED_MLP=False
 # export ENABLE_NUMA_BINDING=1
 # export HSA_KERNARG_POOL_SIZE=12582912
 
+export FP8_RECIPE=delayed # 'tensorwise', 'delayed', 'mxfp8', 'blockwise', 'custom'
+
 if [ "$TURBO_USE_GROUPED_MLP" = "True" ]; then
   export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=TRITON
-#   export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=CK
-#   export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=HIPBLASLT
+  # export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=CK
+  # export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=HIPBLASLT
+  export FP8_RECIPE=tensorwise
 fi
 
 export PRECISION_TYPE=FP8 # BF16
@@ -57,6 +60,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --expert_model_parallel_size $PRIMUS_EP \
   --use_turbo_grouped_mlp $TURBO_USE_GROUPED_MLP \
   --moe_use_legacy_grouped_gemm $LEGACY_GG \
+  --fp8_recipe $FP8_RECIPE \
   --recompute_num_layers $PRIMUS_RECOMPUTE_LAYERS \
   --recompute_granularity full \
   --recompute_method block \
