@@ -482,6 +482,8 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         packed_seq_params: PackedSeqParams = None,
     ):
         """Forward."""
+        SUPPORTED_QKV_FORMATS = "sbhd"
+
         packed_seq_kwargs = (
             {key: getattr(packed_seq_params, key) for key in self.kept_packed_seq_params}
             if packed_seq_params is not None
@@ -489,9 +491,11 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         )
 
         qkv_format = packed_seq_kwargs.get("qkv_format", self.qkv_format)
-        assert qkv_format in ("sbhd", "bhsd"), "qkv_format only support bshd, but got {qkv_format}"
-        if qkv_format == "sbhd":
-            query, key, value = [x.transpose(0, 1).contiguous() for x in (query, key, value)]
+        assert (
+            qkv_format in SUPPORTED_QKV_FORMATS
+        ), f"qkv_format only support {SUPPORTED_QKV_FORMATS}, but got {qkv_format}"
+        # NOTE(ruibin): The layout of q, k and v is (S, B, H, D). But attn accept the shape of qkv is (B, S, H, D).
+        query, key, value = [x.permute(1, 0, 2, 3) for x in (query, key, value)]
         mask_type = attn_mask_type.name
         if mask_type == AttnMaskType.causal.name:
             causal = True
@@ -547,9 +551,10 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             **self.attn_kwargs,
         )
 
-        o = o.reshape(o.shape[0], o.shape[1], -1).transpose(0, 1)
-        if not o.is_contiguous():
-            o = o.contiguous()
+        # NOTE(ruibin): The output of attn is BSHD. Use permute to convert the layout to SBHD.
+        o = o.permute(1, 0, 2, 3).contiguous()
+        o = o.view(o.shape[0], o.shape[1], -1)
+
         return o
 
 
