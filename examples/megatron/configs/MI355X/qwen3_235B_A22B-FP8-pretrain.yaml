@@ -3,6 +3,8 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:qwen3_235B_A22B-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+# The config below is tuned for 32N on MI355X
+
 modules:
   pre_trainer:
     framework: megatron
@@ -61,6 +63,16 @@ modules:
       valid_data_path: null
       test_data_path: null
 
+      # optimizer
+      use_precision_aware_optimizer: true
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
+
+      # rope fusion
+      enable_experimental: true
+      apply_rope_fusion: true
+
       # ckpt
       finetune: false
       auto_continue_train: false
@@ -89,7 +101,7 @@ modules:
       moe_router_dtype: fp32
 
       # 64 or 80 for ep8, 32 for ep16-64 is best practice
-      turbo_deepep_num_cu: 64
+      turbo_deepep_num_cu: 80
       turbo_deepep_use_comm_stream: false
 
       # sync-free moe support stage 1-2, 0 means not use sync-free moe

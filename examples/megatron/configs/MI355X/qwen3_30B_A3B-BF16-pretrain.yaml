@@ -56,6 +56,16 @@ modules:
       valid_data_path: null
       test_data_path: null
 
+      # optimizer
+      use_precision_aware_optimizer: true
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
+
+      # rope fusion
+      enable_experimental: true
+      apply_rope_fusion: true
+
       # ckpt
       finetune: false
       auto_continue_train: false
