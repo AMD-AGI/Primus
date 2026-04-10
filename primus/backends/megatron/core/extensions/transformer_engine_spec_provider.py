@@ -32,6 +32,7 @@ from megatron.core.utils import get_te_version, is_te_min_version
 from primus.backends.megatron.core.extensions.primus_turbo import (
     PrimusTurboAttention,
     PrimusTurboColumnParallelLinear,
+    PrimusTurboGroupedMLP,
     PrimusTurboLayerNormColumnParallelLinear,
     PrimusTurboLinear,
     PrimusTurboRowParallelLinear,
@@ -102,6 +103,19 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             assert not self.cfg.use_turbo_grouped_mlp, "PrimusTurbo not support RowParallelGroupedLinear"
 
             return TEGroupedMLP, TEGroupedMLPSubmodules(
+                linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
+            )
+        elif (
+            moe_use_grouped_gemm
+            and moe_use_legacy_grouped_gemm
+            and self.cfg.use_turbo_grouped_mlp
+            and TEColumnParallelGroupedLinear is not None
+        ):
+            # ``deprecate GroupedMLP`` removed the old legacy class, but DeepEP
+            # sync-free stage 2/3 still needs the turbo grouped-gemm contract.
+            # Keep a local compatibility implementation until the dispatcher path
+            # is fully migrated off the legacy grouped-gemm semantics.
+            return PrimusTurboGroupedMLP, TEGroupedMLPSubmodules(
                 linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
             )
         else:

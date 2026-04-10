@@ -9,7 +9,9 @@ from typing import Callable, List, Optional, Tuple
 import primus_turbo.pytorch as pt
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 import transformer_engine as te
+from megatron.core import tensor_parallel
 from megatron.core.extensions.transformer_engine import TELinear, condition_init_method
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -26,6 +28,7 @@ from megatron.core.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
 )
 from megatron.core.transformer.enums import AttnMaskType
+from megatron.core.transformer.moe.experts import TEGroupedMLP
 from megatron.core.transformer.moe.token_dispatcher import MoETokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
@@ -1246,6 +1249,173 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         if self.use_bias:
             return out + bias_tensor, None
         return out, None
+
+
+class PrimusTurboGroupedMLP(TEGroupedMLP):
+    """
+    Compatibility GroupedMLP for legacy turbo grouped-gemm paths.
+
+    Megatron removed the old ``GroupedMLP`` implementation, but DeepEP sync-free
+    stage 2/3 still relies on the turbo grouped-gemm token-count contract. Keep
+    TEGroupedMLP-style parameter initialization/checkpoint layout while executing
+    the expert MLP with PrimusTurbo grouped-gemm kernels.
+    """
+
+    def __init__(
+        self,
+        num_local_experts: int,
+        config: TransformerConfig,
+        submodules,
+        pg_collection: Optional[ProcessGroupCollection] = None,
+    ):
+        args = get_args()
+        self.offload = args.offload and "grouped_linear" in args.offload_ops
+        assert not self.offload, "grouped_linear offload is not supported in PrimusTurboGroupedMLP"
+
+        super().__init__(
+            num_local_experts=num_local_experts,
+            config=config,
+            submodules=submodules,
+            pg_collection=pg_collection,
+        )
+        self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
+        self.disable_turbo_grouped_mlp_low_precision = args.disable_turbo_grouped_mlp_low_precision
+        self.patch_zero_bubble = args.patch_zero_bubble
+        self.patch_primus_pipeline = args.patch_primus_pipeline
+
+        if self.config.add_bias_linear:
+            raise ValueError("PrimusTurboGroupedMLP does not support add_bias_linear=True")
+
+        if self.use_turbo_fused_act_with_probs:
+            assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
+
+            if self.config.activation_func == F.silu:
+                turbo_fused_act_with_probs = pt.ops.swiglu_with_probs
+            elif self.config.activation_func == F.gelu:
+                turbo_fused_act_with_probs = pt.ops.geglu_with_probs
+            else:
+                raise ValueError("Activation function must be silu or gelu when using GroupedMLP.")
+
+            def _activation_func_with_probs(x, probs, tokens_per_experts):
+                assert x.ndim == 2
+                assert probs.ndim == 1
+                num_tokens = x.shape[0]
+                row_mask = pt.ops.tokens_per_expert_to_mask(tokens_per_experts, num_tokens)
+                return turbo_fused_act_with_probs(x, probs, row_mask)
+
+            self.activation_func_with_probs = _activation_func_with_probs
+
+    def _stack_grouped_linear_weight(self, module: torch.nn.Module) -> torch.Tensor:
+        weights = [getattr(module, f"weight{i}") for i in range(self.num_local_experts)]
+        return torch.stack(weights, dim=0).transpose(1, 2).contiguous()
+
+    def forward(
+        self,
+        permuted_local_hidden_states: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        permuted_probs: torch.Tensor,
+        routing_map: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Forward step of the legacy PrimusTurbo grouped-gemm MLP."""
+        del routing_map
+
+        if self.activation_recompute:
+            self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
+
+        if self.config.moe_apply_probs_on_input:
+            assert (
+                self.config.moe_router_topk == 1
+            ), "`moe_apply_probs_on_input` only works with `moe_router_topk`=1."
+            original_dtype = permuted_local_hidden_states.dtype
+            permuted_local_hidden_states = permuted_probs.unsqueeze(-1) * permuted_local_hidden_states
+            permuted_local_hidden_states = permuted_local_hidden_states.to(original_dtype)
+            # Probs already applied, so reset to 1.
+            permuted_probs = torch.ones_like(permuted_probs)
+
+        w1 = self._stack_grouped_linear_weight(self.linear_fc1)
+        w2 = self._stack_grouped_linear_weight(self.linear_fc2)
+        tokens_per_expert = tokens_per_expert.to(w1.device)
+
+        use_grouped_gemm_low_precision = (
+            PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
+            and not self.disable_turbo_grouped_mlp_low_precision
+        )
+        probs_for_activation = permuted_probs.unsqueeze(-1)
+
+        if permuted_local_hidden_states.nelement() != 0:
+            if use_grouped_gemm_low_precision:
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                fc1_output = pt.ops.grouped_gemm_fp8(
+                    permuted_local_hidden_states,
+                    w1,
+                    tokens_per_expert,
+                    trans_b=False,
+                    config=quant_config.data(),
+                )
+            else:
+                fc1_output = pt.ops.grouped_gemm(
+                    permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False
+                )
+
+            if self.activation_recompute:
+                if self.use_turbo_fused_act_with_probs:
+                    intermediate_parallel = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs,
+                        fc1_output,
+                        permuted_probs,
+                        tokens_per_expert,
+                    )
+                else:
+                    intermediate_parallel = self.activation_checkpoint.checkpoint(
+                        self.bias_act_func, fc1_output, None, probs_for_activation
+                    )
+            else:
+                if self.use_turbo_fused_act_with_probs:
+                    intermediate_parallel = self.activation_func_with_probs(
+                        fc1_output, permuted_probs, tokens_per_expert
+                    )
+                else:
+                    intermediate_parallel = self.bias_act_func(fc1_output, None, probs_for_activation)
+
+            if use_grouped_gemm_low_precision:
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                output = pt.ops.grouped_gemm_fp8(
+                    intermediate_parallel,
+                    w2,
+                    tokens_per_expert,
+                    trans_b=False,
+                    config=quant_config.data(),
+                )
+            else:
+                output = pt.ops.grouped_gemm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
+        else:
+            # Keep a gradient path for expert weights even when no local token is routed here.
+            assert (
+                not self.patch_zero_bubble and not self.patch_primus_pipeline
+            ), "Zero bubble or primus pipeline not support torch.matmul backend yet"
+            w1_flat = w1.view(self.config.hidden_size, -1)
+            w2_flat = w2.view(-1, self.config.hidden_size)
+            hidden = torch.matmul(permuted_local_hidden_states, w1_flat)
+            if self.activation_recompute:
+                if self.use_turbo_fused_act_with_probs:
+                    hidden = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, hidden, permuted_probs, tokens_per_expert
+                    )
+                else:
+                    hidden = self.activation_checkpoint.checkpoint(
+                        self.bias_act_func, hidden, None, probs_for_activation
+                    )
+            else:
+                if self.use_turbo_fused_act_with_probs:
+                    hidden = self.activation_func_with_probs(hidden, permuted_probs, tokens_per_expert)
+                else:
+                    hidden = self.bias_act_func(hidden, None, probs_for_activation)
+            output = torch.matmul(hidden, w2_flat)
+
+        if self.activation_recompute:
+            self.activation_checkpoint.discard_output_and_register_recompute(output)
+
+        return output, None
 
 
 class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
