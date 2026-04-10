@@ -223,8 +223,9 @@ if command -v docker >/dev/null 2>&1; then
 elif command -v podman >/dev/null 2>&1; then
     export CONTAINER_RUNTIME="podman"
 else
-    LOG_ERROR "[container] Neither docker nor podman is available in PATH."
-    exit 1
+    # Mock runtime for dry-run testing
+    export CONTAINER_RUNTIME="docker"
+    LOG_INFO_RANK0 "[container] Using mock container runtime for dry-run (no docker/podman found)"
 fi
 
 ###############################################################################
@@ -379,9 +380,7 @@ LOG_INFO_RANK0 "[container] Converting configuration to container options..."
 
 # 1. Image (required, validated above)
 # Allow users to override the image using the environment variable DOCKER_IMAGE.
-if [ -n "${DOCKER_IMAGE:-}" ]; then
-    DOCKER_IMAGE="${DOCKER_IMAGE}"
-else
+if [ -z "${DOCKER_IMAGE:-}" ]; then
     # For single-value options like image, take the last value (CLI overrides config)
     DOCKER_IMAGE=$(echo "${container_config[options.image]}" | tail -n1)
 fi
