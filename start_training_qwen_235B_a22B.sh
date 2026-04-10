@@ -6,10 +6,7 @@ export DOCKER_IMAGE="docker.io/tasimage/primus:pr-563-ainic"
 # export SLURM_TREE_WIDTH=128
 export NNODES=32
 export TRAIN_ITERS=10
-export SLURM_TIME=48:00:00
-export SLURM_PARTITION=amd-aig-2
-export SLURM_NODELIST="uswslocpm2m-106-[1627,1629,1659-1660,1678,1683-1684,1698,1722,1727,1741,1755,1779,1791,1795,1805,1819,1841,1858,1876-1877,1880,1902,1916,1921-1922,1947,1965,1968,1973,1995,2006]"
-# export NCCL_DEBUG=INFO
+
 export USING_AINIC=1
 export NCCL_IB_HCA="ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,ionic_8:1,ionic_9:1"
 export GLOO_SOCKET_IFNAME=ens9np0
@@ -103,43 +100,39 @@ export PRIMUS_TEAM=amd
 export PRIMUS_USER=tas
 export PRIMUS_TOKENIZED_DATA_PATH=/shared_aig/c4/tokenized/c4_en_train_text_document # this is the tokenized data path for the training
 export PRIMUS_EXP_NAME=qwen3_235B_A22B-pretrain-${PRETRAIN_TYPE}-node_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-profile_$PROFILE-recompute_$PRIMUS_RECOMPUTE_LAYERS
-# export PRIMUS_EXP_NAME=qwen3_235B_A22B-${PRETRAIN_TYPE}-node_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP
-# export PRIMUS_EXP_NAME=debug
-
-#CKPT_DIR=output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/checkpoints
 
 
-mkdir -p output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
+mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
 # mkdir -p "$CKPT_DIR"
 #bash ./examples/run_slurm_pretrain.sh \
 ./primus-cli direct --numa \
   -- train pretrain --config "$EXP" \
-  --num_layers $PRIMUS_TOTAL_LAYERS \
-  --train_iters $TRAIN_ITERS \
-  --micro_batch_size $MBS \
-  --global_batch_size $GBS \
+  --num_layers "$PRIMUS_TOTAL_LAYERS" \
+  --train_iters "$TRAIN_ITERS" \
+  --micro_batch_size "$MBS" \
+  --global_batch_size "$GBS" \
   --use_turbo_attention "$TURBO_ATTENTION" \
   --use_turbo_deepep "$TURBO_DEEPEEP" \
   --use_turbo_grouped_mlp "$TURBO_GROUPED_MLP" \
-  --moe_use_legacy_grouped_gemm $LEGACY_GG \
-  --pipeline_model_parallel_size $PRIMUS_PP \
-  --expert_model_parallel_size $PRIMUS_EP \
+  --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
+  --pipeline_model_parallel_size "$PRIMUS_PP" \
+  --expert_model_parallel_size "$PRIMUS_EP" \
   "${PIPELINE_ARGS[@]}" \
   "${FEATURE_ARGS[@]}" \
   --cross_entropy_fusion_impl "te" \
   --cross_entropy_loss_fusion True \
-  --recompute_num_layers $PRIMUS_RECOMPUTE_LAYERS \
+  --recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS" \
   --recompute_granularity full \
   --recompute_method block \
   --disable_last_saving True \
-  --moe_layer_freq $PRIMUS_MOE_LAYER_FREQ \
+  --moe_layer_freq "$PRIMUS_MOE_LAYER_FREQ" \
   --mock_data True \
   --manual_gc True \
   --manual_gc_interval 1 \
   --pp_warmup True  \
   --mtp_num_layers 0 \
-  --profile $PROFILE \
-  --use_pytorch_profiler $PROFILE \
+  --profile "$PROFILE" \
+  --use_pytorch_profiler "$PROFILE" \
   --profile_step_end 7 \
   --profile_step_start 6 \
   --disable_wandb True \
@@ -152,4 +145,4 @@ mkdir -p output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME
   --main_grads_dtype bf16 \
   --exp_avg_dtype bf16 \
   --exp_avg_sq_dtype bf16 \
-  2>&1 | tee output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log.txt
+  2>&1 | tee "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log.txt"

@@ -9,11 +9,7 @@ export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/tasimage/primus:pr-563-ainic"}
 # export SLURM_TREE_WIDTH=128
 export NNODES=1
 export TRAIN_ITERS=20
-export SLURM_TIME=48:00:00
-export SLURM_PARTITION=amd-aig-2
-export SLURM_NODELIST="uswslocpm2m-106-1962"
 
-# export NCCL_DEBUG=INFO
 export USING_AINIC=1
 export NCCL_IB_HCA="ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,ionic_8:1,ionic_9:1"
 export GLOO_SOCKET_IFNAME=ens9np0
@@ -47,7 +43,6 @@ export PRIMUS_USER="${WORKLOAD_ID:-tas}"
 export PRIMUS_USER
 export PRIMUS_TOKENIZED_DATA_PATH=/shared_aig/c4/tokenized/c4_en_train_text_document # this is the tokenized data path for the training
 export PRIMUS_EXP_NAME=qwen3_30B_A3B-pretrain-${PRETRAIN_TYPE}-node_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-legacygg_$LEGACY_GG
-# export PRIMUS_EXP_NAME=debug
 
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
@@ -87,5 +82,3 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --disable_wandb True \
   --disable_tensorboard True \
   2>&1 | tee "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK}.txt"
-  # --manual_gc True \
-  # --manual_gc_interval 1 \

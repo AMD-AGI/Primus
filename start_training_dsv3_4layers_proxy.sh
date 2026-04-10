@@ -16,9 +16,6 @@ fi
 
 export NNODES=4
 export TRAIN_ITERS=10
-export SLURM_TIME=01:00:00
-export SLURM_PARTITION=amd-aig
-# export SLURM_NODELIST="uswslocpm2m-106-079"
 
 # export NCCL_DEBUG=INFO
 export USING_AINIC=1
@@ -57,7 +54,6 @@ export EXP=examples/megatron/configs/MI355X/deepseek_v3-${PRETRAIN_TYPE}-pretrai
 export PRIMUS_TEAM=amd
 PRIMUS_USER="tas-$(date +%Y%m%d)"
 export PRIMUS_USER
-export PRIMUS_EXP_NAME=dsv3-pretrain-platform_$PLATFORM-layers_$PRIMUS_TOTAL_LAYERS-type_$PRETRAIN_TYPE-mbs_$MBS-gbs_$GBS-legacygg_$LEGACY_GG
 export PRIMUS_EXP_NAME=debug_4layers-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP
 
 
@@ -91,6 +87,3 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --disable_tensorboard True \
   "$EXTRA_ARGS" \
   2>&1 | tee "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK}.txt"
-
-  # --manual_gc True \
-  # --manual_gc_interval 1 \

@@ -6,13 +6,9 @@ export HF_TOKEN="${HF_TOKEN:-'your_hf_token'}"
 export WANDB_API_KEY="${WANDB_API_KEY:-'your_wandb_api_key'}"
 
 export NNODES=${NNODES:-8}
-export SLURM_TIME=48:00:00
-export SLURM_PARTITION=amd-aig
-# export SLURM_NODELIST="uswslocpm2m-106-[...]"
 
 export TRAIN_ITERS=${TRAIN_ITERS:-10}
 
-# export NCCL_DEBUG=INFO
 export USING_AINIC=1
 export NCCL_IB_HCA="ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,ionic_8:1,ionic_9:1"
 export GLOO_SOCKET_IFNAME=ens9np0
@@ -101,14 +97,13 @@ export PRIMUS_TEAM
 PRIMUS_USER="${WORKLOAD_ID:-tas}"
 export PRIMUS_USER
 export PRIMUS_TOKENIZED_DATA_PATH=/shared_aig/c4/tokenized/c4_en_train_text_document
-export PRIMUS_EXP_NAME=glm5-pretrain-nnodes_$NNODES-mbs_$MBS-gbs_$GBS-PP_$PRIMUS_PP-EP_$PRIMUS_EP-VPP_$PRIMUS_VPP-turbodeepep_$TURBO_DEEPEEP-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turboattn_$TURBO_ATTENTION-profile_$PROFILE
-export PRIMUS_EXP_NAME=debug_glm5-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turbodeepep_$TURBO_DEEPEEP-turboattn_$TURBO_ATTENTION-autotune_$PRIMUS_TURBO_AUTO_TUNE
+export PRIMUS_EXP_NAME=glm5-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turbodeepep_$TURBO_DEEPEEP-turboattn_$TURBO_ATTENTION-autotune_$PRIMUS_TURBO_AUTO_TUNE
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
 ./primus-cli direct --numa \
   -- train pretrain --config "$EXP" \
   --num_layers $PRIMUS_TOTAL_LAYERS \
-  --train_iters $TRAIN_ITERS \
+  --train_iters "$TRAIN_ITERS" \
   --micro_batch_size "$MBS" \
   --global_batch_size "$GBS" \
   --use_turbo_attention "$TURBO_ATTENTION" \

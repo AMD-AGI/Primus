@@ -27,7 +27,6 @@ export TURBO_DEEPEEP=True
 export LEGACY_GG=True
 export PRIMUS_DETERMINISTIC=0
 
-# export EXP=examples/megatron/configs/MI355X/llama3.1_8B-BF16-pretrain.yaml
 export EXP=examples/megatron/configs/MI355X/deepseek_v2_lite-BF16-pretrain.yaml
 export PRIMUS_TEAM=amd
 export PRIMUS_USER=tas
