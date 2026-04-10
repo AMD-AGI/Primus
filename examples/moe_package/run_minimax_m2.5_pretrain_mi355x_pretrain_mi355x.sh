@@ -1,11 +1,16 @@
 #!/bin/bash
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 set -x
 
 export HF_TOKEN="${HF_TOKEN:-'your_hf_token'}"
 export WANDB_API_KEY="${WANDB_API_KEY:-'your_wandb_api_key'}"
 
-export NNODES=${NNODES:-8}
+export NNODES=${NNODES:-16}
 
 export TRAIN_ITERS=${TRAIN_ITERS:-10}
 
@@ -19,29 +24,28 @@ export NVTE_CK_USES_BWD_V3=1
 export GPU_MAX_HW_QUEUES=4
 export PRIMUS_TURBO_DEEPEP_TIMEOUT=600
 
-export MBS=${MBS:-1}
-export GBS=$((32 * NNODES))
-export PRIMUS_TOTAL_LAYERS=78
+export MBS=${MBS:-2}
+export GBS=$((64 * NNODES))
+export PRIMUS_TOTAL_LAYERS=62
 export PRIMUS_MOE_LAYER_FREQ=1
 export PRIMUS_EP=${PRIMUS_EP:-8}
-export PRIMUS_PP=${PRIMUS_PP:-8}
-export PRIMUS_VPP=${PRIMUS_VPP:-1}
-export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-8}
+export PRIMUS_PP=${PRIMUS_PP:-4}
+export PRIMUS_VPP=${PRIMUS_VPP:-2}
+export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-2}
 
 export PROFILE=False
-export TURBO_ATTENTION=${TURBO_ATTENTION:-True}
+export TURBO_ATTENTION=${TURBO_ATTENTION:-False}
 export TURBO_DEEPEEP=${TURBO_DEEPEEP:-True}
 export LEGACY_GG=${LEGACY_GG:-True}
 export TURBO_GROUPED_MLP=${TURBO_GROUPED_MLP:-False}
 export TURBO_RMS_NORM=${TURBO_RMS_NORM:-True}
-# MLA does not support rope fusion
-export APPLY_ROPE_FUSION=False
+export APPLY_ROPE_FUSION=True
 export PRIMUS_TURBO_AUTO_TUNE=${PRIMUS_TURBO_AUTO_TUNE:-0}
 
 export ENABLE_NUMA_BINDING=1
 export HSA_KERNARG_POOL_SIZE=12582912
 
-# GLM-5: 78 layers, MLA + MoE (256 experts, top-8, first 3 dense)
+# MiniMax M2.5: 62 layers, GQA + MoE (256 experts, top-8)
 # Pipeline layout for PP*VPP stages
 STAGE=$(( PRIMUS_PP * PRIMUS_VPP ))
 FEATURE_ARGS=()
@@ -49,18 +53,12 @@ PIPELINE_ARGS=()
 if [ "$PRIMUS_VPP" -gt 1 ]; then
   case $STAGE in
     8)
-      # 78 layers / 8 stages: 10*6+9*2=78
-      FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*9|t*10|t*10|t*10|t*10|t*10|t*10|t*9,L'")
+      # 62 layers / 8 stages: 8*6+7*2=62
+      FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*7|t*8|t*8|t*8|t*8|t*8|t*8|t*7,L'")
       ;;
     16)
-      # 78 layers / 16 stages: 5*14+4*2=78
-      FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*4|t*5|t*5|t*5|t*5|t*5|t*5|t*5|t*5|t*5|t*5|t*5|t*5|t*5|t*5|t*4,L'")
-      ;;
-    32)
-      # 78 layers / 32 stages: 3*14+2*18=78 → actually 3*10+2*22=74 nope
-      # 78/32=2.4375 → 3*14+2*18=78 nope. Let's do: 2*16+3*16=2*16+3*16 nope.
-      # Correct: 78=3*24+2*8=72+6 nope. Actually 78/32: 2 per stage + 14 stages with 3 = 2*18+3*14=36+42=78 ✓
-      FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*2|t*3|t*3|t*3|t*2|t*3|t*3|t*3|t*2|t*3|t*3|t*3|t*2|t*3|t*3|t*2|t*3|t*3|t*2|t*3|t*3|t*2|t*3|t*3|t*2|t*3|t*3|t*2|t*3|t*3|t*2|t*2,L'")
+      # 62 layers / 16 stages: 4*14+3*2=62
+      FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*3|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*3,L'")
       ;;
     *)
       echo "Unsupported STAGE=${STAGE} (PRIMUS_PP=${PRIMUS_PP}, PRIMUS_VPP=${PRIMUS_VPP})." >&2
@@ -70,9 +68,9 @@ if [ "$PRIMUS_VPP" -gt 1 ]; then
 else
   if [ -z "${DECODER_LAST_PIPELINE_NUM_LAYERS:-}" ]; then
     if [ "$PRIMUS_PP" -eq 4 ]; then
-      DECODER_LAST_PIPELINE_NUM_LAYERS=18
+      DECODER_LAST_PIPELINE_NUM_LAYERS=14
     elif [ "$PRIMUS_PP" -eq 8 ]; then
-      DECODER_LAST_PIPELINE_NUM_LAYERS=8
+      DECODER_LAST_PIPELINE_NUM_LAYERS=6
     else
       MIDDLE_LAYERS_EACH=$(( (PRIMUS_TOTAL_LAYERS + PRIMUS_PP - 1) / PRIMUS_PP ))
       DECODER_LAST_PIPELINE_NUM_LAYERS=$(( PRIMUS_TOTAL_LAYERS - (PRIMUS_PP - 1) * MIDDLE_LAYERS_EACH ))
@@ -91,13 +89,13 @@ fi
 
 export PRETRAIN_TYPE=${PRETRAIN_TYPE:-BF16}
 
-export EXP=examples/megatron/configs/MI355X/glm5-${PRETRAIN_TYPE}-pretrain.yaml
+export EXP=examples/megatron/configs/MI355X/minimax_m2.5-${PRETRAIN_TYPE}-pretrain.yaml
 PRIMUS_TEAM="amd-$(date +%Y%m%d)"
 export PRIMUS_TEAM
 PRIMUS_USER="${WORKLOAD_ID:-tas}"
 export PRIMUS_USER
 export PRIMUS_TOKENIZED_DATA_PATH=/shared_aig/c4/tokenized/c4_en_train_text_document
-export PRIMUS_EXP_NAME=glm5-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turbodeepep_$TURBO_DEEPEEP-turboattn_$TURBO_ATTENTION-autotune_$PRIMUS_TURBO_AUTO_TUNE
+export PRIMUS_EXP_NAME=minimax_m2.5-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turbodeepep_$TURBO_DEEPEEP-turboattn_$TURBO_ATTENTION-autotune_$PRIMUS_TURBO_AUTO_TUNE
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
 ./primus-cli direct --numa \
@@ -116,6 +114,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --lr_decay_iters 5000 \
   --lr_decay_style cosine \
   --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
+  --enable_experimental "$APPLY_ROPE_FUSION" \
+  --apply_rope_fusion "$APPLY_ROPE_FUSION" \
   --pipeline_model_parallel_size "$PRIMUS_PP" \
   --expert_model_parallel_size "$PRIMUS_EP" \
   "${PIPELINE_ARGS[@]}" \
@@ -137,6 +137,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --disable_wandb True \
   --disable_tensorboard True \
   --turbo_deepep_num_cu 80 \
-  --overlap_grad_reduce False \
-  --overlap_param_gather False \
+  --use_precision_aware_optimizer True \
+  --main_grads_dtype bf16 \
+  --exp_avg_dtype bf16 \
+  --exp_avg_sq_dtype bf16 \
   2>&1 | tee "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK}.txt"

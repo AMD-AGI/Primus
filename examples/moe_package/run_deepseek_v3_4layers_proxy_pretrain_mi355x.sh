@@ -1,4 +1,9 @@
 #!/bin/bash
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 export HF_TOKEN="${HF_TOKEN:-'your_hf_token'}"  # make it your own hf token
 export WANDB_API_KEY="${WANDB_API_KEY:-'your_wandb_api_key'}"  # make it your own wandb api key
@@ -14,13 +19,14 @@ else
   exit 1
 fi
 
-export NNODES=${NNODES:-1}
+export NNODES=4
 export TRAIN_ITERS=10
 
-export USING_AINIC=0
+# export NCCL_DEBUG=INFO
+export USING_AINIC=1
 export NCCL_IB_HCA="ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,ionic_8:1,ionic_9:1"
-# export GLOO_SOCKET_IFNAME=ens9np0
-# export NCCL_SOCKET_IFNAME=ens9np0
+export GLOO_SOCKET_IFNAME=ens9np0
+export NCCL_SOCKET_IFNAME=ens9np0
 export HSA_NO_SCRATCH_RECLAIM=1
 export NVTE_CK_USES_BWD_V3=1
 export GPU_MAX_HW_QUEUES=4
@@ -35,6 +41,7 @@ export PRIMUS_PP=1
 export PRIMUS_EP=8
 export PRIMUS_VPP=1
 export PROFILE=False
+export TURBO_ATTENTION=${TURBO_ATTENTION:-True}
 export TURBO_DEEPEEP=${TURBO_DEEPEEP:-True}
 export LEGACY_GG=${LEGACY_GG:-True}
 export TURBO_GROUPED_MLP=${TURBO_GROUPED_MLP:-True}
@@ -48,11 +55,11 @@ export PRIMUS_TURBO_DEEPEP_TIMEOUT=600
 
 export PRETRAIN_TYPE=${PRETRAIN_TYPE:-BF16} # BF16 or FP8
 
-export EXP=examples/megatron/configs/MI355X/minimax_m2.5-${PRETRAIN_TYPE}-pretrain.yaml
+export EXP=examples/megatron/configs/MI355X/deepseek_v3-${PRETRAIN_TYPE}-pretrain.yaml
 export PRIMUS_TEAM=amd
 PRIMUS_USER="tas-$(date +%Y%m%d)"
 export PRIMUS_USER
-export PRIMUS_EXP_NAME=minimax_m2.5_4layers-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP
+export PRIMUS_EXP_NAME=debug_4layers-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP
 
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"

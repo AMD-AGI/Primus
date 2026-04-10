@@ -1,5 +1,9 @@
 #!/bin/bash
-
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 set -x
 
 export HF_TOKEN="${HF_TOKEN:-'your_hf_token'}"  # make it your own hf token

@@ -1,4 +1,9 @@
 #!/bin/bash
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 export HF_TOKEN="your_hf_token"  # make it your own hf token
 export WANDB_API_KEY="your_wandb_api_key"  # make it your own wandb api key
