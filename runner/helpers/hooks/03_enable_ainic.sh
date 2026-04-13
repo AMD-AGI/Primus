@@ -22,6 +22,10 @@ if [[ "${USING_AINIC:-0}" != "1" ]]; then
     exit 0
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/../envs/path_utils.sh"
+
 ANP_HOME_DIR="${ANP_HOME_DIR:-/workspace/amd-anp}"
 RCCL_HOME_DIR="${RCCL_HOME_DIR:-/workspace/rccl}"
 MPI_HOME_DIR="${MPI_HOME_DIR:-/opt/ompi}"
@@ -50,15 +54,14 @@ NCCL_DMABUF_ENABLE="${NCCL_DMABUF_ENABLE:-0}"
 NCCL_IGNORE_CPU_AFFINITY="${NCCL_IGNORE_CPU_AFFINITY:-1}"
 NCCL_IB_QPS_PER_CONNECTION="${NCCL_IB_QPS_PER_CONNECTION:-1}"
 
-# LD_LIBRARY_PATH: prepend AINIC/RCCL/MPI paths while preserving existing.
-_ld_base="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/install/lib"
-# Need to append AINIC/RCCL/MPI paths to the existing LD_LIBRARY_PATH. Otherwise,
-# JAX MaxText will not find the appropriate ROCm libraries.
-LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}${_ld_base}"
-
-# _ld_base="/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib"
-# LD_LIBRARY_PATH="${_ld_base}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-
+# Keep ROCm first, then append AINIC/RCCL/MPI paths without duplicates.
+ensure_rocm_ld_library_path
+path_append_unique LD_LIBRARY_PATH \
+    /usr/lib/x86_64-linux-gnu \
+    /usr/lib/x86_64-linux-gnu/libibverbs \
+    "${RCCL_HOME_DIR}/build/release" \
+    "${ANP_HOME_DIR}/build" \
+    "${MPI_HOME_DIR}/install/lib"
 LOG_INFO_RANK0 "Using AINIC"
 LOG_INFO_RANK0 "RCCL_HOME_DIR: ${RCCL_HOME_DIR}"
 LOG_INFO_RANK0 "ANP_HOME_DIR: ${ANP_HOME_DIR}"
