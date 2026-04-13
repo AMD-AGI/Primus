@@ -34,6 +34,7 @@ CUSTOM_TOKENIZER_TYPES = {
     "Llama3Tokenizer",
     "MixtralTokenizer",
     "Llama4Tokenizer",
+    "KimiK2Tokenizer",
     "HuggingFaceTokenizer",
 }
 
@@ -53,7 +54,7 @@ def build_tokenizer(args, **kwargs):
 
     # Select and instantiate the tokenizer.
     if args.tokenizer_type in CUSTOM_TOKENIZER_TYPES:
-        tokenizer = _HuggingFaceTokenizer(args.tokenizer_model)
+        tokenizer = _HuggingFaceTokenizer(args.tokenizer_model, trust_remote_code=True)
     else:
         return megatron_build_tokenizer(args, **kwargs)
 
