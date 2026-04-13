@@ -15,8 +15,8 @@ export NCCL_IB_HCA="ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,
 # export NCCL_SOCKET_IFNAME=ens9np0
 export HSA_NO_SCRATCH_RECLAIM=1
 export NVTE_CK_USES_BWD_V3=1
-export GPU_MAX_HW_QUEUES=4
-export CLEAN_DOCKER_CONTAINER=1
+# export GPU_MAX_HW_QUEUES=4
+# export CLEAN_DOCKER_CONTAINER=1
 
 export MBS=16
 export GBS=512
@@ -31,16 +31,34 @@ export TURBO_USE_GROUPED_MLP=False
 # export ENABLE_NUMA_BINDING=1
 # export HSA_KERNARG_POOL_SIZE=12582912
 
-export FP8_RECIPE=delayed # 'tensorwise', 'delayed', 'mxfp8', 'blockwise', 'custom'
 
-if [ "$TURBO_USE_GROUPED_MLP" = "True" ]; then
-  export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=TRITON
-  # export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=CK
-  # export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=HIPBLASLT
-  export FP8_RECIPE=tensorwise
+export PRECISION_TYPE=FP8 # BF16, FP8
+export FP8=null # 'e4m3', 'hybrid'
+export FP8_RECIPE=null # 'tensorwise', 'delayed', 'mxfp8', 'blockwise', 'custom'
+export TE_PRECISION_CONFIG_FILE=null
+
+if [ "$PRECISION_TYPE" = "FP8" ]; then
+  if [ "$TURBO_USE_GROUPED_MLP" = "True" ]; then
+    export LEGACY_GG=True
+    export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=TRITON
+    # export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=CK
+    # export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=HIPBLASLT
+    export FP8=e4m3
+    export FP8_RECIPE=tensorwise
+  else
+    export FP8=hybrid
+    export FP8_RECIPE=delayed
+  fi
+  export TE_PRECISION_CONFIG_FILE=examples/megatron/configs/MI355X/lfm2_8B_A1B-FP8-te-precision.yaml
+elif [ "$PRECISION_TYPE" = "BF16" ]; then
+  if [ "$TURBO_USE_GROUPED_MLP" = "True" ]; then
+    export LEGACY_GG=True
+  fi
+  export FP8=null
+  export FP8_RECIPE=null
 fi
 
-export PRECISION_TYPE=FP8 # BF16
+# export EXP=examples/megatron/configs/MI355X/llama3.1_8B-${PRECISION_TYPE}-pretrain.yaml
 export EXP=examples/megatron/configs/MI355X/lfm2_8B_A1B-${PRECISION_TYPE}-pretrain.yaml
 # export EXP=examples/megatron/configs/MI355X/qwen3_30B_A3B-BF16-pretrain.yaml
 export PRIMUS_TEAM=amd
@@ -60,7 +78,9 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --expert_model_parallel_size $PRIMUS_EP \
   --use_turbo_grouped_mlp $TURBO_USE_GROUPED_MLP \
   --moe_use_legacy_grouped_gemm $LEGACY_GG \
+  --fp8 $FP8 \
   --fp8_recipe $FP8_RECIPE \
+  --te_precision_config_file $TE_PRECISION_CONFIG_FILE \
   --recompute_num_layers $PRIMUS_RECOMPUTE_LAYERS \
   --recompute_granularity full \
   --recompute_method block \
