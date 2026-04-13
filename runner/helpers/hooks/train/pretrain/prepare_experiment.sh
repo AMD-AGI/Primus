@@ -19,8 +19,7 @@
 set -euo pipefail
 
 # First two args are the hook group/name injected by execute_hooks.sh (e.g. train pretrain)
-HOOK_GROUP="$1"
-HOOK_NAME="$2"
+: "${1:?missing hook group}" "${2:?missing hook name}"
 shift 2
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -258,4 +257,3 @@ if [[ "$FRAMEWORK_DIR" == "megatron" ]]; then
 fi
 
 exec "${CMD[@]}"
-

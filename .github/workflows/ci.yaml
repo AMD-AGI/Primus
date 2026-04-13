@@ -34,27 +34,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Display Python version
         run: python -c "import sys; print(sys.version)"
-      - name: Install Autoflake
-        run: pip install autoflake==2.3.1
-      - name: Run Autoflake
-        if: always()
-        run: |
-          output=$(autoflake . --remove-all-unused-imports --remove-unused-variables --expand-star-imports --ignore-init-module-imports --recursive)
-          if [[ -n "$output" ]]; then
-            echo "Autoflake check failed: $output"
-            exit 1
-          else
-            echo "Autoflake check success."
-          fi
-      - uses: isort/isort-action@v1
-        if: always()
-        with:
-          isort-version: "5.13.2"
-          configuration: "--profile black --check-only --diff"
-      - uses: psf/black@24.8.0
-        if: always()
-        with:
-          options: "--check --diff --color --verbose --line-length=110"
+      # Mirrors `.pre-commit-config.yaml` exactly (hooks + pinned revs/args).
+      - name: Install pre-commit
+        run: pip install pre-commit
+      - name: Run pre-commit (all hooks, all files)
+        run: pre-commit run --all-files --show-diff-on-failure
 
   build-docker:
     needs: [code-lint]

@@ -381,11 +381,11 @@ configuring backend-specific env vars at runtime), you can use **train hooks**
 under `runner/helpers/hooks`.
 
 - **Hook locations for training**:
-  - Global hooks (run for all commands):  
+  - Global hooks (run for all commands):
     `runner/helpers/hooks/*.sh|*.py`
-  - Train-specific hooks (per framework):  
-    `runner/helpers/hooks/train/pretrain/<framework>/*.sh|*.py`  
-    `runner/helpers/hooks/train/posttrain/<framework>/*.sh|*.py`  
+  - Train-specific hooks (per framework):
+    `runner/helpers/hooks/train/pretrain/<framework>/*.sh|*.py`
+    `runner/helpers/hooks/train/posttrain/<framework>/*.sh|*.py`
     where `<framework>` is `megatron`, `torchtitan`, `dummy`, etc.
 - Files in each directory are discovered with `find ... -name "*.sh" -o -name "*.py"`
   and executed in **lexicographical order** of their filenames.

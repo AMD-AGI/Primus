@@ -32,7 +32,7 @@ path_prepend_unique() {
     done
 
     printf -v "$var_name" '%s' "$result"
-    export "$var_name"
+    declare -x "${var_name}=${!var_name}"
 }
 
 path_append_unique() {
@@ -50,7 +50,7 @@ path_append_unique() {
     done
 
     printf -v "$var_name" '%s' "$result"
-    export "$var_name"
+    declare -x "${var_name}=${!var_name}"
 }
 
 ensure_rocm_ld_library_path() {
