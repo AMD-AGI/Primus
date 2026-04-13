@@ -124,7 +124,7 @@ modules:
 
       # Fine-tuning method
       peft: "none"  # Full fine-tuning
-      
+
       # Training configuration
       train_iters: 200
       global_batch_size: 8
@@ -167,7 +167,7 @@ modules:
 
       # Fine-tuning method
       peft: lora  # LoRA fine-tuning
-      
+
       # Training configuration
       train_iters: 200
       global_batch_size: 32
@@ -181,7 +181,7 @@ modules:
 
       # Precision
       precision_config: bf16_mixed
-      
+
       # Recompute configuration
       recompute_granularity: full
       recompute_method: uniform
@@ -357,7 +357,7 @@ recompute_num_layers: 1       # Number of layers to recompute
 **For SFT:**
 - Use higher `tensor_model_parallel_size` for large models (e.g., TP=8 for 70B)
 - Consider pipeline parallelism for very large models
-- Examples: 
+- Examples:
   - 32B model: TP=1-2 (MI300X: TP=2, MI355X: TP=1)
   - 70B model: TP=8
 
