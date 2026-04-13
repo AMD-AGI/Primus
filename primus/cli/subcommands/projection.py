@@ -38,17 +38,17 @@ def register_subcommand(subparsers):
     Example:
         # Memory projection
         primus projection memory --config exp.yaml
-        
+
         # Performance projection (single-node benchmarking only)
         primus projection performance --config exp.yaml
-        
+
         # Performance projection with multinode scaling to 4 nodes
         primus projection performance --config exp.yaml --target-nodes 4
-        
+
         # Performance projection with custom hardware config
         primus projection performance --config exp.yaml --target-nodes 8 \\
             --hardware-config hardware_mi300x.yaml
-        
+
     Args:
         subparsers: argparse subparsers object from main.py
 

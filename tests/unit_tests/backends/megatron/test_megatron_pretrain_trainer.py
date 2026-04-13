@@ -124,3 +124,61 @@ class TestMegatronPretrainTrainer:
 
         # Keyword arguments:
         assert kwargs == {"store": "STORE"}
+
+    def test_train_marks_function_provider_distributed_when_attribute_is_missing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        trainer = _build_trainer(monkeypatch)
+
+        calls: List[Tuple[tuple, dict]] = []
+
+        model_type = SimpleNamespace(encoder_or_decoder="ENCODER_OR_DECODER")
+        enums_mod = types.SimpleNamespace(ModelType=model_type)
+        monkeypatch.setitem(sys.modules, "megatron.core.enums", enums_mod)
+
+        def fake_pretrain(*args, **kwargs):
+            raise AssertionError("fake_pretrain was called directly; expected wrapped_pretrain to be used")
+
+        def wrapped_pretrain(*args, store=None, **kwargs):
+            calls.append((args, {"store": store, **kwargs}))
+
+        class DummyInprocessRestart:
+            @staticmethod
+            def maybe_wrap_for_inprocess_restart(fn):
+                assert fn is fake_pretrain
+                return wrapped_pretrain, "STORE"
+
+        training_mod = types.SimpleNamespace(
+            inprocess_restart=DummyInprocessRestart,
+            pretrain=fake_pretrain,
+        )
+        monkeypatch.setitem(sys.modules, "megatron.training", training_mod)
+
+        # This matches upstream more closely: the provider is a plain function and only gets the
+        # marker attribute when the wrapper sets it explicitly.
+        def train_valid_test_datasets_provider(train_val_test_num_samples):
+            raise AssertionError("dataset provider should not be executed in the wiring test")
+
+        pretrain_gpt_mod = types.SimpleNamespace(
+            forward_step="FORWARD_STEP",
+            train_valid_test_datasets_provider=train_valid_test_datasets_provider,
+        )
+        monkeypatch.setitem(sys.modules, "pretrain_gpt", pretrain_gpt_mod)
+
+        model_provider = object()
+        import_utils_mod = types.SimpleNamespace(
+            get_model_provider=lambda: model_provider,
+        )
+        monkeypatch.setitem(sys.modules, "primus.core.utils.import_utils", import_utils_mod)
+
+        trainer.train()
+
+        assert getattr(train_valid_test_datasets_provider, "is_distributed", None) is True
+        assert len(calls) == 1
+        (args, kwargs) = calls[0]
+        assert args[0] is train_valid_test_datasets_provider
+        assert args[1] is model_provider
+        assert args[2] is model_type.encoder_or_decoder
+        assert args[3] == "FORWARD_STEP"
+        assert kwargs == {"store": "STORE"}

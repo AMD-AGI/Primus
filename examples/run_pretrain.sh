@@ -101,6 +101,9 @@ PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
 export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 
+# shellcheck disable=SC1091
+source "${PRIMUS_PATH}/runner/helpers/envs/path_utils.sh"
+
 LOG_INFO_RANK0 "Pip installing required packages ..."
 if [ "${BACKEND:-}" != "MaxText" ]; then
     pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
@@ -166,8 +169,8 @@ LOG_INFO_RANK0 ""
 HIP_VISIBLE_DEVICES=$(seq -s, 0 $((GPUS_PER_NODE - 1)))
 export HIP_VISIBLE_DEVICES
 
-# set LD_LIBRARY_PATH for ROCm in case it is not set in the container
-export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-/opt/rocm/lib}
+# Keep ROCm libraries ahead of any system-provided HSA runtime.
+ensure_rocm_ld_library_path
 
 # ----------------- NCCL and Network Settings -----------------
 # VERSION, WARN, INFO, DEBUG, TRACE
@@ -216,7 +219,12 @@ if [ "$USING_AINIC" == "1" ]; then
         export NCCL_PXN_DISABLE=0
         export RCCL_LL128_FORCE_ENABLE=1
 
-        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib
+        path_append_unique LD_LIBRARY_PATH \
+            /usr/lib/x86_64-linux-gnu \
+            /usr/lib/x86_64-linux-gnu/libibverbs \
+            "${RCCL_HOME_DIR}/build/release" \
+            "${ANP_HOME_DIR}/build" \
+            "${MPI_HOME_DIR}/lib"
     else
         export ANP_HOME_DIR=${ANP_HOME_DIR:-"/workspace/amd-anp"}
         export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/workspace/rccl"}
@@ -226,7 +234,12 @@ if [ "$USING_AINIC" == "1" ]; then
         export NCCL_DMABUF_ENABLE=0
         export NCCL_IB_QPS_PER_CONNECTION=1
 
-        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib
+        path_append_unique LD_LIBRARY_PATH \
+            /usr/lib/x86_64-linux-gnu \
+            /usr/lib/x86_64-linux-gnu/libibverbs \
+            "${RCCL_HOME_DIR}/build/release" \
+            "${ANP_HOME_DIR}/build" \
+            "${MPI_HOME_DIR}/lib"
     fi
     # Check which NCCL net plugin library is present under ${ANP_HOME_DIR}/build and set accordingly
     if [ -n "${NCCL_NET_PLUGIN:-}" ]; then
