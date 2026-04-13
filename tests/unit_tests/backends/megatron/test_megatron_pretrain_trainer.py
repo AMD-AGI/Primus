@@ -182,4 +182,3 @@ class TestMegatronPretrainTrainer:
         assert args[2] is model_type.encoder_or_decoder
         assert args[3] == "FORWARD_STEP"
         assert kwargs == {"store": "STORE"}
-

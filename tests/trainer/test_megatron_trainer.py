@@ -123,7 +123,6 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
-
     def test_llama3_70B(self):
         run_script(
             self.__class__.__name__,
