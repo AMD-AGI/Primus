@@ -32,7 +32,8 @@ path_prepend_unique() {
     done
 
     printf -v "$var_name" '%s' "$result"
-    declare -x "${var_name}=${!var_name}"
+    # shellcheck disable=SC2163
+    export "$var_name"
 }
 
 path_append_unique() {
@@ -50,7 +51,8 @@ path_append_unique() {
     done
 
     printf -v "$var_name" '%s' "$result"
-    declare -x "${var_name}=${!var_name}"
+    # shellcheck disable=SC2163
+    export "$var_name"
 }
 
 ensure_rocm_ld_library_path() {
