@@ -57,7 +57,6 @@ def get_buffer(group: torch.distributed.ProcessGroup, hidden_bytes: int):
         Buffer.get_dispatch_config(group.size()),
         Buffer.get_combine_config(group.size()),
     ):
-        # Split long line for PEP8 compliance
         num_nvl_bytes = max(
             config.get_nvl_buffer_size_hint(
                 hidden_bytes, group.size()), num_nvl_bytes
@@ -83,197 +82,6 @@ def get_buffer(group: torch.distributed.ProcessGroup, hidden_bytes: int):
     return _buffer
 
 
-# def dispatch_with_permute(buffer,
-#                           x,
-#                           group,
-#                           num_local_experts=None,
-#                           token_indices=None,
-#                           token_probs=None,
-#                           num_permuted_tokens=None,
-#                           handle=None,
-#                           ):
-
-#     # If we provide the num_permuted_tokens, we do not need to use sync to
-#     # wait for the data in pinned memory ready
-#     non_blocking = num_permuted_tokens is not None
-#     forward_pass = handle is None
-#     if forward_pass:
-#         assert num_local_experts is not None
-#         assert token_indices is not None
-#         assert token_probs is not None
-
-#     else:
-#         num_local_experts, _, _, _, _, handle = handle
-
-#     num_tokens_per_rank, num_tokens_per_rdma_rank, num_tokens_per_expert, is_token_in_rank = None, None, None, None
-#     # Process the dispatch in forward
-#     if forward_pass:
-#         num_experts = num_local_experts * group.size()
-#         (
-#             num_tokens_per_rank,
-#             num_tokens_per_rdma_rank,
-#             num_tokens_per_expert,
-#             is_token_in_rank,
-#             _,
-#         ) = buffer.get_dispatch_layout(
-#             token_indices,
-#             num_experts,
-#         )
-
-#     # Do MoE dispatch
-#     # NOTES: the CPU will wait for GPU's signal to arrive,
-#     # so this is not compatible with CUDA graph
-#     (
-#         recv_x,
-#         recv_token_indices,
-#         recv_token_probs,
-#         _,
-#         handle,
-#         _,
-#     ) = buffer.dispatch(
-#         x,
-#         topk_idx=token_indices,
-#         topk_weights=token_probs,  # DeepEP only supports float32 probs
-#         num_tokens_per_rank=num_tokens_per_rank,
-#         num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
-#         is_token_in_rank=is_token_in_rank,
-#         num_tokens_per_expert=num_tokens_per_expert,
-#         num_worst_tokens=num_permuted_tokens if non_blocking else 0,
-#         handle=handle,
-#     )
-
-#     # permute the tokens
-#     if forward_pass:
-#         dispatched_routing_map, dispatched_probs = turbo.ops.IndicesToMultihot.forward(
-#             recv_token_indices, recv_token_probs, num_local_experts, fused=True)
-#     else:
-
-
-#     hidden_shape_before_permute = recv_x.shape
-
-#     permuted_x, permuted_probs, reversed_mapping_for_combine, tokens_per_expert = (
-#         turbo.ops.token_permute(
-#             recv_x,
-#             num_out_tokens=num_permuted_tokens,
-#             routing_map=dispatched_routing_map,
-#             probs=dispatched_probs,
-#             fused=True,
-#             return_tokens_per_expert=True,
-#         )
-#     )
-
-#     handle = (num_local_experts, reversed_mapping_for_combine,
-#               dispatched_routing_map, hidden_shape_before_permute, group, handle)
-
-#     return permuted_x, permuted_probs, tokens_per_expert, handle
-
-
-# def combine_with_unpermute(buffer,
-#                            x,
-#                            handle,
-#                            probs=None):
-#     _, reversed_mapping_for_combine, dispatched_routing_map, hidden_shape_before_permute, _, handle = handle
-#     unpermuted_x = turbo.ops.token_unpermute(
-#         x,
-#         reversed_mapping_for_combine,
-#         restore_shape=hidden_shape_before_permute,
-#         routing_map=dispatched_routing_map,
-#         fused=True,
-#     )
-#     combined_x, combine_probs, _ = buffer.combine(
-#         unpermuted_x,
-#         handle=handle,
-#         topk_weights=probs.float() if probs is not None else None,
-#     )
-#     return combined_x, combine_probs
-
-
-# class HybridEPDispatch(torch.autograd.Function):
-#     '''
-#     Fused dispatch operation for permute + dispatch a2a + permute using the HybridEP backend
-#     '''
-
-#     @staticmethod
-#     def forward(
-#         ctx,
-#         x,
-#         token_indices,
-#         probs,
-#         group,
-#         num_local_experts,
-#         num_permuted_tokens=None,
-#     ):
-#         '''
-#         Forward pass of fused dispatch
-#         '''
-#         buffer = get_buffer(group, get_hidden_bytes(x))
-#         permuted_x, permuted_probs, tokens_per_expert, handle = dispatch_with_permute(
-#             buffer, x, group,
-#             num_local_experts=num_local_experts,
-#             token_indices=token_indices,
-#             token_probs=probs,
-#             num_permuted_tokens=num_permuted_tokens)
-
-#         ctx.handle = handle
-#         ctx.group = group
-#         return (
-#             permuted_x,
-#             permuted_probs,
-#             None,
-#             tokens_per_expert,
-#             handle,
-#         )
-
-#     @staticmethod
-#     def backward(ctx, grad_x, grad_probs, grad_scaling_factor, grad_tokens_per_expert, grad_handle):
-#         '''
-#         Backward pass of fused dispatch of the HybridEP backend
-#         '''
-#         handle = ctx.handle
-#         buffer = get_buffer(ctx.group, get_hidden_bytes(grad_x))
-#         combined_hidden, combined_probs = combine_with_unpermute(
-#             buffer, grad_x, handle, probs=grad_probs
-#         )
-#         return combined_hidden, None, combined_probs, None, None, None, None, None, None, None
-
-
-# class HybridEPCombine(torch.autograd.Function):
-#     '''
-#     Fused combine operation for permute + combine a2a + permute using the HybridEP backend
-#     '''
-
-#     @staticmethod
-#     def forward(ctx, x, handle, num_permuted_tokens=None):
-#         '''
-#         Forward pass of fused combine of the HybridEP backend
-#         '''
-#         assert len(handle) == 6
-#         group = handle[-2]
-#         buffer = get_buffer(group, get_hidden_bytes(x))
-#         combined_hidden, _ = combine_with_unpermute(
-#             buffer, x, handle,
-#         )
-
-#         ctx.handle = handle
-#         ctx.group = group
-#         ctx.num_permuted_tokens = num_permuted_tokens
-#         return combined_hidden
-
-#     @staticmethod
-#     def backward(ctx, grad_x):
-#         '''
-#         Backward pass of fused combine of the HybridEP backend
-#         '''
-#         handle = ctx.handle
-#         buffer = get_buffer(ctx.group, get_hidden_bytes(grad_x))
-#         dispatched_hidden, _, _, _, _ = dispatch_with_permute(
-#             buffer, grad_x, ctx.group,
-#             num_permuted_tokens=ctx.num_permuted_tokens,
-#             handle=handle,
-#         )
-#         return dispatched_hidden, None, None, None, None
-
-
 class FusedDispatch(torch.autograd.Function):
     """Fused dispatch operation for MoE routing combining computation and communication."""
 
@@ -285,45 +93,41 @@ class FusedDispatch(torch.autograd.Function):
         token_probs,
         num_experts,
         group,
-        num_worst_tokens=0,
+        num_worst_tokens,
     ):
         """Forward pass of fused dispatch."""
-        # Calculate layout before actual dispatch
         buffer = get_buffer(group, get_hidden_bytes(x))
+        assert num_worst_tokens > 0, "num_worst_tokens must be greater than 0"
+
         (
             num_tokens_per_rank,
             num_tokens_per_rdma_rank,
             num_tokens_per_expert,
             is_token_in_rank,
-            _,
         ) = buffer.get_dispatch_layout(
             token_indices,
             num_experts,
         )
 
         # Do MoE dispatch
-        # NOTES: the CPU will wait for GPU's signal to arrive,
-        # so this is not compatible with CUDA graph
+        # NOTES: Always no-sync with num_worst_tokens
         (
             recv_x,
             recv_token_indices,
             recv_token_probs,
             _,
             handle,
-            _,
         ) = buffer.dispatch(
             x,
             topk_idx=token_indices,
-            topk_weights=token_probs,  # DeepEP only supports float32 probs
+            topk_weights=token_probs,
             num_tokens_per_rank=num_tokens_per_rank,
             num_tokens_per_rdma_rank=num_tokens_per_rdma_rank,
             is_token_in_rank=is_token_in_rank,
             num_tokens_per_expert=num_tokens_per_expert,
-            num_worst_tokens=num_worst_tokens)
+            num_worst_tokens=num_worst_tokens,
+        )
 
-        # Make sure current stream is synchronized
-
-        # Save for backward
         ctx.group = group
         ctx.handle = handle
 
@@ -336,7 +140,8 @@ class FusedDispatch(torch.autograd.Function):
         """Backward pass of fused dispatch."""
         buffer = get_buffer(ctx.group, get_hidden_bytes(grad_output))
         handle = ctx.handle
-        grad_x, grad_token_probs, _ = buffer.combine(
+
+        grad_x, grad_token_probs = buffer.combine(
             grad_output.contiguous(),
             handle,
             topk_weights=grad_token_probs.float(),
@@ -352,7 +157,7 @@ class FusedCombine(torch.autograd.Function):
     def forward(ctx, x, group, handle):
         """Forward pass of fused combine."""
         buffer = get_buffer(group, get_hidden_bytes(x))
-        combined_x, _, _ = buffer.combine(
+        combined_x, _ = buffer.combine(
             x,
             handle=handle,
         )
@@ -364,7 +169,7 @@ class FusedCombine(torch.autograd.Function):
     def backward(ctx, grad_output):
         """Backward pass of fused combine."""
         buffer = get_buffer(ctx.group, get_hidden_bytes(grad_output))
-        grad_x, _, _, _, _, _ = buffer.dispatch(
+        grad_x, _, _, _, _ = buffer.dispatch(
             grad_output.contiguous(),
             handle=ctx.handle,
         )
@@ -412,6 +217,9 @@ def bridge_hybrid_ep_dispatch(
             Alignment multiple required for FP8 GEMM. If not provided, no padding
             is performed.
     '''
+    assert pad_multiple is None, "not support"
+    assert moe_router_topk is not None and num_experts is not None
+
     num_sms = max(num_sms_dispatch_api, num_sms_combine_api)
     Buffer.set_num_sms(num_sms)
     num_tokens = x.size(0)
@@ -446,7 +254,6 @@ def bridge_hybrid_ep_dispatch(
         return_tokens_per_expert=True,
     )
 
-    # TODO(zhenhuang12): add overflow_flag to permutation phase
     overflow_flag = torch.zeros(1, dtype=torch.int32, device='cuda')
 
     handle = (num_local_experts, reversed_mapping_for_combine,

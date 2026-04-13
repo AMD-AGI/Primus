@@ -107,4 +107,7 @@ modules:
         - expert_fc2
         - moe_act
 
+      cuda_graph_scope:
+        - full_iteration
+
       # moe_expert_rank_capacity_factor: 2

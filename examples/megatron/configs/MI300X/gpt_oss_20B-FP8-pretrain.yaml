@@ -98,8 +98,8 @@ modules:
       # cross_entropy_fusion_impl: "te"
       # cross_entropy_loss_fusion: true
 
-      # enable fp8 training
-      fp8: hybrid
+      # enable fp8 training (disabled for cuda graph testing)
+      # fp8: hybrid
       moe_use_legacy_grouped_gemm: true
       moe_shared_expert_overlap: false
       moe_router_dtype: "fp32"
@@ -107,7 +107,10 @@ modules:
       # moe_paged_stash: true
       stash_modules:
         - expert_fc1
-        - expert_fc2
-        - moe_act
+        # - expert_fc2
+        # - moe_act
+
+      cuda_graph_scope: null
+
 
       # moe_expert_rank_capacity_factor: 2
