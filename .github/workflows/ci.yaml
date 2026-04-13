@@ -9,6 +9,10 @@ on:
       - "v*"
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.event.merge_group.head_ref || github.ref }}
+  cancel-in-progress: true
+
 env:
   PRIMUS_TURBO_COMMIT: 333b68d7c81b722b21b4aad10cd250c45f15027c # fix sm_scale none bug (#263)
   PRIMUS_TURBO_AITER_COMMIT: e83f9903c07001a0ec29e85d223f6e6cdbe00859
