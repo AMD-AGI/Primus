@@ -1,9 +1,3 @@
-# Generated: training args from start_training_minimax_m2.5.sh merged into overrides (default env).
-# Defaults used: NNODES=16, TRAIN_ITERS=10, MBS=2, GBS=64*NNODES=1024, PRIMUS_PP=4, PRIMUS_VPP=2,
-# PRIMUS_EP=8, PRIMUS_RECOMPUTE_LAYERS=2, APPLY_ROPE_FUSION=True, TURBO_* as in script.
-# Pipeline layout for STAGE=PP*VPP=8 matches script case 8).
-# Original preset kept at: minimax_m2.5-BF16-pretrain.yaml (unchanged).
-
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:minimax_m2.5-pretrain}
@@ -14,6 +8,7 @@ modules:
     framework: megatron
     config: pre_trainer.yaml
 
+    # model to run
     model: ${PRIMUS_MODEL:minimax_m2.5}.yaml
     overrides:
       # log
@@ -25,13 +20,13 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      # --- start_training_minimax_m2.5.sh → train pretrain CLI (resolved defaults) ---
-      num_layers: 62
+      # hyper parameters (optimized for 8-node 64-GPU MI355X, BF16 best: ~493 TFLOP/s)
       train_iters: 10
-      micro_batch_size: 2
-      global_batch_size: 1024
+      micro_batch_size: 3
+      global_batch_size: 768
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      num_layers: 62
       lr: 2.2e-4
       min_lr: 2.2e-5
       lr_warmup_iters: 200
@@ -44,27 +39,31 @@ modules:
       init_method_std: 0.02
       norm_epsilon: 1.0e-6
 
-      # parallel (PP=4, VPP=2, EP=8; layout for 62 layers / 8 stages)
+      # parallel (optimized: PP=4 with VPP=2 for reduced pipeline bubble)
       tensor_model_parallel_size: ${PRIMUS_TP:1}
       pipeline_model_parallel_size: 4
-      virtual_pipeline_model_parallel_size: 2
       expert_model_parallel_size: 8
+      virtual_pipeline_model_parallel_size: 2
       pipeline_model_parallel_layout: "Et*7|t*8|t*8|t*8|t*8|t*8|t*8|t*7,L"
       overlap_grad_reduce: true
       overlap_param_gather: true
       gradient_accumulation_fusion: true
 
+      # recompute (optimized: disabled for max throughput, mem ~93%)
+      recompute_num_layers: 0
+      recompute_granularity: full
+      recompute_method: block
+
       # data
       mock_data: true
-      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:/shared_aig/c4/tokenized/c4_en_train_text_document}
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
 
       moe_use_legacy_grouped_gemm: true
-
-      # rope fusion (script: --enable_experimental --apply_rope_fusion from APPLY_ROPE_FUSION=True)
-      enable_experimental: true
+      moe_layer_freq: 1
       apply_rope_fusion: true
+      enable_experimental: true
 
       # ckpt
       finetune: false
@@ -97,34 +96,20 @@ modules:
       moe_use_fused_router_with_aux_score: true
       moe_permute_fusion: true
 
-      moe_layer_freq: 1
-
-      # recompute
-      recompute_num_layers: 2
-      recompute_granularity: full
-      recompute_method: block
-
-      # Cross entropy
+      # Cross entropy flags
       cross_entropy_fusion_impl: "te"
       cross_entropy_loss_fusion: true
 
-      # precision-aware optimizer (script)
+      # precision-aware optimizer (bf16 states to save memory)
       use_precision_aware_optimizer: true
       main_grads_dtype: bf16
       exp_avg_dtype: bf16
       exp_avg_sq_dtype: bf16
 
-      # GC / PP warmup / MTP
+      # training control
       manual_gc: true
       manual_gc_interval: 1
       pp_warmup: true
       mtp_num_layers: 0
-
-      # profile
-      profile: false
-      use_pytorch_profiler: false
-      profile_step_end: 7
-      profile_step_start: 6
-
       disable_wandb: true
       disable_tensorboard: true
