@@ -1,0 +1,177 @@
+Metadata-Version: 2.4
+Name: nvidia-modelopt
+Version: 0.42.0
+Summary: Nvidia Model Optimizer: a unified model optimization and deployment toolkit.
+Home-page: https://github.com/NVIDIA/Model-Optimizer
+Author: NVIDIA Corporation
+License: Apache 2.0
+Classifier: Programming Language :: Python :: 3
+Classifier: Intended Audience :: Developers
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.10,<3.13
+Description-Content-Type: text/markdown
+License-File: LICENSE_HEADER
+Requires-Dist: ninja
+Requires-Dist: numpy
+Requires-Dist: packaging
+Requires-Dist: pydantic>=2.0
+Requires-Dist: nvidia-ml-py>=12
+Requires-Dist: rich
+Requires-Dist: scipy
+Requires-Dist: tqdm
+Requires-Dist: pulp
+Requires-Dist: regex
+Requires-Dist: safetensors
+Requires-Dist: torch>=2.6
+Provides-Extra: onnx
+Requires-Dist: cppimport; extra == "onnx"
+Requires-Dist: cupy-cuda12x; (platform_machine != "aarch64" and platform_system != "Darwin") and extra == "onnx"
+Requires-Dist: lief; extra == "onnx"
+Requires-Dist: ml_dtypes; extra == "onnx"
+Requires-Dist: onnx-graphsurgeon; extra == "onnx"
+Requires-Dist: onnx~=1.19.0; extra == "onnx"
+Requires-Dist: onnxconverter-common~=1.16.0; extra == "onnx"
+Requires-Dist: onnxruntime~=1.22.0; (platform_machine == "aarch64" or platform_system == "Darwin") and extra == "onnx"
+Requires-Dist: onnxruntime-gpu~=1.22.0; (platform_machine != "aarch64" and platform_system != "Darwin") and extra == "onnx"
+Requires-Dist: onnxscript; extra == "onnx"
+Requires-Dist: onnxslim>=0.1.76; extra == "onnx"
+Requires-Dist: polygraphy>=0.49.22; extra == "onnx"
+Provides-Extra: hf
+Requires-Dist: accelerate>=1.0.0; extra == "hf"
+Requires-Dist: datasets>=3.0.0; extra == "hf"
+Requires-Dist: deepspeed>=0.9.6; (platform_system != "Darwin" and platform_system != "Windows") and extra == "hf"
+Requires-Dist: diffusers>=0.32.2; extra == "hf"
+Requires-Dist: huggingface_hub>=0.24.0; extra == "hf"
+Requires-Dist: peft>=0.17.0; extra == "hf"
+Requires-Dist: transformers<5.0,>=4.53; extra == "hf"
+Provides-Extra: dev-lint
+Requires-Dist: bandit[toml]==1.7.9; extra == "dev-lint"
+Requires-Dist: mypy==1.17.1; extra == "dev-lint"
+Requires-Dist: pre-commit==4.3.0; extra == "dev-lint"
+Requires-Dist: ruff==0.12.11; extra == "dev-lint"
+Provides-Extra: dev-test
+Requires-Dist: coverage; extra == "dev-test"
+Requires-Dist: pytest; extra == "dev-test"
+Requires-Dist: pytest-cov; extra == "dev-test"
+Requires-Dist: pytest-instafail; extra == "dev-test"
+Requires-Dist: pytest-timeout; extra == "dev-test"
+Requires-Dist: sentencepiece; extra == "dev-test"
+Requires-Dist: timm; extra == "dev-test"
+Requires-Dist: torchprofile>=0.0.4; extra == "dev-test"
+Requires-Dist: torchvision; extra == "dev-test"
+Requires-Dist: torch-geometric; extra == "dev-test"
+Requires-Dist: tox>4.18; extra == "dev-test"
+Requires-Dist: tox-current-env>=0.0.12; extra == "dev-test"
+Provides-Extra: dev-docs
+Requires-Dist: autodoc_pydantic>=2.1.0; extra == "dev-docs"
+Requires-Dist: sphinx~=8.1.0; extra == "dev-docs"
+Requires-Dist: sphinx-argparse>=0.5.2; extra == "dev-docs"
+Requires-Dist: sphinx-autobuild>=2024.10.3; extra == "dev-docs"
+Requires-Dist: sphinx-copybutton>=0.5.2; extra == "dev-docs"
+Requires-Dist: sphinx-inline-tabs>=2023.4.21; extra == "dev-docs"
+Requires-Dist: sphinx-rtd-theme~=3.0.0; extra == "dev-docs"
+Requires-Dist: sphinx-togglebutton>=0.3.2; extra == "dev-docs"
+Provides-Extra: dev-build
+Requires-Dist: cython; extra == "dev-build"
+Requires-Dist: setuptools>=80; extra == "dev-build"
+Requires-Dist: setuptools-scm>=8; extra == "dev-build"
+Provides-Extra: all
+Requires-Dist: cppimport; extra == "all"
+Requires-Dist: cupy-cuda12x; (platform_machine != "aarch64" and platform_system != "Darwin") and extra == "all"
+Requires-Dist: lief; extra == "all"
+Requires-Dist: ml_dtypes; extra == "all"
+Requires-Dist: onnx-graphsurgeon; extra == "all"
+Requires-Dist: onnx~=1.19.0; extra == "all"
+Requires-Dist: onnxconverter-common~=1.16.0; extra == "all"
+Requires-Dist: onnxruntime~=1.22.0; (platform_machine == "aarch64" or platform_system == "Darwin") and extra == "all"
+Requires-Dist: onnxruntime-gpu~=1.22.0; (platform_machine != "aarch64" and platform_system != "Darwin") and extra == "all"
+Requires-Dist: onnxscript; extra == "all"
+Requires-Dist: onnxslim>=0.1.76; extra == "all"
+Requires-Dist: polygraphy>=0.49.22; extra == "all"
+Requires-Dist: accelerate>=1.0.0; extra == "all"
+Requires-Dist: datasets>=3.0.0; extra == "all"
+Requires-Dist: deepspeed>=0.9.6; (platform_system != "Darwin" and platform_system != "Windows") and extra == "all"
+Requires-Dist: diffusers>=0.32.2; extra == "all"
+Requires-Dist: huggingface_hub>=0.24.0; extra == "all"
+Requires-Dist: peft>=0.17.0; extra == "all"
+Requires-Dist: transformers<5.0,>=4.53; extra == "all"
+Provides-Extra: dev
+Requires-Dist: cppimport; extra == "dev"
+Requires-Dist: cupy-cuda12x; (platform_machine != "aarch64" and platform_system != "Darwin") and extra == "dev"
+Requires-Dist: lief; extra == "dev"
+Requires-Dist: ml_dtypes; extra == "dev"
+Requires-Dist: onnx-graphsurgeon; extra == "dev"
+Requires-Dist: onnx~=1.19.0; extra == "dev"
+Requires-Dist: onnxconverter-common~=1.16.0; extra == "dev"
+Requires-Dist: onnxruntime~=1.22.0; (platform_machine == "aarch64" or platform_system == "Darwin") and extra == "dev"
+Requires-Dist: onnxruntime-gpu~=1.22.0; (platform_machine != "aarch64" and platform_system != "Darwin") and extra == "dev"
+Requires-Dist: onnxscript; extra == "dev"
+Requires-Dist: onnxslim>=0.1.76; extra == "dev"
+Requires-Dist: polygraphy>=0.49.22; extra == "dev"
+Requires-Dist: accelerate>=1.0.0; extra == "dev"
+Requires-Dist: datasets>=3.0.0; extra == "dev"
+Requires-Dist: deepspeed>=0.9.6; (platform_system != "Darwin" and platform_system != "Windows") and extra == "dev"
+Requires-Dist: diffusers>=0.32.2; extra == "dev"
+Requires-Dist: huggingface_hub>=0.24.0; extra == "dev"
+Requires-Dist: peft>=0.17.0; extra == "dev"
+Requires-Dist: transformers<5.0,>=4.53; extra == "dev"
+Requires-Dist: bandit[toml]==1.7.9; extra == "dev"
+Requires-Dist: mypy==1.17.1; extra == "dev"
+Requires-Dist: pre-commit==4.3.0; extra == "dev"
+Requires-Dist: ruff==0.12.11; extra == "dev"
+Requires-Dist: coverage; extra == "dev"
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: pytest-cov; extra == "dev"
+Requires-Dist: pytest-instafail; extra == "dev"
+Requires-Dist: pytest-timeout; extra == "dev"
+Requires-Dist: sentencepiece; extra == "dev"
+Requires-Dist: timm; extra == "dev"
+Requires-Dist: torchprofile>=0.0.4; extra == "dev"
+Requires-Dist: torchvision; extra == "dev"
+Requires-Dist: torch-geometric; extra == "dev"
+Requires-Dist: tox>4.18; extra == "dev"
+Requires-Dist: tox-current-env>=0.0.12; extra == "dev"
+Requires-Dist: autodoc_pydantic>=2.1.0; extra == "dev"
+Requires-Dist: sphinx~=8.1.0; extra == "dev"
+Requires-Dist: sphinx-argparse>=0.5.2; extra == "dev"
+Requires-Dist: sphinx-autobuild>=2024.10.3; extra == "dev"
+Requires-Dist: sphinx-copybutton>=0.5.2; extra == "dev"
+Requires-Dist: sphinx-inline-tabs>=2023.4.21; extra == "dev"
+Requires-Dist: sphinx-rtd-theme~=3.0.0; extra == "dev"
+Requires-Dist: sphinx-togglebutton>=0.3.2; extra == "dev"
+Requires-Dist: cython; extra == "dev"
+Requires-Dist: setuptools>=80; extra == "dev"
+Requires-Dist: setuptools-scm>=8; extra == "dev"
+Requires-Dist: cppimport; extra == "dev"
+Requires-Dist: cupy-cuda12x; (platform_machine != "aarch64" and platform_system != "Darwin") and extra == "dev"
+Requires-Dist: lief; extra == "dev"
+Requires-Dist: ml_dtypes; extra == "dev"
+Requires-Dist: onnx-graphsurgeon; extra == "dev"
+Requires-Dist: onnx~=1.19.0; extra == "dev"
+Requires-Dist: onnxconverter-common~=1.16.0; extra == "dev"
+Requires-Dist: onnxruntime~=1.22.0; (platform_machine == "aarch64" or platform_system == "Darwin") and extra == "dev"
+Requires-Dist: onnxruntime-gpu~=1.22.0; (platform_machine != "aarch64" and platform_system != "Darwin") and extra == "dev"
+Requires-Dist: onnxscript; extra == "dev"
+Requires-Dist: onnxslim>=0.1.76; extra == "dev"
+Requires-Dist: polygraphy>=0.49.22; extra == "dev"
+Requires-Dist: accelerate>=1.0.0; extra == "dev"
+Requires-Dist: datasets>=3.0.0; extra == "dev"
+Requires-Dist: deepspeed>=0.9.6; (platform_system != "Darwin" and platform_system != "Windows") and extra == "dev"
+Requires-Dist: diffusers>=0.32.2; extra == "dev"
+Requires-Dist: huggingface_hub>=0.24.0; extra == "dev"
+Requires-Dist: peft>=0.17.0; extra == "dev"
+Requires-Dist: transformers<5.0,>=4.53; extra == "dev"
+Dynamic: author
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: license
+Dynamic: license-file
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
+
+Checkout https://github.com/nvidia/Model-Optimizer for more information.

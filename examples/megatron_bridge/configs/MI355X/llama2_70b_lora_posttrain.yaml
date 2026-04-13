@@ -28,10 +28,13 @@ modules:
       peft: lora
       dataset_type: mlperf_dataset # can be squad or mlperf_dataset
       # for mlperf_dataset, you need to set the following parameters
+      # One directory (default matches tools/docker data mount); filenames match download_dataset.py / convert_dataset.py.
+      # Override any single path via CLI if train/val/metadata live in different trees, e.g.
+      #   modules.post_trainer.overrides.packed_train_data_path=/path/train.npy
       packed_sequence: true
-      packed_train_data_path: ${PACKED_TRAIN_DATA_PATH:/data/train.npy}
-      packed_val_data_path: ${PACKED_VAL_DATA_PATH:/data/validation.npy}
-      packed_metadata_path: ${PACKED_METADATA_PATH:/data/packed_metadata.jsonl}
+      packed_train_data_path: ${PACKED_DATA_DIR:/data}/train.npy
+      packed_val_data_path: ${PACKED_DATA_DIR:/data}/validation.npy
+      packed_metadata_path: ${PACKED_DATA_DIR:/data}/packed_metadata.jsonl
 
       # Training configuration
       train_iters: 1024

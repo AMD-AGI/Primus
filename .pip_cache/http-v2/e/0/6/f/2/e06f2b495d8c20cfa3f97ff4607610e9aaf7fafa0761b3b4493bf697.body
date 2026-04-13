@@ -1,0 +1,366 @@
+Metadata-Version: 2.4
+Name: rapidyaml
+Version: 0.11.1
+Summary: Parse and emit YAML, and do it fast. Python wrapper for the C++ library
+Home-page: https://github.com/biojppm/rapidyaml-python
+Author: Joao Paulo Magalhaes
+Author-email: Joao Paulo Magalhaes <dev@jpmag.me>
+License: MIT
+Project-URL: Homepage, https://github.com/biojppm/rapidyaml-python
+Project-URL: Issues, https://github.com/biojppm/rapidyaml-python/issues
+Classifier: Programming Language :: Python :: 3
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.6
+Description-Content-Type: text/markdown
+License-File: LICENSE.txt
+Requires-Dist: deprecation
+Dynamic: author
+Dynamic: home-page
+Dynamic: license
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: requires-python
+
+# Rapid YAML - Python package
+
+[![MIT Licensed](https://img.shields.io/badge/License-MIT-green.svg)](https://github.com/biojppm/rapidyaml/blob/master/LICENSE.txt)
+[![PyPI](https://img.shields.io/pypi/v/rapidyaml?color=g)](https://pypi.org/project/rapidyaml/)
+
+Or ryml, for short. ryml is [a C++ library to parse and emit
+YAML](https://github.com/biojppm/rapidyaml), and do it fast, on
+everything from x64 to bare-metal chips without operating system. This
+repo contains the rapidyaml python package, which was previously in
+the original repo (up to [release 0.11.0](https://github.com/biojppm/rapidyaml/releases/tag/v0.11.0)).
+
+This python wrapper exposes only the index-based low-level C++ API,
+which works with node indices and string views. This API is blazing
+fast, but you may find it hard to use: it does not build a python
+structure of dicts/seqs/scalars (that's up to you), and all the
+scalars are untyped strings. With that said, it is really fast,
+and once you have the tree you can still walk over the tree to create
+the native python structure.
+
+
+
+## Performance
+
+Here are some results for a [timeit benchmark](bm/bm_parse.py)
+comparing ryml against [PyYaml](https://pyyaml.org/) and
+[ruamel.yaml](https://yaml.readthedocs.io/en/latest/) (and note you
+can use this script with your YAML files!). ryml parses quicker by
+generally 100x and up to 400x:
+
+```
++----------------------------------------+-------+----------+----------+-----------+
+| style_seqs_blck_outer1000_inner100.yml | count | time(ms) | avg(ms)  | avg(MB/s) |
++----------------------------------------+-------+----------+----------+-----------+
+| parse:RuamelYamlParse                  |     1 | 4564.812 | 4564.812 |     0.173 |
+| parse:PyYamlParse                      |     1 | 2815.426 | 2815.426 |     0.280 |
+| parse:RymlParseInArena                 |    38 |  588.024 |   15.474 |    50.988 |
+| parse:RymlParseInArenaReuse            |    38 |  466.997 |   12.289 |    64.202 |
+| parse:RymlParseInPlace                 |    38 |  579.770 |   15.257 |    51.714 |
+| parse:RymlParseInPlaceReuse            |    38 |  462.932 |   12.182 |    64.765 |
++----------------------------------------+-------+----------+----------+-----------+
+```
+(Note that the parse timings above are somewhat biased towards ryml, because
+it does not perform any type conversions in Python-land: return types
+are merely `memoryviews` to the source buffer, possibly copied to the tree's
+arena).
+
+As for emitting, the improvement can be as high as 3000x:
+```
++----------------------------------------+-------+-----------+-----------+-----------+
+| style_maps_blck_outer1000_inner100.yml | count |  time(ms) |  avg(ms)  | avg(MB/s) |
++----------------------------------------+-------+-----------+-----------+-----------+
+| emit_yaml:RuamelYamlEmit               |     1 | 18149.288 | 18149.288 |     0.054 |
+| emit_yaml:PyYamlEmit                   |     1 |  2683.380 |  2683.380 |     0.365 |
+| emit_yaml:RymlEmitToNewBuffer          |    88 |   861.726 |     9.792 |    99.976 |
+| emit_yaml:RymlEmitReuse                |    88 |   437.931 |     4.976 |   196.725 |
++----------------------------------------+-------+-----------+-----------+-----------+
+```
+
+
+## Examples
+
+### Parsing a file
+
+Here's a quick example (this is a unit test at [test/test_ex_read.py](test/test_ex_read.py)):
+
+```yaml
+import ryml
+
+def test_read_yaml():
+    yaml = b"{HELLO: a, foo: b, bar: c, baz: d, seq: [0, 1, 2, 3]}"
+
+    # ryml holds only views to the parsed yaml source (following the C++ library).
+    #
+    # parse_in_place() parses directly the input buffer,
+    # so this requires the user to keep the input buffer
+    # alive while using the tree.
+    #
+    # parse_in_arena() copies the input buffer to
+    # an arena in the tree, then parses the copy.
+    # This is safer, so let's use it here:
+    tree = ryml.parse_in_arena(yaml)
+
+    # The returned tree has the following structure:
+    #
+    #   [node 0] root, map
+    #     ` [node 1] "HELLO": "a"
+    #     ` [node 2] "foo": "b"
+    #     ` [node 3] "bar": "c"
+    #     ` [node 4] "baz": "d"
+    #     ` [node 5] "seq":
+    #         ` [node 6] "0"
+    #         ` [node 7] "1"
+    #         ` [node 8] "2"
+    #         ` [node 9] "3"
+    #
+    # let's now do some assertions (keeping this structure in mind):
+    assert tree.size() == 10
+    assert tree.root_id() == 0
+    assert tree.is_root(0)
+    assert tree.is_map(0)
+    assert tree.is_keyval(1)
+    assert tree.is_seq(5)
+    assert tree.is_val(6)
+    # use bytes or str objects for queries
+    assert tree.find_child(0, b"HELLO") == 1
+    assert tree.find_child(0, "HELLO") == 1
+    assert tree.find_child(0, b"foo") == 2
+    assert tree.find_child(0, "foo") == 2
+    assert tree.find_child(0, b"seq") == 5
+    assert tree.find_child(0, "seq") == 5
+    assert tree.key(1) == b"HELLO"
+    assert tree.val(1) == b"a"
+    assert tree.key(2) == b"foo"
+    assert tree.val(2) == b"b"
+    assert tree.find_child(0, b"seq") == 5
+    assert tree.find_child(0, "seq") == 5
+    # hierarchy:
+    assert tree.first_child(0) == 1
+    assert tree.last_child(0) == 5
+    assert tree.next_sibling(1) == 2
+    assert tree.first_sibling(5) == 1
+    assert tree.last_sibling(1) == 5
+    assert tree.first_child(5) == 6
+    assert tree.last_child(5) == 9
+    # to loop over children:
+    expected = [b"0", b"1", b"2", b"3"]
+    for i, ch in enumerate(ryml.children(tree, 5)):
+        assert tree.val(ch) == expected[i]
+    # to loop over siblings:
+    expected = [b"HELLO", b"foo", b"bar", b"baz", b"seq"]
+    for i, sib in enumerate(ryml.siblings(tree, 5)):
+        assert tree.key(sib) == expected[i]
+    # to walk over all elements
+    visited = [False] * tree.size()
+    for node_id, indentation_level in ryml.walk(tree):
+        visited[node_id] = True
+    assert False not in visited
+    # NOTE about encoding!
+    k = tree.key(5)
+    assert isinstance(k, memoryview)
+    #print(k)  # '<memory at 0x7f80d5b93f48>'
+    assert k == b"seq"               # ok, as expected
+    assert k != "seq"                # not ok - NOTE THIS!
+    assert str(k) != "seq"           # not ok
+    assert str(k, "utf8") == "seq"   # ok again
+```
+
+
+### Creating and emitting a tree
+
+Here are some examples on how to create trees programatically (this is a unit test at [test/test_ex_write.py](test/test_ex_write.py)):
+
+```python
+import ryml
+
+
+# all the tests below create this tree
+expected_yaml = '{HELLO: a,foo: b,bar: c,baz: d,seq: [0,1,2,3]}'
+expected_json = '{"HELLO": "a","foo": "b","bar": "c","baz": "d","seq": [0,1,2,3]}'
+
+
+# helper to create map children nodes
+def _append_keyval(tree: ryml.Tree, node_id: int, key, val, flags=0):
+    child_id = tree.append_child(node_id)
+    tree.to_keyval(child_id, key, val, flags)
+    return child_id
+
+
+# helper to create seq children nodes
+def _append_val(tree: ryml.Tree, node_id: int, val, flags=0):
+    child_id = tree.append_child(node_id)
+    tree.to_val(child_id, val, flags)
+    return child_id
+
+
+def test_create_tree():
+    tree = ryml.Tree()
+    root_id = tree.root_id()
+    tree.to_map(root_id, ryml.FLOW_SL) # set the root node as a map,
+                                       # with FLOW_SL style (flow, single line)
+    _append_keyval(tree, root_id, "HELLO", "a")
+    _append_keyval(tree, root_id, "foo", "b")
+    _append_keyval(tree, root_id, "bar", "c")
+    _append_keyval(tree, root_id, "baz", "d")
+    seq_id = tree.append_child(root_id)
+    tree.to_seq(seq_id, "seq", ryml.FLOW_SL)  # append a sequence
+    _append_val(tree, seq_id, "0")
+    _append_val(tree, seq_id, "1")
+    _append_val(tree, seq_id, "2")
+    _append_val(tree, seq_id, "3")
+    # check that this tree is emitted as expected
+    _check_emits(tree)
+
+
+# BEWARE! The tree is pointing at the memory of the scalars!
+#
+# If you are using dynamic strings for scalars, you must be sure to
+# hold onto them while using the tree!
+#
+# Because explicitly managing lifetimes is generally hard or
+# cumbersome to do in python, ryml provides you a tree.to_arena()
+# helper to do this: it copies the scalar to the tree's arena, which
+# will fix any lifetime issues.
+#
+# Here's an example:
+def test_create_tree_dynamic():
+    # let's now programmatically create the same tree as above:
+    tree = ryml.Tree()
+    root_id = tree.root_id()
+    tree.to_map(root_id, ryml.FLOW_SL) # set the root node as a map,
+                                       # with FLOW_SL style (flow, single line)
+    # utility function to create a dynamic string and store it in the tree:
+    def ds(s: str):
+        # make a dynamic copy (using f-string to force creation a
+        # different string object)
+        dyn = f"_{s}_"[1:-1]
+        # ...serialize the copy in the tree's arena
+        saved = tree.to_arena(dyn)
+        return saved
+    # now we use ds() with each scalar, making it safer
+    _append_keyval(tree, root_id, ds("HELLO"), ds("a"))
+    _append_keyval(tree, root_id, ds("foo"), ds("b"))
+    _append_keyval(tree, root_id, ds("bar"), ds("c"))
+    _append_keyval(tree, root_id, ds("baz"), ds("d"))
+    seq_id = tree.append_child(root_id)
+    tree.to_seq(seq_id, ds("seq"), ryml.FLOW_SL)  # append a sequence
+    _append_val(tree, seq_id, ds("0"))
+    _append_val(tree, seq_id, ds("1"))
+    _append_val(tree, seq_id, ds("2"))
+    _append_val(tree, seq_id, ds("3"))
+    # check that this tree is emitted as expected
+    _check_emits(tree)
+
+
+# But note you don't need to use tree.to_arena(); you can save the
+# dynamic scalars for example by keeping them in a tree. But then you
+# must take care of the lifetimes!
+#
+# Here's an example:
+def test_create_tree_dynamic_explicit_save():
+    # let's now programmatically create the same tree as above:
+    tree = ryml.Tree()
+    root_id = tree.root_id()
+    tree.to_map(root_id, ryml.FLOW_SL) # set the root node as a map,
+                                       # with FLOW_SL style (flow, single line)
+    # this time we'll use a list to save the scalars. It works because
+    # both `tree` and `saved_scalars` are defined and used in the same
+    # scope. But it would fail if `saved_scalars` went out of scope
+    # before ending the use of `tree`, eg if tree was returned from
+    # this function but `saved_scalars` were not.
+    saved_scalars = []
+    # utility function to create a dynamic string and store it:
+    def ds(s: str):
+        # make a dynamic copy (using f-string to force creation a
+        # different string object)
+        dyn = f"_{s}_"[1:-1]
+        # save the string in the list
+        saved_scalars.append(dyn)
+        return dyn
+    # now we use ds() with each scalar, making it safer
+    _append_keyval(tree, root_id, ds("HELLO"), ds("a"))
+    _append_keyval(tree, root_id, ds("foo"), ds("b"))
+    _append_keyval(tree, root_id, ds("bar"), ds("c"))
+    _append_keyval(tree, root_id, ds("baz"), ds("d"))
+    seq_id = tree.append_child(root_id)
+    tree.to_seq(seq_id, ds("seq"), ryml.FLOW_SL)  # append a sequence
+    _append_val(tree, seq_id, ds("0"))
+    _append_val(tree, seq_id, ds("1"))
+    _append_val(tree, seq_id, ds("2"))
+    _append_val(tree, seq_id, ds("3"))
+    # check that this tree is emitted as expected
+    _check_emits(tree)
+
+
+def test_create_tree_bytes():
+    # ryml also works with bytes scalars
+    tree = ryml.Tree()
+    root_id = tree.root_id()
+    tree.to_map(root_id, ryml.FLOW_SL) # set the root node as a map,
+                                       # with FLOW_SL style (flow, single line)
+    _append_keyval(tree, root_id, b"HELLO", b"a")
+    _append_keyval(tree, root_id, b"foo", b"b")
+    _append_keyval(tree, root_id, b"bar", b"c")
+    _append_keyval(tree, root_id, b"baz", b"d")
+    seq_id = tree.append_child(root_id)
+    tree.to_seq(seq_id, b"seq", ryml.FLOW_SL)  # append a sequence
+    _append_val(tree, seq_id, b"0")
+    _append_val(tree, seq_id, b"1")
+    _append_val(tree, seq_id, b"2")
+    _append_val(tree, seq_id, b"3")
+    # check that this tree is emitted as expected
+    _check_emits(tree)
+
+
+def test_create_tree_memoryview():
+    # ryml also works with memoryview scalars
+    tree = ryml.Tree()
+    root_id = tree.root_id()
+    tree.to_map(root_id, ryml.FLOW_SL) # set the root node as a map,
+                                       # with FLOW_SL style (flow, single line)
+    def s(scalar: bytes):
+        return memoryview(scalar)
+    _append_keyval(tree, root_id, s(b"HELLO"), s(b"a"))
+    _append_keyval(tree, root_id, s(b"foo"), s(b"b"))
+    _append_keyval(tree, root_id, s(b"bar"), s(b"c"))
+    _append_keyval(tree, root_id, s(b"baz"), s(b"d"))
+    seq_id = tree.append_child(root_id)
+    tree.to_seq(seq_id, s(b"seq"), ryml.FLOW_SL)  # append a sequence
+    _append_val(tree, seq_id, s(b"0"))
+    _append_val(tree, seq_id, s(b"1"))
+    _append_val(tree, seq_id, s(b"2"))
+    _append_val(tree, seq_id, s(b"3"))
+    # check that this tree is emitted as expected
+    _check_emits(tree)
+
+
+# this function shows several different ways of emitting from an
+# existing tree (and tests that the results are as expected).
+def _check_emits(tree: ryml.Tree):
+    # emit_yaml() and emit_json() return a str object
+    out_yaml = ryml.emit_yaml(tree)
+    out_json = ryml.emit_json(tree)
+    assert isinstance(out_yaml, str)
+    assert isinstance(out_json, str)
+    assert out_yaml == expected_yaml
+    assert out_json == expected_json
+    # if it is really important, you can emit to existing buffers:
+    len_yaml = ryml.compute_yaml_length(tree) #
+    len_json = ryml.compute_json_length(tree)
+    buf_yaml = bytearray(len_yaml)
+    buf_json = bytearray(len_json)
+    out_yaml = ryml.emit_yaml_in_place(tree, buf_yaml)
+    out_json = ryml.emit_json_in_place(tree, buf_json)
+    assert isinstance(out_yaml, memoryview)
+    assert isinstance(out_json, memoryview)
+    assert out_yaml.tobytes().decode('utf8') == expected_yaml
+    assert out_json.tobytes().decode('utf8') == expected_json
+```
+
+------
+## License
+
+ryml is permissively licensed under the [MIT license](LICENSE.txt).

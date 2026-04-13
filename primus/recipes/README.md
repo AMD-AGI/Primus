@@ -108,3 +108,4 @@ def my_custom_flavor(**kwargs) -> ConfigContainer:
 - Standard Megatron-Bridge recipes: `third_party/Megatron-Bridge/src/megatron/bridge/recipes/`
 - Configuration utilities: `primus/backends/megatron_bridge/config_utils.py`
 - Example usage: `examples/megatron_bridge/configs/MI355X/llama2_70b_lora_posttrain.yaml`
+- **Llama 2 70B LoRA end-to-end setup (paths, data, container, one command):** `primus/recipes/readme_run_llama2_70b.md`

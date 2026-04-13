@@ -1,0 +1,89 @@
+Metadata-Version: 2.4
+Name: multi-storage-client
+Version: 0.46.0
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Programming Language :: Rust
+Classifier: Programming Language :: Python :: Implementation :: CPython
+Classifier: Programming Language :: Python :: Implementation :: PyPy
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Requires-Dist: filelock>=3.20.3,<4
+Requires-Dist: jmespath>=1.0.1,<2
+Requires-Dist: jsonschema>=4,<5
+Requires-Dist: python-dateutil>=2.9,<3
+Requires-Dist: pyyaml>=6.0.1,<7
+Requires-Dist: opentelemetry-api>=1.24,<2
+Requires-Dist: xattr>=1.1.4,<2
+Requires-Dist: wcmatch>=10,<11
+Requires-Dist: tqdm>=4.67.1,<5
+Requires-Dist: lark>=1.2.2,<2
+Requires-Dist: prettytable>=3.10,<4
+Requires-Dist: psutil>=7,<8
+Requires-Dist: tzdata>=2024.2,<2026
+Requires-Dist: aistore>=1.16,<2 ; extra == 'aistore'
+Requires-Dist: azure-storage-blob>=12.28.0,<13 ; extra == 'azure-storage-blob'
+Requires-Dist: azure-identity>=1.25,<2 ; extra == 'azure-storage-blob'
+Requires-Dist: boto3>=1.36,<2 ; extra == 'boto3'
+Requires-Dist: cryptography>=44.0.1,<47 ; extra == 'cloudfront'
+Requires-Dist: fastapi>=0.128.3,<1 ; extra == 'explorer'
+Requires-Dist: uvicorn[standard]>=0.39,<1 ; extra == 'explorer'
+Requires-Dist: aiofiles>=23.2.1 ; extra == 'explorer'
+Requires-Dist: fsspec>=2023.9.0 ; extra == 'fsspec'
+Requires-Dist: google-cloud-storage>=2.12,<4 ; extra == 'google-cloud-storage'
+Requires-Dist: huggingface-hub>=0.34.4,<1 ; extra == 'huggingface'
+Requires-Dist: hf-transfer>=0.1.9 ; extra == 'huggingface'
+Requires-Dist: hydra-core>=1.3,<2 ; extra == 'hydra-core'
+Requires-Dist: fastmcp>=3,<4 ; extra == 'mcp'
+Requires-Dist: msal>=1.31.1,<2 ; extra == 'msal'
+Requires-Dist: numpy>=2.1,<3 ; extra == 'numpy'
+Requires-Dist: opentelemetry-sdk>=1.32.1,<2 ; extra == 'observability-otel'
+Requires-Dist: opentelemetry-exporter-otlp-proto-http>=1.32.1,<2 ; extra == 'observability-otel'
+Requires-Dist: oci>=2.150,<3 ; extra == 'oci'
+Requires-Dist: pyarrow>=21 ; extra == 'parquet'
+Requires-Dist: ray>=2.54,<3 ; extra == 'ray'
+Requires-Dist: protobuf>=7.34.0rc2 ; extra == 'ray'
+Requires-Dist: torch>=2.10,<3 ; extra == 'torch'
+Requires-Dist: hvac>=2.3,<3 ; extra == 'vault'
+Requires-Dist: cryptography>=44.0.1,<47 ; extra == 'vault'
+Requires-Dist: xarray>=2024.7.0 ; extra == 'xarray'
+Requires-Dist: zarr>=2.18.3,<3 ; python_full_version == '3.10.*' and extra == 'zarr'
+Requires-Dist: zarr>=2.18.7,<3 ; python_full_version >= '3.11' and extra == 'zarr'
+Provides-Extra: aistore
+Provides-Extra: azure-storage-blob
+Provides-Extra: boto3
+Provides-Extra: cloudfront
+Provides-Extra: explorer
+Provides-Extra: fsspec
+Provides-Extra: google-cloud-storage
+Provides-Extra: huggingface
+Provides-Extra: hydra-core
+Provides-Extra: mcp
+Provides-Extra: msal
+Provides-Extra: numpy
+Provides-Extra: observability-otel
+Provides-Extra: oci
+Provides-Extra: parquet
+Provides-Extra: ray
+Provides-Extra: torch
+Provides-Extra: vault
+Provides-Extra: xarray
+Provides-Extra: zarr
+Summary: Unified high-performance Python client for object and file stores.
+Author: NVIDIA Multi-Storage Client Team
+License-Expression: Apache-2.0
+Requires-Python: >=3.10, <4
+Description-Content-Type: text/markdown; charset=UTF-8; variant=GFM
+Project-URL: documentation, https://nvidia.github.io/multi-storage-client/
+Project-URL: source, https://github.com/NVIDIA/multi-storage-client
+
+# Multi-Storage Client
+
+The Multi-Storage Client (MSC) is a unified high-performance Python client for object and file stores such as AWS S3, Azure Blob Storage, Google Cloud Storage (GCS), NVIDIA AIStore, Oracle Cloud Infrastructure (OCI) Object Storage, POSIX file systems, and more.
+
+It provides a generic interface to interact with objects and files across various storage services. This lets you spend less time learning each storage service's unique interface and lets you change where data is stored without having to change how your code accesses it.
+
+See the [documentation](https://nvidia.github.io/multi-storage-client/) to get started.
+

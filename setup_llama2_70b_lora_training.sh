@@ -34,9 +34,13 @@ MEGATRON_BRIDGE_CONTAINER="${CONTAINER_PRIMUS_ROOT}/third_party/Megatron-Bridge"
 PATCH_DIR="${CONTAINER_PRIMUS_ROOT}/primus/recipes/patches"
 
 # Data + optional Megatron checkpoints: under this repo by default (override with HOST_MLPERF_DATA).
-# Same host path is mounted into the container as MOUNT_DATA_PATH (default /data); YAML uses
-# PACKED_* / PRETRAINED_CHECKPOINT env vars resolved at config load time.
+# tools/docker/start_container.sh mounts DATA_PATH as -v "${DATA_PATH}:${DATA_PATH}", so the
+# in-container path is the same absolute path as on the host (not a fixed /data alias).
+# YAML uses PACKED_DATA_DIR; HF cache should live under this tree so it survives container removal.
 HOST_MLPERF_DATA="${HOST_MLPERF_DATA:-${PRIMUS_ROOT}/data/mlperf_llama2}"
+# Directory for packed .npy, metadata, HF hub cache, etc. (identical path string on host and in container).
+CONTAINER_DATA_ROOT="${HOST_MLPERF_DATA}"
+HF_CACHE_ROOT="${CONTAINER_DATA_ROOT}/.cache/huggingface"
 # Typical layout (optional): ${HOST_MLPERF_DATA}/megatron_checkpoints/<model>/iter_0000000
 MEGATRON_CKPT_SUBDIR="${MEGATRON_CKPT_SUBDIR:-megatron_checkpoints}"
 SEQ_LENGTH=8192
@@ -50,23 +54,23 @@ if [ -z "$WANDB_API_KEY" ]; then
     echo -e "${RED}[WARNING]${NC} WANDB_API_KEY is not set or is empty."
 fi
 
-# Docker configuration (for start_container.sh: -v DATA_PATH:MOUNT_DATA_PATH)
+# Docker configuration (for start_container.sh: -v DATA_PATH:DATA_PATH)
 export DOCKER_IMAGE="${DOCKER_IMAGE:-rocm/primus:v26.2}"
 export DATA_PATH="${HOST_MLPERF_DATA}"
-export MOUNT_DATA_PATH="${MOUNT_DATA_PATH:-/data}"
 export CONTAINER_NAME="${CONTAINER_NAME:-llama2_lora_26_2_primus_upstream}"
 
-# Paths inside the container (must match MOUNT_DATA_PATH mount of HOST_MLPERF_DATA)
-PACKED_TRAIN_DATA_PATH="${MOUNT_DATA_PATH}/train.npy"
-PACKED_VAL_DATA_PATH="${MOUNT_DATA_PATH}/validation.npy"
-PACKED_METADATA_PATH="${MOUNT_DATA_PATH}/packed_metadata.jsonl"
+# Paths (same string on host and in container because of the DATA_PATH bind mount)
+PACKED_TRAIN_DATA_PATH="${CONTAINER_DATA_ROOT}/train.npy"
+PACKED_VAL_DATA_PATH="${CONTAINER_DATA_ROOT}/validation.npy"
+PACKED_METADATA_PATH="${CONTAINER_DATA_ROOT}/packed_metadata.jsonl"
 
 # Optional Megatron pretrained dir on host -> container path for PEFT base weights
 PRETRAINED_CHECKPOINT=""
 if [ -d "${HOST_MLPERF_DATA}/${MEGATRON_CKPT_SUBDIR}" ]; then
     _iter_dir="$(find "${HOST_MLPERF_DATA}/${MEGATRON_CKPT_SUBDIR}" -type d -name 'iter_*' 2>/dev/null | sort | head -n 1)"
     if [ -n "${_iter_dir}" ]; then
-        PRETRAINED_CHECKPOINT="${MOUNT_DATA_PATH}${_iter_dir#"${HOST_MLPERF_DATA}"}"
+        # Same absolute path is valid inside the container (bind mount).
+        PRETRAINED_CHECKPOINT="${_iter_dir}"
     fi
 fi
 
@@ -78,9 +82,9 @@ echo_info "Submodules updated successfully"
 # Step 2: Start Primus Docker container with data mount
 echo_info "Step 2: Starting Primus Docker container..."
 echo_info "Primus repo (host): ${PRIMUS_ROOT}"
-echo_info "Data / checkpoints root (host): ${HOST_MLPERF_DATA}"
-echo_info "Container mount: ${HOST_MLPERF_DATA} -> ${MOUNT_DATA_PATH}"
-echo_info "Packed data paths (container): ${PACKED_TRAIN_DATA_PATH}, ${PACKED_VAL_DATA_PATH}, ${PACKED_METADATA_PATH}"
+echo_info "Data / checkpoints root (host, same path in container): ${HOST_MLPERF_DATA}"
+echo_info "HF cache (persistent): ${HF_CACHE_ROOT}"
+echo_info "Packed data: ${PACKED_TRAIN_DATA_PATH}, ${PACKED_VAL_DATA_PATH}, ${PACKED_METADATA_PATH}"
 if [ -n "${PRETRAINED_CHECKPOINT}" ]; then
     echo_info "Megatron pretrained_checkpoint (container): ${PRETRAINED_CHECKPOINT}"
 else
@@ -91,6 +95,7 @@ echo_info "Docker image: ${DOCKER_IMAGE}"
 
 mkdir -p "${HOST_MLPERF_DATA}"
 mkdir -p "${HOST_MLPERF_DATA}/${MEGATRON_CKPT_SUBDIR}"
+mkdir -p "${HF_CACHE_ROOT}"
 
 # Check if container is already running
 if docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
@@ -104,23 +109,31 @@ else
     echo_info "Container started successfully"
 fi
 
-# Step 3: Download dataset and create tokenizer metadata
+# Step 3: Download dataset and create tokenizer metadata (skip if already on the bind-mounted host dir)
 echo_info "Step 3: Download dataset and create tokenizer metadata..."
-docker exec "${CONTAINER_NAME}" bash -c "
+if [ -f "${HOST_MLPERF_DATA}/train.npy" ] && [ -f "${HOST_MLPERF_DATA}/validation.npy" ] && [ -f "${HOST_MLPERF_DATA}/packed_metadata.jsonl" ]; then
+    echo_info "Dataset and metadata already present under ${HOST_MLPERF_DATA}; skipping download and convert."
+else
+    docker exec "${CONTAINER_NAME}" bash -c "
+    set -e
+    export HF_HOME=\"${HF_CACHE_ROOT}\"
+    mkdir -p \"\${HF_HOME}\"
     cd ${CONTAINER_PRIMUS_ROOT}
-    if [ ! -f ${MOUNT_DATA_PATH}/train.npy ]; then
-        python download_dataset.py --data_dir ${MOUNT_DATA_PATH}
-        python convert_dataset.py --data_dir ${MOUNT_DATA_PATH}
+    DATA_ROOT=\"${CONTAINER_DATA_ROOT}\"
+    if [ ! -f \"\${DATA_ROOT}/train.npy\" ] || [ ! -f \"\${DATA_ROOT}/validation.npy\" ]; then
+        python download_dataset.py --data_dir \"\${DATA_ROOT}\"
+        python convert_dataset.py --data_dir \"\${DATA_ROOT}\"
     else
-        echo 'Dataset already exists: ${MOUNT_DATA_PATH}/train.npy'
+        echo \"Packed dataset already present: \${DATA_ROOT}/train.npy and validation.npy\"
     fi
 
-    if [ ! -f ${MOUNT_DATA_PATH}/packed_metadata.jsonl ]; then
-        python3 create_metadata.py ${SEQ_LENGTH} ${MOUNT_DATA_PATH}/packed_metadata.jsonl
+    if [ ! -f \"\${DATA_ROOT}/packed_metadata.jsonl\" ]; then
+        python3 create_metadata.py ${SEQ_LENGTH} \"\${DATA_ROOT}/packed_metadata.jsonl\"
     else
-        echo 'Metadata already exists: ${MOUNT_DATA_PATH}/packed_metadata.jsonl'
+        echo \"Metadata already exists: \${DATA_ROOT}/packed_metadata.jsonl\"
     fi
 "
+fi
 
 # Patches are files under primus/recipes/patches on the host; git apply runs in Megatron-Bridge submodule (pinned HEAD).
 echo_info "Megatron-Bridge (host): ${MEGATRON_BRIDGE_HOST}"
@@ -138,7 +151,12 @@ docker exec "${CONTAINER_NAME}" bash -c "
     # reset so the working tree matches HEAD and git apply can find the expected context.
     echo \"[patch] git reset --hard HEAD (drops uncommitted Megatron-Bridge edits under this submodule)\"
     git reset --hard HEAD
-    git apply ${PATCH_DIR}/megatron_nemo_lora_only.patch || true"
+    if ! git apply --check \"${PATCH_DIR}/megatron_nemo_lora_only.patch\"; then
+        echo \"[patch][ERROR] megatron_nemo_lora_only.patch does not apply to this Megatron-Bridge commit (\$(git rev-parse --short HEAD)).\" >&2
+        echo \"[patch][ERROR] Bump the submodule pin or refresh the patch (see primus/recipes/patches/megatron_nemo_lora_only.patch).\" >&2
+        exit 1
+    fi
+    git apply \"${PATCH_DIR}/megatron_nemo_lora_only.patch\""
 
 # Step 5: Validation sample accounting and capped validation dataloader (loaders.py, samplers.py).
 echo_info "Step 5: Patching Megatron-Bridge for llama2_70b_lora training (validation / consumed samples)..."
@@ -168,11 +186,10 @@ if [ -n "${PRETRAINED_CHECKPOINT}" ]; then
 fi
 docker exec -it "${CONTAINER_NAME}" bash -c "
     cd ${CONTAINER_PRIMUS_ROOT} && \
-    PACKED_TRAIN_DATA_PATH=\"${PACKED_TRAIN_DATA_PATH}\" \
-    PACKED_VAL_DATA_PATH=\"${PACKED_VAL_DATA_PATH}\" \
-    PACKED_METADATA_PATH=\"${PACKED_METADATA_PATH}\" \
-    HF_TOKEN=${HF_TOKEN} \
-    WANDB_API_KEY=${WANDB_API_KEY} \
+    export HF_HOME=\"${HF_CACHE_ROOT}\" && \
+    export PACKED_DATA_DIR=\"${CONTAINER_DATA_ROOT}\" && \
+    export HF_TOKEN=\"${HF_TOKEN}\" && \
+    export WANDB_API_KEY=\"${WANDB_API_KEY}\" && \
     MEGATRON_BRIDGE_LOGGING_LEVEL=10 \
     NVTE_DEBUG=1 \
     NVTE_DEBUG_LEVEL=2 \

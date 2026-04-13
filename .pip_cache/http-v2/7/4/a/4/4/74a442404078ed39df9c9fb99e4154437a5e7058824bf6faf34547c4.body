@@ -1,0 +1,158 @@
+Metadata-Version: 2.4
+Name: megatron-energon
+Version: 7.3.2
+Summary: Megatron's multi-modal data loader
+Project-URL: Homepage, https://github.com/NVIDIA/Megatron-Energon
+Author-email: Lukas Vögtle <lvoegtle@nvidia.com>, Philipp Fischer <pfischer@nvidia.com>
+License-Expression: BSD-3-Clause
+License-File: LICENSE
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Requires-Python: >=3.10
+Requires-Dist: braceexpand
+Requires-Dist: click
+Requires-Dist: filetype>=1.0.0
+Requires-Dist: mfusepy
+Requires-Dist: multi-storage-client>=0.33.0
+Requires-Dist: numpy
+Requires-Dist: pillow>=10.0.1
+Requires-Dist: pyyaml
+Requires-Dist: rapidyaml>=0.10.0
+Requires-Dist: s3fs
+Requires-Dist: torch
+Requires-Dist: tqdm
+Requires-Dist: webdataset
+Provides-Extra: aistore
+Requires-Dist: multi-storage-client[aistore]; extra == 'aistore'
+Provides-Extra: av-decode
+Requires-Dist: av>=14.4.0; extra == 'av-decode'
+Requires-Dist: bitstring>=4.2.3; extra == 'av-decode'
+Requires-Dist: ebmlite>=3.3.1; extra == 'av-decode'
+Requires-Dist: filetype>=1.2.0; extra == 'av-decode'
+Requires-Dist: sortedcontainers>=2.4.0; extra == 'av-decode'
+Provides-Extra: azure-storage-blob
+Requires-Dist: multi-storage-client[azure-storage-blob]; extra == 'azure-storage-blob'
+Provides-Extra: dev
+Requires-Dist: myst-parser; extra == 'dev'
+Requires-Dist: ruff; extra == 'dev'
+Requires-Dist: soundfile; extra == 'dev'
+Requires-Dist: sphinx; extra == 'dev'
+Requires-Dist: sphinx-click; extra == 'dev'
+Requires-Dist: sphinx-rtd-theme; extra == 'dev'
+Requires-Dist: sphinxcontrib-napoleon; extra == 'dev'
+Provides-Extra: google-cloud-storage
+Requires-Dist: multi-storage-client[google-cloud-storage]; extra == 'google-cloud-storage'
+Provides-Extra: huggingface
+Requires-Dist: multi-storage-client[huggingface]; extra == 'huggingface'
+Provides-Extra: oci
+Requires-Dist: multi-storage-client[oci]; extra == 'oci'
+Provides-Extra: s3
+Requires-Dist: multi-storage-client[boto3]; extra == 's3'
+Provides-Extra: tar-patcher
+Requires-Dist: numba; extra == 'tar-patcher'
+Provides-Extra: transforms
+Requires-Dist: torchvision; extra == 'transforms'
+Description-Content-Type: text/markdown
+
+<!--- Copyright (c) 2025, NVIDIA CORPORATION.
+SPDX-License-Identifier: BSD-3-Clause -->
+<a name="top"></a>
+
+<div align="center">
+  <h4 align="center">Megatron's multi-modal data loader</h4>
+  <h2 align="center">Megatron Energon</h2>
+  <p align="center">
+    <a href="https://github.com/NVIDIA/Megatron-Energon/actions/workflows/tests.yml"><img src="https://github.com/NVIDIA/Megatron-Energon/actions/workflows/tests.yml/badge.svg" alt="Tests"></a> <a href="https://nvidia.github.io/Megatron-Energon/"><img src="https://github.com/NVIDIA/Megatron-Energon/actions/workflows/documentation.yml/badge.svg" alt="Documentation"></a>
+    <br />
+    <a href="https://github.com/NVIDIA/Megatron-Energon/issues">Report Bug</a>
+    ·
+    <a href="https://github.com/NVIDIA/Megatron-Energon/issues">Request Feature</a>
+  </p>
+</div>
+
+<br />
+
+ _**DISCLAIMER**: This package contains research code. APIs may change._
+
+# What is this?
+
+**Megatron Energon** is the multi-modal data loader of [Megatron](https://github.com/NVIDIA/Megatron-LM) (you can also use it independently).
+
+It's best at
+
+- loading large training data to train large multi-modal models
+- blending many different datasets together
+- distributing the work across many nodes and processes of a cluster
+- ensuring reproducibility and resumability
+- adapting easily to various types of data samples and processing
+
+Try using it together with [Megatron](https://github.com/NVIDIA/Megatron-LM) Core.
+
+# Quickstart
+**Megatron Energon** is a pip-installable python package that offers
+- dataset-related classes that you can import in your project
+- a command line utility for data preprocessing and conversion
+
+This document is just a quick start. Please also check out the [documentation](https://nvidia.github.io/Megatron-Energon/).
+
+## Installation
+
+To install the latest stable version:
+```shell
+pip install megatron-energon
+```
+
+Or to install the current development version:
+```shell
+pip install git+https://github.com/NVIDIA/Megatron-Energon.git
+```
+
+**NOTE**: We encourage you to install the package (and not just import a local copy). This will ensure you have all the needed dependencies and that you can use the command line tool.
+
+For more details on installing this package, see [here](https://nvidia.github.io/Megatron-Energon/intro/installation.html).
+
+## Usage of command line tool
+
+After installation, the command `energon` will be available.
+
+Here are some examples for things you can do:
+
+| Command | Description  |
+|---|---|
+| `energon prepare DATASET_ROOT` | Take an existing WebDataset and add the required yaml files to turn it into an energon-compatible dataset |
+| `energon lint DATASET_ROOT` | Verify that the dataset complies with the energon dataset format and that all samples are loadable |
+
+
+## Usage of the library
+
+To get started, pick a [WebDataset](https://github.com/webdataset/webdataset)-compliant dataset and run `energon prepare DATASET_ROOT` on it, to run the interactive assistant and create the `.nv-meta` folder. As an alternative to WebDataset, Energon also supports the JSONL format, see [here](https://nvidia.github.io/Megatron-Energon/basic/data_prep.html).
+
+Once done, try to load it from your Python program:
+
+```python
+from megatron.energon import get_train_dataset, get_loader, WorkerConfig
+
+
+simple_worker_config = WorkerConfig(rank=0, world_size=1, num_workers=2)
+
+
+train_ds = get_train_dataset(
+    '/my/dataset/path',
+    batch_size=2,
+    shuffle_buffer_size=None,
+    max_samples_per_sequence=None,
+    worker_config=simple_worker_config,
+)
+
+train_loader = get_loader(train_ds)
+
+for batch in train_loader:
+    # Do something with batch
+    # Infer, gradient step, ...
+    pass
+```
+
+For more details, read the [documentation](https://nvidia.github.io/Megatron-Energon/).

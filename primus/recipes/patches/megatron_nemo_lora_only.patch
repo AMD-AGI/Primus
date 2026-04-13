@@ -87,7 +87,7 @@ index b1f8b55d..7daedb41 100644
  
              logging.info(f"Adding lora to: {full_name}")
 diff --git a/src/megatron/bridge/training/utils/train_utils.py b/src/megatron/bridge/training/utils/train_utils.py
-index 777242b3..9548964a 100644
+index 777242b3..8f5dad7a 100644
 --- a/src/megatron/bridge/training/utils/train_utils.py
 +++ b/src/megatron/bridge/training/utils/train_utils.py
 @@ -336,6 +336,7 @@ def training_log(
@@ -102,14 +102,14 @@ index 777242b3..9548964a 100644
          history_wct (list): list of elapsed time per each iteration.
          model (list[MegatronModule]): megatron model state.
          log_max_attention_logit (Optional[float]): Maximum attention logit if available, None otherwise.
-+        nemo_elapsed_time_per_iter_sec (Optional[float]): If set on a log-interval step, used as the
-+            reported ``elapsed time per iteration`` and for Step Time / TFLOP/s (e.g. NeMo-style
-+            ``time.time()`` over ``train_step`` only). Megatron ``interval-time`` is still read for
-+            comparison and appended to the log line when this is set.
++        nemo_elapsed_time_per_iter_sec (Optional[float]): If set on a log-interval step, used for
++            TFLOP/s and logged as ``NeMo-style time/iter`` (``time.time()`` over ``train_step`` only).
++            Megatron-Bridge ``interval-time`` is still averaged over the log interval and printed
++            alongside for comparison when this is set.
      Returns:
          bool: The updated report_memory_flag.
      """
-@@ -581,13 +586,16 @@ def training_log(
+@@ -581,13 +586,22 @@ def training_log(
  
      if iteration % logger_config.log_interval == 0:
          elapsed_time = timers("interval-time").elapsed(barrier=True)
@@ -119,25 +119,40 @@ index 777242b3..9548964a 100644
 +        if nemo_elapsed_time_per_iter_sec is not None:
 +            elapsed_time_per_iteration = nemo_elapsed_time_per_iter_sec
  
-         # Calculate GPU utilization
+-        # Calculate GPU utilization
++        # Calculate GPU utilization (TFLOP/s uses elapsed_time_per_iteration: NeMo-style wall clock
++        # over train_step when provided, else Megatron-Bridge interval-time averaged over log_interval).
          num_flops = num_floating_point_operations(config, batch_size)
          per_gpu_tf = num_flops / elapsed_time_per_iteration / get_world_size_safe() / 1e12
++        if nemo_elapsed_time_per_iter_sec is not None:
++            _tput_basis = "NeMo-style train_step wall clock"
++        else:
++            _tput_basis = "Megatron-Bridge interval-time"
          print_rank_0(
 -            f"Step Time : {elapsed_time_per_iteration:.2f}s GPU utilization: {per_gpu_tf:.1f}MODEL_TFLOP/s/GPU"
-+            f"Step Time : {elapsed_time_per_iteration:.2f}s | model TFLOP/s/GPU: {per_gpu_tf:.1f}"
++            f"[TFLOP/s basis: {_tput_basis}] Step time: {elapsed_time_per_iteration:.2f}s | "
++            f"model TFLOP/s/GPU: {per_gpu_tf:.1f}"
          )
  
          if logger_config.log_throughput_to_tensorboard:
-@@ -609,6 +617,8 @@ def training_log(
+@@ -608,7 +622,15 @@ def training_log(
+         log_string += " consumed samples: {:12d} |".format(global_state.train_state.consumed_train_samples)
          if global_state.train_state.skipped_train_samples > 0:
              log_string += " skipped samples: {:12d} |".format(global_state.train_state.skipped_train_samples)
-         log_string += " elapsed time per iteration (ms): {:.1f} |".format(elapsed_time_per_iteration * 1000.0)
+-        log_string += " elapsed time per iteration (ms): {:.1f} |".format(elapsed_time_per_iteration * 1000.0)
 +        if nemo_elapsed_time_per_iter_sec is not None:
-+            log_string += " interval-time (ms): {:.1f} |".format(interval_time_per_iteration * 1000.0)
++            log_string += " NeMo-style time/iter (ms): {:.1f} |".format(elapsed_time_per_iteration * 1000.0)
++            log_string += " Megatron-Bridge interval-time/iter (ms): {:.1f} |".format(
++                interval_time_per_iteration * 1000.0
++            )
++        else:
++            log_string += " Megatron-Bridge interval-time/iter (ms): {:.1f} |".format(
++                elapsed_time_per_iteration * 1000.0
++            )
  
          if logger_config.log_throughput:
              log_string += f" throughput per GPU (TFLOP/s/GPU): {per_gpu_tf:.1f} |"
-@@ -648,7 +658,7 @@ def training_log(
+@@ -648,7 +670,7 @@ def training_log(
          total_loss_dict[advanced_iters_key] = 0
          total_loss_dict[skipped_iters_key] = 0
          total_loss_dict[nan_iters_key] = 0
