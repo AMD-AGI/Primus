@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:qwen3_235B_A22B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:kimi_k2-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
@@ -9,31 +9,29 @@ modules:
     config: pre_trainer.yaml
 
     # model to run
-    model: qwen3_235B_A22B.yaml
+    model: ${PRIMUS_MODEL:kimi_k2}.yaml
     overrides:
       # log
-      wandb_project: "Primus_Qwen3_235B_A22B_Pretrain"
-      # disable_wandb: false
-      # disable_tensorboard: false
+      wandb_project: "Primus_Kimi_K2_Pretrain"
       stderr_sink_level: DEBUG
 
+      # debug
+      moe_router_force_load_balancing: true
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
-      moe_router_force_load_balancing: true
 
+      # hyper parameters
       train_iters: 50
       micro_batch_size: 4
-      global_batch_size: 8192 # 32nodes
-
+      global_batch_size: 256
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
-
-      lr: 1.0e-4
-      min_lr: 1.0e-5
+      lr: 1.0e-5
+      min_lr: 0.0
       lr_warmup_iters: 2
-      lr_decay_iters: 320000
+      lr_decay_iters: null
       lr_decay_style: cosine
-      weight_decay: 1.0e-1
+      weight_decay: 0.1
       adam_beta1: 0.9
       adam_beta2: 0.95
       eod_mask_loss: true
@@ -41,35 +39,23 @@ modules:
       norm_epsilon: 1.0e-6
 
       # parallel
-      tensor_model_parallel_size: 1
-      pipeline_model_parallel_size: 4
-      # Qwen3-235B has 94 decoder layers. For PP4+VPP4 (16 chunks): 6*14 + 5*2 = 94
-      pipeline_model_parallel_layout: "Et*5|t*6|t*6|t*6|t*6|t*6|t*6|t*6|t*6|t*6|t*6|t*6|t*6|t*6|t*6|t*5,L"
-      expert_model_parallel_size: 8
-      sequence_parallel: 1
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:8}
+      expert_model_parallel_size: ${PRIMUS_EP:8}
       overlap_grad_reduce: true
-
       overlap_param_gather: true
-      use_torch_fsdp2: false
-      use_distributed_optimizer: true
       gradient_accumulation_fusion: true
-      ckpt_format: torch
 
       # data
       mock_data: true
-      train_data_path: null
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:null}
       valid_data_path: null
       test_data_path: null
 
-      # optimizer
-      use_precision_aware_optimizer: true
-      main_grads_dtype: bf16
-      exp_avg_dtype: bf16
-      exp_avg_sq_dtype: bf16
+      moe_use_legacy_grouped_gemm: true
+      # MLA
+      multi_latent_attention: true
 
-      # rope fusion
-      enable_experimental: true
-      apply_rope_fusion: true
 
       # ckpt
       finetune: false
@@ -82,17 +68,12 @@ modules:
       no_save_optim: null
       no_save_rng: null
       disable_last_saving: true
-
-      # recompute
-      recompute_granularity: full # full, selective
-      recompute_method: block # uniform, block
-      recompute_num_layers: 3 # int
-
-      moe_use_legacy_grouped_gemm: true
+      ckpt_format: torch
+      eval_iters: 0
 
       # Turbo
       enable_primus_turbo: true
-      use_turbo_attention: false
+      use_turbo_attention: true
       use_turbo_grouped_mlp: false
 
       # deepep
@@ -101,12 +82,17 @@ modules:
       moe_router_dtype: fp32
 
       # 64 or 80 for ep8, 32 for ep16-64 is best practice
-      turbo_deepep_num_cu: 80
+      turbo_deepep_num_cu: 64
       turbo_deepep_use_comm_stream: false
 
       # sync-free moe support stage 1-2, 0 means not use sync-free moe
       # stage 2 is recommended for better performance
       turbo_sync_free_moe_stage: 1
+
+      # remove once super flag is functional again
+      moe_use_fused_router_with_aux_score: true
+      moe_permute_fusion: true
+
 
       # Cross entropy flags
       cross_entropy_fusion_impl: "te"

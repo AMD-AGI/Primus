@@ -15,6 +15,41 @@ from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
 
 
+def validate_specified_recompute_layers(config, args):
+    if config.recompute_layer_ids is None:
+        return
+
+    if isinstance(config.recompute_layer_ids, str):
+        config.recompute_layer_ids = [
+            int(x.strip()) for x in config.recompute_layer_ids.split(",") if x.strip()
+        ]
+    else:
+        config.recompute_layer_ids = [int(x) for x in config.recompute_layer_ids]
+
+    config.recompute_layer_ids = list(set(config.recompute_layer_ids))
+    if len(config.recompute_layer_ids) == 0:
+        raise ValueError("recompute_layer_ids must not be empty.")
+    for layer_id in config.recompute_layer_ids:
+        if layer_id < 0 or layer_id >= args.num_layers:
+            raise ValueError(f"recompute layer id must be between 0 and {args.num_layers - 1}")
+
+    if args.recompute_granularity != "full":
+        raise ValueError(
+            f'When using recompute_layer_ids, recompute_granularity: {args.recompute_granularity} must be "full"'
+        )
+
+    if args.recompute_method is not None:
+        raise ValueError(
+            f"When using recompute_layer_ids, recompute_method: {args.recompute_method} must be None."
+        )
+
+    if args.distribute_saved_activations and args.sequence_parallel:
+        raise ValueError(
+            f"distribute_saved_activations: {args.distribute_saved_activations} must be "
+            f"false when sequence parallel is enabled: {args.sequence_parallel}"
+        )
+
+
 @register_patch(
     "megatron.transformer.custom_recompute_layer_ids",
     backend="megatron",
@@ -53,6 +88,7 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
         self.recompute_granularity = None
         orig_post_init(self)
         self.recompute_granularity = tmp
+        validate_specified_recompute_layers(config_mod.TransformerConfig, args)
 
     config_mod.TransformerConfig.__post_init__ = new_post_init
 
@@ -61,7 +97,6 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
 
     import megatron.core.models.bert.bert_model as orig_bert_model
     import megatron.core.models.gpt.gpt_model as orig_gpt_model
-    import megatron.core.models.retro.decoder_attention as orig_decoder_attention
     import megatron.core.models.T5.t5_model as orig_t5_model
     import megatron.core.models.vision.clip_vit_model as orig_clip_vit_model
     import megatron.core.models.vision.radio as orig_radio
@@ -85,11 +120,6 @@ def patch_custom_recompute_layer_ids(ctx: PatchContext):
     orig_gpt_model.TransformerBlock = PrimusTransformerBlock
     log_rank_0(
         f"[Patch:megatron.transformer.recompute_layer_ids]   Patched megatron.core.models.gpt.gpt_model.TransformerBlock "
-        f"-> {PrimusTransformerBlock.__name__}"
-    )
-    orig_decoder_attention.TransformerBlock = PrimusTransformerBlock
-    log_rank_0(
-        f"[Patch:megatron.transformer.recompute_layer_ids]   Patched megatron.core.models.retro.decoder_attention.TransformerBlock "
         f"-> {PrimusTransformerBlock.__name__}"
     )
     orig_t5_model.TransformerBlock = PrimusTransformerBlock
