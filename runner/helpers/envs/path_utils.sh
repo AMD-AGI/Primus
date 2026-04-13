@@ -32,6 +32,7 @@ path_prepend_unique() {
     done
 
     printf -v "$var_name" '%s' "$result"
+    # shellcheck disable=SC2163
     export "$var_name"
 }
 
@@ -50,6 +51,7 @@ path_append_unique() {
     done
 
     printf -v "$var_name" '%s' "$result"
+    # shellcheck disable=SC2163
     export "$var_name"
 }
 

@@ -34,7 +34,8 @@ MASTER_PORT=29500
 SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
 OUTPUT_DIR="${SCRIPT_DIR}"
 
-export MASTER_ADDR=$(scontrol show hostname "$SLURM_NODELIST" | head -n1)
+MASTER_ADDR=$(scontrol show hostname "$SLURM_NODELIST" | head -n1)
+export MASTER_ADDR
 
 # ---- Build NODE_TAG from Slurm node list ----
 readarray -t NODE_ARRAY < <(scontrol show hostnames "$SLURM_NODELIST")
@@ -81,13 +82,13 @@ srun --container-image="${DOCKER_IMAGE}" \
      --container-workdir="${SCRIPT_DIR}" \
      --container-env=NCCL_MNNVL_ENABLE,TORCH_NCCL_AVOID_RECORD_STREAMS,NCCL_NVLS_ENABLE,NCCL_DEBUG,TORCH_NCCL_HIGH_PRIORITY,GLOO_SOCKET_IFNAME,NCCL_SOCKET_IFNAME,PYTHONPATH,MELLANOX_VISIBLE_DEVICES,UCX_NET_DEVICES,UCX_TLS,NCCL_NET,NCCL_IB_HCA,NCCL_IB_DISABLE \
      torchrun \
-       --nnodes=${SLURM_JOB_NUM_NODES} \
-       --nproc_per_node=${GPUS_PER_NODE} \
-       --rdzv_id=${SLURM_JOB_ID} \
+       --nnodes="${SLURM_JOB_NUM_NODES}" \
+       --nproc_per_node="${GPUS_PER_NODE}" \
+       --rdzv_id="${SLURM_JOB_ID}" \
        --rdzv_backend=c10d \
-       --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
+       --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
        --rdzv_conf=timeout=300 \
-       ${SCRIPT_DIR}/benchmark_allreduce.py \
+       "${SCRIPT_DIR}/benchmark_allreduce.py" \
          --allreduce-report-csv-path "${ALLREDUCE_CSV}" \
          --allgather-report-csv-path "${ALLGATHER_CSV}" \
          --reducescatter-report-csv-path "${REDUCESCATTER_CSV}"

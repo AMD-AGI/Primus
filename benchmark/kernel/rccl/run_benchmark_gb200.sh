@@ -25,7 +25,8 @@ MASTER_PORT=29500
 SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
 OUTPUT_DIR="${SCRIPT_DIR}"
 
-export MASTER_ADDR=$(scontrol show hostname "$SLURM_NODELIST" | head -n1)
+MASTER_ADDR=$(scontrol show hostname "$SLURM_NODELIST" | head -n1)
+export MASTER_ADDR
 
 # ---- Build NODE_TAG from Slurm node list ----
 readarray -t NODE_ARRAY < <(scontrol show hostnames "$SLURM_NODELIST")
@@ -59,12 +60,12 @@ srun --container-image="${DOCKER_IMAGE}" \
      --container-env=PYTHONPATH="${SCRIPT_DIR}" \
      --network=host \
      torchrun \
-       --nnodes=${SLURM_JOB_NUM_NODES} \
-       --nproc_per_node=${GPUS_PER_NODE} \
-       --rdzv_id=${SLURM_JOB_ID} \
+       --nnodes="${SLURM_JOB_NUM_NODES}" \
+       --nproc_per_node="${GPUS_PER_NODE}" \
+       --rdzv_id="${SLURM_JOB_ID}" \
        --rdzv_backend=c10d \
-       --rdzv_endpoint=${MASTER_ADDR}:${MASTER_PORT} \
-       ${SCRIPT_DIR}/benchmark_allreduce.py \
+       --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+       "${SCRIPT_DIR}/benchmark_allreduce.py" \
          --allreduce-report-csv-path "${ALLREDUCE_CSV}" \
          --allgather-report-csv-path "${ALLGATHER_CSV}" \
          --reducescatter-report-csv-path "${REDUCESCATTER_CSV}"
