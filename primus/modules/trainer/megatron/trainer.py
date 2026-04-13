@@ -170,6 +170,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         self.patch_mla_attention()
         self.patch_fp8_context()
         self.patch_zbpp()
+        self.patch_farskip()
 
         self.app_metrics = {}
 
@@ -612,6 +613,68 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
                 ori_transformer_layer.get_transformer_layer_offset = get_transformer_layer_offset
 
+    def patch_farskip(self):
+        if not (self.module_config.use_simple_farskip_layer or self.module_config.use_overlapped_farskip_layer):
+            return
+        assert not getattr(self.module_config, 'moe_shared_expert_overlap', False), (
+            "moe_shared_expert_overlap must be False when using farskip layers. "
+            "FarSkip requires shared experts to be computed at the transformer layer level, "
+            "not inside the token dispatcher."
+        )
+        self.patch_attention_split_forward()
+        self.patch_async_moe_layer()
+        self.patch_farskip_layer_specs()
+
+        from megatron.core.transformer.transformer_block import TransformerBlock
+        from primus.backends.megatron.core.transformer.farskip_transformer_block import forward
+        TransformerBlock.forward = forward
+
+    def patch_attention_split_forward(self):
+        from primus.backends.megatron.core.transformer.attention_farskip import (
+            mha_forward_part_a,
+            mha_forward_part_b,
+            mla_forward_part_a,
+            mla_forward_part_b,
+        )
+        from megatron.core.transformer.attention import Attention
+        from megatron.core.transformer.multi_latent_attention import MLASelfAttention
+
+        Attention.forward_a = mha_forward_part_a
+        Attention.forward_b = mha_forward_part_b
+        MLASelfAttention.forward_a = mla_forward_part_a
+        MLASelfAttention.forward_b = mla_forward_part_b
+
+    def patch_async_moe_layer(self):
+        from primus.backends.megatron.core.transformer.moe.async_moe_layer import (
+            AsyncMoEAlltoAllTokenDispatcher,
+            dispatch,
+            combine,
+            forward,
+        )
+        from megatron.core.transformer.moe import token_dispatcher
+        import megatron.core.transformer.moe.moe_layer as moe_layer_module
+        from megatron.core.transformer.moe.moe_layer import MoELayer
+
+        token_dispatcher.MoEAlltoAllTokenDispatcher = AsyncMoEAlltoAllTokenDispatcher
+        moe_layer_module.MoEAlltoAllTokenDispatcher = AsyncMoEAlltoAllTokenDispatcher
+        MoELayer.dispatch = dispatch
+        MoELayer.combine = combine
+        MoELayer.forward = forward
+
+    def patch_farskip_layer_specs(self):
+        from megatron.core.models.gpt import gpt_layer_specs
+        from primus.backends.megatron.core.models.gpt.gpt_layer_specs_farskip import (
+            get_gpt_layer_with_transformer_engine_spec,
+            get_gpt_layer_local_spec,
+            get_gpt_mtp_block_spec_for_backend,
+        )
+        gpt_layer_specs._original_get_te_spec = gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec
+        gpt_layer_specs._original_get_local_spec = gpt_layer_specs.get_gpt_layer_local_spec
+        gpt_layer_specs._original_get_mtp_block_spec_for_backend = gpt_layer_specs.get_gpt_mtp_block_spec_for_backend
+        gpt_layer_specs.get_gpt_layer_with_transformer_engine_spec = get_gpt_layer_with_transformer_engine_spec
+        gpt_layer_specs.get_gpt_layer_local_spec = get_gpt_layer_local_spec
+        gpt_layer_specs.get_gpt_mtp_block_spec_for_backend = get_gpt_mtp_block_spec_for_backend
+
     def init(self, *init_args, **kwargs):
         allowed_keys = {
             "extra_args_provider",
@@ -748,10 +811,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.disable_tensorboard = False
 
         # checkpoint
-        ckpt_path = os.path.abspath(os.path.join(exp_root_path, "checkpoints"))
-        if args.save is not None:
-            warning_rank_0(f" args.save is deprecated, the checkpoint path is: {ckpt_path}")
-        args.save = ckpt_path
+        if args.save is None:
+            args.save = os.path.abspath(os.path.join(exp_root_path, "checkpoints"))
         log_kv_rank_0(f"-save", f"{args.save}")
 
         # auto_continue_train
@@ -859,13 +920,16 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             log_rank_0(f"-data_path: {args.data_path}")
 
         if args.train_data_path is not None:
-            args.train_data_path = args.train_data_path.split(" ")
+            if not type(args.train_data_path) == list:
+                args.train_data_path = args.train_data_path.split(" ")
             log_rank_0(f"-train_data_path: {args.train_data_path}")
         if args.valid_data_path is not None:
-            args.valid_data_path = args.valid_data_path.split(" ")
+            if not type(args.valid_data_path) == list:
+                args.valid_data_path = args.valid_data_path.split(" ")
             log_rank_0(f"-valid_data_path: {args.valid_data_path}")
         if args.test_data_path is not None:
-            args.test_data_path = args.test_data_path.split(" ")
+            if not type(args.test_data_path) == list:
+                args.test_data_path = args.test_data_path.split(" ")
             log_rank_0(f"-test_data_path: {args.test_data_path}")
 
         # update sp
@@ -876,7 +940,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.iterations_to_skip = []
 
         # support moe_freq_type
-        # args.moe_layer_freq = moe_freq_type(args.moe_layer_freq)
+        if type(args.moe_layer_freq) == str:
+            args.moe_layer_freq = eval(args.moe_layer_freq)
 
         if args.mock_data:
             args.data_path = None
@@ -1341,7 +1406,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
     def run(self, *args, **kwargs):
         one_logger = get_one_logger()
         args = get_args()
-
+        if type(args.moe_layer_freq) == str:
+            args.moe_layer_freq = eval(args.moe_layer_freq)
         if args.pp_warmup:
             from .utils import pp_warmup
 

@@ -1,4 +1,9 @@
+###############################################################################
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 import logging
 from abc import ABC, abstractmethod
@@ -13,6 +18,7 @@ from megatron.core.fusions.fused_indices_converter import fused_indices_to_multi
 from megatron.core.fusions.fused_pad_routing_map import fused_pad_routing_map
 from megatron.core.tensor_parallel import (
     all_to_all,
+    async_all_to_all,
     gather_from_sequence_parallel_region,
     reduce_scatter_to_sequence_parallel_region,
 )
@@ -583,6 +589,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.tokens_per_expert = self.preprocess(self.routing_map)
 
         if self.shared_experts is not None:
+            raise NotImplementedError('shared_experts computation inside the dispatcher is not currently implemented with FarSkip layers')
             self.shared_experts.pre_forward_comm(hidden_states.view(self.hidden_shape))
 
         # Permutation 1: input to AlltoAll input
@@ -604,7 +611,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         )
         return permutated_local_input_tokens, permuted_probs
 
-    def token_dispatch(self, permutated_local_input_tokens, permuted_probs):
+    def token_dispatch(self, permutated_local_input_tokens, permuted_probs, async_op=False):
         """
         Perform all-to-all communication for dispatching tokens.
 
@@ -623,14 +630,25 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         self.tokens_per_expert = self._maybe_dtoh_and_synchronize(
             "before_ep_alltoall", self.tokens_per_expert
         )
-        global_input_tokens = all_to_all(
-            self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
-        )
-        global_probs = all_to_all(
-            self.ep_group, permuted_probs, self.output_splits, self.input_splits
-        )
+        if not async_op:
+            global_input_tokens = all_to_all(
+                self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
+            )
+            global_probs = all_to_all(
+                self.ep_group, permuted_probs, self.output_splits, self.input_splits
+            )
+            return global_input_tokens, global_probs
+        else:
+            global_probs, dist_handle2, handle2_backward_handles = async_all_to_all(
+                self.ep_group, permuted_probs, self.output_splits, self.input_splits
+            )
+            global_input_tokens, dist_handle1, handle1_backward_handles = async_all_to_all(
+                self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
+            )
+            return global_input_tokens, global_probs, (dist_handle1, dist_handle2), (handle1_backward_handles, handle2_backward_handles)
 
-        return global_input_tokens, global_probs
+
+
 
     def dispatch_postprocess(self, global_input_tokens, global_probs):
         """Post-processes tokens after All-to-All communication.
@@ -646,6 +664,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             A tuple of processed tokens, token counts per expert, and processed probabilities.
         """
         if self.shared_experts is not None:
+            raise NotImplementedError('shared_experts computation inside the dispatcher is not currently implemented with FarSkip layers')
             self.shared_experts.linear_fc1_forward_and_act(global_input_tokens)
 
         if self.tp_size > 1:
@@ -749,6 +768,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         hidden_states: torch.Tensor,
         async_finish: bool = True,
         allocate_on_comm_stream: bool = True,
+        async_op: bool = False,
     ):
         """Executes fused un-permutation and communication using DeepEP kernels.
 
@@ -767,10 +787,16 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         """
         # Perform expert parallel AlltoAll communication
         # hidden_states: [SEQL, H] -> [SEQL, H/TP]
-        permutated_local_input_tokens = all_to_all(
-            self.ep_group, hidden_states, self.input_splits, self.output_splits
-        )
-        return permutated_local_input_tokens
+        if async_op:
+            permutated_local_input_tokens, combine_handle, combine_backward_handle = async_all_to_all(
+                self.ep_group, hidden_states, self.input_splits, self.output_splits
+            )
+            return permutated_local_input_tokens, combine_handle, combine_backward_handle
+        else:
+            permutated_local_input_tokens = all_to_all(
+                self.ep_group, hidden_states, self.input_splits, self.output_splits
+            )
+            return permutated_local_input_tokens
 
     def combine_postprocess(self, permutated_local_input_tokens):
         """Finalizes token reconstruction with un-permutation and reshaping.
@@ -786,6 +812,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             The final MoE layer output reshaped to its original dimensions.
         """
         if self.shared_experts is not None:
+            raise NotImplementedError('shared_experts computation inside the dispatcher is not currently implemented with FarSkip layers')
             self.shared_experts.linear_fc2_forward(permutated_local_input_tokens)
             self.shared_experts.post_forward_comm()
 
@@ -804,6 +831,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
 
         # Add shared experts output
         if self.shared_experts is not None:
+            raise NotImplementedError('shared_experts computation inside the dispatcher is not currently implemented with FarSkip layers')
             shared_expert_output = self.shared_experts.get_output()
             output += shared_expert_output
         return output

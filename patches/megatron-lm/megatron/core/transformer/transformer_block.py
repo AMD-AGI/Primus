@@ -1,9 +1,14 @@
+###############################################################################
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import List, Optional, Union
-
+import os
 import torch
 from torch import Tensor
 
@@ -677,6 +682,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     use_inner_quantization_context=use_inner_quantization_context,
                 )
             else:
+                farskip_state = {} # only at layer 0
                 for l_no, layer in enumerate(self.layers):
                     # Get appropriate inner quantization context
                     if use_inner_quantization_context:
@@ -694,7 +700,8 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                         inner_quantization_context = nullcontext()
 
                     with self.offload_context, inner_quantization_context:
-                        hidden_states, context = layer(
+
+                        layer_output = layer(
                             hidden_states=hidden_states,
                             attention_mask=attention_mask,
                             context=context,
@@ -707,7 +714,13 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                             inference_context=inference_context,
                             packed_seq_params=packed_seq_params,
                             sequence_len_offset=sequence_len_offset,
+                            **farskip_state,
                         )
+                        if len(layer_output) == 3:
+                            hidden_states, context, farskip_state = layer_output
+                        else:
+                            hidden_states, context = layer_output
+                            farskip_state = {}
 
                     if (
                         torch.is_grad_enabled()
@@ -715,6 +728,28 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                         and self.group_prefetch_offload_commit_async is not None
                     ):
                         hidden_states = self.group_prefetch_offload_commit_async(hidden_states)
+
+
+                # handle synchronization in overlapped settings
+                if farskip_state:
+                    if 'combine_handle' in farskip_state and farskip_state['combine_handle'] is not None:
+                        farskip_state['combine_handle'].wait()
+                    if 'combined_experts' in farskip_state and farskip_state['combined_experts'] is not None:
+                        from megatron.core.transformer.moe.moe_utils import unpermute
+                        unpermute_inputs = farskip_state.pop('dispatcher_state', None)
+                        reversed_local_input_permutation_mapping = unpermute_inputs.pop(
+                            'reversed_local_input_permutation_mapping')
+                        combined_experts = unpermute(
+                            farskip_state['combined_experts'],
+                            reversed_local_input_permutation_mapping, **unpermute_inputs
+                        )
+                        combined_experts = combined_experts.view(hidden_states.shape)
+                        if 'last_residual_with_attention' in farskip_state and 'shared_expert' in farskip_state:
+                            if os.environ.get('VERBOSE_DEBUG_PRINT', '0') == '1':
+                                print('Adding farskip using the same associative add order (a +(b+c)) as simple and regular')
+                            hidden_states = farskip_state['last_residual_with_attention'] + (combined_experts + farskip_state['shared_expert'])
+                        else:
+                            hidden_states = hidden_states + combined_experts
 
         # Final layer norm.
         if self.final_layernorm is not None:
@@ -811,5 +846,4 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                         module, f'{prefix}{name}.', sharded_offsets, metadata
                     )
                 )
-
         return sharded_state_dict

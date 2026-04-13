@@ -1,5 +1,11 @@
+###############################################################################
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
+import os
 import torch
 
 from megatron.core.parallel_state import get_global_memory_buffer
@@ -461,6 +467,71 @@ class _AllToAll(torch.autograd.Function):
         )
 
 
+class _AsyncAllToAll(torch.autograd.Function):
+    work_handles = {}
+
+    @staticmethod
+    def forward(ctx, group, input, output_split_sizes, input_split_sizes, work_handles_dict):
+        """Forward function."""
+        ctx.group = group
+        ctx.output_split_sizes = output_split_sizes
+        ctx.input_split_sizes = input_split_sizes
+        ctx.work_handles_dict = work_handles_dict
+
+        world_size = group.size()
+        # Bypass the function if we are using only 1 GPU.
+        if world_size == 1:
+            return input, None
+
+        input = input.contiguous()
+        if output_split_sizes is None:
+            # Equal split (all2all)
+            output = torch.empty_like(input)
+        else:
+            # Unequal split (all2all-v)
+            output = input.new_empty(
+                size=[sum(output_split_sizes)] + list(input.size()[1:]),
+                dtype=input.dtype,
+                device=torch.cuda.current_device(),
+            )
+        work = torch.distributed.all_to_all_single(
+            output,
+            input,
+            output_split_sizes=output_split_sizes,
+            input_split_sizes=input_split_sizes,
+            group=group,
+            async_op=True,
+        )
+        # ctx.mark_non_differentiable(work)
+        if os.environ.get('FWD_ASYNC_WORK_DEBUG_EAGER_SYNC') == '1' and world_size > 1:
+            if os.environ.get('VERBOSE_DEBUG_PRINT') == '1':
+                print("In Forward: FWD_ASYNC_WORK_DEBUG_EAGER_SYNC: Calling work.wait() in _AsyncAllToAll forward")
+            work.wait()
+        return output, work
+
+    @staticmethod
+    def backward(ctx, grad_output, grad_work):
+        """Backward function."""
+        world_size = ctx.group.size()
+        grad_input, work = _AsyncAllToAll.apply(
+            ctx.group, grad_output, ctx.input_split_sizes, ctx.output_split_sizes, ctx.work_handles_dict
+        )
+        if os.environ.get('BWD_ASYNC_WORK_DEBUG_EAGER_SYNC') == '1' and world_size > 1:
+            if os.environ.get('VERBOSE_DEBUG_PRINT') == '1':
+                print("In Backward: ASYNC_WORK_DEBUG_EAGER_SYNC: Calling work.wait() in _AsyncAllToAll backward")
+            work.wait()
+        if world_size > 1:
+            ctx.work_handles_dict['backward'] = work
+        return (
+            None,
+            grad_input,
+            None,
+            None,
+            None,
+        )
+
+
+
 # -----------------
 # Helper functions.
 # -----------------
@@ -538,6 +609,14 @@ def all_to_all(group, input_, output_split_sizes_=None, input_split_sizes=None):
     return _AllToAll.apply(group, input_, output_split_sizes_, input_split_sizes)
 
 
+def async_all_to_all(group, input_, output_split_sizes_=None, input_split_sizes=None):
+    """Wrapper for async autograd function"""
+    assert group is not None, "group should not be None"
+    work_handles_dict = {}
+    output, work = _AsyncAllToAll.apply(group, input_, output_split_sizes_, input_split_sizes, work_handles_dict)
+    return output, work, work_handles_dict
+
+
 def all_to_all_sp2hp(input_, group=None):
     """
     Perform AlltoAll communication on tensor parallel group, transform the input tensor from shape
@@ -594,3 +673,6 @@ def all_to_all_hp2sp(input_, group=None):
     )
     output = torch.cat(split_tensors, dim=-1)
     return output
+
+
+

@@ -1,4 +1,9 @@
+###############################################################################
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 import warnings
 from dataclasses import dataclass
@@ -211,6 +216,24 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_deepep_num_sms: int = 20
     """Number of SMs to use for DeepEP."""
+
+    use_simple_farskip_layer: bool = False
+    """Use SimpleFarSkipTransformerLayer instead of TransformerLayer for farskip connections."""
+
+    use_overlapped_farskip_layer: bool = False
+    """Use OverlappedFarSkipTransformerLayer instead of TransformerLayer for farskip connections with communication-computation overlap."""
+
+    attn_only_farskip: bool = False
+    """Apply farskip connections only to attention layers. (currently only implemented for SimpleFarSkipTransformerLayer) """
+
+    mlp_only_farskip: bool = False
+    """Apply farskip connections only to MLP layers. (currently only implemented for SimpleFarSkipTransformerLayer) """
+
+    farskip_overlap_associative_add: bool = False
+    """Use associative addition order for farskip overlap (a + (b + c) instead of (a + b) + c)."""
+
+    gated_attention: bool = False
+    """Whether to use gated multi-latent attention."""
 
     ####################
     # initialization

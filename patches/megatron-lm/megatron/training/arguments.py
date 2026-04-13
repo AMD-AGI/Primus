@@ -1,4 +1,9 @@
+###############################################################################
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 """Megatron arguments."""
 
@@ -1265,6 +1270,8 @@ def core_transformer_config_from_args(args, config_class=None):
         kw_args['cp_comm_type'] = args.cp_comm_type[0]
     if args.is_hybrid_model:
         kw_args['is_hybrid_model'] = args.is_hybrid_model
+    if args.gated_attention:
+        kw_args['gated_attention'] = args.gated_attention
 
     kw_args['inference_sampling_seed'] = args.seed
 
@@ -2984,6 +2991,16 @@ def _add_vision_args(parser):
                        help='Whether to layer normalize the q and k attention embeddings.')
     group.add_argument('--qk-l2-norm', action='store_true',
                        help='Use llama 4 qk l2 norm')
+    group.add_argument('--use-simple-farskip-layer', action='store_true',
+                       help='Use SimpleFarSkipTransformerLayer instead of TransformerLayer for far skip connections.')
+    group.add_argument('--use-overlapped-farskip-layer', action='store_true',
+                       help='Use OverlappedFarSkipTransformerLayer instead of TransformerLayer for far skip connections with communication-computation overlap.')
+    group.add_argument('--attn-only-farskip', action='store_true',
+                       help='Apply far skip connections only to attention layers.')
+    group.add_argument('--mlp-only-farskip', action='store_true',
+                       help='Apply far skip connections only to MLP layers.')
+    group.add_argument('--farskip-overlap-associative-add', action='store_true',
+                       help='Use associative addition order for farskip overlap (a + (b + c) instead of (a + b) + c).')
 
     return parser
 
@@ -3114,6 +3131,8 @@ def _add_moe_args(parser):
 
 def _add_mla_args(parser):
     group = parser.add_argument_group(title="mla")
+    group.add_argument('--gated-attention', default=False, action='store_true',
+                       help='Whether to use Gated Multi-Latent Attention. Default is False.')
     group.add_argument('--q-lora-rank', type=int, default=None,
                        help="Rank of Query tensor's low rank representation.")
     group.add_argument('--kv-lora-rank', type=int, default=32,

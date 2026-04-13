@@ -1,4 +1,9 @@
+###############################################################################
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 import warnings
 from typing import Optional, Union
@@ -28,6 +33,8 @@ from megatron.core.transformer.transformer_block import (
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import (
+    OverlappedFarSkipTransformerLayer,
+    SimpleFarSkipTransformerLayer,
     TransformerLayer,
     TransformerLayerSubmodules,
     get_transformer_layer_offset,
@@ -80,6 +87,8 @@ def get_gpt_layer_with_transformer_engine_spec(
     use_te_op_fuser: Optional[bool] = False,
     use_kitchen: bool = False,
     use_te_activation_func: bool = False,
+    use_simple_farskip_layer: bool = False,
+    use_overlapped_farskip_layer: bool = False,
 ) -> ModuleSpec:
     """Use this spec to use lower-level Transformer Engine modules (required for fp8 training).
 
@@ -123,6 +132,13 @@ def get_gpt_layer_with_transformer_engine_spec(
         use_te_op_fuser=use_te_op_fuser,
         use_te_activation_func=use_te_activation_func,
     )
+    # For dense MLP layers, fall back to Simple FarSkip
+    if use_overlapped_farskip_layer and num_experts is not None:
+        layer_module = OverlappedFarSkipTransformerLayer
+    elif use_simple_farskip_layer or (use_overlapped_farskip_layer and num_experts is None):
+        layer_module = SimpleFarSkipTransformerLayer
+    else:
+        layer_module = TransformerLayer
 
     if multi_latent_attention:
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
@@ -137,7 +153,7 @@ def get_gpt_layer_with_transformer_engine_spec(
             else backend.column_parallel_linear()
         )
         return ModuleSpec(
-            module=TransformerLayer,
+            module=layer_module,
             submodules=TransformerLayerSubmodules(
                 input_layernorm=backend.layer_norm(),
                 self_attention=ModuleSpec(
@@ -150,6 +166,7 @@ def get_gpt_layer_with_transformer_engine_spec(
                         linear_kv_down_proj=backend.linear(),
                         linear_kv_up_proj=linear_kv_up_proj,
                         core_attention=backend.core_attention(),
+                        linear_gate_proj=backend.column_parallel_linear(),
                         linear_proj=backend.row_parallel_linear(),
                         q_layernorm=IdentityOp,
                         kv_layernorm=IdentityOp,
@@ -164,7 +181,7 @@ def get_gpt_layer_with_transformer_engine_spec(
     else:
         qk_norm = backend.layer_norm(for_qk=True)
         return ModuleSpec(
-            module=TransformerLayer,
+            module=layer_module,
             submodules=TransformerLayerSubmodules(
                 self_attention=ModuleSpec(
                     module=SelfAttention,
@@ -207,6 +224,8 @@ def get_gpt_layer_local_spec(
     normalization: Optional[str] = None,
     qk_l2_norm: Optional[bool] = False,
     use_kitchen: bool = False,
+    use_simple_farskip_layer: bool = False,
+    use_overlapped_farskip_layer: bool = False,
 ) -> ModuleSpec:
     """Use this spec for an implementation using only modules in Megatron-Core.
 
@@ -249,11 +268,18 @@ def get_gpt_layer_local_spec(
         moe_grouped_gemm=moe_grouped_gemm,
         moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
     )
+    # For dense MLP layers, fall back to Simple FarSkip
+    if use_overlapped_farskip_layer and num_experts is not None:
+        layer_module = OverlappedFarSkipTransformerLayer
+    elif use_simple_farskip_layer or (use_overlapped_farskip_layer and num_experts is None):
+        layer_module = SimpleFarSkipTransformerLayer
+    else:
+        layer_module = TransformerLayer
 
     if multi_latent_attention:
         assert qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
         return ModuleSpec(
-            module=TransformerLayer,
+            module=layer_module,
             submodules=TransformerLayerSubmodules(
                 input_layernorm=layer_norm,
                 self_attention=ModuleSpec(
@@ -266,6 +292,7 @@ def get_gpt_layer_local_spec(
                         linear_kv_down_proj=backend.column_parallel_linear(),
                         linear_kv_up_proj=backend.column_parallel_linear(),
                         core_attention=backend.core_attention(),
+                        linear_gate_proj=backend.column_parallel_linear(),
                         linear_proj=backend.row_parallel_linear(),
                         q_layernorm=qk_norm if qk_layernorm else IdentityOp,
                         kv_layernorm=qk_norm if qk_layernorm else IdentityOp,
@@ -279,7 +306,7 @@ def get_gpt_layer_local_spec(
         )
     else:
         return ModuleSpec(
-            module=TransformerLayer,
+            module=layer_module,
             submodules=TransformerLayerSubmodules(
                 input_layernorm=layer_norm,
                 self_attention=ModuleSpec(
@@ -421,6 +448,8 @@ def get_gpt_decoder_block_spec(
             qk_l2_norm=qk_l2_norm,
             use_kitchen=config.use_kitchen,
             use_te_activation_func=config.use_te_activation_func,
+            use_simple_farskip_layer=config.use_simple_farskip_layer,
+            use_overlapped_farskip_layer=config.use_overlapped_farskip_layer,
         )
         moe_layer_spec = get_gpt_layer_with_transformer_engine_spec(
             num_experts=config.num_moe_experts,
@@ -431,6 +460,8 @@ def get_gpt_decoder_block_spec(
             qk_l2_norm=qk_l2_norm,
             use_kitchen=config.use_kitchen,
             use_te_activation_func=config.use_te_activation_func,
+            use_simple_farskip_layer=config.use_simple_farskip_layer,
+            use_overlapped_farskip_layer=config.use_overlapped_farskip_layer,
         )
     else:
         layer_norm_impl = LNImpl
@@ -443,6 +474,8 @@ def get_gpt_decoder_block_spec(
             normalization=normalization,
             qk_l2_norm=qk_l2_norm,
             use_kitchen=config.use_kitchen,
+            use_simple_farskip_layer=config.use_simple_farskip_layer,
+            use_overlapped_farskip_layer=config.use_overlapped_farskip_layer,
         )
         moe_layer_spec = get_gpt_layer_local_spec(
             num_experts=config.num_moe_experts,
@@ -453,18 +486,24 @@ def get_gpt_decoder_block_spec(
             normalization=normalization,
             qk_l2_norm=qk_l2_norm,
             use_kitchen=config.use_kitchen,
+            use_simple_farskip_layer=config.use_simple_farskip_layer,
+            use_overlapped_farskip_layer=config.use_overlapped_farskip_layer,
         )
 
     # Parse config.moe_layer_freq to determine the pattern of expert/dense layers.
     # 0 stands for dense layers, 1 stands for expert layers.
     # For integer N: Creates a pattern with one expert layer every N layers.
     # For string pattern: Evaluates the str directly (e.g. "[1,0,1]" for alternating expert/dense).
-    if isinstance(config.moe_layer_freq, int):
+    if type(config.moe_layer_freq) == str:
+        layer_freq = eval(config.moe_layer_freq)
+    else:
+        layer_freq = config.moe_layer_freq
+    if isinstance(layer_freq, int):
         moe_layer_pattern = [
             1 if (i % config.moe_layer_freq == 0) else 0 for i in range(config.num_layers)
         ]
-    elif isinstance(config.moe_layer_freq, list):
-        moe_layer_pattern = config.moe_layer_freq
+    elif isinstance(layer_freq, list):
+        moe_layer_pattern = layer_freq
         assert len(moe_layer_pattern) == config.num_layers, (
             f"Invalid length of moe_layer_pattern: {len(moe_layer_pattern)}, "
             f"expected {config.num_layers}, "
@@ -552,6 +591,12 @@ def get_gpt_mtp_block_spec_for_backend(
         transformer_layer_spec = spec
     else:
         raise ValueError(f"Invalid spec: {spec}")
+
+    # Disable FarSkip for MTP layers
+    if transformer_layer_spec.module in (SimpleFarSkipTransformerLayer, OverlappedFarSkipTransformerLayer):
+        from copy import deepcopy
+        transformer_layer_spec = deepcopy(transformer_layer_spec)
+        transformer_layer_spec.module = TransformerLayer
 
     mtp_layer_spec = get_mtp_layer_spec_for_backend(
         transformer_layer_spec=transformer_layer_spec, backend=backend

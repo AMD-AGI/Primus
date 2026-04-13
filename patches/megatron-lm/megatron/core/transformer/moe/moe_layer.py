@@ -1,4 +1,9 @@
+###############################################################################
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -181,13 +186,13 @@ class MoELayer(BaseMoELayer):
         )
         return hidden_states, probs, residual
 
-    def dispatch(self, hidden_states: torch.Tensor, probs: torch.Tensor):
+    def dispatch(self, hidden_states: torch.Tensor, probs: torch.Tensor, async_op=False):
         """Dispatches tokens to assigned expert ranks via communication.
         This method performs the actual communication (e.g., All-to-All) to distribute
         tokens and their associated probabilities to the devices hosting their assigned
         experts.
         """
-        return self.token_dispatcher.token_dispatch(hidden_states, probs)
+        return self.token_dispatcher.token_dispatch(hidden_states, probs, async_op=async_op)
 
     def experts_compute(
         self, hidden_states: torch.Tensor, probs: torch.Tensor, residual: torch.Tensor
@@ -227,20 +232,20 @@ class MoELayer(BaseMoELayer):
 
         return output, shared_expert_output, mlp_bias
 
-    def combine(self, output: torch.Tensor, shared_expert_output: Optional[torch.Tensor]):
+    def combine(self, output: torch.Tensor, shared_expert_output: Optional[torch.Tensor], async_op=False):
         """Combines expert outputs via communication and adds shared expert output.
 
         This method uses the token dispatcher to combine the outputs from different
         experts (e.g., via an All-to-All communication). It then adds the output
         from the shared expert if it exists.
         """
-        output = self.token_dispatcher.token_combine(output)
+        output = self.token_dispatcher.token_combine(output, async_op=async_op)
         output = self.token_dispatcher.combine_postprocess(output)
         if shared_expert_output is not None:
             output = output + shared_expert_output
         return output
 
-    def forward(self, hidden_states: torch.Tensor):
+    def forward(self, hidden_states: torch.Tensor, return_shared_expert=False):
         """Forward pass for the MoE layer.
 
         The forward pass comprises four main steps:
@@ -269,11 +274,11 @@ class MoELayer(BaseMoELayer):
                 dispatched_input, probs, residual
             )
             output = self.combine(output, shared_expert_output)
-            return output, mlp_bias
+            return output, shared_expert_output, mlp_bias
 
         if self.moe_layer_recompute:
             if self.config.fp8:
-                output, mlp_bias = te_checkpoint(
+                output, shared_expert_output, mlp_bias = te_checkpoint(
                     custom_forward,
                     False,
                     tensor_parallel.random.get_cuda_rng_tracker,
@@ -281,11 +286,15 @@ class MoELayer(BaseMoELayer):
                     hidden_states,
                 )
             else:
-                output, mlp_bias = tensor_parallel.checkpoint(custom_forward, False, hidden_states)
+                output,shared_expert_output, mlp_bias = tensor_parallel.checkpoint(custom_forward, False, hidden_states)
         else:
-            output, mlp_bias = custom_forward(hidden_states)
+            output, shared_expert_output, mlp_bias = custom_forward(hidden_states)
+        if return_shared_expert:
+            return output, shared_expert_output, mlp_bias
+        else:
+            return output, mlp_bias
 
-        return output, mlp_bias
+
 
     def backward_dw(self):
         """Compute weight gradients for experts and shared experts."""

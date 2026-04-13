@@ -1,4 +1,9 @@
+###############################################################################
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Modification Copyright© 2025 Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
 from .cross_entropy import vocab_parallel_cross_entropy
 from .data import broadcast_data
 from .layers import (
@@ -14,6 +19,7 @@ from .layers import (
 from .mappings import (
     all_gather_last_dim_from_tensor_parallel_region,
     all_to_all,
+    async_all_to_all,
     all_to_all_hp2sp,
     all_to_all_sp2hp,
     copy_to_tensor_model_parallel_region,
