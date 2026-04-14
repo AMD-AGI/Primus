@@ -90,6 +90,7 @@ apply_layernorm_1p: false
 
 # MLA
 multi_latent_attention: false
+gated_attention: false
 q_lora_rank: null # int
 kv_lora_rank: 32 # int
 qk_head_dim: 128 # int
@@ -137,6 +138,14 @@ moe_input_jitter_eps: null
 moe_token_dispatcher_type: allgather # str: 'allgather', 'alltoall', 'flex', 'alltoall_seq'
 moe_enable_deepep: false
 moe_per_layer_logging: false
+
+# farskip
+use_simple_farskip_layer: false
+use_overlapped_farskip_layer: false
+attn_only_farskip: false
+mlp_only_farskip: false
+farskip_overlap_associative_add: true
+
 moe_expert_capacity_factor: null
 moe_pad_expert_input_to_capacity: false
 moe_token_drop_policy: probs

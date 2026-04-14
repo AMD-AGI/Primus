@@ -1,0 +1,38 @@
+bases:
+  - deepseek_v3_base.yaml
+
+# https://huggingface.co/moonshotai/Moonlight-16B-A3B
+# 16B total params, 3B active params
+
+tokenizer_type: DeepSeekV3Tokenizer
+tokenizer_model: deepseek-ai/DeepSeek-V3
+
+# model
+num_layers: 27
+hidden_size: 2048
+ffn_hidden_size: 11264
+num_attention_heads: 16
+# mla
+q_lora_rank: null
+kv_lora_rank: 512
+qk_head_dim: 128
+qk_pos_emb_head_dim: 64
+v_head_dim: 128
+kv_channels: 128
+# mtp
+mtp_num_layers: 1
+moe_aux_loss_coeff: 0.001 # aux_loss_alpha
+mtp_loss_scaling_factor: 0.1
+# moe
+moe_layer_freq: "([0]*1+[1]*26)"
+num_experts: 64
+# num_shared_experts: 2
+moe_ffn_hidden_size: 1408
+moe_shared_expert_intermediate_size: 2816 # num_shared_experts * moe_ffn_hidden_size
+# norm
+norm_epsilon: 1.0e-05
+
+expert_model_parallel_size: 8
+moe_router_num_groups: null # int
+moe_router_group_topk: null # int
+moe_router_topk_scaling_factor: 2.446
