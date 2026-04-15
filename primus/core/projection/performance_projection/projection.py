@@ -772,16 +772,14 @@ def _calculate_single_node_config(
         # EP should not exceed original EP
         benchmark_ep = min(benchmark_ep, max_ep_for_benchmark)
 
-        # When benchmark EP >= 2, keep num_experts at the original value so
-        # the measured A2A has the correct routing sparsity (topk/num_experts).
-        # This changes experts_per_rank, so compute_scale is applied later.
-        #
-        # When benchmark EP == 1, there is no A2A to measure (analytical is
-        # used instead), so we reduce num_experts proportionally to preserve
-        # experts_per_rank for accurate compute measurement.
-        if num_experts is not None and benchmark_ep >= 2 and benchmark_ep < ep:
-            benchmark_num_experts = num_experts
-        elif num_experts is not None and benchmark_ep < ep:
+        # Always reduce num_experts proportionally to preserve
+        # experts_per_rank.  This keeps per-GPU compute identical to the
+        # target config so no analytical expert-correction is needed.
+        # The A2A measurement at the reduced num_experts is representative
+        # because total A2A traffic depends on EP, not num_experts.
+        # The additive A2A delta (analytical_target - analytical_bench)
+        # handles the EP scaling accurately.
+        if num_experts is not None and benchmark_ep < ep:
             experts_per_rank = math.ceil(num_experts / ep)
             topk = getattr(original_config, "moe_router_topk", 2) or 2
             benchmark_num_experts = max(benchmark_ep * experts_per_rank, topk)
@@ -3528,6 +3526,7 @@ def launch_projection_from_cli(args, overrides):
 
                     if benchmark_ep == original_ep:
                         # No EP scaling — use measured A2A directly
+                        a2a_delta = 0.0
                         target_a2a_fwd = measured_a2a_fwd
                         target_a2a_bwd = measured_a2a_bwd
                         if is_rank_0 and moe_layers_adjusted == 0:
@@ -3535,59 +3534,17 @@ def launch_projection_from_cli(args, overrides):
                                 f"    [INFO] Benchmark EP ({benchmark_ep}) == target EP ({original_ep}), using measured A2A directly"
                             )
 
-                    # ── Estimate per-expert GEMM time for epr correction ──
-                    # The measured "compute" (total MLP minus A2A) includes both
-                    # expert MLP GEMMs and large routing/permutation overhead that
-                    # does NOT scale with experts_per_rank. Scaling the entire
-                    # compute by target_epr/bench_epr drastically underestimates.
-                    # Instead, we estimate only the expert MLP GEMM time
-                    # analytically and subtract the per-expert delta.
-                    model_cfg = training_config.model_config
-                    runtime_cfg = training_config.runtime_config
-                    _hidden = model_cfg.hidden_size
-                    _ffn = getattr(model_cfg, "moe_ffn_hidden_size", None) or \
-                           getattr(model_cfg, "ffn_hidden_size", None) or _hidden * 4
-                    _topk = getattr(model_cfg, "moe_router_topk", 2) or 2
-                    _seq = getattr(runtime_cfg, "sequence_length", 4096)
-                    _mbs = getattr(runtime_cfg, "micro_batch_size", 1)
-
-                    bench_epr = (benchmark_num_experts // max(benchmark_ep, 1)
-                                 if benchmark_num_experts else 1)
-                    target_epr = (original_num_experts // max(original_ep, 1)
-                                  if original_num_experts else 1)
-
-                    if benchmark_ep != original_ep and bench_epr != target_epr:
-                        # Tokens per expert depends on routing density
-                        _tpe_bench = _mbs * _seq * _topk / max(benchmark_num_experts, 1)
-                        _tpe_target = _mbs * _seq * _topk / max(original_num_experts, 1)
-
-                        # SwiGLU forward FLOPs per expert: 3 projections × 2 (matmul)
-                        GPU_PEAK_TFLOPS = 1300  # MI300X/MI355X BF16 matrix peak
-                        _expert_fwd_bench = (
-                            bench_epr * 6 * _tpe_bench * _hidden * _ffn
-                            / (GPU_PEAK_TFLOPS * 1e9)
-                        )
-                        _expert_fwd_target = (
-                            target_epr * 6 * _tpe_target * _hidden * _ffn
-                            / (GPU_PEAK_TFLOPS * 1e9)
-                        )
-                        expert_correction_fwd = _expert_fwd_bench - _expert_fwd_target
-                        expert_correction_bwd = 2.0 * expert_correction_fwd
-                    else:
-                        expert_correction_fwd = 0.0
-                        expert_correction_bwd = 0.0
-
                     # ── Compute A2A delta (additive, not multiplicative) ──
-                    # The measured A2A includes both communication and large
-                    # dispatch/combine overhead. Multiplicative ratio-scaling
-                    # amplifies that overhead. Additive correction adjusts only
-                    # the communication portion via the analytical model.
-                    if benchmark_ep != original_ep and measured_a2a_fwd > 0:
+                    # Multiplicative ratio-scaling amplifies fixed
+                    # dispatch/combine overhead that is independent of EP.
+                    # Additive correction adjusts only the communication
+                    # portion via the analytical model:
+                    #   target_a2a = measured_a2a + (analytical_target - analytical_bench)
+                    elif benchmark_ep != original_ep and measured_a2a_fwd > 0:
                         a2a_delta = analytical_target_a2a - analytical_bench_a2a
                         target_a2a_fwd = measured_a2a_fwd + a2a_delta
                         target_a2a_bwd = measured_a2a_bwd + a2a_delta
                     elif benchmark_ep != original_ep:
-                        # No measured A2A (e.g. benchmark EP=1) — use analytical
                         a2a_delta = analytical_target_a2a
                         target_a2a_fwd = analytical_target_a2a
                         target_a2a_bwd = analytical_target_a2a
@@ -3599,32 +3556,29 @@ def launch_projection_from_cli(args, overrides):
                             )
                     else:
                         a2a_delta = 0.0
+                        target_a2a_fwd = measured_a2a_fwd
+                        target_a2a_bwd = measured_a2a_bwd
 
                     # ── Adjust total MLP time ──
-                    # Formula: new_mlp = measured_mlp - expert_correction + a2a_delta
-                    # This avoids decomposing into compute + A2A (which is unreliable
-                    # because measured "compute" is dominated by routing overhead
-                    # that doesn't scale with epr).
+                    # Because num_experts is reduced proportionally during
+                    # benchmarking, experts_per_rank is preserved and the
+                    # measured compute is already correct for the target.
+                    # Only the A2A portion changes (via additive delta).
+                    model_cfg = training_config.model_config
                     use_deepep = getattr(model_cfg, "use_turbo_deepep", False)
 
                     if use_deepep and benchmark_ep != original_ep:
-                        # With DeepEP overlap, A2A delta is partially hidden.
-                        # Compute typically dominates A2A, so overlap = A2A × OE.
-                        # Increasing A2A by delta means overlap also grows by delta × OE,
-                        # so the effective A2A increase is delta × (1 - OE).
                         DEEPEP_OVERLAP_EFFICIENCY = 0.65
                         effective_a2a_delta = a2a_delta * (1.0 - DEEPEP_OVERLAP_EFFICIENCY)
-                        new_mlp_fwd = mlp_fwd - expert_correction_fwd + effective_a2a_delta
-                        new_mlp_bwd = mlp_bwd - expert_correction_bwd + effective_a2a_delta
+                        new_mlp_fwd = mlp_fwd + effective_a2a_delta
+                        new_mlp_bwd = mlp_bwd + effective_a2a_delta
                     else:
-                        new_mlp_fwd = mlp_fwd - expert_correction_fwd + a2a_delta
-                        new_mlp_bwd = mlp_bwd - expert_correction_bwd + a2a_delta
+                        new_mlp_fwd = mlp_fwd + a2a_delta
+                        new_mlp_bwd = mlp_bwd + a2a_delta
 
-                    # Safety: new MLP should not be negative
                     new_mlp_fwd = max(new_mlp_fwd, 0.1)
                     new_mlp_bwd = max(new_mlp_bwd, 0.1)
 
-                    # Update layer total: replace old MLP with new MLP
                     new_fwd = (old_fwd - mlp_fwd) + new_mlp_fwd
                     new_bwd = (old_bwd - mlp_bwd) + new_mlp_bwd
 
@@ -3633,12 +3587,6 @@ def launch_projection_from_cli(args, overrides):
                         print(
                             f"    MLP fwd: {mlp_fwd:.2f} ms (measured A2A: {measured_a2a_fwd:.2f})"
                         )
-                        if abs(expert_correction_fwd) > 0.001:
-                            print(
-                                f"    Expert GEMM correction (epr {bench_epr} → {target_epr}): "
-                                f"-{expert_correction_fwd:.2f} ms "
-                                f"(analytical at {GPU_PEAK_TFLOPS} TFLOPS)"
-                            )
                         if benchmark_ep != original_ep:
                             print(
                                 f"    A2A delta (additive): {a2a_delta:+.3f} ms "
