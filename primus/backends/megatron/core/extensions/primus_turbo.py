@@ -501,15 +501,15 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
                 else:
                     window_size = (self.sink_sliding_window, 0)
 
-            # NOTE: sink attention only support bshd format
-            query = query.permute(1, 0, 2, 3).contiguous()
-            key = key.permute(1, 0, 2, 3).contiguous()
-            value = value.permute(1, 0, 2, 3).contiguous()
-
         if self.offload:
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_q", query)
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_k", key)
             OFFLOAD_BUFFER.add_offload_tensor(f"attn_v", value)
+
+        if qkv_format == "sbhd":
+            query = query.permute(1, 0, 2, 3)
+            key = key.permute(1, 0, 2, 3)
+            value = value.permute(1, 0, 2, 3)
 
         o = self.attn(
             query,
@@ -525,12 +525,11 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             return_lse=False,
             return_attn_probs=False,
             sink=sink_tensor,  # PR 208: pass sink tensor to Primus-Turbo
-            qkv_format=qkv_format if not use_sink_attn else "bshd",
             **self.attn_kwargs,
         )
 
-        if use_sink_attn:
-            o = o.permute(1, 0, 2, 3).contiguous()
+        if qkv_format == "sbhd":
+            o = o.permute(1, 0, 2, 3)
 
         o = o.reshape(o.shape[0], o.shape[1], -1)
 
