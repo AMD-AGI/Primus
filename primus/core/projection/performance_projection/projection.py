@@ -772,10 +772,19 @@ def _calculate_single_node_config(
         # EP should not exceed original EP
         benchmark_ep = min(benchmark_ep, max_ep_for_benchmark)
 
-        # Adjust num_experts to preserve experts per rank
-        if num_experts is not None and benchmark_ep < ep:
+        # When benchmark EP >= 2, keep num_experts at the original value so
+        # the measured A2A has the correct routing sparsity (topk/num_experts).
+        # This changes experts_per_rank, so compute_scale is applied later.
+        #
+        # When benchmark EP == 1, there is no A2A to measure (analytical is
+        # used instead), so we reduce num_experts proportionally to preserve
+        # experts_per_rank for accurate compute measurement.
+        if num_experts is not None and benchmark_ep >= 2 and benchmark_ep < ep:
+            benchmark_num_experts = num_experts
+        elif num_experts is not None and benchmark_ep < ep:
             experts_per_rank = math.ceil(num_experts / ep)
-            benchmark_num_experts = max(benchmark_ep, benchmark_ep * experts_per_rank)
+            topk = getattr(original_config, "moe_router_topk", 2) or 2
+            benchmark_num_experts = max(benchmark_ep * experts_per_rank, topk)
         else:
             benchmark_num_experts = num_experts
 
@@ -2821,15 +2830,24 @@ def _run_multinode_projection(
 
                 measured_a2a_per_layer = measured_a2a_fwd
 
-                # Calculate analytical A2A for benchmark EP (if available)
-                # If benchmark_ep is not provided or same as target EP, use measured directly
-                analytical_bench_a2a = None
-                if benchmark_ep is not None and benchmark_ep != ep and benchmark_ep > 0:
+                # Check if per-layer adjustment already corrected the A2A
+                _a2a_already_adjusted = any(
+                    isinstance(ld, dict)
+                    and ld.get("type") == "moe"
+                    and ld.get("mlp", {}).get("a2a_ep_adjusted", False)
+                    for ld in profiling_results.values()
+                )
+
+                if _a2a_already_adjusted:
+                    # Per-layer MoE adjustment already applied additive A2A
+                    # correction and stored the target A2A. Use it directly.
+                    target_a2a_per_layer = measured_a2a_per_layer
+                    analytical_bench_a2a = None
+                    a2a_source = "pre-adjusted by per-layer MoE correction"
+                elif benchmark_ep is not None and benchmark_ep != ep and benchmark_ep > 0:
                     analytical_bench_a2a = _estimate_a2a_per_layer_ms(
                         training_config, benchmark_ep, hardware_config_dict
                     )
-                    # Subtract analytical benchmark A2A, add analytical target A2A
-                    # This way permute and other times remain unchanged
                     target_a2a_per_layer = (
                         measured_a2a_per_layer
                         - analytical_bench_a2a
@@ -2837,8 +2855,8 @@ def _run_multinode_projection(
                     )
                     a2a_source = f"measured - analytical_bench({benchmark_ep}) + analytical_target({ep})"
                 else:
-                    # No benchmark EP info or EP unchanged, use measured directly
                     target_a2a_per_layer = measured_a2a_per_layer
+                    analytical_bench_a2a = None
                     a2a_source = "measured (benchmark EP not available or unchanged)"
 
                 effective_a2a_per_layer = target_a2a_per_layer
@@ -3508,85 +3526,103 @@ def launch_projection_from_cli(args, overrides):
                     measured_a2a_fwd = mlp_info.get("a2a_forward_time_ms", 0)
                     measured_a2a_bwd = mlp_info.get("a2a_backward_time_ms", 0)
 
-                    # Ratio-based target A2A: anchor to measured, scale by analytical ratio
-                    # If benchmark EP == target EP, use measured A2A directly (no scaling needed)
                     if benchmark_ep == original_ep:
-                        # No EP scaling needed - use measured A2A directly
+                        # No EP scaling — use measured A2A directly
                         target_a2a_fwd = measured_a2a_fwd
                         target_a2a_bwd = measured_a2a_bwd
                         if is_rank_0 and moe_layers_adjusted == 0:
                             print(
-                                f"    [INFO] Benchmark EP ({benchmark_ep}) == target EP ({original_ep}), using measured A2A directly (no scaling)"
+                                f"    [INFO] Benchmark EP ({benchmark_ep}) == target EP ({original_ep}), using measured A2A directly"
                             )
-                    elif analytical_bench_a2a > 0 and measured_a2a_fwd > 0:
-                        a2a_ratio = analytical_target_a2a / analytical_bench_a2a
-                        target_a2a_fwd = measured_a2a_fwd * a2a_ratio
-                        target_a2a_bwd = measured_a2a_bwd * a2a_ratio
-                        # Warn if analytical ratio seems unreasonable (likely model error)
-                        if (
-                            is_rank_0
-                            and moe_layers_adjusted == 0
-                            and (a2a_ratio > 2.0 or a2a_ratio < 0.5)
-                        ):
-                            print(
-                                f"    [WARNING] Analytical A2A ratio ({a2a_ratio:.3f}x) seems extreme. "
-                                f"Analytical model may be inaccurate for EP scaling."
-                            )
+
+                    # ── Estimate per-expert GEMM time for epr correction ──
+                    # The measured "compute" (total MLP minus A2A) includes both
+                    # expert MLP GEMMs and large routing/permutation overhead that
+                    # does NOT scale with experts_per_rank. Scaling the entire
+                    # compute by target_epr/bench_epr drastically underestimates.
+                    # Instead, we estimate only the expert MLP GEMM time
+                    # analytically and subtract the per-expert delta.
+                    model_cfg = training_config.model_config
+                    runtime_cfg = training_config.runtime_config
+                    _hidden = model_cfg.hidden_size
+                    _ffn = getattr(model_cfg, "moe_ffn_hidden_size", None) or \
+                           getattr(model_cfg, "ffn_hidden_size", None) or _hidden * 4
+                    _topk = getattr(model_cfg, "moe_router_topk", 2) or 2
+                    _seq = getattr(runtime_cfg, "sequence_length", 4096)
+                    _mbs = getattr(runtime_cfg, "micro_batch_size", 1)
+
+                    bench_epr = (benchmark_num_experts // max(benchmark_ep, 1)
+                                 if benchmark_num_experts else 1)
+                    target_epr = (original_num_experts // max(original_ep, 1)
+                                  if original_num_experts else 1)
+
+                    if benchmark_ep != original_ep and bench_epr != target_epr:
+                        # Tokens per expert depends on routing density
+                        _tpe_bench = _mbs * _seq * _topk / max(benchmark_num_experts, 1)
+                        _tpe_target = _mbs * _seq * _topk / max(original_num_experts, 1)
+
+                        # SwiGLU forward FLOPs per expert: 3 projections × 2 (matmul)
+                        GPU_PEAK_TFLOPS = 1300  # MI300X/MI355X BF16 matrix peak
+                        _expert_fwd_bench = (
+                            bench_epr * 6 * _tpe_bench * _hidden * _ffn
+                            / (GPU_PEAK_TFLOPS * 1e9)
+                        )
+                        _expert_fwd_target = (
+                            target_epr * 6 * _tpe_target * _hidden * _ffn
+                            / (GPU_PEAK_TFLOPS * 1e9)
+                        )
+                        expert_correction_fwd = _expert_fwd_bench - _expert_fwd_target
+                        expert_correction_bwd = 2.0 * expert_correction_fwd
                     else:
-                        # Fallback to raw analytical if no measured or no bench analytical
+                        expert_correction_fwd = 0.0
+                        expert_correction_bwd = 0.0
+
+                    # ── Compute A2A delta (additive, not multiplicative) ──
+                    # The measured A2A includes both communication and large
+                    # dispatch/combine overhead. Multiplicative ratio-scaling
+                    # amplifies that overhead. Additive correction adjusts only
+                    # the communication portion via the analytical model.
+                    if benchmark_ep != original_ep and measured_a2a_fwd > 0:
+                        a2a_delta = analytical_target_a2a - analytical_bench_a2a
+                        target_a2a_fwd = measured_a2a_fwd + a2a_delta
+                        target_a2a_bwd = measured_a2a_bwd + a2a_delta
+                    elif benchmark_ep != original_ep:
+                        # No measured A2A (e.g. benchmark EP=1) — use analytical
+                        a2a_delta = analytical_target_a2a
                         target_a2a_fwd = analytical_target_a2a
                         target_a2a_bwd = analytical_target_a2a
-
-                    # ── Decompose MLP into compute + A2A ──
-                    # When DeepEP is ON, the benchmark wall-clock mlp_fwd already has
-                    # the A2A-compute overlap baked in, so the naive subtraction
-                    # compute = mlp - a2a would underestimate true compute.
-                    # We must first reconstruct the sequential compute time.
-                    use_deepep = getattr(
-                        training_config.model_config, "use_turbo_deepep", False
-                    )
-
-                    if use_deepep:
-                        # Reconstruct true sequential compute from overlapped measurement.
-                        # During benchmarking with DeepEP ON:
-                        #   overlap = min(A2A, compute) × OE
-                        #   mlp_wall_clock = compute + A2A - overlap
-                        #
-                        # Case 1 (compute ≥ A2A, typical for MoE):
-                        #   mlp = compute + A2A × (1 - OE)  →  compute = mlp - A2A × (1 - OE)
-                        # Case 2 (A2A > compute):
-                        #   mlp = compute × (1 - OE) + A2A  →  compute = (mlp - A2A) / (1 - OE)
-                        DEEPEP_OVERLAP_EFFICIENCY = 0.65
-                        residual = 1.0 - DEEPEP_OVERLAP_EFFICIENCY  # 0.35
-
-                        # Try Case 1 first
-                        compute_fwd = mlp_fwd - measured_a2a_fwd * residual
-                        compute_bwd = mlp_bwd - measured_a2a_bwd * residual
-                        # If Case 1 doesn't hold (compute < A2A), use Case 2
-                        if compute_fwd < measured_a2a_fwd:
-                            compute_fwd = max(
-                                0, (mlp_fwd - measured_a2a_fwd) / residual
+                        if is_rank_0 and moe_layers_adjusted == 0:
+                            print(
+                                f"    [INFO] No measured A2A (bench EP={benchmark_ep}), "
+                                f"using analytical for target EP={original_ep}: "
+                                f"{analytical_target_a2a:.3f} ms/layer"
                             )
-                        if compute_bwd < measured_a2a_bwd:
-                            compute_bwd = max(
-                                0, (mlp_bwd - measured_a2a_bwd) / residual
-                            )
-
-                        # Rebuild new MLP with target A2A, re-applying DeepEP overlap
-                        overlap_fwd = (
-                            min(target_a2a_fwd, compute_fwd) * DEEPEP_OVERLAP_EFFICIENCY
-                        )
-                        overlap_bwd = (
-                            min(target_a2a_bwd, compute_bwd) * DEEPEP_OVERLAP_EFFICIENCY
-                        )
-                        new_mlp_fwd = compute_fwd + target_a2a_fwd - overlap_fwd
-                        new_mlp_bwd = compute_bwd + target_a2a_bwd - overlap_bwd
                     else:
-                        # DeepEP OFF: A2A is synchronous, simple sequential decomposition
-                        compute_fwd = mlp_fwd - measured_a2a_fwd
-                        compute_bwd = mlp_bwd - measured_a2a_bwd
-                        new_mlp_fwd = compute_fwd + target_a2a_fwd
-                        new_mlp_bwd = compute_bwd + target_a2a_bwd
+                        a2a_delta = 0.0
+
+                    # ── Adjust total MLP time ──
+                    # Formula: new_mlp = measured_mlp - expert_correction + a2a_delta
+                    # This avoids decomposing into compute + A2A (which is unreliable
+                    # because measured "compute" is dominated by routing overhead
+                    # that doesn't scale with epr).
+                    use_deepep = getattr(model_cfg, "use_turbo_deepep", False)
+
+                    if use_deepep and benchmark_ep != original_ep:
+                        # With DeepEP overlap, A2A delta is partially hidden.
+                        # Compute typically dominates A2A, so overlap = A2A × OE.
+                        # Increasing A2A by delta means overlap also grows by delta × OE,
+                        # so the effective A2A increase is delta × (1 - OE).
+                        DEEPEP_OVERLAP_EFFICIENCY = 0.65
+                        effective_a2a_delta = a2a_delta * (1.0 - DEEPEP_OVERLAP_EFFICIENCY)
+                        new_mlp_fwd = mlp_fwd - expert_correction_fwd + effective_a2a_delta
+                        new_mlp_bwd = mlp_bwd - expert_correction_bwd + effective_a2a_delta
+                    else:
+                        new_mlp_fwd = mlp_fwd - expert_correction_fwd + a2a_delta
+                        new_mlp_bwd = mlp_bwd - expert_correction_bwd + a2a_delta
+
+                    # Safety: new MLP should not be negative
+                    new_mlp_fwd = max(new_mlp_fwd, 0.1)
+                    new_mlp_bwd = max(new_mlp_bwd, 0.1)
 
                     # Update layer total: replace old MLP with new MLP
                     new_fwd = (old_fwd - mlp_fwd) + new_mlp_fwd
@@ -3597,22 +3633,18 @@ def launch_projection_from_cli(args, overrides):
                         print(
                             f"    MLP fwd: {mlp_fwd:.2f} ms (measured A2A: {measured_a2a_fwd:.2f})"
                         )
-                        if use_deepep:
+                        if abs(expert_correction_fwd) > 0.001:
                             print(
-                                f"    DeepEP ON: reconstructed sequential compute: {compute_fwd:.2f} ms"
+                                f"    Expert GEMM correction (epr {bench_epr} → {target_epr}): "
+                                f"-{expert_correction_fwd:.2f} ms "
+                                f"(analytical at {GPU_PEAK_TFLOPS} TFLOPS)"
                             )
-                        else:
+                        if benchmark_ep != original_ep:
                             print(
-                                f"    DeepEP OFF: sequential compute = mlp - a2a = {compute_fwd:.2f} ms"
+                                f"    A2A delta (additive): {a2a_delta:+.3f} ms "
+                                f"(analytical {analytical_bench_a2a:.3f} → {analytical_target_a2a:.3f})"
                             )
-                        if analytical_bench_a2a > 0 and measured_a2a_fwd > 0:
-                            print(
-                                f"    Ratio-based target A2A fwd: {measured_a2a_fwd:.2f} × {a2a_ratio:.3f} = {target_a2a_fwd:.2f} ms"
-                            )
-                        else:
-                            print(
-                                f"    Target A2A fwd (raw analytical): {target_a2a_fwd:.2f} ms"
-                            )
+                        print(f"    Target A2A fwd: {target_a2a_fwd:.2f} ms")
                         print(f"    → New MLP fwd: {new_mlp_fwd:.2f} ms")
                         print(f"    → New MLP bwd: {new_mlp_bwd:.2f} ms")
                         print(f"    Layer fwd: {old_fwd:.2f} → {new_fwd:.2f} ms")
@@ -3623,10 +3655,9 @@ def launch_projection_from_cli(args, overrides):
                     if mlp_info:
                         mlp_info["forward_time_ms"] = new_mlp_fwd
                         mlp_info["backward_time_ms"] = new_mlp_bwd
-                        # Store the scaled A2A values for use in multinode projection
-                        # This allows multinode projection to use ratio-scaled A2A instead of analytical
                         mlp_info["a2a_forward_time_ms"] = target_a2a_fwd
                         mlp_info["a2a_backward_time_ms"] = target_a2a_bwd
+                        mlp_info["a2a_ep_adjusted"] = True
                     moe_layers_adjusted += 1
 
         else:
@@ -4069,7 +4100,7 @@ def launch_projection_from_cli(args, overrides):
 
             print(f"  Benchmarked on: {benchmark_gpus} GPUs")
             print(f"  Compute time ({per_mb_label}): {per_mb_time:.3f} ms")
-            print()
+            print("")
 
             # Compute tray level (if benchmarked on 1 GPU, show tray projection)
             if benchmark_gpus == 1 and gpus_per_tray > 1:
@@ -4078,7 +4109,7 @@ def launch_projection_from_cli(args, overrides):
                     f"     TP={min(tp, gpus_per_tray)}, PP=1, EP={min(ep, gpus_per_tray // min(tp, gpus_per_tray))}"
                 )
                 print("     Per-microbatch compute: included in node-level projection")
-                print()
+                print("")
 
             # Node level
             print(
@@ -4091,10 +4122,8 @@ def launch_projection_from_cli(args, overrides):
                 if hardware_config_dict
                 else "     (Using default intra-node communication model)"
             )
-            print()
-            print(
-                f"  📊 Multi-Node ({target_nodes} nodes = {target_nodes * gpus_per_node} GPUs):"
-            )
+            print("")
+            print(f"  📊 Multi-Node ({target_nodes} nodes = {target_nodes * gpus_per_node} GPUs):")
             print("     → See detailed projection below")
             print("=" * 100)
 
