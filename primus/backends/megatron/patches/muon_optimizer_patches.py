@@ -15,6 +15,7 @@ the function is actually used, not megatron.core.optimizer.
 """
 
 import dataclasses
+import inspect
 
 from primus.core.patches import PatchContext, register_patch
 from primus.modules.module_utils import log_rank_0
@@ -43,27 +44,40 @@ def patch_get_megatron_optimizer_muon(ctx: PatchContext) -> None:
         return
 
     original_get_megatron_optimizer = training_module.get_megatron_optimizer
+    original_signature = inspect.signature(original_get_megatron_optimizer)
 
     if getattr(original_get_megatron_optimizer, "_primus_muon_wrapper", False):
         return
 
-    def _patched_get_megatron_optimizer(
-        config,
-        model_chunks,
-        config_overrides=None,
-        use_gloo_process_groups=True,
-        pg_collection=None,
-        dump_param_to_param_group_map=None,
-    ):
-        if not config.optimizer or "muon" not in config.optimizer:
-            return original_get_megatron_optimizer(
-                config,
-                model_chunks,
-                config_overrides=config_overrides,
-                use_gloo_process_groups=use_gloo_process_groups,
-                pg_collection=pg_collection,
-                dump_param_to_param_group_map=dump_param_to_param_group_map,
-            )
+    def _get_bound_arg(bound_arguments, name, fallback=None):
+        if name in bound_arguments:
+            return bound_arguments[name]
+
+        parameter = original_signature.parameters.get(name)
+        if parameter and parameter.default is not inspect.Parameter.empty:
+            return parameter.default
+
+        return fallback
+
+    def _patched_get_megatron_optimizer(*func_args, **func_kwargs):
+        config = func_kwargs.get("config")
+        if config is None and func_args:
+            config = func_args[0]
+
+        optimizer_name = getattr(config, "optimizer", None)
+        if not optimizer_name or "muon" not in optimizer_name:
+            return original_get_megatron_optimizer(*func_args, **func_kwargs)
+
+        bound_arguments = original_signature.bind_partial(*func_args, **func_kwargs).arguments
+        model_chunks = _get_bound_arg(bound_arguments, "model_chunks")
+        config_overrides = _get_bound_arg(bound_arguments, "config_overrides")
+        use_gloo_process_groups = _get_bound_arg(
+            bound_arguments, "use_gloo_process_groups", True
+        )
+        pg_collection = _get_bound_arg(bound_arguments, "pg_collection")
+        dump_param_to_param_group_map = _get_bound_arg(
+            bound_arguments, "dump_param_to_param_group_map"
+        )
 
         from primus.backends.megatron.core.optimizer.moun import (
             get_megatron_muon_optimizer,
@@ -86,7 +100,7 @@ def patch_get_megatron_optimizer_muon(ctx: PatchContext) -> None:
             model_chunks,
             config_overrides=config_overrides,
             use_gloo_process_groups=use_gloo_process_groups,
-            layer_wise_distributed_optimizer="dist" in config.optimizer,
+            layer_wise_distributed_optimizer="dist" in optimizer_name,
             pg_collection=pg_collection,
             dump_param_to_param_group_map=dump_param_to_param_group_map,
         )
