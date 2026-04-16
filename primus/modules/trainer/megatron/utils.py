@@ -202,8 +202,9 @@ def validate_manual_split(args):
 def validate_args_modified(*args, **kwargs):
     def validate_args_modifier(func, modification):
         import inspect
+        import textwrap
 
-        source = inspect.getsource(func)
+        source = textwrap.dedent(inspect.getsource(func))
         modified_source = modification(source)
         namespace = {}
         exec(modified_source, func.__globals__, namespace)
@@ -214,9 +215,16 @@ def validate_args_modified(*args, **kwargs):
 
     assert ori_code is not None and new_code is not None, "ori_code and new_code must be provided."
 
-    megatron.training.arguments.validate_args = validate_args_modifier(
-        megatron.training.arguments.validate_args, lambda s: s.replace(ori_code, new_code)
+    target_fn = getattr(
+        megatron.training.arguments, "_primus_original_validate_args",
+        megatron.training.arguments.validate_args,
     )
+    modified_fn = validate_args_modifier(target_fn, lambda s: s.replace(ori_code, new_code))
+    if hasattr(megatron.training.arguments, "_primus_original_validate_args"):
+        megatron.training.arguments._primus_original_validate_args = modified_fn
+    else:
+        megatron.training.arguments.validate_args = modified_fn
+
     megatron.training.arguments.validate_args(*args, **kwargs)
 
 

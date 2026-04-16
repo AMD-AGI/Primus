@@ -755,14 +755,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 )
 
                 validate_args_modified(args, args_defaults, ori_code=ori_code, new_code=new_code)
-            elif args.fp4 is not None:
-                # TODO(ruibin): Remove it when ROCm TE upgrade to 2.7.0.dev0
-                from .utils import validate_args_modified
-
-                ori_code = """raise ValueError("--fp4-format requires Transformer Engine >= 2.7.0.dev0 for NVFP4BlockScaling support.")"""
-                new_code = """pass"""
-
-                validate_args_modified(args, args_defaults, ori_code=ori_code, new_code=new_code)
             else:
                 validate_args(args, args_defaults)
 
