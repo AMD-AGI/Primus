@@ -24,14 +24,13 @@ from primus.modules.module_utils import log_rank_0
     phase="before_train",
     description="Set reduce_amax in TEDelayedScaling based on TP/SP requirements",
     condition=lambda ctx: (
-        getattr(get_args(ctx), "fp8", False)
-        and getattr(get_args(ctx), "fp8_recipe", "delayed") == "delayed"
+        getattr(get_args(ctx), "fp8", False) and getattr(get_args(ctx), "fp8_recipe", "delayed") == "delayed"
     ),
 )
 def patch_te_delayed_scaling_reduce_amax(ctx: PatchContext):
     """
     Patch TEDelayedScaling to choose reduce_amax based on parallelism mode.
-    
+
         - reduce_amax=False was introduced as an FP8 optimization to avoid
             cross-rank amax synchronization in delayed scaling.
         - FP8 + sequence parallelism requires amax reduction across the tensor
