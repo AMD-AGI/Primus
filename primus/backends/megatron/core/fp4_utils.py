@@ -6,7 +6,7 @@
 
 
 """Utility functions related to FP4 that are used throughout Megatron core"""
-
+import os
 from contextlib import nullcontext
 
 from megatron.core import parallel_state
@@ -34,7 +34,7 @@ HAVE_TURBO = False
 try:
     import primus_turbo  # pylint: disable=W0611
 
-    HAVE_TURBO = True
+    HAVE_TURBO = False
 except (ImportError, ModuleNotFoundError):
     # Primus-Turbo not found
     pass
@@ -148,27 +148,90 @@ if HAVE_TE and HAVE_TURBO:
 
 elif HAVE_TE:
 
+    def _ensure_mxfp4_recipe_support():
+        """Patch TE's Recipe and RecipeState to support MXFP4BlockScaling.
+
+        TE may ship MXFP4BlockScaling, MXFP4Tensor, and MXFP4Quantizer but
+        lack the RecipeState.create() branch and Recipe.mxfp4() discriminator.
+        This adds the missing wiring so fp8_autocast works with MXFP4.
+        """
+        from transformer_engine.common.recipe import Recipe
+
+        if hasattr(Recipe, "mxfp4"):
+            return
+
+        from typing import Optional
+
+        import torch
+
+        from transformer_engine.common.recipe import MXFP4BlockScaling
+        from transformer_engine.pytorch import quantization as te_quant
+        from transformer_engine.pytorch.quantization import RecipeState, get_fp4_te_dtype
+        from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer
+
+        Recipe.mxfp4 = lambda self: isinstance(self, MXFP4BlockScaling)
+
+        class MXFP4BlockScalingRecipeState(RecipeState):
+            """Configuration for MXFP4 quantization."""
+
+            def __init__(
+                self,
+                recipe: MXFP4BlockScaling,
+                *,
+                mode: str,
+                num_quantizers: int = 1,
+                device: Optional[torch.device] = None,
+            ) -> None:
+                self.recipe = recipe
+                self.mode = mode
+                self.num_quantizers = num_quantizers
+                self.dtype = get_fp4_te_dtype(recipe)
+                if device is None:
+                    device = torch.device("cuda")
+
+            def make_quantizers(self) -> list:
+                return [
+                    MXFP4Quantizer(
+                        self.dtype,
+                        use_hadamard=self.recipe.use_hadamard,
+                    )
+                    for _ in range(self.num_quantizers)
+                ]
+
+        te_quant.MXFP4BlockScalingRecipeState = MXFP4BlockScalingRecipeState
+
+        _original_create = RecipeState.create
+
+        @staticmethod
+        def _patched_create(recipe, *, mode, num_quantizers=1, device=None):
+            if recipe.mxfp4():
+                return MXFP4BlockScalingRecipeState(
+                    recipe, mode=mode, num_quantizers=num_quantizers, device=device,
+                )
+            return _original_create(recipe, mode=mode, num_quantizers=num_quantizers, device=device)
+
+        RecipeState.create = _patched_create
+
     def get_fp4_recipe(config: TransformerConfig):
         """Return fp4 recipe."""
-        if is_te_min_version("2.7.0.dev0"):
-            if config.fp4_recipe == Fp4Recipe.nvfp4:
-                try:
-                    fp4_recipe = transformer_engine.common.recipe.NVFP4BlockScaling()
-                except AttributeError:
-                    raise ValueError(
-                        """NVFP4BlockScaling recipe is not available in this version of
-                        Transformer Engine. Please make sure you are using TE version
-                        >= 2.7.0.dev0."""
-                    )
-            else:
+        if config.fp4_recipe == Fp4Recipe.nvfp4:
+            if not is_te_min_version("2.7.0.dev0"):
                 raise ValueError(
-                    "NVFP4BlockScaling is the only supported FP4 recipe. "
-                    "Please make sure you are using a compatible TE version >= 2.7.0.dev0."
+                    "NVFP4BlockScaling requires TransformerEngine >= 2.7.0.dev0."
                 )
+            fp4_recipe = transformer_engine.common.recipe.NVFP4BlockScaling()
+        elif config.fp4_recipe == Fp4Recipe.mxfp4:
+            if not is_te_min_version("2.8.0"):
+                raise ValueError(
+                    "MXFP4BlockScaling requires TransformerEngine >= 2.8.0."
+                )
+            _ensure_mxfp4_recipe_support()
+            fp4_recipe = transformer_engine.common.recipe.MXFP4BlockScaling()
+            fp4_recipe.use_hadamard = os.environ.get("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
         else:
             raise ValueError(
-                """FP4 support requires TransformerEngine version >= 2.7.0.dev0
-                for NVFP4BlockScaling."""
+                f"Unsupported FP4 recipe: {config.fp4_recipe}. "
+                "Supported: nvfp4, mxfp4."
             )
         return fp4_recipe
 
