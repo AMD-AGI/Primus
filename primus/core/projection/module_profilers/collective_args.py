@@ -90,6 +90,27 @@ class CollectiveArgs:
     # linearly with peer count. The fixed sync component (barrier, kernel setup)
     # dominates, with a small per-peer scheduling cost.
     # Inter-node overhead is per-peer (~0.45 us) due to sequential RDMA QP setup.
+    a2a_mesh_contention: float = 0.12  # Peak BW derate for full-mesh A2A contention
+    # Full-mesh AllToAll saturates all xGMI links simultaneously, causing HBM
+    # controller and xGMI bridge contention that reduces per-link efficiency.
+    # Applied as: effective_bw *= 1 - contention * link_saturation^2
+    #   link_saturation = (gpus - 1) / (node_size - 1)
+    # The quadratic scaling captures that contention grows super-linearly as
+    # the mesh approaches full saturation. Only affects intra-node A2A bandwidth.
+    # Calibrated against MI325X 8-GPU AllToAll preflight measurements.
+    a2a_rccl_overhead_us: float = 150.0  # Fixed A2A kernel/protocol overhead (us)
+    # RCCL AllToAll has a size-independent setup cost (algorithm selection,
+    # communicator state, kernel launch chain) observed as a ~150us floor in
+    # measured A2A times across all configurations (intra and inter-node).
+    # Distinct from rccl_overhead_us (AllReduce) because A2A uses a different
+    # RCCL protocol path with additional per-peer coordination.
+    a2a_remote_contention: float = 0.04  # Per-remote-node inter-node A2A BW derate
+    # In multi-node AllToAll, each GPU sends to (num_nodes-1) * gpus_per_node
+    # remote peers through a single NIC. As the number of remote destinations
+    # grows, the NIC must multiplex between more QPs, causing PFC/switching
+    # overhead and reduced per-flow efficiency. Applied as:
+    #   effective_pod_bw *= 1 - a2a_remote_contention * (num_nodes - 1)
+    # Calibrated: 2N has no derate; 4N has 8% derate matching measured BW drop.
 
 
 def get_default_args(
@@ -211,8 +232,9 @@ def get_default_args(
     if args.nics_per_node is None:
         args.nics_per_node = gpus_per_node
 
-    # Store raw node_bw before applying bw_eff (needed for P2P which uses p2p_bw_eff)
+    # Store raw bandwidths before applying bw_eff (needed for P2P which uses p2p_bw_eff)
     args._raw_node_bw = args.node_bw
+    args._raw_pod_bw = args.pod_bw
 
     # Apply bw_eff to bandwidth values once at initialization
     args.node_bw = args.node_bw * args.bw_eff

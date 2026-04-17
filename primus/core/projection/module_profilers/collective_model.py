@@ -13,7 +13,7 @@ import numpy as np
 # ---------------------------
 
 
-def get_effective_node_bw(args, group_size=None):
+def get_effective_node_bw(args, group_size=None, a2a=False):
     """
     Get effective intra-node bandwidth, applying mesh topology derate.
 
@@ -26,21 +26,33 @@ def get_effective_node_bw(args, group_size=None):
     Formula: effective_node_bw = node_bw × (g - 1) / (node_size - 1)
     Only applies when: g > 1 AND g < node_size AND node_topology == "mesh"
 
+    A2A contention derate: Full-mesh AllToAll saturates all xGMI links
+    simultaneously. Applied only when a2a=True.
+
     Args:
         args: CollectiveArgs instance (node_bw already has bw_eff applied)
         group_size: Optional override for the communicating group size.
                     Defaults to args.hp (TP size) for AllReduce-style collectives.
                     AllToAll should pass the actual EP/A2A group size.
+        a2a: If True, apply A2A mesh contention derate for full-mesh patterns.
 
     Returns:
-        Effective node bandwidth in GB/s (after mesh derate)
+        Effective node bandwidth in GB/s (after mesh derate and optional contention)
     """
     g = group_size if group_size is not None else args.hp
     if args.node_topology == "mesh" and g > 1 and g < args.node_size:
         derate_factor = (g - 1) / (args.node_size - 1)
-        return args.node_bw * derate_factor
+        bw = args.node_bw * derate_factor
     else:
-        return args.node_bw
+        bw = args.node_bw
+
+    if a2a and args.node_topology == "mesh" and g > 1 and args.node_size > 2:
+        contention = getattr(args, "a2a_mesh_contention", 0.0)
+        if contention > 0:
+            link_saturation = (g - 1) / (args.node_size - 1)
+            bw *= (1 - contention * link_saturation ** 2)
+
+    return bw
 
 
 def get_bandwidth_and_latency(args, domain_size):
@@ -146,7 +158,9 @@ def sendrecv(args, msg_size):
     pp_is_inter_node = (pp > 1) and (num_nodes > 1) and (gpus_per_pp_stage >= args.node_size)
 
     if pp_is_inter_node:
-        bw = args.pod_bw
+        raw_pod = getattr(args, "_raw_pod_bw", args.pod_bw / args.bw_eff)
+        p2p_eff = getattr(args, "p2p_bw_eff", 0.80)
+        bw = raw_pod * p2p_eff
         lat = args.pod_lat
     else:
         domain = args.hp * args.cp * args.ep
@@ -200,20 +214,22 @@ def direct_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None, original
     node_lat, intra_vol_adj = node_latency_and_volume_protocol(args, intra_node_volume, protocol)
     pod_lat = args.pod_lat
 
-    # Intra-node time
-    t_intra = intra_vol_adj / get_effective_node_bw(args) * 1.0e-3 + node_lat
+    # Intra-node time (with A2A contention derate)
+    t_intra = intra_vol_adj / get_effective_node_bw(args, group_size=gpus_per_node, a2a=True) * 1.0e-3 + node_lat
 
-    # Inter-node time with all NICs
+    # Inter-node time with all NICs — A2A uses P2P-like NIC streams
+    # plus a multi-destination contention derate (NIC QP multiplexing cost grows with node count).
+    raw_pod = getattr(args, "_raw_pod_bw", args.pod_bw / args.bw_eff)
+    p2p_eff = getattr(args, "p2p_bw_eff", 0.80)
+    remote_contention = getattr(args, "a2a_remote_contention", 0.0)
+    contention_factor = max(0.0, 1.0 - remote_contention * (num_nodes - 1))
+    effective_pod_bw = raw_pod * p2p_eff * contention_factor
     if args.switch_topology:
-        # Total inter-node volume from the node
         total_inter_volume = inter_node_volume_per_gpu * gpus_per_node
-        # Aggregate bandwidth using all NICs
-        effective_pod_bw = args.pod_bw
         aggregate_inter_bw = effective_pod_bw * nics_per_node
         t_inter = total_inter_volume / aggregate_inter_bw * 1.0e-3 + pod_lat
     else:
         remote_nodes = num_nodes - 1
-        effective_pod_bw = args.pod_bw
         t_inter = inter_node_volume_per_gpu / effective_pod_bw * 1.0e-3 + pod_lat * remote_nodes
 
     # Overlap intra and inter
@@ -250,7 +266,7 @@ def run_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None):
     # tensor parallelism groups will require alltoall across hp dimension
     if (args.hp * gpus) <= args.node_size:
         # Alltoall fits within node — derate based on actual A2A group size
-        bw = get_effective_node_bw(args, group_size=gpus)
+        bw = get_effective_node_bw(args, group_size=gpus, a2a=True)
         lat = node_lat
     elif (args.hp * gpus > args.node_size) and (args.hp * gpus) <= args.pod_size:
         # Alltoall fits within pod
@@ -520,7 +536,7 @@ def single_shot_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     t_inter_node = 0
     if intra_node_gpus > 0:
         node_lat, msg_size_per_peer_adj = node_latency_and_volume_protocol(args, msg_size_per_peer, protocol)
-        node_bw = get_effective_node_bw(args, group_size=gpus_per_node)
+        node_bw = get_effective_node_bw(args, group_size=gpus_per_node, a2a=True)
         intra_node_rounds = ceil(intra_node_gpus / intra_node_fanout)
         t_intra_node = intra_node_rounds * node_lat
         intra_node_msg_size = msg_size_per_peer_adj * intra_node_gpus
@@ -528,18 +544,22 @@ def single_shot_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     if inter_node_gpus > 0:
         pod_lat = args.pod_lat
         inter_node_msg_size_per_gpu = msg_size_per_peer * inter_node_gpus
+        raw_pod = getattr(args, "_raw_pod_bw", args.pod_bw / args.bw_eff)
+        p2p_eff = getattr(args, "p2p_bw_eff", 0.80)
+        num_nodes_a2a = int(np.ceil(gpus / args.node_size))
+        remote_contention = getattr(args, "a2a_remote_contention", 0.0)
+        contention_factor = max(0.0, 1.0 - remote_contention * (num_nodes_a2a - 1))
+        eff_pod_bw = raw_pod * p2p_eff * contention_factor
         if args.switch_topology:
-            # With switch topology, use all NICs
             total_inter_volume = inter_node_msg_size_per_gpu * gpus_per_node
-            aggregate_bw = args.pod_bw * nics_per_node
+            aggregate_bw = eff_pod_bw * nics_per_node
             inter_node_rounds = ceil(inter_node_gpus / inter_node_fanout)
             t_inter_node = inter_node_rounds * pod_lat
             t_inter_node += total_inter_volume / aggregate_bw * 1.0e-3
         else:
-            pod_bw = args.pod_bw
             inter_node_rounds = ceil(inter_node_gpus / inter_node_fanout)
             t_inter_node = inter_node_rounds * pod_lat
-            t_inter_node += inter_node_msg_size_per_gpu / pod_bw * 1.0e-3
+            t_inter_node += inter_node_msg_size_per_gpu / eff_pod_bw * 1.0e-3
     t_a2a = max(t_intra_node, t_inter_node)
     t_a2a += args.kernel_launch_latency
     return t_a2a
@@ -569,19 +589,23 @@ def hierarchical_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     intra_node_volume = msg_size * (gpus_per_node - 1) / gpus
     inter_node_volume_per_gpu = msg_size * (gpus - gpus_per_node) / gpus
 
-    # Intra-node time — derate based on intra-node A2A group size
+    # Intra-node time — derate based on intra-node A2A group size + contention
     node_lat, intra_vol_adj = node_latency_and_volume_protocol(args, intra_node_volume, protocol)
-    node_bw = get_effective_node_bw(args, group_size=gpus_per_node)
+    node_bw = get_effective_node_bw(args, group_size=gpus_per_node, a2a=True)
     t_intra = node_lat + intra_vol_adj / node_bw * 1.0e-3
 
-    # Inter-node time with all NICs (All-to-All specific efficiency)
+    # Inter-node time — A2A uses P2P-like NIC streams with multi-dest contention
+    raw_pod = getattr(args, "_raw_pod_bw", args.pod_bw / args.bw_eff)
+    p2p_eff = getattr(args, "p2p_bw_eff", 0.80)
+    remote_contention = getattr(args, "a2a_remote_contention", 0.0)
+    contention_factor = max(0.0, 1.0 - remote_contention * (num_nodes - 1))
+    eff_pod_bw = raw_pod * p2p_eff * contention_factor
     if args.switch_topology:
         total_inter_volume = inter_node_volume_per_gpu * gpus_per_node
-        aggregate_inter_bw = args.pod_bw * nics_per_node
+        aggregate_inter_bw = eff_pod_bw * nics_per_node
         t_inter = args.pod_lat + total_inter_volume / aggregate_inter_bw * 1.0e-3
     else:
-        effective_pod_bw = args.pod_bw
-        t_inter = args.pod_lat * num_nodes + inter_node_volume_per_gpu / effective_pod_bw * 1.0e-3
+        t_inter = args.pod_lat * num_nodes + inter_node_volume_per_gpu / eff_pod_bw * 1.0e-3
 
     t_total = max(t_intra, t_inter)
     t_total += args.kernel_launch_latency
@@ -612,11 +636,10 @@ def single_shot_allgather(args, msg_size, gpus, groups=None, protocol=None):
         t_intra_node += intra_node_msg_size / node_bw * 1.0e-3
     if inter_node_gpus > 0:
         pod_lat = args.pod_lat
-        pod_bw = args.pod_bw
         inter_node_rounds = ceil(inter_node_gpus / inter_node_fanout)
         t_inter_node = inter_node_rounds * pod_lat
         inter_node_msg_size = msg_size_per_peer * inter_node_gpus
-        t_inter_node += inter_node_msg_size / pod_bw * 1.0e-3
+        t_inter_node += inter_node_msg_size / args.pod_bw * 1.0e-3
     t_ag = max(t_intra_node, t_inter_node)
     t_ag += args.kernel_launch_latency
     return t_ag
@@ -645,11 +668,10 @@ def single_shot_reduce_scatter(args, msg_size, gpus, groups=["hp"], protocol=Non
         t_intra_node += intra_node_msg_size / node_bw * 1.0e-3
     if inter_node_gpus > 0:
         pod_lat = args.pod_lat
-        pod_bw = args.pod_bw
         inter_node_rounds = ceil(inter_node_gpus / inter_node_fanout)
         t_inter_node = inter_node_rounds * pod_lat
         inter_node_msg_size = msg_size_per_peer * inter_node_gpus
-        t_inter_node += inter_node_msg_size / pod_bw * 1.0e-3
+        t_inter_node += inter_node_msg_size / args.pod_bw * 1.0e-3
     t_rs = max(t_intra_node, t_inter_node)
     # Add compute time for reduction
     tensor_elems = np.ceil((msg_size_per_peer * (gpus - 1)) / 2)
@@ -773,11 +795,13 @@ def allreduce(args, msg_size, gpus, groups=["dp"]):
     min_ar_time += rccl_overhead
     if gpus > args.node_size:
         nics = getattr(args, "nics_per_node", None) or args.node_size
-        per_nic_bytes = msg_size / nics
+        num_nodes = gpus // args.node_size
+        node_steps = max(1, int(np.ceil(np.log2(num_nodes))))
+        per_nic_bytes = msg_size / (nics * node_steps)
         warmup = getattr(args, "nic_warmup_bytes", 32 * 1024 * 1024)
         ratio = min(1.0, per_nic_bytes / warmup) if warmup > 0 else 1.0
         if ratio < 1.0:
-            setup_us = getattr(args, "nic_rdma_setup_us", 0.0)
+            setup_us = getattr(args, "nic_rdma_setup_us", 0.0) * node_steps
             min_ar_time += setup_us * (1.0 - ratio ** 2.5)
     return min_ar_time
 
@@ -815,6 +839,9 @@ def alltoall(args, msg_size, gpus, groups=["ep"]):
     inter_overhead = inter_per_peer * inter_node_peers
 
     min_a2a_time += intra_overhead + inter_overhead
+
+    # Fixed RCCL A2A kernel/protocol overhead (size-independent)
+    min_a2a_time += getattr(args, "a2a_rccl_overhead_us", 0.0)
 
     return min_a2a_time
 
