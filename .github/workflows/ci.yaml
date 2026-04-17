@@ -9,12 +9,16 @@ on:
       - "v*"
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.event.merge_group.head_ref || github.ref }}
+  cancel-in-progress: true
+
 env:
   PRIMUS_TURBO_COMMIT: 5952cea7b284bad85eaa1465454a2df78d5efcf7 # feat: attn support sbhd layout (#275)
   PRIMUS_TURBO_AITER_COMMIT: 857f4d15775a29af153a2c68a2f8e8a8d696c986 # PR: feat: _flash_attn_forward add out args (#2648)
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
-  BASE_IMAGE: docker.io/rocm/primus:v26.1
+  BASE_IMAGE: docker.io/rocm/primus:v26.2
   MAXTEXT_BASE_IMAGE: docker.io/rocm/jax-training:maxtext-v26.1
 
 jobs:
@@ -34,27 +38,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Display Python version
         run: python -c "import sys; print(sys.version)"
-      - name: Install Autoflake
-        run: pip install autoflake==2.3.1
-      - name: Run Autoflake
-        if: always()
-        run: |
-          output=$(autoflake . --remove-all-unused-imports --remove-unused-variables --expand-star-imports --ignore-init-module-imports --recursive)
-          if [[ -n "$output" ]]; then
-            echo "Autoflake check failed: $output"
-            exit 1
-          else
-            echo "Autoflake check success."
-          fi
-      - uses: isort/isort-action@v1
-        if: always()
-        with:
-          isort-version: "5.13.2"
-          configuration: "--profile black --check-only --diff"
-      - uses: psf/black@24.8.0
-        if: always()
-        with:
-          options: "--check --diff --color --verbose --line-length=110"
+      # Mirrors `.pre-commit-config.yaml` exactly (hooks + pinned revs/args).
+      - name: Install pre-commit
+        run: pip install pre-commit
+      - name: Run pre-commit (all hooks, all files)
+        run: pre-commit run --all-files --show-diff-on-failure
 
   build-docker:
     needs: [code-lint]
@@ -115,24 +103,26 @@ jobs:
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
           docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
-          echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
-          start_time=$(date +%s)
-          mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
-          cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-56.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
-          docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.ainic \
-               --network=host \
-               -t tasimage/primus:${{env.IMAGE_TAG}}-ainic \
-               --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{env.IMAGE_TAG}} \
-               --build-arg AINIC_BUNDLE_PATH=ainic \
-               $GITHUB_WORKSPACE/.github/workflows/docker
-          end_time=$(date +%s)
-          elapsed=$((end_time - start_time))
-          echo "⏱️ [build primus docker-ainic] Total elapsed time: ${elapsed} seconds"
+          # # Primus v26.2 already includes AINIC under /workspace. Re-enable this
+          # # Dockerfile.ainic build only when we need to refresh the tasimage -ainic image.
+          # echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-ainic"
+          # start_time=$(date +%s)
+          # mkdir -p $GITHUB_WORKSPACE/.github/workflows/docker/ainic
+          # cp /apps/tas/0_public/primus_docker_ci/ainic/ainic_bundle_1.117.5-a-56.tar.gz $GITHUB_WORKSPACE/.github/workflows/docker/ainic/ || { echo "Error: Failed to copy ainic bundle"; exit 1; }
+          # docker build -f $GITHUB_WORKSPACE/.github/workflows/docker/Dockerfile.ainic \
+          #      --network=host \
+          #      -t tasimage/primus:${{env.IMAGE_TAG}}-ainic \
+          #      --build-arg BASE_IMAGE=docker.io/tasimage/primus:${{env.IMAGE_TAG}} \
+          #      --build-arg AINIC_BUNDLE_PATH=ainic \
+          #      $GITHUB_WORKSPACE/.github/workflows/docker
+          # end_time=$(date +%s)
+          # elapsed=$((end_time - start_time))
+          # echo "⏱️ [build primus docker-ainic] Total elapsed time: ${elapsed} seconds"
 
-          docker tag tasimage/primus:${{env.IMAGE_TAG}}-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
-          docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
-          docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
-          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # docker tag tasimage/primus:${{env.IMAGE_TAG}}-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
+          # docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
+          # docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-ainic
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-v25.09-ainic"
           start_time=$(date +%s)
@@ -206,7 +196,7 @@ jobs:
       # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
     needs: [code-lint]
     # runs-on: [primus-lm-cicd-torch-j8knc]
-    runs-on: [primus-lm-cicd-torch-tas8n-a16-40]
+    runs-on: [primus-lm-cicd-v26.2-tas8n-a16-40]
     steps:
       - run: echo "🎉 Begin Primus-Turbo Checkout."
       - name: Set commit hash to env
@@ -231,7 +221,7 @@ jobs:
           git submodule update --init --recursive
           start_time=$(date +%s)
           echo "✅ [Build aiter] started at: $(date)"
-          PREBUILD_KERNELS=3 python3 setup.py develop
+          PREBUILD_KERNELS=3 pip install --no-cache-dir --use-pep517 .
           end_time=$(date +%s)
           elapsed=$((end_time - start_time))
           echo "✅ [Build aiter] ended at: $(date)"

@@ -1,0 +1,6 @@
+# Add MaxText pretrain hook private Python deps here when needed.
+
+# install the JAX Python dependencies in requirements-jax.txt.
+# loguru
+# wandb
+# pre-commit

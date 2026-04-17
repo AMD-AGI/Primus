@@ -40,7 +40,7 @@ The key idea of Primus-pipeline is to separate pipeline scheduling logic from tr
 
 - Implement InputGrad/WeightGrad separation ops for GeMM and GroupGemm by redefining [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo) ops.
 
-- Provide simulation tools for each PP algorithm in both theory and practice, which clearly simulate and measure bubble rate and memory consumption under specific configs. 
+- Provide simulation tools for each PP algorithm in both theory and practice, which clearly simulate and measure bubble rate and memory consumption under specific configs.
 
 ### Schedule Design
 
@@ -48,7 +48,7 @@ Primus-pipeline patch and substite the Megatron-LM's `megatron.core.pipeline_par
 
 Here are the steps to define and run a PP algorithm in Primus-pipeline.
 
-1. **Create a ScheduleTable with ScheduleNodes**: For most PP algorithms, a schedule table containing schedule nodes can be defined given PP world size, virtual pipeline chunks per rank, and minibatches. 
+1. **Create a ScheduleTable with ScheduleNodes**: For most PP algorithms, a schedule table containing schedule nodes can be defined given PP world size, virtual pipeline chunks per rank, and minibatches.
   - **ScheduleNode**: Each step of the execution can be abstracted as a ScheduleNode including computation nodes such as FORWARD/BACKWARD/WGRAD and communication nodes such as RECV_FORWARD/SEND_FORWARD.
   - **PP Algorithms**: [pp-algorithms](https://github.com/AMD-AGI/Primus/tree/main/primus/core/pipeline_parallel/scheduler/algorithms)
 

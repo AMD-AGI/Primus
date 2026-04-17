@@ -1,0 +1,119 @@
+# Generated: training args from start_training_glm5.sh merged into overrides (default env).
+# Defaults used: NNODES=8, TRAIN_ITERS=10, MBS=1, GBS=32*NNODES=256, PRIMUS_PP=8, PRIMUS_VPP=1,
+# PRIMUS_EP=8, PRIMUS_RECOMPUTE_LAYERS=8, TURBO_* / LEGACY_GG as in script.
+# Original preset kept at: glm5-BF16-pretrain.yaml (unchanged).
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:glm5-pretrain}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  pre_trainer:
+    framework: megatron
+    config: pre_trainer.yaml
+
+    model: ${PRIMUS_MODEL:glm5}.yaml
+    overrides:
+      # log
+      wandb_project: "Primus_GLM5_Pretrain"
+      stderr_sink_level: DEBUG
+
+      # debug
+      moe_router_force_load_balancing: true
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+
+      # --- start_training_glm5.sh → train pretrain CLI (resolved defaults) ---
+      num_layers: 78
+      train_iters: 10
+      micro_batch_size: 1
+      global_batch_size: 256
+      seq_length: ${PRIMUS_SEQ_LENGTH:4096}
+      max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
+      lr: 2.2e-4
+      min_lr: 2.2e-5
+      lr_warmup_iters: 200
+      lr_decay_iters: 5000
+      lr_decay_style: cosine
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      eod_mask_loss: true
+      init_method_std: 0.008
+      norm_epsilon: 1.0e-5
+
+      # parallel (tensor_model_parallel_size / PP / EP / last-PP layers)
+      tensor_model_parallel_size: ${PRIMUS_TP:1}
+      pipeline_model_parallel_size: 8
+      expert_model_parallel_size: 8
+      decoder_last_pipeline_num_layers: 8
+      overlap_grad_reduce: false
+      overlap_param_gather: false
+      gradient_accumulation_fusion: true
+
+      # data
+      mock_data: true
+      train_data_path: ${PRIMUS_TOKENIZED_DATA_PATH:/shared_aig/c4/tokenized/c4_en_train_text_document}
+      valid_data_path: null
+      test_data_path: null
+
+      moe_use_legacy_grouped_gemm: true
+      multi_latent_attention: true
+
+      # ckpt
+      finetune: false
+      auto_continue_train: false
+      load: null
+      no_load_optim: null
+      no_load_rng: null
+      save: null
+      save_interval: 20000
+      no_save_optim: null
+      no_save_rng: null
+      disable_last_saving: true
+      ckpt_format: torch
+      eval_iters: 0
+
+      # Turbo / MLA-related (script: TURBO_ATTENTION=True, TURBO_GROUPED_MLP=False, TURBO_RMS_NORM=True)
+      enable_primus_turbo: true
+      use_turbo_attention: true
+      use_turbo_grouped_mlp: false
+      use_turbo_rms_norm: true
+
+      # deepep
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+      turbo_deepep_num_cu: 80
+      turbo_deepep_use_comm_stream: false
+      turbo_sync_free_moe_stage: 1
+
+      moe_use_fused_router_with_aux_score: true
+      moe_permute_fusion: true
+
+      moe_layer_freq: 1
+
+      # recompute (script: --recompute_num_layers + full + block)
+      recompute_num_layers: 8
+      recompute_granularity: full
+      recompute_method: block
+
+      # Cross entropy
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
+
+      # GC / PP warmup / MTP (script: manual_gc, pp_warmup, mtp_num_layers=0)
+      manual_gc: true
+      manual_gc_interval: 1
+      pp_warmup: true
+      mtp_num_layers: 0
+
+      # profile (script: PROFILE=False, step range 6–7)
+      profile: false
+      use_pytorch_profiler: false
+      profile_step_end: 7
+      profile_step_start: 6
+
+      disable_wandb: true
+      disable_tensorboard: true
