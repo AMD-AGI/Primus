@@ -71,13 +71,9 @@ def patch_get_megatron_optimizer_muon(ctx: PatchContext) -> None:
         bound_arguments = original_signature.bind_partial(*func_args, **func_kwargs).arguments
         model_chunks = _get_bound_arg(bound_arguments, "model_chunks")
         config_overrides = _get_bound_arg(bound_arguments, "config_overrides")
-        use_gloo_process_groups = _get_bound_arg(
-            bound_arguments, "use_gloo_process_groups", True
-        )
+        use_gloo_process_groups = _get_bound_arg(bound_arguments, "use_gloo_process_groups", True)
         pg_collection = _get_bound_arg(bound_arguments, "pg_collection")
-        dump_param_to_param_group_map = _get_bound_arg(
-            bound_arguments, "dump_param_to_param_group_map"
-        )
+        dump_param_to_param_group_map = _get_bound_arg(bound_arguments, "dump_param_to_param_group_map")
 
         from primus.backends.megatron.core.optimizer.moun import (
             get_megatron_muon_optimizer,

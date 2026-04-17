@@ -84,9 +84,7 @@ def _install_fake_muon_dependencies(monkeypatch: pytest.MonkeyPatch):
 
     moun_mod.get_megatron_muon_optimizer = fake_get_megatron_muon_optimizer
 
-    moun_config_mod = types.ModuleType(
-        "primus.backends.megatron.core.optimizer.moun_optimizer_config"
-    )
+    moun_config_mod = types.ModuleType("primus.backends.megatron.core.optimizer.moun_optimizer_config")
 
     @dataclasses.dataclass
     class FakeMounOptimizerConfig:
