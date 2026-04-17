@@ -299,11 +299,11 @@ def run_allgather(args, msg_size, gpus, groups=["hp"], protocol=None):
     """
     Run allgather collective.
     Handles node and pod domains, and CP group special case.
+    When spanning multiple nodes, uses overlap model instead of additive timing.
     """
     if gpus == 1 or msg_size == 0:
         return 0
     if "cp" in groups:
-        # Use CP allgather if requested
         return cp_allgather(args, msg_size, gpus, protocol)
     msg_scale = (gpus - 1) / gpus
     msg_size = int(msg_size * msg_scale)
@@ -312,21 +312,24 @@ def run_allgather(args, msg_size, gpus, groups=["hp"], protocol=None):
     t = 0
     lat = 0
     if gpus > args.node_size:
-        # Communication spans node and pod
+        base_overlap = getattr(args, "ar_overlap_factor", 0.9)
+        warmup_bytes = getattr(args, "ar_warmup_chunk_bytes", 32 * 1024 * 1024)
+        chunk_per_gpu = (msg_size * gpus / (gpus - 1)) / args.node_size
+        warmup_ratio = min(1.0, chunk_per_gpu / warmup_bytes) if warmup_bytes > 0 else 1.0
+        effective_overlap = base_overlap * warmup_ratio
         bw = get_effective_node_bw(args)
         node_msg_volume = msg_size * (args.node_size - 1) / args.node_size
-        t = node_msg_volume / bw * 1.0e-3
-        lat += node_lat * np.ceil(np.log2(args.node_size))
+        t_intra = node_msg_volume / bw * 1.0e-3 + node_lat * np.ceil(np.log2(args.node_size))
         bw = args.pod_bw
         pod_msg_volume = msg_size - node_msg_volume
-        t += pod_msg_volume / bw * 1.0e-3
-        lat += pod_lat * np.ceil(np.log2(gpus / args.node_size))
+        t_inter = pod_msg_volume / bw * 1.0e-3 + pod_lat * np.ceil(np.log2(gpus / args.node_size))
+        t = max(t_intra, t_inter) + (1 - effective_overlap) * min(t_intra, t_inter)
     else:
-        # Allgather fits within node
         bw = get_effective_node_bw(args)
         t = msg_size / bw * 1.0e-3
         lat += node_lat * np.ceil(np.log2(gpus))
-    t += lat + args.kernel_launch_latency
+        t += lat
+    t += args.kernel_launch_latency
     return t
 
 
@@ -334,6 +337,7 @@ def run_reduce_scatter(args, msg_size, gpus, groups=["hp"], protocol=None):
     """
     Run reduce_scatter collective.
     Handles node and pod domains, includes compute time for reduction.
+    When spanning multiple nodes, uses overlap model instead of additive timing.
     """
     if gpus == 1 or msg_size == 0:
         return 0
@@ -343,23 +347,24 @@ def run_reduce_scatter(args, msg_size, gpus, groups=["hp"], protocol=None):
     t = 0
     lat = 0
     if gpus > args.node_size:
-        # Communication spans node and pod
+        base_overlap = getattr(args, "ar_overlap_factor", 0.9)
+        warmup_bytes = getattr(args, "ar_warmup_chunk_bytes", 32 * 1024 * 1024)
+        chunk_per_gpu = (msg_size * gpus / (gpus - 1)) / args.node_size
+        warmup_ratio = min(1.0, chunk_per_gpu / warmup_bytes) if warmup_bytes > 0 else 1.0
+        effective_overlap = base_overlap * warmup_ratio
         bw = get_effective_node_bw(args)
         node_msg_volume = msg_size * (args.node_size - 1) / args.node_size
-        t = node_msg_volume / bw * 1.0e-3
-        lat += node_lat * np.ceil(np.log2(args.node_size))
+        t_intra = node_msg_volume / bw * 1.0e-3 + node_lat * np.ceil(np.log2(args.node_size))
         bw = args.pod_bw
         pod_msg_volume = msg_size - node_msg_volume
         pod_lat = args.pod_lat
-        t += pod_msg_volume / bw * 1.0e-3
-        lat += pod_lat * np.ceil(np.log2(gpus / args.node_size))
+        t_inter = pod_msg_volume / bw * 1.0e-3 + pod_lat * np.ceil(np.log2(gpus / args.node_size))
+        t = max(t_intra, t_inter) + (1 - effective_overlap) * min(t_intra, t_inter)
     else:
-        # Reduce scatter fits within node
         bw = get_effective_node_bw(args)
         t = msg_size / bw * 1.0e-3
         lat += node_lat * np.ceil(np.log2(gpus))
-    t += lat
-    # Add compute time for reduction (vector flops)
+        t += lat
     tensor_elems = msg_size / 2
     t += tensor_elems / (args.vector_flops) * 1.0e6
     t += args.kernel_launch_latency
@@ -667,6 +672,77 @@ def single_shot_allreduce(args, msg_size, gpus, groups=["hp"], protocol=None):
 
 
 # ---------------------------
+# Hierarchical AllReduce
+# ---------------------------
+
+
+def hierarchical_allreduce(args, msg_size, gpus, groups=["dp"], protocol=None):
+    """
+    Hierarchical AllReduce: intra-RS → inter-AR → intra-AG with pipelining.
+
+    Models the 3-phase approach used by RCCL for multi-node AllReduce:
+      Phase 1: Intra-node reduce-scatter (each node reduces locally)
+      Phase 2: Inter-node allreduce (rank-0s allreduce across nodes via NICs)
+      Phase 3: Intra-node allgather (broadcast result within each node)
+
+    Phases 1+3 use intra-node links; Phase 2 uses inter-node links.
+    With pipelining, intra and inter phases overlap:
+      t = max(t_intra, t_inter) + (1 - overlap_factor) * min(t_intra, t_inter)
+    """
+    if gpus == 1 or msg_size == 0:
+        return 0
+    if gpus <= args.node_size:
+        return run_reduce_scatter(args, msg_size, gpus, groups, protocol) + \
+               run_allgather(args, msg_size, gpus, groups, protocol) - \
+               args.kernel_launch_latency
+
+    node_size = args.node_size
+    num_nodes = int(np.ceil(gpus / node_size))
+    nics_per_node = args.nics_per_node if args.nics_per_node else node_size
+    base_overlap = getattr(args, "ar_overlap_factor", 0.9)
+    warmup_bytes = getattr(args, "ar_warmup_chunk_bytes", 32 * 1024 * 1024)
+
+    # --- Phase 1: Intra-node reduce-scatter ---
+    rs_volume = msg_size * (node_size - 1) / node_size
+    node_lat_rs, rs_vol_adj = node_latency_and_volume_protocol(args, rs_volume, protocol)
+    node_bw = get_effective_node_bw(args)
+    t_intra_rs = rs_vol_adj / node_bw * 1.0e-3 + node_lat_rs * np.ceil(np.log2(node_size))
+    rs_compute = (rs_vol_adj / 2) / args.vector_flops * 1.0e6
+    t_intra_rs += rs_compute
+
+    # --- Phase 2: Inter-node allreduce of the reduced chunk ---
+    chunk_size = msg_size / node_size
+    inter_ar_volume = chunk_size * (num_nodes - 1) / num_nodes
+    if args.switch_topology:
+        inter_bw = args.pod_bw * nics_per_node
+    else:
+        inter_bw = args.pod_bw
+    pod_lat = args.pod_lat
+    t_inter_ar = 2.0 * (inter_ar_volume / inter_bw * 1.0e-3 + pod_lat * np.ceil(np.log2(num_nodes)))
+    inter_compute = (inter_ar_volume / 2) / args.vector_flops * 1.0e6
+    t_inter_ar += inter_compute
+
+    # --- Phase 3: Intra-node allgather ---
+    ag_volume = msg_size * (node_size - 1) / node_size
+    node_lat_ag, ag_vol_adj = node_latency_and_volume_protocol(args, ag_volume, protocol)
+    t_intra_ag = ag_vol_adj / node_bw * 1.0e-3 + node_lat_ag * np.ceil(np.log2(node_size))
+
+    # --- Size-dependent pipelined overlap ---
+    # RCCL's pipeline efficiency depends on per-GPU chunk size;
+    # small chunks can't fill the pipeline, reducing effective overlap.
+    chunk_per_gpu = msg_size / node_size
+    warmup_ratio = min(1.0, chunk_per_gpu / warmup_bytes) if warmup_bytes > 0 else 1.0
+    effective_overlap = base_overlap * warmup_ratio
+
+    t_intra = t_intra_rs + t_intra_ag
+    t_inter = t_inter_ar
+    t = max(t_intra, t_inter) + (1 - effective_overlap) * min(t_intra, t_inter)
+    t += args.kernel_launch_latency
+
+    return t
+
+
+# ---------------------------
 # Algorithm Selection Wrappers
 # ---------------------------
 
@@ -675,7 +751,11 @@ def allreduce(args, msg_size, gpus, groups=["dp"]):
     """
     Select best allreduce algorithm among several options.
     Tries multiple protocols and algorithms, returns fastest.
+    Includes hierarchical allreduce with pipelining for multi-node.
+    Adds fixed RCCL overhead for protocol negotiation and sync.
     """
+    if gpus == 1 or msg_size == 0:
+        return 0
     min_ar_time = float("inf")
     for p in ["simple", "ll", "ll64", "ll128"]:
         rs_time = run_reduce_scatter(args, msg_size, gpus, protocol=p)
@@ -684,9 +764,21 @@ def allreduce(args, msg_size, gpus, groups=["dp"]):
         hypercubeallreduce = oneshotHCallreduce(args, msg_size, gpus, protocol=p)
         ss_allreduce = single_shot_allreduce(args, msg_size, gpus, protocol=p)
         ringallreduce = RingAllreduce(args, msg_size, gpus, protocol=p)
-        min_ar_alg_time = min(ringallreduce, bruck_time, hypercubeallreduce, ss_allreduce)
+        hier_allreduce = hierarchical_allreduce(args, msg_size, gpus, groups, protocol=p)
+        min_ar_alg_time = min(ringallreduce, bruck_time, hypercubeallreduce,
+                              ss_allreduce, hier_allreduce)
         if min_ar_alg_time < min_ar_time:
             min_ar_time = min_ar_alg_time
+    rccl_overhead = getattr(args, "rccl_overhead_us", 0.0)
+    min_ar_time += rccl_overhead
+    if gpus > args.node_size:
+        nics = getattr(args, "nics_per_node", None) or args.node_size
+        per_nic_bytes = msg_size / nics
+        warmup = getattr(args, "nic_warmup_bytes", 32 * 1024 * 1024)
+        ratio = min(1.0, per_nic_bytes / warmup) if warmup > 0 else 1.0
+        if ratio < 1.0:
+            setup_us = getattr(args, "nic_rdma_setup_us", 0.0)
+            min_ar_time += setup_us * (1.0 - ratio ** 2.5)
     return min_ar_time
 
 

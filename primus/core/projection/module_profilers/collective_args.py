@@ -52,10 +52,34 @@ class CollectiveArgs:
     kernel_launch_latency: float = 2.8  # Kernel launch overhead (us)
     vector_flops: float = 3.2e12  # Vector FLOPS (for reduction compute)
 
+    # RCCL fixed overhead per collective call (us)
+    rccl_overhead_us: float = 200.0
+    # Per-collective setup cost covering protocol negotiation, synchronization
+    # barriers, memory registration, and GPU scheduler overhead. Independent
+    # of message size. Calibrated against MI325X preflight measurements.
+
     # Network topology
     switch_topology: bool = True  # Whether using switch-based topology
     node_topology: str = "switch"  # Node topology: "switch" or "mesh" (for mesh derate)
     nics_per_node: Optional[int] = 8  # NICs per node (None = gpus_per_node)
+
+    # Hierarchical AllReduce pipelining
+    ar_overlap_factor: float = 0.9  # Peak overlap between intra-node and inter-node phases (0-1)
+    ar_warmup_chunk_bytes: int = 32 * 1024 * 1024  # 32 MB per-GPU chunk for full pipelining
+    # RCCL pipelines intra/inter phases using fine-grained chunking. The effective
+    # overlap scales with per-GPU chunk size: small chunks can't fill the pipeline,
+    # so overlap is reduced proportionally below ar_warmup_chunk_bytes.
+    # effective_overlap = ar_overlap_factor * min(1, chunk_per_gpu / ar_warmup_chunk_bytes)
+    # Calibrated against MI325X 2-node/4-node preflight measurements.
+    nic_rdma_setup_us: float = 260.0
+    nic_warmup_bytes: int = 32 * 1024 * 1024  # 32 MB per-NIC for peak RDMA throughput
+    # Small RDMA transfers don't achieve peak NIC throughput due to DMA engine
+    # warmup, QP setup, and PCIe round-trip overhead. The penalty decays as
+    # per-NIC data reaches nic_warmup_bytes via a power-law:
+    #   overhead = nic_rdma_setup_us * max(0, 1 - (per_nic_data / nic_warmup_bytes)^2.5)
+    # At 8MB/NIC: ~252us overhead (NIC underutilized)
+    # At 32MB+/NIC: 0us overhead (peak RDMA throughput achieved)
+    # Calibrated against MI325X 2-node preflight AllReduce measurements.
 
     # All-to-all specific
     a2a_peer_lat: float = 0.45  # Per-peer latency overhead for inter-node a2a (RDMA setup)
@@ -111,6 +135,11 @@ def get_default_args(
                         - node_topology: Node topology type ("switch" or "mesh") for mesh derate
                         - nics_per_node: Number of NICs per node (int)
                         - p2p_bw_eff: Bandwidth efficiency for P2P SendRecv (0-1)
+                        - rccl_overhead_us: Fixed per-collective RCCL setup overhead (us)
+                        - ar_overlap_factor: Overlap factor for hierarchical AllReduce pipelining (0-1)
+                        - ar_warmup_chunk_bytes: Min per-GPU chunk for full pipeline overlap (bytes)
+                        - nic_rdma_setup_us: Peak NIC RDMA setup overhead for small transfers (us)
+                        - nic_warmup_bytes: Per-NIC data threshold for peak RDMA throughput (bytes)
                         - a2a_peer_lat: Per-peer latency for inter-node all-to-all (us)
                         - a2a_intra_sync_overhead: Fixed intra-node A2A sync overhead (us)
                         - a2a_intra_node_peer_lat: Per-peer scheduling overhead for intra-node A2A (us)
