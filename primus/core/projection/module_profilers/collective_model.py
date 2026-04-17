@@ -13,31 +13,33 @@ import numpy as np
 # ---------------------------
 
 
-def get_effective_node_bw(args):
+def get_effective_node_bw(args, group_size=None):
     """
     Get effective intra-node bandwidth, applying mesh topology derate.
 
     Note: bw_eff is already applied to args.node_bw at initialization.
 
-    Mesh topology derate: When TP (hp) uses fewer GPUs than node_size on mesh topology,
-    the effective bandwidth is reduced because only (hp-1) links are used out of (node_size-1) available.
+    Mesh topology derate: When a communicating group uses fewer GPUs than node_size
+    on mesh topology, the effective bandwidth is reduced because only (g-1) links
+    are used out of (node_size-1) available.
 
-    Formula: effective_node_bw = node_bw × (hp - 1) / (node_size - 1)
-    Only applies when: hp > 1 AND hp < node_size AND node_topology == "mesh"
+    Formula: effective_node_bw = node_bw × (g - 1) / (node_size - 1)
+    Only applies when: g > 1 AND g < node_size AND node_topology == "mesh"
 
     Args:
         args: CollectiveArgs instance (node_bw already has bw_eff applied)
+        group_size: Optional override for the communicating group size.
+                    Defaults to args.hp (TP size) for AllReduce-style collectives.
+                    AllToAll should pass the actual EP/A2A group size.
 
     Returns:
         Effective node bandwidth in GB/s (after mesh derate)
     """
-    # Apply mesh topology derate if applicable
-    if args.node_topology == "mesh" and args.hp > 1 and args.hp < args.node_size:
-        # Mesh derate: only (hp-1) links are useful out of (node_size-1) available
-        derate_factor = (args.hp - 1) / (args.node_size - 1)
+    g = group_size if group_size is not None else args.hp
+    if args.node_topology == "mesh" and g > 1 and g < args.node_size:
+        derate_factor = (g - 1) / (args.node_size - 1)
         return args.node_bw * derate_factor
     else:
-        # No derate: full bandwidth (switch topology or hp == node_size)
         return args.node_bw
 
 
@@ -129,11 +131,39 @@ def get_max_fanout(args):
 def sendrecv(args, msg_size):
     """
     Point-to-point send/recv latency calculation.
-    Used for basic communication between two GPUs.
+    Used for basic communication between two GPUs (e.g. pipeline parallelism).
+
+    Determines intra-node vs inter-node based on PP stage placement:
+    - If each PP stage fills >= 1 full node, adjacent stages are on different
+      nodes → inter-node P2P using NIC bandwidth.
+    - Otherwise, P2P is intra-node using a single xGMI link with p2p_bw_eff.
     """
-    domain = args.hp * args.cp * args.ep
-    bw, lat = get_bandwidth_and_latency(args, domain)
-    # Time = transmission + latency + kernel launch overhead
+    pp = getattr(args, "pp", 1)
+    num_nodes = getattr(args, "num_nodes", 1)
+    total_gpus = num_nodes * args.node_size
+    gpus_per_pp_stage = total_gpus // max(pp, 1)
+
+    pp_is_inter_node = (pp > 1) and (num_nodes > 1) and (gpus_per_pp_stage >= args.node_size)
+
+    if pp_is_inter_node:
+        bw = args.pod_bw
+        lat = args.pod_lat
+    else:
+        domain = args.hp * args.cp * args.ep
+        if domain <= args.node_size:
+            raw_bw = getattr(args, "_raw_node_bw", args.node_bw / args.bw_eff)
+            p2p_eff = getattr(args, "p2p_bw_eff", 0.80)
+            p2p_node_bw = raw_bw * p2p_eff
+            if args.node_topology == "mesh" and args.node_size > 2:
+                p2p_node_bw *= 1 / (args.node_size - 1)
+            bw = p2p_node_bw
+            lat = args.node_lat
+        elif domain <= args.pod_size:
+            bw = args.pod_bw
+            lat = args.pod_lat
+        else:
+            bw = args.cluster_bw
+            lat = args.cluster_lat
     t = (msg_size / bw) * 1.0e-3 + lat + args.kernel_launch_latency
     return t
 
@@ -219,8 +249,8 @@ def run_alltoall(args, msg_size, gpus, groups=["ep"], protocol=None):
     node_lat, msg_size = node_latency_and_volume_protocol(args, msg_size, protocol)
     # tensor parallelism groups will require alltoall across hp dimension
     if (args.hp * gpus) <= args.node_size:
-        # Alltoall fits within node
-        bw = get_effective_node_bw(args)
+        # Alltoall fits within node — derate based on actual A2A group size
+        bw = get_effective_node_bw(args, group_size=gpus)
         lat = node_lat
     elif (args.hp * gpus > args.node_size) and (args.hp * gpus) <= args.pod_size:
         # Alltoall fits within pod
@@ -485,7 +515,7 @@ def single_shot_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     t_inter_node = 0
     if intra_node_gpus > 0:
         node_lat, msg_size_per_peer_adj = node_latency_and_volume_protocol(args, msg_size_per_peer, protocol)
-        node_bw = get_effective_node_bw(args)
+        node_bw = get_effective_node_bw(args, group_size=gpus_per_node)
         intra_node_rounds = ceil(intra_node_gpus / intra_node_fanout)
         t_intra_node = intra_node_rounds * node_lat
         intra_node_msg_size = msg_size_per_peer_adj * intra_node_gpus
@@ -534,9 +564,9 @@ def hierarchical_alltoall(args, msg_size, gpus, groups=None, protocol=None):
     intra_node_volume = msg_size * (gpus_per_node - 1) / gpus
     inter_node_volume_per_gpu = msg_size * (gpus - gpus_per_node) / gpus
 
-    # Intra-node time
+    # Intra-node time — derate based on intra-node A2A group size
     node_lat, intra_vol_adj = node_latency_and_volume_protocol(args, intra_node_volume, protocol)
-    node_bw = get_effective_node_bw(args)
+    node_bw = get_effective_node_bw(args, group_size=gpus_per_node)
     t_intra = node_lat + intra_vol_adj / node_bw * 1.0e-3
 
     # Inter-node time with all NICs (All-to-All specific efficiency)
@@ -676,28 +706,23 @@ def alltoall(args, msg_size, gpus, groups=["ep"]):
         if a2a_time < min_a2a_time:
             min_a2a_time = a2a_time
 
-    # Add per-peer latency overhead for ALL A2A communication (both intra and inter-node)
-    # This accounts for:
-    # - P2P scatter/gather scheduling overhead
-    # - RCCL internal synchronization barriers
-    # - Memory copy and buffer management
-    # - RDMA QP setup, work request posting, completion polling (for inter-node)
-    # For intra-node A2A, overhead is significant due to synchronization and scheduling
-    # Measured overhead: ~50 us per peer for intra-node (vs ~0.45 us for inter-node)
+    # Add overhead for A2A communication (intra-node and inter-node components)
     gpus_per_node = args.node_size
-    intra_node_peers = min(gpus - 1, gpus_per_node - 1)  # Peers within same node
-    inter_node_peers = max(0, gpus - gpus_per_node)  # Peers on other nodes
+    intra_node_peers = min(gpus - 1, gpus_per_node - 1)
+    inter_node_peers = max(0, gpus - gpus_per_node)
 
-    # Intra-node overhead is much higher due to synchronization and scheduling
-    # Based on preflight measurements: EP=8 intra-node A2A needs ~19-28 us per peer
-    # Inter-node overhead is lower (~0.45 us per peer) due to RDMA efficiency
-    intra_node_overhead_per_peer = getattr(args, "a2a_intra_node_peer_lat", 28.0)  # Default 28 us
-    inter_node_overhead_per_peer = getattr(args, "a2a_peer_lat", 0.45)  # Default 0.45 us
+    # Intra-node: fixed sync overhead + small per-peer scheduling cost
+    # RCCL parallelizes intra-node P2P transfers so overhead is sub-linear in peers.
+    # Calibrated against MI325X preflight (2/4/8 GPU A2A measurements).
+    intra_sync = getattr(args, "a2a_intra_sync_overhead", 50.0)
+    intra_per_peer = getattr(args, "a2a_intra_node_peer_lat", 2.5)
+    intra_overhead = (intra_sync + intra_per_peer * intra_node_peers) if intra_node_peers > 0 else 0
 
-    peer_overhead = (
-        intra_node_overhead_per_peer * intra_node_peers + inter_node_overhead_per_peer * inter_node_peers
-    )
-    min_a2a_time += peer_overhead
+    # Inter-node: per-peer RDMA setup cost (sequential QP establishment)
+    inter_per_peer = getattr(args, "a2a_peer_lat", 0.45)
+    inter_overhead = inter_per_peer * inter_node_peers
+
+    min_a2a_time += intra_overhead + inter_overhead
 
     return min_a2a_time
 
