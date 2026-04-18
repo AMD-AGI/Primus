@@ -83,9 +83,16 @@ def calculate_collective_communication_time(
     cp: int,
     dp: int,
     hardware_config: Dict[str, Any] = None,
+    compute_time_ms: float = None,
 ) -> Tuple[float, Dict[str, float], Dict[str, Any], list]:
     """
     Calculate collective communication time for given configuration.
+
+    Args:
+        compute_time_ms: Optional per-microbatch compute time (ms). When provided
+            along with FSDP enabled, the FSDP overlap fraction is computed from
+            the per-layer compute/comm ratio (physics-based) rather than the
+            legacy constant ceiling. This generalizes across model sizes.
 
     Returns:
         (total_comm_time_ms, breakdown_dict, message_info_dict, per_layer_info_list)
@@ -353,19 +360,91 @@ def calculate_collective_communication_time(
         if overlap_fsdp:
             total_fsdp_ag = breakdown.get("fsdp_allgather_fwd", 0)
             total_fsdp_rs = breakdown.get("fsdp_reducescatter_bwd", 0)
+            ag_per_layer_ms = message_info.get("fsdp_ag_per_layer_ms", 0.0)
+            rs_per_layer_ms = message_info.get("fsdp_rs_per_layer_ms", 0.0)
+            ag_multiplier = message_info.get("fsdp_ag_multiplier", 1.0)
 
-            # Overlap factor applied uniformly to all FSDP
-            # communication - (AllGather fwd, AllGather recompute, ReduceScatter).
-            # This number is based on observed overlap in the benchmarked run of llama3-70b.
-            FSDP_OVERLAP = 0.93
+            # Legacy ceiling (used when compute_time_ms not provided)
+            FSDP_OVERLAP_LEGACY = 0.93
 
-            total_fsdp = total_fsdp_ag + total_fsdp_rs
-            total_hidden = total_fsdp * FSDP_OVERLAP
-            total_comm_time -= total_hidden
-            message_info["fsdp_overlapped"] = True
-            message_info["fsdp_overlap"] = FSDP_OVERLAP
-            message_info["fsdp_overall_overlap"] = FSDP_OVERLAP
-            message_info["fsdp_exposed_ms"] = total_fsdp - total_hidden
+            if compute_time_ms is not None and num_layers > 0 and compute_time_ms > 0:
+                # Physics-based per-layer overlap:
+                #
+                # FSDP comm hides behind adjacent-layer compute via prefetch.
+                # The fraction that can hide depends on the compute/comm ratio
+                # PER LAYER (total ratios don't matter — sequential layers
+                # can't "borrow" compute from each other).
+                #
+                # Split compute using empirical fwd/bwd ratio (0.37/0.63 of
+                # per-microbatch time). Backward includes recompute fwd when
+                # recompute_granularity=full.
+                compute_per_layer_ms = compute_time_ms / num_layers
+                fwd_per_layer_ms = compute_per_layer_ms * 0.37
+                bwd_per_layer_ms = compute_per_layer_ms * 0.63
+
+                # Hiding windows per comm phase. Ceilings model real-world
+                # scheduling inefficiencies (kernel launch gaps, stream sync,
+                # bus contention) that prevent 100% overlap even when compute
+                # vastly exceeds comm. Calibrated to match observed 0.93
+                # overall overlap on Llama 3.1 70B BF16 (compute-dominated).
+                #  - AG forward: single-hop prefetch, near-ideal. 0.95
+                #  - AG recompute: competes with RS in backward. 0.93
+                #  - RS: depends on bwd results, slightly tighter pipe. 0.92
+                AG_FWD_CEILING = 0.95
+                AG_RECOMPUTE_CEILING = 0.93
+                RS_CEILING = 0.92
+
+                def _overlap(comm_ms, compute_ms, ceiling):
+                    if comm_ms <= 0 or compute_ms <= 0:
+                        return 0.0
+                    return min(1.0, compute_ms / comm_ms) * ceiling
+
+                ag_fwd_ovl = _overlap(
+                    ag_per_layer_ms, fwd_per_layer_ms, AG_FWD_CEILING
+                )
+                ag_recomp_ovl = _overlap(
+                    ag_per_layer_ms, bwd_per_layer_ms, AG_RECOMPUTE_CEILING
+                )
+                rs_ovl = _overlap(rs_per_layer_ms, bwd_per_layer_ms, RS_CEILING)
+
+                # Split total AG into fwd (1 per layer) and recompute
+                # ((ag_multiplier - 1) per layer).
+                recomp_fraction = max(0.0, ag_multiplier - 1.0) / max(
+                    ag_multiplier, 1e-9
+                )
+                fwd_fraction = 1.0 - recomp_fraction
+
+                ag_fwd_portion = total_fsdp_ag * fwd_fraction
+                ag_recomp_portion = total_fsdp_ag * recomp_fraction
+
+                total_hidden = (
+                    ag_fwd_portion * ag_fwd_ovl
+                    + ag_recomp_portion * ag_recomp_ovl
+                    + total_fsdp_rs * rs_ovl
+                )
+                total_fsdp = total_fsdp_ag + total_fsdp_rs
+                total_comm_time -= total_hidden
+                effective_overlap = (
+                    total_hidden / total_fsdp if total_fsdp > 0 else 0.0
+                )
+                message_info["fsdp_overlapped"] = True
+                message_info["fsdp_overlap"] = effective_overlap
+                message_info["fsdp_overall_overlap"] = effective_overlap
+                message_info["fsdp_ag_fwd_overlap"] = ag_fwd_ovl
+                message_info["fsdp_ag_recompute_overlap"] = ag_recomp_ovl
+                message_info["fsdp_rs_overlap"] = rs_ovl
+                message_info["fsdp_compute_per_layer_ms"] = compute_per_layer_ms
+                message_info["fsdp_exposed_ms"] = total_fsdp - total_hidden
+            else:
+                # Fallback: legacy constant overlap (when compute time not
+                # provided, e.g. early in the pipeline before benchmark).
+                total_fsdp = total_fsdp_ag + total_fsdp_rs
+                total_hidden = total_fsdp * FSDP_OVERLAP_LEGACY
+                total_comm_time -= total_hidden
+                message_info["fsdp_overlapped"] = True
+                message_info["fsdp_overlap"] = FSDP_OVERLAP_LEGACY
+                message_info["fsdp_overall_overlap"] = FSDP_OVERLAP_LEGACY
+                message_info["fsdp_exposed_ms"] = total_fsdp - total_hidden
         else:
             message_info["fsdp_overlapped"] = False
 
@@ -2791,7 +2870,9 @@ def _run_multinode_projection(
     # Per-microbatch projected time stays as compute only
     projected_time_ms = projected_compute_time_ms
 
-    # For reporting, get full breakdown for target
+    # For reporting, get full breakdown for target.
+    # Pass compute time to enable physics-based FSDP overlap (compute/comm
+    # ratio per layer) rather than a constant ceiling.
     total_comm_time_ms, breakdown, message_info, per_layer_info = (
         calculate_collective_communication_time(
             training_config,
@@ -2803,6 +2884,7 @@ def _run_multinode_projection(
             cp,
             dp_target,
             hardware_config_dict,
+            compute_time_ms=projected_compute_time_ms,
         )
     )
 
