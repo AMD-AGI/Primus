@@ -323,7 +323,7 @@ def _extract_iter_times(log_text: str) -> List[float]:
 def _summarize_times(
     label: str, times: List[float]
 ) -> Tuple[Optional[float], Optional[float], Optional[float], str]:
-    """Return (iter1, iter2, iter3..last-avg, pretty_line)."""
+    """Return (iter1, iter3..last-avg, pretty_line)."""
     if not times:
         return None, None, None, f"{label}: <no iter times parsed>"
     t1 = times[0]
@@ -332,7 +332,6 @@ def _summarize_times(
     avg_rest = (sum(rest) / len(rest)) if rest else None
 
     parts = [f"iter1 = {t1:9.1f} ms"]
-    parts.append(f"iter2 = {t2:9.1f} ms" if t2 is not None else "iter2 =       N/A")
     if avg_rest is not None:
         parts.append(f"iter3..iter{len(times)} avg = {avg_rest:9.1f} ms  " f"(n_rest = {len(rest)})")
     else:
@@ -439,8 +438,8 @@ class TestPPWarmupPatches(unittest.TestCase):
         times_baseline = _extract_iter_times(log_baseline)
         times_warmup = _extract_iter_times(log_warmup)
 
-        b_t1, b_t2, b_avg, b_line = _summarize_times("baseline (no pp_warmup)", times_baseline)
-        w_t1, w_t2, w_avg, w_line = _summarize_times("warmup   (pp_warmup=on)", times_warmup)
+        b_t1, _, b_avg, b_line = _summarize_times("baseline (no pp_warmup)", times_baseline)
+        w_t1, _, w_avg, w_line = _summarize_times("warmup   (pp_warmup=on)", times_warmup)
 
         print("\n================================================================")
         print("                     iter-time summary                          ")
@@ -453,8 +452,6 @@ class TestPPWarmupPatches(unittest.TestCase):
             speedup_t1 = b_t1 / w_t1
             print()
             print(f"  iter-1 speedup        : {b_t1:9.1f} / {w_t1:9.1f} " f"= {speedup_t1:.3f}x")
-            if b_t2 is not None and w_t2 is not None and w_t2 > 0:
-                print(f"  iter-2 speedup        : {b_t2:9.1f} / {w_t2:9.1f} " f"= {b_t2 / w_t2:.3f}x")
             if b_avg is not None and w_avg is not None and w_avg > 0:
                 ratio_avg = b_avg / w_avg
                 print(
