@@ -97,7 +97,7 @@ class ZebraLlamaMambaMLAProvider(MLATransformerConfig, ModelProviderMixin[MCoreM
     position_embedding_type: Literal["learned_absolute", "rope", "none"] = "none"
     rotary_percent: float = 1.0
     seq_len_interpolation_factor: Optional[float] = None
-    apply_rope_fusion: bool = True
+    apply_rope_fusion: bool = False
     make_vocab_size_divisible_by: int = 128
     add_bias_linear: bool = False
     hidden_dropout: float = 0.0
@@ -201,6 +201,106 @@ class ZebraLlama1BModelProvider(ZebraLlamaMambaMLAProvider):
     qk_head_dim: int = 32
     qk_pos_emb_head_dim: int = 32
     v_head_dim: int = 64
+    rotary_scaling_factor: float = 1.0
+    mscale: float = 1.0
+    mscale_all_dim: float = 1.0
+
+    # SwiGLU activation
+    gated_linear_unit: bool = True
+
+    # Position embedding — MLA uses its own internal positional encoding
+    position_embedding_type: Literal["learned_absolute", "rope", "none"] = "none"
+    rotary_base: float = 500000
+    normalization: str = "RMSNorm"
+    layernorm_epsilon: float = 1e-5
+
+
+# ---------------------------------------------------------------------------
+# Zebra Llama 3B Provider
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ZebraLlama3BModelProvider(ZebraLlamaMambaMLAProvider):
+    """Configuration for Zebra Llama 3B (hybrid Mamba+MLA).
+
+    Architecture summary:
+        - 56 layers with 25% attention ratio (14 MLA + 42 Mamba layers)
+        - hidden_size=3072, ffn_hidden_size=8192
+        - Multi-Latent Attention with q_lora_rank=1536, kv_lora_rank=128
+        - Mamba SSM with 8 groups
+        - SwiGLU activation in MLP layers
+        - Tokenizer: meta-llama/Llama-3.2-3B
+    """
+
+    # Layer counts and sizes
+    num_layers: int = 56
+    hidden_size: int = 3072
+    ffn_hidden_size: int = 8192
+    num_attention_heads: int = 24
+    seq_length: int = 8192
+
+    # Hybrid Mamba parameters
+    hybrid_attention_ratio: float = 0.25
+    mamba_num_groups: int = 8
+
+    # MLA parameters
+    multi_latent_attention: bool = True
+    q_lora_rank: int = 1536
+    kv_lora_rank: int = 128
+    qk_head_dim: int = 64
+    qk_pos_emb_head_dim: int = 64
+    v_head_dim: int = 128
+    rotary_scaling_factor: float = 1.0
+    mscale: float = 1.0
+    mscale_all_dim: float = 1.0
+
+    # SwiGLU activation
+    gated_linear_unit: bool = True
+
+    # Position embedding — MLA uses its own internal positional encoding
+    position_embedding_type: Literal["learned_absolute", "rope", "none"] = "none"
+    rotary_base: float = 500000
+    normalization: str = "RMSNorm"
+    layernorm_epsilon: float = 1e-5
+
+
+# ---------------------------------------------------------------------------
+# Zebra Llama 8B Provider
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ZebraLlama8BModelProvider(ZebraLlamaMambaMLAProvider):
+    """Configuration for Zebra Llama 8B (hybrid Mamba+MLA).
+
+    Architecture summary:
+        - 64 layers with 25% attention ratio (16 MLA + 48 Mamba layers)
+        - hidden_size=4096, ffn_hidden_size=14436
+        - Multi-Latent Attention with q_lora_rank=2048, kv_lora_rank=160
+        - Mamba SSM with 8 groups
+        - SwiGLU activation in MLP layers
+        - Tokenizer: meta-llama/Llama-3.1-8B
+    """
+
+    # Layer counts and sizes
+    num_layers: int = 64
+    hidden_size: int = 4096
+    ffn_hidden_size: int = 14436
+    num_attention_heads: int = 32
+    seq_length: int = 8192
+
+    # Hybrid Mamba parameters
+    hybrid_attention_ratio: float = 0.25
+    mamba_num_groups: int = 8
+
+    # MLA parameters
+    multi_latent_attention: bool = True
+    q_lora_rank: int = 2048
+    kv_lora_rank: int = 160
+    qk_head_dim: int = 64
+    qk_pos_emb_head_dim: int = 64
+    v_head_dim: int = 128
     rotary_scaling_factor: float = 1.0
     mscale: float = 1.0
     mscale_all_dim: float = 1.0
@@ -338,6 +438,7 @@ def zebra_llama_1b_finetune_config(
 ) -> ConfigContainer:
     """Return a finetuning config for Zebra Llama 1B (hybrid Mamba+MLA)."""
     recommended: ZebraLlamaFinetuneKwargs = {
+        "name": "zebra_llama_1b",
         "tensor_model_parallel_size": 1,
         "pipeline_model_parallel_size": 1,
         "sequence_parallel": False,
@@ -346,6 +447,83 @@ def zebra_llama_1b_finetune_config(
     kwargs: ZebraLlamaFinetuneKwargs = {**recommended, **user_kwargs}
     return _zebra_llama_finetune_common(
         model_provider=ZebraLlama1BModelProvider,
+        tokenizer_model="meta-llama/Llama-3.2-1B",
+        **kwargs,
+    )
+
+
+def zebra_llama_3b_pretrain_config(
+    **user_kwargs: Unpack[ZebraLlamaPretrainKwargs],
+) -> ConfigContainer:
+    """Return a pre-training config for Zebra Llama 3B (hybrid Mamba+MLA)."""
+    recommended: ZebraLlamaPretrainKwargs = {
+        "tensor_model_parallel_size": 1,
+        "pipeline_model_parallel_size": 1,
+        "sequence_parallel": False,
+        "precision_config": "bf16_mixed",
+        "use_null_tokenizer": False,
+    }
+    kwargs: ZebraLlamaPretrainKwargs = {**recommended, **user_kwargs}
+    return _zebra_llama_pretrain_common(
+        model_provider=ZebraLlama3BModelProvider,
+        tokenizer_model="meta-llama/Llama-3.2-3B",
+        **kwargs,
+    )
+
+
+def zebra_llama_3b_finetune_config(
+    **user_kwargs: Unpack[ZebraLlamaFinetuneKwargs],
+) -> ConfigContainer:
+    """Return a finetuning config for Zebra Llama 3B (hybrid Mamba+MLA)."""
+    recommended: ZebraLlamaFinetuneKwargs = {
+        "name": "zebra_llama_3b",
+        "tensor_model_parallel_size": 1,
+        "pipeline_model_parallel_size": 1,
+        "sequence_parallel": False,
+        "precision_config": "bf16_mixed",
+    }
+    kwargs: ZebraLlamaFinetuneKwargs = {**recommended, **user_kwargs}
+    return _zebra_llama_finetune_common(
+        model_provider=ZebraLlama3BModelProvider,
+        tokenizer_model="meta-llama/Llama-3.2-3B",
+        **kwargs,
+    )
+
+
+def zebra_llama_8b_pretrain_config(
+    **user_kwargs: Unpack[ZebraLlamaPretrainKwargs],
+) -> ConfigContainer:
+    """Return a pre-training config for Zebra Llama 8B (hybrid Mamba+MLA)."""
+    recommended: ZebraLlamaPretrainKwargs = {
+        "tensor_model_parallel_size": 1,
+        "pipeline_model_parallel_size": 1,
+        "sequence_parallel": False,
+        "precision_config": "bf16_mixed",
+        "use_null_tokenizer": False,
+    }
+    kwargs: ZebraLlamaPretrainKwargs = {**recommended, **user_kwargs}
+    return _zebra_llama_pretrain_common(
+        model_provider=ZebraLlama8BModelProvider,
+        tokenizer_model="meta-llama/Llama-3.1-8B",
+        **kwargs,
+    )
+
+
+def zebra_llama_8b_finetune_config(
+    **user_kwargs: Unpack[ZebraLlamaFinetuneKwargs],
+) -> ConfigContainer:
+    """Return a finetuning config for Zebra Llama 8B (hybrid Mamba+MLA)."""
+    recommended: ZebraLlamaFinetuneKwargs = {
+        "name": "zebra_llama_8b",
+        "tensor_model_parallel_size": 1,
+        "pipeline_model_parallel_size": 1,
+        "sequence_parallel": False,
+        "precision_config": "bf16_mixed",
+    }
+    kwargs: ZebraLlamaFinetuneKwargs = {**recommended, **user_kwargs}
+    return _zebra_llama_finetune_common(
+        model_provider=ZebraLlama8BModelProvider,
+        tokenizer_model="meta-llama/Llama-3.1-8B",
         **kwargs,
     )
 
@@ -492,6 +670,7 @@ def _zebra_llama_pretrain_common(
 
 def _zebra_llama_finetune_common(
     model_provider: type[ZebraLlamaMambaMLAProvider],
+    tokenizer_model: str = "meta-llama/Llama-3.2-1B",
     dir: str | None = None,
     name: str = "default",
     # Model parallelism
@@ -577,7 +756,7 @@ def _zebra_llama_finetune_common(
 
     tokenizer_cfg = TokenizerConfig(
         tokenizer_type="HuggingFaceTokenizer",
-        tokenizer_model="meta-llama/Llama-3.2-1B",
+        tokenizer_model=tokenizer_model,
         hf_tokenizer_kwargs={"use_fast": True},
     )
 
@@ -622,6 +801,12 @@ def _zebra_llama_finetune_common(
 __all__ = [
     "ZebraLlamaMambaMLAProvider",
     "ZebraLlama1BModelProvider",
+    "ZebraLlama3BModelProvider",
+    "ZebraLlama8BModelProvider",
     "zebra_llama_1b_pretrain_config",
     "zebra_llama_1b_finetune_config",
+    "zebra_llama_3b_pretrain_config",
+    "zebra_llama_3b_finetune_config",
+    "zebra_llama_8b_pretrain_config",
+    "zebra_llama_8b_finetune_config",
 ]
