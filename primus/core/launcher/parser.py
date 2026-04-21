@@ -127,6 +127,17 @@ def _split_known_unknown(ns: SimpleNamespace, overrides: dict) -> Tuple[dict, di
     return known, unknown
 
 
+def _allow_unknown_cli_overrides(pre_trainer_cfg: SimpleNamespace) -> bool:
+    """
+    Decide whether CLI override keys should be merged directly into module config
+    even when those keys are not declared in the module YAML preset.
+    """
+    launcher_cfg = getattr(pre_trainer_cfg, "launcher", None)
+    if launcher_cfg is None:
+        return False
+    return bool(getattr(launcher_cfg, "allow_unknown_cli_overrides", False))
+
+
 def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     args, unknown_args = _parse_args(extra_args_provider, ignore_unknown_args=True)
 
@@ -135,7 +146,8 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
 
     overrides = parse_cli_overrides(unknown_args, type_mode="legacy")
     pre_trainer_cfg = primus_config.get_module_config("pre_trainer")
-    _check_keys_exist(pre_trainer_cfg, overrides)
+    if not _allow_unknown_cli_overrides(pre_trainer_cfg):
+        _check_keys_exist(pre_trainer_cfg, overrides)
     _deep_merge_namespace(pre_trainer_cfg, overrides)
 
     return primus_config
@@ -165,7 +177,11 @@ def _load_legacy_primus_config(args: argparse.Namespace, overrides: List[str]) -
     # _check_keys_exist(pre_trainer_cfg, override_ns)
     # _deep_merge_namespace(pre_trainer_cfg, override_ns)
 
-    # return primus_config
+    if _allow_unknown_cli_overrides(pre_trainer_cfg):
+        # Megatron legacy flow should not depend on YAML key presence. This keeps
+        # overrides stable after removing redundant/null keys from module presets.
+        _deep_merge_namespace(pre_trainer_cfg, override_ns)
+        return primus_config, {}
     known_overrides, unknown_overrides = _split_known_unknown(pre_trainer_cfg, override_ns)
 
     if known_overrides:
