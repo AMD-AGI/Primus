@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:zebra_llama_1B-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:zebra_llama_1B_gdn_pure-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
@@ -8,56 +8,66 @@ modules:
     framework: megatron
     config: pre_trainer.yaml
 
-    # model to run
-    model: zebra_llama_1B.yaml
+    model: zebra_llama_1B_gdn_pure.yaml
     overrides:
-      # log
-      wandb_project: "Primus_Zebra_Llama_1B_Pretrain"
+      wandb_project: "Primus_Zebra_Llama_1B_GDN_Pure_Pretrain"
       stderr_sink_level: DEBUG
 
       eval_iters: 0
 
+      num_workers: 0
+      create_attention_mask_in_dataloader: false
+
+      profile: false
+      use_pytorch_profiler: false
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      train_iters: 400000
+      # Training schedule — matched to FLA (4 GPUs):
+      #   batch=16, update=1, gpus=4, context=2048
+      #   global_batch = 16 * 4 = 64, tokens/step = 64 * 2048 = 131,072
+      #   total tokens ~= 76294 * 131072 ≈ 10B
+      train_iters: 76294
       micro_batch_size: 16
-      global_batch_size: 128
+      global_batch_size: 64
 
       seq_length: 2048
       max_position_embeddings: 2048
       original_max_position_embeddings: 2048
 
+      # Optimizer — matched to FLA:
+      #   lr=2e-4, cosine (min_lr_rate=0.1 → min_lr=2e-5)
+      #   AdamW, beta1=0.9, beta2=0.95, weight_decay=0.01
+      #   max_grad_norm=1.0, warmup_steps=200
       lr: 2.0e-4
-      min_lr: 1.0e-5
-      lr_warmup_iters: 15000
-      lr_decay_iters: 350000
+      min_lr: 2.0e-5
+      lr_warmup_iters: 200
+      lr_decay_iters: 76294
       lr_decay_style: cosine
-      weight_decay: 0.1
+      weight_decay: 0.01
       adam_beta1: 0.9
       adam_beta2: 0.95
-      eod_mask_loss: true
+      eod_mask_loss: false
 
-      # Mamba-specific: must provide spec
-      # Use custom hybrid Mamba+MLA spec
-      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'hybrid_stack_spec']
-      
+      # Pure GDN hybrid spec (hybrid_attention_ratio=0.0 → all GDN, no MLA)
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'gdn_hybrid_stack_spec']
+
       # Tokenizer
       tokenizer_type: HuggingFaceTokenizer
       tokenizer_model: meta-llama/Llama-3.2-1B
-      
-      # parallel
+
+      # Parallelism
       tensor_model_parallel_size: 1
       pipeline_model_parallel_size: 1
       expert_model_parallel_size: 1
       overlap_grad_reduce: true
       overlap_param_gather: true
       gradient_accumulation_fusion: true
+      use_torch_fsdp2: false
+      use_distributed_optimizer: true
 
-      # data
+      # Data — FineWeb-Edu sample-10BT
       mock_data: false
-      # NOTE: MegatronTrainer.update_primus_config expects *string* paths and splits on spaces.
-      # Use a folded scalar so YAML stays readable but resolves to a single space-separated string.
       train_data_path: >
         /home/vanbhati@amd.com/Primus/data/fineweb-edu-10BT/HuggingFaceTokenizer/fineweb_edu_10BT_0_text_sentence
         /home/vanbhati@amd.com/Primus/data/fineweb-edu-10BT/HuggingFaceTokenizer/fineweb_edu_10BT_1_text_sentence
@@ -66,17 +76,18 @@ modules:
       valid_data_path: null
       test_data_path: null
 
-      # ckpt
+      # Checkpoints
       finetune: false
-      auto_continue_train: false
+      auto_continue_train: true
       load: null
-      save: ./output/zebra_llama_1B-pretrain
-      save_interval: 50000
+      save: ./output/zebra_llama_1B_gdn_pure-pretrain
+      save_interval: 2048
       disable_last_saving: false
       ckpt_format: torch
 
       # Turbo
-      # enable_primus_turbo: true
-      # use_turbo_attention: true
-      # use_turbo_grouped_mlp: true
+      enable_primus_turbo: false
+      use_turbo_attention: false
 
+      # Context parallel
+      context_parallel_size: 1

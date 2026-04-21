@@ -179,6 +179,13 @@ class HybridStack(MegatronModule):
         layer_type_list = []
         num_attention_layers = int(num_layers//2 * hybrid_attention_ratio)
         num_mamba_layers = num_layers//2 - num_attention_layers
+
+        if num_attention_layers == 0:
+            return [LayerSymbols.MAMBA, LayerSymbols.MLP] * num_mamba_layers
+
+        if num_mamba_layers == 0:
+            return [LayerSymbols.ATTENTION, LayerSymbols.MLP] * num_attention_layers
+
         num_mamba_per_attention_layer = num_mamba_layers // num_attention_layers
 
         if hybrid_attention_ratio <= 0.5:

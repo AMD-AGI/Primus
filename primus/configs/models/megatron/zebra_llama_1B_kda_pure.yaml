@@ -1,0 +1,52 @@
+bases:
+  - mamba_base.yaml
+
+# Zebra Llama 1B Pure KDA — matches FLA kda_1B_pure.json exactly
+model_type: mamba
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: meta-llama/Llama-3.2-1B
+
+# Model size parameters (matches FLA: hidden_size=2048, intermediate_size=8192, num_hidden_layers=16)
+# Megatron counts sublayers: 16 KDA + 16 MLP = 32
+num_layers: 32
+hidden_size: 2048
+ffn_hidden_size: 8192
+
+# Pure KDA — no attention layers
+is_hybrid_model: true
+hybrid_attention_ratio: 0.0
+
+# Mamba params kept for base config compatibility (unused in pure KDA)
+mamba_state_dim: 64
+mamba_head_dim: 64
+mamba_num_groups: 8
+
+# KDA parameters — matched to FLA config:
+#   FLA: num_heads=16, head_dim=32, expand_v=2.0, conv_size=4
+#   key: 16 heads x 32 dim = 512 total
+#   value: 16 heads x (32*2.0=64) dim = 1024 total
+linear_conv_kernel_dim: 4
+linear_key_head_dim: 32
+linear_value_head_dim: 64
+linear_num_key_heads: 16
+linear_num_value_heads: 16
+
+# No MLA needed for pure KDA
+group_query_attention: false
+swiglu: true
+num_query_groups: null
+multi_latent_attention: false
+num_attention_heads: 16
+
+# Embedding tying (matches FLA tie_word_embeddings=true)
+untie_embeddings_and_output_weights: false
+
+# Norm epsilon (matches FLA norm_eps=1e-6)
+norm_epsilon: 1.0e-6
+
+# Positional encoding
+rotary_base: 500000
+position_embedding_type: none
+add_position_embedding: true
+use_rotary_position_embeddings: false
+max_position_embeddings: 131072

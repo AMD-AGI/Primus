@@ -1,0 +1,40 @@
+bases:
+  - mamba_base.yaml
+
+# Zebra Llama 1B Pure GDN configuration
+model_type: mamba  # CRITICAL: Hybrid models must use mamba model type
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: fla-hub/gla-1.3B-100B
+
+# Model size parameters
+num_layers: 32
+hidden_size: 2048
+ffn_hidden_size: 8192 
+
+# Pure GDN — no attention layers
+is_hybrid_model: true
+hybrid_attention_ratio: 0.0
+mamba_state_dim: 64
+mamba_head_dim: 64
+mamba_num_groups: 8
+
+# Gated Delta Net parameters
+linear_conv_kernel_dim: 4
+linear_key_head_dim: 64
+linear_value_head_dim: 64
+linear_num_key_heads: 8
+linear_num_value_heads: 16
+
+# No MLA needed for pure GDN
+group_query_attention: false
+swiglu: true
+num_query_groups: null
+multi_latent_attention: false
+num_attention_heads: 32
+
+# Positional encoding
+rotary_base: 500000
+position_embedding_type: none
+add_position_embedding: true
+use_rotary_position_embeddings: false
+max_position_embeddings: 131072
