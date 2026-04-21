@@ -5,8 +5,13 @@
 ###############################################################################
 
 import copy
+import json
 import math
 import os
+import socket
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -38,6 +43,281 @@ from primus.core.projection.training_config import (
 
 _MAX_EXPERT_PARALLEL_SIZE = 8
 _BYTES_PER_GB = 1024**3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hybrid sourcing: save/load/merge profiling results
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _save_profiling_results(profiling_results, reduction_info, save_path):
+    """Serialize profiling results + metadata to JSON for later hybrid sourcing."""
+    serializable = {}
+    for key, value in profiling_results.items():
+        str_key = str(key)
+        if isinstance(value, dict):
+            serializable[str_key] = copy.deepcopy(value)
+        else:
+            serializable[str_key] = value
+
+    payload = {
+        "profiling_results": serializable,
+        "metadata": {
+            "benchmark_ep": reduction_info.get("benchmark_ep", 1),
+            "benchmark_tp": reduction_info.get("benchmark_tp", 1),
+            "benchmark_pp": reduction_info.get("benchmark_pp", 1),
+            "benchmark_gpus": reduction_info.get("benchmark_gpus", 1),
+            "original_ep": reduction_info.get("original_ep", 1),
+            "original_num_experts": reduction_info.get("original_num_experts"),
+            "benchmark_num_experts": reduction_info.get("benchmark_num_experts"),
+        },
+    }
+
+    with open(save_path, "w") as f:
+        json.dump(payload, f, indent=2)
+
+
+def _load_profiling_results(load_path):
+    """Load profiling results + metadata from a JSON file."""
+    with open(load_path, "r") as f:
+        payload = json.load(f)
+
+    raw = payload["profiling_results"]
+    profiling_results = {}
+    for key, value in raw.items():
+        try:
+            int_key = int(key)
+            profiling_results[int_key] = value
+        except ValueError:
+            profiling_results[key] = value
+
+    return profiling_results, payload.get("metadata", {})
+
+
+def _merge_hybrid_profiling(
+    current_results,
+    baseline_results,
+    baseline_metadata,
+    current_benchmark_ep,
+):
+    """Replace current profiling compute times with clean baseline values.
+
+    For MoE layers:
+      - Attention times are taken from baseline (no AllToAll contention).
+      - MLP compute is taken from baseline and scaled by EP_baseline / EP_current
+        to account for per-GPU workload differences (tokens × topk / EP).
+      - Measured A2A times are kept from the current (bg=N) profiling.
+
+    For dense layers:
+      - All times are replaced with baseline values.
+
+    Returns the number of layers merged and a dict of diagnostics.
+    """
+    baseline_ep = baseline_metadata.get("benchmark_ep", 1)
+
+    # EP compute scaling: in theory, per-GPU MoE compute scales as topk/EP.
+    # In practice, MoE MLP time is dominated by fixed overhead (routing,
+    # permutation, GroupedGEMM setup) that doesn't scale with EP.  Using
+    # the raw baseline compute (scale=1.0) works well because the bg=1
+    # MLP time (routing overhead + compute for all local experts) is a
+    # reasonable proxy for the non-A2A MLP cost at any EP.  The subsequent
+    # EP adjustment step then correctly scales only the A2A portion.
+    ep_compute_scale = 1.0
+
+    merged_count = 0
+    diagnostics = {}
+
+    for layer_idx, current_data in current_results.items():
+        if not isinstance(current_data, dict):
+            continue
+        if layer_idx in ("embedding", "output", "_tp_allreduce_benchmark"):
+            continue
+
+        # Find matching baseline layer (by index, or use the representative
+        # layer of the same type if exact match is missing).
+        baseline_data = baseline_results.get(layer_idx)
+        if baseline_data is None:
+            baseline_data = baseline_results.get(str(layer_idx))
+        if baseline_data is None:
+            continue
+
+        layer_type = current_data.get("type", "dense")
+
+        if layer_type == "moe":
+            cur_attn = current_data.get("attention", {})
+            base_attn = baseline_data.get("attention", {})
+            cur_mlp = current_data.get("mlp", {})
+            base_mlp = baseline_data.get("mlp", {})
+
+            # At EP=1 (bg=1), there's no A2A, so baseline mlp fwd is pure compute.
+            base_mlp_compute_fwd = base_mlp.get("forward_time_ms", 0)
+            base_mlp_compute_bwd = base_mlp.get("backward_time_ms", 0)
+
+            scaled_compute_fwd = base_mlp_compute_fwd * ep_compute_scale
+            scaled_compute_bwd = base_mlp_compute_bwd * ep_compute_scale
+
+            cur_a2a_fwd = cur_mlp.get("a2a_forward_time_ms", 0)
+            cur_a2a_bwd = cur_mlp.get("a2a_backward_time_ms", 0)
+
+            new_mlp_fwd = scaled_compute_fwd + cur_a2a_fwd
+            new_mlp_bwd = scaled_compute_bwd + cur_a2a_bwd
+
+            base_attn_fwd = base_attn.get("forward_time_ms", cur_attn.get("forward_time_ms", 0))
+            base_attn_bwd = base_attn.get("backward_time_ms", cur_attn.get("backward_time_ms", 0))
+
+            new_fwd = base_attn_fwd + new_mlp_fwd
+            new_bwd = base_attn_bwd + new_mlp_bwd
+
+            if merged_count == 0:
+                diagnostics = {
+                    "cur_attn_fwd": cur_attn.get("forward_time_ms", 0),
+                    "base_attn_fwd": base_attn_fwd,
+                    "attn_contention_ratio": (
+                        cur_attn.get("forward_time_ms", 0) / base_attn_fwd
+                        if base_attn_fwd > 0
+                        else 0
+                    ),
+                    "base_mlp_compute_fwd": base_mlp_compute_fwd,
+                    "scaled_compute_fwd": scaled_compute_fwd,
+                    "cur_a2a_fwd": cur_a2a_fwd,
+                    "ep_compute_scale": ep_compute_scale,
+                    "old_layer_fwd": current_data.get("forward_time_ms", 0),
+                    "new_layer_fwd": new_fwd,
+                }
+
+            current_data["forward_time_ms"] = new_fwd
+            current_data["backward_time_ms"] = new_bwd
+            cur_attn["forward_time_ms"] = base_attn_fwd
+            cur_attn["backward_time_ms"] = base_attn_bwd
+            cur_mlp["forward_time_ms"] = new_mlp_fwd
+            cur_mlp["backward_time_ms"] = new_mlp_bwd
+
+        else:
+            # Dense layer: replace times entirely with baseline
+            current_data["forward_time_ms"] = baseline_data.get(
+                "forward_time_ms", current_data.get("forward_time_ms", 0)
+            )
+            current_data["backward_time_ms"] = baseline_data.get(
+                "backward_time_ms", current_data.get("backward_time_ms", 0)
+            )
+            base_attn = baseline_data.get("attention", {})
+            if base_attn and "attention" in current_data:
+                current_data["attention"]["forward_time_ms"] = base_attn.get(
+                    "forward_time_ms",
+                    current_data["attention"].get("forward_time_ms", 0),
+                )
+                current_data["attention"]["backward_time_ms"] = base_attn.get(
+                    "backward_time_ms",
+                    current_data["attention"].get("backward_time_ms", 0),
+                )
+            base_mlp_d = baseline_data.get("mlp", {})
+            if base_mlp_d and "mlp" in current_data:
+                current_data["mlp"]["forward_time_ms"] = base_mlp_d.get(
+                    "forward_time_ms",
+                    current_data["mlp"].get("forward_time_ms", 0),
+                )
+                current_data["mlp"]["backward_time_ms"] = base_mlp_d.get(
+                    "backward_time_ms",
+                    current_data["mlp"].get("backward_time_ms", 0),
+                )
+
+        merged_count += 1
+
+    return merged_count, diagnostics
+
+
+def _run_automatic_bg1_baseline(args, reduction_info):
+    """Run bg=1 profiling in a subprocess to get clean compute baselines.
+
+    Only rank 0 spawns the subprocess; all ranks poll for the result file.
+    Returns (profiling_results, metadata) or (None, None) on failure.
+    """
+    rank = int(os.getenv("RANK", "0"))
+    master_port = os.getenv("MASTER_PORT", "29500")
+    save_path = f"/tmp/primus_bg1_baseline_{master_port}.json"
+
+    if rank == 0:
+        if os.path.exists(save_path):
+            os.remove(save_path)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            free_port = s.getsockname()[1]
+
+        cmd = [
+            sys.executable, "-m", "torch.distributed.run",
+            "--nproc_per_node=1", "--nnodes=1", "--node_rank=0",
+            "--master_addr=localhost", f"--master_port={free_port}",
+            "-m", "primus.cli.main",
+            "projection", "performance",
+            "--config", str(args.config),
+            "--benchmark-gpus", "1",
+            "--save-profiling", save_path,
+            "--profile-only",
+        ]
+
+        hw = getattr(args, "hardware_config", None)
+        if hw:
+            cmd.extend(["--hardware-config", hw])
+
+        target = getattr(args, "target_nodes", None) or getattr(
+            args, "target_num_nodes", None
+        )
+        if target:
+            cmd.extend(["--target-num-nodes", str(target)])
+
+        for attr, flag in [
+            ("target_ep_size", "--target-ep-size"),
+            ("micro_batch_size", "--micro-batch-size"),
+            ("global_batch_size", "--global-batch-size"),
+        ]:
+            val = getattr(args, attr, None)
+            if val is not None:
+                cmd.extend([flag, str(val)])
+
+        print(
+            "[Primus:Performance Projection] Running bg=1 compute baseline "
+            "(subprocess)..."
+        )
+
+        env = os.environ.copy()
+        local_gpu = env.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
+        env["CUDA_VISIBLE_DEVICES"] = local_gpu
+
+        result = subprocess.run(
+            cmd, env=env, capture_output=True, text=True, timeout=600
+        )
+
+        if result.returncode != 0:
+            stderr_tail = result.stderr[-1000:] if result.stderr else "(empty)"
+            print(
+                f"[WARNING] bg=1 compute baseline subprocess failed "
+                f"(exit {result.returncode}):\n{stderr_tail}"
+            )
+            with open(save_path + ".failed", "w") as f:
+                f.write("failed")
+
+    for _ in range(600):
+        if os.path.exists(save_path) and os.path.getsize(save_path) > 10:
+            break
+        if os.path.exists(save_path + ".failed"):
+            return None, None
+        time.sleep(0.5)
+
+    if not os.path.exists(save_path) or os.path.getsize(save_path) < 10:
+        if rank == 0:
+            print("[WARNING] bg=1 compute baseline timed out.")
+        return None, None
+
+    results, metadata = _load_profiling_results(save_path)
+
+    if rank == 0:
+        print(
+            f"[Primus:Performance Projection] bg=1 compute baseline loaded "
+            f"({len([k for k in results if isinstance(k, int)])} layers)"
+        )
+
+    return results, metadata
 
 
 def _calculate_min_gpus(tp, pp, ep, cp):
@@ -3277,6 +3557,34 @@ def launch_projection_from_cli(args, overrides):
     if target_nodes is None:
         target_nodes = min_nodes_required
 
+    # ── Auto-hybrid: run bg=1 compute baseline when EP was reduced ──
+    # When benchmark_ep != original_ep, measured compute at the reduced EP
+    # includes artifacts (different token routing, contention) that don't
+    # represent the target config.  We automatically run bg=1 profiling
+    # for clean compute and merge it with the bg=N measured A2A later.
+    # Skip when: bg==ep (no reduction), simulation mode, or --profile-only.
+    profiling_mode = getattr(args, "profiling_mode", "benchmark")
+    _auto_bg1_results = None
+    _auto_bg1_meta = None
+    need_auto_hybrid = (
+        reduction_info["adjusted"]
+        and reduction_info["original_ep"] != reduction_info["benchmark_ep"]
+        and profiling_mode in ("benchmark", "both")
+        and not getattr(args, "profile_only", False)
+        and not getattr(args, "compute_baseline", None)
+    )
+    if need_auto_hybrid:
+        is_rank_0 = int(os.getenv("RANK", "0")) == 0
+        if is_rank_0:
+            print(
+                f"\n[Primus:Performance Projection] EP reduced "
+                f"({reduction_info['original_ep']} → {reduction_info['benchmark_ep']}): "
+                f"auto-running bg=1 for clean compute baseline..."
+            )
+        _auto_bg1_results, _auto_bg1_meta = _run_automatic_bg1_baseline(
+            args, reduction_info
+        )
+
     if reduction_info["adjusted"]:
         benchmark_label = (
             f"{benchmark_gpus}-GPU" if is_sub_node_benchmark else "single-node"
@@ -3362,9 +3670,6 @@ def launch_projection_from_cli(args, overrides):
                 "benchmark_num_experts"
             ]
 
-    # Determine profiling mode
-    profiling_mode = getattr(args, "profiling_mode", "benchmark")
-
     if profiling_mode == "simulate":
         # Pure simulation – no GPU / trainer required
         profiling_results = _run_layer_simulation(primus_config, args)
@@ -3408,6 +3713,21 @@ def launch_projection_from_cli(args, overrides):
     else:
         # Default: actual GPU benchmark
         profiling_results = _run_layer_benchmark(primus_config, unknown_overrides)
+
+    # ── Save profiling results if requested (internal / subprocess use) ──
+    save_profiling_path = getattr(args, "save_profiling", None)
+    is_rank_0 = int(os.getenv("RANK", "0")) == 0
+    if save_profiling_path and is_rank_0:
+        _save_profiling_results(profiling_results, reduction_info, save_profiling_path)
+        print(
+            f"[Primus:Performance Projection] Profiling results saved to: {save_profiling_path}"
+        )
+
+    # ── Early exit for --profile-only (used by bg=1 subprocess) ──
+    if getattr(args, "profile_only", False):
+        if is_rank_0:
+            print("[Primus:Performance Projection] --profile-only: exiting after profiling.")
+        return
 
     # Use original config for projection calculations
     training_config = convert_primus_config_to_projection_config(primus_config_original)
@@ -3481,6 +3801,47 @@ def launch_projection_from_cli(args, overrides):
     # Set data_parallel_size to target_dp so the pipeline simulation and
     # _compute_micro_batches use the correct microbatch count.
     training_config.runtime_config.data_parallel_size = target_dp
+
+    # ── Hybrid sourcing: merge clean compute baseline with measured A2A ──
+    # Source: auto bg=1 results (computed above) or manual --compute-baseline.
+    compute_baseline_path = getattr(args, "compute_baseline", None)
+    baseline_results, baseline_meta = None, None
+    if _auto_bg1_results is not None:
+        baseline_results, baseline_meta = _auto_bg1_results, _auto_bg1_meta
+    elif compute_baseline_path:
+        baseline_results, baseline_meta = _load_profiling_results(compute_baseline_path)
+
+    if baseline_results is not None and benchmark_ep != ep:
+        merged_count, diag = _merge_hybrid_profiling(
+            profiling_results,
+            baseline_results,
+            baseline_meta,
+            current_benchmark_ep=benchmark_ep,
+        )
+
+        if is_rank_0:
+            print("\n" + "=" * 100)
+            print("[Primus:Performance Projection] Hybrid Sourcing: bg=1 compute + "
+                  f"bg={benchmark_gpus} communication")
+            print("=" * 100)
+            print(
+                f"  Baseline config: bg={baseline_meta.get('benchmark_gpus', '?')}, "
+                f"EP={baseline_meta.get('benchmark_ep', '?')}"
+            )
+            print(f"  Current config:  bg={benchmark_gpus}, EP={benchmark_ep}")
+            print(f"  Merged {merged_count} layers")
+            if diag:
+                print(f"  Attention fwd: current={diag['cur_attn_fwd']:.2f} ms → "
+                      f"baseline={diag['base_attn_fwd']:.2f} ms "
+                      f"(contention ratio: {diag['attn_contention_ratio']:.2f}x)")
+                print(f"  MLP compute fwd: baseline={diag['base_mlp_compute_fwd']:.2f} ms "
+                      f"× {diag['ep_compute_scale']:.3f} (EP scale) "
+                      f"= {diag['scaled_compute_fwd']:.2f} ms")
+                print(f"  Measured A2A fwd: {diag['cur_a2a_fwd']:.2f} ms "
+                      f"(from current bg={benchmark_gpus})")
+                print(f"  Layer fwd: {diag['old_layer_fwd']:.2f} → "
+                      f"{diag['new_layer_fwd']:.2f} ms")
+            print("=" * 100)
 
     # If TP was reduced for sub-node benchmarking, apply TP scaling BEFORE pipeline simulation
     if reduction_info["adjusted"] and reduction_info.get("benchmark_tp", tp) != tp:

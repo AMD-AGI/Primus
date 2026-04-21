@@ -226,6 +226,23 @@ def register_subcommand(subparsers):
         default=None,
         help="Override global_batch_size for projection.",
     )
+    import argparse as _argparse
+
+    performance.add_argument(
+        "--save-profiling",
+        type=str, required=False, default=None,
+        help=_argparse.SUPPRESS,
+    )
+    performance.add_argument(
+        "--compute-baseline",
+        type=str, required=False, default=None,
+        help=_argparse.SUPPRESS,
+    )
+    performance.add_argument(
+        "--profile-only",
+        action="store_true", default=False,
+        help=_argparse.SUPPRESS,
+    )
     parser.set_defaults(func=run)
 
     return parser
