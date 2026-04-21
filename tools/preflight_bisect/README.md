@@ -73,7 +73,7 @@ python tools/preflight_bisect/bisect.py \
 | `--trial-timeout-sec` | 900 | Wall-clock per trial; on timeout the trial is marked `HANG` |
 | `--slurm-time` | `00:45:00` | `srun -t` |
 | `--cpus-per-task` | 128 | `srun -c` (per the non-container doc) |
-| `--gpus-per-node` | 8 | `srun --gpus-per-node` |
+| `--gpus-per-node` | 8 | Emitted to srun as `--gres=gpu:N` |
 | `--preflight-env KEY=VALUE` | (repeatable) | Passed through as `runner/primus-cli-direct-preflight.sh --env KEY=VALUE` |
 | `--output-dir` | `./bisect-out` | Trial logs + `summary.txt` |
 | `--runner` | `runner/primus-cli-direct-preflight.sh` | Override if you ship a custom runner |

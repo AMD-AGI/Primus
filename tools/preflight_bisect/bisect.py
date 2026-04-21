@@ -70,7 +70,7 @@ def run_trial(
         "--ntasks-per-node=1",
         "-c",
         str(args.cpus_per_task),
-        f"--gpus-per-node={args.gpus_per_node}",
+        f"--gres=gpu:{args.gpus_per_node}",
         f"-t{args.slurm_time}",
     ]
     if args.partition:
@@ -204,7 +204,7 @@ Caveats:
         help="srun -t limit per trial (default: 00:45:00)",
     )
     p.add_argument("--cpus-per-task", type=int, default=128, help="srun -c (default: 128)")
-    p.add_argument("--gpus-per-node", type=int, default=8, help="srun --gpus-per-node (default: 8)")
+    p.add_argument("--gpus-per-node", type=int, default=8, help="GPUs per node; emitted as srun --gres=gpu:N (default: 8)")
     p.add_argument(
         "--preflight-env",
         action="append",
