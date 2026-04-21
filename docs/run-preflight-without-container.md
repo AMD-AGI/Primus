@@ -135,3 +135,30 @@ srun -t 00:30:00 -N 4 -c 128 --gpus-per-node=8 --nodelist <nodes> \
   -- preflight --report-file-name preflight-report-4N \
   2>&1 | tee preflight-report-4N.log
 ```
+
+## Automated node bisection (finding the bad node in an NCCL hang)
+
+When a cluster-wide preflight run hangs or fails, you can automatically bisect
+the nodelist to isolate the node(s) responsible instead of manually halving
+the nodelist and re-running preflight.
+
+From the Slurm login node, with `VENV_PATH` exported:
+
+```bash
+python tools/preflight_bisect/bisect.py \
+    --nodelist "node[01-32]" \
+    --partition gpus \
+    --trial-timeout-sec 900 \
+    --output-dir ./bisect-out \
+    --preflight-env NCCL_CROSS_NIC=1 \
+    --preflight-env NCCL_PXN_DISABLE=0
+```
+
+The script runs `preflight --perf-test` sequentially on shrinking subsets via
+`srun`; any non-zero exit or trial timeout is treated as a failure and the
+subset is split in half until suspects are isolated. Per-trial logs and a
+final `summary.txt` (including `SUSPECT_NODES: ...`) are written under
+`--output-dir`.
+
+See [`tools/preflight_bisect/README.md`](../tools/preflight_bisect/README.md)
+for flags, example output, and caveats.
