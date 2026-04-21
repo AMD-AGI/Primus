@@ -11,6 +11,7 @@ import functools
 import gc
 import importlib.util
 import inspect
+import json
 import os
 import statistics
 import sys
@@ -57,7 +58,6 @@ from megatron.core.datasets.gpt_dataset import (
     GPTDatasetConfig,
     MockGPTDataset,
 )
-from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.enums import ModelType
 from megatron.core.num_microbatches_calculator import (
     get_current_global_batch_size,
@@ -131,6 +131,7 @@ from megatron.training.training import (
 from megatron.training.utils import (
     append_to_progress_log,
     calc_params_l2_norm,
+    get_blend_and_blend_per_split,
     is_first_or_last_pipeline_stage,
     logical_and_across_model_parallel_group,
     reduce_max_stat_across_model_parallel_group,
@@ -172,6 +173,17 @@ from .utils import (
 
 # The earliest we can measure the start time.
 set_train_start_time()
+
+
+def _normalize_data_path_arg(path_value):
+    """Normalize data path args to list form when paths are passed as strings."""
+    if path_value is None:
+        return None
+    if isinstance(path_value, str):
+        return path_value.split()
+    if isinstance(path_value, (list, tuple)):
+        return list(path_value)
+    return path_value
 
 
 class MegatronTrainer(BaseTrainer, BaseModule):
@@ -463,17 +475,17 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         # update data path
         # "data1 data2 data3" -> ['data1', 'data2', 'data3']
         if args.data_path is not None:
-            args.data_path = args.data_path.split(" ")
+            args.data_path = _normalize_data_path_arg(args.data_path)
             log_rank_0(f"-data_path: {args.data_path}")
 
         if args.train_data_path is not None:
-            args.train_data_path = args.train_data_path.split(" ")
+            args.train_data_path = _normalize_data_path_arg(args.train_data_path)
             log_rank_0(f"-train_data_path: {args.train_data_path}")
         if args.valid_data_path is not None:
-            args.valid_data_path = args.valid_data_path.split(" ")
+            args.valid_data_path = _normalize_data_path_arg(args.valid_data_path)
             log_rank_0(f"-valid_data_path: {args.valid_data_path}")
         if args.test_data_path is not None:
-            args.test_data_path = args.test_data_path.split(" ")
+            args.test_data_path = _normalize_data_path_arg(args.test_data_path)
             log_rank_0(f"-test_data_path: {args.test_data_path}")
 
         # update sp
@@ -627,25 +639,45 @@ class MegatronTrainer(BaseTrainer, BaseModule):
     def core_gpt_dataset_config_from_args(self, args):
         tokenizer = get_tokenizer()
 
-        return GPTDatasetConfig(
-            random_seed=args.seed,
-            sequence_length=args.seq_length,
-            blend=get_blend_from_list(args.data_path),
-            blend_per_split=[
-                get_blend_from_list(args.train_data_path),
-                get_blend_from_list(args.valid_data_path),
-                get_blend_from_list(args.test_data_path),
-            ],
-            split=args.split,
-            num_dataset_builder_threads=args.num_dataset_builder_threads,
-            path_to_cache=args.data_cache_path,
-            mmap_bin_files=args.mmap_bin_files,
-            tokenizer=tokenizer,
-            reset_position_ids=args.reset_position_ids,
-            reset_attention_mask=args.reset_attention_mask,
-            eod_mask_loss=args.eod_mask_loss,
-            create_attention_mask=args.create_attention_mask_in_dataloader,
-        )
+        # Keep legacy trainer aligned with upstream pretrain_gpt dataset argument handling.
+        blend, blend_per_split = get_blend_and_blend_per_split(args)
+
+        sequences_per_dataset = None
+        per_dataset_sequences_path = getattr(args, "per_dataset_sequences_path", None)
+        if per_dataset_sequences_path is not None:
+            with open(per_dataset_sequences_path, "r") as f:
+                sequences_per_dataset = json.load(f)
+
+        data_args = {
+            "random_seed": args.seed,
+            "sequence_length": args.seq_length,
+            "blend": blend,
+            "blend_per_split": blend_per_split,
+            "split": args.split,
+            "multiple_validation_sets": getattr(args, "multiple_validation_sets", None),
+            "full_validation": getattr(args, "full_validation", None),
+            "num_dataset_builder_threads": args.num_dataset_builder_threads,
+            "path_to_cache": args.data_cache_path,
+            "mmap_bin_files": args.mmap_bin_files,
+            "tokenizer": tokenizer,
+            "reset_position_ids": args.reset_position_ids,
+            "reset_attention_mask": args.reset_attention_mask,
+            "eod_mask_loss": args.eod_mask_loss,
+            "create_attention_mask": args.create_attention_mask_in_dataloader,
+            "object_storage_cache_path": getattr(args, "object_storage_cache_path", None),
+            "mid_level_dataset_surplus": getattr(args, "mid_level_dataset_surplus", 0.005),
+            "allow_ambiguous_pad_tokens": getattr(args, "allow_ambiguous_pad_tokens", False),
+            "fast_cache_load": getattr(args, "dataloader_fast_cache_load", False),
+            "sequences_per_dataset": sequences_per_dataset,
+            "defer_npy_index_mmap": getattr(args, "dataloader_defer_npy_index_mmap", False),
+            "context_parallel_size": getattr(args, "context_parallel_size", 1),
+            "data_parallel_size": getattr(args, "data_parallel_size", 1),
+            "sequence_parallel_size": getattr(args, "tensor_model_parallel_size", 1)
+            * getattr(args, "sequence_parallel", False),
+            "hybrid_context_parallel": getattr(args, "hybrid_context_parallel", False),
+        }
+
+        return GPTDatasetConfig(**data_args)
 
     def train_valid_test_datasets_provider(self, train_val_test_num_samples, vp_stage=None):
         """Build the train test and validation datasets.
