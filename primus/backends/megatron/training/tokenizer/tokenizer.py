@@ -78,10 +78,7 @@ def _build_custom_hf_tokenizer(args, **kwargs):
             tokenizer = builder(args, **kwargs)
         except Exception as e:
             tokenizer = None
-            fallback_reason = (
-                "upstream build_tokenizer failed with "
-                f"{type(e).__name__}: {e}"
-            )
+            fallback_reason = "upstream build_tokenizer failed with " f"{type(e).__name__}: {e}"
         finally:
             args.tokenizer_type = original_tokenizer_type
 
