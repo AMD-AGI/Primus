@@ -62,7 +62,7 @@ modules:
       use_distributed_optimizer: true
 
       # data
-      mock_data: false
+      mock_data: true
       train_data_path: >
         /home/vanbhati@amd.com/Primus/data/fineweb-edu-10BT/HuggingFaceTokenizer/fineweb_edu_10BT_0_text_sentence
         /home/vanbhati@amd.com/Primus/data/fineweb-edu-10BT/HuggingFaceTokenizer/fineweb_edu_10BT_1_text_sentence
@@ -74,7 +74,7 @@ modules:
       # ckpt
       finetune: false
       auto_continue_train: true
-      load: ./output/amd/root/zebra_llama_1B_kda-pretrain/checkpoints
+      load: null
       save: ./output/zebra_llama_1B_kda-pretrain
       save_interval: 1000
       disable_last_saving: false
