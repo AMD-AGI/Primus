@@ -935,22 +935,27 @@ def _limit_layers_for_projection(module_config):
     original_layers = getattr(module_config, "num_layers", 1) or 1
     original_moe_layout = getattr(module_config, "moe_layer_freq", None)
     dense_layers_present = _has_dense_layers(original_moe_layout)
-    # Use 1 layer for fast profiling - results are extrapolated to full model
-    # Increase to 2-4 for better accuracy if needed
-    max_layers = 1
+
+    if has_moe and dense_layers_present:
+        # Need at least 2 layers to profile both dense (layer 0) and MoE (layer 1)
+        # so extraction code can correctly classify each type using the full
+        # model's moe_pattern where layer 0 is typically dense.
+        max_layers = 2
+    else:
+        max_layers = 1
     target_layers = max(1, min(original_layers, max_layers))
     module_config.num_layers = target_layers
 
     if has_moe:
         if not dense_layers_present:
             module_config.moe_layer_freq = [1] * target_layers
-        elif target_layers == 1:
-            module_config.moe_layer_freq = [1]
         else:
             dense_then_moe = [0, 1]
             if target_layers > 2:
                 dense_then_moe.extend([0] * (target_layers - 2))
-            module_config.moe_layer_freq = dense_then_moe
+            elif target_layers == 1:
+                dense_then_moe = [1]
+            module_config.moe_layer_freq = dense_then_moe[:target_layers]
     else:
         module_config.moe_layer_freq = [0] * target_layers
 
@@ -1315,6 +1320,23 @@ def _estimate_pp_communication_overhead(
     )
 
     return total_p2p_time_ms
+
+
+def _get_deepep_overlap_efficiency(model_config):
+    """Return the A2A-compute overlap efficiency for DeepEP/SyncFree.
+
+    DeepEP alone achieves ~65% overlap.  SyncFree stages progressively
+    eliminate CPU synchronisation stalls and use fully-async dispatch,
+    yielding higher overlap efficiencies.
+    """
+    sync_free_stage = getattr(model_config, "turbo_sync_free_moe_stage", 0)
+    if sync_free_stage >= 3:
+        return 0.85
+    if sync_free_stage >= 2:
+        return 0.80
+    if sync_free_stage >= 1:
+        return 0.75
+    return 0.65
 
 
 def _compute_ep_mlp_scale(
@@ -2365,19 +2387,36 @@ def _run_layer_benchmark(primus_config, unknown_overrides):
     print("[Primus:Performance Projection] Initializing MegatronPretrainTrainer...")
     # Disable overlap features and FSDP2 for profiling (they add complexity without benefiting isolated layer benchmarking)
     # FSDP2 uses DTensor which causes issues with benchmarking inputs
-    primus_config.get_module_config("pre_trainer").overlap_grad_reduce = False
-    primus_config.get_module_config("pre_trainer").overlap_param_gather = False
-    primus_config.get_module_config("pre_trainer").use_torch_fsdp2 = False
+    cfg = primus_config.get_module_config("pre_trainer")
+    cfg.overlap_grad_reduce = False
+    cfg.overlap_param_gather = False
+    cfg.use_torch_fsdp2 = False
+
+    # Auto-enable Primus Turbo kernels when MLA or DeepEP is configured.
+    # Measured training runs use the full Turbo stack (PrimusMLASelfAttention,
+    # PrimusTurboColumnParallelLinear, TurboGroupedMLP).  Profiling without
+    # these causes systematic under-prediction (~8-15%).
+    _turbo_candidates = {
+        "enable_primus_turbo": True,
+        "use_turbo_parallel_linear": getattr(cfg, "multi_latent_attention", False),
+        "use_turbo_grouped_mlp": bool(getattr(cfg, "num_experts", 0)),
+    }
+    if getattr(cfg, "multi_latent_attention", False) or getattr(cfg, "use_turbo_deepep", False):
+        for flag, val in _turbo_candidates.items():
+            if val and not getattr(cfg, flag, False):
+                setattr(cfg, flag, True)
+                print(
+                    f"[Primus:Performance Projection] Auto-enabled {flag} "
+                    "for profiling accuracy"
+                )
+
     print("[Primus:Performance Projection] Config (with profiling overrides):")
-    print(
-        f"  overlap_grad_reduce: {primus_config.get_module_config('pre_trainer').overlap_grad_reduce}"
-    )
-    print(
-        f"  overlap_param_gather: {primus_config.get_module_config('pre_trainer').overlap_param_gather}"
-    )
-    print(
-        f"  use_torch_fsdp2: {primus_config.get_module_config('pre_trainer').use_torch_fsdp2}"
-    )
+    print(f"  overlap_grad_reduce: {cfg.overlap_grad_reduce}")
+    print(f"  overlap_param_gather: {cfg.overlap_param_gather}")
+    print(f"  use_torch_fsdp2: {cfg.use_torch_fsdp2}")
+    if getattr(cfg, "multi_latent_attention", False):
+        print(f"  enable_primus_turbo: {cfg.enable_primus_turbo}")
+        print(f"  use_turbo_parallel_linear: {cfg.use_turbo_parallel_linear}")
     trainer = MegatronPretrainTrainer(
         module_name="pre_trainer",
         primus_config=primus_config,
@@ -2820,7 +2859,7 @@ def _run_pipeline_simulation(
 
     if scheduler_algorithm != "seaailab-ilp":
         sim_config = _build_scheduler_sim_config(
-            training_config, profiling_results, enable_zero_bubble, scheduler_algorithm
+            training_config, profiling_results, enable_zero_bubble, scheduler_algorithm,
         )
         if sim_config is None:
             return None
@@ -3522,6 +3561,16 @@ def launch_projection_from_cli(args, overrides):
             module_cfg.use_turbo_deepep = True
         cli_overrides_applied.append("use_turbo_deepep=True")
 
+    cli_sync_free_stage = getattr(args, "sync_free_stage", 0) or 0
+    if cli_sync_free_stage > 0:
+        module_cfg.turbo_sync_free_moe_stage = cli_sync_free_stage
+        if not cli_enable_deepep:
+            if hasattr(module_cfg, "model") and hasattr(module_cfg.model, "moe"):
+                module_cfg.model.moe.use_turbo_deepep = True
+            else:
+                module_cfg.use_turbo_deepep = True
+        cli_overrides_applied.append(f"turbo_sync_free_moe_stage={cli_sync_free_stage}")
+
     if cli_overrides_applied and is_rank_0:
         print("[Primus:Performance Projection] CLI overrides applied to config:")
         for ov in cli_overrides_applied:
@@ -4011,7 +4060,7 @@ def launch_projection_from_cli(args, overrides):
                     use_deepep = getattr(model_cfg, "use_turbo_deepep", False)
 
                     if use_deepep and benchmark_ep != original_ep:
-                        DEEPEP_OVERLAP_EFFICIENCY = 0.65
+                        DEEPEP_OVERLAP_EFFICIENCY = _get_deepep_overlap_efficiency(model_cfg)
                         effective_a2a_delta = a2a_delta * (1.0 - DEEPEP_OVERLAP_EFFICIENCY)
                         new_mlp_fwd = mlp_fwd + effective_a2a_delta
                         new_mlp_bwd = mlp_bwd + effective_a2a_delta
@@ -4196,7 +4245,7 @@ def launch_projection_from_cli(args, overrides):
                 f"(benchmarked with PP={pp})"
             )
         pipeline_simulation_time_ms = _run_pipeline_simulation(
-            training_config, profiling_results, enable_zero_bubble, scheduler_algorithm
+            training_config, profiling_results, enable_zero_bubble, scheduler_algorithm,
         )
 
     # Restore training_config PP to benchmark value for consistency
@@ -4337,7 +4386,7 @@ def launch_projection_from_cli(args, overrides):
 
                                 # Decompose MLP into compute + A2A (same logic as Path A)
                                 if use_deepep:
-                                    DEEPEP_OVERLAP_EFFICIENCY = 0.65
+                                    DEEPEP_OVERLAP_EFFICIENCY = _get_deepep_overlap_efficiency(model_cfg)
                                     residual = 1.0 - DEEPEP_OVERLAP_EFFICIENCY
                                     compute_fwd = mlp_fwd - measured_a2a_fwd * residual
                                     compute_bwd = mlp_bwd - measured_a2a_bwd * residual

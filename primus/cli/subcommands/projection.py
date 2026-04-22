@@ -206,6 +206,13 @@ def register_subcommand(subparsers):
         help="Enable DeepEP (async All-to-All overlap with compute).",
     )
     performance.add_argument(
+        "--sync-free-stage",
+        type=int,
+        required=False,
+        default=0,
+        help="SyncFree MoE stage (0=off, 1=fused router, 2=+DeepEP+grouped, 3=+fused act). Auto-enables DeepEP.",
+    )
+    performance.add_argument(
         "--num-virtual-stages-per-pipeline-rank",
         type=int,
         required=False,
