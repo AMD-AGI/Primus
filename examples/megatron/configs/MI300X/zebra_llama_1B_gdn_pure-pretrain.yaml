@@ -29,7 +29,7 @@ modules:
       #   total tokens ~= 76294 * 131072 ≈ 10B
       train_iters: 76294
       micro_batch_size: 16
-      global_batch_size: 64
+      global_batch_size: 128
 
       seq_length: 2048
       max_position_embeddings: 2048
@@ -67,7 +67,7 @@ modules:
       use_distributed_optimizer: true
 
       # Data — FineWeb-Edu sample-10BT
-      mock_data: false
+      mock_data: true
       train_data_path: >
         /home/vanbhati@amd.com/Primus/data/fineweb-edu-10BT/HuggingFaceTokenizer/fineweb_edu_10BT_0_text_sentence
         /home/vanbhati@amd.com/Primus/data/fineweb-edu-10BT/HuggingFaceTokenizer/fineweb_edu_10BT_1_text_sentence
