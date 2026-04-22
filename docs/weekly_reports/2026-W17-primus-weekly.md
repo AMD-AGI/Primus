@@ -1,10 +1,10 @@
 # Primus Weekly Update: Main PRs + Megatron-LM Upstream Delta (Mon-to-Now)
 
-**Report window:** 2026-04-20 00:00 UTC (Monday) → 2026-04-22 08:36 UTC
-**Repositories:** `AMD-AGI/Primus` (branch `main`), submodule `third_party/Megatron-LM`
-**Primus `Megatron-LM` pin:** `d3528a21` (2026-03-06) — "fix(moe): fix TE general_gemm API change (#3582)"
-**Upstream `NVIDIA/Megatron-LM` main tip:** `e7789676` (2026-04-21) — "RL: Onload optimizer after logprobs computation (#4235)"
-**Commit distance:** `0` ahead / **`343`** behind (`342` first-parent PR merges).
+- **Report window:** 2026-04-20 00:00 UTC (Monday) → 2026-04-22 08:36 UTC
+- **Repositories:** `AMD-AGI/Primus` (branch `main`), submodule `third_party/Megatron-LM`
+- **Primus `Megatron-LM` pin:** `d3528a21` (2026-03-06) — "fix(moe): fix TE general_gemm API change (#3582)"
+- **Upstream `NVIDIA/Megatron-LM` main tip:** `e7789676` (2026-04-21) — "RL: Onload optimizer after logprobs computation (#4235)"
+- **Commit distance:** `0` ahead / **`343`** behind (`342` first-parent PR merges).
 
 ---
 
@@ -153,13 +153,5 @@
 - Removals of **vision / biencoder-realm / T5 / BERT / data / mpu / encoder_and_decoder** legacy modules — any Primus code depending on these must be audited first.
 - DiT `conditions_embeddings` (`1daa19f89`) — landed and later reverted (`cc4cb0119`); not currently in upstream `main`, do not build on it yet.
 
-### Blocking note on email delivery
-- No SMTP relay, SendGrid/Mailgun key, or `mail`/`sendmail` binary is available in this Cloud Agent VM environment, so this report could not be delivered directly to `wen.xie@amd.com`. The exact subject line and body for manual forwarding are captured below; the file is committed to the repo under `reports/` for traceability.
-
----
-
-## 5. Email Ready-to-Send
-
-**To:** `wen.xie@amd.com`
-**Subject:** `Primus Weekly Update: Main PRs + Megatron-LM Upstream Delta (Mon-to-Now)`
-**Body:** The Markdown above (Sections 1–4).
+### Delivery
+- Report is committed under `docs/weekly_reports/` and delivered via a pull request opened by the release-analysis automation.
