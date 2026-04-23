@@ -1,0 +1,70 @@
+diff --git a/megatron/training/training.py b/megatron/training/training.py
+--- a/megatron/training/training.py
++++ b/megatron/training/training.py
+@@ -919,16 +919,22 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
+     ):
+         for model_module in model:
+             model_module.cuda(torch.cuda.current_device())
++        if torch.cuda.is_available():
++            torch.cuda.synchronize()
+ 
+     # Fp16 conversion.
+     if args.fp16 or args.bf16:
+         config = get_model_config(model[0])
+         model = [Float16Module(config, model_module) for model_module in model]
++        if torch.cuda.is_available():
++            torch.cuda.synchronize()
+ 
+     # Materialize tensors on meta device (GPU allocation) if not using FSDP2 and not using Megatron FSDP.
+     if args.init_model_with_meta_device and not args.use_torch_fsdp2 and not args.use_megatron_fsdp:
+         #for model_module in model:
+         model = [to_empty_if_meta_device(model_module, device=torch.device("cuda")) for model_module in model]
++        if torch.cuda.is_available():
++            torch.cuda.synchronize()
+ 
+ 
+ 
+@@ -939,8 +945,11 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
+     #               the amax_history back.
+     # After TE2.x: Below function is an empty function and does nothing.
+     correct_amax_history_if_needed(model)
++    if torch.cuda.is_available():
++        torch.cuda.synchronize()
+ 
+     if wrap_with_ddp:
++
+         if args.use_torch_fsdp2:
+             assert HAVE_FSDP2, "Torch FSDP2 requires torch>=2.4.0"
+             DP = torch_FSDP
+@@ -989,6 +998,12 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
+             if not ddp_config.overlap_grad_reduce:
+                 ddp_config.bucket_size = None
+ 
++        # Flush all streams before DDP ctor: vanilla Megatron wraps DP in a new stream; Primus
++        # may replace torch.cuda.stream with a no-op (default stream). Either way, ensure prior
++        # init and correct_amax kernels finished before param remap / copy_.
++        if torch.cuda.is_available():
++            torch.cuda.synchronize()
++
+         with torch.cuda.stream(torch.cuda.Stream()):
+             model = [
+                 DP(
+@@ -1003,11 +1018,18 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
+                 for (model_chunk_idx, model_chunk) in enumerate(model)
+             ]
+ 
++        if torch.cuda.is_available():
++            torch.cuda.synchronize()
++
+         # Broadcast params from data parallel src rank to other data parallel ranks.
+         if args.data_parallel_random_init:
+             for model_module in model:
+                 model_module.broadcast_params()
+ 
++        if torch.cuda.is_available():
++            torch.cuda.synchronize()
++
++
+     return model
+ 
+ 

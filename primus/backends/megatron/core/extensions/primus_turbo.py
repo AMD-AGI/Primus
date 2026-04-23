@@ -51,8 +51,8 @@ from transformer_engine.pytorch.fp8 import (
     DelayedScaling,
     FP8GlobalStateManager,
     Recipe,
-    dist_group_type,
 )
+from transformer_engine.pytorch.constants import dist_group_type
 
 from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
 
@@ -177,7 +177,7 @@ class PrimusTurboLowPrecisionGlobalStateManager(FP8GlobalStateManager):
         enabled_turbo: bool = False,
         turbo_quant_config: Optional[PrimusTurboQuantConfig] = None,
     ) -> None:
-        FP8GlobalStateManager.fp8_autocast_enter(
+        FP8GlobalStateManager.autocast_enter(
             enabled=enabled,
             calibrating=calibrating,
             fp8_recipe=fp8_recipe,
@@ -267,10 +267,10 @@ def primus_turbo_fp8_autocast(
         yield
     finally:
         PrimusTurboLowPrecisionGlobalStateManager.set_fp8_autocast_state(fp8_state)
-        # NOTE(ruibin): use FP8GlobalStateManager.fp8_autocast_exit instead of
-        # PrimusTurboLowPrecisionGlobalStateManager.fp8_autocast_exit to make sure
+        # NOTE(ruibin): use FP8GlobalStateManager.autocast_exit instead of
+        # PrimusTurboLowPrecisionGlobalStateManager.autocast_exit to make sure
         # FP8GlobalStateManager.FP8_AUTOCAST_DEPTH is updated correctly.
-        FP8GlobalStateManager.fp8_autocast_exit(enabled, _graph=_graph)
+        FP8GlobalStateManager.autocast_exit(enabled, _graph=_graph)
 
 
 @contextmanager
@@ -1527,17 +1527,216 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
         return hidden_states.view(self.hidden_shape)
 
 
+from primus.backends.megatron.core.extensions.triton_rmsnorm import (
+    triton_rmsnorm as _triton_rmsnorm,
+)
+
+
 class PrimusTurboRMSNorm(te.pytorch.RMSNorm):
+    """Drop-in replacement for ``te.pytorch.RMSNorm`` backed by an in-house
+    Triton RMSNorm kernel that beats both TE and ``primus_turbo``'s
+    ``rmsnorm_fwd_two_scan_kernel`` on GPT-OSS-20B shapes.
+
+    Bench (MI355X, bf16):
+
+      shape (B, H)         | TE     | turbo  | triton (this) | speedup vs TE
+      ---------------------+--------+--------+---------------+--------------
+      (16384, 2880)  main  |  58 us |  79 us |     29 us     |  1.97x
+      (1048576, 128) q-nrm | 165 us | 4253us |     92 us     |  1.79x
+      (131072, 128)  k-nrm |  27 us |  505us |     19 us     |  1.42x
+
+    Why this exists:
+      * ``primus_turbo``'s ``rmsnorm_fwd_two_scan_kernel`` is designed for
+        H ≫ 8K (DSv3 H=7168 it wins). On GPT-OSS H=2880 it loses to TE 1.4x;
+        on q_norm (H=128, B=1M) it loses 25x because the two-scan algorithm
+        plus a 1M-row grid is the worst possible match for that layout.
+      * TE's kernel is great at q_norm but loses 2x on the H=2880 main norm.
+      * One Triton kernel with two code paths (single-row, multi-row) wins
+        on every site that GPT-OSS uses and remains correct (max abs diff vs
+        ``F.rms_norm`` ≤ 2^-5 for bf16 input).
+
+    Why this still subclasses ``te.pytorch.RMSNorm``:
+      * Megatron's spec system + Primus' ``te_spec_provider`` patch decide on
+        the RMSNorm class at module-build time. Returning a class that
+        already passes ``isinstance(self, te.pytorch.RMSNorm)`` checks
+        downstream is the lowest-risk plug-in point.
+      * ``self.weight`` from the TE base class is the single Parameter DDP
+        sees, so ``per_param_grad_ready_counts`` bookkeeping stays correct.
+        (The original implementation registered a *second* weight via an
+        inner ``pt.modules.RMSNorm`` and then routed forward only through
+        the inner one, which crashed DDP at the assert in
+        ``param_and_grad_buffer.py: reset()``.)
+    """
+
     def __init__(self, *args, **kwargs):
         assert "device" in kwargs
         assert "dtype" in kwargs or "params_dtype" in kwargs, "device and dtype must be provided"
         super().__init__(*args, **kwargs)
-        self.rms_norm_func = pt.modules.RMSNorm(
-            normalized_shape=kwargs["hidden_size"],
-            eps=self.eps,
-            device=kwargs["device"],
-            dtype=kwargs["dtype"] if "dtype" in kwargs else kwargs["params_dtype"],
-        )
 
     def forward(self, x):
-        return self.rms_norm_func(x)
+        gamma = self.weight
+        if getattr(self, "zero_centered_gamma", False):
+            gamma = gamma + 1
+        return _triton_rmsnorm(x, gamma, self.eps)
+
+
+def _make_primus_turbo_layer_norm_column_parallel_linear():
+    """Build a drop-in replacement for ``TELayerNormColumnParallelLinear``
+    that routes the *fused* layer-norm-linear's normalization through
+    ``PrimusTurboRMSNorm`` (Triton) instead of the TE built-in
+    ``rmsnorm_fwd_general_kernel`` baked into ``te.pytorch.LayerNormLinear``.
+
+    ``TELayerNormColumnParallelLinear`` is a single ``nn.Module`` that owns
+    both the layer-norm weight (``layer_norm_weight``) and a column-parallel
+    linear weight. Its forward fuses the two through TE's C++ kernel. When
+    ``rms_norm_patches.py`` swaps ``te.pytorch.RMSNorm`` to
+    ``PrimusTurboRMSNorm``, this class is *not* affected because it inherits
+    from ``te.pytorch.LayerNormLinear`` (where the norm is hard-wired
+    inside the kernel, not via ``te.pytorch.RMSNorm``).
+
+    Replacement strategy:
+      * Subclass nothing TE-specific. Instead build a small ``nn.Module``
+        that holds an internal ``PrimusTurboRMSNorm`` and a
+        ``TEColumnParallelLinear``.
+      * Expose the layer-norm weight under both
+        ``self.layer_norm_weight`` (Megatron / TE-style API used by
+        ``te_op_fuser.py``, modelopt state-dict hooks, TRT-LLM export,
+        and Megatron's own sharded_state_dict mapping) AND
+        ``self.layernorm.weight`` (PyTorch-style backref).
+      * Forward returns ``(out, bias_or_None)`` matching the original
+        ``TELayerNormColumnParallelLinear.forward`` contract.
+
+    Trade-off vs the fused TE kernel:
+      * Loses TE's "norm + GEMM" fusion (one launch -> two launches).
+      * Gains the Triton fwd / bwd kernels which are 2-3x faster per launch
+        on the GPT-OSS-20B shapes (see PrimusTurboRMSNorm docstring) and a
+        cheap fp32 ``sum(dim=0)`` dgamma reduction that replaces TE's
+        slow ``rmsnorm_bwd_finalize_general_kernel``.
+      * Net: -188.9 ms RMSNorm GPU time / 3 steps (B0 vs B8) measured
+        end-to-end, plus another ~13 ms / 3 steps freed by routing this
+        site too.
+    """
+    import torch.nn as nn
+    from megatron.core.extensions.transformer_engine import (
+        TEColumnParallelLinear,
+        _get_extra_te_kwargs,
+    )
+
+    class PrimusTurboLayerNormColumnParallelLinear(nn.Module):
+        """See ``_make_primus_turbo_layer_norm_column_parallel_linear``."""
+
+        def __init__(
+            self,
+            input_size,
+            output_size,
+            *,
+            config,
+            init_method,
+            gather_output,
+            bias,
+            skip_bias_add,
+            is_expert,
+            skip_weight_param_allocation: bool = False,
+            tp_comm_buffer_name=None,
+            tp_group=None,
+        ):
+            super().__init__()
+            self.config = config
+            # Build the layer-norm out of band so it shows up as a real
+            # nn.Module in named_modules(). Mirror the kwargs the original
+            # TELayerNormColumnParallelLinear feeds into te.pytorch.LayerNormLinear.
+            extra = _get_extra_te_kwargs(config)
+            params_dtype = extra.get("params_dtype", torch.float32)
+            device = extra.get("device", torch.cuda.current_device())
+            self.layernorm = PrimusTurboRMSNorm(
+                hidden_size=input_size,
+                eps=config.layernorm_epsilon,
+                sequence_parallel=config.sequence_parallel,
+                zero_centered_gamma=config.layernorm_zero_centered_gamma,
+                params_dtype=params_dtype,
+                device=device,
+            )
+            self.linear = TEColumnParallelLinear(
+                input_size=input_size,
+                output_size=output_size,
+                config=config,
+                init_method=init_method,
+                gather_output=gather_output,
+                bias=bias,
+                skip_bias_add=skip_bias_add,
+                is_expert=is_expert,
+                skip_weight_param_allocation=skip_weight_param_allocation,
+                tp_comm_buffer_name=tp_comm_buffer_name,
+                tp_group=tp_group,
+            )
+
+        # --- Megatron/TE API compatibility -----------------------------------
+        # Many places address ``layer_norm_weight`` directly (te_op_fuser,
+        # modelopt state-dict hooks, default conversion dicts, …). Expose
+        # it as a property alias of self.layernorm.weight so checkpoints
+        # written with the original fused class load straight back into us.
+        @property
+        def layer_norm_weight(self):
+            return self.layernorm.weight
+
+        @property
+        def normalization(self):
+            # te_op_fuser.py reads ``self.linear_fc1.normalization``
+            return self.config.normalization
+
+        @property
+        def weight(self):
+            return self.linear.weight
+
+        @property
+        def bias(self):
+            return getattr(self.linear, "bias", None)
+
+        @property
+        def in_features(self):
+            return self.linear.in_features
+
+        @property
+        def out_features(self):
+            return self.linear.out_features
+
+        def forward(self, x):
+            x = self.layernorm(x)
+            return self.linear(x)
+
+        def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
+            # Map our internal layout (layernorm.weight + linear.weight) into
+            # the flat ``{prefix}layer_norm_weight`` / ``{prefix}weight`` /
+            # ``{prefix}bias`` names that downstream ckpt code expects.
+            from megatron.core.dist_checkpointing.mapping import ShardedStateDict
+            from megatron.core.transformer.utils import (
+                make_sharded_tensors_for_checkpoint,
+            )
+
+            sd: ShardedStateDict = {}
+            linear_sd = self.linear.sharded_state_dict(
+                prefix=prefix, sharded_offsets=sharded_offsets, metadata=metadata
+            )
+            sd.update(linear_sd)
+            ln_sd = self.layernorm.state_dict(prefix="", keep_vars=True)
+            sd.update(
+                make_sharded_tensors_for_checkpoint(
+                    {"layer_norm_weight": ln_sd["weight"]},
+                    prefix,
+                    {},
+                    sharded_offsets,
+                )
+            )
+            return sd
+
+        def __repr__(self):
+            return (
+                f"PrimusTurboLayerNormColumnParallelLinear("
+                f"in={self.in_features}, out={self.out_features}, "
+                f"norm={type(self.layernorm).__name__})"
+            )
+
+    return PrimusTurboLayerNormColumnParallelLinear
+
+
+PrimusTurboLayerNormColumnParallelLinear = _make_primus_turbo_layer_norm_column_parallel_linear()

@@ -65,12 +65,36 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
         return True
 
     def column_parallel_layer_norm_linear(self) -> Optional[type]:
-        """Which module for sequential layernorm and linear"""
-        return (
-            PrimusTurboLayerNormColumnParallelLinear
-            if self.cfg.use_turbo_parallel_linear
-            else TELayerNormColumnParallelLinear
-        )
+        """Which module for sequential layernorm and linear.
+
+        Selection logic (priority high -> low):
+          1. ``use_turbo_parallel_linear=True`` -> the *existing* primus
+             implementation that subclasses ``te.pytorch.LayerNormLinear``
+             and is mostly used as part of the broader Primus parallel-linear
+             stack.
+          2. ``use_turbo_rms_norm=True`` -> our split implementation
+             ``[PrimusTurboRMSNorm (Triton), TEColumnParallelLinear]``. The
+             fused TE LayerNormLinear bakes ``rmsnorm_fwd_general_kernel``
+             into its C++ kernel and is *not* affected by the
+             ``te.pytorch.RMSNorm`` patch, so we have to swap the whole
+             module to push the Triton kernel into the linear_qkv site.
+             Microbench (16384x2880 -> 10240, FP8 DelayedScaling, MI355X)
+             shows split is 3-4% faster end-to-end vs the fused TE path:
+                 fused TE (RMS) FP8 fwd+bwd  : 1850 us
+                 Triton + TELinear FP8 f+b   : 1784 us
+          3. otherwise -> stock TE fused LayerNormLinear.
+        """
+        if self.cfg.use_turbo_parallel_linear:
+            return PrimusTurboLayerNormColumnParallelLinear
+        # Primus yaml env-var substitution returns the raw string ``"true"`` /
+        # ``"false"`` (both truthy under plain ``bool(...)``), so coerce
+        # common string forms explicitly here.
+        _flag = getattr(self.cfg, "use_turbo_rms_norm", False)
+        if _flag is True or (
+            isinstance(_flag, str) and _flag.strip().lower() in ("true", "1", "yes", "on")
+        ):
+            return PrimusTurboLayerNormColumnParallelLinear
+        return TELayerNormColumnParallelLinear
 
     def layer_norm(self, rms_norm: bool = False, for_qk: bool = False) -> type:
         """Which module to use for layer norm"""

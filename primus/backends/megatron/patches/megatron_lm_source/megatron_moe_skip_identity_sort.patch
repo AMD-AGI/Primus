@@ -1,0 +1,93 @@
+diff --git a/megatron/core/transformer/moe/token_dispatcher.py b/megatron/core/transformer/moe/token_dispatcher.py
+--- a/megatron/core/transformer/moe/token_dispatcher.py
++++ b/megatron/core/transformer/moe/token_dispatcher.py
+@@ -1,6 +1,7 @@
+ # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+ 
+ import logging
++import os
+ from abc import ABC, abstractmethod
+ from typing import List, Optional, Tuple
+ 
+@@ -33,6 +34,27 @@
+ from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
+ from megatron.core.transformer.transformer_config import TransformerConfig
+ 
++# Enable (``1``, default) or disable (``0``) the identity-sort short-circuit
++# in MoE token dispatch / combine. Read once at module import; to toggle, set
++# the env var before launching the training process.
++_MOE_SKIP_IDENTITY_SORT_ENABLED = os.environ.get("MOE_SKIP_IDENTITY_SORT", "1") != "0"
++
++
++def _is_identity_local_expert_sort(idx: Optional[torch.Tensor]) -> bool:
++    """Return True if ``idx`` is the identity permutation ``[0, 1, ..., N-1]``.
++
++    When the MoE topology yields ``sort_input_by_local_experts`` (and its
++    inverse ``restore_output_by_local_experts``) equal to ``arange(N)``,
++    ``sort_chunks_by_idxs`` reduces to a full-tensor memcopy with no useful
++    reordering. Typical trigger is ``EP=1`` / ``TP=1`` with the default
++    routing; the index is a function of the EP/TP topology only, so this
++    property is stable across iterations and can be cached per dispatcher.
++    """
++    if not _MOE_SKIP_IDENTITY_SORT_ENABLED or idx is None or idx.dim() != 1 or idx.numel() == 0:
++        return False
++    return bool(torch.equal(idx, torch.arange(idx.numel(), device=idx.device, dtype=idx.dtype)))
++
++
+ """ We use the following notation throughout this file:
+      H: hidden size
+      B: micro batch size
+@@ -689,13 +711,21 @@
+                     .flatten(start_dim=0, end_dim=2)
+                 )
+             else:
+-                global_input_tokens, global_probs = sort_chunks_by_idxs(
+-                    global_input_tokens,
+-                    self.num_global_tokens_per_local_expert.ravel(),
+-                    self.sort_input_by_local_experts,
+-                    probs=global_probs,
+-                    fused=self.config.moe_permute_fusion,
+-                )
++                # Skip sort_chunks_by_idxs when the index is an identity
++                # permutation: the call would be a full-tensor memcopy with no
++                # reordering. Property is stable per dispatcher, so cache it.
++                if getattr(self, "_skip_identity_sort_dispatch", None) is None:
++                    self._skip_identity_sort_dispatch = _is_identity_local_expert_sort(
++                        self.sort_input_by_local_experts
++                    )
++                if not self._skip_identity_sort_dispatch:
++                    global_input_tokens, global_probs = sort_chunks_by_idxs(
++                        global_input_tokens,
++                        self.num_global_tokens_per_local_expert.ravel(),
++                        self.sort_input_by_local_experts,
++                        probs=global_probs,
++                        fused=self.config.moe_permute_fusion,
++                    )
+ 
+         tokens_per_expert = self._maybe_dtoh_and_synchronize(
+             "before_finish", self.tokens_per_expert
+@@ -724,12 +754,18 @@
+                     .flatten(start_dim=0, end_dim=2)
+                 )
+             else:
+-                hidden_states, _ = sort_chunks_by_idxs(
+-                    hidden_states,
+-                    self.num_global_tokens_per_local_expert.T.ravel(),
+-                    self.restore_output_by_local_experts,
+-                    fused=self.config.moe_permute_fusion,
+-                )
++                # Symmetric to dispatch_postprocess: skip the identity unsort.
++                if getattr(self, "_skip_identity_sort_combine", None) is None:
++                    self._skip_identity_sort_combine = _is_identity_local_expert_sort(
++                        self.restore_output_by_local_experts
++                    )
++                if not self._skip_identity_sort_combine:
++                    hidden_states, _ = sort_chunks_by_idxs(
++                        hidden_states,
++                        self.num_global_tokens_per_local_expert.T.ravel(),
++                        self.restore_output_by_local_experts,
++                        fused=self.config.moe_permute_fusion,
++                    )
+ 
+         if self.tp_size > 1:
+             if self.output_splits_tp is None:

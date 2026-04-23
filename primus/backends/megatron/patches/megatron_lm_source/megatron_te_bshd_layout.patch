@@ -1,0 +1,35 @@
+diff --git a/megatron/core/extensions/transformer_engine.py b/megatron/core/extensions/transformer_engine.py
+--- a/megatron/core/extensions/transformer_engine.py
++++ b/megatron/core/extensions/transformer_engine.py
+@@ -1023,6 +1023,21 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
+         )
+         qkv_format = packed_seq_kwargs.get('qkv_format', self.qkv_format)
+ 
++        _converted_to_bshd = False
++        _bshd_env = os.getenv("NVTE_FMHA_USE_BSHD", "0")
++        if _bshd_env == "1" and os.getenv("NVTE_FMHA_BSHD_DEBUG", "0") == "1":
++            _has_psp = packed_seq_kwargs.get('packed_seq_params') is not None
++            print(f"[BSHD_DEBUG] qkv_format={qkv_format} env={_bshd_env} "
++                  f"self.qkv_format={self.qkv_format} "
++                  f"packed_seq_params={_has_psp} cls={type(self).__name__}")
++        if _bshd_env == "1" and qkv_format == "sbhd":
++            qkv_format = "bshd"
++            packed_seq_kwargs['qkv_format'] = 'bshd'
++            query = query.transpose(0, 1).contiguous()
++            key = key.transpose(0, 1).contiguous()
++            value = value.transpose(0, 1).contiguous()
++            _converted_to_bshd = True
++
+         attention_bias_kwargs = {}
+         if attention_bias is not None:
+             assert is_te_min_version("1.2.0"), (
+@@ -1062,6 +1077,9 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
+                 query, key, value, attention_mask, **attention_bias_kwargs, **packed_seq_kwargs
+             )
+ 
++        if _converted_to_bshd:
++            core_attn_out = core_attn_out.transpose(0, 1).contiguous()
++
+         return core_attn_out
+ 
+ 

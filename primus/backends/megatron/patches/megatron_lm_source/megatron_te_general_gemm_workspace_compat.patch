@@ -1,0 +1,25 @@
+--- a/megatron/core/extensions/transformer_engine.py
++++ b/megatron/core/extensions/transformer_engine.py
+@@ -2045,10 +2045,7 @@ try:
+         Note: not all combinations of these settings are supported. If not supported,
+         cublaslt will throw an error.
+         """
+-        return general_gemm(
+-            A,
+-            B,
+-            workspace=get_workspace(),
++        kwargs = dict(
+             out_dtype=out_dtype,
+             quantization_params=None,
+             gelu=None,
+@@ -2064,6 +2061,10 @@ try:
+             extra_output=None,
+             bulk_overlap=False,
+         )
++        if _GENERAL_GEMM_SUPPORTS_WORKSPACE:
++            kwargs["workspace"] = get_workspace()
++        return general_gemm(A, B, **kwargs)
+ 
++    _GENERAL_GEMM_SUPPORTS_WORKSPACE = "workspace" in inspect.signature(general_gemm).parameters
+ except ImportError:
+     te_general_gemm = None  # type: ignore[assignment, misc]
