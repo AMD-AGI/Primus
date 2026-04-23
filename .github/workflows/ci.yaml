@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PRIMUS_TURBO_COMMIT: 5952cea7b284bad85eaa1465454a2df78d5efcf7 # feat: attn support sbhd layout (#275)
+  PRIMUS_TURBO_COMMIT: 28b2666548339e7a692472a0f82d20ee04838f51 # feat: attn add bhsd layout support (#304)
   PRIMUS_TURBO_AITER_COMMIT: 857f4d15775a29af153a2c68a2f8e8a8d696c986 # PR: feat: _flash_attn_forward add out args (#2648)
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)

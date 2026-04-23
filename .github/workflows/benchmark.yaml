@@ -6,7 +6,7 @@ on:
     - cron: '0 16 * * *'
 
 env:
-  PRIMUS_TURBO_COMMIT: 5952cea7b284bad85eaa1465454a2df78d5efcf7 # feat: attn support sbhd layout (#275)
+  PRIMUS_TURBO_COMMIT: 28b2666548339e7a692472a0f82d20ee04838f51 # feat: attn add bhsd layout support (#304)
   BENCHMARK_ROOT_DIR: /wekafs/primus/benchmark
 
 jobs:
