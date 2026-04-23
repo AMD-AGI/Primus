@@ -154,11 +154,16 @@ python tools/preflight_bisect/bisect.py \
     --preflight-env NCCL_PXN_DISABLE=0
 ```
 
-The script runs `preflight --perf-test` sequentially on shrinking subsets via
-`srun`; any non-zero exit or trial timeout is treated as a failure and the
-subset is split in half until suspects are isolated. Per-trial logs and a
-final `summary.txt` (including `SUSPECT_NODES: ...`) are written under
-`--output-dir`.
+The script runs `preflight --perf-test` on shrinking subsets via `srun`. By
+default, when a subset fails or hangs, its two sibling halves are launched in
+parallel (up to 2 concurrent trials total), while passing subsets are pruned
+immediately and are not split further. Any non-zero exit or trial timeout is
+treated as a failure. Per-trial logs and a final `summary.txt` (including
+`SUSPECT_NODES: ...`) are written under `--output-dir`.
+
+If you need the old sequential behavior, pass `--max-concurrent-trials 1`. That
+is also the only supported mode together with `--scancel-user-on-hang`, since
+that flag cancels all Slurm jobs for `$USER`.
 
 See [`tools/preflight_bisect/README.md`](../tools/preflight_bisect/README.md)
 for flags, example output, and caveats.
