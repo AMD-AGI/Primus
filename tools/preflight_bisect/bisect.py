@@ -76,8 +76,13 @@ def run_trial(
     if args.partition:
         cmd.extend(["-p", args.partition])
     cmd.append(str(runner))
+    # Use the space-separated form "--env KEY=VALUE" rather than the equals
+    # form "--env=KEY=VALUE" so runner/primus-cli-direct-preflight.sh recognizes
+    # --env as a runner-level option and consumes it. The equals form leaks past
+    # the runner's arg parser into the primus CLI, which does not accept --env
+    # and errors with "argument command: invalid choice: '--'".
     for kv in args.preflight_env:
-        cmd.append(f"--env={kv}")
+        cmd.extend(["--env", kv])
     cmd.extend(
         [
             "--",
