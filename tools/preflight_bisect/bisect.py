@@ -21,6 +21,9 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -51,9 +54,50 @@ def _format_node_range(nodes: list[str]) -> str:
     return f"{nodes[0]}..{nodes[-1]}"
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be >= 1")
+    return parsed
+
+
+@dataclass
+class BisectState:
+    max_concurrent_trials: int
+    idx: int = 0
+    trials: list[dict[str, Any]] = field(default_factory=list)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _trial_slots: threading.BoundedSemaphore = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._trial_slots = threading.BoundedSemaphore(self.max_concurrent_trials)
+
+    def next_trial_idx(self) -> int:
+        with self._lock:
+            idx = self.idx
+            self.idx += 1
+            return idx
+
+    def record_trial(self, idx: int, nodes: list[str], status: str) -> None:
+        record = {"idx": idx, "n": len(nodes), "status": status, "nodes": list(nodes)}
+        with self._lock:
+            self.trials.append(record)
+
+    def ordered_trials(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return sorted(self.trials, key=lambda trial: trial["idx"])
+
+    def acquire_trial_slot(self) -> None:
+        self._trial_slots.acquire()
+
+    def release_trial_slot(self) -> None:
+        self._trial_slots.release()
+
+
 def run_trial(
     nodes: list[str],
     trial_idx: int,
+    state: BisectState,
     args: argparse.Namespace,
     runner: Path,
     out_dir: Path,
@@ -93,57 +137,58 @@ def run_trial(
         ]
     )
 
-    header = (
-        f"CMD: {' '.join(cmd)}\n"
-        f"NODES ({len(nodes)}): {subset}\n"
-        f"START: {datetime.now(timezone.utc).isoformat()}\n\n"
-    )
-    print(
-        f"[trial {trial_idx:03d}] N={len(nodes)} {_format_node_range(nodes)} -> {log_path.name}",
-        flush=True,
-    )
-
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("wb", buffering=0) as logf:
-        logf.write(header.encode())
-
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(_repo_root()),
-            stdout=logf,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
+    state.acquire_trial_slot()
+    try:
+        header = (
+            f"CMD: {' '.join(cmd)}\n"
+            f"NODES ({len(nodes)}): {subset}\n"
+            f"START: {datetime.now(timezone.utc).isoformat()}\n\n"
         )
-        try:
-            rc = proc.wait(timeout=args.trial_timeout_sec)
-            return "pass" if rc == 0 else "fail"
-        except subprocess.TimeoutExpired:
+        print(
+            f"[trial {trial_idx:03d}] N={len(nodes)} {_format_node_range(nodes)} -> {log_path.name}",
+            flush=True,
+        )
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("wb", buffering=0) as logf:
+            logf.write(header.encode())
+
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(_repo_root()),
+                stdout=logf,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            proc.wait(timeout=60)
-            if args.scancel_user_on_hang:
-                subprocess.run(
-                    ["scancel", "--signal=KILL", "--user", os.environ.get("USER", "")],
-                    stderr=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                )
-            return "hang"
+                rc = proc.wait(timeout=args.trial_timeout_sec)
+                return "pass" if rc == 0 else "fail"
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.wait(timeout=60)
+                if args.scancel_user_on_hang:
+                    subprocess.run(
+                        ["scancel", "--signal=KILL", "--user", os.environ.get("USER", "")],
+                        stderr=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                    )
+                return "hang"
+    finally:
+        state.release_trial_slot()
 
 
 def bisect(
     nodes: list[str],
-    state: dict[str, Any],
+    state: BisectState,
     args: argparse.Namespace,
     runner: Path,
     out_dir: Path,
 ) -> list[str]:
-    idx: int = state["idx"]
-    state["idx"] = idx + 1
-
-    status = run_trial(nodes, idx, args, runner, out_dir)
-    state["trials"].append({"idx": idx, "n": len(nodes), "status": status, "nodes": list(nodes)})
+    idx = state.next_trial_idx()
+    status = run_trial(nodes, idx, state, args, runner, out_dir)
+    state.record_trial(idx, nodes, status)
 
     if status == "pass":
         return []
@@ -151,8 +196,15 @@ def bisect(
         return list(nodes)
 
     mid = len(nodes) // 2
-    left = bisect(nodes[:mid], state, args, runner, out_dir)
-    right = bisect(nodes[mid:], state, args, runner, out_dir)
+    if args.max_concurrent_trials == 1:
+        left = bisect(nodes[:mid], state, args, runner, out_dir)
+        right = bisect(nodes[mid:], state, args, runner, out_dir)
+        return left + right
+
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="preflight-bisect") as executor:
+        right_future = executor.submit(bisect, nodes[mid:], state, args, runner, out_dir)
+        left = bisect(nodes[:mid], state, args, runner, out_dir)
+        right = right_future.result()
     return left + right
 
 
@@ -161,7 +213,7 @@ def write_summary(out_dir: Path, nodes: list[str], suspects: list[str], trials: 
     lines = [
         f"{datetime.now(timezone.utc).isoformat()} bisect nodes={len(nodes)}",
     ]
-    for t in trials:
+    for t in sorted(trials, key=lambda trial: trial["idx"]):
         nlist = t["nodes"]
         r = _format_node_range(nlist)
         lines.append(f"[{t['idx']:03d}] N={t['n']:2d} {t['status'].upper():4s}  nodes={r}")
@@ -175,7 +227,7 @@ def write_summary(out_dir: Path, nodes: list[str], suspects: list[str], trials: 
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="Recursively bisect a Slurm nodelist using Primus preflight --perf-test (sequential).",
+        description="Recursively bisect a Slurm nodelist using Primus preflight --perf-test.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Environment:
@@ -185,8 +237,9 @@ Environment:
 Caveats:
   - If the hang only reproduces at full scale, all subsets may PASS -> SUSPECT_NODES empty.
   - Multiple faulty nodes yield a union of suspects from failing singleton trials.
+  - By default, failing sibling subsets launch in parallel (up to 2 concurrent trials).
   - --trial-timeout-sec too low marks healthy runs as HANG.
-  - --scancel-user-on-hang cancels ALL jobs for $USER; omit unless you accept that risk.
+  - --scancel-user-on-hang cancels ALL jobs for $USER; only use it with --max-concurrent-trials=1.
 """,
     )
     p.add_argument("--nodelist", required=True, help='Slurm nodelist expression, e.g. "node[01-32]"')
@@ -207,6 +260,12 @@ Caveats:
         "--slurm-time",
         default="00:45:00",
         help="srun -t limit per trial (default: 00:45:00)",
+    )
+    p.add_argument(
+        "--max-concurrent-trials",
+        type=_positive_int,
+        default=2,
+        help="Maximum concurrent subset trials (default: 2). Set to 1 to force sequential execution.",
     )
     p.add_argument("--cpus-per-task", type=int, default=128, help="srun -c (default: 128)")
     p.add_argument("--gpus-per-node", type=int, default=8, help="GPUs per node; emitted as srun --gres=gpu:N (default: 8)")
@@ -229,6 +288,8 @@ Caveats:
         help="On timeout, also run: scancel --signal=KILL --user $USER (DANGEROUS)",
     )
     args = p.parse_args()
+    if args.scancel_user_on_hang and args.max_concurrent_trials > 1:
+        p.error("--scancel-user-on-hang is only supported with --max-concurrent-trials=1")
 
     runner = args.runner or (_repo_root() / "runner" / "primus-cli-direct-preflight.sh")
     if not runner.is_file():
@@ -245,9 +306,9 @@ Caveats:
         return 2
 
     out_dir = args.output_dir.resolve()
-    state: dict[str, Any] = {"idx": 0, "trials": []}
+    state = BisectState(max_concurrent_trials=args.max_concurrent_trials)
     suspects = bisect(hosts, state, args, runner, out_dir)
-    write_summary(out_dir, hosts, suspects, state["trials"])
+    write_summary(out_dir, hosts, suspects, state.ordered_trials())
     return 0
 
 

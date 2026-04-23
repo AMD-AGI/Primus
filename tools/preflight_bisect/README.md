@@ -5,8 +5,9 @@ or failure during Primus preflight.
 
 Each trial runs `preflight --perf-test` on a subset of nodes via
 [`runner/primus-cli-direct-preflight.sh`](../../runner/primus-cli-direct-preflight.sh).
-Subsets that pass are pruned; subsets that fail or time out are split in half
-and re-tested until a singleton (the suspect node) is isolated.
+Subsets that pass are pruned immediately. Subsets that fail or time out are
+split in half, and the two sibling subsets are launched in parallel by default
+(up to 2 concurrent trials) until a singleton suspect is isolated.
 
 ## Prerequisites
 
@@ -33,7 +34,8 @@ python tools/preflight_bisect/bisect.py \
 
 Outputs under `./bisect-out/`:
 - `trial-000.log`, `trial-001.log`, ... - full stdout/stderr of each `srun`.
-- `summary.txt` - one line per trial plus `SUSPECT_NODES: ...`.
+- `summary.txt` - one line per trial plus `SUSPECT_NODES: ...`, sorted by
+  trial id rather than completion order.
 
 Example `summary.txt`:
 
@@ -72,12 +74,13 @@ python tools/preflight_bisect/bisect.py \
 | `-p`, `--partition` | (unset) | `srun -p` |
 | `--trial-timeout-sec` | 900 | Wall-clock per trial; on timeout the trial is marked `HANG` |
 | `--slurm-time` | `00:45:00` | `srun -t` |
+| `--max-concurrent-trials` | 2 | Concurrent subset trials; set to `1` to force the old sequential behavior |
 | `--cpus-per-task` | 128 | `srun -c` (per the non-container doc) |
 | `--gpus-per-node` | 8 | Emitted to srun as `--gres=gpu:N` |
 | `--preflight-env KEY=VALUE` | (repeatable) | Passed through as `runner/primus-cli-direct-preflight.sh --env KEY=VALUE` |
 | `--output-dir` | `./bisect-out` | Trial logs + `summary.txt` |
 | `--runner` | `runner/primus-cli-direct-preflight.sh` | Override if you ship a custom runner |
-| `--scancel-user-on-hang` | off | DANGEROUS: runs `scancel --user $USER` on timeout |
+| `--scancel-user-on-hang` | off | DANGEROUS: runs `scancel --user $USER` on timeout; only supported with `--max-concurrent-trials=1` |
 
 ## How classification works
 
@@ -86,6 +89,7 @@ python tools/preflight_bisect/bisect.py \
 - `srun` exceeds `--trial-timeout-sec` -> `HANG` (process group SIGKILL'd; subset bisected further)
 
 `FAIL` and `HANG` are treated identically for routing: both mean "this subset is bad".
+`PASS` prunes that subset immediately, so known-good siblings are not split further.
 
 ## Caveats
 
@@ -96,26 +100,32 @@ python tools/preflight_bisect/bisect.py \
   union of singleton failures.
 - **Timeout tuning**: start at roughly 2-3x the expected healthy full-N runtime.
   Too short -> false HANGs -> over-reporting suspects.
+- **Parallel launch order**: sibling failures run concurrently by default, so
+  trial ids reflect launch order and `summary.txt` is sorted by trial id rather
+  than wall-clock completion order.
 - **Killing hung steps**: the script `SIGKILL`s the `srun` process group on
   timeout, which is usually enough for Slurm to release the step's nodes. If a
-  trial's nodes remain `ALLOCATED` after a kill, pass `--scancel-user-on-hang`,
-  but only if you have no unrelated Slurm jobs running (it cancels everything
-  for `$USER`).
+  trial's nodes remain `ALLOCATED` after a kill, pass
+  `--scancel-user-on-hang --max-concurrent-trials=1`, but only if you have no
+  unrelated Slurm jobs running (it cancels everything for `$USER`).
 
 ## Testing
 
-For a POC like this, **manual end-to-end on the target cluster is the fastest
-useful test**:
+There is now a small offline unit test for the recursion and summary logic in
+[`tests/unit_tests/tools/test_preflight_bisect.py`](../../tests/unit_tests/tools/test_preflight_bisect.py).
+It does not exercise Slurm itself, but it does validate pruning, stable trial
+ids, sorted summaries, and the `--scancel-user-on-hang` guard.
+
+For real cluster behavior, **manual end-to-end on the target cluster is still
+the most useful validation**:
 
 1. Pick a small healthy nodelist (e.g. 2 nodes). It should exit 0 with one
    `PASS` trial and `SUSPECT_NODES: (none)`.
 2. Then run on a larger nodelist known to have (or reproduce) the hang to
    confirm convergence.
 
-A pytest suite isn't worth writing for the MVP because the interesting
-behavior is all in the `srun` / `scontrol` / Slurm interaction, which can't
-be faithfully mocked. If you want a quick offline sanity check of just the
-bisection logic, you can point `--runner` at a small shim script that returns
-exit codes based on the nodelist (e.g. exit 1 iff `node31` is in the list).
-That would verify only the recursion and summary-writing, which have almost
-no logic. Skip until you're promoting this out of POC status.
+The interesting remaining behavior is still the `srun` / `scontrol` / Slurm
+interaction, which can't be faithfully mocked. If you want an additional quick
+offline sanity check, you can also point `--runner` at a small shim script that
+returns exit codes based on the nodelist (e.g. exit 1 iff `node31` is in the
+list).
