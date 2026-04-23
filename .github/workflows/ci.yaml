@@ -320,8 +320,8 @@ jobs:
 
   run-unittest-jax:
     env:
-    # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/jax
-      PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_docker_jax_ci/actions-runner/
+      # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/jax
+      PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_docker_jax_ci/actions-runner
     needs: [code-lint]
     runs-on: [primus-jax-tas-runner] # docker container primus_jax_github_runner on tas a16-31
     steps:
@@ -338,6 +338,7 @@ jobs:
       - run: echo "Begin Primus-Turbo Install."
       - name: Install Primus-Turbo
         run: |
+          rm -rf /tmp/Primus-Turbo || true
           mv Primus-Turbo /tmp/
           echo "Primus-Turbo dir: /tmp/Primus-Turbo"
           git config --global --add safe.directory /tmp/Primus-Turbo
