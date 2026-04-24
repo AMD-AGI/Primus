@@ -32,7 +32,7 @@ Global Options:
     --config <FILE>             Load configuration from specified YAML file
     --debug                     Enable debug mode (verbose logging)
     --dry-run                   Show what would be executed without running
-    --clean                     Stop all running containers before launch (does not remove)
+    --clean                     Force-remove containers named primus-training before launch
     --help, -h                  Show this message and exit
 
 Docker/Podman Options:
@@ -449,13 +449,14 @@ done
 ###############################################################################
 
 if [[ "$CLEAN_DOCKER_CONTAINER" == "true" ]]; then
-    LOG_INFO_RANK0 "[container] Stopping running containers before launch..."
-    CONTAINERS="$($CONTAINER_RUNTIME ps -q)"
+    LOG_INFO_RANK0 "[container] Removing existing containers named primus-training..."
+    # Anchored name filter: exact match only (avoids e.g. primus-training-extra).
+    CONTAINERS="$($CONTAINER_RUNTIME ps -aq --filter 'name=^primus-training$')"
     if [[ -n "$CONTAINERS" ]]; then
-        printf '%s\n' "$CONTAINERS" | xargs -r -n1 "$CONTAINER_RUNTIME" stop
-        LOG_INFO_RANK0 "[container] Stopped containers: $CONTAINERS"
+        printf '%s\n' "$CONTAINERS" | xargs -r -n1 "$CONTAINER_RUNTIME" rm -f
+        LOG_INFO_RANK0 "[container] Removed containers: $CONTAINERS"
     else
-        LOG_INFO_RANK0 "[container] No running containers to stop."
+        LOG_INFO_RANK0 "[container] No containers named primus-training to remove."
     fi
 fi
 
