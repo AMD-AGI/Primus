@@ -61,6 +61,8 @@ export PROFILE_STEP_START=${PROFILE_STEP_START:-5}
 export PROFILE_STEP_END=${PROFILE_STEP_END:-6}
 export TRAIN_ITERS=${TRAIN_ITERS:-10}
 
+export PRIMUS_TURBO_EP_BACKEND=${PRIMUS_TURBO_EP_BACKEND:-"TURBO"} # DEEP_EP(UCCL), MORI, TURBO
+
 # MoE_Features legend:
 # 0 - Baseline (no extra optimization toggles)
 # 1 - Turbo attention acceleration
@@ -70,13 +72,12 @@ export TRAIN_ITERS=${TRAIN_ITERS:-10}
 # 5 - Sync-free MoE (stage 1/2)
 # 6 - CPU NUMA binding helper
 # 7 - Manual GC helper
-# 8 - Using UCCL-EP
 if [ -z "${MoE_Features}" ]; then
     # MoE_Features=(0 7)
     # MoE_Features=(3 7)
     # MoE_Features=(3 4 7)
     # MoE_Features=(3 4 6 7)
-    MoE_Features=(3 4 5 6 7 8)
+    MoE_Features=(3 4 5 6 7)
 else
     # Convert string to array
     # shellcheck disable=SC2128
@@ -111,7 +112,6 @@ for feature in "${MoE_Features[@]}"; do
         ensure_primus_turbo
         FEATURE_ARGS+=("--use_turbo_deepep" "True")
         FEATURE_ARGS+=("--turbo_deepep_num_cu" "64")
-        FEATURE_ARGS+=("--turbo_deepep_use_comm_stream" "False")
         FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
         FEATURE_ARGS+=("--moe_router_dtype" "fp32")
         ;;
@@ -136,9 +136,6 @@ for feature in "${MoE_Features[@]}"; do
     7)
         FEATURE_ARGS+=("--manual_gc" "True")
         FEATURE_ARGS+=("--manual_gc_interval" "1")
-        ;;
-    8)
-        export USING_UEP=1
         ;;
     *) ;;
     esac

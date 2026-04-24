@@ -203,7 +203,6 @@ docker_podman_proxy run --rm \
     --env BACKEND_PATH \
     --env REBUILD_PRIMUS_TURBO \
     --env REBUILD_UEP \
-    --env USING_UEP \
     "${ENV_ARGS[@]}" \
     --ulimit core=0:0 \
     --ipc=host --network=host \

@@ -91,7 +91,6 @@ modules:
       moe_shared_expert_overlap: false
       moe_router_dtype: fp32
       turbo_deepep_num_cu: 80
-      turbo_deepep_use_comm_stream: false
       turbo_sync_free_moe_stage: 1
 
       moe_use_fused_router_with_aux_score: true

@@ -290,6 +290,30 @@ LOG_INFO "NCCL_SOCKET_IFNAME: $NCCL_SOCKET_IFNAME"
 LOG_INFO "GLOO_SOCKET_IFNAME: $GLOO_SOCKET_IFNAME"
 LOG_INFO ""
 
+
+# ----------------- UCCL / MoRI default network env (derived from NCCL) -----
+source "${PRIMUS_PATH}/runner/helpers/envs/comm_envs.sh"
+
+LOG_INFO "==========UCCL Network Settings=========="
+LOG_INFO "UCCL_IB_GID_INDEX: $UCCL_IB_GID_INDEX"
+LOG_INFO "UCCL_IB_HCA: $UCCL_IB_HCA"
+LOG_INFO "UCCL_SOCKET_IFNAME: $UCCL_SOCKET_IFNAME"
+LOG_INFO "UCCL_IB_TC: ${UCCL_IB_TC:-}"
+LOG_INFO "UCCL_IB_SL: ${UCCL_IB_SL:-}"
+LOG_INFO "UCCL_IB_MAX_INFLIGHT_NORMAL: ${UCCL_IB_MAX_INFLIGHT_NORMAL:-}"
+LOG_INFO "UCCL_IB_MAX_INFLIGHT_LOW_LATENCY: ${UCCL_IB_MAX_INFLIGHT_LOW_LATENCY:-}"
+LOG_INFO "UCCL_IB_MAX_INFLIGHT_BYTES: ${UCCL_IB_MAX_INFLIGHT_BYTES:-}"
+LOG_INFO ""
+LOG_INFO "==========MoRI Network Settings=========="
+LOG_INFO "MORI_IB_GID_INDEX: $MORI_IB_GID_INDEX"
+LOG_INFO "MORI_RDMA_DEVICES: $MORI_RDMA_DEVICES"
+LOG_INFO "MORI_SOCKET_IFNAME: $MORI_SOCKET_IFNAME"
+LOG_INFO "MORI_RDMA_SL: ${MORI_RDMA_SL:-}"
+LOG_INFO "MORI_RDMA_TC: ${MORI_RDMA_TC:-}"
+LOG_INFO "MORI_SHMEM_HEAP_SIZE: $MORI_SHMEM_HEAP_SIZE"
+LOG_INFO ""
+# ----------------- UCCL / MoRI default network env (derived from NCCL) -----
+
 # ----------------- AMD-specific GPU optimizations -----------------
 
 # Enable system DMA engine (SDMA) on AMD GPUs for better IO throughput
@@ -471,55 +495,6 @@ else
     LOG_INFO "Skip UCCL rebuild. REBUILD_UEP=$REBUILD_UEP"
 fi
 
-# ----------------- Using UCCL-EP -----------------
-if [ "$USING_UEP" == "1" ]; then
-    LOG_INFO "USING_UEP is enabled, checking required packages..."
-
-    if ! python3 -m pip show uccl &>/dev/null || ! python3 -m pip show deep_ep &>/dev/null; then
-        LOG_ERROR "uccl is not installed! Please use pre-installed primus image or set REBUILD_UEP=1."
-        exit 1
-    fi
-    LOG_INFO "uccl package is installed: $(python3 -m pip show uccl | grep Version)"
-    LOG_INFO "deep_ep package is installed: $(python3 -m pip show deep_ep | grep Version)"
-
-    export PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND=DEEP_EP
-    LOG_INFO "PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND set to DEEP_EP"
-
-
-    # network settings for UCCL
-    export UCCL_IB_GID_INDEX=${UCCL_IB_GID_INDEX:-$NCCL_IB_GID_INDEX}
-    export UCCL_IB_HCA=${UCCL_IB_HCA:-$NCCL_IB_HCA}
-    export UCCL_SOCKET_IFNAME=${UCCL_SOCKET_IFNAME:-$NCCL_SOCKET_IFNAME}
-    export UCCL_IB_TC=${UCCL_IB_TC:-$NCCL_IB_TC}
-    export UCCL_IB_SL=${UCCL_IB_SL:-$NCCL_IB_SL}
-
-    # set low latency and normal inflight and bytes to avoid hang on AMD Pollara AI NIC and Broadcom Thor-2
-    if [ "$USING_AINIC" == "1" ]; then
-        export UCCL_IB_MAX_INFLIGHT_NORMAL=${UCCL_IB_MAX_INFLIGHT_NORMAL:-1}
-        export UCCL_IB_MAX_INFLIGHT_LOW_LATENCY=${UCCL_IB_MAX_INFLIGHT_LOW_LATENCY:-1}
-        export UCCL_IB_MAX_INFLIGHT_BYTES=${UCCL_IB_MAX_INFLIGHT_BYTES:-4194304} # 4MB
-    elif [ "$REBUILD_BNXT" == "1" ]; then # Broadcom Thor-2
-        # FIXME(zhuang12): use `USING_BNXT` for Broadcom Thor-2 maybe better than `REBUILD_BNXT`
-        export UCCL_IB_MAX_INFLIGHT_NORMAL=${UCCL_IB_MAX_INFLIGHT_NORMAL:-1}
-        export UCCL_IB_MAX_INFLIGHT_LOW_LATENCY=${UCCL_IB_MAX_INFLIGHT_LOW_LATENCY:-1}
-        export UCCL_IB_MAX_INFLIGHT_BYTES=${UCCL_IB_MAX_INFLIGHT_BYTES:-1572864}
-    fi
-
-
-    LOG_INFO "==========UCCL Network Settings=========="
-    LOG_INFO "UCCL_IB_GID_INDEX: $UCCL_IB_GID_INDEX"
-    LOG_INFO "UCCL_IB_HCA: $UCCL_IB_HCA"
-    LOG_INFO "UCCL_SOCKET_IFNAME: $UCCL_SOCKET_IFNAME"
-    LOG_INFO "UCCL_IB_MAX_INFLIGHT_NORMAL: $UCCL_IB_MAX_INFLIGHT_NORMAL"
-    LOG_INFO "UCCL_IB_MAX_INFLIGHT_LOW_LATENCY: $UCCL_IB_MAX_INFLIGHT_LOW_LATENCY"
-    LOG_INFO "UCCL_IB_MAX_INFLIGHT_BYTES: $UCCL_IB_MAX_INFLIGHT_BYTES"
-    LOG_INFO "UCCL_IB_TC: $UCCL_IB_TC"
-    LOG_INFO "UCCL_IB_SL: $UCCL_IB_SL"
-    LOG_INFO ""
-else
-    export PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND=TURBO
-    LOG_INFO "USING_UEP is disabled. PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND set to TURBO"
-fi
 
 # nvte debug envs
 export NVTE_DEBUG=0 # 0, 1

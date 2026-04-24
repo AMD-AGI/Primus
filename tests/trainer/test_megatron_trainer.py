@@ -476,7 +476,7 @@ class TestMegatronTrainer(PrimusUT):
             self.__class__.__name__,
             "deepseek_v2_lite_uep",
             exp_path="examples/megatron/configs/MI300X/deepseek_v2_lite-BF16-pretrain.yaml",
-            env_override={"USING_UEP": "1", "REBUILD_UEP": "1"},
+            env_override={"PRIMUS_TURBO_EP_BACKEND": "DEEP_EP", "REBUILD_UEP": "1"},
             extra_args=[
                 "--num_layers",
                 "4",

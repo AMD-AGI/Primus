@@ -1473,7 +1473,6 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             expert_capacity_factor=config.moe_expert_capacity_factor,
             permute_fusion=config.moe_permute_fusion,
             permute_max_token_num=permute_max_token_num,
-            deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
             deepep_num_use_cu=args.turbo_deepep_num_cu,
             deepep_num_worst_tokens=num_worst_tokens,
             deepep_use_cuda_num_tokens_per_expert=(

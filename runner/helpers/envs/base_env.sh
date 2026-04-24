@@ -175,6 +175,12 @@ log_exported_vars "RCCL Settings" \
     RCCL_MSCCL_ENABLE RCCL_MSCCLPP_ENABLE RCCL_MSCCLPP_FORCE_ENABLE RCCL_MSCCLPP_THRESHOLD \
     MSCCLPP_DISABLE_CHANNEL_CACHE TORCH_NCCL_USE_TENSOR_REGISTER_ALLOCATOR_HOOK
 
+# ----------------- UCCL / MoRI Defaults (derive from NCCL) -----------------
+# UCCL and MoRI network env vars default to the corresponding NCCL values
+# so they work out of the box. Override by exporting UCCL_* / MORI_* before
+# invoking the launcher.
+source "${SCRIPT_DIR}/comm_envs.sh"
+
 # =============================================================================
 # Performance Tuning Configuration
 # =============================================================================

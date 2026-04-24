@@ -34,7 +34,6 @@ moe_use_fused_router_with_aux_score: false
 # operator switch
 use_turbo_deepep: false
 turbo_deepep_num_cu: 32
-turbo_deepep_use_comm_stream: false
 
 # ===== Sync-Free MoE =====
 turbo_sync_free_moe_stage: 0

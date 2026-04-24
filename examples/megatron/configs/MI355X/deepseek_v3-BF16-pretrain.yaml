@@ -99,7 +99,6 @@ modules:
 
       # 64 or 80 for ep8, 32 for ep16-64 is best practice
       turbo_deepep_num_cu: 80
-      turbo_deepep_use_comm_stream: false
 
       # sync-free moe support stage 1-2, 0 means not use sync-free moe
       # stage 2 is recommended for better performance

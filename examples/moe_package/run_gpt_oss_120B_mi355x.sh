@@ -110,7 +110,6 @@ for feature in "${MoE_Features[@]}"; do
         ensure_primus_turbo
         FEATURE_ARGS+=("--use_turbo_deepep" "True")
         FEATURE_ARGS+=("--turbo_deepep_num_cu" "64")
-        FEATURE_ARGS+=("--turbo_deepep_use_comm_stream" "False")
         FEATURE_ARGS+=("--moe_shared_expert_overlap" "False")
         FEATURE_ARGS+=("--moe_router_dtype" "fp32")
         ;;

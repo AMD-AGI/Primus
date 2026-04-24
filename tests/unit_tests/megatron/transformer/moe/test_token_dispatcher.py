@@ -43,7 +43,6 @@ def create_args():
     args.moe_use_legacy_grouped_gemm = True
     args.use_turbo_grouped_mlp = True
     args.turbo_deepep_num_cu = 32
-    args.turbo_deepep_use_comm_stream = False
     return args
 
 
