@@ -103,29 +103,6 @@ def prepare_dataset_if_needed(
     return
 
 
-def install_jax_python_dependencies(primus_path: Path) -> None:
-    """
-    Install JAX Python dependencies from requirements-jax.txt.
-
-    This mirrors the original examples/run_pretrain.sh pip install logic
-    for MaxText backend.
-    """
-    log_info("========== Installing JAX Python dependencies ==========")
-
-    requirements_file = primus_path / "requirements-jax.txt"
-    if not requirements_file.exists():
-        log_error_and_exit(f"Requirements file not found: {requirements_file}")
-
-    cmd = ["pip", "install", "-r", str(requirements_file), "--quiet"]
-
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as exc:
-        log_error_and_exit(f"Failed to install JAX Python dependencies (exit code {exc.returncode})")
-
-    log_info("========== Installing JAX Python dependencies Done ==========")
-
-
 def install_maxtext_dependencies() -> None:
     """
     Install required system packages for MaxText/JAX on every node.
@@ -189,9 +166,6 @@ def main():
         log_error_and_exit("Missing required field: pre_trainer.dataset_type")
 
     dataset_type = pre_trainer_cfg.dataset_type
-
-    # Install JAX Python dependencies first (requirements-jax.txt)
-    install_jax_python_dependencies(primus_path)
 
     # Then install required MaxText/JAX system packages on every node.
     install_maxtext_dependencies()

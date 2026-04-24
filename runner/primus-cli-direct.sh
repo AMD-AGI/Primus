@@ -430,6 +430,12 @@ if [[ -n "${direct_config[env]:-}" ]]; then
     done <<< "${direct_config[env]:-}"
 fi
 
+# HipBLASLt stage-2 offline tuning may request skipping main training launch.
+if [[ "${PRIMUS_SKIP_MAIN_LAUNCH:-0}" == "1" ]]; then
+    LOG_INFO_RANK0 "[direct] PRIMUS_SKIP_MAIN_LAUNCH=1, skip main training launch."
+    exit 0
+fi
+
 ###############################################################################
 # STEP 9: Build launch command
 ###############################################################################
@@ -466,7 +472,7 @@ elif [[ "$RUN_MODE" == "torchrun" ]]; then
     fi
 
     # Add the last local rank on the last node
-    if [ "${NODE_RANK:-0}" -eq "$LAST_NODE" ]; then
+    if [ "${NODE_RANK:-0}" -eq "$LAST_NODE" ] && [ "${NNODES:-1}" -ne 1 ]; then
         FILTERS+=($((${GPUS_PER_NODE:-8} - 1)))
     fi
 

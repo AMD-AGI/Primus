@@ -1,0 +1,11 @@
+job:
+  dump_folder: "./outputs"
+  description: "Llama 4 Maverick 17B-128E training"
+
+model:
+  name: "llama4"
+  flavor: "17bx128e"
+  hf_assets_path: "meta-llama/Llama-4-Maverick-17B-128E"
+  converters:
+    - primus_turbo
+    - quantize.linear.float8

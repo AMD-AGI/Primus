@@ -3,7 +3,6 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-import functools
 from contextlib import contextmanager
 from typing import Callable, List, Optional, Tuple
 
@@ -29,7 +28,7 @@ from megatron.core.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
 )
 from megatron.core.transformer.enums import AttnMaskType
-from megatron.core.transformer.moe.experts import GroupedMLP
+from megatron.core.transformer.moe.experts import TEGroupedMLP
 from megatron.core.transformer.moe.token_dispatcher import MoETokenDispatcher
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
@@ -47,20 +46,50 @@ from primus_turbo.pytorch.core.low_precision import (
     check_mxfp8_support,
 )
 from torch import Tensor
-from transformer_engine.pytorch.fp8 import (
-    DelayedScaling,
-    FP8GlobalStateManager,
-    Recipe,
-    dist_group_type,
-)
+from transformer_engine.pytorch.constants import dist_group_type
+from transformer_engine.pytorch.fp8 import DelayedScaling, FP8GlobalStateManager, Recipe
 
 from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
+
+
+def _call_fp8_autocast_enter(
+    *,
+    enabled: bool,
+    calibrating: bool,
+    fp8_recipe: Optional[Recipe],
+    fp8_group: Optional[dist_group_type],
+    _graph: bool,
+) -> None:
+    """Dispatch to whichever FP8 enter API the installed TE exposes."""
+    enter_fn = getattr(FP8GlobalStateManager, "autocast_enter", None)
+    if enter_fn is None:
+        enter_fn = getattr(FP8GlobalStateManager, "fp8_autocast_enter", None)
+    if enter_fn is None:
+        raise AttributeError("FP8GlobalStateManager has no autocast enter API")
+    enter_fn(
+        enabled=enabled,
+        calibrating=calibrating,
+        fp8_recipe=fp8_recipe,
+        fp8_group=fp8_group,
+        _graph=_graph,
+    )
+
+
+def _call_fp8_autocast_exit(enabled: bool, *, _graph: bool) -> None:
+    """Dispatch to whichever FP8 exit API the installed TE exposes."""
+    exit_fn = getattr(FP8GlobalStateManager, "autocast_exit", None)
+    if exit_fn is None:
+        exit_fn = getattr(FP8GlobalStateManager, "fp8_autocast_exit", None)
+    if exit_fn is None:
+        raise AttributeError("FP8GlobalStateManager has no autocast exit API")
+    exit_fn(enabled, _graph=_graph)
 
 
 def use_split_wgrad_op():
     args = get_args()
     if args.patch_primus_pipeline and args.pp_algorithm in [
         "zero-bubble",
+        "zero-bubble-heuristic",
         "zbv-formatted",
         "v-half",
         "v-min",
@@ -167,7 +196,7 @@ class PrimusTurboLowPrecisionGlobalStateManager(FP8GlobalStateManager):
         cls.PRIMUS_TURBO_QUANT_CONFIG = None
 
     @classmethod
-    def fp8_autocast_enter(
+    def autocast_enter(
         cls,
         enabled: bool = False,
         calibrating: bool = False,
@@ -177,7 +206,7 @@ class PrimusTurboLowPrecisionGlobalStateManager(FP8GlobalStateManager):
         enabled_turbo: bool = False,
         turbo_quant_config: Optional[PrimusTurboQuantConfig] = None,
     ) -> None:
-        FP8GlobalStateManager.fp8_autocast_enter(
+        _call_fp8_autocast_enter(
             enabled=enabled,
             calibrating=calibrating,
             fp8_recipe=fp8_recipe,
@@ -254,7 +283,7 @@ def primus_turbo_fp8_autocast(
     turbo_quant_config: Optional[PrimusTurboQuantConfig] = None,
 ) -> None:  # type: ignore
     fp8_state = PrimusTurboLowPrecisionGlobalStateManager.get_fp8_autocast_state()
-    PrimusTurboLowPrecisionGlobalStateManager.fp8_autocast_enter(
+    PrimusTurboLowPrecisionGlobalStateManager.autocast_enter(
         enabled=enabled,
         calibrating=calibrating,
         fp8_recipe=fp8_recipe,
@@ -267,10 +296,9 @@ def primus_turbo_fp8_autocast(
         yield
     finally:
         PrimusTurboLowPrecisionGlobalStateManager.set_fp8_autocast_state(fp8_state)
-        # NOTE(ruibin): use FP8GlobalStateManager.fp8_autocast_exit instead of
-        # PrimusTurboLowPrecisionGlobalStateManager.fp8_autocast_exit to make sure
-        # FP8GlobalStateManager.FP8_AUTOCAST_DEPTH is updated correctly.
-        FP8GlobalStateManager.fp8_autocast_exit(enabled, _graph=_graph)
+        # Use the base TE state manager so depth accounting stays in sync
+        # across both old and new TE autocast APIs.
+        _call_fp8_autocast_exit(enabled, _graph=_graph)
 
 
 @contextmanager
@@ -285,7 +313,7 @@ def primus_turbo_fp4_autocast(
 ) -> None:  # type: ignore
     # TE currently uses fp8_autocast for fp8 and fp4 quantization.
     fp8_state = PrimusTurboLowPrecisionGlobalStateManager.get_fp8_autocast_state()
-    PrimusTurboLowPrecisionGlobalStateManager.fp8_autocast_enter(
+    PrimusTurboLowPrecisionGlobalStateManager.autocast_enter(
         enabled=enabled,
         calibrating=calibrating,
         fp8_recipe=fp4_recipe,
@@ -298,7 +326,7 @@ def primus_turbo_fp4_autocast(
         yield
     finally:
         PrimusTurboLowPrecisionGlobalStateManager.set_fp8_autocast_state(fp8_state)
-        PrimusTurboLowPrecisionGlobalStateManager.fp8_autocast_exit(enabled, _graph=_graph)
+        _call_fp8_autocast_exit(enabled, _graph=_graph)
 
 
 class PrimusTurboAttention(te.pytorch.DotProductAttention):
@@ -457,6 +485,8 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         packed_seq_params: PackedSeqParams = None,
     ):
         """Forward."""
+        SUPPORTED_QKV_FORMATS = "sbhd"
+
         packed_seq_kwargs = (
             {key: getattr(packed_seq_params, key) for key in self.kept_packed_seq_params}
             if packed_seq_params is not None
@@ -464,9 +494,11 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
         )
 
         qkv_format = packed_seq_kwargs.get("qkv_format", self.qkv_format)
-        assert qkv_format in ("sbhd", "bhsd"), "qkv_format only support bshd, but got {qkv_format}"
-        if qkv_format == "sbhd":
-            query, key, value = [x.transpose(0, 1).contiguous() for x in (query, key, value)]
+        assert (
+            qkv_format in SUPPORTED_QKV_FORMATS
+        ), f"qkv_format only support {SUPPORTED_QKV_FORMATS}, but got {qkv_format}"
+        # NOTE(ruibin): The layout of q, k and v is (S, B, H, D). But attn accept the shape of qkv is (B, S, H, D).
+        query, key, value = [x.permute(1, 0, 2, 3) for x in (query, key, value)]
         mask_type = attn_mask_type.name
         if mask_type == AttnMaskType.causal.name:
             causal = True
@@ -522,9 +554,10 @@ class PrimusTurboAttention(te.pytorch.DotProductAttention):
             **self.attn_kwargs,
         )
 
-        o = o.reshape(o.shape[0], o.shape[1], -1).transpose(0, 1)
-        if not o.is_contiguous():
-            o = o.contiguous()
+        # NOTE(ruibin): The output of attn is BSHD. Use permute to convert the layout to SBHD.
+        o = o.permute(1, 0, 2, 3).contiguous()
+        o = o.view(o.shape[0], o.shape[1], -1)
+
         return o
 
 
@@ -1218,34 +1251,42 @@ class PrimusTurboLayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         return out, None
 
 
-class PrimusTurboGroupedMLP(GroupedMLP):
+class PrimusTurboGroupedMLP(TEGroupedMLP):
+    """
+    Compatibility GroupedMLP for legacy turbo grouped-gemm paths.
+
+    Megatron removed the old ``GroupedMLP`` implementation, but DeepEP sync-free
+    stage 2/3 still relies on the turbo grouped-gemm token-count contract. Keep
+    TEGroupedMLP-style parameter initialization/checkpoint layout while executing
+    the expert MLP with PrimusTurbo grouped-gemm kernels.
+    """
+
     def __init__(
         self,
         num_local_experts: int,
         config: TransformerConfig,
+        submodules,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
         args = get_args()
         self.offload = args.offload and "grouped_linear" in args.offload_ops
-        assert not self.offload, "gemm offload still have some problems"
+        assert not self.offload, "grouped_linear offload is not supported in PrimusTurboGroupedMLP"
 
         super().__init__(
-            num_local_experts,
-            config,
-            pg_collection,
+            num_local_experts=num_local_experts,
+            config=config,
+            submodules=submodules,
+            pg_collection=pg_collection,
         )
-        args = get_args()
+        self.use_turbo_fused_act_with_probs = args.use_turbo_fused_act_with_probs
+        self.disable_turbo_grouped_mlp_low_precision = args.disable_turbo_grouped_mlp_low_precision
+        self.patch_zero_bubble = args.patch_zero_bubble
+        self.patch_primus_pipeline = args.patch_primus_pipeline
 
-        if use_split_wgrad_op() or (args.patch_moe_overlap and args.overlap_moe_expert_parallel_comm):
-            from .zbpp_gemm import grouped_gemm_with_weight_gradient_store
+        if self.config.add_bias_linear:
+            raise ValueError("PrimusTurboGroupedMLP does not support add_bias_linear=True")
 
-            self.grouped_gemm = functools.partial(
-                grouped_gemm_with_weight_gradient_store, gg_backend="turbo-gg"
-            )
-        else:
-            self.grouped_gemm = pt.ops.grouped_gemm
-
-        if args.use_turbo_fused_act_with_probs:
+        if self.use_turbo_fused_act_with_probs:
             assert self.config.gated_linear_unit, "turbo_fused_act_with_probs only support with GLU."
 
             if self.config.activation_func == F.silu:
@@ -1264,13 +1305,20 @@ class PrimusTurboGroupedMLP(GroupedMLP):
 
             self.activation_func_with_probs = _activation_func_with_probs
 
+    def _stack_grouped_linear_weight(self, module: torch.nn.Module) -> torch.Tensor:
+        weights = [getattr(module, f"weight{i}") for i in range(self.num_local_experts)]
+        return torch.stack(weights, dim=0).transpose(1, 2).contiguous()
+
     def forward(
         self,
         permuted_local_hidden_states: torch.Tensor,
         tokens_per_expert: torch.Tensor,
         permuted_probs: torch.Tensor,
-    ):
-        """Forward step of the GroupedMLP."""
+        routing_map: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Forward step of the legacy PrimusTurbo grouped-gemm MLP."""
+        del routing_map
+
         if self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
 
@@ -1284,26 +1332,18 @@ class PrimusTurboGroupedMLP(GroupedMLP):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
-        args = get_args()
-        gemm_kargs = [dict(), dict()]
+        w1 = self._stack_grouped_linear_weight(self.linear_fc1)
+        w2 = self._stack_grouped_linear_weight(self.linear_fc2)
+        tokens_per_expert = tokens_per_expert.to(w1.device)
+
+        use_grouped_gemm_low_precision = (
+            PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled()
+            and not self.disable_turbo_grouped_mlp_low_precision
+        )
+        probs_for_activation = permuted_probs.unsqueeze(-1)
+
         if permuted_local_hidden_states.nelement() != 0:
-
-            # Reshape the weights for the grouped GEMMs.
-            if use_split_wgrad_op():
-
-                w1 = self.weight1
-                w2 = self.weight2
-
-                gemm_kargs[0]["weight_reshape_size"] = (self.num_local_experts, self.config.hidden_size, -1)
-                gemm_kargs[1]["weight_reshape_size"] = (self.num_local_experts, -1, self.config.hidden_size)
-            else:
-                w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
-                w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
-
-            tokens_per_expert = tokens_per_expert.to(w1.device)
-            assert w1.is_contiguous(), "w1 must be contiguous"
-            assert w2.is_contiguous(), "w2 must be contiguous"
-            if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
+            if use_grouped_gemm_low_precision:
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                 fc1_output = pt.ops.grouped_gemm_fp8(
                     permuted_local_hidden_states,
@@ -1313,11 +1353,12 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     config=quant_config.data(),
                 )
             else:
-                fc1_output = self.grouped_gemm(
-                    permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False, **(gemm_kargs[0])
+                fc1_output = pt.ops.grouped_gemm(
+                    permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False
                 )
+
             if self.activation_recompute:
-                if args.use_turbo_fused_act_with_probs:
+                if self.use_turbo_fused_act_with_probs:
                     intermediate_parallel = self.activation_checkpoint.checkpoint(
                         self.activation_func_with_probs,
                         fc1_output,
@@ -1326,73 +1367,55 @@ class PrimusTurboGroupedMLP(GroupedMLP):
                     )
                 else:
                     intermediate_parallel = self.activation_checkpoint.checkpoint(
-                        self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
+                        self.bias_act_func, fc1_output, None, probs_for_activation
                     )
-                if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
-                    quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-                    fc2_output = pt.ops.grouped_gemm_fp8(
-                        intermediate_parallel,
-                        w2,
-                        tokens_per_expert,
-                        trans_b=False,
-                        config=quant_config.data(),
-                    )
-                else:
-                    fc2_output = self.grouped_gemm(
-                        intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
-                    )
-                self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
-                if args.use_turbo_fused_act_with_probs:
+                if self.use_turbo_fused_act_with_probs:
                     intermediate_parallel = self.activation_func_with_probs(
                         fc1_output, permuted_probs, tokens_per_expert
                     )
                 else:
-                    intermediate_parallel = self.activation_func_with_probs(
-                        fc1_output, permuted_probs.unsqueeze(-1)
-                    )
-                if PrimusTurboLowPrecisionGlobalStateManager.is_turbo_fp8_enabled():
-                    quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
-                    fc2_output = pt.ops.grouped_gemm_fp8(
-                        intermediate_parallel,
-                        w2,
-                        tokens_per_expert,
-                        trans_b=False,
-                        config=quant_config.data(),
-                    )
-                else:
-                    fc2_output = self.grouped_gemm(
-                        intermediate_parallel, w2, tokens_per_expert, trans_b=False, **(gemm_kargs[1])
-                    )
-        else:
-            # No token is allocated for local experts.
-            assert torch.count_nonzero(tokens_per_expert) == 0
-            # Make sure params of experts still have gradients even given zero tokens.
-            assert (
-                not args.patch_zero_bubble and not args.patch_primus_pipeline
-            ), "Zero bubble or primus pipeline not support torch.matmul backend yet"
-            w1 = self.weight1.view(self.config.hidden_size, -1)
-            w2 = self.weight2.view(-1, self.config.hidden_size)
-            h = torch.matmul(permuted_local_hidden_states, w1)
-            if self.activation_recompute:
-                if args.use_turbo_fused_act_with_probs:
-                    h = self.activation_checkpoint.checkpoint(
-                        self.activation_func_with_probs, h, permuted_probs, tokens_per_expert
-                    )
-                else:
-                    h = self.activation_checkpoint.checkpoint(
-                        self.activation_func_with_probs, h, permuted_probs.unsqueeze(-1)
-                    )
-                fc2_output = torch.matmul(h, w2)
-                self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
-            else:
-                if args.use_turbo_fused_act_with_probs:
-                    h = self.activation_func_with_probs(h, permuted_probs, tokens_per_expert)
-                else:
-                    h = self.activation_func_with_probs(h, permuted_probs.unsqueeze(-1))
-                fc2_output = torch.matmul(h, w2)
+                    intermediate_parallel = self.bias_act_func(fc1_output, None, probs_for_activation)
 
-        return fc2_output, None
+            if use_grouped_gemm_low_precision:
+                quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
+                output = pt.ops.grouped_gemm_fp8(
+                    intermediate_parallel,
+                    w2,
+                    tokens_per_expert,
+                    trans_b=False,
+                    config=quant_config.data(),
+                )
+            else:
+                output = pt.ops.grouped_gemm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
+        else:
+            # Keep a gradient path for expert weights even when no local token is routed here.
+            assert (
+                not self.patch_zero_bubble and not self.patch_primus_pipeline
+            ), "Zero bubble or primus pipeline not support torch.matmul backend yet"
+            w1_flat = w1.view(self.config.hidden_size, -1)
+            w2_flat = w2.view(-1, self.config.hidden_size)
+            hidden = torch.matmul(permuted_local_hidden_states, w1_flat)
+            if self.activation_recompute:
+                if self.use_turbo_fused_act_with_probs:
+                    hidden = self.activation_checkpoint.checkpoint(
+                        self.activation_func_with_probs, hidden, permuted_probs, tokens_per_expert
+                    )
+                else:
+                    hidden = self.activation_checkpoint.checkpoint(
+                        self.bias_act_func, hidden, None, probs_for_activation
+                    )
+            else:
+                if self.use_turbo_fused_act_with_probs:
+                    hidden = self.activation_func_with_probs(hidden, permuted_probs, tokens_per_expert)
+                else:
+                    hidden = self.bias_act_func(hidden, None, probs_for_activation)
+            output = torch.matmul(hidden, w2_flat)
+
+        if self.activation_recompute:
+            self.activation_checkpoint.discard_output_and_register_recompute(output)
+
+        return output, None
 
 
 class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):

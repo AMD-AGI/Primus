@@ -1043,19 +1043,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         one_logger = get_one_logger()
         args = get_args()
 
-        if args.pp_warmup:
-            from .utils import pp_warmup
-
-            log_rank_0(
-                "warmup on each rank in parallel to decrease "
-                "the first iter time, especially when pp degree is large"
-            )
-            timers = get_timers()
-            timers("pp-warmup", log_level=0).start(barrier=True)
-            pp_warmup(args, self.config, self.model, self.optimizer)
-            timers("pp-warmup").stop()
-            timers.log(["pp-warmup"], barrier=True)
-
         process_non_loss_data_func = None
         non_loss_data_func = None
         if not args.skip_train:
@@ -1461,10 +1448,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             else:
                 assert num_skipped_samples_in_batch == 0
             args.skipped_train_samples += num_skipped_samples_in_batch
-            if args.multi_latent_attention and not getattr(args, "is_hybrid_model", False):
-                flops_calc = self.num_floating_point_operations_mla_moe
-            else:
-                flops_calc = num_floating_point_operations
+            flops_calc = (
+                num_floating_point_operations
+                if not args.multi_latent_attention
+                else self.num_floating_point_operations_mla_moe
+            )
             num_floating_point_operations_in_batch = flops_calc(args, batch_size)
             num_floating_point_operations_so_far += num_floating_point_operations_in_batch
             num_floating_point_operations_since_last_log_event += num_floating_point_operations_in_batch
@@ -1999,10 +1987,11 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             elapsed_time = timers("interval-time").elapsed(barrier=True)
             elapsed_time_per_iteration = elapsed_time / total_iterations
 
-            if args.multi_latent_attention and not getattr(args, "is_hybrid_model", False):
-                flops_calc = self.num_floating_point_operations_mla_moe
-            else:
-                flops_calc = num_floating_point_operations
+            flops_calc = (
+                num_floating_point_operations
+                if not args.multi_latent_attention
+                else self.num_floating_point_operations_mla_moe
+            )
             throughput = flops_calc(args, batch_size) / (
                 elapsed_time_per_iteration * 10**12 * args.world_size
             )

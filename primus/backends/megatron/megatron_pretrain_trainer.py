@@ -42,9 +42,11 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
 
             log_rank_0("Using GPT model provider and training components")
 
-        # Configure training components
-        if hasattr(train_valid_test_datasets_provider, "is_distributed"):
-            train_valid_test_datasets_provider.is_distributed = True
+        # Upstream pretrain entrypoints set this in their __main__ blocks, but Primus imports the
+        # provider directly and calls pretrain() programmatically. Without restoring this flag,
+        # only TP rank 0 enters dataset construction while the core dataset builder still issues
+        # distributed barriers, which deadlocks for TP>1.
+        train_valid_test_datasets_provider.is_distributed = True
 
         # Handle Megatron version differences (v0.12.0 vs newer with inprocess_restart)
         wrapped_pretrain = pretrain
@@ -81,5 +83,25 @@ class MegatronPretrainTrainer(MegatronBaseTrainer):
             forward_step,
             **kwargs,
         )
+
+        # Dump PP visualization data if enabled
+        try:
+            from megatron.training import get_args as get_megatron_args
+
+            megatron_args = get_megatron_args()
+            if getattr(megatron_args, "dump_pp_data", False):
+                import os
+
+                from megatron.core.num_microbatches_calculator import (
+                    get_num_microbatches,
+                )
+
+                from primus.modules.trainer.megatron.utils import dump_pp_data
+
+                pp_data_dir = os.environ.get("DUMP_PP_DIR", "output/pp_data")
+                dump_pp_data(megatron_args, get_num_microbatches(), pp_data_dir)
+                log_rank_0(f"PP schedule data dumped to {pp_data_dir}")
+        except Exception as e:
+            log_rank_0(f"Warning: Failed to dump PP data: {e}")
 
         log_rank_0("Megatron pretrain execution completed.")
