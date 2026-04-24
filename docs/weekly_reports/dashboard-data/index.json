@@ -1,0 +1,90 @@
+{
+  "generated_at": "2026-04-24T09:10:26Z",
+  "summary": {
+    "total_reports": 1,
+    "latest_report_id": "2026-W17",
+    "latest_generated_at": "2026-04-24T16:56:00+08:00",
+    "latest_merged_pr_count": 9,
+    "tracked_drift_targets": [
+      "megatron",
+      "primus_turbo",
+      "torchtitan"
+    ],
+    "recommendation_counts": {
+      "plan sync": 1,
+      "urgent sync": 1,
+      "monitor": 1
+    }
+  },
+  "reports": [
+    {
+      "report_id": "2026-W17",
+      "content_type": "weekly-report",
+      "title": "Primus Weekly Engineering Report \u2014 2026-W17",
+      "report_path": "docs/weekly_reports/2026-W17-primus-weekly.md",
+      "report_github_url": "https://github.com/AMD-AGI/Primus/blob/main/docs/weekly_reports/2026-W17-primus-weekly.md",
+      "time_window": {
+        "timezone": "Asia/Shanghai",
+        "start": "2026-04-20T00:00:00+08:00",
+        "end": "2026-04-24T16:56:00+08:00"
+      },
+      "generated_at": "2026-04-24T16:56:00+08:00",
+      "merged_pr_count": 9,
+      "category_breakdown": {
+        "Bug Fix": 3,
+        "Performance Optimization": 2,
+        "Turbo/Dependency Version Update": 0,
+        "CI/Infra": 2,
+        "Refactor": 0,
+        "Docs": 2,
+        "Other": 0
+      },
+      "megatron_status": {
+        "pin_commit": "d3528a21301db2d12e92912b3ec025dc8a2ed4d6",
+        "pin_date": "2026-03-06",
+        "upstream_repo": "https://github.com/NVIDIA/Megatron-LM",
+        "upstream_ref": "main",
+        "upstream_head": "a1165fabcad97eae3778f386839c233dfabf3f8b",
+        "upstream_head_date": "2026-04-24",
+        "commit_gap": 365,
+        "recommendation": "plan sync"
+      },
+      "torchtitan_status": {
+        "pin_commit": "5fb7cc2e3bbb9b9dc0ab7af34ed5cc58b5f32021",
+        "pin_date": "2025-10-15",
+        "upstream_repo": "https://github.com/pytorch/torchtitan",
+        "upstream_ref": "main",
+        "upstream_head": "d40df991ac535108e428b0746a08b74a3cf6afc7",
+        "upstream_head_date": "2026-04-24",
+        "commit_gap": 514,
+        "recommendation": "urgent sync"
+      },
+      "primus_turbo_status": {
+        "drift_type": "monthly_in_repo",
+        "month_start_ts": "2026-04-01T00:00:00+08:00",
+        "current_ci_commit": "333b68d7c81b722b21b4aad10cd250c45f15027c",
+        "month_start_ci_commit": "333b68d7c81b722b21b4aad10cd250c45f15027c",
+        "current_benchmark_commit": "a4488f6cdb15cfff4383c61af7922bb50803f0ea",
+        "month_start_benchmark_commit": "a4488f6cdb15cfff4383c61af7922bb50803f0ea",
+        "current_aiter_commit": "e83f9903c07001a0ec29e85d223f6e6cdbe00859",
+        "month_start_aiter_commit": "e83f9903c07001a0ec29e85d223f6e6cdbe00859",
+        "drift_commits": 0,
+        "recommendation": "monitor"
+      },
+      "recommendations": {
+        "megatron": "plan sync",
+        "torchtitan": "urgent sync",
+        "primus_turbo": "monitor"
+      },
+      "key_findings": [
+        "9 PRs merged to main in the 2026-W17 window (Bug Fix: 3, Performance Optimization: 2, CI/Infra: 2, Docs: 2).",
+        "Week dominated by Megatron backend hardening against upstream API drift: #672 realigns the patched MoE overlap schedule after upstream removed post_attn; #671 makes the muon optimizer wrapper signature-aware; #674 rewrites recompute_layer_patches byte-identical to upstream with a SHA256 fingerprint guard.",
+        "Performance: #673 parallelizes per-rank pp_warmup with a bit-identical loss-parity UT; #684 introduces opt-in PRIMUS_EXIT_FAST shaving ~22s off post-train teardown on MI355X DSV3 EP8 and ~2m off the MI300X Megatron-LM E2E UT suite.",
+        "Infra: #687 lands the shared backend-gap dashboard publishing toolchain under tools/backend_gap_report/ plus the initial torchtitan baseline report; this weekly run extends the same shared site to surface Weekly Reports as a first-class section.",
+        "Megatron-LM upstream drift: pin d3528a21 (2026-03-06) is 365 commits behind upstream HEAD a1165fab; MoE router, Mamba\u2192Hybrid rename (outside core), TE v2.14, DDP parameter-layout refactor, NVRx async compat. Recommendation: plan sync.",
+        "torchtitan upstream drift: pin 5fb7cc2e (2025-10-15) is 514 commits behind upstream HEAD d40df991; GraphTrainer precompile, MoE token dispatcher, Fused QKV GQAttention, FlexAttention CP, FSDP2 fully_shard. Recommendation: urgent sync.",
+        "Primus-Turbo month-to-date drift: none. CI and benchmark PRIMUS_TURBO_COMMIT pins byte-identical to 2026-03-30 values. Recommendation: monitor."
+      ]
+    }
+  ]
+}

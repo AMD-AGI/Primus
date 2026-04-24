@@ -3,81 +3,180 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Primus Backend Gap Dashboard</title>
+    <title>Primus Engineering Dashboard</title>
     <link rel="stylesheet" href="./assets/dashboard.css" />
   </head>
   <body>
     <header class="hero">
-      <div class="hero__content">
-        <p class="eyebrow">Primus Backend Gap</p>
-        <h1>Backend Gap Dashboard</h1>
-        <p class="hero__summary">
-          Browse backend-to-upstream comparison reports, generated artifacts,
-          and the latest verified metadata published from this repository.
-        </p>
-      </div>
-      <div class="hero__meta">
-        <div class="stat-card">
-          <span class="stat-card__label">Total Reports</span>
-          <strong id="total-reports">-</strong>
+      <div class="hero__inner">
+        <div class="hero__content">
+          <p class="eyebrow">Primus Engineering Dashboard</p>
+          <h1>Backend gap reports and weekly engineering updates, in one place.</h1>
+          <p class="hero__summary">
+            A single, verified source for the Primus main branch: track backend-to-upstream
+            drift, read every weekly engineering report, and follow key recommendations
+            across Megatron-LM, torchtitan, and Primus-Turbo.
+          </p>
+          <div class="hero__chips" id="hero-chips"></div>
         </div>
-        <div class="stat-card">
-          <span class="stat-card__label">Backends</span>
-          <strong id="total-backends">-</strong>
-        </div>
-        <div class="stat-card">
-          <span class="stat-card__label">Verified</span>
-          <strong id="verified-reports">-</strong>
-        </div>
-        <div class="stat-card">
-          <span class="stat-card__label">Latest Report</span>
-          <strong id="latest-report-date">-</strong>
-        </div>
+        <nav class="section-tabs" role="tablist" aria-label="Primus dashboard sections">
+          <button
+            class="section-tab is-active"
+            role="tab"
+            data-section="weekly"
+            aria-selected="true"
+          >
+            <span class="section-tab__label">Weekly Reports</span>
+            <span class="section-tab__sub" id="tab-weekly-sub">-</span>
+          </button>
+          <button
+            class="section-tab"
+            role="tab"
+            data-section="backend-gap"
+            aria-selected="false"
+          >
+            <span class="section-tab__label">Backend Gap</span>
+            <span class="section-tab__sub" id="tab-gap-sub">-</span>
+          </button>
+        </nav>
       </div>
     </header>
 
     <main class="layout">
-      <section class="panel filters">
-        <div class="filter-row">
-          <label class="field">
-            <span>Backend</span>
-            <select id="backend-filter">
-              <option value="all">All backends</option>
-            </select>
-          </label>
+      <!-- ========== WEEKLY REPORTS SECTION ========== -->
+      <section class="section" data-section-panel="weekly" aria-label="Weekly Reports">
+        <div class="stat-row" id="weekly-stat-row"></div>
 
-          <label class="field">
-            <span>Status</span>
-            <select id="status-filter">
-              <option value="all">All statuses</option>
-              <option value="verified">Verified</option>
-              <option value="draft">Draft</option>
-              <option value="superseded">Superseded</option>
-            </select>
-          </label>
+        <article class="featured-panel" id="weekly-featured" hidden>
+          <header class="featured-panel__header">
+            <div>
+              <p class="featured-panel__eyebrow">Latest weekly report</p>
+              <h2 id="weekly-featured-title">-</h2>
+              <p class="featured-panel__window" id="weekly-featured-window">-</p>
+            </div>
+            <div class="featured-panel__actions">
+              <a
+                id="weekly-featured-link"
+                class="button button--primary"
+                target="_blank"
+                rel="noopener noreferrer"
+                href="#"
+              >Open Markdown report</a>
+            </div>
+          </header>
 
-          <label class="field field--search">
-            <span>Search</span>
-            <input
-              id="search-filter"
-              type="search"
-              placeholder="Search backend, title, scope, highlight..."
-            />
-          </label>
-        </div>
+          <div class="featured-panel__grid">
+            <section class="featured-panel__card">
+              <h3>Merged PRs</h3>
+              <p class="featured-panel__kpi" id="weekly-featured-prs">-</p>
+              <ul class="chip-list" id="weekly-featured-categories"></ul>
+            </section>
 
-        <div class="filter-summary">
-          <span id="result-count">0 reports</span>
-        </div>
+            <section class="featured-panel__card">
+              <h3>Drift recommendations</h3>
+              <ul class="recommendation-list" id="weekly-featured-recommendations"></ul>
+            </section>
+
+            <section class="featured-panel__card featured-panel__card--wide">
+              <h3>Key findings</h3>
+              <ul class="findings-list" id="weekly-featured-findings"></ul>
+            </section>
+          </div>
+        </article>
+
+        <section class="panel" aria-label="Weekly report history">
+          <div class="panel__header">
+            <h2>Weekly report history</h2>
+            <p class="panel__subtitle">
+              Newest first. Each entry links to the GitHub-rendered Markdown report.
+            </p>
+          </div>
+
+          <div class="filter-row filter-row--compact">
+            <label class="field">
+              <span>Status</span>
+              <select id="weekly-recommendation-filter">
+                <option value="all">Any recommendation</option>
+                <option value="urgent sync">Urgent sync</option>
+                <option value="plan sync">Plan sync</option>
+                <option value="monitor">Monitor</option>
+              </select>
+            </label>
+            <label class="field field--search">
+              <span>Search</span>
+              <input
+                id="weekly-search-filter"
+                type="search"
+                placeholder="Search report id, finding, recommendation..."
+              />
+            </label>
+            <div class="filter-row__summary">
+              <span id="weekly-result-count">0 reports</span>
+            </div>
+          </div>
+
+          <div id="weekly-loading-state" class="state">Loading weekly reports...</div>
+          <div id="weekly-error-state" class="state state--error" hidden></div>
+          <div id="weekly-empty-state" class="state" hidden>No weekly reports match.</div>
+          <div id="weekly-list" class="card-list" hidden></div>
+        </section>
       </section>
 
-      <section class="panel" id="reports-panel">
-        <div id="loading-state" class="state">Loading dashboard data...</div>
-        <div id="error-state" class="state state--error" hidden></div>
-        <div id="empty-state" class="state" hidden>No reports match the current filters.</div>
-        <div id="report-list" class="report-list" hidden></div>
+      <!-- ========== BACKEND GAP SECTION ========== -->
+      <section class="section" data-section-panel="backend-gap" aria-label="Backend Gap" hidden>
+        <div class="stat-row" id="gap-stat-row"></div>
+
+        <section class="panel" aria-label="Backend gap filters">
+          <div class="filter-row">
+            <label class="field">
+              <span>Backend</span>
+              <select id="backend-filter">
+                <option value="all">All backends</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Status</span>
+              <select id="status-filter">
+                <option value="all">All statuses</option>
+                <option value="verified">Verified</option>
+                <option value="draft">Draft</option>
+                <option value="superseded">Superseded</option>
+              </select>
+            </label>
+
+            <label class="field field--search">
+              <span>Search</span>
+              <input
+                id="search-filter"
+                type="search"
+                placeholder="Search backend, title, scope, highlight..."
+              />
+            </label>
+          </div>
+
+          <div class="filter-summary">
+            <span id="result-count">0 reports</span>
+          </div>
+        </section>
+
+        <section class="panel" id="reports-panel">
+          <div id="loading-state" class="state">Loading backend gap reports...</div>
+          <div id="error-state" class="state state--error" hidden></div>
+          <div id="empty-state" class="state" hidden>No reports match the current filters.</div>
+          <div id="report-list" class="report-list" hidden></div>
+        </section>
       </section>
     </main>
+
+    <footer class="site-footer">
+      <p>
+        Generated from
+        <code>tools/backend_gap_report/</code>. Weekly report data comes from
+        <code>docs/weekly_reports/dashboard-data/</code>; backend gap data from
+        <code>docs/backend-gap/dashboard-data/</code>.
+      </p>
+    </footer>
 
     <script src="./assets/dashboard.js"></script>
   </body>
