@@ -32,7 +32,7 @@ Global Options:
     --config <FILE>             Load configuration from specified YAML file
     --debug                     Enable debug mode (verbose logging)
     --dry-run                   Show what would be executed without running
-    --clean                     Remove all containers before launch
+    --clean                     Stop all running containers before launch (does not remove)
     --help, -h                  Show this message and exit
 
 Docker/Podman Options:
@@ -449,13 +449,13 @@ done
 ###############################################################################
 
 if [[ "$CLEAN_DOCKER_CONTAINER" == "true" ]]; then
-    LOG_INFO_RANK0 "[container] Cleaning up existing containers..."
-    CONTAINERS="$($CONTAINER_RUNTIME ps -aq)"
+    LOG_INFO_RANK0 "[container] Stopping running containers before launch..."
+    CONTAINERS="$($CONTAINER_RUNTIME ps -q)"
     if [[ -n "$CONTAINERS" ]]; then
-        printf '%s\n' "$CONTAINERS" | xargs -r -n1 "$CONTAINER_RUNTIME" rm -f
-        LOG_INFO_RANK0 "[container] Removed containers: $CONTAINERS"
+        printf '%s\n' "$CONTAINERS" | xargs -r -n1 "$CONTAINER_RUNTIME" stop
+        LOG_INFO_RANK0 "[container] Stopped containers: $CONTAINERS"
     else
-        LOG_INFO_RANK0 "[container] No containers to remove."
+        LOG_INFO_RANK0 "[container] No running containers to stop."
     fi
 fi
 
