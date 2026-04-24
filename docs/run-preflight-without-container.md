@@ -26,20 +26,23 @@ There is a list of package in the project's top-level `requirements.txt`.
 
 ### Create virtual environment and install packages
 
-The environment is shared between all nodes in the cluster. So we need to create a virtual environment and install packages on a shared file system. Python venv or uv is recommended to create a virtual environment and install packages. Here is an example of creating a virtual environment and installing packages using uv: 
+The environment is shared between all nodes in the cluster. So we need to create a virtual environment and install packages on a shared file system. Python venv or uv is recommended to create a virtual environment and install packages. Here is an example of creating a virtual environment and installing packages using uv:
+
+#### Basic installation
 
 ```bash
-# Use a shared file system accessible from all nodes (e.g. NFS home, /shared)
 mkdir -p ~/envs/preflight
 cd ~/envs/preflight
 
 uv venv --python 3.12
 source .venv/bin/activate
 
-# install torch for rocm
 uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm7.1
+```
 
-# install other packages
+#### Full installation (for plotting and PDF reports)
+
+```bash
 cd /path/to/Primus
 uv pip install -r requirements.txt
 ```
