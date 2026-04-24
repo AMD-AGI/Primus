@@ -39,6 +39,10 @@ modules:
       #   lr=2e-4, cosine (min_lr_rate=0.1 → min_lr=2e-5)
       #   AdamW, beta1=0.9, beta2=0.95, weight_decay=0.01
       #   max_grad_norm=1.0, warmup_steps=200
+      # Both DeepSpeed ZeRO-2 and Megatron clip on ||avg_grad||.
+      # DeepSpeed pre-divides by dp_size before reduce_scatter(SUM),
+      # so its grad norm is on averaged gradients. Match FLA's 1.0 directly.
+      clip_grad: 1.0
       lr: 2.0e-4
       min_lr: 2.0e-5
       lr_warmup_iters: 200
@@ -66,13 +70,12 @@ modules:
       use_torch_fsdp2: false
       use_distributed_optimizer: true
 
-      # Data — FineWeb-Edu sample-10BT
+      # Data — FLA-aligned FineWeb-Edu sample-10BT
+      # Converted from FLA's preprocessed Arrow dataset so both
+      # frameworks see the exact same tokens in the same order.
       mock_data: false
       train_data_path: >
-        /home/vanbhati@amd.com/Primus/data/fineweb-edu-10BT/HuggingFaceTokenizer/fineweb_edu_10BT_0_text_sentence
-        /home/vanbhati@amd.com/Primus/data/fineweb-edu-10BT/HuggingFaceTokenizer/fineweb_edu_10BT_1_text_sentence
-        /home/vanbhati@amd.com/Primus/data/fineweb-edu-10BT/HuggingFaceTokenizer/fineweb_edu_10BT_2_text_sentence
-        /home/vanbhati@amd.com/Primus/data/fineweb-edu-10BT/HuggingFaceTokenizer/fineweb_edu_10BT_3_text_sentence
+        /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
       valid_data_path: null
       test_data_path: null
 

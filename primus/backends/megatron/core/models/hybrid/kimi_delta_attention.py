@@ -297,13 +297,16 @@ class KimiDeltaAttention(MegatronModule):
             hidden_size=self.hidden_size, eps=self.config.layernorm_epsilon,
         )
 
-        # --- Low-rank gate: f_a (bottleneck) -> f_b (expand to heads) ---
+        # --- Low-rank gate: f_a (bottleneck) -> f_b (expand to num_heads * head_k_dim) ---
+        # Gate g has shape [B, T, H, K] (per-key-dim gating), so output must
+        # match q/k after repeat_interleave: num_heads * head_k_dim.
+        self.gate_dim_local_tp = self.num_heads_local_tp * self.head_k_dim
         self.f_a_proj = nn.Linear(
             self.hidden_size, self.head_dim, bias=False,
             device=torch.cuda.current_device(), dtype=config.params_dtype,
         )
         self.f_b_proj = nn.Linear(
-            self.head_dim, self.v_dim_local_tp, bias=False,
+            self.head_dim, self.gate_dim_local_tp, bias=False,
             device=torch.cuda.current_device(), dtype=config.params_dtype,
         )
         setattr(self.f_b_proj.weight, "tensor_model_parallel", True)
@@ -316,7 +319,7 @@ class KimiDeltaAttention(MegatronModule):
         setattr(self.A_log, "tensor_model_parallel", True)
 
         self.dt_bias = nn.Parameter(torch.empty(
-            self.v_dim_local_tp,
+            self.gate_dim_local_tp,
             dtype=torch.float32, device=torch.cuda.current_device(),
         ))
         setattr(self.dt_bias, "tensor_model_parallel", True)
@@ -471,13 +474,12 @@ class KimiDeltaAttention(MegatronModule):
         h_bsh = h_normed.transpose(0, 1)  # s b h -> b s h
 
         g = self.f_b_proj(self.f_a_proj(h_bsh))
-        g = g.reshape(batch, seq_len, self.num_heads_local_tp, self.head_dim)
+        g = g.reshape(batch, seq_len, self.num_heads_local_tp, self.head_k_dim)
 
         if use_fla_triton:
             g = fused_kda_gate(g, self.A_log.view(-1), dt_bias=self.dt_bias)
         else:
-            raise RuntimeError("[KDA] PyTorch fallback gate was reached — Triton kernels are NOT active!")
-            # g = torch_kda_gate(g, self.A_log.view(-1), dt_bias=self.dt_bias)
+            g = torch_kda_gate(g, self.A_log.view(-1), dt_bias=self.dt_bias)
 
         beta = self.b_proj(h_bsh).float().sigmoid()
         nvtx_range_pop(suffix="kda_gate")
@@ -494,11 +496,10 @@ class KimiDeltaAttention(MegatronModule):
         elif use_fla_triton and use_hybrid:
             core_attn_out = hybrid_chunk_kda(q, k, v, g, beta)
         else:
-            raise RuntimeError("[KDA] PyTorch fallback attention was reached — Triton kernels are NOT active!")
-            # core_attn_out = _grad_checkpoint(
-            #     _torch_chunk_kda_ckpt, q, k, v, g, beta,
-            #     use_reentrant=False,
-            # )
+            core_attn_out = _grad_checkpoint(
+                _torch_chunk_kda_ckpt, q, k, v, g, beta,
+                use_reentrant=False,
+            )
         nvtx_range_pop(suffix="kda_attn")
 
         # --- Output gate (g_a -> g_b) + gated norm ---

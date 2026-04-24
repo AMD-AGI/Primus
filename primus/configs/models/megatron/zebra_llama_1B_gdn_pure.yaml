@@ -27,6 +27,7 @@ mamba_num_groups: 8
 #   key_dim  = 8  heads x 64 dim = 512
 #   value_dim = 16 heads x 64 dim = 1024
 #   Grouped Value Attention: each Q/K head serves 2 V heads
+use_short_conv: true
 linear_conv_kernel_dim: 4
 linear_key_head_dim: 64
 linear_value_head_dim: 64
