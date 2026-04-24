@@ -3719,6 +3719,29 @@ def launch_projection_from_cli(args, overrides):
                 "benchmark_num_experts"
             ]
 
+        # When benchmark downscale leaves TP*EP==1, Primus Turbo's DeepEP Flex
+        # token dispatcher asserts `TPxEP > 1` and its underlying DeepEP buffer
+        # kernel configs are only defined for num_ranks >= 2, so the benchmark
+        # subprocess cannot instantiate.  Auto-disable use_turbo_deepep for the
+        # benchmark subprocess only; the target config (primus_config_original)
+        # retains turbo-deepep, and the target A2A is recovered analytically
+        # downstream.
+        _bench_cfg = primus_config.get_module_config("pre_trainer")
+        _bench_tp = reduction_info.get("benchmark_tp", 1) or 1
+        _bench_ep = reduction_info.get("benchmark_ep", 1) or 1
+        if _bench_tp * _bench_ep <= 1 and getattr(_bench_cfg, "use_turbo_deepep", False):
+            if int(os.getenv("RANK", "0")) == 0:
+                print(
+                    "[Primus:Performance Projection] Benchmark TP*EP=1; "
+                    "auto-disabling use_turbo_deepep for the benchmark subprocess "
+                    "(target config retains turbo-deepep; A2A is reconstructed analytically)."
+                )
+            _bench_cfg.use_turbo_deepep = False
+            if hasattr(_bench_cfg, "model") and hasattr(
+                getattr(_bench_cfg, "model", None), "moe"
+            ):
+                _bench_cfg.model.moe.use_turbo_deepep = False
+
     if profiling_mode == "simulate":
         # Pure simulation – no GPU / trainer required
         profiling_results = _run_layer_simulation(primus_config, args)
