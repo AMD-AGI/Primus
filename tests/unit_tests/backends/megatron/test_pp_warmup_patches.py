@@ -221,6 +221,11 @@ def _build_training_cmd(
             "TRAIN_LOG": str(log_file),
         }
     )
+    # Mirror tests/utils.py::run_training_script — save ~20s/run by skipping
+    # Python / torchrun teardown on success. Loss parity and iter-time
+    # parsing both rely on in-training log lines, which are flushed well
+    # before os._exit(0). Override with PRIMUS_EXIT_FAST=0 to opt out.
+    env.setdefault("PRIMUS_EXIT_FAST", "1")
     return cmd, env
 
 

@@ -4,6 +4,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
+import os
+
 from primus.backends.megatron.training.global_vars import set_primus_global_variables
 from primus.core.trainer.base_trainer import BaseTrainer
 from primus.modules.module_utils import log_rank_0
@@ -21,6 +23,33 @@ class MegatronBaseTrainer(BaseTrainer):
         """Initialize Megatron training components."""
         log_rank_0("Initializing Megatron training...")
         # log_dict_aligned("Backend arguments", self.backend_args)
+
+    def cleanup(self, on_error: bool = False):
+        """Megatron cleanup: optional fast exit.
+
+        * ``PRIMUS_EXIT_FAST=1`` — after ``super().cleanup()``, skip Python
+          shutdown and call ``os._exit(0)`` directly. Saves ~20 s of Python
+          interpreter shutdown / torchrun reaper lag at the cost of any
+          ``atexit`` handlers below us. OFF by default.
+
+        When both are off this method just delegates to ``super().cleanup()``,
+        identical to the previous behavior.
+        """
+        super().cleanup(on_error=on_error)
+
+        exit_fast = os.environ.get("PRIMUS_EXIT_FAST", "0") == "1"
+
+        if exit_fast and not on_error:
+            log_rank_0("[MegatronBaseTrainer] PRIMUS_EXIT_FAST=1 -> os._exit(0)")
+            # Flush stdout/stderr so the final log lines are not lost.
+            try:
+                import sys
+
+                sys.stdout.flush()
+                sys.stderr.flush()
+            except Exception:  # pragma: no cover
+                pass
+            os._exit(0)
 
     def _patch_parse_args(self):
         """Patch Megatron's parse_args to return pre-configured Primus arguments."""
