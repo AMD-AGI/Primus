@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Primus Backend Gap Dashboard</title>
+    <link rel="stylesheet" href="./assets/dashboard.css" />
+  </head>
+  <body>
+    <header class="hero">
+      <div class="hero__content">
+        <p class="eyebrow">Primus Backend Gap</p>
+        <h1>Backend Gap Dashboard</h1>
+        <p class="hero__summary">
+          Browse backend-to-upstream comparison reports, generated artifacts,
+          and the latest verified metadata published from this repository.
+        </p>
+      </div>
+      <div class="hero__meta">
+        <div class="stat-card">
+          <span class="stat-card__label">Total Reports</span>
+          <strong id="total-reports">-</strong>
+        </div>
+        <div class="stat-card">
+          <span class="stat-card__label">Backends</span>
+          <strong id="total-backends">-</strong>
+        </div>
+        <div class="stat-card">
+          <span class="stat-card__label">Verified</span>
+          <strong id="verified-reports">-</strong>
+        </div>
+        <div class="stat-card">
+          <span class="stat-card__label">Latest Report</span>
+          <strong id="latest-report-date">-</strong>
+        </div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="panel filters">
+        <div class="filter-row">
+          <label class="field">
+            <span>Backend</span>
+            <select id="backend-filter">
+              <option value="all">All backends</option>
+            </select>
+          </label>
+
+          <label class="field">
+            <span>Status</span>
+            <select id="status-filter">
+              <option value="all">All statuses</option>
+              <option value="verified">Verified</option>
+              <option value="draft">Draft</option>
+              <option value="superseded">Superseded</option>
+            </select>
+          </label>
+
+          <label class="field field--search">
+            <span>Search</span>
+            <input
+              id="search-filter"
+              type="search"
+              placeholder="Search backend, title, scope, highlight..."
+            />
+          </label>
+        </div>
+
+        <div class="filter-summary">
+          <span id="result-count">0 reports</span>
+        </div>
+      </section>
+
+      <section class="panel" id="reports-panel">
+        <div id="loading-state" class="state">Loading dashboard data...</div>
+        <div id="error-state" class="state state--error" hidden></div>
+        <div id="empty-state" class="state" hidden>No reports match the current filters.</div>
+        <div id="report-list" class="report-list" hidden></div>
+      </section>
+    </main>
+
+    <script src="./assets/dashboard.js"></script>
+  </body>
+</html>
