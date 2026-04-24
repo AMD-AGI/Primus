@@ -64,7 +64,9 @@ def register_subcommand(subparsers):
     suite_parsers = parser.add_subparsers(dest="suite", required=True)
 
     # ---------- memory ----------
-    memory = suite_parsers.add_parser("memory", help="Memory projection only (per-GPU memory analysis).")
+    memory = suite_parsers.add_parser(
+        "memory", help="Memory projection only (per-GPU memory analysis)."
+    )
     from primus.core.launcher.parser import add_pretrain_parser
 
     add_pretrain_parser(memory)
@@ -162,7 +164,16 @@ def register_subcommand(subparsers):
         type=str,
         required=False,
         default="auto",
-        choices=["auto", "zerobubble", "zerobubble-heuristic", "zbv-formatted", "zbv-greedy-half", "zbv-greedy-min", "seaailab-ilp", "all"],
+        choices=[
+            "auto",
+            "zerobubble",
+            "zerobubble-heuristic",
+            "zbv-formatted",
+            "zbv-greedy-half",
+            "zbv-greedy-min",
+            "seaailab-ilp",
+            "all",
+        ],
         help=(
             "Pipeline schedule algorithm for simulation.\n"
             "  auto                 - Default: zerobubble when enabled, else 1f1b\n"
@@ -237,17 +248,22 @@ def register_subcommand(subparsers):
 
     performance.add_argument(
         "--save-profiling",
-        type=str, required=False, default=None,
+        type=str,
+        required=False,
+        default=None,
         help=_argparse.SUPPRESS,
     )
     performance.add_argument(
         "--compute-baseline",
-        type=str, required=False, default=None,
+        type=str,
+        required=False,
+        default=None,
         help=_argparse.SUPPRESS,
     )
     performance.add_argument(
         "--profile-only",
-        action="store_true", default=False,
+        action="store_true",
+        default=False,
         help=_argparse.SUPPRESS,
     )
     parser.set_defaults(func=run)

@@ -113,8 +113,6 @@ def _merge_hybrid_profiling(
 
     Returns the number of layers merged and a dict of diagnostics.
     """
-    baseline_ep = baseline_metadata.get("benchmark_ep", 1)
-
     # EP compute scaling: in theory, per-GPU MoE compute scales as topk/EP.
     # In practice, MoE MLP time is dominated by fixed overhead (routing,
     # permutation, GroupedGEMM setup) that doesn't scale with EP.  Using
@@ -162,8 +160,12 @@ def _merge_hybrid_profiling(
             new_mlp_fwd = scaled_compute_fwd + cur_a2a_fwd
             new_mlp_bwd = scaled_compute_bwd + cur_a2a_bwd
 
-            base_attn_fwd = base_attn.get("forward_time_ms", cur_attn.get("forward_time_ms", 0))
-            base_attn_bwd = base_attn.get("backward_time_ms", cur_attn.get("backward_time_ms", 0))
+            base_attn_fwd = base_attn.get(
+                "forward_time_ms", cur_attn.get("forward_time_ms", 0)
+            )
+            base_attn_bwd = base_attn.get(
+                "backward_time_ms", cur_attn.get("backward_time_ms", 0)
+            )
 
             new_fwd = base_attn_fwd + new_mlp_fwd
             new_bwd = base_attn_bwd + new_mlp_bwd
@@ -245,14 +247,24 @@ def _run_automatic_bg1_baseline(args, reduction_info):
             free_port = s.getsockname()[1]
 
         cmd = [
-            sys.executable, "-m", "torch.distributed.run",
-            "--nproc_per_node=1", "--nnodes=1", "--node_rank=0",
-            "--master_addr=localhost", f"--master_port={free_port}",
-            "-m", "primus.cli.main",
-            "projection", "performance",
-            "--config", str(args.config),
-            "--benchmark-gpus", "1",
-            "--save-profiling", save_path,
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--nproc_per_node=1",
+            "--nnodes=1",
+            "--node_rank=0",
+            "--master_addr=localhost",
+            f"--master_port={free_port}",
+            "-m",
+            "primus.cli.main",
+            "projection",
+            "performance",
+            "--config",
+            str(args.config),
+            "--benchmark-gpus",
+            "1",
+            "--save-profiling",
+            save_path,
             "--profile-only",
         ]
 
@@ -679,9 +691,7 @@ def calculate_collective_communication_time(
                         return 0.0
                     return min(1.0, compute_ms / comm_ms) * ceiling
 
-                ag_fwd_ovl = _overlap(
-                    ag_per_layer_ms, fwd_per_layer_ms, AG_FWD_CEILING
-                )
+                ag_fwd_ovl = _overlap(ag_per_layer_ms, fwd_per_layer_ms, AG_FWD_CEILING)
                 ag_recomp_ovl = _overlap(
                     ag_per_layer_ms, bwd_per_layer_ms, AG_RECOMPUTE_CEILING
                 )
@@ -704,9 +714,7 @@ def calculate_collective_communication_time(
                 )
                 total_fsdp = total_fsdp_ag + total_fsdp_rs
                 total_comm_time -= total_hidden
-                effective_overlap = (
-                    total_hidden / total_fsdp if total_fsdp > 0 else 0.0
-                )
+                effective_overlap = total_hidden / total_fsdp if total_fsdp > 0 else 0.0
                 message_info["fsdp_overlapped"] = True
                 message_info["fsdp_overlap"] = effective_overlap
                 message_info["fsdp_overall_overlap"] = effective_overlap
@@ -799,7 +807,25 @@ def extract_single_node_time_from_profiling(
             bwd_time = layer_data.get("backward_time_ms", 0)
             layer_time = fwd_time + bwd_time
 
-            if moe_pattern[layer_idx] == 0:
+            # Bucket by the profiler-observed layer type (what Megatron actually
+            # built in the benchmark subprocess), not by the original
+            # moe_pattern. `_limit_layers_for_projection` can force a dense-
+            # then-MoE profile layout even for all-MoE target models (e.g.
+            # Qwen3-30B with moe_layer_freq="1"), which would otherwise cause
+            # the fast dense-layer profile to be incorrectly averaged into
+            # the MoE bucket and scaled to every layer of the full model.
+            # When the full model contains no dense layers, the captured
+            # dense profile is implicitly discarded below because
+            # num_dense_layers=0.
+            observed_type = layer_data.get("type")
+            if observed_type == "dense":
+                is_dense = True
+            elif observed_type == "moe":
+                is_dense = False
+            else:
+                is_dense = moe_pattern[layer_idx] == 0
+
+            if is_dense:
                 profiled_dense_times.append(layer_time)
                 profiled_dense_fwd_times.append(fwd_time)
             else:
@@ -2401,7 +2427,9 @@ def _run_layer_benchmark(primus_config, unknown_overrides):
         "use_turbo_parallel_linear": getattr(cfg, "multi_latent_attention", False),
         "use_turbo_grouped_mlp": bool(getattr(cfg, "num_experts", 0)),
     }
-    if getattr(cfg, "multi_latent_attention", False) or getattr(cfg, "use_turbo_deepep", False):
+    if getattr(cfg, "multi_latent_attention", False) or getattr(
+        cfg, "use_turbo_deepep", False
+    ):
         for flag, val in _turbo_candidates.items():
             if val and not getattr(cfg, flag, False):
                 setattr(cfg, flag, True)
@@ -2859,7 +2887,10 @@ def _run_pipeline_simulation(
 
     if scheduler_algorithm != "seaailab-ilp":
         sim_config = _build_scheduler_sim_config(
-            training_config, profiling_results, enable_zero_bubble, scheduler_algorithm,
+            training_config,
+            profiling_results,
+            enable_zero_bubble,
+            scheduler_algorithm,
         )
         if sim_config is None:
             return None
@@ -3243,7 +3274,9 @@ def _run_multinode_projection(
                     target_a2a_per_layer = measured_a2a_per_layer
                     analytical_bench_a2a = None
                     a2a_source = "pre-adjusted by per-layer MoE correction"
-                elif benchmark_ep is not None and benchmark_ep != ep and benchmark_ep > 0:
+                elif (
+                    benchmark_ep is not None and benchmark_ep != ep and benchmark_ep > 0
+                ):
                     analytical_bench_a2a = _estimate_a2a_per_layer_ms(
                         training_config, benchmark_ep, hardware_config_dict
                     )
@@ -3729,7 +3762,9 @@ def launch_projection_from_cli(args, overrides):
         _bench_cfg = primus_config.get_module_config("pre_trainer")
         _bench_tp = reduction_info.get("benchmark_tp", 1) or 1
         _bench_ep = reduction_info.get("benchmark_ep", 1) or 1
-        if _bench_tp * _bench_ep <= 1 and getattr(_bench_cfg, "use_turbo_deepep", False):
+        if _bench_tp * _bench_ep <= 1 and getattr(
+            _bench_cfg, "use_turbo_deepep", False
+        ):
             if int(os.getenv("RANK", "0")) == 0:
                 print(
                     "[Primus:Performance Projection] Benchmark TP*EP=1; "
@@ -3798,7 +3833,9 @@ def launch_projection_from_cli(args, overrides):
     # ── Early exit for --profile-only (used by bg=1 subprocess) ──
     if getattr(args, "profile_only", False):
         if is_rank_0:
-            print("[Primus:Performance Projection] --profile-only: exiting after profiling.")
+            print(
+                "[Primus:Performance Projection] --profile-only: exiting after profiling."
+            )
         return
 
     # Use original config for projection calculations
@@ -3893,8 +3930,10 @@ def launch_projection_from_cli(args, overrides):
 
         if is_rank_0:
             print("\n" + "=" * 100)
-            print("[Primus:Performance Projection] Hybrid Sourcing: bg=1 compute + "
-                  f"bg={benchmark_gpus} communication")
+            print(
+                "[Primus:Performance Projection] Hybrid Sourcing: bg=1 compute + "
+                f"bg={benchmark_gpus} communication"
+            )
             print("=" * 100)
             print(
                 f"  Baseline config: bg={baseline_meta.get('benchmark_gpus', '?')}, "
@@ -3903,16 +3942,24 @@ def launch_projection_from_cli(args, overrides):
             print(f"  Current config:  bg={benchmark_gpus}, EP={benchmark_ep}")
             print(f"  Merged {merged_count} layers")
             if diag:
-                print(f"  Attention fwd: current={diag['cur_attn_fwd']:.2f} ms → "
-                      f"baseline={diag['base_attn_fwd']:.2f} ms "
-                      f"(contention ratio: {diag['attn_contention_ratio']:.2f}x)")
-                print(f"  MLP compute fwd: baseline={diag['base_mlp_compute_fwd']:.2f} ms "
-                      f"× {diag['ep_compute_scale']:.3f} (EP scale) "
-                      f"= {diag['scaled_compute_fwd']:.2f} ms")
-                print(f"  Measured A2A fwd: {diag['cur_a2a_fwd']:.2f} ms "
-                      f"(from current bg={benchmark_gpus})")
-                print(f"  Layer fwd: {diag['old_layer_fwd']:.2f} → "
-                      f"{diag['new_layer_fwd']:.2f} ms")
+                print(
+                    f"  Attention fwd: current={diag['cur_attn_fwd']:.2f} ms → "
+                    f"baseline={diag['base_attn_fwd']:.2f} ms "
+                    f"(contention ratio: {diag['attn_contention_ratio']:.2f}x)"
+                )
+                print(
+                    f"  MLP compute fwd: baseline={diag['base_mlp_compute_fwd']:.2f} ms "
+                    f"× {diag['ep_compute_scale']:.3f} (EP scale) "
+                    f"= {diag['scaled_compute_fwd']:.2f} ms"
+                )
+                print(
+                    f"  Measured A2A fwd: {diag['cur_a2a_fwd']:.2f} ms "
+                    f"(from current bg={benchmark_gpus})"
+                )
+                print(
+                    f"  Layer fwd: {diag['old_layer_fwd']:.2f} → "
+                    f"{diag['new_layer_fwd']:.2f} ms"
+                )
             print("=" * 100)
 
     # If TP was reduced for sub-node benchmarking, apply TP scaling BEFORE pipeline simulation
@@ -4083,8 +4130,12 @@ def launch_projection_from_cli(args, overrides):
                     use_deepep = getattr(model_cfg, "use_turbo_deepep", False)
 
                     if use_deepep and benchmark_ep != original_ep:
-                        DEEPEP_OVERLAP_EFFICIENCY = _get_deepep_overlap_efficiency(model_cfg)
-                        effective_a2a_delta = a2a_delta * (1.0 - DEEPEP_OVERLAP_EFFICIENCY)
+                        DEEPEP_OVERLAP_EFFICIENCY = _get_deepep_overlap_efficiency(
+                            model_cfg
+                        )
+                        effective_a2a_delta = a2a_delta * (
+                            1.0 - DEEPEP_OVERLAP_EFFICIENCY
+                        )
                         new_mlp_fwd = mlp_fwd + effective_a2a_delta
                         new_mlp_bwd = mlp_bwd + effective_a2a_delta
                     else:
@@ -4268,7 +4319,10 @@ def launch_projection_from_cli(args, overrides):
                 f"(benchmarked with PP={pp})"
             )
         pipeline_simulation_time_ms = _run_pipeline_simulation(
-            training_config, profiling_results, enable_zero_bubble, scheduler_algorithm,
+            training_config,
+            profiling_results,
+            enable_zero_bubble,
+            scheduler_algorithm,
         )
 
     # Restore training_config PP to benchmark value for consistency
@@ -4409,7 +4463,9 @@ def launch_projection_from_cli(args, overrides):
 
                                 # Decompose MLP into compute + A2A (same logic as Path A)
                                 if use_deepep:
-                                    DEEPEP_OVERLAP_EFFICIENCY = _get_deepep_overlap_efficiency(model_cfg)
+                                    DEEPEP_OVERLAP_EFFICIENCY = (
+                                        _get_deepep_overlap_efficiency(model_cfg)
+                                    )
                                     residual = 1.0 - DEEPEP_OVERLAP_EFFICIENCY
                                     compute_fwd = mlp_fwd - measured_a2a_fwd * residual
                                     compute_bwd = mlp_bwd - measured_a2a_bwd * residual
@@ -4586,7 +4642,9 @@ def launch_projection_from_cli(args, overrides):
                 else "     (Using default intra-node communication model)"
             )
             print("")
-            print(f"  📊 Multi-Node ({target_nodes} nodes = {target_nodes * gpus_per_node} GPUs):")
+            print(
+                f"  📊 Multi-Node ({target_nodes} nodes = {target_nodes * gpus_per_node} GPUs):"
+            )
             print("     → See detailed projection below")
             print("=" * 100)
 
