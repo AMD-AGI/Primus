@@ -1043,19 +1043,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         one_logger = get_one_logger()
         args = get_args()
 
-        if args.pp_warmup:
-            from .utils import pp_warmup
-
-            log_rank_0(
-                "warmup on each rank in parallel to decrease "
-                "the first iter time, especially when pp degree is large"
-            )
-            timers = get_timers()
-            timers("pp-warmup", log_level=0).start(barrier=True)
-            pp_warmup(args, self.config, self.model, self.optimizer)
-            timers("pp-warmup").stop()
-            timers.log(["pp-warmup"], barrier=True)
-
         process_non_loss_data_func = None
         non_loss_data_func = None
         if not args.skip_train:
