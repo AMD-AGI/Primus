@@ -6,6 +6,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import math
 from dataclasses import dataclass, replace
 from typing import List, Optional, Tuple, Union
 
@@ -83,7 +84,7 @@ class GatedDeltaNet(MegatronModule):
         conv_bias: bool = False,
         conv_init: Optional[float] = None,
         use_qk_l2norm: bool = True,
-        A_init_range: Tuple[float, float] = (1, 16),
+        A_init_range: Tuple[float, float] = (0, 16),
         pg_collection: ProcessGroupCollection = None,
     ):
         """
@@ -125,6 +126,7 @@ class GatedDeltaNet(MegatronModule):
         self.hidden_size = config.hidden_size
         self.act_fn = config.activation_func
         self.activation = self.act_fn.__name__
+        self.use_short_conv = getattr(config, 'use_short_conv', True)
         self.conv_kernel_dim = config.linear_conv_kernel_dim
         self.key_head_dim = config.linear_key_head_dim
         self.value_head_dim = config.linear_value_head_dim
@@ -157,25 +159,24 @@ class GatedDeltaNet(MegatronModule):
             tp_group=self.pg_collection.tp,
         )
 
-        # Conv1d for QKV
+        # Conv1d for QKV (only when use_short_conv is enabled)
         self.conv_dim = self.qk_dim * 2 + self.v_dim
         self.conv_dim_local_tp = self.conv_dim // self.tp_size
 
-        # weight shape: [conv_dim, 1, d_conv]
-        # bias shape: [conv_dim]
-        self.conv1d = nn.Conv1d(
-            in_channels=self.conv_dim_local_tp,
-            out_channels=self.conv_dim_local_tp,
-            bias=conv_bias,
-            kernel_size=self.conv_kernel_dim,
-            groups=self.conv_dim_local_tp,
-            padding=self.conv_kernel_dim - 1,
-            device=torch.cuda.current_device(),
-            dtype=config.params_dtype,
-        )
-        setattr(self.conv1d.weight, "tensor_model_parallel", True)
-        if conv_bias:
-            setattr(self.conv1d.bias, "tensor_model_parallel", True)
+        if self.use_short_conv:
+            self.conv1d = nn.Conv1d(
+                in_channels=self.conv_dim_local_tp,
+                out_channels=self.conv_dim_local_tp,
+                bias=conv_bias,
+                kernel_size=self.conv_kernel_dim,
+                groups=self.conv_dim_local_tp,
+                padding=self.conv_kernel_dim - 1,
+                device=torch.cuda.current_device(),
+                dtype=config.params_dtype,
+            )
+            setattr(self.conv1d.weight, "tensor_model_parallel", True)
+            if conv_bias:
+                setattr(self.conv1d.bias, "tensor_model_parallel", True)
 
         # Time step projection (discretization)
         self.num_v_heads_local_tp = self.num_value_heads // self.tp_size
@@ -225,19 +226,28 @@ class GatedDeltaNet(MegatronModule):
         self.reset_parameters()
 
     def reset_parameters(self):
-        """Reset the parameters."""
+        """Reset the parameters.
+
+        Matches FLA's GatedDeltaNet initialization exactly:
+        - A_log: log(uniform(0, 16))
+        - dt_bias: inverse_softplus(uniform(dt_min, dt_max))
+        """
         if self.config.perform_initialization:
             with get_cuda_rng_tracker().fork():
                 # conv1d.weight
-                if self.conv_init is not None:
+                if self.use_short_conv and self.conv_init is not None:
                     nn.init.uniform_(self.conv1d.weight, -self.conv_init, self.conv_init)
-                # dt_bias
-                torch.ones(
-                    self.num_v_heads_local_tp,
-                    out=self.dt_bias.data,
-                    dtype=self.config.params_dtype,
-                    device=torch.cuda.current_device(),
-                )
+                # dt_bias: inverse softplus of log-uniform in [dt_min, dt_max]
+                dt_min, dt_max = 0.001, 0.1
+                dt = torch.exp(
+                    torch.rand(
+                        self.num_v_heads_local_tp,
+                        dtype=torch.float32,
+                        device=torch.cuda.current_device(),
+                    ) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)
+                ).clamp(min=1e-4)
+                inv_dt = dt + torch.log(-torch.expm1(-dt))
+                self.dt_bias.data.copy_(inv_dt.to(self.config.params_dtype))
                 # A_log
                 A = torch.empty(
                     self.num_v_heads_local_tp,
@@ -320,22 +330,25 @@ class GatedDeltaNet(MegatronModule):
         beta = beta.reshape(batch, seq_len, -1)
         alpha = alpha.reshape(batch, seq_len, -1)
 
-        # Convolution on qkv
-        qkv = qkv.transpose(1, 2).contiguous()  # b, s, d -> b, d, s
+        # Convolution on qkv (or SiLU-only when use_short_conv=False)
         nvtx_range_push(suffix="conv1d")
-        if (causal_conv1d_fn is None) or self.config.deterministic_mode:
-            qkv = self.act_fn(self.conv1d(qkv)[..., :seq_len])
+        if self.use_short_conv:
+            qkv = qkv.transpose(1, 2).contiguous()  # b, s, d -> b, d, s
+            if (causal_conv1d_fn is None) or self.config.deterministic_mode:
+                qkv = self.act_fn(self.conv1d(qkv)[..., :seq_len])
+            else:
+                assert self.activation in ["silu", "swish"]
+                qkv = causal_conv1d_fn(
+                    x=qkv,
+                    weight=self.conv1d.weight.squeeze(1),  # d, 1, w -> d, w
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
+                )
+            qkv = qkv.transpose(1, 2)  # b, d, s -> b, s, d
         else:
-            assert self.activation in ["silu", "swish"]
-            qkv = causal_conv1d_fn(
-                x=qkv,
-                weight=self.conv1d.weight.squeeze(1),  # d, 1, w -> d, w
-                bias=self.conv1d.bias,
-                activation=self.activation,
-            )
+            qkv = self.act_fn(qkv)
         nvtx_range_pop(suffix="conv1d")
-        # Split qkv into query, key, and value
-        qkv = qkv.transpose(1, 2)  # b, d, s -> b, s, d
+        # Split qkv into query, key, and value (qkv is already b, s, d)
         query, key, value = torch.split(
             qkv,
             [self.qk_dim // self.tp_size, self.qk_dim // self.tp_size, self.v_dim // self.tp_size],
@@ -344,10 +357,7 @@ class GatedDeltaNet(MegatronModule):
         query = query.reshape(batch, seq_len, -1, self.key_head_dim)
         key = key.reshape(batch, seq_len, -1, self.key_head_dim)
         value = value.reshape(batch, seq_len, -1, self.value_head_dim)
-        # Apply L2 norm to query and key
-        if self.use_qk_l2norm:
-            query = l2norm(query.contiguous())
-            key = l2norm(key.contiguous())
+        # GVA head expansion (must happen before kernel call in both paths)
         if self.num_value_heads // self.num_key_heads > 1:
             query = query.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
             key = key.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
@@ -360,14 +370,28 @@ class GatedDeltaNet(MegatronModule):
         beta = beta.contiguous()
         alpha = alpha.contiguous()
 
-        # Calculate g and beta
         nvtx_range_push(suffix="g_and_beta")
-        g = -self.A_log.exp() * F.softplus(alpha.float() + self.dt_bias)  # In fp32
+        g = -self.A_log.float().exp() * F.softplus(alpha.float() + self.dt_bias)
         beta = beta.sigmoid()
         nvtx_range_pop(suffix="g_and_beta")
 
+        if not hasattr(self, '_gdn_kernel_logged'):
+            self._gdn_kernel_logged = True
+            mode = (
+                "Pure PyTorch fallback (deterministic)"
+                if self.config.deterministic_mode
+                else "FLA Triton (fwd+bwd, use_qk_l2norm_in_kernel=True)"
+            )
+            logger.warning(
+                f"[GDN layer {self.layer_number}] kernel={mode} | "
+                f"HAVE_FLA={HAVE_FLA} deterministic={self.config.deterministic_mode}"
+            )
+
         nvtx_range_push(suffix="gated_delta_rule")
         if self.config.deterministic_mode:
+            if self.use_qk_l2norm:
+                query = l2norm(query)
+                key = l2norm(key)
             core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
                 query,
                 key,
@@ -387,7 +411,7 @@ class GatedDeltaNet(MegatronModule):
                 beta=beta,
                 initial_state=None,
                 output_final_state=False,
-                use_qk_l2norm_in_kernel=False,
+                use_qk_l2norm_in_kernel=self.use_qk_l2norm,
             )
         nvtx_range_pop(suffix="gated_delta_rule")
 
@@ -442,7 +466,7 @@ class GatedDeltaNet(MegatronModule):
         # Submodules
         tp_group = tp_group if tp_group is not None else self.pg_collection.tp
         for name, module in self.named_children():
-            if name == "conv1d":
+            if name == "conv1d" and self.use_short_conv:
                 # Add TP sharding for Conv1d
                 module_sd = module.state_dict(prefix="", keep_vars=True)
                 tp_sharding_map = {f"weight": 0}
@@ -485,26 +509,27 @@ class GatedDeltaNet(MegatronModule):
             0,
         )
 
-        conv_layer_name_list = ["conv1d.weight"]
-        assert (
-            sharded_state_dict[f"{prefix}conv1d.weight"].data.size(0) == self.conv_dim_local_tp
-        ), (self.conv_dim_local_tp, sharded_state_dict[f"{prefix}conv1d.weight"])
-        if self.conv_bias:
-            conv_layer_name_list.append("conv1d.bias")
+        if self.use_short_conv:
+            conv_layer_name_list = ["conv1d.weight"]
             assert (
-                sharded_state_dict[f"{prefix}conv1d.bias"].data.size(0) == self.conv_dim_local_tp
-            ), (self.conv_dim_local_tp, sharded_state_dict[f"{prefix}conv1d.bias"])
-        for conv_layer_name in conv_layer_name_list:
-            sharded_state_dict[f"{prefix}{conv_layer_name}"] = _split_tensor_factory(
-                sharded_state_dict[f"{prefix}{conv_layer_name}"],
-                [
-                    self.qk_dim // self.tp_size,
-                    self.qk_dim // self.tp_size,
-                    self.v_dim // self.tp_size,
-                ],
-                ["query", "key", "value"],
-                0,
-            )
+                sharded_state_dict[f"{prefix}conv1d.weight"].data.size(0) == self.conv_dim_local_tp
+            ), (self.conv_dim_local_tp, sharded_state_dict[f"{prefix}conv1d.weight"])
+            if self.conv_bias:
+                conv_layer_name_list.append("conv1d.bias")
+                assert (
+                    sharded_state_dict[f"{prefix}conv1d.bias"].data.size(0) == self.conv_dim_local_tp
+                ), (self.conv_dim_local_tp, sharded_state_dict[f"{prefix}conv1d.bias"])
+            for conv_layer_name in conv_layer_name_list:
+                sharded_state_dict[f"{prefix}{conv_layer_name}"] = _split_tensor_factory(
+                    sharded_state_dict[f"{prefix}{conv_layer_name}"],
+                    [
+                        self.qk_dim // self.tp_size,
+                        self.qk_dim // self.tp_size,
+                        self.v_dim // self.tp_size,
+                    ],
+                    ["query", "key", "value"],
+                    0,
+                )
 
         return sharded_state_dict
 

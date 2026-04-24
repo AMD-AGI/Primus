@@ -17,6 +17,7 @@ from primus.modules.module_utils import log_rank_0
 
 _GDN_CONFIG_FIELDS = {
     "linear_conv_kernel_dim": None,
+    "use_short_conv": True,
     "linear_key_head_dim": None,
     "linear_value_head_dim": None,
     "linear_num_key_heads": None,
