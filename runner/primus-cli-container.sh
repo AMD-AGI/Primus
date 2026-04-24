@@ -218,10 +218,10 @@ if [[ "$DRY_RUN_MODE" == "false" ]]; then
 fi
 
 # Validate container runtime (docker/podman)
-if command -v docker >/dev/null 2>&1; then
-    export CONTAINER_RUNTIME="docker"
-elif command -v podman >/dev/null 2>&1; then
+if command -v podman >/dev/null 2>&1; then
     export CONTAINER_RUNTIME="podman"
+elif command -v docker >/dev/null 2>&1; then
+    export CONTAINER_RUNTIME="docker"
 else
     # Mock runtime for dry-run testing
     export CONTAINER_RUNTIME="docker"
