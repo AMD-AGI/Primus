@@ -27,6 +27,8 @@ export SLURM_NODELIST="mi355-gpu-7,mi355-gpu-8,mi355-gpu-12,mi355-gpu-26"
 export SLURM_RESERVATION="mi355-gpu-7_gpu-8_gpu-12_gpu-26_reservation"
 
 export EXP="examples/megatron/configs/MI355X/qwen3_30B_A3B-FP8-pretrain.yaml"
+export GBS=$((512 * NNODES))
+export PRIMUS_RECOMPUTE_LAYERS=0
 
 ./primus-cli slurm -N "$NNODES" \
   ${SLURM_TIME:+--time="${SLURM_TIME}"} \
@@ -39,4 +41,6 @@ export EXP="examples/megatron/configs/MI355X/qwen3_30B_A3B-FP8-pretrain.yaml"
   -- --image "${DOCKER_IMAGE}" --clean -- --numa \
   -- train pretrain --config "${EXP}" \
   --train_iters=10 \
+  --global_batch_size "$GBS" \
+  --recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS" \
   2>&1 | tee log.txt
