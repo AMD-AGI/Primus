@@ -35,8 +35,8 @@ def execute_overlapped_1f1b(f_layer, b_layer, f_input=None, b_grad=None, is_last
     to maximize parallelism and efficiency.
 
     When f_layer and b_layer are not None, forward and backward pass are overlapped as follows:
-    comm_stream: combine_bwd            | dispatch_fwd->dispatch_bwd  | combine_fwd
-    comp_stream: attn_fwd->post_attn_fwd| mlp_bwd->mlp_bwd_dw->mlp_fwd| post_attn_bwd->attn_bwd
+    comm_stream: combine_bwd | dispatch_fwd->dispatch_bwd  | combine_fwd
+    comp_stream: attn_fwd    | mlp_bwd->mlp_bwd_dw->mlp_fwd| attn_bwd
     For MTP, mtp_post_process_fwd is executed after the combine_fwd in the comp_stream,
     and mtp_post_process_bwd is executed before the combine_bwd in the comp_stream.
 
@@ -59,7 +59,6 @@ def execute_overlapped_1f1b(f_layer, b_layer, f_input=None, b_grad=None, is_last
     if f_layer is not None:
         with f_layer.get_fp8_context():
             f_input = f_layer.attn.forward(f_input)
-            f_input = f_layer.post_attn.forward(f_input)
 
     if b_layer is not None:
         b_grad = b_layer.mlp.backward(b_grad)
@@ -72,6 +71,9 @@ def execute_overlapped_1f1b(f_layer, b_layer, f_input=None, b_grad=None, is_last
         pop_weight_grad(num=1)
         b_grad = b_layer.moe_dispatch.backward(b_grad)
 
+    if b_layer is not None and b_layer.config.ep_overlap_early_attn_memory_release:
+        b_grad = b_layer.attn.backward(b_grad)
+
     if f_layer is not None:
         with f_layer.get_fp8_context():
             f_input = f_layer.mlp.forward(f_input)
@@ -81,8 +83,7 @@ def execute_overlapped_1f1b(f_layer, b_layer, f_input=None, b_grad=None, is_last
             f_input = f_layer.moe_combine.forward(f_input)
             f_input = f_layer.mtp_post_process.forward(f_input)
 
-    if b_layer is not None:
-        b_grad = b_layer.post_attn.backward(b_grad)
+    if b_layer is not None and not b_layer.config.ep_overlap_early_attn_memory_release:
         b_grad = b_layer.attn.backward(b_grad)
 
     # Delay the last attn_dw in backward pass (attn_dw of the first layer)
