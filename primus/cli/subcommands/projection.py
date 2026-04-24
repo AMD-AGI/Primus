@@ -64,9 +64,7 @@ def register_subcommand(subparsers):
     suite_parsers = parser.add_subparsers(dest="suite", required=True)
 
     # ---------- memory ----------
-    memory = suite_parsers.add_parser(
-        "memory", help="Memory projection only (per-GPU memory analysis)."
-    )
+    memory = suite_parsers.add_parser("memory", help="Memory projection only (per-GPU memory analysis).")
     from primus.core.launcher.parser import add_pretrain_parser
 
     add_pretrain_parser(memory)
