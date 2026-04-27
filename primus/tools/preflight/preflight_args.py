@@ -88,4 +88,21 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         action="store_false",
         help="Disable PDF report generation.",
     )
+
+    # Cluster Sphere (in-tree): RDMA env recommender + optional Verbs ib_write_bw
+    parser.add_argument(
+        "--cluster-sphere",
+        action="store_true",
+        help="Enable Cluster Sphere RDMA env recommendations (info report) and Verbs ib_write_bw (perf report).",
+    )
+    parser.add_argument(
+        "--cluster-sphere-env",
+        action="store_true",
+        help="Cluster Sphere only: NCCL/GLOO/rocSHMEM export hints from local RDMA devices (info report).",
+    )
+    parser.add_argument(
+        "--cluster-sphere-rdma-bw",
+        action="store_true",
+        help="Cluster Sphere only: run ib_write_bw between two ranks (requires WORLD_SIZE=2; perf report).",
+    )
     return parser

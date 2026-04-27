@@ -53,6 +53,15 @@ Selection:
 - `--network`: network info
 - `--perf-test`: run perf tests only (GEMM + comm). This is slower.
 
+Cluster Sphere (built into Primus under `primus/tools/preflight/cluster_sphere/`):
+- `--cluster-sphere`: enable **both** Cluster Sphere behaviors below when dependencies are present.
+- `--cluster-sphere-env`: add **RDMA env recommendations** (NCCL/GLOO/rocSHMEM export hints from local verbs devices) to the **info** report (`preflight_report*.md`).
+- `--cluster-sphere-rdma-bw`: append **Verbs `ib_write_bw`** results to the **perf** report (`*_perf.md`). Intended for **`WORLD_SIZE=2`** only (two processes, typically one per node). Requires [linux-rdma/perftest](https://github.com/linux-rdma/perftest) (`ib_write_bw` on `PATH`). Optional: set `PRIMUS_IB_WRITE_BW_PORT` (default `2000`).
+
+Optional override: set **`PRIMUS_CLUSTER_SPHERE_ROOT`** to a directory only if you need to point at a custom/fork copy of the integration (defaults to the in-tree package path).
+
+Preflight’s existing perf tests measure **PyTorch / NCCL-style** GPU communication and use sysfs link rate as a roofline; they are **not** a substitute for raw Verbs bandwidth. Cluster Sphere **`ib_write_bw`** validates the **host RDMA path** separately.
+
 Reporting:
 - `--dump-path`: output directory (default: `output/preflight`)
 - `--report-file-name`: base report name (default: `preflight_report`)
@@ -69,10 +78,11 @@ Backward compatibility:
 By default, outputs are written under `output/preflight`.
 
 Typical report files:
-- `preflight_report.md` / `preflight_report.pdf`: **info report** (host/GPU/network)
-- `preflight_report_perf.md` / `preflight_report_perf.pdf`: **perf report** (GEMM + comm tests)
+- `preflight_report.md` / `preflight_report.pdf`: **info report** (host/GPU/network, plus Cluster Sphere env section when enabled)
+- `preflight_report_perf.md` / `preflight_report_perf.pdf`: **perf report** (GEMM + comm tests, plus optional `ib_write_bw` section)
 
 ## Notes
 
 - For multi-node runs, use `primus-cli slurm …` (or your preferred launcher) so distributed environment variables are set correctly.
 - If you only want a quick environment snapshot, prefer `--host --gpu --network`.
+- `--perf-test` skips the info report; use `--cluster-sphere-env` without `--perf-test` if you only need RDMA export hints.

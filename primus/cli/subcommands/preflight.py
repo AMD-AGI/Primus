@@ -13,6 +13,7 @@ Usage:
     primus-cli preflight --gpu                        # GPU info only
     primus-cli preflight --network                    # Network info only
     primus-cli preflight --perf-test                  # Perf tests only (skip info)
+    primus-cli preflight --cluster-sphere             # Optional Cluster Sphere RDMA env + ib_write_bw
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ def register_subcommand(subparsers):
         primus-cli preflight --gpu                        # GPU info only
         primus-cli preflight --network                    # Network info only
         primus-cli preflight --perf-test                  # Perf only
+        primus-cli preflight --cluster-sphere             # Cluster Sphere env + ib_write_bw
     """
     from primus.tools.preflight.preflight_args import add_preflight_parser
 

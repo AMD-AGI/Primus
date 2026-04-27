@@ -13,6 +13,20 @@ primus-cli preflight \
   --report-file-name preflight_report
 ```
 
+### Cluster Sphere (optional)
+
+RDMA environment hints (NCCL/GLOO/rocSHMEM) from local InfiniBand/RoCE devices, plus optional Verbs `ib_write_bw` on two ranks:
+
+```bash
+# Info report: export hints only
+primus-cli preflight --cluster-sphere-env --dump-path output/preflight
+
+# Full preflight + Cluster Sphere env + ib_write_bw on the perf report (use WORLD_SIZE=2 for the Verbs test)
+primus-cli slurm srun -N 2 --ntasks-per-node=1 -- primus-cli preflight --cluster-sphere
+```
+
+Cluster Sphere logic ships inside Primus; set **`PRIMUS_CLUSTER_SPHERE_ROOT`** only if overriding that path. Install **perftest** for `ib_write_bw`.
+
 Slurm (multi-node example):
 
 ```bash
