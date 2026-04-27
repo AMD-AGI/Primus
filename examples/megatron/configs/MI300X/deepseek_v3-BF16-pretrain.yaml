@@ -53,6 +53,7 @@ modules:
       valid_data_path: null
       test_data_path: null
 
+      moe_use_legacy_grouped_gemm: true
 
       # Performance toggles
       multi_latent_attention: false

@@ -99,3 +99,5 @@ modules:
       # Cross entropy flags
       # cross_entropy_fusion_impl: "te"
       # cross_entropy_loss_fusion: true
+
+      moe_use_legacy_grouped_gemm: true

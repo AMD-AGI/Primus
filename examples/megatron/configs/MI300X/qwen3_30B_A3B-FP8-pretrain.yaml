@@ -92,3 +92,4 @@ modules:
 
       # enable fp8 training
       fp8: hybrid
+      moe_use_legacy_grouped_gemm: true
