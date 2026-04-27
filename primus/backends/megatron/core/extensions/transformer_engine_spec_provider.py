@@ -29,6 +29,13 @@ from megatron.core.transformer.moe.experts import (
 )
 from megatron.core.utils import get_te_version, is_te_min_version
 
+try:
+    from megatron.core.transformer.moe.experts import GroupedMLP
+except ImportError:
+    from primus.backends.megatron.core.transformer.moe.deprecated_2caa681a1.experts import (
+        DeprecatedGroupedMLP as GroupedMLP,
+    )
+
 from primus.backends.megatron.core.extensions.primus_turbo import (
     PrimusTurboAttention,
     PrimusTurboColumnParallelLinear,
@@ -93,31 +100,27 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             # Megatron callers only pass ``moe_use_grouped_gemm`` here, so when Primus
             # args do not expose the legacy switch we must match upstream TESpecProvider
             # and prefer TEGroupedMLP by default.
-            moe_use_legacy_grouped_gemm = getattr(self.cfg, "moe_use_legacy_grouped_gemm", False)
+            # let it raise an error if cfg does not have moe_use_legacy_grouped_gemm
+            moe_use_legacy_grouped_gemm = self.cfg.moe_use_legacy_grouped_gemm
 
         if (
             moe_use_grouped_gemm
             and TEColumnParallelGroupedLinear is not None
             and not moe_use_legacy_grouped_gemm
         ):
-            assert not self.cfg.use_turbo_grouped_mlp, "PrimusTurbo not support RowParallelGroupedLinear"
-
-            return TEGroupedMLP, TEGroupedMLPSubmodules(
+            _GroupedMLP = PrimusTurboGroupedMLP if self.cfg.use_turbo_grouped_mlp else TEGroupedMLP
+            # TODO: need to update primus_turbo to support TEColumnParallelGroupedLinear?
+            return _GroupedMLP, TEGroupedMLPSubmodules(
                 linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
             )
-        elif (
-            moe_use_grouped_gemm
-            and moe_use_legacy_grouped_gemm
-            and self.cfg.use_turbo_grouped_mlp
-            and TEColumnParallelGroupedLinear is not None
-        ):
-            # ``deprecate GroupedMLP`` removed the old legacy class, but DeepEP
-            # sync-free stage 2/3 still needs the turbo grouped-gemm contract.
-            # Keep a local compatibility implementation until the dispatcher path
-            # is fully migrated off the legacy grouped-gemm semantics.
-            return PrimusTurboGroupedMLP, TEGroupedMLPSubmodules(
-                linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
+        elif moe_use_grouped_gemm:
+            warnings.warn(
+                "The legacy GroupedMLP will be deprecated in Megatron-Core v0.12.0. "
+                "Please update the TransformerEngine to version>=1.7.0 and use TEGroupedMLP."
             )
+            if self.cfg.use_turbo_grouped_mlp:
+                raise NotImplementedError("PrimusTurbo does not support Legacy GroupedMLP")
+            return GroupedMLP, None
         else:
             if not is_te_min_version("1.7.0.dev0"):
                 warnings.warn(
