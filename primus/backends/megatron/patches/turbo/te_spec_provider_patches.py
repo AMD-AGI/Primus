@@ -17,20 +17,50 @@ from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
 
 
+def _primus_turbo_deep_importable() -> bool:
+    """Deep-probe the primus_turbo import chain that the patch body actually uses.
+
+    A shallow ``importlib.util.find_spec("primus_turbo")`` returns a valid spec
+    even when the package's transitive dependencies (e.g. a broken ``aiter`` /
+    ``csrc`` install in the runtime image) cause the real import to crash. In
+    that case the patch would be selected for application and then fail at
+    module-load time, leaving the model in an inconsistent half-patched state
+    that can produce silent NaNs during FP8 training.
+
+    By probing the exact symbols the patch body imports, we either confirm the
+    full chain works or skip the patch cleanly so callers fall back to the
+    stock TE provider.
+    """
+    try:
+        from primus.backends.megatron.core.extensions.primus_turbo import (  # noqa: F401  pylint: disable=W0611
+            PrimusTurboAttention,
+            PrimusTurboColumnParallelLinear,
+        )
+
+        return True
+    except (ImportError, ModuleNotFoundError):
+        return False
+
+
 def _is_primus_turbo_enabled(ctx: PatchContext) -> bool:
     """
     Check if PrimusTurbo is enabled and can be used.
 
     Requires:
-      - primus_turbo package is installed
+      - primus_turbo package is installed AND its deep import chain works
       - tensor_model_parallel_size == 1
       - enable_primus_turbo == True
       - If use_turbo_grouped_mlp is enabled with moe_grouped_gemm,
         must use legacy grouped gemm (moe_use_legacy_grouped_gemm=True)
     """
-    # Check if primus_turbo package is available
-    if importlib.util.find_spec("primus_turbo") is None:
-        log_rank_0("[Patch:megatron.turbo.te_spec_provider] primus_turbo not found, use TE backend...")
+    # Check if primus_turbo package is available *and* its deep import chain works.
+    # A shallow find_spec is not enough: if a transitive dep (e.g. aiter/csrc) is
+    # broken in the runtime image, the patch body will crash at import time and
+    # leave the model half-patched, which can produce silent NaNs in FP8 training.
+    if importlib.util.find_spec("primus_turbo") is None or not _primus_turbo_deep_importable():
+        log_rank_0(
+            "[Patch:megatron.turbo.te_spec_provider] primus_turbo not importable, use TE backend..."
+        )
         return False
 
     args = get_args(ctx)
