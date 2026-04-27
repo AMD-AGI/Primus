@@ -23,11 +23,14 @@ from megatron.core.tensor_parallel.layers import (
 )
 from megatron.core.tensor_parallel.utils import divide
 from megatron.core.transformer.module import MegatronModule
-from megatron.core.transformer.moe import grouped_gemm_util as gg
 from megatron.core.transformer.moe.moe_utils import ProcessGroupCollection
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_object_for_checkpoint
 from torch.nn.parameter import Parameter
+
+from primus.backends.megatron.core.transformer.moe.deprecated_2caa681a1 import (
+    grouped_gemm_util as gg,
+)
 
 logger = logging.getLogger(__name__)
 
