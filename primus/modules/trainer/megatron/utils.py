@@ -284,32 +284,6 @@ def set_manual_pipeline_split_patch(args):
     megatron.core.models.gpt.gpt_layer_specs.get_transformer_layer_offset = get_transformer_layer_offset_patch
 
 
-def pp_warmup(args, config, model, optimizer):
-    for model_chunk in model:
-        with model_chunk.no_sync():
-            if model_chunk.use_forward_hook:
-                model_chunk.disable_forward_pre_hook()
-            dtype = torch.float32
-            if config.bf16:
-                dtype = torch.bfloat16
-            elif config.fp16:
-                dtype = torch.float16
-            seq_len = args.seq_length // args.tensor_model_parallel_size // args.context_parallel_size
-
-            for layer in model_chunk.module.module.decoder.layers:
-                dummy_input = torch.randn(seq_len, 1, config.hidden_size, device="cuda", dtype=dtype)
-                attention_mask = (
-                    torch.tril(torch.ones((seq_len, seq_len), device="cuda")).unsqueeze(0).unsqueeze(0) == 0
-                )
-                dummy_output, _ = layer.forward(hidden_states=dummy_input, attention_mask=attention_mask)
-                dummy_output.backward(torch.ones_like(dummy_output))
-
-            if model_chunk.use_forward_hook:
-                model_chunk.enable_forward_pre_hook()
-            optimizer.zero_grad()
-    torch.cuda.empty_cache()
-
-
 def schedule_wrapper(func):
     def wrapper(*args, **kwargs):
         global _GLOBAL_PP_VIS_EVENTS_PER_ITER
