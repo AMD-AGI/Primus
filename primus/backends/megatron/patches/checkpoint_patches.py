@@ -95,7 +95,9 @@ def patch_save_checkpoint(ctx: PatchContext):
     ):
         args = ctx.extra.get("backend_args", {})
 
-        if args.disable_last_saving and iteration == args.train_iters:
+        _dls = args.disable_last_saving if hasattr(args, "disable_last_saving") else (isinstance(args, dict) and args.get("disable_last_saving", False))
+        _ti = args.train_iters if hasattr(args, "train_iters") else (isinstance(args, dict) and args.get("train_iters", -1))
+        if _dls and iteration == _ti:
             log_rank_0(
                 f"[Patch:megatron.checkpoint.save_checkpoint] Skip saving at the last iteration: {iteration}"
             )

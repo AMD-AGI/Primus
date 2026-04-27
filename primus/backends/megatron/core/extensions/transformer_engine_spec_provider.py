@@ -128,7 +128,15 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
                 "The legacy GroupedMLP will be deprecated in Megatron-Core v0.12.0. "
                 "Please update the TransformerEngine to version>=1.7.0 and use TEGroupedMLP."
             )
-            return PrimusTurboGroupedMLP if self.cfg.use_turbo_grouped_mlp else GroupedMLP, None
+            # Primus yaml env-var substitution returns the raw string ``"true"`` /
+            # ``"false"`` (both truthy under plain ``bool(...)``), so coerce
+            # common string forms explicitly here. Mirror the same handling used
+            # in ``column_parallel_layer_norm_linear`` for ``use_turbo_rms_norm``.
+            _flag = getattr(self.cfg, "use_turbo_grouped_mlp", False)
+            use_turbo = _flag is True or (
+                isinstance(_flag, str) and _flag.strip().lower() in ("true", "1", "yes", "on")
+            )
+            return (PrimusTurboGroupedMLP if use_turbo else GroupedMLP), None
         else:
             if not is_te_min_version("1.7.0.dev0"):
                 warnings.warn(
