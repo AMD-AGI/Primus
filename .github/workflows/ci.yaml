@@ -335,9 +335,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: AMD-AIG-AIMA/Primus-Turbo
-          submodules: "recursive"
           path: Primus-Turbo
           ref: ${{ env.PRIMUS_TURBO_COMMIT }}
+      - name: Init Primus-Turbo submodules (full depth)
+        working-directory: Primus-Turbo
+        run: git submodule update --init --recursive
       - run: echo "Begin Primus-Turbo Install."
       - name: Install Primus-Turbo
         run: |
