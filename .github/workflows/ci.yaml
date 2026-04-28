@@ -337,9 +337,12 @@ jobs:
           repository: AMD-AIG-AIMA/Primus-Turbo
           path: Primus-Turbo
           ref: ${{ env.PRIMUS_TURBO_COMMIT }}
-      - name: Init Primus-Turbo submodules (full depth)
+      - name: Init Primus-Turbo submodules (full clone)
         working-directory: Primus-Turbo
-        run: git submodule update --init --recursive
+        run: |
+          rm -rf 3rdparty/composable_kernel .git/modules/3rdparty/composable_kernel
+          git submodule sync --recursive
+          git submodule update --init --recursive
       - run: echo "Begin Primus-Turbo Install."
       - name: Install Primus-Turbo
         run: |
