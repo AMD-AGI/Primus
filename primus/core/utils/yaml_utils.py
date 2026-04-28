@@ -8,8 +8,6 @@ import json
 from types import SimpleNamespace
 from typing import Any, Mapping
 
-import yaml
-
 from primus.core.config.merge_utils import deep_merge
 from primus.core.config.yaml_loader import parse_yaml as _parse_yaml_core
 
@@ -140,6 +138,7 @@ def dump_namespace_to_yaml(ns: SimpleNamespace, file_path: str):
         >>> ns = SimpleNamespace(a=1, b=SimpleNamespace(c=2))
         >>> dump_namespace_to_yaml(ns, "config.yaml")
     """
+    import yaml
 
     def ns_to_dict(obj):
         if isinstance(obj, SimpleNamespace):
