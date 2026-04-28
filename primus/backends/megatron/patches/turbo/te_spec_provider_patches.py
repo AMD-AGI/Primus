@@ -58,9 +58,7 @@ def _is_primus_turbo_enabled(ctx: PatchContext) -> bool:
     # broken in the runtime image, the patch body will crash at import time and
     # leave the model half-patched, which can produce silent NaNs in FP8 training.
     if importlib.util.find_spec("primus_turbo") is None or not _primus_turbo_deep_importable():
-        log_rank_0(
-            "[Patch:megatron.turbo.te_spec_provider] primus_turbo not importable, use TE backend..."
-        )
+        log_rank_0("[Patch:megatron.turbo.te_spec_provider] primus_turbo not importable, use TE backend...")
         return False
 
     args = get_args(ctx)
