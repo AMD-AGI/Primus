@@ -32,7 +32,7 @@ Global Options:
     --config <FILE>             Load configuration from specified YAML file
     --debug                     Enable debug mode (verbose logging)
     --dry-run                   Show what would be executed without running
-    --clean                     Remove all containers before launch
+    --clean                     Force-remove containers named primus-training before launch
     --help, -h                  Show this message and exit
 
 Docker/Podman Options:
@@ -218,10 +218,10 @@ if [[ "$DRY_RUN_MODE" == "false" ]]; then
 fi
 
 # Validate container runtime (docker/podman)
-if command -v docker >/dev/null 2>&1; then
-    export CONTAINER_RUNTIME="docker"
-elif command -v podman >/dev/null 2>&1; then
+if command -v podman >/dev/null 2>&1; then
     export CONTAINER_RUNTIME="podman"
+elif command -v docker >/dev/null 2>&1; then
+    export CONTAINER_RUNTIME="docker"
 else
     # Mock runtime for dry-run testing
     export CONTAINER_RUNTIME="docker"
@@ -449,13 +449,14 @@ done
 ###############################################################################
 
 if [[ "$CLEAN_DOCKER_CONTAINER" == "true" ]]; then
-    LOG_INFO_RANK0 "[container] Cleaning up existing containers..."
-    CONTAINERS="$($CONTAINER_RUNTIME ps -aq)"
+    LOG_INFO_RANK0 "[container] Removing existing containers named primus-training..."
+    # Anchored name filter: exact match only (avoids e.g. primus-training-extra).
+    CONTAINERS="$($CONTAINER_RUNTIME ps -aq --filter 'name=^primus-training$')"
     if [[ -n "$CONTAINERS" ]]; then
         printf '%s\n' "$CONTAINERS" | xargs -r -n1 "$CONTAINER_RUNTIME" rm -f
         LOG_INFO_RANK0 "[container] Removed containers: $CONTAINERS"
     else
-        LOG_INFO_RANK0 "[container] No containers to remove."
+        LOG_INFO_RANK0 "[container] No containers named primus-training to remove."
     fi
 fi
 
