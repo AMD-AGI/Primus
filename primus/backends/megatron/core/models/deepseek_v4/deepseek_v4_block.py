@@ -4,73 +4,453 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""DeepSeek-V4 transformer block (Phase 3 scaffolding).
-
-This is a transparent subclass of
-:class:`megatron.core.transformer.transformer_block.TransformerBlock`. In
-Phase 3 it just stashes the V4-specific config fields onto ``self`` so the
-Phase-4 patches that swap in :class:`HyperConnection` /
-:class:`HyperConnectionHead` can read them without re-walking ``config``.
-
-Phase 4 will:
-
-* Wrap each ``self.layers[i]`` with a per-layer :class:`HyperConnection`
-  (``hc_mult`` parallel hidden streams; per-layer
-  :func:`sinkhorn_normalize`).
-* Insert a final :class:`HyperConnectionHead` that collapses the K streams
-  back to one hidden state before the LM head.
-* Dispatch attention by ``compress_ratios[layer_id]`` (Dense / HCA / CSA).
-
-Phase 4 will also rewrite this class to be a standalone :class:`torch.nn.Module`
-(no longer inheriting from ``TransformerBlock``) so the multi-stream HC
-loop can be expressed cleanly. Phase 3 keeps the subclass form so the
-end-to-end dispatch path stays runnable.
 """
+DeepSeek-V4 transformer block (multi-stream HC + per-layer attention dispatch).
+
+Reference:
+* techblog §1 ("Hybrid Attention") — per-layer attention selected by
+  ``compress_ratios[layer_id]``.
+* techblog §2 ("mHC: Manifold-Constrained Hyper-Connections") — ``hc_mult``
+  parallel hidden streams, mixed via per-layer ``HyperMixer`` and final
+  ``HyperHead`` collapse.
+
+Phase 4 contract:
+* This is a **standalone** ``nn.Module``. It does not inherit from
+  ``megatron.core.transformer.transformer_block.TransformerBlock``; instead
+  it exposes the same call signature so :class:`DeepseekV4Model` can
+  ``self.decoder = DeepseekV4TransformerBlock(...)`` and Megatron's
+  ``GPTModel.forward`` keeps working.
+* PP / recompute / sequence-parallel etc. are **not** wired up here; that
+  is Phase 6's job (deferred). For Phase 4 the block always runs the full
+  ``num_layers`` on the local rank.
+* The FFN sub-block is a vanilla SwiGLU MLP. The V4 MoE / hash-routed
+  experts / clamped SwiGLU swap in during Phase 5.
+
+Forward shape contract:
+* Input ``hidden_states`` is ``[S, B, D]`` (Megatron's sequence-first
+  convention). The block transposes to ``[B, S, D]`` internally, runs the
+  K-stream HC loop, and transposes back before return.
+* Output is ``[S, B, D]`` of the same dtype/device.
+"""
+
+from __future__ import annotations
 
 from typing import List, Optional, Sequence
 
-from megatron.core.transformer.transformer_block import TransformerBlock
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from primus.backends.megatron.core.transformer.csa_attention import CSAAttention
+from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
+    DeepseekV4Attention,
+)
+from primus.backends.megatron.core.transformer.dual_rope import DualRoPE
+from primus.backends.megatron.core.transformer.hca_attention import HCAAttention
+from primus.backends.megatron.core.transformer.hyper_connection import (
+    HyperHead,
+    HyperMixer,
+)
+
+# ---------------------------------------------------------------------------
+# Pieces used by every layer
+# ---------------------------------------------------------------------------
 
 
-class DeepseekV4TransformerBlock(TransformerBlock):
-    """V4 decoder block.
+class _RMSNorm(nn.Module):
+    """Standalone RMSNorm so the block has no hard dep on TE."""
 
-    Phase 3 surface: identical to ``TransformerBlock`` except that V4 config
-    fields are unpacked into attributes on ``self``. Phase 4 will override
-    ``forward`` and ``__init__`` to add the K-stream HC machinery and
-    per-layer attention dispatch.
+    def __init__(self, dim: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        in_dtype = x.dtype
+        x32 = x.float()
+        rsqrt = torch.rsqrt(x32.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        return (x32 * rsqrt).to(in_dtype) * self.weight
+
+
+class _SwiGLUMLP(nn.Module):
+    """Phase-4 placeholder FFN sub-block.
+
+    Phase 5 will replace this with the V4 MoE (sqrtsoftplus router /
+    hash-routed first ``num_hash_layers`` / clamped SwiGLU). For now we use
+    a standard SwiGLU MLP so the block has a working FFN.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
+    def __init__(self, hidden_size: int, ffn_hidden_size: int) -> None:
+        super().__init__()
+        self.w_gate = nn.Linear(hidden_size, ffn_hidden_size, bias=False)
+        self.w_up = nn.Linear(hidden_size, ffn_hidden_size, bias=False)
+        self.w_down = nn.Linear(ffn_hidden_size, hidden_size, bias=False)
 
-        config = self.config
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w_down(F.silu(self.w_gate(x)) * self.w_up(x))
 
-        # ---- mHC / HC fields (Phase 4) -----------------------------------
-        self.hc_mult: int = int(getattr(config, "hc_mult", 1) or 1)
-        self.hc_eps: float = float(getattr(config, "hc_eps", 1.0e-6) or 1.0e-6)
-        self.hc_sinkhorn_iters: int = int(getattr(config, "hc_sinkhorn_iters", 20) or 20)
 
-        # ---- per-layer attention dispatch (Phase 4) ----------------------
+# ---------------------------------------------------------------------------
+# Per-layer attention factory
+# ---------------------------------------------------------------------------
+
+
+def _build_attention(
+    *,
+    compress_ratio: int,
+    hidden_size: int,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rotary_dim: int,
+    rope: DualRoPE,
+    attn_sliding_window: int,
+    attn_sink_enabled: bool,
+    q_lora_rank: Optional[int],
+    index_topk: int,
+    index_head_dim: int,
+    index_n_heads: int,
+) -> DeepseekV4Attention:
+    """Pick the right attention class for ``compress_ratio``.
+
+    * ``0``   → :class:`DeepseekV4Attention` (dense + SWA + sink)
+    * ``128`` (or any value with the HCA convention) → :class:`HCAAttention`
+    * ``4``   → :class:`CSAAttention` (overlap compressor + Indexer)
+
+    The CSA / HCA distinction is determined by the ratio itself: by V4
+    convention ratio ``4`` means CSA (sparse with Indexer) and any larger
+    ratio (e.g. ``128``) means HCA (full compressed pool, no Indexer).
+    """
+    common = dict(
+        hidden_size=hidden_size,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        rotary_dim=rotary_dim,
+        rope=rope,
+        attn_sliding_window=attn_sliding_window,
+        attn_sink_enabled=attn_sink_enabled,
+        q_lora_rank=q_lora_rank,
+    )
+
+    if compress_ratio == 0:
+        return DeepseekV4Attention(compress_ratio=0, **common)
+    if compress_ratio == 4:
+        return CSAAttention(
+            compress_ratio=compress_ratio,
+            index_topk=index_topk,
+            index_head_dim=index_head_dim,
+            index_n_heads=index_n_heads,
+            compressor_overlap=True,
+            **common,
+        )
+    return HCAAttention(
+        compress_ratio=compress_ratio,
+        compressor_overlap=False,
+        **common,
+    )
+
+
+# ---------------------------------------------------------------------------
+# A single V4 block layer (attention sub-block + FFN sub-block, both wrapped
+# by HyperMixer for the K-stream residual)
+# ---------------------------------------------------------------------------
+
+
+class DeepseekV4HybridLayer(nn.Module):
+    """One layer of the V4 decoder.
+
+    Holds:
+      * pre-attention RMSNorm
+      * attention sub-block (Dense / HCA / CSA, picked from ``compress_ratio``)
+      * pre-FFN RMSNorm
+      * FFN sub-block (Phase-4 placeholder SwiGLU; Phase-5 swaps in MoE)
+      * Two :class:`HyperMixer` instances (one per sub-block) when ``hc_mult > 1``
+    """
+
+    def __init__(
+        self,
+        *,
+        compress_ratio: int,
+        hidden_size: int,
+        ffn_hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        head_dim: int,
+        rotary_dim: int,
+        rope: DualRoPE,
+        attn_sliding_window: int,
+        attn_sink_enabled: bool,
+        q_lora_rank: Optional[int],
+        index_topk: int,
+        index_head_dim: int,
+        index_n_heads: int,
+        hc_mult: int,
+        hc_eps: float = 1e-6,
+        hc_sinkhorn_iters: int = 20,
+        norm_eps: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        self.compress_ratio = int(compress_ratio)
+        self.hc_mult = int(hc_mult)
+
+        self.attn_norm = _RMSNorm(hidden_size, eps=norm_eps)
+        self.attn = _build_attention(
+            compress_ratio=compress_ratio,
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            rotary_dim=rotary_dim,
+            rope=rope,
+            attn_sliding_window=attn_sliding_window,
+            attn_sink_enabled=attn_sink_enabled,
+            q_lora_rank=q_lora_rank,
+            index_topk=index_topk,
+            index_head_dim=index_head_dim,
+            index_n_heads=index_n_heads,
+        )
+
+        self.ffn_norm = _RMSNorm(hidden_size, eps=norm_eps)
+        self.ffn = _SwiGLUMLP(hidden_size=hidden_size, ffn_hidden_size=ffn_hidden_size)
+
+        if hc_mult > 1:
+            self.attn_hc = HyperMixer(
+                hidden_size=hidden_size,
+                hc_mult=hc_mult,
+                eps=hc_eps,
+                sinkhorn_iters=hc_sinkhorn_iters,
+            )
+            self.ffn_hc = HyperMixer(
+                hidden_size=hidden_size,
+                hc_mult=hc_mult,
+                eps=hc_eps,
+                sinkhorn_iters=hc_sinkhorn_iters,
+            )
+        else:
+            self.attn_hc = None
+            self.ffn_hc = None
+
+    # ------------------------------------------------------------------
+
+    def _hc_apply(self, mixer: Optional[HyperMixer], x: torch.Tensor, sub_block, *args):
+        """Run a sub-block under HC.
+
+        ``x`` shape: ``[B, S, K, D]`` if ``hc_mult > 1``, else ``[B, S, D]``.
+        ``sub_block`` is ``Callable[[Tensor, *Any], Tensor]`` whose first
+        positional arg is the (collapsed) hidden in ``[B, S, D]``.
+        """
+        if mixer is None:
+            # Single-stream: classic residual; x already has shape [B, S, D].
+            out = sub_block(x, *args)
+            return x + out
+
+        pre, post, comb = mixer.compute_weights(x)  # [..., K], [..., K], [..., K, K]
+        collapsed = HyperMixer.collapse(x, pre)  # [B, S, D]
+        out = sub_block(collapsed, *args)  # sub-block first positional = collapsed
+        return HyperMixer.expand(x, out, post, comb)  # [B, S, K, D]
+
+    # ------------------------------------------------------------------
+
+    def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        """Run one V4 layer.
+
+        ``x``: ``[B, S, K, D]`` (multi-stream) or ``[B, S, D]`` (single).
+        ``position_ids``: ``[B, S]`` or ``[S]``.
+        """
+
+        # Attention sub-block. The collapse passes a [B, S, D] hidden, then
+        # the attention runs and returns [B, S, D]; HC expand writes back.
+        def _attn_sub(collapsed: torch.Tensor) -> torch.Tensor:
+            return self.attn(self.attn_norm(collapsed), position_ids)
+
+        x = self._hc_apply(self.attn_hc, x, _attn_sub)
+
+        # FFN sub-block.
+        def _ffn_sub(collapsed: torch.Tensor) -> torch.Tensor:
+            return self.ffn(self.ffn_norm(collapsed))
+
+        x = self._hc_apply(self.ffn_hc, x, _ffn_sub)
+        return x
+
+
+# ---------------------------------------------------------------------------
+# Top-level V4 transformer block
+# ---------------------------------------------------------------------------
+
+
+class DeepseekV4TransformerBlock(nn.Module):
+    """Multi-stream HC decoder for DeepSeek-V4.
+
+    Replaces Megatron's ``TransformerBlock`` for V4. The ``__init__``
+    signature accepts a TransformerConfig-like object so it can be
+    constructed exactly the way ``GPTModel.__init__`` constructs the
+    standard block. Most fields are read off ``config`` with ``getattr``
+    fallbacks (so this works whether the V4 fields land via Primus's
+    ``merge_namespace`` mechanism or are set explicitly).
+
+    In Phase 4 the block always runs the full ``num_layers`` on the local
+    rank — no PP slicing yet (P6 deferred).
+    """
+
+    def __init__(
+        self,
+        config,
+        spec=None,
+        post_layer_norm: bool = True,
+        pre_process: bool = True,
+        post_process: bool = True,
+        pg_collection=None,
+        vp_stage=None,
+    ) -> None:
+        super().__init__()
+        # Save arguments matching the parent's interface for compatibility.
+        self.config = config
+        self.spec = spec
+        self.post_layer_norm = post_layer_norm
+        self.pre_process = pre_process
+        self.post_process = post_process
+
+        # ---- shape / model fields ----
+        hidden_size = config.hidden_size
+        ffn_hidden_size = getattr(config, "ffn_hidden_size", None) or 4 * hidden_size
+        num_heads = config.num_attention_heads
+        num_kv_heads = getattr(config, "num_query_groups", None) or num_heads
+        head_dim = getattr(config, "kv_channels", None) or hidden_size // num_heads
+        rotary_dim = getattr(config, "qk_pos_emb_head_dim", 64)
+        num_layers = config.num_layers
+        norm_eps = getattr(config, "norm_epsilon", 1.0e-6)
+
+        # ---- V4-specific fields ----
+        hc_mult = getattr(config, "hc_mult", 1) or 1
+        hc_eps = getattr(config, "hc_eps", 1.0e-6) or 1.0e-6
+        hc_sinkhorn_iters = getattr(config, "hc_sinkhorn_iters", 20) or 20
         compress_ratios: Optional[Sequence[int]] = getattr(config, "compress_ratios", None)
         if compress_ratios is None:
-            compress_ratios = [0] * config.num_layers
+            compress_ratios = [0] * num_layers
         compress_ratios = list(compress_ratios)
-        if len(compress_ratios) != config.num_layers:
-            raise ValueError(
-                "compress_ratios length " f"{len(compress_ratios)} != num_layers {config.num_layers}"
-            )
+        if len(compress_ratios) != num_layers:
+            raise ValueError(f"compress_ratios length {len(compress_ratios)} != num_layers {num_layers}")
         self.compress_ratios: List[int] = compress_ratios
 
-        # ---- attention shared knobs (Phase 4) ----------------------------
-        self.attn_sliding_window: int = int(getattr(config, "attn_sliding_window", 0) or 0)
-        self.attn_sink_enabled: bool = bool(getattr(config, "attn_sink", False))
-        self.q_lora_rank: Optional[int] = getattr(config, "q_lora_rank", None) or None
+        attn_sliding_window = getattr(config, "attn_sliding_window", 128) or 0
+        attn_sink_enabled = bool(getattr(config, "attn_sink", False))
+        q_lora_rank = getattr(config, "q_lora_rank", None) or None
+        index_topk = getattr(config, "index_topk", 512) or 512
+        index_head_dim = getattr(config, "index_head_dim", 128) or 128
+        index_n_heads = getattr(config, "index_n_heads", 64) or 64
 
-        # ---- Indexer (CSA, Phase 4) --------------------------------------
-        self.index_topk: int = int(getattr(config, "index_topk", 512) or 512)
-        self.index_head_dim: int = int(getattr(config, "index_head_dim", 128) or 128)
-        self.index_n_heads: int = int(getattr(config, "index_n_heads", 64) or 64)
+        rope_theta = getattr(config, "rotary_base", 10000.0)
+        compress_rope_theta = getattr(config, "compress_rope_theta", 160000.0)
+        yarn_factor = getattr(config, "rotary_scaling_factor", 1.0) or 1.0
+        original_max_pos = getattr(config, "original_max_position_embeddings", 0) or 0
+
+        # ---- shared dual-RoPE for the whole stack ----
+        self.rope = DualRoPE(
+            rotary_dim=rotary_dim,
+            rope_theta=rope_theta,
+            compress_rope_theta=compress_rope_theta,
+            yarn_factor=yarn_factor,
+            yarn_beta_fast=32.0,
+            yarn_beta_slow=1.0,
+            original_max_position_embeddings=original_max_pos,
+        )
+
+        # ---- layers ----
+        self.layers = nn.ModuleList()
+        for i, ratio in enumerate(compress_ratios):
+            layer = DeepseekV4HybridLayer(
+                compress_ratio=int(ratio),
+                hidden_size=hidden_size,
+                ffn_hidden_size=ffn_hidden_size,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                rotary_dim=rotary_dim,
+                rope=self.rope,
+                attn_sliding_window=attn_sliding_window,
+                attn_sink_enabled=attn_sink_enabled,
+                q_lora_rank=q_lora_rank,
+                index_topk=index_topk,
+                index_head_dim=index_head_dim,
+                index_n_heads=index_n_heads,
+                hc_mult=hc_mult,
+                hc_eps=hc_eps,
+                hc_sinkhorn_iters=hc_sinkhorn_iters,
+                norm_eps=norm_eps,
+            )
+            self.layers.append(layer)
+        self.hc_mult = hc_mult
+
+        # Final HC collapse (only if multi-stream).
+        if hc_mult > 1:
+            self.hyper_head = HyperHead(hidden_size=hidden_size, hc_mult=hc_mult, eps=hc_eps)
+        else:
+            self.hyper_head = None
+
+        # Final RMSNorm if post_layer_norm.
+        if post_layer_norm:
+            self.final_layernorm = _RMSNorm(hidden_size, eps=norm_eps)
+        else:
+            self.final_layernorm = None
+
+    # ------------------------------------------------------------------
+
+    @property
+    def num_layers_per_pipeline_rank(self) -> int:
+        """Compatibility shim for upstream debug printing — we run all layers
+        on every rank since PP isn't wired up yet."""
+        return len(self.layers)
+
+    # ------------------------------------------------------------------
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        inference_context=None,
+        rotary_pos_emb=None,
+        rotary_pos_cos=None,
+        rotary_pos_sin=None,
+        rotary_pos_cos_sin=None,
+        packed_seq_params=None,
+        sequence_len_offset=None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Run the V4 decoder.
+
+        Megatron passes ``hidden_states`` as ``[S, B, D]`` (sequence-first).
+        We transpose to ``[B, S, D]`` for HC math and back for the return.
+        ``attention_mask`` and the various ``rotary_pos_*`` kwargs are
+        ignored — V4 manages its own dual-RoPE and SWA mask internally.
+        """
+        # [S, B, D] -> [B, S, D]
+        x = hidden_states.transpose(0, 1).contiguous()
+        B, S, D = x.shape
+
+        # Position ids (one per token).
+        position_ids = torch.arange(S, device=x.device)
+
+        # Expand to K streams.
+        if self.hc_mult > 1:
+            x = x.unsqueeze(2).expand(B, S, self.hc_mult, D).contiguous()
+
+        # Run the layers.
+        for layer in self.layers:
+            x = layer(x, position_ids)
+
+        # Final HC collapse.
+        if self.hc_mult > 1 and self.hyper_head is not None:
+            x = self.hyper_head(x)  # [B, S, D]
+
+        if self.final_layernorm is not None:
+            x = self.final_layernorm(x)
+
+        # Back to [S, B, D] for downstream Megatron code.
+        return x.transpose(0, 1).contiguous()
 
 
-__all__ = ["DeepseekV4TransformerBlock"]
+__all__ = [
+    "DeepseekV4HybridLayer",
+    "DeepseekV4TransformerBlock",
+]

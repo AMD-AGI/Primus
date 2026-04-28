@@ -4,28 +4,35 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""DeepSeek-V4 layer specs (Phase 3 scaffolding).
+"""
+DeepSeek-V4 layer specs (Phase 4 wrapper).
 
-The four ``get_deepseek_v4_*`` helpers mirror the upstream GPT helpers
-(``get_gpt_layer_local_spec`` / ``get_gpt_decoder_block_spec`` / ...). They
-delegate to the GPT helpers verbatim in Phase 3, then call two **resolution
-hooks** that Phase 4 (attention) and Phase 5 (MoE / SwiGLU) can override
-without touching the call sites.
+Why this file still exists, given that Phase 4's :class:`DeepseekV4TransformerBlock`
+is standalone and **bypasses Megatron's ``ModuleSpec`` mechanism**:
 
-Hook contract:
+* :class:`DeepseekV4Model` inherits from ``megatron.core.models.gpt.GPTModel``.
+  ``GPTModel.__init__`` unconditionally constructs a stock ``TransformerBlock``
+  from the ``transformer_layer_spec`` argument as ``self.decoder``. The V4
+  model class then swaps that out for ``DeepseekV4TransformerBlock`` after
+  ``super().__init__`` finishes (see ``deepseek_v4_model.py``).
 
-* :func:`_resolve_attention_module_spec(config, base_spec, ...)`
-  Phase 4 will return a V4-specific attention ``ModuleSpec`` (Dense / HCA /
-  CSA + SWA + sink + dual-RoPE) here. Phase 3 returns ``None`` -> caller
-  keeps the GPT spec.
+* That intermediate ``TransformerBlock`` still has to be constructable, so we
+  must hand it a *valid* layer spec. Phase 4 keeps the shape of that spec
+  identical to a vanilla GPT layer spec — the V4-specific behavior lives
+  entirely in :class:`DeepseekV4TransformerBlock`.
 
-* :func:`_resolve_mlp_module_spec(config, base_spec, ...)`
-  Phase 5 will return a V4-specific MLP ``ModuleSpec`` (sqrtsoftplus router
-  + hash routing + clamped SwiGLU) here. Phase 3 returns ``None``.
+Phase 6 (deferred) will refactor :class:`DeepseekV4Model` to skip the
+intermediate ``TransformerBlock`` allocation entirely; at that point this
+file can collapse to a no-op stub or be deleted.
 
-Phase 4 / 5 implement these hooks by patching this module (or by switching
-the ``Spec.submodules`` dataclass fields to V4 module classes); the V4
-builder doesn't need to change.
+Why no V4-specific ``ModuleSpec`` here:
+* V4's per-layer attention dispatch (CSA / HCA / dense + SWA / sink) is
+  driven by ``compress_ratios`` at the *block* level, not the spec level.
+* HC multi-stream is also a block-level concern (the block holds the K
+  parallel streams).
+* The submodule-level customization Megatron's spec system was designed for
+  (Linear → ColumnParallelLinear, attention backend selection, etc.) is a
+  Phase-6 / perf-phase concern — not Phase 4.
 """
 
 from typing import Optional
@@ -39,33 +46,6 @@ from megatron.core.models.gpt.gpt_layer_specs import (
 )
 from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.spec_utils import ModuleSpec
-
-# ---------------------------------------------------------------------------
-# Resolution hooks (Phase 4 / 5 will fill these in).
-# ---------------------------------------------------------------------------
-
-
-def _resolve_attention_module_spec(
-    config: TransformerConfig, base_spec: ModuleSpec, **_kw
-) -> Optional[ModuleSpec]:
-    """Return a V4-specific attention spec, or ``None`` to keep the GPT spec.
-
-    Phase 3: always returns ``None`` (V4 attention modules don't exist yet).
-    """
-    return None
-
-
-def _resolve_mlp_module_spec(config: TransformerConfig, base_spec: ModuleSpec, **_kw) -> Optional[ModuleSpec]:
-    """Return a V4-specific MLP spec, or ``None`` to keep the GPT spec.
-
-    Phase 3: always returns ``None``.
-    """
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Public layer-spec helpers (delegating to GPT for now).
-# ---------------------------------------------------------------------------
 
 
 def get_deepseek_v4_layer_spec(
@@ -81,13 +61,14 @@ def get_deepseek_v4_layer_spec(
     use_kitchen: bool = False,
     fallback_to_eager_attn: bool = False,
 ) -> ModuleSpec:
-    """Return a V4 transformer-layer spec.
+    """Return a placeholder layer spec used to satisfy ``GPTModel.__init__``.
 
-    Phase 3 delegates to the GPT helper; the resolution hooks above let
-    Phase 4 / 5 swap in V4 attention / MLP module specs.
+    The returned spec is a vanilla GPT layer spec; it is consumed once during
+    super-init then immediately replaced by :class:`DeepseekV4TransformerBlock`
+    in the V4 model's constructor.
     """
     if use_transformer_engine:
-        spec = get_gpt_layer_with_transformer_engine_spec(
+        return get_gpt_layer_with_transformer_engine_spec(
             num_experts=num_experts,
             moe_grouped_gemm=moe_grouped_gemm,
             qk_layernorm=qk_layernorm,
@@ -99,29 +80,18 @@ def get_deepseek_v4_layer_spec(
             use_kitchen=use_kitchen,
             fallback_to_eager_attn=fallback_to_eager_attn,
         )
-    else:
-        spec = get_gpt_layer_local_spec(
-            num_experts=num_experts,
-            moe_grouped_gemm=moe_grouped_gemm,
-            qk_layernorm=qk_layernorm,
-            multi_latent_attention=getattr(config, "multi_latent_attention", False),
-            experimental_attention_variant=getattr(config, "experimental_attention_variant", None),
-            moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
-            normalization=normalization,
-            qk_l2_norm=qk_l2_norm,
-            use_kitchen=use_kitchen,
-        )
 
-    # Phase 4 / 5 hooks. ``None`` means keep the GPT spec as is.
-    v4_attn = _resolve_attention_module_spec(config, spec)
-    if v4_attn is not None:
-        spec.submodules.self_attention = v4_attn
-
-    v4_mlp = _resolve_mlp_module_spec(config, spec)
-    if v4_mlp is not None:
-        spec.submodules.mlp = v4_mlp
-
-    return spec
+    return get_gpt_layer_local_spec(
+        num_experts=num_experts,
+        moe_grouped_gemm=moe_grouped_gemm,
+        qk_layernorm=qk_layernorm,
+        multi_latent_attention=getattr(config, "multi_latent_attention", False),
+        experimental_attention_variant=getattr(config, "experimental_attention_variant", None),
+        moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
+        normalization=normalization,
+        qk_l2_norm=qk_l2_norm,
+        use_kitchen=use_kitchen,
+    )
 
 
 def get_deepseek_v4_decoder_block_spec(
@@ -133,12 +103,7 @@ def get_deepseek_v4_decoder_block_spec(
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
 ):
-    """Per-layer spec list for the decoder block.
-
-    Phase 3: delegates to the GPT helper. Phase 4 will iterate its return
-    value and apply :func:`_resolve_attention_module_spec` per layer based
-    on ``compress_ratios[layer_id]``.
-    """
+    """Placeholder block spec; same caveats as :func:`get_deepseek_v4_layer_spec`."""
     return get_gpt_decoder_block_spec(
         config=config,
         use_transformer_engine=use_transformer_engine,
@@ -157,7 +122,7 @@ def get_deepseek_v4_decoder_layer_specs(
     qk_l2_norm: Optional[bool] = False,
     vp_stage: Optional[int] = None,
 ):
-    """Per-layer spec list (used by the MTP block spec below)."""
+    """Per-layer spec list (used by the placeholder MTP block spec below)."""
     return get_gpt_decoder_layer_specs(
         config=config,
         use_transformer_engine=use_transformer_engine,
@@ -175,11 +140,11 @@ def get_deepseek_v4_mtp_block_spec(
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
 ):
-    """V4 MTP block spec.
+    """Placeholder MTP block spec.
 
-    Phase 3 delegates to the GPT helper. Phase 5 will replace this with the
-    V4 MTP variant (separate :class:`HyperHead` per MTP layer and an
-    optional dedicated routing path).
+    Phase 5 will replace this with V4's MTP variant (separate ``HyperHead``
+    per MTP layer, optional dedicated routing). For now it delegates to
+    upstream so super-init succeeds.
     """
     return get_gpt_mtp_block_spec(
         config=config,

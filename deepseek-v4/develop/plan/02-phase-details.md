@@ -49,15 +49,18 @@
 
 - `python -c "from primus.core.config_loader import load_config; load_config('configs/models/megatron/deepseek_v4_flash.yaml')"`
   (or equivalent loader) loads without errors.
-- New fields are not rejected by Megatron argparse — at minimum register them
-  via an `extra_args_provider` (cf. `pretrain_mamba.py`).
 
 ### Risks / Notes
 
-- New fields **must** be registered into Megatron CLI in Phase 1 — otherwise
-  Phase 2 builder import will fail when args are missing. Add an
-  `add_arguments` hook in `deepseek_v4_layer_specs_patches.py` that registers
-  but doesn't yet consume them in Phase 1.
+- **No need to register V4 fields in Megatron's argparse.** Primus's
+  `_initialize_trainer` (`primus/core/runtime/train_runtime.py`) calls
+  `merge_namespace(backend_args, module_config.params, allow_override=False)`
+  *after* `MegatronArgBuilder.update` has filtered out non-Megatron keys —
+  this fallback merge copies every yaml-only field onto `backend_args`.
+  Combined with `MegatronBaseTrainer._patch_parse_args`, which makes Megatron
+  return `backend_args` verbatim instead of re-parsing CLI, V4 fields reach
+  the V4 builder via plain `args.<field>` access. Defining the fields in
+  yaml is sufficient.
 
 ---
 

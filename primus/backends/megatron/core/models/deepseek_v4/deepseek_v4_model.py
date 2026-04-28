@@ -7,21 +7,33 @@
 """
 DeepSeek-V4 top-level model.
 
-Phase 3 layout:
+Phase 4 layout:
 
-* :class:`DeepseekV4Model` subclasses :class:`megatron.core.models.gpt.GPTModel`
-  so we keep the embedding / output-head / position-embedding / RoPE
-  plumbing for free.
+* ``DeepseekV4Model`` subclasses ``GPTModel`` so we keep the embedding /
+  output-head / position-embedding / RoPE plumbing for free.
 * After ``super().__init__`` runs (which builds a stock ``TransformerBlock``
   as ``self.decoder``), we **replace** ``self.decoder`` with
-  :class:`DeepseekV4TransformerBlock`. In Phase 3 the V4 block is a
-  transparent subclass of ``TransformerBlock`` -- it stashes V4 config
-  fields (``hc_mult``, ``compress_ratios``, ``attn_sink``, ...) for the
-  Phase-4 patches to consume.
+  :class:`DeepseekV4TransformerBlock` — a standalone module that owns the
+  V4-specific hybrid attention dispatch and ``hc_mult`` parallel hidden
+  streams.
+* The V4 config fields (``hc_mult``, ``compress_ratios``, ``attn_sink``,
+  ``num_hash_layers``, ``swiglu_limit``, ...) flow from yaml → ``args`` →
+  ``backend_args`` via Primus's ``merge_namespace`` step (see
+  ``primus/core/runtime/train_runtime.py:_initialize_trainer``), then onto
+  ``config`` because the V4 builder calls ``core_transformer_config_from_args``
+  which picks up unknown attrs. Both the model class and the V4 block read
+  these via ``getattr(config, ..., default)``.
 
-Phase 4 will plug HC + per-layer hybrid attention into the V4 block.
-Phase 5 will add the V4 MoE / hash routing / clamped SwiGLU and the V4 MTP
-block.
+Phase 5 will:
+* Override ``__init__`` further to instantiate a V4-specific MTP block
+  (separate ``HyperHead`` per MTP layer).
+* Plug in V4's hash-routed MoE for the first ``num_hash_layers`` MoE layers.
+
+Phase 6 (deferred) will:
+* Skip the intermediate stock ``TransformerBlock`` allocation entirely
+  (saves init memory at large scale).
+* Wire PP / TP / EP integration so the V4 block participates in Megatron's
+  distributed framework.
 """
 
 from typing import Optional
@@ -51,15 +63,15 @@ class DeepseekV4Model(GPTModel):
             **kwargs,
         )
 
-        # GPTModel.__init__ already built a stock ``TransformerBlock`` and
-        # stored it on ``self.decoder``. Swap in the V4 block -- it has the
+        # GPTModel.__init__ has already built a stock ``TransformerBlock`` and
+        # stored it on ``self.decoder``. Swap in the V4 block — it has the
         # same call signature so ``GPTModel.forward`` keeps working.
         self.decoder = DeepseekV4TransformerBlock(
             config=self.config,
             spec=transformer_layer_spec,
             pre_process=self.pre_process,
             post_process=self.post_process,
-            pg_collection=self.pg_collection,
+            pg_collection=getattr(self, "pg_collection", None),
             vp_stage=vp_stage,
         )
 
