@@ -610,8 +610,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             args.do_valid,
             args.do_test,
             args.dataloader_type,
-            args.retro_project_dir,
-            args.retro_cyclic_train_iters,
         )
 
         # Print setup timing.
@@ -755,14 +753,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 new_code = (
                     "if args.decoder_pipeline_manual_split_list is None and " + ori_code.split("if ")[-1]
                 )
-
-                validate_args_modified(args, args_defaults, ori_code=ori_code, new_code=new_code)
-            elif args.fp4 is not None:
-                # TODO(ruibin): Remove it when ROCm TE upgrade to 2.7.0.dev0
-                from .utils import validate_args_modified
-
-                ori_code = """raise ValueError("--fp4-format requires Transformer Engine >= 2.7.0.dev0 for NVFP4BlockScaling support.")"""
-                new_code = """pass"""
 
                 validate_args_modified(args, args_defaults, ori_code=ori_code, new_code=new_code)
             else:
@@ -916,9 +906,6 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             optimizer = get_megatron_optimizer(
                 config,
                 model,
-                no_wd_decay_cond,
-                scale_lr_cond,
-                lr_mult,
                 use_gloo_process_groups=args.enable_gloo_process_groups,
             )
         else:
@@ -1236,6 +1223,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         pre_hook_enabled = False
         should_exit = False
         exit_code = 0
+        train_start_time = time.time()
+        log_rank_0(f"Training start time: {train_start_time:.3f} (wall-clock)")
 
         if args.manual_gc:
             # Disable the default garbage collector and perform the collection manually.
@@ -1521,6 +1510,21 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 if should_disable_forward_pre_hook(args):
                     enable_forward_pre_hook(model)
                     pre_hook_enabled = True
+
+                target_eval_loss = float(os.environ.get("TARGET_EVAL_LOSS", "0"))
+                if target_eval_loss > 0 and hasattr(args, "_eval_val_loss"):
+                    if args._eval_val_loss <= target_eval_loss:
+                        run_duration = time.time() - train_start_time
+                        log_rank_0(
+                            f"[EarlyStop] Reached target! Stopping training. "
+                            f"eval_loss: {args._eval_val_loss:.6f} (target: {target_eval_loss}) | "
+                            f"consumed_train_samples: {args.consumed_train_samples} | "
+                            f"duration: {run_duration:.1f} sec -> {run_duration / 60.0:.1f} minutes"
+                        )
+                        args.train_iters = iteration
+                        args.do_valid = False
+                        args.do_test = False
+
                 timers("interval-time", log_level=0).start(barrier=True)
 
             # Miscellaneous post-training-step functions (e.g., FT heartbeats, GC).
@@ -1548,6 +1552,18 @@ class MegatronTrainer(BaseTrainer, BaseModule):
                 break
 
         one_logger_utils.track_e2e_metrics()
+
+        run_duration = time.time() - train_start_time
+        target_eval_loss = float(os.environ.get("TARGET_EVAL_LOSS", "0"))
+        final_eval_loss = getattr(args, "_eval_val_loss", None)
+        status = "success" if (final_eval_loss and target_eval_loss > 0 and final_eval_loss <= target_eval_loss) else "aborted"
+        samples_per_sec = args.consumed_train_samples / run_duration if run_duration > 0 else 0
+        log_rank_0(
+            f"[TimeToTrain] status: {status} | "
+            f"samples_count: {args.consumed_train_samples} | "
+            f"duration: {run_duration:.1f} sec -> {run_duration / 60.0:.1f} minutes | "
+            f"throughput: {samples_per_sec:.2f} samples/s"
+        )
 
         if args.dump_pp_data:
             from .utils import dump_pp_data

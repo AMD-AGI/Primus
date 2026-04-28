@@ -140,6 +140,9 @@ def primus_evaluate(
                     total_loss_dict[key] = total_loss_numerators[key] / total_loss_denominators[key]
                 else:
                     total_loss_dict[key] = 0.0
+            if "lm loss" in total_loss_dict:
+                val = total_loss_dict["lm loss"]
+                args._eval_val_loss = val.item() if hasattr(val, "item") else float(val)
 
         collected_non_loss_data = None
         if non_loss_data_func is not None:

@@ -7,6 +7,7 @@
 """Extra Megatron tokenizers."""
 
 import math
+from collections import OrderedDict
 
 from megatron.training.arguments import (
     _add_tokenizer_args as megatron_add_tokenizer_args,
@@ -24,6 +25,17 @@ except ImportError:
     from megatron.core.tokenizers.text.libraries.huggingface_tokenizer import (
         HuggingFaceTokenizer as _HuggingFaceTokenizer,
     )
+
+
+def _hf_unique_identifiers(self):
+    ids = OrderedDict()
+    ids["class"] = f"{type(self).__module__}.{type(self).__qualname__}"
+    ids["vocab_size"] = self.vocab_size
+    return ids
+
+
+if not hasattr(_HuggingFaceTokenizer, "unique_identifiers"):
+    _HuggingFaceTokenizer.unique_identifiers = property(_hf_unique_identifiers)
 
 from primus.modules.module_utils import log_rank_0
 

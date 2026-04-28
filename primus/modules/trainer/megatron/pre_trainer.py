@@ -80,7 +80,13 @@ def get_batch_func(data_iterator, vp_stage=None):
     else:
         batch = get_batch_on_this_cp_rank(batch)
 
-    return batch.values()
+    return (
+        batch["tokens"],
+        batch["labels"],
+        batch["loss_mask"],
+        batch.get("attention_mask"),
+        batch["position_ids"],
+    )
 
 
 class DataLoaderStore:
