@@ -72,6 +72,7 @@ def _is_primus_turbo_enabled(ctx: PatchContext) -> bool:
     description="Replace TESpecProvider with PrimusTurboSpecProvider when PrimusTurbo is enabled",
     condition=_is_primus_turbo_enabled,
     backend_versions=["<0.17"],
+    priority=41,
 )
 def patch_te_spec_provider(ctx: PatchContext):
     """
@@ -81,9 +82,7 @@ def patch_te_spec_provider(ctx: PatchContext):
     PrimusTurboSpecProvider to enable PrimusTurbo backend.
     """
     import megatron.core.extensions as meg_ext
-    from megatron.core.extensions import (
-        transformer_engine as transformer_engine_spec_provider,
-    )
+    from megatron.core.extensions import transformer_engine_spec_provider
     from megatron.core.models.gpt import gpt_layer_specs, moe_module_specs
     from megatron.core.transformer import multi_token_prediction
 

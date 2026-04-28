@@ -1,0 +1,28 @@
+extends:
+  - lfm_base.yaml
+
+# https://huggingface.co/LiquidAI/LFM2-8B-A1B
+tokenizer_type: Lfm2Tokenizer
+tokenizer_model: LiquidAI/LFM2-8B-A1B
+
+# model
+num_layers: 24
+hidden_size: 2048
+ffn_hidden_size: 7168
+num_attention_heads: 32
+
+lfm_layer_types: ["conv", "conv", "full_attention", "conv", "conv", "conv", "full_attention", "conv", "conv", "conv", "full_attention", "conv", "conv", "conv", "full_attention", "conv", "conv", "conv", "full_attention", "conv", "conv", "full_attention", "conv", "conv"]
+conv_L_cache: 3 # int
+conv_bias: false # bool
+
+# moe
+moe_layer_freq: "([0]*2+[1]*22)"
+num_experts: 32
+moe_router_topk: 4
+moe_ffn_hidden_size: 1792
+
+# gqa
+group_query_attention: true
+num_query_groups: 8
+qk_layernorm: true
+kv_channels: 128
