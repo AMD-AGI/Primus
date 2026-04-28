@@ -7,15 +7,16 @@
 """Runtime monkeypatch — MoE SwiGLU forward+backward without cat/split.
 
 The Triton kernels and autograd Function live in
-:mod:`primus_turbo.pytorch.ops.triton_swiglu`. This module only contains
-the install hook that monkey-patches
+:mod:`primus.backends.megatron.core.extensions.triton_swiglu`. This module
+only contains the install hook that monkey-patches
 ``megatron.core.transformer.moe.experts.GroupedMLP.activation_func_with_probs``
 to call ``triton_swiglu_with_probs`` instead of the default
 ``F.silu(gate) * up * probs`` Python composition.
 
 The default composition gets fused by Inductor into
 ``triton_poi_fused__to_copy_cat_mul_silu_silu_backward_split_1`` in bwd,
-which round-trips ``d_gate / d_up`` through a ``cat`` + ``split`` on stream 0.
+which round-trips ``d_gate / d_up`` through a ``cat`` + ``split`` on stream 0
+(see slab/notes/2026-04/2026-04-25_gptoss_23_swiglu_nocat_triton_verify.md).
 The Triton kernel writes both gradients directly into a single ``[N, 2H]``
 ``dx`` buffer.
 
@@ -62,7 +63,7 @@ def install() -> bool:
         return False
 
     try:
-        from primus_turbo.pytorch.ops.triton_swiglu import (
+        from primus.backends.megatron.core.extensions.triton_swiglu import (
             triton_swiglu_with_probs,
         )
     except ImportError as exc:
