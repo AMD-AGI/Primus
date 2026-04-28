@@ -21,8 +21,9 @@ modules:
       log_avg_reset_interval: 50
 
       lfm_layer_types: ["conv", "conv", "full_attention", "conv", "conv", "conv", "full_attention", "conv", "conv", "conv", "full_attention", "conv", "conv", "conv", "full_attention", "conv", "conv", "conv", "full_attention", "conv", "conv", "full_attention", "conv", "conv"]
-      # lfm_layer_types: ["conv", "conv", "full_attention", "conv"]  # list[str]
-      # moe_layer_freq: "([0]*2+[1]*2)"
+      moe_layer_freq: "([0]*2+[1]*22)"
+      conv_L_cache: 3 # int
+      conv_bias: false # bool
 
       # hyper parameters
       train_iters: 10
