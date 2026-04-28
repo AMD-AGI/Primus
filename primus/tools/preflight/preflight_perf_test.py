@@ -19,6 +19,9 @@ from primus.tools.preflight.inter_node_comm import run_inter_node_comm
 from primus.tools.preflight.inter_node_comm_p2p import run_inter_node_comm_p2p
 from primus.tools.preflight.inter_node_ring_p2p import run_inter_node_ring_p2p
 from primus.tools.preflight.intra_node_comm import run_intra_node_comm
+from primus.tools.preflight.cluster_sphere.env_recommender import collect_cluster_sphere_env_findings
+from primus.tools.preflight.cluster_sphere.paths import resolve_cluster_sphere_root
+from primus.tools.preflight.cluster_sphere.report import wants_cluster_sphere_env
 from primus.tools.preflight.network.info import (
     collect_network_info,
     write_network_report,
@@ -99,6 +102,10 @@ def run_preflight_info(args: Any, expect_distributed: bool = True) -> int:
         for f in collect_network_info(expect_distributed=expect_distributed):
             findings.append(Finding(level=f.level, message=f.message, details=f.details))
 
+    if wants_cluster_sphere_env(args):
+        for f in collect_cluster_sphere_env_findings():
+            findings.append(Finding(level=f.level, message=f.message, details=f.details))
+
     fail_count = sum(1 for x in findings if x.level == "fail")
     warn_count = sum(1 for x in findings if x.level == "warn")
     info_count = sum(1 for x in findings if x.level == "info")
@@ -164,6 +171,13 @@ def run_preflight_info(args: Any, expect_distributed: bool = True) -> int:
                 write_gpu_report(f, by_host)
             if check_network:
                 write_network_report(f, by_host)
+
+            from primus.tools.preflight.cluster_sphere.report import write_cluster_sphere_env_section
+
+            if wants_cluster_sphere_env(args):
+                write_cluster_sphere_env_section(f, gathered)
+                cs_root = resolve_cluster_sphere_root()
+                f.write(f"\n*Cluster Sphere integration path (Primus): `{cs_root}`.*\n\n")
 
         if save_pdf:
             try:
@@ -317,6 +331,10 @@ def run_preflight(args):
         run_inter_node_comm(args)
         run_inter_node_comm_p2p(args)
         run_inter_node_ring_p2p(args)
+
+        from primus.tools.preflight.cluster_sphere.rdma_bw import append_cluster_sphere_verbs_rdma_section
+
+        append_cluster_sphere_verbs_rdma_section(args, args.markdown_file)
 
         if RANK == 0 and args.save_pdf:
             md_to_pdf(args.markdown_file, args.pdf_file)
