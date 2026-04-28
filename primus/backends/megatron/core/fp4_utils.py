@@ -225,7 +225,7 @@ elif HAVE_TE:
                 raise ValueError(
                     "MXFP4BlockScaling requires TransformerEngine >= 2.8.0."
                 )
-            _ensure_mxfp4_recipe_support()
+            # _ensure_mxfp4_recipe_support()
             fp4_recipe = transformer_engine.common.recipe.MXFP4BlockScaling()
             fp4_recipe.use_hadamard = os.environ.get("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
         else:
