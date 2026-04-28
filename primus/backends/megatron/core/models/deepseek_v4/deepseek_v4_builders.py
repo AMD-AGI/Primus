@@ -18,40 +18,46 @@ For DeepSeek-V4 we keep both in a single primus-owned module so the dispatch
 in ``primus/core/utils/import_utils.py`` doesn't have to chase symbols across
 ``third_party/Megatron-LM``.
 
-Phase 2 contract (this file):
-- ``deepseek_v4_builder`` builds a :class:`DeepseekV4Model` (a thin subclass
-  of ``GPTModel``) using vanilla GPT layer specs. This is enough to exercise
-  the end-to-end dispatch path.
-- Phase 3 will swap the layer-spec helpers for V4-specific variants in
-  ``deepseek_v4_layer_specs.py`` without changing this builder's signature.
+Phase 3 contract (this file, current state):
+- ``deepseek_v4_builder`` calls into ``deepseek_v4_layer_specs`` to get the
+  decoder-block spec / MTP-block spec, then instantiates ``DeepseekV4Model``
+  (which uses ``DeepseekV4TransformerBlock``).
+- The layer-spec helpers currently delegate to GPT internals; Phase 4 / 5
+  will replace their bodies with V4-specific module assembly.
 """
 
 from typing import Optional
 
-from megatron.core.models.gpt.gpt_layer_specs import (
-    get_gpt_decoder_block_spec,
-    get_gpt_layer_local_spec,
-    get_gpt_layer_with_transformer_engine_spec,
-    get_gpt_mtp_block_spec,
-)
 from megatron.core.transformer.spec_utils import import_module
 from megatron.training import get_args, print_rank_0
 from megatron.training.arguments import core_transformer_config_from_args
 
+from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_layer_specs import (
+    get_deepseek_v4_decoder_block_spec,
+    get_deepseek_v4_decoder_layer_specs,
+    get_deepseek_v4_layer_spec,
+    get_deepseek_v4_mtp_block_spec,
+)
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_model import (
     DeepseekV4Model,
 )
 
 
 def _resolve_layer_spec(args, config, vp_stage):
-    """Pick the transformer-layer spec for V4 (Phase 2 = GPT specs)."""
+    """Pick the transformer-layer spec for V4.
+
+    * If ``args.spec`` is set, honour it (escape hatch for experiments).
+    * If MoE is on, use ``get_deepseek_v4_decoder_block_spec`` so the spec
+      can vary per layer (Phase 4+ uses this to dispatch on ``compress_ratios``).
+    * Otherwise return a single ``get_deepseek_v4_layer_spec`` to be tiled.
+    """
     if args.spec is not None:
         return import_module(args.spec)
 
     use_te = args.transformer_impl == "transformer_engine"
 
     if args.num_experts:
-        return get_gpt_decoder_block_spec(
+        return get_deepseek_v4_decoder_block_spec(
             config=config,
             use_transformer_engine=use_te,
             normalization=args.normalization,
@@ -59,30 +65,17 @@ def _resolve_layer_spec(args, config, vp_stage):
             vp_stage=vp_stage,
         )
 
-    if use_te:
-        return get_gpt_layer_with_transformer_engine_spec(
-            num_experts=args.num_experts,
-            moe_grouped_gemm=args.moe_grouped_gemm,
-            qk_layernorm=args.qk_layernorm,
-            multi_latent_attention=getattr(config, "multi_latent_attention", False),
-            experimental_attention_variant=getattr(config, "experimental_attention_variant", None),
-            moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
-            normalization=args.normalization,
-            qk_l2_norm=args.qk_l2_norm,
-            use_kitchen=config.use_kitchen,
-            fallback_to_eager_attn=config.fallback_to_eager_attn,
-        )
-
-    return get_gpt_layer_local_spec(
+    return get_deepseek_v4_layer_spec(
+        config=config,
+        use_transformer_engine=use_te,
         num_experts=args.num_experts,
         moe_grouped_gemm=args.moe_grouped_gemm,
         qk_layernorm=args.qk_layernorm,
-        multi_latent_attention=getattr(config, "multi_latent_attention", False),
-        experimental_attention_variant=getattr(config, "experimental_attention_variant", None),
         moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm,
         normalization=args.normalization,
         qk_l2_norm=args.qk_l2_norm,
         use_kitchen=config.use_kitchen,
+        fallback_to_eager_attn=config.fallback_to_eager_attn,
     )
 
 
@@ -94,8 +87,15 @@ def _resolve_mtp_block_spec(args, config, vp_stage):
     if args.spec is not None:
         mtp_layer_spec = import_module(args.spec)
     else:
-        mtp_layer_spec = _resolve_layer_spec(args, config, vp_stage)
-    return get_gpt_mtp_block_spec(
+        decoder_layer_specs = get_deepseek_v4_decoder_layer_specs(
+            config=config,
+            use_transformer_engine=use_te,
+            normalization=args.normalization,
+            qk_l2_norm=args.qk_l2_norm,
+            vp_stage=vp_stage,
+        )
+        mtp_layer_spec = decoder_layer_specs[-1]
+    return get_deepseek_v4_mtp_block_spec(
         config=config,
         spec=mtp_layer_spec,
         use_transformer_engine=use_te,
@@ -106,11 +106,15 @@ def _resolve_mtp_block_spec(args, config, vp_stage):
 def deepseek_v4_builder(args, pre_process, post_process, vp_stage=None, config=None):
     """Build a DeepSeek-V4 model.
 
-    Phase 2: behaves like ``gpt_builder`` but instantiates ``DeepseekV4Model``,
-    so the dispatch path is exercised end-to-end. Phase 3 swaps the layer-spec
-    helpers for V4-specific ones.
+    Phase 3: behaves like a V4-flavored ``gpt_builder``. Layer specs come
+    from ``deepseek_v4_layer_specs``; the model is a ``DeepseekV4Model`` whose
+    decoder is a ``DeepseekV4TransformerBlock``.
+
+    Phase 4/5: per-layer attention dispatch (``compress_ratios``) and the V4
+    MoE / activation will replace the body of the layer-spec helpers without
+    touching this builder.
     """
-    print_rank_0("[Primus:DeepSeek-V4] building DeepseekV4Model (Phase-2 stub)...")
+    print_rank_0("[Primus:DeepSeek-V4] building DeepseekV4Model...")
 
     if config is None:
         config = core_transformer_config_from_args(args)

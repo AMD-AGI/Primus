@@ -4,18 +4,23 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""DeepSeek-V4 model package (Phase 2 stub).
+"""DeepSeek-V4 model package.
 
-Phase 2 surface:
+Phase 3 surface (current):
 
-    DeepseekV4Model               # thin subclass of GPTModel
+    DeepseekV4Model               # top-level model
+    DeepseekV4TransformerBlock    # decoder block (P4 will plug in HC)
     deepseek_v4_builder           # builder used by model_provider
     model_provider                # Megatron pretrain() entry point
 
-Phase 3 will add ``DeepseekV4TransformerBlock`` and the V4 layer-spec
-helpers; Phase 4 will plug HC + hybrid attention into the block.
+Phase 4+ will add: HyperConnection / Compressor / Indexer / SWA / AttnSink /
+DualRoPE / CSA / HCA modules under ``core/transformer`` siblings, and a
+V4-specific MoE submodule under this package.
 """
 
+from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_block import (
+    DeepseekV4TransformerBlock,
+)
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_builders import (
     deepseek_v4_builder,
     model_provider,
@@ -26,6 +31,7 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_model import (
 
 __all__ = [
     "DeepseekV4Model",
+    "DeepseekV4TransformerBlock",
     "deepseek_v4_builder",
     "model_provider",
 ]
