@@ -54,7 +54,7 @@ def _is_primus_turbo_enabled(ctx: PatchContext) -> bool:
     if (
         getattr(args, "use_turbo_grouped_mlp", False)
         and getattr(args, "moe_grouped_gemm", False)
-        and not getattr(args, "moe_use_legacy_grouped_gemm", True)
+        and not getattr(args, "moe_use_legacy_grouped_gemm", False)
         and is_te_min_version("1.9.0")
     ):
         log_rank_0(

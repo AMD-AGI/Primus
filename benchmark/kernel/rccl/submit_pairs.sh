@@ -19,13 +19,12 @@ NODELISTS=(
   "smci355-ccs-aus-n05-33,smci355-ccs-aus-n06-25"
   "smci355-ccs-aus-n06-33,smci355-ccs-aus-n10-29"
 )
-``
 
 echo "Submitting ${#NODELISTS[@]} jobs..."
+export DOCKER_IMAGE NNODES
 for nodelist in "${NODELISTS[@]}"; do
   echo ">> $nodelist"
-  DOCKER_IMAGE="$DOCKER_IMAGE" NNODES="$NNODES" \
-    sbatch -N"$NNODES" -w "$nodelist" -p "$PARTITION" "$SCRIPT"
+  sbatch -N "${NNODES}" -w "$nodelist" -p "$PARTITION" "$SCRIPT"
 done
 
 echo "Done."
