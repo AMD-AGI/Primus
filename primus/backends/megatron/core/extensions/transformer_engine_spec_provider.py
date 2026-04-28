@@ -39,6 +39,7 @@ except ImportError:
 from primus.backends.megatron.core.extensions.primus_turbo import (
     PrimusTurboAttention,
     PrimusTurboColumnParallelLinear,
+    PrimusTurboGroupedMLP,
     PrimusTurboLayerNormColumnParallelLinear,
     PrimusTurboLinear,
     PrimusTurboRowParallelLinear,
@@ -99,21 +100,23 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             # Megatron callers only pass ``moe_use_grouped_gemm`` here, so when Primus
             # args do not expose the legacy switch we must match upstream TESpecProvider
             # and prefer TEGroupedMLP by default.
-            moe_use_legacy_grouped_gemm = getattr(self.cfg, "moe_use_legacy_grouped_gemm", False)
+            # let it raise an error if cfg does not have moe_use_legacy_grouped_gemm
+            moe_use_legacy_grouped_gemm = self.cfg.moe_use_legacy_grouped_gemm
 
         if (
             moe_use_grouped_gemm
             and TEColumnParallelGroupedLinear is not None
             and not moe_use_legacy_grouped_gemm
         ):
-            assert not self.cfg.use_turbo_grouped_mlp, "PrimusTurbo not support RowParallelGroupedLinear"
-            return TEGroupedMLP, TEGroupedMLPSubmodules(
+            _GroupedMLP = PrimusTurboGroupedMLP if self.cfg.use_turbo_grouped_mlp else TEGroupedMLP
+            # TODO: need to update primus_turbo to support TEColumnParallelGroupedLinear?
+            return _GroupedMLP, TEGroupedMLPSubmodules(
                 linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
             )
         elif moe_use_grouped_gemm:
             warnings.warn(
-                "The legacy GroupedMLP was removed from this Megatron version; "
-                "Primus is using its local compatibility implementation."
+                "The legacy GroupedMLP will be deprecated in Megatron-Core v0.12.0. "
+                "Please update the TransformerEngine to version>=1.7.0 and use TEGroupedMLP."
             )
             if self.cfg.use_turbo_grouped_mlp:
                 raise NotImplementedError("PrimusTurbo does not support Legacy GroupedMLP")
