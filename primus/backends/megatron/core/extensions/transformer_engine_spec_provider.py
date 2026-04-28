@@ -115,8 +115,8 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             )
         elif moe_use_grouped_gemm:
             warnings.warn(
-                "The legacy GroupedMLP will be deprecated in Megatron-Core v0.12.0. "
-                "Please update the TransformerEngine to version>=1.7.0 and use TEGroupedMLP."
+                "The legacy GroupedMLP was removed from this Megatron version; "
+                "Primus is using its local compatibility implementation."
             )
             if self.cfg.use_turbo_grouped_mlp:
                 raise NotImplementedError("PrimusTurbo does not support Legacy GroupedMLP")
