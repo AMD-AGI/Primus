@@ -51,6 +51,7 @@ from primus.backends.megatron.core.transformer.hyper_connection import (
     HyperHead,
     HyperMixer,
 )
+from primus.backends.megatron.core.transformer.moe.v4_moe import DeepseekV4MoE
 
 # ---------------------------------------------------------------------------
 # Pieces used by every layer
@@ -72,12 +73,12 @@ class _RMSNorm(nn.Module):
         return (x32 * rsqrt).to(in_dtype) * self.weight
 
 
-class _SwiGLUMLP(nn.Module):
-    """Phase-4 placeholder FFN sub-block.
+class _DenseSwiGLUMLP(nn.Module):
+    """Plain dense SwiGLU FFN.
 
-    Phase 5 will replace this with the V4 MoE (sqrtsoftplus router /
-    hash-routed first ``num_hash_layers`` / clamped SwiGLU). For now we use
-    a standard SwiGLU MLP so the block has a working FFN.
+    Used for non-MoE layers (or as a fallback when ``num_routed_experts``
+    is 0). V4-Flash has a tiny number of dense head/tail layers; the bulk
+    of layers are MoE (see :class:`DeepseekV4MoE`).
     """
 
     def __init__(self, hidden_size: int, ffn_hidden_size: int) -> None:
@@ -164,13 +165,17 @@ class DeepseekV4HybridLayer(nn.Module):
       * pre-attention RMSNorm
       * attention sub-block (Dense / HCA / CSA, picked from ``compress_ratio``)
       * pre-FFN RMSNorm
-      * FFN sub-block (Phase-4 placeholder SwiGLU; Phase-5 swaps in MoE)
+      * FFN sub-block: MoE (:class:`DeepseekV4MoE`) when ``num_routed_experts > 0``,
+        otherwise a plain dense SwiGLU. The MoE handles its own router dispatch
+        (hash for the first ``num_hash_layers`` layers, sqrtsoftplus / sigmoid
+        / softmax for the rest).
       * Two :class:`HyperMixer` instances (one per sub-block) when ``hc_mult > 1``
     """
 
     def __init__(
         self,
         *,
+        layer_idx: int,
         compress_ratio: int,
         hidden_size: int,
         ffn_hidden_size: int,
@@ -189,8 +194,20 @@ class DeepseekV4HybridLayer(nn.Module):
         hc_eps: float = 1e-6,
         hc_sinkhorn_iters: int = 20,
         norm_eps: float = 1e-6,
+        # MoE config (set num_routed_experts=0 to use the plain dense FFN).
+        num_routed_experts: int = 0,
+        moe_router_topk: int = 1,
+        moe_intermediate_size: Optional[int] = None,
+        num_shared_experts: int = 1,
+        num_hash_layers: int = 0,
+        hash_vocab_size: Optional[int] = None,
+        hash_seed: int = 0,
+        moe_score_function: str = "sqrtsoftplus",
+        moe_enable_expert_bias: bool = True,
+        clamp_alpha: float = 7.0,
     ) -> None:
         super().__init__()
+        self.layer_idx = int(layer_idx)
         self.compress_ratio = int(compress_ratio)
         self.hc_mult = int(hc_mult)
 
@@ -212,7 +229,25 @@ class DeepseekV4HybridLayer(nn.Module):
         )
 
         self.ffn_norm = _RMSNorm(hidden_size, eps=norm_eps)
-        self.ffn = _SwiGLUMLP(hidden_size=hidden_size, ffn_hidden_size=ffn_hidden_size)
+        self.is_moe = num_routed_experts > 0
+        if self.is_moe:
+            moe_inner = moe_intermediate_size or ffn_hidden_size
+            self.ffn = DeepseekV4MoE(
+                hidden_size=hidden_size,
+                moe_intermediate_size=moe_inner,
+                num_routed_experts=num_routed_experts,
+                moe_router_topk=moe_router_topk,
+                num_shared_experts=num_shared_experts,
+                layer_idx=self.layer_idx,
+                num_hash_layers=num_hash_layers,
+                hash_vocab_size=hash_vocab_size,
+                hash_seed=hash_seed,
+                score_function=moe_score_function,
+                enable_expert_bias=moe_enable_expert_bias,
+                clamp_alpha=clamp_alpha,
+            )
+        else:
+            self.ffn = _DenseSwiGLUMLP(hidden_size=hidden_size, ffn_hidden_size=ffn_hidden_size)
 
         if hc_mult > 1:
             self.attn_hc = HyperMixer(
@@ -252,11 +287,19 @@ class DeepseekV4HybridLayer(nn.Module):
 
     # ------------------------------------------------------------------
 
-    def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        position_ids: torch.Tensor,
+        token_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Run one V4 layer.
 
         ``x``: ``[B, S, K, D]`` (multi-stream) or ``[B, S, D]`` (single).
         ``position_ids``: ``[B, S]`` or ``[S]``.
+        ``token_ids``: ``[B, S]`` integer tensor; required when this is a
+            hash-routed MoE layer (``layer_idx < num_hash_layers``). Ignored
+            for non-MoE / non-hash layers.
         """
 
         # Attention sub-block. The collapse passes a [B, S, D] hidden, then
@@ -266,9 +309,17 @@ class DeepseekV4HybridLayer(nn.Module):
 
         x = self._hc_apply(self.attn_hc, x, _attn_sub)
 
-        # FFN sub-block.
-        def _ffn_sub(collapsed: torch.Tensor) -> torch.Tensor:
-            return self.ffn(self.ffn_norm(collapsed))
+        # FFN sub-block. MoE FFN needs token_ids when the layer is hash-routed;
+        # plain SwiGLU ignores it.
+        if self.is_moe:
+
+            def _ffn_sub(collapsed: torch.Tensor) -> torch.Tensor:
+                return self.ffn(self.ffn_norm(collapsed), token_ids=token_ids)
+
+        else:
+
+            def _ffn_sub(collapsed: torch.Tensor) -> torch.Tensor:
+                return self.ffn(self.ffn_norm(collapsed))
 
         x = self._hc_apply(self.ffn_hc, x, _ffn_sub)
         return x
@@ -345,6 +396,25 @@ class DeepseekV4TransformerBlock(nn.Module):
         yarn_factor = getattr(config, "rotary_scaling_factor", 1.0) or 1.0
         original_max_pos = getattr(config, "original_max_position_embeddings", 0) or 0
 
+        # ---- V4 MoE fields ----
+        # ``num_routed_experts == 0`` keeps the dense SwiGLU FFN; this lets us
+        # stand up small unit tests without instantiating MoE state.
+        num_routed_experts = int(getattr(config, "num_moe_experts", 0) or 0)
+        moe_router_topk = int(getattr(config, "moe_router_topk", 1) or 1)
+        moe_intermediate_size = getattr(config, "moe_ffn_hidden_size", None) or getattr(
+            config, "moe_intermediate_size", None
+        )
+        num_shared_experts = int(getattr(config, "moe_shared_expert_intermediate_size", 0) > 0) or int(
+            getattr(config, "num_shared_experts", 1)
+        )
+        num_hash_layers = int(getattr(config, "num_hash_layers", 0) or 0)
+        hash_vocab_size = getattr(config, "padded_vocab_size", None) or getattr(config, "vocab_size", None)
+        hash_seed = int(getattr(config, "hash_routing_seed", 0) or 0)
+        moe_score_function = getattr(config, "moe_router_score_function", "sqrtsoftplus")
+        moe_enable_expert_bias = bool(getattr(config, "moe_router_enable_expert_bias", True))
+        clamp_alpha = float(getattr(config, "swiglu_limit", 7.0) or 7.0)
+        self.num_hash_layers = num_hash_layers
+
         # ---- shared dual-RoPE for the whole stack ----
         self.rope = DualRoPE(
             rotary_dim=rotary_dim,
@@ -360,6 +430,7 @@ class DeepseekV4TransformerBlock(nn.Module):
         self.layers = nn.ModuleList()
         for i, ratio in enumerate(compress_ratios):
             layer = DeepseekV4HybridLayer(
+                layer_idx=i,
                 compress_ratio=int(ratio),
                 hidden_size=hidden_size,
                 ffn_hidden_size=ffn_hidden_size,
@@ -378,6 +449,16 @@ class DeepseekV4TransformerBlock(nn.Module):
                 hc_eps=hc_eps,
                 hc_sinkhorn_iters=hc_sinkhorn_iters,
                 norm_eps=norm_eps,
+                num_routed_experts=num_routed_experts,
+                moe_router_topk=moe_router_topk,
+                moe_intermediate_size=moe_intermediate_size,
+                num_shared_experts=num_shared_experts,
+                num_hash_layers=num_hash_layers,
+                hash_vocab_size=hash_vocab_size,
+                hash_seed=hash_seed,
+                moe_score_function=moe_score_function,
+                moe_enable_expert_bias=moe_enable_expert_bias,
+                clamp_alpha=clamp_alpha,
             )
             self.layers.append(layer)
         self.hc_mult = hc_mult
@@ -415,6 +496,7 @@ class DeepseekV4TransformerBlock(nn.Module):
         rotary_pos_cos_sin=None,
         packed_seq_params=None,
         sequence_len_offset=None,
+        token_ids: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         """Run the V4 decoder.
@@ -423,7 +505,18 @@ class DeepseekV4TransformerBlock(nn.Module):
         We transpose to ``[B, S, D]`` for HC math and back for the return.
         ``attention_mask`` and the various ``rotary_pos_*`` kwargs are
         ignored — V4 manages its own dual-RoPE and SWA mask internally.
+
+        ``token_ids`` (``[B, S]`` long tensor) is required only when one
+        or more layers run hash routing (``layer_idx < num_hash_layers``).
+        :class:`DeepseekV4Model` forwards ``input_ids`` here for that
+        purpose; non-V4 callers (e.g. probes / unit tests of layers
+        without hash routing) can omit it.
         """
+        # If the model stashed ``input_ids`` on the block (see
+        # :class:`DeepseekV4Model.forward`), pick it up; explicit kwarg wins.
+        if token_ids is None:
+            token_ids = getattr(self, "_v4_token_ids", None)
+
         # [S, B, D] -> [B, S, D]
         x = hidden_states.transpose(0, 1).contiguous()
         B, S, D = x.shape
@@ -437,7 +530,7 @@ class DeepseekV4TransformerBlock(nn.Module):
 
         # Run the layers.
         for layer in self.layers:
-            x = layer(x, position_ids)
+            x = layer(x, position_ids, token_ids=token_ids)
 
         # Final HC collapse.
         if self.hc_mult > 1 and self.hyper_head is not None:

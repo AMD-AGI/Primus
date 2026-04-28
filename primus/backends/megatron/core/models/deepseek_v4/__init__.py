@@ -6,16 +6,16 @@
 
 """DeepSeek-V4 model package.
 
-Phase 3 surface (current):
+Phase 5 surface:
 
     DeepseekV4Model               # top-level model
-    DeepseekV4TransformerBlock    # decoder block (P4 will plug in HC)
+    DeepseekV4TransformerBlock    # decoder block (HC + hybrid attention + V4 MoE)
+    DeepseekV4MTPBlock            # MTP head (separate HyperHead per MTP layer)
     deepseek_v4_builder           # builder used by model_provider
     model_provider                # Megatron pretrain() entry point
 
-Phase 4+ will add: HyperConnection / Compressor / Indexer / SWA / AttnSink /
-DualRoPE / CSA / HCA modules under ``core/transformer`` siblings, and a
-V4-specific MoE submodule under this package.
+Phase 6 (deferred) will: wire MTP loss path, PP / TP / EP integration,
+and skip the stock-TransformerBlock allocation in ``GPTModel.__init__``.
 """
 
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_block import (
@@ -28,10 +28,14 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_builders impor
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_model import (
     DeepseekV4Model,
 )
+from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_mtp import (
+    DeepseekV4MTPBlock,
+)
 
 __all__ = [
     "DeepseekV4Model",
     "DeepseekV4TransformerBlock",
+    "DeepseekV4MTPBlock",
     "deepseek_v4_builder",
     "model_provider",
 ]
