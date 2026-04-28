@@ -41,3 +41,6 @@ dump_pp_data: false
 
 # recompute
 recompute_layer_ids: null #int list，id srange from 0 to (num_layers_per_pp_stage - 1)
+
+# dataloader
+dataloader_mp_context: null # "forkserver" | "spawn" | "fork" | null
