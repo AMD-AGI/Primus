@@ -7,7 +7,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+from primus.tools.preflight.network.info import Finding
 
 
 def test_resolve_default_is_primus_package():
@@ -54,6 +56,64 @@ def test_collect_findings_warns_when_empty_sysfs():
         findings = collect_cluster_sphere_env_findings()
         assert len(findings) == 1
         assert findings[0].level == "warn"
+
+
+def test_emit_markdown_firmware_report_section():
+    from primus.tools.preflight.cluster_sphere.report import emit_cluster_sphere_env_markdown
+
+    findings = [
+        Finding(
+            level="info",
+            message="Cluster Sphere RDMA environment recommendations",
+            details={
+                "warnings": [],
+                "devices": [
+                    {
+                        "rdma": "mlx5_0",
+                        "pci": "—",
+                        "netdev": "eth0",
+                        "firmware": "fwA",
+                        "gid_index": "3",
+                        "gid_value": "::",
+                        "vendor": "MLNX",
+                    },
+                ],
+                "firmware_by_version": {"fwA": ["mlx5_0"], "fwB": ["mlx5_1"]},
+                "nccl_exports": [],
+            },
+        ),
+    ]
+    md = emit_cluster_sphere_env_markdown("test-host", findings)
+    assert "**Firmware report:**" in md
+    assert "| fwA | mlx5_0 |" in md
+    assert "| fwB | mlx5_1 |" in md
+
+
+def test_verbs_pair_routes_by_slurm_procid(monkeypatch):
+    from primus.tools.preflight.cluster_sphere import __main__ as cs_main
+
+    args = MagicMock()
+    args.device = None
+    args.port = None
+    args.timeout = 120
+    args.client_delay = 0.0
+
+    monkeypatch.delenv("SLURM_PROCID", raising=False)
+    assert cs_main._cmd_verbs_pair(args) == 2
+
+    monkeypatch.setenv("SLURM_PROCID", "2")
+    assert cs_main._cmd_verbs_pair(args) == 2
+
+    monkeypatch.setenv("SLURM_PROCID", "1")
+    monkeypatch.delenv("SERVER_RDMA_IP", raising=False)
+    assert cs_main._cmd_verbs_pair(args) == 2
+
+    monkeypatch.setenv("SERVER_RDMA_IP", "10.0.0.1")
+    mock_cli = MagicMock(return_value=0)
+    monkeypatch.setattr(cs_main, "_cmd_verbs_client", mock_cli)
+    assert cs_main._cmd_verbs_pair(args) == 0
+    mock_cli.assert_called_once()
+    assert args.server_ip == "10.0.0.1"
 
 
 def test_nccl_exports_with_stub_devices(monkeypatch):

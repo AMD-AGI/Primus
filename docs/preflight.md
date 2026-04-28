@@ -81,6 +81,65 @@ Typical report files:
 - `preflight_report.md` / `preflight_report.pdf`: **info report** (host/GPU/network, plus Cluster Sphere env section when enabled)
 - `preflight_report_perf.md` / `preflight_report_perf.pdf`: **perf report** (GEMM + comm tests, plus optional `ib_write_bw` section)
 
+## Slurm: Cluster Sphere without preflight / torchrun
+
+Use this when you only need **host RDMA validation** and **NCCL-style export hints**, not full GPU preflight (no `torchrun`, no `primus-cli preflight` required). Run on **compute nodes** so `/sys/class/infiniband` and `ibv_devinfo` match real jobs.
+
+**Checklist**
+
+- Primus checkout on nodes (or bind-mount); set `PYTHONPATH` to the repo root that contains the `primus/` package.
+- `ibv_devinfo` (often `rdma-core`), `lspci` for PCI vendor detection.
+- For Pipeline B: [perftest](https://github.com/linux-rdma/perftest) (`ib_write_bw` on `PATH`).
+- Your site may require Slurm `-t`, `-p`, `-A`, etc.
+
+### Pipeline A — RDMA env recommender (one node)
+
+Produces a NIC-oriented Markdown report (GID, per-device firmware, a grouped **firmware report** when multiple NICs exist, suggested `NCCL_*` / `GLOO_*` exports).
+
+```bash
+export PRIMUS_ROOT=/path/to/Primus
+export PYTHONPATH="${PRIMUS_ROOT}"
+
+srun -N 1 -n 1 -t 00:30:00 bash -lc '
+  cd "${PRIMUS_ROOT}" && python3 -m primus.tools.preflight.cluster_sphere env --markdown \
+    > cluster_sphere_env_${SLURM_JOB_ID:-local}.md
+'
+```
+
+Or use the helper script: [`scripts/slurm/cluster_sphere_env_single_node.sh`](../scripts/slurm/cluster_sphere_env_single_node.sh).
+
+### Pipeline B — Verbs `ib_write_bw` (two nodes)
+
+Server listens on **node A**; client on **node B** connects to **`SERVER_RDMA_IP`** — the address of **A on the RDMA/RoCE network**, not necessarily the management DNS name. Obtain it from Pipeline A output / `ip` on the HCA netdev.
+
+Manual (two terminals or SSH into allocated nodes):
+
+```bash
+# Node A
+export PYTHONPATH=/path/to/Primus
+python3 -m primus.tools.preflight.cluster_sphere verbs-server --device rdma0
+
+# Node B (after server is up)
+python3 -m primus.tools.preflight.cluster_sphere verbs-client --server-ip <A_RDMA_IP> --device rdma0
+```
+
+Port: `2000` or `PRIMUS_IB_WRITE_BW_PORT`.
+
+**Single `srun` (server + client)** — set `SERVER_RDMA_IP` to the **server host’s** RDMA address (task 0 / first node); task 1 runs the client after a short delay:
+
+```bash
+export SERVER_RDMA_IP=<node_A_RDMA_IP>
+export PYTHONPATH=/path/to/Primus
+srun -N 2 -n 2 -t 00:30:00 env PYTHONPATH="${PYTHONPATH}" SERVER_RDMA_IP="${SERVER_RDMA_IP}" \
+  python3 -m primus.tools.preflight.cluster_sphere verbs-pair --device rdma0
+```
+
+Automated helper (same allocation, two nodes): [`scripts/slurm/cluster_sphere_ib_write_bw_two_node.sh`](../scripts/slurm/cluster_sphere_ib_write_bw_two_node.sh) — set `SERVER_RDMA_IP` before running.
+
+See [`scripts/slurm/README.md`](../scripts/slurm/README.md) for examples.
+
+---
+
 ## Notes
 
 - For multi-node runs, use `primus-cli slurm …` (or your preferred launcher) so distributed environment variables are set correctly.

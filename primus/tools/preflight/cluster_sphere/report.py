@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
+import io
 from typing import Any, Dict, List
+
+from primus.tools.preflight.network.info import Finding
 
 
 def wants_cluster_sphere_env(args: Any) -> bool:
@@ -15,6 +18,17 @@ def wants_cluster_sphere_env(args: Any) -> bool:
 
 def wants_cluster_sphere_rdma_bw(args: Any) -> bool:
     return bool(getattr(args, "cluster_sphere", False) or getattr(args, "cluster_sphere_rdma_bw", False))
+
+
+def emit_cluster_sphere_env_markdown(hostname: str, findings: List[Finding]) -> str:
+    """Serialize Cluster Sphere env findings to Markdown (standalone CLI / Slurm)."""
+    fd: List[Dict[str, Any]] = []
+    for fin in findings:
+        fd.append({"message": fin.message, "level": fin.level, "details": fin.details})
+    gathered = [{"host": hostname, "findings": fd}]
+    buf = io.StringIO()
+    write_cluster_sphere_env_section(buf, gathered)
+    return buf.getvalue()
 
 
 def write_cluster_sphere_env_section(f, gathered: List[Dict[str, Any]]) -> None:
@@ -67,6 +81,17 @@ def _write_one_host_block(f, host: str, details: Dict[str, Any]) -> None:
                 f"{d.get('firmware','')} | {d.get('gid_index','')} | {d.get('gid_value','')} | "
                 f"{d.get('vendor','')} |\n"
             )
+        f.write("\n")
+
+    fw_by = details.get("firmware_by_version") or {}
+    if fw_by:
+        f.write("**Firmware report:**\n\n")
+        f.write("| Firmware | RDMA devices |\n")
+        f.write("|----------|---------------|\n")
+        for fw in sorted(fw_by.keys()):
+            devs = fw_by[fw]
+            devs_s = ", ".join(devs) if isinstance(devs, list) else str(devs)
+            f.write(f"| {fw} | {devs_s} |\n")
         f.write("\n")
 
     nccl = details.get("nccl_exports") or []

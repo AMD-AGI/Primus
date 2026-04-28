@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import threading
@@ -16,33 +15,14 @@ from typing import Any, Dict, List, Optional
 
 import torch.distributed as dist
 
+from primus.tools.preflight.cluster_sphere.verbs_bw import (
+    default_port,
+    first_ib_device_name,
+    ib_write_bw_client_cmd,
+    ib_write_bw_server_cmd,
+    parse_peak_gbps,
+)
 from primus.tools.preflight.global_vars import RANK, WORLD_SIZE
-
-
-def _first_ib_device_name() -> Optional[str]:
-    ib_path = "/sys/class/infiniband"
-    try:
-        names = sorted(os.listdir(ib_path))
-        return names[0] if names else None
-    except OSError:
-        return None
-
-
-def _resolve_server_host() -> str:
-    return os.environ.get("MASTER_ADDR", "localhost").strip() or "localhost"
-
-
-def _parse_peak_gbps(text: str) -> Optional[float]:
-    """Best-effort peak Gb/sec from ib_write_bw stdout/stderr."""
-    best: Optional[float] = None
-    for line in text.splitlines():
-        for m in re.finditer(r"(\d+\.\d+)\s*Gb/sec", line, re.I):
-            v = float(m.group(1))
-            best = v if best is None else max(best, v)
-        for m in re.finditer(r"(\d+\.\d+)\s*GB/sec", line):
-            v = float(m.group(1))
-            best = v if best is None else max(best, v)
-    return best
 
 
 def append_cluster_sphere_verbs_rdma_section(args: Any, markdown_file: str) -> None:
@@ -75,31 +55,20 @@ def append_cluster_sphere_verbs_rdma_section(args: Any, markdown_file: str) -> N
             _append_lines(markdown_file, lines)
         return
 
-    ib_dev = _first_ib_device_name()
+    ib_dev = first_ib_device_name()
     if not ib_dev:
         lines.append("No InfiniBand / RDMA device under `/sys/class/infiniband`; skipping.\n\n")
         if RANK == 0:
             _append_lines(markdown_file, lines)
         return
 
-    port = int(os.environ.get("PRIMUS_IB_WRITE_BW_PORT", "2000"))
-    server_host = _resolve_server_host()
+    port = default_port()
+    server_host = os.environ.get("MASTER_ADDR", "localhost").strip() or "localhost"
 
     server_holder: Dict[str, Any] = {}
 
     def server_main() -> None:
-        cmd = [
-            "ib_write_bw",
-            "-d",
-            ib_dev,
-            "-q",
-            "4",
-            "-a",
-            "--report_gbits",
-            "-F",
-            "-p",
-            str(port),
-        ]
+        cmd = ib_write_bw_server_cmd(ib_dev, port)
         try:
             proc = subprocess.run(
                 cmd,
@@ -124,23 +93,11 @@ def append_cluster_sphere_verbs_rdma_section(args: Any, markdown_file: str) -> N
     client_payload: Optional[Dict[str, Any]] = None
     if RANK == 1:
         time.sleep(5)
-        cmd = [
-            "ib_write_bw",
-            "-d",
-            ib_dev,
-            "-q",
-            "4",
-            "-a",
-            "--report_gbits",
-            "-F",
-            server_host,
-            "-p",
-            str(port),
-        ]
+        cmd = ib_write_bw_client_cmd(ib_dev, server_host, port)
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-            peak = _parse_peak_gbps(out)
+            peak = parse_peak_gbps(out)
             client_payload = {"stdout": out, "rc": proc.returncode, "peak_gbps": peak}
         except subprocess.TimeoutExpired as e:
             client_payload = {"stdout": str(e), "rc": -1, "peak_gbps": None}
@@ -170,7 +127,7 @@ def append_cluster_sphere_verbs_rdma_section(args: Any, markdown_file: str) -> N
             client_txt = str(client.get("stdout") or "")
 
         if peak is None:
-            peak = _parse_peak_gbps(client_txt)
+            peak = parse_peak_gbps(client_txt)
 
         lines.append(f"- **Device**: `{ib_dev}`\n")
         lines.append(f"- **Server**: `{server_host}:{port}` (rank 0)\n")
