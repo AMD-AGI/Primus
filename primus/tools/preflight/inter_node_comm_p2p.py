@@ -49,10 +49,13 @@ def run_inter_node_comm_p2p(args):
     bandwidth_results = {}
 
     num_adjacent_groups = num_nodes // adjacent_nodes
+    num_paired_ranks = num_adjacent_groups * adjacent_nodes * LOCAL_WORLD_SIZE
     p2p_group = None
     is_src_rank = ((RANK // LOCAL_WORLD_SIZE) % 2) == 0
-    peer_rank = RANK + LOCAL_WORLD_SIZE if is_src_rank else RANK - LOCAL_WORLD_SIZE
-    assert peer_rank >= 0 and peer_rank < WORLD_SIZE
+    if RANK < num_paired_ranks:
+        peer_rank = RANK + LOCAL_WORLD_SIZE if is_src_rank else RANK - LOCAL_WORLD_SIZE
+    else:
+        peer_rank = -1
     for i_group in range(num_adjacent_groups):
         for i_r in range(LOCAL_WORLD_SIZE):
             group_ranks = [
@@ -114,9 +117,10 @@ def run_inter_node_comm_p2p(args):
         src_rank_latency_results = []
         src_rank_bandwidth_results = []
         for rank, r in enumerate(all_bandwidth_results):
+            if rank >= num_paired_ranks:
+                continue
             is_src_rank = ((rank // LOCAL_WORLD_SIZE) % 2) == 0
             peer_rank = rank + LOCAL_WORLD_SIZE if is_src_rank else rank - LOCAL_WORLD_SIZE
-            assert peer_rank >= 0 and peer_rank < WORLD_SIZE
             if not is_src_rank:
                 continue
             src_ranks.append(rank)

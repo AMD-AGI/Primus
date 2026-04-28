@@ -62,20 +62,36 @@ def run_inter_node_comm(args):
             latency_results = {}
             bandwidth_results = {}
 
-            num_procs = adjacent_nodes * LOCAL_WORLD_SIZE
-            num_adjacent_groups = num_nodes // adjacent_nodes
+            num_full_groups = num_nodes // adjacent_nodes
+            remainder_nodes = num_nodes % adjacent_nodes
             adjacent_group = None
-            for i_group in range(num_adjacent_groups):
+            group_leaders = []
+
+            for i_group in range(num_full_groups):
+                group_start = i_group * adjacent_nodes * LOCAL_WORLD_SIZE
                 group_ranks = [
-                    i_group * adjacent_nodes * LOCAL_WORLD_SIZE + r
+                    group_start + r
                     for r in range(adjacent_nodes * LOCAL_WORLD_SIZE)
                 ]
                 tmp_group = dist.new_group(ranks=group_ranks)
                 if RANK in group_ranks:
                     assert adjacent_group is None
                     adjacent_group = tmp_group
-            if RANK < num_adjacent_groups * adjacent_nodes * LOCAL_WORLD_SIZE:
-                assert adjacent_group is not None
+                group_leaders.append(group_start)
+
+            if remainder_nodes >= 2:
+                group_start = num_full_groups * adjacent_nodes * LOCAL_WORLD_SIZE
+                group_ranks = [
+                    group_start + r
+                    for r in range(remainder_nodes * LOCAL_WORLD_SIZE)
+                ]
+                tmp_group = dist.new_group(ranks=group_ranks)
+                if RANK in group_ranks:
+                    assert adjacent_group is None
+                    adjacent_group = tmp_group
+                group_leaders.append(group_start)
+
+            num_procs = dist.get_world_size(adjacent_group) if adjacent_group is not None else 0
 
             for size in sizes:
                 if adjacent_group is None:
@@ -133,7 +149,7 @@ def run_inter_node_comm(args):
                     log(f"{'Hostname':<{max_len}} {'Node':<5} {'Rank':<5} {' '.join(formatted_keys)}")
                     for rank, r in enumerate(all_latency_results):
                         hostname = get_hostnames()[rank]
-                        if rank % num_procs != 0:
+                        if rank not in group_leaders:
                             continue
                         node_id = rank // LOCAL_WORLD_SIZE
 
@@ -151,7 +167,7 @@ def run_inter_node_comm(args):
                     log(f"{'Hostname':<{max_len}} {'Node':<5} {'Rank':<5} {' '.join(formatted_keys)}")
                     for rank, r in enumerate(all_bandwidth_results):
                         hostname = get_hostnames()[rank]
-                        if rank % num_procs != 0:
+                        if rank not in group_leaders:
                             continue
                         node_id = rank // LOCAL_WORLD_SIZE
 
@@ -171,17 +187,17 @@ def run_inter_node_comm(args):
                 create_dir(dump_path)
                 print_keys = extract_first_middle_last(keys)
                 first_rank_bandwidth_results = [
-                    all_bandwidth_results[i] for i in range(len(all_bandwidth_results)) if i % num_procs == 0
+                    all_bandwidth_results[i] for i in group_leaders
                 ]
                 num_print_ranks = len(first_rank_bandwidth_results)
                 for size_key in print_keys:
                     values = [r[size_key] for r in first_rank_bandwidth_results]
                     plt.figure(figsize=(10, 4))
                     bars = plt.bar(range(num_print_ranks), values)
-                    plt.xlabel(f"RankPair ({num_procs} ranks)")
+                    plt.xlabel(f"Group (starting rank)")
                     plt.ylabel("Bandwidth")
                     plt.title(f"Inter Node {case_name} Bandwidth for {size_key}")
-                    xtick_labels = [f"{i*num_procs}" for i in range(num_print_ranks)]
+                    xtick_labels = [f"{r}" for r in group_leaders]
                     plt.xticks(range(num_print_ranks), xtick_labels)
                     plt.grid(True, axis="y")
 
