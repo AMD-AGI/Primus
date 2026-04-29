@@ -41,9 +41,11 @@ def run_inter_node_comm(args):
     # N-node allreduce & alltoall (adjacent pairs)
     # 2-node allreduce, pair nodes: [0, 1], [2, 3], ...
     # 4-node allreduce, pair nodes: [0, 1, 2, 3], [4, 5, 6, 7]...
+    node_counts = [2, 4, num_nodes] if args.split_nodes_subgroup else [num_nodes]
+    node_counts = sorted(set(node_counts))
     cases = {
-        "allreduce": list(set([2, 4] + [num_nodes])),
-        "alltoall": list(set([2, 4] + [num_nodes])),
+        "allreduce": node_counts,
+        "alltoall": node_counts,
     }
 
     if RANK == 0:
