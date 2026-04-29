@@ -34,7 +34,7 @@ modules:
       micro_batch_size: 4
       seq_length: 8192
       eval_interval: 30
-      save_interval: 50
+      save_interval: 500
 
       # Optimizer configuration
       finetune_lr: 5.0e-6
