@@ -111,6 +111,11 @@ if [[ "${USING_UEP:-0}" == "1" ]]; then
         echo "extra.overlap_p2p_comm=false"
         echo "extra.communication_method=batch_p2p"
         LOG_INFO "Broadcom RoCE + Turbo DeepEP detected; requesting overlap_p2p_comm=false and communication_method=batch_p2p."
+
+        if [[ "${PRIMUS_DISABLE_NUM_WORKERS0_FOR_DEEPEP_ROCEP:-0}" != "1" ]]; then
+            echo "extra.num_workers=0"
+            LOG_INFO "Broadcom RoCE + Turbo DeepEP detected; requesting num_workers=0."
+        fi
     fi
 else
     echo "env.PRIMUS_TURBO_MOE_DISPATCH_COMBINE_BACKEND=TURBO"
