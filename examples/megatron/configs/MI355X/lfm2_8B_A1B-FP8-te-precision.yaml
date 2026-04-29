@@ -1,0 +1,16 @@
+configs:
+  bf16:
+    transformer_engine_config_type: "TEQuantizationParams"
+    training_recipe: {}
+
+matchers:
+  self_attn_qkv_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.self_attention.linear_qkv"
+    enabled: true
+  self_attn_proj_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.self_attention.linear_proj"
+    enabled: true
