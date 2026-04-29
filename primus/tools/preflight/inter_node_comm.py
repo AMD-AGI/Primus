@@ -66,6 +66,7 @@ def run_inter_node_comm(args):
             remainder_nodes = num_nodes % adjacent_nodes
             adjacent_group = None
             group_leaders = []
+            group_node_counts = []
 
             for i_group in range(num_full_groups):
                 group_start = i_group * adjacent_nodes * LOCAL_WORLD_SIZE
@@ -78,6 +79,7 @@ def run_inter_node_comm(args):
                     assert adjacent_group is None
                     adjacent_group = tmp_group
                 group_leaders.append(group_start)
+                group_node_counts.append(adjacent_nodes)
 
             if remainder_nodes >= 2:
                 group_start = num_full_groups * adjacent_nodes * LOCAL_WORLD_SIZE
@@ -90,8 +92,15 @@ def run_inter_node_comm(args):
                     assert adjacent_group is None
                     adjacent_group = tmp_group
                 group_leaders.append(group_start)
+                group_node_counts.append(remainder_nodes)
 
             num_procs = dist.get_world_size(adjacent_group) if adjacent_group is not None else 0
+
+            total_grouped_ranks = num_full_groups * adjacent_nodes * LOCAL_WORLD_SIZE
+            if remainder_nodes >= 2:
+                total_grouped_ranks += remainder_nodes * LOCAL_WORLD_SIZE
+            if RANK < total_grouped_ranks:
+                assert adjacent_group is not None
 
             for size in sizes:
                 if adjacent_group is None:
@@ -197,7 +206,10 @@ def run_inter_node_comm(args):
                     plt.xlabel(f"Group (starting rank)")
                     plt.ylabel("Bandwidth")
                     plt.title(f"Inter Node {case_name} Bandwidth for {size_key}")
-                    xtick_labels = [f"{r}" for r in group_leaders]
+                    xtick_labels = [
+                        f"{group_leaders[i]} ({group_node_counts[i]}N)"
+                        for i in range(num_print_ranks)
+                    ]
                     plt.xticks(range(num_print_ranks), xtick_labels)
                     plt.grid(True, axis="y")
 
