@@ -114,11 +114,11 @@
 
 | | Task | commit | date | note |
 |---|---|---|---|---|
-| [ ] | define V4 runtime `ModuleSpec` topology in `deepseek_v4_layer_specs.py` | | | replace placeholder-only role with runtime-usable spec chain |
-| [ ] | make `DeepseekV4Model` runtime path spec-driven (remove decoder swap as default) | | | keep temporary compatibility path only if strictly needed |
-| [ ] | align builder (`deepseek_v4_builders.py`) layer/mtp spec resolution with spec-driven runtime | | | ensure no hidden dependence on post-init decoder replacement |
-| [ ] | PP/VP/MTP compatibility validation for the refactored spec path | | | local-layer slicing + stage ownership checks |
-| [ ] | document retirement plan for legacy placeholder/swap path | | | tracked in `deepseek-v4/develop/plan-1/01-phase-details.md` |
+| [x] | define V4 runtime `ModuleSpec` topology in `deepseek_v4_layer_specs.py` | (working tree) | 2026-04-29 | landed full DeepSeek layer/submodules spec tree (attention/ffn/hc) rooted at `get_deepseek_v4_runtime_decoder_spec` |
+| [x] | make `DeepseekV4Model` runtime path spec-driven (remove decoder swap as default) | (working tree) | 2026-04-29 | `DeepseekV4Model` now inherits `LanguageModule` and builds decoder directly from external runtime spec (`build_module`) |
+| [x] | align builder (`deepseek_v4_builders.py`) layer/mtp spec resolution with spec-driven runtime | (working tree) | 2026-04-29 | builder now resolves/passes DeepSeek runtime decoder spec only; removed GPT placeholder/super-init spec dependence |
+| [x] | PP/VP/MTP compatibility validation for the refactored spec path | (working tree) | 2026-04-29 | validated runtime instantiate/forward in container `dev_primus_wenx_691` with expected decoder + attention topology |
+| [x] | document retirement plan for legacy placeholder/swap path | (working tree) | 2026-04-29 | package/model docs updated to record LanguageModule-based path and retirement of GPT placeholder/swap strategy |
 
 ## Phase 9 (v2) — TE provider reuse integration
 

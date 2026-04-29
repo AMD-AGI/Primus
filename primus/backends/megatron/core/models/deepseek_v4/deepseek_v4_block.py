@@ -36,11 +36,13 @@ from __future__ import annotations
 
 import ast
 import logging
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import List, Optional, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_block import get_num_layers_to_build
 from megatron.core.utils import make_viewless_tensor
 
@@ -173,6 +175,27 @@ class _DenseSwiGLUMLP(nn.Module):
         return self.w_down(F.silu(self.w_gate(x)) * self.w_up(x))
 
 
+@dataclass
+class DeepseekV4HybridLayerSubmodules:
+    """Spec tree for one DeepSeek-V4 hybrid layer."""
+
+    attn_norm: Union[ModuleSpec, type] = _RMSNorm
+    attention: Union[ModuleSpec, type] = DeepseekV4Attention
+    ffn_norm: Union[ModuleSpec, type] = _RMSNorm
+    ffn: Union[ModuleSpec, type] = _DenseSwiGLUMLP
+    attn_hc: Optional[Union[ModuleSpec, type]] = None
+    ffn_hc: Optional[Union[ModuleSpec, type]] = None
+
+
+@dataclass
+class DeepseekV4TransformerBlockSubmodules:
+    """Spec tree for the DeepSeek-V4 decoder block."""
+
+    layer_specs: Optional[List[ModuleSpec]] = None
+    hyper_head: Optional[Union[ModuleSpec, type]] = None
+    final_layernorm: Optional[Union[ModuleSpec, type]] = None
+
+
 # ---------------------------------------------------------------------------
 # Per-layer attention factory
 # ---------------------------------------------------------------------------
@@ -287,32 +310,48 @@ class DeepseekV4HybridLayer(nn.Module):
         moe_score_function: str = "sqrtsoftplus",
         moe_enable_expert_bias: bool = True,
         clamp_alpha: float = 7.0,
+        submodules: Optional[DeepseekV4HybridLayerSubmodules] = None,
     ) -> None:
         super().__init__()
         self.layer_idx = int(layer_idx)
         self.compress_ratio = int(compress_ratio)
         self.hc_mult = int(hc_mult)
+        use_spec_submodules = submodules is not None
+        submodules = submodules or DeepseekV4HybridLayerSubmodules()
 
-        self.attn_norm = _RMSNorm(hidden_size, eps=norm_eps)
-        self.attn = _build_attention(
-            compress_ratio=compress_ratio,
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-            rotary_dim=rotary_dim,
-            rope=rope,
-            attn_sliding_window=attn_sliding_window,
-            attn_sink_enabled=attn_sink_enabled,
-            q_lora_rank=q_lora_rank,
-            index_topk=index_topk,
-            index_head_dim=index_head_dim,
-            index_n_heads=index_n_heads,
-        )
+        if use_spec_submodules and submodules.attn_norm is not None:
+            self.attn_norm = build_module(submodules.attn_norm, dim=hidden_size, eps=norm_eps)
+        else:
+            self.attn_norm = _RMSNorm(hidden_size, eps=norm_eps)
 
-        self.ffn_norm = _RMSNorm(hidden_size, eps=norm_eps)
+        if use_spec_submodules and submodules.attention is not None:
+            self.attn = build_module(submodules.attention, rope=rope)
+        else:
+            self.attn = _build_attention(
+                compress_ratio=compress_ratio,
+                hidden_size=hidden_size,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                rotary_dim=rotary_dim,
+                rope=rope,
+                attn_sliding_window=attn_sliding_window,
+                attn_sink_enabled=attn_sink_enabled,
+                q_lora_rank=q_lora_rank,
+                index_topk=index_topk,
+                index_head_dim=index_head_dim,
+                index_n_heads=index_n_heads,
+            )
+
+        if use_spec_submodules and submodules.ffn_norm is not None:
+            self.ffn_norm = build_module(submodules.ffn_norm, dim=hidden_size, eps=norm_eps)
+        else:
+            self.ffn_norm = _RMSNorm(hidden_size, eps=norm_eps)
         self.is_moe = num_routed_experts > 0
-        if self.is_moe:
+        if use_spec_submodules and submodules.ffn is not None:
+            self.ffn = build_module(submodules.ffn)
+            self.is_moe = isinstance(self.ffn, DeepseekV4MoE)
+        elif self.is_moe:
             moe_inner = moe_intermediate_size or ffn_hidden_size
             self.ffn = DeepseekV4MoE(
                 hidden_size=hidden_size,
@@ -332,18 +371,36 @@ class DeepseekV4HybridLayer(nn.Module):
             self.ffn = _DenseSwiGLUMLP(hidden_size=hidden_size, ffn_hidden_size=ffn_hidden_size)
 
         if hc_mult > 1:
-            self.attn_hc = HyperMixer(
-                hidden_size=hidden_size,
-                hc_mult=hc_mult,
-                eps=hc_eps,
-                sinkhorn_iters=hc_sinkhorn_iters,
-            )
-            self.ffn_hc = HyperMixer(
-                hidden_size=hidden_size,
-                hc_mult=hc_mult,
-                eps=hc_eps,
-                sinkhorn_iters=hc_sinkhorn_iters,
-            )
+            if use_spec_submodules and submodules.attn_hc is not None:
+                self.attn_hc = build_module(
+                    submodules.attn_hc,
+                    hidden_size=hidden_size,
+                    hc_mult=hc_mult,
+                    eps=hc_eps,
+                    sinkhorn_iters=hc_sinkhorn_iters,
+                )
+            else:
+                self.attn_hc = HyperMixer(
+                    hidden_size=hidden_size,
+                    hc_mult=hc_mult,
+                    eps=hc_eps,
+                    sinkhorn_iters=hc_sinkhorn_iters,
+                )
+            if use_spec_submodules and submodules.ffn_hc is not None:
+                self.ffn_hc = build_module(
+                    submodules.ffn_hc,
+                    hidden_size=hidden_size,
+                    hc_mult=hc_mult,
+                    eps=hc_eps,
+                    sinkhorn_iters=hc_sinkhorn_iters,
+                )
+            else:
+                self.ffn_hc = HyperMixer(
+                    hidden_size=hidden_size,
+                    hc_mult=hc_mult,
+                    eps=hc_eps,
+                    sinkhorn_iters=hc_sinkhorn_iters,
+                )
         else:
             self.attn_hc = None
             self.ffn_hc = None
@@ -437,11 +494,13 @@ class DeepseekV4TransformerBlock(nn.Module):
         post_process: bool = True,
         pg_collection=None,
         vp_stage=None,
+        submodules: Optional[DeepseekV4TransformerBlockSubmodules] = None,
     ) -> None:
         super().__init__()
         # Save arguments matching the parent's interface for compatibility.
         self.config = config
         self.spec = spec
+        self.submodules = submodules
         self.post_layer_norm = post_layer_norm
         self.pre_process = pre_process
         self.post_process = post_process
@@ -512,61 +571,81 @@ class DeepseekV4TransformerBlock(nn.Module):
             original_max_position_embeddings=original_max_pos,
         )
 
-        # ---- PP local layer range ----
-        try:
-            local_layer_count = int(get_num_layers_to_build(config, vp_stage=vp_stage))
-            layer_offset = int(get_transformer_layer_offset(config, vp_stage=vp_stage))
-        except Exception:
-            # Standalone/unit-test path where distributed context isn't fully set up.
-            local_layer_count = num_layers
-            layer_offset = 0
-
-        local_start = max(0, layer_offset)
-        local_end = min(num_layers, local_start + max(0, local_layer_count))
-        self.global_layer_indices = list(range(local_start, local_end))
-        self.layer_offset = local_start
-
         # ---- local layers ----
+        provided_layer_specs = (
+            submodules.layer_specs if submodules is not None and submodules.layer_specs is not None else None
+        )
         self.layers = nn.ModuleList()
-        for global_layer_idx in self.global_layer_indices:
-            ratio = compress_ratios[global_layer_idx]
-            layer = DeepseekV4HybridLayer(
-                layer_idx=global_layer_idx,
-                compress_ratio=int(ratio),
-                hidden_size=hidden_size,
-                ffn_hidden_size=ffn_hidden_size,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim=head_dim,
-                rotary_dim=rotary_dim,
-                rope=self.rope,
-                attn_sliding_window=attn_sliding_window,
-                attn_sink_enabled=attn_sink_enabled,
-                q_lora_rank=q_lora_rank,
-                index_topk=index_topk,
-                index_head_dim=index_head_dim,
-                index_n_heads=index_n_heads,
-                hc_mult=hc_mult,
-                hc_eps=hc_eps,
-                hc_sinkhorn_iters=hc_sinkhorn_iters,
-                norm_eps=norm_eps,
-                num_routed_experts=num_routed_experts,
-                moe_router_topk=moe_router_topk,
-                moe_intermediate_size=moe_intermediate_size,
-                num_shared_experts=num_shared_experts,
-                num_hash_layers=num_hash_layers,
-                hash_vocab_size=hash_vocab_size,
-                hash_seed=hash_seed,
-                moe_score_function=moe_score_function,
-                moe_enable_expert_bias=moe_enable_expert_bias,
-                clamp_alpha=clamp_alpha,
-            )
-            self.layers.append(layer)
+
+        if provided_layer_specs is not None:
+            self.global_layer_indices = []
+            for local_idx, layer_spec in enumerate(provided_layer_specs):
+                layer = build_module(layer_spec, rope=self.rope)
+                self.layers.append(layer)
+                self.global_layer_indices.append(int(getattr(layer, "layer_idx", local_idx)))
+            self.layer_offset = self.global_layer_indices[0] if self.global_layer_indices else 0
+        else:
+            # ---- PP local layer range ----
+            try:
+                local_layer_count = int(get_num_layers_to_build(config, vp_stage=vp_stage))
+                layer_offset = int(get_transformer_layer_offset(config, vp_stage=vp_stage))
+            except Exception:
+                # Standalone/unit-test path where distributed context isn't fully set up.
+                local_layer_count = num_layers
+                layer_offset = 0
+
+            local_start = max(0, layer_offset)
+            local_end = min(num_layers, local_start + max(0, local_layer_count))
+            self.global_layer_indices = list(range(local_start, local_end))
+            self.layer_offset = local_start
+
+            for global_layer_idx in self.global_layer_indices:
+                ratio = compress_ratios[global_layer_idx]
+                layer = DeepseekV4HybridLayer(
+                    layer_idx=global_layer_idx,
+                    compress_ratio=int(ratio),
+                    hidden_size=hidden_size,
+                    ffn_hidden_size=ffn_hidden_size,
+                    num_heads=num_heads,
+                    num_kv_heads=num_kv_heads,
+                    head_dim=head_dim,
+                    rotary_dim=rotary_dim,
+                    rope=self.rope,
+                    attn_sliding_window=attn_sliding_window,
+                    attn_sink_enabled=attn_sink_enabled,
+                    q_lora_rank=q_lora_rank,
+                    index_topk=index_topk,
+                    index_head_dim=index_head_dim,
+                    index_n_heads=index_n_heads,
+                    hc_mult=hc_mult,
+                    hc_eps=hc_eps,
+                    hc_sinkhorn_iters=hc_sinkhorn_iters,
+                    norm_eps=norm_eps,
+                    num_routed_experts=num_routed_experts,
+                    moe_router_topk=moe_router_topk,
+                    moe_intermediate_size=moe_intermediate_size,
+                    num_shared_experts=num_shared_experts,
+                    num_hash_layers=num_hash_layers,
+                    hash_vocab_size=hash_vocab_size,
+                    hash_seed=hash_seed,
+                    moe_score_function=moe_score_function,
+                    moe_enable_expert_bias=moe_enable_expert_bias,
+                    clamp_alpha=clamp_alpha,
+                )
+                self.layers.append(layer)
         self.hc_mult = hc_mult
 
         # Final HC collapse (only if multi-stream).
         if hc_mult > 1:
-            self.hyper_head = HyperHead(hidden_size=hidden_size, hc_mult=hc_mult, eps=hc_eps)
+            if submodules is not None and submodules.hyper_head is not None:
+                self.hyper_head = build_module(
+                    submodules.hyper_head,
+                    hidden_size=hidden_size,
+                    hc_mult=hc_mult,
+                    eps=hc_eps,
+                )
+            else:
+                self.hyper_head = HyperHead(hidden_size=hidden_size, hc_mult=hc_mult, eps=hc_eps)
         else:
             self.hyper_head = None
 
@@ -574,7 +653,14 @@ class DeepseekV4TransformerBlock(nn.Module):
         # - no MTP: on post_process stage
         # - with MTP: on the stage containing decoder's final layer
         if self._has_final_layernorm_in_this_stage(total_decoder_layers=num_layers):
-            self.final_layernorm = _RMSNorm(hidden_size, eps=norm_eps)
+            if submodules is not None and submodules.final_layernorm is not None:
+                self.final_layernorm = build_module(
+                    submodules.final_layernorm,
+                    dim=hidden_size,
+                    eps=norm_eps,
+                )
+            else:
+                self.final_layernorm = _RMSNorm(hidden_size, eps=norm_eps)
         else:
             self.final_layernorm = None
 
@@ -680,6 +766,8 @@ class DeepseekV4TransformerBlock(nn.Module):
 
 
 __all__ = [
+    "DeepseekV4HybridLayerSubmodules",
+    "DeepseekV4TransformerBlockSubmodules",
     "DeepseekV4HybridLayer",
     "DeepseekV4TransformerBlock",
 ]

@@ -7,115 +7,210 @@
 """
 DeepSeek-V4 top-level model.
 
-Phase 5 layout:
-
-* ``DeepseekV4Model`` subclasses ``GPTModel`` so we keep the embedding /
-  output-head / position-embedding / RoPE plumbing for free.
-* After ``super().__init__`` runs (which builds a stock ``TransformerBlock``
-  as ``self.decoder``), we **replace** ``self.decoder`` with
-  :class:`DeepseekV4TransformerBlock` — a standalone module that owns the
-  V4-specific hybrid attention dispatch, ``hc_mult`` parallel hidden
-  streams, and (Phase 5) per-layer V4 MoE FFN.
-* A V4 custom MTP block (:class:`DeepseekV4MTPBlock`) is available behind
-  ``config.v4_use_custom_mtp_block`` for experiments. By default P6 keeps
-  GPTModel's native MTP path for loss wiring + PP placement.
-* The V4 config fields (``hc_mult``, ``compress_ratios``, ``attn_sink``,
-  ``num_hash_layers``, ``swiglu_limit``, MoE / hash-router knobs ...)
-  flow from yaml → ``args`` → ``backend_args`` via Primus's
-  ``merge_namespace`` step (see
-  ``primus/core/runtime/train_runtime.py:_initialize_trainer``), then onto
-  ``config`` because the V4 builder calls ``core_transformer_config_from_args``
-  which picks up unknown attrs. Both the model class and the V4 block read
-  these via ``getattr(config, ..., default)``.
-* ``forward`` is overridden so we can stash ``input_ids`` on the V4 block
-  before delegating to ``GPTModel.forward``. The V4 block needs token ids
-  for its hash-routed MoE layers (``layer_idx < num_hash_layers``).
-
-Phase 6 (deferred) will:
-* Skip the intermediate stock ``TransformerBlock`` allocation entirely
-  (saves init memory at large scale).
-* Wire MTP outputs into the loss path.
-* Wire PP / TP / EP integration so the V4 block participates in Megatron's
-  distributed framework.
+This model intentionally subclasses :class:`LanguageModule` (not GPTModel)
+so DeepSeek-V4 no longer depends on GPT's internal TransformerBlock
+construction path.
 """
 
-from typing import Optional
+from typing import Literal, Optional, Union
 
-from megatron.core.models.gpt import GPTModel
-from megatron.core.transformer.spec_utils import ModuleSpec
-
-from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_block import (
-    DeepseekV4TransformerBlock,
+from megatron.core import tensor_parallel
+from megatron.core.models.common.embeddings.language_model_embedding import (
+    LanguageModelEmbedding,
 )
+from megatron.core.models.common.language_module.language_module import LanguageModule
+from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.transformer.enums import ModelType
+from megatron.core.transformer.spec_utils import ModuleSpec, build_module
+from torch import Tensor
+
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_mtp import (
     DeepseekV4MTPBlock,
 )
 
 
-class DeepseekV4Model(GPTModel):
-    """V4 model class. See module docstring for the rollout plan."""
+class DeepseekV4Model(LanguageModule):
+    """DeepSeek-V4 language model rooted on LanguageModule."""
 
     def __init__(
         self,
-        *args,
-        transformer_layer_spec: ModuleSpec,
+        config,
+        transformer_layer_spec: Union[ModuleSpec, type],
+        vocab_size: int,
+        max_sequence_length: int,
+        pre_process: bool = True,
+        post_process: bool = True,
+        fp16_lm_cross_entropy: bool = False,
+        parallel_output: bool = True,
+        share_embeddings_and_output_weights: bool = False,
+        position_embedding_type: Literal[
+            "learned_absolute",
+            "rope",
+            "mrope",
+            "yarn",
+            "none",
+        ] = "none",
+        rotary_percent: float = 1.0,
+        rotary_base: int = 10000,
+        rope_scaling: bool = False,
+        scatter_embedding_sequence_parallel: bool = True,
+        pg_collection: Optional[ProcessGroupCollection] = None,
         vp_stage: Optional[int] = None,
-        **kwargs,
+        **_kwargs,
     ) -> None:
-        super().__init__(
-            *args,
-            transformer_layer_spec=transformer_layer_spec,
-            vp_stage=vp_stage,
-            **kwargs,
-        )
+        del rotary_percent, rotary_base, rope_scaling
+        super().__init__(config=config, pg_collection=pg_collection)
 
-        # GPTModel.__init__ has already built a stock ``TransformerBlock`` and
-        # stored it on ``self.decoder``. Swap in the V4 block — it has the
-        # same call signature so ``GPTModel.forward`` keeps working.
-        self.decoder = DeepseekV4TransformerBlock(
+        self.transformer_layer_spec = transformer_layer_spec
+        self.vocab_size = vocab_size
+        self.max_sequence_length = max_sequence_length
+        self.pre_process = pre_process
+        self.post_process = post_process
+        self.fp16_lm_cross_entropy = fp16_lm_cross_entropy
+        self.parallel_output = parallel_output
+        self.share_embeddings_and_output_weights = share_embeddings_and_output_weights
+        self.vp_stage = vp_stage
+        self.model_type = ModelType.encoder_or_decoder
+
+        if hasattr(self.config, "position_embedding_type"):
+            self.position_embedding_type = self.config.position_embedding_type
+        else:
+            self.position_embedding_type = position_embedding_type
+
+        if self.pre_process:
+            self.embedding = LanguageModelEmbedding(
+                config=self.config,
+                vocab_size=self.vocab_size,
+                max_sequence_length=self.max_sequence_length,
+                position_embedding_type=self.position_embedding_type,
+                scatter_to_sequence_parallel=scatter_embedding_sequence_parallel,
+                tp_group=self.pg_collection.tp,
+            )
+
+        self.decoder = build_module(
+            transformer_layer_spec,
             config=self.config,
-            spec=transformer_layer_spec,
             pre_process=self.pre_process,
             post_process=self.post_process,
-            pg_collection=getattr(self, "pg_collection", None),
+            pg_collection=self.pg_collection,
             vp_stage=vp_stage,
         )
 
-        # ---- Optional V4 custom MTP block ----
-        # P6 keeps GPTModel's native MTP path as default because it already
-        # integrates with Megatron's loss wiring and PP placement. The custom
-        # V4 MTP block remains available behind a config flag for experiments.
+        # Optional V4 custom MTP block. This path is experimental and currently
+        # orthogonal to Megatron's native MTP loss pipeline.
         mtp_num_layers = int(getattr(self.config, "mtp_num_layers", 0) or 0)
         use_custom_v4_mtp = bool(getattr(self.config, "v4_use_custom_mtp_block", False))
         if use_custom_v4_mtp and mtp_num_layers > 0 and self.post_process:
             mtp_compress_ratios = getattr(self.config, "mtp_compress_ratios", None)
+            decoder_rope = getattr(self.decoder, "rope", None)
+            if decoder_rope is None:
+                raise ValueError(
+                    "v4_use_custom_mtp_block requires decoder.rope. "
+                    "Please ensure transformer_layer_spec builds a decoder with DualRoPE support."
+                )
             self.mtp_block = DeepseekV4MTPBlock(
                 config=self.config,
-                rope=self.decoder.rope,
+                rope=decoder_rope,
                 mtp_num_layers=mtp_num_layers,
                 mtp_compress_ratios=mtp_compress_ratios,
             )
         else:
             self.mtp_block = None
 
-    def forward(self, input_ids, *args, **kwargs):
-        """Cache ``input_ids`` on the V4 block for hash-routed MoE layers.
+        if self.post_process:
+            if getattr(self.config, "defer_embedding_wgrad_compute", False):
+                self.embedding_activation_buffer = []
+                self.grad_output_buffer = []
+            else:
+                self.embedding_activation_buffer = None
+                self.grad_output_buffer = None
 
-        ``GPTModel.forward`` consumes ``input_ids`` itself for the embedding
-        on the first PP stage; on later stages it is ``None``. We stash a
-        local copy on ``self.decoder`` before super-forward so the V4 block
-        can pick it up via ``getattr(self, "_v4_token_ids", None)``.
+            self.output_layer = tensor_parallel.ColumnParallelLinear(
+                self.config.hidden_size,
+                self.vocab_size,
+                config=self.config,
+                init_method=(
+                    self.config.embedding_init_method
+                    if getattr(self.config, "use_mup", False) and not self.share_embeddings_and_output_weights
+                    else self.config.init_method
+                ),
+                bias=False,
+                skip_bias_add=False,
+                gather_output=not self.parallel_output,
+                skip_weight_param_allocation=self.pre_process and self.share_embeddings_and_output_weights,
+                embedding_activation_buffer=self.embedding_activation_buffer,
+                grad_output_buffer=self.grad_output_buffer,
+                tp_group=self.pg_collection.tp,
+            )
 
-        Cross-PP propagation of ``input_ids`` is a Phase 6 concern.
+        if self.pre_process or self.post_process:
+            self.setup_embeddings_and_output_layer()
+
+    def set_input_tensor(self, input_tensor: Tensor) -> None:
+        """Pipeline-parallel hook to set decoder input tensor."""
+        if not isinstance(input_tensor, list):
+            input_tensor = [input_tensor]
+        assert len(input_tensor) == 1, "input_tensor should only be length 1 for decoder-only models"
+        self.decoder.set_input_tensor(input_tensor[0])
+
+    def forward(
+        self,
+        input_ids: Optional[Tensor],
+        position_ids: Optional[Tensor],
+        attention_mask: Optional[Tensor],
+        decoder_input: Optional[Tensor] = None,
+        labels: Optional[Tensor] = None,
+        runtime_gather_output: Optional[bool] = None,
+        **kwargs,
+    ):
+        """Forward pass for DeepSeek-V4.
+
+        ``input_ids`` are additionally stashed on the decoder for hash-routed
+        MoE layers.
         """
+        if decoder_input is None:
+            if self.pre_process:
+                if input_ids is None:
+                    raise ValueError("input_ids must be provided when pre_process=True.")
+                if position_ids is None:
+                    batch, seq = input_ids.shape
+                    position_ids = (
+                        input_ids.new_arange(seq, dtype=input_ids.dtype).unsqueeze(0).expand(batch, -1)
+                    )
+                decoder_input = self.embedding(input_ids=input_ids, position_ids=position_ids)
+            else:
+                decoder_input = None
+
         decoder = getattr(self, "decoder", None)
         if decoder is not None:
             decoder._v4_token_ids = input_ids
         try:
-            return super().forward(input_ids, *args, **kwargs)
+            hidden_states = self.decoder(
+                hidden_states=decoder_input,
+                attention_mask=attention_mask,
+                **kwargs,
+            )
         finally:
             if decoder is not None:
                 decoder._v4_token_ids = None
+
+        if not self.post_process:
+            return hidden_states
+
+        output_weight = None
+        if self.share_embeddings_and_output_weights:
+            output_weight = self.shared_embedding_or_output_weight()
+
+        logits, _ = self.output_layer(
+            hidden_states,
+            weight=output_weight,
+            runtime_gather_output=runtime_gather_output,
+        )
+        logits = self._scale_logits(logits)
+
+        if labels is None:
+            return logits.transpose(0, 1).contiguous()
+        return self.compute_language_model_loss(labels, logits)
 
 
 __all__ = ["DeepseekV4Model"]
