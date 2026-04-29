@@ -8,7 +8,7 @@
 
 This is the runtime install hook (callable from a trainer entry point such
 as ``small_llm_moe_pretraining/primus/src/train.py``). The Triton kernels
-live in :mod:`primus_turbo.pytorch.ops.triton_rmsnorm`.
+live in :mod:`primus.backends.megatron.core.extensions.triton_rmsnorm`.
 
 V1 — IN-LAYER fuse  (``PRIMUS_FUSED_RESIDUAL_NORM=1``)
     self_attn_bda(residual + attn_out) → pre_mlp_layernorm
@@ -85,7 +85,7 @@ def install() -> bool:
         return False
 
     try:
-        from primus_turbo.pytorch.ops.triton_rmsnorm import (
+        from primus.backends.megatron.core.extensions.triton_rmsnorm import (
             triton_rmsnorm_residual,
         )
     except ImportError as exc:
@@ -364,7 +364,7 @@ def _do_fused_forward(layer: Any, hidden_states=None, *args, **kwargs):
         prev_mlp_out, prev_residual = carry
         # We bypass PrimusTurboRMSNorm.forward to access x_plus_r directly,
         # which is needed as the residual for ADD#1.
-        from primus_turbo.pytorch.ops.triton_rmsnorm import (
+        from primus.backends.megatron.core.extensions.triton_rmsnorm import (
             triton_rmsnorm_residual,
         )
         in_ln = layer.input_layernorm
