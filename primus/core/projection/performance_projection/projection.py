@@ -5,8 +5,13 @@
 ###############################################################################
 
 import copy
+import json
 import math
 import os
+import socket
+import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -38,6 +43,280 @@ from primus.core.projection.training_config import (
 
 _MAX_EXPERT_PARALLEL_SIZE = 8
 _BYTES_PER_GB = 1024**3
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hybrid sourcing: save/load/merge profiling results
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _save_profiling_results(profiling_results, reduction_info, save_path):
+    """Serialize profiling results + metadata to JSON for later hybrid sourcing."""
+    serializable = {}
+    for key, value in profiling_results.items():
+        str_key = str(key)
+        if isinstance(value, dict):
+            serializable[str_key] = copy.deepcopy(value)
+        else:
+            serializable[str_key] = value
+
+    payload = {
+        "profiling_results": serializable,
+        "metadata": {
+            "benchmark_ep": reduction_info.get("benchmark_ep", 1),
+            "benchmark_tp": reduction_info.get("benchmark_tp", 1),
+            "benchmark_pp": reduction_info.get("benchmark_pp", 1),
+            "benchmark_gpus": reduction_info.get("benchmark_gpus", 1),
+            "original_ep": reduction_info.get("original_ep", 1),
+            "original_num_experts": reduction_info.get("original_num_experts"),
+            "benchmark_num_experts": reduction_info.get("benchmark_num_experts"),
+        },
+    }
+
+    with open(save_path, "w") as f:
+        json.dump(payload, f, indent=2)
+
+
+def _load_profiling_results(load_path):
+    """Load profiling results + metadata from a JSON file."""
+    with open(load_path, "r") as f:
+        payload = json.load(f)
+
+    raw = payload["profiling_results"]
+    profiling_results = {}
+    for key, value in raw.items():
+        try:
+            int_key = int(key)
+            profiling_results[int_key] = value
+        except ValueError:
+            profiling_results[key] = value
+
+    return profiling_results, payload.get("metadata", {})
+
+
+def _merge_hybrid_profiling(
+    current_results,
+    baseline_results,
+    baseline_metadata,
+    current_benchmark_ep,
+):
+    """Replace current profiling compute times with clean baseline values.
+
+    For MoE layers:
+      - Attention times are taken from baseline (no AllToAll contention).
+      - MLP compute is taken from baseline and scaled by EP_baseline / EP_current
+        to account for per-GPU workload differences (tokens × topk / EP).
+      - Measured A2A times are kept from the current (bg=N) profiling.
+
+    For dense layers:
+      - All times are replaced with baseline values.
+
+    Returns the number of layers merged and a dict of diagnostics.
+    """
+    # EP compute scaling: in theory, per-GPU MoE compute scales as topk/EP.
+    # In practice, MoE MLP time is dominated by fixed overhead (routing,
+    # permutation, GroupedGEMM setup) that doesn't scale with EP.  Using
+    # the raw baseline compute (scale=1.0) works well because the bg=1
+    # MLP time (routing overhead + compute for all local experts) is a
+    # reasonable proxy for the non-A2A MLP cost at any EP.  The subsequent
+    # EP adjustment step then correctly scales only the A2A portion.
+    ep_compute_scale = 1.0
+
+    merged_count = 0
+    diagnostics = {}
+
+    for layer_idx, current_data in current_results.items():
+        if not isinstance(current_data, dict):
+            continue
+        if layer_idx in ("embedding", "output", "_tp_allreduce_benchmark"):
+            continue
+
+        # Find matching baseline layer (by index, or use the representative
+        # layer of the same type if exact match is missing).
+        baseline_data = baseline_results.get(layer_idx)
+        if baseline_data is None:
+            baseline_data = baseline_results.get(str(layer_idx))
+        if baseline_data is None:
+            continue
+
+        layer_type = current_data.get("type", "dense")
+
+        if layer_type == "moe":
+            cur_attn = current_data.get("attention", {})
+            base_attn = baseline_data.get("attention", {})
+            cur_mlp = current_data.get("mlp", {})
+            base_mlp = baseline_data.get("mlp", {})
+
+            # At EP=1 (bg=1), there's no A2A, so baseline mlp fwd is pure compute.
+            base_mlp_compute_fwd = base_mlp.get("forward_time_ms", 0)
+            base_mlp_compute_bwd = base_mlp.get("backward_time_ms", 0)
+
+            scaled_compute_fwd = base_mlp_compute_fwd * ep_compute_scale
+            scaled_compute_bwd = base_mlp_compute_bwd * ep_compute_scale
+
+            cur_a2a_fwd = cur_mlp.get("a2a_forward_time_ms", 0)
+            cur_a2a_bwd = cur_mlp.get("a2a_backward_time_ms", 0)
+
+            new_mlp_fwd = scaled_compute_fwd + cur_a2a_fwd
+            new_mlp_bwd = scaled_compute_bwd + cur_a2a_bwd
+
+            base_attn_fwd = base_attn.get("forward_time_ms", cur_attn.get("forward_time_ms", 0))
+            base_attn_bwd = base_attn.get("backward_time_ms", cur_attn.get("backward_time_ms", 0))
+
+            new_fwd = base_attn_fwd + new_mlp_fwd
+            new_bwd = base_attn_bwd + new_mlp_bwd
+
+            if merged_count == 0:
+                diagnostics = {
+                    "cur_attn_fwd": cur_attn.get("forward_time_ms", 0),
+                    "base_attn_fwd": base_attn_fwd,
+                    "attn_contention_ratio": (
+                        cur_attn.get("forward_time_ms", 0) / base_attn_fwd if base_attn_fwd > 0 else 0
+                    ),
+                    "base_mlp_compute_fwd": base_mlp_compute_fwd,
+                    "scaled_compute_fwd": scaled_compute_fwd,
+                    "cur_a2a_fwd": cur_a2a_fwd,
+                    "ep_compute_scale": ep_compute_scale,
+                    "old_layer_fwd": current_data.get("forward_time_ms", 0),
+                    "new_layer_fwd": new_fwd,
+                }
+
+            current_data["forward_time_ms"] = new_fwd
+            current_data["backward_time_ms"] = new_bwd
+            cur_attn["forward_time_ms"] = base_attn_fwd
+            cur_attn["backward_time_ms"] = base_attn_bwd
+            cur_mlp["forward_time_ms"] = new_mlp_fwd
+            cur_mlp["backward_time_ms"] = new_mlp_bwd
+
+        else:
+            # Dense layer: replace times entirely with baseline
+            current_data["forward_time_ms"] = baseline_data.get(
+                "forward_time_ms", current_data.get("forward_time_ms", 0)
+            )
+            current_data["backward_time_ms"] = baseline_data.get(
+                "backward_time_ms", current_data.get("backward_time_ms", 0)
+            )
+            base_attn = baseline_data.get("attention", {})
+            if base_attn and "attention" in current_data:
+                current_data["attention"]["forward_time_ms"] = base_attn.get(
+                    "forward_time_ms",
+                    current_data["attention"].get("forward_time_ms", 0),
+                )
+                current_data["attention"]["backward_time_ms"] = base_attn.get(
+                    "backward_time_ms",
+                    current_data["attention"].get("backward_time_ms", 0),
+                )
+            base_mlp_d = baseline_data.get("mlp", {})
+            if base_mlp_d and "mlp" in current_data:
+                current_data["mlp"]["forward_time_ms"] = base_mlp_d.get(
+                    "forward_time_ms",
+                    current_data["mlp"].get("forward_time_ms", 0),
+                )
+                current_data["mlp"]["backward_time_ms"] = base_mlp_d.get(
+                    "backward_time_ms",
+                    current_data["mlp"].get("backward_time_ms", 0),
+                )
+
+        merged_count += 1
+
+    return merged_count, diagnostics
+
+
+def _run_automatic_bg1_baseline(args, reduction_info):
+    """Run bg=1 profiling in a subprocess to get clean compute baselines.
+
+    Only rank 0 spawns the subprocess; all ranks poll for the result file.
+    Returns (profiling_results, metadata) or (None, None) on failure.
+    """
+    rank = int(os.getenv("RANK", "0"))
+    master_port = os.getenv("MASTER_PORT", "29500")
+    save_path = f"/tmp/primus_bg1_baseline_{master_port}.json"
+
+    if rank == 0:
+        if os.path.exists(save_path):
+            os.remove(save_path)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("", 0))
+            free_port = s.getsockname()[1]
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--nproc_per_node=1",
+            "--nnodes=1",
+            "--node_rank=0",
+            "--master_addr=localhost",
+            f"--master_port={free_port}",
+            "-m",
+            "primus.cli.main",
+            "projection",
+            "performance",
+            "--config",
+            str(args.config),
+            "--benchmark-gpus",
+            "1",
+            "--save-profiling",
+            save_path,
+            "--profile-only",
+        ]
+
+        hw = getattr(args, "hardware_config", None)
+        if hw:
+            cmd.extend(["--hardware-config", hw])
+
+        target = getattr(args, "target_nodes", None) or getattr(args, "target_num_nodes", None)
+        if target:
+            cmd.extend(["--target-num-nodes", str(target)])
+
+        for attr, flag in [
+            ("target_ep_size", "--target-ep-size"),
+            ("micro_batch_size", "--micro-batch-size"),
+            ("global_batch_size", "--global-batch-size"),
+        ]:
+            val = getattr(args, attr, None)
+            if val is not None:
+                cmd.extend([flag, str(val)])
+
+        print("[Primus:Performance Projection] Running bg=1 compute baseline " "(subprocess)...")
+
+        env = os.environ.copy()
+        local_gpu = env.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
+        env["CUDA_VISIBLE_DEVICES"] = local_gpu
+
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=600)
+
+        if result.returncode != 0:
+            stderr_tail = result.stderr[-1000:] if result.stderr else "(empty)"
+            print(
+                f"[WARNING] bg=1 compute baseline subprocess failed "
+                f"(exit {result.returncode}):\n{stderr_tail}"
+            )
+            with open(save_path + ".failed", "w") as f:
+                f.write("failed")
+
+    for _ in range(600):
+        if os.path.exists(save_path) and os.path.getsize(save_path) > 10:
+            break
+        if os.path.exists(save_path + ".failed"):
+            return None, None
+        time.sleep(0.5)
+
+    if not os.path.exists(save_path) or os.path.getsize(save_path) < 10:
+        if rank == 0:
+            print("[WARNING] bg=1 compute baseline timed out.")
+        return None, None
+
+    results, metadata = _load_profiling_results(save_path)
+
+    if rank == 0:
+        print(
+            f"[Primus:Performance Projection] bg=1 compute baseline loaded "
+            f"({len([k for k in results if isinstance(k, int)])} layers)"
+        )
+
+    return results, metadata
 
 
 def _calculate_min_gpus(tp, pp, ep, cp):
@@ -83,9 +362,16 @@ def calculate_collective_communication_time(
     cp: int,
     dp: int,
     hardware_config: Dict[str, Any] = None,
+    compute_time_ms: float = None,
 ) -> Tuple[float, Dict[str, float], Dict[str, Any], list]:
     """
     Calculate collective communication time for given configuration.
+
+    Args:
+        compute_time_ms: Optional per-microbatch compute time (ms). When provided
+            along with FSDP enabled, the FSDP overlap fraction is computed from
+            the per-layer compute/comm ratio (physics-based) rather than the
+            legacy constant ceiling. This generalizes across model sizes.
 
     Returns:
         (total_comm_time_ms, breakdown_dict, message_info_dict, per_layer_info_list)
@@ -331,19 +617,81 @@ def calculate_collective_communication_time(
         if overlap_fsdp:
             total_fsdp_ag = breakdown.get("fsdp_allgather_fwd", 0)
             total_fsdp_rs = breakdown.get("fsdp_reducescatter_bwd", 0)
+            ag_per_layer_ms = message_info.get("fsdp_ag_per_layer_ms", 0.0)
+            rs_per_layer_ms = message_info.get("fsdp_rs_per_layer_ms", 0.0)
+            ag_multiplier = message_info.get("fsdp_ag_multiplier", 1.0)
 
-            # Overlap factor applied uniformly to all FSDP
-            # communication - (AllGather fwd, AllGather recompute, ReduceScatter).
-            # This number is based on observed overlap in the benchmarked run of llama3-70b.
-            FSDP_OVERLAP = 0.93
+            # Legacy ceiling (used when compute_time_ms not provided)
+            FSDP_OVERLAP_LEGACY = 0.93
 
-            total_fsdp = total_fsdp_ag + total_fsdp_rs
-            total_hidden = total_fsdp * FSDP_OVERLAP
-            total_comm_time -= total_hidden
-            message_info["fsdp_overlapped"] = True
-            message_info["fsdp_overlap"] = FSDP_OVERLAP
-            message_info["fsdp_overall_overlap"] = FSDP_OVERLAP
-            message_info["fsdp_exposed_ms"] = total_fsdp - total_hidden
+            if compute_time_ms is not None and num_layers > 0 and compute_time_ms > 0:
+                # Physics-based per-layer overlap:
+                #
+                # FSDP comm hides behind adjacent-layer compute via prefetch.
+                # The fraction that can hide depends on the compute/comm ratio
+                # PER LAYER (total ratios don't matter — sequential layers
+                # can't "borrow" compute from each other).
+                #
+                # Split compute using empirical fwd/bwd ratio (0.37/0.63 of
+                # per-microbatch time). Backward includes recompute fwd when
+                # recompute_granularity=full.
+                compute_per_layer_ms = compute_time_ms / num_layers
+                fwd_per_layer_ms = compute_per_layer_ms * 0.37
+                bwd_per_layer_ms = compute_per_layer_ms * 0.63
+
+                # Hiding windows per comm phase. Ceilings model real-world
+                # scheduling inefficiencies (kernel launch gaps, stream sync,
+                # bus contention) that prevent 100% overlap even when compute
+                # vastly exceeds comm. Calibrated to match observed 0.93
+                # overall overlap on Llama 3.1 70B BF16 (compute-dominated).
+                #  - AG forward: single-hop prefetch, near-ideal. 0.95
+                #  - AG recompute: competes with RS in backward. 0.93
+                #  - RS: depends on bwd results, slightly tighter pipe. 0.92
+                AG_FWD_CEILING = 0.95
+                AG_RECOMPUTE_CEILING = 0.93
+                RS_CEILING = 0.92
+
+                def _overlap(comm_ms, compute_ms, ceiling):
+                    if comm_ms <= 0 or compute_ms <= 0:
+                        return 0.0
+                    return min(1.0, compute_ms / comm_ms) * ceiling
+
+                ag_fwd_ovl = _overlap(ag_per_layer_ms, fwd_per_layer_ms, AG_FWD_CEILING)
+                ag_recomp_ovl = _overlap(ag_per_layer_ms, bwd_per_layer_ms, AG_RECOMPUTE_CEILING)
+                rs_ovl = _overlap(rs_per_layer_ms, bwd_per_layer_ms, RS_CEILING)
+
+                # Split total AG into fwd (1 per layer) and recompute
+                # ((ag_multiplier - 1) per layer).
+                recomp_fraction = max(0.0, ag_multiplier - 1.0) / max(ag_multiplier, 1e-9)
+                fwd_fraction = 1.0 - recomp_fraction
+
+                ag_fwd_portion = total_fsdp_ag * fwd_fraction
+                ag_recomp_portion = total_fsdp_ag * recomp_fraction
+
+                total_hidden = (
+                    ag_fwd_portion * ag_fwd_ovl + ag_recomp_portion * ag_recomp_ovl + total_fsdp_rs * rs_ovl
+                )
+                total_fsdp = total_fsdp_ag + total_fsdp_rs
+                total_comm_time -= total_hidden
+                effective_overlap = total_hidden / total_fsdp if total_fsdp > 0 else 0.0
+                message_info["fsdp_overlapped"] = True
+                message_info["fsdp_overlap"] = effective_overlap
+                message_info["fsdp_overall_overlap"] = effective_overlap
+                message_info["fsdp_ag_fwd_overlap"] = ag_fwd_ovl
+                message_info["fsdp_ag_recompute_overlap"] = ag_recomp_ovl
+                message_info["fsdp_rs_overlap"] = rs_ovl
+                message_info["fsdp_compute_per_layer_ms"] = compute_per_layer_ms
+                message_info["fsdp_exposed_ms"] = total_fsdp - total_hidden
+            else:
+                # Fallback: legacy constant overlap (when compute time not
+                # provided, e.g. early in the pipeline before benchmark).
+                total_fsdp = total_fsdp_ag + total_fsdp_rs
+                total_hidden = total_fsdp * FSDP_OVERLAP_LEGACY
+                total_comm_time -= total_hidden
+                message_info["fsdp_overlapped"] = True
+                message_info["fsdp_overlap"] = FSDP_OVERLAP_LEGACY
+                message_info["fsdp_overall_overlap"] = FSDP_OVERLAP_LEGACY
+                message_info["fsdp_exposed_ms"] = total_fsdp - total_hidden
         else:
             message_info["fsdp_overlapped"] = False
 
@@ -410,7 +758,25 @@ def extract_single_node_time_from_profiling(profiling_results: dict, training_co
             bwd_time = layer_data.get("backward_time_ms", 0)
             layer_time = fwd_time + bwd_time
 
-            if moe_pattern[layer_idx] == 0:
+            # Bucket by the profiler-observed layer type (what Megatron actually
+            # built in the benchmark subprocess), not by the original
+            # moe_pattern. `_limit_layers_for_projection` can force a dense-
+            # then-MoE profile layout even for all-MoE target models (e.g.
+            # Qwen3-30B with moe_layer_freq="1"), which would otherwise cause
+            # the fast dense-layer profile to be incorrectly averaged into
+            # the MoE bucket and scaled to every layer of the full model.
+            # When the full model contains no dense layers, the captured
+            # dense profile is implicitly discarded below because
+            # num_dense_layers=0.
+            observed_type = layer_data.get("type")
+            if observed_type == "dense":
+                is_dense = True
+            elif observed_type == "moe":
+                is_dense = False
+            else:
+                is_dense = moe_pattern[layer_idx] == 0
+
+            if is_dense:
                 profiled_dense_times.append(layer_time)
                 profiled_dense_fwd_times.append(fwd_time)
             else:
@@ -520,22 +886,27 @@ def _limit_layers_for_projection(module_config):
     original_layers = getattr(module_config, "num_layers", 1) or 1
     original_moe_layout = getattr(module_config, "moe_layer_freq", None)
     dense_layers_present = _has_dense_layers(original_moe_layout)
-    # Use 1 layer for fast profiling - results are extrapolated to full model
-    # Increase to 2-4 for better accuracy if needed
-    max_layers = 1
+
+    if has_moe and dense_layers_present:
+        # Need at least 2 layers to profile both dense (layer 0) and MoE (layer 1)
+        # so extraction code can correctly classify each type using the full
+        # model's moe_pattern where layer 0 is typically dense.
+        max_layers = 2
+    else:
+        max_layers = 1
     target_layers = max(1, min(original_layers, max_layers))
     module_config.num_layers = target_layers
 
     if has_moe:
         if not dense_layers_present:
             module_config.moe_layer_freq = [1] * target_layers
-        elif target_layers == 1:
-            module_config.moe_layer_freq = [1]
         else:
             dense_then_moe = [0, 1]
             if target_layers > 2:
                 dense_then_moe.extend([0] * (target_layers - 2))
-            module_config.moe_layer_freq = dense_then_moe
+            elif target_layers == 1:
+                dense_then_moe = [1]
+            module_config.moe_layer_freq = dense_then_moe[:target_layers]
     else:
         module_config.moe_layer_freq = [0] * target_layers
 
@@ -710,10 +1081,17 @@ def _calculate_single_node_config(original_config, gpus_per_node=8, benchmark_gp
         # EP should not exceed original EP
         benchmark_ep = min(benchmark_ep, max_ep_for_benchmark)
 
-        # Adjust num_experts to preserve experts per rank
+        # Always reduce num_experts proportionally to preserve
+        # experts_per_rank.  This keeps per-GPU compute identical to the
+        # target config so no analytical expert-correction is needed.
+        # The A2A measurement at the reduced num_experts is representative
+        # because total A2A traffic depends on EP, not num_experts.
+        # The additive A2A delta (analytical_target - analytical_bench)
+        # handles the EP scaling accurately.
         if num_experts is not None and benchmark_ep < ep:
             experts_per_rank = math.ceil(num_experts / ep)
-            benchmark_num_experts = max(benchmark_ep, benchmark_ep * experts_per_rank)
+            topk = getattr(original_config, "moe_router_topk", 2) or 2
+            benchmark_num_experts = max(benchmark_ep * experts_per_rank, topk)
         else:
             benchmark_num_experts = num_experts
 
@@ -873,6 +1251,23 @@ def _estimate_pp_communication_overhead(training_config, pp_size, hardware_confi
     total_p2p_time_ms = 2 * (pp_size - 1) * num_microbatches * p2p_time_per_transfer / 1000
 
     return total_p2p_time_ms
+
+
+def _get_deepep_overlap_efficiency(model_config):
+    """Return the A2A-compute overlap efficiency for DeepEP/SyncFree.
+
+    DeepEP alone achieves ~65% overlap.  SyncFree stages progressively
+    eliminate CPU synchronisation stalls and use fully-async dispatch,
+    yielding higher overlap efficiencies.
+    """
+    sync_free_stage = getattr(model_config, "turbo_sync_free_moe_stage", 0)
+    if sync_free_stage >= 3:
+        return 0.85
+    if sync_free_stage >= 2:
+        return 0.80
+    if sync_free_stage >= 1:
+        return 0.75
+    return 0.65
 
 
 def _compute_ep_mlp_scale(
@@ -1419,7 +1814,10 @@ def _compute_micro_batches(runtime_cfg, model_parallel_config) -> int:
 
 
 def _build_scheduler_sim_config(
-    training_config, profiling_results, enable_zero_bubble=False, scheduler_algorithm="auto"
+    training_config,
+    profiling_results,
+    enable_zero_bubble=False,
+    scheduler_algorithm="auto",
 ):
     chunk_time_matrix = _build_chunk_time_matrix(training_config, profiling_results)
     assert chunk_time_matrix is not None
@@ -1427,7 +1825,15 @@ def _build_scheduler_sim_config(
     # For zero-bubble scheduling, we need to split backward into B (input grad) and W (weight grad)
     # The zero-bubble scheduler schedules these separately to minimize pipeline bubbles.
     # Typically B and W are roughly equal in duration (each ~50% of total backward).
-    if enable_zero_bubble:
+    needs_bw_split = enable_zero_bubble or scheduler_algorithm in (
+        "zerobubble",
+        "zerobubble-heuristic",
+        "zbv-formatted",
+        "zbv-greedy-half",
+        "zbv-greedy-min",
+        "all",
+    )
+    if needs_bw_split:
         print("[Primus:Performance Projection] Splitting backward time for zero-bubble scheduling:")
         print("  B (input grad) = 50% of backward, W (weight grad) = 50% of backward")
         for rank_chunks in chunk_time_matrix:
@@ -1445,7 +1851,7 @@ def _build_scheduler_sim_config(
                 bwd = chunk.get("bwd", 0.0)
                 wgrad = chunk.get("wgrad", 0.0)
                 activation = chunk.get("activation", 0.0)
-                if enable_zero_bubble:
+                if needs_bw_split:
                     print(
                         f"  Rank {rank_idx:02d} Chunk {chunk_idx:02d} -> "
                         f"fwd={fwd:.2f} ms, bwd(B)={bwd:.2f} ms, wgrad(W)={wgrad:.2f} ms, activation={activation:.2f} GB"
@@ -1463,22 +1869,14 @@ def _build_scheduler_sim_config(
 
     micro_batches = _compute_micro_batches(training_config.runtime_config, mp_cfg)
 
-    schedulers_to_run = []
+    # Determine which algorithms to run
+    schedulers = []
 
     if scheduler_algorithm == "all":
-        # Run all available Primus schedulers for comparison.
-        # basic_1f1b is only valid for VPP=1; interleaved_1f1b requires VPP>1.
+        # Run ALL applicable schedulers for comparison
         if vpp_size == 1:
-            schedulers_to_run.append(
-                {
-                    "name": "basic_1f1b",
-                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.basic_1f1b.Schedule1F1B",
-                    "pp_size": pp_size,
-                    "vpp_size": 1,
-                    "micro_batches": micro_batches,
-                }
-            )
-            schedulers_to_run.append(
+            # ZB basic
+            schedulers.append(
                 {
                     "name": "zerobubble",
                     "class": "primus.core.pipeline_parallel.scheduler.algorithms.zerobubble.ScheduleZeroBubble",
@@ -1487,9 +1885,26 @@ def _build_scheduler_sim_config(
                     "micro_batches": micro_batches,
                 }
             )
+            # ZB heuristic (tries 8 combinations, picks best)
+            cost_f = [chunk_time_matrix[r][0].get("fwd", 0.0) for r in range(pp_size)]
+            cost_b = [chunk_time_matrix[r][0].get("bwd", 0.0) for r in range(pp_size)]
+            cost_w = [chunk_time_matrix[r][0].get("wgrad", 0.0) for r in range(pp_size)]
+            schedulers.append(
+                {
+                    "name": "zerobubble-heuristic",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.zerobubble_heuristic.ScheduleZeroBubbleHeuristic",
+                    "pp_size": pp_size,
+                    "vpp_size": 1,
+                    "micro_batches": micro_batches,
+                    "cost_f": cost_f,
+                    "cost_b": cost_b,
+                    "cost_w": cost_w,
+                    "cost_comm": 0.1,
+                }
+            )
         else:
-            # VPP > 1: interleaved schedule is the baseline
-            schedulers_to_run.append(
+            # VPP > 1: interleaved 1F1B
+            schedulers.append(
                 {
                     "name": "interleaved_1f1b",
                     "class": "primus.core.pipeline_parallel.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
@@ -1498,107 +1913,222 @@ def _build_scheduler_sim_config(
                     "micro_batches": micro_batches,
                 }
             )
-        if vpp_size == 2:
-            # ZBV (Zero-Bubble V-shape) schedulers — designed for VPP == 2
-            schedulers_to_run.append(
+            if vpp_size == 2:
+                # ZBV schedulers are designed for VPP=2
+                schedulers.append(
+                    {
+                        "name": "zbv-formatted",
+                        "class": "primus.core.pipeline_parallel.scheduler.algorithms.zbv_formatted.ScheduleZBVFormatted",
+                        "pp_size": pp_size,
+                        "vpp_size": 2,
+                        "micro_batches": micro_batches,
+                    }
+                )
+                schedulers.append(
+                    {
+                        "name": "zbv-greedy-half",
+                        "class": "primus.core.pipeline_parallel.scheduler.algorithms.zbv_greedy.ScheduleZBVGreedy",
+                        "pp_size": pp_size,
+                        "vpp_size": 2,
+                        "micro_batches": micro_batches,
+                        "memory_config": "half",
+                    }
+                )
+                schedulers.append(
+                    {
+                        "name": "zbv-greedy-min",
+                        "class": "primus.core.pipeline_parallel.scheduler.algorithms.zbv_greedy.ScheduleZBVGreedy",
+                        "pp_size": pp_size,
+                        "vpp_size": 2,
+                        "micro_batches": micro_batches,
+                        "memory_config": "min",
+                    }
+                )
+        # NOTE: seaailab-ilp is handled separately in _run_pipeline_simulation (VPP=1 only)
+        sched_names = [s["name"] for s in schedulers]
+        if vpp_size == 1:
+            sched_names.append("seaailab-ilp")
+        print(
+            f"[Primus:Performance Projection] Compare-all mode: running schedulers: {', '.join(sched_names)}"
+        )
+
+    elif scheduler_algorithm == "zerobubble-heuristic":
+        if vpp_size > 1:
+            print("[WARNING] zerobubble-heuristic requires VPP=1, falling back to interleaved_1f1b")
+            schedulers.append(
                 {
-                    "name": "zbv_formatted",
+                    "name": "interleaved_1f1b",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
+                    "pp_size": pp_size,
+                    "vpp_size": vpp_size,
+                    "micro_batches": micro_batches,
+                }
+            )
+        else:
+            cost_f = [chunk_time_matrix[r][0].get("fwd", 0.0) for r in range(pp_size)]
+            cost_b = [chunk_time_matrix[r][0].get("bwd", 0.0) for r in range(pp_size)]
+            cost_w = [chunk_time_matrix[r][0].get("wgrad", 0.0) for r in range(pp_size)]
+            schedulers.append(
+                {
+                    "name": "zerobubble-heuristic",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.zerobubble_heuristic.ScheduleZeroBubbleHeuristic",
+                    "pp_size": pp_size,
+                    "vpp_size": 1,
+                    "micro_batches": micro_batches,
+                    "cost_f": cost_f,
+                    "cost_b": cost_b,
+                    "cost_w": cost_w,
+                    "cost_comm": 0.1,
+                }
+            )
+
+    elif scheduler_algorithm == "zerobubble":
+        if vpp_size > 1:
+            print("[WARNING] zerobubble requires VPP=1, falling back to interleaved_1f1b")
+            schedulers.append(
+                {
+                    "name": "interleaved_1f1b",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
+                    "pp_size": pp_size,
+                    "vpp_size": vpp_size,
+                    "micro_batches": micro_batches,
+                }
+            )
+        else:
+            schedulers.append(
+                {
+                    "name": "zerobubble",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.zerobubble.ScheduleZeroBubble",
+                    "pp_size": pp_size,
+                    "vpp_size": 1,
+                    "micro_batches": micro_batches,
+                }
+            )
+
+    elif scheduler_algorithm == "zbv-formatted":
+        if vpp_size != 2:
+            print(
+                f"[WARNING] zbv-formatted requires VPP=2, but VPP={vpp_size}. Falling back to interleaved_1f1b"
+            )
+            schedulers.append(
+                {
+                    "name": "interleaved_1f1b",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
+                    "pp_size": pp_size,
+                    "vpp_size": vpp_size,
+                    "micro_batches": micro_batches,
+                }
+            )
+        else:
+            schedulers.append(
+                {
+                    "name": "zbv-formatted",
                     "class": "primus.core.pipeline_parallel.scheduler.algorithms.zbv_formatted.ScheduleZBVFormatted",
                     "pp_size": pp_size,
-                    "vpp_size": vpp_size,
+                    "vpp_size": 2,
                     "micro_batches": micro_batches,
                 }
             )
-            schedulers_to_run.append(
+
+    elif scheduler_algorithm in ("zbv-greedy-half", "zbv-greedy-min"):
+        mem_cfg = "half" if scheduler_algorithm == "zbv-greedy-half" else "min"
+        if vpp_size != 2:
+            print(
+                f"[WARNING] {scheduler_algorithm} requires VPP=2, but VPP={vpp_size}. Falling back to interleaved_1f1b"
+            )
+            schedulers.append(
                 {
-                    "name": "zbv_greedy_min",
-                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.zbv_greedy.ScheduleZBVGreedy",
+                    "name": "interleaved_1f1b",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
                     "pp_size": pp_size,
                     "vpp_size": vpp_size,
                     "micro_batches": micro_batches,
-                    "memory_config": "min",
                 }
             )
-            schedulers_to_run.append(
+        else:
+            schedulers.append(
                 {
-                    "name": "zbv_greedy_half",
+                    "name": scheduler_algorithm,
                     "class": "primus.core.pipeline_parallel.scheduler.algorithms.zbv_greedy.ScheduleZBVGreedy",
+                    "pp_size": pp_size,
+                    "vpp_size": 2,
+                    "micro_batches": micro_batches,
+                    "memory_config": mem_cfg,
+                }
+            )
+
+    elif scheduler_algorithm == "seaailab-ilp":
+        # SeaAILab ILP is handled entirely in _run_pipeline_simulation
+        # but we still need a fallback Primus scheduler for the sim config
+        if enable_zero_bubble and vpp_size == 1:
+            schedulers.append(
+                {
+                    "name": "zerobubble",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.zerobubble.ScheduleZeroBubble",
+                    "pp_size": pp_size,
+                    "vpp_size": 1,
+                    "micro_batches": micro_batches,
+                }
+            )
+        elif vpp_size > 1:
+            schedulers.append(
+                {
+                    "name": "interleaved_1f1b",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
                     "pp_size": pp_size,
                     "vpp_size": vpp_size,
                     "micro_batches": micro_batches,
-                    "memory_config": "half",
                 }
             )
-    elif scheduler_algorithm == "zerobubble" and vpp_size == 1:
-        schedulers_to_run.append(
-            {
-                "name": "zerobubble",
-                "class": "primus.core.pipeline_parallel.scheduler.algorithms.zerobubble.ScheduleZeroBubble",
-                "pp_size": pp_size,
-                "vpp_size": 1,
-                "micro_batches": micro_batches,
-            }
-        )
-    elif scheduler_algorithm == "zbv-formatted" and vpp_size == 2:
-        schedulers_to_run.append(
-            {
-                "name": "zbv_formatted",
-                "class": "primus.core.pipeline_parallel.scheduler.algorithms.zbv_formatted.ScheduleZBVFormatted",
-                "pp_size": pp_size,
-                "vpp_size": vpp_size,
-                "micro_batches": micro_batches,
-            }
-        )
-    elif scheduler_algorithm == "zbv-greedy" and vpp_size == 2:
-        schedulers_to_run.append(
-            {
-                "name": "zbv_greedy_half",
-                "class": "primus.core.pipeline_parallel.scheduler.algorithms.zbv_greedy.ScheduleZBVGreedy",
-                "pp_size": pp_size,
-                "vpp_size": vpp_size,
-                "micro_batches": micro_batches,
-                "memory_config": "half",
-            }
-        )
-    elif enable_zero_bubble and vpp_size == 1:
-        # Zero-bubble schedule minimizes pipeline bubbles by separating B and W
-        schedulers_to_run.append(
-            {
-                "name": "zerobubble",
-                "class": "primus.core.pipeline_parallel.scheduler.algorithms.zerobubble.ScheduleZeroBubble",
-                "pp_size": pp_size,
-                "vpp_size": 1,
-                "micro_batches": micro_batches,
-            }
-        )
-        print(
-            "[Primus:Performance Projection] Using Primus zero-bubble scheduler (fallback from Megatron ILP)"
-        )
-    elif vpp_size > 1:
-        schedulers_to_run.append(
-            {
-                "name": "interleaved_1f1b",
-                "class": "primus.core.pipeline_parallel.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
-                "pp_size": pp_size,
-                "vpp_size": vpp_size,
-                "micro_batches": micro_batches,
-            }
-        )
-    else:  # Default to basic_1f1b
-        schedulers_to_run.append(
-            {
-                "name": "basic_1f1b",
-                "class": "primus.core.pipeline_parallel.scheduler.algorithms.basic_1f1b.Schedule1F1B",
-                "pp_size": pp_size,
-                "vpp_size": 1,
-                "micro_batches": micro_batches,
-            }
-        )
+        else:
+            schedulers.append(
+                {
+                    "name": "basic_1f1b",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.basic_1f1b.Schedule1F1B",
+                    "pp_size": pp_size,
+                    "vpp_size": 1,
+                    "micro_batches": micro_batches,
+                }
+            )
+
+    else:
+        # "auto" — current default behavior
+        if enable_zero_bubble and vpp_size == 1:
+            schedulers.append(
+                {
+                    "name": "zerobubble",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.zerobubble.ScheduleZeroBubble",
+                    "pp_size": pp_size,
+                    "vpp_size": 1,
+                    "micro_batches": micro_batches,
+                }
+            )
+            print("[Primus:Performance Projection] Using zero-bubble scheduler (enable_zero_bubble=True)")
+        elif vpp_size > 1:
+            schedulers.append(
+                {
+                    "name": "interleaved_1f1b",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.interleaved_1f1b.ScheduleInterleaved1F1B",
+                    "pp_size": pp_size,
+                    "vpp_size": vpp_size,
+                    "micro_batches": micro_batches,
+                }
+            )
+        else:
+            schedulers.append(
+                {
+                    "name": "basic_1f1b",
+                    "class": "primus.core.pipeline_parallel.scheduler.algorithms.basic_1f1b.Schedule1F1B",
+                    "pp_size": pp_size,
+                    "vpp_size": 1,
+                    "micro_batches": micro_batches,
+                }
+            )
 
     return {
         "chunk_time_ms": chunk_time_matrix,
         "output_dir": str(Path.cwd() / "pp_simulation_result"),
-        "schedulers": schedulers_to_run,
+        "schedulers": schedulers,
     }
 
 
@@ -1721,13 +2251,33 @@ def _run_layer_benchmark(primus_config, unknown_overrides):
     print("[Primus:Performance Projection] Initializing MegatronPretrainTrainer...")
     # Disable overlap features and FSDP2 for profiling (they add complexity without benefiting isolated layer benchmarking)
     # FSDP2 uses DTensor which causes issues with benchmarking inputs
-    primus_config.get_module_config("pre_trainer").overlap_grad_reduce = False
-    primus_config.get_module_config("pre_trainer").overlap_param_gather = False
-    primus_config.get_module_config("pre_trainer").use_torch_fsdp2 = False
+    cfg = primus_config.get_module_config("pre_trainer")
+    cfg.overlap_grad_reduce = False
+    cfg.overlap_param_gather = False
+    cfg.use_torch_fsdp2 = False
+
+    # Auto-enable Primus Turbo kernels when MLA or DeepEP is configured.
+    # Measured training runs use the full Turbo stack (PrimusMLASelfAttention,
+    # PrimusTurboColumnParallelLinear, TurboGroupedMLP).  Profiling without
+    # these causes systematic under-prediction (~8-15%).
+    _turbo_candidates = {
+        "enable_primus_turbo": True,
+        "use_turbo_parallel_linear": getattr(cfg, "multi_latent_attention", False),
+        "use_turbo_grouped_mlp": bool(getattr(cfg, "num_experts", 0)),
+    }
+    if getattr(cfg, "multi_latent_attention", False) or getattr(cfg, "use_turbo_deepep", False):
+        for flag, val in _turbo_candidates.items():
+            if val and not getattr(cfg, flag, False):
+                setattr(cfg, flag, True)
+                print(f"[Primus:Performance Projection] Auto-enabled {flag} " "for profiling accuracy")
+
     print("[Primus:Performance Projection] Config (with profiling overrides):")
-    print(f"  overlap_grad_reduce: {primus_config.get_module_config('pre_trainer').overlap_grad_reduce}")
-    print(f"  overlap_param_gather: {primus_config.get_module_config('pre_trainer').overlap_param_gather}")
-    print(f"  use_torch_fsdp2: {primus_config.get_module_config('pre_trainer').use_torch_fsdp2}")
+    print(f"  overlap_grad_reduce: {cfg.overlap_grad_reduce}")
+    print(f"  overlap_param_gather: {cfg.overlap_param_gather}")
+    print(f"  use_torch_fsdp2: {cfg.use_torch_fsdp2}")
+    if getattr(cfg, "multi_latent_attention", False):
+        print(f"  enable_primus_turbo: {cfg.enable_primus_turbo}")
+        print(f"  use_turbo_parallel_linear: {cfg.use_turbo_parallel_linear}")
     trainer = MegatronPretrainTrainer(
         module_name="pre_trainer",
         primus_config=primus_config,
@@ -2000,7 +2550,7 @@ def _run_pipeline_simulation_megatron_zb(training_config, profiling_results):
     mem_b = []
     mem_w = []
 
-    print("[Primus:Performance Projection] Using Megatron ILP zero-bubble scheduler (SeaAI lab)")
+    print("[Primus:Performance Projection] Using Megatron zero-bubble scheduler (ILP-based)")
     print(f"  PP size: {pp_size}, VPP size: {vpp_size}, Microbatches: {micro_batches}")
     if vpp_size > 1:
         print(f"  NOTE: Aggregating {vpp_size} VPP chunks per rank for ZB scheduler (VPP>1)")
@@ -2054,7 +2604,7 @@ def _run_pipeline_simulation_megatron_zb(training_config, profiling_results):
     )
 
     # Run the Megatron ZB scheduler
-    print("[Primus:Performance Projection] Running Megatron ILP schedule generation (SeaAI lab)...")
+    print("[Primus:Performance Projection] Running Megatron ZB schedule generation...")
 
     # Build graph and run initial_solution which explores multiple heuristics
     graph = zb.Graph.build_graph(pp_size, micro_batches, config)
@@ -2068,7 +2618,7 @@ def _run_pipeline_simulation_megatron_zb(training_config, profiling_results):
     bubble_time = step_time_ms - ideal_time
     bubble_ratio = bubble_time / step_time_ms if step_time_ms > 0 else 0
 
-    print("[Primus:Performance Projection] Megatron ILP Schedule Results (SeaAI lab):")
+    print("[Primus:Performance Projection] Megatron ZB Schedule Results:")
     print(f"  Step time: {step_time_ms:.2f} ms")
     print(f"  Ideal time (no bubble): {ideal_time:.2f} ms")
     print(f"  Bubble time: {bubble_time:.2f} ms ({bubble_ratio:.1%})")
@@ -2079,197 +2629,183 @@ def _run_pipeline_simulation_megatron_zb(training_config, profiling_results):
 def _print_scheduler_comparison(all_results, training_config):
     """Print a comparison table of all scheduler results."""
     runtime_config = training_config.runtime_config
-    seq_len = getattr(runtime_config, "sequence_length", None) or 0
-    micro_batch_size = getattr(runtime_config, "micro_batch_size", None) or 0
+    seq_len = getattr(runtime_config, "sequence_length", None)
+    micro_batch_size = getattr(runtime_config, "micro_batch_size", None)
+
     mp_cfg = training_config.model_parallel_config
     pp_size = getattr(mp_cfg, "pipeline_model_parallel_size", 1) or 1
     micro_batches = _compute_micro_batches(runtime_config, mp_cfg)
+    tokens_per_step = (seq_len or 0) * (micro_batch_size or 0) * micro_batches
 
     print("\n" + "=" * 100)
     print("  PIPELINE SCHEDULER COMPARISON")
     print("=" * 100)
-    print(f"  {'Scheduler':<40} {'Step Time (ms)':>15} {'Tokens/GPU/s':>14} {'Max Bubble %':>13}")
+    print(f"  {'Scheduler':<35s} {'Step Time (ms)':>15s} {'Tokens/GPU/s':>15s} {'Max Bubble %':>14s}")
     print("  " + "-" * 79)
 
     best_name = None
     best_time = float("inf")
-    for name, result in all_results.items():
-        step_time = result.get("step_time_ms")
-        bubble = result.get("max_bubble_ratio", 0.0)
-        if step_time is not None:
-            tokens_per_step = seq_len * micro_batch_size * micro_batches
-            tokens_per_gpu_sec = tokens_per_step * 1000 / step_time / pp_size if step_time > 0 else 0
-            print(f"  {name:<40} {step_time:>15.2f} {tokens_per_gpu_sec:>13,.0f} {bubble:>12.2%}")
-            if step_time < best_time:
-                best_time = step_time
-                best_name = name
-        else:
-            print(f"  {name:<40} {'FAILED':>15} {'N/A':>14} {'N/A':>13}")
+    for name, info in all_results.items():
+        step_time = info.get("step_time_ms")
+        bubble_ratio = info.get("max_bubble_ratio", 0.0)
+        if step_time is None:
+            print(f"  {name:<35s} {'FAILED':>15s} {'—':>15s} {'—':>14s}")
+            continue
+        tps = tokens_per_step * 1000 / step_time / pp_size if step_time > 0 else 0
+        print(f"  {name:<35s} {step_time:>15.2f} {tps:>15,.0f} {bubble_ratio:>13.2%}")
+        if step_time < best_time:
+            best_time = step_time
+            best_name = name
 
     print("  " + "-" * 79)
     if best_name:
-        print(f"  ✓ Best scheduler: {best_name} ({best_time:.2f} ms)")
+        print(f"  Best scheduler: {best_name} ({best_time:.2f} ms)")
     print("=" * 100 + "\n")
 
 
 def _run_pipeline_simulation(
-    training_config, profiling_results, enable_zero_bubble=False, scheduler_algorithm="auto"
+    training_config,
+    profiling_results,
+    enable_zero_bubble=False,
+    scheduler_algorithm="auto",
 ):
     """
     Run pipeline simulation and return the step time.
 
-    When scheduler_algorithm is "all":
-        Runs all available Primus schedulers + Megatron ILP and compares results.
-    When scheduler_algorithm is "auto" (default):
-        When enable_zero_bubble is OFF: Uses Primus pipeline scheduler (basic 1F1B or interleaved 1F1B).
-        When enable_zero_bubble is ON AND VPP == 1: Uses Megatron ILP scheduler (SeaAI lab).
-        When enable_zero_bubble is ON AND VPP > 1: Falls back to Primus pipeline scheduler.
-    Other values: "zerobubble", "zbv-formatted", "zbv-greedy", "megatron-ilp" run specific schedulers.
+    Supports multiple scheduler algorithms for comparison.
 
     Args:
         training_config: Training configuration
         profiling_results: Layer profiling results
-        enable_zero_bubble: Whether to use Megatron ILP zero-bubble scheduling.
-        scheduler_algorithm: Which scheduler(s) to run ("auto", "zerobubble",
-            "zbv-formatted", "zbv-greedy", "megatron-ilp", or "all").
+        enable_zero_bubble: Whether to use zero-bubble scheduling (reduces pipeline bubbles).
+        scheduler_algorithm: Which scheduler(s) to run:
+            "auto"               - Default behavior (zerobubble if enabled, else 1f1b)
+            "zerobubble"         - Primus basic zero-bubble
+            "zerobubble-heuristic" - Primus heuristic (tries 8 combos)
+            "seaailab-ilp"       - SeaAILab ILP-based scheduler
+            "all"                - Run ALL schedulers and compare
 
     Returns:
         float: Step time in ms from pipeline simulation, or None if simulation failed
     """
     is_compare_mode = scheduler_algorithm == "all"
-
-    mp_cfg = training_config.model_parallel_config
-    vpp_size = getattr(mp_cfg, "virtual_pipeline_model_parallel_size", 1) or 1
-
-    # Megatron ILP scheduler only supports VPP=1
-    run_megatron_ilp = scheduler_algorithm == "megatron-ilp" and vpp_size == 1
-    if scheduler_algorithm == "all" and vpp_size == 1:
-        run_megatron_ilp = True
+    run_seaailab_ilp = scheduler_algorithm in ("seaailab-ilp", "all")
 
     if is_compare_mode:
-        print("[Primus:Performance Projection] Running ALL schedulers for comparison...")
-    elif scheduler_algorithm == "megatron-ilp":
-        if vpp_size > 1:
-            print(
-                f"[Primus:Performance Projection] WARNING: Megatron ILP scheduler only supports VPP=1, "
-                f"but VPP={vpp_size}. Skipping megatron-ilp."
-            )
-        else:
-            print("[Primus:Performance Projection] Running Megatron ILP scheduler only...")
-    elif scheduler_algorithm == "zerobubble":
-        print("[Primus:Performance Projection] Running zerobubble scheduler...")
-    elif scheduler_algorithm == "zbv-formatted":
-        print("[Primus:Performance Projection] Running ZBV Formatted scheduler (VPP=2)...")
-    elif scheduler_algorithm == "zbv-greedy":
-        print("[Primus:Performance Projection] Running ZBV Greedy scheduler (VPP=2)...")
-    elif enable_zero_bubble and vpp_size == 1:
-        print(
-            "[Primus:Performance Projection] Zero-bubble enabled (VPP=1) → using Megatron ILP scheduler (SeaAI lab)"
-        )
-        run_megatron_ilp = True
-    elif enable_zero_bubble and vpp_size > 1:
-        print(
-            f"[Primus:Performance Projection] Zero-bubble enabled but VPP={vpp_size} > 1 "
-            f"→ Megatron ILP scheduler only supports VPP=1, using Primus pipeline scheduler instead"
-        )
+        print("[Primus:Performance Projection] Compare-all mode: running multiple pipeline schedulers")
+    elif enable_zero_bubble:
+        print("[Primus:Performance Projection] Using Primus Pipeline scheduler with zero-bubble")
     else:
-        print("[Primus:Performance Projection] Zero-bubble disabled → using Primus pipeline scheduler")
+        print("[Primus:Performance Projection] Using Primus Pipeline scheduler (zero-bubble disabled)")
 
-    all_results: Dict[str, dict] = {}
+    # ── Run Primus schedulers ──
+    all_results = {}
     primus_step_time_ms = None
 
-    # Run Primus schedulers (unless only running megatron-ilp)
-    if scheduler_algorithm != "megatron-ilp":
+    if scheduler_algorithm != "seaailab-ilp":
         sim_config = _build_scheduler_sim_config(
-            training_config, profiling_results, enable_zero_bubble, scheduler_algorithm
+            training_config,
+            profiling_results,
+            enable_zero_bubble,
+            scheduler_algorithm,
         )
-        if sim_config is not None:
-            print("[Primus:Performance Projection] Running Primus pipeline schedule simulator...")
-            runner = SchedulerSimulationRunner(sim_config)
-            simulation_runs = runner.run()
-            _report_simulation_results(simulation_runs, training_config)
+        if sim_config is None:
+            return None
 
-            # Collect results from each scheduler run
-            if simulation_runs:
-                for sim in simulation_runs:
-                    summary = (sim or {}).get("summary") or {}
-                    sched_name = sim.get("name", "unknown")
-                    sched_step_time = summary.get("step_time_ms")
-                    # Calculate max bubble ratio across ranks
-                    per_rank = sim.get("per_rank") or []
-                    max_bubble = 0.0
-                    for scheduled_layers in per_rank:
-                        fwd_time = sum(
-                            end - start
-                            for start, end in zip(
-                                scheduled_layers.get("fwd_start", []),
-                                scheduled_layers.get("fwd_end", []),
-                            )
-                        )
-                        bwd_time = sum(
-                            end - start
-                            for start, end in zip(
-                                scheduled_layers.get("bwd_start", []),
-                                scheduled_layers.get("bwd_end", []),
-                            )
-                        )
-                        wgrad_time = sum(
-                            end - start
-                            for start, end in zip(
-                                scheduled_layers.get("wgrad_start", []),
-                                scheduled_layers.get("wgrad_end", []),
-                            )
-                        )
-                        total_compute = fwd_time + bwd_time + wgrad_time
-                        if sched_step_time and sched_step_time > 0:
-                            bubble = max(0.0, sched_step_time - total_compute) / sched_step_time
-                            max_bubble = max(max_bubble, bubble)
-                    all_results[sched_name] = {
-                        "step_time_ms": sched_step_time,
-                        "max_bubble_ratio": max_bubble,
-                    }
-                    if primus_step_time_ms is None and sched_step_time is not None:
-                        primus_step_time_ms = sched_step_time
+        print("[Primus:Performance Projection] Running Primus Pipeline schedule simulator...")
+        runner = SchedulerSimulationRunner(sim_config)
+        simulation_runs = runner.run()
 
-    # Run Megatron ILP scheduler
-    if run_megatron_ilp:
+        # Collect results from each Primus scheduler
+        for sim in simulation_runs:
+            summary = (sim or {}).get("summary") or {}
+            step_time = summary.get("step_time_ms")
+            per_rank = sim.get("per_rank") or []
+
+            # Compute max bubble ratio
+            max_bubble_ratio = 0.0
+            if step_time and per_rank:
+                for rank_data in per_rank:
+                    fwd_time = sum(
+                        e - s for s, e in zip(rank_data.get("fwd_start", []), rank_data.get("fwd_end", []))
+                    )
+                    bwd_time = sum(
+                        e - s for s, e in zip(rank_data.get("bwd_start", []), rank_data.get("bwd_end", []))
+                    )
+                    wgrad_time = sum(
+                        e - s
+                        for s, e in zip(
+                            rank_data.get("wgrad_start", []),
+                            rank_data.get("wgrad_end", []),
+                        )
+                    )
+                    compute_time = fwd_time + bwd_time + wgrad_time
+                    bubble = max(0.0, step_time - compute_time)
+                    ratio = bubble / step_time if step_time > 0 else 0.0
+                    max_bubble_ratio = max(max_bubble_ratio, ratio)
+
+            all_results[sim.get("name", "unknown")] = {
+                "step_time_ms": step_time,
+                "max_bubble_ratio": max_bubble_ratio,
+            }
+            primus_step_time_ms = step_time  # use last Primus scheduler as default
+
+        # Print per-scheduler detailed results
+        _report_simulation_results(simulation_runs, training_config)
+
+    # ── Run SeaAILab ILP scheduler (if requested or auto with zero-bubble) ──
+    # SeaAILab ILP (zb.py) only supports VPP=1; skip when VPP>1.
+    mp_cfg_check = training_config.model_parallel_config
+    vpp_size_check = getattr(mp_cfg_check, "virtual_pipeline_model_parallel_size", 1) or 1
+    should_run_seaailab = (
+        run_seaailab_ilp or (scheduler_algorithm == "auto" and enable_zero_bubble)
+    ) and vpp_size_check == 1
+    if vpp_size_check > 1 and run_seaailab_ilp:
+        print(
+            f"[Primus:Performance Projection] Skipping SeaAILab ILP — does not natively support VPP={vpp_size_check}"
+        )
+    if should_run_seaailab:
         try:
-            megatron_time = _run_pipeline_simulation_megatron_zb(
+            seaailab_time = _run_pipeline_simulation_megatron_zb(
                 training_config, copy.deepcopy(profiling_results)
             )
-            if megatron_time is not None:
-                # Recalculate bubble ratio for megatron-ilp from its own output
-                # We already printed it in _run_pipeline_simulation_megatron_zb
-                # Just estimate from the step time vs ideal
+            if seaailab_time is not None:
+                # Compute approximate bubble ratio
+                mp_cfg = training_config.model_parallel_config
                 pp_size = getattr(mp_cfg, "pipeline_model_parallel_size", 1) or 1
                 micro_batches = _compute_micro_batches(training_config.runtime_config, mp_cfg)
-                # Build chunk times to estimate ideal time
-                chunk_times = _build_chunk_time_matrix(training_config, profiling_results)
-                if chunk_times:
-                    ideal_per_mb = 0.0
-                    for rank_chunks in chunk_times:
-                        rank_total = sum(c.get("fwd", 0) + c.get("bwd", 0) for c in rank_chunks)
-                        ideal_per_mb = max(ideal_per_mb, rank_total)
-                    ideal_per_mb /= pp_size if pp_size > 1 else 1
-                    ideal_time = ideal_per_mb * micro_batches
-                    bubble_ratio = (
-                        max(0.0, megatron_time - ideal_time) / megatron_time if megatron_time > 0 else 0
+                chunk_time_matrix = _build_chunk_time_matrix(training_config, profiling_results)
+                if chunk_time_matrix:
+                    avg_compute = 0.0
+                    for rank_chunks in chunk_time_matrix:
+                        rank_total = sum(
+                            c.get("fwd", 0) + c.get("bwd", 0) + c.get("wgrad", 0) for c in rank_chunks
+                        )
+                        avg_compute += rank_total
+                    avg_compute /= pp_size
+                    ideal_time = avg_compute * micro_batches
+                    bubble_time = seaailab_time - ideal_time
+                    seaailab_bubble_ratio = (
+                        max(0.0, bubble_time / seaailab_time) if seaailab_time > 0 else 0.0
                     )
                 else:
-                    bubble_ratio = 0.0
-                all_results["megatron-ilp"] = {
-                    "step_time_ms": megatron_time,
-                    "max_bubble_ratio": bubble_ratio,
+                    seaailab_bubble_ratio = 0.0
+                all_results["seaailab-ilp"] = {
+                    "step_time_ms": seaailab_time,
+                    "max_bubble_ratio": seaailab_bubble_ratio,
                 }
         except Exception as e:
-            print(f"[WARNING] Megatron ILP scheduler failed: {e}")
-            all_results["megatron-ilp"] = {"step_time_ms": None, "max_bubble_ratio": 0.0}
+            print(f"[WARNING] SeaAILab ILP scheduler failed: {e}")
+            all_results["seaailab-ilp"] = {
+                "step_time_ms": None,
+                "max_bubble_ratio": 0.0,
+            }
 
-    # Print comparison table if multiple schedulers were run
+    # ── Print comparison table (if multiple schedulers) ──
     if len(all_results) > 1:
         _print_scheduler_comparison(all_results, training_config)
 
-    # Return best step time
+    # ── Return the best step time ──
     valid_times = [r["step_time_ms"] for r in all_results.values() if r.get("step_time_ms") is not None]
     if valid_times:
         best_time = min(valid_times)
@@ -2398,9 +2934,7 @@ def _run_multinode_projection(
             print(f"  Using custom hardware config from: {args.hardware_config}")
     else:
         if is_rank_0:
-            print(
-                "  Using default hardware parameters (see examples/hardware_configs/mi300x.yaml for reference)"
-            )
+            print("  Using default hardware parameters from custom_hardware_example.yaml")
 
     # Calculate communication times
     total_comm_time_ms, breakdown, message_info, per_layer_info = calculate_collective_communication_time(
@@ -2474,7 +3008,9 @@ def _run_multinode_projection(
     # Per-microbatch projected time stays as compute only
     projected_time_ms = projected_compute_time_ms
 
-    # For reporting, get full breakdown for target
+    # For reporting, get full breakdown for target.
+    # Pass compute time to enable physics-based FSDP overlap (compute/comm
+    # ratio per layer) rather than a constant ceiling.
     total_comm_time_ms, breakdown, message_info, per_layer_info = calculate_collective_communication_time(
         training_config,
         target_nodes,
@@ -2485,6 +3021,7 @@ def _run_multinode_projection(
         cp,
         dp_target,
         hardware_config_dict,
+        compute_time_ms=projected_compute_time_ms,
     )
 
     # ── Override A2A time with measured/ratio-scaled values ──
@@ -2509,59 +3046,66 @@ def _run_multinode_projection(
 
                 measured_a2a_per_layer = measured_a2a_fwd
 
-                # Calculate analytical A2A for benchmark EP (if available)
-                # If benchmark_ep is not provided or same as target EP, use measured directly
-                analytical_bench_a2a = None
-                if benchmark_ep is not None and benchmark_ep != ep and benchmark_ep > 0:
+                # Check if per-layer adjustment already corrected the A2A
+                _a2a_already_adjusted = any(
+                    isinstance(ld, dict)
+                    and ld.get("type") == "moe"
+                    and ld.get("mlp", {}).get("a2a_ep_adjusted", False)
+                    for ld in profiling_results.values()
+                )
+
+                if _a2a_already_adjusted:
+                    # Per-layer MoE adjustment already applied additive A2A
+                    # correction and stored the target A2A. Use it directly.
+                    target_a2a_per_layer = measured_a2a_per_layer
+                    analytical_bench_a2a = None
+                    a2a_source = "pre-adjusted by per-layer MoE correction"
+                elif benchmark_ep is not None and benchmark_ep != ep and benchmark_ep > 0:
                     analytical_bench_a2a = _estimate_a2a_per_layer_ms(
                         training_config, benchmark_ep, hardware_config_dict
                     )
-                    # Subtract analytical benchmark A2A, add analytical target A2A
-                    # This way permute and other times remain unchanged
                     target_a2a_per_layer = (
                         measured_a2a_per_layer - analytical_bench_a2a + analytical_target_a2a
                     )
                     a2a_source = f"measured - analytical_bench({benchmark_ep}) + analytical_target({ep})"
                 else:
-                    # No benchmark EP info or EP unchanged, use measured directly
                     target_a2a_per_layer = measured_a2a_per_layer
+                    analytical_bench_a2a = None
                     a2a_source = "measured (benchmark EP not available or unchanged)"
 
-                # Apply DeepEP overlap if enabled
-                use_deepep = getattr(training_config.model_config, "use_turbo_deepep", False)
-                if use_deepep:
-                    # Estimate compute time per layer (rough estimate: MLP time - A2A time)
-                    # This is approximate, but needed for overlap calculation
-                    compute_per_layer = measured_a2a_fwd * 2.0  # Rough estimate
-                    DEEPEP_OVERLAP_EFFICIENCY = 0.65
-                    overlap_per_layer = (
-                        min(target_a2a_per_layer, compute_per_layer) * DEEPEP_OVERLAP_EFFICIENCY
-                    )
-                    overlap_per_layer = min(overlap_per_layer, target_a2a_per_layer)
-                    effective_a2a_per_layer = target_a2a_per_layer - overlap_per_layer
+                effective_a2a_per_layer = target_a2a_per_layer
+
+                # When the pipeline simulation was used, A2A is already baked
+                # into the per-layer wall-clock times (whether DeepEP overlapped
+                # it or not). Showing it again as separate communication would
+                # be misleading.  Zero it out in the breakdown so
+                # "Total Communication" only reflects truly *additional* overhead.
+                if time_includes_all_microbatches:
+                    # A2A already inside pipeline sim — remove from breakdown
+                    old_a2a_fwd = breakdown.get("moe_a2a_fwd", 0)
+                    old_a2a_bwd = breakdown.get("moe_a2a_bwd", 0)
+                    breakdown["moe_a2a_fwd"] = 0
+                    breakdown["moe_a2a_bwd"] = 0
+                    total_comm_time_ms = total_comm_time_ms - old_a2a_fwd - old_a2a_bwd
+                    message_info["moe_a2a_per_layer_fwd"] = effective_a2a_per_layer
+                    message_info["a2a_in_pipeline_sim"] = True
                 else:
-                    effective_a2a_per_layer = target_a2a_per_layer
+                    # No pipeline sim — A2A must be accounted for in the
+                    # communication breakdown explicitly.
+                    total_a2a_fwd = effective_a2a_per_layer * num_moe_layers
+                    total_a2a_bwd = effective_a2a_per_layer * num_moe_layers
+                    old_a2a_fwd = breakdown.get("moe_a2a_fwd", 0)
+                    old_a2a_bwd = breakdown.get("moe_a2a_bwd", 0)
+                    breakdown["moe_a2a_fwd"] = total_a2a_fwd
+                    breakdown["moe_a2a_bwd"] = total_a2a_bwd
+                    message_info["moe_a2a_per_layer_fwd"] = effective_a2a_per_layer
+                    total_comm_time_ms = (
+                        total_comm_time_ms - old_a2a_fwd - old_a2a_bwd + total_a2a_fwd + total_a2a_bwd
+                    )
 
-                # Override breakdown and message_info with measured/scaled values
-                total_a2a_fwd = effective_a2a_per_layer * num_moe_layers
-                total_a2a_bwd = effective_a2a_per_layer * num_moe_layers  # Use same for backward
-
-                # Update breakdown
-                old_a2a_fwd = breakdown.get("moe_a2a_fwd", 0)
-                old_a2a_bwd = breakdown.get("moe_a2a_bwd", 0)
-                breakdown["moe_a2a_fwd"] = total_a2a_fwd
-                breakdown["moe_a2a_bwd"] = total_a2a_bwd
-
-                # Update message_info
-                message_info["moe_a2a_per_layer_fwd"] = effective_a2a_per_layer
-
-                # Recalculate total communication time
-                total_comm_time_ms = (
-                    total_comm_time_ms - old_a2a_fwd - old_a2a_bwd + total_a2a_fwd + total_a2a_bwd
-                )
-
+                use_deepep = getattr(training_config.model_config, "use_turbo_deepep", False)
                 if is_rank_0:
-                    print("  [INFO] Using measured/scaled A2A instead of analytical:")
+                    print("  [INFO] A2A timing (measured/scaled):")
                     print(f"    Analytical target (EP={ep}): {analytical_target_a2a:.3f} ms/layer")
                     if analytical_bench_a2a is not None:
                         print(
@@ -2569,16 +3113,26 @@ def _run_multinode_projection(
                         )
                     print(f"    Measured: {measured_a2a_per_layer:.3f} ms/layer")
                     print(f"    Using: {target_a2a_per_layer:.3f} ms/layer ({a2a_source})")
-                    if use_deepep:
+                    if time_includes_all_microbatches:
                         print(
-                            f"    DeepEP enabled: Effective A2A (with overlap): {effective_a2a_per_layer:.3f} ms/layer"
+                            "    → A2A already included in pipeline simulation layer times (not added to comm overhead)"
                         )
-                        print(
-                            f"      Overlap benefit: {target_a2a_per_layer - effective_a2a_per_layer:.3f} ms/layer"
-                        )
-                    else:
-                        print("    DeepEP disabled: No overlap, effective A2A = target A2A")
-                    print(f"    Total A2A: {total_a2a_fwd + total_a2a_bwd:.3f} ms ({num_moe_layers} layers)")
+                    elif use_deepep:
+                        print("    DeepEP ON: A2A overlap already baked into layer times")
+                    total_a2a_display = effective_a2a_per_layer * num_moe_layers * 2
+                    print(f"    Total A2A: {total_a2a_display:.3f} ms ({num_moe_layers} layers)")
+
+    # Safety net: if the pipeline sim was used but no measured A2A was found
+    # (e.g. ep > 1 but profiler didn't decompose A2A), still zero out the
+    # analytical A2A in the breakdown — it's already inside the sim.
+    if time_includes_all_microbatches and not message_info.get("a2a_in_pipeline_sim", False):
+        old_fwd = breakdown.get("moe_a2a_fwd", 0)
+        old_bwd = breakdown.get("moe_a2a_bwd", 0)
+        if old_fwd > 0 or old_bwd > 0:
+            breakdown["moe_a2a_fwd"] = 0
+            breakdown["moe_a2a_bwd"] = 0
+            total_comm_time_ms -= old_fwd + old_bwd
+            message_info["a2a_in_pipeline_sim"] = True
 
     # Add exposed FSDP communication time to projected time
     # (total_comm_time_ms already has overlap accounted for - it's the critical path)
@@ -2690,6 +3244,12 @@ def _run_multinode_projection(
                     )
                 else:
                     print("")
+        if message_info.get("a2a_in_pipeline_sim", False):
+            a2a_per_layer = message_info.get("moe_a2a_per_layer_fwd", 0)
+            n_moe = message_info.get("num_moe_layers", 0)
+            print(
+                f"   moe_a2a: (included in pipeline simulation — {n_moe} layers × {a2a_per_layer:.3f} ms/layer)"
+            )
         print(f"   Total Communication (critical path): {total_comm_time_ms:.3f} ms")
 
         # Target Configuration Summary (at the end for easy visibility)
@@ -2740,6 +3300,62 @@ def launch_projection_from_cli(args, overrides):
 
     # Load Primus configuration
     primus_config, unknown_overrides = load_primus_config(args, overrides)
+
+    # ── Apply projection-specific CLI overrides to the config ──
+    # These args are registered in the projection CLI so they don't leak
+    # to the Megatron trainer as unknown extra_args.
+    module_cfg = primus_config.get_module_config("pre_trainer")
+    is_rank_0 = int(os.getenv("RANK", "0")) == 0
+    cli_overrides_applied = []
+
+    cli_ep_size = getattr(args, "target_ep_size", None)
+    if cli_ep_size is not None:
+        module_cfg.expert_model_parallel_size = cli_ep_size
+        cli_overrides_applied.append(f"expert_model_parallel_size={cli_ep_size}")
+
+    cli_mbs = getattr(args, "micro_batch_size", None)
+    if cli_mbs is not None:
+        module_cfg.micro_batch_size = cli_mbs
+        cli_overrides_applied.append(f"micro_batch_size={cli_mbs}")
+
+    cli_gbs = getattr(args, "global_batch_size", None)
+    if cli_gbs is not None:
+        module_cfg.global_batch_size = cli_gbs
+        cli_overrides_applied.append(f"global_batch_size={cli_gbs}")
+
+    cli_vpp = getattr(args, "num_virtual_stages_per_pipeline_rank", None)
+    if cli_vpp is not None:
+        module_cfg.virtual_pipeline_model_parallel_size = cli_vpp
+        cli_overrides_applied.append(f"virtual_pipeline_model_parallel_size={cli_vpp}")
+
+    cli_enable_zb = getattr(args, "enable_zero_bubble", False)
+    if cli_enable_zb:
+        module_cfg.enable_zero_bubble = True
+        cli_overrides_applied.append("enable_zero_bubble=True")
+
+    cli_enable_deepep = getattr(args, "enable_deepep", False)
+    if cli_enable_deepep:
+        if hasattr(module_cfg, "model") and hasattr(module_cfg.model, "moe"):
+            module_cfg.model.moe.use_turbo_deepep = True
+        else:
+            module_cfg.use_turbo_deepep = True
+        cli_overrides_applied.append("use_turbo_deepep=True")
+
+    cli_sync_free_stage = getattr(args, "sync_free_stage", 0) or 0
+    if cli_sync_free_stage > 0:
+        module_cfg.turbo_sync_free_moe_stage = cli_sync_free_stage
+        if not cli_enable_deepep:
+            if hasattr(module_cfg, "model") and hasattr(module_cfg.model, "moe"):
+                module_cfg.model.moe.use_turbo_deepep = True
+            else:
+                module_cfg.use_turbo_deepep = True
+        cli_overrides_applied.append(f"turbo_sync_free_moe_stage={cli_sync_free_stage}")
+
+    if cli_overrides_applied and is_rank_0:
+        print("[Primus:Performance Projection] CLI overrides applied to config:")
+        for ov in cli_overrides_applied:
+            print(f"  {ov}")
+
     primus_config_original = copy.deepcopy(primus_config)
 
     # Check if we need to reduce config for single-node benchmarking
@@ -2752,8 +3368,10 @@ def launch_projection_from_cli(args, overrides):
 
     is_sub_node_benchmark = benchmark_gpus < gpus_per_node
 
-    # Get target nodes from CLI flag (--target-nodes)
+    # Get target nodes from CLI flag (--target-nodes or --target-num-nodes)
     target_nodes = getattr(args, "target_nodes", None)
+    if target_nodes is None:
+        target_nodes = getattr(args, "target_num_nodes", None)
 
     # Store original parallelism before any modifications
     module_config = primus_config.get_module_config("pre_trainer")
@@ -2767,6 +3385,32 @@ def launch_projection_from_cli(args, overrides):
     # If target_nodes not specified, default to minimum required
     if target_nodes is None:
         target_nodes = min_nodes_required
+
+    # ── Auto-hybrid: run bg=1 compute baseline when EP was reduced ──
+    # When benchmark_ep != original_ep, measured compute at the reduced EP
+    # includes artifacts (different token routing, contention) that don't
+    # represent the target config.  We automatically run bg=1 profiling
+    # for clean compute and merge it with the bg=N measured A2A later.
+    # Skip when: bg==ep (no reduction), simulation mode, or --profile-only.
+    profiling_mode = getattr(args, "profiling_mode", "benchmark")
+    _auto_bg1_results = None
+    _auto_bg1_meta = None
+    need_auto_hybrid = (
+        reduction_info["adjusted"]
+        and reduction_info["original_ep"] != reduction_info["benchmark_ep"]
+        and profiling_mode in ("benchmark", "both")
+        and not getattr(args, "profile_only", False)
+        and not getattr(args, "compute_baseline", None)
+    )
+    if need_auto_hybrid:
+        is_rank_0 = int(os.getenv("RANK", "0")) == 0
+        if is_rank_0:
+            print(
+                f"\n[Primus:Performance Projection] EP reduced "
+                f"({reduction_info['original_ep']} → {reduction_info['benchmark_ep']}): "
+                f"auto-running bg=1 for clean compute baseline..."
+            )
+        _auto_bg1_results, _auto_bg1_meta = _run_automatic_bg1_baseline(args, reduction_info)
 
     if reduction_info["adjusted"]:
         benchmark_label = f"{benchmark_gpus}-GPU" if is_sub_node_benchmark else "single-node"
@@ -2814,10 +3458,14 @@ def launch_projection_from_cli(args, overrides):
         ]
         if reduction_info["benchmark_pp"] <= 1:
             if hasattr(
-                primus_config.get_module_config("pre_trainer"), "virtual_pipeline_model_parallel_size"
+                primus_config.get_module_config("pre_trainer"),
+                "virtual_pipeline_model_parallel_size",
             ):
                 primus_config.get_module_config("pre_trainer").virtual_pipeline_model_parallel_size = 1
-            if hasattr(primus_config.get_module_config("pre_trainer"), "pipeline_model_parallel_layout"):
+            if hasattr(
+                primus_config.get_module_config("pre_trainer"),
+                "pipeline_model_parallel_layout",
+            ):
                 primus_config.get_module_config("pre_trainer").pipeline_model_parallel_layout = None
         primus_config.get_module_config("pre_trainer").expert_model_parallel_size = reduction_info[
             "benchmark_ep"
@@ -2833,8 +3481,26 @@ def launch_projection_from_cli(args, overrides):
                 "benchmark_num_experts"
             ]
 
-    # Determine profiling mode
-    profiling_mode = getattr(args, "profiling_mode", "benchmark")
+        # When benchmark downscale leaves TP*EP==1, Primus Turbo's DeepEP Flex
+        # token dispatcher asserts `TPxEP > 1` and its underlying DeepEP buffer
+        # kernel configs are only defined for num_ranks >= 2, so the benchmark
+        # subprocess cannot instantiate.  Auto-disable use_turbo_deepep for the
+        # benchmark subprocess only; the target config (primus_config_original)
+        # retains turbo-deepep, and the target A2A is recovered analytically
+        # downstream.
+        _bench_cfg = primus_config.get_module_config("pre_trainer")
+        _bench_tp = reduction_info.get("benchmark_tp", 1) or 1
+        _bench_ep = reduction_info.get("benchmark_ep", 1) or 1
+        if _bench_tp * _bench_ep <= 1 and getattr(_bench_cfg, "use_turbo_deepep", False):
+            if int(os.getenv("RANK", "0")) == 0:
+                print(
+                    "[Primus:Performance Projection] Benchmark TP*EP=1; "
+                    "auto-disabling use_turbo_deepep for the benchmark subprocess "
+                    "(target config retains turbo-deepep; A2A is reconstructed analytically)."
+                )
+            _bench_cfg.use_turbo_deepep = False
+            if hasattr(_bench_cfg, "model") and hasattr(getattr(_bench_cfg, "model", None), "moe"):
+                _bench_cfg.model.moe.use_turbo_deepep = False
 
     if profiling_mode == "simulate":
         # Pure simulation – no GPU / trainer required
@@ -2875,6 +3541,19 @@ def launch_projection_from_cli(args, overrides):
     else:
         # Default: actual GPU benchmark
         profiling_results = _run_layer_benchmark(primus_config, unknown_overrides)
+
+    # ── Save profiling results if requested (internal / subprocess use) ──
+    save_profiling_path = getattr(args, "save_profiling", None)
+    is_rank_0 = int(os.getenv("RANK", "0")) == 0
+    if save_profiling_path and is_rank_0:
+        _save_profiling_results(profiling_results, reduction_info, save_profiling_path)
+        print(f"[Primus:Performance Projection] Profiling results saved to: {save_profiling_path}")
+
+    # ── Early exit for --profile-only (used by bg=1 subprocess) ──
+    if getattr(args, "profile_only", False):
+        if is_rank_0:
+            print("[Primus:Performance Projection] --profile-only: exiting after profiling.")
+        return
 
     # Use original config for projection calculations
     training_config = convert_primus_config_to_projection_config(primus_config_original)
@@ -2944,6 +3623,53 @@ def launch_projection_from_cli(args, overrides):
     # Set data_parallel_size to target_dp so the pipeline simulation and
     # _compute_micro_batches use the correct microbatch count.
     training_config.runtime_config.data_parallel_size = target_dp
+
+    # ── Hybrid sourcing: merge clean compute baseline with measured A2A ──
+    # Source: auto bg=1 results (computed above) or manual --compute-baseline.
+    compute_baseline_path = getattr(args, "compute_baseline", None)
+    baseline_results, baseline_meta = None, None
+    if _auto_bg1_results is not None:
+        baseline_results, baseline_meta = _auto_bg1_results, _auto_bg1_meta
+    elif compute_baseline_path:
+        baseline_results, baseline_meta = _load_profiling_results(compute_baseline_path)
+
+    if baseline_results is not None and benchmark_ep != ep:
+        merged_count, diag = _merge_hybrid_profiling(
+            profiling_results,
+            baseline_results,
+            baseline_meta,
+            current_benchmark_ep=benchmark_ep,
+        )
+
+        if is_rank_0:
+            print("\n" + "=" * 100)
+            print(
+                "[Primus:Performance Projection] Hybrid Sourcing: bg=1 compute + "
+                f"bg={benchmark_gpus} communication"
+            )
+            print("=" * 100)
+            print(
+                f"  Baseline config: bg={baseline_meta.get('benchmark_gpus', '?')}, "
+                f"EP={baseline_meta.get('benchmark_ep', '?')}"
+            )
+            print(f"  Current config:  bg={benchmark_gpus}, EP={benchmark_ep}")
+            print(f"  Merged {merged_count} layers")
+            if diag:
+                print(
+                    f"  Attention fwd: current={diag['cur_attn_fwd']:.2f} ms → "
+                    f"baseline={diag['base_attn_fwd']:.2f} ms "
+                    f"(contention ratio: {diag['attn_contention_ratio']:.2f}x)"
+                )
+                print(
+                    f"  MLP compute fwd: baseline={diag['base_mlp_compute_fwd']:.2f} ms "
+                    f"× {diag['ep_compute_scale']:.3f} (EP scale) "
+                    f"= {diag['scaled_compute_fwd']:.2f} ms"
+                )
+                print(
+                    f"  Measured A2A fwd: {diag['cur_a2a_fwd']:.2f} ms " f"(from current bg={benchmark_gpus})"
+                )
+                print(f"  Layer fwd: {diag['old_layer_fwd']:.2f} → " f"{diag['new_layer_fwd']:.2f} ms")
+            print("=" * 100)
 
     # If TP was reduced for sub-node benchmarking, apply TP scaling BEFORE pipeline simulation
     if reduction_info["adjusted"] and reduction_info.get("benchmark_tp", tp) != tp:
@@ -3053,109 +3779,75 @@ def launch_projection_from_cli(args, overrides):
                     measured_a2a_fwd = mlp_info.get("a2a_forward_time_ms", 0)
                     measured_a2a_bwd = mlp_info.get("a2a_backward_time_ms", 0)
 
-                    # Ratio-based target A2A: anchor to measured, scale by analytical ratio
-                    # If benchmark EP == target EP, use measured A2A directly (no scaling needed)
                     if benchmark_ep == original_ep:
-                        # No EP scaling needed - use measured A2A directly
+                        # No EP scaling — use measured A2A directly
+                        a2a_delta = 0.0
                         target_a2a_fwd = measured_a2a_fwd
                         target_a2a_bwd = measured_a2a_bwd
                         if is_rank_0 and moe_layers_adjusted == 0:
                             print(
-                                f"    [INFO] Benchmark EP ({benchmark_ep}) == target EP ({original_ep}), using measured A2A directly (no scaling)"
+                                f"    [INFO] Benchmark EP ({benchmark_ep}) == target EP ({original_ep}), using measured A2A directly"
                             )
-                    elif analytical_bench_a2a > 0 and measured_a2a_fwd > 0:
-                        a2a_ratio = analytical_target_a2a / analytical_bench_a2a
-                        target_a2a_fwd = measured_a2a_fwd * a2a_ratio
-                        target_a2a_bwd = measured_a2a_bwd * a2a_ratio
-                        # Warn if analytical ratio seems unreasonable (likely model error)
-                        if is_rank_0 and moe_layers_adjusted == 0 and (a2a_ratio > 2.0 or a2a_ratio < 0.5):
-                            print(
-                                f"    [WARNING] Analytical A2A ratio ({a2a_ratio:.3f}x) seems extreme. "
-                                f"Analytical model may be inaccurate for EP scaling."
-                            )
-                    else:
-                        # Fallback to raw analytical if no measured or no bench analytical
+
+                    # ── Compute A2A delta (additive, not multiplicative) ──
+                    # Multiplicative ratio-scaling amplifies fixed
+                    # dispatch/combine overhead that is independent of EP.
+                    # Additive correction adjusts only the communication
+                    # portion via the analytical model:
+                    #   target_a2a = measured_a2a + (analytical_target - analytical_bench)
+                    elif benchmark_ep != original_ep and measured_a2a_fwd > 0:
+                        a2a_delta = analytical_target_a2a - analytical_bench_a2a
+                        target_a2a_fwd = measured_a2a_fwd + a2a_delta
+                        target_a2a_bwd = measured_a2a_bwd + a2a_delta
+                    elif benchmark_ep != original_ep:
+                        a2a_delta = analytical_target_a2a
                         target_a2a_fwd = analytical_target_a2a
                         target_a2a_bwd = analytical_target_a2a
+                        if is_rank_0 and moe_layers_adjusted == 0:
+                            print(
+                                f"    [INFO] No measured A2A (bench EP={benchmark_ep}), "
+                                f"using analytical for target EP={original_ep}: "
+                                f"{analytical_target_a2a:.3f} ms/layer"
+                            )
+                    else:
+                        a2a_delta = 0.0
+                        target_a2a_fwd = measured_a2a_fwd
+                        target_a2a_bwd = measured_a2a_bwd
 
-                    # Decompose: compute = total_MLP - measured_A2A
-                    compute_fwd = mlp_fwd - measured_a2a_fwd
-                    compute_bwd = mlp_bwd - measured_a2a_bwd
+                    # ── Adjust total MLP time ──
+                    # Because num_experts is reduced proportionally during
+                    # benchmarking, experts_per_rank is preserved and the
+                    # measured compute is already correct for the target.
+                    # Only the A2A portion changes (via additive delta).
+                    model_cfg = training_config.model_config
+                    use_deepep = getattr(model_cfg, "use_turbo_deepep", False)
 
-                    # ── DeepEP overlap estimation ──
-                    # DeepEP uses async A2A on a separate comm stream, allowing expert
-                    # compute to overlap with A2A communication. The overlap benefit is
-                    # the portion of A2A that can be hidden behind compute.
-                    #
-                    # IMPORTANT: Overlap is ONLY applied when use_turbo_deepep is True.
-                    # When DeepEP is disabled, A2A is synchronous and runs sequentially
-                    # with compute, so no overlap benefit is applied (deepep_overlap = 0.0).
-                    #
-                    # Overlap = min(A2A_time, compute_time) × overlap_efficiency
-                    # Overlap efficiency accounts for stream sync overhead, kernel launch
-                    # gaps, and imperfect parallelism. Conservative estimate: 65%.
-                    use_deepep = getattr(training_config.model_config, "use_turbo_deepep", False)
-                    deepep_overlap_fwd = 0.0
-                    deepep_overlap_bwd = 0.0
-                    if use_deepep:
-                        # Conservative overlap efficiency: 65% of min(A2A, compute) can be hidden
-                        # This accounts for stream synchronization overhead and imperfect parallelism
-                        DEEPEP_OVERLAP_EFFICIENCY = 0.65
-                        deepep_overlap_fwd = min(target_a2a_fwd, compute_fwd) * DEEPEP_OVERLAP_EFFICIENCY
-                        deepep_overlap_bwd = min(target_a2a_bwd, compute_bwd) * DEEPEP_OVERLAP_EFFICIENCY
-                        # Clamp overlap to not exceed A2A time
-                        deepep_overlap_fwd = min(deepep_overlap_fwd, target_a2a_fwd)
-                        deepep_overlap_bwd = min(deepep_overlap_bwd, target_a2a_bwd)
+                    if use_deepep and benchmark_ep != original_ep:
+                        DEEPEP_OVERLAP_EFFICIENCY = _get_deepep_overlap_efficiency(model_cfg)
+                        effective_a2a_delta = a2a_delta * (1.0 - DEEPEP_OVERLAP_EFFICIENCY)
+                        new_mlp_fwd = mlp_fwd + effective_a2a_delta
+                        new_mlp_bwd = mlp_bwd + effective_a2a_delta
+                    else:
+                        new_mlp_fwd = mlp_fwd + a2a_delta
+                        new_mlp_bwd = mlp_bwd + a2a_delta
 
-                    # Projected MLP = compute + (ratio-scaled A2A - overlap benefit) for target EP
-                    # The overlap reduces the effective A2A time since it runs concurrently with compute
-                    effective_a2a_fwd = target_a2a_fwd - deepep_overlap_fwd
-                    effective_a2a_bwd = target_a2a_bwd - deepep_overlap_bwd
-                    new_mlp_fwd = compute_fwd + effective_a2a_fwd
-                    new_mlp_bwd = compute_bwd + effective_a2a_bwd
+                    new_mlp_fwd = max(new_mlp_fwd, 0.1)
+                    new_mlp_bwd = max(new_mlp_bwd, 0.1)
 
-                    # Update layer total: replace old MLP with new MLP
                     new_fwd = (old_fwd - mlp_fwd) + new_mlp_fwd
                     new_bwd = (old_bwd - mlp_bwd) + new_mlp_bwd
 
                     if is_rank_0 and moe_layers_adjusted == 0:
                         print("  MoE layer adjustment (per layer):")
-                        print(
-                            f"    MLP fwd: {mlp_fwd:.2f} ms (measured A2A: {measured_a2a_fwd:.2f}, compute: {compute_fwd:.2f})"
-                        )
-                        print(
-                            f"    MLP bwd: {mlp_bwd:.2f} ms (measured A2A: {measured_a2a_bwd:.2f}, compute: {compute_bwd:.2f})"
-                        )
-                        if analytical_bench_a2a > 0 and measured_a2a_fwd > 0:
+                        print(f"    MLP fwd: {mlp_fwd:.2f} ms (measured A2A: {measured_a2a_fwd:.2f})")
+                        if benchmark_ep != original_ep:
                             print(
-                                f"    Ratio-based target A2A fwd: {measured_a2a_fwd:.2f} × {a2a_ratio:.3f} = {target_a2a_fwd:.2f} ms"
+                                f"    A2A delta (additive): {a2a_delta:+.3f} ms "
+                                f"(analytical {analytical_bench_a2a:.3f} → {analytical_target_a2a:.3f})"
                             )
-                        else:
-                            print(f"    Target A2A fwd (raw analytical): {target_a2a_fwd:.2f} ms")
-                        print(f"    [DEBUG] use_turbo_deepep flag: {use_deepep}")
-                        print(
-                            f"    [DEBUG] target_a2a_fwd: {target_a2a_fwd:.2f} ms, compute_fwd: {compute_fwd:.2f} ms"
-                        )
-                        print(
-                            f"    [DEBUG] deepep_overlap_fwd: {deepep_overlap_fwd:.2f} ms, effective_a2a_fwd: {effective_a2a_fwd:.2f} ms"
-                        )
-                        if use_deepep and deepep_overlap_fwd > 0:
-                            print(
-                                f"    DeepEP overlap benefit fwd: {deepep_overlap_fwd:.2f} ms (hidden behind compute)"
-                            )
-                            print(
-                                f"    Effective A2A fwd: {target_a2a_fwd:.2f} - {deepep_overlap_fwd:.2f} = {effective_a2a_fwd:.2f} ms"
-                            )
-                        else:
-                            print(
-                                "    DeepEP disabled: no overlap (synchronous A2A), effective A2A = target A2A"
-                            )
-                        print(
-                            f"    → New MLP fwd: {new_mlp_fwd:.2f} ms (compute: {compute_fwd:.2f} + effective A2A: {effective_a2a_fwd:.2f})"
-                        )
-                        print(
-                            f"    → New MLP bwd: {new_mlp_bwd:.2f} ms (compute: {compute_bwd:.2f} + effective A2A: {effective_a2a_bwd:.2f})"
-                        )
+                        print(f"    Target A2A fwd: {target_a2a_fwd:.2f} ms")
+                        print(f"    → New MLP fwd: {new_mlp_fwd:.2f} ms")
+                        print(f"    → New MLP bwd: {new_mlp_bwd:.2f} ms")
                         print(f"    Layer fwd: {old_fwd:.2f} → {new_fwd:.2f} ms")
                         print(f"    Layer bwd: {old_bwd:.2f} → {new_bwd:.2f} ms")
 
@@ -3164,10 +3856,9 @@ def launch_projection_from_cli(args, overrides):
                     if mlp_info:
                         mlp_info["forward_time_ms"] = new_mlp_fwd
                         mlp_info["backward_time_ms"] = new_mlp_bwd
-                        # Store the scaled A2A values for use in multinode projection
-                        # This allows multinode projection to use ratio-scaled A2A instead of analytical
                         mlp_info["a2a_forward_time_ms"] = target_a2a_fwd
                         mlp_info["a2a_backward_time_ms"] = target_a2a_bwd
+                        mlp_info["a2a_ep_adjusted"] = True
                     moe_layers_adjusted += 1
 
         else:
@@ -3245,74 +3936,39 @@ def launch_projection_from_cli(args, overrides):
                 print(f"  Adjusted {moe_layers_adjusted} MoE layer(s) in profiling results")
         ep_overhead_applied = True
 
-    # ── Apply DeepEP overlap even when EP doesn't change ──
-    # DeepEP overlap should be applied whenever DeepEP is enabled, regardless
-    # of whether EP is being scaled. This accounts for async A2A overlapping
-    # with compute during benchmarking.
+    # ── DeepEP overlap when EP doesn't change ──
+    # When DeepEP is ON and EP is unchanged, the benchmark already ran with
+    # DeepEP enabled, so the measured wall-clock layer times already include
+    # the A2A-compute overlap benefit.  No additional overlap adjustment is
+    # needed — applying it again would double-count the savings.
     use_deepep = getattr(training_config.model_config, "use_turbo_deepep", False)
     if use_deepep and not ep_overhead_applied:
-        has_decomposed_a2a = any(
-            isinstance(ld, dict)
-            and ld.get("type") == "moe"
-            and ld.get("mlp", {}).get("a2a_forward_time_ms", 0) > 0
-            for ld in profiling_results.values()
-        )
-        if has_decomposed_a2a:
-            # Apply DeepEP overlap to measured A2A times
-            if is_rank_0:
-                print("[Primus:Performance Projection] Applying DeepEP overlap (EP unchanged):")
-            moe_layers_adjusted = 0
-            for layer_idx, layer_data in profiling_results.items():
-                if isinstance(layer_data, dict) and layer_data.get("type") == "moe":
-                    old_fwd = layer_data.get("forward_time_ms", 0)
-                    old_bwd = layer_data.get("backward_time_ms", 0)
+        if is_rank_0:
+            print(
+                "[Primus:Performance Projection] DeepEP ON, EP unchanged: "
+                "benchmark times already include A2A overlap — no adjustment needed."
+            )
 
-                    mlp_info = layer_data.get("mlp", {})
-                    mlp_fwd = mlp_info.get("forward_time_ms", 0)
-                    mlp_bwd = mlp_info.get("backward_time_ms", 0)
-                    measured_a2a_fwd = mlp_info.get("a2a_forward_time_ms", 0)
-                    measured_a2a_bwd = mlp_info.get("a2a_backward_time_ms", 0)
-
-                    # Decompose: compute = total_MLP - measured_A2A
-                    compute_fwd = mlp_fwd - measured_a2a_fwd
-                    compute_bwd = mlp_bwd - measured_a2a_bwd
-
-                    # Apply DeepEP overlap to measured A2A
-                    DEEPEP_OVERLAP_EFFICIENCY = 0.65
-                    deepep_overlap_fwd = min(measured_a2a_fwd, compute_fwd) * DEEPEP_OVERLAP_EFFICIENCY
-                    deepep_overlap_bwd = min(measured_a2a_bwd, compute_bwd) * DEEPEP_OVERLAP_EFFICIENCY
-                    deepep_overlap_fwd = min(deepep_overlap_fwd, measured_a2a_fwd)
-                    deepep_overlap_bwd = min(deepep_overlap_bwd, measured_a2a_bwd)
-
-                    effective_a2a_fwd = measured_a2a_fwd - deepep_overlap_fwd
-                    effective_a2a_bwd = measured_a2a_bwd - deepep_overlap_bwd
-                    new_mlp_fwd = compute_fwd + effective_a2a_fwd
-                    new_mlp_bwd = compute_bwd + effective_a2a_bwd
-
-                    new_fwd = (old_fwd - mlp_fwd) + new_mlp_fwd
-                    new_bwd = (old_bwd - mlp_bwd) + new_mlp_bwd
-
-                    if is_rank_0 and moe_layers_adjusted == 0:
-                        print("  MoE layer adjustment (DeepEP overlap):")
-                        print(
-                            f"    MLP fwd: {mlp_fwd:.2f} ms (measured A2A: {measured_a2a_fwd:.2f}, compute: {compute_fwd:.2f})"
-                        )
-                        print(f"    DeepEP overlap fwd: {deepep_overlap_fwd:.2f} ms")
-                        print(f"    Effective A2A fwd: {effective_a2a_fwd:.2f} ms")
-                        print(f"    → New MLP fwd: {new_mlp_fwd:.2f} ms")
-
-                    layer_data["forward_time_ms"] = new_fwd
-                    layer_data["backward_time_ms"] = new_bwd
-                    if mlp_info:
-                        mlp_info["forward_time_ms"] = new_mlp_fwd
-                        mlp_info["backward_time_ms"] = new_mlp_bwd
-                    moe_layers_adjusted += 1
-
-    # Check if zero-bubble scheduling is enabled in the original config.
-    # Default is OFF (Primus pipeline). When ON, uses Megatron ILP scheduler (SeaAI lab).
+    # Check if zero-bubble scheduling is enabled in the original config
     original_module_config = primus_config_original.get_module_config("pre_trainer")
-    enable_zero_bubble = getattr(original_module_config, "enable_zero_bubble", True)
+    enable_zero_bubble = getattr(original_module_config, "enable_zero_bubble", False)
+
+    # Pipeline schedule algorithm from CLI (default: "auto")
     scheduler_algorithm = getattr(args, "pipeline_schedule_algorithm", "auto")
+    # When "all" or specific ZB algorithm is requested, auto-enable zero bubble
+    if scheduler_algorithm in (
+        "all",
+        "zerobubble",
+        "zerobubble-heuristic",
+        "seaailab-ilp",
+    ):
+        if not enable_zero_bubble:
+            enable_zero_bubble = True
+            if is_rank_0:
+                print(
+                    f"[Primus:Performance Projection] Auto-enabling zero-bubble scheduling "
+                    f"for --pipeline-schedule-algorithm={scheduler_algorithm}"
+                )
 
     # Use ORIGINAL PP for pipeline simulation decision, not benchmark PP
     # If original PP > 1, we should run pipeline simulation even if we benchmarked with PP=1
@@ -3335,7 +3991,10 @@ def launch_projection_from_cli(args, overrides):
                 f"(benchmarked with PP={pp})"
             )
         pipeline_simulation_time_ms = _run_pipeline_simulation(
-            training_config, profiling_results, enable_zero_bubble, scheduler_algorithm
+            training_config,
+            profiling_results,
+            enable_zero_bubble,
+            scheduler_algorithm,
         )
 
     # Restore training_config PP to benchmark value for consistency
@@ -3451,30 +4110,26 @@ def launch_projection_from_cli(args, overrides):
                                     target_a2a_fwd = analytical_target_a2a
                                     target_a2a_bwd = analytical_target_a2a
 
-                                compute_fwd = mlp_fwd - measured_a2a_fwd
-                                compute_bwd = mlp_bwd - measured_a2a_bwd
-
-                                # ── DeepEP overlap estimation ──
-                                # IMPORTANT: Overlap is ONLY applied when use_turbo_deepep is True.
-                                # When DeepEP is disabled, A2A is synchronous and no overlap benefit applies.
-                                deepep_overlap_fwd = 0.0
-                                deepep_overlap_bwd = 0.0
+                                # Decompose MLP into compute + A2A (same logic as Path A)
                                 if use_deepep:
-                                    DEEPEP_OVERLAP_EFFICIENCY = 0.65
-                                    deepep_overlap_fwd = (
-                                        min(target_a2a_fwd, compute_fwd) * DEEPEP_OVERLAP_EFFICIENCY
-                                    )
-                                    deepep_overlap_bwd = (
-                                        min(target_a2a_bwd, compute_bwd) * DEEPEP_OVERLAP_EFFICIENCY
-                                    )
-                                    deepep_overlap_fwd = min(deepep_overlap_fwd, target_a2a_fwd)
-                                    deepep_overlap_bwd = min(deepep_overlap_bwd, target_a2a_bwd)
-                                    total_overlap_per_layer = deepep_overlap_fwd + deepep_overlap_bwd
-
-                                effective_a2a_fwd = target_a2a_fwd - deepep_overlap_fwd
-                                effective_a2a_bwd = target_a2a_bwd - deepep_overlap_bwd
-                                new_mlp_fwd = compute_fwd + effective_a2a_fwd
-                                new_mlp_bwd = compute_bwd + effective_a2a_bwd
+                                    DEEPEP_OVERLAP_EFFICIENCY = _get_deepep_overlap_efficiency(model_cfg)
+                                    residual = 1.0 - DEEPEP_OVERLAP_EFFICIENCY
+                                    compute_fwd = mlp_fwd - measured_a2a_fwd * residual
+                                    compute_bwd = mlp_bwd - measured_a2a_bwd * residual
+                                    if compute_fwd < measured_a2a_fwd:
+                                        compute_fwd = max(0, (mlp_fwd - measured_a2a_fwd) / residual)
+                                    if compute_bwd < measured_a2a_bwd:
+                                        compute_bwd = max(0, (mlp_bwd - measured_a2a_bwd) / residual)
+                                    overlap_fwd = min(target_a2a_fwd, compute_fwd) * DEEPEP_OVERLAP_EFFICIENCY
+                                    overlap_bwd = min(target_a2a_bwd, compute_bwd) * DEEPEP_OVERLAP_EFFICIENCY
+                                    total_overlap_per_layer = overlap_fwd + overlap_bwd
+                                    new_mlp_fwd = compute_fwd + target_a2a_fwd - overlap_fwd
+                                    new_mlp_bwd = compute_bwd + target_a2a_bwd - overlap_bwd
+                                else:
+                                    compute_fwd = mlp_fwd - measured_a2a_fwd
+                                    compute_bwd = mlp_bwd - measured_a2a_bwd
+                                    new_mlp_fwd = compute_fwd + target_a2a_fwd
+                                    new_mlp_bwd = compute_bwd + target_a2a_bwd
 
                                 delta_fwd = new_mlp_fwd - mlp_fwd
                                 delta_bwd = new_mlp_bwd - mlp_bwd
@@ -3578,7 +4233,7 @@ def launch_projection_from_cli(args, overrides):
 
             print(f"  Benchmarked on: {benchmark_gpus} GPUs")
             print(f"  Compute time ({per_mb_label}): {per_mb_time:.3f} ms")
-            print()
+            print("")
 
             # Compute tray level (if benchmarked on 1 GPU, show tray projection)
             if benchmark_gpus == 1 and gpus_per_tray > 1:
@@ -3587,7 +4242,7 @@ def launch_projection_from_cli(args, overrides):
                     f"     TP={min(tp, gpus_per_tray)}, PP=1, EP={min(ep, gpus_per_tray // min(tp, gpus_per_tray))}"
                 )
                 print("     Per-microbatch compute: included in node-level projection")
-                print()
+                print("")
 
             # Node level
             print(
@@ -3600,7 +4255,7 @@ def launch_projection_from_cli(args, overrides):
                 if hardware_config_dict
                 else "     (Using default intra-node communication model)"
             )
-            print()
+            print("")
             print(f"  📊 Multi-Node ({target_nodes} nodes = {target_nodes * gpus_per_node} GPUs):")
             print("     → See detailed projection below")
             print("=" * 100)

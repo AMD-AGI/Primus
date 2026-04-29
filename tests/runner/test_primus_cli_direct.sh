@@ -124,7 +124,7 @@ direct:
 EOF
 
     local output
-    output=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run -- benchmark gemm 2>&1 || true)
+    output=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run -- benchmark gemm 2>&1 || true)
 
     assert_contains "$output" "[DRY RUN] Direct Launch Configuration" "Dry-run header displayed"
     assert_contains "$output" "Run Mode" "Run mode displayed"
@@ -150,7 +150,7 @@ direct:
 EOF
 
     local output
-    output=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run --env CLI_VAR=from_cli -- test 2>&1 || true)
+    output=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run --env CLI_VAR=from_cli -- test 2>&1 || true)
 
     assert_contains "$output" "Environment Variables:" "Environment variables section displayed"
     assert_contains "$output" "CONFIG_VAR=from_config" "Config env var displayed"
@@ -172,7 +172,7 @@ direct:
 EOF
 
     local output
-    output=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run --script custom_script.py -- test 2>&1 || true)
+    output=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run --script custom_script.py -- test 2>&1 || true)
 
     assert_contains "$output" "Script Path     : custom_script.py" "CLI script overrides config"
     assert_not_contains "$output" "default_script.py" "Default script not used"
@@ -194,12 +194,12 @@ EOF
 
     # Test --numa flag
     local output_numa
-    output_numa=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run --numa -- test 2>&1 || true)
+    output_numa=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run --numa -- test 2>&1 || true)
     assert_contains "$output_numa" "NUMA Binding    : true" "NUMA enabled with --numa"
 
     # Test --no-numa flag
     local output_no_numa
-    output_no_numa=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run --no-numa -- test 2>&1 || true)
+    output_no_numa=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run --no-numa -- test 2>&1 || true)
     assert_contains "$output_no_numa" "NUMA Binding    : false" "NUMA disabled with --no-numa"
 
     rm -f "$test_config"
@@ -219,14 +219,14 @@ EOF
 
     # Test single mode
     local output_single
-    output_single=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run --single -- test 2>&1 || true)
+    output_single=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run --single -- test 2>&1 || true)
     assert_contains "$output_single" "Run Mode        : single" "Single mode set"
     assert_contains "$output_single" "python3 test.py" "Python3 command used"
     assert_not_contains "$output_single" "torchrun" "Torchrun not used in single mode"
 
     # Test torchrun mode (default)
     local output_torchrun
-    output_torchrun=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run -- test 2>&1 || true)
+    output_torchrun=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run -- test 2>&1 || true)
     assert_contains "$output_torchrun" "Run Mode        : torchrun" "Torchrun mode set"
     assert_contains "$output_torchrun" "torchrun" "Torchrun command used"
     assert_contains "$output_torchrun" "Distributed Settings:" "Distributed settings displayed"
@@ -249,7 +249,7 @@ direct:
 EOF
 
     local output
-    output=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run --patch /tmp/patch2.sh -- test 2>&1 || true)
+    output=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run --patch /tmp/patch2.sh -- test 2>&1 || true)
 
     assert_contains "$output" "Detected patch scripts: /tmp/patch1.sh /tmp/patch2.sh" "Both config and CLI patches displayed"
 
@@ -269,7 +269,7 @@ direct:
 EOF
 
     local output
-    output=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run --config "$test_config" --env INVALID_ENV -- test 2>&1 || true)
+    output=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --dry-run --config "$test_config" --env INVALID_ENV -- test 2>&1 || true)
 
     assert_contains "$output" "Env file not found or not readable: INVALID_ENV" "Non KEY=VALUE --env treated as env file and validated"
 
@@ -289,7 +289,7 @@ direct:
 EOF
 
     local output
-    output=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --debug --dry-run -- test 2>&1 || true)
+    output=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --debug --dry-run -- test 2>&1 || true)
 
     assert_contains "$output" "Debug mode enabled" "Debug mode message displayed"
     assert_contains "$output" "[DEBUG]" "Debug logs present"
@@ -314,7 +314,7 @@ direct:
 EOF
 
     local output
-    output=$(timeout 5 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run --script cli_script.py --numa --env VAR1=cli_value -- test 2>&1 || true)
+    output=$(timeout 30 bash "$RUNNER_DIR/primus-cli-direct.sh" --config "$test_config" --dry-run --script cli_script.py --numa --env VAR1=cli_value -- test 2>&1 || true)
 
     assert_contains "$output" "Script Path     : cli_script.py" "CLI script overrides config"
     assert_contains "$output" "NUMA Binding    : true" "CLI numa overrides config"

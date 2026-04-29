@@ -54,16 +54,30 @@ def patch_v_schedule_support(ctx: PatchContext):
     """
     # Patch parallel_state
     import megatron.core.parallel_state as ori_parallel_state
+    import megatron.core.pipeline_parallel.utils as ori_pipeline_parallel_utils
+    import megatron.training.training as ori_training
 
     from primus.backends.megatron.core.parallel_state import (
         default_embedding_ranks,
         is_pipeline_last_stage,
+        is_pp_first_stage,
+        is_pp_last_stage,
         is_rank_in_embedding_group,
     )
 
     ori_parallel_state.default_embedding_ranks = default_embedding_ranks
     ori_parallel_state.is_pipeline_last_stage = is_pipeline_last_stage
     ori_parallel_state.is_rank_in_embedding_group = is_rank_in_embedding_group
+    ori_pipeline_parallel_utils.is_pp_first_stage = is_pp_first_stage
+    ori_pipeline_parallel_utils.is_pp_last_stage = is_pp_last_stage
+    ori_training.is_pp_first_stage = is_pp_first_stage
+    ori_training.is_pp_last_stage = is_pp_last_stage
+
+    import megatron.core.pipeline_parallel.schedules as ori_schedules
+
+    ori_schedules.is_pp_first_stage = is_pp_first_stage
+    ori_schedules.is_pp_last_stage = is_pp_last_stage
+
     log_rank_0(
         f"[Patch:megatron.pp.v_schedule]   Patched megatron.core.parallel_state.default_embedding_ranks "
         f"-> {default_embedding_ranks.__name__}"
@@ -75,6 +89,14 @@ def patch_v_schedule_support(ctx: PatchContext):
     log_rank_0(
         f"[Patch:megatron.pp.v_schedule]   Patched megatron.core.parallel_state.is_rank_in_embedding_group "
         f"-> {is_rank_in_embedding_group.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.pp.v_schedule]   Patched megatron.core.pipeline_parallel.utils.is_pp_first_stage "
+        f"-> {is_pp_first_stage.__name__}"
+    )
+    log_rank_0(
+        f"[Patch:megatron.pp.v_schedule]   Patched megatron.core.pipeline_parallel.utils.is_pp_last_stage "
+        f"-> {is_pp_last_stage.__name__}"
     )
 
     # Patch finalize_model_grads

@@ -83,9 +83,22 @@ def patch_te_general_gemm_workspace_helper(ctx: PatchContext):
         )
         return
 
-    from primus.backends.transformer_engine.pytorch.module.base import (
-        get_workspace as primus_get_workspace,
-    )
+    # Importing the Primus workspace helper transitively pulls in TE PyTorch
+    # extensions (and on ROCm images, ``aiter``/``csrc``). If that chain is
+    # broken in the runtime image we still want a graceful fallback rather
+    # than a hard patch failure that leaves Megatron's stock helper untouched
+    # in some half-applied state.
+    try:
+        from primus.backends.transformer_engine.pytorch.module.base import (
+            get_workspace as primus_get_workspace,
+        )
+    except (ImportError, ModuleNotFoundError) as exc:
+        te_ext._get_workspace = None
+        log_rank_0(
+            "[Patch:megatron.te.general_gemm_workspace_helper] "
+            f"Primus workspace helper unavailable ({exc}); disabled workspace injection"
+        )
+        return
 
     te_ext._get_workspace = primus_get_workspace
 
