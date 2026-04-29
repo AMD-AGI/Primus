@@ -103,7 +103,14 @@ def _resolve_mtp_block_spec(args, config, vp_stage):
     )
 
 
-def deepseek_v4_builder(args, pre_process, post_process, vp_stage=None, config=None):
+def deepseek_v4_builder(
+    args,
+    pre_process,
+    post_process,
+    vp_stage=None,
+    config=None,
+    pg_collection=None,
+):
     """Build a DeepSeek-V4 model.
 
     Phase 3: behaves like a V4-flavored ``gpt_builder``. Layer specs come
@@ -139,6 +146,7 @@ def deepseek_v4_builder(args, pre_process, post_process, vp_stage=None, config=N
         rotary_base=args.rotary_base,
         rope_scaling=args.use_rope_scaling,
         mtp_block_spec=mtp_block_spec,
+        pg_collection=pg_collection,
         vp_stage=vp_stage,
     )
     return model
@@ -149,6 +157,8 @@ def model_provider(
     pre_process: bool = True,
     post_process: bool = True,
     vp_stage: Optional[int] = None,
+    config=None,
+    pg_collection=None,
 ):
     """``model_provider`` entry point used by Megatron's ``pretrain()``.
 
@@ -170,4 +180,11 @@ def model_provider(
             trace_alloc_record_context=True,
         )
 
-    return model_builder(args, pre_process, post_process, vp_stage)
+    return model_builder(
+        args,
+        pre_process,
+        post_process,
+        vp_stage,
+        config=config,
+        pg_collection=pg_collection,
+    )

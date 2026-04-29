@@ -87,35 +87,30 @@
 
 | | Task | commit | date | note |
 |---|---|---|---|---|
-| [ ] | swap builder in to use real model with HC + V4 attention + V4 MoE | | | |
-| [ ] | PP layout design (HC 4-stream sent atomically) | | | |
+| [x] | swap builder in to use real model with HC + V4 attention + V4 MoE | (working tree) | 2026-04-28 | `deepseek_v4_builders.py` now matches upstream provider signature (`config` / `pg_collection`) and forwards into `DeepseekV4Model` |
+| [x] | PP layout design (HC 4-stream sent atomically) | (working tree) | 2026-04-28 | `DeepseekV4TransformerBlock` now builds per-PP local layers (`get_num_layers_to_build` + `get_transformer_layer_offset`) and supports `set_input_tensor` |
 | [ ] | TP partitioning (QKV / Compressor / Indexer end-to-end) | | | |
-| [ ] | EP routing (hash + sqrtsoftplus) | | | |
-| [ ] | smoke: 1×8 BF16 50 iter | | | |
-| [ ] | smoke: 1×8 PP=2 EP=4 BF16 | | | |
+| [x] | EP routing (hash + sqrtsoftplus) | (working tree) | 2026-04-28 | `DeepseekV4MoE` now shards experts by EP rank and all-reduces routed outputs across EP group |
+| [ ] | smoke: 1×8 BF16 50 iter | | | not run yet (completed 3-iter smoke for functional bring-up) |
+| [x] | smoke: 1×8 PP=2 EP=4 BF16 | (working tree) | 2026-04-28 | passed on `uswslocpm2m-106-2371` / `dev_primus_wenx_691` with `TRAIN_ITERS=3`, no fatal error, `iteration        3/       3` reached |
 
-## Phase 7 — Muon Optimizer
-
-| | Task | commit | date | note |
-|---|---|---|---|---|
-| [ ] | param-group split (HC / MTP head / embed / lm_head → AdamW; rest → Muon) | | | |
-| [ ] | NS coefficients / 5 iter aligned with RedNote / reference | | | |
-| [ ] | 50-iter BF16 run with Muon enabled passes | | | |
-| [ ] | grad-norm + loss slope vs AdamW comparison | | | |
-
-## Phase 8 — Convergence + FP8 / FP4
+## Phase 7 — Single-node bring-up (PP=2, EP=4)
 
 | | Task | commit | date | note |
 |---|---|---|---|---|
-| [ ] | short runs (mock_data 50 / 200 / 1000 iter) | | | |
-| [ ] | medium run (bookcorpus 100M tokens) | | | |
-| [ ] | long run (1B tokens, one representative experiment) | | | |
-| [ ] | `examples/megatron/configs/MI355X/deepseek_v4_flash-FP8-pretrain.yaml` | | | |
-| [ ] | FP8 throughput ≥ +30% vs BF16 | | | |
-| [ ] | (optional) FP4 path | | | |
+| [-] | ~~Muon optimizer phase~~ | (n/a) | 2026-04-28 | cancelled: Primus already includes distributed Muon optimizer; no dedicated integration phase needed here |
+| [x] | create `run_deepseek_v4.sh` (reference: `run_qwen.bak.sh`) | (working tree) | 2026-04-28 | fixed knobs `MBS=1`, `GBS=16`, `PRIMUS_PP=2`, `PRIMUS_EP=4`; added lightweight smoke overrides (`num_layers=8`, `num_experts=8`, `mtp_num_layers=0`) |
+| [x] | run `run_deepseek_v4.sh` on `uswslocpm2m-106-2371` in container `dev_primus_wenx_691` | (working tree) | 2026-04-28 | single-node smoke passed with PP/EP groups initialized, training reached `iteration        3` and torchrun exited code 0 |
+
+## Phase 8 — ~~Convergence + FP8 / FP4~~ (cancelled)
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [-] | ~~convergence / FP8 / FP4 campaign~~ | (n/a) | 2026-04-28 | cancelled for current DeepSeek-V4 bring-up scope |
 
 ## Blockers / Risks Log
 
 | date | description | status | decision |
 |---|---|---|---|
+| 2026-04-28 | PyTorch warns `c10d::allreduce_` autograd kernel is not registered for the EP routed-output allreduce path in `v4_moe.py` | open | Keep functional path for Phase 7 bring-up; replace with proper token dispatcher / autograd-safe EP path in follow-up optimization work |
 |  | (example) HC 4-stream PP send/recv interface does not directly support 4D tensor | open | plan to add a reshape buffer in PP launcher |

@@ -154,8 +154,8 @@ class DeepseekV4Attention(nn.Module):
 
     def _apply_rope(self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor):
         """Apply partial RoPE on Q and K at the layer's ``compress_ratio``."""
-        q = self.rope.apply(q, position_ids=position_ids, compress_ratio=self.compress_ratio)
-        k = self.rope.apply(k, position_ids=position_ids, compress_ratio=self.compress_ratio)
+        q = self.rope.apply_rope(q, position_ids=position_ids, compress_ratio=self.compress_ratio)
+        k = self.rope.apply_rope(k, position_ids=position_ids, compress_ratio=self.compress_ratio)
         return q, k
 
     def _attention_scale(self) -> float:
@@ -192,6 +192,7 @@ class DeepseekV4Attention(nn.Module):
         probs = logits.softmax(dim=-1)
         if self.attn_dropout > 0.0 and self.training:
             probs = torch.nn.functional.dropout(probs, p=self.attn_dropout)
+        probs = probs.to(v.dtype)
         return torch.matmul(probs, v)
 
     # ------------------------------------------------------------------

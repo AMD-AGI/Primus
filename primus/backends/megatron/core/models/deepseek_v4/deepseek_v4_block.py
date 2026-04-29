@@ -14,17 +14,16 @@ Reference:
   parallel hidden streams, mixed via per-layer ``HyperMixer`` and final
   ``HyperHead`` collapse.
 
-Phase 4 contract:
+Phase 6 contract:
 * This is a **standalone** ``nn.Module``. It does not inherit from
   ``megatron.core.transformer.transformer_block.TransformerBlock``; instead
   it exposes the same call signature so :class:`DeepseekV4Model` can
   ``self.decoder = DeepseekV4TransformerBlock(...)`` and Megatron's
   ``GPTModel.forward`` keeps working.
-* PP / recompute / sequence-parallel etc. are **not** wired up here; that
-  is Phase 6's job (deferred). For Phase 4 the block always runs the full
-  ``num_layers`` on the local rank.
-* The FFN sub-block is a vanilla SwiGLU MLP. The V4 MoE / hash-routed
-  experts / clamped SwiGLU swap in during Phase 5.
+* PP local-layer partitioning is wired via Megatron's layer-offset helpers
+  (build only this rank's decoder layers + accept ``set_input_tensor``).
+* The FFN sub-block supports both dense SwiGLU and V4 MoE (hash-routed
+  prefix + learned router tail).
 
 Forward shape contract:
 * Input ``hidden_states`` is ``[S, B, D]`` (Megatron's sequence-first
@@ -35,11 +34,15 @@ Forward shape contract:
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+import ast
+import logging
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from megatron.core.transformer.transformer_block import get_num_layers_to_build
+from megatron.core.utils import make_viewless_tensor
 
 from primus.backends.megatron.core.transformer.csa_attention import CSAAttention
 from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
@@ -52,10 +55,89 @@ from primus.backends.megatron.core.transformer.hyper_connection import (
     HyperMixer,
 )
 from primus.backends.megatron.core.transformer.moe.v4_moe import DeepseekV4MoE
+from primus.backends.megatron.core.transformer.transformer_layer import (
+    get_transformer_layer_offset,
+)
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Pieces used by every layer
 # ---------------------------------------------------------------------------
+
+
+def _parse_int_sequence(value, *, field_name: str) -> Optional[List[int]]:
+    """Parse config-provided sequence fields into ``List[int]``.
+
+    YAML values may arrive as:
+    - actual list/tuple: ``[0, 4, 128, ...]``
+    - stringified list: ``"[0, 4, 128, ...]"``
+    """
+    if value is None:
+        return None
+
+    parsed = value
+    if isinstance(parsed, str):
+        try:
+            parsed = ast.literal_eval(parsed)
+        except (SyntaxError, ValueError) as exc:
+            raise ValueError(f"{field_name} must be a list-like value, got {value!r}") from exc
+
+    if isinstance(parsed, torch.Tensor):
+        parsed = parsed.tolist()
+
+    if not isinstance(parsed, (list, tuple)):
+        raise TypeError(f"{field_name} must be list/tuple, got {type(parsed).__name__}")
+
+    out: List[int] = []
+    for i, item in enumerate(parsed):
+        try:
+            out.append(int(item))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name}[{i}]={item!r} is not int-castable") from exc
+    return out
+
+
+def _normalize_compress_ratios(
+    compress_ratios,
+    *,
+    num_layers: int,
+    mtp_num_layers: int,
+) -> List[int]:
+    """Normalize ``compress_ratios`` to exactly ``num_layers`` entries."""
+    ratios = _parse_int_sequence(compress_ratios, field_name="compress_ratios")
+    if ratios is None:
+        return [0] * num_layers
+
+    if len(ratios) == num_layers:
+        return ratios
+
+    # Common DeepSeek layout: decoder ratios + mtp ratios in one list.
+    if len(ratios) == num_layers + mtp_num_layers:
+        logger.warning(
+            "compress_ratios has decoder+MTP length (%s), truncating to decoder num_layers (%s).",
+            len(ratios),
+            num_layers,
+        )
+        return ratios[:num_layers]
+
+    if len(ratios) > num_layers:
+        logger.warning(
+            "compress_ratios length (%s) > num_layers (%s), truncating.",
+            len(ratios),
+            num_layers,
+        )
+        return ratios[:num_layers]
+
+    # len(ratios) < num_layers: extend with last ratio (or 0 if empty).
+    pad_value = ratios[-1] if ratios else 0
+    logger.warning(
+        "compress_ratios length (%s) < num_layers (%s), padding with %s.",
+        len(ratios),
+        num_layers,
+        pad_value,
+    )
+    return ratios + [pad_value] * (num_layers - len(ratios))
 
 
 class _RMSNorm(nn.Module):
@@ -340,8 +422,10 @@ class DeepseekV4TransformerBlock(nn.Module):
     fallbacks (so this works whether the V4 fields land via Primus's
     ``merge_namespace`` mechanism or are set explicitly).
 
-    In Phase 4 the block always runs the full ``num_layers`` on the local
-    rank — no PP slicing yet (P6 deferred).
+    Phase 6 update:
+    - respects PP / VP layer partitioning by constructing only local layers
+      for this pipeline rank;
+    - supports ``set_input_tensor`` so non-first PP stages consume P2P input.
     """
 
     def __init__(
@@ -361,6 +445,9 @@ class DeepseekV4TransformerBlock(nn.Module):
         self.post_layer_norm = post_layer_norm
         self.pre_process = pre_process
         self.post_process = post_process
+        self.vp_stage = vp_stage
+        # Required by pipeline schedules (same contract as TransformerBlock).
+        self.input_tensor = None
 
         # ---- shape / model fields ----
         hidden_size = config.hidden_size
@@ -376,12 +463,11 @@ class DeepseekV4TransformerBlock(nn.Module):
         hc_mult = getattr(config, "hc_mult", 1) or 1
         hc_eps = getattr(config, "hc_eps", 1.0e-6) or 1.0e-6
         hc_sinkhorn_iters = getattr(config, "hc_sinkhorn_iters", 20) or 20
-        compress_ratios: Optional[Sequence[int]] = getattr(config, "compress_ratios", None)
-        if compress_ratios is None:
-            compress_ratios = [0] * num_layers
-        compress_ratios = list(compress_ratios)
-        if len(compress_ratios) != num_layers:
-            raise ValueError(f"compress_ratios length {len(compress_ratios)} != num_layers {num_layers}")
+        compress_ratios = _normalize_compress_ratios(
+            getattr(config, "compress_ratios", None),
+            num_layers=num_layers,
+            mtp_num_layers=int(getattr(config, "mtp_num_layers", 0) or 0),
+        )
         self.compress_ratios: List[int] = compress_ratios
 
         attn_sliding_window = getattr(config, "attn_sliding_window", 128) or 0
@@ -426,11 +512,26 @@ class DeepseekV4TransformerBlock(nn.Module):
             original_max_position_embeddings=original_max_pos,
         )
 
-        # ---- layers ----
+        # ---- PP local layer range ----
+        try:
+            local_layer_count = int(get_num_layers_to_build(config, vp_stage=vp_stage))
+            layer_offset = int(get_transformer_layer_offset(config, vp_stage=vp_stage))
+        except Exception:
+            # Standalone/unit-test path where distributed context isn't fully set up.
+            local_layer_count = num_layers
+            layer_offset = 0
+
+        local_start = max(0, layer_offset)
+        local_end = min(num_layers, local_start + max(0, local_layer_count))
+        self.global_layer_indices = list(range(local_start, local_end))
+        self.layer_offset = local_start
+
+        # ---- local layers ----
         self.layers = nn.ModuleList()
-        for i, ratio in enumerate(compress_ratios):
+        for global_layer_idx in self.global_layer_indices:
+            ratio = compress_ratios[global_layer_idx]
             layer = DeepseekV4HybridLayer(
-                layer_idx=i,
+                layer_idx=global_layer_idx,
                 compress_ratio=int(ratio),
                 hidden_size=hidden_size,
                 ffn_hidden_size=ffn_hidden_size,
@@ -469,18 +570,35 @@ class DeepseekV4TransformerBlock(nn.Module):
         else:
             self.hyper_head = None
 
-        # Final RMSNorm if post_layer_norm.
-        if post_layer_norm:
+        # Final RMSNorm placement follows Megatron semantics:
+        # - no MTP: on post_process stage
+        # - with MTP: on the stage containing decoder's final layer
+        if self._has_final_layernorm_in_this_stage(total_decoder_layers=num_layers):
             self.final_layernorm = _RMSNorm(hidden_size, eps=norm_eps)
         else:
             self.final_layernorm = None
 
     # ------------------------------------------------------------------
 
+    def _has_final_layernorm_in_this_stage(self, *, total_decoder_layers: int) -> bool:
+        if not self.post_layer_norm:
+            return False
+
+        mtp_num_layers = getattr(self.config, "mtp_num_layers", None)
+        if mtp_num_layers is None:
+            return self.post_process
+
+        if not self.global_layer_indices:
+            return False
+        return self.global_layer_indices[-1] == (total_decoder_layers - 1)
+
+    def set_input_tensor(self, input_tensor: torch.Tensor):
+        """Pipeline-parallel hook: stash tensor from previous PP stage."""
+        self.input_tensor = input_tensor
+
     @property
     def num_layers_per_pipeline_rank(self) -> int:
-        """Compatibility shim for upstream debug printing — we run all layers
-        on every rank since PP isn't wired up yet."""
+        """Compatibility shim used by upstream debug / recompute code."""
         return len(self.layers)
 
     # ------------------------------------------------------------------
@@ -517,6 +635,20 @@ class DeepseekV4TransformerBlock(nn.Module):
         if token_ids is None:
             token_ids = getattr(self, "_v4_token_ids", None)
 
+        if not self.pre_process:
+            hidden_states = self.input_tensor if self.input_tensor is not None else hidden_states
+        if hidden_states is None:
+            raise ValueError("DeepseekV4TransformerBlock.forward received no hidden_states tensor")
+
+        needs_hash_token_ids = self.num_hash_layers > 0 and any(
+            layer_idx < self.num_hash_layers for layer_idx in self.global_layer_indices
+        )
+        if needs_hash_token_ids and token_ids is None:
+            raise ValueError(
+                "token_ids is required on this PP stage because it owns hash-routed MoE layers "
+                f"(global layer idx < num_hash_layers={self.num_hash_layers})."
+            )
+
         # [S, B, D] -> [B, S, D]
         x = hidden_states.transpose(0, 1).contiguous()
         B, S, D = x.shape
@@ -539,8 +671,12 @@ class DeepseekV4TransformerBlock(nn.Module):
         if self.final_layernorm is not None:
             x = self.final_layernorm(x)
 
+        if not self.pre_process and len(self.layers) == 0 and self.final_layernorm is None:
+            x = x.clone()
+
         # Back to [S, B, D] for downstream Megatron code.
-        return x.transpose(0, 1).contiguous()
+        out = x.transpose(0, 1).contiguous()
+        return make_viewless_tensor(inp=out, requires_grad=out.requires_grad, keep_graph=True)
 
 
 __all__ = [

@@ -272,7 +272,7 @@ class DualRoPE(nn.Module):
         """
         return self.main_rope if compress_ratio == 0 else self.compress_rope
 
-    def apply(
+    def apply_rope(
         self,
         x: torch.Tensor,
         *,

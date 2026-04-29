@@ -40,7 +40,9 @@ from __future__ import annotations
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
+from megatron.core import parallel_state
 
 from primus.backends.megatron.core.transformer.clamped_swiglu import ClampedSwiGLUMLP
 from primus.backends.megatron.core.transformer.moe.v4_hash_router import HashRouter
@@ -106,6 +108,27 @@ class DeepseekV4MoE(nn.Module):
         self.num_hash_layers = int(num_hash_layers)
         self.use_hash_router = self.layer_idx < self.num_hash_layers
 
+        # ---- EP placement (P6) ----
+        self.ep_group = None
+        self.ep_size = 1
+        self.ep_rank = 0
+        if dist.is_available() and dist.is_initialized():
+            try:
+                self.ep_group = parallel_state.get_expert_model_parallel_group()
+                self.ep_size = int(parallel_state.get_expert_model_parallel_world_size())
+                self.ep_rank = int(parallel_state.get_expert_model_parallel_rank())
+            except Exception:
+                # Fallback to non-EP behavior outside full Megatron runtime.
+                self.ep_group = None
+                self.ep_size = 1
+                self.ep_rank = 0
+
+        base = self.num_routed_experts // self.ep_size
+        remainder = self.num_routed_experts % self.ep_size
+        self.local_num_routed_experts = base + (1 if self.ep_rank < remainder else 0)
+        self.local_expert_start = (self.ep_rank * base) + min(self.ep_rank, remainder)
+        self.local_expert_end = self.local_expert_start + self.local_num_routed_experts
+
         # ---- router ----
         if self.use_hash_router:
             if hash_vocab_size is None or hash_vocab_size <= 0:
@@ -132,8 +155,8 @@ class DeepseekV4MoE(nn.Module):
             )
 
         # ---- routed experts ----
-        # Each expert is an independent ClampedSwiGLUMLP. P6 will swap
-        # this for a grouped-GEMM-friendly layout when EP lands.
+        # Each EP rank owns only its local expert shard; routed outputs are
+        # merged via EP all-reduce in forward (simple but functional P6 wiring).
         self.experts = nn.ModuleList(
             [
                 ClampedSwiGLUMLP(
@@ -141,7 +164,7 @@ class DeepseekV4MoE(nn.Module):
                     intermediate_size=moe_intermediate_size,
                     alpha=clamp_alpha,
                 )
-                for _ in range(num_routed_experts)
+                for _ in range(self.local_num_routed_experts)
             ]
         )
 
@@ -201,19 +224,24 @@ class DeepseekV4MoE(nn.Module):
         # the rest of the residual stream.
         probs = probs.to(hidden.dtype)
 
-        out = torch.zeros_like(flat)
+        routed_out = torch.zeros_like(flat)
 
         # Per-expert dispatch: gather tokens routed to expert i, run FFN,
-        # scatter-add weighted output. Slow but correct; P6 swaps for
-        # token-dispatcher + grouped-gemm.
-        for i, expert in enumerate(self.experts):
-            mask_i = routing_map[:, i]  # [N]
+        # scatter-add weighted output.
+        for local_i, expert in enumerate(self.experts):
+            global_i = self.local_expert_start + local_i
+            mask_i = routing_map[:, global_i]  # [N]
             if not mask_i.any():
                 continue
             tokens_i = flat[mask_i]  # [n_i, D]
             y_i = expert(tokens_i)  # [n_i, D]
-            w_i = probs[mask_i, i].unsqueeze(-1)  # [n_i, 1]
-            out.index_add_(0, mask_i.nonzero(as_tuple=True)[0], y_i * w_i)
+            w_i = probs[mask_i, global_i].unsqueeze(-1)  # [n_i, 1]
+            routed_out.index_add_(0, mask_i.nonzero(as_tuple=True)[0], y_i * w_i)
+
+        if self.ep_size > 1 and self.ep_group is not None:
+            dist.all_reduce(routed_out, group=self.ep_group)
+
+        out = routed_out
 
         if self.shared_expert is not None:
             out = out + self.shared_expert(flat)

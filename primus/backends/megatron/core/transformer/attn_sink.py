@@ -109,6 +109,7 @@ class AttentionSink(nn.Module):
         probs = self.softmax_with_sink(logits, dim=-1)
         if dropout is not None and dropout > 0 and self.training:
             probs = torch.nn.functional.dropout(probs, p=dropout)
+        probs = probs.to(value.dtype)
         return torch.matmul(probs, value)
 
 

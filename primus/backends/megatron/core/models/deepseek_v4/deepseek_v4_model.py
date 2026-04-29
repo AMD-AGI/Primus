@@ -16,12 +16,9 @@ Phase 5 layout:
   :class:`DeepseekV4TransformerBlock` — a standalone module that owns the
   V4-specific hybrid attention dispatch, ``hc_mult`` parallel hidden
   streams, and (Phase 5) per-layer V4 MoE FFN.
-* If ``mtp_num_layers > 0`` (V4-Flash = 1), we additionally build a
-  :class:`DeepseekV4MTPBlock` and store it on ``self.mtp_block``. The
-  MTP block owns its **own** HyperHead per layer (V4 design), but
-  shares ``rope`` with the main decoder. Wiring the MTP outputs into
-  the loss path is a Phase 6 concern; Phase 5 only stands the module up
-  so it can be unit-tested standalone.
+* A V4 custom MTP block (:class:`DeepseekV4MTPBlock`) is available behind
+  ``config.v4_use_custom_mtp_block`` for experiments. By default P6 keeps
+  GPTModel's native MTP path for loss wiring + PP placement.
 * The V4 config fields (``hc_mult``, ``compress_ratios``, ``attn_sink``,
   ``num_hash_layers``, ``swiglu_limit``, MoE / hash-router knobs ...)
   flow from yaml → ``args`` → ``backend_args`` via Primus's
@@ -84,9 +81,13 @@ class DeepseekV4Model(GPTModel):
             vp_stage=vp_stage,
         )
 
-        # ---- V4 MTP block (P5) ----
+        # ---- Optional V4 custom MTP block ----
+        # P6 keeps GPTModel's native MTP path as default because it already
+        # integrates with Megatron's loss wiring and PP placement. The custom
+        # V4 MTP block remains available behind a config flag for experiments.
         mtp_num_layers = int(getattr(self.config, "mtp_num_layers", 0) or 0)
-        if mtp_num_layers > 0 and self.post_process:
+        use_custom_v4_mtp = bool(getattr(self.config, "v4_use_custom_mtp_block", False))
+        if use_custom_v4_mtp and mtp_num_layers > 0 and self.post_process:
             mtp_compress_ratios = getattr(self.config, "mtp_compress_ratios", None)
             self.mtp_block = DeepseekV4MTPBlock(
                 config=self.config,
