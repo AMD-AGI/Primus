@@ -59,6 +59,13 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
 
     # Performance test specific options (only used with --perf-test)
     parser.add_argument("--plot", action="store_true", help="Generate plots (only with --perf-test)")
+    parser.add_argument(
+        "--no-split-nodes-subgroup",
+        dest="split_nodes_subgroup",
+        action="store_false",
+        help="Skip inter-node comm tests on node subgroups (2-node, 4-node). "
+        "Only run the all-node test.",
+    )
 
     # Distributed init timeout (prevents hangs when network/rendezvous is misconfigured)
     parser.add_argument(

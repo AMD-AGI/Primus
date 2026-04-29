@@ -315,7 +315,9 @@ def run_preflight(args):
         run_square_gemm(args)
         run_intra_node_comm(args)
         run_inter_node_comm(args)
-        run_inter_node_comm_p2p(args)
+        if args.split_nodes_subgroup:
+            # p2p test only exercises 2-node pairs; skip when subgroups disabled
+            run_inter_node_comm_p2p(args)
         run_inter_node_ring_p2p(args)
 
         if RANK == 0 and args.save_pdf:

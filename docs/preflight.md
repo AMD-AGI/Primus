@@ -76,3 +76,7 @@ Typical report files:
 
 - For multi-node runs, use `primus-cli slurm …` (or your preferred launcher) so distributed environment variables are set correctly.
 - If you only want a quick environment snapshot, prefer `--host --gpu --network`.
+
+## Running preflight without a container
+
+If you cannot (or prefer not to) use a container, see **[Preflight Without Container](./preflight-direct.md)** for a step-by-step walkthrough of `runner/run_preflight_direct.sh`, including Python virtual-environment setup and SLURM invocation patterns for Broadcom and Pensando (AINIC) clusters.
