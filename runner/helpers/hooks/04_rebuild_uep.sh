@@ -50,7 +50,10 @@ import re
 from pathlib import Path
 
 pattern = re.compile(
-    r"(send_head\.data_ptr\(\),\n)(\s*)None,\n(\s*)async_finish,\n(\s*)allocate_on_comm_stream,"
+    r"((?:send_head|send_nvl_head)\.data_ptr\(\),\n)"
+    r"(\s*)None,\n"
+    r"(\s*)async_finish,\n"
+    r"(\s*)allocate_on_comm_stream,"
 )
 replacement = (
     r'\1\2getattr(previous_event, "event", None),\n'
@@ -63,23 +66,34 @@ candidates = [
     Path("ep/bench/buffer.py"),
 ]
 
-patched = False
+patched_total = 0
+incomplete = []
+
 for path in candidates:
     if not path.exists():
         continue
 
     text = path.read_text()
     updated, count = pattern.subn(replacement, text)
-    if count == 0:
-        continue
+    if count:
+        path.write_text(updated)
+        print(f"[hook system] Patched {count} DeepEP previous_event call site(s) in {path}")
+        patched_total += count
 
-    path.write_text(updated)
-    print(f"[hook system] Patched {count} DeepEP previous_event call site(s) in {path}")
-    patched = True
-    break
+    current = updated if count else text
+    if pattern.search(current):
+        incomplete.append(str(path))
 
-if not patched:
+if incomplete:
+    raise SystemExit(
+        "[hook system] DeepEP previous_event compatibility patch is incomplete for: "
+        + ", ".join(incomplete)
+    )
+
+if patched_total == 0:
     print("[hook system] No DeepEP previous_event compatibility patch needed")
+else:
+    print(f"[hook system] Patched {patched_total} DeepEP previous_event call site(s) in total")
 PY
 
 LOG_INFO_RANK0 "[hook system] Building uccl ep"
