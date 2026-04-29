@@ -18,12 +18,26 @@ try:
     from megatron.training.tokenizer import build_tokenizer as megatron_build_tokenizer
     from megatron.training.tokenizer.tokenizer import _HuggingFaceTokenizer
 except ImportError:
+    from collections import OrderedDict
+
+    from megatron.core.tokenizers.text.libraries.huggingface_tokenizer import (
+        HuggingFaceTokenizer as _HuggingFaceTokenizerBase,
+    )
     from megatron.core.tokenizers.utils.build_tokenizer import (
         build_tokenizer as megatron_build_tokenizer,
     )
-    from megatron.core.tokenizers.text.libraries.huggingface_tokenizer import (
-        HuggingFaceTokenizer as _HuggingFaceTokenizer,
-    )
+
+    class _HuggingFaceTokenizer(_HuggingFaceTokenizerBase):
+        """Compatibility shim that adds methods expected by megatron.training
+        but missing from megatron.core's HuggingFaceTokenizer."""
+
+        def tokenize(self, text: str):
+            return self.text_to_ids(text)
+
+        @property
+        def unique_identifiers(self) -> OrderedDict:
+            return OrderedDict({"class": f"{type(self).__module__}.{type(self).__qualname__}"})
+
 
 from primus.modules.module_utils import log_rank_0
 
