@@ -21,21 +21,48 @@ that:
     1. Parses the log string to extract elapsed time and batch size.
     2. Computes and appends **tokens/s/GPU** (not provided by Megatron-Bridge).
     3. Emits the enriched line via ``log_rank_0`` (Python ``logging`` at INFO).
+
+For SFT / finetuning workloads the batch dataloader pads to the **actual**
+max sequence length in each batch, which can be much shorter than the
+configured ``seq_length``.  The patch intercepts
+``megatron.bridge.data.finetuning.prepare_finetuning_batch`` to capture
+the real per-step sequence length so that the tokens/s/GPU metric reflects
+the positions the model actually processes rather than the configured
+maximum.
 """
 
 import re
+import threading
 from typing import Optional
 
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
 
+# Per-step actual sequence length captured from prepare_finetuning_batch.
+# Accessed from the same training-loop thread; the lock guards against
+# unlikely concurrent reads during logging.
+_actual_seq_length_lock = threading.Lock()
+_actual_seq_length: Optional[int] = None
+
+
+def _set_actual_seq_length(value: int) -> None:
+    global _actual_seq_length
+    with _actual_seq_length_lock:
+        _actual_seq_length = value
+
+
+def _get_actual_seq_length() -> Optional[int]:
+    with _actual_seq_length_lock:
+        return _actual_seq_length
+
 
 def _parse_and_enrich(
     log_string: str,
-    seq_length: Optional[int],
+    configured_seq_length: Optional[int],
     world_size: Optional[int],
 ) -> str:
     """Append tokens/s/GPU to *log_string* if the required fields are present."""
+    seq_length = _get_actual_seq_length() or configured_seq_length
     if seq_length is None or world_size is None or world_size == 0:
         return log_string
 
@@ -57,7 +84,10 @@ def _parse_and_enrich(
         tokens_per_iter = seq_length * batch_size
         tokens_per_gpu = tokens_per_iter / elapsed_s / world_size
 
-        throughput_seg = f" tokens per GPU (tokens/s/GPU): {tokens_per_gpu:.1f} |"
+        throughput_seg = (
+            f" tokens per GPU (tokens/s/GPU): {tokens_per_gpu:.1f} |"
+            f" seq_length: {seq_length} |"
+        )
 
         tflop_match = re.search(
             r"throughput per GPU \(TFLOP/s/GPU\):\s*[\d.]+\s*\|", log_string
@@ -79,6 +109,26 @@ def _parse_and_enrich(
         return log_string
 
 
+def _install_seq_length_hook() -> None:
+    """Wrap ``prepare_finetuning_batch`` to capture per-step seq_length."""
+    try:
+        import megatron.bridge.data.finetuning as bridge_ft
+    except ImportError:
+        return
+
+    original_fn = getattr(bridge_ft, "prepare_finetuning_batch", None)
+    if original_fn is None or getattr(original_fn, "_primus_seq_hook", False):
+        return
+
+    def _hooked_prepare(*args, **kwargs):
+        iterator, seq_length = original_fn(*args, **kwargs)
+        _set_actual_seq_length(seq_length)
+        return iterator, seq_length
+
+    _hooked_prepare._primus_seq_hook = True
+    bridge_ft.prepare_finetuning_batch = _hooked_prepare
+
+
 @register_patch(
     "megatron_bridge.training_log.print_rank_last_patch",
     backend="megatron_bridge",
@@ -93,6 +143,10 @@ def patch_bridge_training_log(ctx: PatchContext):
     Wrap Megatron-Bridge's ``training_log`` so that ``print_rank_last``
     calls made inside it are routed through ``log_rank_0`` with an
     additional tokens/s/GPU metric appended to the log string.
+
+    Also hooks ``prepare_finetuning_batch`` so that the actual per-batch
+    sequence length (which can be shorter than the configured max for SFT
+    workloads) is used in the throughput calculation.
     """
     try:
         import megatron.bridge.training.utils.train_utils as bridge_train_utils
@@ -107,13 +161,15 @@ def patch_bridge_training_log(ctx: PatchContext):
         return
 
     args = get_args(ctx)
-    seq_length = getattr(args, "seq_length", None)
+    configured_seq_length = getattr(args, "seq_length", None)
+
+    _install_seq_length_hook()
 
     def _enriched_log_rank_0(log_string: str) -> None:
         import torch
 
         ws = torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
-        enriched = _parse_and_enrich(log_string, seq_length, ws)
+        enriched = _parse_and_enrich(log_string, configured_seq_length, ws)
         log_rank_0(enriched)
 
     def primus_bridge_training_log(*args, **kwargs):
@@ -130,5 +186,5 @@ def patch_bridge_training_log(ctx: PatchContext):
     log_rank_0(
         f"[Patch:megatron_bridge.training_log] "
         f"Wrapped Megatron-Bridge training_log with Primus log_rank_0 hook "
-        f"(seq_length={seq_length})"
+        f"(configured_seq_length={configured_seq_length})"
     )
