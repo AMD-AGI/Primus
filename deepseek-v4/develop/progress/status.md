@@ -108,6 +108,48 @@
 |---|---|---|---|---|
 | [-] | ~~convergence / FP8 / FP4 campaign~~ | (n/a) | 2026-04-28 | cancelled for current DeepSeek-V4 bring-up scope |
 
+## Phase 8 (v2) — ModuleSpec main-path refactor
+
+> Replan baseline: `deepseek-v4/develop/plan-1/`.
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [ ] | define V4 runtime `ModuleSpec` topology in `deepseek_v4_layer_specs.py` | | | replace placeholder-only role with runtime-usable spec chain |
+| [ ] | make `DeepseekV4Model` runtime path spec-driven (remove decoder swap as default) | | | keep temporary compatibility path only if strictly needed |
+| [ ] | align builder (`deepseek_v4_builders.py`) layer/mtp spec resolution with spec-driven runtime | | | ensure no hidden dependence on post-init decoder replacement |
+| [ ] | PP/VP/MTP compatibility validation for the refactored spec path | | | local-layer slicing + stage ownership checks |
+| [ ] | document retirement plan for legacy placeholder/swap path | | | tracked in `deepseek-v4/develop/plan-1/01-phase-details.md` |
+
+## Phase 9 (v2) — TE provider reuse integration
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [ ] | define V4 provider strategy (`TE` vs local fallback) | | | module-level mapping matrix required |
+| [ ] | align norm path to provider-based implementation (TE-first where available) | | | reduce standalone `_RMSNorm` footprint where feasible |
+| [ ] | align linear path to provider-selected parallel linear modules | | | preserve existing shape and distributed contracts |
+| [ ] | integrate MoE expert path with grouped-GEMM capable provider path | | | maintain V4 clamped SwiGLU semantics |
+| [ ] | deliver TE/local fallback and A/B validation report | | | include default/fallback behavior and known gaps |
+
+## Phase 10 (v2) — MoE + distributed path convergence
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [ ] | integrate hash/learned router flow with Megatron dispatcher path | | | replace local scatter-centric route implementation |
+| [ ] | replace EP routed-output `all_reduce` fallback with autograd-safe path | | | closes current `c10d::allreduce_` warning risk |
+| [ ] | implement robust token-id propagation across PP stages for hash routing | | | explicit stage ownership and data contract |
+| [ ] | distributed smoke: 1x8 and PP/EP combined run | | | no hang, no fatal warning regressions |
+| [ ] | deterministic routing regression checks under fixed seeds | | | compare hash and learned route stability |
+
+## Phase 11 (v2) — Validation + release gates
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [ ] | execute full regression gate matrix (G1-G6) | | | see `deepseek-v4/develop/plan-1/02-test-strategy.md` |
+| [ ] | numerical alignment run and tolerance report | | | fixed seed/checkpoint snapshots |
+| [ ] | short-run convergence campaign and baseline comparison | | | track loss slope and stability |
+| [ ] | TE on/off throughput + memory comparison report | | | performance gate for release decision |
+| [ ] | publish release checklist and blocker disposition | | | go/no-go output with risk owners |
+
 ## Blockers / Risks Log
 
 | date | description | status | decision |

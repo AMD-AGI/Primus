@@ -66,6 +66,18 @@ top of mcore. There's also a doc at
 `docs/model-coverage/llm/deepseek-ai/dsv4-flash.md` — note that NeMo only
 covers V4-Flash.
 
+## TransformerEngine (Megatron dependency)
+
+`deepseek-v4/TransformerEngine/` is the TransformerEngine code that Megatron
+depends on. Use this checkout as the reference when tracing Megatron's
+TransformerEngine modules, kernels and specs.
+
+## Primus-Turbo (Primus dependency)
+
+`deepseek-v4/Primus-Turbo/` is dependency code used by Primus. Use this
+checkout as a reference for Primus-side dependency behavior and integration
+details.
+
 ## RedNote
 
 `deepseek-v4/references/deepseek-rednote-1/` is a slide deck I came across
