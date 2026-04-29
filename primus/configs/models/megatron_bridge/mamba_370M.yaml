@@ -1,0 +1,5 @@
+recipe: mamba.mamba2
+flavor: mamba2_370m_finetune_config
+
+dataset:
+    dataset_name: "rajpurkar/squad"
