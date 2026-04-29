@@ -138,3 +138,57 @@ srun -t 00:30:00 -N 4 -c 128 --gpus-per-node=8 --nodelist <nodes> \
   -- preflight --report-file-name preflight-report-4N \
   2>&1 | tee preflight-report-4N.log
 ```
+
+## Automated node bisection (finding the bad node in an NCCL hang)
+
+When a cluster-wide preflight run hangs or fails, you can automatically bisect
+the nodelist to isolate the node(s) responsible instead of manually halving
+the nodelist and re-running preflight.
+
+Each trial runs `preflight --perf-test` on a subset of nodes via
+[`runner/primus-cli-direct-preflight.sh`](../runner/primus-cli-direct-preflight.sh).
+Subsets that pass are pruned immediately. Subsets that fail or time out are
+split in half, and the two sibling subsets are launched in parallel by default
+(up to 2 concurrent trials) until a singleton suspect is isolated.
+
+### Prerequisites
+
+1. Working non-container preflight setup from the sections above, with
+   `VENV_PATH` exported from a shared filesystem path.
+2. Run from the Slurm login/head node, where both `scontrol` and `srun` are
+   available.
+3. `scontrol show hostnames "<nodelist>"` must resolve the node expression you
+   plan to bisect.
+
+### Example template
+
+```bash
+PARTITION="<your-partition>"
+OUTPUT_DIR="<your-output-dir>"
+LOG_FILE="<your-log-file>"
+NODELIST="${SLURM_NODELIST:-<your-nodelist>}"
+
+python tools/preflight_bisect/bisect.py \
+    --nodelist "$NODELIST" \
+    --partition "$PARTITION" \
+    --output-dir "$OUTPUT_DIR/bisect-$(date +%Y%m%d-%H%M%S)" \
+    --trial-timeout-sec 600 \
+    --slurm-time 00:15:00 \
+    --preflight-env USING_AINIC=1 \
+    --preflight-env NCCL_IB_GID_INDEX=1 \
+    --preflight-env NCCL_CROSS_NIC=1 \
+    --preflight-env NCCL_PXN_DISABLE=0 \
+    2>&1 | tee "$LOG_FILE"
+```
+
+Set `PARTITION`, `OUTPUT_DIR`, and `LOG_FILE` for your environment. If you are
+already inside a Slurm allocation, `SLURM_NODELIST` is used automatically;
+otherwise set `NODELIST` explicitly. Adjust the `--preflight-env` lines to
+match your cluster.
+
+The script runs `preflight --perf-test` on shrinking subsets via `srun`. By
+default, when a subset fails or hangs, its two sibling halves are launched in
+parallel (up to 2 concurrent trials total), while passing subsets are pruned
+immediately and are not split further. Any non-zero exit or trial timeout is
+treated as a failure. Per-trial logs and a final `summary.txt` (including
+`SUSPECT_NODES: ...`) are written under `--output-dir`.
