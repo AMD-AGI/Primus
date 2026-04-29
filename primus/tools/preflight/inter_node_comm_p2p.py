@@ -54,6 +54,7 @@ def run_inter_node_comm_p2p(args):
     is_src_rank = ((RANK // LOCAL_WORLD_SIZE) % 2) == 0
     if RANK < num_paired_ranks:
         peer_rank = RANK + LOCAL_WORLD_SIZE if is_src_rank else RANK - LOCAL_WORLD_SIZE
+        assert peer_rank >= 0 and peer_rank < WORLD_SIZE
     else:
         peer_rank = -1
     for i_group in range(num_adjacent_groups):
@@ -121,6 +122,7 @@ def run_inter_node_comm_p2p(args):
                 continue
             is_src_rank = ((rank // LOCAL_WORLD_SIZE) % 2) == 0
             peer_rank = rank + LOCAL_WORLD_SIZE if is_src_rank else rank - LOCAL_WORLD_SIZE
+            assert peer_rank >= 0 and peer_rank < WORLD_SIZE
             if not is_src_rank:
                 continue
             src_ranks.append(rank)
