@@ -21,6 +21,7 @@ from typing import Any
 
 from primus.backends.megatron_bridge.argument_builder import MegatronBridgeArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
+from primus.core.backend.backend_registry import BackendRegistry
 from primus.modules.module_utils import log_dict_aligned, log_rank_0
 
 
@@ -40,26 +41,14 @@ class MegatronBridgeAdapter(BackendAdapter):
         self.third_party_dir_name = "Megatron-Bridge"
 
     def load_trainer_class(self, stage: str = "pretrain"):
-        """
-        Return the Megatron-Bridge Trainer class for the specified training stage.
-
-        Args:
-            stage: Training stage ("sft" for supervised fine-tuning)
-
-        Returns:
-            Trainer class for the specified stage
-
-        Raises:
-            ValueError: If stage is not supported
-        """
-        if stage == "sft":
-            from primus.backends.megatron_bridge.megatron_bridge_posttrain_trainer import (
-                MegatronBridgePosttrainTrainer,
-            )
-
-            return MegatronBridgePosttrainTrainer
-        else:
-            raise ValueError(f"Invalid stage: {stage}")
+        """Load the Megatron-Bridge trainer class registered for the specified stage."""
+        try:
+            return BackendRegistry.get_trainer_class(self.framework, stage=stage)
+        except (ValueError, AssertionError) as exc:
+            raise RuntimeError(
+                "[Primus:MegatronBridgeAdapter] 'megatron_bridge' backend trainer not registered. "
+                "Ensure primus.backends.megatron_bridge registers trainer classes via BackendRegistry."
+            ) from exc
 
     def setup_backend_path(self, backend_path=None) -> str:
         """

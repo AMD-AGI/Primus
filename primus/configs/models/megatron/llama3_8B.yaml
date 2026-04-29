@@ -1,7 +1,7 @@
 extends:
   - llama3_base.yaml
 
-tokenizer_type: Llama3Tokenizer
+tokenizer_type: HuggingFaceTokenizer
 tokenizer_model: meta-llama/Meta-Llama-3-8B
 
 

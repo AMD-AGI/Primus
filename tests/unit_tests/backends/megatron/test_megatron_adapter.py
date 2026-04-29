@@ -20,6 +20,7 @@ from unittest.mock import Mock, patch
 import pytest
 
 from primus.backends.megatron.megatron_adapter import MegatronAdapter
+from primus.backends.megatron.megatron_sft_trainer import MegatronSFTTrainer
 
 
 class TestMegatronAdapterVersionDetection:
@@ -195,14 +196,22 @@ class TestMegatronAdapterTrainerLoading:
 
         assert result == MegatronPretrainTrainer
 
+    @patch("primus.backends.megatron.megatron_adapter.log_rank_0")
+    def test_load_sft_trainer_class_success(self, mock_log):
+        """Test successful SFT trainer class loading."""
+        adapter = MegatronAdapter()
+        result = adapter.load_trainer_class(stage="sft")
+
+        assert result == MegatronSFTTrainer
+
     def test_load_trainer_class_invalid_stage(self):
-        """Test error handling for invalid stage."""
+        """Test error handling for an unregistered stage."""
         adapter = MegatronAdapter()
 
-        with pytest.raises(ValueError) as exc_info:
+        with pytest.raises(RuntimeError) as exc_info:
             adapter.load_trainer_class(stage="invalid_stage")
 
-        assert "Invalid stage" in str(exc_info.value)
+        assert "backend trainer not registered" in str(exc_info.value)
 
 
 class TestMegatronAdapterBackendPreparation:

@@ -1,0 +1,93 @@
+# Multi-Turn Conversation Training Configuration
+# Example configuration for training with OpenAI messages format
+
+work_group: ${PRIMUS_TEAM:amd}
+user_name: ${PRIMUS_USER:root}
+exp_name: ${PRIMUS_EXP_NAME:llama3_8B-multiturn-sft}
+workspace: ${PRIMUS_WORKSPACE:./output}
+
+modules:
+  sft_trainer:
+    framework: megatron
+    config: sft_trainer.yaml
+    model: llama3_8B.yaml
+    
+    overrides:
+      # Specify stage to use SFT trainer (required)
+      stage: sft
+      
+      # Multi-Turn Conversation Configuration
+      # Use local JSONL file with messages format
+      sft_dataset_name: "examples/megatron/data/multi_turn_examples.jsonl"
+      
+      # OR: Use HuggingFace dataset with messages format
+      # sft_dataset_name: "your-dataset/with-messages"
+      
+      # IMPORTANT: Use "openai" or "messages" formatter for multi-turn
+      sft_conversation_format: "openai"
+      
+      # Logging
+      wandb_project: "Primus_Llama3_MultiTurn_SFT"
+      stderr_sink_level: DEBUG
+      log_avg_skip_iterations: 2
+      log_avg_reset_interval: 50
+      
+      # Training parameters
+      # Multi-turn conversations are longer, consider:
+      # - Longer sequences (if your data needs it)
+      # - Smaller batch size (due to longer sequences)
+      # - Lower learning rate (fine-tuning on conversations)
+      
+      seq_length: 2048  # Adjust based on conversation length
+      micro_batch_size: 1
+      global_batch_size: 64  # Smaller due to longer sequences
+      
+      # Learning rate schedule
+      lr: 5.0e-6  # Lower for multi-turn fine-tuning
+      min_lr: 5.0e-7
+      lr_warmup_iters: 100
+      lr_decay_style: "cosine"
+      
+      # Training iterations
+      train_iters: 2000
+      eval_interval: 100
+      eval_iters: 10
+      
+      # Checkpointing
+      save_interval: 500
+      save: "./checkpoints/llama3_8B_multiturn"
+      
+      # Load pretrained checkpoint
+      finetune: true
+      load: "./checkpoints/llama3_8B_pretrained"
+      
+      # Data splits
+      train_data_path: "examples/megatron/data/multi_turn_examples.jsonl"
+      # If you have separate validation data:
+      # valid_data_path: "examples/megatron/data/multi_turn_val.jsonl"
+      
+      # Optimization
+      optimizer: "adam"
+      adam_beta1: 0.9
+      adam_beta2: 0.999
+      adam_eps: 1.0e-8
+      weight_decay: 0.01
+      clip_grad: 1.0
+      
+      # Mixed precision
+      bf16: true
+      
+      # Distributed training
+      tensor_model_parallel_size: 1
+      pipeline_model_parallel_size: 1
+      
+      # Additional settings
+      use_flash_attn: true
+      seed: 1234
+      
+# Notes:
+# 1. Multi-turn conversations typically need longer sequence lengths
+# 2. Consider reducing batch size due to longer sequences
+# 3. Use lower learning rate for fine-tuning on conversations
+# 4. Monitor loss per turn if possible for better insights
+# 5. Ensure your data has proper "messages" format with roles

@@ -17,4 +17,4 @@ BackendRegistry.register_adapter("megatron_bridge", MegatronBridgeAdapter)
 
 # Register posttrain trainer as the default trainer
 # Megatron-Bridge is designed for post-training tasks (SFT, instruction tuning, LoRA)
-# BackendRegistry.register_trainer_class(MegatronBridgePosttrainTrainer, "megatron_bridge", "sft")
+BackendRegistry.register_trainer_class(MegatronBridgePosttrainTrainer, "megatron_bridge", "sft")
