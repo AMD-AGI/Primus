@@ -83,6 +83,7 @@ rotary_interleaved: true                    # released weights use interleaved R
 # ---------- Activation ----------
 swiglu: true
 swiglu_limit: 10.0                         # clamped SwiGLU (FP4/FP8 stability)
+activation_func_clamp_value: 10.0          # clamp swiglu parameter (Megatron config field)
 bias_swiglu_fusion: false                   # fused path lacks clamp; revisit in perf phase
 
 # ---------- Parallelism defaults ----------

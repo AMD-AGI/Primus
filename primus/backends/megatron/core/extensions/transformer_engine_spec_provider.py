@@ -171,39 +171,14 @@ class DeepSeekV4SpecProvider(PrimusTurboSpecProvider):
         super().__init__()
         self.config = config
 
-    def runtime_mode(self) -> str:
-        """Return runtime mode used by V4 spec construction."""
-        transformer_impl = getattr(self.config, "transformer_impl", "transformer_engine")
-        if transformer_impl not in ("transformer_engine", "inference_optimized"):
-            return "local"
-
-        turbo_enabled = bool(getattr(self.cfg, "enable_primus_turbo", False)) and any(
-            (
-                getattr(self.cfg, "use_turbo_parallel_linear", False),
-                getattr(self.cfg, "use_turbo_attention", False),
-                getattr(self.cfg, "use_turbo_grouped_mlp", False),
-            )
-        )
-        if turbo_enabled:
-            return "turbo"
-        return "te"
-
-    def use_provider_modules(self) -> bool:
-        """Whether V4 should resolve TE/Turbo-backed modules."""
-        return self.runtime_mode() in ("te", "turbo")
-
     def v4_norm_module(self):
-        """Norm module used by V4 specs; None means local fallback."""
-        if not self.use_provider_modules():
-            return None
+        """Norm module used by V4 specs."""
         return self.layer_norm(rms_norm=True)
 
     def v4_grouped_mlp_modules(
         self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: Optional[bool] = None
     ):
         """Grouped-MLP module selection for V4 MoE expert path."""
-        if not self.use_provider_modules():
-            return None, None
         return self.grouped_mlp_modules(
             moe_use_grouped_gemm=moe_use_grouped_gemm,
             moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,

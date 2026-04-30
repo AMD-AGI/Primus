@@ -44,6 +44,9 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_block import (
     DeepseekV4HybridLayer,
     _RMSNorm,
 )
+from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
+    DeepSeekV4TransformerConfig,
+)
 from primus.backends.megatron.core.transformer.dual_rope import DualRoPE
 from primus.backends.megatron.core.transformer.hyper_connection import HyperHead
 
@@ -52,7 +55,7 @@ class DeepseekV4MTPBlock(nn.Module):
     """A stack of ``mtp_num_layers`` V4 layers + per-layer :class:`HyperHead`.
 
     Args:
-        config: TransformerConfig-like object. Reads the same V4 fields as
+        config: :class:`DeepSeekV4TransformerConfig` object. Reads the same V4 fields as
             :class:`DeepseekV4TransformerBlock` (``hidden_size``,
             ``hc_mult``, ``compress_ratios`` first MTP entry, etc.).
         rope: shared :class:`DualRoPE` instance — must be the same object
@@ -66,7 +69,7 @@ class DeepseekV4MTPBlock(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: DeepSeekV4TransformerConfig,
         *,
         rope: DualRoPE,
         mtp_num_layers: int,
@@ -86,37 +89,10 @@ class DeepseekV4MTPBlock(nn.Module):
 
         # ---- shape / model fields (mirror DeepseekV4TransformerBlock) ----
         hidden_size = config.hidden_size
-        ffn_hidden_size = getattr(config, "ffn_hidden_size", None) or 4 * hidden_size
-        num_heads = config.num_attention_heads
-        num_kv_heads = getattr(config, "num_query_groups", None) or num_heads
-        head_dim = getattr(config, "kv_channels", None) or hidden_size // num_heads
-        rotary_dim = getattr(config, "qk_pos_emb_head_dim", 64)
-        norm_eps = getattr(config, "norm_epsilon", 1.0e-6)
+        norm_eps = config.norm_epsilon
 
-        hc_mult = int(getattr(config, "hc_mult", 1) or 1)
-        hc_eps = float(getattr(config, "hc_eps", 1.0e-6) or 1.0e-6)
-        hc_sinkhorn_iters = int(getattr(config, "hc_sinkhorn_iters", 20) or 20)
-
-        attn_sliding_window = int(getattr(config, "attn_sliding_window", 128) or 0)
-        attn_sink_enabled = bool(getattr(config, "attn_sink", False))
-        q_lora_rank = getattr(config, "q_lora_rank", None) or None
-        index_topk = int(getattr(config, "index_topk", 512) or 512)
-        index_head_dim = int(getattr(config, "index_head_dim", 128) or 128)
-        index_n_heads = int(getattr(config, "index_n_heads", 64) or 64)
-
-        num_routed_experts = int(getattr(config, "num_moe_experts", 0) or 0)
-        moe_router_topk = int(getattr(config, "moe_router_topk", 1) or 1)
-        moe_intermediate_size = getattr(config, "moe_ffn_hidden_size", None) or getattr(
-            config, "moe_intermediate_size", None
-        )
-        num_shared_experts = int(getattr(config, "num_shared_experts", 1) or 1)
-        # MTP runs at the top of the stack — past the hash-routed prefix —
-        # so its routing always uses the learned router.
-        num_hash_layers = 0
-        hash_vocab_size = getattr(config, "padded_vocab_size", None) or getattr(config, "vocab_size", None)
-        moe_score_function = getattr(config, "moe_router_score_function", "sqrtsoftplus")
-        moe_enable_expert_bias = bool(getattr(config, "moe_router_enable_expert_bias", True))
-        clamp_alpha = float(getattr(config, "swiglu_limit", 7.0) or 7.0)
+        hc_mult = int(config.hc_mult)
+        hc_eps = float(config.hc_eps)
 
         self.mtp_num_layers = int(mtp_num_layers)
         self.hc_mult = hc_mult
@@ -132,37 +108,12 @@ class DeepseekV4MTPBlock(nn.Module):
         self.heads: List[HyperHead] = nn.ModuleList()  # type: ignore[assignment]
         for i, ratio in enumerate(mtp_compress_ratios):
             layer = DeepseekV4HybridLayer(
+                config=config,
                 # ``layer_idx`` is purposely left at the post-prefix range so
-                # the layer's MoE picks the learned router — see num_hash_layers=0.
+                # the layer's MoE picks the learned router.
                 layer_idx=10**6 + i,
                 compress_ratio=int(ratio),
-                hidden_size=hidden_size,
-                ffn_hidden_size=ffn_hidden_size,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim=head_dim,
-                rotary_dim=rotary_dim,
                 rope=rope,
-                attn_sliding_window=attn_sliding_window,
-                attn_sink_enabled=attn_sink_enabled,
-                q_lora_rank=q_lora_rank,
-                index_topk=index_topk,
-                index_head_dim=index_head_dim,
-                index_n_heads=index_n_heads,
-                hc_mult=hc_mult,
-                hc_eps=hc_eps,
-                hc_sinkhorn_iters=hc_sinkhorn_iters,
-                norm_eps=norm_eps,
-                num_routed_experts=num_routed_experts,
-                moe_router_topk=moe_router_topk,
-                moe_intermediate_size=moe_intermediate_size,
-                num_shared_experts=num_shared_experts,
-                num_hash_layers=num_hash_layers,
-                hash_vocab_size=hash_vocab_size,
-                hash_seed=0,
-                moe_score_function=moe_score_function,
-                moe_enable_expert_bias=moe_enable_expert_bias,
-                clamp_alpha=clamp_alpha,
             )
             self.layers.append(layer)
 
@@ -194,9 +145,9 @@ class DeepseekV4MTPBlock(nn.Module):
                 transposes back. This makes MTP shape contract internal
                 and uniform with the rest of V4.)
             token_ids: ``[B, S]`` long tensor. Forwarded to each MTP
-                layer's MoE FFN. Optional even when MoE is on, since
-                ``num_hash_layers=0`` here means the learned router is
-                always used.
+                layer's MoE FFN. Optional even when MoE is on, since MTP
+                layers use large synthetic ``layer_idx`` values and route
+                through the learned router path.
 
         Returns:
             A list of ``mtp_num_layers`` tensors, each ``[B, S, D]``,

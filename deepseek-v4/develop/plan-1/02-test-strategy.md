@@ -20,9 +20,11 @@
 |---|---|---|---|---|
 | Unit | Spec construction | P8 | V4 layer/block/mtp spec objects and build path | Spec build succeeds and module ownership matches design doc |
 | Unit | Provider parity | P9 | `DeepSeekV4SpecProvider`-driven norm/linear/MoE expert path under TE/local/turbo modes | Provider-selected paths instantiate and run forward/backward under each mode |
+| Unit | MoE submodule contract | P10 | `DeepseekV4MoE` router/dispatcher/experts/shared-experts build path | MoE submodule construction map matches plan and per-layer mode map is emitted |
 | Unit | Router determinism | P10 | Hash and learned router deterministic checks | Fixed seed gives stable route decisions and top-k probabilities |
+| Unit | Activation semantic parity | P10 | clamped-SwiGLU behavior across local and grouped-gemm expert paths | Active backend preserves clamp semantics or explicit fallback is triggered |
 | Integration | Decoder runtime | P8-P9 | V4 decoder forward/backward on toy model | No crash, no NaN/Inf, expected tensor shapes |
-| Integration | MoE distributed path | P10 | EP route + dispatcher end-to-end toy run | No autograd warning regressions on active path |
+| Integration | MoE distributed path | P10 | EP route + dispatcher bridge end-to-end toy run | No autograd warning regressions and no routed-output all-reduce fallback on active path |
 | Distributed smoke | Single node | P10 | 1x8 (or target local setup) short run | Training reaches target iterations without hang |
 | Distributed smoke | Multi-stage setup | P10 | PP/EP combined short run | Stage ownership and token propagation are valid |
 | Regression | Full gate run | P11 | Unit + integration + smoke aggregate | All mandatory gates green |
@@ -35,7 +37,7 @@
 |---|---|---|
 | **G1** | Spec-driven runtime decoder path is validated | Yes |
 | **G2** | TE/local dual path instantiation + runtime checks pass | Yes |
-| **G3** | MoE dispatcher/EP path passes no-warning distributed smoke | Yes |
+| **G3** | MoE dispatcher bridge path (without routed-output all-reduce fallback) passes distributed smoke | Yes |
 | **G4** | Numerical alignment within tolerance | Yes |
 | **G5** | Convergence trend does not regress baseline expectation | Yes |
 | **G6** | Throughput/memory check meets minimum release target | Yes |
@@ -74,12 +76,18 @@
 
 - Inputs: PP/EP test config with hash + learned routing coverage.
 - Steps:
-  1. Execute single-node distributed smoke.
-  2. Execute multi-stage PP/EP smoke.
-  3. Validate token-id propagation and routing consistency.
+  1. Validate MoE submodule map (`router`, `dispatcher`, `experts`, `shared_experts`)
+     and runtime mode logs before distributed runs.
+  2. Execute single-node distributed smoke with dispatcher path explicitly enabled.
+  3. Execute multi-stage PP/EP smoke with hash-routed and learned-routed layer coverage.
+  4. Run clamped-SwiGLU parity checks on active grouped-gemm backend and verify fallback
+     diagnostics when backend semantics are unsupported.
+  5. Validate token-id propagation and deterministic routing snapshots across stages.
 - Artifacts:
   - rank-wise health summary,
   - routing diagnostics summary,
+  - submodule/backend mode map,
+  - activation parity table and fallback log excerpt,
   - blocker list.
 
 ### Template D — Release gate run (P11)

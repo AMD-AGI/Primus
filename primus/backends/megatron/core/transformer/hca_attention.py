@@ -26,6 +26,9 @@ from typing import Tuple
 
 import torch
 
+from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
+    DeepSeekV4TransformerConfig,
+)
 from primus.backends.megatron.core.transformer.compressor import Compressor
 from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
     DeepseekV4Attention,
@@ -40,21 +43,26 @@ class HCAAttention(DeepseekV4Attention):
 
     Args:
         compress_ratio: must be a positive integer; ``128`` per V4 release.
-        compressor_overlap: overrides the auto-detect inside
-            :class:`Compressor` (``False`` for ratio==128).
         See :class:`DeepseekV4Attention` for the rest.
     """
 
     def __init__(
         self,
+        config: DeepSeekV4TransformerConfig,
         *,
+        rope,
         compress_ratio: int,
-        compressor_overlap: bool = False,
-        **kwargs,
+        submodules=None,
     ) -> None:
         if compress_ratio <= 0:
             raise ValueError(f"HCAAttention requires compress_ratio > 0, got {compress_ratio}")
-        super().__init__(compress_ratio=compress_ratio, **kwargs)
+        super().__init__(
+            config=config,
+            rope=rope,
+            compress_ratio=compress_ratio,
+            submodules=submodules,
+        )
+        resolved_compressor_overlap = False
 
         # HCA's K-projection from compressed pool. We project ``head_dim`` →
         # ``num_kv_heads * head_dim`` so the compressed positions can be
@@ -66,7 +74,7 @@ class HCAAttention(DeepseekV4Attention):
             hidden_size=self.hidden_size,
             head_dim=self.head_dim,
             ratio=compress_ratio,
-            overlap=compressor_overlap,
+            overlap=resolved_compressor_overlap,
         )
 
     # ------------------------------------------------------------------

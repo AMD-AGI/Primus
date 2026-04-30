@@ -27,6 +27,9 @@ from torch import Tensor
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_mtp import (
     DeepseekV4MTPBlock,
 )
+from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
+    DeepSeekV4TransformerConfig,
+)
 
 
 class DeepseekV4Model(LanguageModule):
@@ -34,7 +37,7 @@ class DeepseekV4Model(LanguageModule):
 
     def __init__(
         self,
-        config,
+        config: DeepSeekV4TransformerConfig,
         transformer_layer_spec: Union[ModuleSpec, type],
         vocab_size: int,
         max_sequence_length: int,

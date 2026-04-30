@@ -54,6 +54,9 @@ import torch
 import torch.nn as nn
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 
+from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
+    DeepSeekV4TransformerConfig,
+)
 from primus.backends.megatron.core.transformer.attn_sink import AttentionSink
 from primus.backends.megatron.core.transformer.dual_rope import DualRoPE
 from primus.backends.megatron.core.transformer.sliding_window_kv import (
@@ -104,66 +107,57 @@ class DeepseekV4Attention(nn.Module):
     """Dense V4 attention (``compress_ratio == 0`` layers).
 
     Args:
-        hidden_size: ``D``.
-        num_heads: number of Q heads ``H``.
-        num_kv_heads: number of K/V heads (V4 uses 1; we keep it general
-            for unit-test flexibility).
-        head_dim: per-head channel dim.
-        rotary_dim: partial-RoPE dim (``qk_pos_emb_head_dim``).
+        config: runtime DeepSeek-V4 config. All attention dimensions and
+            feature toggles are read directly from config.
         rope: a :class:`DualRoPE` instance shared across the model.
-        attn_sliding_window: SWA window length.
-        attn_sink_enabled: whether to add the per-head sink scalar.
-        q_lora_rank: optional low-rank rank for Q. ``None`` → plain Linear.
-        attn_dropout: dropout probability for the softmax probs (training only).
         compress_ratio: ``0`` for the base / dense case. Subclasses override.
     """
 
     def __init__(
         self,
+        config: DeepSeekV4TransformerConfig,
         *,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
-        rotary_dim: int,
         rope: DualRoPE,
-        attn_sliding_window: int = 0,
-        attn_sink_enabled: bool = False,
-        q_lora_rank: Optional[int] = None,
-        attn_dropout: float = 0.0,
         compress_ratio: int = 0,
-        config=None,
-        provider_mode: str = "local",
         submodules: Optional[DeepseekV4AttentionSubmodules] = None,
     ) -> None:
-        del config
         super().__init__()
+        hidden_size = int(config.hidden_size)
+        num_heads = int(config.num_attention_heads)
+        num_kv_heads = int(config.num_query_groups)
+        head_dim = int(config.kv_channels)
+        rotary_dim = int(config.qk_pos_emb_head_dim)
+        attn_sliding_window = int(config.attn_sliding_window)
+        attn_sink_enabled = bool(config.attn_sink)
+        q_lora_rank = config.q_lora_rank
+        attn_dropout = float(config.attention_dropout)
+
         if num_heads % num_kv_heads != 0:
             raise ValueError(f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})")
+
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
         self.rotary_dim = rotary_dim
-        self.attn_sliding_window = int(attn_sliding_window)
-        self.attn_dropout = float(attn_dropout)
+        self.attn_sliding_window = attn_sliding_window
+        self.attn_dropout = attn_dropout
         self.compress_ratio = int(compress_ratio)
-        self.provider_mode = str(provider_mode)
         submodules = submodules or DeepseekV4AttentionSubmodules()
 
         # Q projection (optional LoRA).
-        q_out = num_heads * head_dim
+        q_out = self.num_heads * self.head_dim
         if q_lora_rank is None or q_lora_rank <= 0:
             self.q_a = None
             self.q_b = _build_projection(
                 submodules.linear_q_b,
-                in_features=hidden_size,
+                in_features=self.hidden_size,
                 out_features=q_out,
             )
         else:
             self.q_a = _build_projection(
                 submodules.linear_q_a,
-                in_features=hidden_size,
+                in_features=self.hidden_size,
                 out_features=q_lora_rank,
             )
             self.q_b = _build_projection(
@@ -173,23 +167,23 @@ class DeepseekV4Attention(nn.Module):
             )
 
         # K, V projections (MQA-style: ``num_kv_heads * head_dim``).
-        kv_out = num_kv_heads * head_dim
+        kv_out = self.num_kv_heads * self.head_dim
         self.k_proj = _build_projection(
             submodules.linear_k_proj,
-            in_features=hidden_size,
+            in_features=self.hidden_size,
             out_features=kv_out,
         )
         self.v_proj = _build_projection(
             submodules.linear_v_proj,
-            in_features=hidden_size,
+            in_features=self.hidden_size,
             out_features=kv_out,
         )
 
         # Output projection.
         self.o_proj = _build_projection(
             submodules.linear_o_proj,
-            in_features=num_heads * head_dim,
-            out_features=hidden_size,
+            in_features=self.num_heads * self.head_dim,
+            out_features=self.hidden_size,
         )
 
         # Shared dual-RoPE (held by reference; not registered as submodule
@@ -198,7 +192,7 @@ class DeepseekV4Attention(nn.Module):
         self._rope = [rope]
 
         if attn_sink_enabled:
-            self.attn_sink = AttentionSink(num_heads=num_heads)
+            self.attn_sink = AttentionSink(num_heads=self.num_heads)
         else:
             self.attn_sink = None
 

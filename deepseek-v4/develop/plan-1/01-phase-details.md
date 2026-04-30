@@ -108,31 +108,63 @@
 
 ### Tasks
 
-1. **Router + dispatcher integration**
-   - Move from local per-expert scatter logic to Megatron-compatible dispatcher
-     flow while preserving hash-router and learned-router semantics.
-2. **EP path cleanup**
-   - Replace temporary routed-output all-reduce fallback with dispatcher/EP-safe
-     autograd path.
-3. **Token id propagation**
-   - Define and implement stable token-id propagation rules across PP stages for
-     hash-routed layers.
-4. **Distributed shape/ownership protocol**
-   - Lock tensor shape and ownership expectations across TP/PP/EP boundaries.
-5. **Failure observability**
-   - Add focused checks/logging around routing density, dropped tokens, and
-     dispatcher consistency under distributed runs.
+1. **MoE submodule spec contract**
+   - Add explicit MoE submodule ownership for DeepSeek-V4 (`router`, `dispatcher`,
+     `experts`, `shared_experts`) and instantiate them via `build_module`.
+   - Keep `DeepSeekV4SpecProvider` as the single backend selector for grouped-gemm
+     and expert module choice.
+2. **Dispatcher bridge reuse from Megatron**
+   - Reuse Megatron token dispatcher implementations (`allgather`, `alltoall`, `flex`)
+     through a V4 adapter instead of local scatter/index-add as the default path.
+   - Align V4 MoE forward flow with `MoELayer` execution order:
+     `route -> dispatch_preprocess -> token_dispatch -> dispatch_postprocess -> experts -> combine -> postprocess`.
+3. **Hash and learned router compatibility**
+   - Preserve hash-router token-id contract for lower layers.
+   - Preserve learned-router score-function behavior for upper layers.
+   - Add adapter boundaries so dispatcher always receives canonical
+     `[num_tokens, num_experts]` routing tensors.
+4. **Remove EP routed-output fallback from active path**
+   - Retire the temporary routed-output `all_reduce` fallback once dispatcher-based
+     combine path is validated.
+   - Keep fallback only behind an explicit debug gate during migration.
+5. **Token-id propagation across PP stages**
+   - Define per-stage token-id ownership and transport contract for hash-routed layers.
+   - Add fail-fast assertions at stage boundaries when token ids are required but missing.
+6. **Clamped-SwiGLU backend compatibility**
+   - Define clamp semantic parity checks for:
+     - `PrimusTurboGroupedMLP`,
+     - TE grouped expert path,
+     - legacy grouped-gemm compatibility path.
+   - If a backend cannot enforce post-multiplication clamp semantics, force local
+     expert fallback and log mode downgrade explicitly.
+7. **Observability and diagnostics**
+   - Emit per-layer mode map for router, dispatcher, expert backend, and activation path.
+   - Add targeted counters for routed-token density, dropped-token count, and
+     dispatcher consistency.
+8. **Integration validation package**
+   - Run single-node (`1x8`) and PP/EP combined smoke with both hash and learned routing coverage.
+   - Freeze deterministic routing snapshots and compare before/after dispatcher migration.
 
 ### Exit Criteria
 
-- Single-node and distributed smoke runs complete with stable MoE routing path.
-- No known autograd warnings remain on active MoE distributed path.
+- `DeepseekV4MoE` is built through explicit submodule specs and `build_module`
+  for router/dispatcher/experts/shared experts.
+- Active distributed MoE path uses dispatcher-based dispatch/combine and does not
+  rely on routed-output `all_reduce` fallback in standard smoke runs.
+- No known `c10d::allreduce_` warning remains on the active MoE distributed path.
 - Hash and learned routing semantics remain deterministic under fixed seeds.
+- Clamped-SwiGLU semantic checks pass on active grouped-gemm backend, or controlled
+  fallback is applied with explicit diagnostics.
+- Single-node and PP/EP smoke runs complete without hang and with stable routing diagnostics.
 
 ### Risks / Notes
 
-- Dispatcher migration is high-risk; include deterministic golden-vector checks
-  to catch silent route drift.
+- Hash router requires `token_ids`, while Megatron dispatcher reuse is built around
+  hidden-state router APIs; adapter boundaries must be explicit.
+- Grouped-gemm backends may only support `silu/gelu` fused activation variants;
+  clamp parity must be verified before backend defaulting.
+- Dispatcher migration is high-risk; land in small steps with rollback toggles and
+  deterministic routing-vector checks to catch silent drift.
 - PP token-id handling is easy to break; prioritize stage-wise tests early.
 
 ---

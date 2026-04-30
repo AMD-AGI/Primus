@@ -21,12 +21,13 @@ V4's MoE block has three pieces:
    token's contribution. V4-Flash has 1 shared expert with the same
    ``moe_intermediate_size`` as the routed experts.
 
-This module is a **pure-PyTorch** implementation suitable for CPU /
-single-GPU validation. It does not yet integrate with Megatron's MoE
-token-dispatcher, EP, or grouped-GEMM — those land in P6 alongside the
-TP / PP / EP wiring. The public API
-(``forward(hidden, *, token_ids=None) -> [B, S, D]``) is stable across
-P5 → P6: the dispatcher swap-in lives strictly inside ``forward``.
+Phase-10 update:
+* keeps V4 routing semantics (hash + V4TopK) but reuses Megatron
+  dispatcher flow for distributed expert dispatch/combine;
+* supports submodule-driven construction (`submodules + build_module`)
+  for router/dispatcher/expert/shared-expert ownership;
+* enforces Megatron dispatcher + grouped-experts path as the only
+  routed-expert execution mode.
 
 Phase 5 contract:
 * Layer-aware: caller passes ``layer_idx``; values ``< num_hash_layers``
@@ -38,112 +39,112 @@ Phase 5 contract:
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from copy import copy
+from dataclasses import dataclass
+from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from megatron.core import parallel_state
+from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
+from megatron.core.transformer.moe.token_dispatcher import (
+    MoEAllGatherTokenDispatcher,
+    MoEAlltoAllTokenDispatcher,
+    MoEFlexTokenDispatcher,
+    MoETokenDispatcher,
+)
+from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 
-from primus.backends.megatron.core.transformer.clamped_swiglu import ClampedSwiGLUMLP
+from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
+    DeepSeekV4TransformerConfig,
+)
 from primus.backends.megatron.core.transformer.moe.v4_hash_router import HashRouter
 from primus.backends.megatron.core.transformer.moe.v4_topk_router import V4TopKRouter
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class DeepseekV4MoESubmodules:
+    """Spec tree for V4 MoE construction."""
+
+    hash_router: Optional[Union[ModuleSpec, type]] = HashRouter
+    learned_router: Optional[Union[ModuleSpec, type]] = V4TopKRouter
+    token_dispatcher: Optional[Union[ModuleSpec, type]] = MoEAlltoAllTokenDispatcher
+    grouped_experts: Optional[Union[ModuleSpec, type]] = None
+    shared_expert: Optional[Union[ModuleSpec, type]] = SharedExpertMLP
+
+
 class DeepseekV4MoE(nn.Module):
     """V4 MoE FFN sub-block.
 
     Args:
-        hidden_size: model dim ``D``.
-        moe_intermediate_size: per-expert FFN inner dim.
-        num_routed_experts: number of routed experts.
-        moe_router_topk: top-K experts per token.
-        num_shared_experts: number of always-on shared experts (each of
-            size ``moe_intermediate_size``). Set to 0 to disable.
+        config: runtime DeepSeek-V4 config. Core MoE dimensions and router
+            options are read directly from config.
         layer_idx: 0-based decoder layer index. Used to pick router type
             against ``num_hash_layers``.
-        num_hash_layers: number of layers from the bottom that use the
-            static :class:`HashRouter`.
-        hash_vocab_size: vocab size for the hash routing table; required
-            when ``layer_idx < num_hash_layers``.
-        hash_seed: deterministic seed for the hash table.
-        score_function: scoring function for the learned top-K router
-            (one of ``"sqrtsoftplus" / "sigmoid" / "softmax"``).
-        enable_expert_bias: whether the learned router uses a noaux_tc
-            per-expert bias for selection.
-        clamp_alpha: clamp bound for clamped SwiGLU (V4 default 7.0).
     """
 
     def __init__(
         self,
+        config: DeepSeekV4TransformerConfig,
         *,
-        hidden_size: int,
-        moe_intermediate_size: int,
-        num_routed_experts: int,
-        moe_router_topk: int,
-        num_shared_experts: int = 1,
         layer_idx: int,
-        num_hash_layers: int = 0,
-        hash_vocab_size: Optional[int] = None,
-        hash_seed: int = 0,
-        score_function: str = "sqrtsoftplus",
-        enable_expert_bias: bool = True,
-        clamp_alpha: float = 7.0,
-        config=None,
         pg_collection=None,
-        provider_mode: str = "local",
-        moe_use_grouped_gemm: bool = False,
-        provider_grouped_mlp_module: Optional[type] = None,
-        provider_grouped_mlp_submodules=None,
+        submodules: Optional[DeepseekV4MoESubmodules] = None,
     ) -> None:
         super().__init__()
+        if config is None:
+            raise ValueError("DeepSeek-V4 MoE requires config.")
+        self.config = config
+        self.pg_collection = pg_collection
+        self.submodules = submodules
+        assert self.submodules is not None, "DeepSeek-V4 MoE requires explicit submodules."
+
+        hidden_size = int(config.hidden_size)
+        moe_intermediate_size = int(
+            config.moe_ffn_hidden_size or config.moe_intermediate_size or config.ffn_hidden_size
+        )
+        num_routed_experts = int(config.num_moe_experts)
+        moe_router_topk = int(config.moe_router_topk)
+        use_shared_expert = config.moe_shared_expert_intermediate_size is not None
+        layer_num_hash_layers = int(config.num_hash_layers)
+        layer_hash_vocab_size = config.padded_vocab_size or config.vocab_size
+        layer_hash_seed = int(config.hash_routing_seed)
+        score_function = str(config.moe_router_score_function)
+        enable_expert_bias = bool(config.moe_router_enable_expert_bias)
+        clamp_alpha = float(config.swiglu_limit)
+
         if num_routed_experts <= 0:
             raise ValueError(f"num_routed_experts must be > 0, got {num_routed_experts}")
         if moe_router_topk <= 0 or moe_router_topk > num_routed_experts:
-            raise ValueError(
-                f"moe_router_topk must be in [1, {num_routed_experts}], " f"got {moe_router_topk}"
-            )
-        if num_shared_experts < 0:
-            raise ValueError(f"num_shared_experts must be >= 0, got {num_shared_experts}")
+            raise ValueError(f"moe_router_topk must be in [1, {num_routed_experts}], got {moe_router_topk}")
 
-        self.hidden_size = int(hidden_size)
-        self.moe_intermediate_size = int(moe_intermediate_size)
-        self.num_routed_experts = int(num_routed_experts)
-        self.moe_router_topk = int(moe_router_topk)
-        self.num_shared_experts = int(num_shared_experts)
+        self.hidden_size = hidden_size
+        self.moe_intermediate_size = moe_intermediate_size
+        self.num_routed_experts = num_routed_experts
+        self.moe_router_topk = moe_router_topk
+        self.use_shared_expert = use_shared_expert
         self.layer_idx = int(layer_idx)
-        self.num_hash_layers = int(num_hash_layers)
+        self.num_hash_layers = layer_num_hash_layers
         self.use_hash_router = self.layer_idx < self.num_hash_layers
-        self.provider_mode = str(provider_mode)
-        self.moe_use_grouped_gemm = bool(moe_use_grouped_gemm)
-        self.provider_grouped_mlp_module = provider_grouped_mlp_module
-        self.provider_grouped_mlp_submodules = provider_grouped_mlp_submodules
-        self._provider_config = config
-        self._provider_pg_collection = pg_collection
-        if self.provider_grouped_mlp_module is not None and self.moe_use_grouped_gemm:
-            logger.info(
-                "[DeepSeek-V4] MoE layer=%s provider=%s grouped-gemm module=%s requested.",
-                self.layer_idx,
-                self.provider_mode,
-                self.provider_grouped_mlp_module.__name__,
-            )
+        self.clamp_alpha = clamp_alpha
+        self.moe_token_dispatcher_type = "alltoall"
 
-        # ---- EP placement (P6) ----
-        self.ep_group = None
+        # ---- EP placement ----
+        self.ep_group = getattr(pg_collection, "ep", None) if pg_collection is not None else None
         self.ep_size = 1
         self.ep_rank = 0
-        if dist.is_available() and dist.is_initialized():
+        if self.ep_group is None and dist.is_available() and dist.is_initialized():
             try:
                 self.ep_group = parallel_state.get_expert_model_parallel_group()
-                self.ep_size = int(parallel_state.get_expert_model_parallel_world_size())
-                self.ep_rank = int(parallel_state.get_expert_model_parallel_rank())
             except Exception:
-                # Fallback to non-EP behavior outside full Megatron runtime.
                 self.ep_group = None
-                self.ep_size = 1
-                self.ep_rank = 0
+        if self.ep_group is not None and dist.is_available() and dist.is_initialized():
+            self.ep_size = int(self.ep_group.size())
+            self.ep_rank = int(self.ep_group.rank())
 
         base = self.num_routed_experts // self.ep_size
         remainder = self.num_routed_experts % self.ep_size
@@ -151,58 +152,169 @@ class DeepseekV4MoE(nn.Module):
         self.local_expert_start = (self.ep_rank * base) + min(self.ep_rank, remainder)
         self.local_expert_end = self.local_expert_start + self.local_num_routed_experts
 
-        self.grouped_experts = self._build_grouped_experts()
-
-        # ---- router ----
-        if self.use_hash_router:
-            if hash_vocab_size is None or hash_vocab_size <= 0:
-                raise ValueError(
-                    "hash_vocab_size must be provided (and > 0) when " "layer_idx < num_hash_layers"
-                )
-            self.router = HashRouter(
-                num_experts=num_routed_experts,
-                topk=moe_router_topk,
-                vocab_size=hash_vocab_size,
-                seed=hash_seed,
-            )
-            self.learned_router = None
-        else:
-            self.router = None
-            self.learned_router = V4TopKRouter(
-                hidden_size=hidden_size,
-                num_experts=num_routed_experts,
-                topk=moe_router_topk,
-                score_function=score_function,
-                enable_expert_bias=enable_expert_bias,
-                renormalize=True,
-                topk_scaling_factor=1.0,
-            )
-
-        # ---- routed experts ----
-        # Each EP rank owns only its local expert shard; routed outputs are
-        # merged via EP all-reduce in forward (simple but functional P6 wiring).
-        self.experts = nn.ModuleList(
-            [
-                ClampedSwiGLUMLP(
-                    hidden_size=hidden_size,
-                    intermediate_size=moe_intermediate_size,
-                    alpha=clamp_alpha,
-                )
-                for _ in range(self.local_num_routed_experts)
-            ]
+        # ---- routers ----
+        self.router = None
+        self.learned_router = None
+        self._build_router_modules(
+            hash_vocab_size=layer_hash_vocab_size,
+            hash_seed=layer_hash_seed,
+            score_function=score_function,
+            enable_expert_bias=enable_expert_bias,
         )
 
+        # ---- token dispatcher (Megatron-only path) ----
+        self.token_dispatcher: MoETokenDispatcher = self._build_token_dispatcher()
+
+        # ---- grouped experts (mandatory) ----
+        self.grouped_experts = self._build_grouped_experts()
+
         # ---- shared experts ----
-        if num_shared_experts > 0:
-            self.shared_expert = ClampedSwiGLUMLP(
-                hidden_size=hidden_size,
-                intermediate_size=moe_intermediate_size * num_shared_experts,
-                alpha=clamp_alpha,
+        if self.use_shared_expert:
+            assert self.config.moe_shared_expert_intermediate_size is not None
+            self.shared_expert = self._build_shared_expert_module(
+                intermediate_size=int(self.config.moe_shared_expert_intermediate_size)
             )
         else:
             self.shared_expert = None
 
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_dispatcher_type_from_spec(dispatcher_spec: Optional[Union[ModuleSpec, type]]) -> str:
+        module = dispatcher_spec.module if isinstance(dispatcher_spec, ModuleSpec) else dispatcher_spec
+        if module is MoEAllGatherTokenDispatcher:
+            return "allgather"
+        if module is MoEFlexTokenDispatcher:
+            return "flex"
+        if module is MoEAlltoAllTokenDispatcher or module is None:
+            return "alltoall"
+        logger.warning(
+            "[DeepSeek-V4] unsupported dispatcher module=%s; fallback type to alltoall.",
+            getattr(module, "__name__", str(module)),
+        )
+        return "alltoall"
+
+    def _build_router_modules(
+        self,
+        *,
+        hash_vocab_size: Optional[int],
+        hash_seed: int,
+        score_function: str,
+        enable_expert_bias: bool,
+    ) -> None:
+        if self.use_hash_router:
+            if hash_vocab_size is None or hash_vocab_size <= 0:
+                raise ValueError(
+                    "hash_vocab_size must be provided (and > 0) when layer_idx < num_hash_layers"
+                )
+            hash_router_spec = self.submodules.hash_router or HashRouter
+            self.router = build_module(
+                hash_router_spec,
+                num_experts=self.num_routed_experts,
+                topk=self.moe_router_topk,
+                vocab_size=hash_vocab_size,
+                seed=hash_seed,
+            )
+            self.learned_router = None
+            return
+
+        learned_router_spec = self.submodules.learned_router or V4TopKRouter
+        self.router = None
+        self.learned_router = build_module(
+            learned_router_spec,
+            hidden_size=self.hidden_size,
+            num_experts=self.num_routed_experts,
+            topk=self.moe_router_topk,
+            score_function=score_function,
+            enable_expert_bias=enable_expert_bias,
+            renormalize=True,
+            topk_scaling_factor=1.0,
+        )
+
+    def _build_shared_expert_module(self, *, intermediate_size: int) -> nn.Module:
+        shared_expert_spec = self.submodules.shared_expert
+        assert isinstance(
+            shared_expert_spec, ModuleSpec
+        ), "DeepSeek-V4 MoE requires shared_expert ModuleSpec in submodules."
+        shared_expert_module = shared_expert_spec.module
+        assert shared_expert_module is SharedExpertMLP, "DeepSeek-V4 shared_expert must be SharedExpertMLP."
+        if self.config is None or self.pg_collection is None:
+            raise RuntimeError("DeepSeek-V4 MoE SharedExpertMLP requires config and pg_collection.")
+
+        # Shared experts must always run with clamped SwiGLU via SharedExpertMLP.
+        shared_cfg = copy(self.config)
+        shared_cfg.add_bias_linear = False
+        shared_cfg.gated_linear_unit = True
+        shared_cfg.activation_func = F.silu
+        shared_cfg.bias_activation_fusion = False
+        shared_cfg.use_te_activation_func = False
+        if self.clamp_alpha > 0:
+            shared_cfg.activation_func_clamp_value = float(self.clamp_alpha)
+        else:
+            shared_cfg.activation_func_clamp_value = None
+        if int(shared_cfg.moe_shared_expert_intermediate_size or 0) <= 0:
+            setattr(
+                shared_cfg,
+                "moe_shared_expert_intermediate_size",
+                int(intermediate_size),
+            )
+
+        try:
+            return build_module(
+                shared_expert_spec,
+                config=shared_cfg,
+                pg_collection=self.pg_collection,
+                gate=bool(shared_cfg.moe_shared_expert_gate),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"DeepSeek-V4 MoE shared expert build failed with SharedExpertMLP: {exc}"
+            ) from exc
+
+    def _build_token_dispatcher(self) -> MoETokenDispatcher:
+        if self.config is None or self.pg_collection is None:
+            raise RuntimeError(
+                "DeepSeek-V4 MoE requires config and pg_collection for Megatron dispatcher path."
+            )
+        if self.local_num_routed_experts <= 0:
+            raise RuntimeError(
+                f"DeepSeek-V4 MoE layer={self.layer_idx} has no local experts for dispatcher path."
+            )
+
+        dispatcher_spec: Union[ModuleSpec, type, None] = self.submodules.token_dispatcher
+        assert dispatcher_spec is not None, "DeepSeek-V4 MoE requires token_dispatcher spec in submodules."
+        requested_dispatcher_type = self._resolve_dispatcher_type_from_spec(dispatcher_spec)
+        ep_group = getattr(self.pg_collection, "ep", None)
+        tp_ep_group = getattr(self.pg_collection, "tp_ep", None)
+        if requested_dispatcher_type == "alltoall" and ep_group is None:
+            logger.info(
+                "[DeepSeek-V4] MoE layer=%s alltoall dispatcher requires EP group.",
+                self.layer_idx,
+            )
+        if requested_dispatcher_type == "flex" and tp_ep_group is None:
+            logger.info(
+                "[DeepSeek-V4] MoE layer=%s flex dispatcher requires TPxEP group.",
+                self.layer_idx,
+            )
+        self.moe_token_dispatcher_type = requested_dispatcher_type
+
+        local_expert_indices = list(range(self.local_expert_start, self.local_expert_end))
+        try:
+            dispatcher = build_module(
+                dispatcher_spec,
+                num_local_experts=self.local_num_routed_experts,
+                local_expert_indices=local_expert_indices,
+                config=self.config,
+                pg_collection=self.pg_collection,
+            )
+            logger.info(
+                "[DeepSeek-V4] MoE layer=%s dispatcher active via %s.",
+                self.layer_idx,
+                type(dispatcher).__name__,
+            )
+            return dispatcher
+        except Exception as exc:
+            raise RuntimeError(f"DeepSeek-V4 MoE layer={self.layer_idx} dispatcher build failed: {exc}")
 
     def _route(
         self,
@@ -223,83 +335,98 @@ class DeepseekV4MoE(nn.Module):
     # ------------------------------------------------------------------
 
     def _build_grouped_experts(self):
-        if (
-            self.provider_grouped_mlp_module is None
-            or not self.moe_use_grouped_gemm
-            or self.local_num_routed_experts <= 0
-        ):
-            return None
-
-        if self._provider_config is None or self._provider_pg_collection is None:
-            logger.info(
-                "[DeepSeek-V4] MoE layer=%s provider grouped-gemm unavailable (missing config/pg_collection); fallback local.",
-                self.layer_idx,
+        grouped_experts_spec: Optional[Union[ModuleSpec, type]] = self.submodules.grouped_experts
+        assert (
+            grouped_experts_spec is not None
+        ), "DeepSeek-V4 MoE requires grouped experts spec in submodules."
+        if self.local_num_routed_experts <= 0:
+            raise RuntimeError(
+                f"DeepSeek-V4 MoE layer={self.layer_idx} has no local experts for grouped backend."
             )
-            return None
 
-        init_kwargs = {
-            "num_local_experts": self.local_num_routed_experts,
-            "config": self._provider_config,
-            "pg_collection": self._provider_pg_collection,
-        }
-        if self.provider_grouped_mlp_submodules is not None:
-            init_kwargs["submodules"] = self.provider_grouped_mlp_submodules
+        if self.config is None or self.pg_collection is None:
+            raise RuntimeError("DeepSeek-V4 MoE requires config and pg_collection to build grouped experts.")
 
         try:
-            module = self.provider_grouped_mlp_module(**init_kwargs)
+            module = build_module(
+                grouped_experts_spec,
+                num_local_experts=self.local_num_routed_experts,
+                config=self.config,
+                pg_collection=self.pg_collection,
+            )
+            if not self._grouped_backend_supports_clamped_swiglu(module):
+                raise RuntimeError(
+                    "DeepSeek-V4 MoE grouped backend "
+                    f"{type(module).__name__} does not declare clamped-SwiGLU support. "
+                    "Set `v4_grouped_experts_support_clamped_swiglu=True` only "
+                    "after backend parity is validated."
+                )
             logger.info(
                 "[DeepSeek-V4] MoE layer=%s provider grouped-gemm active via %s.",
                 self.layer_idx,
-                self.provider_grouped_mlp_module.__name__,
+                type(module).__name__,
             )
             return module
         except Exception as exc:
-            logger.warning(
-                "[DeepSeek-V4] MoE layer=%s provider grouped-gemm init failed (%s); fallback local.",
-                self.layer_idx,
-                exc,
-            )
-            return None
+            raise RuntimeError(f"DeepSeek-V4 MoE layer={self.layer_idx} grouped experts build failed: {exc}")
 
-    def _provider_grouped_forward(
+    def _grouped_backend_supports_clamped_swiglu(self, module: nn.Module) -> bool:
+        if self.clamp_alpha <= 0:
+            return True
+        if bool(getattr(module, "supports_clamped_swiglu", False)):
+            return True
+        if self.config is not None and bool(self.config.v4_grouped_experts_support_clamped_swiglu):
+            return True
+        return False
+
+    def _dispatcher_expert_forward(
         self,
-        flat: torch.Tensor,
+        permuted_hidden: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        permuted_probs: torch.Tensor,
+        routing_map: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.grouped_experts is not None
+        try:
+            grouped_out = self.grouped_experts(
+                permuted_hidden,
+                tokens_per_expert,
+                permuted_probs,
+                routing_map=routing_map,
+            )
+        except TypeError:
+            grouped_out = self.grouped_experts(
+                permuted_hidden,
+                tokens_per_expert,
+                permuted_probs,
+            )
+        if isinstance(grouped_out, tuple):
+            return grouped_out[0]
+        return grouped_out
+
+    def _dispatcher_forward(
+        self,
+        hidden: torch.Tensor,
         probs: torch.Tensor,
         routing_map: torch.Tensor,
     ) -> torch.Tensor:
-        if self.grouped_experts is None or self.local_num_routed_experts <= 0:
-            return torch.zeros_like(flat)
+        assert self.token_dispatcher is not None
+        hidden_states, probs = self.token_dispatcher.dispatch_preprocess(hidden, routing_map, probs)
+        hidden_states, probs = self.token_dispatcher.token_dispatch(hidden_states, probs)
+        expert_input, tokens_per_expert, permuted_probs = self.token_dispatcher.dispatch_postprocess(
+            hidden_states, probs
+        )
 
-        per_expert_indices = []
-        per_expert_probs = []
-        token_count_list = []
-        for local_i in range(self.local_num_routed_experts):
-            global_i = self.local_expert_start + local_i
-            token_indices = routing_map[:, global_i].nonzero(as_tuple=True)[0]
-            token_count_list.append(int(token_indices.numel()))
-            if token_indices.numel() == 0:
-                continue
-            per_expert_indices.append(token_indices)
-            per_expert_probs.append(probs[token_indices, global_i])
-
-        if not per_expert_indices:
-            return torch.zeros_like(flat)
-
-        permuted_indices = torch.cat(per_expert_indices, dim=0)
-        permuted_hidden = flat.index_select(0, permuted_indices)
-        permuted_probs = torch.cat(per_expert_probs, dim=0).to(flat.dtype)
-        tokens_per_expert = torch.tensor(token_count_list, device=flat.device, dtype=torch.int64)
-
-        grouped_out, _ = self.grouped_experts(
-            permuted_hidden,
+        expert_output = self._dispatcher_expert_forward(
+            expert_input,
             tokens_per_expert,
             permuted_probs,
+            routing_map,
         )
-        routed_out = torch.zeros_like(flat)
-        routed_out.index_add_(0, permuted_indices, grouped_out)
-        return routed_out
 
-    # ------------------------------------------------------------------
+        combined = self.token_dispatcher.combine_preprocess(expert_output)
+        combined = self.token_dispatcher.token_combine(combined)
+        return self.token_dispatcher.combine_postprocess(combined)
 
     def forward(
         self,
@@ -318,40 +445,13 @@ class DeepseekV4MoE(nn.Module):
             ``[B, S, D]`` output. Sum of routed-expert and shared-expert
             contributions.
         """
-        B, S, D = hidden.shape
-        flat = hidden.reshape(-1, D)  # [N, D]
-        flat.shape[0]
-
         probs, routing_map = self._route(hidden, token_ids)  # [N, E], bool
-        # Cast probs to hidden dtype so the convex combo doesn't upcast
-        # the rest of the residual stream.
-        probs = probs.to(hidden.dtype)
-
-        if self.grouped_experts is not None:
-            routed_out = self._provider_grouped_forward(flat, probs, routing_map)
-        else:
-            routed_out = torch.zeros_like(flat)
-            # Per-expert dispatch: gather tokens routed to expert i, run FFN,
-            # scatter-add weighted output.
-            for local_i, expert in enumerate(self.experts):
-                global_i = self.local_expert_start + local_i
-                mask_i = routing_map[:, global_i]  # [N]
-                if not mask_i.any():
-                    continue
-                tokens_i = flat[mask_i]  # [n_i, D]
-                y_i = expert(tokens_i)  # [n_i, D]
-                w_i = probs[mask_i, global_i].unsqueeze(-1)  # [n_i, 1]
-                routed_out.index_add_(0, mask_i.nonzero(as_tuple=True)[0], y_i * w_i)
-
-        if self.ep_size > 1 and self.ep_group is not None:
-            dist.all_reduce(routed_out, group=self.ep_group)
-
-        out = routed_out
+        out = self._dispatcher_forward(hidden, probs, routing_map)
 
         if self.shared_expert is not None:
-            out = out + self.shared_expert(flat)
+            out = out + self.shared_expert(hidden)
 
-        return out.reshape(B, S, D)
+        return out
 
 
-__all__ = ["DeepseekV4MoE"]
+__all__ = ["DeepseekV4MoE", "DeepseekV4MoESubmodules"]

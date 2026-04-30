@@ -29,6 +29,9 @@ from typing import Tuple
 
 import torch
 
+from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
+    DeepSeekV4TransformerConfig,
+)
 from primus.backends.megatron.core.transformer.compressor import Compressor
 from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
     DeepseekV4Attention,
@@ -45,25 +48,29 @@ class CSAAttention(DeepseekV4Attention):
     Args:
         compress_ratio: must be ``4`` per V4 release; we leave it
             parametric for testability.
-        index_topk: number of compressed positions selected per query.
-        index_head_dim / index_n_heads: Indexer mini-compressor shape.
-        compressor_overlap: ``True`` for V4 (ratio=4 stitches windows).
         See :class:`DeepseekV4Attention` for the rest.
     """
 
     def __init__(
         self,
+        config: DeepSeekV4TransformerConfig,
         *,
+        rope,
         compress_ratio: int = 4,
-        index_topk: int,
-        index_head_dim: int,
-        index_n_heads: int,
-        compressor_overlap: bool = True,
-        **kwargs,
+        submodules=None,
     ) -> None:
         if compress_ratio <= 0:
             raise ValueError(f"CSAAttention requires compress_ratio > 0, got {compress_ratio}")
-        super().__init__(compress_ratio=compress_ratio, **kwargs)
+        index_topk = int(config.index_topk)
+        index_head_dim = int(config.index_head_dim)
+        index_n_heads = int(config.index_n_heads)
+        compressor_overlap = bool(compress_ratio == 4)
+        super().__init__(
+            config=config,
+            rope=rope,
+            compress_ratio=compress_ratio,
+            submodules=submodules,
+        )
 
         # Main Compressor (its output is the actual K/V of the sparse branch).
         self.compressor = Compressor(
@@ -74,7 +81,7 @@ class CSAAttention(DeepseekV4Attention):
         )
 
         # Indexer (its own mini-Compressor inside).
-        self.index_topk = int(index_topk)
+        self.index_topk = index_topk
         self.indexer = Indexer(
             hidden_size=self.hidden_size,
             index_head_dim=index_head_dim,

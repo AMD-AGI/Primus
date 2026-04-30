@@ -19,7 +19,7 @@
 |---|---|---|---|---|
 | **8** | ModuleSpec main-path refactor | architecture | V4 layer/block/mtp spec topology; model init no longer depends on decoder swap for runtime | `transformer_layer_spec` directly builds and runs V4 decoder path |
 | **9** | TE provider reuse integration | performance architecture | `DeepSeekV4SpecProvider` (inherits `PrimusTurboSpecProvider`) + V4 spec wiring for norm/linear/MoE expert paths | V4 runtime specs are provider-driven through a single provider class with executable TE/local A/B path |
-| **10** | MoE + distributed convergence | distributed integration | Hash/learned router dispatch integration with Megatron dispatcher + EP semantics | 1x8 and PP/EP smoke run with no autograd warning regressions in MoE path |
+| **10** | MoE + distributed convergence | distributed integration | `DeepseekV4MoE` submodules+build_module path, dispatcher bridge reuse (`alltoall`/`flex`), and clamped-SwiGLU backend compatibility contract | Dispatcher-based MoE path is default, hash/learned routing stays deterministic, and distributed smoke passes without EP all-reduce autograd-warning fallback |
 | **11** | Validation + release gates | quality / release | Regression matrix, convergence checks, throughput comparison, release checklist | All mandatory gates pass and blockers are documented |
 
 ## Dependency Graph
@@ -87,3 +87,39 @@ phase10MoE --> phase11QA
 | Projection linears | `DeepSeekV4SpecProvider`-selected (`TE`/`Turbo`/local) | preserve TP/shape contracts |
 | MoE expert kernel path | `DeepSeekV4SpecProvider` grouped-GEMM path + fallback | retain clamped-SwiGLU semantics |
 | Router logic (`Hash`/`V4TopK`) | custom V4 modules | no behavior drift allowed |
+
+## Phase 10 Landing Snapshot (2026-04-30, pre-implementation lock)
+
+### Scope Lock
+
+- Convert `DeepseekV4MoE` from parameter-only construction to explicit submodule
+  ownership (`router`, `dispatcher`, `experts`, `shared_experts`) under spec-driven build.
+- Reuse Megatron dispatcher pipeline from `MoELayer` through a V4 adapter instead of
+  keeping local scatter/index-add as the default MoE path.
+- Keep V4 router behavior unchanged: hash layers remain token-id driven, and learned
+  layers keep V4 score-function semantics.
+
+### Delivery Sequence
+
+1. **S1 - Spec contract**: define `DeepseekV4MoESubmodules` and wire it through
+   `deepseek_v4_layer_specs.py`.
+2. **S2 - Dispatcher bridge**: align V4 MoE forward execution with
+   `route -> preprocess -> dispatch -> expert_compute -> combine -> postprocess`.
+3. **S3 - EP cleanup**: retire routed-output `all_reduce` fallback from the active path.
+4. **S4 - PP token ids**: lock token-id propagation/data ownership across PP stages
+   for hash-routed layers.
+
+### Activation Compatibility Strategy (clamped SwiGLU)
+
+- Keep `clamped_swiglu` as the semantic source of truth.
+- Add backend-compatibility checks for:
+  - `PrimusTurboGroupedMLP`,
+  - TE grouped expert path,
+  - legacy grouped-gemm compatibility path.
+- If a backend cannot enforce post-multiplication clamp semantics, force local expert
+  fallback and emit explicit runtime diagnostics.
+
+### Out of Scope (Phase 10)
+
+- New third-party kernel development in `third_party/`.
+- Long convergence or release campaign work (belongs to Phase 11).

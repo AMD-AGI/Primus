@@ -37,9 +37,16 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_layer_specs im
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_model import (
     DeepseekV4Model,
 )
+from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
+    DeepSeekV4TransformerConfig,
+)
 
 
-def _resolve_runtime_decoder_spec(args, config, vp_stage):
+def _resolve_runtime_decoder_spec(
+    args,
+    config: DeepSeekV4TransformerConfig,
+    vp_stage,
+):
     """Resolve effective runtime decoder spec for DeepSeek-V4 decoder path."""
     if args.spec is not None:
         return import_module(args.spec)
@@ -51,7 +58,7 @@ def deepseek_v4_builder(
     pre_process,
     post_process,
     vp_stage=None,
-    config=None,
+    config: Optional[DeepSeekV4TransformerConfig] = None,
     pg_collection=None,
 ):
     """Build a DeepSeek-V4 model.
@@ -61,7 +68,10 @@ def deepseek_v4_builder(
     print_rank_0("[Primus:DeepSeek-V4] building DeepseekV4Model...")
 
     if config is None:
-        config = core_transformer_config_from_args(args)
+        config = core_transformer_config_from_args(
+            args,
+            config_class=DeepSeekV4TransformerConfig,
+        )
 
     assert not args.use_legacy_models, "DeepSeek-V4 requires use_legacy_models=False (Mcore-only)."
 
@@ -92,7 +102,7 @@ def model_provider(
     pre_process: bool = True,
     post_process: bool = True,
     vp_stage: Optional[int] = None,
-    config=None,
+    config: Optional[DeepSeekV4TransformerConfig] = None,
     pg_collection=None,
 ):
     """``model_provider`` entry point used by Megatron's ``pretrain()``.

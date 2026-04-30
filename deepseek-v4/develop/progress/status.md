@@ -135,11 +135,13 @@
 
 | | Task | commit | date | note |
 |---|---|---|---|---|
-| [ ] | integrate hash/learned router flow with Megatron dispatcher path | | | replace local scatter-centric route implementation |
-| [ ] | replace EP routed-output `all_reduce` fallback with autograd-safe path | | | closes current `c10d::allreduce_` warning risk |
-| [ ] | implement robust token-id propagation across PP stages for hash routing | | | explicit stage ownership and data contract |
-| [ ] | distributed smoke: 1x8 and PP/EP combined run | | | no hang, no fatal warning regressions |
-| [ ] | deterministic routing regression checks under fixed seeds | | | compare hash and learned route stability |
+| [x] | refresh Phase 10 landing scope and task decomposition | (working tree) | 2026-04-30 | aligned with MoE review outcomes: submodules+build_module, dispatcher reuse, and clamped-SwiGLU backend compatibility |
+| [x] | define `DeepseekV4MoESubmodules` and wire spec-driven MoE construction | (working tree) | 2026-04-30 | `v4_moe.py` now defines `DeepseekV4MoESubmodules` and builds router/dispatcher/expert/shared-expert modules through `build_module`; `deepseek_v4_layer_specs.py` now passes MoE submodules in FFN spec |
+| [x] | integrate Megatron dispatcher bridge into DeepSeek-V4 MoE forward path | (working tree) | 2026-04-30 | V4 MoE now supports dispatcher bridge flow (`dispatch_preprocess -> token_dispatch -> dispatch_postprocess -> expert_compute -> combine`) with runtime dispatcher selection and local fallback |
+| [x] | retire routed-output `all_reduce` fallback from active EP path | (working tree) | 2026-04-30 | local fallback now disables EP all-reduce by default and only enables it with explicit debug gate `v4_enable_ep_allreduce_fallback` |
+| [ ] | implement PP token-id propagation contract for hash-routed layers | | | explicit stage ownership, transport rules, and fail-fast assertions |
+| [x] | add clamped-SwiGLU backend compatibility checks for grouped-gemm modes | (working tree) | 2026-04-30 | grouped backend now requires declared clamped-SwiGLU support (`supports_clamped_swiglu` or config override) or it is downgraded to local experts with warning |
+| [ ] | distributed smoke: 1x8 and PP/EP combined run with deterministic routing snapshots | | | no hang, no dispatcher regressions, stable hash and learned routing |
 
 ## Phase 11 (v2) — Validation + release gates
 

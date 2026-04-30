@@ -42,12 +42,17 @@ from typing import Callable, List, Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from megatron.core.transformer.mlp import MLPSubmodules
+from megatron.core.transformer.module import GraphableMegatronModule
+from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
-from megatron.core.transformer.transformer_block import get_num_layers_to_build
 from megatron.core.utils import make_viewless_tensor
 
 from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
     DeepSeekV4SpecProvider,
+)
+from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
+    DeepSeekV4TransformerConfig,
 )
 from primus.backends.megatron.core.transformer.csa_attention import CSAAttention
 from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
@@ -59,10 +64,12 @@ from primus.backends.megatron.core.transformer.hyper_connection import (
     HyperHead,
     HyperMixer,
 )
-from primus.backends.megatron.core.transformer.moe.v4_moe import DeepseekV4MoE
-from primus.backends.megatron.core.transformer.transformer_layer import (
-    get_transformer_layer_offset,
+from primus.backends.megatron.core.transformer.moe.v4_hash_router import HashRouter
+from primus.backends.megatron.core.transformer.moe.v4_moe import (
+    DeepseekV4MoE,
+    DeepseekV4MoESubmodules,
 )
+from primus.backends.megatron.core.transformer.moe.v4_topk_router import V4TopKRouter
 
 logger = logging.getLogger(__name__)
 
@@ -79,18 +86,14 @@ def _build_projection(
     in_features: int,
     out_features: int,
     *,
-    config,
-    provider_mode: str,
+    config: DeepSeekV4TransformerConfig,
 ) -> nn.Module:
-    if config is None or provider_mode not in ("te", "turbo"):
+    if config is None:
         return nn.Linear(in_features, out_features, bias=False)
 
     provider = DeepSeekV4SpecProvider(config=config)
-    if not provider.use_provider_modules():
-        return nn.Linear(in_features, out_features, bias=False)
-
     linear_module_cls = provider.linear()
-    init_method: Callable = getattr(config, "init_method", _default_init_method)
+    init_method: Callable = config.init_method or _default_init_method
     try:
         return linear_module_cls(
             input_size=in_features,
@@ -234,32 +237,28 @@ class _DenseSwiGLUMLP(nn.Module):
 
     def __init__(
         self,
-        hidden_size: int,
-        ffn_hidden_size: int,
-        provider_mode: str = "local",
-        config=None,
+        config: DeepSeekV4TransformerConfig,
+        *,
         pg_collection=None,
     ) -> None:
         del pg_collection
         super().__init__()
-        self.provider_mode = provider_mode
+        hidden_size = int(config.hidden_size)
+        ffn_hidden_size = int(config.ffn_hidden_size)
         self.w_gate = _build_projection(
             hidden_size,
             ffn_hidden_size,
             config=config,
-            provider_mode=provider_mode,
         )
         self.w_up = _build_projection(
             hidden_size,
             ffn_hidden_size,
             config=config,
-            provider_mode=provider_mode,
         )
         self.w_down = _build_projection(
             ffn_hidden_size,
             hidden_size,
             config=config,
-            provider_mode=provider_mode,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -297,20 +296,8 @@ class DeepseekV4TransformerBlockSubmodules:
 def _build_attention(
     *,
     compress_ratio: int,
-    hidden_size: int,
-    num_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    rotary_dim: int,
     rope: DualRoPE,
-    attn_sliding_window: int,
-    attn_sink_enabled: bool,
-    q_lora_rank: Optional[int],
-    index_topk: int,
-    index_head_dim: int,
-    index_n_heads: int,
-    config=None,
-    provider_mode: str = "local",
+    config: Optional[DeepSeekV4TransformerConfig] = None,
 ) -> DeepseekV4Attention:
     """Pick the right attention class for ``compress_ratio``.
 
@@ -322,34 +309,17 @@ def _build_attention(
     convention ratio ``4`` means CSA (sparse with Indexer) and any larger
     ratio (e.g. ``128``) means HCA (full compressed pool, no Indexer).
     """
-    common = dict(
-        hidden_size=hidden_size,
-        num_heads=num_heads,
-        num_kv_heads=num_kv_heads,
-        head_dim=head_dim,
-        rotary_dim=rotary_dim,
-        rope=rope,
-        attn_sliding_window=attn_sliding_window,
-        attn_sink_enabled=attn_sink_enabled,
-        q_lora_rank=q_lora_rank,
-        config=config,
-        provider_mode=provider_mode,
-    )
+    common = dict(rope=rope, config=config)
 
     if compress_ratio == 0:
         return DeepseekV4Attention(compress_ratio=0, **common)
     if compress_ratio == 4:
         return CSAAttention(
             compress_ratio=compress_ratio,
-            index_topk=index_topk,
-            index_head_dim=index_head_dim,
-            index_n_heads=index_n_heads,
-            compressor_overlap=True,
             **common,
         )
     return HCAAttention(
         compress_ratio=compress_ratio,
-        compressor_overlap=False,
         **common,
     )
 
@@ -360,7 +330,7 @@ def _build_attention(
 # ---------------------------------------------------------------------------
 
 
-class DeepseekV4HybridLayer(nn.Module):
+class DeepseekV4HybridLayer(GraphableMegatronModule):
     """One layer of the V4 decoder.
 
     Holds:
@@ -376,47 +346,24 @@ class DeepseekV4HybridLayer(nn.Module):
 
     def __init__(
         self,
+        config: DeepSeekV4TransformerConfig,
         *,
         layer_idx: int,
         compress_ratio: int,
-        hidden_size: int,
-        ffn_hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
-        rotary_dim: int,
         rope: DualRoPE,
-        attn_sliding_window: int,
-        attn_sink_enabled: bool,
-        q_lora_rank: Optional[int],
-        index_topk: int,
-        index_head_dim: int,
-        index_n_heads: int,
-        hc_mult: int,
-        hc_eps: float = 1e-6,
-        hc_sinkhorn_iters: int = 20,
-        norm_eps: float = 1e-6,
-        # MoE config (set num_routed_experts=0 to use the plain dense FFN).
-        num_routed_experts: int = 0,
-        moe_router_topk: int = 1,
-        moe_intermediate_size: Optional[int] = None,
-        num_shared_experts: int = 1,
-        num_hash_layers: int = 0,
-        hash_vocab_size: Optional[int] = None,
-        hash_seed: int = 0,
-        moe_score_function: str = "sqrtsoftplus",
-        moe_enable_expert_bias: bool = True,
-        clamp_alpha: float = 7.0,
-        config=None,
         pg_collection=None,
-        provider_mode: str = "local",
         submodules: Optional[DeepseekV4HybridLayerSubmodules] = None,
     ) -> None:
-        super().__init__()
+        super().__init__(config)
         self.layer_idx = int(layer_idx)
         self.compress_ratio = int(compress_ratio)
-        self.hc_mult = int(hc_mult)
-        self.provider_mode = str(provider_mode)
+        self.hc_mult = int(config.hc_mult)
+
+        hidden_size = int(config.hidden_size)
+        norm_eps = float(config.norm_epsilon)
+        hc_eps = float(config.hc_eps)
+        hc_sinkhorn_iters = int(config.hc_sinkhorn_iters)
+
         use_spec_submodules = submodules is not None
         submodules = submodules or DeepseekV4HybridLayerSubmodules()
 
@@ -438,21 +385,9 @@ class DeepseekV4HybridLayer(nn.Module):
             )
         else:
             self.attn = _build_attention(
-                compress_ratio=compress_ratio,
-                hidden_size=hidden_size,
-                num_heads=num_heads,
-                num_kv_heads=num_kv_heads,
-                head_dim=head_dim,
-                rotary_dim=rotary_dim,
+                compress_ratio=self.compress_ratio,
                 rope=rope,
-                attn_sliding_window=attn_sliding_window,
-                attn_sink_enabled=attn_sink_enabled,
-                q_lora_rank=q_lora_rank,
-                index_topk=index_topk,
-                index_head_dim=index_head_dim,
-                index_n_heads=index_n_heads,
                 config=config,
-                provider_mode=self.provider_mode,
             )
 
         if use_spec_submodules and submodules.ffn_norm is not None:
@@ -464,7 +399,8 @@ class DeepseekV4HybridLayer(nn.Module):
             )
         else:
             self.ffn_norm = _RMSNorm(hidden_size, eps=norm_eps)
-        self.is_moe = num_routed_experts > 0
+
+        self.is_moe = int(config.num_moe_experts) > 0
         if use_spec_submodules and submodules.ffn is not None:
             self.ffn = build_module(
                 submodules.ffn,
@@ -473,45 +409,60 @@ class DeepseekV4HybridLayer(nn.Module):
             )
             self.is_moe = isinstance(self.ffn, DeepseekV4MoE)
         elif self.is_moe:
-            moe_inner = moe_intermediate_size or ffn_hidden_size
+            moe_use_grouped_gemm = bool(config.moe_grouped_gemm)
+            moe_use_legacy_grouped_gemm = bool(config.moe_use_legacy_grouped_gemm)
+
+            provider = DeepSeekV4SpecProvider(config=config)
+            grouped_mlp_module, grouped_mlp_submodules = provider.v4_grouped_mlp_modules(
+                moe_use_grouped_gemm=moe_use_grouped_gemm,
+                moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
+            )
+            assert (
+                grouped_mlp_module is not None
+            ), "DeepSeek-V4 grouped MLP module must be provided by DeepSeekV4SpecProvider."
+
+            shared_expert_spec = ModuleSpec(
+                module=SharedExpertMLP,
+                submodules=MLPSubmodules(
+                    linear_fc1=provider.column_parallel_linear(),
+                    linear_fc2=provider.row_parallel_linear(),
+                    activation_func=provider.activation_func(),
+                ),
+            )
+            moe_submodules = DeepseekV4MoESubmodules(
+                hash_router=ModuleSpec(module=HashRouter),
+                learned_router=ModuleSpec(module=V4TopKRouter),
+                grouped_experts=ModuleSpec(
+                    module=grouped_mlp_module,
+                    submodules=grouped_mlp_submodules,
+                ),
+                shared_expert=shared_expert_spec,
+            )
+
             self.ffn = DeepseekV4MoE(
-                hidden_size=hidden_size,
-                moe_intermediate_size=moe_inner,
-                num_routed_experts=num_routed_experts,
-                moe_router_topk=moe_router_topk,
-                num_shared_experts=num_shared_experts,
-                layer_idx=self.layer_idx,
-                num_hash_layers=num_hash_layers,
-                hash_vocab_size=hash_vocab_size,
-                hash_seed=hash_seed,
-                score_function=moe_score_function,
-                enable_expert_bias=moe_enable_expert_bias,
-                clamp_alpha=clamp_alpha,
                 config=config,
+                layer_idx=self.layer_idx,
                 pg_collection=pg_collection,
-                provider_mode=self.provider_mode,
+                submodules=moe_submodules,
             )
         else:
             self.ffn = _DenseSwiGLUMLP(
-                hidden_size=hidden_size,
-                ffn_hidden_size=ffn_hidden_size,
                 config=config,
-                provider_mode=self.provider_mode,
             )
 
-        if hc_mult > 1:
+        if self.hc_mult > 1:
             if use_spec_submodules and submodules.attn_hc is not None:
                 self.attn_hc = build_module(
                     submodules.attn_hc,
                     hidden_size=hidden_size,
-                    hc_mult=hc_mult,
+                    hc_mult=self.hc_mult,
                     eps=hc_eps,
                     sinkhorn_iters=hc_sinkhorn_iters,
                 )
             else:
                 self.attn_hc = HyperMixer(
                     hidden_size=hidden_size,
-                    hc_mult=hc_mult,
+                    hc_mult=self.hc_mult,
                     eps=hc_eps,
                     sinkhorn_iters=hc_sinkhorn_iters,
                 )
@@ -519,14 +470,14 @@ class DeepseekV4HybridLayer(nn.Module):
                 self.ffn_hc = build_module(
                     submodules.ffn_hc,
                     hidden_size=hidden_size,
-                    hc_mult=hc_mult,
+                    hc_mult=self.hc_mult,
                     eps=hc_eps,
                     sinkhorn_iters=hc_sinkhorn_iters,
                 )
             else:
                 self.ffn_hc = HyperMixer(
                     hidden_size=hidden_size,
-                    hc_mult=hc_mult,
+                    hc_mult=self.hc_mult,
                     eps=hc_eps,
                     sinkhorn_iters=hc_sinkhorn_iters,
                 )
@@ -602,11 +553,9 @@ class DeepseekV4TransformerBlock(nn.Module):
     """Multi-stream HC decoder for DeepSeek-V4.
 
     Replaces Megatron's ``TransformerBlock`` for V4. The ``__init__``
-    signature accepts a TransformerConfig-like object so it can be
+    signature accepts a :class:`DeepSeekV4TransformerConfig` object so it can be
     constructed exactly the way ``GPTModel.__init__`` constructs the
-    standard block. Most fields are read off ``config`` with ``getattr``
-    fallbacks (so this works whether the V4 fields land via Primus's
-    ``merge_namespace`` mechanism or are set explicitly).
+    standard block.
 
     Phase 6 update:
     - respects PP / VP layer partitioning by constructing only local layers
@@ -616,14 +565,13 @@ class DeepseekV4TransformerBlock(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: DeepSeekV4TransformerConfig,
         spec=None,
         post_layer_norm: bool = True,
         pre_process: bool = True,
         post_process: bool = True,
         pg_collection=None,
         vp_stage=None,
-        provider_mode: str = "local",
         submodules: Optional[DeepseekV4TransformerBlockSubmodules] = None,
     ) -> None:
         super().__init__()
@@ -635,62 +583,33 @@ class DeepseekV4TransformerBlock(nn.Module):
         self.pre_process = pre_process
         self.post_process = post_process
         self.vp_stage = vp_stage
-        self.provider_mode = str(provider_mode)
         # Required by pipeline schedules (same contract as TransformerBlock).
         self.input_tensor = None
-        logger.info("[DeepSeek-V4] decoder block provider mode=%s", self.provider_mode)
+        logger.info("[DeepSeek-V4] decoder block initialized.")
 
         # ---- shape / model fields ----
         hidden_size = config.hidden_size
-        ffn_hidden_size = getattr(config, "ffn_hidden_size", None) or 4 * hidden_size
-        num_heads = config.num_attention_heads
-        num_kv_heads = getattr(config, "num_query_groups", None) or num_heads
-        head_dim = getattr(config, "kv_channels", None) or hidden_size // num_heads
-        rotary_dim = getattr(config, "qk_pos_emb_head_dim", 64)
+        rotary_dim = config.qk_pos_emb_head_dim
         num_layers = config.num_layers
-        norm_eps = getattr(config, "norm_epsilon", 1.0e-6)
+        norm_eps = config.norm_epsilon
 
         # ---- V4-specific fields ----
-        hc_mult = getattr(config, "hc_mult", 1) or 1
-        hc_eps = getattr(config, "hc_eps", 1.0e-6) or 1.0e-6
-        hc_sinkhorn_iters = getattr(config, "hc_sinkhorn_iters", 20) or 20
+        hc_mult = config.hc_mult
+        hc_eps = config.hc_eps
+        config.hc_sinkhorn_iters
         compress_ratios = _normalize_compress_ratios(
-            getattr(config, "compress_ratios", None),
+            config.compress_ratios,
             num_layers=num_layers,
-            mtp_num_layers=int(getattr(config, "mtp_num_layers", 0) or 0),
+            mtp_num_layers=int(config.mtp_num_layers),
         )
         self.compress_ratios: List[int] = compress_ratios
 
-        attn_sliding_window = getattr(config, "attn_sliding_window", 128) or 0
-        attn_sink_enabled = bool(getattr(config, "attn_sink", False))
-        q_lora_rank = getattr(config, "q_lora_rank", None) or None
-        index_topk = getattr(config, "index_topk", 512) or 512
-        index_head_dim = getattr(config, "index_head_dim", 128) or 128
-        index_n_heads = getattr(config, "index_n_heads", 64) or 64
+        rope_theta = config.rotary_base
+        compress_rope_theta = config.compress_rope_theta
+        yarn_factor = config.rotary_scaling_factor
+        original_max_pos = config.original_max_position_embeddings
 
-        rope_theta = getattr(config, "rotary_base", 10000.0)
-        compress_rope_theta = getattr(config, "compress_rope_theta", 160000.0)
-        yarn_factor = getattr(config, "rotary_scaling_factor", 1.0) or 1.0
-        original_max_pos = getattr(config, "original_max_position_embeddings", 0) or 0
-
-        # ---- V4 MoE fields ----
-        # ``num_routed_experts == 0`` keeps the dense SwiGLU FFN; this lets us
-        # stand up small unit tests without instantiating MoE state.
-        num_routed_experts = int(getattr(config, "num_moe_experts", 0) or 0)
-        moe_router_topk = int(getattr(config, "moe_router_topk", 1) or 1)
-        moe_intermediate_size = getattr(config, "moe_ffn_hidden_size", None) or getattr(
-            config, "moe_intermediate_size", None
-        )
-        num_shared_experts = int(getattr(config, "moe_shared_expert_intermediate_size", 0) > 0) or int(
-            getattr(config, "num_shared_experts", 1)
-        )
-        num_hash_layers = int(getattr(config, "num_hash_layers", 0) or 0)
-        hash_vocab_size = getattr(config, "padded_vocab_size", None) or getattr(config, "vocab_size", None)
-        hash_seed = int(getattr(config, "hash_routing_seed", 0) or 0)
-        moe_score_function = getattr(config, "moe_router_score_function", "sqrtsoftplus")
-        moe_enable_expert_bias = bool(getattr(config, "moe_router_enable_expert_bias", True))
-        clamp_alpha = float(getattr(config, "swiglu_limit", 7.0) or 7.0)
-        self.num_hash_layers = num_hash_layers
+        self.num_hash_layers = int(config.num_hash_layers)
 
         # ---- shared dual-RoPE for the whole stack ----
         self.rope = DualRoPE(
@@ -703,76 +622,21 @@ class DeepseekV4TransformerBlock(nn.Module):
             original_max_position_embeddings=original_max_pos,
         )
 
-        # ---- local layers ----
-        provided_layer_specs = (
-            submodules.layer_specs if submodules is not None and submodules.layer_specs is not None else None
-        )
+        # ---- stage-local layer specs (always provided by runtime spec) ----
+        provided_layer_specs = submodules.layer_specs if submodules is not None else None
+        assert provided_layer_specs, "DeepSeek-V4 requires non-empty submodules.layer_specs."
         self.layers = nn.ModuleList()
-
-        if provided_layer_specs is not None:
-            self.global_layer_indices = []
-            for local_idx, layer_spec in enumerate(provided_layer_specs):
-                layer = build_module(
-                    layer_spec,
-                    config=config,
-                    pg_collection=pg_collection,
-                    rope=self.rope,
-                )
-                self.layers.append(layer)
-                self.global_layer_indices.append(int(getattr(layer, "layer_idx", local_idx)))
-            self.layer_offset = self.global_layer_indices[0] if self.global_layer_indices else 0
-        else:
-            # ---- PP local layer range ----
-            try:
-                local_layer_count = int(get_num_layers_to_build(config, vp_stage=vp_stage))
-                layer_offset = int(get_transformer_layer_offset(config, vp_stage=vp_stage))
-            except Exception:
-                # Standalone/unit-test path where distributed context isn't fully set up.
-                local_layer_count = num_layers
-                layer_offset = 0
-
-            local_start = max(0, layer_offset)
-            local_end = min(num_layers, local_start + max(0, local_layer_count))
-            self.global_layer_indices = list(range(local_start, local_end))
-            self.layer_offset = local_start
-
-            for global_layer_idx in self.global_layer_indices:
-                ratio = compress_ratios[global_layer_idx]
-                layer = DeepseekV4HybridLayer(
-                    layer_idx=global_layer_idx,
-                    compress_ratio=int(ratio),
-                    hidden_size=hidden_size,
-                    ffn_hidden_size=ffn_hidden_size,
-                    num_heads=num_heads,
-                    num_kv_heads=num_kv_heads,
-                    head_dim=head_dim,
-                    rotary_dim=rotary_dim,
-                    rope=self.rope,
-                    attn_sliding_window=attn_sliding_window,
-                    attn_sink_enabled=attn_sink_enabled,
-                    q_lora_rank=q_lora_rank,
-                    index_topk=index_topk,
-                    index_head_dim=index_head_dim,
-                    index_n_heads=index_n_heads,
-                    hc_mult=hc_mult,
-                    hc_eps=hc_eps,
-                    hc_sinkhorn_iters=hc_sinkhorn_iters,
-                    norm_eps=norm_eps,
-                    num_routed_experts=num_routed_experts,
-                    moe_router_topk=moe_router_topk,
-                    moe_intermediate_size=moe_intermediate_size,
-                    num_shared_experts=num_shared_experts,
-                    num_hash_layers=num_hash_layers,
-                    hash_vocab_size=hash_vocab_size,
-                    hash_seed=hash_seed,
-                    moe_score_function=moe_score_function,
-                    moe_enable_expert_bias=moe_enable_expert_bias,
-                    clamp_alpha=clamp_alpha,
-                    config=config,
-                    pg_collection=pg_collection,
-                    provider_mode=self.provider_mode,
-                )
-                self.layers.append(layer)
+        self.global_layer_indices = []
+        for local_idx, layer_spec in enumerate(provided_layer_specs):
+            layer = build_module(
+                layer_spec,
+                config=config,
+                pg_collection=pg_collection,
+                rope=self.rope,
+            )
+            self.layers.append(layer)
+            self.global_layer_indices.append(int(getattr(layer, "layer_idx", local_idx)))
+        self.layer_offset = self.global_layer_indices[0] if self.global_layer_indices else 0
         self.hc_mult = hc_mult
 
         # Final HC collapse (only if multi-stream).
@@ -811,7 +675,7 @@ class DeepseekV4TransformerBlock(nn.Module):
         if not self.post_layer_norm:
             return False
 
-        mtp_num_layers = getattr(self.config, "mtp_num_layers", None)
+        mtp_num_layers = self.config.mtp_num_layers
         if mtp_num_layers is None:
             return self.post_process
 
@@ -878,12 +742,6 @@ class DeepseekV4TransformerBlock(nn.Module):
 
         # [S, B, D] -> [B, S, D]
         x = hidden_states.transpose(0, 1).contiguous()
-        if self.provider_mode in ("te", "turbo") and not x.is_cuda:
-            raise RuntimeError(
-                "DeepSeek-V4 provider mode "
-                f"{self.provider_mode!r} requires CUDA hidden_states. "
-                "Please move model and inputs to CUDA before forward."
-            )
         B, S, D = x.shape
 
         # Position ids (one per token).
