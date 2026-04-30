@@ -203,9 +203,7 @@ def run_inter_node_ring_p2p(args):
 
     if _GLOBAL_PIPELINE_GROUP is not None:
         dist.destroy_process_group(_GLOBAL_PIPELINE_GROUP)
-    barrier_after_comm_destroy(
-        getattr(args, "comm_cleanup_delay_sec", 2.0)
-    )
+    barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
 
     # TODO (limou)
     # support plot

@@ -96,9 +96,7 @@ def run_intra_node_comm(args):
 
             # destroy this parallel group
             dist.destroy_process_group(group)
-            barrier_after_comm_destroy(
-                getattr(args, "comm_cleanup_delay_sec", 2.0)
-            )
+            barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
 
             all_latency_results = [None for _ in range(WORLD_SIZE)]
             all_bandwidth_results = [None for _ in range(WORLD_SIZE)]

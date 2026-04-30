@@ -137,9 +137,7 @@ def run_inter_node_comm(args):
             dist.barrier(device_ids=[torch.cuda.current_device()])
             if adjacent_group is not None:
                 dist.destroy_process_group(adjacent_group)
-            barrier_after_comm_destroy(
-                getattr(args, "comm_cleanup_delay_sec", 2.0)
-            )
+            barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
 
             all_latency_results = [None for _ in range(WORLD_SIZE)]
             all_bandwidth_results = [None for _ in range(WORLD_SIZE)]
