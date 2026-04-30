@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-24T09:10:26Z",
+  "generated_at": "2026-04-30T05:53:54Z",
   "summary": {
     "total_reports": 1,
     "verified_reports": 1,
@@ -53,6 +53,36 @@
         "Upstream main tracks the latest nightly on CUDA cu130 and ROCm 7.1, while the current Primus baseline is centered on cu126.",
         "Primus has a non-trivial outer integration layer with direct dependencies on upstream internal paths."
       ],
+      "dashboard_summary": {
+        "headline": "TorchTitan is 493 commits behind upstream main, with dependency-channel and Primus integration impact.",
+        "recommendation": "urgent sync",
+        "why_it_matters": [
+          "Primus bundles TorchTitan 0.1.0 while upstream main is at 0.2.2.",
+          "Upstream main moved to nightly cu130 and ROCm 7.1 while the Primus baseline remains centered on cu126.",
+          "The gap includes 447 changed files, so this is not a narrow dependency bump.",
+          "Primus trainer, adapter, and patch layers directly depend on upstream internal paths."
+        ],
+        "feature_deltas": [
+          "GraphTrainer precompile and cudagraph paths",
+          "MoE token dispatcher and DeepEP / HybridEP distributed runtime updates",
+          "Fused QKV GQAttention and FlexAttention context-parallel work",
+          "FSDP2 fully_shard and broader distributed runtime updates",
+          "New model families and reorganized shared model abstractions"
+        ],
+        "dependency_deltas": [
+          "README nightly channel moved from nightly/cu126 to nightly/cu130.",
+          "ROCm workflow coverage now targets nightly/rocm7.1.",
+          "torchdata is explicitly installed as 0.12.0.dev20260327 in workflow.",
+          "datasets lower bound moved from >=2.21.0 to >=3.6.0 with CI constraints.",
+          "safetensors, einops, pillow, av, torchvision, numpy, and pyrefly were added or expanded."
+        ],
+        "integration_risks": [
+          "Primus trainer imports torchtitan.config.job_config.JobConfig and torchtitan.train.Trainer.",
+          "Turbo attention patches reference upstream llama3, llama4, and deepseek_v3 internals.",
+          "FP8 and MX patches depend on torchtitan.components.quantization.float8 and mx.",
+          "MoE grouped-mm patch depends on torchtitan.models.moe.moe."
+        ]
+      },
       "artifacts": [
         {
           "label": "Detailed Report (PDF)",
