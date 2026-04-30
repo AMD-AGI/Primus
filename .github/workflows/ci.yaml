@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PRIMUS_TURBO_COMMIT: ecb7e5cad1f5f86e5719f4afbe5e644b702d0aa9
+  PRIMUS_TURBO_COMMIT: ef5b58ea3de0a2956d57dba518be466b7a092442
   PRIMUS_TURBO_AITER_COMMIT: 857f4d15775a29af153a2c68a2f8e8a8d696c986
   ROCSHMEM_COMMIT: 17ff985c026f9f97f85068647e863ab541dd5645 # Update version to 3.2.0 for 7.2.0 rocm release (#351) (#355)
   UCCL_COMMIT: 5afb4117893c58cc0c8557d9286336141a301053 # [EP]: fix fp8 error of internode_ll on amd gfx950 arch. (#710)
@@ -197,6 +197,7 @@ jobs:
     env:
       PRIMUS_WORKDIR: /mnt/apps_proxy/tas/0_public/primus_ci/actions-runner-torch
       # PRIMUS_WORKDIR: /wekafs/primus-data/primus_safe_ci/torch
+      PRIMUS_TURBO_ATTN_V3_ATOMIC_FP32: 1
     needs: [code-lint]
     # runs-on: [primus-lm-cicd-torch-j8knc]
     runs-on: [primus-lm-cicd-v26.2-tas8n-a16-40]

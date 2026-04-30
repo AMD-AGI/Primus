@@ -6,7 +6,7 @@ on:
     - cron: '0 16 * * *'
 
 env:
-  PRIMUS_TURBO_COMMIT: ecb7e5cad1f5f86e5719f4afbe5e644b702d0aa9
+  PRIMUS_TURBO_COMMIT: ef5b58ea3de0a2956d57dba518be466b7a092442
   BENCHMARK_ROOT_DIR: /wekafs/primus/benchmark
 
 jobs:
