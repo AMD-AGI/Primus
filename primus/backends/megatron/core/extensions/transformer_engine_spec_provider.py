@@ -5,6 +5,7 @@
 ###############################################################################
 
 import warnings
+from types import SimpleNamespace
 from typing import Optional, Tuple
 
 from megatron.core.extensions.transformer_engine import (
@@ -47,25 +48,45 @@ from primus.backends.megatron.core.extensions.primus_turbo import (
 from primus.backends.megatron.training.global_vars import get_primus_args
 
 
+def _build_default_primus_args() -> SimpleNamespace:
+    """Fallback args for environments without initialized Primus globals."""
+    return SimpleNamespace(
+        enable_primus_turbo=False,
+        use_turbo_parallel_linear=False,
+        use_turbo_attention=False,
+        use_turbo_grouped_mlp=False,
+        moe_use_legacy_grouped_gemm=False,
+    )
+
+
 class PrimusTurboSpecProvider(BackendSpecProvider):
     """A protocol for providing the submodules used in Spec building."""
 
     def __init__(self):
-        self.cfg = get_primus_args()
+        try:
+            self.cfg = get_primus_args()
+        except AssertionError:
+            self.cfg = _build_default_primus_args()
 
     def linear(self) -> type:
         """Which linear module TE backend uses"""
-        return PrimusTurboLinear if self.cfg.use_turbo_parallel_linear else TELinear
+        return PrimusTurboLinear if getattr(self.cfg, "use_turbo_parallel_linear", False) else TELinear
 
     def column_parallel_linear(self) -> type:
         """Which column parallel linear module TE backend uses"""
         return (
-            PrimusTurboColumnParallelLinear if self.cfg.use_turbo_parallel_linear else TEColumnParallelLinear
+            PrimusTurboColumnParallelLinear
+            if getattr(self.cfg, "use_turbo_parallel_linear", False)
+            else TEColumnParallelLinear
         )
 
     def row_parallel_linear(self) -> type:
         """Which row parallel linear module TE backend uses"""
-        return PrimusTurboRowParallelLinear if self.cfg.use_turbo_parallel_linear else TERowParallelLinear
+        return (
+            PrimusTurboRowParallelLinear
+            if getattr(self.cfg, "use_turbo_parallel_linear", False)
+            else TERowParallelLinear
+        )
 
     def fuse_layernorm_and_linear(self) -> bool:
         """TE backend chooses a single module for layernorm and linear"""
@@ -75,7 +96,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
         """Which module for sequential layernorm and linear"""
         return (
             PrimusTurboLayerNormColumnParallelLinear
-            if self.cfg.use_turbo_parallel_linear
+            if getattr(self.cfg, "use_turbo_parallel_linear", False)
             else TELayerNormColumnParallelLinear
         )
 
@@ -90,7 +111,9 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
 
     def core_attention(self) -> type:
         """Which module to use for attention"""
-        return PrimusTurboAttention if self.cfg.use_turbo_attention else TEDotProductAttention
+        return (
+            PrimusTurboAttention if getattr(self.cfg, "use_turbo_attention", False) else TEDotProductAttention
+        )
 
     def grouped_mlp_modules(
         self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: Optional[bool] = None
@@ -100,15 +123,16 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             # Megatron callers only pass ``moe_use_grouped_gemm`` here, so when Primus
             # args do not expose the legacy switch we must match upstream TESpecProvider
             # and prefer TEGroupedMLP by default.
-            # let it raise an error if cfg does not have moe_use_legacy_grouped_gemm
-            moe_use_legacy_grouped_gemm = self.cfg.moe_use_legacy_grouped_gemm
+            moe_use_legacy_grouped_gemm = getattr(self.cfg, "moe_use_legacy_grouped_gemm", False)
 
         if (
             moe_use_grouped_gemm
             and TEColumnParallelGroupedLinear is not None
             and not moe_use_legacy_grouped_gemm
         ):
-            _GroupedMLP = PrimusTurboGroupedMLP if self.cfg.use_turbo_grouped_mlp else TEGroupedMLP
+            _GroupedMLP = (
+                PrimusTurboGroupedMLP if getattr(self.cfg, "use_turbo_grouped_mlp", False) else TEGroupedMLP
+            )
             # TODO: need to update primus_turbo to support TEColumnParallelGroupedLinear?
             return _GroupedMLP, TEGroupedMLPSubmodules(
                 linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
@@ -118,7 +142,7 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
                 "The legacy GroupedMLP was removed from this Megatron version; "
                 "Primus is using its local compatibility implementation."
             )
-            if self.cfg.use_turbo_grouped_mlp:
+            if getattr(self.cfg, "use_turbo_grouped_mlp", False):
                 raise NotImplementedError("PrimusTurbo does not support Legacy GroupedMLP")
             return GroupedMLP, None
         else:
@@ -138,3 +162,24 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
     def activation_func(self) -> type:
         """Which module to use for activation function"""
         return TEActivationOp
+
+
+class DeepSeekV4SpecProvider(PrimusTurboSpecProvider):
+    """DeepSeek-V4 provider rooted on PrimusTurboSpecProvider."""
+
+    def __init__(self, config=None):
+        super().__init__()
+        self.config = config
+
+    def v4_norm_module(self):
+        """Norm module used by V4 specs."""
+        return self.layer_norm(rms_norm=True)
+
+    def v4_grouped_mlp_modules(
+        self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: Optional[bool] = None
+    ):
+        """Grouped-MLP module selection for V4 MoE expert path."""
+        return self.grouped_mlp_modules(
+            moe_use_grouped_gemm=moe_use_grouped_gemm,
+            moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
+        )
