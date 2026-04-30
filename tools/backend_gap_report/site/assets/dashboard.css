@@ -80,7 +80,7 @@ code {
 .hero h1 {
   margin: 0;
   max-width: 52rem;
-  font-size: clamp(1.9rem, 3.2vw, 2.8rem);
+  font-size: clamp(2.2rem, 4vw, 3.5rem);
   line-height: 1.15;
   font-weight: 700;
   letter-spacing: -0.01em;
@@ -181,8 +181,52 @@ code {
   gap: 1.5rem;
 }
 
+.section--lead {
+  margin-top: -0.25rem;
+}
+
 .section[hidden] {
   display: none;
+}
+
+.section-heading {
+  display: grid;
+  gap: 0.4rem;
+  max-width: 56rem;
+}
+
+.section-heading--split {
+  max-width: none;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 1rem;
+}
+
+.section-heading__eyebrow {
+  margin: 0;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.section-heading h2 {
+  margin: 0;
+  font-size: clamp(1.55rem, 2.4vw, 2.1rem);
+  letter-spacing: -0.02em;
+}
+
+.section-heading p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.section-heading__meta {
+  color: var(--muted);
+  font-size: 0.9rem;
+  white-space: nowrap;
 }
 
 .panel {
@@ -193,6 +237,10 @@ code {
   padding: 1.4rem 1.5rem;
   display: grid;
   gap: 1rem;
+}
+
+.panel--quiet {
+  box-shadow: none;
 }
 
 .panel__header h2 {
@@ -339,6 +387,56 @@ code {
 
 .featured-panel__card--wide {
   grid-column: 1 / -1;
+}
+
+.compact-facts {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.compact-fact {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #ffffff;
+}
+
+.compact-fact__label {
+  color: var(--muted);
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.compact-fact__value {
+  color: var(--text);
+  font-size: 0.95rem;
+  word-break: break-word;
+}
+
+.compact-fact--success .compact-fact__value {
+  color: var(--success);
+}
+
+.compact-fact--warning .compact-fact__value {
+  color: var(--warning);
+}
+
+.compact-fact--danger .compact-fact__value {
+  color: var(--danger);
+}
+
+.artifact-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.artifact-list .artifact-link {
+  justify-content: space-between;
+  width: 100%;
 }
 
 .featured-panel__card h3 {
@@ -566,7 +664,166 @@ code {
   flex-wrap: wrap;
 }
 
-/* ---------- Backend gap report cards (reuse & modernize) ---------- */
+/* ---------- Backend deep dives ---------- */
+.backend-deep-dive-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(23rem, 1fr));
+  gap: 1rem;
+}
+
+.backend-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-soft);
+  padding: 1.35rem;
+  display: grid;
+  gap: 1.1rem;
+}
+
+.backend-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.backend-card__title-group {
+  min-width: 0;
+}
+
+.backend-card__eyebrow {
+  margin: 0 0 0.35rem;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.backend-card__title-group h3 {
+  margin: 0;
+  font-size: 1.25rem;
+  letter-spacing: -0.01em;
+}
+
+.backend-card__scope {
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.93rem;
+  line-height: 1.5;
+}
+
+.commit-gap-badge {
+  flex: 0 0 auto;
+  min-width: 6.2rem;
+  border-radius: 14px;
+  padding: 0.65rem 0.75rem;
+  display: grid;
+  gap: 0.1rem;
+  text-align: right;
+  border: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+
+.commit-gap-badge strong {
+  font-size: 1.35rem;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.commit-gap-badge span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 700;
+}
+
+.commit-gap-badge--success strong {
+  color: var(--success);
+}
+
+.commit-gap-badge--warning strong {
+  color: var(--warning);
+}
+
+.commit-gap-badge--danger strong {
+  color: var(--danger);
+}
+
+.backend-card__facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+
+.backend-card__focus {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.backend-card__focus h4 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.backend-card__insights {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.backend-card__insight {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-muted);
+  padding: 0.85rem 0.95rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.backend-card__insight h4 {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.compact-list {
+  margin: 0;
+  padding-left: 1rem;
+  display: grid;
+  gap: 0.35rem;
+  color: var(--text);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.compact-list li::marker {
+  color: var(--accent);
+}
+
+.backend-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--border);
+  padding-top: 0.9rem;
+}
+
+.backend-card__meta {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* ---------- Legacy backend report cards (kept for generated record compatibility) ---------- */
 #reports-panel {
   padding: 1.4rem 1.5rem;
 }
@@ -769,7 +1026,15 @@ code {
 
 /* ---------- Responsive ---------- */
 @media (max-width: 900px) {
+  .section-heading--split {
+    grid-template-columns: 1fr;
+  }
+
   .featured-panel__grid {
+    grid-template-columns: 1fr;
+  }
+
+  .backend-card__insights {
     grid-template-columns: 1fr;
   }
 
@@ -779,6 +1044,20 @@ code {
 }
 
 @media (max-width: 640px) {
+  .backend-deep-dive-grid,
+  .backend-card__facts {
+    grid-template-columns: 1fr;
+  }
+
+  .backend-card__header {
+    display: grid;
+  }
+
+  .commit-gap-badge {
+    text-align: left;
+    width: 100%;
+  }
+
   .field--search {
     grid-column: span 1;
   }
