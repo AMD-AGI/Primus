@@ -37,7 +37,7 @@ from __future__ import annotations
 import ast
 import logging
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -46,6 +46,9 @@ from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_block import get_num_layers_to_build
 from megatron.core.utils import make_viewless_tensor
 
+from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
+    DeepSeekV4SpecProvider,
+)
 from primus.backends.megatron.core.transformer.csa_attention import CSAAttention
 from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
     DeepseekV4Attention,
@@ -62,6 +65,59 @@ from primus.backends.megatron.core.transformer.transformer_layer import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Provider-aware projection helpers
+# ---------------------------------------------------------------------------
+
+
+def _default_init_method(_weight: torch.Tensor) -> None:
+    return None
+
+
+def _build_projection(
+    in_features: int,
+    out_features: int,
+    *,
+    config,
+    provider_mode: str,
+) -> nn.Module:
+    if config is None or provider_mode not in ("te", "turbo"):
+        return nn.Linear(in_features, out_features, bias=False)
+
+    provider = DeepSeekV4SpecProvider(config=config)
+    if not provider.use_provider_modules():
+        return nn.Linear(in_features, out_features, bias=False)
+
+    linear_module_cls = provider.linear()
+    init_method: Callable = getattr(config, "init_method", _default_init_method)
+    try:
+        return linear_module_cls(
+            input_size=in_features,
+            output_size=out_features,
+            parallel_mode="duplicated",
+            config=config,
+            init_method=init_method,
+            bias=False,
+            skip_bias_add=False,
+            skip_weight_param_allocation=False,
+            tp_comm_buffer_name=None,
+            is_expert=False,
+        )
+    except Exception as exc:
+        logger.warning(
+            "DeepSeek-V4 MLP projection provider linear init failed (%s); fallback to nn.Linear.",
+            exc,
+        )
+        return nn.Linear(in_features, out_features, bias=False)
+
+
+def _projection_forward(proj: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    out = proj(x)
+    if isinstance(out, tuple):
+        return out[0]
+    return out
+
 
 # ---------------------------------------------------------------------------
 # Pieces used by every layer
@@ -145,8 +201,19 @@ def _normalize_compress_ratios(
 class _RMSNorm(nn.Module):
     """Standalone RMSNorm so the block has no hard dep on TE."""
 
-    def __init__(self, dim: int, eps: float = 1e-6) -> None:
+    def __init__(
+        self,
+        dim: Optional[int] = None,
+        eps: float = 1e-6,
+        hidden_size: Optional[int] = None,
+        config=None,
+    ) -> None:
+        del config
         super().__init__()
+        if dim is None:
+            dim = hidden_size
+        if dim is None:
+            raise ValueError("RMSNorm requires `dim` or `hidden_size`.")
         self.weight = nn.Parameter(torch.ones(dim))
         self.eps = eps
 
@@ -165,14 +232,40 @@ class _DenseSwiGLUMLP(nn.Module):
     of layers are MoE (see :class:`DeepseekV4MoE`).
     """
 
-    def __init__(self, hidden_size: int, ffn_hidden_size: int) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        ffn_hidden_size: int,
+        provider_mode: str = "local",
+        config=None,
+        pg_collection=None,
+    ) -> None:
+        del pg_collection
         super().__init__()
-        self.w_gate = nn.Linear(hidden_size, ffn_hidden_size, bias=False)
-        self.w_up = nn.Linear(hidden_size, ffn_hidden_size, bias=False)
-        self.w_down = nn.Linear(ffn_hidden_size, hidden_size, bias=False)
+        self.provider_mode = provider_mode
+        self.w_gate = _build_projection(
+            hidden_size,
+            ffn_hidden_size,
+            config=config,
+            provider_mode=provider_mode,
+        )
+        self.w_up = _build_projection(
+            hidden_size,
+            ffn_hidden_size,
+            config=config,
+            provider_mode=provider_mode,
+        )
+        self.w_down = _build_projection(
+            ffn_hidden_size,
+            hidden_size,
+            config=config,
+            provider_mode=provider_mode,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w_down(F.silu(self.w_gate(x)) * self.w_up(x))
+        gate = _projection_forward(self.w_gate, x)
+        up = _projection_forward(self.w_up, x)
+        return _projection_forward(self.w_down, F.silu(gate) * up)
 
 
 @dataclass
@@ -216,6 +309,8 @@ def _build_attention(
     index_topk: int,
     index_head_dim: int,
     index_n_heads: int,
+    config=None,
+    provider_mode: str = "local",
 ) -> DeepseekV4Attention:
     """Pick the right attention class for ``compress_ratio``.
 
@@ -237,6 +332,8 @@ def _build_attention(
         attn_sliding_window=attn_sliding_window,
         attn_sink_enabled=attn_sink_enabled,
         q_lora_rank=q_lora_rank,
+        config=config,
+        provider_mode=provider_mode,
     )
 
     if compress_ratio == 0:
@@ -310,22 +407,35 @@ class DeepseekV4HybridLayer(nn.Module):
         moe_score_function: str = "sqrtsoftplus",
         moe_enable_expert_bias: bool = True,
         clamp_alpha: float = 7.0,
+        config=None,
+        pg_collection=None,
+        provider_mode: str = "local",
         submodules: Optional[DeepseekV4HybridLayerSubmodules] = None,
     ) -> None:
         super().__init__()
         self.layer_idx = int(layer_idx)
         self.compress_ratio = int(compress_ratio)
         self.hc_mult = int(hc_mult)
+        self.provider_mode = str(provider_mode)
         use_spec_submodules = submodules is not None
         submodules = submodules or DeepseekV4HybridLayerSubmodules()
 
         if use_spec_submodules and submodules.attn_norm is not None:
-            self.attn_norm = build_module(submodules.attn_norm, dim=hidden_size, eps=norm_eps)
+            self.attn_norm = build_module(
+                submodules.attn_norm,
+                config=config,
+                hidden_size=hidden_size,
+                eps=norm_eps,
+            )
         else:
             self.attn_norm = _RMSNorm(hidden_size, eps=norm_eps)
 
         if use_spec_submodules and submodules.attention is not None:
-            self.attn = build_module(submodules.attention, rope=rope)
+            self.attn = build_module(
+                submodules.attention,
+                config=config,
+                rope=rope,
+            )
         else:
             self.attn = _build_attention(
                 compress_ratio=compress_ratio,
@@ -341,15 +451,26 @@ class DeepseekV4HybridLayer(nn.Module):
                 index_topk=index_topk,
                 index_head_dim=index_head_dim,
                 index_n_heads=index_n_heads,
+                config=config,
+                provider_mode=self.provider_mode,
             )
 
         if use_spec_submodules and submodules.ffn_norm is not None:
-            self.ffn_norm = build_module(submodules.ffn_norm, dim=hidden_size, eps=norm_eps)
+            self.ffn_norm = build_module(
+                submodules.ffn_norm,
+                config=config,
+                hidden_size=hidden_size,
+                eps=norm_eps,
+            )
         else:
             self.ffn_norm = _RMSNorm(hidden_size, eps=norm_eps)
         self.is_moe = num_routed_experts > 0
         if use_spec_submodules and submodules.ffn is not None:
-            self.ffn = build_module(submodules.ffn)
+            self.ffn = build_module(
+                submodules.ffn,
+                config=config,
+                pg_collection=pg_collection,
+            )
             self.is_moe = isinstance(self.ffn, DeepseekV4MoE)
         elif self.is_moe:
             moe_inner = moe_intermediate_size or ffn_hidden_size
@@ -366,9 +487,17 @@ class DeepseekV4HybridLayer(nn.Module):
                 score_function=moe_score_function,
                 enable_expert_bias=moe_enable_expert_bias,
                 clamp_alpha=clamp_alpha,
+                config=config,
+                pg_collection=pg_collection,
+                provider_mode=self.provider_mode,
             )
         else:
-            self.ffn = _DenseSwiGLUMLP(hidden_size=hidden_size, ffn_hidden_size=ffn_hidden_size)
+            self.ffn = _DenseSwiGLUMLP(
+                hidden_size=hidden_size,
+                ffn_hidden_size=ffn_hidden_size,
+                config=config,
+                provider_mode=self.provider_mode,
+            )
 
         if hc_mult > 1:
             if use_spec_submodules and submodules.attn_hc is not None:
@@ -494,6 +623,7 @@ class DeepseekV4TransformerBlock(nn.Module):
         post_process: bool = True,
         pg_collection=None,
         vp_stage=None,
+        provider_mode: str = "local",
         submodules: Optional[DeepseekV4TransformerBlockSubmodules] = None,
     ) -> None:
         super().__init__()
@@ -505,8 +635,10 @@ class DeepseekV4TransformerBlock(nn.Module):
         self.pre_process = pre_process
         self.post_process = post_process
         self.vp_stage = vp_stage
+        self.provider_mode = str(provider_mode)
         # Required by pipeline schedules (same contract as TransformerBlock).
         self.input_tensor = None
+        logger.info("[DeepSeek-V4] decoder block provider mode=%s", self.provider_mode)
 
         # ---- shape / model fields ----
         hidden_size = config.hidden_size
@@ -580,7 +712,12 @@ class DeepseekV4TransformerBlock(nn.Module):
         if provided_layer_specs is not None:
             self.global_layer_indices = []
             for local_idx, layer_spec in enumerate(provided_layer_specs):
-                layer = build_module(layer_spec, rope=self.rope)
+                layer = build_module(
+                    layer_spec,
+                    config=config,
+                    pg_collection=pg_collection,
+                    rope=self.rope,
+                )
                 self.layers.append(layer)
                 self.global_layer_indices.append(int(getattr(layer, "layer_idx", local_idx)))
             self.layer_offset = self.global_layer_indices[0] if self.global_layer_indices else 0
@@ -631,6 +768,9 @@ class DeepseekV4TransformerBlock(nn.Module):
                     moe_score_function=moe_score_function,
                     moe_enable_expert_bias=moe_enable_expert_bias,
                     clamp_alpha=clamp_alpha,
+                    config=config,
+                    pg_collection=pg_collection,
+                    provider_mode=self.provider_mode,
                 )
                 self.layers.append(layer)
         self.hc_mult = hc_mult
@@ -656,7 +796,8 @@ class DeepseekV4TransformerBlock(nn.Module):
             if submodules is not None and submodules.final_layernorm is not None:
                 self.final_layernorm = build_module(
                     submodules.final_layernorm,
-                    dim=hidden_size,
+                    config=self.config,
+                    hidden_size=hidden_size,
                     eps=norm_eps,
                 )
             else:
@@ -737,6 +878,12 @@ class DeepseekV4TransformerBlock(nn.Module):
 
         # [S, B, D] -> [B, S, D]
         x = hidden_states.transpose(0, 1).contiguous()
+        if self.provider_mode in ("te", "turbo") and not x.is_cuda:
+            raise RuntimeError(
+                "DeepSeek-V4 provider mode "
+                f"{self.provider_mode!r} requires CUDA hidden_states. "
+                "Please move model and inputs to CUDA before forward."
+            )
         B, S, D = x.shape
 
         # Position ids (one per token).

@@ -48,37 +48,59 @@
 
 ### Tasks
 
-1. **Provider strategy**
-   - Introduce an explicit provider-selection layer for V4 path:
-     `TESpecProvider` vs local provider fallback.
-2. **Norm path alignment**
-   - Replace standalone `_RMSNorm` usage where feasible with provider-driven norm
-     (TE-backed when enabled, local fallback when disabled/unavailable).
-3. **Linear path alignment**
-   - Migrate eligible `nn.Linear` paths in V4 blocks to provider-selected
-     parallel linear modules, preserving tensor-shape contracts.
-4. **MoE expert path alignment**
-   - Plan and integrate grouped-GEMM capable path through provider strategy
-     where semantics match V4 clamped SwiGLU requirements.
-5. **Custom attention boundary**
-   - Keep new V4 attention kernels/modules custom where needed, while ensuring
-     surrounding projection/norm pieces can still benefit from provider reuse.
+1. **Create V4 provider class (single entry point)**
+   - In `primus/backends/megatron/core/extensions/transformer_engine_spec_provider.py`,
+     define `DeepSeekV4SpecProvider(PrimusTurboSpecProvider)`.
+   - Keep this class as the only V4-facing provider entry for norm/linear/MoE
+     expert spec decisions.
+2. **Define provider API contract for V4 spec build**
+   - Enumerate methods used by V4 spec construction (norm, linear/projection,
+     grouped-MLP/expert path, attention-side projection helpers).
+   - Document which methods are inherited unchanged from `PrimusTurboSpecProvider`
+     and which are V4-overridden.
+3. **Wire V4 specs to provider**
+   - Update `deepseek_v4_layer_specs.py` to resolve one provider instance and
+     construct layer/block submodules through `DeepSeekV4SpecProvider`.
+   - Keep V4-specific attention kernels (`Dense`/`CSA`/`HCA`) and routers
+     custom; provider controls surrounding reusable modules.
+4. **Migrate norm + projection paths through provider**
+   - Replace eligible `_RMSNorm` and projection module selection points with
+     provider-driven specs.
+   - Preserve dtype, tensor-shape, TP/PP contracts, and deterministic fallback.
+5. **Providerize MoE expert compute selection**
+   - Route V4 MoE expert module choice through provider grouped-GEMM decision
+     path where semantics are compatible.
+   - Preserve clamped-SwiGLU behavior and existing hash/learned routing logic.
+6. **Runtime mode observability**
+   - Add explicit runtime logging/reporting for active provider mode
+     (`TE`/`Turbo`/`Local`) used by V4 key module categories.
+7. **A/B validation package**
+   - Produce repeatable baseline (`Local`) vs provider-enabled (`TE`/`Turbo`)
+     runs with module-map snapshot and behavior/perf comparison.
 
 ### Exit Criteria
 
-- A module-level matrix exists and is implemented:
-  - `TE reused`,
-  - `custom kept`,
-  - `fallback local`.
-- Runtime can switch TE/local path with stable behavior.
-- Performance-critical modules (norm/linear/MoE expert path) have TE-backed
-  integration points and fallback documentation.
+- `DeepSeekV4SpecProvider` exists and is the single V4 provider entry used by
+  V4 spec construction.
+- V4 runtime `ModuleSpec` generation (`deepseek_v4_layer_specs.py`) is wired to
+  provider methods for norm/projection/MoE expert module selection.
+- Runtime mode switching (`TE`/`Turbo`/`Local`) is executable on the same model
+  config with stable forward/backward behavior.
+- V4 MoE expert path has provider-driven grouped-GEMM integration point with
+  documented fallback behavior.
+- A/B report (baseline vs provider-enabled) is published with module map,
+  behavior verdict, and known gaps.
 
 ### Risks / Notes
 
-- TE integration can alter numerical behavior; keep A/B checks mandatory.
+- Provider inheritance can hide behavior drift if inherited methods change
+  upstream; pin and verify method-level assumptions for V4-critical paths.
+- TE/Turbo availability differs by hardware/backend and TP mode; keep local
+  fallback path as safe default until A/B gates pass.
+- Primus-Turbo grouped-GEMM / dispatcher dependencies may impose extra runtime
+  constraints; do not couple router semantics to provider mode.
 - Provider API drift across Megatron variants (Megatron-LM vs Bridge) must be
-  guarded with compatibility tests/import checks.
+  guarded with import checks and smoke coverage.
 
 ---
 

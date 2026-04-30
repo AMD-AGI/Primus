@@ -124,11 +124,12 @@
 
 | | Task | commit | date | note |
 |---|---|---|---|---|
-| [ ] | define V4 provider strategy (`TE` vs local fallback) | | | module-level mapping matrix required |
-| [ ] | align norm path to provider-based implementation (TE-first where available) | | | reduce standalone `_RMSNorm` footprint where feasible |
-| [ ] | align linear path to provider-selected parallel linear modules | | | preserve existing shape and distributed contracts |
-| [ ] | integrate MoE expert path with grouped-GEMM capable provider path | | | maintain V4 clamped SwiGLU semantics |
-| [ ] | deliver TE/local fallback and A/B validation report | | | include default/fallback behavior and known gaps |
+| [x] | revise Phase 9 plan with provider-inheritance direction | (working tree) | 2026-04-30 | switched plan to `DeepSeekV4SpecProvider(PrimusTurboSpecProvider)` as the single V4 provider entry |
+| [x] | add `DeepSeekV4SpecProvider` class in TE spec provider module | (working tree) | 2026-04-30 | landed in `core/extensions/transformer_engine_spec_provider.py`; inherits `PrimusTurboSpecProvider`, adds V4 mode resolution (`local`/`te`/`turbo`) and grouped-MLP selector |
+| [x] | wire V4 spec construction to `DeepSeekV4SpecProvider` | (working tree) | 2026-04-30 | `deepseek_v4_layer_specs.py` now resolves one provider instance, injects provider mode into block/layer params, and routes norm + MoE spec payload through provider |
+| [x] | migrate norm + projection path to provider-driven selection | (working tree) | 2026-04-30 | norm path remains provider-driven; attention projections now use `DeepseekV4AttentionSubmodules + build_module`, and dense-MLP projections route through provider `linear()` in duplicated mode (TE/Turbo) with local fallback when provider modules are unavailable |
+| [x] | providerize V4 MoE expert grouped-GEMM path | (working tree) | 2026-04-30 | `v4_moe.py` now supports provider grouped-MLP instantiation and grouped forward dispatch (expert bucketing + grouped forward + scatter-add), and falls back to local expert path when runtime dependencies are missing |
+| [x] | deliver provider-mode A/B validation report | (working tree) | 2026-04-30 | report added in `deepseek-v4/develop/plan-1/03-phase9-provider-ab-report.md`; local forward passes, TE module-map build + CUDA forward both pass, and TE/Turbo mode host-input path now has explicit CUDA guard in decoder forward |
 
 ## Phase 10 (v2) — MoE + distributed path convergence
 

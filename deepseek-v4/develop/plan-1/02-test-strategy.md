@@ -19,7 +19,7 @@
 | Level | Focus | Phase | Scope | Pass Criteria |
 |---|---|---|---|---|
 | Unit | Spec construction | P8 | V4 layer/block/mtp spec objects and build path | Spec build succeeds and module ownership matches design doc |
-| Unit | Module parity | P9 | Norm/linear/MoE building path under TE/local | TE on/off path both instantiate and run forward/backward |
+| Unit | Provider parity | P9 | `DeepSeekV4SpecProvider`-driven norm/linear/MoE expert path under TE/local/turbo modes | Provider-selected paths instantiate and run forward/backward under each mode |
 | Unit | Router determinism | P10 | Hash and learned router deterministic checks | Fixed seed gives stable route decisions and top-k probabilities |
 | Integration | Decoder runtime | P8-P9 | V4 decoder forward/backward on toy model | No crash, no NaN/Inf, expected tensor shapes |
 | Integration | MoE distributed path | P10 | EP route + dispatcher end-to-end toy run | No autograd warning regressions on active path |
@@ -56,12 +56,17 @@
 
 ### Template B — TE reuse A/B (P9)
 
-- Inputs: same config/seed, `TE=on` and `TE=off`.
+- Inputs: same config/seed, provider modes:
+  - `Local` (fallback baseline),
+  - `TE` (or `Turbo`) enabled path.
 - Steps:
-  1. Run identical short training windows.
+  1. Run identical short training windows under each provider mode.
   2. Compare loss trajectory, runtime errors, and key tensor statistics.
+  3. Assert active provider class is `DeepSeekV4SpecProvider`.
+  4. Capture active module map (norm/linear/MoE expert path) from runtime logs.
 - Artifacts:
   - A/B result table,
+  - provider-mode module map snapshot,
   - fallback usage map,
   - regression verdict.
 

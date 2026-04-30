@@ -18,7 +18,7 @@
 | # | Phase | Type | Key Deliverables | Exit Criteria |
 |---|---|---|---|---|
 | **8** | ModuleSpec main-path refactor | architecture | V4 layer/block/mtp spec topology; model init no longer depends on decoder swap for runtime | `transformer_layer_spec` directly builds and runs V4 decoder path |
-| **9** | TE provider reuse integration | performance architecture | V4 provider selection matrix (`TE`/`Local`), TE-backed RMSNorm/parallel linear/grouped GEMM adoption plan | Runtime module map clearly shows TE-reused vs custom components with fallback |
+| **9** | TE provider reuse integration | performance architecture | `DeepSeekV4SpecProvider` (inherits `PrimusTurboSpecProvider`) + V4 spec wiring for norm/linear/MoE expert paths | V4 runtime specs are provider-driven through a single provider class with executable TE/local A/B path |
 | **10** | MoE + distributed convergence | distributed integration | Hash/learned router dispatch integration with Megatron dispatcher + EP semantics | 1x8 and PP/EP smoke run with no autograd warning regressions in MoE path |
 | **11** | Validation + release gates | quality / release | Regression matrix, convergence checks, throughput comparison, release checklist | All mandatory gates pass and blockers are documented |
 
@@ -62,3 +62,28 @@ phase10MoE --> phase11QA
 | TE integration changes numerics/perf unexpectedly | Regression in convergence or stability | Keep per-module fallback toggles and perform A/B validation by test matrix |
 | MoE dispatcher migration breaks hash-router assumptions | Incorrect routing or silent accuracy drift | Freeze deterministic routing test vectors and compare before/after outputs |
 | Multiple backends (Megatron-LM vs Bridge compatibility) | Signature/runtime drift | Document supported runtime baseline and add import-path sanity checks |
+
+## Phase 9 Change Plan Snapshot (2026-04-30, provider-inheritance revision)
+
+### Integration Surfaces
+
+- `primus/backends/megatron/core/extensions/transformer_engine_spec_provider.py`
+  - Add `DeepSeekV4SpecProvider(PrimusTurboSpecProvider)` as V4-specific provider entry.
+- `primus/backends/megatron/core/models/deepseek_v4/deepseek_v4_layer_specs.py`
+  - Resolve provider once and build V4 submodule specs via provider methods.
+- `primus/backends/megatron/core/models/deepseek_v4/deepseek_v4_block.py`
+  - Consume provider-selected submodules while preserving PP/VP ownership logic and custom V4 attention boundaries.
+- `primus/backends/megatron/core/models/deepseek_v4/deepseek_v4_model.py`
+  - Keep `LanguageModule` runtime path stable; expose selected provider-mode observability.
+- `primus/backends/megatron/core/transformer/moe/v4_moe.py`
+  - Introduce grouped-GEMM-capable expert compute path with local fallback.
+
+### Component Ownership Matrix (Target)
+
+| Component | Target owner | Notes |
+|---|---|---|
+| Hybrid attention algorithm (`Dense`/`CSA`/`HCA`) | custom V4 modules | Keep V4-specific compressor/indexer/mask semantics |
+| Norm modules | `DeepSeekV4SpecProvider`-selected (`TE` first, local fallback) | reduce `_RMSNorm` footprint where feasible |
+| Projection linears | `DeepSeekV4SpecProvider`-selected (`TE`/`Turbo`/local) | preserve TP/shape contracts |
+| MoE expert kernel path | `DeepSeekV4SpecProvider` grouped-GEMM path + fallback | retain clamped-SwiGLU semantics |
+| Router logic (`Hash`/`V4TopK`) | custom V4 modules | no behavior drift allowed |

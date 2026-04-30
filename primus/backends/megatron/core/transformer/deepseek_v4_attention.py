@@ -46,16 +46,58 @@ Phase 4 contract:
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
 import torch.nn as nn
+from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 
 from primus.backends.megatron.core.transformer.attn_sink import AttentionSink
 from primus.backends.megatron.core.transformer.dual_rope import DualRoPE
 from primus.backends.megatron.core.transformer.sliding_window_kv import (
     sliding_window_causal_mask,
 )
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DeepseekV4AttentionSubmodules:
+    """Projection submodules for DeepSeek-V4 attention."""
+
+    linear_q_a: Optional[ModuleSpec] = None
+    linear_q_b: Optional[ModuleSpec] = None
+    linear_k_proj: Optional[ModuleSpec] = None
+    linear_v_proj: Optional[ModuleSpec] = None
+    linear_o_proj: Optional[ModuleSpec] = None
+
+
+def _build_projection(
+    projection_submodule: Optional[ModuleSpec],
+    *,
+    in_features: int,
+    out_features: int,
+) -> nn.Module:
+    """Build a projection by submodule spec with local fallback."""
+    if projection_submodule is None:
+        return nn.Linear(in_features, out_features, bias=False)
+    try:
+        return build_module(projection_submodule)
+    except Exception as exc:
+        logger.warning(
+            "DeepSeek-V4 attention projection submodule init failed (%s); fallback to nn.Linear.",
+            exc,
+        )
+        return nn.Linear(in_features, out_features, bias=False)
+
+
+def _projection_forward(proj: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    out = proj(x)
+    if isinstance(out, tuple):
+        return out[0]
+    return out
 
 
 class DeepseekV4Attention(nn.Module):
@@ -90,7 +132,11 @@ class DeepseekV4Attention(nn.Module):
         q_lora_rank: Optional[int] = None,
         attn_dropout: float = 0.0,
         compress_ratio: int = 0,
+        config=None,
+        provider_mode: str = "local",
+        submodules: Optional[DeepseekV4AttentionSubmodules] = None,
     ) -> None:
+        del config
         super().__init__()
         if num_heads % num_kv_heads != 0:
             raise ValueError(f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})")
@@ -102,23 +148,49 @@ class DeepseekV4Attention(nn.Module):
         self.attn_sliding_window = int(attn_sliding_window)
         self.attn_dropout = float(attn_dropout)
         self.compress_ratio = int(compress_ratio)
+        self.provider_mode = str(provider_mode)
+        submodules = submodules or DeepseekV4AttentionSubmodules()
 
         # Q projection (optional LoRA).
         q_out = num_heads * head_dim
         if q_lora_rank is None or q_lora_rank <= 0:
             self.q_a = None
-            self.q_b = nn.Linear(hidden_size, q_out, bias=False)
+            self.q_b = _build_projection(
+                submodules.linear_q_b,
+                in_features=hidden_size,
+                out_features=q_out,
+            )
         else:
-            self.q_a = nn.Linear(hidden_size, q_lora_rank, bias=False)
-            self.q_b = nn.Linear(q_lora_rank, q_out, bias=False)
+            self.q_a = _build_projection(
+                submodules.linear_q_a,
+                in_features=hidden_size,
+                out_features=q_lora_rank,
+            )
+            self.q_b = _build_projection(
+                submodules.linear_q_b,
+                in_features=q_lora_rank,
+                out_features=q_out,
+            )
 
         # K, V projections (MQA-style: ``num_kv_heads * head_dim``).
         kv_out = num_kv_heads * head_dim
-        self.k_proj = nn.Linear(hidden_size, kv_out, bias=False)
-        self.v_proj = nn.Linear(hidden_size, kv_out, bias=False)
+        self.k_proj = _build_projection(
+            submodules.linear_k_proj,
+            in_features=hidden_size,
+            out_features=kv_out,
+        )
+        self.v_proj = _build_projection(
+            submodules.linear_v_proj,
+            in_features=hidden_size,
+            out_features=kv_out,
+        )
 
         # Output projection.
-        self.o_proj = nn.Linear(num_heads * head_dim, hidden_size, bias=False)
+        self.o_proj = _build_projection(
+            submodules.linear_o_proj,
+            in_features=num_heads * head_dim,
+            out_features=hidden_size,
+        )
 
         # Shared dual-RoPE (held by reference; not registered as submodule
         # to avoid double-counting parameters when several attention layers
@@ -140,16 +212,20 @@ class DeepseekV4Attention(nn.Module):
 
     def _project_q(self, hidden: torch.Tensor) -> torch.Tensor:
         """``[B, S, D]`` → ``[B, S, H, head_dim]``."""
-        x = self.q_a(hidden) if self.q_a is not None else hidden
-        q = self.q_b(x) if self.q_a is not None else self.q_b(hidden)
+        x = _projection_forward(self.q_a, hidden) if self.q_a is not None else hidden
+        q = (
+            _projection_forward(self.q_b, x)
+            if self.q_a is not None
+            else _projection_forward(self.q_b, hidden)
+        )
         B, S, _ = q.shape
         return q.view(B, S, self.num_heads, self.head_dim)
 
     def _project_kv(self, hidden: torch.Tensor):
         """``[B, S, D]`` → ``(k, v)`` each ``[B, S, num_kv_heads, head_dim]``."""
         B, S, _ = hidden.shape
-        k = self.k_proj(hidden).view(B, S, self.num_kv_heads, self.head_dim)
-        v = self.v_proj(hidden).view(B, S, self.num_kv_heads, self.head_dim)
+        k = _projection_forward(self.k_proj, hidden).view(B, S, self.num_kv_heads, self.head_dim)
+        v = _projection_forward(self.v_proj, hidden).view(B, S, self.num_kv_heads, self.head_dim)
         return k, v
 
     def _apply_rope(self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor):
@@ -265,8 +341,11 @@ class DeepseekV4Attention(nn.Module):
 
         # Output projection.
         out = out.reshape(B, S, self.num_heads * self.head_dim)
-        out = self.o_proj(out)
+        out = _projection_forward(self.o_proj, out)
         return out
 
 
-__all__ = ["DeepseekV4Attention"]
+__all__ = [
+    "DeepseekV4AttentionSubmodules",
+    "DeepseekV4Attention",
+]

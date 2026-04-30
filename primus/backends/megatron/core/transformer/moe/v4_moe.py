@@ -37,6 +37,7 @@ Phase 5 contract:
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import torch
@@ -47,6 +48,8 @@ from megatron.core import parallel_state
 from primus.backends.megatron.core.transformer.clamped_swiglu import ClampedSwiGLUMLP
 from primus.backends.megatron.core.transformer.moe.v4_hash_router import HashRouter
 from primus.backends.megatron.core.transformer.moe.v4_topk_router import V4TopKRouter
+
+logger = logging.getLogger(__name__)
 
 
 class DeepseekV4MoE(nn.Module):
@@ -88,6 +91,12 @@ class DeepseekV4MoE(nn.Module):
         score_function: str = "sqrtsoftplus",
         enable_expert_bias: bool = True,
         clamp_alpha: float = 7.0,
+        config=None,
+        pg_collection=None,
+        provider_mode: str = "local",
+        moe_use_grouped_gemm: bool = False,
+        provider_grouped_mlp_module: Optional[type] = None,
+        provider_grouped_mlp_submodules=None,
     ) -> None:
         super().__init__()
         if num_routed_experts <= 0:
@@ -107,6 +116,19 @@ class DeepseekV4MoE(nn.Module):
         self.layer_idx = int(layer_idx)
         self.num_hash_layers = int(num_hash_layers)
         self.use_hash_router = self.layer_idx < self.num_hash_layers
+        self.provider_mode = str(provider_mode)
+        self.moe_use_grouped_gemm = bool(moe_use_grouped_gemm)
+        self.provider_grouped_mlp_module = provider_grouped_mlp_module
+        self.provider_grouped_mlp_submodules = provider_grouped_mlp_submodules
+        self._provider_config = config
+        self._provider_pg_collection = pg_collection
+        if self.provider_grouped_mlp_module is not None and self.moe_use_grouped_gemm:
+            logger.info(
+                "[DeepSeek-V4] MoE layer=%s provider=%s grouped-gemm module=%s requested.",
+                self.layer_idx,
+                self.provider_mode,
+                self.provider_grouped_mlp_module.__name__,
+            )
 
         # ---- EP placement (P6) ----
         self.ep_group = None
@@ -128,6 +150,8 @@ class DeepseekV4MoE(nn.Module):
         self.local_num_routed_experts = base + (1 if self.ep_rank < remainder else 0)
         self.local_expert_start = (self.ep_rank * base) + min(self.ep_rank, remainder)
         self.local_expert_end = self.local_expert_start + self.local_num_routed_experts
+
+        self.grouped_experts = self._build_grouped_experts()
 
         # ---- router ----
         if self.use_hash_router:
@@ -198,6 +222,85 @@ class DeepseekV4MoE(nn.Module):
 
     # ------------------------------------------------------------------
 
+    def _build_grouped_experts(self):
+        if (
+            self.provider_grouped_mlp_module is None
+            or not self.moe_use_grouped_gemm
+            or self.local_num_routed_experts <= 0
+        ):
+            return None
+
+        if self._provider_config is None or self._provider_pg_collection is None:
+            logger.info(
+                "[DeepSeek-V4] MoE layer=%s provider grouped-gemm unavailable (missing config/pg_collection); fallback local.",
+                self.layer_idx,
+            )
+            return None
+
+        init_kwargs = {
+            "num_local_experts": self.local_num_routed_experts,
+            "config": self._provider_config,
+            "pg_collection": self._provider_pg_collection,
+        }
+        if self.provider_grouped_mlp_submodules is not None:
+            init_kwargs["submodules"] = self.provider_grouped_mlp_submodules
+
+        try:
+            module = self.provider_grouped_mlp_module(**init_kwargs)
+            logger.info(
+                "[DeepSeek-V4] MoE layer=%s provider grouped-gemm active via %s.",
+                self.layer_idx,
+                self.provider_grouped_mlp_module.__name__,
+            )
+            return module
+        except Exception as exc:
+            logger.warning(
+                "[DeepSeek-V4] MoE layer=%s provider grouped-gemm init failed (%s); fallback local.",
+                self.layer_idx,
+                exc,
+            )
+            return None
+
+    def _provider_grouped_forward(
+        self,
+        flat: torch.Tensor,
+        probs: torch.Tensor,
+        routing_map: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.grouped_experts is None or self.local_num_routed_experts <= 0:
+            return torch.zeros_like(flat)
+
+        per_expert_indices = []
+        per_expert_probs = []
+        token_count_list = []
+        for local_i in range(self.local_num_routed_experts):
+            global_i = self.local_expert_start + local_i
+            token_indices = routing_map[:, global_i].nonzero(as_tuple=True)[0]
+            token_count_list.append(int(token_indices.numel()))
+            if token_indices.numel() == 0:
+                continue
+            per_expert_indices.append(token_indices)
+            per_expert_probs.append(probs[token_indices, global_i])
+
+        if not per_expert_indices:
+            return torch.zeros_like(flat)
+
+        permuted_indices = torch.cat(per_expert_indices, dim=0)
+        permuted_hidden = flat.index_select(0, permuted_indices)
+        permuted_probs = torch.cat(per_expert_probs, dim=0).to(flat.dtype)
+        tokens_per_expert = torch.tensor(token_count_list, device=flat.device, dtype=torch.int64)
+
+        grouped_out, _ = self.grouped_experts(
+            permuted_hidden,
+            tokens_per_expert,
+            permuted_probs,
+        )
+        routed_out = torch.zeros_like(flat)
+        routed_out.index_add_(0, permuted_indices, grouped_out)
+        return routed_out
+
+    # ------------------------------------------------------------------
+
     def forward(
         self,
         hidden: torch.Tensor,
@@ -224,19 +327,21 @@ class DeepseekV4MoE(nn.Module):
         # the rest of the residual stream.
         probs = probs.to(hidden.dtype)
 
-        routed_out = torch.zeros_like(flat)
-
-        # Per-expert dispatch: gather tokens routed to expert i, run FFN,
-        # scatter-add weighted output.
-        for local_i, expert in enumerate(self.experts):
-            global_i = self.local_expert_start + local_i
-            mask_i = routing_map[:, global_i]  # [N]
-            if not mask_i.any():
-                continue
-            tokens_i = flat[mask_i]  # [n_i, D]
-            y_i = expert(tokens_i)  # [n_i, D]
-            w_i = probs[mask_i, global_i].unsqueeze(-1)  # [n_i, 1]
-            routed_out.index_add_(0, mask_i.nonzero(as_tuple=True)[0], y_i * w_i)
+        if self.grouped_experts is not None:
+            routed_out = self._provider_grouped_forward(flat, probs, routing_map)
+        else:
+            routed_out = torch.zeros_like(flat)
+            # Per-expert dispatch: gather tokens routed to expert i, run FFN,
+            # scatter-add weighted output.
+            for local_i, expert in enumerate(self.experts):
+                global_i = self.local_expert_start + local_i
+                mask_i = routing_map[:, global_i]  # [N]
+                if not mask_i.any():
+                    continue
+                tokens_i = flat[mask_i]  # [n_i, D]
+                y_i = expert(tokens_i)  # [n_i, D]
+                w_i = probs[mask_i, global_i].unsqueeze(-1)  # [n_i, 1]
+                routed_out.index_add_(0, mask_i.nonzero(as_tuple=True)[0], y_i * w_i)
 
         if self.ep_size > 1 and self.ep_group is not None:
             dist.all_reduce(routed_out, group=self.ep_group)
