@@ -10,13 +10,13 @@ import torch
 import torch.distributed as dist
 
 from primus.tools.preflight.global_vars import (
-    ITERATION,
     LOCAL_RANK,
     LOCAL_WORLD_SIZE,
     RANK,
-    WARMUP,
     WORLD_SIZE,
     get_hostnames,
+    get_iteration,
+    get_warmup,
 )
 from primus.tools.preflight.utility import create_dir, log
 
@@ -25,19 +25,21 @@ def run_square_gemm(args):
     sizes = [1024, 2048, 4096, 8192, 10240]
     latency_results = {}
     flops_results = {}
+    warmup = get_warmup()
+    iteration = get_iteration()
     for size in sizes:
         a = torch.randn((size, size), device=f"cuda:{LOCAL_RANK}", dtype=torch.bfloat16)
         b = torch.randn((size, size), device=f"cuda:{LOCAL_RANK}", dtype=torch.bfloat16)
         torch.cuda.synchronize()
-        for _ in range(WARMUP):
+        for _ in range(warmup):
             torch.matmul(a, b)
         torch.cuda.synchronize()
         start = time.time()
-        for _ in range(ITERATION):
+        for _ in range(iteration):
             torch.matmul(a, b)
         torch.cuda.synchronize()
         end = time.time()
-        t = (end - start) / ITERATION
+        t = (end - start) / iteration
         tflops = 2 * size * size * size / (t * 1e12)
         latency_results[f"{size}x{size}x{size}"] = t
         flops_results[f"{size}x{size}x{size}"] = tflops
