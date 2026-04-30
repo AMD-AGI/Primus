@@ -205,6 +205,36 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def test_qwen3_5_35B_A3B(self):
+        run_script(
+            self.__class__.__name__,
+            "qwen3_5_35B_A3B",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/qwen3_5_35B_A3B-BF16-pretrain.yaml",
+            env_override={},
+            extra_args=[
+                "--num_layers",
+                "4",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "8",
+                "--expert_model_parallel_size",
+                "8",
+                "--recompute_granularity",
+                "full",
+                "--recompute_method",
+                "block",
+                "--recompute_num_layers",
+                "0",
+                "--enable_primus_turbo",
+                "1",
+                "--use_turbo_attention",
+                "1",
+            ],
+        )
+
     def test_deepseek_v2_lite(self):
         run_script(
             self.__class__.__name__,
