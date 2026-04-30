@@ -6,12 +6,15 @@
 
 import os
 import socket
+import time
 from pathlib import Path
 
 import torch
 import torch.distributed as dist
 
 from primus.tools.preflight.global_vars import RANK, WORLD_SIZE
+
+DEFAULT_COMM_CLEANUP_DELAY_SEC = 2.0
 
 
 def log(msg):
@@ -44,6 +47,21 @@ def gather_hostnames():
     else:
         dist.gather_object(hostname, None, dst=0)
         return None
+
+
+def barrier_after_comm_destroy(delay_sec: float = DEFAULT_COMM_CLEANUP_DELAY_SEC):
+    """Global barrier + sleep after destroying NCCL/RCCL process groups.
+
+    When communicators are destroyed and recreated quickly (e.g. in test loops),
+    the underlying sockets may still be in TIME_WAIT or the remote side may not
+    have fully cleaned up.  This causes "Address already in use" errors on bind.
+
+    This function ensures all ranks have completed destruction (barrier) and then
+    waits a short period for the OS to release ports before the next group creation.
+    """
+    dist.barrier(device_ids=[torch.cuda.current_device()])
+    if delay_sec > 0:
+        time.sleep(delay_sec)
 
 
 def remove_file(file_path):

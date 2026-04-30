@@ -19,6 +19,7 @@ from primus.tools.preflight.global_vars import (
     get_hostnames,
 )
 from primus.tools.preflight.utility import (
+    barrier_after_comm_destroy,
     create_dir,
     extract_first_middle_last,
     extract_number,
@@ -95,6 +96,9 @@ def run_intra_node_comm(args):
 
             # destroy this parallel group
             dist.destroy_process_group(group)
+            barrier_after_comm_destroy(
+                getattr(args, "comm_cleanup_delay_sec", 2.0)
+            )
 
             all_latency_results = [None for _ in range(WORLD_SIZE)]
             all_bandwidth_results = [None for _ in range(WORLD_SIZE)]

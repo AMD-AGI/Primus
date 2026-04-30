@@ -76,6 +76,17 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         "If init times out, preflight will write the info report and exit with failure.",
     )
 
+    # Communicator cleanup delay (prevents "Address already in use" from rapid
+    # destroy/recreate cycles in NCCL/RCCL)
+    parser.add_argument(
+        "--comm-cleanup-delay-sec",
+        type=float,
+        default=2.0,
+        help="Delay (seconds) after destroying NCCL/RCCL process groups before "
+        "creating new ones.  Prevents 'Address already in use' errors from "
+        "socket port reuse races. Set to 0 to disable the delay (barrier only).",
+    )
+
     # Report output options
     parser.add_argument(
         "--dump-path",
