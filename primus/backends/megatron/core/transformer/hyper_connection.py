@@ -155,7 +155,7 @@ class HyperMixer(nn.Module):
         flat = x.flatten(-2)
         flat32 = flat.float()
         rsqrt = torch.rsqrt(flat32.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        logits = F.linear(flat32 * rsqrt, self.fn.weight)
+        logits = F.linear(flat32 * rsqrt, self.fn.weight.to(dtype=flat32.dtype))
         return logits
 
     # ---- public API ------------------------------------------------------
@@ -254,7 +254,7 @@ class HyperHead(nn.Module):
         """``x``: ``[..., K, D]`` → ``[..., D]``."""
         flat = x.flatten(-2).float()
         rsqrt = torch.rsqrt(flat.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        mixes = F.linear(flat * rsqrt, self.fn.weight)  # [..., K]
+        mixes = F.linear(flat * rsqrt, self.fn.weight.to(dtype=flat.dtype))  # [..., K]
         pre = torch.sigmoid(mixes * self.scale + self.base) + self.eps
         return (pre.unsqueeze(-1) * x).sum(dim=-2).to(x.dtype)
 

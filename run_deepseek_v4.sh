@@ -22,13 +22,15 @@ export PRIMUS_EP=${PRIMUS_EP:-4}
 
 # Keep this smoke config lightweight for quick bring-up.
 export PRIMUS_TOTAL_LAYERS=${PRIMUS_TOTAL_LAYERS:-8}
-export PRIMUS_SEQ_LENGTH=${PRIMUS_SEQ_LENGTH:-1024}
-export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-1024}
+export PRIMUS_SEQ_LENGTH=${PRIMUS_SEQ_LENGTH:-128}
+export PRIMUS_MAX_POSITION_EMBEDDINGS=${PRIMUS_MAX_POSITION_EMBEDDINGS:-128}
 export PRIMUS_NUM_EXPERTS=${PRIMUS_NUM_EXPERTS:-8}
 export PRIMUS_MOE_TOPK=${PRIMUS_MOE_TOPK:-2}
 export PRIMUS_MOE_FFN_HIDDEN_SIZE=${PRIMUS_MOE_FFN_HIDDEN_SIZE:-512}
+export PRIMUS_INDEX_TOPK=${PRIMUS_INDEX_TOPK:-8}
 export PRIMUS_COMPRESS_RATIOS=${PRIMUS_COMPRESS_RATIOS:-"[0,0,4,4,4,4,4,0]"}
 export PRIMUS_MOE_ENABLE_EXPERT_BIAS=${PRIMUS_MOE_ENABLE_EXPERT_BIAS:-False}
+export PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU=${PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU:-True}
 export PROFILE=${PROFILE:-False}
 export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-False}
 export TURBO_USE_GROUPED_MLP=${TURBO_USE_GROUPED_MLP:-False}
@@ -46,7 +48,7 @@ fi
 export EXP=${EXP:-examples/megatron/configs/MI355X/deepseek_v4_flash-BF16-pretrain.yaml}
 export BACKEND_PATH=${BACKEND_PATH:-"$(pwd)/third_party/Megatron-LM"}
 export PRIMUS_TEAM=${PRIMUS_TEAM:-amd}
-export PRIMUS_USER=${PRIMUS_USER:-tas-mi325x-$(date +%Y%m%d)}
+export PRIMUS_USER=${PRIMUS_USER:-tas-mi355x-$(date +%Y%m%d)}
 export PRIMUS_EXP_NAME=${PRIMUS_EXP_NAME:-deepseek_v4_smoke_${PRECISION_TYPE}_MBS${MBS}_GBS${GBS}_PP${PRIMUS_PP}_EP${PRIMUS_EP}}
 
 if [ ! -d "$BACKEND_PATH" ] || [ -z "$(ls -A "$BACKEND_PATH" 2>/dev/null)" ]; then
@@ -76,6 +78,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --moe_router_topk "$PRIMUS_MOE_TOPK" \
   --moe_router_enable_expert_bias "$PRIMUS_MOE_ENABLE_EXPERT_BIAS" \
   --moe_ffn_hidden_size "$PRIMUS_MOE_FFN_HIDDEN_SIZE" \
+  --index_topk "$PRIMUS_INDEX_TOPK" \
+  --v4_grouped_experts_support_clamped_swiglu "$PRIMUS_V4_GROUPED_EXPERTS_SUPPORT_CLAMPED_SWIGLU" \
   --compress_ratios "$PRIMUS_COMPRESS_RATIOS" \
   --mtp_num_layers 0 \
   --mock_data True \
@@ -87,6 +91,8 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --recompute_num_layers 0 \
   --recompute_granularity full \
   --recompute_method block \
+  --overlap_grad_reduce False \
+  --overlap_param_gather False \
   --disable_last_saving True \
   --disable_wandb True \
   --disable_tensorboard True \

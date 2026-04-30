@@ -332,6 +332,7 @@ class DeepseekV4Attention(nn.Module):
         out_bh = self._compute_attention_output(q_bh, k_bh, v_bh, full_mask)
         # back to [B, S, H, head_dim]
         out = out_bh.transpose(1, 2).contiguous()
+        out = out.to(dtype=dtype)
 
         # Output projection.
         out = out.reshape(B, S, self.num_heads * self.head_dim)
