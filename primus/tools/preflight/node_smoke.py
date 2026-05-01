@@ -379,16 +379,25 @@ def _measure_hbm_gbs(
 # ---------------------------------------------------------------------------
 
 
+# Regex (NOT substring) patterns matched case-insensitively against each
+# dmesg line. They MUST be valid Python regex -- if you only want a literal
+# substring (e.g. ``mce: ``), it's still a valid regex with no specials.
+# Why regex: real amdgpu failure lines look like
+#   ``amdgpu 0000:05:00.0: amdgpu_device_resume failed: -19``
+#   ``amdgpu: [drm] *ERROR* ring sdma0 timeout``
+# so we need ``amdgpu.*(error|fail|timeout)`` -- a substring match against
+# the literal pattern ``amdgpu.*error`` would essentially never fire.
 _DMESG_PATTERNS = (
-    "xid",
-    "hardware error",
-    "gpu reset",
-    "hung_task",
-    "hung task",
-    "page allocation failure",
-    "soft lockup",
-    "amdgpu.*error",
-    "mce: ",
+    r"\bxid\b",
+    r"hardware error",
+    r"gpu reset",
+    r"hung_task",
+    r"hung task",
+    r"page allocation failure",
+    r"soft lockup",
+    r"amdgpu.*(error|fail|timeout)",
+    r"\*error\*",          # [drm] *ERROR*
+    r"mce: ",
 )
 
 
@@ -428,11 +437,19 @@ def _collect_dmesg_errors(window_minutes: int = 15) -> Dict[str, Any]:
                 return out
             text = "\n".join(cp.stdout.splitlines()[-2000:])
 
+        import re
+
         matches: List[str] = []
-        lower_patterns = [p.lower() for p in _DMESG_PATTERNS]
+        # Pre-compile each pattern with re.IGNORECASE; a malformed regex is
+        # logged into ``out['pattern_errors']`` but never aborts the scan.
+        compiled: List[Any] = []
+        for p in _DMESG_PATTERNS:
+            try:
+                compiled.append(re.compile(p, re.IGNORECASE))
+            except re.error as e:
+                out.setdefault("pattern_errors", []).append(f"{p!r}: {e}")
         for line in text.splitlines():
-            ll = line.lower()
-            if any(p in ll for p in lower_patterns):
+            if any(pat.search(line) for pat in compiled):
                 matches.append(line)
                 if len(matches) >= 50:
                     break
