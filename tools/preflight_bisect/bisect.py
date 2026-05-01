@@ -4,7 +4,7 @@
 # Run from repo root (or any cwd; script resolves repo root for runner/ path).
 #
 # Usage (typical):
-#   export VENV_PATH=~/envs/preflight/.venv/bin/activate
+#   export VENV_ACTIVATE=~/envs/preflight/.venv/bin/activate
 #   cd /path/to/Primus
 #   python tools/preflight_bisect/bisect.py --nodelist "node[01-32]" -p gpus ...
 #
@@ -119,18 +119,16 @@ def run_trial(
     ]
     if args.partition:
         cmd.extend(["-p", args.partition])
+    # The new wrapper run_preflight_direct.sh does NOT accept "--env KEY=VALUE".
+    # Per-trial env overrides are propagated via srun --export. ALL keeps the
+    # caller's environment (notably VENV_ACTIVATE) intact; the trailing K=V
+    # pairs override / add on top. SLURM tokenizes --export on commas, so
+    # values must not contain ',' or whitespace (NCCL flags never do).
+    if args.preflight_env:
+        cmd.append("--export=ALL," + ",".join(args.preflight_env))
     cmd.append(str(runner))
-    # Use the space-separated form "--env KEY=VALUE" rather than the equals
-    # form "--env=KEY=VALUE" so runner/primus-cli-direct-preflight.sh recognizes
-    # --env as a runner-level option and consumes it. The equals form leaks past
-    # the runner's arg parser into the primus CLI, which does not accept --env
-    # and errors with "argument command: invalid choice: '--'".
-    for kv in args.preflight_env:
-        cmd.extend(["--env", kv])
     cmd.extend(
         [
-            "--",
-            "preflight",
             "--perf-test",
             "--report-file-name",
             f"trial-{trial_idx:03d}",
@@ -231,8 +229,8 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Environment:
-  Export VENV_PATH to your venv activate script before running (required by
-  runner/primus-cli-direct-preflight.sh). See docs/run-preflight-without-container.md.
+  Export VENV_ACTIVATE to your venv activate script before running (required by
+  runner/run_preflight_direct.sh). See docs/preflight-direct.md.
 
 Caveats:
   - If the hang only reproduces at full scale, all subsets may PASS -> SUSPECT_NODES empty.
@@ -274,13 +272,16 @@ Caveats:
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="Repeatable; passed as runner/primus-cli-direct-preflight.sh --env KEY=VALUE",
+        help=(
+            "Repeatable; propagated into each trial via "
+            "'srun --export=ALL,KEY=VALUE,...'. Values must not contain ',' or whitespace."
+        ),
     )
     p.add_argument(
         "--runner",
         type=Path,
         default=None,
-        help="Override path to primus-cli-direct-preflight.sh (default: repo runner/)",
+        help="Override path to run_preflight_direct.sh (default: repo runner/)",
     )
     p.add_argument(
         "--scancel-user-on-hang",
@@ -291,7 +292,16 @@ Caveats:
     if args.scancel_user_on_hang and args.max_concurrent_trials > 1:
         p.error("--scancel-user-on-hang is only supported with --max-concurrent-trials=1")
 
-    runner = args.runner or (_repo_root() / "runner" / "primus-cli-direct-preflight.sh")
+    if not os.environ.get("VENV_ACTIVATE"):
+        print(
+            "ERROR: VENV_ACTIVATE is not set. Export the path to your venv's "
+            "bin/activate before running, e.g.\n"
+            "  export VENV_ACTIVATE=~/envs/preflight/.venv/bin/activate",
+            file=sys.stderr,
+        )
+        return 2
+
+    runner = args.runner or (_repo_root() / "runner" / "run_preflight_direct.sh")
     if not runner.is_file():
         print(f"ERROR: runner not found: {runner}", file=sys.stderr)
         return 2
