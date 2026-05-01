@@ -5,7 +5,8 @@ export WANDB_API_KEY="${WANDB_API_KEY:-'your_wandb_api_key'}"  # make it your ow
 
 export CONTAINER_RUNTIME="podman"
 # export DOCKER_IMAGE="docker.io/tasimage/primus:pr-624-ainic"
-export DOCKER_IMAGE="docker.io/rocm/primus:v26.2"
+# export DOCKER_IMAGE="docker.io/rocm/primus:v26.2"
+export DOCKER_IMAGE="docker.io/tasimage/primus:pr-693"
 
 export NNODES=${NNODES:-4}
 export TRAIN_ITERS=10
@@ -37,17 +38,17 @@ export NCCL_IB_MERGE_NICS=1
 export NCCL_CROSS_NIC=0
 
 export MBS=4
-export GBS=512
-# export GBS=64
+# export GBS=512
+export GBS=128
 export SEQ_LENGTH=16384
 export PRIMUS_EP=${PRIMUS_EP:-8}
-export PRIMUS_PP=${PRIMUS_PP:-1}
-export PRIMUS_VPP=${PRIMUS_VPP:-1}
+export PRIMUS_PP=${PRIMUS_PP:-4}
+export PRIMUS_VPP=${PRIMUS_VPP:-2}
 export PRIMUS_CP=${PRIMUS_CP:-4}
 export PRIMUS_ETP=${PRIMUS_ETP:-1}
-export TURBO_DEEPEEP=${TURBO_DEEPEEP:-False}
+export TURBO_DEEPEEP=${TURBO_DEEPEEP:-True}
 export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-0}
-export DISABLE_PROFILER_ACTIVITY_CPU=${DISABLE_PROFILER_ACTIVITY_CPU:-True}
+export DISABLE_PROFILER_ACTIVITY_CPU=${DISABLE_PROFILER_ACTIVITY_CPU:-False}
 
 export PROFILE=False
 export HSA_NO_SCRATCH_RECLAIM=1
@@ -62,7 +63,7 @@ export PRIMUS_TURBO_AUTO_TUNE=${PRIMUS_TURBO_AUTO_TUNE:-0}
 export ENABLE_NUMA_BINDING=1
 export HSA_KERNARG_POOL_SIZE=12582912
 
-export USE_MEGATRON_FSDP=False
+export USE_MEGATRON_FSDP=true
 export MEGATRON_FSDP_ZERO_LEVEL=2 # 2, 3
 export PRETRAIN_TYPE=${PRETRAIN_TYPE:-BF16}
 if [ "$USE_MEGATRON_FSDP" = "True" ]; then
@@ -86,9 +87,8 @@ fi
 export PRIMUS_TEAM=amd
 PRIMUS_USER="tas-$(date +%Y%m%d)"
 export PRIMUS_USER
-# export PRIMUS_EXP_NAME=deepseek_proxy-type_$PRETRAIN_TYPE-mbs_$MBS-gbs_$GBS-seq_length_$SEQ_LENGTH-cp_$PRIMUS_CP-etp_$PRIMUS_ETP-ep_$PRIMUS_EP-pp_$PRIMUS_PP-turbodeepep_$TURBO_DEEPEEP
-export PRIMUS_EXP_NAME=deepseek_proxy-type_$PRETRAIN_TYPE-FSDP_${USE_MEGATRON_FSDP}-zero${MEGATRON_FSDP_ZERO_LEVEL}-mbs_$MBS-gbs_$GBS-seq_length_$SEQ_LENGTH-cp_$PRIMUS_CP-etp_$PRIMUS_ETP-ep_$PRIMUS_EP-pp_$PRIMUS_PP-turbodeepep_$TURBO_DEEPEEP
-export PRIMUS_EXP_NAME=debug
+export PRIMUS_EXP_NAME=deepseek_proxy-type_$PRETRAIN_TYPE-FSDP_${USE_MEGATRON_FSDP}-zero${MEGATRON_FSDP_ZERO_LEVEL}-mbs_$MBS-gbs_$GBS-seq_length_$SEQ_LENGTH-cp_$PRIMUS_CP-etp_$PRIMUS_ETP-ep_$PRIMUS_EP-pp_$PRIMUS_PP-vpp_$PRIMUS_VPP-turbodeepep_$TURBO_DEEPEEP
+# export PRIMUS_EXP_NAME=debug
 
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
