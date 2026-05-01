@@ -167,7 +167,7 @@ class DeepseekV4MTPBlock(nn.Module):
             stream = x
             if self.hc_mult > 1:
                 stream = stream.unsqueeze(2).expand(B, S, self.hc_mult, D).contiguous()
-            stream = layer(stream, position_ids, token_ids=token_ids)
+            stream = layer(stream, position_ids=position_ids, token_ids=token_ids)
             if self.hc_mult > 1:
                 stream = head(stream)
             outputs.append(self.final_layernorm(stream))

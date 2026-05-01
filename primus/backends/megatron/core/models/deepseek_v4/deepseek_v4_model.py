@@ -168,8 +168,12 @@ class DeepseekV4Model(LanguageModule):
     ):
         """Forward pass for DeepSeek-V4.
 
-        ``input_ids`` are additionally stashed on the decoder for hash-routed
-        MoE layers.
+        Plan-2 P15: ``input_ids`` are now passed to the decoder as the
+        ``token_ids`` forward kwarg (replacing the ``decoder._v4_token_ids``
+        attribute stash). Hash-routed MoE layers consume them directly via
+        the standard kwargs propagation chain
+        ``model.forward -> decoder.forward -> layer.forward -> mlp.forward
+        -> hash_router.forward``.
         """
         if decoder_input is None:
             if self.pre_process:
@@ -184,18 +188,13 @@ class DeepseekV4Model(LanguageModule):
             else:
                 decoder_input = None
 
-        decoder = getattr(self, "decoder", None)
-        if decoder is not None:
-            decoder._v4_token_ids = input_ids
-        try:
-            hidden_states = self.decoder(
-                hidden_states=decoder_input,
-                attention_mask=attention_mask,
-                **kwargs,
-            )
-        finally:
-            if decoder is not None:
-                decoder._v4_token_ids = None
+        hidden_states = self.decoder(
+            hidden_states=decoder_input,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            token_ids=input_ids,
+            **kwargs,
+        )
 
         if not self.post_process:
             return hidden_states

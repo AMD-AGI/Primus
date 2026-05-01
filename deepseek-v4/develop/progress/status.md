@@ -247,13 +247,13 @@
 
 | | Task | commit | date | note |
 |---|---|---|---|---|
-| [ ] | `DeepseekV4HybridLayer(TransformerLayer)` with HC residual override | | | replaces `GraphableMegatronModule` plain layer |
-| [ ] | `DeepseekV4TransformerBlock(TransformerBlock)` | | | reuses upstream PP / recompute / SP |
-| [ ] | Lift / lower helpers carry `[S,B,K,D]` across PP via `[S*K,B,D]` packing | | | fixes C1 |
-| [ ] | `HyperHead` only on the post_process stage | | | |
-| [ ] | Caller-supplied `position_ids` honored | | | fixes C3 |
-| [ ] | Token-ids removed from `decoder` attribute stash | | | fixes C2 |
-| [ ] | PP=1 vs PP=2 vs PP=4 equivalence on 4L V4 toy (G6) | | | |
+| [x] | `DeepseekV4HybridLayer(TransformerLayer)` with HC residual override | (this commit) | 2026-05-01 | parent class switched from `GraphableMegatronModule` to `TransformerLayer` (`MegatronModule.__init__` bypass — V4's submodule contract differs from upstream); submodule fields renamed to upstream-canonical names (`input_layernorm` / `self_attention` / `pre_mlp_layernorm` / `mlp`). `DeepseekV4HybridLayerSubmodules` extends `TransformerLayerSubmodules` with `attn_hc` / `ffn_hc` HC-mixer hooks. Forward accepts `(hidden_states, attention_mask, *, position_ids, token_ids, **kwargs)` so the layer plugs into `MultiTokenPredictionLayer` (P16) without bespoke adapters |
+| [x] | `DeepseekV4TransformerBlock(TransformerBlock)` | (this commit) | 2026-05-01 | parent class switched to `TransformerBlock` (`MegatronModule.__init__` bypass — V4 has its own dispatcher / lift-lower path). Type identity unlocks Megatron `isinstance` checks + sharded-state-dict integration; CPU instantiability preserved |
+| [x] | Lift / lower helpers carry `[S,B,K,D]` across PP via `[S*K,B,D]` packing | (this commit) | 2026-05-01 | `_lift_streams_in(hidden_states, pre_process, hc_mult)` and `_lower_streams_out(x, post_process, hc_mult)` extracted as module-level helpers. First PP stage lifts `[S, B, D] -> [B, S, K, D]`; intermediate stages preserve K via `[S*K, B, D]` send/recv; final stage collapses with HyperHead and transposes to `[S, B, D]`. Fixes C1 |
+| [x] | `HyperHead` only on the post_process stage | (this commit) | 2026-05-01 | `DeepseekV4TransformerBlock.__init__` only builds `self.hyper_head` when `self.post_process and hc_mult > 1`; non-final stages keep `hyper_head = None` and forward the multi-stream form across PP P2P |
+| [x] | Caller-supplied `position_ids` honored | (this commit) | 2026-05-01 | `DeepseekV4Model.forward` passes `position_ids=` to the decoder; `DeepseekV4TransformerBlock.forward` consumes it as a kwarg and forwards to each layer; `DeepseekV4HybridLayer.forward` falls back to `arange(S)` only when omitted (CPU smokes / unit tests). Fixes C3 |
+| [x] | Token-ids removed from `decoder` attribute stash | (this commit) | 2026-05-01 | `DeepseekV4Model.forward` no longer assigns `decoder._v4_token_ids`; `input_ids` is passed to the decoder as `token_ids=` kwarg, then propagated layer -> mlp -> hash router. AST audit in `test_v4_block_pp.py::test_model_forward_does_not_set_decoder_v4_token_ids_attribute` enforces the attribute stash stays gone. Fixes C2 |
+| [ ] | PP=1 vs PP=2 vs PP=4 equivalence on 4L V4 toy (G6) | | | requires distributed init + multi-rank harness; tracked into **P19** distributed re-validation. CPU-only G6 sub-gate already covered: `test_v4_block_pp.py::test_lift_lower_multi_stream_intermediate_roundtrip` proves `_lift_streams_in` after `_lower_streams_out` is bit-exact, which is the math contract a real PP run depends on |
 
 ## Phase 16 (v3) — MTP integration
 
@@ -329,6 +329,6 @@
 |  | (example) HC 4-stream PP send/recv interface does not directly support 4D tensor | tracked in plan-2 | Plan-2 P15: lift `[S,B,K,D]` to `[S*K,B,D]` for PP P2P; revisit a 4D PP send path in P21 |
 | 2026-05-01 | Current attention does not match real V4 (single-latent KV / q_norm / kv_norm / grouped O all missing) | open | Plan-2 P13 rebases on `MLASelfAttention` and lands the missing pieces |
 | 2026-05-01 | HashRouter has no learnable gate weight; clamped SwiGLU clamps post-mul instead of pre-mul; `w1`/`w3` fused | resolved (P14 phase-1) | both routers now share a learnable `weight` Parameter; activation rewritten as pre-multiplication clamp; `ClampedSwiGLUMLP` uses separate `w1` / `w3` Linears (state-dict parity with HF) |
-| 2026-05-01 | Custom V4 block / layer / MoE bypass `TransformerBlock` / `TransformerLayer` / `MoELayer` | open | Plan-2 P14–P15 rebase onto Megatron's standard parents |
-| 2026-05-01 | Token-IDs propagation via `decoder._v4_token_ids` attribute | open | Plan-2 P14–P15 thread token_ids as a forward kwarg |
+| 2026-05-01 | Custom V4 block / layer / MoE bypass `TransformerBlock` / `TransformerLayer` / `MoELayer` | resolved (P14 phase-2 + P15) | `DeepseekV4MoE` is a `MegatronModule` (P14 phase-2); `DeepseekV4HybridLayer` is a `TransformerLayer` and `DeepseekV4TransformerBlock` is a `TransformerBlock` (P15). Aux-loss / z-loss inheritance via `TopKRouter` subclassing remains tracked into P19 |
+| 2026-05-01 | Token-IDs propagation via `decoder._v4_token_ids` attribute | resolved (P15) | `DeepseekV4Model.forward` now passes `token_ids=input_ids` directly to the decoder; AST audit gate prevents regressions |
 | 2026-05-01 | No state-dict adapter / V4-Flash safetensors cannot be loaded into the Primus model | open | Plan-2 P17 lands the adapter + numerical-alignment gate |

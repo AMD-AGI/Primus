@@ -374,14 +374,14 @@ def _build_hybrid_layer_spec(
     hc_mult = int(config.hc_mult)
 
     layer_submodules = DeepseekV4HybridLayerSubmodules(
-        attn_norm=_build_norm_spec(config=config, provider=provider),
-        attention=_build_attention_spec(
+        input_layernorm=_build_norm_spec(config=config, provider=provider),
+        self_attention=_build_attention_spec(
             compress_ratio=compress_ratio,
             config=config,
             provider=provider,
         ),
-        ffn_norm=_build_norm_spec(config=config, provider=provider),
-        ffn=_build_ffn_spec(
+        pre_mlp_layernorm=_build_norm_spec(config=config, provider=provider),
+        mlp=_build_ffn_spec(
             config=config,
             provider=provider,
             layer_idx=layer_idx,
