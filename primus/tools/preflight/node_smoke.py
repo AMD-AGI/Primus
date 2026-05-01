@@ -88,13 +88,32 @@ def _ts() -> str:
     return time.strftime("%H:%M:%S")
 
 
+def _short_name(h: str) -> str:
+    """Return the leading short-hostname segment.
+
+    SLURM tools (`scontrol show hostnames`, `srun --nodelist=`,
+    `srun --exclude=`) all operate on short hostnames, so we normalize
+    everywhere so the produced ``passing_nodes.txt`` / ``failing_nodes.txt``
+    can be piped straight into them. ``socket.gethostname()`` returns the
+    FQDN on some clusters, hence this helper.
+    """
+    if not h:
+        return h
+    return h.split(".", 1)[0]
+
+
+def _this_host_short() -> str:
+    """This node's short hostname (first segment of socket.gethostname())."""
+    return _short_name(socket.gethostname())
+
+
 def _log(msg: str) -> None:
-    print(f"[{_ts()}][node-smoke][{socket.gethostname()}] {msg}", flush=True)
+    print(f"[{_ts()}][node-smoke][{_this_host_short()}] {msg}", flush=True)
 
 
 def _warn(msg: str) -> None:
     print(
-        f"[{_ts()}][node-smoke][{socket.gethostname()}] WARN: {msg}",
+        f"[{_ts()}][node-smoke][{_this_host_short()}] WARN: {msg}",
         file=sys.stderr,
         flush=True,
     )
@@ -1062,7 +1081,10 @@ def _cmd_per_gpu(ns: argparse.Namespace) -> int:
 
 def _cmd_run(ns: argparse.Namespace) -> int:
     """Per-node entry: orchestrate Tier 1 + optional Tier 2 + write JSON."""
-    host = socket.gethostname()
+    # Always store the short hostname so consumers (passing_nodes.txt /
+    # failing_nodes.txt and SLURM tools that read them) get a name they
+    # can use directly.
+    host = _this_host_short()
     node_rank = int(os.environ.get("NODE_RANK", os.environ.get("SLURM_NODEID", "0")))
     expected_gpus = ns.expected_gpus
     if expected_gpus is None:
@@ -1329,22 +1351,68 @@ def _cmd_aggregate(ns: argparse.Namespace) -> int:
                 }
             )
 
-    seen_hosts = {n.get("host", "") for n in nodes}
-    if expected is not None and len(seen_hosts) < expected:
-        # We don't necessarily know the missing hostnames; emit a marker entry.
-        for i in range(expected - len(seen_hosts)):
-            nodes.append(
-                {
-                    "host": f"<missing-{i}>",
-                    "status": "FAIL",
-                    "fail_reasons": [
-                        f"no JSON received within {ns.wait_timeout_sec}s "
-                        f"(expected_nodes={expected}, found={len(seen_hosts)})"
-                    ],
-                    "duration_sec": 0,
-                    "node_rank": -1,
-                }
+    # Normalize every loaded ``host`` to its short form so legacy JSON files
+    # that hold an FQDN (older runs of node_smoke) still produce SLURM-ready
+    # passing/failing lists.
+    for n in nodes:
+        n["host"] = _short_name(str(n.get("host", "")))
+
+    # Optional: an explicit expected hostname list (one per line). When
+    # provided, we name missing nodes by their real short hostname instead
+    # of synthetic ``<missing-N>`` placeholders, so the failing nodes list
+    # is directly usable with ``srun --exclude=``.
+    expected_hosts_short: List[str] = []
+    nodelist_file = getattr(ns, "expected_nodelist_file", None)
+    if nodelist_file:
+        try:
+            with open(nodelist_file, "r", encoding="utf-8") as f:
+                expected_hosts_short = [
+                    _short_name(line.strip())
+                    for line in f
+                    if line.strip()
+                ]
+            _log(
+                f"loaded {len(expected_hosts_short)} expected hostnames from "
+                f"{nodelist_file}"
             )
+        except Exception as e:
+            _warn(f"failed to read --expected-nodelist-file {nodelist_file}: {e}")
+
+    seen_hosts_short = {n.get("host", "") for n in nodes}
+
+    if expected_hosts_short:
+        # An explicit list always wins over --expected-nodes for both the
+        # count and (more importantly) the identity of missing nodes.
+        if expected is None or expected != len(expected_hosts_short):
+            expected = len(expected_hosts_short)
+        missing_hosts = sorted(set(expected_hosts_short) - seen_hosts_short)
+        for h in missing_hosts:
+            nodes.append({
+                "host": h,
+                "status": "FAIL",
+                "fail_reasons": [
+                    f"no JSON received within {ns.wait_timeout_sec}s "
+                    f"(expected hostname '{h}' from --expected-nodelist-file)"
+                ],
+                "duration_sec": 0,
+                "node_rank": -1,
+            })
+    elif expected is not None and len(seen_hosts_short) < expected:
+        # Fallback: we know the count but not the identities -> emit
+        # synthetic placeholders. These intentionally do NOT land in
+        # passing/failing txt files (see _is_real_host below).
+        for i in range(expected - len(seen_hosts_short)):
+            nodes.append({
+                "host": f"<missing-{i}>",
+                "status": "FAIL",
+                "fail_reasons": [
+                    f"no JSON received within {ns.wait_timeout_sec}s "
+                    f"(expected_nodes={expected}, "
+                    f"found={len(seen_hosts_short)})"
+                ],
+                "duration_sec": 0,
+                "node_rank": -1,
+            })
 
     # Sort by node_rank if present, otherwise by hostname.
     def _key(n: Dict[str, Any]):
@@ -1662,6 +1730,12 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Number of nodes expected to report. Missing nodes are FAIL.")
     pa.add_argument("--wait-timeout-sec", type=int, default=60,
                     help="How long to wait for all expected JSONs to land before aggregating anyway.")
+    pa.add_argument("--expected-nodelist-file", type=str, default=None,
+                    help="Optional file with one expected (short) hostname per line. "
+                         "When provided, missing nodes are reported with their real "
+                         "hostname instead of synthetic <missing-N> placeholders, and "
+                         "are written to failing_nodes.txt directly. The runner script "
+                         "auto-populates this from `scontrol show hostnames` under SLURM.")
     pa.set_defaults(func=_cmd_aggregate)
 
     # ---- _per_gpu (internal) ----

@@ -159,11 +159,35 @@ fi
 ###############################################################################
 ec_agg=0
 if [[ "${NODE_RANK}" == "0" && "$RUN_AGGREGATE" == "1" ]]; then
+    # Resolve SLURM's compressed nodelist (e.g. "tus1-p3-g[14,15,25]") into
+    # one short hostname per line, so the aggregator can name nodes that
+    # never produced a JSON (e.g. tasks marked "unknown" by srun) instead of
+    # falling back to <missing-N> placeholders. Best effort: if scontrol is
+    # unavailable or fails (non-SLURM run, container without slurm-client),
+    # we silently fall back to the count-only behaviour.
+    EXPECTED_NODELIST_FILE=""
+    if [[ -n "${SLURM_JOB_NODELIST:-}" ]] && command -v scontrol >/dev/null 2>&1; then
+        _candidate="${DUMP_PATH}/expected_nodes.txt"
+        if scontrol show hostnames "$SLURM_JOB_NODELIST" > "$_candidate" 2>/dev/null \
+                && [[ -s "$_candidate" ]]; then
+            EXPECTED_NODELIST_FILE="$_candidate"
+            log "Resolved expected nodelist ($(wc -l < "$EXPECTED_NODELIST_FILE") nodes) -> $EXPECTED_NODELIST_FILE"
+        else
+            log "WARN: 'scontrol show hostnames' failed; aggregator will use <missing-N> for nodes that never reported"
+            rm -f "$_candidate"
+        fi
+    fi
+
     log "Aggregating: expected_nodes=$NNODES wait_timeout_sec=$WAIT_TIMEOUT_SEC"
-    python -m primus.tools.preflight.node_smoke aggregate \
-        --dump-path "$DUMP_PATH" \
-        --expected-nodes "$NNODES" \
-        --wait-timeout-sec "$WAIT_TIMEOUT_SEC" 3>&- || ec_agg=$?
+    AGG_ARGS=(
+        --dump-path "$DUMP_PATH"
+        --expected-nodes "$NNODES"
+        --wait-timeout-sec "$WAIT_TIMEOUT_SEC"
+    )
+    if [[ -n "$EXPECTED_NODELIST_FILE" ]]; then
+        AGG_ARGS+=(--expected-nodelist-file "$EXPECTED_NODELIST_FILE")
+    fi
+    python -m primus.tools.preflight.node_smoke aggregate "${AGG_ARGS[@]}" 3>&- || ec_agg=$?
 
     REPORT_MD="${DUMP_PATH}/smoke_report.md"
     PASS_TXT="${DUMP_PATH}/passing_nodes.txt"
