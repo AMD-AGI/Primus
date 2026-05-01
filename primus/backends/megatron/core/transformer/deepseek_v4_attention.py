@@ -8,11 +8,12 @@
 DeepSeek-V4 attention.
 
 Plan-2 P13 — *faithful* attention rooted on Megatron's
-``MLASelfAttention``. The dense (``compress_ratio == 0``) path
-reproduces the math of the released V4-Flash checkpoint:
+``MLASelfAttention``. The released ``DeepSeek-V4-Flash`` checkpoint is
+reproduced for **all three** layer types (``compress_ratio in {0, 4, 128}``)
+inside a single attention class:
 
 * Single-latent KV: a single ``linear_kv`` projection ``hidden -> head_dim``
-  produces both K and V, which are broadcast across all query heads.
+  produces both K and V, broadcast across all query heads.
 * Per-head ``q_rms``: a parameter-less RMS normalization on ``head_dim``
   applied AFTER ``linear_q_up_proj`` and BEFORE partial RoPE — matches
   the ``inference/model.py`` reference exactly.
@@ -22,18 +23,18 @@ reproduces the math of the released V4-Flash checkpoint:
   zero value, joined into the softmax. Drops the column after softmax
   so the value-weighted sum is unaffected; the head can still spend mass
   on the sink as a "no attention" fallback.
+* Compressed branches (``compress_ratio > 0``) fold their compressor
+  (and indexer for CSA) in as :class:`Compressor` / :class:`Indexer`
+  spec submodules; the dense local SWA branch and the compressed branch
+  are softmax-joined together so the attention sink is shared across
+  both paths.
 * Field names mirror MLA's canonical layout (``linear_q_down_proj``,
   ``linear_q_up_proj``, ``q_layernorm``, ``kv_layernorm``) plus the V4
-  extras (``linear_kv``, ``linear_o_a``, ``linear_o_b``, ``attn_sink``)
-  so the state-dict adapter (P17) can map the released safetensors keys
-  (``layers.{i}.attn.{wq_a,wq_b,wkv,q_norm,kv_norm,wo_a,wo_b,attn_sink}``)
-  in one straightforward table.
-
-For now the compressed branches (``compress_ratio in {4, 128}``) continue
-to ride on the plan-1 :class:`CSAAttention` / :class:`HCAAttention`
-classes (which inherit from :class:`_LegacyDeepseekV4Attention` below).
-The plan-2 follow-up commit folds them into this class as
-``compressor`` / ``indexer`` spec submodules.
+  extras (``linear_kv``, ``linear_o_a``, ``linear_o_b``, ``attn_sink``,
+  ``compressor``, ``indexer``) so the state-dict adapter (P17) can map
+  the released safetensors keys
+  (``layers.{i}.attn.{wq_a,wq_b,wkv,q_norm,kv_norm,wo_a,wo_b,attn_sink,
+  compressor.*,indexer.*}``) in one straightforward table.
 
 Forward signature:
 
@@ -51,7 +52,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -61,13 +62,20 @@ from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
     DeepSeekV4TransformerConfig,
 )
-from primus.backends.megatron.core.transformer.attn_sink import AttentionSink
-from primus.backends.megatron.core.transformer.dual_rope import DualRoPE
+from primus.backends.megatron.core.transformer.compressor import Compressor
+from primus.backends.megatron.core.transformer.dual_rope import (
+    DualRoPE,
+    apply_interleaved_partial_rope,
+)
+from primus.backends.megatron.core.transformer.indexer import Indexer
 from primus.backends.megatron.core.transformer.sliding_window_kv import (
     sliding_window_causal_mask,
 )
 
 logger = logging.getLogger(__name__)
+
+
+_SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +103,8 @@ class DeepseekV4AttentionSubmodules:
     * ``linear_o_a``         : ``(n_heads * head_dim / o_groups) -> o_groups * o_lora_rank``
     * ``linear_o_b``         : ``o_groups * o_lora_rank -> hidden``
     * ``attn_sink``          : :class:`AttentionSink` (per-head learnable scalar)
+    * ``compressor``         : :class:`Compressor` (compress_ratio > 0 only)
+    * ``indexer``            : :class:`Indexer`    (compress_ratio == 4 only)
 
     When the spec provider supplies ``linear_proj`` (instead of grouped
     ``linear_o_a`` / ``linear_o_b``) the attention falls back to MLA's
@@ -111,6 +121,8 @@ class DeepseekV4AttentionSubmodules:
     q_layernorm: Optional[Union[ModuleSpec, type]] = None
     kv_layernorm: Optional[Union[ModuleSpec, type]] = None
     attn_sink: Optional[Union[ModuleSpec, type]] = None
+    compressor: Optional[Union[ModuleSpec, type]] = None
+    indexer: Optional[Union[ModuleSpec, type]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -173,8 +185,26 @@ def _per_head_rms_norm(x: torch.Tensor, *, eps: float) -> torch.Tensor:
     return (x32 * rsqrt).to(in_dtype)
 
 
+def _build_local_rms_norm(dim: int, *, eps: float) -> nn.Module:
+    """Tiny CPU-friendly RMSNorm used as a fallback when no spec is given."""
+
+    class _RMSNorm(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(dim))
+            self.eps = eps
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            in_dtype = x.dtype
+            x32 = x.float()
+            rsqrt = torch.rsqrt(x32.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+            return (x32 * rsqrt).to(in_dtype) * self.weight
+
+    return _RMSNorm()
+
+
 # ---------------------------------------------------------------------------
-# Plan-2 DeepseekV4Attention (faithful, MLA-rooted, dense-only)
+# DeepseekV4Attention (faithful, MLA-rooted, dense + CSA + HCA)
 # ---------------------------------------------------------------------------
 
 
@@ -192,6 +222,13 @@ class DeepseekV4Attention(MLASelfAttention):
       ``linear_o_a`` / ``linear_o_b`` (when ``config.o_lora_rank > 0``).
     * V4 adds a per-head parameter-less ``q_rms`` and a learnable
       ``attn_sink``.
+    * V4 layers come in three flavours selected by ``compress_ratio``:
+
+      * ``0``   — dense / SWA over local KV.
+      * ``128`` — HCA: local SWA *plus* a fully-visible compressed pool
+        (Compressor in non-overlap mode).
+      * ``4``   — CSA: local SWA *plus* a per-query top-K selection over
+        a compressed pool (Compressor in overlap mode + Indexer).
 
     Because the parent's ``__init__`` builds modules we don't want, we
     skip the MLA / Attention init chain and call ``nn.Module.__init__``
@@ -215,15 +252,10 @@ class DeepseekV4Attention(MLASelfAttention):
         # working in the Megatron stack.
         nn.Module.__init__(self)
 
-        if compress_ratio != 0:
-            # Plan-2 P13 first commit lands only the dense path here.
-            # CSA / HCA still ride on _LegacyDeepseekV4Attention until the
-            # compressor / indexer spec submodules are folded into this
-            # class in a P13 follow-up.
+        if compress_ratio not in _SUPPORTED_COMPRESS_RATIOS:
             raise ValueError(
-                f"DeepseekV4Attention currently supports compress_ratio == 0 only "
-                f"(got {compress_ratio}). Use the legacy CSA / HCA classes for "
-                f"compressed branches."
+                f"DeepseekV4Attention supports compress_ratio in "
+                f"{_SUPPORTED_COMPRESS_RATIOS} (got {compress_ratio})."
             )
 
         hidden_size = int(config.hidden_size)
@@ -371,6 +403,89 @@ class DeepseekV4Attention(MLASelfAttention):
         else:
             self.attn_sink_module = None
 
+        # ---- compressor / indexer (compressed branches only) ----
+        self.compressor: Optional[nn.Module] = None
+        self.indexer: Optional[nn.Module] = None
+        if self.compress_ratio > 0:
+            self.compressor = self._build_compressor(submodules.compressor)
+            if self.compress_ratio == 4:
+                self.indexer = self._build_indexer(submodules.indexer)
+
+    # ------------------------------------------------------------------
+    # construction helpers (compressed branches)
+    # ------------------------------------------------------------------
+
+    def _build_compressor(self, spec: Optional[Union[ModuleSpec, type]]) -> nn.Module:
+        """Build the V4 :class:`Compressor` for compressed branches.
+
+        Plan-1 conventions (kept under V4): ``ratio=4`` → overlap mode
+        (CSA), ``ratio=128`` → non-overlap mode (HCA). The released
+        checkpoint hard-codes ``coff=2`` for overlap (CSA) and ``coff=1``
+        for non-overlap (HCA); :class:`Compressor` enforces this through
+        its own ``overlap`` argument.
+        """
+        if spec is None:
+            return Compressor(
+                hidden_size=self.hidden_size,
+                head_dim=self.head_dim,
+                ratio=self.compress_ratio,
+                overlap=(self.compress_ratio == 4),
+            )
+        try:
+            return build_module(
+                spec,
+                hidden_size=self.hidden_size,
+                head_dim=self.head_dim,
+                ratio=self.compress_ratio,
+                overlap=(self.compress_ratio == 4),
+            )
+        except Exception as exc:
+            logger.warning(
+                "DeepSeek-V4 compressor submodule init failed (%s); using local Compressor.",
+                exc,
+            )
+            return Compressor(
+                hidden_size=self.hidden_size,
+                head_dim=self.head_dim,
+                ratio=self.compress_ratio,
+                overlap=(self.compress_ratio == 4),
+            )
+
+    def _build_indexer(self, spec: Optional[Union[ModuleSpec, type]]) -> nn.Module:
+        """Build the V4 :class:`Indexer` for the CSA branch."""
+        index_topk = int(self.config.index_topk)
+        index_head_dim = int(self.config.index_head_dim)
+        index_n_heads = int(self.config.index_n_heads)
+        if spec is None:
+            return Indexer(
+                hidden_size=self.hidden_size,
+                index_head_dim=index_head_dim,
+                index_n_heads=index_n_heads,
+                index_topk=index_topk,
+                compress_ratio=self.compress_ratio,
+            )
+        try:
+            return build_module(
+                spec,
+                hidden_size=self.hidden_size,
+                index_head_dim=index_head_dim,
+                index_n_heads=index_n_heads,
+                index_topk=index_topk,
+                compress_ratio=self.compress_ratio,
+            )
+        except Exception as exc:
+            logger.warning(
+                "DeepSeek-V4 indexer submodule init failed (%s); using local Indexer.",
+                exc,
+            )
+            return Indexer(
+                hidden_size=self.hidden_size,
+                index_head_dim=index_head_dim,
+                index_n_heads=index_n_heads,
+                index_topk=index_topk,
+                compress_ratio=self.compress_ratio,
+            )
+
     # ------------------------------------------------------------------
     # internals
     # ------------------------------------------------------------------
@@ -403,41 +518,61 @@ class DeepseekV4Attention(MLASelfAttention):
         return kv.view(B, S, 1, self.head_dim)
 
     def _apply_rope_q_k(self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor):
-        """Apply partial RoPE (last ``rotary_dim`` channels) to Q and K."""
+        """Apply partial RoPE (last ``rotary_dim`` channels) to Q and K
+        using the LAYER's compress_ratio (so CSA/HCA use the compress base
+        + YaRN; dense uses the main base)."""
         q = self.rope.apply_rope(q, position_ids=position_ids, compress_ratio=self.compress_ratio)
         k = self.rope.apply_rope(k, position_ids=position_ids, compress_ratio=self.compress_ratio)
         return q, k
+
+    def _local_mask(self, S: int, *, device, dtype) -> torch.Tensor:
+        """Mask for the local (SWA or full causal) branch.
+
+        ``attn_sliding_window > 0`` enables sliding-window; ``0`` (the
+        default for unit tests / configs without SWA) gives full causal.
+        """
+        window = self.attn_sliding_window if self.attn_sliding_window > 0 else 0
+        if window > 0:
+            return sliding_window_causal_mask(S, window, device=device, dtype=dtype)
+        return sliding_window_causal_mask(S, S, device=device, dtype=dtype)
+
+    def _append_sink_softmax(self, logits: torch.Tensor) -> torch.Tensor:
+        """Numerically-stable softmax with optional virtual-sink column.
+
+        ``logits`` shape is ``[B, H, ..., Sk]`` — the head axis is at
+        ``dim=1``. Returns probabilities on the *real* keys (sink column
+        dropped) of the same shape as ``logits``.
+        """
+        if self.attn_sink is None:
+            logits = logits - logits.amax(dim=-1, keepdim=True).detach()
+            return logits.softmax(dim=-1)
+
+        # Build a sink column that broadcasts over all dims except the
+        # head axis (dim=1) and the key axis (dim=-1).
+        ndim = logits.dim()
+        view_shape = [1] * ndim
+        view_shape[1] = self.num_heads
+        view_shape[-1] = 1
+        target_shape = list(logits.shape[:-1]) + [1]
+        sink_col = self.attn_sink.float().view(*view_shape).expand(*target_shape)
+        logits_aug = torch.cat([logits, sink_col], dim=-1)
+        logits_aug = logits_aug - logits_aug.amax(dim=-1, keepdim=True).detach()
+        probs = logits_aug.softmax(dim=-1)
+        return probs[..., :-1]
 
     def _attention_forward(
         self,
         q: torch.Tensor,  # [B, H, Sq, head_dim]
         k: torch.Tensor,  # [B, H, Sk, head_dim]
         v: torch.Tensor,  # [B, H, Sk, head_dim]
-        attn_mask: torch.Tensor,  # [Sq, Sk] additive
+        attn_mask: torch.Tensor,  # [Sq, Sk] additive (broadcasts over B,H)
     ) -> torch.Tensor:
-        """Eager scaled-dot-product attention with optional attn_sink.
-
-        Math mirrors ``inference/model.py``: when ``self.attn_sink`` is
-        non-None, a per-head learnable scalar is appended as a virtual
-        key column with value zero. Softmax runs over ``[real_keys, sink]``
-        but only the ``real_keys`` probabilities are used in the
-        value-weighted sum. The dropped sink column lets each head spend
-        attention mass on "no real key" without distorting the value sum.
-        """
+        """Eager scaled-dot-product attention with optional attn_sink
+        for the dense / HCA paths (single key axis)."""
         scale = self._attention_scale()
         logits = torch.matmul(q.float(), k.float().transpose(-2, -1)) * scale
         logits = logits + attn_mask
-
-        if self.attn_sink is not None:
-            B, H, Sq, _ = logits.shape
-            sink_col = self.attn_sink.float().view(1, H, 1, 1).expand(B, H, Sq, 1)
-            logits_aug = torch.cat([logits, sink_col], dim=-1)
-            logits_aug = logits_aug - logits_aug.amax(dim=-1, keepdim=True).detach()
-            probs = logits_aug.softmax(dim=-1)[..., :-1]
-        else:
-            logits = logits - logits.amax(dim=-1, keepdim=True).detach()
-            probs = logits.softmax(dim=-1)
-
+        probs = self._append_sink_softmax(logits)
         if self.attn_dropout > 0.0 and self.training:
             probs = torch.nn.functional.dropout(probs, p=self.attn_dropout)
         return torch.matmul(probs.to(v.dtype), v)
@@ -485,6 +620,126 @@ class DeepseekV4Attention(MLASelfAttention):
         return _projection_forward(self.linear_proj, attn.reshape(B, S, H * Dh))
 
     # ------------------------------------------------------------------
+    # compressed branches (HCA / CSA)
+    # ------------------------------------------------------------------
+
+    def _build_compressed_pool(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Run the compressor + compress-base partial RoPE.
+
+        Returns ``[B, P, head_dim]`` where ``P = S // compress_ratio``.
+        """
+        device = hidden.device
+        pooled = self.compressor(hidden)  # [B, P, head_dim]
+        P = pooled.shape[1]
+
+        # Compress-base partial RoPE on compressed indices [0..P).
+        comp_pos = torch.arange(P, device=device)
+        cos, sin = self.rope.compress_rope(comp_pos)
+        cos = cos[..., : self.rotary_dim // 2]
+        sin = sin[..., : self.rotary_dim // 2]
+        pool_kv = pooled.unsqueeze(2)  # [B, P, 1, head_dim]
+        pool_kv = apply_interleaved_partial_rope(pool_kv, cos, sin, rotary_dim=self.rotary_dim)
+        return pool_kv.squeeze(2)  # [B, P, head_dim]
+
+    def _hca_extra_kv(
+        self,
+        hidden: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build the HCA (compress_ratio == 128) compressed branch.
+
+        Returns ``(extra_k_bh, extra_v_bh, extra_mask)`` where the
+        compressed pool is broadcast across H heads (single-latent
+        compressor output) and the additive mask is shape ``[S, P]``
+        (broadcasts over B, H).
+
+        Per the techblog: pool position ``s`` covers raw tokens
+        ``[s*ratio, (s+1)*ratio)``; query at raw token ``t`` may attend
+        to ``s`` iff ``(s+1)*ratio - 1 <= t``.
+        """
+        B, S, _ = hidden.shape
+        device, dtype = hidden.device, hidden.dtype
+        pool = self._build_compressed_pool(hidden)  # [B, P, head_dim]
+        P = pool.shape[1]
+
+        # Broadcast pool across all H query-heads: [B, P, head_dim] -> [B, P, H, head_dim].
+        pool_h = pool.unsqueeze(2).expand(B, P, self.num_heads, self.head_dim)
+        # Move heads dim to dim=1: [B, H, P, head_dim].
+        pool_bh = pool_h.transpose(1, 2)
+
+        t = torch.arange(S, device=device).unsqueeze(1)  # [S, 1]
+        s_end = (torch.arange(P, device=device).unsqueeze(0) + 1) * self.compress_ratio - 1  # [1, P]
+        extra_mask = torch.where(s_end <= t, 0.0, float("-inf")).to(dtype)
+        return pool_bh, pool_bh, extra_mask  # K = V = compressed pool
+
+    def _csa_forward(
+        self,
+        hidden: torch.Tensor,
+        q_bh: torch.Tensor,  # [B, H, S, head_dim]
+        k_local_bh: torch.Tensor,  # [B, H, S, head_dim]
+        v_local_bh: torch.Tensor,  # [B, H, S, head_dim]
+        local_mask: torch.Tensor,  # [S, S]
+    ) -> torch.Tensor:
+        """CSA (compress_ratio == 4) joint local-SWA + sparse-compressed attention.
+
+        The compressor produces a per-batch pool ``[B, P, head_dim]``,
+        the indexer picks ``index_topk`` pool positions per query, and
+        the attention runs softmax JOINTLY over ``[local_keys, sparse_keys]``
+        so the optional ``attn_sink`` is shared across both branches.
+        """
+        B, H, S, Dh = q_bh.shape
+        device, dtype = hidden.device, hidden.dtype
+
+        # 1) Compressed pool with compress-base RoPE.
+        pool = self._build_compressed_pool(hidden)  # [B, P, head_dim]
+        P = pool.shape[1]
+
+        # 2) Indexer top-K per query.
+        topk_idxs, _ = self.indexer(hidden)  # [B, S, K]
+        K = topk_idxs.shape[-1]
+        valid = topk_idxs >= 0  # [B, S, K]
+        safe_idx = topk_idxs.clamp(min=0)
+
+        # 3) Gather per-query pool slices: [B, S, K, head_dim].
+        idx_expand = safe_idx.unsqueeze(-1).expand(B, S, K, Dh)
+        pool_expand = pool.unsqueeze(1).expand(B, S, P, Dh)
+        gathered = torch.gather(pool_expand, dim=2, index=idx_expand)
+        gathered = gathered * valid.unsqueeze(-1).to(gathered.dtype)
+        sparse_mask = torch.where(valid, 0.0, float("-inf")).to(dtype)  # [B, S, K]
+
+        scale = self._attention_scale()
+
+        # Local logits over SWA keys: [B, H, S, S].
+        local_logits = torch.matmul(q_bh.float(), k_local_bh.float().transpose(-2, -1)) * scale
+        local_logits = local_logits + local_mask  # [S, S] broadcasts over B, H
+
+        # Sparse logits over per-query top-K: [B, H, S, K].
+        gathered_h = gathered.unsqueeze(1).expand(B, H, S, K, Dh).float()
+        sparse_logits = torch.einsum("bhsd,bhskd->bhsk", q_bh.float(), gathered_h) * scale
+        sparse_logits = sparse_logits + sparse_mask.unsqueeze(1)  # broadcast H
+
+        # Joint softmax-with-sink across [local_keys ++ sparse_keys].
+        joint_logits = torch.cat([local_logits, sparse_logits], dim=-1)  # [B, H, S, S+K]
+        probs = self._append_sink_softmax(joint_logits)  # [B, H, S, S+K]
+
+        if self.attn_dropout > 0.0 and self.training:
+            probs = torch.nn.functional.dropout(probs, p=self.attn_dropout)
+
+        probs_local = probs[..., :S].to(v_local_bh.dtype)  # [B, H, S, S]
+        probs_sparse = probs[..., S:].to(v_local_bh.dtype)  # [B, H, S, K]
+
+        # Local v-weighted sum: standard.
+        out_local = torch.matmul(probs_local, v_local_bh)  # [B, H, S, head_dim]
+
+        # Sparse v-weighted sum: per-query gather -> einsum.
+        out_sparse = torch.einsum(
+            "bhsk,bhskd->bhsd",
+            probs_sparse,
+            gathered_h.to(v_local_bh.dtype),
+        )
+
+        return out_local + out_sparse
+
+    # ------------------------------------------------------------------
     # public forward
     # ------------------------------------------------------------------
 
@@ -493,7 +748,14 @@ class DeepseekV4Attention(MLASelfAttention):
         hidden: torch.Tensor,
         position_ids: torch.Tensor,
     ) -> torch.Tensor:
-        """``[B, S, D] -> [B, S, D]``."""
+        """``[B, S, D] -> [B, S, D]``.
+
+        Dispatches on ``self.compress_ratio``:
+
+        * ``0``   — dense / SWA over local KV (single key axis).
+        * ``128`` — HCA: concat compressed pool to local KV, joint softmax.
+        * ``4``   — CSA: per-query top-K from compressed pool, joint softmax.
+        """
         B, S, _ = hidden.shape
         device, dtype = hidden.device, hidden.dtype
 
@@ -503,26 +765,31 @@ class DeepseekV4Attention(MLASelfAttention):
         # Partial RoPE on Q and K. K is post-RoPE; V uses the SAME tensor
         # (V4's single-latent design: K and V share the rope-applied kv).
         q, kv = self._apply_rope_q_k(q, kv, position_ids)
-        k = kv  # [B, S, 1, head_dim]
-        v = kv  # K = V (single latent)
-
         # Broadcast K / V across the H query-head axis.
-        k_h = k.expand(B, S, self.num_heads, self.head_dim)
-        v_h = v.expand(B, S, self.num_heads, self.head_dim)
+        k_h = kv.expand(B, S, self.num_heads, self.head_dim)
+        v_h = kv.expand(B, S, self.num_heads, self.head_dim)
 
-        # Causal / sliding-window mask.
-        window = self.attn_sliding_window if self.attn_sliding_window > 0 else 0
-        if window > 0:
-            attn_mask = sliding_window_causal_mask(S, window, device=device, dtype=dtype)
-        else:
-            attn_mask = sliding_window_causal_mask(S, S, device=device, dtype=dtype)
+        local_mask = self._local_mask(S, device=device, dtype=dtype)
 
         # Move heads dim before sequence: [B, S, H, head_dim] -> [B, H, S, head_dim]
         q_bh = q.transpose(1, 2)
-        k_bh = k_h.transpose(1, 2)
-        v_bh = v_h.transpose(1, 2)
+        k_local_bh = k_h.transpose(1, 2)
+        v_local_bh = v_h.transpose(1, 2)
 
-        out_bh = self._attention_forward(q_bh, k_bh, v_bh, attn_mask)
+        if self.compress_ratio == 0:
+            out_bh = self._attention_forward(q_bh, k_local_bh, v_local_bh, local_mask)
+        elif self.compress_ratio == 128:
+            extra_k_bh, extra_v_bh, extra_mask = self._hca_extra_kv(hidden)
+            k_full = torch.cat([k_local_bh, extra_k_bh], dim=2)  # along Sk
+            v_full = torch.cat([v_local_bh, extra_v_bh], dim=2)
+            full_mask = torch.cat([local_mask, extra_mask], dim=-1)  # [S, S+P]
+            out_bh = self._attention_forward(q_bh, k_full, v_full, full_mask)
+        elif self.compress_ratio == 4:
+            out_bh = self._csa_forward(hidden, q_bh, k_local_bh, v_local_bh, local_mask)
+        else:
+            # Guarded by __init__; included for static-analysis completeness.
+            raise ValueError(f"Unsupported compress_ratio {self.compress_ratio}")
+
         out = out_bh.transpose(1, 2).contiguous()  # [B, S, H, head_dim]
         out = out.to(dtype=dtype)
 
@@ -531,240 +798,7 @@ class DeepseekV4Attention(MLASelfAttention):
         return self._flat_o_projection(out)
 
 
-def _build_local_rms_norm(dim: int, *, eps: float) -> nn.Module:
-    """Tiny CPU-friendly RMSNorm used as a fallback when no spec is given."""
-
-    class _RMSNorm(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.weight = nn.Parameter(torch.ones(dim))
-            self.eps = eps
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            in_dtype = x.dtype
-            x32 = x.float()
-            rsqrt = torch.rsqrt(x32.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-            return (x32 * rsqrt).to(in_dtype) * self.weight
-
-    return _RMSNorm()
-
-
-# ---------------------------------------------------------------------------
-# Legacy plan-1 attention (kept for CSA / HCA inheritance until those classes
-# are folded into the plan-2 ``DeepseekV4Attention`` as spec submodules).
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class _LegacyDeepseekV4AttentionSubmodules:
-    """Plan-1 submodules dataclass.
-
-    Retained verbatim so :class:`CSAAttention` / :class:`HCAAttention` keep
-    constructing without any ``__init__`` change. The plan-2 P13 follow-up
-    folds compressor / indexer into the new ``DeepseekV4Attention.forward``
-    and retires this dataclass alongside the legacy class below.
-    """
-
-    linear_q_a: Optional[ModuleSpec] = None
-    linear_q_b: Optional[ModuleSpec] = None
-    linear_k_proj: Optional[ModuleSpec] = None
-    linear_v_proj: Optional[ModuleSpec] = None
-    linear_o_proj: Optional[ModuleSpec] = None
-
-
-class _LegacyDeepseekV4Attention(nn.Module):
-    """Plan-1 dense V4 attention (separate K / V projections, flat O).
-
-    Continues to back the plan-1 :class:`CSAAttention` and
-    :class:`HCAAttention` modules until their compressor / indexer logic
-    is moved onto the plan-2 :class:`DeepseekV4Attention`.
-
-    DO NOT use this class for new code — it does not match the released
-    V4-Flash checkpoint layout (no single-latent KV, no per-head q_rms,
-    no grouped low-rank O).
-    """
-
-    def __init__(
-        self,
-        config: DeepSeekV4TransformerConfig,
-        *,
-        rope: DualRoPE,
-        compress_ratio: int = 0,
-        submodules: Optional[_LegacyDeepseekV4AttentionSubmodules] = None,
-    ) -> None:
-        super().__init__()
-        hidden_size = int(config.hidden_size)
-        num_heads = int(config.num_attention_heads)
-        num_kv_heads = int(config.num_query_groups)
-        head_dim = int(config.kv_channels)
-        rotary_dim = int(config.qk_pos_emb_head_dim)
-        attn_sliding_window = int(config.attn_sliding_window)
-        attn_sink_enabled = bool(config.attn_sink)
-        q_lora_rank = config.q_lora_rank
-        attn_dropout = float(config.attention_dropout)
-
-        if num_heads % num_kv_heads != 0:
-            raise ValueError(f"num_heads ({num_heads}) must be divisible by num_kv_heads ({num_kv_heads})")
-
-        self.hidden_size = hidden_size
-        self.num_heads = num_heads
-        self.num_kv_heads = num_kv_heads
-        self.head_dim = head_dim
-        self.rotary_dim = rotary_dim
-        self.attn_sliding_window = attn_sliding_window
-        self.attn_dropout = attn_dropout
-        self.compress_ratio = int(compress_ratio)
-        submodules = submodules or _LegacyDeepseekV4AttentionSubmodules()
-
-        q_out = self.num_heads * self.head_dim
-        if q_lora_rank is None or q_lora_rank <= 0:
-            self.q_a = None
-            self.q_b = _build_projection(
-                submodules.linear_q_b,
-                in_features=self.hidden_size,
-                out_features=q_out,
-            )
-        else:
-            self.q_a = _build_projection(
-                submodules.linear_q_a,
-                in_features=self.hidden_size,
-                out_features=q_lora_rank,
-            )
-            self.q_b = _build_projection(
-                submodules.linear_q_b,
-                in_features=q_lora_rank,
-                out_features=q_out,
-            )
-
-        kv_out = self.num_kv_heads * self.head_dim
-        self.k_proj = _build_projection(
-            submodules.linear_k_proj,
-            in_features=self.hidden_size,
-            out_features=kv_out,
-        )
-        self.v_proj = _build_projection(
-            submodules.linear_v_proj,
-            in_features=self.hidden_size,
-            out_features=kv_out,
-        )
-
-        self.o_proj = _build_projection(
-            submodules.linear_o_proj,
-            in_features=self.num_heads * self.head_dim,
-            out_features=self.hidden_size,
-        )
-
-        self._rope = [rope]
-
-        if attn_sink_enabled:
-            self.attn_sink = AttentionSink(num_heads=self.num_heads)
-        else:
-            self.attn_sink = None
-
-    @property
-    def rope(self) -> DualRoPE:
-        return self._rope[0]
-
-    def _project_q(self, hidden: torch.Tensor) -> torch.Tensor:
-        x = _projection_forward(self.q_a, hidden) if self.q_a is not None else hidden
-        q = (
-            _projection_forward(self.q_b, x)
-            if self.q_a is not None
-            else _projection_forward(self.q_b, hidden)
-        )
-        B, S, _ = q.shape
-        return q.view(B, S, self.num_heads, self.head_dim)
-
-    def _project_kv(self, hidden: torch.Tensor):
-        B, S, _ = hidden.shape
-        k = _projection_forward(self.k_proj, hidden).view(B, S, self.num_kv_heads, self.head_dim)
-        v = _projection_forward(self.v_proj, hidden).view(B, S, self.num_kv_heads, self.head_dim)
-        return k, v
-
-    def _apply_rope(self, q: torch.Tensor, k: torch.Tensor, position_ids: torch.Tensor):
-        q = self.rope.apply_rope(q, position_ids=position_ids, compress_ratio=self.compress_ratio)
-        k = self.rope.apply_rope(k, position_ids=position_ids, compress_ratio=self.compress_ratio)
-        return q, k
-
-    def _attention_scale(self) -> float:
-        base = self.head_dim**-0.5
-        rope_scale = self.rope.attn_scale(compress_ratio=self.compress_ratio)
-        return base * rope_scale
-
-    def _broadcast_kv_heads(self, kv: torch.Tensor) -> torch.Tensor:
-        if self.num_kv_heads == self.num_heads:
-            return kv
-        repeats = self.num_heads // self.num_kv_heads
-        return kv.repeat_interleave(repeats, dim=2)
-
-    def _compute_attention_output(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        attn_mask: torch.Tensor,
-    ) -> torch.Tensor:
-        scale = self._attention_scale()
-        logits = torch.matmul(q, k.transpose(-2, -1)) * scale
-        logits = logits + attn_mask
-
-        if self.attn_sink is not None:
-            return self.attn_sink(logits, v, dropout=self.attn_dropout)
-
-        probs = logits.softmax(dim=-1)
-        if self.attn_dropout > 0.0 and self.training:
-            probs = torch.nn.functional.dropout(probs, p=self.attn_dropout)
-        probs = probs.to(v.dtype)
-        return torch.matmul(probs, v)
-
-    def _extra_kv(self, hidden, position_ids, q):
-        return None, None, None
-
-    def forward(
-        self,
-        hidden: torch.Tensor,
-        position_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        B, S, _ = hidden.shape
-        device, dtype = hidden.device, hidden.dtype
-
-        q = self._project_q(hidden)
-        k_local, v_local = self._project_kv(hidden)
-        q, k_local = self._apply_rope(q, k_local, position_ids)
-
-        k_local_h = self._broadcast_kv_heads(k_local)
-        v_local_h = self._broadcast_kv_heads(v_local)
-
-        window = self.attn_sliding_window
-        local_mask = sliding_window_causal_mask(S, window, device=device, dtype=dtype)
-
-        extra_k, extra_v, extra_mask = self._extra_kv(hidden, position_ids, q)
-
-        if extra_k is not None:
-            k_full = torch.cat([k_local_h, extra_k], dim=1)
-            v_full = torch.cat([v_local_h, extra_v], dim=1)
-            full_mask = torch.cat([local_mask, extra_mask], dim=-1)
-        else:
-            k_full = k_local_h
-            v_full = v_local_h
-            full_mask = local_mask
-
-        q_bh = q.transpose(1, 2)
-        k_bh = k_full.transpose(1, 2)
-        v_bh = v_full.transpose(1, 2)
-
-        out_bh = self._compute_attention_output(q_bh, k_bh, v_bh, full_mask)
-        out = out_bh.transpose(1, 2).contiguous()
-        out = out.to(dtype=dtype)
-
-        out = out.reshape(B, S, self.num_heads * self.head_dim)
-        out = _projection_forward(self.o_proj, out)
-        return out
-
-
 __all__ = [
     "DeepseekV4Attention",
     "DeepseekV4AttentionSubmodules",
-    "_LegacyDeepseekV4Attention",
-    "_LegacyDeepseekV4AttentionSubmodules",
 ]

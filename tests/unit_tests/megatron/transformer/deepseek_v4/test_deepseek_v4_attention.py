@@ -416,8 +416,12 @@ def test_o_lora_rank_zero_falls_back_to_flat_proj():
     assert "linear_o_b.weight" not in keys
 
 
-def test_compress_ratio_nonzero_rejected():
-    """V4-faithful class refuses compress_ratio != 0 (plan-2 P13 first commit)."""
+def test_unsupported_compress_ratio_rejected():
+    """V4 attention only supports ``compress_ratio in {0, 4, 128}``.
+
+    Plan-2 P13 follow-up landed CSA (4) and HCA (128) inside the new
+    class; anything else (e.g. 64, 256) is a config error.
+    """
     config = _make_v4_config(
         hidden_size=64,
         num_heads=4,
@@ -433,8 +437,8 @@ def test_compress_ratio_nonzero_rejected():
         rope_theta=config.rotary_base,
         compress_rope_theta=config.compress_rope_theta,
     )
-    with pytest.raises(ValueError, match="compress_ratio == 0 only"):
-        DeepseekV4Attention(config, rope=rope, compress_ratio=4, submodules=None)
+    with pytest.raises(ValueError, match="compress_ratio in"):
+        DeepseekV4Attention(config, rope=rope, compress_ratio=3, submodules=None)
 
 
 def test_q_lora_rank_zero_rejected():
@@ -456,3 +460,387 @@ def test_q_lora_rank_zero_rejected():
     )
     with pytest.raises(ValueError, match="q_lora_rank > 0"):
         DeepseekV4Attention(config, rope=rope, compress_ratio=0, submodules=None)
+
+
+# ---------------------------------------------------------------------------
+# Compressed-branch tests (plan-2 P13 follow-up: HCA / CSA folded into the
+# single :class:`DeepseekV4Attention` class).
+# ---------------------------------------------------------------------------
+
+
+def _make_compressed_attention(
+    *,
+    config: DeepSeekV4TransformerConfig,
+    compress_ratio: int,
+) -> DeepseekV4Attention:
+    """Construct V4 attention with a non-zero ``compress_ratio``.
+
+    With ``submodules=None`` the compressor (and indexer for CSA) fall
+    back to local :class:`Compressor` / :class:`Indexer` instances and
+    every projection falls back to ``nn.Linear`` — ideal for CPU smoke
+    tests without a TP group.
+    """
+    rope = DualRoPE(
+        rotary_dim=config.qk_pos_emb_head_dim,
+        rope_theta=config.rotary_base,
+        compress_rope_theta=config.compress_rope_theta,
+        yarn_factor=1.0,  # disable YaRN so CPU references stay simple
+        original_max_position_embeddings=config.original_max_position_embeddings,
+    )
+    return DeepseekV4Attention(
+        config,
+        rope=rope,
+        compress_ratio=compress_ratio,
+        submodules=None,
+    )
+
+
+def test_hca_forward_shape_and_finite():
+    """HCA (compress_ratio=128) forward pass produces ``[B, S, D]`` finite."""
+    compress_ratio = 128
+    B, S = 2, compress_ratio  # exactly one compressed-pool slot
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=4,
+        head_dim=16,
+        rotary_dim=8,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=8,
+        attn_sink=True,
+    )
+    attn = _make_compressed_attention(config=config, compress_ratio=compress_ratio)
+    attn = attn.to(_TEST_DTYPE)
+    assert attn.compressor is not None
+    assert attn.indexer is None  # HCA does not use Indexer
+
+    hidden = torch.randn(B, S, config.hidden_size, dtype=_TEST_DTYPE)
+    position_ids = torch.arange(S).unsqueeze(0).expand(B, S)
+    out = attn(hidden, position_ids)
+    assert out.shape == (B, S, config.hidden_size)
+    assert torch.isfinite(out).all()
+
+
+def test_csa_forward_shape_and_finite():
+    """CSA (compress_ratio=4) forward pass produces ``[B, S, D]`` finite.
+
+    Builds an Indexer + overlap-mode Compressor through the spec-less
+    fallback path. The key contract: with valid ``index_topk`` ≤ ``P``
+    selections the joint softmax-with-sink path runs end-to-end.
+    """
+    compress_ratio = 4
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=4,
+        head_dim=16,
+        rotary_dim=8,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=8,
+        attn_sink=True,
+    )
+    # Override Indexer config knobs (the test config dataclass exposes them
+    # as attributes; these are read by ``_build_indexer``).
+    config.index_topk = 2
+    config.index_head_dim = 16
+    config.index_n_heads = 2
+
+    B, S = 2, 8  # P = S // ratio = 2 → top-K = 2 always covers the pool
+    attn = _make_compressed_attention(config=config, compress_ratio=compress_ratio)
+    attn = attn.to(_TEST_DTYPE)
+    assert attn.compressor is not None
+    assert attn.indexer is not None
+
+    hidden = torch.randn(B, S, config.hidden_size, dtype=_TEST_DTYPE)
+    position_ids = torch.arange(S).unsqueeze(0).expand(B, S)
+    out = attn(hidden, position_ids)
+    assert out.shape == (B, S, config.hidden_size)
+    assert torch.isfinite(out).all()
+
+
+def _reference_hca_forward(
+    *,
+    attn: DeepseekV4Attention,
+    hidden: torch.Tensor,
+    position_ids: torch.Tensor,
+) -> torch.Tensor:
+    """Inline HCA reference forward, matching the plan-2 fold-in.
+
+    Reproduces the new ``DeepseekV4Attention.forward`` for compress_ratio
+    == 128 step-for-step but written as plain matmuls / einsums so the
+    test is independent of internal helpers.
+    """
+    from primus.backends.megatron.core.transformer.dual_rope import (
+        apply_interleaved_partial_rope,
+    )
+
+    B, S, _ = hidden.shape
+    H = attn.num_heads
+    Dh = attn.head_dim
+    rotary_dim = attn.rotary_dim
+    eps = attn.norm_eps
+    ratio = attn.compress_ratio
+
+    # Q branch (single-latent KV; same as dense reference).
+    wq_a = attn.linear_q_down_proj.weight
+    wq_b = attn.linear_q_up_proj.weight
+    q_n = attn.q_layernorm.weight
+    q_compressed = hidden @ wq_a.t()
+    q32 = q_compressed.float()
+    q_rms = torch.rsqrt(q32.square().mean(dim=-1, keepdim=True) + eps)
+    q_compressed = (q32 * q_rms).to(q_compressed.dtype) * q_n
+    q = q_compressed @ wq_b.t()
+    q = q.view(B, S, H, Dh)
+    q = _rms_norm_per_head(q, eps)
+
+    wkv = attn.linear_kv.weight
+    kv_n = attn.kv_layernorm.weight
+    kv = hidden @ wkv.t()
+    kv32 = kv.float()
+    kv_rms = torch.rsqrt(kv32.square().mean(dim=-1, keepdim=True) + eps)
+    kv = (kv32 * kv_rms).to(kv.dtype) * kv_n
+    kv = kv.view(B, S, 1, Dh)
+
+    # Q / K rope using the LAYER's compress_ratio (compress base for HCA).
+    q = attn.rope.apply_rope(q, position_ids=position_ids, compress_ratio=ratio)
+    kv = attn.rope.apply_rope(kv, position_ids=position_ids, compress_ratio=ratio)
+    k_local = kv.expand(B, S, H, Dh)
+    v_local = kv.expand(B, S, H, Dh)
+
+    # Compressed pool from the attention's own Compressor + compress-base RoPE.
+    pool = attn.compressor(hidden)  # [B, P, Dh]
+    P = pool.shape[1]
+    comp_pos = torch.arange(P, device=hidden.device)
+    cos, sin = attn.rope.compress_rope(comp_pos)
+    cos = cos[..., : rotary_dim // 2]
+    sin = sin[..., : rotary_dim // 2]
+    pool_kv = pool.unsqueeze(2)  # [B, P, 1, Dh]
+    pool_kv = apply_interleaved_partial_rope(pool_kv, cos, sin, rotary_dim=rotary_dim)
+    pool_h = pool_kv.expand(B, P, H, Dh)
+
+    # Local mask (full causal in this test config; SWA disabled).
+    q_idx = torch.arange(S, device=hidden.device).unsqueeze(1)
+    k_idx = torch.arange(S, device=hidden.device).unsqueeze(0)
+    local_mask = torch.where(q_idx >= k_idx, 0.0, float("-inf")).to(hidden.dtype)
+
+    # Compressed-pool causal mask: pool s allowed for query t iff (s+1)*ratio - 1 <= t.
+    s_end = (torch.arange(P, device=hidden.device).unsqueeze(0) + 1) * ratio - 1
+    extra_mask = torch.where(s_end <= q_idx, 0.0, float("-inf")).to(hidden.dtype)
+
+    full_mask = torch.cat([local_mask, extra_mask], dim=-1)  # [S, S+P]
+
+    # Concat keys / values.
+    k_full = torch.cat([k_local, pool_h], dim=1)  # [B, S+P, H, Dh]
+    v_full = torch.cat([v_local, pool_h], dim=1)
+
+    q_bh = q.transpose(1, 2)  # [B, H, S, Dh]
+    k_bh = k_full.transpose(1, 2)
+    v_bh = v_full.transpose(1, 2)
+
+    scale = 1.0 / math.sqrt(Dh) * attn.rope.attn_scale(compress_ratio=ratio)
+    logits = torch.matmul(q_bh.float(), k_bh.float().transpose(-2, -1)) * scale
+    logits = logits + full_mask
+
+    if attn.attn_sink is None:
+        logits = logits - logits.amax(dim=-1, keepdim=True).detach()
+        probs = logits.softmax(dim=-1).to(v_bh.dtype)
+    else:
+        sink_col = attn.attn_sink.float().view(1, H, 1, 1).expand(B, H, S, 1)
+        logits_aug = torch.cat([logits, sink_col], dim=-1)
+        logits_aug = logits_aug - logits_aug.amax(dim=-1, keepdim=True).detach()
+        probs = logits_aug.softmax(dim=-1)[..., :-1].to(v_bh.dtype)
+
+    out = torch.matmul(probs, v_bh.float()).to(hidden.dtype)
+    out = out.transpose(1, 2).contiguous()  # [B, S, H, Dh]
+
+    # Grouped low-rank O.
+    G, r = attn.o_groups, attn.o_lora_rank
+    out_g = out.reshape(B, S, G, (H * Dh) // G)
+    wo_a_w = attn.linear_o_a.weight.view(G, r, (H * Dh) // G)
+    o = torch.einsum("bsgd,grd->bsgr", out_g, wo_a_w)
+    o = o.flatten(2)
+    return o @ attn.linear_o_b.weight.t()
+
+
+def test_hca_forward_matches_inline_reference():
+    """HCA forward agrees with an inline reference of the same math.
+
+    Both implementations apply the same partial-interleaved RoPE on the
+    compressed pool, the same compressed-causal mask, and the same joint
+    softmax-with-sink, so the agreement should be at machine precision.
+    """
+    torch.manual_seed(0)
+    compress_ratio = 128
+    B, S = 1, compress_ratio  # P = 1
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=4,
+        head_dim=16,
+        rotary_dim=8,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=8,
+        attn_sink=True,
+    )
+    attn = _make_compressed_attention(config=config, compress_ratio=compress_ratio)
+    attn = attn.to(_TEST_DTYPE)
+    with torch.no_grad():
+        attn.attn_sink.copy_(torch.linspace(-0.5, 0.5, attn.num_heads))
+
+    hidden = torch.randn(B, S, config.hidden_size, dtype=_TEST_DTYPE)
+    position_ids = torch.arange(S).unsqueeze(0).expand(B, S)
+
+    with torch.no_grad():
+        ours = attn(hidden, position_ids)
+        ref = _reference_hca_forward(
+            attn=attn,
+            hidden=hidden,
+            position_ids=position_ids,
+        )
+
+    diff = (ours - ref).abs().max().item()
+    assert diff < 1e-3, f"HCA forward mismatch: max abs diff = {diff:.3e}"
+
+
+# ---------------------------------------------------------------------------
+# Spec / TP wiring tests (no torch.distributed required — these check the
+# spec-tree shape, not actual TP execution).
+# ---------------------------------------------------------------------------
+
+
+def test_attention_spec_uses_column_and_row_parallel():
+    """V4-faithful attention spec sources ``linear_q_up_proj`` from the
+    provider's column-parallel linear, and ``linear_o_b`` /
+    ``linear_proj`` from the row-parallel linear.
+
+    This is the contract that lets TP > 1 actually shard the projection
+    weights at runtime; at TP = 1 it is functionally identical to the
+    duplicated spec.
+    """
+    from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
+        DeepSeekV4SpecProvider,
+    )
+    from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_layer_specs import (
+        _build_v4_attention_submodules,
+    )
+
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=4,
+        head_dim=16,
+        rotary_dim=8,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=8,
+        attn_sink=True,
+    )
+    provider = DeepSeekV4SpecProvider(config=config)
+    submods = _build_v4_attention_submodules(
+        config=config,
+        provider=provider,
+        compress_ratio=0,
+    )
+    assert submods.linear_q_up_proj is not None
+    assert submods.linear_q_up_proj.module is provider.column_parallel_linear()
+    assert submods.linear_q_up_proj.params.get("gather_output") is True
+    assert submods.linear_o_b is not None
+    assert submods.linear_o_b.module is provider.row_parallel_linear()
+    assert submods.linear_o_b.params.get("input_is_parallel") is False
+
+    # Flat-O fallback path also goes through row-parallel.
+    cfg_flat = _make_v4_config(
+        hidden_size=64,
+        num_heads=4,
+        head_dim=16,
+        rotary_dim=8,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=0,
+        attn_sink=True,
+    )
+    submods_flat = _build_v4_attention_submodules(
+        config=cfg_flat,
+        provider=provider,
+        compress_ratio=0,
+    )
+    assert submods_flat.linear_proj is not None
+    assert submods_flat.linear_proj.module is provider.row_parallel_linear()
+
+
+def test_attention_spec_includes_compressor_and_indexer():
+    """Compressed branches expose ``compressor`` (always) and ``indexer``
+    (CSA only) as :class:`ModuleSpec`s in the V4 attention submodules."""
+    from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
+        DeepSeekV4SpecProvider,
+    )
+    from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_layer_specs import (
+        _build_v4_attention_submodules,
+    )
+    from primus.backends.megatron.core.transformer.compressor import Compressor
+    from primus.backends.megatron.core.transformer.indexer import Indexer
+
+    config = _make_v4_config(
+        hidden_size=64,
+        num_heads=4,
+        head_dim=16,
+        rotary_dim=8,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=8,
+        attn_sink=True,
+    )
+    provider = DeepSeekV4SpecProvider(config=config)
+
+    dense = _build_v4_attention_submodules(
+        config=config,
+        provider=provider,
+        compress_ratio=0,
+    )
+    assert dense.compressor is None
+    assert dense.indexer is None
+
+    hca = _build_v4_attention_submodules(
+        config=config,
+        provider=provider,
+        compress_ratio=128,
+    )
+    assert hca.compressor is not None
+    assert hca.compressor.module is Compressor
+    assert hca.indexer is None  # HCA has no Indexer
+
+    csa = _build_v4_attention_submodules(
+        config=config,
+        provider=provider,
+        compress_ratio=4,
+    )
+    assert csa.compressor is not None
+    assert csa.compressor.module is Compressor
+    assert csa.indexer is not None
+    assert csa.indexer.module is Indexer
+
+
+# ---------------------------------------------------------------------------
+# TP=2 sharding parity scaffold (skips on CPU / single-rank).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(
+    not (hasattr(torch, "distributed") and torch.distributed.is_available()),
+    reason="torch.distributed not available",
+)
+def test_tp2_sharding_parity_scaffold():
+    """Scaffold for the TP=2 sharding-parity test.
+
+    Skipped unless ``torch.distributed`` is initialized with
+    ``world_size >= 2``. When run under ``torchrun --nproc_per_node=2``
+    with the PrimusTurbo provider, this test will assert that the
+    column-parallel ``linear_q_up_proj`` + row-parallel ``linear_o_b``
+    pair produces output identical (≤1e-4) to a duplicated baseline.
+
+    Implementation deferred to P14 (full TP=2 smoke matrix).
+    """
+    if not torch.distributed.is_initialized():
+        pytest.skip("torch.distributed not initialized")
+    if torch.distributed.get_world_size() < 2:
+        pytest.skip("TP=2 parity test requires world_size >= 2")
+    pytest.skip("TP=2 sharding-parity check implementation tracked in P14")

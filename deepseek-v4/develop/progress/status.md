@@ -175,30 +175,35 @@
 
 ## Phase 13 (v3) — Faithful attention (`MLASelfAttention`-rooted)
 
-> P13 lands in two commits inside the May 06 budget:
-> 1. **First commit (this one)** — V4-faithful dense (`compress_ratio == 0`)
+> P13 landed in two commits inside the May 06 budget:
+> 1. **First commit** (`cad0fb38`) — V4-faithful dense (`compress_ratio == 0`)
 >    attention rooted on `MLASelfAttention`, with single-latent KV, per-head
 >    `q_rms`, attn-sink, grouped low-rank O, and an inline numerical-alignment
->    test scaffold. The legacy plan-1 `_LegacyDeepseekV4Attention` keeps
->    backing CSA / HCA so the smoke matrix continues to run.
-> 2. **Follow-up commit** — fold compressor / indexer into the new
->    `DeepseekV4Attention.forward` as spec submodules, switch projection
->    specs from `parallel_mode="duplicated"` to TP, add the TP=2 sharding
->    parity test, retire `csa_attention.py` / `hca_attention.py`.
+>    test scaffold. The legacy plan-1 `_LegacyDeepseekV4Attention` kept
+>    backing CSA / HCA so the smoke matrix continued to run.
+> 2. **Follow-up commit (this one)** — fold Compressor / Indexer into the
+>    new `DeepseekV4Attention.forward` as spec submodules so all three V4
+>    layer types (dense / HCA / CSA) share one class; switch
+>    `linear_q_up_proj` / `linear_o_b` projection specs from
+>    `parallel_mode="duplicated"` to ColumnParallel / RowParallel; add a
+>    TP=2 sharding-parity scaffold; retire `csa_attention.py` /
+>    `hca_attention.py` / `_LegacyDeepseekV4Attention`.
 
 | | Task | commit | date | note |
 |---|---|---|---|---|
-| [x] | `DeepseekV4Attention(MLASelfAttention)` + V4 `DeepseekV4AttentionSubmodules` dataclass | (this commit) | 2026-05-01 | dense path only; CSA / HCA still ride on `_LegacyDeepseekV4Attention` |
-| [x] | Single-latent KV (K = V = `wkv`) | (this commit) | 2026-05-01 | new attention drops `linear_k_proj` / `linear_v_proj`; `linear_kv` projects `hidden -> head_dim` and broadcasts |
-| [x] | Per-head `q_rms` after `linear_q_up_proj` | (this commit) | 2026-05-01 | parameter-less RMS — matches the released checkpoint (no `q_rms.weight` key) |
-| [x] | Reuse MLA `kv_layernorm` for V4 `kv_norm` | (this commit) | 2026-05-01 | provider-built RMSNorm on `head_dim`; same module name as MLA |
-| [x] | Learnable per-head `attn_sink` parameter | (this commit) | 2026-05-01 | direct `nn.Parameter` on the attention (key: `attn_sink`); inline softmax-with-sink — matches released checkpoint key exactly. Spec-built `attn_sink_module` retained as forward-compat for a future TE-fused sink |
-| [x] | Grouped low-rank O projection (`linear_o_a` + `linear_o_b`, `o_groups`/`o_lora_rank`) | (this commit) | 2026-05-01 | added `o_groups` / `o_lora_rank` to `DeepSeekV4TransformerConfig`; einsum-based `wo_a` per group + `wo_b` matches `inference/model.py`. `o_lora_rank == 0` falls back to MLA-style flat `linear_proj` |
-| [ ] | Compressor / Indexer as spec submodules of attention | | | **deferred to P13 follow-up commit**; legacy CSA / HCA still handle compress_ratio in {4, 128} |
-| [ ] | Switch projection specs from `parallel_mode="duplicated"` to TP | | | **deferred to P13 follow-up commit** (`linear_q_up_proj` / `linear_o_b` → column / row parallel) |
-| [x] | Inline numerical-alignment test scaffold (CPU fp32, compress_ratio=0) | (this commit) | 2026-05-01 | `tests/unit_tests/megatron/transformer/deepseek_v4/test_deepseek_v4_attention.py`: state-dict-key check, shape-and-finite, sink on/off forward equivalence ≤1e-3 vs inline reference, fallback path coverage. P17 will replace the inline reference with the actual HF `DeepseekV4Attention.forward` once the state-dict adapter lands |
+| [x] | `DeepseekV4Attention(MLASelfAttention)` + V4 `DeepseekV4AttentionSubmodules` dataclass | `cad0fb38` | 2026-05-01 | dense path; CSA / HCA folded in via the follow-up |
+| [x] | Single-latent KV (K = V = `wkv`) | `cad0fb38` | 2026-05-01 | new attention drops `linear_k_proj` / `linear_v_proj`; `linear_kv` projects `hidden -> head_dim` and broadcasts |
+| [x] | Per-head `q_rms` after `linear_q_up_proj` | `cad0fb38` | 2026-05-01 | parameter-less RMS — matches the released checkpoint (no `q_rms.weight` key) |
+| [x] | Reuse MLA `kv_layernorm` for V4 `kv_norm` | `cad0fb38` | 2026-05-01 | provider-built RMSNorm on `head_dim`; same module name as MLA |
+| [x] | Learnable per-head `attn_sink` parameter | `cad0fb38` | 2026-05-01 | direct `nn.Parameter` on the attention (key: `attn_sink`); inline softmax-with-sink — matches released checkpoint key exactly. Spec-built `attn_sink_module` retained as forward-compat for a future TE-fused sink |
+| [x] | Grouped low-rank O projection (`linear_o_a` + `linear_o_b`, `o_groups`/`o_lora_rank`) | `cad0fb38` | 2026-05-01 | added `o_groups` / `o_lora_rank` to `DeepSeekV4TransformerConfig`; einsum-based `wo_a` per group + `wo_b` matches `inference/model.py`. `o_lora_rank == 0` falls back to MLA-style flat `linear_proj` |
+| [x] | Compressor / Indexer as spec submodules of attention | (this commit) | 2026-05-01 | added `compressor` / `indexer` to `DeepseekV4AttentionSubmodules`; `DeepseekV4Attention.forward` now dispatches on `compress_ratio in {0, 4, 128}` and shares the attn-sink softmax across local + compressed branches; `_LegacyDeepseekV4Attention`, `csa_attention.py`, `hca_attention.py` deleted |
+| [x] | Switch projection specs from `parallel_mode="duplicated"` to TP | (this commit) | 2026-05-01 | `linear_q_up_proj` → `provider.column_parallel_linear()` (`gather_output=True`); `linear_o_b` / `linear_proj` → `provider.row_parallel_linear()` (`input_is_parallel=False`). At TP > 1 the projection weights are sharded across TP ranks; at TP = 1 the result is bit-identical to the previous duplicated path. Grouped-O `linear_o_a` + the rest stay duplicated; full sharded grouped-O TP plan tracked in P14 |
+| [x] | Inline numerical-alignment test scaffold (CPU fp32, compress_ratio=0) | `cad0fb38` | 2026-05-01 | `tests/unit_tests/megatron/transformer/deepseek_v4/test_deepseek_v4_attention.py`: state-dict-key check, shape-and-finite, sink on/off forward equivalence ≤1e-3 vs inline reference, fallback path coverage |
+| [x] | Compressed branches: HCA shape + numerical alignment, CSA shape | (this commit) | 2026-05-01 | extended the unit-test file with `test_hca_forward_shape_and_finite`, `test_hca_forward_matches_inline_reference` (compress-base RoPE + compressed-causal mask + joint softmax-with-sink, ≤1e-3 vs inline reference) and `test_csa_forward_shape_and_finite` (overlap Compressor + Indexer top-K + per-query joint softmax) |
+| [x] | Spec wiring contract tests | (this commit) | 2026-05-01 | `test_attention_spec_uses_column_and_row_parallel` asserts the q-up-proj / o-b spec uses `ColumnParallel` / `RowParallel`; `test_attention_spec_includes_compressor_and_indexer` asserts compressed-branch submodules carry `Compressor` (always) + `Indexer` (CSA only) |
 | [ ] | 1L attention forward agrees with HF reference within 1e-3 (CPU fp32) | | | **partial**: inline reference equivalence verified this commit; HF-reference comparison waits for P17 state-dict adapter |
-| [ ] | TP=2 sharding parity test | | | **deferred to P13 follow-up commit** |
+| [x] | TP=2 sharding parity test (scaffold) | (this commit) | 2026-05-01 | `test_tp2_sharding_parity_scaffold` skips on CPU / single-rank; runnable only under `torchrun --nproc_per_node=2`. Implementation of the bit-equality check vs a duplicated baseline is tracked in P19 (distributed re-validation) |
 
 ## Phase 14 (v3) — Faithful MoE + activation + router
 

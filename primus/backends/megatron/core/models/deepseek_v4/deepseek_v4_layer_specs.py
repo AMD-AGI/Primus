@@ -38,17 +38,16 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_block import (
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
     DeepSeekV4TransformerConfig,
 )
-from primus.backends.megatron.core.transformer.csa_attention import CSAAttention
+from primus.backends.megatron.core.transformer.compressor import Compressor
 from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
     DeepseekV4Attention,
     DeepseekV4AttentionSubmodules,
-    _LegacyDeepseekV4AttentionSubmodules,
 )
-from primus.backends.megatron.core.transformer.hca_attention import HCAAttention
 from primus.backends.megatron.core.transformer.hyper_connection import (
     HyperHead,
     HyperMixer,
 )
+from primus.backends.megatron.core.transformer.indexer import Indexer
 from primus.backends.megatron.core.transformer.moe.v4_hash_router import HashRouter
 from primus.backends.megatron.core.transformer.moe.v4_moe import (
     DeepseekV4MoE,
@@ -70,6 +69,13 @@ def _build_linear_projection_spec(
     in_features: int,
     out_features: int,
 ) -> ModuleSpec:
+    """Default projection spec — a duplicated TE linear (no TP sharding).
+
+    Used for projections that V4's grouped-low-rank O does not natively
+    shard along TP (``linear_q_down_proj``, ``linear_kv``, ``linear_o_a``).
+    Keep these duplicated for now; full TP sharding of the grouped O
+    projection is tracked in P14.
+    """
     return ModuleSpec(
         module=provider.linear(),
         params={
@@ -87,58 +93,72 @@ def _build_linear_projection_spec(
     )
 
 
-def _build_legacy_attention_submodules(
+def _build_column_parallel_spec(
     *,
     config: DeepSeekV4TransformerConfig,
     provider: DeepSeekV4SpecProvider,
-) -> _LegacyDeepseekV4AttentionSubmodules:
-    """Plan-1 submodules — used by the compressed branches (CSA / HCA)
-    until plan-2 P13 follow-up folds compressor / indexer onto the new
-    :class:`DeepseekV4Attention` as spec submodules."""
-    hidden_size = int(config.hidden_size)
-    num_heads = int(config.num_attention_heads)
-    num_kv_heads = int(config.num_query_groups or num_heads)
-    head_dim = int(config.kv_channels or (hidden_size // num_heads))
-    q_lora_rank = config.q_lora_rank or None
-    q_out = num_heads * head_dim
-    kv_out = num_kv_heads * head_dim
-    q_a_spec = None
-    q_input_dim = hidden_size
-    if q_lora_rank is not None and q_lora_rank > 0:
-        q_a_spec = _build_linear_projection_spec(
-            config=config,
-            provider=provider,
-            in_features=hidden_size,
-            out_features=q_lora_rank,
-        )
-        q_input_dim = q_lora_rank
+    in_features: int,
+    out_features: int,
+    gather_output: bool = True,
+) -> ModuleSpec:
+    """Column-parallel projection spec.
 
-    return _LegacyDeepseekV4AttentionSubmodules(
-        linear_q_a=q_a_spec,
-        linear_q_b=_build_linear_projection_spec(
-            config=config,
-            provider=provider,
-            in_features=q_input_dim,
-            out_features=q_out,
-        ),
-        linear_k_proj=_build_linear_projection_spec(
-            config=config,
-            provider=provider,
-            in_features=hidden_size,
-            out_features=kv_out,
-        ),
-        linear_v_proj=_build_linear_projection_spec(
-            config=config,
-            provider=provider,
-            in_features=hidden_size,
-            out_features=kv_out,
-        ),
-        linear_o_proj=_build_linear_projection_spec(
-            config=config,
-            provider=provider,
-            in_features=q_out,
-            out_features=hidden_size,
-        ),
+    With ``gather_output=True`` the output dim is gathered back to full
+    width across TP ranks, so downstream attention math (which assumes
+    ``H * head_dim`` per rank) does not need to know about TP at all.
+    Memory of the projection's weight matrix is sharded across TP ranks
+    even at ``gather_output=True``.
+
+    Plan-2 P13 follow-up: this is used for ``linear_q_up_proj``. The
+    gather-then-shard variant for full sharded heads is tracked in P14
+    once the grouped-O TP plan lands.
+    """
+    return ModuleSpec(
+        module=provider.column_parallel_linear(),
+        params={
+            "input_size": in_features,
+            "output_size": out_features,
+            "config": config,
+            "init_method": config.init_method or _default_init_method,
+            "gather_output": gather_output,
+            "bias": False,
+            "skip_bias_add": False,
+            "skip_weight_param_allocation": False,
+            "tp_comm_buffer_name": None,
+            "is_expert": False,
+        },
+    )
+
+
+def _build_row_parallel_spec(
+    *,
+    config: DeepSeekV4TransformerConfig,
+    provider: DeepSeekV4SpecProvider,
+    in_features: int,
+    out_features: int,
+    input_is_parallel: bool = False,
+) -> ModuleSpec:
+    """Row-parallel projection spec.
+
+    With ``input_is_parallel=False`` the linear scatters the input across
+    TP ranks internally and all-reduces the output, so the caller can
+    pass a full-width input tensor and get a full-width output tensor.
+    Weight memory is sharded across TP ranks. Used for ``linear_o_b``
+    and the flat-O fallback ``linear_proj``.
+    """
+    return ModuleSpec(
+        module=provider.row_parallel_linear(),
+        params={
+            "input_size": in_features,
+            "output_size": out_features,
+            "config": config,
+            "init_method": config.init_method or _default_init_method,
+            "input_is_parallel": input_is_parallel,
+            "bias": False,
+            "skip_bias_add": False,
+            "tp_comm_buffer_name": None,
+            "is_expert": False,
+        },
     )
 
 
@@ -146,8 +166,9 @@ def _build_v4_attention_submodules(
     *,
     config: DeepSeekV4TransformerConfig,
     provider: DeepSeekV4SpecProvider,
+    compress_ratio: int,
 ) -> DeepseekV4AttentionSubmodules:
-    """Plan-2 P13 submodules for :class:`DeepseekV4Attention`.
+    """V4-canonical submodules for :class:`DeepseekV4Attention`.
 
     Field names match the released V4-Flash checkpoint layout (and MLA's
     canonical names where they overlap):
@@ -155,12 +176,21 @@ def _build_v4_attention_submodules(
     * ``linear_q_down_proj``  : ``hidden -> q_lora_rank``  (= ``wq_a``)
     * ``q_layernorm``        : RMSNorm(``q_lora_rank``)    (= ``q_norm``)
     * ``linear_q_up_proj``    : ``q_lora_rank -> n_heads * head_dim`` (= ``wq_b``)
+      — built as **column-parallel** so the projection's weight is
+      sharded across TP at ``tp > 1``. ``gather_output=True`` keeps
+      downstream math TP-agnostic.
     * ``linear_kv``           : ``hidden -> head_dim``     (= ``wkv``,
       single-latent KV)
     * ``kv_layernorm``       : RMSNorm(``head_dim``)       (= ``kv_norm``)
-    * ``linear_o_a``         : grouped low-rank O down-proj
+    * ``linear_o_a``         : grouped low-rank O down-proj (duplicated;
+      grouped-O TP plan is P14).
     * ``linear_o_b``         : grouped low-rank O up-proj  (-> ``hidden``)
+      — built as **row-parallel** so its weight is sharded across TP.
+    * ``linear_proj``        : flat-O fallback (``o_lora_rank == 0``,
+      e.g. unit tests) — also row-parallel.
     * ``attn_sink``          : per-head learnable scalar
+    * ``compressor``         : :class:`Compressor` (compressed branches)
+    * ``indexer``            : :class:`Indexer` (CSA branch only)
     """
     hidden_size = int(config.hidden_size)
     num_heads = int(config.num_attention_heads)
@@ -183,7 +213,7 @@ def _build_v4_attention_submodules(
             in_features=hidden_size,
             out_features=q_lora_rank,
         ),
-        linear_q_up_proj=_build_linear_projection_spec(
+        linear_q_up_proj=_build_column_parallel_spec(
             config=config,
             provider=provider,
             in_features=q_lora_rank,
@@ -212,20 +242,24 @@ def _build_v4_attention_submodules(
             in_features=n_per_group,
             out_features=o_groups * o_lora_rank,
         )
-        submods.linear_o_b = _build_linear_projection_spec(
+        submods.linear_o_b = _build_row_parallel_spec(
             config=config,
             provider=provider,
             in_features=o_groups * o_lora_rank,
             out_features=hidden_size,
         )
     else:
-        # Fallback flat O projection (MLA style).
-        submods.linear_proj = _build_linear_projection_spec(
+        submods.linear_proj = _build_row_parallel_spec(
             config=config,
             provider=provider,
             in_features=q_out,
             out_features=hidden_size,
         )
+
+    if compress_ratio > 0:
+        submods.compressor = ModuleSpec(module=Compressor)
+        if compress_ratio == 4:
+            submods.indexer = ModuleSpec(module=Indexer)
 
     return submods
 
@@ -247,35 +281,17 @@ def _build_attention_spec(
     config: DeepSeekV4TransformerConfig,
     provider: DeepSeekV4SpecProvider,
 ) -> ModuleSpec:
-    if compress_ratio == 0:
-        # Plan-2 P13: the dense path uses the faithful, MLA-rooted
-        # DeepseekV4Attention with V4-canonical submodules.
-        return ModuleSpec(
-            module=DeepseekV4Attention,
-            params={"compress_ratio": 0},
-            submodules=_build_v4_attention_submodules(
-                config=config,
-                provider=provider,
-            ),
-        )
-
-    # Compressed branches still ride on the plan-1 legacy attention until
-    # their compressor / indexer logic is folded into DeepseekV4Attention
-    # in a P13 follow-up.
-    legacy_submodules = _build_legacy_attention_submodules(
-        config=config,
-        provider=provider,
-    )
-    if compress_ratio == 4:
-        return ModuleSpec(
-            module=CSAAttention,
-            params={"compress_ratio": compress_ratio},
-            submodules=legacy_submodules,
-        )
+    """Plan-2 P13 attention spec — single :class:`DeepseekV4Attention`
+    class for all three V4 layer types (dense / HCA / CSA), dispatched
+    inside the class on ``compress_ratio``."""
     return ModuleSpec(
-        module=HCAAttention,
-        params={"compress_ratio": compress_ratio},
-        submodules=legacy_submodules,
+        module=DeepseekV4Attention,
+        params={"compress_ratio": int(compress_ratio)},
+        submodules=_build_v4_attention_submodules(
+            config=config,
+            provider=provider,
+            compress_ratio=int(compress_ratio),
+        ),
     )
 
 

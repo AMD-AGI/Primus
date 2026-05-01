@@ -54,13 +54,10 @@ from primus.backends.megatron.core.extensions.transformer_engine_spec_provider i
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
     DeepSeekV4TransformerConfig,
 )
-from primus.backends.megatron.core.transformer.csa_attention import CSAAttention
 from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
     DeepseekV4Attention,
-    _LegacyDeepseekV4Attention,
 )
 from primus.backends.megatron.core.transformer.dual_rope import DualRoPE
-from primus.backends.megatron.core.transformer.hca_attention import HCAAttention
 from primus.backends.megatron.core.transformer.hyper_connection import (
     HyperHead,
     HyperMixer,
@@ -301,29 +298,20 @@ def _build_attention(
     config: Optional[DeepSeekV4TransformerConfig] = None,
 ):
     """No-spec fallback used when the layer is built without an
-    ``attention`` :class:`ModuleSpec`. Production paths construct the
-    attention via :func:`get_deepseek_v4_runtime_decoder_spec`, which
-    routes ``compress_ratio == 0`` through the new V4-faithful
-    :class:`DeepseekV4Attention`. This fallback keeps the legacy
-    plan-1 path alive for unit tests / configs that pre-date the
-    P13 rewrite.
+    ``attention`` :class:`ModuleSpec`.
 
-    * ``0``   → :class:`_LegacyDeepseekV4Attention` (dense + SWA + sink)
-    * ``128`` (or any larger ratio: HCA convention) → :class:`HCAAttention`
-    * ``4``   → :class:`CSAAttention` (overlap compressor + Indexer)
+    Plan-2 P13: all three V4 layer types (``compress_ratio in {0, 4, 128}``)
+    construct through the single faithful :class:`DeepseekV4Attention`
+    class, which carries its own compressor / indexer (built locally
+    when no spec is provided). Production paths use
+    :func:`get_deepseek_v4_runtime_decoder_spec` which provides full
+    spec submodules; this fallback is for configs / unit tests that
+    construct a layer without an explicit attention spec.
     """
-    common = dict(rope=rope, config=config)
-
-    if compress_ratio == 0:
-        return _LegacyDeepseekV4Attention(compress_ratio=0, **common)
-    if compress_ratio == 4:
-        return CSAAttention(
-            compress_ratio=compress_ratio,
-            **common,
-        )
-    return HCAAttention(
-        compress_ratio=compress_ratio,
-        **common,
+    return DeepseekV4Attention(
+        config=config,
+        rope=rope,
+        compress_ratio=int(compress_ratio),
     )
 
 
