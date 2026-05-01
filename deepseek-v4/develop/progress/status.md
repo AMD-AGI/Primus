@@ -259,12 +259,14 @@
 
 | | Task | commit | date | note |
 |---|---|---|---|---|
-| [ ] | `get_v4_mtp_block_spec` builder | | | mirrors `_mamba_mtp_block_spec` |
-| [ ] | `DeepseekV4Model.__init__` builds `MultiTokenPredictionBlock` when `mtp_num_layers > 0` | | | |
-| [ ] | Per-MTP-layer separate `HyperHead` | | | |
-| [ ] | `process_mtp_loss` wired in `DeepseekV4Model.forward` | | | |
-| [ ] | `DeepseekV4MTPBlock` retired or moved to `research/` | | | |
-| [ ] | MTP loss appears in train log; ablation `mtp_num_layers=0` matches LM loss to 1e-6 (G7) | | | |
+| [x] | `get_v4_mtp_block_spec` builder | (this commit) | 2026-05-01 | new module `deepseek_v4_mtp_specs.py`. Returns a `ModuleSpec(MultiTokenPredictionBlock, submodules=MultiTokenPredictionBlockSubmodules(layer_specs=[mtp_layer_spec]*mtp_num_layers))`. Each per-depth spec wraps `MultiTokenPredictionLayer` with V4 RMSNorm (`provider.v4_norm_module()` for `enorm` / `hnorm` / `layer_norm`) + column-parallel `eh_proj` (from `provider.column_parallel_linear()`) + the V4 hybrid layer spec passed in by the model |
+| [x] | `DeepseekV4Model.__init__` builds `MultiTokenPredictionBlock` when `mtp_num_layers > 0` | (this commit) | 2026-05-01 | spec-based path is the default; gated on `mtp_on_this_rank` (with try/except so CPU smokes without `parallel_state` keep working). The legacy `DeepseekV4MTPBlock` path is preserved behind `v4_use_custom_mtp_block` (planned removal: P21) |
+| [x] | Per-MTP-layer separate `HyperHead` | (this commit) | 2026-05-01 | the V4 hybrid layer's HC mixers are baked into `DeepseekV4HybridLayer.forward`, so each MTP depth that builds a hybrid layer naturally owns its own HC math; no separate per-MTP-layer HyperHead orchestration is needed at the MTP-block level |
+| [x] | `process_mtp_loss` wired in `DeepseekV4Model.forward` | (this commit) | 2026-05-01 | mirrors `GPTModel.forward`: when `self.mtp_process and self.mtp is not None`, the MTP block runs after the decoder; on `post_process` with `mtp_num_layers > 0`, `process_mtp_loss` chunks the concatenated hidden states and adds the auxiliary MTP loss to the LM-loss path |
+| [x] | `DeepseekV4MTPBlock` retired (deprecation banner + warning) | (this commit) | 2026-05-01 | module docstring annotates the class as deprecated (planned removal: P21); construction emits a `DeprecationWarning` pointing users at `get_v4_mtp_block_spec`. Kept behind `v4_use_custom_mtp_block` for back-compat |
+| [ ] | MTP loss appears in train log; ablation `mtp_num_layers=0` matches LM loss to 1e-6 (G7) | | | requires distributed init + `MultiTokenPredictionBlock` runtime (CP / SP plumbing); tracked into **P19** distributed re-validation alongside the PP equivalence (G6) |
+| [+] | Plan-2 P16 follow-on — `DeepseekV4HybridLayer.forward` returns `(hidden_states, None)` tuple | (this commit) | 2026-05-01 | required by `MultiTokenPredictionLayer._proj_and_transformer_layer` which unpacks `hidden_states, _ = self.mtp_model_layer(...)`. The block's per-layer call updates to `x, _ = layer(...)`; legacy `DeepseekV4MTPBlock` likewise updates |
+| [+] | Plan-2 P16 follow-on — V4 attention spec advertises `attn_mask_type=AttnMaskType.causal` | (this commit) | 2026-05-01 | needed because `MultiTokenPredictionLayer.__init__` validates the inner layer's `self_attention.params['attn_mask_type']` against `{padding, causal, no_mask, padding_causal}`. `DeepseekV4Attention.__init__` accepts and ignores the kwarg (V4 manages its own SWA / sink mask) |
 
 ## Phase 17 (v3) — State-dict adapter + checkpoint load
 

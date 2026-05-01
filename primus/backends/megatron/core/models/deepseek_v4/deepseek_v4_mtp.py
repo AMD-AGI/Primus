@@ -4,7 +4,20 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""DeepSeek-V4 Multi-Token Prediction (MTP) block.
+"""DeepSeek-V4 Multi-Token Prediction (MTP) block — **legacy**.
+
+.. deprecated:: plan-2 P16
+    This standalone implementation is superseded by the spec-based
+    integration with upstream :class:`MultiTokenPredictionBlock` (see
+    :func:`primus.backends.megatron.core.models.deepseek_v4.\
+deepseek_v4_mtp_specs.get_v4_mtp_block_spec`). New training runs build
+    the MTP block via that spec helper, which threads V4's HC / hash
+    routing / clamped-SwiGLU through Megatron's standard
+    ``process_mtp_loss`` pipeline.
+
+    This file remains for back-compat with research checkpoints that
+    set ``v4_use_custom_mtp_block=True`` in the YAML config; planned
+    removal: P21 cleanup. No new features should be added here.
 
 Reference: techblog §7 ("MTP V4 head") and
 ``DeepSeek-V4-Flash/inference/model.py:MTPBlock``.
@@ -23,18 +36,11 @@ Phase 5 contract (this file):
 * Each MTP layer is a :class:`DeepseekV4HybridLayer` with the same
   attention / FFN configuration as the main decoder, plus its own
   per-layer HyperHead at the output.
-* Wiring this into the model's loss path (``forward`` + auxiliary MTP
-  loss term) is intentionally deferred to **Phase 6**, when the model
-  integrates with Megatron's training loop and the upstream
-  ``mtp_num_layers`` argument flows end-to-end.
-
-The fact that this file exists as a P5 deliverable (instead of waiting
-for P6) lets us land + unit-test the V4-specific MTP shape contract in
-isolation, parallel to the rest of P5.
 """
 
 from __future__ import annotations
 
+import warnings
 from typing import List, Optional, Sequence
 
 import torch
@@ -76,6 +82,16 @@ class DeepseekV4MTPBlock(nn.Module):
         mtp_compress_ratios: Optional[Sequence[int]] = None,
     ) -> None:
         super().__init__()
+        warnings.warn(
+            "DeepseekV4MTPBlock is deprecated; use the spec-based MTP path "
+            "via primus.backends.megatron.core.models.deepseek_v4."
+            "deepseek_v4_mtp_specs.get_v4_mtp_block_spec, which integrates "
+            "with Megatron's MultiTokenPredictionBlock + process_mtp_loss. "
+            "This standalone module is kept for back-compat behind the "
+            "v4_use_custom_mtp_block flag; planned removal in plan-2 P21.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         if mtp_num_layers <= 0:
             raise ValueError(f"mtp_num_layers must be > 0, got {mtp_num_layers}")
 
@@ -167,7 +183,7 @@ class DeepseekV4MTPBlock(nn.Module):
             stream = x
             if self.hc_mult > 1:
                 stream = stream.unsqueeze(2).expand(B, S, self.hc_mult, D).contiguous()
-            stream = layer(stream, position_ids=position_ids, token_ids=token_ids)
+            stream, _ = layer(stream, position_ids=position_ids, token_ids=token_ids)
             if self.hc_mult > 1:
                 stream = head(stream)
             outputs.append(self.final_layernorm(stream))

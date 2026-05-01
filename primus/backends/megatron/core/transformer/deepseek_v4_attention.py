@@ -244,12 +244,22 @@ class DeepseekV4Attention(MLASelfAttention):
         submodules: Optional[DeepseekV4AttentionSubmodules] = None,
         layer_number: Optional[int] = None,
         pg_collection=None,
+        attn_mask_type=None,
+        **kwargs,
     ) -> None:
         # We deliberately bypass the MLA / Attention parent __init__ chain
         # because V4's KV layout differs from MLA's compressed-KV form.
         # The class still subclasses MLASelfAttention for type identity so
         # that ``isinstance(layer.self_attention, MLASelfAttention)`` keeps
         # working in the Megatron stack.
+        #
+        # Plan-2 P16: ``attn_mask_type`` is accepted (and ignored) so the
+        # attention spec can declare a value that satisfies upstream
+        # :class:`MultiTokenPredictionLayer`'s pre-build validator; V4
+        # manages its own SWA / sink mask internally. ``**kwargs`` swallows
+        # any forward-compatible kwargs upstream may add (e.g.
+        # ``cp_comm_type``) so the spec lifecycle keeps working.
+        del attn_mask_type, kwargs
         nn.Module.__init__(self)
 
         if compress_ratio not in _SUPPORTED_COMPRESS_RATIOS:

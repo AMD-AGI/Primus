@@ -13,6 +13,7 @@ This module only defines DeepSeek-native runtime specs.
 import logging
 from typing import List, Optional
 
+from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.mlp import MLPSubmodules
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.moe.token_dispatcher import (
@@ -287,10 +288,24 @@ def _build_attention_spec(
 ) -> ModuleSpec:
     """Plan-2 P13 attention spec — single :class:`DeepseekV4Attention`
     class for all three V4 layer types (dense / HCA / CSA), dispatched
-    inside the class on ``compress_ratio``."""
+    inside the class on ``compress_ratio``.
+
+    Plan-2 P16: ``attn_mask_type=AttnMaskType.causal`` is declared on the
+    spec params for upstream :class:`MultiTokenPredictionLayer`
+    compatibility. The value is functionally inert for V4 (the V4
+    attention forward manages its own SWA / sink mask internally) but
+    the upstream MTP layer's pre-build validator requires the field to
+    be one of ``{padding, causal, no_mask, padding_causal}`` when the
+    inner layer's submodules are :class:`TransformerLayerSubmodules` —
+    which they are, since :class:`DeepseekV4HybridLayerSubmodules` now
+    extends that dataclass.
+    """
     return ModuleSpec(
         module=DeepseekV4Attention,
-        params={"compress_ratio": int(compress_ratio)},
+        params={
+            "compress_ratio": int(compress_ratio),
+            "attn_mask_type": AttnMaskType.causal,
+        },
         submodules=_build_v4_attention_submodules(
             config=config,
             provider=provider,

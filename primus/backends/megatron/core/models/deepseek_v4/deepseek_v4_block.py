@@ -680,7 +680,7 @@ class DeepseekV4HybridLayer(TransformerLayer):
         position_ids: Optional[torch.Tensor] = None,
         token_ids: Optional[torch.Tensor] = None,
         **kwargs,
-    ) -> torch.Tensor:
+    ):
         """Run one V4 layer.
 
         Args:
@@ -700,6 +700,15 @@ class DeepseekV4HybridLayer(TransformerLayer):
                 inside upstream :class:`MultiTokenPredictionLayer`,
                 which forwards a richer kwargs set (rotary buffers,
                 inference params, etc.).
+
+        Returns:
+            ``(hidden_states, context)`` where ``context`` is always
+            ``None``. The upstream :class:`TransformerLayer` returns a
+            tuple of this shape (cross-attention context pass-through);
+            V4 has no cross-attention, so the second element is always
+            ``None``. Returning a tuple keeps V4 layers compatible with
+            :class:`MultiTokenPredictionLayer._proj_and_transformer_layer`
+            which unpacks ``hidden_states, _ = self.mtp_model_layer(...)``.
         """
         del attention_mask, kwargs
 
@@ -730,7 +739,7 @@ class DeepseekV4HybridLayer(TransformerLayer):
                 return self.mlp(self.pre_mlp_layernorm(collapsed))
 
         x = self._hc_apply(self.ffn_hc, x, _ffn_sub)
-        return x
+        return x, None
 
 
 # ---------------------------------------------------------------------------
@@ -991,9 +1000,10 @@ class DeepseekV4TransformerBlock(TransformerBlock):
         if position_ids is None:
             position_ids = torch.arange(seq_len, device=x.device)
 
-        # Run the layers.
+        # Run the layers. Each V4 layer returns ``(hidden, None)`` for
+        # upstream-tuple compatibility (see DeepseekV4HybridLayer.forward).
         for layer in self.layers:
-            x = layer(
+            x, _ = layer(
                 x,
                 position_ids=position_ids,
                 token_ids=token_ids,
