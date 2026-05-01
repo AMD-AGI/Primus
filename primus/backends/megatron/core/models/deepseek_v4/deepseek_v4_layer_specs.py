@@ -48,12 +48,16 @@ from primus.backends.megatron.core.transformer.hyper_connection import (
     HyperMixer,
 )
 from primus.backends.megatron.core.transformer.indexer import Indexer
-from primus.backends.megatron.core.transformer.moe.v4_hash_router import HashRouter
+from primus.backends.megatron.core.transformer.moe.v4_hash_router import (
+    DeepseekV4HashRouter,
+)
 from primus.backends.megatron.core.transformer.moe.v4_moe import (
     DeepseekV4MoE,
     DeepseekV4MoESubmodules,
 )
-from primus.backends.megatron.core.transformer.moe.v4_topk_router import V4TopKRouter
+from primus.backends.megatron.core.transformer.moe.v4_topk_router import (
+    DeepseekV4LearnedRouter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -342,8 +346,8 @@ def _build_ffn_spec(
     )
 
     moe_submodules = DeepseekV4MoESubmodules(
-        hash_router=ModuleSpec(module=HashRouter),
-        learned_router=ModuleSpec(module=V4TopKRouter),
+        hash_router=ModuleSpec(module=DeepseekV4HashRouter),
+        learned_router=ModuleSpec(module=DeepseekV4LearnedRouter),
         token_dispatcher=ModuleSpec(module=dispatcher_cls),
         grouped_experts=grouped_experts_spec,
         shared_expert=shared_expert_spec,

@@ -207,16 +207,32 @@
 
 ## Phase 14 (v3) — Faithful MoE + activation + router
 
+> P14 ships in two commits:
+> 1. **First commit (this one)** — math + parameter-layout faithfulness:
+>    pre-multiplication clamped SwiGLU, learned router rewritten with HF-aligned
+>    scoring + bias-only-for-selection semantics, hash router rewritten with a
+>    *learnable* gate weight (weights gathered from learned scores, expert ids
+>    from `tid2eid`), `_DenseSwiGLUMLP` clamp fix, plus G3 + G4 unit tests
+>    (CPU fp32 ≤1e-6 vs inline HF reference). The `MoELayer` subclassing,
+>    the provider helpers, and the token-ids threading move to phase-2.
+> 2. **Follow-up commit (P14 phase-2)** — structural refactor:
+>    `DeepseekV4MoE(MoELayer)` so it inherits load-balance loss / z-loss /
+>    dispatcher lifecycle; provider `v4_grouped_mlp_spec(swiglu_limit)` +
+>    `v4_router_spec(learned)`; thread `token_ids` as a forward kwarg
+>    (the `decoder._v4_token_ids` stash is co-removed with P15's hybrid-layer
+>    refactor); G5 1L MoE forward within 1e-3 of HF reference.
+
 | | Task | commit | date | note |
 |---|---|---|---|---|
-| [ ] | `clamped_swiglu_pre_mul(gate, up, alpha)` activation; separate `w1`/`w3` for the eager MLP | | | matches HF reference (gate clamp `max=α`, up clamp `(-α,+α)`) |
-| [ ] | `DeepseekV4LearnedRouter(TopKRouter)` with sqrtsoftplus / sigmoid / softmax + bias | | | honors `moe_router_topk_scaling_factor` |
-| [ ] | `DeepseekV4HashRouter(TopKRouter)` with learnable `gate_linear` + `tid2eid` lookup | | | weights from learned score, expert ids from table |
-| [ ] | `DeepseekV4MoE(MoELayer)` | | | inherits load-balance / z-loss / dispatcher lifecycle |
-| [ ] | Provider `v4_grouped_mlp_spec(swiglu_limit)` + `v4_router_spec(learned)` | | | activation_func returns callable instance |
-| [ ] | Token-ids threaded as forward kwarg (no `decoder._v4_token_ids`) | | | |
-| [ ] | Router unit tests: identical (probs, indices) + gradient on gate (G4) | | | |
-| [ ] | 1L MoE forward within 1e-3 of HF reference (G5) | | | |
+| [x] | `clamped_swiglu_pre_mul(gate, up, alpha)` activation; separate `w1`/`w3` for the eager MLP | (this commit) | 2026-05-01 | new pre-mul clamp matches HF reference (gate clamp `max=α` one-sided, up clamp `(-α,+α)` two-sided); `ClampedSwiGLUMLP` exposes `w1.weight` / `w2.weight` / `w3.weight` keys for state-dict parity; `_DenseSwiGLUMLP` in `deepseek_v4_block.py` now applies the same pre-mul clamp; fused `[gate \| up]` form provided for grouped-gemm experts |
+| [x] | `DeepseekV4LearnedRouter` with sqrtsoftplus / sigmoid / softmax + bias | (this commit) | 2026-05-01 | renamed from `V4TopKRouter` (alias retained); gate exposed as `weight` Parameter (matches Megatron `TopKRouter` AND HF `Gate.weight`); `expert_bias` is selection-only; renormalization gated by `score_function != softmax`; honors `moe_router_topk_scaling_factor` (= HF `route_scale`). Subclassing Megatron's `TopKRouter` for full aux-loss / z-loss / dispatcher lifecycle deferred to P14 phase-2 |
+| [x] | `DeepseekV4HashRouter` with learnable `gate_linear` + `tid2eid` lookup | (this commit) | 2026-05-01 | renamed from `HashRouter` (alias retained); learnable `weight` Parameter same shape as the learned router (was uniform 1/topk); `tid2eid` is a frozen `nn.Parameter(requires_grad=False, dtype=int32)` matching HF reference layout; `forward(hidden, token_ids)` gathers learned scores at expert ids prescribed by `tid2eid`; renorm + scale parity with the learned router |
+| [ ] | `DeepseekV4MoE(MoELayer)` | | | deferred to P14 phase-2 (next commit) |
+| [ ] | Provider `v4_grouped_mlp_spec(swiglu_limit)` + `v4_router_spec(learned)` | | | deferred to P14 phase-2 |
+| [ ] | Token-ids threaded as forward kwarg (no `decoder._v4_token_ids`) | | | tracked under P15; intermediate decoupling in P14 phase-2 (router-side `(hidden, token_ids)` already plumbed) |
+| [x] | G3 unit tests: pre-mul activation matches HF reference within 1e-6 fp32 | (this commit) | 2026-05-01 | `tests/unit_tests/megatron/transformer/deepseek_v4/test_clamped_swiglu.py` — 7 tests cover split / fused / one-sided gate / α=0 / `w1`/`w2`/`w3` state-dict keys / fused-vs-split forward equivalence / end-to-end MLP vs HF `Expert.forward` (≤1e-6 fp32) |
+| [x] | G4 unit tests: routers identical (probs, indices) to HF + gradient flow on gate | (this commit) | 2026-05-01 | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_routers.py` — 13 tests across both routers: score-function parity, learned-router HF agreement (3 score functions × 2 expert-bias modes ≤1e-6), softmax-skips-renorm contract, gradient flows to `weight`, expert-bias detached from probs graph; hash-router HF agreement (3 score functions ≤1e-6), tid2eid frozen parameter (`requires_grad=False`, dtype int32), state-dict keys, deterministic table across seeds, OOB / shape-mismatch error paths, gradient flows to `weight` while `tid2eid.grad is None` |
+| [ ] | 1L MoE forward within 1e-3 of HF reference (G5) | | | deferred to P14 phase-2 (after `MoELayer` subclassing + grouped-MLP provider helpers land) |
 
 ## Phase 15 (v3) — Faithful layer + block + HC × PP
 
@@ -303,7 +319,7 @@
 | 2026-04-28 | PyTorch warns `c10d::allreduce_` autograd kernel is not registered for the EP routed-output allreduce path in `v4_moe.py` | open | Plan-2 (P19) verifies the warning is gone after dispatcher migration; fallback gate retired in P21 |
 |  | (example) HC 4-stream PP send/recv interface does not directly support 4D tensor | tracked in plan-2 | Plan-2 P15: lift `[S,B,K,D]` to `[S*K,B,D]` for PP P2P; revisit a 4D PP send path in P21 |
 | 2026-05-01 | Current attention does not match real V4 (single-latent KV / q_norm / kv_norm / grouped O all missing) | open | Plan-2 P13 rebases on `MLASelfAttention` and lands the missing pieces |
-| 2026-05-01 | HashRouter has no learnable gate weight; clamped SwiGLU clamps post-mul instead of pre-mul; `w1`/`w3` fused | open | Plan-2 P14 rewrites router + activation to match HF reference |
+| 2026-05-01 | HashRouter has no learnable gate weight; clamped SwiGLU clamps post-mul instead of pre-mul; `w1`/`w3` fused | resolved (P14 phase-1) | both routers now share a learnable `weight` Parameter; activation rewritten as pre-multiplication clamp; `ClampedSwiGLUMLP` uses separate `w1` / `w3` Linears (state-dict parity with HF) |
 | 2026-05-01 | Custom V4 block / layer / MoE bypass `TransformerBlock` / `TransformerLayer` / `MoELayer` | open | Plan-2 P14–P15 rebase onto Megatron's standard parents |
 | 2026-05-01 | Token-IDs propagation via `decoder._v4_token_ids` attribute | open | Plan-2 P14–P15 thread token_ids as a forward kwarg |
 | 2026-05-01 | No state-dict adapter / V4-Flash safetensors cannot be loaded into the Primus model | open | Plan-2 P17 lands the adapter + numerical-alignment gate |

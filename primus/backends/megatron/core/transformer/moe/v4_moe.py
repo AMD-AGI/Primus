@@ -11,29 +11,32 @@ and ``DeepSeek-V4-Flash/inference/model.py:MoE``.
 
 V4's MoE block has three pieces:
 
-1. **Router** — either :class:`HashRouter` (first ``num_hash_layers``
-   layers) or :class:`V4TopKRouter` (the rest). Both produce the same
-   ``(probs, routing_map)`` shape contract: ``[N, num_experts]``.
+1. **Router** — either :class:`DeepseekV4HashRouter` (first
+   ``num_hash_layers`` layers) or :class:`DeepseekV4LearnedRouter` (the
+   rest). Both produce the same ``(probs, routing_map)`` shape contract:
+   ``[N, num_experts]``. P14 unified the two routers around a learned
+   gate weight (only the *selection* differs: top-K argmax for the
+   learned router, ``tid2eid`` lookup for the hash router); routing
+   weights always come from the same ``v4_score_fn(linear(hidden,
+   weight))`` path.
 2. **Routed experts** — ``num_experts`` clamped-SwiGLU MLPs. Each token
    contributes to ``moe_router_topk`` of them, weighted by the router
-   probability.
+   probability. The clamp is **pre-multiplication**:
+   ``SiLU(clamp(gate, max=alpha)) * clamp(up, +/- alpha)``.
 3. **Shared expert(s)** — always-on MLP(s) whose output is added to every
    token's contribution. V4-Flash has 1 shared expert with the same
    ``moe_intermediate_size`` as the routed experts.
 
-Phase-10 update:
-* keeps V4 routing semantics (hash + V4TopK) but reuses Megatron
-  dispatcher flow for distributed expert dispatch/combine;
-* supports submodule-driven construction (`submodules + build_module`)
-  for router/dispatcher/expert/shared-expert ownership;
-* enforces Megatron dispatcher + grouped-experts path as the only
-  routed-expert execution mode.
-
-Phase 5 contract:
+Plan-2 contract (P14 phase-1):
 * Layer-aware: caller passes ``layer_idx``; values ``< num_hash_layers``
-  use :class:`HashRouter`, otherwise :class:`V4TopKRouter`.
-* Token-id aware: hash routing needs ``token_ids`` since the routing
-  table is keyed on the token itself, not on the hidden state.
+  use :class:`DeepseekV4HashRouter`, otherwise
+  :class:`DeepseekV4LearnedRouter`.
+* Hash router needs ``(hidden, token_ids)``: the *learned weights* come
+  from ``hidden`` and the *selection indices* from ``tid2eid[token_ids]``.
+* P14 phase-2 (follow-up): rewrite :class:`DeepseekV4MoE` to subclass
+  Megatron's :class:`MoELayer` so it inherits the load-balance / z-loss /
+  dispatcher lifecycle. The current standalone form keeps numerical
+  parity with the HF reference while we land that refactor incrementally.
 """
 
 from __future__ import annotations
@@ -60,8 +63,12 @@ from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
     DeepSeekV4TransformerConfig,
 )
-from primus.backends.megatron.core.transformer.moe.v4_hash_router import HashRouter
-from primus.backends.megatron.core.transformer.moe.v4_topk_router import V4TopKRouter
+from primus.backends.megatron.core.transformer.moe.v4_hash_router import (
+    DeepseekV4HashRouter,
+)
+from primus.backends.megatron.core.transformer.moe.v4_topk_router import (
+    DeepseekV4LearnedRouter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +77,8 @@ logger = logging.getLogger(__name__)
 class DeepseekV4MoESubmodules:
     """Spec tree for V4 MoE construction."""
 
-    hash_router: Optional[Union[ModuleSpec, type]] = HashRouter
-    learned_router: Optional[Union[ModuleSpec, type]] = V4TopKRouter
+    hash_router: Optional[Union[ModuleSpec, type]] = DeepseekV4HashRouter
+    learned_router: Optional[Union[ModuleSpec, type]] = DeepseekV4LearnedRouter
     token_dispatcher: Optional[Union[ModuleSpec, type]] = MoEAlltoAllTokenDispatcher
     grouped_experts: Optional[Union[ModuleSpec, type]] = None
     shared_expert: Optional[Union[ModuleSpec, type]] = SharedExpertMLP
@@ -115,6 +122,7 @@ class DeepseekV4MoE(nn.Module):
         layer_hash_seed = int(config.hash_routing_seed)
         score_function = str(config.moe_router_score_function)
         enable_expert_bias = bool(config.moe_router_enable_expert_bias)
+        topk_scaling_factor = float(getattr(config, "moe_router_topk_scaling_factor", 1.0) or 1.0)
         clamp_alpha = float(config.swiglu_limit)
 
         if num_routed_experts <= 0:
@@ -160,6 +168,7 @@ class DeepseekV4MoE(nn.Module):
             hash_seed=layer_hash_seed,
             score_function=score_function,
             enable_expert_bias=enable_expert_bias,
+            topk_scaling_factor=topk_scaling_factor,
         )
 
         # ---- token dispatcher (Megatron-only path) ----
@@ -201,24 +210,28 @@ class DeepseekV4MoE(nn.Module):
         hash_seed: int,
         score_function: str,
         enable_expert_bias: bool,
+        topk_scaling_factor: float,
     ) -> None:
         if self.use_hash_router:
             if hash_vocab_size is None or hash_vocab_size <= 0:
                 raise ValueError(
                     "hash_vocab_size must be provided (and > 0) when layer_idx < num_hash_layers"
                 )
-            hash_router_spec = self.submodules.hash_router or HashRouter
+            hash_router_spec = self.submodules.hash_router or DeepseekV4HashRouter
             self.router = build_module(
                 hash_router_spec,
+                hidden_size=self.hidden_size,
                 num_experts=self.num_routed_experts,
                 topk=self.moe_router_topk,
                 vocab_size=hash_vocab_size,
                 seed=hash_seed,
+                score_function=score_function,
+                topk_scaling_factor=topk_scaling_factor,
             )
             self.learned_router = None
             return
 
-        learned_router_spec = self.submodules.learned_router or V4TopKRouter
+        learned_router_spec = self.submodules.learned_router or DeepseekV4LearnedRouter
         self.router = None
         self.learned_router = build_module(
             learned_router_spec,
@@ -227,8 +240,7 @@ class DeepseekV4MoE(nn.Module):
             topk=self.moe_router_topk,
             score_function=score_function,
             enable_expert_bias=enable_expert_bias,
-            renormalize=True,
-            topk_scaling_factor=1.0,
+            topk_scaling_factor=topk_scaling_factor,
         )
 
     def _build_shared_expert_module(self, *, intermediate_size: int) -> nn.Module:
@@ -321,14 +333,20 @@ class DeepseekV4MoE(nn.Module):
         hidden: torch.Tensor,
         token_ids: Optional[torch.Tensor],
     ):
-        """Return ``(probs, routing_map)`` for the current router."""
+        """Return ``(probs, routing_map)`` for the current router.
+
+        Hash-routed layers feed both ``hidden`` (for the learned routing
+        weights) AND ``token_ids`` (for the static expert ids from
+        ``tid2eid``); learned layers only consume ``hidden``.
+        """
         if self.use_hash_router:
             assert self.router is not None
             if token_ids is None:
                 raise ValueError(
-                    f"layer {self.layer_idx} uses HashRouter; " "token_ids is required (shape [B, S])."
+                    f"layer {self.layer_idx} uses DeepseekV4HashRouter; "
+                    "token_ids is required (shape [B, S])."
                 )
-            return self.router(token_ids)
+            return self.router(hidden, token_ids)
         assert self.learned_router is not None
         return self.learned_router(hidden)
 

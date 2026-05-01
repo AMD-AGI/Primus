@@ -4,33 +4,38 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Clamped SwiGLU activation for DeepSeek-V4.
+"""Clamped SwiGLU activation for DeepSeek-V4 (pre-mul layout).
 
 Reference: techblog §3 ("Activation: clamped SwiGLU") and the inference
-reference at ``DeepSeek-V4-Flash/inference/model.py:clamp_swiglu``.
+reference at ``DeepSeek-V4-Flash/inference/model.py:Expert.forward``.
 
-V4 replaces the standard ``SwiGLU(x) = SiLU(x_gate) * x_up`` with a
-clamped variant whose post-multiplication output is bounded to
-``[-α, α]`` (V4 default ``α = 7.0``). The clamp keeps the expert
-output magnitudes well-behaved so the MoE summation does not explode in
-bf16.
+DeepSeek-V4 replaces the standard ``SwiGLU(gate, up) = SiLU(gate) * up``
+with a **pre-multiplication** clamp:
 
-This module exposes:
+    gate_c = clamp(gate, max=alpha)             # one-sided (top only)
+    up_c   = clamp(up,   min=-alpha, max=alpha) # two-sided
+    out    = SiLU(gate_c) * up_c
 
-* :func:`clamped_swiglu` — the pointwise activation. Input layout is the
-  Megatron / V4 convention ``[..., 2 * intermediate]`` where the gate /
-  up halves are concatenated along the **last** dim (matching
-  Megatron's :func:`~megatron.core.fusions.fused_bias_swiglu.bias_swiglu`).
-* :class:`ClampedSwiGLUMLP` — a tiny MLP wrapper used by V4's routed and
-  shared experts. Two linears down the hidden axis (gate / up are merged
-  into a single ``[..., 2I]`` projection so we can apply the activation
-  in one call), then a ``[..., I] → [..., D]`` down projection.
+This matches the released checkpoint and Megatron's
+``mlp.MLP``-side clamp path (``activation_func_clamp_value``); both
+clamp the gate / up *before* the activation and multiply, so the
+post-multiply value is bounded by ``alpha * max(SiLU)`` and stays
+well-behaved in bf16 expert summations.
 
-Phase-5 use:
-* ``DeepseekV4MoE`` builds a list of :class:`ClampedSwiGLUMLP` for the
-  routed experts and one for the shared expert.
-* Phase 4's ``DeepseekV4HybridLayer._SwiGLUMLP`` was a placeholder; the
-  block wiring is updated in P5 to call the V4 MoE instead.
+Plan-2 P14 contract:
+
+* :func:`clamped_swiglu_pre_mul` — split-input pointwise activation. Used
+  by the eager :class:`ClampedSwiGLUMLP` and as the canonical reference
+  for unit tests.
+* :func:`clamped_swiglu_pre_mul_fused` — Megatron-fused-input
+  ``[..., 2I]`` gate-concat-up form. Lets a grouped-gemm expert backend
+  call a single function on the post-GEMM output.
+* :class:`ClampedSwiGLUMLP` — eager MLP using **separate** ``w1`` (gate)
+  and ``w3`` (up) Linears so the parameter layout matches the
+  ``DeepSeek-V4-Flash`` checkpoint (``w1.weight`` / ``w3.weight``).
+  An optional ``fused_gate_up`` flag lets callers fuse the two GEMMs at
+  forward time without changing the state-dict layout — the saved /
+  loaded keys are always ``w1.weight`` / ``w3.weight``.
 """
 
 from __future__ import annotations
@@ -42,45 +47,101 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def clamped_swiglu(x: torch.Tensor, *, alpha: float = 7.0) -> torch.Tensor:
-    """Clamped SwiGLU activation.
+def _resolve_alpha(alpha: Optional[float]) -> Optional[float]:
+    """Return a clamp bound or ``None`` when clamping is disabled."""
+    if alpha is None:
+        return None
+    if alpha <= 0.0:
+        return None
+    return float(alpha)
+
+
+def clamped_swiglu_pre_mul(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    *,
+    alpha: float = 7.0,
+) -> torch.Tensor:
+    """Pre-multiplication clamped SwiGLU on split inputs.
 
     Args:
-        x: ``[..., 2 * intermediate_size]`` — gate / up halves concatenated
-            along the last dim.
-        alpha: clamp bound; V4 default is 7.0. Set to ``inf`` (or a very
-            large number) to fall back to vanilla SwiGLU.
+        gate: ``[..., I]`` gate stream (output of ``w1``).
+        up:   ``[..., I]`` up stream (output of ``w3``).
+        alpha: clamp bound; V4-Flash default is ``7.0``. Pass ``0`` /
+            ``None`` to fall back to vanilla ``SiLU(gate) * up``.
 
     Returns:
-        ``[..., intermediate_size]`` clamped to ``[-alpha, alpha]``.
+        ``[..., I]`` activation output, ``SiLU(clamp(gate, max=alpha))
+        * clamp(up, +/- alpha)``.
+    """
+    if gate.shape != up.shape:
+        raise ValueError(
+            "clamped_swiglu_pre_mul expects matching gate / up shapes; "
+            f"got {tuple(gate.shape)} vs {tuple(up.shape)}."
+        )
+    bound = _resolve_alpha(alpha)
+    if bound is not None:
+        gate_c = gate.clamp(max=bound)
+        up_c = up.clamp(min=-bound, max=bound)
+    else:
+        gate_c = gate
+        up_c = up
+    return F.silu(gate_c) * up_c
+
+
+def clamped_swiglu_pre_mul_fused(
+    x: torch.Tensor,
+    *,
+    alpha: float = 7.0,
+) -> torch.Tensor:
+    """Pre-multiplication clamped SwiGLU on a fused ``[..., 2I]`` input.
+
+    The input is the Megatron-convention concatenated ``[gate | up]``
+    along the last dimension (matching
+    :func:`megatron.core.fusions.fused_bias_swiglu.bias_swiglu` and the
+    eager glu path in :class:`megatron.core.transformer.mlp.MLP`).
+
+    Args:
+        x: ``[..., 2 * I]`` — ``[gate | up]`` halves concatenated along
+            the last dim.
+        alpha: clamp bound; same semantics as :func:`clamped_swiglu_pre_mul`.
+
+    Returns:
+        ``[..., I]`` activation output.
     """
     if x.shape[-1] % 2 != 0:
         raise ValueError(
-            "clamped_swiglu expects a concatenated [gate | up] last dim; "
+            "clamped_swiglu_pre_mul_fused expects a [gate | up] last dim; "
             f"got shape {tuple(x.shape)} (last dim must be even)."
         )
     gate, up = x.chunk(2, dim=-1)
-    out = F.silu(gate) * up
-    if alpha is not None and alpha > 0.0:
-        out = out.clamp(min=-alpha, max=alpha)
-    return out
+    return clamped_swiglu_pre_mul(gate, up, alpha=alpha)
 
 
 class ClampedSwiGLUMLP(nn.Module):
-    """Standard SwiGLU MLP block with V4's clamp.
+    """Eager SwiGLU MLP with V4's pre-multiplication clamp.
 
     Computes::
 
-        gate_up = W_gu @ x          # [..., 2 * intermediate]
-        h = clamp(silu(gate) * up, min=-alpha, max=alpha)
-        y = W_d @ h                 # [..., hidden]
+        gate = w1(x)                            # [..., I]
+        up   = w3(x)                            # [..., I]
+        h    = SiLU(clamp(gate, max=alpha))
+                * clamp(up, +/- alpha)
+        y    = w2(h)                            # [..., D]
+
+    The parameter layout (``w1`` / ``w2`` / ``w3``) mirrors the released
+    DeepSeek-V4-Flash ``Expert`` checkpoint exactly. The ``fused_gate_up``
+    knob fuses the gate / up GEMMs at *forward time only* by stacking
+    ``w1.weight`` and ``w3.weight`` on the fly; the saved / loaded
+    ``state_dict`` keys remain ``w1.weight`` / ``w3.weight`` so released
+    checkpoints can be loaded without remapping.
 
     Notes:
-        * ``W_gu`` is a single fused projection so we only do one GEMM
-          before the activation. This matches Megatron's fused-SwiGLU
-          input layout. (P8 will swap this for a fused activation
-          kernel; P5 keeps it eager so we can validate on CPU.)
-        * Bias is omitted by default to match V4's reference checkpoints.
+        * Bias is omitted by default to match V4 reference checkpoints.
+        * ``alpha=0`` (or ``None``) disables clamping → vanilla SwiGLU.
+        * This module is the canonical *eager* reference. Production
+          training uses Megatron's grouped-MLP path with
+          ``activation_func_clamp_value`` set; the math is the same.
     """
 
     def __init__(
@@ -91,22 +152,41 @@ class ClampedSwiGLUMLP(nn.Module):
         alpha: float = 7.0,
         bias: bool = False,
         dtype: Optional[torch.dtype] = None,
+        fused_gate_up: bool = False,
     ) -> None:
         super().__init__()
         if intermediate_size <= 0:
             raise ValueError(f"intermediate_size must be > 0, got {intermediate_size}")
-        self.hidden_size = hidden_size
-        self.intermediate_size = intermediate_size
+        self.hidden_size = int(hidden_size)
+        self.intermediate_size = int(intermediate_size)
         self.alpha = float(alpha)
+        self.fused_gate_up = bool(fused_gate_up)
 
         kw = {} if dtype is None else {"dtype": dtype}
-        self.gate_up = nn.Linear(hidden_size, 2 * intermediate_size, bias=bias, **kw)
-        self.down = nn.Linear(intermediate_size, hidden_size, bias=bias, **kw)
+        # w1 = gate, w3 = up (V4 convention; matches DeepSeek-V4-Flash checkpoint).
+        self.w1 = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias, **kw)
+        self.w3 = nn.Linear(self.hidden_size, self.intermediate_size, bias=bias, **kw)
+        self.w2 = nn.Linear(self.intermediate_size, self.hidden_size, bias=bias, **kw)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up = self.gate_up(x)
-        h = clamped_swiglu(gate_up, alpha=self.alpha)
-        return self.down(h)
+        if self.fused_gate_up:
+            # Build the fused weight on the fly so the state_dict layout
+            # is unchanged (w1.weight / w3.weight). Bias is None by default.
+            w_gu = torch.cat([self.w1.weight, self.w3.weight], dim=0)
+            b_gu = None
+            if self.w1.bias is not None and self.w3.bias is not None:
+                b_gu = torch.cat([self.w1.bias, self.w3.bias], dim=0)
+            gate_up = F.linear(x, w_gu, b_gu)
+            h = clamped_swiglu_pre_mul_fused(gate_up, alpha=self.alpha)
+        else:
+            gate = self.w1(x)
+            up = self.w3(x)
+            h = clamped_swiglu_pre_mul(gate, up, alpha=self.alpha)
+        return self.w2(h)
 
 
-__all__ = ["clamped_swiglu", "ClampedSwiGLUMLP"]
+__all__ = [
+    "clamped_swiglu_pre_mul",
+    "clamped_swiglu_pre_mul_fused",
+    "ClampedSwiGLUMLP",
+]

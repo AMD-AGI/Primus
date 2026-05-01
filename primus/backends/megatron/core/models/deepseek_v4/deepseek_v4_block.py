@@ -62,12 +62,16 @@ from primus.backends.megatron.core.transformer.hyper_connection import (
     HyperHead,
     HyperMixer,
 )
-from primus.backends.megatron.core.transformer.moe.v4_hash_router import HashRouter
+from primus.backends.megatron.core.transformer.moe.v4_hash_router import (
+    DeepseekV4HashRouter,
+)
 from primus.backends.megatron.core.transformer.moe.v4_moe import (
     DeepseekV4MoE,
     DeepseekV4MoESubmodules,
 )
-from primus.backends.megatron.core.transformer.moe.v4_topk_router import V4TopKRouter
+from primus.backends.megatron.core.transformer.moe.v4_topk_router import (
+    DeepseekV4LearnedRouter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -226,11 +230,15 @@ class _RMSNorm(nn.Module):
 
 
 class _DenseSwiGLUMLP(nn.Module):
-    """Plain dense SwiGLU FFN.
+    """Plain dense SwiGLU FFN with V4 pre-multiplication clamp.
 
     Used for non-MoE layers (or as a fallback when ``num_routed_experts``
     is 0). V4-Flash has a tiny number of dense head/tail layers; the bulk
     of layers are MoE (see :class:`DeepseekV4MoE`).
+
+    The activation matches V4's released ``Expert.forward``:
+    ``SiLU(clamp(gate, max=alpha)) * clamp(up, +/- alpha)`` with
+    ``alpha = config.swiglu_limit`` (``0`` disables clamping).
     """
 
     def __init__(
@@ -258,10 +266,14 @@ class _DenseSwiGLUMLP(nn.Module):
             hidden_size,
             config=config,
         )
+        self.swiglu_limit = float(getattr(config, "swiglu_limit", 0.0) or 0.0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate = _projection_forward(self.w_gate, x)
         up = _projection_forward(self.w_up, x)
+        if self.swiglu_limit > 0.0:
+            gate = gate.clamp(max=self.swiglu_limit)
+            up = up.clamp(min=-self.swiglu_limit, max=self.swiglu_limit)
         return _projection_forward(self.w_down, F.silu(gate) * up)
 
 
@@ -421,8 +433,8 @@ class DeepseekV4HybridLayer(GraphableMegatronModule):
                 ),
             )
             moe_submodules = DeepseekV4MoESubmodules(
-                hash_router=ModuleSpec(module=HashRouter),
-                learned_router=ModuleSpec(module=V4TopKRouter),
+                hash_router=ModuleSpec(module=DeepseekV4HashRouter),
+                learned_router=ModuleSpec(module=DeepseekV4LearnedRouter),
                 grouped_experts=ModuleSpec(
                     module=grouped_mlp_module,
                     submodules=grouped_mlp_submodules,
