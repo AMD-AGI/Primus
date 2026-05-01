@@ -22,14 +22,15 @@
 | **G3** | Activation pre-mul clamp matches HF | P14 | L0 | randomized inputs; max-abs error ≤1e-6 |
 | **G4** | Routers (hash + learned) match HF | P14 | L0 | identical weights; (probs, indices) match exactly; gradient flows on `gate_linear` |
 | **G5** | MoE forward agrees with HF | P14 | L1 | 1L toy, fp32 CPU; token-0 hidden ≤1e-3 abs |
-| **G6** | TransformerLayer / TransformerBlock equivalence under PP | P15 | L1 | 4L toy; PP=1 vs PP=2 vs PP=4 token-0 hidden ≤1e-4 abs; loss curve over 50 iters ≤1e-4 |
-| **G7** | MTP loss path | P16 | L1 | 4L toy + `mtp_num_layers=1`; both LM and MTP loss appear; `mtp_num_layers=0` ablation matches LM loss to 1e-6 |
-| **G8** | State-dict round-trip | P17 | L0 | Random init Primus → adapter → HF dict → adapter → Primus; bit-exact |
-| **G9** | V4-Flash safetensors load + numerical | P17 | L1 | Token-0 logits ≤1e-2 abs vs HF reference; max-abs ≤1e-1 in top-100 |
+| **G6** | TransformerLayer / TransformerBlock equivalence under PP | P15 (smoke deferred to P19) | L1 / L2 | 4L toy; PP=1 vs PP=2 vs PP=4 token-0 hidden ≤1e-4 abs; loss curve over 50 iters ≤1e-4 |
+| **G7** | MTP loss path | P16 (smoke deferred to P19) | L1 / L2 | 4L toy + `mtp_num_layers=1`; both LM and MTP loss appear; `mtp_num_layers=0` ablation matches LM loss to 1e-6 |
+| ~~**G8**~~ | ~~State-dict round-trip~~ | **deferred → P22+** | L0 | Random init Primus → adapter → HF dict → adapter → Primus; bit-exact. Not on pre-training release path. |
+| ~~**G9**~~ | ~~V4-Flash safetensors load + numerical~~ | **deferred → P22+** | L1 | Token-0 logits ≤1e-2 abs vs HF reference; max-abs ≤1e-1 in top-100. Not on pre-training release path. |
 | **G10** | Distributed smoke matrix | P19 | L2 | 5 configurations reach `iteration 50` without hang; loss decreases monotonically |
 | **G11** | Routing determinism across PP / EP | P19 | L2 | snapshot diff = 0 |
-| **G12** | Short-run convergence | P20 | L3 | 200-step loss curve within ±0.05 of HF reference baseline |
+| **G12** | Short-run convergence vs Megatron-bridge baseline | P20 | L3 | 200-step loss curve within ±0.05 of Megatron-bridge baseline (HF-reference convergence comparison **deferred → P22+**) |
 | **G13** | TE on/off perf comparison | P20 | L3 | TFLOPS ratio + HBM delta reported |
+| **G14** | Static dead-code audit | P17 | L0 | `csa_attention.py` / `hca_attention.py` / standalone `dual_rope.py` / legacy `DeepseekV4MTPBlock` removed; AST scan finds zero `_v4_token_ids` references; `__init__.py` exports the live surface only |
 
 ## CPU-only Toy Configurations
 
@@ -106,13 +107,21 @@ Each config dumps a routing snapshot (after iter 1) for G11.
 
 ## Release Gates Workflow
 
-1. P19 must be green (G10, G11) before kicking off P20.
-2. P20's three reports (numerical / convergence / perf) attach to the
-   release ticket.
-3. Final gate review checklist:
-   - G1–G9 passing on CI (last 7 days).
+1. P17 must be green (G14) before kicking off P18 — the audit phase
+   should walk a clean tree.
+2. P19 must be green (G10, G11) before kicking off P20.
+3. P20's reports (convergence vs Megatron-bridge baseline / perf)
+   attach to the release ticket.
+4. Final gate review checklist (pre-training release):
+   - G1–G7 passing on CI (last 7 days).
    - G10–G13 passing on the release branch.
+   - G14 dead-code audit clean.
+   - **G8 / G9 marked N/A — deferred to P22+** (HF-checkpoint adapter
+     not on the pre-training release path).
    - No CRIT findings in `00-review-findings.md` left untracked.
+5. P22+ activation checklist (when SFT / evaluation needs HF
+   weights):
+   - G8 + G9 added to CI / nightly.
    - State-dict adapter signed off by a second engineer.
    - HF reference fork pinned at a known commit; documented in
      `state_dict_adapter.py`.
@@ -125,9 +134,10 @@ Each config dumps a routing snapshot (after iter 1) for G11.
 | G2–G5 / module alignment | core attention + MoE owners |
 | G6 / PP equivalence | distributed lead |
 | G7 / MTP | MTP engineer |
-| G8–G9 / checkpoint | adapter author |
+| ~~G8 / G9~~ — deferred (P22+) | future adapter author |
 | G10–G11 / smoke matrix | infra / training-ops |
 | G12 / convergence | research / training-quality |
 | G13 / perf | TE / Turbo lead |
+| G14 / dead-code audit | V4 module owner |
 
 Failures roll up to a single release-board issue; no merge-on-red.

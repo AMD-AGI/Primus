@@ -48,12 +48,18 @@
   `HyperMixer`.
 - **Wire MTP through Megatron's `MultiTokenPredictionBlock`** and retire
   the standalone `DeepseekV4MTPBlock`.
-- **Add a state-dict adapter** so V4-Flash safetensors can be loaded into
-  the Primus model for finetuning / numerical-alignment.
 - **Fix HC × PP**: lift hidden shape to `[S, B, K, D]` across PP boundaries
   (or use serialize/deserialize helpers); apply `HyperHead` only on the
   last PP stage.
 - **Fix TP**: switch projection specs from `parallel_mode="duplicated"` to
   `column_parallel` / `row_parallel` so QKV/O are sharded.
-- **Numerical alignment gate**: token-0 logits within 1e-2 of the HF
-  reference on V4-Flash before any release.
+- **Pre-training first**: Plan-2 ships from-scratch pre-training. The
+  HF state-dict adapter + V4-Flash checkpoint load (token-0 logits
+  ≤1e-2 vs HF) is **deferred to P22+** — see
+  [`03-phase-details.md`](./03-phase-details.md#p22--hf-state-dict-adapter--v4-flash-checkpoint-load-deferred-follow-up)
+  and `02-target-architecture.md` §7. Activate that follow-up when an
+  SFT / evaluation campaign needs the HF weights.
+- **Numerical alignment within Primus is still a gate**: per-module
+  forward agreement with inline HF references (G2 / G3 / G4 / G5) on
+  CPU 4L toys is mandatory; the full V4-Flash safetensors numerical
+  gate (G8 / G9) moves with the deferred adapter to P22+.

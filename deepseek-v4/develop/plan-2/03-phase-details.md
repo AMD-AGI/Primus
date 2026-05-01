@@ -245,39 +245,96 @@
 
 ---
 
-## P17 — State-Dict Adapter + Checkpoint Load
+## P17 — Code Cleanup (dead-code retirement)
+
+> Plan-2 reshuffle (Phase 16 follow-up): the original P17 (HF state-dict
+> adapter + V4-Flash checkpoint load) is **deferred to P22+**. Plan-2
+> is pre-training-only — no HF weights need to be loaded for the
+> release. The slot is now used for the dead-code / hygiene work that
+> previously sat in P21, so the lean release happens *before* P18's
+> spec audit walks the tree.
 
 ### Tasks
 
-1. Implement `DeepSeekV4StateDictAdapter` per the table in §7 of
-   `02-target-architecture.md`.
-2. Add `scripts/load_v4_flash_check.py`:
-   - Loads the released `DeepSeek-V4-Flash` safetensors.
-   - Builds the Primus model (`hc_mult=1` for the smoke; `hc_mult=4`
-     once HC is verified).
-   - Adapter applied to remap keys.
-   - Runs a 64-token forward on CPU (fp32) and compares token-0 logits
-     against an HF reference forward on the same prompt.
-3. CI: a small (4-layer, 4-experts) deterministic-init checkpoint is
-   round-tripped through the adapter (Primus → HF dict → Primus).
+1. **Remove `_RMSNorm` duplicates**:
+   - `primus/backends/megatron/core/models/deepseek_v4/deepseek_v4_block.py`
+     keeps a private `_RMSNorm` for the no-spec fallback. Move it
+     onto a single canonical implementation (or delete entirely once
+     every call site gets a spec-built norm via the V4 provider).
+   - `primus/backends/megatron/core/transformer/compressor.py` shadows
+     the same class. Pull from a single source of truth.
+2. **Retire the standalone `dual_rope.py`**:
+   - V4 attention (P13) uses Megatron's rotary path internally; the
+     standalone dual-RoPE module survives only as a fallback. Audit
+     remaining call sites and remove the file once the spec-driven
+     attention path is the only consumer.
+3. **Retire `csa_attention.py` / `hca_attention.py`**:
+   - All three V4 layer types (`compress_ratio in {0, 4, 128}`) now
+     route through `DeepseekV4Attention.forward` (P13). The legacy
+     CSA / HCA classes are dead code; delete the files and remove
+     them from the package surface.
+4. **Retire the legacy `DeepseekV4MTPBlock`**:
+   - P16 wired the spec-based MTP path
+     (`get_v4_mtp_block_spec` + upstream
+     `MultiTokenPredictionBlock` + `process_mtp_loss`). The standalone
+     `DeepseekV4MTPBlock` has been deprecation-warned since P16 commit
+     `6c5875d4`. Move it under `research/` (or delete) and drop the
+     `v4_use_custom_mtp_block` config flag.
+5. **Drop the EP `all_reduce` fallback gate**:
+   - `v4_enable_ep_allreduce_fallback` toggle and the corresponding
+     `c10d::allreduce_` warning path in `v4_moe.py` go away once
+     `MoEAlltoAllTokenDispatcher` (or `MoEFlexTokenDispatcher`) is the
+     only routed-output reduction path.
+6. **Drop the `_v4_token_ids` references everywhere** (was P18 task,
+   front-loaded here so the audit phase finds a clean tree):
+   - AST audit on the entire `primus/backends/megatron/...` subtree
+     confirms zero matches for `_v4_token_ids`.
+   - Status check belongs in CI as a static-analysis test.
+7. **Fix yaml comments** (was P21 task):
+   - `compress_ratios` comment in
+     `primus/configs/models/megatron/deepseek_v4_*.yaml` correctly
+     documents `4 = CSA` and `128 = HCA` (current comments invert
+     this in some files).
+8. **`__init__.py` package surface refresh**:
+   - Re-export only the live classes; remove deprecated symbols from
+     `__all__`.
 
 ### Exit Criteria
 
-- V4-Flash safetensors load with no missing / unexpected keys.
-- Token-0 logits match HF reference to ≤1e-2 in fp32.
-- Round-trip preserves the state_dict bit-exact (modulo dtype casts).
+- No dead-code warnings on a fresh import audit (`isort` + `autoflake`
+  both clean on the V4 subtree).
+- AST audit confirms no `_v4_token_ids` references anywhere.
+- `csa_attention.py`, `hca_attention.py`, standalone `dual_rope.py`,
+  and `deepseek_v4_mtp.py` (legacy) are deleted (or moved under
+  `research/`).
+- `v4_enable_ep_allreduce_fallback` flag removed; YAML config files
+  no longer reference it.
+- yaml `compress_ratios` comment block matches the canonical
+  4 / 128 mapping.
+- Package `__init__` exports the active surface only; deprecated
+  `DeepseekV4MTPBlock` and CSA / HCA classes removed.
 
 ### Risks / Notes
 
-- The released checkpoint includes FP4-quantized expert weights for
-  larger variants. P17 only commits to **BF16** loading; FP4 / FP8
-  unpacking is deferred.
-- Hash router's `tid2eid` is a checkpoint tensor — make sure the
-  adapter loads it as a non-trainable buffer, not as a parameter.
+- Removing `_RMSNorm` duplicates without breaking the no-spec
+  fallback path (used by tiny CPU smokes / unit tests) is the
+  trickiest item — keep one private RMSNorm in `deepseek_v4_block.py`
+  if necessary, but make sure the spec-driven path never reaches it.
+- Yaml comment fix coordinates with downstream training scripts; do
+  it in a single commit with a deprecation table for old field
+  values.
+- The deferred state-dict adapter (P22+) will need the parameter
+  layouts that land here to stay stable; record any rename / remove
+  decisions in `02-target-architecture.md` §7 so the future adapter
+  knows where the keys went.
 
 ---
 
 ## P18 — Spec-System Audit
+
+> Note: the `_v4_token_ids` removal moved to **P17** so the audit phase
+> walks a clean tree. P15 already eliminated the runtime stash; P17
+> deletes any remaining references / docs / tests.
 
 ### Tasks
 
@@ -295,14 +352,13 @@
 4. Add `tests/configs/test_deepseek_v4_yaml.py`:
    - All three V4 yamls (Flash, Pro, Base) parse to valid configs.
    - Schema mismatches surface clear errors.
-5. Drop the `_v4_token_ids` stash everywhere.
 
 ### Exit Criteria
 
 - `pytest tests/configs/test_deepseek_v4_yaml.py` green.
-- A static check (or AST audit) confirms no `_v4_token_ids` left in the
-  tree.
 - Provider singleton test passes.
+- No eager construction inside `__init__` for spec-replaceable
+  components on a quick AST scan of the V4 subtree.
 
 ### Risks / Notes
 
@@ -343,65 +399,127 @@
 
 ---
 
-## P20 — Numerical / Convergence / Perf Gates
+## P20 — Convergence / Perf Gates
+
+> Plan-2 reshuffle: full V4-Flash numerical alignment (token-0 logits
+> ≤1e-2 vs HF) is **deferred to P22+** (it depends on the deferred HF
+> state-dict adapter). The release gate now relies on (a) per-module
+> numerical alignment that already lands in G2 / G3 / G4 / G5
+> (P13 + P14), (b) PP / MTP equivalence in G6 / G7 (P19), and
+> (c) Megatron-bridge training-baseline parity below.
 
 ### Tasks
 
-1. **Numerical alignment**: full V4-Flash reference forward → Primus
-   forward agreement on a 4L slice (or full 43L if compute permits) at
-   ≤1e-2 token-0 logits, ≤1e-1 mean-of-top-100 logits.
-2. **Short-run convergence**: 200-step training on the same data slice
-   as the HF reference (or a Megatron-bridge baseline). Loss curves
-   match within ±0.05.
-3. **TE on/off perf**: TE-backed forward + backward vs local-fallback
+1. **Short-run convergence**: 200-step training on a fixed data slice
+   against a **Megatron-bridge baseline** (same data, same optimizer,
+   same hparams, no DeepSeek-V4 specifics on the baseline side).
+   Loss curves agree within ±0.05.
+2. **TE on/off perf**: TE-backed forward + backward vs local-fallback
    on the same 4L config. Record TFLOPS and HBM use.
-4. **FP8 follow-up**: scope the FP8 path against TE + Primus-Turbo and
+3. **FP8 follow-up**: scope the FP8 path against TE + Primus-Turbo and
    write a short proposal for the next plan.
 
 ### Exit Criteria
 
-- Numerical-alignment report published under
-  `deepseek-v4/develop/plan-2/`.
-- Convergence report published; loss curve plot attached.
+- Convergence report published under `deepseek-v4/develop/plan-2/`;
+  loss curve plot attached.
 - Perf comparison report published.
-- Release checklist signed off (go/no-go matrix).
+- Release checklist signed off (go/no-go matrix; HF numerical-
+  alignment row marked **N/A — deferred to P22+**).
 
 ### Risks / Notes
 
-- Numerical alignment depends on P17's adapter being correct AND P14
-  routers gradient-checked.
-- The HF reference uses dense causal attention as a fallback for
-  compressed layers (per the modeling_deepseek_v4.py TODO). The Primus
-  alignment gate must use the same fallback, not the real Compressor /
-  Indexer (otherwise we are comparing different math).
+- Convergence baseline must use exactly the same data slice + RNG
+  seed as the V4 run; otherwise the ±0.05 band is meaningless.
+- TE on/off perf gate is informational, not blocking, for the
+  pre-training release; document the TFLOPS / HBM delta and call out
+  any TE-specific regressions.
 
 ---
 
-## P21 — Cleanup + Docs + Handover
+## P21 — Docs + Handover
+
+> Plan-2 reshuffle: the dead-code / yaml-comment items moved to **P17**
+> so cleanup happens before the spec audit (P18) walks the tree. P21
+> is now docs-only.
 
 ### Tasks
 
-1. Remove dead code:
-   - `_RMSNorm` duplicates (`block.py`, `compressor.py`).
-   - Standalone `dual_rope.py` (replaced by Megatron's rotary).
-   - `csa_attention.py` / `hca_attention.py` (folded into
-     `DeepseekV4Attention`).
-   - `DeepseekV4MTPBlock` (if not moved to research/).
-   - EP `all_reduce` fallback gate.
-2. Update the techblog (`deepseek-v4/develop/techblog/`) with the
-   as-built notes.
-3. Refresh `deepseek-v4/develop/progress/` HTML timeline +
-   `ppt-template-amd.pptx` slide deck.
-4. Update yaml comments (fix the `4 / 128` HCA / CSA confusion).
-5. Refresh `develop_deepseek-v4-in-primus.md` with the final convention.
+1. Update the techblog (`deepseek-v4/develop/techblog/`) with as-built
+   notes for P13–P20 (architecture decisions, deferred items, testing
+   coverage, known limitations).
+2. Refresh `deepseek-v4/develop/progress/` HTML timeline +
+   `ppt-template-amd.pptx` slide deck to the final plan-2 state.
+3. Refresh `deepseek-v4/develop_deepseek-v4-in-primus.md` with the
+   final on-disk convention (modules, specs, yaml fields).
+4. Cross-link the deferred **P22+** HF state-dict adapter section
+   (this file + `02-target-architecture.md` §7) as the entry point
+   for whoever picks up the SFT / evaluation track.
 
 ### Exit Criteria
 
-- No dead-code warnings on a fresh import audit.
 - Tech blog reflects what shipped.
 - Progress HTML + PPT updated to plan-2 final state.
+- `develop_deepseek-v4-in-primus.md` matches the released module
+  surface 1:1.
+- Deferred-work index (P22+) is discoverable from both the roadmap
+  and the techblog.
 
 ### Risks / Notes
 
-- Coordinating yaml field renames with downstream training scripts —
-  do this in a single commit with a deprecation table.
+- Keep the docs change in a separate commit from any code change so
+  reviewers can verify "no behavior delta" easily.
+
+---
+
+## P22+ — HF State-Dict Adapter + V4-Flash Checkpoint Load *(deferred follow-up)*
+
+> **Status: deferred, not on the pre-training release path.** The
+> pre-training release ships without HF-weight loading. This section
+> is preserved so a future SFT / evaluation campaign can pick it up
+> without re-deriving the design.
+
+### Trigger to activate
+
+- A downstream consumer needs to fine-tune from `DeepSeek-V4-Flash`
+  weights, OR
+- An evaluation campaign needs token-0 logit parity against the HF
+  reference checkpoint.
+
+### Tasks (carried over from the original plan-2 P17 + plan-2 P20 numerical-alignment item)
+
+1. Implement `DeepSeekV4StateDictAdapter` per the table in §7 of
+   `02-target-architecture.md`.
+2. Add `scripts/load_v4_flash_check.py`:
+   - Loads the released `DeepSeek-V4-Flash` safetensors.
+   - Builds the Primus model (`hc_mult=1` for the smoke; `hc_mult=4`
+     once HC is verified).
+   - Adapter applied to remap keys.
+   - Runs a 64-token forward on CPU (fp32) and compares token-0 logits
+     against an HF reference forward on the same prompt.
+3. CI: a small (4-layer, 4-experts) deterministic-init checkpoint
+   round-tripped through the adapter (Primus → HF dict → Primus).
+4. Numerical-alignment harness on a 4L (or full 43L if compute
+   permits) slice: token-0 logits ≤1e-2, top-100 mean ≤1e-1.
+
+### Exit Criteria (when activated)
+
+- V4-Flash safetensors load with no missing / unexpected keys.
+- Token-0 logits match HF reference to ≤1e-2 in fp32.
+- Round-trip preserves the state_dict bit-exact (modulo dtype casts).
+
+### Risks / Notes
+
+- The released checkpoint includes FP4-quantized expert weights for
+  larger variants. The adapter's first cut commits to **BF16**
+  loading; FP4 / FP8 unpacking is its own follow-up.
+- Hash router's `tid2eid` is a checkpoint tensor — make sure the
+  adapter loads it as a non-trainable buffer, not as a parameter.
+- The HF reference uses dense causal attention as a fallback for
+  compressed layers (per the `modeling_deepseek_v4.py` TODO). The
+  alignment gate must use the same fallback, not the real Compressor
+  / Indexer (otherwise we are comparing different math).
+- If parameter layouts shift in P13 / P14 / P15 / P17 between now
+  and the trigger, update the adapter table in
+  `02-target-architecture.md` §7 in the same PR — that file is the
+  contract for this deferred phase.

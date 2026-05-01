@@ -268,18 +268,33 @@
 | [+] | Plan-2 P16 follow-on — `DeepseekV4HybridLayer.forward` returns `(hidden_states, None)` tuple | (this commit) | 2026-05-01 | required by `MultiTokenPredictionLayer._proj_and_transformer_layer` which unpacks `hidden_states, _ = self.mtp_model_layer(...)`. The block's per-layer call updates to `x, _ = layer(...)`; legacy `DeepseekV4MTPBlock` likewise updates |
 | [+] | Plan-2 P16 follow-on — V4 attention spec advertises `attn_mask_type=AttnMaskType.causal` | (this commit) | 2026-05-01 | needed because `MultiTokenPredictionLayer.__init__` validates the inner layer's `self_attention.params['attn_mask_type']` against `{padding, causal, no_mask, padding_causal}`. `DeepseekV4Attention.__init__` accepts and ignores the kwarg (V4 manages its own SWA / sink mask) |
 
-## Phase 17 (v3) — State-dict adapter + checkpoint load
+## Phase 17 (v3) — Code cleanup (dead-code retirement)
+
+> Plan-2 reshuffle (2026-05-01): the original Phase 17 (HF state-dict
+> adapter + V4-Flash checkpoint load) is **deferred to Phase 22+** —
+> see "Deferred / future work" below. Plan-2 is pre-training-only, so
+> HF-weight loading is not on the release path. The slot is reused for
+> the dead-code work that previously sat in Phase 21, so the cleanup
+> happens *before* Phase 18's spec audit walks the tree.
 
 | | Task | commit | date | note |
 |---|---|---|---|---|
-| [ ] | `DeepSeekV4StateDictAdapter` (HF / inference key map → Primus) | | | |
-| [ ] | `scripts/load_v4_flash_check.py` (CPU forward, 64-token prompt) | | | |
-| [ ] | `tid2eid` loaded as non-trainable buffer | | | |
-| [ ] | Round-trip test (G8) | | | |
-| [ ] | V4-Flash token-0 logits ≤1e-2 vs HF reference (G9) | | | |
-| [ ] | FP4 / FP8 expert weights documented as out-of-scope | | | |
+| [ ] | Remove `_RMSNorm` duplicates (`block.py`, `compressor.py`) | | | keep at most one canonical fallback for no-spec CPU smokes |
+| [ ] | Retire standalone `dual_rope.py` (replaced by Megatron's rotary) | | | audit call sites first; remove only after every consumer reaches the spec-driven attention path |
+| [ ] | Retire `csa_attention.py` / `hca_attention.py` | | | logic now lives in `DeepseekV4Attention` (P13); delete files + remove from `__all__` |
+| [ ] | Retire legacy `DeepseekV4MTPBlock` (move under `research/` or delete) | | | spec-based MTP path landed in P16; deprecation banner present since `6c5875d4` |
+| [ ] | Drop `v4_use_custom_mtp_block` config flag | | | obsolete once legacy MTP block is gone |
+| [ ] | Drop EP `all_reduce` fallback gate (`v4_enable_ep_allreduce_fallback`) | | | dispatcher-only path going forward |
+| [ ] | AST audit: zero `_v4_token_ids` references in `primus/backends/megatron/...` | | | front-loaded from old P18 task list |
+| [ ] | Fix yaml comments (4=CSA, 128=HCA) in `deepseek_v4_*.yaml` | | | front-loaded from old P21 task list |
+| [ ] | Refresh `__init__.py` package surface to live classes only | | | mirrors removal items above |
+| [ ] | Static dead-code audit gate (G14) green | | | exit gate for Phase 17 |
 
 ## Phase 18 (v3) — Spec-system audit
+
+> `_v4_token_ids` removal moved to Phase 17 so the audit walks a clean
+> tree (P15 already eliminated the runtime stash; P17 removes any
+> leftover references).
 
 | | Task | commit | date | note |
 |---|---|---|---|---|
@@ -288,7 +303,6 @@
 | [ ] | YAML `compress_ratios` becomes a list field | | | fixes D4 |
 | [ ] | `tests/configs/test_deepseek_v4_yaml.py` (G1) | | | |
 | [ ] | Audit: no spec-replaceable module instantiated outside `build_module` | | | |
-| [ ] | Drop `_v4_token_ids` references everywhere | | | |
 
 ## Phase 19 (v3) — Distributed re-validation
 
@@ -302,35 +316,61 @@
 | [ ] | Routing snapshot diff = 0 across PP / EP changes (G11) | | | |
 | [ ] | `c10d::allreduce_` warning gone | | | |
 
-## Phase 20 (v3) — Numerical / convergence / perf gates
+## Phase 20 (v3) — Convergence / perf gates
+
+> Plan-2 reshuffle (2026-05-01): full V4-Flash numerical alignment
+> (token-0 logits ≤1e-2 vs HF) is **deferred to Phase 22+** along with
+> the HF state-dict adapter. The pre-training release relies on
+> per-module numerical agreement (G2 / G3 / G4 / G5) plus a
+> Megatron-bridge convergence baseline.
 
 | | Task | commit | date | note |
 |---|---|---|---|---|
-| [ ] | Numerical alignment report on V4-Flash (G9 extended) | | | |
-| [ ] | 200-step convergence vs HF baseline (G12) | | | ±0.05 loss curve match |
+| [ ] | 200-step convergence vs Megatron-bridge baseline (G12) | | | ±0.05 loss curve match — HF-reference comparison deferred to P22+ |
 | [ ] | TE on/off perf report (G13) | | | TFLOPS + HBM delta |
 | [ ] | FP8 follow-up plan scoped | | | next plan |
-| [ ] | Release checklist signed off | | | go/no-go |
+| [ ] | Release checklist signed off (G8 / G9 row marked **N/A — deferred**) | | | go/no-go |
 
-## Phase 21 (v3) — Cleanup + docs + handover
+## Phase 21 (v3) — Docs + handover
+
+> Plan-2 reshuffle (2026-05-01): all dead-code / yaml-comment items
+> moved to Phase 17 so the audit (P18) and release (P20) walk a clean
+> tree. Phase 21 is now docs-only.
 
 | | Task | commit | date | note |
 |---|---|---|---|---|
-| [ ] | Remove `_RMSNorm` duplicates / `dual_rope.py` / `csa_attention.py` / `hca_attention.py` | | | |
-| [ ] | Remove `DeepseekV4MTPBlock` (or move to `research/`) | | | |
-| [ ] | Remove EP `all_reduce` fallback gate | | | |
-| [ ] | Refresh techblog with as-built notes | | | |
-| [ ] | Refresh `progress/` HTML + `ppt-template-amd.pptx` slides | | | |
-| [ ] | Fix yaml comments (`compress_ratio` 4=CSA, 128=HCA) | | | |
+| [ ] | Refresh techblog (`deepseek-v4/develop/techblog/`) with as-built notes for P13–P20 | | | |
+| [ ] | Refresh `develop/progress/` HTML timeline + `ppt-template-amd.pptx` to plan-2 final state | | | |
+| [ ] | Refresh `develop_deepseek-v4-in-primus.md` with the final on-disk convention | | | |
+| [ ] | Cross-link the deferred Phase 22+ HF-checkpoint adapter as the entry point for SFT / eval | | | |
+
+## Phase 22+ (deferred) — HF state-dict adapter + V4-Flash checkpoint load
+
+> **Status: deferred, not on the pre-training release path.** Plan-2
+> ships from-scratch pre-training; HF-weight loading activates when an
+> SFT or evaluation campaign needs it. Design notes live in
+> `plan-2/02-target-architecture.md` §7 and
+> `plan-2/03-phase-details.md` (P22+ section).
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [ ] | `DeepSeekV4StateDictAdapter` (HF / inference key map → Primus) | | | from old Phase 17 |
+| [ ] | `scripts/load_v4_flash_check.py` (CPU forward, 64-token prompt) | | | from old Phase 17 |
+| [ ] | `tid2eid` loaded as non-trainable buffer | | | from old Phase 17 |
+| [ ] | Round-trip test (G8) | | | from old Phase 17 |
+| [ ] | V4-Flash token-0 logits ≤1e-2 vs HF reference (G9) | | | from old Phase 17 / Phase 20 |
+| [ ] | Numerical alignment report on V4-Flash (G9 extended) | | | from old Phase 20 |
+| [ ] | FP4 / FP8 expert weights documented as out-of-scope | | | from old Phase 17 |
 
 ## Blockers / Risks Log
 
 | date | description | status | decision |
 |---|---|---|---|
-| 2026-04-28 | PyTorch warns `c10d::allreduce_` autograd kernel is not registered for the EP routed-output allreduce path in `v4_moe.py` | open | Plan-2 (P19) verifies the warning is gone after dispatcher migration; fallback gate retired in P21 |
+| 2026-04-28 | PyTorch warns `c10d::allreduce_` autograd kernel is not registered for the EP routed-output allreduce path in `v4_moe.py` | open | Plan-2 (P19) verifies the warning is gone after dispatcher migration; fallback gate retired in P17 (per 2026-05-01 reshuffle) |
 |  | (example) HC 4-stream PP send/recv interface does not directly support 4D tensor | tracked in plan-2 | Plan-2 P15: lift `[S,B,K,D]` to `[S*K,B,D]` for PP P2P; revisit a 4D PP send path in P21 |
 | 2026-05-01 | Current attention does not match real V4 (single-latent KV / q_norm / kv_norm / grouped O all missing) | open | Plan-2 P13 rebases on `MLASelfAttention` and lands the missing pieces |
 | 2026-05-01 | HashRouter has no learnable gate weight; clamped SwiGLU clamps post-mul instead of pre-mul; `w1`/`w3` fused | resolved (P14 phase-1) | both routers now share a learnable `weight` Parameter; activation rewritten as pre-multiplication clamp; `ClampedSwiGLUMLP` uses separate `w1` / `w3` Linears (state-dict parity with HF) |
 | 2026-05-01 | Custom V4 block / layer / MoE bypass `TransformerBlock` / `TransformerLayer` / `MoELayer` | resolved (P14 phase-2 + P15) | `DeepseekV4MoE` is a `MegatronModule` (P14 phase-2); `DeepseekV4HybridLayer` is a `TransformerLayer` and `DeepseekV4TransformerBlock` is a `TransformerBlock` (P15). Aux-loss / z-loss inheritance via `TopKRouter` subclassing remains tracked into P19 |
 | 2026-05-01 | Token-IDs propagation via `decoder._v4_token_ids` attribute | resolved (P15) | `DeepseekV4Model.forward` now passes `token_ids=input_ids` directly to the decoder; AST audit gate prevents regressions |
-| 2026-05-01 | No state-dict adapter / V4-Flash safetensors cannot be loaded into the Primus model | open | Plan-2 P17 lands the adapter + numerical-alignment gate |
+| 2026-05-01 | No state-dict adapter / V4-Flash safetensors cannot be loaded into the Primus model | deferred | Pre-training-only release; adapter + numerical-alignment moved to **Phase 22+** (deferred follow-up) per 2026-05-01 user-driven reshuffle. Activate when SFT / evaluation needs HF weights |
+| 2026-05-01 | Plan-2 reshuffle: P17 → code cleanup; P21 → docs only; HF state-dict adapter / V4-Flash numerical alignment deferred to Phase 22+ | resolved (docs-only) | Pre-training is the release path; HF-checkpoint load is not. Dead-code (`_RMSNorm` duplicates / `dual_rope.py` / `csa_attention.py` / `hca_attention.py` / legacy `DeepseekV4MTPBlock` / EP `all_reduce` fallback gate / `_v4_token_ids` residue / yaml comment fixes) front-loaded into P17 so the spec audit (P18) and release gates (P19 / P20) walk a clean tree. See plan-2 `01-roadmap.md` + `03-phase-details.md` |
