@@ -1468,6 +1468,14 @@ def _node_status_from(
     Empty list -> node PASS. Any non-empty result -> node FAIL.
     """
     reasons: List[str] = []
+
+    # Self-contained GPU visibility guard. Decoupled from any other
+    # collector so a wrapped/downgraded "No GPUs detected" finding can
+    # never silently turn a CPU-only or stale-GPU node into a PASS.
+    vis = tier1_extra.get("gpu_visibility") or {}
+    for r in vis.get("fail_reasons", []) or []:
+        reasons.append(f"gpu_visibility: {r}")
+
     for r in per_gpu:
         if r.status != "PASS":
             reasons.append(f"gpu{r.gpu}: {r.status}: {r.reason}")
@@ -1577,6 +1585,43 @@ def _cmd_run(ns: argparse.Namespace) -> int:
                 expected_gpus = 0
     expected_gpus = max(0, int(expected_gpus))
 
+    # GPU visibility guard. We capture each independent source (the
+    # --expected-gpus flag, env vars, torch, and -- below -- amd-smi) so
+    # the JSON tells the operator *why* we resolved to N. The hard-fail
+    # rules live here, decoupled from any other collector, because we have
+    # seen `_collect_reused_info()` downgrade the "No GPUs detected" fail
+    # to a warn when collect_gpu_info() raises -- which would otherwise
+    # let a CPU-only or stale-GPU node PASS smoke silently.
+    torch_visible = 0
+    torch_is_available = False
+    try:
+        import torch  # type: ignore
+
+        torch_is_available = bool(torch.cuda.is_available())
+        torch_visible = int(torch.cuda.device_count()) if torch_is_available else 0
+    except Exception:
+        pass
+    gpu_visibility: Dict[str, Any] = {
+        "expected_gpus": expected_gpus,
+        "explicit_expected_gpus": ns.expected_gpus,
+        "torch_visible": torch_visible,
+        "torch_is_available": torch_is_available,
+        "env_local_world_size": int(os.environ.get("LOCAL_WORLD_SIZE", "0") or 0),
+        "env_gpus_per_node": int(os.environ.get("GPUS_PER_NODE", "0") or 0),
+        "amd_smi_visible": None,  # filled in after _collect_amd_smi_metrics
+        "fail_reasons": [],
+    }
+    if expected_gpus < 1:
+        msg = (
+            f"expected_gpus={expected_gpus}: no per-GPU sanity tests will "
+            f"run (torch_is_available={torch_is_available}, "
+            f"torch_visible={torch_visible}, "
+            f"LOCAL_WORLD_SIZE={gpu_visibility['env_local_world_size']}, "
+            f"GPUS_PER_NODE={gpu_visibility['env_gpus_per_node']})"
+        )
+        gpu_visibility["fail_reasons"].append(msg)
+        _warn(msg)
+
     _log(
         f"start node-smoke: node_rank={node_rank} expected_gpus={expected_gpus} "
         f"tier2={ns.tier2} tier2_rccl={ns.tier2_rccl}"
@@ -1629,6 +1674,28 @@ def _cmd_run(ns: argparse.Namespace) -> int:
     tier1_extra["tooling"] = _collect_rocm_smi_self_latency(
         timeout_sec=float(ns.rocm_smi_timeout_sec)
     )
+
+    # Visibility cross-check: if amd-smi successfully enumerated GPUs but
+    # torch couldn't see them, that's a high-signal sign of a stale ROCm
+    # install / wedged amdgpu driver -- exactly the case where a "smoke
+    # test" is supposed to pull the node out of rotation. We only treat
+    # the JSON path as authoritative for counting (the text fallback
+    # cannot be reliably parsed for a count).
+    amd_low = tier1_extra["gpu_low_level"]
+    if amd_low.get("ok") and amd_low.get("tool") == "amd-smi metric --json":
+        per = amd_low.get("per_gpu") or []
+        n_amd = len(per) if isinstance(per, list) else 0
+        gpu_visibility["amd_smi_visible"] = n_amd
+        if n_amd > 0 and torch_visible < n_amd:
+            mismatch = (
+                f"gpu_visibility_mismatch: amd-smi sees {n_amd} GPU(s) "
+                f"but torch.cuda.device_count()={torch_visible} "
+                f"(torch_is_available={torch_is_available}); ROCm install "
+                f"or amdgpu driver may be broken on this node"
+            )
+            gpu_visibility["fail_reasons"].append(mismatch)
+            _warn(mismatch)
+    tier1_extra["gpu_visibility"] = gpu_visibility
     xg = tier1_extra["xgmi"]
     if xg.get("ok"):
         bad = xg.get("non_xgmi_pairs") or []
@@ -2225,6 +2292,53 @@ def _cmd_aggregate(ns: argparse.Namespace) -> int:
         except Exception as e:
             f.write(f"*Host limits section failed to render: {e}*\n")
             _warn(f"host-limits render failed: {e}")
+
+        # ----- GPU visibility issues (no GPUs / amd-smi vs torch mismatch) -----
+        # Independent guard -- doesn't rely on the reused gpu_info collector
+        # emitting a level=fail finding, which has been known to silently
+        # downgrade to warn when collect_gpu_info() raises.
+        f.write("\n## GPU visibility issues\n\n")
+        try:
+            vis_rows: List[Dict[str, Any]] = []
+            for n in nodes:
+                vis = (n.get("tier1") or {}).get("gpu_visibility") or {}
+                for issue in vis.get("fail_reasons", []) or []:
+                    vis_rows.append({
+                        "node_rank": n.get("node_rank", "?"),
+                        "host": n.get("host", "?"),
+                        "torch": vis.get("torch_visible"),
+                        "amd_smi": vis.get("amd_smi_visible"),
+                        "expected": vis.get("expected_gpus"),
+                        "issue": issue,
+                    })
+            if not vis_rows:
+                f.write("*Every node resolved expected_gpus >= 1 and torch + "
+                        "amd-smi agree on the GPU count.*\n")
+            else:
+                f.write(
+                    "Nodes where the GPU is invisible to torch, or where "
+                    "amd-smi sees more GPUs than torch (stale ROCm / wedged "
+                    "amdgpu driver). These are hard fails independent of "
+                    "every other collector.\n\n"
+                )
+                f.write(
+                    "| Node | Hostname | expected | torch | amd-smi | Issue |\n"
+                )
+                f.write(
+                    "|------|----------|----------|-------|---------|-------|\n"
+                )
+                for row in vis_rows:
+                    msg = str(row["issue"]).replace("|", "/")
+                    if len(msg) > 200:
+                        msg = msg[:197] + "..."
+                    f.write(
+                        f"| {row['node_rank']} | {row['host']} | "
+                        f"{row['expected']} | {row['torch']} | "
+                        f"{row['amd_smi']} | {msg} |\n"
+                    )
+        except Exception as e:
+            f.write(f"*GPU visibility section failed to render: {e}*\n")
+            _warn(f"gpu-visibility render failed: {e}")
 
         # ----- D-1: GPU low-level outliers (PCIe link, HBM total) -----
         f.write("\n## GPU low-level outliers (PCIe link / HBM)\n\n")
