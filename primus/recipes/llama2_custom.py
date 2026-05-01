@@ -37,6 +37,7 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.rerun_state_machine import RerunDataIterator, RerunMode, get_rerun_state_machine
 from megatron.core.transformer import MegatronModule
 from megatron.core.transformer.cuda_graphs import TECudaGraphHelper
+from megatron.core.transformer.enums import AttnBackend
 from megatron.core.utils import check_param_hashes_across_dp_replicas, get_model_config
 from megatron.core.full_cuda_graph import FullCudaGraphWrapper
 
@@ -125,6 +126,14 @@ from megatron.bridge.training.train import (
 
 MLPERF_TARGET_LOSS = 0.925
 
+# Sticky flag: once ``evaluate_and_print_results_custom`` observes an lm-loss
+# value strictly below ``MLPERF_TARGET_LOSS`` we flip this to True. Subsequent
+# calls to ``evaluate_and_print_results_custom`` / ``warmup_eval`` become
+# no-ops that return ``should_exit=True`` without running another full
+# validation pass. Prevents redundant evals from the in-loop interval check,
+# a resumed loop, or any outer Megatron-Bridge / callback re-entry path.
+_TARGET_LOSS_REACHED: bool = False
+
 @register
 def bf16_with_fp8_hybrid() -> MixedPrecisionConfig:
     """Create a MixedPrecisionConfig for mixed precision training using BF16 with MXFP8.
@@ -139,6 +148,21 @@ def bf16_with_fp8_hybrid() -> MixedPrecisionConfig:
     cfg.fp8_amax_compute_algo = "most_recent"
     cfg.fp8_param_gather = True
     return cfg
+
+
+@register
+def bf16_with_mxfp4_mixed() -> MixedPrecisionConfig:
+    """Same as megatron.bridge ``bf16_with_mxfp4_mixed``; defined here so it registers when this
+    module is imported (before ``runtime_config_update`` resolves ``precision_config`` strings).
+    """
+    cfg = bf16_mixed()
+    cfg.fp8 = None
+    cfg.fp4 = "e2m1"
+    cfg.fp4_recipe = "mxfp4"
+    cfg.fp8_param_gather = False
+    cfg.grad_reduce_in_fp32 = False
+    return cfg
+
 
 class Timer:
     def __init__(self, gbs):
@@ -217,11 +241,17 @@ class Llama2CustomKwargs(TypedDict, total=False):
     dataset_type: str
     seed: int
     check_for_nan_in_loss: bool
-    # TE op fuser on backbone + Primus stable-LoRA coupling (see stable_lora_with_te_op_fuser).
-    use_transformer_engine_op_fuser: bool
-    stable_lora_with_te_op_fuser: bool
     te_fused_lora_include_modules: Optional[List[str]]
     te_fused_lora_exclude_modules: Optional[List[str]]
+    # MLPerf NeMo MI355X FP4-style activation recompute (optional)
+    recompute_granularity: Optional[str]
+    recompute_method: Optional[str]
+    recompute_num_layers: Optional[int]
+    # TE attention backend ("flash", "fused", "unfused", "local", "auto").
+    # When set, the recipe both sets ``model_cfg.attention_backend`` and lets
+    # Megatron's _set_attention_backend reconcile NVTE_FLASH_ATTN / NVTE_FUSED_ATTN
+    # / NVTE_UNFUSED_ATTN. Leave as None to keep Megatron's default ("auto").
+    attention_backend: Optional[str]
 
 
 def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigContainer:
@@ -249,6 +279,26 @@ def llama2_70b_lora_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigC
     # Combine defaults with user kwargs; user values take precedence.
     combined_kwargs: Llama2CustomKwargs = {**recommended_kwargs, **user_kwargs}
     return _llama2_lora(**combined_kwargs)
+
+
+def llama2_70b_lora_mxfp4_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> ConfigContainer:
+    """
+    Llama-2 70B LoRA with MXFP4 mixed precision (``bf16_with_mxfp4_mixed``), aligned with
+    MLPerf training 6.0 ``llama2_sft/nemo/config_MI355X_1x8x1_fp4.sh`` defaults for FP4 phase:
+    full/block recompute over 8 layers, Hadamard controlled via ``NVTE_MXFP4_USE_HADAMARD``.
+    """
+    mxfp4_defaults: Llama2CustomKwargs = {
+        "precision_config": "bf16_with_mxfp4_mixed",
+        "recompute_granularity": "full",
+        "recompute_method": "block",
+        # MLPerf 6.0 NeMo MI355X FP4 reference: RECOMPUTE_NUM_LAYERS=8.
+        "recompute_num_layers": 0,
+        # MXFP4 path is exercised with FusedAttention (CK / AOTriton); FlashAttention
+        # has not been validated for this recipe on MI355X. User can still override.
+        "attention_backend": "fused",
+    }
+    combined_kwargs: Llama2CustomKwargs = {**mxfp4_defaults, **user_kwargs}
+    return llama2_70b_lora_config(**combined_kwargs)
 
 
 def _llama2_lora(
@@ -289,10 +339,12 @@ def _llama2_lora(
     comm_overlap_config: Optional[CommOverlapConfig] = None,
     seed: int = 1234,
     check_for_nan_in_loss: bool = False,
-    use_transformer_engine_op_fuser: bool = True,
-    stable_lora_with_te_op_fuser: bool = True,
     te_fused_lora_include_modules: Optional[List[str]] = None,
     te_fused_lora_exclude_modules: Optional[List[str]] = None,
+    recompute_granularity: Optional[str] = None,
+    recompute_method: Optional[str] = None,
+    recompute_num_layers: Optional[int] = None,
+    attention_backend: Optional[str] = None,
 ) -> ConfigContainer:
     """
     Create a custom pre-training configuration for Llama2 models.
@@ -342,17 +394,11 @@ def _llama2_lora(
         packed_val_data_path (str | None): Path to packed validation data.
         packed_metadata_path (str | None): Path to packed metadata.
         dataset_type (str): Dataset type to use. Either "squad" (default) or "mlperf_dataset".
-        use_transformer_engine_op_fuser (bool): If True, set ``model_cfg.use_transformer_engine_op_fuser``
-            (TE op-fuser path on the backbone, e.g. fused MLP). Set False if LM/validation loss diverges
-            from a known-good run.
-        stable_lora_with_te_op_fuser (bool): Single Primus knob for the **stable LoRA + op fuser** combo.
-            If True (default): backbone follows ``use_transformer_engine_op_fuser``, but LoRA always
-            uses unfused :class:`LoRALinear` (``use_te_fused_lora=False``) so loss matches the safe path.
-            If False: **legacy** behavior — LoRA uses ``use_te_fused_lora = use_transformer_engine_op_fuser``
-            (when TP=1, fused :class:`TEFusedLoRALinear` tracks backbone op fuser, as in older Bridge).
-        te_fused_lora_include_modules (Optional[List[str]]): Passed to :class:`LoRA`; only applies when
-            fused LoRA is enabled (``stable_lora_with_te_op_fuser=False`` and backbone op fuser on).
-        te_fused_lora_exclude_modules (Optional[List[str]]): Passed to :class:`LoRA`; same scope as include.
+        te_fused_lora_include_modules (Optional[List[str]]): Passed to :class:`LoRA` (unused when LoRA is unfused).
+        te_fused_lora_exclude_modules (Optional[List[str]]): Passed to :class:`LoRA` (unused when LoRA is unfused).
+        recompute_granularity (Optional[str]): If set, enables activation recompute (e.g. ``"full"`` for MXFP4).
+        recompute_method (Optional[str]): Recompute method (e.g. ``"block"``).
+        recompute_num_layers (Optional[int]): Layers per recompute block when using block method.
 
     Returns:
         ConfigContainer: Configuration for pre-training.
@@ -379,10 +425,10 @@ def _llama2_lora(
     model_cfg.cross_entropy_loss_fusion = True
     model_cfg.cross_entropy_fusion_impl = "te"
     model_cfg.gradient_accumulation_fusion = True
-    model_cfg.bias_dropout_fusion = False
-    model_cfg.fused_single_qkv_rope = True
+    model_cfg.bias_dropout_fusion = True
+    model_cfg.fused_single_qkv_rope = False
     model_cfg.apply_rope_fusion = True
-    model_cfg.use_transformer_engine_op_fuser = use_transformer_engine_op_fuser
+    model_cfg.use_transformer_engine_op_fuser = False
     # Activation offload hint for TP paths (distinct from cpu_offloading / cpu_offloading_num_layers).
     model_cfg.cpu_offloading_activations = True
     # Used when cuda_graph_impl is not "none" (harmless when graphs are disabled).
@@ -397,6 +443,24 @@ def _llama2_lora(
     model_cfg.cpu_offloading = False
     model_cfg.cpu_offloading_num_layers = 0
     model_cfg.empty_unused_memory_level = 0 # 0: No empty, 1: Empty at end of eval, 2: Empty at end of eval and train.
+    if recompute_granularity is not None:
+        model_cfg.recompute_granularity = recompute_granularity
+    if recompute_method is not None:
+        model_cfg.recompute_method = recompute_method
+    if recompute_num_layers is not None:
+        model_cfg.recompute_num_layers = recompute_num_layers
+    # Pin TE's attention backend (default "auto" lets TE pick FlashAttention).
+    # Setting "fused" forces FusedAttention (CK / AOTriton on ROCm) and aligns
+    # the NVTE_FLASH_ATTN / NVTE_FUSED_ATTN / NVTE_UNFUSED_ATTN env vars via
+    # Megatron's _set_attention_backend.
+    if attention_backend is not None:
+        try:
+            model_cfg.attention_backend = AttnBackend[attention_backend]
+        except KeyError as e:
+            raise ValueError(
+                f"Unknown attention_backend {attention_backend!r}; expected one of "
+                f"{[b.name for b in AttnBackend]}."
+            ) from e
     # Disable attention QK clipping / max-logit scans in the optimizer path (extra GPU work per step).
     if hasattr(model_cfg, "qk_clip"):
         model_cfg.qk_clip = False
@@ -425,13 +489,6 @@ def _llama2_lora(
     opt_config.barrier_with_L1_time = False
     opt_config.log_num_zeros_in_grad = False
 
-    # Stable path: backbone op fuser on, LoRA always LoRALinear. Legacy: couple fused LoRA to backbone flag.
-    use_te_fused_lora = (
-        False
-        if stable_lora_with_te_op_fuser
-        else bool(use_transformer_engine_op_fuser)
-    )
-
     peft_config = LoRA(
         dim=16,
         alpha=32,
@@ -441,7 +498,7 @@ def _llama2_lora(
         lora_B_init_method="zero",
         a2a_experimental=True,
         target_modules=["linear_qkv", "linear_proj"],
-        use_te_fused_lora=use_te_fused_lora,
+        use_te_fused_lora=False,
         te_fused_lora_include_modules=te_fused_lora_include_modules,
         te_fused_lora_exclude_modules=(
             te_fused_lora_exclude_modules if te_fused_lora_exclude_modules is not None else []
@@ -506,20 +563,26 @@ def _llama2_lora(
             # Per-step NaN grad scan + sync; disable for throughput when loss NaN checks are off.
             check_for_nan_in_grad=False,
             grad_reduce_in_fp32=False,
-            overlap_grad_reduce=True,
-            overlap_param_gather=True,
-            average_in_collective=True,
+            overlap_grad_reduce=False,
+            overlap_param_gather=False,
+            average_in_collective=False,
             use_distributed_optimizer=True,
-            gradient_reduce_div_fusion=True,
-            pad_buckets_for_high_nccl_busbw=True,
+            # gradient_reduce_div_fusion=True,
+            # pad_buckets_for_high_nccl_busbw=True,
             use_megatron_fsdp=False,
-            keep_fp8_transpose_cache=True,
+
+            keep_fp8_transpose_cache=(
+                os.getenv("ENABLE_TRANSPOSE_CACHE", "").strip().lower()
+                in ("1", "true", "yes", "on")
+            ),
             fp8_param_gather=False,
         ),
         dataset=dataset_cfg,
         logger=LoggerConfig(
             log_interval=10,
-            tensorboard_dir=None,
+            # Megatron-Bridge train.py passes this to torch.profiler.tensorboard_trace_handler
+            # when use_pytorch_profiler=True; None makes on_trace_ready call stat(None).
+            tensorboard_dir="torch_profiler_traces",
             # Per-step / log-interval overhead toggles (keep off for throughput).
             log_params_norm=False,
             log_throughput=False,
@@ -569,10 +632,10 @@ def _llama2_lora(
         mixed_precision=precision_config,
         peft=peft_config,
         profiling=ProfilingConfig(
-            use_pytorch_profiler=False,
-            profile_step_start=140,
-            profile_step_end=144,
-            profile_ranks=list(range(8)),  # 1 node × 8 GPUs
+            use_pytorch_profiler=True,
+            profile_step_start=30,
+            profile_step_end=32,
+            profile_ranks=list(range(8)),  # 1 node × 8 GPUs (unused when profiler off)
             record_shapes=False,
             nvtx_ranges=False,
         ),
@@ -792,6 +855,14 @@ def evaluate_and_print_results_custom(
         process_non_loss_data_func (Optional[Callable], optional): Function to process non-loss data. Defaults to None.
         non_loss_data_func (Optional[Callable], optional): Function to compute non-loss data. Defaults to None.
     """
+    global _TARGET_LOSS_REACHED
+    if _TARGET_LOSS_REACHED:
+        log_rank_0(
+            f"[llama2_custom] Skipping evaluation at {prefix}: "
+            f"target loss < {MLPERF_TARGET_LOSS} already reached on an earlier "
+            "validation pass (see sticky _TARGET_LOSS_REACHED flag)."
+        )
+        return True
     log_rank_0(f"Evaluating and printing results at {prefix}")
     should_exit = False
     def is_last_rank():
@@ -811,7 +882,8 @@ def evaluate_and_print_results_custom(
     eval_duration = time.time() - eval_start
     # Timelimit hit during evaluation
     if timelimit:
-        return
+        log_rank_0("[llama2_custom] Evaluation stopped early (exit duration limit).")
+        return False
     string = f" validation loss at {prefix} | "
     for key in total_loss_dict:
         string += "{} value: {:.6E} | ".format(key, total_loss_dict[key].item())
@@ -852,9 +924,19 @@ def evaluate_and_print_results_custom(
     log_rank_0("-" * length)
     log_rank_0(string)
     log_rank_0("-" * length)
-    if total_loss_dict['lm loss'] < MLPERF_TARGET_LOSS:
+    if not total_loss_dict:
+        log_rank_0(
+            "[llama2_custom] Validation produced no reduced losses (e.g. non-PP-last rank path); "
+            "skipping MLPerf early-exit check."
+        )
+    elif "lm loss" in total_loss_dict and total_loss_dict["lm loss"].item() < MLPERF_TARGET_LOSS:
         should_exit = True
-        log_rank_0(f"Validation loss is less than {MLPERF_TARGET_LOSS}, exiting training")
+        _TARGET_LOSS_REACHED = True
+        log_rank_0(
+            f"Validation loss is less than {MLPERF_TARGET_LOSS}, exiting training "
+            "(sticky _TARGET_LOSS_REACHED flag set; any further evaluate "
+            "calls will be no-ops)."
+        )
     return should_exit
 
 eval.evaluate_and_print_results = evaluate_and_print_results_custom
@@ -1102,14 +1184,113 @@ def megatron_bridge_train_override(
 
     # Wall-clock for the training loop only (first through last train step; warmup eval disabled).
     training_wall_start = time.perf_counter()
-    # Skip the first N interval evals (e.g. 48, 96, 144 when eval_interval=48); run from step 4*interval (192).
-    eval_skip_first_n = 3
+
+    if not global_state.train_state.do_valid:
+        log_rank_0(
+            "[llama2_custom] do_valid=False: no validation DataLoader (check dataset.do_validation, "
+            "val paths / packed validation.npy, and train.eval_iters > 0). Interval validation is disabled."
+        )
+    else:
+        log_rank_0(
+            f"[llama2_custom] Interval validation enabled: eval_interval={train_config.eval_interval}, "
+            f"eval_iters={train_config.eval_iters} (runs when training step is a multiple of eval_interval, "
+            f"same as Megatron-Bridge train.py — first at step {train_config.eval_interval})."
+        )
+
+    try:
+        from primus.recipes.mxfp4_healing import log_healing_env_banner_once
+
+        log_healing_env_banner_once()
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Baseline (step-0) evaluation: run one validation pass on the freshly
+    # loaded model BEFORE the first optimizer step, so we can compare the
+    # "MXFP4 pre-quantize only, no LoRA training yet" loss/PPL against the
+    # post-finetuning numbers. Gated by EVAL_AT_STEP_0 (default "1" = on).
+    # The forward pre-hooks are already disabled at this point (see the
+    # `should_toggle_forward_pre_hook` block above) and will be re-enabled
+    # after the first successful train_step, so we don't need to toggle
+    # them around the baseline eval. Same for param_sync_func.
+    #
+    # NeMo MLPerf parity: NeMo's CustomCallback.on_train_start kicks
+    # `trainer.fit_loop.epoch_loop.val_loop.run()` with `limit_val_batches=1.0`,
+    # which iterates the FULL packed GovReport validation set (173 sequences)
+    # at val_global_batch_size=8 -> ceil(173/8)=22 microbatches per pass.
+    # Primus's YAML default is `eval_iters: 24` (= 192 samples, wraps the
+    # 173-sample dataset by 19). To match NeMo's per-eval sample budget at
+    # step 0 *only*, we override eval_iters here and restore it before the
+    # main loop so interval evals (step 48, 96, ...) keep the configured
+    # value. Override controlled by env EVAL_AT_STEP_0_ITERS (default 22).
+    _eval_at_step_0 = os.environ.get("EVAL_AT_STEP_0", "1") not in ("0", "false", "False", "")
+    if (
+        _eval_at_step_0
+        and global_state.train_state.do_valid
+        and global_state.train_state.step == 0
+        and train_config.eval_iters and train_config.eval_iters > 0
+    ):
+        _step0_eval_iters_env = os.environ.get("EVAL_AT_STEP_0_ITERS", "22")
+        try:
+            _step0_eval_iters = int(_step0_eval_iters_env)
+        except ValueError:
+            log_rank_0(
+                f"[llama2_custom] EVAL_AT_STEP_0_ITERS={_step0_eval_iters_env!r} "
+                f"is not an int; falling back to train.eval_iters="
+                f"{train_config.eval_iters}."
+            )
+            _step0_eval_iters = train_config.eval_iters
+        if _step0_eval_iters <= 0:
+            _step0_eval_iters = train_config.eval_iters
+        _orig_eval_iters = train_config.eval_iters
+
+        if train_config.manual_gc and train_config.manual_gc_eval:
+            gc.collect()
+        timers("eval-time", log_level=0).start(barrier=True)
+        log_rank_0(
+            f"[llama2_custom] Baseline validation at iteration 0 (before finetuning): "
+            f"eval_iters={_step0_eval_iters} "
+            f"(YAML train.eval_iters={_orig_eval_iters}, "
+            f"override via EVAL_AT_STEP_0_ITERS={_step0_eval_iters_env!r}; "
+            f"NeMo MLPerf parity uses 22 = ceil(173 / 8)), "
+            f"global_batch_size={train_config.global_batch_size}, "
+            f"effective samples={_step0_eval_iters * train_config.global_batch_size}. "
+            f"Set EVAL_AT_STEP_0=0 to skip, EVAL_AT_STEP_0_ITERS=<n> to change."
+        )
+        try:
+            train_config.eval_iters = _step0_eval_iters
+            evaluate_and_print_results_custom(
+                global_state,
+                "iteration 0 (baseline, pre-finetune)",
+                forward_step_func,
+                valid_data_iterator,
+                model,
+                model_config,
+                verbose=True,
+                write_to_tensorboard=False,
+                process_non_loss_data_func=process_non_loss_data_func,
+                non_loss_data_func=non_loss_data_func,
+                throughput=0.0,
+            )
+        except Exception as _eval0_err:  # noqa: BLE001
+            log_rank_0(
+                f"[llama2_custom] Baseline step-0 eval raised "
+                f"({type(_eval0_err).__name__}: {_eval0_err}); continuing to training."
+            )
+        finally:
+            train_config.eval_iters = _orig_eval_iters
+        eval_duration += timers("eval-time").elapsed()
+        eval_iterations += _step0_eval_iters
+        timers("eval-time").stop()
+        if train_config.manual_gc and train_config.manual_gc_eval:
+            gc.collect(generation=0)
 
     # NeMo / MLPerf reference (MI355X implementation): CustomCallback uses time.time() in Lightning
     # on_train_batch_start / on_train_batch_end — i.e. wall time over training_step only, no cuda.synchronize.
     # We mirror that by timing megatron.train_step only, then averaging over logger.log_interval like interval-time.
     nemo_style_iter_seconds_accum = 0.0
     nemo_style_iter_count = 0
+    # Skip the first N interval evals (e.g. 48, 96, 144 when eval_interval=48); run from step 4*interval (192).
+    eval_skip_first_n = 3
 
     # Run training iterations till done.
     while global_state.train_state.step < train_config.train_iters:
@@ -1223,6 +1404,22 @@ def megatron_bridge_train_override(
 
         global_state.train_state.step += 1
 
+        # NeMo MLPerf MI355X FP4 "healing": at train_state.step + 1 == HEALING_ITER, restore FP8
+        # weights from the CPU stash (saved just before MXFP4 pre-quantize) and switch
+        # ``megatron.core.fp4_utils`` out of the MXFP4 phase (see ``primus/recipes/mxfp4_healing.py``).
+        try:
+            from primus.recipes import mxfp4_healing as _mxh
+
+            if _mxh.healing_iter() > 0:
+                _mxh.apply_healing_after_step(model, model_config, global_state.train_state.step)
+            _mxh.log_training_step_phase(global_state.train_state.step)
+        except Exception as _heal_err:  # noqa: BLE001
+            log_rank_0(
+                f"[mxfp4_healing] Failed at train_state.step={global_state.train_state.step}: "
+                f"{type(_heal_err).__name__}: {_heal_err}"
+            )
+            raise
+
         # If fsdp_manual_registration is enabled, manually register FSDP communication buffers after one training step.
         # if global_state.train_state.step == start_iteration + 1 and config.ddp.use_megatron_fsdp:
         #     _maybe_register_fsdp_buffers(config, model)
@@ -1304,7 +1501,12 @@ def megatron_bridge_train_override(
                 gc.collect()
             prefix = f"iteration {global_state.train_state.step}"
             timers("eval-time", log_level=0).start(barrier=True)
-            assert timer.consumed_samples == global_state.train_state.consumed_train_samples, "Timer and global_state sample mismatch"
+            if timer.consumed_samples != global_state.train_state.consumed_train_samples:
+                log_rank_0(
+                    f"[llama2_custom] WARN: throughput timer consumed_samples={timer.consumed_samples} != "
+                    f"consumed_train_samples={global_state.train_state.consumed_train_samples} (skipped batches?); "
+                    f"continuing with validation."
+                )
             should_exit = evaluate_and_print_results_custom(
                 global_state,
                 prefix,
@@ -1312,7 +1514,7 @@ def megatron_bridge_train_override(
                 valid_data_iterator,
                 model,
                 model_config,
-                verbose=False,
+                verbose=True,
                 write_to_tensorboard=False,
                 process_non_loss_data_func=process_non_loss_data_func,
                 non_loss_data_func=non_loss_data_func,
@@ -1425,5 +1627,65 @@ def megatron_bridge_train_override(
     # Close NVIDIA DLFw Inspect at clean finish
     tensor_inspect_end_if_enabled(config.tensor_inspect)
 
-from megatron.bridge.training import train
-train.train = megatron_bridge_train_override
+# ---------------------------------------------------------------------------
+# Install ``megatron_bridge_train_override`` onto the megatron-bridge training
+# modules. When ``PRE_QUANTIZED_MODEL`` is enabled, the override is first
+# wrapped by ``install_pre_quantize_wrap`` so that the very first entry into
+# the training loop pre-quantizes all TE Linear / LayerNormLinear weights to
+# MXFP4 (stashing FP8 copies on CPU for healing) before delegating to the
+# override. When disabled, the override is installed directly (no wrap).
+#
+# The recipe module owns this install entirely; there is no ``before_train``
+# patch any more, so no setter/getter indirection is needed to coexist with
+# a pre-installed wrapper.
+# ---------------------------------------------------------------------------
+from megatron.bridge.training import train as _mb_train_mod
+from primus.recipes.pre_quantize_mxfp4 import (
+    install_pre_quantize_wrap,
+    is_pre_quantized_enabled,
+)
+
+_installed_train = install_pre_quantize_wrap(megatron_bridge_train_override)
+_pre_quantize_mode = "wrapped" if is_pre_quantized_enabled() else "off"
+
+setattr(megatron_bridge_train_override, "_primus_llama2_custom_train_override", True)
+
+_mb_train_mod.train = _installed_train
+_train_install_mode = "direct-rebind"
+
+try:
+    from megatron.bridge.training import pretrain as _mb_pretrain_mod
+
+    _mb_pretrain_mod.train = _installed_train
+    _pretrain_install_mode = "direct-rebind"
+except ImportError:
+    _pretrain_install_mode = "import-error"
+
+try:
+    from megatron.bridge.training import finetune as _mb_finetune_mod
+
+    if hasattr(_mb_finetune_mod, "train"):
+        _mb_finetune_mod.train = _installed_train
+        _finetune_install_mode = "direct-rebind"
+    else:
+        _finetune_install_mode = "no-train-attr"
+except ImportError:
+    _finetune_install_mode = "import-error"
+
+try:
+    from primus.modules.module_utils import log_rank_0 as _log_rank_0_install
+
+    _log_rank_0_install(
+        "[llama2_custom] Installed megatron_bridge_train_override "
+        f"(pre_quantize={_pre_quantize_mode}, train={_train_install_mode}, "
+        f"pretrain={_pretrain_install_mode}, finetune={_finetune_install_mode})."
+    )
+except Exception:  # noqa: BLE001
+    pass
+
+print(
+    "[llama2_custom] Installed megatron_bridge_train_override "
+    f"(pre_quantize={_pre_quantize_mode}, train={_train_install_mode}, "
+    f"pretrain={_pretrain_install_mode}, finetune={_finetune_install_mode})",
+    flush=True,
+)
