@@ -153,9 +153,140 @@
 | [ ] | TE on/off throughput + memory comparison report | | | performance gate for release decision |
 | [ ] | publish release checklist and blocker disposition | | | go/no-go output with risk owners |
 
+## Phase 12 (v3) — Plan-2 lockdown
+
+> Replan baseline: `deepseek-v4/develop/plan-2/`.
+> Plan-1 phases 9 / 10 / 11 are paused — their tracking rows above remain
+> for history but are no longer the active program of work.
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [x] | Architecture review of `dev/wenx/deepseek-v4` from `e194e039`..HEAD | (review) | 2026-05-01 | findings recorded in `deepseek-v4/develop/plan-2/00-review-findings.md` |
+| [x] | Plan-2 documents (`README.md`, `00`-`04`) | (review) | 2026-05-01 | replaces plan-0 / plan-1 as the active plan |
+| [x] | Phase 12+ tracking section opened in `status.md` | (this commit) | 2026-05-01 | append-only |
+| [x] | Update tech-blog with as-built notes for plan-1 + pointer to plan-2 | (working tree) | 2026-05-01 | added `techblog/02-plan-1-as-built-and-plan-2-pointer.md`; techblog `README.md` now points plan-2 as active plan of record |
+| [x] | Refresh `progress/timeline.html` (standard fonts + day-by-day Gantt) | (working tree) | 2026-05-01 | swapped Google Fonts → system stack; Gantt switched to daily columns with May 02–05 holiday band; P13–P21 packed into May 06–09 |
+| [x] | Refresh `progress/deepseek_v4_roadmap.pptx` (add 开发计划 schedule slide) | (working tree) | 2026-05-01 | new slide 7/13 with 3-row date / phase / work-content layout + holiday-gap arrow; section eyebrows renumbered |
+| [ ] | **Stakeholder sign-off on plan-2 scope** | | | **external blocker — required before P13 starts (May 06)**. Sign-off owner: project lead. Material to review: `plan-2/README.md`, `00-review-findings.md`, `01-roadmap.md`, `progress/timeline.html`, `progress/deepseek_v4_roadmap.pptx`. |
+
+> **P12 status (2026-05-01 EOD):** all engineering deliverables are done.
+> The only open item is the external sign-off; plan-2 P13 starts on May 06
+> (after the May 02–05 holiday) once that sign-off lands.
+
+## Phase 13 (v3) — Faithful attention (`MLASelfAttention`-rooted)
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [ ] | `DeepseekV4Attention(MLASelfAttention)` + V4 attention submodules dataclass | | | replaces standalone `nn.Module` |
+| [ ] | Single-latent KV (K = V = `wkv`) | | | retires separate `linear_k_proj` / `linear_v_proj` |
+| [ ] | Per-head `q_rms` after `linear_q_up_proj` | | | matches HF reference |
+| [ ] | Reuse MLA `kv_layernorm` for V4 `kv_norm` | | | |
+| [ ] | Learnable per-head `attn_sink` as spec submodule | | | TE / local fallback |
+| [ ] | Grouped low-rank O projection (`linear_o_a` + `linear_o_b`, `o_groups`/`o_lora_rank`) | | | replaces flat `linear_o_proj` |
+| [ ] | Compressor / Indexer as spec submodules of attention | | | retires `csa_attention.py` / `hca_attention.py` |
+| [ ] | Switch projection specs from `parallel_mode="duplicated"` to TP | | | fixes C4 |
+| [ ] | 1L attention forward agrees with HF reference within 1e-3 (CPU fp32) | | | exit gate G2 |
+| [ ] | TP=2 sharding parity test | | | |
+
+## Phase 14 (v3) — Faithful MoE + activation + router
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [ ] | `clamped_swiglu_pre_mul(gate, up, alpha)` activation; separate `w1`/`w3` for the eager MLP | | | matches HF reference (gate clamp `max=α`, up clamp `(-α,+α)`) |
+| [ ] | `DeepseekV4LearnedRouter(TopKRouter)` with sqrtsoftplus / sigmoid / softmax + bias | | | honors `moe_router_topk_scaling_factor` |
+| [ ] | `DeepseekV4HashRouter(TopKRouter)` with learnable `gate_linear` + `tid2eid` lookup | | | weights from learned score, expert ids from table |
+| [ ] | `DeepseekV4MoE(MoELayer)` | | | inherits load-balance / z-loss / dispatcher lifecycle |
+| [ ] | Provider `v4_grouped_mlp_spec(swiglu_limit)` + `v4_router_spec(learned)` | | | activation_func returns callable instance |
+| [ ] | Token-ids threaded as forward kwarg (no `decoder._v4_token_ids`) | | | |
+| [ ] | Router unit tests: identical (probs, indices) + gradient on gate (G4) | | | |
+| [ ] | 1L MoE forward within 1e-3 of HF reference (G5) | | | |
+
+## Phase 15 (v3) — Faithful layer + block + HC × PP
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [ ] | `DeepseekV4HybridLayer(TransformerLayer)` with HC residual override | | | replaces `GraphableMegatronModule` plain layer |
+| [ ] | `DeepseekV4TransformerBlock(TransformerBlock)` | | | reuses upstream PP / recompute / SP |
+| [ ] | Lift / lower helpers carry `[S,B,K,D]` across PP via `[S*K,B,D]` packing | | | fixes C1 |
+| [ ] | `HyperHead` only on the post_process stage | | | |
+| [ ] | Caller-supplied `position_ids` honored | | | fixes C3 |
+| [ ] | Token-ids removed from `decoder` attribute stash | | | fixes C2 |
+| [ ] | PP=1 vs PP=2 vs PP=4 equivalence on 4L V4 toy (G6) | | | |
+
+## Phase 16 (v3) — MTP integration
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [ ] | `get_v4_mtp_block_spec` builder | | | mirrors `_mamba_mtp_block_spec` |
+| [ ] | `DeepseekV4Model.__init__` builds `MultiTokenPredictionBlock` when `mtp_num_layers > 0` | | | |
+| [ ] | Per-MTP-layer separate `HyperHead` | | | |
+| [ ] | `process_mtp_loss` wired in `DeepseekV4Model.forward` | | | |
+| [ ] | `DeepseekV4MTPBlock` retired or moved to `research/` | | | |
+| [ ] | MTP loss appears in train log; ablation `mtp_num_layers=0` matches LM loss to 1e-6 (G7) | | | |
+
+## Phase 17 (v3) — State-dict adapter + checkpoint load
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [ ] | `DeepSeekV4StateDictAdapter` (HF / inference key map → Primus) | | | |
+| [ ] | `scripts/load_v4_flash_check.py` (CPU forward, 64-token prompt) | | | |
+| [ ] | `tid2eid` loaded as non-trainable buffer | | | |
+| [ ] | Round-trip test (G8) | | | |
+| [ ] | V4-Flash token-0 logits ≤1e-2 vs HF reference (G9) | | | |
+| [ ] | FP4 / FP8 expert weights documented as out-of-scope | | | |
+
+## Phase 18 (v3) — Spec-system audit
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [ ] | Provider built once per builder call; threaded via `BuildContext` | | | fixes D1 |
+| [ ] | `provider.activation_func()` returns callable instance | | | fixes D2 |
+| [ ] | YAML `compress_ratios` becomes a list field | | | fixes D4 |
+| [ ] | `tests/configs/test_deepseek_v4_yaml.py` (G1) | | | |
+| [ ] | Audit: no spec-replaceable module instantiated outside `build_module` | | | |
+| [ ] | Drop `_v4_token_ids` references everywhere | | | |
+
+## Phase 19 (v3) — Distributed re-validation
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [ ] | Smoke 1×8 BF16 (TP=1 PP=1 EP=1) | | | |
+| [ ] | Smoke 1×8 BF16 (TP=1 PP=2 EP=4) | | | |
+| [ ] | Smoke 1×8 BF16 (TP=2 PP=2 EP=2) | | | |
+| [ ] | Smoke 1×8 BF16 (TP=1 PP=4 EP=2) | | | |
+| [ ] | Smoke 2×8 BF16 (DP=2 PP=2 EP=2 TP=2) | | | |
+| [ ] | Routing snapshot diff = 0 across PP / EP changes (G11) | | | |
+| [ ] | `c10d::allreduce_` warning gone | | | |
+
+## Phase 20 (v3) — Numerical / convergence / perf gates
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [ ] | Numerical alignment report on V4-Flash (G9 extended) | | | |
+| [ ] | 200-step convergence vs HF baseline (G12) | | | ±0.05 loss curve match |
+| [ ] | TE on/off perf report (G13) | | | TFLOPS + HBM delta |
+| [ ] | FP8 follow-up plan scoped | | | next plan |
+| [ ] | Release checklist signed off | | | go/no-go |
+
+## Phase 21 (v3) — Cleanup + docs + handover
+
+| | Task | commit | date | note |
+|---|---|---|---|---|
+| [ ] | Remove `_RMSNorm` duplicates / `dual_rope.py` / `csa_attention.py` / `hca_attention.py` | | | |
+| [ ] | Remove `DeepseekV4MTPBlock` (or move to `research/`) | | | |
+| [ ] | Remove EP `all_reduce` fallback gate | | | |
+| [ ] | Refresh techblog with as-built notes | | | |
+| [ ] | Refresh `progress/` HTML + `ppt-template-amd.pptx` slides | | | |
+| [ ] | Fix yaml comments (`compress_ratio` 4=CSA, 128=HCA) | | | |
+
 ## Blockers / Risks Log
 
 | date | description | status | decision |
 |---|---|---|---|
-| 2026-04-28 | PyTorch warns `c10d::allreduce_` autograd kernel is not registered for the EP routed-output allreduce path in `v4_moe.py` | open | Keep functional path for Phase 7 bring-up; replace with proper token dispatcher / autograd-safe EP path in follow-up optimization work |
-|  | (example) HC 4-stream PP send/recv interface does not directly support 4D tensor | open | plan to add a reshape buffer in PP launcher |
+| 2026-04-28 | PyTorch warns `c10d::allreduce_` autograd kernel is not registered for the EP routed-output allreduce path in `v4_moe.py` | open | Plan-2 (P19) verifies the warning is gone after dispatcher migration; fallback gate retired in P21 |
+|  | (example) HC 4-stream PP send/recv interface does not directly support 4D tensor | tracked in plan-2 | Plan-2 P15: lift `[S,B,K,D]` to `[S*K,B,D]` for PP P2P; revisit a 4D PP send path in P21 |
+| 2026-05-01 | Current attention does not match real V4 (single-latent KV / q_norm / kv_norm / grouped O all missing) | open | Plan-2 P13 rebases on `MLASelfAttention` and lands the missing pieces |
+| 2026-05-01 | HashRouter has no learnable gate weight; clamped SwiGLU clamps post-mul instead of pre-mul; `w1`/`w3` fused | open | Plan-2 P14 rewrites router + activation to match HF reference |
+| 2026-05-01 | Custom V4 block / layer / MoE bypass `TransformerBlock` / `TransformerLayer` / `MoELayer` | open | Plan-2 P14–P15 rebase onto Megatron's standard parents |
+| 2026-05-01 | Token-IDs propagation via `decoder._v4_token_ids` attribute | open | Plan-2 P14–P15 thread token_ids as a forward kwarg |
+| 2026-05-01 | No state-dict adapter / V4-Flash safetensors cannot be loaded into the Primus model | open | Plan-2 P17 lands the adapter + numerical-alignment gate |
