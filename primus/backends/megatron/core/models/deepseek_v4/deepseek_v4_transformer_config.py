@@ -18,6 +18,14 @@ from typing import List, Optional, Tuple, Union
 
 from megatron.core.transformer.transformer_config import MLATransformerConfig
 
+# ``mtp_compress_ratios`` and ``v4_use_custom_mtp_block`` lived here in
+# plan-1 / plan-2 P12-P16 as escape hatches for the legacy primus-owned
+# :class:`DeepseekV4MTPBlock`. Plan-2 P17 retired that block (the MTP path
+# is now exclusively the spec-based upstream
+# :class:`MultiTokenPredictionBlock` route via
+# :func:`get_v4_mtp_block_spec`); both fields are deliberately gone here
+# and their references in YAML configs / training scripts must be removed.
+
 
 @dataclass
 class DeepSeekV4TransformerConfig(MLATransformerConfig):
@@ -61,10 +69,6 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     # ---- Compat aliases for V4 code paths ----
     norm_epsilon: Optional[float] = None
     position_embedding_type: str = "none"
-
-    # ---- Optional V4 MTP extras ----
-    mtp_compress_ratios: Optional[Union[str, List[int], Tuple[int, ...]]] = None
-    v4_use_custom_mtp_block: bool = False
 
     def __post_init__(self) -> None:
         # Keep V4's ``norm_epsilon`` alias consistent with MCore's

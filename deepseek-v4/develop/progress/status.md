@@ -279,16 +279,16 @@
 
 | | Task | commit | date | note |
 |---|---|---|---|---|
-| [ ] | Remove `_RMSNorm` duplicates (`block.py`, `compressor.py`) | | | keep at most one canonical fallback for no-spec CPU smokes |
-| [ ] | Retire standalone `dual_rope.py` (replaced by Megatron's rotary) | | | audit call sites first; remove only after every consumer reaches the spec-driven attention path |
-| [ ] | Retire `csa_attention.py` / `hca_attention.py` | | | logic now lives in `DeepseekV4Attention` (P13); delete files + remove from `__all__` |
-| [ ] | Retire legacy `DeepseekV4MTPBlock` (move under `research/` or delete) | | | spec-based MTP path landed in P16; deprecation banner present since `6c5875d4` |
-| [ ] | Drop `v4_use_custom_mtp_block` config flag | | | obsolete once legacy MTP block is gone |
-| [ ] | Drop EP `all_reduce` fallback gate (`v4_enable_ep_allreduce_fallback`) | | | dispatcher-only path going forward |
-| [ ] | AST audit: zero `_v4_token_ids` references in `primus/backends/megatron/...` | | | front-loaded from old P18 task list |
-| [ ] | Fix yaml comments (4=CSA, 128=HCA) in `deepseek_v4_*.yaml` | | | front-loaded from old P21 task list |
-| [ ] | Refresh `__init__.py` package surface to live classes only | | | mirrors removal items above |
-| [ ] | Static dead-code audit gate (G14) green | | | exit gate for Phase 17 |
+| [x] | Dedup `_RMSNorm` duplicates (`block.py`, `attention.py`, `compressor.py`) into shared `LocalRMSNorm` | (P17 commit) | 2026-05-01 | new module `primus/backends/megatron/core/transformer/local_rmsnorm.py`; three call sites import the canonical class. AST guard `test_no_v4_module_redefines_local_rmsnorm` (G14) prevents regression. |
+| [-] | ~~Retire standalone `dual_rope.py`~~ | — | 2026-05-01 | **kept**: `DualRoPE` is load-bearing for V4's CSA / HCA branches (dual-base partial RoPE; main base for local KV + compress base for the compressed pool). Megatron's `RotaryEmbedding` only supports a single base; no equivalent exists. The plan-2 line item was over-eager. Documented here so future audits do not re-open this. |
+| [x] | Retire `csa_attention.py` / `hca_attention.py` | already-gone (P13 phase-2) | 2026-05-01 | confirmed: files do not exist on disk; logic lives in `DeepseekV4Attention.forward` (compress_ratio dispatch). G14 test re-asserts. |
+| [x] | Retire legacy `DeepseekV4MTPBlock` (delete) | (P17 commit) | 2026-05-01 | `primus/backends/megatron/core/models/deepseek_v4/deepseek_v4_mtp.py` deleted; spec-based path via `get_v4_mtp_block_spec` is the only MTP route. Package `__init__` no longer exports the symbol. |
+| [x] | Drop `v4_use_custom_mtp_block` config flag | (P17 commit) | 2026-05-01 | removed from `DeepSeekV4TransformerConfig`; `DeepseekV4Model.__init__` simplified — only the spec-based `MultiTokenPredictionBlock` branch remains. `mtp_compress_ratios` (legacy-only) also removed. |
+| [x] | Drop EP `all_reduce` fallback gate (`v4_enable_ep_allreduce_fallback`) | already-gone (P14 phase-2) | 2026-05-01 | the flag was retired with the dispatcher migration; only docs reference it now. The remaining "fallback" string in `v4_moe.py` is unrelated (dispatcher-type fallback warning). |
+| [x] | AST audit: zero `_v4_token_ids` references in `primus/backends/megatron/.../deepseek_v4` (G14) | (P17 commit) | 2026-05-01 | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p17_dead_code.py::test_no_runtime_v4_token_ids_attribute_access` walks every V4 source via `ast` and rejects any `Attribute` / `Assign` / `Name` reference. Docstring mentions are exempt (audit walks the syntax tree). |
+| [x] | Fix yaml comments (4=CSA, 128=HCA) in `deepseek_v4_*.yaml` | (P17 commit) | 2026-05-01 | `flash.yaml` comment inverted (was "4=HCA, 128=CSA"); `pro.yaml` schedule list now carries the canonical comment block; `base.yaml` stub annotated. G14 test parameterises over all three yamls. |
+| [x] | Refresh `__init__.py` package surface to live classes only | (P17 commit) | 2026-05-01 | dropped `DeepseekV4MTPBlock` from imports + `__all__`; surface is now `Model / TransformerBlock / HybridLayer / get_v4_mtp_block_spec / deepseek_v4_builder / model_provider`. |
+| [x] | Static dead-code audit gate (G14) green | (P17 commit) | 2026-05-01 | new `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p17_dead_code.py` covers retired files / config fields / package surface / `_v4_token_ids` AST scan / `_RMSNorm` shadow scan / yaml comment mapping. |
 
 ## Phase 18 (v3) — Spec-system audit
 
@@ -366,7 +366,7 @@
 
 | date | description | status | decision |
 |---|---|---|---|
-| 2026-04-28 | PyTorch warns `c10d::allreduce_` autograd kernel is not registered for the EP routed-output allreduce path in `v4_moe.py` | open | Plan-2 (P19) verifies the warning is gone after dispatcher migration; fallback gate retired in P17 (per 2026-05-01 reshuffle) |
+| 2026-04-28 | PyTorch warns `c10d::allreduce_` autograd kernel is not registered for the EP routed-output allreduce path in `v4_moe.py` | resolved (`v4_enable_ep_allreduce_fallback` flag gone) | flag removed during P14 phase-2 dispatcher migration; P17 audit confirmed it is no longer in code (only historical docs mention it). Distributed verification that the runtime warning is gone is still tracked into P19. |
 |  | (example) HC 4-stream PP send/recv interface does not directly support 4D tensor | tracked in plan-2 | Plan-2 P15: lift `[S,B,K,D]` to `[S*K,B,D]` for PP P2P; revisit a 4D PP send path in P21 |
 | 2026-05-01 | Current attention does not match real V4 (single-latent KV / q_norm / kv_norm / grouped O all missing) | open | Plan-2 P13 rebases on `MLASelfAttention` and lands the missing pieces |
 | 2026-05-01 | HashRouter has no learnable gate weight; clamped SwiGLU clamps post-mul instead of pre-mul; `w1`/`w3` fused | resolved (P14 phase-1) | both routers now share a learnable `weight` Parameter; activation rewritten as pre-multiplication clamp; `ClampedSwiGLUMLP` uses separate `w1` / `w3` Linears (state-dict parity with HF) |

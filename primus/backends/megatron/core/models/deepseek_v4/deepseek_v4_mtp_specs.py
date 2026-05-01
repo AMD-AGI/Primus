@@ -30,11 +30,11 @@ What this file does *not* include:
 Reference: techblog §7 ("MTP V4 head") and
 ``DeepSeek-V4-Flash/inference/model.py:MTPBlock``.
 
-The legacy primus-owned :class:`DeepseekV4MTPBlock` (in
-``deepseek_v4_mtp.py``) is preserved behind the
-``v4_use_custom_mtp_block`` config flag for back-compat with prior
-research checkpoints; new training runs should leave that flag at
-``False`` (the default) so the spec-based path here is used.
+This is the **only** MTP path in plan-2 (P17 retired the legacy
+primus-owned :class:`DeepseekV4MTPBlock` and the
+``v4_use_custom_mtp_block`` config flag). Set ``mtp_num_layers > 0`` in
+the config to enable MTP; the model wires this helper into
+:class:`MultiTokenPredictionBlock` automatically.
 """
 
 from __future__ import annotations

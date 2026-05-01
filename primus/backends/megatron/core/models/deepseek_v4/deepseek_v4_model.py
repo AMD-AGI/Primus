@@ -29,9 +29,6 @@ from megatron.core.transformer.multi_token_prediction import (
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from torch import Tensor
 
-from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_mtp import (
-    DeepseekV4MTPBlock,
-)
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_mtp_specs import (
     get_v4_mtp_block_spec,
 )
@@ -108,34 +105,17 @@ class DeepseekV4Model(LanguageModule):
         )
 
         # ----- MTP block ---------------------------------------------------
-        # Plan-2 P16: by default V4 uses the spec-based MTP block
-        # (:class:`MultiTokenPredictionBlock`) wired via
-        # :func:`get_v4_mtp_block_spec`, sharing the V4 hybrid layer and
-        # provider-resolved RMSNorm / column-parallel linear with the main
-        # decoder. The ``v4_use_custom_mtp_block`` flag preserves the
-        # legacy primus-owned :class:`DeepseekV4MTPBlock` path for back-
-        # compat with research checkpoints; planned removal: P21.
+        # Plan-2 P16/P17: V4 wires multi-token prediction exclusively via
+        # the spec-based upstream :class:`MultiTokenPredictionBlock`,
+        # built from :func:`get_v4_mtp_block_spec`. The legacy
+        # primus-owned ``DeepseekV4MTPBlock`` (gated by
+        # ``v4_use_custom_mtp_block`` in plan-2 P16) was retired in plan-2
+        # P17; only the spec-based path remains.
         mtp_num_layers = int(getattr(self.config, "mtp_num_layers", 0) or 0)
-        use_custom_v4_mtp = bool(getattr(self.config, "v4_use_custom_mtp_block", False))
         self.mtp_process = False
         self.mtp = None
-        self.mtp_block = None  # legacy, only set when ``v4_use_custom_mtp_block`` is True
 
-        if mtp_num_layers > 0 and use_custom_v4_mtp and self.post_process:
-            mtp_compress_ratios = getattr(self.config, "mtp_compress_ratios", None)
-            decoder_rope = getattr(self.decoder, "rope", None)
-            if decoder_rope is None:
-                raise ValueError(
-                    "v4_use_custom_mtp_block requires decoder.rope. "
-                    "Please ensure transformer_layer_spec builds a decoder with DualRoPE support."
-                )
-            self.mtp_block = DeepseekV4MTPBlock(
-                config=self.config,
-                rope=decoder_rope,
-                mtp_num_layers=mtp_num_layers,
-                mtp_compress_ratios=mtp_compress_ratios,
-            )
-        elif mtp_num_layers > 0 and not use_custom_v4_mtp:
+        if mtp_num_layers > 0:
             self.mtp_block_spec = get_v4_mtp_block_spec(
                 self.config,
                 transformer_layer_spec=transformer_layer_spec,

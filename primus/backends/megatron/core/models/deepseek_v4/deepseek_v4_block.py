@@ -90,6 +90,7 @@ from primus.backends.megatron.core.transformer.hyper_connection import (
     HyperHead,
     HyperMixer,
 )
+from primus.backends.megatron.core.transformer.local_rmsnorm import LocalRMSNorm
 from primus.backends.megatron.core.transformer.moe.v4_hash_router import (
     DeepseekV4HashRouter,
 )
@@ -231,30 +232,12 @@ def _normalize_compress_ratios(
     return ratios + [pad_value] * (num_layers - len(ratios))
 
 
-class _RMSNorm(nn.Module):
-    """Standalone RMSNorm so the block has no hard dep on TE."""
-
-    def __init__(
-        self,
-        dim: Optional[int] = None,
-        eps: float = 1e-6,
-        hidden_size: Optional[int] = None,
-        config=None,
-    ) -> None:
-        del config
-        super().__init__()
-        if dim is None:
-            dim = hidden_size
-        if dim is None:
-            raise ValueError("RMSNorm requires `dim` or `hidden_size`.")
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        in_dtype = x.dtype
-        x32 = x.float()
-        rsqrt = torch.rsqrt(x32.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return (x32 * rsqrt).to(in_dtype) * self.weight
+# Plan-2 P17 dedup: the duplicated ``_RMSNorm`` here was retired.
+# Block-level RMSNorm fallbacks now use the canonical
+# :class:`LocalRMSNorm` from
+# ``primus.backends.megatron.core.transformer.local_rmsnorm`` (imported
+# at the top of this file). Spec-driven norms still come from
+# ``DeepSeekV4SpecProvider.v4_norm_module()``.
 
 
 class _DenseSwiGLUMLP(nn.Module):
@@ -541,7 +524,7 @@ class DeepseekV4HybridLayer(TransformerLayer):
                 eps=norm_eps,
             )
         else:
-            self.input_layernorm = _RMSNorm(hidden_size, eps=norm_eps)
+            self.input_layernorm = LocalRMSNorm(hidden_size, eps=norm_eps)
 
         if use_spec_submodules and submodules.self_attention is not None:
             self.self_attention = build_module(
@@ -564,7 +547,7 @@ class DeepseekV4HybridLayer(TransformerLayer):
                 eps=norm_eps,
             )
         else:
-            self.pre_mlp_layernorm = _RMSNorm(hidden_size, eps=norm_eps)
+            self.pre_mlp_layernorm = LocalRMSNorm(hidden_size, eps=norm_eps)
 
         self.is_moe = int(config.num_moe_experts) > 0
         if use_spec_submodules and submodules.mlp is not None:
@@ -885,7 +868,7 @@ class DeepseekV4TransformerBlock(TransformerBlock):
                     eps=norm_eps,
                 )
             else:
-                self.final_layernorm = _RMSNorm(hidden_size, eps=norm_eps)
+                self.final_layernorm = LocalRMSNorm(hidden_size, eps=norm_eps)
         else:
             self.final_layernorm = None
 

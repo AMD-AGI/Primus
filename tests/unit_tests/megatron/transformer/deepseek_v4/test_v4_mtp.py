@@ -5,7 +5,8 @@
 ###############################################################################
 
 """Unit tests for V4 MTP integration with upstream
-:class:`MultiTokenPredictionBlock` (P16).
+:class:`MultiTokenPredictionBlock` (P16) plus plan-2 P17 cleanup
+guarantees.
 
 What this file covers (CPU-friendly):
 
@@ -24,8 +25,10 @@ What this file covers (CPU-friendly):
 * The V4 attention spec advertises ``attn_mask_type`` so upstream MTP
   validation passes (V4 manages its own SWA / sink mask internally,
   but the field is required by the upstream pre-build assertion).
-* :class:`DeepseekV4MTPBlock` (legacy) emits a ``DeprecationWarning``
-  on construction (planned removal: plan-2 P21).
+* The legacy primus-owned ``DeepseekV4MTPBlock`` is **gone** in plan-2
+  P17 — its module is no longer importable, the
+  ``v4_use_custom_mtp_block`` config flag is removed, and
+  ``DeepseekV4Model.__init__`` no longer references either of them.
 * :class:`DeepseekV4Model.forward` wires :func:`process_mtp_loss` and
   :class:`MultiTokenPredictionBlock` (AST audit; full distributed run
   is gated G7 in P19).
@@ -38,8 +41,8 @@ P19 distributed re-validation.
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
-import warnings
 from dataclasses import is_dataclass
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -61,7 +64,6 @@ from primus.backends.megatron.core.extensions.transformer_engine_spec_provider i
 from primus.backends.megatron.core.models.deepseek_v4 import (
     DeepseekV4HybridLayer,
     DeepseekV4HybridLayerSubmodules,
-    DeepseekV4MTPBlock,
     get_v4_mtp_block_spec,
 )
 
@@ -199,29 +201,26 @@ def test_attention_spec_declares_supported_attn_mask_type() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Legacy V4 MTP block — deprecated
+# Legacy V4 MTP block — retired in plan-2 P17 (G14 dead-code audit)
 # ---------------------------------------------------------------------------
 
 
-def test_legacy_mtp_block_emits_deprecation_warning() -> None:
-    """Constructing :class:`DeepseekV4MTPBlock` must surface a
-    ``DeprecationWarning`` so users migrate to ``get_v4_mtp_block_spec``."""
-    cfg = _make_v4_config(mtp_num_layers=1)
-    rope = MagicMock()
-    with warnings.catch_warnings(record=True) as captured:
-        warnings.simplefilter("always")
-        try:
-            DeepseekV4MTPBlock(cfg, rope=rope, mtp_num_layers=1)
-        except Exception:
-            # The construction may fail later (e.g. RMSNorm init expects real
-            # config fields); that's OK — we only care the warning fires.
-            pass
-        deprecation_warnings = [
-            str(w.message) for w in captured if issubclass(w.category, DeprecationWarning)
-        ]
-    assert any("DeepseekV4MTPBlock is deprecated" in m for m in deprecation_warnings), (
-        "Constructing DeepseekV4MTPBlock should emit a DeprecationWarning "
-        "pointing users to get_v4_mtp_block_spec; got: " + repr(deprecation_warnings)
+def test_legacy_mtp_block_module_is_gone() -> None:
+    """plan-2 P17 deletes :mod:`...deepseek_v4_mtp` outright.
+
+    Importing the module must raise :class:`ImportError`; the symbol
+    must not be re-exported from the package surface either.
+    """
+    with pytest.raises(ImportError):
+        importlib.import_module("primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_mtp")
+
+    # Package surface — the legacy class must not leak back via __init__.py.
+    pkg = importlib.import_module("primus.backends.megatron.core.models.deepseek_v4")
+    assert not hasattr(pkg, "DeepseekV4MTPBlock"), (
+        "DeepseekV4MTPBlock must be retired in plan-2 P17; the package " "must not re-export it."
+    )
+    assert "DeepseekV4MTPBlock" not in getattr(pkg, "__all__", []), (
+        "DeepseekV4MTPBlock must be removed from the package __all__ " "(plan-2 P17 dead-code audit)."
     )
 
 
@@ -265,14 +264,52 @@ def test_model_init_routes_through_v4_mtp_spec_helper() -> None:
     )
 
 
-def test_model_preserves_legacy_mtp_block_flag() -> None:
-    """The ``v4_use_custom_mtp_block`` config flag stays available for
-    back-compat with research checkpoints; planned removal P21."""
+def test_model_no_longer_references_legacy_mtp_block() -> None:
+    """Plan-2 P17 retires the legacy MTP block AND the
+    ``v4_use_custom_mtp_block`` config flag; ``DeepseekV4Model``'s
+    source must not reference either of them anywhere outside a
+    historical comment that explicitly says the field is gone.
+    """
     src = _MODEL_PATH.read_text()
-    assert "v4_use_custom_mtp_block" in src
-    assert "DeepseekV4MTPBlock(" in src, (
-        "DeepseekV4Model.__init__ must keep the legacy DeepseekV4MTPBlock "
-        "construction behind v4_use_custom_mtp_block until P21 retirement."
+    tree = ast.parse(src)
+
+    bad_attr = []
+    bad_name = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "v4_use_custom_mtp_block":
+            bad_attr.append(getattr(node, "lineno", -1))
+        if isinstance(node, ast.Name) and node.id == "DeepseekV4MTPBlock":
+            bad_name.append(getattr(node, "lineno", -1))
+        if isinstance(node, (ast.ImportFrom, ast.Import)):
+            module = getattr(node, "module", None) or ""
+            if module.endswith("deepseek_v4_mtp"):
+                bad_attr.append(getattr(node, "lineno", -1))
+
+    assert not bad_attr, (
+        "DeepseekV4Model must not reference v4_use_custom_mtp_block / "
+        "deepseek_v4_mtp after plan-2 P17 (lines: %s)." % bad_attr
+    )
+    assert not bad_name, (
+        "DeepseekV4Model must not call/reference DeepseekV4MTPBlock after "
+        "plan-2 P17 (lines: %s)." % bad_name
+    )
+
+
+def test_v4_config_no_longer_carries_legacy_mtp_fields() -> None:
+    """Plan-2 P17 dead-code audit: ``v4_use_custom_mtp_block`` and
+    ``mtp_compress_ratios`` are removed from the V4 config dataclass."""
+    from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
+        DeepSeekV4TransformerConfig,
+    )
+
+    fields = {f.name for f in DeepSeekV4TransformerConfig.__dataclass_fields__.values()}
+    assert "v4_use_custom_mtp_block" not in fields, (
+        "v4_use_custom_mtp_block must be removed from DeepSeekV4TransformerConfig "
+        "(plan-2 P17 retired the legacy MTP block path)."
+    )
+    assert "mtp_compress_ratios" not in fields, (
+        "mtp_compress_ratios was only consumed by the legacy MTP block; "
+        "remove it alongside the block (plan-2 P17)."
     )
 
 

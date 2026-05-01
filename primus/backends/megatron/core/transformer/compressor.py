@@ -34,21 +34,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
-class _RMSNorm(nn.Module):
-    """Tiny RMSNorm (TE / Megatron's RMSNorm requires extra deps; we keep it
-    local here because Compressor is independent of the surrounding stack)."""
-
-    def __init__(self, dim: int, eps: float = 1e-6) -> None:
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(dim))
-        self.eps = eps
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        in_dtype = x.dtype
-        x32 = x.float()
-        rms = torch.rsqrt(x32.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-        return (x32 * rms).to(in_dtype) * self.weight
+from primus.backends.megatron.core.transformer.local_rmsnorm import LocalRMSNorm
 
 
 class Compressor(nn.Module):
@@ -102,7 +88,7 @@ class Compressor(nn.Module):
         self.ape = nn.Parameter(torch.zeros(ape_len, head_dim))
         nn.init.normal_(self.ape, std=0.02)
 
-        self.kv_norm = _RMSNorm(head_dim, eps=rmsnorm_eps)
+        self.kv_norm = LocalRMSNorm(head_dim, eps=rmsnorm_eps)
 
     # ------------------------------------------------------------------
     # internals

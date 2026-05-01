@@ -68,6 +68,7 @@ from primus.backends.megatron.core.transformer.dual_rope import (
     apply_interleaved_partial_rope,
 )
 from primus.backends.megatron.core.transformer.indexer import Indexer
+from primus.backends.megatron.core.transformer.local_rmsnorm import LocalRMSNorm
 from primus.backends.megatron.core.transformer.sliding_window_kv import (
     sliding_window_causal_mask,
 )
@@ -186,21 +187,15 @@ def _per_head_rms_norm(x: torch.Tensor, *, eps: float) -> torch.Tensor:
 
 
 def _build_local_rms_norm(dim: int, *, eps: float) -> nn.Module:
-    """Tiny CPU-friendly RMSNorm used as a fallback when no spec is given."""
+    """Tiny CPU-friendly RMSNorm used as a fallback when no spec is given.
 
-    class _RMSNorm(nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.weight = nn.Parameter(torch.ones(dim))
-            self.eps = eps
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            in_dtype = x.dtype
-            x32 = x.float()
-            rsqrt = torch.rsqrt(x32.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-            return (x32 * rsqrt).to(in_dtype) * self.weight
-
-    return _RMSNorm()
+    Plan-2 P17 retired the closure-built ``_RMSNorm`` helper here; the
+    canonical implementation lives in
+    :class:`primus.backends.megatron.core.transformer.local_rmsnorm.LocalRMSNorm`
+    so the same code path is shared with
+    :mod:`...deepseek_v4_block` and :mod:`...compressor`.
+    """
+    return LocalRMSNorm(dim=dim, eps=eps)
 
 
 # ---------------------------------------------------------------------------

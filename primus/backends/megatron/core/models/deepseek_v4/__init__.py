@@ -6,15 +6,21 @@
 
 """DeepSeek-V4 model package.
 
-Plan-2 P16 surface:
+Plan-2 P17 surface (post-cleanup):
 
     DeepseekV4Model               # top-level model (LanguageModule)
     DeepseekV4TransformerBlock    # decoder block (TransformerBlock subclass)
     DeepseekV4HybridLayer         # decoder layer (TransformerLayer subclass)
-    DeepseekV4MTPBlock            # legacy V4 MTP head (deprecated, P21 removal)
     get_v4_mtp_block_spec         # spec helper for upstream MultiTokenPredictionBlock
     deepseek_v4_builder           # builder used by model_provider
     model_provider                # Megatron pretrain() entry point
+
+Retired in plan-2 P17:
+
+    DeepseekV4MTPBlock            # legacy primus-owned MTP head; replaced
+                                  # by the spec-based path above. The
+                                  # ``v4_use_custom_mtp_block`` config
+                                  # toggle is also gone.
 """
 
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_block import (
@@ -30,9 +36,6 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_builders impor
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_model import (
     DeepseekV4Model,
 )
-from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_mtp import (
-    DeepseekV4MTPBlock,
-)
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_mtp_specs import (
     get_v4_mtp_block_spec,
 )
@@ -43,7 +46,6 @@ __all__ = [
     "DeepseekV4TransformerBlockSubmodules",
     "DeepseekV4HybridLayer",
     "DeepseekV4HybridLayerSubmodules",
-    "DeepseekV4MTPBlock",
     "get_v4_mtp_block_spec",
     "deepseek_v4_builder",
     "model_provider",

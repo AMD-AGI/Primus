@@ -37,7 +37,8 @@ mtp_use_separate_hc_head: true
 
 # ---------- Hybrid Attention ----------
 hybrid_attention_enabled: true
-compress_ratios: null            # provided by the per-variant yaml (Flash / Pro)
+compress_ratios: null            # provided by the per-variant yaml (Flash / Pro);
+                                 # entries: 0 = dense+SWA, 4 = CSA, 128 = HCA
 compress_rope_theta: 160000.0
 index_topk: 512
 index_head_dim: 128

@@ -33,8 +33,8 @@ index_topk: 512
 
 # Per-layer compression schedule (from config.json:compress_ratios)
 # 0   = uncompressed dense layer (full attention with SWA)
-# 4   = HCA branch (compress ratio 4)
-# 128 = CSA branch (compress ratio 128)
+# 4   = CSA branch (overlap mode; per-query top-K from compressed pool via Indexer)
+# 128 = HCA branch (non-overlap mode; full visibility over compressed pool)
 compress_ratios: "[0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]"
 
 # context

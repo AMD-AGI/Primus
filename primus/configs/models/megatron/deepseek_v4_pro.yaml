@@ -27,6 +27,10 @@ moe_router_topk_scaling_factor: 2.5
 
 index_topk: 1024
 
+# Per-layer compression schedule:
+#   0   = uncompressed dense layer (full attention with SWA)
+#   4   = CSA branch (overlap mode; per-query top-K from compressed pool via Indexer)
+#   128 = HCA branch (non-overlap mode; full visibility over compressed pool)
 compress_ratios: "[128, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]"
 
 seq_length: 4096
