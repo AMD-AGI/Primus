@@ -52,6 +52,9 @@ from megatron.core.transformer.spec_utils import ModuleSpec
 from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
     DeepSeekV4SpecProvider,
 )
+from primus.backends.megatron.core.models.deepseek_v4.build_context import (
+    resolve_v4_provider,
+)
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
     DeepSeekV4TransformerConfig,
 )
@@ -141,7 +144,7 @@ def get_v4_mtp_block_spec(
             f"got mtp_num_layers={config.mtp_num_layers!r}."
         )
 
-    provider = DeepSeekV4SpecProvider(config=config)
+    provider = resolve_v4_provider(config)
     mtp_layer_specs = [
         _v4_mtp_layer_spec(
             config=config,

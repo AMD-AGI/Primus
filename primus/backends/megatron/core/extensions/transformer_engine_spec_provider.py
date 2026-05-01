@@ -203,6 +203,39 @@ class DeepSeekV4SpecProvider(PrimusTurboSpecProvider):
 
         return AttentionSink
 
+    def v4_mlp_activation_func(self) -> Optional[type]:
+        """Activation-func selection for V4 MLP / shared-expert specs.
+
+        Plan-2 P18 (D2 audit): the parent ``activation_func()`` returns
+        the TE module **type** (``TEActivationOp``); but Megatron's
+        ``MLP.__init__`` only consumes ``submodules.activation_func`` when
+        ``config.use_te_activation_func == True`` (otherwise it falls
+        back to the callable in ``config.activation_func``).
+
+        Returning the TE class unconditionally caused a silent
+        contract mismatch in V4 yamls (which keep
+        ``use_te_activation_func: false`` by default — V4 wants the
+        clamped-SwiGLU eager path so the activation-clamp gets
+        applied).
+
+        Behavior:
+
+        * ``config.use_te_activation_func`` is True → return the TE
+          activation class (instantiated by Megatron MLP at build).
+        * Otherwise → return ``None`` so the spec leaves the
+          ``MLPSubmodules.activation_func`` slot empty and Megatron
+          MLP uses ``config.activation_func`` (V4's clamped SwiGLU).
+
+        This keeps the spec self-consistent: if the V4 yaml opts into
+        the TE path, the spec carries the TE class; otherwise the
+        spec carries ``None`` instead of a class that would be
+        silently ignored.
+        """
+        cfg = getattr(self, "config", None)
+        if cfg is not None and bool(getattr(cfg, "use_te_activation_func", False)):
+            return self.activation_func()
+        return None
+
     def v4_grouped_mlp_modules(
         self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: Optional[bool] = None
     ):

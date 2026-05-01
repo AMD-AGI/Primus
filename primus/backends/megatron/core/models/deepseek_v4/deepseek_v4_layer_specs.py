@@ -25,8 +25,8 @@ from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import get_num_layers_to_build
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
-from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
-    DeepSeekV4SpecProvider,
+from primus.backends.megatron.core.models.deepseek_v4.build_context import (
+    resolve_v4_provider,
 )
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_block import (
     DeepseekV4HybridLayer,
@@ -353,7 +353,10 @@ def _build_ffn_spec(
     shared_expert_submodules = MLPSubmodules(
         linear_fc1=provider.column_parallel_linear(),
         linear_fc2=provider.row_parallel_linear(),
-        activation_func=provider.activation_func(),
+        # P18 D2: V4-aware activation_func selection — see
+        # ``DeepSeekV4SpecProvider.v4_mlp_activation_func`` for why
+        # this is None on the eager (clamped-SwiGLU) path.
+        activation_func=provider.v4_mlp_activation_func(),
     )
     shared_expert_spec = ModuleSpec(
         module=SharedExpertMLP,
@@ -468,7 +471,7 @@ def get_deepseek_v4_runtime_decoder_spec(
     """
     del pp_rank
 
-    provider = DeepSeekV4SpecProvider(config=config)
+    provider = resolve_v4_provider(config)
     logger.info("[DeepSeek-V4] resolve spec provider=%s", type(provider).__name__)
 
     hc_mult = int(config.hc_mult)

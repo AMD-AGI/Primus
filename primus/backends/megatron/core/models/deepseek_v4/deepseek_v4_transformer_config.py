@@ -13,6 +13,7 @@ upstream ``TransformerConfig``/``MLATransformerConfig`` schema.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
@@ -25,6 +26,48 @@ from megatron.core.transformer.transformer_config import MLATransformerConfig
 # :class:`MultiTokenPredictionBlock` route via
 # :func:`get_v4_mtp_block_spec`); both fields are deliberately gone here
 # and their references in YAML configs / training scripts must be removed.
+
+
+def _normalize_compress_ratios_field(
+    value: Optional[Union[str, List[int], Tuple[int, ...]]],
+    *,
+    field_name: str = "compress_ratios",
+) -> Optional[Tuple[int, ...]]:
+    """Plan-2 P18 (D4 audit): normalize ``compress_ratios`` to a tuple.
+
+    YAML loaders deliver this field as a *string* (e.g.
+    ``"[0, 0, 4, 128, ...]"``) when wrapped in quotes, or as an actual
+    list when written without quotes. The dataclass stored both as
+    ``Optional[Union[str, List[int], Tuple[int, ...]]]``, and runtime
+    helpers (``_parse_int_sequence`` / ``_normalize_compress_ratios``
+    in ``deepseek_v4_block.py``) had to ``ast.literal_eval`` the string
+    on every consumer path.
+
+    With this helper running once in ``__post_init__``, every consumer
+    sees a single canonical type — ``tuple[int, ...]`` — and the runtime
+    parsing layer is reduced to a length-fitting check.
+
+    Args:
+        value: raw config value (string, list, tuple, or ``None``).
+        field_name: only used for error messages.
+
+    Returns:
+        ``None`` (when ``value`` is ``None``) or a tuple of ints.
+    """
+    if value is None:
+        return None
+    parsed = value
+    if isinstance(parsed, str):
+        try:
+            parsed = ast.literal_eval(parsed)
+        except (SyntaxError, ValueError) as exc:
+            raise ValueError(f"{field_name} must be a list-like value, got {value!r}") from exc
+    if isinstance(parsed, (list, tuple)):
+        try:
+            return tuple(int(x) for x in parsed)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} entries must be int-castable; got {parsed!r}") from exc
+    raise TypeError(f"{field_name} must be a list/tuple/str, got {type(parsed).__name__}")
 
 
 @dataclass
@@ -71,6 +114,14 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     position_embedding_type: str = "none"
 
     def __post_init__(self) -> None:
+        # P18 D4: normalize compress_ratios once so downstream helpers
+        # always see ``tuple[int, ...]`` (or None). YAML strings like
+        # ``"[0, 0, 4, ...]"`` are evaluated here.
+        if self.compress_ratios is not None:
+            self.compress_ratios = _normalize_compress_ratios_field(
+                self.compress_ratios, field_name="compress_ratios"
+            )
+
         # Keep V4's ``norm_epsilon`` alias consistent with MCore's
         # ``layernorm_epsilon`` before parent validation runs.
         if self.norm_epsilon is None:

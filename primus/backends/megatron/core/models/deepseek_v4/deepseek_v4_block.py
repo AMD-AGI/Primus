@@ -76,8 +76,8 @@ from megatron.core.transformer.transformer_layer import (
 )
 from megatron.core.utils import make_viewless_tensor
 
-from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
-    DeepSeekV4SpecProvider,
+from primus.backends.megatron.core.models.deepseek_v4.build_context import (
+    resolve_v4_provider,
 )
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
     DeepSeekV4TransformerConfig,
@@ -122,7 +122,7 @@ def _build_projection(
     if config is None:
         return nn.Linear(in_features, out_features, bias=False)
 
-    provider = DeepSeekV4SpecProvider(config=config)
+    provider = resolve_v4_provider(config)
     linear_module_cls = provider.linear()
     init_method: Callable = config.init_method or _default_init_method
     try:
@@ -561,7 +561,7 @@ class DeepseekV4HybridLayer(TransformerLayer):
             moe_use_grouped_gemm = bool(config.moe_grouped_gemm)
             moe_use_legacy_grouped_gemm = bool(config.moe_use_legacy_grouped_gemm)
 
-            provider = DeepSeekV4SpecProvider(config=config)
+            provider = resolve_v4_provider(config)
             grouped_mlp_module, grouped_mlp_submodules = provider.v4_grouped_mlp_modules(
                 moe_use_grouped_gemm=moe_use_grouped_gemm,
                 moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
@@ -575,7 +575,11 @@ class DeepseekV4HybridLayer(TransformerLayer):
                 submodules=MLPSubmodules(
                     linear_fc1=provider.column_parallel_linear(),
                     linear_fc2=provider.row_parallel_linear(),
-                    activation_func=provider.activation_func(),
+                    # P18 D2: pull from the V4-aware helper so the slot
+                    # is None when ``use_te_activation_func`` is False
+                    # (the default in V4 yamls; clamped-SwiGLU lives on
+                    # the eager path via ``config.activation_func``).
+                    activation_func=provider.v4_mlp_activation_func(),
                 ),
             )
             moe_submodules = DeepseekV4MoESubmodules(
