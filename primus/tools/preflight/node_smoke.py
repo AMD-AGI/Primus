@@ -229,6 +229,38 @@ def _per_gpu_body(
             "details": details,
         }
 
+    # --- D-1 light: PCIe link + HBM (sysfs + torch only, fast & no shell-out) ---
+    # Captured into details.low_level so the aggregator can flag drift across
+    # the cluster (e.g. a single GPU running at Gen3 x8 because the slot
+    # needs reseating, or a GPU that exposes only half of its HBM).
+    low: Dict[str, Any] = {}
+    try:
+        props = torch.cuda.get_device_properties(gpu)
+        bdf = getattr(props, "pci_bus_id", None) or None
+        if bdf:
+            low["pci_bdf"] = bdf
+            sysdir = f"/sys/bus/pci/devices/{bdf.lower()}"
+            speed = _read_text(f"{sysdir}/current_link_speed")
+            width = _read_text(f"{sysdir}/current_link_width")
+            low["pcie_link_speed_raw"] = speed or None
+            low["pcie_link_width"] = int(width) if width.isdigit() else None
+            # speed is e.g. "32.0 GT/s PCIe" -> 32.0
+            try:
+                low["pcie_link_speed_gts"] = float(speed.split()[0]) if speed else None
+            except Exception:
+                low["pcie_link_speed_gts"] = None
+        try:
+            free_b, total_b = torch.cuda.mem_get_info(gpu)
+            low["hbm_total_bytes"] = int(total_b)
+            low["hbm_free_bytes"] = int(free_b)
+            low["hbm_total_gib"] = round(total_b / (1 << 30), 2)
+        except Exception:
+            low["hbm_total_bytes"] = int(getattr(props, "total_memory", 0)) or None
+    except Exception as e:
+        low["error"] = f"low_level capture failed: {e}"
+    if low:
+        details["low_level"] = low
+
     # --- Tier 2 perf sanity (optional) ---
     if tier2:
         # GEMM TFLOPS. Warmup/iter counts mirror the preflight `--quick` preset
@@ -744,6 +776,415 @@ def _collect_host_limits(*, ulimit_l_min_gb: float, shm_min_gb: float) -> Dict[s
     return out
 
 
+# ---------------------------------------------------------------------------
+# Tier 1 -- D-1 heavy: per-GPU low-level via amd-smi (ECC, throttle, clocks,
+# power cap). Runs ONCE per node (not per per-GPU subprocess) so the smoke
+# step doesn't pay an amd-smi startup tax 8x. Best-effort: missing amd-smi
+# or unparseable output degrades to {"ok": False, ...} without raising.
+# ---------------------------------------------------------------------------
+
+
+def _which(prog: str) -> Optional[str]:
+    """Tiny shutil.which() replacement that doesn't pull in shutil at import."""
+    for d in (os.environ.get("PATH") or "").split(os.pathsep):
+        p = os.path.join(d, prog)
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def _collect_amd_smi_metrics() -> Dict[str, Any]:
+    """Best-effort capture of per-GPU low-level metrics via ``amd-smi``.
+
+    We try ``amd-smi metric --json`` first (newer builds emit valid JSON);
+    if that fails we fall back to text output and surface the raw text under
+    ``raw`` so an operator can still grep it. The on-disk shape is:
+
+        {
+            "ok": bool,
+            "tool": "amd-smi metric --json" | "amd-smi metric" | None,
+            "per_gpu": [ {gpu, gfx_clock_mhz, hbm_used_bytes,
+                          power_avg_w, power_cap_w, temp_edge_c,
+                          ecc_uncorrectable_total, ecc_correctable_total,
+                          throttle_status_raw, ...}, ... ],
+            "error": "..."  (only when ok is False)
+        }
+
+    Hard-fail semantics live in ``_node_status_from``: any non-zero
+    uncorrectable ECC count, or any throttle reason that contains
+    ``thermal``/``power``/``current``, becomes a node FAIL.
+    """
+    out: Dict[str, Any] = {"ok": False, "tool": None, "per_gpu": []}
+    if _which("amd-smi") is None:
+        out["error"] = "amd-smi not found in PATH"
+        return out
+
+    # Try JSON first.
+    try:
+        cp = subprocess.run(
+            ["amd-smi", "metric", "--json"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=15, check=False,
+        )
+        if cp.returncode == 0 and cp.stdout.strip():
+            try:
+                doc = json.loads(cp.stdout)
+                out["ok"] = True
+                out["tool"] = "amd-smi metric --json"
+                out["per_gpu"] = _flatten_amd_smi_metric_json(doc)
+                return out
+            except Exception as e:
+                out["json_parse_error"] = str(e)
+        else:
+            out["json_rc"] = cp.returncode
+            out["json_stderr"] = (cp.stderr or "").strip()[:200]
+    except subprocess.TimeoutExpired:
+        out["json_error"] = "amd-smi metric --json timed out"
+    except Exception as e:
+        out["json_error"] = str(e)
+
+    # Fallback: capture the raw text output for operator grepping. We don't
+    # try to parse the human-readable text -- per-GPU outliers will still
+    # show up via the sysfs/torch-side details we capture in _per_gpu_body.
+    try:
+        cp = subprocess.run(
+            ["amd-smi", "metric"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=15, check=False,
+        )
+        if cp.returncode == 0:
+            out["ok"] = True
+            out["tool"] = "amd-smi metric"
+            out["raw"] = cp.stdout[:8000]  # cap to keep JSON small
+            return out
+        out["error"] = (cp.stderr or "").strip()[:200] or f"rc={cp.returncode}"
+    except subprocess.TimeoutExpired:
+        out["error"] = "amd-smi metric timed out"
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
+def _flatten_amd_smi_metric_json(doc: Any) -> List[Dict[str, Any]]:
+    """Pull the fields we care about out of `amd-smi metric --json` output.
+
+    The exact schema varies between amd-smi releases. We touch only the
+    most-stable nesting -- a top-level list of per-GPU dicts, each with
+    sub-blocks like ``power``, ``clock``, ``temperature``, ``ecc``,
+    ``throttle_status`` -- and tolerate missing fields silently.
+    """
+    out: List[Dict[str, Any]] = []
+    items = doc if isinstance(doc, list) else (doc.get("gpus", []) if isinstance(doc, dict) else [])
+    for i, g in enumerate(items):
+        if not isinstance(g, dict):
+            continue
+        rec: Dict[str, Any] = {"gpu": i}
+        # gpu id may be in g["gpu"] or g["device_id"] depending on schema
+        if isinstance(g.get("gpu"), int):
+            rec["gpu"] = g["gpu"]
+        # power
+        power = g.get("power") or {}
+        if isinstance(power, dict):
+            for k_src, k_dst in (
+                ("average_socket_power", "power_avg_w"),
+                ("current_socket_power", "power_avg_w"),
+                ("socket_power", "power_avg_w"),
+                ("power_cap", "power_cap_w"),
+                ("power_limit", "power_cap_w"),
+            ):
+                v = power.get(k_src)
+                if isinstance(v, (int, float)) and rec.get(k_dst) is None:
+                    rec[k_dst] = v
+        # clocks (gfx clock most useful)
+        clk = g.get("clock") or g.get("clocks") or {}
+        if isinstance(clk, dict):
+            gfx = clk.get("gfx") or clk.get("gfx_0") or clk.get("gfx_clock") or {}
+            if isinstance(gfx, dict):
+                for k in ("clk", "current", "value", "frequency"):
+                    if isinstance(gfx.get(k), (int, float)):
+                        rec["gfx_clock_mhz"] = gfx[k]
+                        break
+            elif isinstance(gfx, (int, float)):
+                rec["gfx_clock_mhz"] = gfx
+        # temperature
+        temp = g.get("temperature") or {}
+        if isinstance(temp, dict):
+            for k in ("edge", "current", "value"):
+                v = temp.get(k)
+                if isinstance(v, (int, float)):
+                    rec["temp_edge_c"] = v
+                    break
+        # ECC
+        ecc = g.get("ecc") or g.get("ecc_count") or {}
+        if isinstance(ecc, dict):
+            ue = ecc.get("uncorrectable") or ecc.get("uncorrectable_total") or ecc.get("ue") or 0
+            ce = ecc.get("correctable") or ecc.get("correctable_total") or ecc.get("ce") or 0
+            try:
+                rec["ecc_uncorrectable_total"] = int(ue)
+                rec["ecc_correctable_total"] = int(ce)
+            except Exception:
+                pass
+        # Throttle
+        thr = g.get("throttle_status") or g.get("throttle") or {}
+        if isinstance(thr, dict):
+            rec["throttle_status_raw"] = thr
+        elif isinstance(thr, (str, list)):
+            rec["throttle_status_raw"] = thr
+        out.append(rec)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 -- D-2: XGMI topology matrix via `amd-smi topology` (text parser)
+# ---------------------------------------------------------------------------
+
+
+def _collect_xgmi_topology() -> Dict[str, Any]:
+    """Parse ``amd-smi topology`` and return a square link-type matrix.
+
+    ``amd-smi topology`` emits several BDF-labelled sub-tables (ACCESS,
+    WEIGHT, HOPS, LINK TYPE, NUMA BW, ...). We pick the ``LINK TYPE TABLE``
+    sub-section, which contains values like ``SELF`` (diagonal) and
+    ``XGMI`` / ``PCIE`` / ``PIX`` / ``SOC`` etc. Off-diagonal cells that
+    aren't ``XGMI`` are recorded as ``non_xgmi_pairs`` and treated as a
+    hard fail by ``_node_status_from`` -- the moment a single GPU pair
+    falls back to PCIe inside a node, intra-node collectives lose 5-10x
+    of the bandwidth NCCL/RCCL expects.
+
+    The on-disk shape:
+
+        {
+            "ok": bool,
+            "tool": "amd-smi topology" | None,
+            "bdfs": ["0000:05:00.0", ...],
+            "matrix": [["SELF","XGMI",...], ["XGMI","SELF",...], ...],
+            "n_gpus": int,
+            "non_xgmi_pairs": [(i, j, link_type), ...],
+            "error": "..."
+        }
+    """
+    out: Dict[str, Any] = {
+        "ok": False, "tool": None, "bdfs": [], "matrix": [],
+        "non_xgmi_pairs": [],
+    }
+    if _which("amd-smi") is None:
+        out["error"] = "amd-smi not found in PATH"
+        return out
+    try:
+        cp = subprocess.run(
+            ["amd-smi", "topology"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=15, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        out["error"] = "amd-smi topology timed out"
+        return out
+    except Exception as e:
+        out["error"] = str(e)
+        return out
+    if cp.returncode != 0:
+        out["error"] = (cp.stderr or "").strip()[:200] or f"rc={cp.returncode}"
+        return out
+
+    text = cp.stdout
+
+    # Parse: find the `LINK TYPE TABLE:` section, then the BDF header row,
+    # then the per-BDF data rows. Stop at the next section header (any all-
+    # caps label ending in `TABLE:`) or end of text.
+    import re
+    bdf_re = re.compile(r"\b([0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.\d)\b")
+    section_header_re = re.compile(r"^\s*[A-Z][A-Z0-9 -]+TABLE:\s*$")
+
+    lines = text.splitlines()
+    try:
+        idx = next(
+            i for i, l in enumerate(lines)
+            if l.strip().upper() == "LINK TYPE TABLE:"
+        )
+    except StopIteration:
+        out["error"] = "no `LINK TYPE TABLE:` section in `amd-smi topology` output"
+        out["raw"] = text[:4000]
+        return out
+
+    # Header row is the next non-empty line after the label, and contains
+    # no leading BDF -- only column BDFs.
+    header_bdfs: List[str] = []
+    data_start = None
+    for j in range(idx + 1, len(lines)):
+        l = lines[j].rstrip()
+        if not l.strip():
+            continue
+        if section_header_re.match(l):
+            break
+        toks = bdf_re.findall(l)
+        if not toks:
+            continue
+        # The header line has only column BDFs (no leading row label), and
+        # the first non-whitespace char position lines up with the columns.
+        # Heuristic: header has BDFs but no other tokens that look like
+        # link-type values (XGMI/PCIE/SELF/...). Data rows always have
+        # exactly one leading BDF followed by N value tokens.
+        non_bdf_toks = [
+            t for t in l.split() if not bdf_re.fullmatch(t)
+        ]
+        if not non_bdf_toks:
+            header_bdfs = toks
+            data_start = j + 1
+            break
+
+    if not header_bdfs or data_start is None:
+        out["error"] = "could not find header row inside LINK TYPE TABLE"
+        out["raw"] = text[:4000]
+        return out
+
+    n = len(header_bdfs)
+    bdf_to_idx = {b: i for i, b in enumerate(header_bdfs)}
+    matrix: List[List[str]] = [[""] * n for _ in range(n)]
+    seen_rows = 0
+    for j in range(data_start, len(lines)):
+        l = lines[j].rstrip()
+        if not l.strip():
+            continue
+        if section_header_re.match(l):
+            break
+        toks = l.split()
+        # First token must be a BDF, the remaining N tokens are the row.
+        if not bdf_re.fullmatch(toks[0]):
+            continue
+        row_bdf = toks[0]
+        cells = toks[1:]
+        if row_bdf not in bdf_to_idx:
+            continue
+        row_idx = bdf_to_idx[row_bdf]
+        for k, cell in enumerate(cells[:n]):
+            matrix[row_idx][k] = cell
+        seen_rows += 1
+
+    if seen_rows == 0:
+        out["error"] = "no BDF-labelled rows found inside LINK TYPE TABLE"
+        out["raw"] = text[:4000]
+        return out
+
+    healthy_diag = {"SELF", "X", "-", "0"}
+    healthy_link = {"XGMI"}
+    non_xgmi: List[Any] = []
+    for i, row in enumerate(matrix):
+        for j_idx, cell in enumerate(row):
+            cu = cell.strip().upper()
+            if i == j_idx:
+                # Diagonal: must be SELF (or empty if the row was missing).
+                if cu and cu not in healthy_diag and cu not in healthy_link:
+                    non_xgmi.append((i, j_idx, cell))
+                continue
+            if not cu:
+                # Missing cell -> can't certify XGMI -> flag.
+                non_xgmi.append((i, j_idx, "<missing>"))
+                continue
+            if cu in healthy_link or cu in healthy_diag:
+                continue
+            non_xgmi.append((i, j_idx, cell))
+
+    out["ok"] = True
+    out["tool"] = "amd-smi topology"
+    out["bdfs"] = header_bdfs
+    out["matrix"] = matrix
+    out["n_gpus"] = n
+    out["non_xgmi_pairs"] = non_xgmi
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 -- E: clock state (wall time + time-daemon active states)
+# ---------------------------------------------------------------------------
+
+
+def _systemctl_is_active(unit: str) -> Optional[str]:
+    """Return ``systemctl is-active <unit>`` ('active'/'inactive'/'failed'/...)
+    or None if systemctl is missing / errors. Always best-effort."""
+    if _which("systemctl") is None:
+        return None
+    try:
+        cp = subprocess.run(
+            ["systemctl", "is-active", unit],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=3, check=False,
+        )
+        # systemctl returns non-zero for inactive/failed -- that's fine,
+        # we just want the textual state.
+        return (cp.stdout or "").strip() or "unknown"
+    except Exception:
+        return None
+
+
+def _collect_clock_state() -> Dict[str, Any]:
+    """Capture this node's wall time and time-daemon health.
+
+    Wall time is captured early so the aggregator can compute a
+    cluster-wide spread. Note this includes srun launch jitter, so the
+    spread is an *upper bound* on the real clock skew. The aggregator
+    uses loose thresholds (warn at 30 s, no hard fail) for the spread,
+    and reserves the hard fail for "no time-sync daemon active".
+    """
+    out: Dict[str, Any] = {
+        "wall_time_unix": time.time(),
+        "monotonic": time.monotonic(),
+        "daemons": {},
+    }
+    for unit in ("chronyd", "ntp", "ntpd", "systemd-timesyncd"):
+        out["daemons"][unit] = _systemctl_is_active(unit)
+    active = [u for u, s in out["daemons"].items() if s == "active"]
+    out["any_active"] = bool(active)
+    out["active_units"] = active
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 -- F-partial: rocm-smi self-latency
+# ---------------------------------------------------------------------------
+
+
+def _collect_rocm_smi_self_latency(*, timeout_sec: float) -> Dict[str, Any]:
+    """Time a single ``rocm-smi --version`` call against ``timeout_sec``.
+
+    A wedged amdgpu driver makes ``rocm-smi`` calls take 30-60 s before
+    failing outright -- usually minutes before the GPU itself stops
+    responding. Catching this in preflight gives operators a chance to
+    drain the node before a real training job starts hanging on it.
+    """
+    out: Dict[str, Any] = {
+        "ok": False,
+        "tool": None,
+        "latency_sec": None,
+        "timeout_sec": float(timeout_sec),
+    }
+    binpath = _which("rocm-smi")
+    if binpath is None:
+        out["error"] = "rocm-smi not found in PATH"
+        return out
+    out["tool"] = binpath
+    t0 = time.monotonic()
+    try:
+        cp = subprocess.run(
+            [binpath, "--version"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=timeout_sec, check=False,
+        )
+        out["latency_sec"] = round(time.monotonic() - t0, 3)
+        out["rc"] = cp.returncode
+        out["ok"] = (cp.returncode == 0)
+        if cp.returncode != 0:
+            out["error"] = (cp.stderr or cp.stdout or "").strip()[:200]
+    except subprocess.TimeoutExpired:
+        out["latency_sec"] = round(time.monotonic() - t0, 3)
+        out["timed_out"] = True
+        out["error"] = (
+            f"rocm-smi --version did not finish in {timeout_sec}s -- driver may be wedging"
+        )
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
 def _findings_to_dicts(findings: List[Any]) -> List[Dict[str, Any]]:
     """Normalize Finding dataclasses (different modules each define their own)
     into plain dicts."""
@@ -1058,6 +1499,37 @@ def _node_status_from(
     if rccl and rccl.get("status") not in (None, "PASS"):
         reasons.append(f"rccl: {rccl.get('status')}: {rccl.get('error', '')}")
 
+    # D-1 heavy: any per-GPU uncorrectable ECC count is a hard fail. The
+    # amd-smi schema isn't stable across releases so we trust only the
+    # values our flattener was able to coerce to int. Throttle reasons stay
+    # informational (the schema is too vendor-specific to fail on).
+    amd = tier1_extra.get("gpu_low_level") or {}
+    for rec in amd.get("per_gpu", []) or []:
+        ue = rec.get("ecc_uncorrectable_total")
+        if isinstance(ue, int) and ue > 0:
+            reasons.append(
+                f"gpu{rec.get('gpu', '?')}: ECC uncorrectable count = {ue}"
+            )
+
+    # D-2: any non-XGMI GPU pair is a hard fail -- intra-node collectives
+    # silently fall back to PCIe and lose 5-10x bandwidth.
+    xg = tier1_extra.get("xgmi") or {}
+    bad = xg.get("non_xgmi_pairs") or []
+    if bad:
+        sample = ", ".join(f"({i},{j})={t}" for i, j, t in bad[:3])
+        reasons.append(
+            f"xgmi: {len(bad)} non-XGMI GPU pair(s) detected, e.g. {sample}"
+        )
+
+    # F-partial: rocm-smi --version that timed out -> driver is wedging.
+    # Slow-but-completed calls are surfaced by the aggregator only.
+    tool = tier1_extra.get("tooling") or {}
+    if tool.get("timed_out"):
+        reasons.append(
+            f"tooling: rocm-smi --version did not return within "
+            f"{tool.get('timeout_sec', '?')}s -- driver may be wedging"
+        )
+
     return reasons
 
 
@@ -1144,6 +1616,38 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         ulimit_l_min_gb=ns.ulimit_l_min_gb,
         shm_min_gb=ns.shm_min_gb,
     )
+
+    # D-1 heavy: per-GPU ECC / throttle / clocks / power via amd-smi (one
+    # node-level call, results indexed by gpu).
+    # D-2: XGMI link matrix via amd-smi topology (one node-level call).
+    # E:   wall-time + time-daemon active states.
+    # F-partial: rocm-smi --version self-latency with a hard timeout to
+    # catch drivers that are starting to wedge.
+    tier1_extra["gpu_low_level"] = _collect_amd_smi_metrics()
+    tier1_extra["xgmi"] = _collect_xgmi_topology()
+    tier1_extra["clock"] = _collect_clock_state()
+    tier1_extra["tooling"] = _collect_rocm_smi_self_latency(
+        timeout_sec=float(ns.rocm_smi_timeout_sec)
+    )
+    xg = tier1_extra["xgmi"]
+    if xg.get("ok"):
+        bad = xg.get("non_xgmi_pairs") or []
+        _log(
+            f"xgmi: {xg.get('n_gpus', 0)}x{xg.get('n_gpus', 0)} matrix, "
+            f"{len(bad)} non-XGMI pair(s)"
+        )
+    elif xg.get("error"):
+        _warn(f"xgmi: {xg.get('error')}")
+    tool = tier1_extra["tooling"]
+    if tool.get("ok"):
+        _log(f"rocm-smi --version: {tool.get('latency_sec')}s")
+    elif tool.get("timed_out"):
+        _warn(
+            f"rocm-smi --version timed out after {tool.get('timeout_sec')}s "
+            "-- driver may be wedging"
+        )
+    elif tool.get("error"):
+        _warn(f"tooling: {tool.get('error')}")
     nic_summary = tier1_extra["nics"]
     _log(
         f"nics: {len(nic_summary.get('ports', []))} port(s) found, "
@@ -1312,6 +1816,153 @@ def _host_limits_issue_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]
                 "host": n.get("host", "?"),
                 "issue": issue,
             })
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Aggregator helpers -- D-1 / D-2 / E / F
+# ---------------------------------------------------------------------------
+
+
+def _gpu_low_level_outlier_rows(
+    nodes: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Find per-GPU outliers in PCIe link + HBM total across the cluster.
+
+    For each scalar metric the cluster has a strong majority value (e.g.
+    16 lanes, 32 GT/s, 191 GiB HBM). A single GPU below the majority on
+    any of these is almost always a hardware issue -- a cold-soldered
+    socket, a degraded PCIe link, or HBM that the firmware refused to
+    bring online. We surface every such (host, gpu, metric, value)
+    tuple, with the cluster majority for context.
+
+    Power cap and ECC counters from amd-smi are intentionally NOT included
+    here; they have their own narrower checks (ECC = hard fail in
+    ``_node_status_from``; power cap = informational only because cluster
+    operators sometimes set per-rack caps deliberately).
+    """
+    from collections import Counter
+
+    fields = (
+        ("pcie_link_width", "PCIe width (lanes)"),
+        ("pcie_link_speed_gts", "PCIe speed (GT/s)"),
+        ("hbm_total_gib", "HBM total (GiB)"),
+    )
+    rows: List[Dict[str, Any]] = []
+    for key, label in fields:
+        per_gpu: List[tuple] = []  # (host, gpu_idx, value)
+        for n in nodes:
+            for p in (n.get("tier1") or {}).get("per_gpu") or []:
+                low = (p.get("details") or {}).get("low_level") or {}
+                v = low.get(key)
+                if isinstance(v, (int, float)):
+                    per_gpu.append((n.get("host", "?"), p.get("gpu", "?"), v))
+        if not per_gpu:
+            continue
+        c = Counter(v for _, _, v in per_gpu)
+        majority, count = c.most_common(1)[0]
+        outliers = [(h, g, v) for h, g, v in per_gpu if v != majority]
+        if not outliers:
+            continue
+        rows.append({
+            "key": key,
+            "label": label,
+            "majority": majority,
+            "count": count,
+            "total": len(per_gpu),
+            "outliers": outliers,
+        })
+    return rows
+
+
+def _xgmi_issue_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Per-node XGMI link issues (any non-XGMI GPU pair)."""
+    rows: List[Dict[str, Any]] = []
+    for n in nodes:
+        xg = (n.get("tier1") or {}).get("xgmi") or {}
+        if not xg.get("ok"):
+            err = xg.get("error")
+            if err:
+                rows.append({
+                    "node_rank": n.get("node_rank", "?"),
+                    "host": n.get("host", "?"),
+                    "summary": f"could not collect topology: {err}",
+                })
+            continue
+        bad = xg.get("non_xgmi_pairs") or []
+        if not bad:
+            continue
+        # Show up to 6 sample pairs to keep the table readable; the full
+        # matrix lives in the per-node JSON.
+        sample = ", ".join(f"({i},{j})={t}" for i, j, t in bad[:6])
+        suffix = "" if len(bad) <= 6 else f" (+{len(bad) - 6} more)"
+        rows.append({
+            "node_rank": n.get("node_rank", "?"),
+            "host": n.get("host", "?"),
+            "summary": f"{len(bad)} non-XGMI pair(s): {sample}{suffix}",
+        })
+    return rows
+
+
+def _clock_summary(
+    nodes: List[Dict[str, Any]], skew_warn_sec: float,
+) -> Dict[str, Any]:
+    """Compute wall-clock spread + per-node time-daemon health."""
+    times: List[tuple] = []  # (host, wall_time_unix)
+    no_daemon_hosts: List[tuple] = []  # (node_rank, host)
+    for n in nodes:
+        clk = (n.get("tier1") or {}).get("clock") or {}
+        wt = clk.get("wall_time_unix")
+        if isinstance(wt, (int, float)):
+            times.append((n.get("host", "?"), float(wt)))
+        if clk and not clk.get("any_active", True):
+            no_daemon_hosts.append(
+                (n.get("node_rank", "?"), n.get("host", "?"))
+            )
+
+    spread_sec = None
+    earliest_h = latest_h = None
+    if len(times) >= 2:
+        earliest_h, earliest = min(times, key=lambda x: x[1])
+        latest_h, latest = max(times, key=lambda x: x[1])
+        spread_sec = round(latest - earliest, 3)
+    return {
+        "n_nodes_with_time": len(times),
+        "spread_sec": spread_sec,
+        "spread_warn_sec": skew_warn_sec,
+        "spread_warn": (spread_sec is not None and spread_sec > skew_warn_sec),
+        "earliest_host": earliest_h,
+        "latest_host": latest_h,
+        "no_daemon_hosts": no_daemon_hosts,
+    }
+
+
+def _tooling_latency_rows(
+    nodes: List[Dict[str, Any]], warn_sec: float,
+) -> List[Dict[str, Any]]:
+    """Per-node `rocm-smi --version` self-latency outliers (timed-out + slow)."""
+    rows: List[Dict[str, Any]] = []
+    for n in nodes:
+        t = (n.get("tier1") or {}).get("tooling") or {}
+        lat = t.get("latency_sec")
+        timed_out = bool(t.get("timed_out"))
+        if t.get("error") and lat is None:
+            # Tool missing -- not interesting for a slow-tool report.
+            continue
+        flag = ""
+        if timed_out:
+            flag = "TIMEOUT"
+        elif isinstance(lat, (int, float)) and lat > warn_sec:
+            flag = f">{warn_sec}s"
+        if not flag:
+            continue
+        rows.append({
+            "node_rank": n.get("node_rank", "?"),
+            "host": n.get("host", "?"),
+            "latency_sec": lat,
+            "flag": flag,
+            "timeout_sec": t.get("timeout_sec"),
+        })
     return rows
 
 
@@ -1575,6 +2226,133 @@ def _cmd_aggregate(ns: argparse.Namespace) -> int:
             f.write(f"*Host limits section failed to render: {e}*\n")
             _warn(f"host-limits render failed: {e}")
 
+        # ----- D-1: GPU low-level outliers (PCIe link, HBM total) -----
+        f.write("\n## GPU low-level outliers (PCIe link / HBM)\n\n")
+        try:
+            gpu_outliers = _gpu_low_level_outlier_rows(nodes)
+            if not gpu_outliers:
+                f.write("*All GPUs match the cluster majority on PCIe link "
+                        "and HBM total.*\n")
+            else:
+                f.write(
+                    "Per-GPU values that differ from the cluster majority. A "
+                    "GPU sitting at half PCIe width / half HBM is almost "
+                    "always a hardware fault on that single device.\n\n"
+                )
+                f.write(
+                    "| Metric | Cluster majority (count/total) | "
+                    "Outliers (`host:gpu` = value) |\n"
+                )
+                f.write(
+                    "|--------|---------------------------------|"
+                    "-------------------------------|\n"
+                )
+                for row in gpu_outliers:
+                    out_str = "; ".join(
+                        f"`{h}:{g}` = `{v}`" for h, g, v in row["outliers"]
+                    )
+                    f.write(
+                        f"| {row['label']} | `{row['majority']}` "
+                        f"({row['count']}/{row['total']}) | {out_str} |\n"
+                    )
+        except Exception as e:
+            f.write(f"*GPU low-level section failed to render: {e}*\n")
+            _warn(f"gpu-low-level render failed: {e}")
+
+        # ----- D-2: XGMI link issues -----
+        f.write("\n## XGMI link issues\n\n")
+        try:
+            xgmi_issues = _xgmi_issue_rows(nodes)
+            if not xgmi_issues:
+                f.write("*All GPU pairs report XGMI on every node "
+                        "(or amd-smi topology was unavailable).*\n")
+            else:
+                f.write(
+                    "Any non-XGMI GPU pair is a hard fail -- intra-node "
+                    "collectives silently fall back to PCIe and lose 5-10x "
+                    "of the bandwidth NCCL/RCCL expects.\n\n"
+                )
+                f.write("| Node | Hostname | Issue |\n")
+                f.write("|------|----------|-------|\n")
+                for row in xgmi_issues:
+                    msg = str(row["summary"]).replace("|", "/")
+                    if len(msg) > 200:
+                        msg = msg[:197] + "..."
+                    f.write(
+                        f"| {row['node_rank']} | {row['host']} | {msg} |\n"
+                    )
+        except Exception as e:
+            f.write(f"*XGMI section failed to render: {e}*\n")
+            _warn(f"xgmi render failed: {e}")
+
+        # ----- E: cluster wall-clock spread + time-daemon roll-call -----
+        f.write("\n## Cluster clock + time daemons\n\n")
+        try:
+            clk = _clock_summary(nodes, skew_warn_sec=ns.clock_skew_warn_sec)
+            spread = clk["spread_sec"]
+            if spread is None:
+                f.write("*Not enough nodes reported a wall-clock timestamp.*\n")
+            else:
+                marker = " (**warn** -- exceeds " \
+                         f"{clk['spread_warn_sec']}s)" if clk["spread_warn"] else ""
+                f.write(
+                    f"- Wall-clock spread across {clk['n_nodes_with_time']} "
+                    f"nodes: **{spread}s**{marker}.\n"
+                )
+                f.write(
+                    f"- Earliest: `{clk['earliest_host']}`, "
+                    f"latest: `{clk['latest_host']}`.\n"
+                )
+                f.write(
+                    "- (Spread is an upper bound on real clock skew -- it "
+                    "also includes srun launch jitter.)\n"
+                )
+            if clk["no_daemon_hosts"]:
+                f.write("\n**Nodes with no active time-sync daemon "
+                        "(chronyd / ntpd / systemd-timesyncd):**\n\n")
+                f.write("| Node | Hostname |\n")
+                f.write("|------|----------|\n")
+                for nr, h in clk["no_daemon_hosts"]:
+                    f.write(f"| {nr} | {h} |\n")
+            else:
+                f.write("\n*Every node has at least one active time-sync "
+                        "daemon.*\n")
+        except Exception as e:
+            f.write(f"*Clock section failed to render: {e}*\n")
+            _warn(f"clock render failed: {e}")
+
+        # ----- F-partial: rocm-smi self-latency -----
+        f.write("\n## Tooling self-latency (`rocm-smi --version`)\n\n")
+        try:
+            tool_rows = _tooling_latency_rows(
+                nodes, warn_sec=float(ns.rocm_smi_warn_sec),
+            )
+            if not tool_rows:
+                f.write(
+                    "*No nodes exceeded the warn threshold "
+                    f"({ns.rocm_smi_warn_sec}s) and no timeouts.*\n"
+                )
+            else:
+                f.write(
+                    "Slow `rocm-smi --version` calls historically precede a "
+                    "wedged amdgpu driver. Hitting the hard timeout is a "
+                    "node FAIL; slow-but-completed calls are warn-only.\n\n"
+                )
+                f.write("| Node | Hostname | Latency (s) | Flag |\n")
+                f.write("|------|----------|-------------|------|\n")
+                for r in tool_rows:
+                    lat = r.get("latency_sec")
+                    lat_s = (
+                        f"{lat:.2f}" if isinstance(lat, (int, float)) else "?"
+                    )
+                    f.write(
+                        f"| {r['node_rank']} | {r['host']} | "
+                        f"{lat_s} | {r['flag']} |\n"
+                    )
+        except Exception as e:
+            f.write(f"*Tooling section failed to render: {e}*\n")
+            _warn(f"tooling render failed: {e}")
+
         # Tier 2 perf summary -- only emitted when at least one node ran Tier 2.
         # Surfaces per-node GEMM TFLOPS / HBM GB/s (min/median/max across the
         # node's GPUs) plus the local RCCL all-reduce GB/s, so outliers across
@@ -1719,6 +2497,12 @@ def _build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--shm-min-gb", type=float, default=8.0,
                     help="FAIL the node if /dev/shm is below this many GiB "
                          "(NCCL shared-mem may fail). 0 disables.")
+    # F-partial: rocm-smi self-latency. Hitting this timeout is treated as a
+    # hard fail because a wedging amdgpu driver typically makes rocm-smi
+    # hang for 30-60 s before the GPU itself stops responding.
+    pr.add_argument("--rocm-smi-timeout-sec", type=float, default=5.0,
+                    help="Hard timeout for `rocm-smi --version`. Hitting it is "
+                         "a node FAIL (driver likely wedging).")
     pr.set_defaults(func=_cmd_run)
 
     # ---- aggregate ----
@@ -1730,6 +2514,13 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Number of nodes expected to report. Missing nodes are FAIL.")
     pa.add_argument("--wait-timeout-sec", type=int, default=60,
                     help="How long to wait for all expected JSONs to land before aggregating anyway.")
+    pa.add_argument("--rocm-smi-warn-sec", type=float, default=1.0,
+                    help="Flag (warn-only) any node where `rocm-smi --version` "
+                         "took longer than this many seconds.")
+    pa.add_argument("--clock-skew-warn-sec", type=float, default=30.0,
+                    help="Warn (info-only) when wall-clock spread across nodes "
+                         "exceeds this many seconds. Includes srun launch "
+                         "jitter so the default is loose.")
     pa.add_argument("--expected-nodelist-file", type=str, default=None,
                     help="Optional file with one expected (short) hostname per line. "
                          "When provided, missing nodes are reported with their real "
