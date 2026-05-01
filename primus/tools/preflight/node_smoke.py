@@ -1196,13 +1196,16 @@ def _stack_drift_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     from collections import Counter
 
+    # Only collect keys that at least ONE node reported as a scalar. We
+    # ignore None here so a key that happens to be None on one node and a
+    # dict on another (e.g. nic_fw on a node without an IB stack) doesn't
+    # leak into the scalar-drift loop and crash Counter() with an unhashable
+    # value.
     keys: set = set()
     for n in nodes:
         fp = ((n.get("tier1") or {}).get("fingerprint") or {}) or {}
         for k, v in fp.items():
-            # Only compare scalars; nic_fw / nic_hca dicts get their own
-            # per-device drift section below.
-            if v is None or isinstance(v, (str, int, float)):
+            if isinstance(v, (str, int, float)):
                 keys.add(k)
 
     rows: List[Dict[str, Any]] = []
@@ -1211,7 +1214,9 @@ def _stack_drift_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         for n in nodes:
             fp = ((n.get("tier1") or {}).get("fingerprint") or {}) or {}
             v = fp.get(k)
-            if v is None:
+            # Defense in depth: skip non-scalar values per-host too, in case
+            # different nodes disagree on the type for the same key.
+            if not isinstance(v, (str, int, float)):
                 continue
             per_host.append((n.get("host", "?"), v))
         if not per_host:
@@ -1378,70 +1383,129 @@ def _cmd_aggregate(ns: argparse.Namespace) -> int:
         # Empty section when every node reports the same value for every
         # scalar fingerprint key. We always print the section header so the
         # operator can see at a glance that the check ran.
-        drift = _stack_drift_rows(nodes)
+        # Each helper is wrapped so a single bug in one section can never
+        # truncate the whole report; the failure is recorded inline so the
+        # operator still sees something for that section.
         f.write("\n## Stack drift across cluster\n\n")
-        if not drift:
-            f.write("*All nodes match.*\n")
-        else:
-            f.write("| Key | Majority (count/total) | Outlier nodes |\n")
-            f.write("|------|-------------------------|----------------|\n")
-            for row in drift:
-                outliers = "; ".join(
-                    f"`{h}` = `{v}`" for h, v in row["outliers"]
-                )
-                f.write(
-                    f"| `{row['key']}` | `{row['majority']}` "
-                    f"({row['count']}/{row['total']}) | {outliers} |\n"
-                )
+        try:
+            drift = _stack_drift_rows(nodes)
+            if not drift:
+                f.write("*All nodes match.*\n")
+            else:
+                f.write("| Key | Majority (count/total) | Outlier nodes |\n")
+                f.write("|------|-------------------------|----------------|\n")
+                for row in drift:
+                    outliers = "; ".join(
+                        f"`{h}` = `{v}`" for h, v in row["outliers"]
+                    )
+                    f.write(
+                        f"| `{row['key']}` | `{row['majority']}` "
+                        f"({row['count']}/{row['total']}) | {outliers} |\n"
+                    )
+        except Exception as e:
+            f.write(f"*Stack-drift section failed to render: {e}*\n")
+            _warn(f"stack-drift render failed: {e}")
 
         # ----- A.2 NIC firmware drift across cluster -----
-        nic_drift = _nic_fw_drift_rows(nodes)
         f.write("\n## NIC firmware drift across cluster\n\n")
-        if not nic_drift:
-            f.write("*All NIC firmwares match (or no NICs reported).*\n")
-        else:
-            f.write("| NIC | Majority FW (count/total) | Outlier nodes |\n")
-            f.write("|-----|---------------------------|----------------|\n")
-            for row in nic_drift:
-                outliers = "; ".join(
-                    f"`{h}` = `{v}`" for h, v in row["outliers"]
-                )
-                f.write(
-                    f"| `{row['device']}` | `{row['majority']}` "
-                    f"({row['count']}/{row['total']}) | {outliers} |\n"
-                )
+        try:
+            nic_drift = _nic_fw_drift_rows(nodes)
+            if not nic_drift:
+                f.write("*All NIC firmwares match (or no NICs reported).*\n")
+            else:
+                f.write("| NIC | Majority FW (count/total) | Outlier nodes |\n")
+                f.write("|-----|---------------------------|----------------|\n")
+                for row in nic_drift:
+                    outliers = "; ".join(
+                        f"`{h}` = `{v}`" for h, v in row["outliers"]
+                    )
+                    f.write(
+                        f"| `{row['device']}` | `{row['majority']}` "
+                        f"({row['count']}/{row['total']}) | {outliers} |\n"
+                    )
+        except Exception as e:
+            f.write(f"*NIC firmware drift section failed to render: {e}*\n")
+            _warn(f"nic-fw-drift render failed: {e}")
 
         # ----- B. NIC / RDMA roll-call issues -----
-        nic_issues = _nic_issue_rows(nodes)
         f.write("\n## NIC / RDMA roll-call issues\n\n")
-        if not nic_issues:
-            f.write("*No NIC issues.*\n")
-        else:
-            f.write("| Node | Hostname | Issue |\n")
-            f.write("|------|----------|-------|\n")
-            for row in nic_issues:
-                msg = str(row["issue"]).replace("|", "/")
-                if len(msg) > 160:
-                    msg = msg[:157] + "..."
+        try:
+            nic_issues = _nic_issue_rows(nodes)
+            if not nic_issues:
+                f.write("*No NIC issues.*\n")
+            else:
+                f.write("| Node | Hostname | Issue |\n")
+                f.write("|------|----------|-------|\n")
+                for row in nic_issues:
+                    msg = str(row["issue"]).replace("|", "/")
+                    if len(msg) > 160:
+                        msg = msg[:157] + "..."
+                    f.write(
+                        f"| {row['node_rank']} | {row['host']} | {msg} |\n"
+                    )
+        except Exception as e:
+            f.write(f"*NIC issues section failed to render: {e}*\n")
+            _warn(f"nic-issues render failed: {e}")
+
+        # ----- B.2 NIC port-count summary (helps spot "node X has fewer
+        # NICs than the cluster") -- always rendered, even when no per-port
+        # issue tripped. We flag any node whose port count differs from the
+        # cluster majority so operators can act on partial-degradation cases
+        # like 7/8 ports without having to set --expected-rdma-nics.
+        f.write("\n## NIC port-count summary\n\n")
+        try:
+            from collections import Counter
+
+            counts = []
+            for n in nodes:
+                nic = (n.get("tier1") or {}).get("nics") or {}
+                counts.append((
+                    n.get("node_rank", "?"),
+                    n.get("host", "?"),
+                    len(nic.get("ports") or []),
+                ))
+            if not counts:
+                f.write("*No NIC data reported.*\n")
+            else:
+                cnt = Counter(c for *_, c in counts)
+                majority_count, _ = cnt.most_common(1)[0]
+                anomalies = [
+                    (nr, h, c) for nr, h, c in counts if c != majority_count
+                ]
                 f.write(
-                    f"| {row['node_rank']} | {row['host']} | {msg} |\n"
+                    f"Cluster-majority port count: **{majority_count}** "
+                    f"(seen on {cnt[majority_count]}/{len(counts)} nodes).\n\n"
                 )
+                if not anomalies:
+                    f.write("*Every node reports the majority count.*\n")
+                else:
+                    f.write("| Node | Hostname | Ports found |\n")
+                    f.write("|------|----------|-------------|\n")
+                    for nr, h, c in anomalies:
+                        f.write(f"| {nr} | {h} | {c} |\n")
+        except Exception as e:
+            f.write(f"*NIC port-count summary failed to render: {e}*\n")
+            _warn(f"nic-port-count render failed: {e}")
 
         # ----- C. Host limits issues -----
-        limits_issues = _host_limits_issue_rows(nodes)
         f.write("\n## Host limits issues\n\n")
-        if not limits_issues:
-            f.write("*No host-limit issues.*\n")
-        else:
-            f.write("| Node | Hostname | Issue |\n")
-            f.write("|------|----------|-------|\n")
-            for row in limits_issues:
-                msg = str(row["issue"]).replace("|", "/")
-                if len(msg) > 200:
-                    msg = msg[:197] + "..."
-                f.write(
-                    f"| {row['node_rank']} | {row['host']} | {msg} |\n"
-                )
+        try:
+            limits_issues = _host_limits_issue_rows(nodes)
+            if not limits_issues:
+                f.write("*No host-limit issues.*\n")
+            else:
+                f.write("| Node | Hostname | Issue |\n")
+                f.write("|------|----------|-------|\n")
+                for row in limits_issues:
+                    msg = str(row["issue"]).replace("|", "/")
+                    if len(msg) > 200:
+                        msg = msg[:197] + "..."
+                    f.write(
+                        f"| {row['node_rank']} | {row['host']} | {msg} |\n"
+                    )
+        except Exception as e:
+            f.write(f"*Host limits section failed to render: {e}*\n")
+            _warn(f"host-limits render failed: {e}")
 
         # Tier 2 perf summary -- only emitted when at least one node ran Tier 2.
         # Surfaces per-node GEMM TFLOPS / HBM GB/s (min/median/max across the
