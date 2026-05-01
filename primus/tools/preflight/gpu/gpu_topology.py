@@ -66,7 +66,7 @@ def _xgmi_presence_best_effort() -> Optional[Dict[str, Any]]:
     # Best-effort: use amd-smi topology if available; otherwise skip.
     if which("amd-smi") is None:
         return None
-    rc, out, err = run_cmd(["amd-smi", "topo"], timeout_s=10)
+    rc, out, err = run_cmd(["amd-smi", "topology"], timeout_s=10)
     if rc != 0:
         return {"rc": rc, "err": err}
     return {"rc": rc, "out": out}
@@ -126,7 +126,7 @@ def run_gpu_standard_checks(*, force_topology: bool = False) -> Dict[str, Any]:
         if topo is None:
             findings.append(Finding("warn", "Topology check skipped (amd-smi not found)", {}))
         else:
-            findings.append(Finding("info", "GPU topology (amd-smi topo)", topo))
+            findings.append(Finding("info", "GPU topology (amd-smi topology)", topo))
             # Detect obvious PCIe fallback hint (heuristic on output).
             out = str(topo.get("out", ""))
             if out and ("PCIE" in out.upper() or "PCIe" in out):
