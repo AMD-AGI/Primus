@@ -172,8 +172,36 @@ class DeepSeekV4SpecProvider(PrimusTurboSpecProvider):
         self.config = config
 
     def v4_norm_module(self):
-        """Norm module used by V4 specs."""
+        """Norm module used by V4 specs (block / layer / final)."""
         return self.layer_norm(rms_norm=True)
+
+    def v4_q_layernorm(self) -> type:
+        """Norm module for V4's `q_norm` (RMSNorm on `q_lora_rank`).
+
+        Same as MLA's `q_layernorm`; we use the for_qk path so the TE
+        version selection picks Apex / FusedLayerNorm on older TE.
+        """
+        return self.layer_norm(rms_norm=True, for_qk=True)
+
+    def v4_kv_layernorm(self) -> type:
+        """Norm module for V4's `kv_norm` (RMSNorm on `head_dim`).
+
+        Single-latent KV: V4 normalizes the `wkv` output (one shared head)
+        BEFORE broadcasting to all query heads.
+        """
+        return self.layer_norm(rms_norm=True, for_qk=True)
+
+    def v4_attention_sink(self) -> type:
+        """Module class for V4's per-head learnable attention sink.
+
+        Returns the local :class:`AttentionSink` wrapper (TE does not
+        currently expose a fused softmax-with-sink primitive that matches
+        V4's "extra virtual key with zero value" semantics).
+        """
+        # Lazy import to avoid pulling V4 modules at extension import time.
+        from primus.backends.megatron.core.transformer.attn_sink import AttentionSink
+
+        return AttentionSink
 
     def v4_grouped_mlp_modules(
         self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: Optional[bool] = None

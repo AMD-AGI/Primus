@@ -175,18 +175,30 @@
 
 ## Phase 13 (v3) — Faithful attention (`MLASelfAttention`-rooted)
 
+> P13 lands in two commits inside the May 06 budget:
+> 1. **First commit (this one)** — V4-faithful dense (`compress_ratio == 0`)
+>    attention rooted on `MLASelfAttention`, with single-latent KV, per-head
+>    `q_rms`, attn-sink, grouped low-rank O, and an inline numerical-alignment
+>    test scaffold. The legacy plan-1 `_LegacyDeepseekV4Attention` keeps
+>    backing CSA / HCA so the smoke matrix continues to run.
+> 2. **Follow-up commit** — fold compressor / indexer into the new
+>    `DeepseekV4Attention.forward` as spec submodules, switch projection
+>    specs from `parallel_mode="duplicated"` to TP, add the TP=2 sharding
+>    parity test, retire `csa_attention.py` / `hca_attention.py`.
+
 | | Task | commit | date | note |
 |---|---|---|---|---|
-| [ ] | `DeepseekV4Attention(MLASelfAttention)` + V4 attention submodules dataclass | | | replaces standalone `nn.Module` |
-| [ ] | Single-latent KV (K = V = `wkv`) | | | retires separate `linear_k_proj` / `linear_v_proj` |
-| [ ] | Per-head `q_rms` after `linear_q_up_proj` | | | matches HF reference |
-| [ ] | Reuse MLA `kv_layernorm` for V4 `kv_norm` | | | |
-| [ ] | Learnable per-head `attn_sink` as spec submodule | | | TE / local fallback |
-| [ ] | Grouped low-rank O projection (`linear_o_a` + `linear_o_b`, `o_groups`/`o_lora_rank`) | | | replaces flat `linear_o_proj` |
-| [ ] | Compressor / Indexer as spec submodules of attention | | | retires `csa_attention.py` / `hca_attention.py` |
-| [ ] | Switch projection specs from `parallel_mode="duplicated"` to TP | | | fixes C4 |
-| [ ] | 1L attention forward agrees with HF reference within 1e-3 (CPU fp32) | | | exit gate G2 |
-| [ ] | TP=2 sharding parity test | | | |
+| [x] | `DeepseekV4Attention(MLASelfAttention)` + V4 `DeepseekV4AttentionSubmodules` dataclass | (this commit) | 2026-05-01 | dense path only; CSA / HCA still ride on `_LegacyDeepseekV4Attention` |
+| [x] | Single-latent KV (K = V = `wkv`) | (this commit) | 2026-05-01 | new attention drops `linear_k_proj` / `linear_v_proj`; `linear_kv` projects `hidden -> head_dim` and broadcasts |
+| [x] | Per-head `q_rms` after `linear_q_up_proj` | (this commit) | 2026-05-01 | parameter-less RMS — matches the released checkpoint (no `q_rms.weight` key) |
+| [x] | Reuse MLA `kv_layernorm` for V4 `kv_norm` | (this commit) | 2026-05-01 | provider-built RMSNorm on `head_dim`; same module name as MLA |
+| [x] | Learnable per-head `attn_sink` parameter | (this commit) | 2026-05-01 | direct `nn.Parameter` on the attention (key: `attn_sink`); inline softmax-with-sink — matches released checkpoint key exactly. Spec-built `attn_sink_module` retained as forward-compat for a future TE-fused sink |
+| [x] | Grouped low-rank O projection (`linear_o_a` + `linear_o_b`, `o_groups`/`o_lora_rank`) | (this commit) | 2026-05-01 | added `o_groups` / `o_lora_rank` to `DeepSeekV4TransformerConfig`; einsum-based `wo_a` per group + `wo_b` matches `inference/model.py`. `o_lora_rank == 0` falls back to MLA-style flat `linear_proj` |
+| [ ] | Compressor / Indexer as spec submodules of attention | | | **deferred to P13 follow-up commit**; legacy CSA / HCA still handle compress_ratio in {4, 128} |
+| [ ] | Switch projection specs from `parallel_mode="duplicated"` to TP | | | **deferred to P13 follow-up commit** (`linear_q_up_proj` / `linear_o_b` → column / row parallel) |
+| [x] | Inline numerical-alignment test scaffold (CPU fp32, compress_ratio=0) | (this commit) | 2026-05-01 | `tests/unit_tests/megatron/transformer/deepseek_v4/test_deepseek_v4_attention.py`: state-dict-key check, shape-and-finite, sink on/off forward equivalence ≤1e-3 vs inline reference, fallback path coverage. P17 will replace the inline reference with the actual HF `DeepseekV4Attention.forward` once the state-dict adapter lands |
+| [ ] | 1L attention forward agrees with HF reference within 1e-3 (CPU fp32) | | | **partial**: inline reference equivalence verified this commit; HF-reference comparison waits for P17 state-dict adapter |
+| [ ] | TP=2 sharding parity test | | | **deferred to P13 follow-up commit** |
 
 ## Phase 14 (v3) — Faithful MoE + activation + router
 

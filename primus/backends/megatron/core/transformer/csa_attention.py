@@ -34,7 +34,7 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_co
 )
 from primus.backends.megatron.core.transformer.compressor import Compressor
 from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
-    DeepseekV4Attention,
+    _LegacyDeepseekV4Attention,
 )
 from primus.backends.megatron.core.transformer.dual_rope import (
     apply_interleaved_partial_rope,
@@ -42,7 +42,7 @@ from primus.backends.megatron.core.transformer.dual_rope import (
 from primus.backends.megatron.core.transformer.indexer import Indexer
 
 
-class CSAAttention(DeepseekV4Attention):
+class CSAAttention(_LegacyDeepseekV4Attention):
     """CSA attention layer.
 
     Args:

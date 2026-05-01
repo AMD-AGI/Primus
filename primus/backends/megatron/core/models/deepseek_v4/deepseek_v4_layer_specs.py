@@ -42,6 +42,7 @@ from primus.backends.megatron.core.transformer.csa_attention import CSAAttention
 from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
     DeepseekV4Attention,
     DeepseekV4AttentionSubmodules,
+    _LegacyDeepseekV4AttentionSubmodules,
 )
 from primus.backends.megatron.core.transformer.hca_attention import HCAAttention
 from primus.backends.megatron.core.transformer.hyper_connection import (
@@ -86,11 +87,14 @@ def _build_linear_projection_spec(
     )
 
 
-def _build_attention_submodules(
+def _build_legacy_attention_submodules(
     *,
     config: DeepSeekV4TransformerConfig,
     provider: DeepSeekV4SpecProvider,
-) -> DeepseekV4AttentionSubmodules:
+) -> _LegacyDeepseekV4AttentionSubmodules:
+    """Plan-1 submodules — used by the compressed branches (CSA / HCA)
+    until plan-2 P13 follow-up folds compressor / indexer onto the new
+    :class:`DeepseekV4Attention` as spec submodules."""
     hidden_size = int(config.hidden_size)
     num_heads = int(config.num_attention_heads)
     num_kv_heads = int(config.num_query_groups or num_heads)
@@ -109,7 +113,7 @@ def _build_attention_submodules(
         )
         q_input_dim = q_lora_rank
 
-    return DeepseekV4AttentionSubmodules(
+    return _LegacyDeepseekV4AttentionSubmodules(
         linear_q_a=q_a_spec,
         linear_q_b=_build_linear_projection_spec(
             config=config,
@@ -138,6 +142,94 @@ def _build_attention_submodules(
     )
 
 
+def _build_v4_attention_submodules(
+    *,
+    config: DeepSeekV4TransformerConfig,
+    provider: DeepSeekV4SpecProvider,
+) -> DeepseekV4AttentionSubmodules:
+    """Plan-2 P13 submodules for :class:`DeepseekV4Attention`.
+
+    Field names match the released V4-Flash checkpoint layout (and MLA's
+    canonical names where they overlap):
+
+    * ``linear_q_down_proj``  : ``hidden -> q_lora_rank``  (= ``wq_a``)
+    * ``q_layernorm``        : RMSNorm(``q_lora_rank``)    (= ``q_norm``)
+    * ``linear_q_up_proj``    : ``q_lora_rank -> n_heads * head_dim`` (= ``wq_b``)
+    * ``linear_kv``           : ``hidden -> head_dim``     (= ``wkv``,
+      single-latent KV)
+    * ``kv_layernorm``       : RMSNorm(``head_dim``)       (= ``kv_norm``)
+    * ``linear_o_a``         : grouped low-rank O down-proj
+    * ``linear_o_b``         : grouped low-rank O up-proj  (-> ``hidden``)
+    * ``attn_sink``          : per-head learnable scalar
+    """
+    hidden_size = int(config.hidden_size)
+    num_heads = int(config.num_attention_heads)
+    head_dim = int(config.kv_channels or (hidden_size // num_heads))
+    q_lora_rank = int(config.q_lora_rank or 0)
+    o_groups = max(int(getattr(config, "o_groups", 1) or 1), 1)
+    o_lora_rank = int(getattr(config, "o_lora_rank", 0) or 0)
+
+    if q_lora_rank <= 0:
+        raise ValueError(
+            "DeepSeek-V4 requires q_lora_rank > 0; the released checkpoint "
+            "always low-rank-projects Q via wq_a / wq_b."
+        )
+
+    q_out = num_heads * head_dim
+    submods = DeepseekV4AttentionSubmodules(
+        linear_q_down_proj=_build_linear_projection_spec(
+            config=config,
+            provider=provider,
+            in_features=hidden_size,
+            out_features=q_lora_rank,
+        ),
+        linear_q_up_proj=_build_linear_projection_spec(
+            config=config,
+            provider=provider,
+            in_features=q_lora_rank,
+            out_features=q_out,
+        ),
+        linear_kv=_build_linear_projection_spec(
+            config=config,
+            provider=provider,
+            in_features=hidden_size,
+            out_features=head_dim,  # single-latent: K = V = wkv(hidden)
+        ),
+        q_layernorm=ModuleSpec(module=provider.v4_q_layernorm()),
+        kv_layernorm=ModuleSpec(module=provider.v4_kv_layernorm()),
+        attn_sink=(
+            ModuleSpec(module=provider.v4_attention_sink())
+            if bool(getattr(config, "attn_sink", False))
+            else None
+        ),
+    )
+
+    if o_lora_rank > 0:
+        n_per_group = q_out // o_groups
+        submods.linear_o_a = _build_linear_projection_spec(
+            config=config,
+            provider=provider,
+            in_features=n_per_group,
+            out_features=o_groups * o_lora_rank,
+        )
+        submods.linear_o_b = _build_linear_projection_spec(
+            config=config,
+            provider=provider,
+            in_features=o_groups * o_lora_rank,
+            out_features=hidden_size,
+        )
+    else:
+        # Fallback flat O projection (MLA style).
+        submods.linear_proj = _build_linear_projection_spec(
+            config=config,
+            provider=provider,
+            in_features=q_out,
+            out_features=hidden_size,
+        )
+
+    return submods
+
+
 def _build_norm_spec(
     *,
     config: DeepSeekV4TransformerConfig,
@@ -155,31 +247,35 @@ def _build_attention_spec(
     config: DeepSeekV4TransformerConfig,
     provider: DeepSeekV4SpecProvider,
 ) -> ModuleSpec:
-    attention_submodules = _build_attention_submodules(
-        config=config,
-        provider=provider,
-    )
-
     if compress_ratio == 0:
+        # Plan-2 P13: the dense path uses the faithful, MLA-rooted
+        # DeepseekV4Attention with V4-canonical submodules.
         return ModuleSpec(
             module=DeepseekV4Attention,
             params={"compress_ratio": 0},
-            submodules=attention_submodules,
+            submodules=_build_v4_attention_submodules(
+                config=config,
+                provider=provider,
+            ),
         )
+
+    # Compressed branches still ride on the plan-1 legacy attention until
+    # their compressor / indexer logic is folded into DeepseekV4Attention
+    # in a P13 follow-up.
+    legacy_submodules = _build_legacy_attention_submodules(
+        config=config,
+        provider=provider,
+    )
     if compress_ratio == 4:
         return ModuleSpec(
             module=CSAAttention,
-            params={
-                "compress_ratio": compress_ratio,
-            },
-            submodules=attention_submodules,
+            params={"compress_ratio": compress_ratio},
+            submodules=legacy_submodules,
         )
     return ModuleSpec(
         module=HCAAttention,
-        params={
-            "compress_ratio": compress_ratio,
-        },
-        submodules=attention_submodules,
+        params={"compress_ratio": compress_ratio},
+        submodules=legacy_submodules,
     )
 
 

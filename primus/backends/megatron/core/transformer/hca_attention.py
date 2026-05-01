@@ -31,14 +31,14 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_co
 )
 from primus.backends.megatron.core.transformer.compressor import Compressor
 from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
-    DeepseekV4Attention,
+    _LegacyDeepseekV4Attention,
 )
 from primus.backends.megatron.core.transformer.dual_rope import (
     apply_interleaved_partial_rope,
 )
 
 
-class HCAAttention(DeepseekV4Attention):
+class HCAAttention(_LegacyDeepseekV4Attention):
     """HCA attention layer.
 
     Args:

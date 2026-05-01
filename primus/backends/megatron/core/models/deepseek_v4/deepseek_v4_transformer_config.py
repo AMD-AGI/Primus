@@ -36,6 +36,14 @@ class DeepSeekV4TransformerConfig(MLATransformerConfig):
     index_head_dim: int = 128
     index_n_heads: int = 64
 
+    # ---- DeepSeek-V4 grouped low-rank output projection ----
+    # Mirrors the released checkpoint's `wo_a` / `wo_b` layout.
+    # When ``o_lora_rank == 0`` the attention falls back to a flat O proj
+    # (Megatron's ``linear_proj``); set it >0 to use the grouped low-rank
+    # form (``linear_o_a`` + ``linear_o_b``) with ``o_groups`` groups.
+    o_groups: int = 8
+    o_lora_rank: int = 0
+
     # ---- DeepSeek-V4 MoE routing / expert extras ----
     num_hash_layers: int = 0
     hash_routing_seed: int = 0

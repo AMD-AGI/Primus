@@ -57,6 +57,7 @@ from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_co
 from primus.backends.megatron.core.transformer.csa_attention import CSAAttention
 from primus.backends.megatron.core.transformer.deepseek_v4_attention import (
     DeepseekV4Attention,
+    _LegacyDeepseekV4Attention,
 )
 from primus.backends.megatron.core.transformer.dual_rope import DualRoPE
 from primus.backends.megatron.core.transformer.hca_attention import HCAAttention
@@ -298,21 +299,23 @@ def _build_attention(
     compress_ratio: int,
     rope: DualRoPE,
     config: Optional[DeepSeekV4TransformerConfig] = None,
-) -> DeepseekV4Attention:
-    """Pick the right attention class for ``compress_ratio``.
+):
+    """No-spec fallback used when the layer is built without an
+    ``attention`` :class:`ModuleSpec`. Production paths construct the
+    attention via :func:`get_deepseek_v4_runtime_decoder_spec`, which
+    routes ``compress_ratio == 0`` through the new V4-faithful
+    :class:`DeepseekV4Attention`. This fallback keeps the legacy
+    plan-1 path alive for unit tests / configs that pre-date the
+    P13 rewrite.
 
-    * ``0``   → :class:`DeepseekV4Attention` (dense + SWA + sink)
-    * ``128`` (or any value with the HCA convention) → :class:`HCAAttention`
+    * ``0``   → :class:`_LegacyDeepseekV4Attention` (dense + SWA + sink)
+    * ``128`` (or any larger ratio: HCA convention) → :class:`HCAAttention`
     * ``4``   → :class:`CSAAttention` (overlap compressor + Indexer)
-
-    The CSA / HCA distinction is determined by the ratio itself: by V4
-    convention ratio ``4`` means CSA (sparse with Indexer) and any larger
-    ratio (e.g. ``128``) means HCA (full compressed pool, no Indexer).
     """
     common = dict(rope=rope, config=config)
 
     if compress_ratio == 0:
-        return DeepseekV4Attention(compress_ratio=0, **common)
+        return _LegacyDeepseekV4Attention(compress_ratio=0, **common)
     if compress_ratio == 4:
         return CSAAttention(
             compress_ratio=compress_ratio,
