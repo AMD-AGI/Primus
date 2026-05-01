@@ -211,3 +211,87 @@ class DeepSeekV4SpecProvider(PrimusTurboSpecProvider):
             moe_use_grouped_gemm=moe_use_grouped_gemm,
             moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
         )
+
+    # ---- V4 spec factories (plan-2 P14 §5/§6) -------------------------
+
+    def v4_grouped_mlp_spec(
+        self,
+        *,
+        swiglu_limit: float,
+        moe_use_grouped_gemm: bool = True,
+        moe_use_legacy_grouped_gemm: Optional[bool] = None,
+    ):
+        """Return a ready-to-use ``ModuleSpec`` for V4 grouped MoE experts.
+
+        The V4 pre-multiplication clamp itself is applied through
+        ``config.activation_func_clamp_value`` (Megatron's MLP eager
+        ``glu()`` already clamps gate (max=alpha) and up (+/- alpha)
+        before SiLU + multiply, which is bit-equal to the HF reference
+        ``Expert.forward`` math). This spec only commits to the right
+        grouped module + the column / row-parallel linears; the runtime
+        config carries the clamp value.
+
+        Args:
+            swiglu_limit: V4 ``alpha`` value (the released ``DeepSeek-V4-Flash``
+                checkpoint uses ``7.0``). Recorded on the returned spec
+                so the caller can assert it lines up with the runtime
+                config; not consumed by the grouped-MLP module directly.
+            moe_use_grouped_gemm: prefer the TE / Turbo grouped-gemm
+                module over the local SequentialMLP fallback (default
+                True in production).
+            moe_use_legacy_grouped_gemm: optional override for the
+                legacy code path; when ``None`` the provider reads the
+                Primus arg of the same name.
+
+        Returns:
+            A ``ModuleSpec`` whose ``module`` is the grouped MoE module
+            and whose ``submodules`` carry the linear modules. Caller
+            wires this into :class:`DeepseekV4MoESubmodules.grouped_experts`.
+
+        Notes:
+            * Plan-2 P14 §5 calls for "downgrade to local experts with
+              explicit warning" when the grouped backend cannot apply
+              the clamp; that downgrade lives in
+              :class:`DeepseekV4MoE` (which already builds
+              :class:`ClampedSwiGLUMLP` local experts when
+              ``pg_collection is None`` or the backend declares no
+              clamp support).
+        """
+        del swiglu_limit  # documented but not consumed by the grouped MLP itself
+        from megatron.core.transformer.spec_utils import ModuleSpec
+
+        module, submodules = self.v4_grouped_mlp_modules(
+            moe_use_grouped_gemm=moe_use_grouped_gemm,
+            moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
+        )
+        if submodules is None:
+            return ModuleSpec(module=module)
+        return ModuleSpec(module=module, submodules=submodules)
+
+    def v4_router_spec(self, *, learned: bool = True):
+        """Return a ``ModuleSpec`` for the V4 hash / learned router.
+
+        Args:
+            learned: when True (default) returns the learned router
+                spec (``layer_idx >= num_hash_layers``); when False
+                returns the hash-router spec (``layer_idx <
+                num_hash_layers``).
+
+        Returns:
+            A bare-module ``ModuleSpec`` suitable for
+            :class:`DeepseekV4MoESubmodules.{learned_router, hash_router}`.
+            Both routers are ``nn.Module`` standalones (not
+            ``TopKRouter`` subclasses) so they instantiate cleanly on
+            CPU; aux-loss / z-loss / RouterReplay inheritance is
+            tracked as a P19 follow-up.
+        """
+        from megatron.core.transformer.spec_utils import ModuleSpec
+
+        from primus.backends.megatron.core.transformer.moe.v4_hash_router import (
+            DeepseekV4HashRouter,
+        )
+        from primus.backends.megatron.core.transformer.moe.v4_topk_router import (
+            DeepseekV4LearnedRouter,
+        )
+
+        return ModuleSpec(module=(DeepseekV4LearnedRouter if learned else DeepseekV4HashRouter))

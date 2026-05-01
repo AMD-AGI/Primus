@@ -207,32 +207,41 @@
 
 ## Phase 14 (v3) — Faithful MoE + activation + router
 
-> P14 ships in two commits:
-> 1. **First commit (this one)** — math + parameter-layout faithfulness:
+> P14 landed in two commits:
+> 1. **First commit (`1a8bf32e`)** — math + parameter-layout faithfulness:
 >    pre-multiplication clamped SwiGLU, learned router rewritten with HF-aligned
 >    scoring + bias-only-for-selection semantics, hash router rewritten with a
 >    *learnable* gate weight (weights gathered from learned scores, expert ids
 >    from `tid2eid`), `_DenseSwiGLUMLP` clamp fix, plus G3 + G4 unit tests
->    (CPU fp32 ≤1e-6 vs inline HF reference). The `MoELayer` subclassing,
->    the provider helpers, and the token-ids threading move to phase-2.
-> 2. **Follow-up commit (P14 phase-2)** — structural refactor:
->    `DeepseekV4MoE(MoELayer)` so it inherits load-balance loss / z-loss /
->    dispatcher lifecycle; provider `v4_grouped_mlp_spec(swiglu_limit)` +
->    `v4_router_spec(learned)`; thread `token_ids` as a forward kwarg
->    (the `decoder._v4_token_ids` stash is co-removed with P15's hybrid-layer
->    refactor); G5 1L MoE forward within 1e-3 of HF reference.
+>    (CPU fp32 ≤1e-6 vs inline HF reference).
+> 2. **Follow-up commit (this one)** — structural bring-up:
+>    `DeepseekV4MoE` is now a `MegatronModule` (was `nn.Module`) and exposes
+>    a `BaseMoELayer`-compatible public surface (`local_expert_indices` +
+>    `set_layer_number`); the CPU local-experts path (no `pg_collection`)
+>    builds a `nn.ModuleList[ClampedSwiGLUMLP]` + per-expert dispatch loop
+>    that mirrors the HF reference math; provider helpers
+>    `v4_grouped_mlp_spec(swiglu_limit)` + `v4_router_spec(learned)`
+>    landed; G5 (1L MoE forward ≤ 1e-3 fp32 vs inline HF reference) gated by
+>    `test_v4_moe.py`. Aux-loss / z-loss inheritance via `TopKRouter`
+>    subclassing is intentionally deferred to P19 (the parent registers
+>    CUDA buffers in `__init__`; gating that on a device check upstream is
+>    out-of-scope for the CPU-clean V4 routers).
+> 3. **Token-ids threading**: the router-side `(hidden, token_ids)`
+>    contract is plumbed; the full `TransformerBlock → TransformerLayer →
+>    MoE` forward-kwarg refactor (and the `decoder._v4_token_ids` stash
+>    removal) co-lands with the P15 hybrid-layer rewrite.
 
 | | Task | commit | date | note |
 |---|---|---|---|---|
 | [x] | `clamped_swiglu_pre_mul(gate, up, alpha)` activation; separate `w1`/`w3` for the eager MLP | (this commit) | 2026-05-01 | new pre-mul clamp matches HF reference (gate clamp `max=α` one-sided, up clamp `(-α,+α)` two-sided); `ClampedSwiGLUMLP` exposes `w1.weight` / `w2.weight` / `w3.weight` keys for state-dict parity; `_DenseSwiGLUMLP` in `deepseek_v4_block.py` now applies the same pre-mul clamp; fused `[gate \| up]` form provided for grouped-gemm experts |
 | [x] | `DeepseekV4LearnedRouter` with sqrtsoftplus / sigmoid / softmax + bias | (this commit) | 2026-05-01 | renamed from `V4TopKRouter` (alias retained); gate exposed as `weight` Parameter (matches Megatron `TopKRouter` AND HF `Gate.weight`); `expert_bias` is selection-only; renormalization gated by `score_function != softmax`; honors `moe_router_topk_scaling_factor` (= HF `route_scale`). Subclassing Megatron's `TopKRouter` for full aux-loss / z-loss / dispatcher lifecycle deferred to P14 phase-2 |
 | [x] | `DeepseekV4HashRouter` with learnable `gate_linear` + `tid2eid` lookup | (this commit) | 2026-05-01 | renamed from `HashRouter` (alias retained); learnable `weight` Parameter same shape as the learned router (was uniform 1/topk); `tid2eid` is a frozen `nn.Parameter(requires_grad=False, dtype=int32)` matching HF reference layout; `forward(hidden, token_ids)` gathers learned scores at expert ids prescribed by `tid2eid`; renorm + scale parity with the learned router |
-| [ ] | `DeepseekV4MoE(MoELayer)` | | | deferred to P14 phase-2 (next commit) |
-| [ ] | Provider `v4_grouped_mlp_spec(swiglu_limit)` + `v4_router_spec(learned)` | | | deferred to P14 phase-2 |
-| [ ] | Token-ids threaded as forward kwarg (no `decoder._v4_token_ids`) | | | tracked under P15; intermediate decoupling in P14 phase-2 (router-side `(hidden, token_ids)` already plumbed) |
-| [x] | G3 unit tests: pre-mul activation matches HF reference within 1e-6 fp32 | (this commit) | 2026-05-01 | `tests/unit_tests/megatron/transformer/deepseek_v4/test_clamped_swiglu.py` — 7 tests cover split / fused / one-sided gate / α=0 / `w1`/`w2`/`w3` state-dict keys / fused-vs-split forward equivalence / end-to-end MLP vs HF `Expert.forward` (≤1e-6 fp32) |
-| [x] | G4 unit tests: routers identical (probs, indices) to HF + gradient flow on gate | (this commit) | 2026-05-01 | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_routers.py` — 13 tests across both routers: score-function parity, learned-router HF agreement (3 score functions × 2 expert-bias modes ≤1e-6), softmax-skips-renorm contract, gradient flows to `weight`, expert-bias detached from probs graph; hash-router HF agreement (3 score functions ≤1e-6), tid2eid frozen parameter (`requires_grad=False`, dtype int32), state-dict keys, deterministic table across seeds, OOB / shape-mismatch error paths, gradient flows to `weight` while `tid2eid.grad is None` |
-| [ ] | 1L MoE forward within 1e-3 of HF reference (G5) | | | deferred to P14 phase-2 (after `MoELayer` subclassing + grouped-MLP provider helpers land) |
+| [x] | `DeepseekV4MoE` integrates with Megatron spec lifecycle | (this commit) | 2026-05-01 | parent class switched from `nn.Module` to `MegatronModule`; added `set_layer_number` (mirrors `BaseMoELayer.set_layer_number`) and `local_expert_indices`; CPU local-experts path (`pg_collection=None` -> `nn.ModuleList[ClampedSwiGLUMLP]` + per-expert dispatch loop matching HF reference). `MoELayer`-rooted aux-loss / z-loss inheritance via `TopKRouter` subclassing tracked into **P19** because the upstream `TopKRouter.__init__` registers CUDA buffers unconditionally; the V4 routers stay standalone `nn.Module`s for CPU-clean unit tests in the meantime |
+| [x] | Provider `v4_grouped_mlp_spec(swiglu_limit)` + `v4_router_spec(learned)` | (this commit) | 2026-05-01 | added to `DeepSeekV4SpecProvider` (`extensions/transformer_engine_spec_provider.py`). `v4_grouped_mlp_spec` returns a `ModuleSpec(grouped_module, MLPSubmodules)` ready for `DeepseekV4MoESubmodules.grouped_experts`; the V4 pre-mul clamp itself flows via `config.activation_func_clamp_value` (Megatron's eager `glu()` already does the right math). `v4_router_spec(learned)` returns a bare `ModuleSpec` for either the learned or the hash router |
+| [ ] | Token-ids threaded as forward kwarg (no `decoder._v4_token_ids`) | | | router-side `(hidden, token_ids)` already plumbed in phase-1; the full `TransformerBlock -> TransformerLayer -> MoE` forward-kwarg refactor (and the `decoder._v4_token_ids` stash removal) co-lands with the P15 hybrid-layer rewrite |
+| [x] | G3 unit tests: pre-mul activation matches HF reference within 1e-6 fp32 | `1a8bf32e` | 2026-05-01 | `tests/unit_tests/megatron/transformer/deepseek_v4/test_clamped_swiglu.py` — 7 tests cover split / fused / one-sided gate / α=0 / `w1`/`w2`/`w3` state-dict keys / fused-vs-split forward equivalence / end-to-end MLP vs HF `Expert.forward` (≤1e-6 fp32) |
+| [x] | G4 unit tests: routers identical (probs, indices) to HF + gradient flow on gate | `1a8bf32e` | 2026-05-01 | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_routers.py` — 13 tests across both routers: score-function parity, learned-router HF agreement (3 score functions × 2 expert-bias modes ≤1e-6), softmax-skips-renorm contract, gradient flows to `weight`, expert-bias detached from probs graph; hash-router HF agreement (3 score functions ≤1e-6), tid2eid frozen parameter (`requires_grad=False`, dtype int32), state-dict keys, deterministic table across seeds, OOB / shape-mismatch error paths, gradient flows to `weight` while `tid2eid.grad is None` |
+| [x] | 1L MoE forward within 1e-3 of HF reference (G5) | (this commit) | 2026-05-01 | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_moe.py` — 11 tests: parent-class / CPU-path construction, `set_layer_number`, learned-router MoE forward vs inline HF reference (3 score functions × shared-expert on/off, ≤ 1e-3 fp32), hash-router MoE forward vs HF (3 score functions, ≤ 1e-3), `route_scale` propagation, gradient flows to `router.weight` + at least one routed expert + the shared expert, hash layer requires `token_ids` error path |
 
 ## Phase 15 (v3) — Faithful layer + block + HC × PP
 

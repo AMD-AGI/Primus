@@ -14,11 +14,10 @@ V4's MoE block has three pieces:
 1. **Router** — either :class:`DeepseekV4HashRouter` (first
    ``num_hash_layers`` layers) or :class:`DeepseekV4LearnedRouter` (the
    rest). Both produce the same ``(probs, routing_map)`` shape contract:
-   ``[N, num_experts]``. P14 unified the two routers around a learned
-   gate weight (only the *selection* differs: top-K argmax for the
-   learned router, ``tid2eid`` lookup for the hash router); routing
-   weights always come from the same ``v4_score_fn(linear(hidden,
-   weight))`` path.
+   ``[N, num_experts]``. The two routers share a learned gate weight;
+   only the *selection* differs (top-K argmax for the learned router,
+   ``tid2eid`` lookup for the hash router). Routing weights always come
+   from the same ``v4_score_fn(linear(hidden, weight))`` path.
 2. **Routed experts** — ``num_experts`` clamped-SwiGLU MLPs. Each token
    contributes to ``moe_router_topk`` of them, weighted by the router
    probability. The clamp is **pre-multiplication**:
@@ -27,16 +26,38 @@ V4's MoE block has three pieces:
    token's contribution. V4-Flash has 1 shared expert with the same
    ``moe_intermediate_size`` as the routed experts.
 
-Plan-2 contract (P14 phase-1):
-* Layer-aware: caller passes ``layer_idx``; values ``< num_hash_layers``
-  use :class:`DeepseekV4HashRouter`, otherwise
-  :class:`DeepseekV4LearnedRouter`.
-* Hash router needs ``(hidden, token_ids)``: the *learned weights* come
-  from ``hidden`` and the *selection indices* from ``tid2eid[token_ids]``.
-* P14 phase-2 (follow-up): rewrite :class:`DeepseekV4MoE` to subclass
-  Megatron's :class:`MoELayer` so it inherits the load-balance / z-loss /
-  dispatcher lifecycle. The current standalone form keeps numerical
-  parity with the HF reference while we land that refactor incrementally.
+Plan-2 P14 contract:
+
+P14 phase-1 (committed in 1a8bf32e) — math + parameter-layout
+faithfulness: pre-multiplication clamped SwiGLU activation, learned
+router rewritten with HF-aligned scoring + bias-only-for-selection
+semantics, hash router rewritten with a learnable gate weight + frozen
+``tid2eid`` Parameter.
+
+P14 phase-2 (this commit) — structural bring-up:
+* :class:`DeepseekV4MoE` now subclasses :class:`MegatronModule` (was
+  ``nn.Module``) so it integrates with Megatron's spec lifecycle and
+  shares config plumbing with the rest of the V4 stack.
+* CPU-friendly local-experts path: when ``pg_collection`` is ``None``
+  (or when the grouped backend does not declare clamped-SwiGLU support),
+  :class:`DeepseekV4MoE` builds a :class:`nn.ModuleList` of
+  :class:`ClampedSwiGLUMLP` routed experts plus a single
+  :class:`ClampedSwiGLUMLP` shared expert and runs a per-expert dispatch
+  loop in ``forward`` that mirrors the HF reference exactly. This makes
+  the MoE forward unit-testable on CPU at G5 (1L MoE forward agreement
+  vs HF reference within 1e-3 fp32) without requiring distributed init.
+* :meth:`set_layer_number` mirrors :class:`BaseMoELayer` so this module
+  slots into ``TransformerLayer`` via the spec lifecycle.
+* :attr:`local_expert_indices` exposed for compatibility with downstream
+  tooling that expects the ``BaseMoELayer`` public surface.
+
+Aux-loss / z-loss inheritance via :class:`TopKRouter` is left as a
+follow-up: the V4 routers are standalone ``nn.Module``\\ s rather than
+subclasses of Megatron's :class:`TopKRouter` (the parent registers CUDA
+buffers in ``__init__`` and is impractical to instantiate on CPU). The
+distributed re-validation phase (P19) will re-introduce that path
+behind a TopKRouter subclass once the CUDA-buffer init is gated by a
+device check upstream.
 """
 
 from __future__ import annotations
@@ -51,6 +72,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from megatron.core import parallel_state
+from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.moe.token_dispatcher import (
     MoEAllGatherTokenDispatcher,
@@ -63,6 +85,7 @@ from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_transformer_config import (
     DeepSeekV4TransformerConfig,
 )
+from primus.backends.megatron.core.transformer.clamped_swiglu import ClampedSwiGLUMLP
 from primus.backends.megatron.core.transformer.moe.v4_hash_router import (
     DeepseekV4HashRouter,
 )
@@ -84,7 +107,7 @@ class DeepseekV4MoESubmodules:
     shared_expert: Optional[Union[ModuleSpec, type]] = SharedExpertMLP
 
 
-class DeepseekV4MoE(nn.Module):
+class DeepseekV4MoE(MegatronModule):
     """V4 MoE FFN sub-block.
 
     Args:
@@ -92,6 +115,16 @@ class DeepseekV4MoE(nn.Module):
             options are read directly from config.
         layer_idx: 0-based decoder layer index. Used to pick router type
             against ``num_hash_layers``.
+        pg_collection: Megatron process-group collection. When ``None``
+            (CPU unit tests), the module skips the distributed dispatcher
+            and builds a local :class:`nn.ModuleList` of
+            :class:`ClampedSwiGLUMLP` routed experts plus a single
+            :class:`ClampedSwiGLUMLP` shared expert; ``forward`` runs a
+            per-expert dispatch loop matching the HF reference math.
+        submodules: spec tree describing routers / dispatcher / experts /
+            shared expert. Must be provided.
+        layer_number: optional 1-based layer number used by Megatron's
+            spec lifecycle (mirrors :class:`BaseMoELayer.set_layer_number`).
     """
 
     def __init__(
@@ -101,14 +134,15 @@ class DeepseekV4MoE(nn.Module):
         layer_idx: int,
         pg_collection=None,
         submodules: Optional[DeepseekV4MoESubmodules] = None,
+        layer_number: Optional[int] = None,
     ) -> None:
-        super().__init__()
         if config is None:
             raise ValueError("DeepSeek-V4 MoE requires config.")
-        self.config = config
+        super().__init__(config=config)
         self.pg_collection = pg_collection
         self.submodules = submodules
         assert self.submodules is not None, "DeepSeek-V4 MoE requires explicit submodules."
+        self.layer_number = layer_number
 
         hidden_size = int(config.hidden_size)
         moe_intermediate_size = int(
@@ -159,6 +193,8 @@ class DeepseekV4MoE(nn.Module):
         self.local_num_routed_experts = base + (1 if self.ep_rank < remainder else 0)
         self.local_expert_start = (self.ep_rank * base) + min(self.ep_rank, remainder)
         self.local_expert_end = self.local_expert_start + self.local_num_routed_experts
+        # BaseMoELayer-compatible public attribute.
+        self.local_expert_indices = list(range(self.local_expert_start, self.local_expert_end))
 
         # ---- routers ----
         self.router = None
@@ -171,20 +207,69 @@ class DeepseekV4MoE(nn.Module):
             topk_scaling_factor=topk_scaling_factor,
         )
 
-        # ---- token dispatcher (Megatron-only path) ----
-        self.token_dispatcher: MoETokenDispatcher = self._build_token_dispatcher()
+        # ---- experts ----
+        # Production path: full Megatron dispatcher + grouped-experts.
+        # CPU path: a local nn.ModuleList of ClampedSwiGLUMLP experts + a
+        # single ClampedSwiGLUMLP shared expert. The CPU path is used when
+        # ``pg_collection is None`` so unit tests can drive ``forward``
+        # without distributed initialization.
+        self.token_dispatcher: Optional[MoETokenDispatcher] = None
+        self.grouped_experts: Optional[nn.Module] = None
+        self.local_experts: Optional[nn.ModuleList] = None
+        self.shared_expert: Optional[nn.Module] = None
 
-        # ---- grouped experts (mandatory) ----
-        self.grouped_experts = self._build_grouped_experts()
-
-        # ---- shared experts ----
-        if self.use_shared_expert:
-            assert self.config.moe_shared_expert_intermediate_size is not None
-            self.shared_expert = self._build_shared_expert_module(
-                intermediate_size=int(self.config.moe_shared_expert_intermediate_size)
-            )
+        if pg_collection is None:
+            self.local_experts = self._build_local_experts(intermediate_size=self.moe_intermediate_size)
+            if self.use_shared_expert:
+                assert self.config.moe_shared_expert_intermediate_size is not None
+                self.shared_expert = ClampedSwiGLUMLP(
+                    hidden_size=self.hidden_size,
+                    intermediate_size=int(self.config.moe_shared_expert_intermediate_size),
+                    alpha=self.clamp_alpha,
+                    bias=False,
+                )
         else:
-            self.shared_expert = None
+            self.token_dispatcher = self._build_token_dispatcher()
+            self.grouped_experts = self._build_grouped_experts()
+            if self.use_shared_expert:
+                assert self.config.moe_shared_expert_intermediate_size is not None
+                self.shared_expert = self._build_shared_expert_module(
+                    intermediate_size=int(self.config.moe_shared_expert_intermediate_size)
+                )
+
+    # ------------------------------------------------------------------
+
+    def set_layer_number(self, layer_number: int) -> None:
+        """Mirror :class:`BaseMoELayer.set_layer_number` for spec lifecycle.
+
+        Megatron's :class:`TransformerLayer` walks every spec submodule
+        with a ``set_layer_number`` method to populate the 1-based layer
+        index. The V4 routers are intentionally standalone (CPU-clean),
+        but we still need to track ``layer_number`` here so future
+        TopKRouter-rooted upgrades plug in without spec changes.
+        """
+        self.layer_number = layer_number
+
+    def _build_local_experts(self, *, intermediate_size: int) -> nn.ModuleList:
+        """Build a local :class:`nn.ModuleList` of clamped-SwiGLU experts.
+
+        Used when ``pg_collection is None`` (CPU unit tests). Each module
+        in the list mirrors a single HF reference ``Expert`` (separate
+        ``w1`` / ``w2`` / ``w3`` Linears + V4 pre-mul clamp).
+        """
+        if self.local_num_routed_experts <= 0:
+            raise RuntimeError(f"DeepSeek-V4 MoE layer={self.layer_idx} has no local experts.")
+        return nn.ModuleList(
+            [
+                ClampedSwiGLUMLP(
+                    hidden_size=self.hidden_size,
+                    intermediate_size=intermediate_size,
+                    alpha=self.clamp_alpha,
+                    bias=False,
+                )
+                for _ in range(self.local_num_routed_experts)
+            ]
+        )
 
     # ------------------------------------------------------------------
 
@@ -446,6 +531,45 @@ class DeepseekV4MoE(nn.Module):
         combined = self.token_dispatcher.token_combine(combined)
         return self.token_dispatcher.combine_postprocess(combined)
 
+    def _local_experts_forward(
+        self,
+        hidden: torch.Tensor,
+        probs: torch.Tensor,
+        routing_map: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-expert dispatch loop matching the HF reference math.
+
+        Drives :attr:`local_experts` directly (no token dispatcher); used
+        on the CPU path when ``pg_collection is None``. The math mirrors
+        ``DeepSeek-V4-Flash/inference/model.py:MoE.forward`` exactly:
+
+            for i in local_experts:
+                idx = where(routing_map[:, i])
+                out[idx] += probs[idx, i] * expert_i(hidden[idx])
+
+        Args:
+            hidden: ``[N, D]`` flattened input.
+            probs: ``[N, num_experts]`` sparse routing weights (already
+                renormalized + scaled by the router).
+            routing_map: ``[N, num_experts]`` bool mask, True at
+                ``(n, e)`` iff token ``n`` is routed to expert ``e``.
+
+        Returns:
+            ``[N, D]`` routed-expert contribution (no shared expert).
+        """
+        assert self.local_experts is not None
+        out = torch.zeros_like(hidden, dtype=hidden.dtype)
+        for local_i, global_i in enumerate(self.local_expert_indices):
+            mask = routing_map[:, global_i]  # [N]
+            if not bool(mask.any()):
+                continue
+            idx = mask.nonzero(as_tuple=True)[0]  # [n_i]
+            weight = probs[idx, global_i].unsqueeze(-1).to(hidden.dtype)  # [n_i, 1]
+            expert = self.local_experts[local_i]
+            out_idx = expert(hidden[idx])
+            out[idx] = out[idx] + weight * out_idx
+        return out
+
     def forward(
         self,
         hidden: torch.Tensor,
@@ -464,11 +588,21 @@ class DeepseekV4MoE(nn.Module):
             contributions.
         """
         probs, routing_map = self._route(hidden, token_ids)  # [N, E], bool
-        out = self._dispatcher_forward(hidden, probs, routing_map)
 
+        if self.local_experts is not None:
+            # CPU local-experts path. Reshape to flat then back; the
+            # router already returned [N, E] sparse outputs.
+            shape = hidden.shape
+            flat_hidden = hidden.reshape(-1, self.hidden_size)
+            flat_out = self._local_experts_forward(flat_hidden, probs, routing_map)
+            if self.shared_expert is not None:
+                flat_out = flat_out + self.shared_expert(flat_hidden)
+            return flat_out.view(*shape)
+
+        # Production path: Megatron dispatcher + grouped experts.
+        out = self._dispatcher_forward(hidden, probs, routing_map)
         if self.shared_expert is not None:
             out = out + self.shared_expert(hidden)
-
         return out
 
 
