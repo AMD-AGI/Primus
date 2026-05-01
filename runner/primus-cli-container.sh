@@ -219,14 +219,15 @@ fi
 
 # Validate container runtime (docker/podman)
 if command -v docker >/dev/null 2>&1; then
-    export CONTAINER_RUNTIME="docker"
+    export CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 elif command -v podman >/dev/null 2>&1; then
-    export CONTAINER_RUNTIME="podman"
+    export CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-podman}"
 else
     # Mock runtime for dry-run testing
     export CONTAINER_RUNTIME="docker"
     LOG_INFO_RANK0 "[container] Using mock container runtime for dry-run (no docker/podman found)"
 fi
+
 
 ###############################################################################
 # STEP 4: Parse container-specific CLI arguments

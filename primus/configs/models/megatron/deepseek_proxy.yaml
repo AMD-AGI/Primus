@@ -1,0 +1,31 @@
+extends:
+  - deepseek_v2_base.yaml
+
+# 118B total params, 5.7B active params
+
+tokenizer_type: DeepSeekV2Tokenizer
+tokenizer_model: deepseek-ai/DeepSeek-V2
+
+# model
+num_layers: 48
+hidden_size: 4096
+ffn_hidden_size: 12288 # not used
+
+# gqa
+num_attention_heads: 64
+group_query_attention: true
+num_query_groups: 8
+qk_head_dim: 128
+v_head_dim: 128
+kv_channels: 128
+
+multi_latent_attention: false
+apply_rope_fusion: true
+
+# moe
+moe_layer_freq: 1
+num_experts: 128
+moe_router_topk: 4
+# num_shared_experts: 0
+moe_ffn_hidden_size: 1536 # moe_intermediate_size
+# moe_shared_expert_intermediate_size: 3072 # num_shared_experts * moe_ffn_hidden_size
