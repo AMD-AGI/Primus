@@ -393,6 +393,338 @@ def _collect_dmesg_errors(window_minutes: int = 15) -> Dict[str, Any]:
         return out
 
 
+def _read_text(path: str, default: str = "") -> str:
+    """Best-effort read of a small sysfs/proc text file. Never raises."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read().strip()
+    except Exception:
+        return default
+
+
+def _parse_os_release_pretty() -> Optional[str]:
+    """Return PRETTY_NAME from /etc/os-release, or None."""
+    try:
+        with open("/etc/os-release", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("PRETTY_NAME="):
+                    v = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    return v
+    except Exception:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 -- A. Software-stack fingerprint (drift detection happens at aggregate)
+# ---------------------------------------------------------------------------
+
+
+def _collect_node_fingerprint() -> Dict[str, Any]:
+    """Collect a deterministic, hashable fingerprint of the software stack
+    on this node so the aggregator can detect drift across the cluster.
+
+    Every value is best-effort: missing tools / files become ``None`` rather
+    than raising. The aggregator skips ``None`` values when computing the
+    cluster majority for a given key.
+    """
+    fp: Dict[str, Any] = {}
+
+    # Kernel + OS
+    try:
+        fp["kernel"] = os.uname().release
+    except Exception:
+        fp["kernel"] = None
+    fp["os_release"] = _parse_os_release_pretty()
+    fp["python"] = sys.version.split()[0]
+
+    # ROCm / HIP / amdgpu
+    fp["rocm"] = _read_text("/opt/rocm/.info/version") or None
+    fp["amdgpu_driver"] = _read_text("/sys/module/amdgpu/version") or None
+
+    # PyTorch + (R)CCL
+    try:
+        import torch  # type: ignore
+
+        fp["torch"] = getattr(torch, "__version__", None)
+        fp["torch_hip"] = getattr(getattr(torch, "version", None), "hip", None)
+        try:
+            v = torch.cuda.nccl.version()  # type: ignore[attr-defined]
+            if isinstance(v, tuple):
+                fp["rccl"] = ".".join(str(x) for x in v)
+            else:
+                fp["rccl"] = str(v)
+        except Exception:
+            fp["rccl"] = None
+
+        # Locate librccl.so under torch's lib dir for a stable per-node path.
+        try:
+            torch_lib = os.path.join(os.path.dirname(torch.__file__), "lib")
+            for n in sorted(os.listdir(torch_lib)):
+                if n.startswith("librccl.so"):
+                    fp["rccl_path"] = os.path.join(torch_lib, n)
+                    break
+        except Exception:
+            pass
+    except Exception:
+        fp["torch"] = None
+        fp["torch_hip"] = None
+        fp["rccl"] = None
+
+    # Per-IB-device firmware + HCA model fingerprints. Both are critical for
+    # detecting "1 of N nodes flashed differently" silent regressions.
+    nic_fw: Dict[str, str] = {}
+    nic_hca: Dict[str, str] = {}
+    ib_root = "/sys/class/infiniband"
+    if os.path.isdir(ib_root):
+        try:
+            for dev in sorted(os.listdir(ib_root)):
+                fw = _read_text(os.path.join(ib_root, dev, "fw_ver"))
+                if fw:
+                    nic_fw[dev] = fw
+                hca = _read_text(os.path.join(ib_root, dev, "hca_type"))
+                if hca:
+                    nic_hca[dev] = hca
+        except Exception:
+            pass
+    fp["nic_fw"] = nic_fw or None
+    fp["nic_hca"] = nic_hca or None
+
+    return fp
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 -- B. NIC / RDMA roll-call (per-port state + GIDs from sysfs)
+# ---------------------------------------------------------------------------
+
+
+def _collect_nic_status(expected_count: Optional[int]) -> Dict[str, Any]:
+    """Inventory every RDMA port on this node and flag the ones that would
+    silently break inter-node training.
+
+    Reads everything from ``/sys/class/infiniband`` so we don't depend on
+    ``ibv_devinfo`` / ``ibstat`` being present in the container. Per port
+    we capture:
+
+    * link state (``state``: ``ACTIVE``/``DOWN``/``INIT``) and physical
+      state (``phys_state``: ``LinkUp``/``Polling``/...);
+    * link rate (Gb/s);
+    * netdev + MTU (so the aggregator can detect MTU drift, which silently
+      tanks RoCE all-reduce throughput);
+    * GID counts -- total non-zero GIDs and the subset configured as
+      ``RoCE v2`` (an empty RoCE v2 set is a frequent cause of training
+      jobs hanging at the first inter-node collective).
+
+    Issues are pushed into ``out["issues"]`` (each a short string). Hard
+    issues (port not Active / no RoCE v2 GIDs / wrong NIC count) are
+    treated as node FAIL by ``_node_status_from``.
+    """
+    out: Dict[str, Any] = {
+        "expected_count": expected_count,
+        "ports": [],
+        "issues": [],
+    }
+    base = "/sys/class/infiniband"
+    if not os.path.isdir(base):
+        # Container may not expose the IB stack; report and let the operator
+        # decide. We only mark this as a hard issue when the user explicitly
+        # asked for a positive expected_count.
+        msg = f"{base} missing -- no RDMA stack visible"
+        if expected_count and expected_count > 0:
+            out["issues"].append(msg)
+        else:
+            out["info"] = msg
+        return out
+
+    try:
+        devs = sorted(os.listdir(base))
+    except Exception as e:
+        out["issues"].append(f"failed to list {base}: {e}")
+        return out
+
+    for dev in devs:
+        port_dir = os.path.join(base, dev, "ports")
+        if not os.path.isdir(port_dir):
+            continue
+        try:
+            ports = sorted(os.listdir(port_dir))
+        except Exception:
+            continue
+        for port_str in ports:
+            try:
+                port = int(port_str)
+            except ValueError:
+                continue
+            p = os.path.join(port_dir, port_str)
+
+            # Sysfs values look like "4: ACTIVE" / "5: LinkUp" / "400 Gb/sec (4X NDR)"
+            state_raw = _read_text(os.path.join(p, "state"))
+            phys_raw = _read_text(os.path.join(p, "phys_state"))
+            rate_raw = _read_text(os.path.join(p, "rate"))
+            state = state_raw.split(":", 1)[-1].strip() if state_raw else ""
+            phys = phys_raw.split(":", 1)[-1].strip() if phys_raw else ""
+            rate_gbps: Optional[int] = None
+            try:
+                rate_gbps = int(rate_raw.split()[0])
+            except Exception:
+                pass
+
+            # GID inventory. A GID is "all-zero" until configured.
+            gid_count = 0
+            rocev2_count = 0
+            gids_dir = os.path.join(p, "gids")
+            types_dir = os.path.join(p, "gid_attrs", "types")
+            valid_gid_indices: List[int] = []
+            if os.path.isdir(gids_dir):
+                try:
+                    for gn in sorted(os.listdir(gids_dir), key=lambda s: int(s) if s.isdigit() else 0):
+                        if not gn.isdigit():
+                            continue
+                        g = _read_text(os.path.join(gids_dir, gn))
+                        if g and g != "0000:0000:0000:0000:0000:0000:0000:0000":
+                            gid_count += 1
+                            valid_gid_indices.append(int(gn))
+                except Exception:
+                    pass
+            if os.path.isdir(types_dir):
+                for idx in valid_gid_indices:
+                    t = _read_text(os.path.join(types_dir, str(idx)))
+                    if "RoCE v2" in t or "RoCEv2" in t:
+                        rocev2_count += 1
+
+            # Linked netdev + MTU.
+            ifname: Optional[str] = None
+            mtu: Optional[int] = None
+            net_dir = os.path.join(base, dev, "device", "net")
+            if os.path.isdir(net_dir):
+                try:
+                    nets = sorted(os.listdir(net_dir))
+                    if nets:
+                        ifname = nets[0]
+                        mtu_raw = _read_text(f"/sys/class/net/{ifname}/mtu")
+                        try:
+                            mtu = int(mtu_raw)
+                        except Exception:
+                            mtu = None
+                except Exception:
+                    pass
+
+            out["ports"].append({
+                "device": dev,
+                "port": port,
+                "state": state or None,
+                "phys_state": phys or None,
+                "rate_gbps": rate_gbps,
+                "ifname": ifname,
+                "mtu": mtu,
+                "gid_count": gid_count,
+                "rocev2_gid_count": rocev2_count,
+            })
+
+            # Per-port hard issues -> node FAIL.
+            if state and state.upper() != "ACTIVE":
+                out["issues"].append(f"{dev}:{port} state={state} (expected ACTIVE)")
+            if phys and phys.upper() != "LINKUP":
+                out["issues"].append(f"{dev}:{port} phys_state={phys} (expected LinkUp)")
+            if state.upper() == "ACTIVE" and rocev2_count == 0:
+                out["issues"].append(f"{dev}:{port} no RoCE v2 GIDs configured")
+
+    if expected_count is not None and len(out["ports"]) != expected_count:
+        out["issues"].append(
+            f"RDMA NIC port count {len(out['ports'])} != expected {expected_count}"
+        )
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 -- C. Host limits (ulimit -l, /dev/shm, NUMA, CPU governor)
+# ---------------------------------------------------------------------------
+
+
+def _collect_host_limits(*, ulimit_l_min_gb: float, shm_min_gb: float) -> Dict[str, Any]:
+    """Capture training-relevant kernel/process limits and tunables and
+    return hard-failure reasons for the ones that block training under load.
+
+    Hard fail today (cause node FAIL):
+
+    * ``ulimit -l`` (RLIMIT_MEMLOCK) is not unlimited and below
+      ``ulimit_l_min_gb`` -- RDMA pin failures look like NCCL hangs.
+    * ``/dev/shm`` total size below ``shm_min_gb`` -- NCCL shared-memory
+      transport falls back or fails.
+
+    Soft (collected for drift detection only):
+
+    * NUMA node count, CPU count, CPU governor, kernel/OS version. The
+      aggregator flags drift across the cluster but does not FAIL nodes
+      individually for these.
+    """
+    out: Dict[str, Any] = {}
+
+    # Resource limits.
+    try:
+        import resource  # type: ignore
+
+        soft_l, _ = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+        out["memlock_soft_bytes"] = (
+            -1 if soft_l == resource.RLIM_INFINITY else int(soft_l)
+        )
+        soft_n, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+        out["nofile_soft"] = int(soft_n)
+        soft_p, _ = resource.getrlimit(resource.RLIMIT_NPROC)
+        out["nproc_soft"] = -1 if soft_p == resource.RLIM_INFINITY else int(soft_p)
+    except Exception as e:
+        out["resource_error"] = str(e)
+
+    # /dev/shm size + free.
+    try:
+        st = os.statvfs("/dev/shm")
+        out["shm_size_bytes"] = int(st.f_blocks) * int(st.f_frsize)
+        out["shm_avail_bytes"] = int(st.f_bavail) * int(st.f_frsize)
+    except Exception as e:
+        out["shm_error"] = str(e)
+
+    # NUMA topology.
+    try:
+        nodes = [
+            n for n in os.listdir("/sys/devices/system/node")
+            if n.startswith("node") and n[4:].isdigit()
+        ]
+        out["numa_nodes"] = len(nodes)
+    except Exception:
+        out["numa_nodes"] = None
+
+    # CPU count + governor.
+    try:
+        out["cpu_count"] = os.cpu_count()
+    except Exception:
+        out["cpu_count"] = None
+    out["cpu_governor"] = (
+        _read_text("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") or None
+    )
+
+    # Hard checks.
+    fail_reasons: List[str] = []
+    memlock = out.get("memlock_soft_bytes")
+    if memlock is not None and memlock != -1 and ulimit_l_min_gb > 0:
+        if memlock < ulimit_l_min_gb * (1 << 30):
+            fail_reasons.append(
+                f"ulimit -l (memlock) = {memlock // (1 << 20)} MiB; "
+                f"required: unlimited or >= {ulimit_l_min_gb} GiB. "
+                "RDMA pin will fail under load."
+            )
+    shm = out.get("shm_size_bytes")
+    if shm is not None and shm_min_gb > 0:
+        if shm < shm_min_gb * (1 << 30):
+            fail_reasons.append(
+                f"/dev/shm size = {shm / (1 << 30):.2f} GiB; "
+                f"required: >= {shm_min_gb} GiB. NCCL shared-mem may fail."
+            )
+    out["fail_reasons"] = fail_reasons
+
+    return out
+
+
 def _findings_to_dicts(findings: List[Any]) -> List[Dict[str, Any]]:
     """Normalize Finding dataclasses (different modules each define their own)
     into plain dicts."""
@@ -692,6 +1024,17 @@ def _node_status_from(
             f"dmesg ({len(dmesg['matches'])} match(es), e.g.): {first[:200]}"
         )
 
+    # B. NIC / RDMA roll-call -- every issue here is a hard fail because each
+    # one (port DOWN, missing RoCE v2 GID, wrong NIC count) silently breaks
+    # inter-node training the moment the first global collective runs.
+    for issue in (tier1_extra.get("nics") or {}).get("issues", []) or []:
+        reasons.append(f"nic: {issue}")
+
+    # C. Host limits -- only the entries the collector flagged as hard
+    # (ulimit -l below threshold, /dev/shm too small) become node FAIL.
+    for issue in (tier1_extra.get("host_limits") or {}).get("fail_reasons", []) or []:
+        reasons.append(f"host_limits: {issue}")
+
     rccl = tier2_extra.get("rccl") or {}
     if rccl and rccl.get("status") not in (None, "PASS"):
         reasons.append(f"rccl: {rccl.get('status')}: {rccl.get('error', '')}")
@@ -770,6 +1113,24 @@ def _cmd_run(ns: argparse.Namespace) -> int:
     else:
         tier1_extra["dmesg"] = {"ok": True, "matches": [], "error": "skipped"}
 
+    # A/B/C: software-stack fingerprint, NIC roll-call, host limits.
+    # All three are pure data-collection (millisecond-scale sysfs reads); the
+    # heavy cluster-level drift detection happens at aggregation time.
+    tier1_extra["fingerprint"] = _collect_node_fingerprint()
+    tier1_extra["nics"] = _collect_nic_status(expected_count=ns.expected_rdma_nics)
+    tier1_extra["host_limits"] = _collect_host_limits(
+        ulimit_l_min_gb=ns.ulimit_l_min_gb,
+        shm_min_gb=ns.shm_min_gb,
+    )
+    nic_summary = tier1_extra["nics"]
+    _log(
+        f"nics: {len(nic_summary.get('ports', []))} port(s) found, "
+        f"{len(nic_summary.get('issues', []))} issue(s)"
+    )
+    if tier1_extra["host_limits"].get("fail_reasons"):
+        for r in tier1_extra["host_limits"]["fail_reasons"]:
+            _warn(f"host_limits: {r}")
+
     # Tier 2 local RCCL all-reduce
     tier2_extra: Dict[str, Any] = {}
     if ns.tier2 and ns.tier2_rccl and expected_gpus > 1:
@@ -818,6 +1179,113 @@ def _cmd_run(ns: argparse.Namespace) -> int:
             _warn(r)
 
     return 0 if status == "PASS" else 1
+
+
+# ---------------------------------------------------------------------------
+# Aggregator helpers -- A. stack/NIC drift, B. NIC issues, C. host limits
+# ---------------------------------------------------------------------------
+
+
+def _stack_drift_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """For every *scalar* fingerprint key, find the cluster-majority value and
+    list the nodes that disagree.
+
+    Returns one row per key that has at least one outlier. Keys missing from
+    every node, or where every node reported the same value, are omitted so
+    a healthy cluster produces an empty list.
+    """
+    from collections import Counter
+
+    keys: set = set()
+    for n in nodes:
+        fp = ((n.get("tier1") or {}).get("fingerprint") or {}) or {}
+        for k, v in fp.items():
+            # Only compare scalars; nic_fw / nic_hca dicts get their own
+            # per-device drift section below.
+            if v is None or isinstance(v, (str, int, float)):
+                keys.add(k)
+
+    rows: List[Dict[str, Any]] = []
+    for k in sorted(keys):
+        per_host: List[tuple] = []
+        for n in nodes:
+            fp = ((n.get("tier1") or {}).get("fingerprint") or {}) or {}
+            v = fp.get(k)
+            if v is None:
+                continue
+            per_host.append((n.get("host", "?"), v))
+        if not per_host:
+            continue
+        c = Counter(v for _, v in per_host)
+        majority, count = c.most_common(1)[0]
+        outliers = [(h, v) for h, v in per_host if v != majority]
+        if not outliers:
+            continue
+        rows.append({
+            "key": k, "majority": majority, "count": count,
+            "total": len(per_host), "outliers": outliers,
+        })
+    return rows
+
+
+def _nic_fw_drift_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Per-IB-device firmware drift across the cluster (e.g. rdma0 mismatch)."""
+    from collections import Counter
+
+    all_devs: set = set()
+    for n in nodes:
+        fp = ((n.get("tier1") or {}).get("fingerprint") or {}) or {}
+        all_devs.update((fp.get("nic_fw") or {}).keys())
+
+    rows: List[Dict[str, Any]] = []
+    for dev in sorted(all_devs):
+        per_host: List[tuple] = []
+        for n in nodes:
+            fp = ((n.get("tier1") or {}).get("fingerprint") or {}) or {}
+            v = (fp.get("nic_fw") or {}).get(dev)
+            if v is None:
+                continue
+            per_host.append((n.get("host", "?"), v))
+        if not per_host:
+            continue
+        c = Counter(v for _, v in per_host)
+        majority, count = c.most_common(1)[0]
+        outliers = [(h, v) for h, v in per_host if v != majority]
+        if not outliers:
+            continue
+        rows.append({
+            "device": dev, "majority": majority, "count": count,
+            "total": len(per_host), "outliers": outliers,
+        })
+    return rows
+
+
+def _nic_issue_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Per-node NIC roll-call issues (port DOWN / no GIDs / count mismatch)."""
+    rows: List[Dict[str, Any]] = []
+    for n in nodes:
+        nic = (n.get("tier1") or {}).get("nics") or {}
+        for issue in nic.get("issues", []) or []:
+            rows.append({
+                "node_rank": n.get("node_rank", "?"),
+                "host": n.get("host", "?"),
+                "issue": issue,
+            })
+    return rows
+
+
+def _host_limits_issue_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Per-node host-limit hard violations (ulimit -l / /dev/shm too low)."""
+    rows: List[Dict[str, Any]] = []
+    for n in nodes:
+        hl = (n.get("tier1") or {}).get("host_limits") or {}
+        for issue in hl.get("fail_reasons", []) or []:
+            rows.append({
+                "node_rank": n.get("node_rank", "?"),
+                "host": n.get("host", "?"),
+                "issue": issue,
+            })
+    return rows
 
 
 def _cmd_aggregate(ns: argparse.Namespace) -> int:
@@ -906,6 +1374,75 @@ def _cmd_aggregate(ns: argparse.Namespace) -> int:
                 f"| {n.get('node_rank', '?')} | {n.get('host', '?')} | "
                 f"{n.get('status', '?')} | {n.get('duration_sec', 0)}s | {top} |\n"
             )
+        # ----- A. Stack drift across cluster -----
+        # Empty section when every node reports the same value for every
+        # scalar fingerprint key. We always print the section header so the
+        # operator can see at a glance that the check ran.
+        drift = _stack_drift_rows(nodes)
+        f.write("\n## Stack drift across cluster\n\n")
+        if not drift:
+            f.write("*All nodes match.*\n")
+        else:
+            f.write("| Key | Majority (count/total) | Outlier nodes |\n")
+            f.write("|------|-------------------------|----------------|\n")
+            for row in drift:
+                outliers = "; ".join(
+                    f"`{h}` = `{v}`" for h, v in row["outliers"]
+                )
+                f.write(
+                    f"| `{row['key']}` | `{row['majority']}` "
+                    f"({row['count']}/{row['total']}) | {outliers} |\n"
+                )
+
+        # ----- A.2 NIC firmware drift across cluster -----
+        nic_drift = _nic_fw_drift_rows(nodes)
+        f.write("\n## NIC firmware drift across cluster\n\n")
+        if not nic_drift:
+            f.write("*All NIC firmwares match (or no NICs reported).*\n")
+        else:
+            f.write("| NIC | Majority FW (count/total) | Outlier nodes |\n")
+            f.write("|-----|---------------------------|----------------|\n")
+            for row in nic_drift:
+                outliers = "; ".join(
+                    f"`{h}` = `{v}`" for h, v in row["outliers"]
+                )
+                f.write(
+                    f"| `{row['device']}` | `{row['majority']}` "
+                    f"({row['count']}/{row['total']}) | {outliers} |\n"
+                )
+
+        # ----- B. NIC / RDMA roll-call issues -----
+        nic_issues = _nic_issue_rows(nodes)
+        f.write("\n## NIC / RDMA roll-call issues\n\n")
+        if not nic_issues:
+            f.write("*No NIC issues.*\n")
+        else:
+            f.write("| Node | Hostname | Issue |\n")
+            f.write("|------|----------|-------|\n")
+            for row in nic_issues:
+                msg = str(row["issue"]).replace("|", "/")
+                if len(msg) > 160:
+                    msg = msg[:157] + "..."
+                f.write(
+                    f"| {row['node_rank']} | {row['host']} | {msg} |\n"
+                )
+
+        # ----- C. Host limits issues -----
+        limits_issues = _host_limits_issue_rows(nodes)
+        f.write("\n## Host limits issues\n\n")
+        if not limits_issues:
+            f.write("*No host-limit issues.*\n")
+        else:
+            f.write("| Node | Hostname | Issue |\n")
+            f.write("|------|----------|-------|\n")
+            for row in limits_issues:
+                msg = str(row["issue"]).replace("|", "/")
+                if len(msg) > 200:
+                    msg = msg[:197] + "..."
+                f.write(
+                    f"| {row['node_rank']} | {row['host']} | {msg} |\n"
+                )
+
         # Tier 2 perf summary -- only emitted when at least one node ran Tier 2.
         # Surfaces per-node GEMM TFLOPS / HBM GB/s (min/median/max across the
         # node's GPUs) plus the local RCCL all-reduce GB/s, so outliers across
@@ -1038,6 +1575,18 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Skip the dmesg recent-error scan (e.g. inside containers).")
     pr.add_argument("--dmesg-minutes", type=int, default=15,
                     help="Window for dmesg --since (minutes).")
+    # NIC / RDMA roll-call (B). expected_count=None means "report only";
+    # set this to e.g. 8 to make a missing or down NIC port a node FAIL.
+    pr.add_argument("--expected-rdma-nics", type=int, default=None,
+                    help="Expected RDMA NIC port count. If set, a count "
+                         "mismatch becomes a node FAIL.")
+    # Host-limits hard thresholds (C). Set to 0 to disable a check.
+    pr.add_argument("--ulimit-l-min-gb", type=float, default=32.0,
+                    help="FAIL the node if RLIMIT_MEMLOCK is finite and below "
+                         "this many GiB (RDMA pin will fail). 0 disables.")
+    pr.add_argument("--shm-min-gb", type=float, default=8.0,
+                    help="FAIL the node if /dev/shm is below this many GiB "
+                         "(NCCL shared-mem may fail). 0 disables.")
     pr.set_defaults(func=_cmd_run)
 
     # ---- aggregate ----
