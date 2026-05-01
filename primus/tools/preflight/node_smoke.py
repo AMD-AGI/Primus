@@ -828,8 +828,10 @@ def _collect_amd_smi_metrics() -> Dict[str, Any]:
         }
 
     Hard-fail semantics live in ``_node_status_from``: any non-zero
-    uncorrectable ECC count, or any throttle reason that contains
-    ``thermal``/``power``/``current``, becomes a node FAIL.
+    uncorrectable ECC count becomes a node FAIL. Throttle status is
+    captured under ``throttle_status_raw`` for operator inspection but
+    is NOT failed-on -- the amd-smi throttle schema varies too much
+    across releases to make a robust default rule.
     """
     out: Dict[str, Any] = {"ok": False, "tool": None, "per_gpu": []}
     if _which("amd-smi") is None:
