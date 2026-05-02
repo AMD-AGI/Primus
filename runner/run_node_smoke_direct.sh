@@ -38,8 +38,8 @@
 #                            to aggregate later from a separate command).
 #   --wait-timeout-sec SEC   Override aggregator wait timeout (default 60).
 #
-# Anything else is forwarded verbatim to `node_smoke run` (e.g. --tier2,
-# --tier2-rccl, --gemm-tflops-min, --dump-path, --expected-gpus, ...).
+# Anything else is forwarded verbatim to `node_smoke run` (e.g. --tier2-perf,
+# --gemm-tflops-min, --dump-path, --expected-gpus, ...).
 ###############################################################################
 
 set -euo pipefail

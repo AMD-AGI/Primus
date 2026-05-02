@@ -17,13 +17,19 @@ Subcommands
 
 * ``run`` -- per-node entry. Runs Tier 1 (per-GPU sanity + reused
   host/gpu/network info collectors + a small dmesg scan) and, when
-  ``--tier2`` is set, Tier 2 perf sanity (GEMM TFLOPS, HBM bandwidth, and
-  optional local RCCL all-reduce). Writes ``<dump>/smoke/<host>.json``.
+  ``--tier2-perf`` is set, Tier 2 perf sanity (GEMM TFLOPS, HBM bandwidth,
+  and node-local RCCL all-reduce). Writes ``<dump>/smoke/<host>.json``.
+  Always exits 0 when the JSON was written (the per-node verdict lives
+  in the JSON's ``status`` field, not in the exit code) -- otherwise an
+  intentionally-detected unhealthy node would make srun pollute its
+  output with one ``error: ... task N: Exited with exit code 1`` per
+  failing node, which is misleading: the smoke test is succeeding at
+  identifying bad nodes, not failing.
 
 * ``aggregate`` -- read all per-node JSONs and emit
   ``<dump>/smoke_report.md``, ``<dump>/passing_nodes.txt``, and
   ``<dump>/failing_nodes.txt``. Exits non-zero if any node FAILs or is
-  missing.
+  missing -- this is the single CI-friendly cluster-health exit signal.
 
 * ``_per_gpu`` -- internal subcommand spawned by ``run`` to test a single
   GPU in an isolated subprocess with a hard timeout. Not for direct use.
@@ -124,10 +130,53 @@ def _warn(msg: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_gpu_bdf(props: Any) -> Optional[str]:
+    """Return the PCIe BDF (e.g. ``"0000:75:00.0"``) for a torch device.
+
+    ``torch.cuda.get_device_properties(i).pci_bus_id`` is annoyingly
+    polymorphic across PyTorch + ROCm versions: sometimes a string in the
+    canonical ``domain:bus:device.function`` form (lowercase or uppercase),
+    sometimes an int (just the bus byte). We coerce all variants into the
+    canonical lowercase form and verify the sysfs directory actually
+    exists before returning -- so the caller can read PCIe link info
+    without an extra existence check.
+
+    Returns None if the BDF cannot be resolved (caller should still
+    capture HBM via ``mem_get_info`` and skip PCIe sysfs reads).
+    """
+    raw = getattr(props, "pci_bus_id", None)
+    if raw is None:
+        return None
+    # 1) String form. Could be "0000:05:00.0", "05:00.0", or uppercase.
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if not s:
+            return None
+        candidates = [s, f"0000:{s}" if not s.startswith("0000:") else s]
+        for c in candidates:
+            if os.path.isdir(f"/sys/bus/pci/devices/{c}"):
+                return c
+        return None
+    # 2) Int form (just the bus byte). Standard layout for AMD GPUs is
+    # 0000:<bus>:00.0; verify with sysfs and fall back to a glob if the
+    # device.function differs from 00.0 on this host.
+    if isinstance(raw, int):
+        bus_hex = f"{raw:02x}"
+        primary = f"0000:{bus_hex}:00.0"
+        if os.path.isdir(f"/sys/bus/pci/devices/{primary}"):
+            return primary
+        import glob
+        matches = sorted(glob.glob(f"/sys/bus/pci/devices/0000:{bus_hex}:*"))
+        if matches:
+            return os.path.basename(matches[0])
+        return None
+    return None
+
+
 def _per_gpu_body(
     gpu: int,
     *,
-    tier2: bool,
+    tier2_perf: bool,
     gemm_tflops_min: float,
     hbm_gbs_min: float,
 ) -> Dict[str, Any]:
@@ -136,9 +185,10 @@ def _per_gpu_body(
     Tier 1 (always): set_device, allocate 256 MB, tiny GEMM 2048x2048 bf16
     with finite-value check.
 
-    Tier 2 (when ``tier2`` is True): GEMM 8192x8192 bf16 TFLOPS measurement
-    against ``gemm_tflops_min``, and HBM device-to-device copy bandwidth
-    against ``hbm_gbs_min``. Each metric below threshold yields FAIL.
+    Tier 2 (when ``tier2_perf`` is True): GEMM 8192x8192 bf16 TFLOPS
+    measurement against ``gemm_tflops_min``, and HBM device-to-device
+    copy bandwidth against ``hbm_gbs_min``. Each metric below threshold
+    yields FAIL.
     """
     t0 = time.time()
     details: Dict[str, Any] = {}
@@ -233,36 +283,58 @@ def _per_gpu_body(
     # Captured into details.low_level so the aggregator can flag drift across
     # the cluster (e.g. a single GPU running at Gen3 x8 because the slot
     # needs reseating, or a GPU that exposes only half of its HBM).
+    # Each sub-capture is independent: a missing/unparseable PCIe BDF must
+    # not cost us the HBM size, and vice-versa.
     low: Dict[str, Any] = {}
+    props = None
     try:
         props = torch.cuda.get_device_properties(gpu)
-        bdf = getattr(props, "pci_bus_id", None) or None
-        if bdf:
-            low["pci_bdf"] = bdf
-            sysdir = f"/sys/bus/pci/devices/{bdf.lower()}"
-            speed = _read_text(f"{sysdir}/current_link_speed")
-            width = _read_text(f"{sysdir}/current_link_width")
-            low["pcie_link_speed_raw"] = speed or None
-            low["pcie_link_width"] = int(width) if width.isdigit() else None
-            # speed is e.g. "32.0 GT/s PCIe" -> 32.0
-            try:
-                low["pcie_link_speed_gts"] = float(speed.split()[0]) if speed else None
-            except Exception:
-                low["pcie_link_speed_gts"] = None
+    except Exception as e:
+        low["error"] = f"get_device_properties failed: {e}"
+
+    if props is not None:
+        # PCIe link details (sysfs)
+        try:
+            bdf = _resolve_gpu_bdf(props)
+            if bdf:
+                low["pci_bdf"] = bdf
+                sysdir = f"/sys/bus/pci/devices/{bdf}"
+                speed = _read_text(f"{sysdir}/current_link_speed")
+                width = _read_text(f"{sysdir}/current_link_width")
+                low["pcie_link_speed_raw"] = speed or None
+                low["pcie_link_width"] = int(width) if width.isdigit() else None
+                # speed is e.g. "32.0 GT/s PCIe" -> 32.0
+                try:
+                    low["pcie_link_speed_gts"] = (
+                        float(speed.split()[0]) if speed else None
+                    )
+                except Exception:
+                    low["pcie_link_speed_gts"] = None
+            else:
+                low["pcie_error"] = (
+                    f"could not resolve PCIe BDF (pci_bus_id="
+                    f"{getattr(props, 'pci_bus_id', None)!r})"
+                )
+        except Exception as e:
+            low["pcie_error"] = f"PCIe sysfs capture failed: {e}"
+
+        # HBM total/free (torch). Independent of BDF resolution.
         try:
             free_b, total_b = torch.cuda.mem_get_info(gpu)
             low["hbm_total_bytes"] = int(total_b)
             low["hbm_free_bytes"] = int(free_b)
             low["hbm_total_gib"] = round(total_b / (1 << 30), 2)
-        except Exception:
-            low["hbm_total_bytes"] = int(getattr(props, "total_memory", 0)) or None
-    except Exception as e:
-        low["error"] = f"low_level capture failed: {e}"
+        except Exception as e:
+            low["hbm_error"] = f"mem_get_info failed: {e}"
+            tm = int(getattr(props, "total_memory", 0) or 0)
+            if tm:
+                low["hbm_total_bytes"] = tm
+                low["hbm_total_gib"] = round(tm / (1 << 30), 2)
     if low:
         details["low_level"] = low
 
     # --- Tier 2 perf sanity (optional) ---
-    if tier2:
+    if tier2_perf:
         # GEMM TFLOPS. Warmup/iter counts mirror the preflight `--quick` preset
         # (`square_gemm.py` with WARMUP=5, ITERATION=20) so smoke and preflight
         # report comparable steady-state numbers.
@@ -1401,7 +1473,7 @@ def _spawn_per_gpu(
     gpu: int,
     *,
     timeout_sec: int,
-    tier2: bool,
+    tier2_perf: bool,
     gemm_tflops_min: float,
     hbm_gbs_min: float,
 ) -> GPUResult:
@@ -1418,8 +1490,8 @@ def _spawn_per_gpu(
         "--hbm-gbs-min",
         str(hbm_gbs_min),
     ]
-    if tier2:
-        cmd.append("--tier2")
+    if tier2_perf:
+        cmd.append("--tier2-perf")
 
     t0 = time.time()
     try:
@@ -1565,11 +1637,55 @@ def _node_status_from(
 # ---------------------------------------------------------------------------
 
 
+def _clean_dump_path(dump_path: str) -> List[str]:
+    """Wipe stale per-node JSONs and aggregator outputs from a previous run.
+
+    Without this, a re-run on a different (smaller) nodelist would leave
+    JSONs from removed nodes in ``<dump>/smoke/`` and the aggregator would
+    happily count them as PASS, contaminating the report. We clean only
+    artifacts that ``run`` and ``aggregate`` produce (per-node JSONs and
+    the four top-level outputs); anything else under ``--dump-path`` is
+    left untouched.
+
+    Race safety: this is called only on rank 0 in ``_cmd_run``, BEFORE any
+    rank can have written its current-run JSON (each rank's per-GPU
+    subprocess loop + collector phase takes seconds; rank 0's cleanup
+    finishes in milliseconds). Other ranks never delete anything.
+
+    Returns the list of files actually removed (for logging).
+    """
+    removed: List[str] = []
+    smoke_dir = os.path.join(dump_path, "smoke")
+    if os.path.isdir(smoke_dir):
+        for name in os.listdir(smoke_dir):
+            if name.endswith(".json"):
+                p = os.path.join(smoke_dir, name)
+                try:
+                    os.remove(p)
+                    removed.append(p)
+                except OSError:
+                    pass
+    for name in (
+        "smoke_report.md",
+        "passing_nodes.txt",
+        "failing_nodes.txt",
+        "expected_nodes.txt",
+    ):
+        p = os.path.join(dump_path, name)
+        if os.path.isfile(p):
+            try:
+                os.remove(p)
+                removed.append(p)
+            except OSError:
+                pass
+    return removed
+
+
 def _cmd_per_gpu(ns: argparse.Namespace) -> int:
     """Internal subcommand: run all per-GPU checks for a single GPU index."""
     result = _per_gpu_body(
         gpu=int(ns.gpu),
-        tier2=bool(ns.tier2),
+        tier2_perf=bool(ns.tier2_perf),
         gemm_tflops_min=float(ns.gemm_tflops_min),
         hbm_gbs_min=float(ns.hbm_gbs_min),
     )
@@ -1585,6 +1701,21 @@ def _cmd_run(ns: argparse.Namespace) -> int:
     # can use directly.
     host = _this_host_short()
     node_rank = int(os.environ.get("NODE_RANK", os.environ.get("SLURM_NODEID", "0")))
+
+    # Rank-0 only: wipe stale JSONs / aggregator outputs from a previous
+    # run so re-runs on a different (smaller) nodelist cannot inherit
+    # ghost PASS verdicts from removed nodes. This MUST run before any
+    # rank's _spawn_per_gpu loop completes (and thus before any rank
+    # writes its JSON) -- which is why it lives at the top of _cmd_run
+    # on rank 0 only, not in the wrapper.
+    if node_rank == 0 and not ns.no_clean_dump_path:
+        removed = _clean_dump_path(ns.dump_path)
+        if removed:
+            _log(
+                f"cleaned {len(removed)} stale file(s) from {ns.dump_path} "
+                f"(per-node JSONs + aggregator outputs)"
+            )
+
     expected_gpus = ns.expected_gpus
     if expected_gpus is None:
         expected_gpus = int(
@@ -1643,8 +1774,17 @@ def _cmd_run(ns: argparse.Namespace) -> int:
 
     _log(
         f"start node-smoke: node_rank={node_rank} expected_gpus={expected_gpus} "
-        f"tier2={ns.tier2} tier2_rccl={ns.tier2_rccl}"
+        f"tier2_perf={ns.tier2_perf}"
     )
+    if ns.tier2_perf and expected_gpus < 2:
+        # Tier 2 also includes a node-local RCCL all-reduce, which needs at
+        # least 2 GPUs. Surface the skip up front instead of silently doing
+        # only GEMM/HBM and giving the operator false coverage confidence.
+        _warn(
+            f"--tier2-perf requested but expected_gpus={expected_gpus} < 2; "
+            "the node-local RCCL all-reduce phase will be skipped. "
+            "Per-GPU GEMM and HBM checks will still run."
+        )
 
     t0 = time.time()
     per_gpu: List[GPUResult] = []
@@ -1652,7 +1792,7 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         r = _spawn_per_gpu(
             i,
             timeout_sec=ns.per_gpu_timeout_sec,
-            tier2=bool(ns.tier2),
+            tier2_perf=bool(ns.tier2_perf),
             gemm_tflops_min=ns.gemm_tflops_min,
             hbm_gbs_min=ns.hbm_gbs_min,
         )
@@ -1743,9 +1883,10 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         for r in tier1_extra["host_limits"]["fail_reasons"]:
             _warn(f"host_limits: {r}")
 
-    # Tier 2 local RCCL all-reduce
+    # Tier 2 local RCCL all-reduce. Gated on a single flag now (--tier2-perf)
+    # so users cannot accidentally end up with only the per-GPU half running.
     tier2_extra: Dict[str, Any] = {}
-    if ns.tier2 and ns.tier2_rccl and expected_gpus > 1:
+    if ns.tier2_perf and expected_gpus > 1:
         _log(f"tier2 local RCCL all-reduce: {expected_gpus} ranks, {ns.rccl_size_mb}MB")
         rccl = _run_local_rccl(
             local_world_size=expected_gpus,
@@ -1790,7 +1931,16 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         for r in fail_reasons[:5]:
             _warn(r)
 
-    return 0 if status == "PASS" else 1
+    # Per-node `run` exits 0 whenever the smoke test ran to completion --
+    # the node verdict (PASS/FAIL) is in the JSON, in failing_nodes.txt,
+    # and in the aggregator's exit code. Conflating "this node is broken"
+    # with "this tool crashed" makes srun output look like the smoke test
+    # itself is failing, when in fact it's correctly DOING ITS JOB of
+    # identifying broken nodes. The aggregator (rank 0) is the single
+    # source of truth for the CI-friendly cluster-health exit signal.
+    # Tool failures (couldn't import, couldn't write JSON, etc.) still
+    # propagate as non-zero via Python's default exception handling.
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -2593,17 +2743,24 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # ---- run ----
-    pr = sub.add_parser("run", help="Run per-node smoke test on this node.")
+    # allow_abbrev=False so abbreviated forms (e.g. an old --tier2 left in
+    # a script) do NOT silently match the new --tier2-perf as a prefix.
+    # We want them to error out loudly so behavior never changes silently
+    # underneath an unsuspecting caller.
+    pr = sub.add_parser(
+        "run", help="Run per-node smoke test on this node.",
+        allow_abbrev=False,
+    )
     pr.add_argument("--dump-path", default="output/preflight",
                     help="Directory under which smoke/<host>.json is written.")
     pr.add_argument("--expected-gpus", type=int, default=None,
                     help="Expected GPU count on this node (default: LOCAL_WORLD_SIZE/GPUS_PER_NODE/torch.cuda.device_count()).")
     pr.add_argument("--per-gpu-timeout-sec", type=int, default=15,
                     help="Hard timeout for each per-GPU subprocess.")
-    pr.add_argument("--tier2", action="store_true",
-                    help="Enable Tier 2 perf sanity (GEMM TFLOPS, HBM bandwidth).")
-    pr.add_argument("--tier2-rccl", action="store_true",
-                    help="Enable Tier 2 local RCCL all-reduce (implies --tier2 in spirit).")
+    pr.add_argument("--tier2-perf", action="store_true",
+                    help="Enable Tier 2 perf sanity: per-GPU GEMM TFLOPS, "
+                         "HBM bandwidth, AND node-local RCCL all-reduce. "
+                         "All three are fast (< 30 s/node total).")
     pr.add_argument("--gemm-tflops-min", type=float, default=600.0,
                     help="FAIL if Tier 2 GEMM TFLOPS is below this. Default: 600 (MI300X-class).")
     pr.add_argument("--hbm-gbs-min", type=float, default=2000.0,
@@ -2636,6 +2793,12 @@ def _build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--rocm-smi-timeout-sec", type=float, default=5.0,
                     help="Hard timeout for `rocm-smi --version`. Hitting it is "
                          "a node FAIL (driver likely wedging).")
+    pr.add_argument("--no-clean-dump-path", action="store_true",
+                    help="Do NOT auto-wipe stale per-node JSONs and aggregator "
+                         "outputs from --dump-path on rank 0 at startup. "
+                         "Default behavior is to clean so re-runs on a "
+                         "different nodelist don't inherit ghost PASS "
+                         "verdicts from removed nodes.")
     pr.set_defaults(func=_cmd_run)
 
     # ---- aggregate ----
@@ -2666,7 +2829,7 @@ def _build_parser() -> argparse.ArgumentParser:
     pg = sub.add_parser("_per_gpu",
                         help="(internal) Run smoke checks for a single GPU index. Spawned by `run`.")
     pg.add_argument("gpu", type=int)
-    pg.add_argument("--tier2", action="store_true")
+    pg.add_argument("--tier2-perf", action="store_true")
     pg.add_argument("--gemm-tflops-min", type=float, default=600.0)
     pg.add_argument("--hbm-gbs-min", type=float, default=2000.0)
     pg.set_defaults(func=_cmd_per_gpu)
