@@ -179,16 +179,26 @@ def _per_gpu_body(
     tier2_perf: bool,
     gemm_tflops_min: float,
     hbm_gbs_min: float,
+    hbm_busy_threshold_bytes: int = 2 * (1 << 30),
 ) -> Dict[str, Any]:
     """Run all per-GPU tests for a single GPU and return a dict result.
 
-    Tier 1 (always): set_device, allocate 256 MB, tiny GEMM 2048x2048 bf16
-    with finite-value check.
+    Tier 1 (always): set_device, **pre-touch HBM-busy check** (FAIL if more
+    than ``hbm_busy_threshold_bytes`` already in use before our test
+    allocates anything), allocate 256 MB, tiny GEMM 2048x2048 bf16 with
+    finite-value check.
 
     Tier 2 (when ``tier2_perf`` is True): GEMM 8192x8192 bf16 TFLOPS
     measurement against ``gemm_tflops_min``, and HBM device-to-device
     copy bandwidth against ``hbm_gbs_min``. Each metric below threshold
     yields FAIL.
+
+    Pre-touch HBM check: ``torch.cuda.mem_get_info`` is called BEFORE we
+    allocate anything on this GPU, so the "used" reading reflects only
+    foreign / leaked allocations. The post-test reading is also captured
+    (under ``low_level.hbm_free_bytes``) for completeness, but the FAIL
+    rule uses only the pre-touch number to avoid being polluted by our
+    own caching-allocator footprint.
     """
     t0 = time.time()
     details: Dict[str, Any] = {}
@@ -234,6 +244,35 @@ def _per_gpu_body(
             "duration_sec": round(time.time() - t0, 3),
             "details": details,
         }
+
+    # --- pre-touch HBM-busy check (BEFORE we allocate anything) ---
+    # Captured here, NOT in the low_level block at the end, because by
+    # then PyTorch's caching allocator has already taken pages we won't
+    # truly release on empty_cache(). The pre-touch reading is the only
+    # honest answer to "is someone else holding this GPU?".
+    try:
+        free_b, total_b = torch.cuda.mem_get_info(gpu)
+        used_b = max(0, int(total_b) - int(free_b))
+        details["hbm_pre_touch_total_bytes"] = int(total_b)
+        details["hbm_pre_touch_free_bytes"] = int(free_b)
+        details["hbm_pre_touch_used_bytes"] = used_b
+        details["hbm_pre_touch_used_gib"] = round(used_b / (1 << 30), 3)
+        if used_b > hbm_busy_threshold_bytes:
+            return {
+                "gpu": gpu,
+                "status": "FAIL",
+                "reason": (
+                    f"pre-touch HBM busy: {round(used_b / (1 << 30), 2)} GiB "
+                    f"already in use (threshold "
+                    f"{round(hbm_busy_threshold_bytes / (1 << 30), 2)} GiB) "
+                    f"-- likely leaked process from a previous job; "
+                    f"see node-level gpu_processes section to identify the PID"
+                ),
+                "duration_sec": round(time.time() - t0, 3),
+                "details": details,
+            }
+    except Exception as e:
+        details["hbm_pre_touch_error"] = f"mem_get_info failed: {e}"
 
     # --- 256 MB tensor alloc + simple write + sync ---
     try:
@@ -1021,8 +1060,373 @@ def _flatten_amd_smi_metric_json(doc: Any) -> List[Dict[str, Any]]:
             rec["throttle_status_raw"] = thr
         elif isinstance(thr, (str, list)):
             rec["throttle_status_raw"] = thr
+        # GPU compute activity %. Used by the aggregator to surface GPUs
+        # that are running someone else's compute right now (warn-only;
+        # short bursts are normal but a sustained pegged-100% across
+        # multiple GPUs is a strong signal of a leaked rank from a
+        # previous job).
+        usage = g.get("usage") or g.get("activity") or g.get("utilization") or {}
+        if isinstance(usage, dict):
+            for k in ("gfx_activity", "gfx", "gfx_busy_percent", "gpu_busy_percent"):
+                v = usage.get(k)
+                if isinstance(v, (int, float)):
+                    rec["gfx_activity_pct"] = float(v)
+                    break
+            if rec.get("gfx_activity_pct") is None:
+                v = usage.get("activity") or usage.get("value")
+                if isinstance(v, (int, float)):
+                    rec["gfx_activity_pct"] = float(v)
+        elif isinstance(usage, (int, float)):
+            rec["gfx_activity_pct"] = float(usage)
         out.append(rec)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 -- G: foreign / leaked process detection on each GPU
+#
+# The single most common reason a "healthy" cluster fails to launch a large
+# training job is that a previous job's Python ranks are still attached to
+# the GPUs (held HBM, half-torn-down NCCL communicators, or just stuck in
+# __del__). Symptoms in the new training job: torch.cuda.OutOfMemoryError
+# at model init with a misleading "free=Y" message, NCCL/RCCL bootstrap
+# hang, or random ranks failing the first all-reduce due to compute
+# contention. node-smoke catches these BEFORE the operator launches the
+# real job by enumerating PIDs that hold each GPU and FAILing the node
+# unless the operator explicitly opted in via --allow-foreign-procs.
+# ---------------------------------------------------------------------------
+
+
+def _collect_gpu_processes(
+    self_pid: int,
+    allowed_proc_names: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Enumerate processes currently holding each GPU on this node.
+
+    Tries, in order:
+      1. ``amd-smi process --json``  (preferred -- structured)
+      2. ``amd-smi process``         (text fallback -- best-effort parse)
+      3. ``lsof /dev/kfd /dev/dri/renderD*``  (last resort: just openers)
+
+    Output shape::
+
+        {
+            "ok": bool,
+            "tool": "amd-smi process --json" | "amd-smi process" | "lsof" | None,
+            "self_pid": int,
+            "self_pgid": int,
+            "allowed_proc_names": [str, ...],   # passthrough for aggregator
+            "per_gpu": [
+                {"gpu": 0, "processes": [
+                    {"pid": int, "name": str, "hbm_bytes": int|None,
+                     "is_self": bool, "is_allowed": bool, "is_foreign": bool},
+                    ...
+                ]},
+                ...
+            ],
+            "foreign_count": int,   # PIDs not in our pgid and not allowed
+            "error": str            # only when ok is False
+        }
+
+    Filtering: a PID is treated as "ours" (and thus not foreign) if it
+    matches our pgid -- this catches our own python process plus any
+    per-GPU subprocess we have spawned. ``allowed_proc_names`` is a
+    case-insensitive name allow-list for known node-resident agents
+    (``rocm-smi-daemon``, ``amd-smi``, ``dcgm-exporter``, ...).
+    """
+    allowed = {n.strip().lower() for n in (allowed_proc_names or []) if n.strip()}
+    try:
+        self_pgid = os.getpgid(self_pid)
+    except OSError:
+        self_pgid = self_pid
+
+    out: Dict[str, Any] = {
+        "ok": False,
+        "tool": None,
+        "self_pid": int(self_pid),
+        "self_pgid": int(self_pgid),
+        "allowed_proc_names": sorted(allowed),
+        "per_gpu": [],
+        "foreign_count": 0,
+    }
+
+    def _annotate(pid: int, name: str, hbm_bytes: Optional[int]) -> Dict[str, Any]:
+        try:
+            pgid = os.getpgid(int(pid))
+        except OSError:
+            pgid = -1
+        is_self = (int(pid) == int(self_pid)) or (pgid == self_pgid)
+        is_allowed = (name or "").strip().lower() in allowed
+        return {
+            "pid": int(pid),
+            "name": name or "",
+            "hbm_bytes": int(hbm_bytes) if isinstance(hbm_bytes, (int, float)) else None,
+            "is_self": bool(is_self),
+            "is_allowed": bool(is_allowed),
+            "is_foreign": bool(not is_self and not is_allowed),
+        }
+
+    if _which("amd-smi") is not None:
+        # 1) amd-smi process --json
+        try:
+            cp = subprocess.run(
+                ["amd-smi", "process", "--json"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=15, check=False,
+            )
+            if cp.returncode == 0 and cp.stdout.strip():
+                try:
+                    doc = json.loads(cp.stdout)
+                    out["per_gpu"] = _flatten_amd_smi_process_json(doc, _annotate)
+                    out["tool"] = "amd-smi process --json"
+                    out["ok"] = True
+                except Exception as e:
+                    out["json_parse_error"] = str(e)
+            else:
+                out["json_rc"] = cp.returncode
+                out["json_stderr"] = (cp.stderr or "").strip()[:200]
+        except subprocess.TimeoutExpired:
+            out["json_error"] = "amd-smi process --json timed out"
+        except Exception as e:
+            out["json_error"] = str(e)
+
+        # 2) amd-smi process (text)
+        if not out["ok"]:
+            try:
+                cp = subprocess.run(
+                    ["amd-smi", "process"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=15, check=False,
+                )
+                if cp.returncode == 0:
+                    parsed = _parse_amd_smi_process_text(cp.stdout, _annotate)
+                    out["per_gpu"] = parsed
+                    out["tool"] = "amd-smi process"
+                    out["ok"] = True
+                    out["raw"] = cp.stdout[:4000]
+                else:
+                    out["text_rc"] = cp.returncode
+                    out["text_stderr"] = (cp.stderr or "").strip()[:200]
+            except subprocess.TimeoutExpired:
+                out["text_error"] = "amd-smi process timed out"
+            except Exception as e:
+                out["text_error"] = str(e)
+
+    # 3) lsof on /dev/kfd + /dev/dri/renderD* (we cannot map back to specific
+    # GPUs reliably this way, but at least we surface foreign openers).
+    if not out["ok"]:
+        try:
+            import glob as _glob
+            paths = ["/dev/kfd"] + sorted(_glob.glob("/dev/dri/renderD*"))
+            existing = [p for p in paths if os.path.exists(p)]
+            if existing and _which("lsof") is not None:
+                cp = subprocess.run(
+                    ["lsof", "-Fpcn", "--", *existing],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=10, check=False,
+                )
+                if cp.returncode in (0, 1):  # lsof exits 1 when nothing open
+                    procs = _parse_lsof_pcn(cp.stdout, _annotate)
+                    # Without per-GPU mapping, surface as a single bucket
+                    # under gpu=-1 so the aggregator still flags foreigners.
+                    out["per_gpu"] = [{"gpu": -1, "processes": procs}] if procs else []
+                    out["tool"] = "lsof"
+                    out["ok"] = True
+                else:
+                    out["lsof_rc"] = cp.returncode
+        except Exception as e:
+            out["lsof_error"] = str(e)
+
+    if not out["ok"] and "error" not in out:
+        out["error"] = "no working enumeration tool (amd-smi process / lsof)"
+
+    out["foreign_count"] = sum(
+        1
+        for g in out["per_gpu"]
+        for p in (g.get("processes") or [])
+        if p.get("is_foreign")
+    )
+    return out
+
+
+def _flatten_amd_smi_process_json(
+    doc: Any,
+    annotate: Any,
+) -> List[Dict[str, Any]]:
+    """Coerce the amd-smi process JSON into a stable per-GPU shape.
+
+    The schema varies across releases; we only touch the most-stable
+    nesting and tolerate missing fields silently. Two top-level shapes
+    are seen in the wild:
+
+      A) Top-level list of per-GPU dicts each carrying ``process_list``::
+
+           [{"gpu": 0, "process_list": [{"pid": ..., "name": ...,
+                                          "memory_usage": {"vram_mem": ...}}]}]
+
+      B) Top-level list of per-process dicts each carrying ``gpus`` /
+         ``gpu``::
+
+           [{"pid": ..., "name": ..., "gpu": 0, "memory_usage": {...}}]
+    """
+    out_by_gpu: Dict[int, List[Dict[str, Any]]] = {}
+
+    def _push(gpu: int, pid: Any, name: Any, hbm: Any) -> None:
+        if not isinstance(pid, (int, float)):
+            return
+        ann = annotate(int(pid), str(name or ""), hbm)
+        out_by_gpu.setdefault(int(gpu), []).append(ann)
+
+    def _hbm_of(d: Dict[str, Any]) -> Optional[int]:
+        # "memory_usage": {"vram_mem": "12345 B" | 12345 | "12 MB"}
+        mu = d.get("memory_usage") or d.get("mem_usage") or d.get("vram") or {}
+        if isinstance(mu, dict):
+            for k in ("vram_mem", "vram_memory", "vram", "value", "bytes"):
+                v = mu.get(k)
+                if isinstance(v, (int, float)):
+                    return int(v)
+                if isinstance(v, str):
+                    return _parse_size_with_unit(v)
+        if isinstance(mu, (int, float)):
+            return int(mu)
+        if isinstance(mu, str):
+            return _parse_size_with_unit(mu)
+        return None
+
+    items = doc if isinstance(doc, list) else (
+        doc.get("processes") or doc.get("gpus") or [] if isinstance(doc, dict) else []
+    )
+    if not isinstance(items, list):
+        items = []
+
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        # Shape A: per-GPU dict with process_list
+        plist = item.get("process_list") or item.get("processes")
+        if isinstance(plist, list):
+            gpu_idx = item.get("gpu")
+            if not isinstance(gpu_idx, int):
+                gpu_idx = -1
+            for p in plist:
+                if not isinstance(p, dict):
+                    continue
+                _push(gpu_idx,
+                      p.get("pid") or p.get("process_id"),
+                      p.get("name") or p.get("process_name"),
+                      _hbm_of(p))
+            continue
+        # Shape B: per-process dict with explicit gpu
+        if "pid" in item or "process_id" in item:
+            g = item.get("gpu")
+            gpus = item.get("gpus") if isinstance(item.get("gpus"), list) else (
+                [g] if isinstance(g, int) else [-1]
+            )
+            for gpu_idx in gpus:
+                if not isinstance(gpu_idx, int):
+                    gpu_idx = -1
+                _push(gpu_idx,
+                      item.get("pid") or item.get("process_id"),
+                      item.get("name") or item.get("process_name"),
+                      _hbm_of(item))
+
+    return [{"gpu": k, "processes": v} for k, v in sorted(out_by_gpu.items())]
+
+
+def _parse_amd_smi_process_text(text: str, annotate: Any) -> List[Dict[str, Any]]:
+    """Best-effort parser for ``amd-smi process`` plain-text output.
+
+    Format varies, but typical layout is one record per process with lines
+    like ``GPU: 0`` / ``PID: 12345`` / ``NAME: python`` / ``VRAM_MEM: 256 MB``.
+    We tokenise key-value pairs case-insensitively and group records by
+    blank-line separators.
+    """
+    out_by_gpu: Dict[int, List[Dict[str, Any]]] = {}
+    cur: Dict[str, Any] = {}
+    blocks: List[Dict[str, Any]] = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            if cur:
+                blocks.append(cur)
+                cur = {}
+            continue
+        if ":" in line:
+            k, _, v = line.partition(":")
+            cur[k.strip().lower()] = v.strip()
+    if cur:
+        blocks.append(cur)
+    for b in blocks:
+        gpu_s = b.get("gpu") or b.get("gpu_id") or b.get("device") or "-1"
+        try:
+            gpu = int(gpu_s.split()[0])
+        except Exception:
+            gpu = -1
+        try:
+            pid = int(b.get("pid", "").split()[0])
+        except Exception:
+            continue
+        name = b.get("name") or b.get("process") or b.get("process_name") or ""
+        hbm_raw = (
+            b.get("vram_mem") or b.get("vram") or b.get("memory_usage")
+            or b.get("mem_usage") or ""
+        )
+        hbm = _parse_size_with_unit(hbm_raw) if hbm_raw else None
+        out_by_gpu.setdefault(gpu, []).append(annotate(pid, name, hbm))
+    return [{"gpu": k, "processes": v} for k, v in sorted(out_by_gpu.items())]
+
+
+def _parse_lsof_pcn(text: str, annotate: Any) -> List[Dict[str, Any]]:
+    """Parse ``lsof -Fpcn`` output (one field per line, prefixed by f-code).
+
+    We only need ``p<pid>`` and ``c<command>``. Returns one annotated
+    record per unique PID; HBM bytes unknown (lsof can't measure that).
+    """
+    out: Dict[int, Dict[str, Any]] = {}
+    cur_pid: Optional[int] = None
+    cur_name = ""
+    for line in text.splitlines():
+        if not line:
+            continue
+        tag, val = line[0], line[1:]
+        if tag == "p":
+            try:
+                cur_pid = int(val)
+            except ValueError:
+                cur_pid = None
+            cur_name = ""
+        elif tag == "c" and cur_pid is not None:
+            cur_name = val
+            out[cur_pid] = annotate(cur_pid, cur_name, None)
+    return list(out.values())
+
+
+def _parse_size_with_unit(s: str) -> Optional[int]:
+    """Parse a size string like ``"256 MB"``/``"12.5GiB"``/``"12345"`` into bytes."""
+    if not s:
+        return None
+    s = s.strip()
+    if not s:
+        return None
+    # plain int / float
+    try:
+        return int(float(s))
+    except ValueError:
+        pass
+    units = {
+        "b": 1, "k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10,
+        "m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
+        "g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
+        "t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40,
+    }
+    parts = s.replace(",", " ").split()
+    try:
+        num = float(parts[0])
+    except (ValueError, IndexError):
+        return None
+    unit = (parts[1].lower() if len(parts) > 1 else "b").rstrip(".")
+    mult = units.get(unit, 1)
+    return int(num * mult)
 
 
 # ---------------------------------------------------------------------------
@@ -1476,6 +1880,7 @@ def _spawn_per_gpu(
     tier2_perf: bool,
     gemm_tflops_min: float,
     hbm_gbs_min: float,
+    hbm_busy_threshold_gib: float,
 ) -> GPUResult:
     """Spawn ``python -m primus.tools.preflight.node_smoke _per_gpu <gpu> ...``
     with a hard timeout so a stuck driver call cannot wedge the parent."""
@@ -1489,6 +1894,8 @@ def _spawn_per_gpu(
         str(gemm_tflops_min),
         "--hbm-gbs-min",
         str(hbm_gbs_min),
+        "--hbm-busy-threshold-gib",
+        str(hbm_busy_threshold_gib),
     ]
     if tier2_perf:
         cmd.append("--tier2-perf")
@@ -1553,10 +1960,16 @@ def _node_status_from(
     per_gpu: List[GPUResult],
     tier1_extra: Dict[str, Any],
     tier2_extra: Dict[str, Any],
+    *,
+    allow_foreign_procs: bool = False,
 ) -> List[str]:
     """Compute a list of ``fail_reasons`` for the node from collected results.
 
     Empty list -> node PASS. Any non-empty result -> node FAIL.
+
+    ``allow_foreign_procs`` downgrades the foreign-process FAIL to a
+    silent inclusion in the JSON (still surfaced by the aggregator's
+    "Busy GPUs" section, just not a hard fail).
     """
     reasons: List[str] = []
 
@@ -1629,6 +2042,40 @@ def _node_status_from(
             f"{tool.get('timeout_sec', '?')}s -- driver may be wedging"
         )
 
+    # G: foreign processes holding the GPU. Hard-fail by default because
+    # this is the single most common cause of training failing to launch
+    # on an otherwise-healthy node (leaked Python ranks from a previous
+    # job, a profiler that never detached, a foreign tenant on a shared
+    # partition). The operator can downgrade with --allow-foreign-procs
+    # if their workflow legitimately co-tenants the GPU.
+    gp = tier1_extra.get("gpu_processes") or {}
+    if not allow_foreign_procs and gp.get("foreign_count", 0) > 0:
+        examples: List[str] = []
+        for g in gp.get("per_gpu") or []:
+            for p in g.get("processes") or []:
+                if not p.get("is_foreign"):
+                    continue
+                hbm = p.get("hbm_bytes")
+                hbm_s = (
+                    f" hbm={round(hbm / (1 << 30), 2)}GiB"
+                    if isinstance(hbm, int) and hbm > 0
+                    else ""
+                )
+                examples.append(
+                    f"gpu{g.get('gpu')}: pid={p.get('pid')} "
+                    f"name={p.get('name')!r}{hbm_s}"
+                )
+                if len(examples) >= 3:
+                    break
+            if len(examples) >= 3:
+                break
+        reasons.append(
+            f"gpu_processes: {gp.get('foreign_count', 0)} foreign process(es) "
+            f"holding GPU(s) (e.g. " + "; ".join(examples) + ") -- likely "
+            f"leaked rank(s) from a previous job. Clean up with "
+            f"`pkill -9 -f train.py` (or similar) or pass --allow-foreign-procs."
+        )
+
     return reasons
 
 
@@ -1688,6 +2135,7 @@ def _cmd_per_gpu(ns: argparse.Namespace) -> int:
         tier2_perf=bool(ns.tier2_perf),
         gemm_tflops_min=float(ns.gemm_tflops_min),
         hbm_gbs_min=float(ns.hbm_gbs_min),
+        hbm_busy_threshold_bytes=int(float(ns.hbm_busy_threshold_gib) * (1 << 30)),
     )
     # Single JSON line on stdout; nothing else.
     print(json.dumps(result), flush=True)
@@ -1786,6 +2234,48 @@ def _cmd_run(ns: argparse.Namespace) -> int:
             "Per-GPU GEMM and HBM checks will still run."
         )
 
+    # G: enumerate processes currently holding each GPU BEFORE we spawn
+    # any per-GPU subprocess. Anything we see here is, by definition, not
+    # us -- it's a leaked rank from a previous job, a foreign tenant, or
+    # an in-band monitoring agent. The aggregator + _node_status_from
+    # turn this into a hard FAIL unless the operator opted out via
+    # --allow-foreign-procs (or whitelisted the agent name).
+    allowed_proc_names = [
+        s for s in (getattr(ns, "allowed_procs", "") or "").split(",") if s.strip()
+    ]
+    tier1_extra_pre: Dict[str, Any] = {}
+    tier1_extra_pre["gpu_processes"] = _collect_gpu_processes(
+        self_pid=os.getpid(),
+        allowed_proc_names=allowed_proc_names,
+    )
+    gp = tier1_extra_pre["gpu_processes"]
+    if gp.get("ok"):
+        _log(
+            f"gpu_processes ({gp.get('tool')}): "
+            f"{gp.get('foreign_count', 0)} foreign PID(s) across "
+            f"{len(gp.get('per_gpu') or [])} GPU bucket(s)"
+        )
+        if gp.get("foreign_count", 0) > 0:
+            for g in gp.get("per_gpu") or []:
+                for p in g.get("processes") or []:
+                    if p.get("is_foreign"):
+                        hbm = p.get("hbm_bytes")
+                        hbm_s = (
+                            f"{round(hbm / (1 << 30), 2)} GiB"
+                            if isinstance(hbm, int) and hbm > 0
+                            else "?"
+                        )
+                        _warn(
+                            f"foreign process on gpu{g.get('gpu')}: "
+                            f"pid={p.get('pid')} name={p.get('name')!r} "
+                            f"hbm={hbm_s}"
+                        )
+    else:
+        _warn(
+            f"gpu_processes: enumeration unavailable "
+            f"({gp.get('error') or gp.get('json_error') or gp.get('text_error') or '?'})"
+        )
+
     t0 = time.time()
     per_gpu: List[GPUResult] = []
     for i in range(expected_gpus):
@@ -1795,6 +2285,7 @@ def _cmd_run(ns: argparse.Namespace) -> int:
             tier2_perf=bool(ns.tier2_perf),
             gemm_tflops_min=ns.gemm_tflops_min,
             hbm_gbs_min=ns.hbm_gbs_min,
+            hbm_busy_threshold_gib=float(ns.hbm_busy_threshold_gib),
         )
         per_gpu.append(r)
         _log(
@@ -1805,6 +2296,7 @@ def _cmd_run(ns: argparse.Namespace) -> int:
 
     # Tier 1 reused info collectors
     tier1_extra: Dict[str, Any] = {}
+    tier1_extra.update(tier1_extra_pre)  # carry forward gpu_processes
     tier1_extra.update(_collect_reused_info())
     if not ns.skip_dmesg:
         tier1_extra["dmesg"] = _collect_dmesg_errors(window_minutes=ns.dmesg_minutes)
@@ -1905,7 +2397,10 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         tier2_extra["rccl"] = rccl
         _log(f"tier2 RCCL: {rccl}")
 
-    fail_reasons = _node_status_from(per_gpu, tier1_extra, tier2_extra)
+    fail_reasons = _node_status_from(
+        per_gpu, tier1_extra, tier2_extra,
+        allow_foreign_procs=bool(ns.allow_foreign_procs),
+    )
     status = "PASS" if not fail_reasons else "FAIL"
 
     node_result = NodeResult(
@@ -2199,6 +2694,77 @@ def _tooling_latency_rows(
             "flag": flag,
             "timeout_sec": t.get("timeout_sec"),
         })
+    return rows
+
+
+def _busy_gpu_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Per-node foreign GPU process listing (for the "Busy GPUs" section)."""
+    rows: List[Dict[str, Any]] = []
+    for n in nodes:
+        gp = (n.get("tier1") or {}).get("gpu_processes") or {}
+        if not gp.get("ok"):
+            continue
+        per_gpu = gp.get("per_gpu") or []
+        for g in per_gpu:
+            for p in g.get("processes") or []:
+                if not p.get("is_foreign"):
+                    continue
+                hbm_b = p.get("hbm_bytes")
+                rows.append({
+                    "node_rank": n.get("node_rank", "?"),
+                    "host": n.get("host", "?"),
+                    "gpu": g.get("gpu", "?"),
+                    "pid": p.get("pid"),
+                    "name": p.get("name") or "",
+                    "hbm_gib": (
+                        round(hbm_b / (1 << 30), 2)
+                        if isinstance(hbm_b, int) and hbm_b > 0
+                        else None
+                    ),
+                })
+    return rows
+
+
+def _pretouch_hbm_rows(
+    nodes: List[Dict[str, Any]], threshold_gib: float,
+) -> List[Dict[str, Any]]:
+    """Per-GPU pre-touch HBM-used outliers (above threshold)."""
+    rows: List[Dict[str, Any]] = []
+    for n in nodes:
+        per_gpu = (n.get("tier1") or {}).get("per_gpu") or []
+        for p in per_gpu:
+            d = p.get("details") or {}
+            used_gib = d.get("hbm_pre_touch_used_gib")
+            if not isinstance(used_gib, (int, float)):
+                continue
+            if used_gib >= threshold_gib:
+                rows.append({
+                    "node_rank": n.get("node_rank", "?"),
+                    "host": n.get("host", "?"),
+                    "gpu": p.get("gpu", "?"),
+                    "used_gib": round(float(used_gib), 2),
+                })
+    return rows
+
+
+def _gpu_activity_rows(
+    nodes: List[Dict[str, Any]], warn_pct: float,
+) -> List[Dict[str, Any]]:
+    """Per-GPU compute-activity outliers (above warn threshold)."""
+    rows: List[Dict[str, Any]] = []
+    for n in nodes:
+        amd = (n.get("tier1") or {}).get("gpu_low_level") or {}
+        for rec in amd.get("per_gpu") or []:
+            pct = rec.get("gfx_activity_pct")
+            if not isinstance(pct, (int, float)):
+                continue
+            if float(pct) >= warn_pct:
+                rows.append({
+                    "node_rank": n.get("node_rank", "?"),
+                    "host": n.get("host", "?"),
+                    "gpu": rec.get("gpu", "?"),
+                    "activity_pct": round(float(pct), 1),
+                })
     return rows
 
 
@@ -2636,6 +3202,95 @@ def _cmd_aggregate(ns: argparse.Namespace) -> int:
             f.write(f"*Tooling section failed to render: {e}*\n")
             _warn(f"tooling render failed: {e}")
 
+        # ----- G: Busy GPUs / leaked processes -----
+        f.write("\n## Busy GPUs / leaked processes\n\n")
+        try:
+            busy_rows = _busy_gpu_rows(nodes)
+            if not busy_rows:
+                f.write(
+                    "*No foreign processes detected on any GPU "
+                    "(or `amd-smi process` was unavailable on every node).*\n"
+                )
+            else:
+                f.write(
+                    "Foreign PIDs found holding GPUs at smoke start. The most "
+                    "common cause is leaked Python ranks from a previous "
+                    "training job (look for `python` / `torchrun` / `train.py`). "
+                    "Clean up with `pkill -9 -f train.py` (or similar) on the "
+                    "listed nodes BEFORE launching the next job.\n\n"
+                )
+                f.write("| Node | Hostname | GPU | PID | Process | HBM held (GiB) |\n")
+                f.write("|------|----------|-----|-----|---------|----------------|\n")
+                for r in busy_rows:
+                    name = str(r.get("name", "")).replace("|", "/")[:40]
+                    hbm = r.get("hbm_gib")
+                    hbm_s = f"{hbm}" if hbm is not None else "?"
+                    f.write(
+                        f"| {r['node_rank']} | {r['host']} | "
+                        f"{r['gpu']} | {r['pid']} | `{name}` | {hbm_s} |\n"
+                    )
+        except Exception as e:
+            f.write(f"*Busy-GPU section failed to render: {e}*\n")
+            _warn(f"busy-gpu render failed: {e}")
+
+        # ----- G: Pre-touch HBM-used outliers -----
+        f.write("\n## GPU pre-touch HBM usage outliers\n\n")
+        try:
+            threshold = float(getattr(ns, "hbm_busy_threshold_gib", 2.0))
+            pt_rows = _pretouch_hbm_rows(nodes, threshold_gib=threshold)
+            if not pt_rows:
+                f.write(
+                    f"*No GPU exceeded the pre-touch HBM threshold "
+                    f"({threshold} GiB) -- every GPU started clean.*\n"
+                )
+            else:
+                f.write(
+                    f"GPUs with more than **{threshold} GiB** of HBM already "
+                    f"in use BEFORE smoke touched the device. This number is "
+                    "not polluted by our own caching allocator (it's measured "
+                    "before any allocation), so it directly reflects foreign "
+                    "or leaked occupancy.\n\n"
+                )
+                f.write("| Node | Hostname | GPU | HBM used pre-touch (GiB) |\n")
+                f.write("|------|----------|-----|---------------------------|\n")
+                for r in pt_rows:
+                    f.write(
+                        f"| {r['node_rank']} | {r['host']} | "
+                        f"{r['gpu']} | {r['used_gib']} |\n"
+                    )
+        except Exception as e:
+            f.write(f"*Pre-touch HBM section failed to render: {e}*\n")
+            _warn(f"pretouch-hbm render failed: {e}")
+
+        # ----- G: GPU compute activity outliers -----
+        f.write("\n## GPU compute-activity outliers\n\n")
+        try:
+            warn_pct = float(getattr(ns, "gpu_activity_warn_pct", 20.0))
+            act_rows = _gpu_activity_rows(nodes, warn_pct=warn_pct)
+            if not act_rows:
+                f.write(
+                    f"*No GPU exceeded `gfx_activity_pct >= {warn_pct}%` at "
+                    "smoke start (or amd-smi did not report activity).*\n"
+                )
+            else:
+                f.write(
+                    f"GPUs reporting **>= {warn_pct}%** compute activity at "
+                    "smoke start. Short bursts are normal; sustained "
+                    "non-trivial activity across multiple GPUs strongly "
+                    "suggests a leaked rank still running compute. Warn-only "
+                    "(does not by itself fail the node).\n\n"
+                )
+                f.write("| Node | Hostname | GPU | Activity % |\n")
+                f.write("|------|----------|-----|------------|\n")
+                for r in act_rows:
+                    f.write(
+                        f"| {r['node_rank']} | {r['host']} | "
+                        f"{r['gpu']} | {r['activity_pct']} |\n"
+                    )
+        except Exception as e:
+            f.write(f"*Activity section failed to render: {e}*\n")
+            _warn(f"activity render failed: {e}")
+
         # Tier 2 perf summary -- only emitted when at least one node ran Tier 2.
         # Surfaces per-node GEMM TFLOPS / HBM GB/s (min/median/max across the
         # node's GPUs) plus the local RCCL all-reduce GB/s, so outliers across
@@ -2793,6 +3448,24 @@ def _build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--rocm-smi-timeout-sec", type=float, default=5.0,
                     help="Hard timeout for `rocm-smi --version`. Hitting it is "
                          "a node FAIL (driver likely wedging).")
+    # G: foreign / leaked process detection. Hard-fail by default; the
+    # operator can opt out for partitions that legitimately co-tenant the
+    # GPU, or whitelist known in-band agents by name.
+    pr.add_argument("--hbm-busy-threshold-gib", type=float, default=2.0,
+                    help="FAIL the node if any GPU has more than this much "
+                         "HBM in use BEFORE we touch the device (i.e. someone "
+                         "else is holding it). Default: 2.0 GiB.")
+    pr.add_argument("--allow-foreign-procs", action="store_true",
+                    help="Do NOT FAIL the node when foreign processes are "
+                         "found holding a GPU. They will still be reported.")
+    pr.add_argument("--allowed-procs", type=str, default="",
+                    help="Comma-separated process names that are OK to find "
+                         "holding the GPU (e.g. "
+                         "'rocm-smi-daemon,amd-smi,dcgm-exporter').")
+    pr.add_argument("--gpu-activity-warn-pct", type=float, default=20.0,
+                    help="Aggregator warns (does NOT fail) if amd-smi reports "
+                         "any GPU's gfx_activity_pct above this when smoke "
+                         "starts. Default: 20.")
     pr.add_argument("--no-clean-dump-path", action="store_true",
                     help="Do NOT auto-wipe stale per-node JSONs and aggregator "
                          "outputs from --dump-path on rank 0 at startup. "
@@ -2817,6 +3490,14 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="Warn (info-only) when wall-clock spread across nodes "
                          "exceeds this many seconds. Includes srun launch "
                          "jitter so the default is loose.")
+    # Mirror the run-side thresholds so the report can label its sections
+    # using the same numbers each node's `run` was configured with.
+    pa.add_argument("--hbm-busy-threshold-gib", type=float, default=2.0,
+                    help="Pre-touch HBM-used threshold (GiB) used by the "
+                         "'GPU pre-touch HBM usage outliers' section.")
+    pa.add_argument("--gpu-activity-warn-pct", type=float, default=20.0,
+                    help="GPU activity %% threshold used by the "
+                         "'GPU compute-activity outliers' section.")
     pa.add_argument("--expected-nodelist-file", type=str, default=None,
                     help="Optional file with one expected (short) hostname per line. "
                          "When provided, missing nodes are reported with their real "
@@ -2832,6 +3513,7 @@ def _build_parser() -> argparse.ArgumentParser:
     pg.add_argument("--tier2-perf", action="store_true")
     pg.add_argument("--gemm-tflops-min", type=float, default=600.0)
     pg.add_argument("--hbm-gbs-min", type=float, default=2000.0)
+    pg.add_argument("--hbm-busy-threshold-gib", type=float, default=2.0)
     pg.set_defaults(func=_cmd_per_gpu)
 
     return p
