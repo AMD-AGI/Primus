@@ -59,9 +59,11 @@ def barrier_after_comm_destroy(delay_sec: float = DEFAULT_COMM_CLEANUP_DELAY_SEC
     This function ensures all ranks have completed destruction (barrier) and then
     waits a short period for the OS to release ports before the next group creation.
     """
+    log(f"  barrier_after_comm_destroy: barrier synced, sleeping {delay_sec:.1f}s")
     dist.barrier(device_ids=[torch.cuda.current_device()])
     if delay_sec > 0:
         time.sleep(delay_sec)
+    log(f"  barrier_after_comm_destroy: done (delay={delay_sec:.1f}s)")
 
 
 def remove_file(file_path):

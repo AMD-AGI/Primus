@@ -192,6 +192,7 @@ See [Preflight](./preflight.md) for the full list. The most common are:
 - Selection: `--host`, `--gpu`, `--network`, `--perf-test`
 - Reporting: `--dump-path`, `--report-file-name`, `--disable-pdf`
 - Perf-test extras: `--plot`
+- Reliability: `--comm-cleanup-delay-sec <float>`
 
 If you do not pass `--report-file-name`, the wrapper auto-generates a unique one of the form:
 
@@ -323,6 +324,23 @@ The script does `source "$VENV_ACTIVATE"`, which works for venv/uv but not direc
    ```
 
    You'll still need `VENV_ACTIVATE` set to anything non-empty so the existence check passes, or remove that guard.
+
+### "Address already in use" during perf tests
+
+This error occurs when NCCL/RCCL sockets are still in `TIME_WAIT` state from a recently destroyed process group. Preflight mitigates this with a barrier + sleep between test phases (`--comm-cleanup-delay-sec`, default 2s).
+
+If the error still occurs at very large scale (128+ nodes / 1000+ ranks):
+
+```bash
+# Increase the inter-phase delay
+runner/run_preflight_direct.sh --perf-test --comm-cleanup-delay-sec 5
+```
+
+If it occurs at `init_process_group` (before tests even start), it typically means a previous job left port 29500 in `TIME_WAIT`. Either wait ~60s or use a different port:
+
+```bash
+export MASTER_PORT=29501
+```
 
 ### Capturing full output
 
