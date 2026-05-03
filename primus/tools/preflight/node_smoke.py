@@ -681,10 +681,18 @@ def _collect_nic_status(expected_count: Optional[int]) -> Dict[str, Any]:
     """Inventory every RDMA port on this node and flag the ones that would
     silently break inter-node training.
 
-    Reads everything from ``/sys/class/infiniband`` so we don't depend on
-    ``ibv_devinfo`` / ``ibstat`` being present in the container. Per port
-    we capture:
+    Reads everything from ``/sys/class/infiniband`` (kernel ``ib_core``
+    ABI) so the check is **vendor- and fabric-agnostic** -- works on
+    Mellanox/NVIDIA (``mlx5_ib``), Broadcom (``bnxt_re``), Intel
+    (``irdma``), Marvell (``qedr``), AWS EFA (``efa``), Huawei
+    (``hns_roce``), etc., and on either RoCE-over-Ethernet or true
+    InfiniBand fabrics. We do not depend on ``ibv_devinfo`` /
+    ``ibstat`` / vendor SDKs being present in the container.
 
+    Per port we capture:
+
+    * ``link_layer`` (``Ethernet`` for RoCE, ``InfiniBand`` for IB) --
+      determines which GID rule applies below;
     * link state (``state``: ``ACTIVE``/``DOWN``/``INIT``) and physical
       state (``phys_state``: ``LinkUp``/``Polling``/...);
     * link rate (Gb/s);
@@ -692,11 +700,20 @@ def _collect_nic_status(expected_count: Optional[int]) -> Dict[str, Any]:
       tanks RoCE all-reduce throughput);
     * GID counts -- total non-zero GIDs and the subset configured as
       ``RoCE v2`` (an empty RoCE v2 set is a frequent cause of training
-      jobs hanging at the first inter-node collective).
+      jobs hanging at the first inter-node collective on RoCE clusters).
 
     Issues are pushed into ``out["issues"]`` (each a short string). Hard
-    issues (port not Active / no RoCE v2 GIDs / wrong NIC count) are
-    treated as node FAIL by ``_node_status_from``.
+    issues (port not Active / missing GIDs / wrong NIC count) are
+    treated as node FAIL by ``_node_status_from``. The GID check is
+    fabric-aware:
+
+    * RoCE/Ethernet port must have at least one ``RoCE v2`` GID
+      configured (RoCEv1 is essentially unused for AI training).
+    * InfiniBand port must have at least one valid (non-zero) GID --
+      it is normally auto-populated by the SM; an empty GID table on
+      an ACTIVE IB port indicates a subnet-manager problem.
+    * Unknown ``link_layer`` (very old kernels) falls back to "must
+      have any valid GID" so we don't false-FAIL exotic configurations.
     """
     out: Dict[str, Any] = {
         "expected_count": expected_count,
@@ -748,6 +765,12 @@ def _collect_nic_status(expected_count: Optional[int]) -> Dict[str, Any]:
             except Exception:
                 pass
 
+            # Fabric type: "Ethernet" -> RoCE, "InfiniBand" -> IB.
+            # Determines which GID rule to apply below. Provided by
+            # ib_core for every RDMA driver since Linux 3.x; missing
+            # only on extremely old kernels.
+            link_layer = (_read_text(os.path.join(p, "link_layer")) or "").strip() or None
+
             # GID inventory. A GID is "all-zero" until configured.
             gid_count = 0
             rocev2_count = 0
@@ -791,6 +814,7 @@ def _collect_nic_status(expected_count: Optional[int]) -> Dict[str, Any]:
             out["ports"].append({
                 "device": dev,
                 "port": port,
+                "link_layer": link_layer,
                 "state": state or None,
                 "phys_state": phys or None,
                 "rate_gbps": rate_gbps,
@@ -805,8 +829,35 @@ def _collect_nic_status(expected_count: Optional[int]) -> Dict[str, Any]:
                 out["issues"].append(f"{dev}:{port} state={state} (expected ACTIVE)")
             if phys and phys.upper() != "LINKUP":
                 out["issues"].append(f"{dev}:{port} phys_state={phys} (expected LinkUp)")
-            if state.upper() == "ACTIVE" and rocev2_count == 0:
-                out["issues"].append(f"{dev}:{port} no RoCE v2 GIDs configured")
+            # Fabric-aware GID requirement on ACTIVE ports.
+            if state.upper() == "ACTIVE":
+                ll = (link_layer or "").lower()
+                if ll == "ethernet":
+                    # RoCE: needs at least one RoCE v2 GID; RoCEv1 is
+                    # essentially unused for AI training and we treat
+                    # its absence as a hard fail.
+                    if rocev2_count == 0:
+                        out["issues"].append(
+                            f"{dev}:{port} no RoCE v2 GIDs configured "
+                            f"(RoCE/Ethernet fabric)"
+                        )
+                elif ll == "infiniband":
+                    # True IB: subnet manager normally populates GIDs.
+                    # Empty GID table on an ACTIVE IB port = SM problem.
+                    if gid_count == 0:
+                        out["issues"].append(
+                            f"{dev}:{port} no GIDs populated "
+                            f"(InfiniBand fabric -- check subnet manager)"
+                        )
+                else:
+                    # Unknown / missing link_layer (very old kernel):
+                    # require at least one valid GID rather than a
+                    # specific type, to avoid false FAIL.
+                    if gid_count == 0:
+                        out["issues"].append(
+                            f"{dev}:{port} no valid GIDs configured "
+                            f"(link_layer unknown)"
+                        )
 
     if expected_count is not None and len(out["ports"]) != expected_count:
         out["issues"].append(
