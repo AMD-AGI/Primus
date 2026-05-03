@@ -945,53 +945,117 @@ def _collect_amd_smi_metrics() -> Dict[str, Any]:
     across releases to make a robust default rule.
     """
     out: Dict[str, Any] = {"ok": False, "tool": None, "per_gpu": []}
-    if _which("amd-smi") is None:
-        out["error"] = "amd-smi not found in PATH"
-        return out
 
-    # Try JSON first.
-    try:
-        cp = subprocess.run(
-            ["amd-smi", "metric", "--json"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=15, check=False,
-        )
-        if cp.returncode == 0 and cp.stdout.strip():
+    if _which("amd-smi") is not None:
+        # Try JSON first.
+        try:
+            cp = subprocess.run(
+                ["amd-smi", "metric", "--json"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=15, check=False,
+            )
+            if cp.returncode == 0 and cp.stdout.strip():
+                try:
+                    doc = json.loads(cp.stdout)
+                    out["ok"] = True
+                    out["tool"] = "amd-smi metric --json"
+                    out["per_gpu"] = _flatten_amd_smi_metric_json(doc)
+                except Exception as e:
+                    out["json_parse_error"] = str(e)
+            else:
+                out["json_rc"] = cp.returncode
+                out["json_stderr"] = (cp.stderr or "").strip()[:200]
+        except subprocess.TimeoutExpired:
+            out["json_error"] = "amd-smi metric --json timed out"
+        except Exception as e:
+            out["json_error"] = str(e)
+
+        # If JSON didn't work, capture the raw text output so the operator
+        # can still grep it. We don't try to parse the human-readable text
+        # -- per-GPU outliers will still show up via the sysfs/torch-side
+        # details we capture in _per_gpu_body, and the rocm-smi fallback
+        # below will fill in ECC + activity in the per_gpu records.
+        if not out["ok"]:
             try:
-                doc = json.loads(cp.stdout)
-                out["ok"] = True
-                out["tool"] = "amd-smi metric --json"
-                out["per_gpu"] = _flatten_amd_smi_metric_json(doc)
-                return out
+                cp = subprocess.run(
+                    ["amd-smi", "metric"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=15, check=False,
+                )
+                if cp.returncode == 0:
+                    out["ok"] = True
+                    out["tool"] = "amd-smi metric"
+                    out["raw"] = cp.stdout[:8000]  # cap to keep JSON small
+                else:
+                    out["error"] = (
+                        (cp.stderr or "").strip()[:200] or f"rc={cp.returncode}"
+                    )
+            except subprocess.TimeoutExpired:
+                out["error"] = "amd-smi metric timed out"
             except Exception as e:
-                out["json_parse_error"] = str(e)
-        else:
-            out["json_rc"] = cp.returncode
-            out["json_stderr"] = (cp.stderr or "").strip()[:200]
-    except subprocess.TimeoutExpired:
-        out["json_error"] = "amd-smi metric --json timed out"
-    except Exception as e:
-        out["json_error"] = str(e)
+                out["error"] = str(e)
+    else:
+        out["error"] = "amd-smi not found in PATH"
 
-    # Fallback: capture the raw text output for operator grepping. We don't
-    # try to parse the human-readable text -- per-GPU outliers will still
-    # show up via the sysfs/torch-side details we capture in _per_gpu_body.
-    try:
-        cp = subprocess.run(
-            ["amd-smi", "metric"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=15, check=False,
-        )
-        if cp.returncode == 0:
-            out["ok"] = True
-            out["tool"] = "amd-smi metric"
-            out["raw"] = cp.stdout[:8000]  # cap to keep JSON small
-            return out
-        out["error"] = (cp.stderr or "").strip()[:200] or f"rc={cp.returncode}"
-    except subprocess.TimeoutExpired:
-        out["error"] = "amd-smi metric timed out"
-    except Exception as e:
-        out["error"] = str(e)
+    # rocm-smi fallback / fill-in. We always run it -- even when amd-smi
+    # produced JSON, the schema may have missed ECC or activity fields,
+    # and rocm-smi gives us a second independent source. Per-GPU records
+    # are merged by GPU index so amd-smi-provided power/clocks/temp stay
+    # alongside rocm-smi-provided ECC/activity.
+    if _which("rocm-smi") is not None:
+        # Build an index of existing records so we can merge in place.
+        by_gpu: Dict[int, Dict[str, Any]] = {}
+        for rec in out.get("per_gpu") or []:
+            g = rec.get("gpu")
+            if isinstance(g, int):
+                by_gpu[g] = rec
+
+        # ECC fill-in (only if not already populated by amd-smi)
+        ras = _rocm_smi_ras_info_text()
+        ecc_filled = 0
+        if ras.get("ok"):
+            for rec in ras.get("per_gpu") or []:
+                g = rec.get("gpu")
+                if not isinstance(g, int):
+                    continue
+                tgt = by_gpu.setdefault(g, {"gpu": g})
+                if tgt.get("ecc_uncorrectable_total") is None:
+                    tgt["ecc_uncorrectable_total"] = rec.get("ecc_uncorrectable_total")
+                    tgt["ecc_correctable_total"] = rec.get("ecc_correctable_total")
+                    tgt["ecc_source"] = "rocm-smi --showrasinfo"
+                    ecc_filled += 1
+            if ecc_filled:
+                out.setdefault("fallback_tools", []).append(
+                    f"rocm-smi --showrasinfo (ECC for {ecc_filled} GPU(s))"
+                )
+
+        # Activity fill-in (only if not already populated by amd-smi)
+        use = _rocm_smi_use_json()
+        act_filled = 0
+        if use.get("ok"):
+            for rec in use.get("per_gpu") or []:
+                g = rec.get("gpu")
+                if not isinstance(g, int):
+                    continue
+                tgt = by_gpu.setdefault(g, {"gpu": g})
+                if tgt.get("gfx_activity_pct") is None:
+                    tgt["gfx_activity_pct"] = rec.get("gfx_activity_pct")
+                    tgt["activity_source"] = "rocm-smi --showuse"
+                    act_filled += 1
+            if act_filled:
+                out.setdefault("fallback_tools", []).append(
+                    f"rocm-smi --showuse (activity for {act_filled} GPU(s))"
+                )
+
+        # Rebuild per_gpu in stable index order if rocm-smi added entries
+        if ecc_filled or act_filled:
+            out["per_gpu"] = [by_gpu[g] for g in sorted(by_gpu.keys())]
+            # If amd-smi produced nothing at all, this is now a successful
+            # collection, just sourced entirely from rocm-smi.
+            if not out["ok"] and out["per_gpu"]:
+                out["ok"] = True
+                out["tool"] = "rocm-smi (ECC/activity fallback)"
+
     return out
 
 
@@ -1212,7 +1276,22 @@ def _collect_gpu_processes(
             except Exception as e:
                 out["text_error"] = str(e)
 
-    # 3) lsof on /dev/kfd + /dev/dri/renderD* (we cannot map back to specific
+    # 3) rocm-smi --showpids --json. Doesn't give us per-GPU mapping
+    # (--showpidgpus emits "WARNING: No JSON data to report"), so all
+    # PIDs go into the gpu=-1 bucket -- same convention as the lsof
+    # fallback. This is still a HUGE win over lsof: rocm-smi reports
+    # the actual KFD process name which lets the operator decide if
+    # it's a leaked rank vs a known agent.
+    if not out["ok"]:
+        rocm = _rocm_smi_processes(_annotate)
+        if rocm.get("ok"):
+            out["per_gpu"] = rocm.get("per_gpu") or []
+            out["tool"] = rocm.get("tool")
+            out["ok"] = True
+        else:
+            out["rocm_smi_error"] = rocm.get("error")
+
+    # 4) lsof on /dev/kfd + /dev/dri/renderD* (we cannot map back to specific
     # GPUs reliably this way, but at least we surface foreign openers).
     if not out["ok"]:
         try:
@@ -1238,7 +1317,10 @@ def _collect_gpu_processes(
             out["lsof_error"] = str(e)
 
     if not out["ok"] and "error" not in out:
-        out["error"] = "no working enumeration tool (amd-smi process / lsof)"
+        out["error"] = (
+            "no working enumeration tool "
+            "(amd-smi process / rocm-smi --showpids / lsof)"
+        )
 
     out["foreign_count"] = sum(
         1
@@ -1255,17 +1337,32 @@ def _flatten_amd_smi_process_json(
 ) -> List[Dict[str, Any]]:
     """Coerce the amd-smi process JSON into a stable per-GPU shape.
 
-    The schema varies across releases; we only touch the most-stable
-    nesting and tolerate missing fields silently. Two top-level shapes
-    are seen in the wild:
+    The schema varies across releases; we tolerate missing fields silently.
+    Three top-level shapes are seen in the wild:
 
-      A) Top-level list of per-GPU dicts each carrying ``process_list``::
+      A) Per-GPU dicts each carrying ``process_list``, where each list
+         item wraps the actual process under ``process_info`` and reports
+         memory as ``{"value": N, "unit": "B"}`` -- this is the modern
+         ``amd-smi`` (>= 6.x) layout::
 
-           [{"gpu": 0, "process_list": [{"pid": ..., "name": ...,
-                                          "memory_usage": {"vram_mem": ...}}]}]
+           [{"gpu": 0, "process_list": [
+               {"process_info": {
+                   "pid": 12345, "name": "python",
+                   "memory_usage": {"vram_mem": {"value": 256, "unit": "MB"}}
+               }}
+           ]}]
 
-      B) Top-level list of per-process dicts each carrying ``gpus`` /
-         ``gpu``::
+      A') Same as A but each ``process_list`` item is the process dict
+          directly (older amd-smi releases), with memory as a flat int or
+          formatted string::
+
+           [{"gpu": 0, "process_list": [
+               {"pid": 12345, "name": "python",
+                "memory_usage": {"vram_mem": "256 MB"}}
+           ]}]
+
+      B) Top-level list of per-process dicts each carrying explicit
+         ``gpu`` / ``gpus`` (uncommon, but seen on a couple of branches)::
 
            [{"pid": ..., "name": ..., "gpu": 0, "memory_usage": {...}}]
     """
@@ -1277,21 +1374,56 @@ def _flatten_amd_smi_process_json(
         ann = annotate(int(pid), str(name or ""), hbm)
         out_by_gpu.setdefault(int(gpu), []).append(ann)
 
-    def _hbm_of(d: Dict[str, Any]) -> Optional[int]:
-        # "memory_usage": {"vram_mem": "12345 B" | 12345 | "12 MB"}
-        mu = d.get("memory_usage") or d.get("mem_usage") or d.get("vram") or {}
-        if isinstance(mu, dict):
-            for k in ("vram_mem", "vram_memory", "vram", "value", "bytes"):
-                v = mu.get(k)
-                if isinstance(v, (int, float)):
-                    return int(v)
-                if isinstance(v, str):
-                    return _parse_size_with_unit(v)
-        if isinstance(mu, (int, float)):
-            return int(mu)
-        if isinstance(mu, str):
-            return _parse_size_with_unit(mu)
+    def _value_unit_to_bytes(v: Any) -> Optional[int]:
+        """Resolve a size value that may be int, formatted string, or
+        ``{"value": N, "unit": "B|KB|MB|GB|..."}`` (modern amd-smi shape)
+        into bytes."""
+        if isinstance(v, (int, float)):
+            return int(v)
+        if isinstance(v, str):
+            return _parse_size_with_unit(v)
+        if isinstance(v, dict):
+            val = v.get("value")
+            unit = v.get("unit")
+            if isinstance(val, (int, float)):
+                if isinstance(unit, str) and unit.strip():
+                    return _parse_size_with_unit(f"{val} {unit.strip()}")
+                return int(val)
+            if isinstance(val, str):
+                if isinstance(unit, str) and unit.strip():
+                    return _parse_size_with_unit(f"{val} {unit.strip()}")
+                return _parse_size_with_unit(val)
         return None
+
+    def _hbm_of(d: Dict[str, Any]) -> Optional[int]:
+        # Preferred path: memory_usage.vram_mem (covers shapes A, A', B).
+        mu = d.get("memory_usage") if isinstance(d.get("memory_usage"), dict) else None
+        if mu is not None:
+            for k in ("vram_mem", "vram_memory", "vram"):
+                if k in mu:
+                    n = _value_unit_to_bytes(mu.get(k))
+                    if n is not None:
+                        return n
+        # Fallback: mem_usage at the same level (older shapes -- usually
+        # mirrors vram_mem on AMD GPUs since GTT/CPU are negligible).
+        if "mem_usage" in d:
+            n = _value_unit_to_bytes(d.get("mem_usage"))
+            if n is not None:
+                return n
+        # Last resort: a flat "vram" key directly under d.
+        if "vram" in d:
+            n = _value_unit_to_bytes(d.get("vram"))
+            if n is not None:
+                return n
+        return None
+
+    def _unwrap_proc(p: Dict[str, Any]) -> Dict[str, Any]:
+        """Modern amd-smi wraps each process under ``process_info``;
+        unwrap so the rest of the parser can read pid/name/memory at
+        the top level uniformly."""
+        if isinstance(p.get("process_info"), dict):
+            return p["process_info"]
+        return p
 
     items = doc if isinstance(doc, list) else (
         doc.get("processes") or doc.get("gpus") or [] if isinstance(doc, dict) else []
@@ -1302,7 +1434,7 @@ def _flatten_amd_smi_process_json(
     for item in items:
         if not isinstance(item, dict):
             continue
-        # Shape A: per-GPU dict with process_list
+        # Shape A / A': per-GPU dict with process_list
         plist = item.get("process_list") or item.get("processes")
         if isinstance(plist, list):
             gpu_idx = item.get("gpu")
@@ -1311,24 +1443,26 @@ def _flatten_amd_smi_process_json(
             for p in plist:
                 if not isinstance(p, dict):
                     continue
+                proc = _unwrap_proc(p)
                 _push(gpu_idx,
-                      p.get("pid") or p.get("process_id"),
-                      p.get("name") or p.get("process_name"),
-                      _hbm_of(p))
+                      proc.get("pid") if proc.get("pid") is not None else proc.get("process_id"),
+                      proc.get("name") or proc.get("process_name"),
+                      _hbm_of(proc))
             continue
         # Shape B: per-process dict with explicit gpu
-        if "pid" in item or "process_id" in item:
-            g = item.get("gpu")
-            gpus = item.get("gpus") if isinstance(item.get("gpus"), list) else (
+        proc = _unwrap_proc(item)
+        if "pid" in proc or "process_id" in proc:
+            g = proc.get("gpu")
+            gpus = proc.get("gpus") if isinstance(proc.get("gpus"), list) else (
                 [g] if isinstance(g, int) else [-1]
             )
             for gpu_idx in gpus:
                 if not isinstance(gpu_idx, int):
                     gpu_idx = -1
                 _push(gpu_idx,
-                      item.get("pid") or item.get("process_id"),
-                      item.get("name") or item.get("process_name"),
-                      _hbm_of(item))
+                      proc.get("pid") if proc.get("pid") is not None else proc.get("process_id"),
+                      proc.get("name") or proc.get("process_name"),
+                      _hbm_of(proc))
 
     return [{"gpu": k, "processes": v} for k, v in sorted(out_by_gpu.items())]
 
@@ -1435,6 +1569,35 @@ def _parse_size_with_unit(s: str) -> Optional[int]:
 
 
 def _collect_xgmi_topology() -> Dict[str, Any]:
+    """Try amd-smi topology first; fall back to rocm-smi --showtopotype.
+
+    Both tools produce slightly different per-row labels (amd-smi uses
+    PCIe BDFs, rocm-smi uses DRM device indices), but the link_types
+    matrix and non_xgmi_pairs computation is identical, so downstream
+    consumers in _node_status_from / the aggregator don't need to know
+    which tool produced the data.
+    """
+    out = _collect_xgmi_topology_amd_smi()
+    if out.get("ok"):
+        return out
+    rocm = _rocm_smi_topotype_json()
+    if rocm.get("ok"):
+        return {
+            "ok": True,
+            "tool": rocm.get("tool") or "rocm-smi --showtopotype --json",
+            "bdfs": [],  # rocm-smi reports DRM indices, not PCIe BDFs
+            "matrix": rocm.get("link_types") or [],
+            "n_gpus": rocm.get("n_gpus") or 0,
+            "non_xgmi_pairs": rocm.get("non_xgmi_pairs") or [],
+            "amd_smi_error": out.get("error"),
+        }
+    # Both failed -- preserve amd-smi's error for the operator and
+    # surface rocm-smi's separately so they can debug both paths.
+    out["rocm_smi_error"] = rocm.get("error")
+    return out
+
+
+def _collect_xgmi_topology_amd_smi() -> Dict[str, Any]:
     """Parse ``amd-smi topology`` and return a square link-type matrix.
 
     ``amd-smi topology`` emits several BDF-labelled sub-tables (ACCESS,
@@ -1678,6 +1841,429 @@ def _collect_rocm_smi_self_latency(*, timeout_sec: float) -> Dict[str, Any]:
     except Exception as e:
         out["error"] = str(e)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 -- rocm-smi fallbacks for the amd-smi-only checks
+#
+# rocm-smi is "usually available" even on nodes that lack amd-smi (older
+# ROCm installs, stripped-down containers). Every amd-smi check we
+# silently no-op when amd-smi is missing has a rocm-smi equivalent, so
+# we can keep ECC / XGMI / foreign-process / activity coverage even
+# without amd-smi. Each helper produces the same record shape the
+# upstream amd-smi parser already emits, so _node_status_from and the
+# aggregator helpers don't need any per-tool conditionals.
+#
+# Output schemas (cross-tool stable):
+#   ECC      -> per-GPU {gpu, ecc_correctable_total, ecc_uncorrectable_total}
+#   XGMI     -> {ok, tool, n_gpus, link_types: [[...]], non_xgmi_pairs}
+#   procs    -> per-GPU {gpu, processes: [annotated PID dicts]}
+#   activity -> per-GPU {gpu, gfx_activity_pct}
+# ---------------------------------------------------------------------------
+
+
+def _rocm_smi_ras_info_text(timeout_sec: float = 15.0) -> Dict[str, Any]:
+    """ECC counts via ``rocm-smi --showrasinfo`` (TEXT only).
+
+    The ``--json`` form returns "WARNING: No JSON data to report" so we
+    parse the text. Format is one block per GPU::
+
+        GPU[0]:         RAS INFO
+                Block       Status    Correctable Error  Uncorrectable Error
+                  UMC        ENABLED                  0                    0
+                 SDMA        ENABLED                  0                    0
+                  GFX        ENABLED                  0                    0
+                ...
+
+    Some blocks (ATHUB, PCIE_BIF, HDP, ...) report only Status. We sum
+    every numeric Correctable/Uncorrectable cell per GPU so a hardware
+    error in any block surfaces in ``ecc_uncorrectable_total``.
+    """
+    out: Dict[str, Any] = {"ok": False, "tool": None, "per_gpu": []}
+    if _which("rocm-smi") is None:
+        out["error"] = "rocm-smi not found in PATH"
+        return out
+    try:
+        cp = subprocess.run(
+            ["rocm-smi", "--showrasinfo"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=timeout_sec, check=False,
+        )
+        if cp.returncode != 0:
+            out["error"] = (cp.stderr or cp.stdout or "").strip()[:200] or f"rc={cp.returncode}"
+            return out
+        out["per_gpu"] = _parse_rocm_smi_ras_info_text(cp.stdout)
+        out["tool"] = "rocm-smi --showrasinfo"
+        out["ok"] = True
+    except subprocess.TimeoutExpired:
+        out["error"] = "rocm-smi --showrasinfo timed out"
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
+def _parse_rocm_smi_ras_info_text(text: str) -> List[Dict[str, Any]]:
+    """Parse the per-GPU ``GPU[N]: RAS INFO`` blocks from rocm-smi text."""
+    import re
+    out: List[Dict[str, Any]] = []
+    cur_gpu: Optional[int] = None
+    cur_corr = 0
+    cur_uncorr = 0
+    in_block = False
+    gpu_hdr = re.compile(r"^GPU\[(\d+)\]:\s*RAS INFO", re.IGNORECASE)
+    for raw in text.splitlines():
+        line = raw.strip()
+        m = gpu_hdr.match(line)
+        if m:
+            # Flush previous GPU
+            if cur_gpu is not None:
+                out.append({
+                    "gpu": cur_gpu,
+                    "ecc_correctable_total": cur_corr,
+                    "ecc_uncorrectable_total": cur_uncorr,
+                })
+            cur_gpu = int(m.group(1))
+            cur_corr = 0
+            cur_uncorr = 0
+            in_block = True
+            continue
+        if not in_block or cur_gpu is None:
+            continue
+        # End-of-block separator
+        if line.startswith("__") or line.startswith("=="):
+            continue
+        # Per-block row: "BLOCK STATUS CORR UNCORR" -- last two are ints
+        # when present. Header row has the words "Correctable Error" so
+        # we filter out non-numeric rows naturally.
+        toks = line.split()
+        if len(toks) < 4:
+            continue
+        try:
+            corr = int(toks[-2])
+            uncorr = int(toks[-1])
+        except ValueError:
+            continue
+        cur_corr += corr
+        cur_uncorr += uncorr
+    if cur_gpu is not None:
+        out.append({
+            "gpu": cur_gpu,
+            "ecc_correctable_total": cur_corr,
+            "ecc_uncorrectable_total": cur_uncorr,
+        })
+    return out
+
+
+def _rocm_smi_topotype_json(timeout_sec: float = 15.0) -> Dict[str, Any]:
+    """XGMI link-type matrix via ``rocm-smi --showtopotype --json``.
+
+    Output shape is keyed by pair-string::
+
+        {"system": {
+            "(Topology) Link type between DRM devices 0 and 1": "XGMI",
+            "(Topology) Link type between DRM devices 0 and 2": "XGMI",
+            ...   # upper triangle only
+        }}
+
+    We parse the indices out of each key with a regex, build a symmetric
+    NxN matrix, and emit it in the same shape ``_collect_xgmi_topology``
+    already produces (so downstream consumers don't care which tool
+    populated it). ``non_xgmi_pairs`` contains the (i, j, link_type)
+    triples for any off-diagonal pair whose link_type is not XGMI.
+    """
+    import re
+    out: Dict[str, Any] = {"ok": False, "tool": None, "n_gpus": 0,
+                           "link_types": [], "non_xgmi_pairs": []}
+    if _which("rocm-smi") is None:
+        out["error"] = "rocm-smi not found in PATH"
+        return out
+    try:
+        cp = subprocess.run(
+            ["rocm-smi", "--showtopotype", "--json"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=timeout_sec, check=False,
+        )
+        if cp.returncode != 0 or not cp.stdout.strip():
+            out["error"] = (cp.stderr or "").strip()[:200] or f"rc={cp.returncode}"
+            return out
+        try:
+            doc = json.loads(cp.stdout)
+        except Exception as e:
+            out["error"] = f"json parse failed: {e}"
+            return out
+        sys_block = doc.get("system") if isinstance(doc, dict) else None
+        if not isinstance(sys_block, dict):
+            out["error"] = "no `system` key in rocm-smi --showtopotype output"
+            return out
+        pat = re.compile(
+            r"DRM\s+devices?\s+(\d+)\s+and\s+(\d+)", re.IGNORECASE
+        )
+        pairs: Dict[tuple, str] = {}
+        max_idx = -1
+        for k, v in sys_block.items():
+            m = pat.search(str(k))
+            if not m:
+                continue
+            i = int(m.group(1))
+            j = int(m.group(2))
+            pairs[(i, j)] = str(v)
+            max_idx = max(max_idx, i, j)
+        if max_idx < 0:
+            out["error"] = "no parseable DRM-device pair keys"
+            return out
+        n = max_idx + 1
+        mat = [["?" for _ in range(n)] for _ in range(n)]
+        for (i, j), t in pairs.items():
+            mat[i][j] = t
+            mat[j][i] = t
+        for i in range(n):
+            mat[i][i] = "SELF"
+        non_xgmi: List[Any] = []
+        for i in range(n):
+            for j in range(i + 1, n):
+                t = mat[i][j]
+                if t and t.upper() != "XGMI":
+                    non_xgmi.append((i, j, t))
+        out["n_gpus"] = n
+        out["link_types"] = mat
+        out["non_xgmi_pairs"] = non_xgmi
+        out["tool"] = "rocm-smi --showtopotype --json"
+        out["ok"] = True
+    except subprocess.TimeoutExpired:
+        out["error"] = "rocm-smi --showtopotype timed out"
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
+def _rocm_smi_processes(
+    annotate: Any,
+    timeout_sec: float = 15.0,
+) -> Dict[str, Any]:
+    """Foreign-process enumeration via ``rocm-smi --showpids --json``.
+
+    Output shape (verified against rocm-smi on a busy MI300X)::
+
+        {"system": {
+            "PID2683309": "python3.11, 1, 24556904448, 0, 0",
+            "PID29324":   "gpuagent, 0, 0, 0, 0"
+        }}
+
+    Comma-separated fields are: ``name, num_gpus_used, vram_bytes,
+    sdma_bytes, cu_occupancy``. We extract ``name`` (field 0) and
+    ``vram_bytes`` (field 2) -- enough to surface leaked training PIDs
+    holding gigabytes of HBM. ``--showpidgpus --json`` returns
+    "No JSON data to report", so per-GPU mapping is not available --
+    all PIDs go into the gpu=-1 bucket (same convention as lsof).
+    """
+    out: Dict[str, Any] = {"ok": False, "tool": None, "per_gpu": []}
+    if _which("rocm-smi") is None:
+        out["error"] = "rocm-smi not found in PATH"
+        return out
+    try:
+        cp = subprocess.run(
+            ["rocm-smi", "--showpids", "--json"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=timeout_sec, check=False,
+        )
+        if cp.returncode != 0 or not cp.stdout.strip():
+            out["error"] = (cp.stderr or "").strip()[:200] or f"rc={cp.returncode}"
+            return out
+        try:
+            doc = json.loads(cp.stdout)
+        except Exception as e:
+            out["error"] = f"json parse failed: {e}"
+            return out
+        sys_block = doc.get("system") if isinstance(doc, dict) else None
+        if not isinstance(sys_block, dict):
+            # Empty or unexpected -- treat as "no PIDs"
+            out["tool"] = "rocm-smi --showpids --json"
+            out["ok"] = True
+            return out
+        procs: List[Dict[str, Any]] = []
+        for k, v in sys_block.items():
+            try:
+                pid = int(str(k).lstrip("PID").lstrip("pid"))
+            except ValueError:
+                continue
+            name = ""
+            hbm: Optional[int] = None
+            if isinstance(v, str):
+                parts = [s.strip() for s in v.split(",")]
+                if parts:
+                    name = parts[0]
+                # field 2 = VRAM bytes (rocm-smi --showpids documented format)
+                if len(parts) > 2:
+                    try:
+                        hbm = int(parts[2])
+                    except ValueError:
+                        hbm = None
+            elif isinstance(v, dict):
+                name = str(v.get("name") or v.get("process_name") or "")
+                vram = v.get("vram") or v.get("vram_bytes")
+                if isinstance(vram, (int, float)):
+                    hbm = int(vram)
+            elif isinstance(v, list) and v:
+                name = str(v[0])
+            procs.append(annotate(pid, name, hbm))
+        if procs:
+            out["per_gpu"] = [{"gpu": -1, "processes": procs}]
+        out["tool"] = "rocm-smi --showpids --json"
+        out["ok"] = True
+    except subprocess.TimeoutExpired:
+        out["error"] = "rocm-smi --showpids timed out"
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
+def _rocm_smi_use_json(timeout_sec: float = 15.0) -> Dict[str, Any]:
+    """GPU compute-activity % via ``rocm-smi --showuse --json``.
+
+    Output shape::
+
+        {"card0": {"GPU use (%)": "0", "GFX Activity": "465307149"}, ...}
+
+    "GPU use (%)" is the percentage we want for ``gfx_activity_pct``
+    (matching the amd-smi field name). "GFX Activity" is a cumulative
+    cycle counter, not a percentage -- ignored.
+    """
+    out: Dict[str, Any] = {"ok": False, "tool": None, "per_gpu": []}
+    if _which("rocm-smi") is None:
+        out["error"] = "rocm-smi not found in PATH"
+        return out
+    try:
+        cp = subprocess.run(
+            ["rocm-smi", "--showuse", "--json"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=timeout_sec, check=False,
+        )
+        if cp.returncode != 0 or not cp.stdout.strip():
+            out["error"] = (cp.stderr or "").strip()[:200] or f"rc={cp.returncode}"
+            return out
+        try:
+            doc = json.loads(cp.stdout)
+        except Exception as e:
+            out["error"] = f"json parse failed: {e}"
+            return out
+        if not isinstance(doc, dict):
+            out["error"] = "unexpected top-level shape"
+            return out
+        per_gpu: List[Dict[str, Any]] = []
+        for k, v in doc.items():
+            if not isinstance(v, dict):
+                continue
+            if not str(k).startswith("card"):
+                continue
+            try:
+                gpu = int(str(k)[len("card"):])
+            except ValueError:
+                continue
+            pct_raw = v.get("GPU use (%)") or v.get("GPU use")
+            try:
+                pct = float(str(pct_raw).strip())
+            except (TypeError, ValueError):
+                continue
+            per_gpu.append({"gpu": gpu, "gfx_activity_pct": pct})
+        out["per_gpu"] = per_gpu
+        out["tool"] = "rocm-smi --showuse --json"
+        out["ok"] = True
+    except subprocess.TimeoutExpired:
+        out["error"] = "rocm-smi --showuse timed out"
+    except Exception as e:
+        out["error"] = str(e)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 -- tooling availability inventory
+#
+# Several Tier 1 checks (ECC via amd-smi metric, XGMI via amd-smi topology,
+# foreign-process enumeration via amd-smi process / lsof, wedged-driver
+# canary via rocm-smi --version) are best-effort: each collector returns
+# ok=False and the FAIL rules in _node_status_from then iterate over empty
+# data, silently no-op'ing. That's fine on a node where the tools are
+# legitimately absent (containers stripped down for size), but DANGEROUS
+# in a production cluster -- a node with ECC errors, broken XGMI, leaked
+# ranks, or a stale ROCm install can PASS smoke just because amd-smi is
+# missing.
+#
+# This collector runs ONCE per node, captures which tools were resolvable
+# in PATH, and feeds three downstream consumers:
+#   1. A loud `_warn` at run-time so missing tools are visible in the
+#      srun log right next to "start node-smoke".
+#   2. An always-on "Tooling availability" section in the aggregator
+#      report -- a per-node table that's loud even when nothing else is.
+#   3. The optional `--require-tools` flag, which promotes a missing
+#      required tool to a hard FAIL via _node_status_from.
+# ---------------------------------------------------------------------------
+
+
+_TRACKED_TOOLS = ("amd-smi", "rocm-smi", "lsof")
+
+
+def _collect_tooling_inventory() -> Dict[str, Any]:
+    """Resolve each tracked tool in PATH and compute per-check coverage.
+
+    Output shape::
+
+        {
+            "ok": True,                          # always True; collector itself can't fail
+            "tools": {
+                "amd-smi":  {"present": True,  "path": "/usr/bin/amd-smi"},
+                "rocm-smi": {"present": True,  "path": "/usr/bin/rocm-smi"},
+                "lsof":     {"present": True,  "path": "/usr/bin/lsof"},
+            },
+            "missing": ["rocm-smi"],             # convenience list of absent tools
+            "coverage": {
+                "ECC":                                  True,
+                "XGMI":                                 True,
+                "foreign-process":                      True,
+                "GPU activity warn":                    True,
+                "amd-smi/torch GPU-count cross-check":  True,
+                "wedged-driver canary":                 True,
+            },
+            "uncovered": [],                     # checks with no working tool
+        }
+
+    Coverage rules (each check is "covered" if ANY of the listed tools
+    is present):
+
+      * ECC                                 -> amd-smi  OR  rocm-smi (--showrasinfo)
+      * XGMI link matrix                    -> amd-smi  OR  rocm-smi (--showtopotype)
+      * foreign-process enumeration         -> amd-smi  OR  rocm-smi  OR  lsof
+      * GPU activity warn (gfx_activity_pct)-> amd-smi  OR  rocm-smi (--showuse)
+      * amd-smi/torch GPU-count cross-check -> amd-smi only (rocm-smi enumerates
+                                               by `cardN` not by torch's index)
+      * wedged-driver canary (rocm-smi --version) -> rocm-smi only
+    """
+    tools: Dict[str, Dict[str, Any]] = {}
+    missing: List[str] = []
+    for name in _TRACKED_TOOLS:
+        path = _which(name)
+        tools[name] = {"present": path is not None, "path": path}
+        if path is None:
+            missing.append(name)
+
+    has_amd = tools["amd-smi"]["present"]
+    has_rocm = tools["rocm-smi"]["present"]
+    has_lsof = tools["lsof"]["present"]
+    coverage = {
+        "ECC": has_amd or has_rocm,
+        "XGMI": has_amd or has_rocm,
+        "foreign-process": has_amd or has_rocm or has_lsof,
+        "GPU activity warn": has_amd or has_rocm,
+        "amd-smi/torch GPU-count cross-check": has_amd,
+        "wedged-driver canary": has_rocm,
+    }
+    uncovered = [name for name, ok in coverage.items() if not ok]
+    return {
+        "ok": True,
+        "tools": tools,
+        "missing": missing,
+        "coverage": coverage,
+        "uncovered": uncovered,
+    }
 
 
 def _findings_to_dicts(findings: List[Any]) -> List[Dict[str, Any]]:
@@ -1962,6 +2548,7 @@ def _node_status_from(
     tier2_extra: Dict[str, Any],
     *,
     allow_foreign_procs: bool = False,
+    required_tools: Optional[List[str]] = None,
 ) -> List[str]:
     """Compute a list of ``fail_reasons`` for the node from collected results.
 
@@ -1970,6 +2557,11 @@ def _node_status_from(
     ``allow_foreign_procs`` downgrades the foreign-process FAIL to a
     silent inclusion in the JSON (still surfaced by the aggregator's
     "Busy GPUs" section, just not a hard fail).
+
+    ``required_tools`` is the operator-supplied list of CLI tools that
+    MUST be present on this node (e.g. ``["amd-smi", "rocm-smi"]``).
+    Anything in this list that is not in the tooling-inventory becomes
+    a hard FAIL. Empty / None means "warn only" (the default).
     """
     reasons: List[str] = []
 
@@ -2041,6 +2633,26 @@ def _node_status_from(
             f"tooling: rocm-smi --version did not return within "
             f"{tool.get('timeout_sec', '?')}s -- driver may be wedging"
         )
+
+    # Tooling availability. Missing CLI tools (amd-smi, rocm-smi, lsof)
+    # cause silent skips of several Tier 1 checks. Operators in strict
+    # environments can pass --require-tools to convert "missing" into a
+    # node FAIL so the node is pulled from rotation until the toolchain
+    # is fixed. Default (empty list) is warn-only (the WARN already fires
+    # in _cmd_run before the per-GPU subprocesses run).
+    if required_tools:
+        inv = (tier1_extra.get("tooling_inventory") or {}).get("tools") or {}
+        missing_required = [
+            t for t in required_tools
+            if not (inv.get(t) or {}).get("present")
+        ]
+        if missing_required:
+            reasons.append(
+                f"tooling_inventory: required tool(s) NOT in PATH: "
+                f"{', '.join(missing_required)} -- silent-skips several "
+                f"Tier 1 checks (ECC, XGMI, foreign-process, wedged-driver). "
+                f"Pass --require-tools '' to disable this fail."
+            )
 
     # G: foreign processes holding the GPU. Hard-fail by default because
     # this is the single most common cause of training failing to launch
@@ -2319,6 +2931,42 @@ def _cmd_run(ns: argparse.Namespace) -> int:
     # E:   wall-time + time-daemon active states.
     # F-partial: rocm-smi --version self-latency with a hard timeout to
     # catch drivers that are starting to wedge.
+    # Tooling inventory FIRST so we can warn loudly before running the
+    # collectors that depend on each tool. Several downstream collectors
+    # (gpu_low_level, xgmi, gpu_processes, tooling) silently no-op when
+    # their tool is missing, which can let a broken node pass smoke
+    # unnoticed -- this section is the operator-visible counterweight.
+    tier1_extra["tooling_inventory"] = _collect_tooling_inventory()
+    inv = tier1_extra["tooling_inventory"]
+    inv_missing = inv["missing"]
+    inv_uncovered = inv["uncovered"]
+    if inv_missing:
+        # First line: which tools are missing. Loud regardless of whether
+        # a fallback covers everything.
+        _warn(
+            f"tooling: {len(inv_missing)} tracked tool(s) NOT in PATH: "
+            f"{', '.join(inv_missing)}."
+        )
+        if inv_uncovered:
+            # Second line: which checks have NO working tool at all. This
+            # is the actually-dangerous case (a check that will silently
+            # no-op no matter which tool we try).
+            _warn(
+                f"tooling: {len(inv_uncovered)} check(s) have NO working "
+                f"tool and will be silently skipped: "
+                + ", ".join(inv_uncovered)
+                + ". Use --require-tools to promote missing tools to a "
+                "node FAIL."
+            )
+        else:
+            # Reassuring line: every check is covered via fallback.
+            _warn(
+                "tooling: every check is still covered via fallback "
+                "(rocm-smi / lsof) -- no checks will be silently skipped. "
+                "Use --require-tools to promote missing tools to a node "
+                "FAIL anyway if your environment requires them."
+            )
+
     tier1_extra["gpu_low_level"] = _collect_amd_smi_metrics()
     tier1_extra["xgmi"] = _collect_xgmi_topology()
     tier1_extra["clock"] = _collect_clock_state()
@@ -2397,9 +3045,14 @@ def _cmd_run(ns: argparse.Namespace) -> int:
         tier2_extra["rccl"] = rccl
         _log(f"tier2 RCCL: {rccl}")
 
+    required_tools = [
+        s.strip() for s in (getattr(ns, "require_tools", "") or "").split(",")
+        if s.strip()
+    ]
     fail_reasons = _node_status_from(
         per_gpu, tier1_extra, tier2_extra,
         allow_foreign_procs=bool(ns.allow_foreign_procs),
+        required_tools=required_tools,
     )
     status = "PASS" if not fail_reasons else "FAIL"
 
@@ -2695,6 +3348,50 @@ def _tooling_latency_rows(
             "timeout_sec": t.get("timeout_sec"),
         })
     return rows
+
+
+def _tooling_inventory_rows(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Per-node tooling-presence rows + a count of nodes missing each tool.
+
+    Returns::
+
+        {
+            "rows": [
+                {"node_rank": 0, "host": "tus1-p3-g25",
+                 "amd-smi": True, "rocm-smi": True, "lsof": True},
+                ...
+            ],
+            "missing_counts": {"amd-smi": 0, "rocm-smi": 1, "lsof": 0},
+            "any_missing": True,
+            "tracked": ["amd-smi", "rocm-smi", "lsof"],
+        }
+
+    Always-on: even when every tool is present everywhere, we still emit
+    a (small, reassuring) summary so the operator can see at a glance
+    that the toolchain was healthy on every node.
+    """
+    tracked = list(_TRACKED_TOOLS)
+    rows: List[Dict[str, Any]] = []
+    missing_counts: Dict[str, int] = {t: 0 for t in tracked}
+    for n in nodes:
+        inv = (n.get("tier1") or {}).get("tooling_inventory") or {}
+        tools = inv.get("tools") or {}
+        row: Dict[str, Any] = {
+            "node_rank": n.get("node_rank", "?"),
+            "host": n.get("host", "?"),
+        }
+        for t in tracked:
+            present = bool((tools.get(t) or {}).get("present"))
+            row[t] = present
+            if not present:
+                missing_counts[t] += 1
+        rows.append(row)
+    return {
+        "rows": rows,
+        "missing_counts": missing_counts,
+        "any_missing": any(c > 0 for c in missing_counts.values()),
+        "tracked": tracked,
+    }
 
 
 def _busy_gpu_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -3202,6 +3899,88 @@ def _cmd_aggregate(ns: argparse.Namespace) -> int:
             f.write(f"*Tooling section failed to render: {e}*\n")
             _warn(f"tooling render failed: {e}")
 
+        # ----- Tooling availability (always-on; loud counterweight to
+        # the silent skips that happen when amd-smi / rocm-smi / lsof
+        # are missing from PATH) -----
+        f.write("\n## Tooling availability\n\n")
+        try:
+            inv = _tooling_inventory_rows(nodes)
+            tracked = inv["tracked"]
+            mc = inv["missing_counts"]
+            if not inv["any_missing"]:
+                f.write(
+                    "*Every tracked tool (`"
+                    + "`, `".join(tracked)
+                    + "`) was present in PATH on every node.*\n"
+                )
+            else:
+                summary_bits = []
+                for t in tracked:
+                    if mc[t]:
+                        summary_bits.append(
+                            f"`{t}` missing on **{mc[t]}** node(s)"
+                        )
+                # Compute cluster-wide uncovered-checks summary so the
+                # operator immediately knows whether the missing tools
+                # actually leave a coverage hole or whether the rocm-smi
+                # / lsof fallbacks are picking up the slack.
+                uncovered_counts: Dict[str, int] = {}
+                for n in nodes:
+                    uc = ((n.get("tier1") or {})
+                          .get("tooling_inventory") or {}).get("uncovered") or []
+                    for c in uc:
+                        uncovered_counts[c] = uncovered_counts.get(c, 0) + 1
+                if uncovered_counts:
+                    uc_bits = [
+                        f"`{c}` on **{n}** node(s)"
+                        for c, n in sorted(uncovered_counts.items())
+                    ]
+                    coverage_line = (
+                        "Checks with NO working tool (truly silent-skipped): "
+                        + "; ".join(uc_bits) + "."
+                    )
+                else:
+                    coverage_line = (
+                        "Every check is still covered via the rocm-smi "
+                        "or lsof fallback on every node -- no checks are "
+                        "silently skipped."
+                    )
+                f.write(
+                    "Several Tier 1 checks (ECC, XGMI, foreign-process, "
+                    "GPU activity, wedged-driver) prefer `amd-smi` but "
+                    "fall back to `rocm-smi` (and `lsof` for foreign-"
+                    "process) when amd-smi is missing. "
+                    + "; ".join(summary_bits) + ". " + coverage_line
+                    + " Add `--require-tools amd-smi,rocm-smi` to `run` to "
+                    "promote a missing tool to a node FAIL anyway.\n\n"
+                )
+                # Per-node table -- only the nodes that ARE missing something,
+                # so a healthy cluster doesn't get a giant N-row table.
+                f.write(
+                    "| Node | Hostname | "
+                    + " | ".join(tracked)
+                    + " |\n"
+                )
+                f.write(
+                    "|------|----------| "
+                    + " | ".join("---" for _ in tracked)
+                    + " |\n"
+                )
+                for r in inv["rows"]:
+                    if all(r.get(t) for t in tracked):
+                        continue
+                    cells = []
+                    for t in tracked:
+                        cells.append("OK" if r.get(t) else "**MISSING**")
+                    f.write(
+                        f"| {r['node_rank']} | {r['host']} | "
+                        + " | ".join(cells)
+                        + " |\n"
+                    )
+        except Exception as e:
+            f.write(f"*Tooling availability section failed to render: {e}*\n")
+            _warn(f"tooling-availability render failed: {e}")
+
         # ----- G: Busy GPUs / leaked processes -----
         f.write("\n## Busy GPUs / leaked processes\n\n")
         try:
@@ -3458,14 +4237,28 @@ def _build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--allow-foreign-procs", action="store_true",
                     help="Do NOT FAIL the node when foreign processes are "
                          "found holding a GPU. They will still be reported.")
-    pr.add_argument("--allowed-procs", type=str, default="",
+    pr.add_argument("--allowed-procs", type=str,
+                    default="gpuagent,rocm-smi-daemon,amd-smi,dcgm-exporter",
                     help="Comma-separated process names that are OK to find "
-                         "holding the GPU (e.g. "
-                         "'rocm-smi-daemon,amd-smi,dcgm-exporter').")
+                         "holding the GPU. The default whitelists the AMD "
+                         "system agents (`gpuagent`, `rocm-smi-daemon`, "
+                         "`amd-smi`) and a common observability sidecar "
+                         "(`dcgm-exporter`) so they don't fail every node. "
+                         "Set to an empty string to disable the whitelist.")
     pr.add_argument("--gpu-activity-warn-pct", type=float, default=20.0,
                     help="Aggregator warns (does NOT fail) if amd-smi reports "
                          "any GPU's gfx_activity_pct above this when smoke "
                          "starts. Default: 20.")
+    # Tooling availability. Default empty = warn-only (the WARN already
+    # fires before the per-GPU subprocesses run, and the aggregator
+    # always renders a "Tooling availability" section). Strict
+    # environments can pass --require-tools amd-smi,rocm-smi to promote
+    # a missing tool to a hard node FAIL.
+    pr.add_argument("--require-tools", type=str, default="",
+                    help="Comma-separated CLI tool names that MUST be "
+                         "present in PATH for the node to PASS. Anything "
+                         "missing becomes a hard node FAIL. Tracked tools: "
+                         "amd-smi, rocm-smi, lsof. Default: warn-only.")
     pr.add_argument("--no-clean-dump-path", action="store_true",
                     help="Do NOT auto-wipe stale per-node JSONs and aggregator "
                          "outputs from --dump-path on rank 0 at startup. "
