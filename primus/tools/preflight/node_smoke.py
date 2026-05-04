@@ -1212,6 +1212,73 @@ def _flatten_amd_smi_metric_json(doc: Any) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_self_pid_view(self_pid: int) -> Dict[str, Any]:
+    """Resolve our own PID as the host kernel sees it, even from inside a
+    private PID namespace (e.g. a Docker / Kubernetes container).
+
+    ``amd-smi process``, ``rocm-smi --showpids`` and ``lsof /dev/kfd``
+    all report PIDs in the **root (host) PID namespace** because KFD is
+    a host-kernel resource that knows nothing about user namespaces.
+    ``os.getpid()``, by contrast, returns the PID *as our own namespace
+    sees it*. In a private PID namespace these are different numbers,
+    and the naive ``reported_pid == os.getpid()`` test would always
+    return False -- causing our own training rank to be flagged
+    ``is_foreign=True`` and (with the default policy) failing the node.
+
+    The kernel exposes the full mapping in ``/proc/self/status``:
+
+        NSpid:  2005679  42
+
+    where the first entry is the deepest-namespace PID (= the host PID
+    on bare metal) and the LAST entry is the most-deeply-nested PID
+    (= what ``os.getpid()`` returns inside a private namespace). On a
+    bare-metal host or a non-namespaced container, the line has a
+    single field equal to ``os.getpid()``.
+
+    Returns::
+
+        {
+            "host_pid": int,           # what amd-smi/rocm-smi report
+            "container_pid": int,      # == self_pid (passed in)
+            "pid_namespaced": bool,    # True if the two differ
+            "ns_chain": [int, ...],    # full NSpid chain (for the report)
+        }
+
+    Best-effort: if ``/proc/self/status`` cannot be read or has no
+    ``NSpid`` line, we assume bare-metal and fall back to ``self_pid``.
+    """
+    out: Dict[str, Any] = {
+        "host_pid": int(self_pid),
+        "container_pid": int(self_pid),
+        "pid_namespaced": False,
+        "ns_chain": [int(self_pid)],
+    }
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.startswith("NSpid:"):
+                    continue
+                parts = line.split()[1:]  # drop "NSpid:"
+                chain: List[int] = []
+                for tok in parts:
+                    try:
+                        chain.append(int(tok))
+                    except ValueError:
+                        continue
+                if not chain:
+                    break
+                out["ns_chain"] = chain
+                # Convention: NSpid lists outermost (host) namespace first
+                # and the current namespace last; matches /proc man page.
+                out["host_pid"] = chain[0]
+                out["container_pid"] = chain[-1]
+                out["pid_namespaced"] = chain[0] != chain[-1]
+                break
+    except Exception:
+        pass
+    return out
+
+
 def _collect_gpu_processes(
     self_pid: int,
     allowed_proc_names: Optional[List[str]] = None,
@@ -1228,8 +1295,11 @@ def _collect_gpu_processes(
         {
             "ok": bool,
             "tool": "amd-smi process --json" | "amd-smi process" | "lsof" | None,
-            "self_pid": int,
-            "self_pgid": int,
+            "self_pid": int,                # container/local view (legacy)
+            "self_pgid": int,               # pgid in our own namespace
+            "self_host_pid": int,           # PID amd-smi/rocm-smi report for us
+            "pid_namespaced": bool,         # True inside a private PID ns
+            "ns_pid_chain": [int, ...],     # full NSpid chain (root..ours)
             "allowed_proc_names": [str, ...],   # passthrough for aggregator
             "per_gpu": [
                 {"gpu": 0, "processes": [
@@ -1239,38 +1309,67 @@ def _collect_gpu_processes(
                 ]},
                 ...
             ],
-            "foreign_count": int,   # PIDs not in our pgid and not allowed
+            "foreign_count": int,   # PIDs not us and not allowed
             "error": str            # only when ok is False
         }
 
     Filtering: a PID is treated as "ours" (and thus not foreign) if it
-    matches our pgid -- this catches our own python process plus any
-    per-GPU subprocess we have spawned. ``allowed_proc_names`` is a
-    case-insensitive name allow-list for known node-resident agents
-    (``rocm-smi-daemon``, ``amd-smi``, ``dcgm-exporter``, ...).
+    matches our **host-namespace PID** (because amd-smi / rocm-smi /
+    lsof always report root-ns PIDs) or, when we are NOT inside a
+    private PID namespace, our pgid (which catches per-GPU subprocesses
+    we may have spawned). Inside a private PID namespace the pgid match
+    is intentionally skipped: we cannot ``os.getpgid()`` PIDs we cannot
+    see, and any spawned subprocess will appear as a sibling host PID
+    that the operator should treat the same way as a leaked rank.
+
+    ``allowed_proc_names`` is a case-insensitive name allow-list for
+    known node-resident agents (``rocm-smi-daemon``, ``amd-smi``,
+    ``dcgm-exporter``, ``gpuagent``, ...).
     """
     allowed = {n.strip().lower() for n in (allowed_proc_names or []) if n.strip()}
+
+    # Resolve host-side PID. Inside a private PID namespace this is the
+    # number amd-smi / rocm-smi / lsof will report for us; on bare metal
+    # or a shared-PID-ns container (the SLURM + pyxis/enroot default) it
+    # equals self_pid.
+    pid_view = _resolve_self_pid_view(int(self_pid))
+    host_self_pid = int(pid_view["host_pid"])
+    pid_namespaced = bool(pid_view["pid_namespaced"])
+
+    # pgid is only meaningful within OUR own PID namespace -- attempting
+    # os.getpgid() on a host-side PID we cannot see would raise ESRCH.
     try:
-        self_pgid = os.getpgid(self_pid)
+        self_pgid = os.getpgid(int(self_pid))
     except OSError:
-        self_pgid = self_pid
+        self_pgid = int(self_pid)
 
     out: Dict[str, Any] = {
         "ok": False,
         "tool": None,
         "self_pid": int(self_pid),
         "self_pgid": int(self_pgid),
+        "self_host_pid": host_self_pid,
+        "pid_namespaced": pid_namespaced,
+        "ns_pid_chain": list(pid_view.get("ns_chain") or [int(self_pid)]),
         "allowed_proc_names": sorted(allowed),
         "per_gpu": [],
         "foreign_count": 0,
     }
 
     def _annotate(pid: int, name: str, hbm_bytes: Optional[int]) -> Dict[str, Any]:
-        try:
-            pgid = os.getpgid(int(pid))
-        except OSError:
-            pgid = -1
-        is_self = (int(pid) == int(self_pid)) or (pgid == self_pgid)
+        # Direct PID match against our HOST-side PID (works in every
+        # mode: bare metal, shared PID ns, private PID ns).
+        is_self = int(pid) == host_self_pid
+        # pgid match is only safe outside a private PID namespace; inside
+        # one we cannot see host PIDs at all and os.getpgid() would
+        # ESRCH for every reported pid.
+        if not is_self and not pid_namespaced:
+            try:
+                pgid = os.getpgid(int(pid))
+            except OSError:
+                pgid = -1
+            if pgid == self_pgid:
+                is_self = True
         is_allowed = (name or "").strip().lower() in allowed
         return {
             "pid": int(pid),
