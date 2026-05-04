@@ -2,7 +2,7 @@
 
 A lightweight, distributed-rendezvous-free preflight check that runs on every node in parallel under SLURM. Designed to **quickly identify broken nodes before a large training job commits to a global rendezvous**, in the common case where we own full nodes and care which *node* is sick rather than which GPU within an otherwise-healthy node.
 
-- **Implementation**: `primus/tools/preflight/node_smoke.py`
+- **Implementation**: `primus/tools/preflight/node_smoke/` (Python sub-package; entry point `python -m primus.tools.preflight.node_smoke`).
 - **Wrapper**: `runner/run_node_smoke_direct.sh`
 - **Companion**: see `docs/preflight.md` for the full preflight tool (with global rendezvous and richer perf tests).
 
@@ -15,10 +15,10 @@ srun -N "$SLURM_NNODES" --ntasks-per-node=1 \
 
 # With perf sanity (GEMM TFLOPS, HBM GB/s, local 8-GPU RCCL all-reduce):
 srun -N "$SLURM_NNODES" --ntasks-per-node=1 \
-     bash runner/run_node_smoke_direct.sh --tier2 --tier2-rccl
+     bash runner/run_node_smoke_direct.sh --tier2-perf
 
 # Hard-fail on partial NIC enumeration (e.g. 7 of 8 RDMA NICs):
-srun ... bash runner/run_node_smoke_direct.sh --tier2 --tier2-rccl \
+srun ... bash runner/run_node_smoke_direct.sh --tier2-perf \
      --expected-rdma-nics 8
 
 # Single-node local check (no SLURM):
@@ -50,6 +50,77 @@ srun --exclude=$(paste -sd, output/preflight/failing_nodes.txt) ... your-real-jo
 - **Per-GPU isolation** — each GPU's checks run in their own Python subprocess with a hard timeout. A stuck `torch.cuda.set_device()` (which can't be aborted by `signal.alarm` because it sits inside a non-interruptible driver syscall) is `SIGKILL`'d from the parent without affecting the rest of the node's checks.
 - **Local-only RCCL** — Tier 2 all-reduce uses `torch.multiprocessing.spawn` over `tcp://127.0.0.1`. No cross-node communication.
 - **Aggregator on `NODE_RANK==0`** — polls `<dump>/smoke/` for the expected number of JSONs (with a timeout), computes drift across the cluster, writes the markdown report and pass/fail txt files. Returns non-zero if any node FAILs or never reports.
+
+## Module layout — where each check lives
+
+The implementation is a Python sub-package under `primus/tools/preflight/node_smoke/`, split so each Tier 1 sub-section, the per-GPU subprocess body, the orchestrator, and the aggregator each live in their own file. The single public entry point is `main` (re-exported from `__init__`); `python -m primus.tools.preflight.node_smoke ...` resolves to `__main__.py` which calls it.
+
+```
+primus/tools/preflight/node_smoke/
+├── __init__.py          # re-export `main`
+├── __main__.py          # `python -m primus.tools.preflight.node_smoke`
+├── cli.py               # `_build_parser`, `_cmd_run`, `_cmd_aggregate`,
+│                        # `_cmd_per_gpu`, `main`
+├── types.py             # `GPUResult`, `NodeResult` dataclasses
+├── logging_utils.py     # `_ts`, `_log`, `_warn`, hostname normalisation
+├── shell_utils.py       # `_which`, `_read_text`, `_resolve_gpu_bdf`,
+│                        # `_systemctl_is_active`, `_parse_size_with_unit`,
+│                        # `_findings_to_dicts`
+├── per_gpu.py           # `_per_gpu_body` (Tier 1 + optional Tier 2 perf,
+│                        # GEMM/HBM bandwidth measurement)
+├── rccl_local.py        # node-local RCCL all-reduce (Tier 2)
+├── orchestrator.py      # `_spawn_per_gpu`, `_node_status_from`,
+│                        # `_clean_dump_path`
+├── collectors/          # one module per Tier 1 sub-section
+│   ├── dmesg.py             # recent dmesg error scan
+│   ├── fingerprint.py       # Tier 1 A — software-stack fingerprint
+│   ├── nics.py              # Tier 1 B — NIC / RDMA roll-call
+│   ├── host_limits.py       # Tier 1 C — ulimit / shm / NUMA / governor
+│   ├── gpu_low_level.py     # Tier 1 D-1 — amd-smi metric (ECC, throttle,
+│   │                        #               clocks, power)
+│   ├── xgmi.py              # Tier 1 D-2 — XGMI link matrix
+│   ├── clock.py             # Tier 1 E — wall time + time-daemon health
+│   ├── rocm_smi.py          # Tier 1 F + cross-tool fallbacks for D-1/2/G
+│   ├── gpu_processes.py     # Tier 1 G — foreign / leaked PID detection
+│   ├── tooling.py           # tooling availability inventory
+│   └── reused_info.py       # reused gpu/host/network info collectors
+└── aggregator/
+    ├── summarizers.py       # `_*_rows` / `_*_summary` data shapers
+    └── report.py            # `write_smoke_report` + one `_write_<section>`
+                             # helper per Markdown `##` section
+```
+
+Dependency graph (acyclic; arrows mean "imports"):
+
+```mermaid
+flowchart TD
+    cli[cli.py] --> orchestrator[orchestrator.py]
+    cli --> per_gpu[per_gpu.py]
+    cli --> rccl_local[rccl_local.py]
+    cli --> aggReport["aggregator/report.py"]
+    cli --> collectorsAll["collectors/*"]
+    cli --> logging[logging_utils.py]
+    cli --> types[types.py]
+
+    aggReport --> aggSum["aggregator/summarizers.py"]
+    aggReport --> logging
+    aggSum --> tooling["collectors/tooling.py"]
+
+    orchestrator --> types
+
+    per_gpu --> shell[shell_utils.py]
+
+    collectorsAll --> shell
+    collectorsAll --> rocmsmi["collectors/rocm_smi.py"]
+    rocmsmi --> shell
+    logging -.->|stdlib only| std[(socket / sys / time)]
+    shell -.->|stdlib only| std
+    types -.->|stdlib only| std
+```
+
+* `collectors/` are leaf modules (depend on `shell_utils` + sometimes `collectors/rocm_smi`); they never import `cli` / `orchestrator` / `per_gpu`.
+* `per_gpu` is the body of the `_per_gpu` subprocess and is the ONLY module loaded inside that subprocess via `python -m primus.tools.preflight.node_smoke _per_gpu N` — so its dependency surface is intentionally narrow (only `shell_utils`).
+* `aggregator/` only depends on its own `summarizers` plus `logging_utils` (and `collectors/tooling` for the static `_TRACKED_TOOLS` constant).
 
 ## What's checked
 
@@ -84,7 +155,7 @@ srun --exclude=$(paste -sd, output/preflight/failing_nodes.txt) ... your-real-jo
 - NUMA node count, CPU count, `cpu0` scaling governor
 - **Hard fail rules**: `RLIMIT_MEMLOCK` finite and below `--ulimit-l-min-gb` (default 32 GiB) → "RDMA pin will fail under load"; `/dev/shm` size below `--shm-min-gb` (default 8 GiB) → "NCCL shared-mem may fail"
 
-### Tier 2 — optional perf sanity (`--tier2 / --tier2-rccl`)
+### Tier 2 — optional perf sanity (`--tier2-perf`)
 
 Per-GPU steady-state metrics, with iteration counts aligned to the preflight `--quick` preset (`warmup=5, iters=20` for GEMM/RCCL; `warmup=10, iters=20` for HBM) so smoke and preflight numbers are directly comparable.
 
@@ -94,48 +165,71 @@ Per-GPU steady-state metrics, with iteration counts aligned to the preflight `--
 
 ## Aggregator report sections
 
-Every section short-circuits to a placeholder (`*All nodes match.*` / `*No NIC issues.*` / `*No host-limit issues.*`) on a healthy cluster, so the report stays short.
+Every section short-circuits to a placeholder (`*All nodes match.*` / `*No NIC issues.*` / `*No host-limit issues.*`) on a healthy cluster, so the report stays short. Each section header is part of the operator-facing contract — order and wording are stable across releases (some Slack bots / CI scripts grep for them).
 
-- **Status table** — one row per node with `node_rank`, hostname, PASS/FAIL, duration, top fail reason
-- **Stack drift across cluster** — for every scalar fingerprint key, lists outliers vs the cluster majority
-- **NIC firmware drift across cluster** — per-IB-device firmware drift
-- **NIC / RDMA roll-call issues** — every offending node + port
-- **NIC port-count summary** — cluster-majority port count and any node that disagrees (catches partial-NIC degradation without needing `--expected-rdma-nics`)
-- **Host limits issues** — per-node hard-limit violations
-- **Tier 2 perf summary** — per-node GEMM TFLOPS / HBM GB/s as `min / median / max`, plus local RCCL GB/s
-- **Failing nodes — full reasons** — every fail reason, expanded per node
+In order:
 
-Each section is wrapped in its own `try / except`, so a future schema bug in one section can't truncate the rest of the report.
+1. **Status table** — one row per node with `node_rank`, hostname, PASS/FAIL, duration, top fail reason.
+2. **Stack drift across cluster** — for every scalar fingerprint key, outliers vs the cluster majority.
+3. **NIC firmware drift across cluster** — per-IB-device firmware drift.
+4. **NIC / RDMA roll-call issues** — every offending node + port.
+5. **NIC port-count summary** — cluster-majority port count and any node that disagrees (catches partial-NIC degradation without `--expected-rdma-nics`).
+6. **Host limits issues** — per-node hard-limit violations.
+7. **GPU visibility issues** — nodes where torch couldn't see the GPUs or amd-smi sees more GPUs than torch (stale ROCm / wedged amdgpu driver). Independent of every other collector.
+8. **GPU low-level outliers (PCIe link / HBM)** — per-GPU outliers vs the cluster majority on PCIe width/speed and HBM total.
+9. **XGMI link issues** — any non-XGMI GPU pair (intra-node collectives silently fall back to PCIe).
+10. **Cluster clock + time daemons** — wall-clock spread plus per-node time-daemon health.
+11. **Tooling self-latency (`rocm-smi --version`)** — slow / timed-out tool calls (precursor to a wedged amdgpu driver).
+12. **Tooling availability** — always-on inventory of `amd-smi` / `rocm-smi` / `lsof` per node, plus which Tier 1 checks have NO working tool on each node.
+13. **Busy GPUs / leaked processes** — foreign PIDs holding GPUs at smoke start (most common cause of training failing to launch on an otherwise-healthy node).
+14. **GPU pre-touch HBM usage outliers** — GPUs with non-trivial HBM in use BEFORE smoke touched the device.
+15. **GPU compute-activity outliers** — GPUs with `gfx_activity_pct >= --gpu-activity-warn-pct` at smoke start (warn-only).
+16. **Tier 2 perf summary** (conditional, only when at least one node ran Tier 2) — per-node GEMM TFLOPS / HBM GB/s as `min / median / max`, plus local RCCL GB/s.
+17. **Failing nodes — full reasons** (conditional, only when there are failing nodes) — every fail reason, expanded per node.
+
+Each section that does pure data shaping is wrapped in its own `try / except`, so a future schema bug in one section can't truncate the rest of the report. The two intentional EXCEPTIONS are **Tier 2 perf summary** and **Failing nodes — full reasons** — both deliberately propagate exceptions so a regression in either bubbles up rather than silently rendering a half-empty section.
 
 ## Configuration knobs
 
-`run` subcommand:
+The authoritative source of flags + defaults is `python -m primus.tools.preflight.node_smoke run --help` (and `... aggregate --help`). The tables below mirror the parser as of the package-split refactor.
+
+### `run` subcommand
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--dump-path` | `output/preflight` | Output directory |
-| `--expected-gpus N` | auto | Override GPU count (auto-detected from `LOCAL_WORLD_SIZE` / `GPUS_PER_NODE` / `torch.cuda.device_count()`) |
-| `--per-gpu-timeout-sec` | 15 | Hard timeout per per-GPU subprocess |
-| `--tier2` | off | Enable per-GPU GEMM TFLOPS + HBM GB/s |
-| `--tier2-rccl` | off | Enable local 8-GPU RCCL all-reduce |
-| `--gemm-tflops-min` | 600 | Tier 2 GEMM threshold |
-| `--hbm-gbs-min` | 2000 | Tier 2 HBM threshold |
-| `--rccl-size-mb` | 64 | Local RCCL message size |
-| `--rccl-gbs-min` | 100 | Local RCCL bandwidth threshold |
-| `--rccl-timeout-sec` | 30 | Hard timeout for the RCCL phase |
-| `--skip-dmesg` | off | Skip dmesg scan (e.g. inside containers) |
-| `--dmesg-minutes` | 15 | dmesg `--since` window |
-| `--expected-rdma-nics N` | auto-report-only | When set, NIC count mismatch becomes a node FAIL |
-| `--ulimit-l-min-gb GB` | 32 | RLIMIT_MEMLOCK threshold (0 disables) |
-| `--shm-min-gb GB` | 8 | `/dev/shm` size threshold (0 disables) |
+| `--dump-path` | `output/preflight` | Output directory. |
+| `--expected-gpus N` | auto | Override GPU count (auto-detected from `LOCAL_WORLD_SIZE` / `GPUS_PER_NODE` / `torch.cuda.device_count()`). |
+| `--per-gpu-timeout-sec` | 15 | Hard timeout per per-GPU subprocess. |
+| `--tier2-perf` | off | Enable Tier 2 perf sanity (per-GPU GEMM TFLOPS + HBM GB/s + node-local RCCL all-reduce). Single switch — you cannot enable just one half. |
+| `--gemm-tflops-min` | 600 | Tier 2 GEMM threshold. |
+| `--hbm-gbs-min` | 2000 | Tier 2 HBM threshold. |
+| `--rccl-size-mb` | 64 | Local RCCL message size. |
+| `--rccl-gbs-min` | 100 | Local RCCL bandwidth threshold. |
+| `--rccl-timeout-sec` | 30 | Hard timeout for the RCCL phase. |
+| `--skip-dmesg` | off | Skip dmesg scan (e.g. inside containers). |
+| `--dmesg-minutes` | 15 | dmesg `--since` window. |
+| `--expected-rdma-nics N` | auto-report-only | When set, NIC count mismatch becomes a node FAIL. |
+| `--ulimit-l-min-gb GB` | 32 | RLIMIT_MEMLOCK threshold (0 disables). |
+| `--shm-min-gb GB` | 8 | `/dev/shm` size threshold (0 disables). |
+| `--rocm-smi-timeout-sec SEC` | 5.0 | Hard timeout for the `rocm-smi --version` self-latency canary; hitting it is a node FAIL (driver likely wedging). |
+| `--hbm-busy-threshold-gib GiB` | 2.0 | FAIL the node if any GPU has more than this many GiB of HBM in use BEFORE smoke touches the device (i.e. someone else is holding it). |
+| `--allow-foreign-procs` | off | Do NOT FAIL the node when foreign processes are found holding a GPU. They will still be reported. |
+| `--allowed-procs LIST` | `gpuagent,rocm-smi-daemon,amd-smi,dcgm-exporter` | Comma-separated process names that are OK to find holding the GPU. Set to `""` to disable the whitelist. |
+| `--gpu-activity-warn-pct PCT` | 20.0 | Warn (does NOT fail) if amd-smi reports any GPU's `gfx_activity_pct` above this when smoke starts. |
+| `--require-tools LIST` | `""` (warn-only) | Comma-separated CLI tool names that MUST be in PATH (`amd-smi`, `rocm-smi`, `lsof`); anything missing becomes a hard node FAIL. |
+| `--no-clean-dump-path` | off | Do NOT auto-wipe stale per-node JSONs / aggregator outputs from `--dump-path` on rank 0 at startup. Default behavior is to clean so re-runs on a different (smaller) nodelist don't inherit ghost PASS verdicts from removed nodes. |
 
-`aggregate` subcommand:
+### `aggregate` subcommand
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--dump-path` | `output/preflight` | Same as `run` |
-| `--expected-nodes N` | none | If fewer JSONs land within `--wait-timeout-sec`, missing nodes are added as FAIL placeholders |
-| `--wait-timeout-sec` | 60 | Polling timeout |
+| `--dump-path` | `output/preflight` | Same as `run`. |
+| `--expected-nodes N` | none | If fewer JSONs land within `--wait-timeout-sec`, missing nodes are added as FAIL placeholders. |
+| `--wait-timeout-sec` | 60 | Polling timeout. |
+| `--rocm-smi-warn-sec SEC` | 1.0 | Flag (warn-only) any node where `rocm-smi --version` took longer than this. |
+| `--clock-skew-warn-sec SEC` | 30.0 | Warn when wall-clock spread across nodes exceeds this many seconds. Includes srun launch jitter so the default is loose. |
+| `--hbm-busy-threshold-gib GiB` | 2.0 | Mirrors the `run`-side default; used to label the **GPU pre-touch HBM usage outliers** section. |
+| `--gpu-activity-warn-pct PCT` | 20.0 | Mirrors the `run`-side default; used to label the **GPU compute-activity outliers** section. |
 | `--expected-nodelist-file FILE` | none | One short hostname per line. Missing nodes get their **real short hostname** in the report and `failing_nodes.txt` (instead of `<missing-N>` placeholders). The wrapper auto-populates this from `scontrol show hostnames "$SLURM_JOB_NODELIST"`. |
 
 Wrapper-only flags (consumed by `run_node_smoke_direct.sh`, not forwarded):
@@ -230,7 +324,11 @@ An 18-node run on a different cluster crashed the aggregator with `TypeError: un
 3. Each report section wrapped in its own `try / except` so one section's bug can't truncate the rest of the report.
 4. New "NIC port-count summary" section that always renders and lists nodes whose port count differs from the cluster majority (so partial-NIC degradation like 7-of-8 is visible without `--expected-rdma-nics`).
 
-### 7. Short hostnames + naming nodes that never reported
+### 7. Package split (refactor of the 4.5k-line monolith)
+
+`node_smoke.py` had grown to ~4500 lines with all collectors, the orchestrator, the per-GPU subprocess body, and the ~700-line aggregator markdown writer in a single file. The refactor turned it into a Python sub-package (`primus/tools/preflight/node_smoke/`) with one module per Tier 1 sub-section (`collectors/`), the per-GPU subprocess body, the orchestrator, and the aggregator's data shapers (`aggregator/summarizers.py`) and Markdown writer (`aggregator/report.py`, with one `_write_<section>` helper per `##` heading). The single public entry point — `main` — is re-exported from `__init__.py`, so the existing `python -m primus.tools.preflight.node_smoke ...` invocation (used by `runner/run_node_smoke_direct.sh` and by `_spawn_per_gpu` for per-GPU subprocesses) keeps working unchanged. Behavior parity was checked by diffing the per-node JSON and `smoke_report.md` against a baseline (with a small allowlist for run-variant fields like PIDs, hardware cycle counters, and `available_gb`/`free_gb`/`cached_gb`); CLI help text, JSON schema, report section order, and exit-code semantics for `run` / `_per_gpu` / `aggregate` are byte-identical to pre-refactor.
+
+### 8. Short hostnames + naming nodes that never reported
 
 `failing_nodes.txt` held FQDNs (`socket.gethostname()` returned the FQDN on the failing cluster) — not pipeable into `srun --exclude=`. Nodes that never produced a JSON only showed up as `<missing-N>` placeholders, so operators couldn't act on them.
 
