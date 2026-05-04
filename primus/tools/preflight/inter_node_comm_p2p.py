@@ -19,6 +19,7 @@ from primus.tools.preflight.global_vars import (
     get_hostnames,
 )
 from primus.tools.preflight.utility import (
+    barrier_after_comm_destroy,
     create_dir,
     extract_first_middle_last,
     extract_number,
@@ -101,6 +102,7 @@ def run_inter_node_comm_p2p(args):
     dist.barrier(device_ids=[torch.cuda.current_device()])
     if p2p_group is not None:
         dist.destroy_process_group(p2p_group)
+    barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
 
     all_latency_results = [None for _ in range(WORLD_SIZE)]
     all_bandwidth_results = [None for _ in range(WORLD_SIZE)]

@@ -9,7 +9,7 @@ from primus.tools.preflight.global_vars import (
     WARMUP,
     WORLD_SIZE,
 )
-from primus.tools.preflight.utility import log
+from primus.tools.preflight.utility import barrier_after_comm_destroy, log
 
 # profile parameters
 _ENABLE_PROFILE = False
@@ -200,6 +200,10 @@ def run_inter_node_ring_p2p(args):
         time_statistics.append(all_latency_results[:LOCAL_WORLD_SIZE])
 
     write_markdown(args, SIZES_IN_MB_TO_BENCH, time_statistics)
+
+    if _GLOBAL_PIPELINE_GROUP is not None:
+        dist.destroy_process_group(_GLOBAL_PIPELINE_GROUP)
+    barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
 
     # TODO (limou)
     # support plot

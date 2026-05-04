@@ -60,6 +60,7 @@ Reporting:
 
 Perf-test extras:
 - `--plot`: generate plots (only used with `--perf-test`)
+- `--comm-cleanup-delay-sec <float>`: delay (seconds) after destroying NCCL/RCCL process groups before creating new ones (default: `2.0`). Prevents "Address already in use" errors from socket port reuse races at large scale. Set to `0` to disable the delay (barrier only).
 
 Backward compatibility:
 - `--check-host/--check-gpu/--check-network` are supported as aliases for `--host/--gpu/--network`.
@@ -76,6 +77,7 @@ Typical report files:
 
 - For multi-node runs, use `primus-cli slurm …` (or your preferred launcher) so distributed environment variables are set correctly.
 - If you only want a quick environment snapshot, prefer `--host --gpu --network`.
+- Between each communication test phase (intra-node → inter-node → P2P → ring), preflight performs a global barrier + sleep to prevent "Address already in use" errors from rapid process group teardown/creation. This is controlled by `--comm-cleanup-delay-sec` (default 2s). At very large scale (128+ nodes), increase if needed.
 
 ## Running preflight without a container
 
