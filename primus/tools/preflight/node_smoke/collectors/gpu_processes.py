@@ -28,6 +28,43 @@ from ..shell_utils import _parse_size_with_unit, _which
 from .rocm_smi import _rocm_smi_processes
 
 
+# Process-name placeholders that some versions of `amd-smi process` and
+# `rocm-smi --showpids` emit when they cannot read the real name from
+# /proc/<pid>/comm (typically for kernel/system-owned PIDs like
+# `gpuagent`). We treat these as "missing" and fall back to /proc.
+_MISSING_NAME_TOKENS = frozenset({"", "n/a", "na", "none", "null", "-", "unknown", "?"})
+
+
+def _is_missing_name(name: str) -> bool:
+    return (name or "").strip().lower() in _MISSING_NAME_TOKENS
+
+
+def _resolve_proc_name(pid: int) -> str:
+    """Best-effort recover the process name for ``pid`` from /proc.
+
+    Tries ``/proc/<pid>/comm`` first (15-char kernel name, world-readable
+    on default Linux), then falls back to the ``Name:`` line in
+    ``/proc/<pid>/status``. Returns ``""`` when both reads fail (PID gone,
+    hidepid mount, ptrace_scope, etc.) so the caller can decide whether
+    to keep the original placeholder.
+    """
+    try:
+        with open(f"/proc/{int(pid)}/comm", "r", encoding="utf-8") as f:
+            name = f.read().strip()
+            if name:
+                return name
+    except OSError:
+        pass
+    try:
+        with open(f"/proc/{int(pid)}/status", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("Name:"):
+                    return line.split(":", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
 def _resolve_self_pid_view(self_pid: int) -> Dict[str, Any]:
     """Resolve our own PID as the host kernel sees it, even from inside a
     private PID namespace (e.g. a Docker / Kubernetes container).
@@ -186,10 +223,25 @@ def _collect_gpu_processes(
                 pgid = -1
             if pgid == self_pgid:
                 is_self = True
+
+        # Some amd-smi / rocm-smi builds report `name="N/A"` (or empty)
+        # for kernel/system PIDs like `gpuagent` because they cannot read
+        # /proc/<pid>/comm themselves. We can: do it inline so the
+        # allowlist actually matches and the report shows the real name.
+        raw_name = name or ""
+        name_resolved_from_proc = False
+        if _is_missing_name(raw_name):
+            recovered = _resolve_proc_name(int(pid))
+            if recovered:
+                name = recovered
+                name_resolved_from_proc = True
+
         is_allowed = (name or "").strip().lower() in allowed
         return {
             "pid": int(pid),
             "name": name or "",
+            "name_raw": raw_name,
+            "name_resolved_from_proc": bool(name_resolved_from_proc),
             "hbm_bytes": int(hbm_bytes) if isinstance(hbm_bytes, (int, float)) else None,
             "is_self": bool(is_self),
             "is_allowed": bool(is_allowed),
