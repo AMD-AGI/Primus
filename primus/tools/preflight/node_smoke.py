@@ -1686,31 +1686,46 @@ def _parse_lsof_pcn(text: str, annotate: Any) -> List[Dict[str, Any]]:
 
 
 def _parse_size_with_unit(s: str) -> Optional[int]:
-    """Parse a size string like ``"256 MB"``/``"12.5GiB"``/``"12345"`` into bytes."""
+    """Parse a size string into bytes.
+
+    Accepts (case-insensitive)::
+
+        "12345"        -> 12345
+        "256 MB"       -> 268435456
+        "256MB"        -> 268435456     (no space)
+        "12.5 GiB"     -> 13421772800
+        "12.5GiB"      -> 13421772800
+        "  -1  "       -> -1            (sentinel for "unlimited")
+
+    Returns ``None`` for empty input, an unrecognised unit (e.g.
+    ``"500 MHz"``), or any input the regex cannot fully match (e.g.
+    ``"12 GB extra"``). This is deliberate: a silent fallthrough
+    to ``num * 1`` would let frequency / count strings masquerade
+    as byte counts and corrupt downstream comparisons.
+    """
     if not s:
         return None
-    s = s.strip()
-    if not s:
+    import re
+
+    m = re.match(
+        r"\s*([+-]?\d+(?:\.\d+)?)\s*([a-zA-Z]+)?\.?\s*$",
+        s,
+    )
+    if not m:
         return None
-    # plain int / float
-    try:
-        return int(float(s))
-    except ValueError:
-        pass
     units = {
         "b": 1, "k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10,
         "m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
         "g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
         "t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40,
     }
-    parts = s.replace(",", " ").split()
-    try:
-        num = float(parts[0])
-    except (ValueError, IndexError):
+    unit = (m.group(2) or "b").lower()
+    if unit not in units:
         return None
-    unit = (parts[1].lower() if len(parts) > 1 else "b").rstrip(".")
-    mult = units.get(unit, 1)
-    return int(num * mult)
+    try:
+        return int(float(m.group(1)) * units[unit])
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------
