@@ -27,8 +27,11 @@ through ``x_plus_r`` (consumed by the next bda) into ``dx``; the autograd
 function then returns the same gradient for both ``x`` and ``residual`` since
 their sum has Jacobian ``[I, I]``.
 
-We use a 2-stage bwd:
-  stage_0 kernel: per-row dx + per-row partial dg (B, H)
+We use a 2-stage bwd. The multi-row variants reduce ``dgamma`` *inside*
+each program over its ``ROWS_PER_BLOCK`` rows, so the partial buffer is
+``(num_programs, H)`` instead of ``(B, H)`` — kills the 1 GiB workspace at
+q_norm (B=2 097 152, H=128) for free since the reduction is identical.
+  stage_0 kernel: per-row dx + per-program partial dg (num_programs, H)
   reduction:      .sum(dim=0) in PyTorch (cheap)
 
 Public API (stable, used by ``primus_turbo.py`` and runtime install hooks):
@@ -261,7 +264,7 @@ def _rmsnorm_bwd_kernel(
 @triton.jit
 def _rmsnorm_bwd_kernel_multi_row(
     DY_ptr, X_ptr, G_ptr, RSTD_ptr, DX_ptr, DG_PART_ptr,
-    stride_xb, stride_xh, stride_dyb, stride_dyh, stride_dxb, stride_dxh, stride_dgb,
+    stride_xb, stride_xh, stride_dyb, stride_dyh, stride_dxb, stride_dxh, stride_dgp,
     B,
     H: tl.constexpr,
     BLOCK_H: tl.constexpr,
@@ -277,7 +280,7 @@ def _rmsnorm_bwd_kernel_multi_row(
     x_ptrs   = X_ptr   + row_offs[:, None] * stride_xb  + h_offs[None, :] * stride_xh
     dy_ptrs  = DY_ptr  + row_offs[:, None] * stride_dyb + h_offs[None, :] * stride_dyh
     dx_ptrs  = DX_ptr  + row_offs[:, None] * stride_dxb + h_offs[None, :] * stride_dxh
-    dgp_ptrs = DG_PART_ptr + row_offs[:, None] * stride_dgb + h_offs[None, :]
+    dgp_ptrs = DG_PART_ptr + pid * stride_dgp + h_offs
     g_ptrs   = G_ptr + h_offs
 
     full_mask = row_mask[:, None] & h_mask[None, :]
@@ -290,10 +293,16 @@ def _rmsnorm_bwd_kernel_multi_row(
     dxhat = dy * g[None, :]
     m = tl.sum(dxhat * x_hat, axis=1) / H        # [ROWS_PER_BLOCK]
     dx = (dxhat - x_hat * m[:, None]) * rstd[:, None]
-    dgp = dy * x_hat
 
-    tl.store(dx_ptrs,  dx.to(DX_ptr.dtype.element_ty),  mask=full_mask)
-    tl.store(dgp_ptrs, dgp, mask=full_mask)
+    tl.store(dx_ptrs, dx.to(DX_ptr.dtype.element_ty), mask=full_mask)
+
+    # ── Per-program dgamma reduction (Option A from handoff item #2) ──
+    # Mask out-of-range rows to zero before reducing, so padding tail
+    # contributes nothing. Writes one fp32 [H] slab per program (was
+    # ROWS_PER_BLOCK rows) — shrinks dg_partial by ROWS_PER_BLOCK×.
+    dgp_block = (dy * x_hat) * row_mask[:, None].to(tl.float32)
+    dgp_row = tl.sum(dgp_block, axis=0)
+    tl.store(dgp_ptrs, dgp_row, mask=h_mask)
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +354,7 @@ def _rmsnorm_bwd_residual_kernel(
 @triton.jit
 def _rmsnorm_bwd_residual_kernel_multi_row(
     DY_ptr, DXPR_ptr, XPR_ptr, G_ptr, RSTD_ptr, DX_ptr, DG_PART_ptr,
-    stride_xprb, stride_xprh, stride_dyb, stride_dyh, stride_dxprb, stride_dxprh, stride_dxb, stride_dxh, stride_dgb,
+    stride_xprb, stride_xprh, stride_dyb, stride_dyh, stride_dxprb, stride_dxprh, stride_dxb, stride_dxh, stride_dgp,
     B,
     H: tl.constexpr,
     BLOCK_H: tl.constexpr,
@@ -362,7 +371,7 @@ def _rmsnorm_bwd_residual_kernel_multi_row(
     dy_ptrs   = DY_ptr    + row_offs[:, None] * stride_dyb   + h_offs[None, :] * stride_dyh
     dxpr_ptrs = DXPR_ptr  + row_offs[:, None] * stride_dxprb + h_offs[None, :] * stride_dxprh
     dx_ptrs   = DX_ptr    + row_offs[:, None] * stride_dxb   + h_offs[None, :] * stride_dxh
-    dgp_ptrs  = DG_PART_ptr + row_offs[:, None] * stride_dgb + h_offs[None, :]
+    dgp_ptrs  = DG_PART_ptr + pid * stride_dgp + h_offs
     g_ptrs    = G_ptr + h_offs
 
     full_mask = row_mask[:, None] & h_mask[None, :]
@@ -377,10 +386,13 @@ def _rmsnorm_bwd_residual_kernel_multi_row(
     m = tl.sum(dxhat * x_hat, axis=1) / H
     dx_norm = (dxhat - x_hat * m[:, None]) * rstd[:, None]
     dx = dx_norm + dxpr
-    dgp = dy * x_hat
 
-    tl.store(dx_ptrs,  dx.to(DX_ptr.dtype.element_ty),  mask=full_mask)
-    tl.store(dgp_ptrs, dgp, mask=full_mask)
+    tl.store(dx_ptrs, dx.to(DX_ptr.dtype.element_ty), mask=full_mask)
+
+    # ── Per-program dgamma reduction (Option A from handoff item #2) ──
+    dgp_block = (dy * x_hat) * row_mask[:, None].to(tl.float32)
+    dgp_row = tl.sum(dgp_block, axis=0)
+    tl.store(dgp_ptrs, dgp_row, mask=h_mask)
 
 
 # ---------------------------------------------------------------------------
@@ -472,8 +484,13 @@ class TritonRMSNormFn(torch.autograd.Function):
         B = x2.shape[0]
         dy2 = _reshape_batch_hidden(dy, H)
         dx = torch.empty_like(x2)
-        dg_partial = torch.empty(B, H, device=x2.device, dtype=torch.float32)
+        # Multi-row bwd kernel reduces dgamma in-program (Option A); the
+        # partial buffer is then ``(num_programs, H)`` instead of ``(B, H)``,
+        # which kills the 1 GiB workspace at q_norm. Single-row kernel still
+        # writes one row per program (num_programs == B), so the ``B`` shape
+        # below is unchanged on that path.
         if ctx.ROWS == 1:
+            dg_partial = torch.empty(B, H, device=x2.device, dtype=torch.float32)
             _rmsnorm_bwd_kernel[(B,)](
                 dy2, x2, gamma, rstd, dx, dg_partial,
                 x2.stride(0), x2.stride(1), dy2.stride(0), dy2.stride(1),
@@ -482,7 +499,9 @@ class TritonRMSNormFn(torch.autograd.Function):
                 num_warps=ctx.num_warps, num_stages=ctx.num_stages,
             )
         else:
-            grid = ((B + ctx.ROWS - 1) // ctx.ROWS,)
+            num_programs = (B + ctx.ROWS - 1) // ctx.ROWS
+            dg_partial = torch.empty(num_programs, H, device=x2.device, dtype=torch.float32)
+            grid = (num_programs,)
             _rmsnorm_bwd_kernel_multi_row[grid](
                 dy2, x2, gamma, rstd, dx, dg_partial,
                 x2.stride(0), x2.stride(1), dy2.stride(0), dy2.stride(1),
@@ -577,9 +596,8 @@ class TritonRMSNormResidualFn(torch.autograd.Function):
         else:
             dxpr2 = _reshape_batch_hidden(dxpr, H)
         dx = torch.empty_like(x_plus_r)
-        dg_partial = torch.empty(B, H, device=x_plus_r.device, dtype=torch.float32)
-
         if ctx.ROWS == 1:
+            dg_partial = torch.empty(B, H, device=x_plus_r.device, dtype=torch.float32)
             _rmsnorm_bwd_residual_kernel[(B,)](
                 dy2, dxpr2, x_plus_r, gamma, rstd, dx, dg_partial,
                 x_plus_r.stride(0), x_plus_r.stride(1),
@@ -590,7 +608,9 @@ class TritonRMSNormResidualFn(torch.autograd.Function):
                 num_warps=ctx.num_warps, num_stages=ctx.num_stages,
             )
         else:
-            grid = ((B + ctx.ROWS - 1) // ctx.ROWS,)
+            num_programs = (B + ctx.ROWS - 1) // ctx.ROWS
+            dg_partial = torch.empty(num_programs, H, device=x_plus_r.device, dtype=torch.float32)
+            grid = (num_programs,)
             _rmsnorm_bwd_residual_kernel_multi_row[grid](
                 dy2, dxpr2, x_plus_r, gamma, rstd, dx, dg_partial,
                 x_plus_r.stride(0), x_plus_r.stride(1),
