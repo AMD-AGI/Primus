@@ -1,6 +1,8 @@
 # Node-Local Smoke Test
 
-A lightweight, distributed-rendezvous-free preflight check that runs on every node in parallel under SLURM. Designed to **quickly identify broken nodes before a large training job commits to a global rendezvous**, in the common case where we own full nodes and care which *node* is sick rather than which GPU within an otherwise-healthy node.
+> **Just want to run it?** See [`node-smoke-test-instruction.md`](./node-smoke-test-instruction.md) for the short quick-start guide. This document is the full reference (architecture, every report section, every flag, design history).
+
+A lightweight, distributed-rendezvous-free preflight check that runs on every node in parallel under SLURM. Designed to **quickly identify broken nodes before a large training job commits to a global rendezvous**. Because training jobs allocate whole nodes, a under-performing GPU (or NIC, or wedged driver) takes the entire node out of rotation -- so the smoke test produces a single PASS/FAIL verdict per node and SLURM-ready `passing_nodes.txt` / `failing_nodes.txt` you can pipe straight into `srun --nodelist=` / `--exclude=`.
 
 - **Implementation**: `primus/tools/preflight/node_smoke/` (Python sub-package; entry point `python -m primus.tools.preflight.node_smoke`).
 - **Wrapper**: `runner/run_node_smoke_direct.sh`
