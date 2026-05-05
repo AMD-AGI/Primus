@@ -79,6 +79,9 @@ PRIMUS_CLI="${PRIMUS_CLI:-$SCRIPT_DIR/primus-cli}"
 log() { echo "[run_preflight_direct] $*"; }
 die() { echo "[run_preflight_direct][ERROR] $*" >&2; exit 1; }
 
+# Invoked indirectly via `trap ... ERR` below; ShellCheck SC2317 cannot
+# follow the trap handler so it flags the body as unreachable -- silence it.
+# shellcheck disable=SC2317
 on_error() {
     local ec=$?
     local line=${1:-?}

@@ -76,8 +76,6 @@ log_always() { echo "[run_node_smoke_direct] $*" >&3; }
 ###############################################################################
 # Paths and helpers
 ###############################################################################
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 log() { echo "[run_node_smoke_direct] $*"; }
 die() { echo "[run_node_smoke_direct][ERROR] $*" >&2; exit 1; }
 
