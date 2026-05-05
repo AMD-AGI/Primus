@@ -24,24 +24,19 @@ import sys
 
 import pytest
 
-from primus.tools.preflight.node_smoke.aggregator.report import (
-    write_smoke_report,
-)
+from primus.tools.preflight.node_smoke.aggregator.report import write_smoke_report
 from primus.tools.preflight.node_smoke.aggregator.summarizers import (
     _busy_gpu_rows,
     _clock_summary,
     _stack_drift_rows,
 )
+from primus.tools.preflight.node_smoke.collectors.gpu_processes import _parse_lsof_pcn
 from primus.tools.preflight.node_smoke.collectors.rocm_smi import (
     _parse_rocm_smi_ras_info_text,
-)
-from primus.tools.preflight.node_smoke.collectors.gpu_processes import (
-    _parse_lsof_pcn,
 )
 from primus.tools.preflight.node_smoke.logging_utils import _short_name
 from primus.tools.preflight.node_smoke.orchestrator import _node_status_from
 from primus.tools.preflight.node_smoke.shell_utils import _parse_size_with_unit
-
 
 # ---------------------------------------------------------------------------
 # A. Pure-helper unit tests
@@ -272,9 +267,7 @@ def test_node_status_require_tools_missing_amd_smi_fails():
         }
     }
     # amd-smi required but absent -> FAIL.
-    reasons = _node_status_from(
-        [], tier1, {}, required_tools=["amd-smi", "rocm-smi"]
-    )
+    reasons = _node_status_from([], tier1, {}, required_tools=["amd-smi", "rocm-smi"])
     assert any("amd-smi" in r for r in reasons)
     # Only rocm-smi required and present -> no reason added.
     assert _node_status_from([], tier1, {}, required_tools=["rocm-smi"]) == []
@@ -336,9 +329,7 @@ def test_report_section_order_stable(tmp_path):
         hbm_busy_threshold_gib=2.0,
         gpu_activity_warn_pct=20.0,
     )
-    seen = [
-        line for line in out.read_text().splitlines() if line.startswith("## ")
-    ]
+    seen = [line for line in out.read_text().splitlines() if line.startswith("## ")]
     assert seen == EXPECTED_SECTIONS
 
 

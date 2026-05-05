@@ -33,7 +33,6 @@ from typing import Any, Dict, List
 
 from ..shell_utils import _which
 
-
 _TRACKED_TOOLS = ("amd-smi", "rocm-smi", "lsof")
 
 

@@ -148,8 +148,7 @@ def run_inter_node_comm_p2p(args, sizes_mb: Optional[Sequence[int]] = None):
         host_col_label = "Leader hostname"
         host_col_w = max(20, len(host_col_label) + 2)
         header_line = (
-            f"{host_col_label:<{host_col_w}} {'Node':<10} {'Rank':<10} "
-            f"{' '.join(formatted_keys)}"
+            f"{host_col_label:<{host_col_w}} {'Node':<10} {'Rank':<10} " f"{' '.join(formatted_keys)}"
         )
 
         with open(args.markdown_file, "a", encoding="utf-8") as f:
@@ -165,12 +164,9 @@ def run_inter_node_comm_p2p(args, sizes_mb: Optional[Sequence[int]] = None):
                 host_str, node_str, rank_str = _row_for(src, peer)
                 formatted_values = [f"{src_rank_latency_results[i_r].get(key, 0):<6.2f}" for key in keys]
                 log(
-                    f"{host_str:<{host_col_w}} {node_str:<10} {rank_str:<10} "
-                    f"{' '.join(formatted_values)}"
+                    f"{host_str:<{host_col_w}} {node_str:<10} {rank_str:<10} " f"{' '.join(formatted_values)}"
                 )
-                f.write(
-                    f"| {host_str} | {node_str} | {rank_str} | {' | '.join(formatted_values)}|\n"
-                )
+                f.write(f"| {host_str} | {node_str} | {rank_str} | {' | '.join(formatted_values)}|\n")
             f.write(f"\n")
 
             f.write(f"=======InterNodeComm - {case_name} (GB/s)=======\n")
@@ -185,12 +181,9 @@ def run_inter_node_comm_p2p(args, sizes_mb: Optional[Sequence[int]] = None):
                 host_str, node_str, rank_str = _row_for(src, peer)
                 formatted_values = [f"{src_rank_bandwidth_results[i_r].get(key, 0):<6.2f}" for key in keys]
                 log(
-                    f"{host_str:<{host_col_w}} {node_str:<10} {rank_str:<10} "
-                    f"{' '.join(formatted_values)}"
+                    f"{host_str:<{host_col_w}} {node_str:<10} {rank_str:<10} " f"{' '.join(formatted_values)}"
                 )
-                f.write(
-                    f"| {host_str} | {node_str} | {rank_str} | {' | '.join(formatted_values)}|\n"
-                )
+                f.write(f"| {host_str} | {node_str} | {rank_str} | {' | '.join(formatted_values)}|\n")
             f.write(f"\n")
 
         if not args.plot:

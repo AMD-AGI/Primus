@@ -38,9 +38,7 @@ def _collect_host_limits(*, ulimit_l_min_gb: float, shm_min_gb: float) -> Dict[s
         import resource  # type: ignore
 
         soft_l, _ = resource.getrlimit(resource.RLIMIT_MEMLOCK)
-        out["memlock_soft_bytes"] = (
-            -1 if soft_l == resource.RLIM_INFINITY else int(soft_l)
-        )
+        out["memlock_soft_bytes"] = -1 if soft_l == resource.RLIM_INFINITY else int(soft_l)
         soft_n, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
         out["nofile_soft"] = int(soft_n)
         soft_p, _ = resource.getrlimit(resource.RLIMIT_NPROC)
@@ -59,8 +57,7 @@ def _collect_host_limits(*, ulimit_l_min_gb: float, shm_min_gb: float) -> Dict[s
     # NUMA topology.
     try:
         nodes = [
-            n for n in os.listdir("/sys/devices/system/node")
-            if n.startswith("node") and n[4:].isdigit()
+            n for n in os.listdir("/sys/devices/system/node") if n.startswith("node") and n[4:].isdigit()
         ]
         out["numa_nodes"] = len(nodes)
     except Exception:
@@ -71,9 +68,7 @@ def _collect_host_limits(*, ulimit_l_min_gb: float, shm_min_gb: float) -> Dict[s
         out["cpu_count"] = os.cpu_count()
     except Exception:
         out["cpu_count"] = None
-    out["cpu_governor"] = (
-        _read_text("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") or None
-    )
+    out["cpu_governor"] = _read_text("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor") or None
 
     # Hard checks.
     fail_reasons: List[str] = []

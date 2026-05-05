@@ -35,7 +35,6 @@ from primus.tools.preflight.network.info import (
 from primus.tools.preflight.preflight_args import PERF_TEST_TOKENS
 from primus.tools.preflight.square_gemm import run_square_gemm
 from primus.tools.preflight.utility import (
-    barrier_after_comm_destroy,
     gather_hostnames,
     get_first_ib_unidirectional_bandwidth,
     log,
@@ -143,8 +142,7 @@ def _parse_perf_tests(value: Optional[str]) -> Set[str]:
             return set(PERF_TEST_TOKENS)
         if tok not in PERF_TEST_TOKENS:
             raise ValueError(
-                f"--tests: unknown token '{tok}'. "
-                f"Valid tokens: {', '.join(PERF_TEST_TOKENS)}, all"
+                f"--tests: unknown token '{tok}'. " f"Valid tokens: {', '.join(PERF_TEST_TOKENS)}, all"
             )
         selected.add(tok)
     if not selected:
@@ -527,9 +525,7 @@ def run_preflight(args):
         if RANK == 0:
             if info_dropped_warning:
                 with open(args.markdown_file, "a", encoding="utf-8") as f:
-                    f.write(
-                        f"> Note: {info_dropped_warning}\n\n"
-                    )
+                    f.write(f"> Note: {info_dropped_warning}\n\n")
             _write_node_hostname_legend(args.markdown_file)
 
         if RANK == 0:
@@ -691,9 +687,7 @@ def _resolve_perf_config(args) -> Dict[str, Any]:
             raise ValueError("--intra-group-sizes yielded no values")
         bad = [g for g in intra_group_sizes if LOCAL_WORLD_SIZE % g != 0]
         if bad:
-            raise ValueError(
-                f"--intra-group-sizes: {bad} do not divide LOCAL_WORLD_SIZE={LOCAL_WORLD_SIZE}"
-            )
+            raise ValueError(f"--intra-group-sizes: {bad} do not divide LOCAL_WORLD_SIZE={LOCAL_WORLD_SIZE}")
 
     inter_group_sizes = _parse_csv_inter_group_list(inter_group_sizes_str, "--inter-group-sizes")
     if needs_inter and not inter_group_sizes:

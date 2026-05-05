@@ -50,8 +50,11 @@ def _collect_amd_smi_metrics() -> Dict[str, Any]:
         try:
             cp = subprocess.run(
                 ["amd-smi", "metric", "--json"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=15, check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=15,
+                check=False,
             )
             if cp.returncode == 0 and cp.stdout.strip():
                 try:
@@ -78,17 +81,18 @@ def _collect_amd_smi_metrics() -> Dict[str, Any]:
             try:
                 cp = subprocess.run(
                     ["amd-smi", "metric"],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, timeout=15, check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=15,
+                    check=False,
                 )
                 if cp.returncode == 0:
                     out["ok"] = True
                     out["tool"] = "amd-smi metric"
                     out["raw"] = cp.stdout[:8000]  # cap to keep JSON small
                 else:
-                    out["error"] = (
-                        (cp.stderr or "").strip()[:200] or f"rc={cp.returncode}"
-                    )
+                    out["error"] = (cp.stderr or "").strip()[:200] or f"rc={cp.returncode}"
             except subprocess.TimeoutExpired:
                 out["error"] = "amd-smi metric timed out"
             except Exception as e:

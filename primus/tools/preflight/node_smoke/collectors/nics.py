@@ -148,18 +148,20 @@ def _collect_nic_status(expected_count: Optional[int]) -> Dict[str, Any]:
                 except Exception:
                     pass
 
-            out["ports"].append({
-                "device": dev,
-                "port": port,
-                "link_layer": link_layer,
-                "state": state or None,
-                "phys_state": phys or None,
-                "rate_gbps": rate_gbps,
-                "ifname": ifname,
-                "mtu": mtu,
-                "gid_count": gid_count,
-                "rocev2_gid_count": rocev2_count,
-            })
+            out["ports"].append(
+                {
+                    "device": dev,
+                    "port": port,
+                    "link_layer": link_layer,
+                    "state": state or None,
+                    "phys_state": phys or None,
+                    "rate_gbps": rate_gbps,
+                    "ifname": ifname,
+                    "mtu": mtu,
+                    "gid_count": gid_count,
+                    "rocev2_gid_count": rocev2_count,
+                }
+            )
 
             # Per-port hard issues -> node FAIL.
             if state and state.upper() != "ACTIVE":
@@ -175,16 +177,14 @@ def _collect_nic_status(expected_count: Optional[int]) -> Dict[str, Any]:
                     # its absence as a hard fail.
                     if rocev2_count == 0:
                         out["issues"].append(
-                            f"{dev}:{port} no RoCE v2 GIDs configured "
-                            f"(RoCE/Ethernet fabric)"
+                            f"{dev}:{port} no RoCE v2 GIDs configured " f"(RoCE/Ethernet fabric)"
                         )
                 elif ll == "infiniband":
                     # True IB: subnet manager normally populates GIDs.
                     # Empty GID table on an ACTIVE IB port = SM problem.
                     if gid_count == 0:
                         out["issues"].append(
-                            f"{dev}:{port} no GIDs populated "
-                            f"(InfiniBand fabric -- check subnet manager)"
+                            f"{dev}:{port} no GIDs populated " f"(InfiniBand fabric -- check subnet manager)"
                         )
                 else:
                     # Unknown / missing link_layer (very old kernel):
@@ -192,13 +192,10 @@ def _collect_nic_status(expected_count: Optional[int]) -> Dict[str, Any]:
                     # specific type, to avoid false FAIL.
                     if gid_count == 0:
                         out["issues"].append(
-                            f"{dev}:{port} no valid GIDs configured "
-                            f"(link_layer unknown)"
+                            f"{dev}:{port} no valid GIDs configured " f"(link_layer unknown)"
                         )
 
     if expected_count is not None and len(out["ports"]) != expected_count:
-        out["issues"].append(
-            f"RDMA NIC port count {len(out['ports'])} != expected {expected_count}"
-        )
+        out["issues"].append(f"RDMA NIC port count {len(out['ports'])} != expected {expected_count}")
 
     return out

@@ -77,9 +77,7 @@ def _per_gpu_body(
         return {
             "gpu": gpu,
             "status": "FAIL",
-            "reason": (
-                f"gpu index {gpu} >= visible device_count {torch.cuda.device_count()}"
-            ),
+            "reason": (f"gpu index {gpu} >= visible device_count {torch.cuda.device_count()}"),
             "duration_sec": round(time.time() - t0, 3),
             "details": details,
         }
@@ -195,15 +193,12 @@ def _per_gpu_body(
                 low["pcie_link_width"] = int(width) if width.isdigit() else None
                 # speed is e.g. "32.0 GT/s PCIe" -> 32.0
                 try:
-                    low["pcie_link_speed_gts"] = (
-                        float(speed.split()[0]) if speed else None
-                    )
+                    low["pcie_link_speed_gts"] = float(speed.split()[0]) if speed else None
                 except Exception:
                     low["pcie_link_speed_gts"] = None
             else:
                 low["pcie_error"] = (
-                    f"could not resolve PCIe BDF (pci_bus_id="
-                    f"{getattr(props, 'pci_bus_id', None)!r})"
+                    f"could not resolve PCIe BDF (pci_bus_id=" f"{getattr(props, 'pci_bus_id', None)!r})"
                 )
         except Exception as e:
             low["pcie_error"] = f"PCIe sysfs capture failed: {e}"
@@ -235,9 +230,7 @@ def _per_gpu_body(
                 return {
                     "gpu": gpu,
                     "status": "FAIL",
-                    "reason": (
-                        f"GEMM TFLOPS {tflops:.0f} < threshold {gemm_tflops_min:.0f}"
-                    ),
+                    "reason": (f"GEMM TFLOPS {tflops:.0f} < threshold {gemm_tflops_min:.0f}"),
                     "duration_sec": round(time.time() - t0, 3),
                     "details": details,
                 }
@@ -305,9 +298,7 @@ def _measure_gemm_tflops(gpu: int, *, size: int, warmup: int, iters: int) -> flo
     return (flops / elapsed_s) / 1e12
 
 
-def _measure_hbm_gbs(
-    gpu: int, *, size_bytes: int, warmup: int, iters: int
-) -> float:
+def _measure_hbm_gbs(gpu: int, *, size_bytes: int, warmup: int, iters: int) -> float:
     """Measure local HBM bandwidth via device-to-device ``copy_``.
 
     Each iteration: 1 read of ``src`` + 1 write to ``dst`` = ``2 * size_bytes``
