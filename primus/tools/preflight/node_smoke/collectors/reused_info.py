@@ -43,9 +43,7 @@ def _collect_reused_info() -> Dict[str, Any]:
         from primus.tools.preflight.network.info import collect_network_info
 
         # expect_distributed=False so we don't WARN about a missing world PG.
-        section["network_info"] = _findings_to_dicts(
-            collect_network_info(expect_distributed=False)
-        )
+        section["network_info"] = _findings_to_dicts(collect_network_info(expect_distributed=False))
     except Exception as e:
         section["network_info"] = [
             {"level": "warn", "message": "collect_network_info raised", "details": {"error": str(e)}}

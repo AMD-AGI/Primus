@@ -12,7 +12,6 @@ This mirrors the pattern used by `primus.tools.benchmark.*_bench_args`.
 
 import argparse
 
-
 # Canonical perf-test tokens accepted by --tests.
 PERF_TEST_TOKENS = (
     "gemm",
@@ -153,8 +152,7 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         "--ring-p2p-sizes-mb",
         type=str,
         default=None,
-        help="Message sizes (CSV in MB) for the inter-node ring P2P test. "
-        "Default: 10,20,40,80,160.",
+        help="Message sizes (CSV in MB) for the inter-node ring P2P test. " "Default: 10,20,40,80,160.",
     )
 
     # Quick preset.

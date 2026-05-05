@@ -23,8 +23,8 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 
 from .aggregator.report import write_smoke_report
-from .collectors.dmesg import _collect_dmesg_errors
 from .collectors.clock import _collect_clock_state
+from .collectors.dmesg import _collect_dmesg_errors
 from .collectors.fingerprint import _collect_node_fingerprint
 from .collectors.gpu_low_level import _collect_amd_smi_metrics
 from .collectors.gpu_processes import _collect_gpu_processes
@@ -79,19 +79,12 @@ def _cmd_run(ns: argparse.Namespace) -> int:
 
     expected_gpus = ns.expected_gpus
     if expected_gpus is None:
-        expected_gpus = int(
-            os.environ.get(
-                "LOCAL_WORLD_SIZE", os.environ.get("GPUS_PER_NODE", "0")
-            )
-            or 0
-        )
+        expected_gpus = int(os.environ.get("LOCAL_WORLD_SIZE", os.environ.get("GPUS_PER_NODE", "0")) or 0)
         if expected_gpus <= 0:
             try:
                 import torch  # type: ignore
 
-                expected_gpus = (
-                    torch.cuda.device_count() if torch.cuda.is_available() else 0
-                )
+                expected_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
             except Exception:
                 expected_gpus = 0
     expected_gpus = max(0, int(expected_gpus))
@@ -153,9 +146,7 @@ def _cmd_run(ns: argparse.Namespace) -> int:
     # an in-band monitoring agent. The aggregator + _node_status_from
     # turn this into a hard FAIL unless the operator opted out via
     # --allow-foreign-procs (or whitelisted the agent name).
-    allowed_proc_names = [
-        s for s in (getattr(ns, "allowed_procs", "") or "").split(",") if s.strip()
-    ]
+    allowed_proc_names = [s for s in (getattr(ns, "allowed_procs", "") or "").split(",") if s.strip()]
     tier1_extra_pre: Dict[str, Any] = {}
     tier1_extra_pre["gpu_processes"] = _collect_gpu_processes(
         self_pid=os.getpid(),
@@ -174,9 +165,7 @@ def _cmd_run(ns: argparse.Namespace) -> int:
                     if p.get("is_foreign"):
                         hbm = p.get("hbm_bytes")
                         hbm_s = (
-                            f"{round(hbm / (1 << 30), 2)} GiB"
-                            if isinstance(hbm, int) and hbm > 0
-                            else "?"
+                            f"{round(hbm / (1 << 30), 2)} GiB" if isinstance(hbm, int) and hbm > 0 else "?"
                         )
                         _warn(
                             f"foreign process on gpu{g.get('gpu')}: "
@@ -244,10 +233,7 @@ def _cmd_run(ns: argparse.Namespace) -> int:
     if inv_missing:
         # First line: which tools are missing. Loud regardless of whether
         # a fallback covers everything.
-        _warn(
-            f"tooling: {len(inv_missing)} tracked tool(s) NOT in PATH: "
-            f"{', '.join(inv_missing)}."
-        )
+        _warn(f"tooling: {len(inv_missing)} tracked tool(s) NOT in PATH: " f"{', '.join(inv_missing)}.")
         if inv_uncovered:
             # Second line: which checks have NO working tool at all. This
             # is the actually-dangerous case (a check that will silently
@@ -271,9 +257,7 @@ def _cmd_run(ns: argparse.Namespace) -> int:
     tier1_extra["gpu_low_level"] = _collect_amd_smi_metrics()
     tier1_extra["xgmi"] = _collect_xgmi_topology()
     tier1_extra["clock"] = _collect_clock_state()
-    tier1_extra["tooling"] = _collect_rocm_smi_self_latency(
-        timeout_sec=float(ns.rocm_smi_timeout_sec)
-    )
+    tier1_extra["tooling"] = _collect_rocm_smi_self_latency(timeout_sec=float(ns.rocm_smi_timeout_sec))
 
     # Visibility cross-check: if amd-smi successfully enumerated GPUs but
     # torch couldn't see them, that's a high-signal sign of a stale ROCm
@@ -299,20 +283,14 @@ def _cmd_run(ns: argparse.Namespace) -> int:
     xg = tier1_extra["xgmi"]
     if xg.get("ok"):
         bad = xg.get("non_xgmi_pairs") or []
-        _log(
-            f"xgmi: {xg.get('n_gpus', 0)}x{xg.get('n_gpus', 0)} matrix, "
-            f"{len(bad)} non-XGMI pair(s)"
-        )
+        _log(f"xgmi: {xg.get('n_gpus', 0)}x{xg.get('n_gpus', 0)} matrix, " f"{len(bad)} non-XGMI pair(s)")
     elif xg.get("error"):
         _warn(f"xgmi: {xg.get('error')}")
     tool = tier1_extra["tooling"]
     if tool.get("ok"):
         _log(f"rocm-smi --version: {tool.get('latency_sec')}s")
     elif tool.get("timed_out"):
-        _warn(
-            f"rocm-smi --version timed out after {tool.get('timeout_sec')}s "
-            "-- driver may be wedging"
-        )
+        _warn(f"rocm-smi --version timed out after {tool.get('timeout_sec')}s " "-- driver may be wedging")
     elif tool.get("error"):
         _warn(f"tooling: {tool.get('error')}")
     nic_summary = tier1_extra["nics"]
@@ -339,19 +317,16 @@ def _cmd_run(ns: argparse.Namespace) -> int:
                 rccl = {
                     "status": "FAIL",
                     "gbs": rccl["gbs"],
-                    "error": (
-                        f"local RCCL {rccl['gbs']} GB/s < threshold {ns.rccl_gbs_min}"
-                    ),
+                    "error": (f"local RCCL {rccl['gbs']} GB/s < threshold {ns.rccl_gbs_min}"),
                 }
         tier2_extra["rccl"] = rccl
         _log(f"tier2 RCCL: {rccl}")
 
-    required_tools = [
-        s.strip() for s in (getattr(ns, "require_tools", "") or "").split(",")
-        if s.strip()
-    ]
+    required_tools = [s.strip() for s in (getattr(ns, "require_tools", "") or "").split(",") if s.strip()]
     fail_reasons = _node_status_from(
-        per_gpu, tier1_extra, tier2_extra,
+        per_gpu,
+        tier1_extra,
+        tier2_extra,
         allow_foreign_procs=bool(ns.allow_foreign_procs),
         required_tools=required_tools,
     )
@@ -401,11 +376,7 @@ def _cmd_aggregate(ns: argparse.Namespace) -> int:
     deadline = time.time() + max(0, int(ns.wait_timeout_sec))
     found_paths: List[str] = []
     while True:
-        found_paths = sorted(
-            os.path.join(smoke_dir, p)
-            for p in os.listdir(smoke_dir)
-            if p.endswith(".json")
-        )
+        found_paths = sorted(os.path.join(smoke_dir, p) for p in os.listdir(smoke_dir) if p.endswith(".json"))
         if expected is None or len(found_paths) >= expected:
             break
         if time.time() >= deadline:
@@ -443,15 +414,8 @@ def _cmd_aggregate(ns: argparse.Namespace) -> int:
     if nodelist_file:
         try:
             with open(nodelist_file, "r", encoding="utf-8") as f:
-                expected_hosts_short = [
-                    _short_name(line.strip())
-                    for line in f
-                    if line.strip()
-                ]
-            _log(
-                f"loaded {len(expected_hosts_short)} expected hostnames from "
-                f"{nodelist_file}"
-            )
+                expected_hosts_short = [_short_name(line.strip()) for line in f if line.strip()]
+            _log(f"loaded {len(expected_hosts_short)} expected hostnames from " f"{nodelist_file}")
         except Exception as e:
             _warn(f"failed to read --expected-nodelist-file {nodelist_file}: {e}")
 
@@ -464,38 +428,44 @@ def _cmd_aggregate(ns: argparse.Namespace) -> int:
             expected = len(expected_hosts_short)
         missing_hosts = sorted(set(expected_hosts_short) - seen_hosts_short)
         for h in missing_hosts:
-            nodes.append({
-                "host": h,
-                "status": "FAIL",
-                "fail_reasons": [
-                    f"no JSON received within {ns.wait_timeout_sec}s "
-                    f"(expected hostname '{h}' from --expected-nodelist-file)"
-                ],
-                "duration_sec": 0,
-                "node_rank": -1,
-            })
+            nodes.append(
+                {
+                    "host": h,
+                    "status": "FAIL",
+                    "fail_reasons": [
+                        f"no JSON received within {ns.wait_timeout_sec}s "
+                        f"(expected hostname '{h}' from --expected-nodelist-file)"
+                    ],
+                    "duration_sec": 0,
+                    "node_rank": -1,
+                }
+            )
     elif expected is not None and len(seen_hosts_short) < expected:
         # Fallback: we know the count but not the identities -> emit
         # synthetic placeholders. These intentionally do NOT land in
         # passing/failing txt files (see _is_real_host below).
         for i in range(expected - len(seen_hosts_short)):
-            nodes.append({
-                "host": f"<missing-{i}>",
-                "status": "FAIL",
-                "fail_reasons": [
-                    f"no JSON received within {ns.wait_timeout_sec}s "
-                    f"(expected_nodes={expected}, "
-                    f"found={len(seen_hosts_short)})"
-                ],
-                "duration_sec": 0,
-                "node_rank": -1,
-            })
+            nodes.append(
+                {
+                    "host": f"<missing-{i}>",
+                    "status": "FAIL",
+                    "fail_reasons": [
+                        f"no JSON received within {ns.wait_timeout_sec}s "
+                        f"(expected_nodes={expected}, "
+                        f"found={len(seen_hosts_short)})"
+                    ],
+                    "duration_sec": 0,
+                    "node_rank": -1,
+                }
+            )
 
     # Sort by node_rank if present, otherwise by hostname.
     def _key(n: Dict[str, Any]):
         nr = n.get("node_rank", 0)
-        return (int(nr) if isinstance(nr, (int, str)) and str(nr).lstrip("-").isdigit() else 1 << 30,
-                str(n.get("host", "")))
+        return (
+            int(nr) if isinstance(nr, (int, str)) and str(nr).lstrip("-").isdigit() else 1 << 30,
+            str(n.get("host", "")),
+        )
 
     nodes.sort(key=_key)
 
@@ -564,126 +534,208 @@ def _build_parser() -> argparse.ArgumentParser:
     # We want them to error out loudly so behavior never changes silently
     # underneath an unsuspecting caller.
     pr = sub.add_parser(
-        "run", help="Run per-node smoke test on this node.",
+        "run",
+        help="Run per-node smoke test on this node.",
         allow_abbrev=False,
     )
-    pr.add_argument("--dump-path", default="output/preflight",
-                    help="Directory under which smoke/<host>.json is written.")
-    pr.add_argument("--expected-gpus", type=int, default=None,
-                    help="Expected GPU count on this node (default: LOCAL_WORLD_SIZE/GPUS_PER_NODE/torch.cuda.device_count()).")
-    pr.add_argument("--per-gpu-timeout-sec", type=int, default=15,
-                    help="Hard timeout for each per-GPU subprocess.")
-    pr.add_argument("--tier2-perf", action="store_true",
-                    help="Enable Tier 2 perf sanity: per-GPU GEMM TFLOPS, "
-                         "HBM bandwidth, AND node-local RCCL all-reduce. "
-                         "All three are fast (< 30 s/node total).")
-    pr.add_argument("--gemm-tflops-min", type=float, default=600.0,
-                    help="FAIL if Tier 2 GEMM TFLOPS is below this. Default: 600 (MI300X-class).")
-    pr.add_argument("--hbm-gbs-min", type=float, default=2000.0,
-                    help="FAIL if Tier 2 HBM GB/s is below this. Default: 2000.")
-    pr.add_argument("--rccl-size-mb", type=int, default=64,
-                    help="Tensor size for local RCCL all-reduce (MB).")
-    pr.add_argument("--rccl-gbs-min", type=float, default=100.0,
-                    help="FAIL if local RCCL GB/s is below this. Default: 100.")
-    pr.add_argument("--rccl-timeout-sec", type=int, default=30,
-                    help="Hard timeout for the local RCCL all-reduce phase.")
-    pr.add_argument("--skip-dmesg", action="store_true",
-                    help="Skip the dmesg recent-error scan (e.g. inside containers).")
-    pr.add_argument("--dmesg-minutes", type=int, default=15,
-                    help="Window for dmesg --since (minutes).")
+    pr.add_argument(
+        "--dump-path", default="output/preflight", help="Directory under which smoke/<host>.json is written."
+    )
+    pr.add_argument(
+        "--expected-gpus",
+        type=int,
+        default=None,
+        help="Expected GPU count on this node (default: LOCAL_WORLD_SIZE/GPUS_PER_NODE/torch.cuda.device_count()).",
+    )
+    pr.add_argument(
+        "--per-gpu-timeout-sec", type=int, default=15, help="Hard timeout for each per-GPU subprocess."
+    )
+    pr.add_argument(
+        "--tier2-perf",
+        action="store_true",
+        help="Enable Tier 2 perf sanity: per-GPU GEMM TFLOPS, "
+        "HBM bandwidth, AND node-local RCCL all-reduce. "
+        "All three are fast (< 30 s/node total).",
+    )
+    pr.add_argument(
+        "--gemm-tflops-min",
+        type=float,
+        default=600.0,
+        help="FAIL if Tier 2 GEMM TFLOPS is below this. Default: 600 (MI300X-class).",
+    )
+    pr.add_argument(
+        "--hbm-gbs-min",
+        type=float,
+        default=2000.0,
+        help="FAIL if Tier 2 HBM GB/s is below this. Default: 2000.",
+    )
+    pr.add_argument(
+        "--rccl-size-mb", type=int, default=64, help="Tensor size for local RCCL all-reduce (MB)."
+    )
+    pr.add_argument(
+        "--rccl-gbs-min",
+        type=float,
+        default=100.0,
+        help="FAIL if local RCCL GB/s is below this. Default: 100.",
+    )
+    pr.add_argument(
+        "--rccl-timeout-sec", type=int, default=30, help="Hard timeout for the local RCCL all-reduce phase."
+    )
+    pr.add_argument(
+        "--skip-dmesg", action="store_true", help="Skip the dmesg recent-error scan (e.g. inside containers)."
+    )
+    pr.add_argument("--dmesg-minutes", type=int, default=15, help="Window for dmesg --since (minutes).")
     # NIC / RDMA roll-call (B). expected_count=None means "report only";
     # set this to e.g. 8 to make a missing or down NIC port a node FAIL.
-    pr.add_argument("--expected-rdma-nics", type=int, default=None,
-                    help="Expected RDMA NIC port count. If set, a count "
-                         "mismatch becomes a node FAIL.")
+    pr.add_argument(
+        "--expected-rdma-nics",
+        type=int,
+        default=None,
+        help="Expected RDMA NIC port count. If set, a count " "mismatch becomes a node FAIL.",
+    )
     # Host-limits hard thresholds (C). Set to 0 to disable a check.
-    pr.add_argument("--ulimit-l-min-gb", type=float, default=32.0,
-                    help="FAIL the node if RLIMIT_MEMLOCK is finite and below "
-                         "this many GiB (RDMA pin will fail). 0 disables.")
-    pr.add_argument("--shm-min-gb", type=float, default=8.0,
-                    help="FAIL the node if /dev/shm is below this many GiB "
-                         "(NCCL shared-mem may fail). 0 disables.")
+    pr.add_argument(
+        "--ulimit-l-min-gb",
+        type=float,
+        default=32.0,
+        help="FAIL the node if RLIMIT_MEMLOCK is finite and below "
+        "this many GiB (RDMA pin will fail). 0 disables.",
+    )
+    pr.add_argument(
+        "--shm-min-gb",
+        type=float,
+        default=8.0,
+        help="FAIL the node if /dev/shm is below this many GiB " "(NCCL shared-mem may fail). 0 disables.",
+    )
     # F-partial: rocm-smi self-latency. Hitting this timeout is treated as a
     # hard fail because a wedging amdgpu driver typically makes rocm-smi
     # hang for 30-60 s before the GPU itself stops responding.
-    pr.add_argument("--rocm-smi-timeout-sec", type=float, default=5.0,
-                    help="Hard timeout for `rocm-smi --version`. Hitting it is "
-                         "a node FAIL (driver likely wedging).")
+    pr.add_argument(
+        "--rocm-smi-timeout-sec",
+        type=float,
+        default=5.0,
+        help="Hard timeout for `rocm-smi --version`. Hitting it is " "a node FAIL (driver likely wedging).",
+    )
     # G: foreign / leaked process detection. Hard-fail by default; the
     # operator can opt out for partitions that legitimately co-tenant the
     # GPU, or whitelist known in-band agents by name.
-    pr.add_argument("--hbm-busy-threshold-gib", type=float, default=2.0,
-                    help="FAIL the node if any GPU has more than this much "
-                         "HBM in use BEFORE we touch the device (i.e. someone "
-                         "else is holding it). Default: 2.0 GiB.")
-    pr.add_argument("--allow-foreign-procs", action="store_true",
-                    help="Do NOT FAIL the node when foreign processes are "
-                         "found holding a GPU. They will still be reported.")
-    pr.add_argument("--allowed-procs", type=str,
-                    default="gpuagent,rocm-smi-daemon,amd-smi,dcgm-exporter",
-                    help="Comma-separated process names that are OK to find "
-                         "holding the GPU. The default whitelists the AMD "
-                         "system agents (`gpuagent`, `rocm-smi-daemon`, "
-                         "`amd-smi`) and a common observability sidecar "
-                         "(`dcgm-exporter`) so they don't fail every node. "
-                         "Set to an empty string to disable the whitelist.")
-    pr.add_argument("--gpu-activity-warn-pct", type=float, default=20.0,
-                    help="Aggregator warns (does NOT fail) if amd-smi reports "
-                         "any GPU's gfx_activity_pct above this when smoke "
-                         "starts. Default: 20.")
+    pr.add_argument(
+        "--hbm-busy-threshold-gib",
+        type=float,
+        default=2.0,
+        help="FAIL the node if any GPU has more than this much "
+        "HBM in use BEFORE we touch the device (i.e. someone "
+        "else is holding it). Default: 2.0 GiB.",
+    )
+    pr.add_argument(
+        "--allow-foreign-procs",
+        action="store_true",
+        help="Do NOT FAIL the node when foreign processes are "
+        "found holding a GPU. They will still be reported.",
+    )
+    pr.add_argument(
+        "--allowed-procs",
+        type=str,
+        default="gpuagent,rocm-smi-daemon,amd-smi,dcgm-exporter",
+        help="Comma-separated process names that are OK to find "
+        "holding the GPU. The default whitelists the AMD "
+        "system agents (`gpuagent`, `rocm-smi-daemon`, "
+        "`amd-smi`) and a common observability sidecar "
+        "(`dcgm-exporter`) so they don't fail every node. "
+        "Set to an empty string to disable the whitelist.",
+    )
+    pr.add_argument(
+        "--gpu-activity-warn-pct",
+        type=float,
+        default=20.0,
+        help="Aggregator warns (does NOT fail) if amd-smi reports "
+        "any GPU's gfx_activity_pct above this when smoke "
+        "starts. Default: 20.",
+    )
     # Tooling availability. Default empty = warn-only (the WARN already
     # fires before the per-GPU subprocesses run, and the aggregator
     # always renders a "Tooling availability" section). Strict
     # environments can pass --require-tools amd-smi,rocm-smi to promote
     # a missing tool to a hard node FAIL.
-    pr.add_argument("--require-tools", type=str, default="",
-                    help="Comma-separated CLI tool names that MUST be "
-                         "present in PATH for the node to PASS. Anything "
-                         "missing becomes a hard node FAIL. Tracked tools: "
-                         "amd-smi, rocm-smi, lsof. Default: warn-only.")
-    pr.add_argument("--no-clean-dump-path", action="store_true",
-                    help="Do NOT auto-wipe stale per-node JSONs and aggregator "
-                         "outputs from --dump-path on rank 0 at startup. "
-                         "Default behavior is to clean so re-runs on a "
-                         "different nodelist don't inherit ghost PASS "
-                         "verdicts from removed nodes.")
+    pr.add_argument(
+        "--require-tools",
+        type=str,
+        default="",
+        help="Comma-separated CLI tool names that MUST be "
+        "present in PATH for the node to PASS. Anything "
+        "missing becomes a hard node FAIL. Tracked tools: "
+        "amd-smi, rocm-smi, lsof. Default: warn-only.",
+    )
+    pr.add_argument(
+        "--no-clean-dump-path",
+        action="store_true",
+        help="Do NOT auto-wipe stale per-node JSONs and aggregator "
+        "outputs from --dump-path on rank 0 at startup. "
+        "Default behavior is to clean so re-runs on a "
+        "different nodelist don't inherit ghost PASS "
+        "verdicts from removed nodes.",
+    )
     pr.set_defaults(func=_cmd_run)
 
     # ---- aggregate ----
-    pa = sub.add_parser("aggregate",
-                        help="Aggregate per-node JSONs into report + passing/failing lists.")
-    pa.add_argument("--dump-path", default="output/preflight",
-                    help="Same as `run --dump-path`.")
-    pa.add_argument("--expected-nodes", type=int, default=None,
-                    help="Number of nodes expected to report. Missing nodes are FAIL.")
-    pa.add_argument("--wait-timeout-sec", type=int, default=60,
-                    help="How long to wait for all expected JSONs to land before aggregating anyway.")
-    pa.add_argument("--rocm-smi-warn-sec", type=float, default=1.0,
-                    help="Flag (warn-only) any node where `rocm-smi --version` "
-                         "took longer than this many seconds.")
-    pa.add_argument("--clock-skew-warn-sec", type=float, default=30.0,
-                    help="Warn (info-only) when wall-clock spread across nodes "
-                         "exceeds this many seconds. Includes srun launch "
-                         "jitter so the default is loose.")
+    pa = sub.add_parser("aggregate", help="Aggregate per-node JSONs into report + passing/failing lists.")
+    pa.add_argument("--dump-path", default="output/preflight", help="Same as `run --dump-path`.")
+    pa.add_argument(
+        "--expected-nodes",
+        type=int,
+        default=None,
+        help="Number of nodes expected to report. Missing nodes are FAIL.",
+    )
+    pa.add_argument(
+        "--wait-timeout-sec",
+        type=int,
+        default=60,
+        help="How long to wait for all expected JSONs to land before aggregating anyway.",
+    )
+    pa.add_argument(
+        "--rocm-smi-warn-sec",
+        type=float,
+        default=1.0,
+        help="Flag (warn-only) any node where `rocm-smi --version` " "took longer than this many seconds.",
+    )
+    pa.add_argument(
+        "--clock-skew-warn-sec",
+        type=float,
+        default=30.0,
+        help="Warn (info-only) when wall-clock spread across nodes "
+        "exceeds this many seconds. Includes srun launch "
+        "jitter so the default is loose.",
+    )
     # Mirror the run-side thresholds so the report can label its sections
     # using the same numbers each node's `run` was configured with.
-    pa.add_argument("--hbm-busy-threshold-gib", type=float, default=2.0,
-                    help="Pre-touch HBM-used threshold (GiB) used by the "
-                         "'GPU pre-touch HBM usage outliers' section.")
-    pa.add_argument("--gpu-activity-warn-pct", type=float, default=20.0,
-                    help="GPU activity %% threshold used by the "
-                         "'GPU compute-activity outliers' section.")
-    pa.add_argument("--expected-nodelist-file", type=str, default=None,
-                    help="Optional file with one expected (short) hostname per line. "
-                         "When provided, missing nodes are reported with their real "
-                         "hostname instead of synthetic <missing-N> placeholders, and "
-                         "are written to failing_nodes.txt directly. The runner script "
-                         "auto-populates this from `scontrol show hostnames` under SLURM.")
+    pa.add_argument(
+        "--hbm-busy-threshold-gib",
+        type=float,
+        default=2.0,
+        help="Pre-touch HBM-used threshold (GiB) used by the " "'GPU pre-touch HBM usage outliers' section.",
+    )
+    pa.add_argument(
+        "--gpu-activity-warn-pct",
+        type=float,
+        default=20.0,
+        help="GPU activity %% threshold used by the " "'GPU compute-activity outliers' section.",
+    )
+    pa.add_argument(
+        "--expected-nodelist-file",
+        type=str,
+        default=None,
+        help="Optional file with one expected (short) hostname per line. "
+        "When provided, missing nodes are reported with their real "
+        "hostname instead of synthetic <missing-N> placeholders, and "
+        "are written to failing_nodes.txt directly. The runner script "
+        "auto-populates this from `scontrol show hostnames` under SLURM.",
+    )
     pa.set_defaults(func=_cmd_aggregate)
 
     # ---- _per_gpu (internal) ----
-    pg = sub.add_parser("_per_gpu",
-                        help="(internal) Run smoke checks for a single GPU index. Spawned by `run`.")
+    pg = sub.add_parser(
+        "_per_gpu", help="(internal) Run smoke checks for a single GPU index. Spawned by `run`."
+    )
     pg.add_argument("gpu", type=int)
     pg.add_argument("--tier2-perf", action="store_true")
     pg.add_argument("--gemm-tflops-min", type=float, default=600.0)

@@ -16,7 +16,6 @@ from __future__ import annotations
 import subprocess
 from typing import Any, Dict, List
 
-
 # Regex (NOT substring) patterns matched case-insensitively against each
 # dmesg line. They MUST be valid Python regex -- if you only want a literal
 # substring (e.g. ``mce: ``), it's still a valid regex with no specials.
@@ -34,7 +33,7 @@ _DMESG_PATTERNS = (
     r"page allocation failure",
     r"soft lockup",
     r"amdgpu.*(error|fail|timeout)",
-    r"\*error\*",          # [drm] *ERROR*
+    r"\*error\*",  # [drm] *ERROR*
     r"mce: ",
 )
 

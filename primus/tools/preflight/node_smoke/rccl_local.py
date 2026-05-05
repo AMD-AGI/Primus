@@ -87,9 +87,7 @@ def _rccl_worker(
                 pass
 
 
-def _run_local_rccl(
-    *, local_world_size: int, size_mb: int, timeout_sec: int
-) -> Dict[str, Any]:
+def _run_local_rccl(*, local_world_size: int, size_mb: int, timeout_sec: int) -> Dict[str, Any]:
     """Spawn local-only RCCL workers to measure intra-node all-reduce bandwidth.
 
     Returns ``{"status": "PASS"|"FAIL"|"TIMEOUT", ...}``.
@@ -110,9 +108,7 @@ def _run_local_rccl(
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
 
-    with tempfile.NamedTemporaryFile(
-        prefix="node_smoke_rccl_", suffix=".json", delete=False
-    ) as tf:
+    with tempfile.NamedTemporaryFile(prefix="node_smoke_rccl_", suffix=".json", delete=False) as tf:
         out_path = tf.name
 
     ctx = mp.get_context("spawn")

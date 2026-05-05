@@ -85,6 +85,7 @@ def _resolve_gpu_bdf(props: Any) -> Optional[str]:
         if os.path.isdir(f"/sys/bus/pci/devices/{primary}"):
             return primary
         import glob
+
         matches = sorted(glob.glob(f"/sys/bus/pci/devices/0000:{bus_hex}:*"))
         if matches:
             return os.path.basename(matches[0])
@@ -100,8 +101,11 @@ def _systemctl_is_active(unit: str) -> Optional[str]:
     try:
         cp = subprocess.run(
             ["systemctl", "is-active", unit],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=3, check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=3,
+            check=False,
         )
         # systemctl returns non-zero for inactive/failed -- that's fine,
         # we just want the textual state.
@@ -139,10 +143,19 @@ def _parse_size_with_unit(s: str) -> Optional[int]:
     if not m:
         return None
     units = {
-        "b": 1, "k": 1 << 10, "kb": 1 << 10, "kib": 1 << 10,
-        "m": 1 << 20, "mb": 1 << 20, "mib": 1 << 20,
-        "g": 1 << 30, "gb": 1 << 30, "gib": 1 << 30,
-        "t": 1 << 40, "tb": 1 << 40, "tib": 1 << 40,
+        "b": 1,
+        "k": 1 << 10,
+        "kb": 1 << 10,
+        "kib": 1 << 10,
+        "m": 1 << 20,
+        "mb": 1 << 20,
+        "mib": 1 << 20,
+        "g": 1 << 30,
+        "gb": 1 << 30,
+        "gib": 1 << 30,
+        "t": 1 << 40,
+        "tb": 1 << 40,
+        "tib": 1 << 40,
     }
     unit = (m.group(2) or "b").lower()
     if unit not in units:

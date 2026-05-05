@@ -50,9 +50,7 @@ def _write_header(
 ) -> None:
     """Write the report title, summary counts, and per-node status table."""
     f.write("# Node-Local Smoke Test Report\n\n")
-    f.write(
-        f"- **Expected nodes**: `{expected if expected is not None else 'unknown'}`\n"
-    )
+    f.write(f"- **Expected nodes**: `{expected if expected is not None else 'unknown'}`\n")
     f.write(f"- **Reported nodes**: `{len(nodes)}`\n")
     f.write(f"- **PASS**: `{len(passing)}`  **FAIL**: `{len(failing)}`\n\n")
     f.write("| Node | Hostname | Status | Duration | Top fail reason |\n")
@@ -85,9 +83,7 @@ def _write_stack_drift(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
             f.write("| Key | Majority (count/total) | Outlier nodes |\n")
             f.write("|------|-------------------------|----------------|\n")
             for row in drift:
-                outliers = "; ".join(
-                    f"`{h}` = `{v}`" for h, v in row["outliers"]
-                )
+                outliers = "; ".join(f"`{h}` = `{v}`" for h, v in row["outliers"])
                 f.write(
                     f"| `{row['key']}` | `{row['majority']}` "
                     f"({row['count']}/{row['total']}) | {outliers} |\n"
@@ -108,9 +104,7 @@ def _write_nic_fw_drift(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
             f.write("| NIC | Majority FW (count/total) | Outlier nodes |\n")
             f.write("|-----|---------------------------|----------------|\n")
             for row in nic_drift:
-                outliers = "; ".join(
-                    f"`{h}` = `{v}`" for h, v in row["outliers"]
-                )
+                outliers = "; ".join(f"`{h}` = `{v}`" for h, v in row["outliers"])
                 f.write(
                     f"| `{row['device']}` | `{row['majority']}` "
                     f"({row['count']}/{row['total']}) | {outliers} |\n"
@@ -134,9 +128,7 @@ def _write_nic_issues(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
                 msg = str(row["issue"]).replace("|", "/")
                 if len(msg) > 160:
                     msg = msg[:157] + "..."
-                f.write(
-                    f"| {row['node_rank']} | {row['host']} | {msg} |\n"
-                )
+                f.write(f"| {row['node_rank']} | {row['host']} | {msg} |\n")
     except Exception as e:
         f.write(f"*NIC issues section failed to render: {e}*\n")
         _warn(f"nic-issues render failed: {e}")
@@ -155,19 +147,19 @@ def _write_nic_port_count(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
         counts = []
         for n in nodes:
             nic = (n.get("tier1") or {}).get("nics") or {}
-            counts.append((
-                n.get("node_rank", "?"),
-                n.get("host", "?"),
-                len(nic.get("ports") or []),
-            ))
+            counts.append(
+                (
+                    n.get("node_rank", "?"),
+                    n.get("host", "?"),
+                    len(nic.get("ports") or []),
+                )
+            )
         if not counts:
             f.write("*No NIC data reported.*\n")
         else:
             cnt = Counter(c for *_, c in counts)
             majority_count, _ = cnt.most_common(1)[0]
-            anomalies = [
-                (nr, h, c) for nr, h, c in counts if c != majority_count
-            ]
+            anomalies = [(nr, h, c) for nr, h, c in counts if c != majority_count]
             f.write(
                 f"Cluster-majority port count: **{majority_count}** "
                 f"(seen on {cnt[majority_count]}/{len(counts)} nodes).\n\n"
@@ -198,9 +190,7 @@ def _write_host_limits(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
                 msg = str(row["issue"]).replace("|", "/")
                 if len(msg) > 200:
                     msg = msg[:197] + "..."
-                f.write(
-                    f"| {row['node_rank']} | {row['host']} | {msg} |\n"
-                )
+                f.write(f"| {row['node_rank']} | {row['host']} | {msg} |\n")
     except Exception as e:
         f.write(f"*Host limits section failed to render: {e}*\n")
         _warn(f"host-limits render failed: {e}")
@@ -217,17 +207,20 @@ def _write_gpu_visibility(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
         for n in nodes:
             vis = (n.get("tier1") or {}).get("gpu_visibility") or {}
             for issue in vis.get("fail_reasons", []) or []:
-                vis_rows.append({
-                    "node_rank": n.get("node_rank", "?"),
-                    "host": n.get("host", "?"),
-                    "torch": vis.get("torch_visible"),
-                    "amd_smi": vis.get("amd_smi_visible"),
-                    "expected": vis.get("expected_gpus"),
-                    "issue": issue,
-                })
+                vis_rows.append(
+                    {
+                        "node_rank": n.get("node_rank", "?"),
+                        "host": n.get("host", "?"),
+                        "torch": vis.get("torch_visible"),
+                        "amd_smi": vis.get("amd_smi_visible"),
+                        "expected": vis.get("expected_gpus"),
+                        "issue": issue,
+                    }
+                )
         if not vis_rows:
-            f.write("*Every node resolved expected_gpus >= 1 and torch + "
-                    "amd-smi agree on the GPU count.*\n")
+            f.write(
+                "*Every node resolved expected_gpus >= 1 and torch + " "amd-smi agree on the GPU count.*\n"
+            )
         else:
             f.write(
                 "Nodes where the GPU is invisible to torch, or where "
@@ -235,12 +228,8 @@ def _write_gpu_visibility(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
                 "amdgpu driver). These are hard fails independent of "
                 "every other collector.\n\n"
             )
-            f.write(
-                "| Node | Hostname | expected | torch | amd-smi | Issue |\n"
-            )
-            f.write(
-                "|------|----------|----------|-------|---------|-------|\n"
-            )
+            f.write("| Node | Hostname | expected | torch | amd-smi | Issue |\n")
+            f.write("|------|----------|----------|-------|---------|-------|\n")
             for row in vis_rows:
                 msg = str(row["issue"]).replace("|", "/")
                 if len(msg) > 200:
@@ -261,26 +250,17 @@ def _write_gpu_low_level(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
     try:
         gpu_outliers = _gpu_low_level_outlier_rows(nodes)
         if not gpu_outliers:
-            f.write("*All GPUs match the cluster majority on PCIe link "
-                    "and HBM total.*\n")
+            f.write("*All GPUs match the cluster majority on PCIe link " "and HBM total.*\n")
         else:
             f.write(
                 "Per-GPU values that differ from the cluster majority. A "
                 "GPU sitting at half PCIe width / half HBM is almost "
                 "always a hardware fault on that single device.\n\n"
             )
-            f.write(
-                "| Metric | Cluster majority (count/total) | "
-                "Outliers (`host:gpu` = value) |\n"
-            )
-            f.write(
-                "|--------|---------------------------------|"
-                "-------------------------------|\n"
-            )
+            f.write("| Metric | Cluster majority (count/total) | " "Outliers (`host:gpu` = value) |\n")
+            f.write("|--------|---------------------------------|" "-------------------------------|\n")
             for row in gpu_outliers:
-                out_str = "; ".join(
-                    f"`{h}:{g}` = `{v}`" for h, g, v in row["outliers"]
-                )
+                out_str = "; ".join(f"`{h}:{g}` = `{v}`" for h, g, v in row["outliers"])
                 f.write(
                     f"| {row['label']} | `{row['majority']}` "
                     f"({row['count']}/{row['total']}) | {out_str} |\n"
@@ -296,8 +276,7 @@ def _write_xgmi(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
     try:
         xgmi_issues = _xgmi_issue_rows(nodes)
         if not xgmi_issues:
-            f.write("*All GPU pairs report XGMI on every node "
-                    "(or amd-smi topology was unavailable).*\n")
+            f.write("*All GPU pairs report XGMI on every node " "(or amd-smi topology was unavailable).*\n")
         else:
             f.write(
                 "Any non-XGMI GPU pair is a hard fail -- intra-node "
@@ -310,16 +289,16 @@ def _write_xgmi(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
                 msg = str(row["summary"]).replace("|", "/")
                 if len(msg) > 200:
                     msg = msg[:197] + "..."
-                f.write(
-                    f"| {row['node_rank']} | {row['host']} | {msg} |\n"
-                )
+                f.write(f"| {row['node_rank']} | {row['host']} | {msg} |\n")
     except Exception as e:
         f.write(f"*XGMI section failed to render: {e}*\n")
         _warn(f"xgmi render failed: {e}")
 
 
 def _write_clock(
-    f: IO[str], nodes: List[Dict[str, Any]], skew_warn_sec: float,
+    f: IO[str],
+    nodes: List[Dict[str, Any]],
+    skew_warn_sec: float,
 ) -> None:
     # ----- E: cluster wall-clock spread + time-daemon roll-call -----
     f.write("\n## Cluster clock + time daemons\n\n")
@@ -329,49 +308,43 @@ def _write_clock(
         if spread is None:
             f.write("*Not enough nodes reported a wall-clock timestamp.*\n")
         else:
-            marker = " (**warn** -- exceeds " \
-                     f"{clk['spread_warn_sec']}s)" if clk["spread_warn"] else ""
+            marker = " (**warn** -- exceeds " f"{clk['spread_warn_sec']}s)" if clk["spread_warn"] else ""
             f.write(
-                f"- Wall-clock spread across {clk['n_nodes_with_time']} "
-                f"nodes: **{spread}s**{marker}.\n"
+                f"- Wall-clock spread across {clk['n_nodes_with_time']} " f"nodes: **{spread}s**{marker}.\n"
             )
+            f.write(f"- Earliest: `{clk['earliest_host']}`, " f"latest: `{clk['latest_host']}`.\n")
             f.write(
-                f"- Earliest: `{clk['earliest_host']}`, "
-                f"latest: `{clk['latest_host']}`.\n"
-            )
-            f.write(
-                "- (Spread is an upper bound on real clock skew -- it "
-                "also includes srun launch jitter.)\n"
+                "- (Spread is an upper bound on real clock skew -- it " "also includes srun launch jitter.)\n"
             )
         if clk["no_daemon_hosts"]:
-            f.write("\n**Nodes with no active time-sync daemon "
-                    "(chronyd / ntpd / systemd-timesyncd):**\n\n")
+            f.write(
+                "\n**Nodes with no active time-sync daemon " "(chronyd / ntpd / systemd-timesyncd):**\n\n"
+            )
             f.write("| Node | Hostname |\n")
             f.write("|------|----------|\n")
             for nr, h in clk["no_daemon_hosts"]:
                 f.write(f"| {nr} | {h} |\n")
         else:
-            f.write("\n*Every node has at least one active time-sync "
-                    "daemon.*\n")
+            f.write("\n*Every node has at least one active time-sync " "daemon.*\n")
     except Exception as e:
         f.write(f"*Clock section failed to render: {e}*\n")
         _warn(f"clock render failed: {e}")
 
 
 def _write_tooling_latency(
-    f: IO[str], nodes: List[Dict[str, Any]], rocm_smi_warn_sec: float,
+    f: IO[str],
+    nodes: List[Dict[str, Any]],
+    rocm_smi_warn_sec: float,
 ) -> None:
     # ----- F-partial: rocm-smi self-latency -----
     f.write("\n## Tooling self-latency (`rocm-smi --version`)\n\n")
     try:
         tool_rows = _tooling_latency_rows(
-            nodes, warn_sec=float(rocm_smi_warn_sec),
+            nodes,
+            warn_sec=float(rocm_smi_warn_sec),
         )
         if not tool_rows:
-            f.write(
-                "*No nodes exceeded the warn threshold "
-                f"({rocm_smi_warn_sec}s) and no timeouts.*\n"
-            )
+            f.write("*No nodes exceeded the warn threshold " f"({rocm_smi_warn_sec}s) and no timeouts.*\n")
         else:
             f.write(
                 "Slow `rocm-smi --version` calls historically precede a "
@@ -382,20 +355,16 @@ def _write_tooling_latency(
             f.write("|------|----------|-------------|------|\n")
             for r in tool_rows:
                 lat = r.get("latency_sec")
-                lat_s = (
-                    f"{lat:.2f}" if isinstance(lat, (int, float)) else "?"
-                )
-                f.write(
-                    f"| {r['node_rank']} | {r['host']} | "
-                    f"{lat_s} | {r['flag']} |\n"
-                )
+                lat_s = f"{lat:.2f}" if isinstance(lat, (int, float)) else "?"
+                f.write(f"| {r['node_rank']} | {r['host']} | " f"{lat_s} | {r['flag']} |\n")
     except Exception as e:
         f.write(f"*Tooling section failed to render: {e}*\n")
         _warn(f"tooling render failed: {e}")
 
 
 def _write_tooling_availability(
-    f: IO[str], nodes: List[Dict[str, Any]],
+    f: IO[str],
+    nodes: List[Dict[str, Any]],
 ) -> None:
     # ----- Tooling availability (always-on; loud counterweight to
     # the silent skips that happen when amd-smi / rocm-smi / lsof
@@ -407,35 +376,26 @@ def _write_tooling_availability(
         mc = inv["missing_counts"]
         if not inv["any_missing"]:
             f.write(
-                "*Every tracked tool (`"
-                + "`, `".join(tracked)
-                + "`) was present in PATH on every node.*\n"
+                "*Every tracked tool (`" + "`, `".join(tracked) + "`) was present in PATH on every node.*\n"
             )
         else:
             summary_bits = []
             for t in tracked:
                 if mc[t]:
-                    summary_bits.append(
-                        f"`{t}` missing on **{mc[t]}** node(s)"
-                    )
+                    summary_bits.append(f"`{t}` missing on **{mc[t]}** node(s)")
             # Compute cluster-wide uncovered-checks summary so the
             # operator immediately knows whether the missing tools
             # actually leave a coverage hole or whether the rocm-smi
             # / lsof fallbacks are picking up the slack.
             uncovered_counts: Dict[str, int] = {}
             for n in nodes:
-                uc = ((n.get("tier1") or {})
-                      .get("tooling_inventory") or {}).get("uncovered") or []
+                uc = ((n.get("tier1") or {}).get("tooling_inventory") or {}).get("uncovered") or []
                 for c in uc:
                     uncovered_counts[c] = uncovered_counts.get(c, 0) + 1
             if uncovered_counts:
-                uc_bits = [
-                    f"`{c}` on **{n}** node(s)"
-                    for c, n in sorted(uncovered_counts.items())
-                ]
+                uc_bits = [f"`{c}` on **{n}** node(s)" for c, n in sorted(uncovered_counts.items())]
                 coverage_line = (
-                    "Checks with NO working tool (truly silent-skipped): "
-                    + "; ".join(uc_bits) + "."
+                    "Checks with NO working tool (truly silent-skipped): " + "; ".join(uc_bits) + "."
                 )
             else:
                 coverage_line = (
@@ -448,33 +408,23 @@ def _write_tooling_availability(
                 "GPU activity, wedged-driver) prefer `amd-smi` but "
                 "fall back to `rocm-smi` (and `lsof` for foreign-"
                 "process) when amd-smi is missing. "
-                + "; ".join(summary_bits) + ". " + coverage_line
+                + "; ".join(summary_bits)
+                + ". "
+                + coverage_line
                 + " Add `--require-tools amd-smi,rocm-smi` to `run` to "
                 "promote a missing tool to a node FAIL anyway.\n\n"
             )
             # Per-node table -- only the nodes that ARE missing something,
             # so a healthy cluster doesn't get a giant N-row table.
-            f.write(
-                "| Node | Hostname | "
-                + " | ".join(tracked)
-                + " |\n"
-            )
-            f.write(
-                "|------|----------| "
-                + " | ".join("---" for _ in tracked)
-                + " |\n"
-            )
+            f.write("| Node | Hostname | " + " | ".join(tracked) + " |\n")
+            f.write("|------|----------| " + " | ".join("---" for _ in tracked) + " |\n")
             for r in inv["rows"]:
                 if all(r.get(t) for t in tracked):
                     continue
                 cells = []
                 for t in tracked:
                     cells.append("OK" if r.get(t) else "**MISSING**")
-                f.write(
-                    f"| {r['node_rank']} | {r['host']} | "
-                    + " | ".join(cells)
-                    + " |\n"
-                )
+                f.write(f"| {r['node_rank']} | {r['host']} | " + " | ".join(cells) + " |\n")
     except Exception as e:
         f.write(f"*Tooling availability section failed to render: {e}*\n")
         _warn(f"tooling-availability render failed: {e}")
@@ -505,8 +455,7 @@ def _write_busy_gpus(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
                 hbm = r.get("hbm_gib")
                 hbm_s = f"{hbm}" if hbm is not None else "?"
                 f.write(
-                    f"| {r['node_rank']} | {r['host']} | "
-                    f"{r['gpu']} | {r['pid']} | `{name}` | {hbm_s} |\n"
+                    f"| {r['node_rank']} | {r['host']} | " f"{r['gpu']} | {r['pid']} | `{name}` | {hbm_s} |\n"
                 )
     except Exception as e:
         f.write(f"*Busy-GPU section failed to render: {e}*\n")
@@ -514,7 +463,9 @@ def _write_busy_gpus(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
 
 
 def _write_pretouch_hbm(
-    f: IO[str], nodes: List[Dict[str, Any]], hbm_busy_threshold_gib: float,
+    f: IO[str],
+    nodes: List[Dict[str, Any]],
+    hbm_busy_threshold_gib: float,
 ) -> None:
     # ----- G: Pre-touch HBM-used outliers -----
     f.write("\n## GPU pre-touch HBM usage outliers\n\n")
@@ -537,17 +488,16 @@ def _write_pretouch_hbm(
             f.write("| Node | Hostname | GPU | HBM used pre-touch (GiB) |\n")
             f.write("|------|----------|-----|---------------------------|\n")
             for r in pt_rows:
-                f.write(
-                    f"| {r['node_rank']} | {r['host']} | "
-                    f"{r['gpu']} | {r['used_gib']} |\n"
-                )
+                f.write(f"| {r['node_rank']} | {r['host']} | " f"{r['gpu']} | {r['used_gib']} |\n")
     except Exception as e:
         f.write(f"*Pre-touch HBM section failed to render: {e}*\n")
         _warn(f"pretouch-hbm render failed: {e}")
 
 
 def _write_gpu_activity(
-    f: IO[str], nodes: List[Dict[str, Any]], gpu_activity_warn_pct: float,
+    f: IO[str],
+    nodes: List[Dict[str, Any]],
+    gpu_activity_warn_pct: float,
 ) -> None:
     # ----- G: GPU compute activity outliers -----
     f.write("\n## GPU compute-activity outliers\n\n")
@@ -570,10 +520,7 @@ def _write_gpu_activity(
             f.write("| Node | Hostname | GPU | Activity % |\n")
             f.write("|------|----------|-----|------------|\n")
             for r in act_rows:
-                f.write(
-                    f"| {r['node_rank']} | {r['host']} | "
-                    f"{r['gpu']} | {r['activity_pct']} |\n"
-                )
+                f.write(f"| {r['node_rank']} | {r['host']} | " f"{r['gpu']} | {r['activity_pct']} |\n")
     except Exception as e:
         f.write(f"*Activity section failed to render: {e}*\n")
         _warn(f"activity render failed: {e}")
@@ -608,9 +555,7 @@ def _write_tier2_perf_summary(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
         ]
         rccl_gbs = (t2.get("rccl") or {}).get("gbs")
         if not gemm and not hbm and rccl_gbs is None:
-            perf_rows.append(
-                f"| {n.get('node_rank', '?')} | {n.get('host', '?')} |  |  |  |"
-            )
+            perf_rows.append(f"| {n.get('node_rank', '?')} | {n.get('host', '?')} |  |  |  |")
             continue
         any_tier2 = True
 
@@ -635,8 +580,7 @@ def _write_tier2_perf_summary(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
             "node-local 8-GPU all-reduce algorithmic bandwidth at 64 MB.\n\n"
         )
         f.write(
-            "| Node | Hostname | GEMM TFLOPS (min/med/max) | "
-            "HBM GB/s (min/med/max) | Local RCCL GB/s |\n"
+            "| Node | Hostname | GEMM TFLOPS (min/med/max) | " "HBM GB/s (min/med/max) | Local RCCL GB/s |\n"
         )
         f.write(
             "|------|----------|----------------------------|"
@@ -647,7 +591,8 @@ def _write_tier2_perf_summary(f: IO[str], nodes: List[Dict[str, Any]]) -> None:
 
 
 def _write_failing_reasons(
-    f: IO[str], failing: List[Dict[str, Any]],
+    f: IO[str],
+    failing: List[Dict[str, Any]],
 ) -> None:
     """Write the per-node fail-reason dump for failing nodes.
 
@@ -701,10 +646,14 @@ def write_smoke_report(
         _write_tooling_availability(f, nodes)
         _write_busy_gpus(f, nodes)
         _write_pretouch_hbm(
-            f, nodes, hbm_busy_threshold_gib=hbm_busy_threshold_gib,
+            f,
+            nodes,
+            hbm_busy_threshold_gib=hbm_busy_threshold_gib,
         )
         _write_gpu_activity(
-            f, nodes, gpu_activity_warn_pct=gpu_activity_warn_pct,
+            f,
+            nodes,
+            gpu_activity_warn_pct=gpu_activity_warn_pct,
         )
         _write_tier2_perf_summary(f, nodes)
         _write_failing_reasons(f, failing)

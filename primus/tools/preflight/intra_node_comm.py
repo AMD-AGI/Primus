@@ -59,13 +59,9 @@ def run_intra_node_comm(
     if group_sizes is None or len(group_sizes) == 0:
         group_sizes = [2, 4, 8]
     # Filter out invalid group sizes (must divide LOCAL_WORLD_SIZE) and de-dupe.
-    group_sizes = sorted(
-        {int(g) for g in group_sizes if int(g) > 0 and LOCAL_WORLD_SIZE % int(g) == 0}
-    )
+    group_sizes = sorted({int(g) for g in group_sizes if int(g) > 0 and LOCAL_WORLD_SIZE % int(g) == 0})
     if not group_sizes:
-        log(
-            f"Skip intra-node comm benchmark, no valid group sizes for LOCAL_WORLD_SIZE={LOCAL_WORLD_SIZE}"
-        )
+        log(f"Skip intra-node comm benchmark, no valid group sizes for LOCAL_WORLD_SIZE={LOCAL_WORLD_SIZE}")
         return
 
     cases = {comm: list(group_sizes) for comm in ("allreduce", "alltoall") if comm in enabled_set}
@@ -168,8 +164,7 @@ def run_intra_node_comm(
                 host_col_label = "Leader hostname"
                 host_col_w = max(20, len(host_col_label) + 2)
                 header_line = (
-                    f"{host_col_label:<{host_col_w}} {'Node':<10} {'Rank':<10} "
-                    f"{' '.join(formatted_keys)}"
+                    f"{host_col_label:<{host_col_w}} {'Node':<10} {'Rank':<10} " f"{' '.join(formatted_keys)}"
                 )
 
                 with open(args.markdown_file, "a", encoding="utf-8") as f:
@@ -186,9 +181,7 @@ def run_intra_node_comm(
                             f"{host_str:<{host_col_w}} {node_str:<10} {rank_str:<10} "
                             f"{' '.join(formatted_values)}"
                         )
-                        f.write(
-                            f"| {host_str} | {node_str} | {rank_str} | {' | '.join(formatted_values)}|\n"
-                        )
+                        f.write(f"| {host_str} | {node_str} | {rank_str} | {' | '.join(formatted_values)}|\n")
                     f.write(f"\n")
 
                     f.write(f"=======IntraNodeComm - {case_name} (GB/s)=======\n")
@@ -204,9 +197,7 @@ def run_intra_node_comm(
                             f"{host_str:<{host_col_w}} {node_str:<10} {rank_str:<10} "
                             f"{' '.join(formatted_values)}"
                         )
-                        f.write(
-                            f"| {host_str} | {node_str} | {rank_str} | {' | '.join(formatted_values)}|\n"
-                        )
+                        f.write(f"| {host_str} | {node_str} | {rank_str} | {' | '.join(formatted_values)}|\n")
                     f.write(f"\n")
 
                     if not args.plot:

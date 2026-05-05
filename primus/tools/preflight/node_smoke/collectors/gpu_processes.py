@@ -27,7 +27,6 @@ from typing import Any, Dict, List, Optional
 from ..shell_utils import _parse_size_with_unit, _which
 from .rocm_smi import _rocm_smi_processes
 
-
 # Process-name placeholders that some versions of `amd-smi process` and
 # `rocm-smi --showpids` emit when they cannot read the real name from
 # /proc/<pid>/comm (typically for kernel/system-owned PIDs like
@@ -253,8 +252,11 @@ def _collect_gpu_processes(
         try:
             cp = subprocess.run(
                 ["amd-smi", "process", "--json"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=15, check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=15,
+                check=False,
             )
             if cp.returncode == 0 and cp.stdout.strip():
                 try:
@@ -277,8 +279,11 @@ def _collect_gpu_processes(
             try:
                 cp = subprocess.run(
                     ["amd-smi", "process"],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, timeout=15, check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=15,
+                    check=False,
                 )
                 if cp.returncode == 0:
                     parsed = _parse_amd_smi_process_text(cp.stdout, _annotate)
@@ -314,13 +319,17 @@ def _collect_gpu_processes(
     if not out["ok"]:
         try:
             import glob as _glob
+
             paths = ["/dev/kfd"] + sorted(_glob.glob("/dev/dri/renderD*"))
             existing = [p for p in paths if os.path.exists(p)]
             if existing and _which("lsof") is not None:
                 cp = subprocess.run(
                     ["lsof", "-Fpcn", "--", *existing],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, timeout=10, check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=10,
+                    check=False,
                 )
                 if cp.returncode in (0, 1):  # lsof exits 1 when nothing open
                     procs = _parse_lsof_pcn(cp.stdout, _annotate)
@@ -335,16 +344,10 @@ def _collect_gpu_processes(
             out["lsof_error"] = str(e)
 
     if not out["ok"] and "error" not in out:
-        out["error"] = (
-            "no working enumeration tool "
-            "(amd-smi process / rocm-smi --showpids / lsof)"
-        )
+        out["error"] = "no working enumeration tool " "(amd-smi process / rocm-smi --showpids / lsof)"
 
     out["foreign_count"] = sum(
-        1
-        for g in out["per_gpu"]
-        for p in (g.get("processes") or [])
-        if p.get("is_foreign")
+        1 for g in out["per_gpu"] for p in (g.get("processes") or []) if p.get("is_foreign")
     )
     return out
 
@@ -443,8 +446,10 @@ def _flatten_amd_smi_process_json(
             return p["process_info"]
         return p
 
-    items = doc if isinstance(doc, list) else (
-        doc.get("processes") or doc.get("gpus") or [] if isinstance(doc, dict) else []
+    items = (
+        doc
+        if isinstance(doc, list)
+        else (doc.get("processes") or doc.get("gpus") or [] if isinstance(doc, dict) else [])
     )
     if not isinstance(items, list):
         items = []
@@ -462,25 +467,31 @@ def _flatten_amd_smi_process_json(
                 if not isinstance(p, dict):
                     continue
                 proc = _unwrap_proc(p)
-                _push(gpu_idx,
-                      proc.get("pid") if proc.get("pid") is not None else proc.get("process_id"),
-                      proc.get("name") or proc.get("process_name"),
-                      _hbm_of(proc))
+                _push(
+                    gpu_idx,
+                    proc.get("pid") if proc.get("pid") is not None else proc.get("process_id"),
+                    proc.get("name") or proc.get("process_name"),
+                    _hbm_of(proc),
+                )
             continue
         # Shape B: per-process dict with explicit gpu
         proc = _unwrap_proc(item)
         if "pid" in proc or "process_id" in proc:
             g = proc.get("gpu")
-            gpus = proc.get("gpus") if isinstance(proc.get("gpus"), list) else (
-                [g] if isinstance(g, int) else [-1]
+            gpus = (
+                proc.get("gpus")
+                if isinstance(proc.get("gpus"), list)
+                else ([g] if isinstance(g, int) else [-1])
             )
             for gpu_idx in gpus:
                 if not isinstance(gpu_idx, int):
                     gpu_idx = -1
-                _push(gpu_idx,
-                      proc.get("pid") if proc.get("pid") is not None else proc.get("process_id"),
-                      proc.get("name") or proc.get("process_name"),
-                      _hbm_of(proc))
+                _push(
+                    gpu_idx,
+                    proc.get("pid") if proc.get("pid") is not None else proc.get("process_id"),
+                    proc.get("name") or proc.get("process_name"),
+                    _hbm_of(proc),
+                )
 
     return [{"gpu": k, "processes": v} for k, v in sorted(out_by_gpu.items())]
 
@@ -519,10 +530,7 @@ def _parse_amd_smi_process_text(text: str, annotate: Any) -> List[Dict[str, Any]
         except Exception:
             continue
         name = b.get("name") or b.get("process") or b.get("process_name") or ""
-        hbm_raw = (
-            b.get("vram_mem") or b.get("vram") or b.get("memory_usage")
-            or b.get("mem_usage") or ""
-        )
+        hbm_raw = b.get("vram_mem") or b.get("vram") or b.get("memory_usage") or b.get("mem_usage") or ""
         hbm = _parse_size_with_unit(hbm_raw) if hbm_raw else None
         out_by_gpu.setdefault(gpu, []).append(annotate(pid, name, hbm))
     return [{"gpu": k, "processes": v} for k, v in sorted(out_by_gpu.items())]

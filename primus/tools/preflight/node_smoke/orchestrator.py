@@ -153,9 +153,7 @@ def _node_status_from(
     dmesg = tier1_extra.get("dmesg") or {}
     if dmesg.get("matches"):
         first = dmesg["matches"][0]
-        reasons.append(
-            f"dmesg ({len(dmesg['matches'])} match(es), e.g.): {first[:200]}"
-        )
+        reasons.append(f"dmesg ({len(dmesg['matches'])} match(es), e.g.): {first[:200]}")
 
     # B. NIC / RDMA roll-call -- every issue here is a hard fail because each
     # one (port DOWN, missing RoCE v2 GID, wrong NIC count) silently breaks
@@ -180,9 +178,7 @@ def _node_status_from(
     for rec in amd.get("per_gpu", []) or []:
         ue = rec.get("ecc_uncorrectable_total")
         if isinstance(ue, int) and ue > 0:
-            reasons.append(
-                f"gpu{rec.get('gpu', '?')}: ECC uncorrectable count = {ue}"
-            )
+            reasons.append(f"gpu{rec.get('gpu', '?')}: ECC uncorrectable count = {ue}")
 
     # D-2: any non-XGMI GPU pair is a hard fail -- intra-node collectives
     # silently fall back to PCIe and lose 5-10x bandwidth.
@@ -190,9 +186,7 @@ def _node_status_from(
     bad = xg.get("non_xgmi_pairs") or []
     if bad:
         sample = ", ".join(f"({i},{j})={t}" for i, j, t in bad[:3])
-        reasons.append(
-            f"xgmi: {len(bad)} non-XGMI GPU pair(s) detected, e.g. {sample}"
-        )
+        reasons.append(f"xgmi: {len(bad)} non-XGMI GPU pair(s) detected, e.g. {sample}")
 
     # F-partial: rocm-smi --version that timed out -> driver is wedging.
     # Slow-but-completed calls are surfaced by the aggregator only.
@@ -211,10 +205,7 @@ def _node_status_from(
     # in _cmd_run before the per-GPU subprocesses run).
     if required_tools:
         inv = (tier1_extra.get("tooling_inventory") or {}).get("tools") or {}
-        missing_required = [
-            t for t in required_tools
-            if not (inv.get(t) or {}).get("present")
-        ]
+        missing_required = [t for t in required_tools if not (inv.get(t) or {}).get("present")]
         if missing_required:
             reasons.append(
                 f"tooling_inventory: required tool(s) NOT in PATH: "
@@ -237,15 +228,8 @@ def _node_status_from(
                 if not p.get("is_foreign"):
                     continue
                 hbm = p.get("hbm_bytes")
-                hbm_s = (
-                    f" hbm={round(hbm / (1 << 30), 2)}GiB"
-                    if isinstance(hbm, int) and hbm > 0
-                    else ""
-                )
-                examples.append(
-                    f"gpu{g.get('gpu')}: pid={p.get('pid')} "
-                    f"name={p.get('name')!r}{hbm_s}"
-                )
+                hbm_s = f" hbm={round(hbm / (1 << 30), 2)}GiB" if isinstance(hbm, int) and hbm > 0 else ""
+                examples.append(f"gpu{g.get('gpu')}: pid={p.get('pid')} " f"name={p.get('name')!r}{hbm_s}")
                 if len(examples) >= 3:
                     break
             if len(examples) >= 3:

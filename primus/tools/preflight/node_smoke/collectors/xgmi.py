@@ -70,7 +70,10 @@ def _collect_xgmi_topology_amd_smi() -> Dict[str, Any]:
         }
     """
     out: Dict[str, Any] = {
-        "ok": False, "tool": None, "bdfs": [], "matrix": [],
+        "ok": False,
+        "tool": None,
+        "bdfs": [],
+        "matrix": [],
         "non_xgmi_pairs": [],
     }
     if _which("amd-smi") is None:
@@ -79,8 +82,11 @@ def _collect_xgmi_topology_amd_smi() -> Dict[str, Any]:
     try:
         cp = subprocess.run(
             ["amd-smi", "topology"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=15, check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=15,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         out["error"] = "amd-smi topology timed out"
@@ -98,15 +104,13 @@ def _collect_xgmi_topology_amd_smi() -> Dict[str, Any]:
     # then the per-BDF data rows. Stop at the next section header (any all-
     # caps label ending in `TABLE:`) or end of text.
     import re
+
     bdf_re = re.compile(r"\b([0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.\d)\b")
     section_header_re = re.compile(r"^\s*[A-Z][A-Z0-9 -]+TABLE:\s*$")
 
     lines = text.splitlines()
     try:
-        idx = next(
-            i for i, l in enumerate(lines)
-            if l.strip().upper() == "LINK TYPE TABLE:"
-        )
+        idx = next(i for i, l in enumerate(lines) if l.strip().upper() == "LINK TYPE TABLE:")
     except StopIteration:
         out["error"] = "no `LINK TYPE TABLE:` section in `amd-smi topology` output"
         out["raw"] = text[:4000]
@@ -130,9 +134,7 @@ def _collect_xgmi_topology_amd_smi() -> Dict[str, Any]:
         # Heuristic: header has BDFs but no other tokens that look like
         # link-type values (XGMI/PCIE/SELF/...). Data rows always have
         # exactly one leading BDF followed by N value tokens.
-        non_bdf_toks = [
-            t for t in l.split() if not bdf_re.fullmatch(t)
-        ]
+        non_bdf_toks = [t for t in l.split() if not bdf_re.fullmatch(t)]
         if not non_bdf_toks:
             header_bdfs = toks
             data_start = j + 1

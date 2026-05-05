@@ -19,7 +19,6 @@ from typing import Any, Dict, List
 
 from ..collectors.tooling import _TRACKED_TOOLS
 
-
 # ---------------------------------------------------------------------------
 # Aggregator helpers -- A. stack/NIC drift, B. NIC issues, C. host limits
 # ---------------------------------------------------------------------------
@@ -65,10 +64,15 @@ def _stack_drift_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         outliers = [(h, v) for h, v in per_host if v != majority]
         if not outliers:
             continue
-        rows.append({
-            "key": k, "majority": majority, "count": count,
-            "total": len(per_host), "outliers": outliers,
-        })
+        rows.append(
+            {
+                "key": k,
+                "majority": majority,
+                "count": count,
+                "total": len(per_host),
+                "outliers": outliers,
+            }
+        )
     return rows
 
 
@@ -97,10 +101,15 @@ def _nic_fw_drift_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         outliers = [(h, v) for h, v in per_host if v != majority]
         if not outliers:
             continue
-        rows.append({
-            "device": dev, "majority": majority, "count": count,
-            "total": len(per_host), "outliers": outliers,
-        })
+        rows.append(
+            {
+                "device": dev,
+                "majority": majority,
+                "count": count,
+                "total": len(per_host),
+                "outliers": outliers,
+            }
+        )
     return rows
 
 
@@ -110,11 +119,13 @@ def _nic_issue_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     for n in nodes:
         nic = (n.get("tier1") or {}).get("nics") or {}
         for issue in nic.get("issues", []) or []:
-            rows.append({
-                "node_rank": n.get("node_rank", "?"),
-                "host": n.get("host", "?"),
-                "issue": issue,
-            })
+            rows.append(
+                {
+                    "node_rank": n.get("node_rank", "?"),
+                    "host": n.get("host", "?"),
+                    "issue": issue,
+                }
+            )
     return rows
 
 
@@ -124,11 +135,13 @@ def _host_limits_issue_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     for n in nodes:
         hl = (n.get("tier1") or {}).get("host_limits") or {}
         for issue in hl.get("fail_reasons", []) or []:
-            rows.append({
-                "node_rank": n.get("node_rank", "?"),
-                "host": n.get("host", "?"),
-                "issue": issue,
-            })
+            rows.append(
+                {
+                    "node_rank": n.get("node_rank", "?"),
+                    "host": n.get("host", "?"),
+                    "issue": issue,
+                }
+            )
     return rows
 
 
@@ -177,14 +190,16 @@ def _gpu_low_level_outlier_rows(
         outliers = [(h, g, v) for h, g, v in per_gpu if v != majority]
         if not outliers:
             continue
-        rows.append({
-            "key": key,
-            "label": label,
-            "majority": majority,
-            "count": count,
-            "total": len(per_gpu),
-            "outliers": outliers,
-        })
+        rows.append(
+            {
+                "key": key,
+                "label": label,
+                "majority": majority,
+                "count": count,
+                "total": len(per_gpu),
+                "outliers": outliers,
+            }
+        )
     return rows
 
 
@@ -196,11 +211,13 @@ def _xgmi_issue_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not xg.get("ok"):
             err = xg.get("error")
             if err:
-                rows.append({
-                    "node_rank": n.get("node_rank", "?"),
-                    "host": n.get("host", "?"),
-                    "summary": f"could not collect topology: {err}",
-                })
+                rows.append(
+                    {
+                        "node_rank": n.get("node_rank", "?"),
+                        "host": n.get("host", "?"),
+                        "summary": f"could not collect topology: {err}",
+                    }
+                )
             continue
         bad = xg.get("non_xgmi_pairs") or []
         if not bad:
@@ -209,16 +226,19 @@ def _xgmi_issue_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         # matrix lives in the per-node JSON.
         sample = ", ".join(f"({i},{j})={t}" for i, j, t in bad[:6])
         suffix = "" if len(bad) <= 6 else f" (+{len(bad) - 6} more)"
-        rows.append({
-            "node_rank": n.get("node_rank", "?"),
-            "host": n.get("host", "?"),
-            "summary": f"{len(bad)} non-XGMI pair(s): {sample}{suffix}",
-        })
+        rows.append(
+            {
+                "node_rank": n.get("node_rank", "?"),
+                "host": n.get("host", "?"),
+                "summary": f"{len(bad)} non-XGMI pair(s): {sample}{suffix}",
+            }
+        )
     return rows
 
 
 def _clock_summary(
-    nodes: List[Dict[str, Any]], skew_warn_sec: float,
+    nodes: List[Dict[str, Any]],
+    skew_warn_sec: float,
 ) -> Dict[str, Any]:
     """Compute wall-clock spread + per-node time-daemon health."""
     times: List[tuple] = []  # (host, wall_time_unix)
@@ -229,9 +249,7 @@ def _clock_summary(
         if isinstance(wt, (int, float)):
             times.append((n.get("host", "?"), float(wt)))
         if clk and not clk.get("any_active", True):
-            no_daemon_hosts.append(
-                (n.get("node_rank", "?"), n.get("host", "?"))
-            )
+            no_daemon_hosts.append((n.get("node_rank", "?"), n.get("host", "?")))
 
     spread_sec = None
     earliest_h = latest_h = None
@@ -251,7 +269,8 @@ def _clock_summary(
 
 
 def _tooling_latency_rows(
-    nodes: List[Dict[str, Any]], warn_sec: float,
+    nodes: List[Dict[str, Any]],
+    warn_sec: float,
 ) -> List[Dict[str, Any]]:
     """Per-node `rocm-smi --version` self-latency outliers (timed-out + slow)."""
     rows: List[Dict[str, Any]] = []
@@ -269,13 +288,15 @@ def _tooling_latency_rows(
             flag = f">{warn_sec}s"
         if not flag:
             continue
-        rows.append({
-            "node_rank": n.get("node_rank", "?"),
-            "host": n.get("host", "?"),
-            "latency_sec": lat,
-            "flag": flag,
-            "timeout_sec": t.get("timeout_sec"),
-        })
+        rows.append(
+            {
+                "node_rank": n.get("node_rank", "?"),
+                "host": n.get("host", "?"),
+                "latency_sec": lat,
+                "flag": flag,
+                "timeout_sec": t.get("timeout_sec"),
+            }
+        )
     return rows
 
 
@@ -336,23 +357,24 @@ def _busy_gpu_rows(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 if not p.get("is_foreign"):
                     continue
                 hbm_b = p.get("hbm_bytes")
-                rows.append({
-                    "node_rank": n.get("node_rank", "?"),
-                    "host": n.get("host", "?"),
-                    "gpu": g.get("gpu", "?"),
-                    "pid": p.get("pid"),
-                    "name": p.get("name") or "",
-                    "hbm_gib": (
-                        round(hbm_b / (1 << 30), 2)
-                        if isinstance(hbm_b, int) and hbm_b > 0
-                        else None
-                    ),
-                })
+                rows.append(
+                    {
+                        "node_rank": n.get("node_rank", "?"),
+                        "host": n.get("host", "?"),
+                        "gpu": g.get("gpu", "?"),
+                        "pid": p.get("pid"),
+                        "name": p.get("name") or "",
+                        "hbm_gib": (
+                            round(hbm_b / (1 << 30), 2) if isinstance(hbm_b, int) and hbm_b > 0 else None
+                        ),
+                    }
+                )
     return rows
 
 
 def _pretouch_hbm_rows(
-    nodes: List[Dict[str, Any]], threshold_gib: float,
+    nodes: List[Dict[str, Any]],
+    threshold_gib: float,
 ) -> List[Dict[str, Any]]:
     """Per-GPU pre-touch HBM-used outliers (above threshold)."""
     rows: List[Dict[str, Any]] = []
@@ -364,17 +386,20 @@ def _pretouch_hbm_rows(
             if not isinstance(used_gib, (int, float)):
                 continue
             if used_gib >= threshold_gib:
-                rows.append({
-                    "node_rank": n.get("node_rank", "?"),
-                    "host": n.get("host", "?"),
-                    "gpu": p.get("gpu", "?"),
-                    "used_gib": round(float(used_gib), 2),
-                })
+                rows.append(
+                    {
+                        "node_rank": n.get("node_rank", "?"),
+                        "host": n.get("host", "?"),
+                        "gpu": p.get("gpu", "?"),
+                        "used_gib": round(float(used_gib), 2),
+                    }
+                )
     return rows
 
 
 def _gpu_activity_rows(
-    nodes: List[Dict[str, Any]], warn_pct: float,
+    nodes: List[Dict[str, Any]],
+    warn_pct: float,
 ) -> List[Dict[str, Any]]:
     """Per-GPU compute-activity outliers (above warn threshold)."""
     rows: List[Dict[str, Any]] = []
@@ -385,10 +410,12 @@ def _gpu_activity_rows(
             if not isinstance(pct, (int, float)):
                 continue
             if float(pct) >= warn_pct:
-                rows.append({
-                    "node_rank": n.get("node_rank", "?"),
-                    "host": n.get("host", "?"),
-                    "gpu": rec.get("gpu", "?"),
-                    "activity_pct": round(float(pct), 1),
-                })
+                rows.append(
+                    {
+                        "node_rank": n.get("node_rank", "?"),
+                        "host": n.get("host", "?"),
+                        "gpu": rec.get("gpu", "?"),
+                        "activity_pct": round(float(pct), 1),
+                    }
+                )
     return rows

@@ -61,20 +61,21 @@ def _collect_rocm_smi_self_latency(*, timeout_sec: float) -> Dict[str, Any]:
     try:
         cp = subprocess.run(
             [binpath, "--version"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=timeout_sec, check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
         )
         out["latency_sec"] = round(time.monotonic() - t0, 3)
         out["rc"] = cp.returncode
-        out["ok"] = (cp.returncode == 0)
+        out["ok"] = cp.returncode == 0
         if cp.returncode != 0:
             out["error"] = (cp.stderr or cp.stdout or "").strip()[:200]
     except subprocess.TimeoutExpired:
         out["latency_sec"] = round(time.monotonic() - t0, 3)
         out["timed_out"] = True
-        out["error"] = (
-            f"rocm-smi --version did not finish in {timeout_sec}s -- driver may be wedging"
-        )
+        out["error"] = f"rocm-smi --version did not finish in {timeout_sec}s -- driver may be wedging"
     except Exception as e:
         out["error"] = str(e)
     return out
@@ -104,8 +105,11 @@ def _rocm_smi_ras_info_text(timeout_sec: float = 15.0) -> Dict[str, Any]:
     try:
         cp = subprocess.run(
             ["rocm-smi", "--showrasinfo"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=timeout_sec, check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
         )
         if cp.returncode != 0:
             out["error"] = (cp.stderr or cp.stdout or "").strip()[:200] or f"rc={cp.returncode}"
@@ -123,6 +127,7 @@ def _rocm_smi_ras_info_text(timeout_sec: float = 15.0) -> Dict[str, Any]:
 def _parse_rocm_smi_ras_info_text(text: str) -> List[Dict[str, Any]]:
     """Parse the per-GPU ``GPU[N]: RAS INFO`` blocks from rocm-smi text."""
     import re
+
     out: List[Dict[str, Any]] = []
     cur_gpu: Optional[int] = None
     cur_corr = 0
@@ -135,11 +140,13 @@ def _parse_rocm_smi_ras_info_text(text: str) -> List[Dict[str, Any]]:
         if m:
             # Flush previous GPU
             if cur_gpu is not None:
-                out.append({
-                    "gpu": cur_gpu,
-                    "ecc_correctable_total": cur_corr,
-                    "ecc_uncorrectable_total": cur_uncorr,
-                })
+                out.append(
+                    {
+                        "gpu": cur_gpu,
+                        "ecc_correctable_total": cur_corr,
+                        "ecc_uncorrectable_total": cur_uncorr,
+                    }
+                )
             cur_gpu = int(m.group(1))
             cur_corr = 0
             cur_uncorr = 0
@@ -164,11 +171,13 @@ def _parse_rocm_smi_ras_info_text(text: str) -> List[Dict[str, Any]]:
         cur_corr += corr
         cur_uncorr += uncorr
     if cur_gpu is not None:
-        out.append({
-            "gpu": cur_gpu,
-            "ecc_correctable_total": cur_corr,
-            "ecc_uncorrectable_total": cur_uncorr,
-        })
+        out.append(
+            {
+                "gpu": cur_gpu,
+                "ecc_correctable_total": cur_corr,
+                "ecc_uncorrectable_total": cur_uncorr,
+            }
+        )
     return out
 
 
@@ -190,16 +199,19 @@ def _rocm_smi_topotype_json(timeout_sec: float = 15.0) -> Dict[str, Any]:
     triples for any off-diagonal pair whose link_type is not XGMI.
     """
     import re
-    out: Dict[str, Any] = {"ok": False, "tool": None, "n_gpus": 0,
-                           "link_types": [], "non_xgmi_pairs": []}
+
+    out: Dict[str, Any] = {"ok": False, "tool": None, "n_gpus": 0, "link_types": [], "non_xgmi_pairs": []}
     if _which("rocm-smi") is None:
         out["error"] = "rocm-smi not found in PATH"
         return out
     try:
         cp = subprocess.run(
             ["rocm-smi", "--showtopotype", "--json"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=timeout_sec, check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
         )
         if cp.returncode != 0 or not cp.stdout.strip():
             out["error"] = (cp.stderr or "").strip()[:200] or f"rc={cp.returncode}"
@@ -213,9 +225,7 @@ def _rocm_smi_topotype_json(timeout_sec: float = 15.0) -> Dict[str, Any]:
         if not isinstance(sys_block, dict):
             out["error"] = "no `system` key in rocm-smi --showtopotype output"
             return out
-        pat = re.compile(
-            r"DRM\s+devices?\s+(\d+)\s+and\s+(\d+)", re.IGNORECASE
-        )
+        pat = re.compile(r"DRM\s+devices?\s+(\d+)\s+and\s+(\d+)", re.IGNORECASE)
         pairs: Dict[tuple, str] = {}
         max_idx = -1
         for k, v in sys_block.items():
@@ -281,8 +291,11 @@ def _rocm_smi_processes(
     try:
         cp = subprocess.run(
             ["rocm-smi", "--showpids", "--json"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=timeout_sec, check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
         )
         if cp.returncode != 0 or not cp.stdout.strip():
             out["error"] = (cp.stderr or "").strip()[:200] or f"rc={cp.returncode}"
@@ -353,8 +366,11 @@ def _rocm_smi_use_json(timeout_sec: float = 15.0) -> Dict[str, Any]:
     try:
         cp = subprocess.run(
             ["rocm-smi", "--showuse", "--json"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=timeout_sec, check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
         )
         if cp.returncode != 0 or not cp.stdout.strip():
             out["error"] = (cp.stderr or "").strip()[:200] or f"rc={cp.returncode}"
@@ -374,7 +390,7 @@ def _rocm_smi_use_json(timeout_sec: float = 15.0) -> Dict[str, Any]:
             if not str(k).startswith("card"):
                 continue
             try:
-                gpu = int(str(k)[len("card"):])
+                gpu = int(str(k)[len("card") :])
             except ValueError:
                 continue
             pct_raw = v.get("GPU use (%)") or v.get("GPU use")
