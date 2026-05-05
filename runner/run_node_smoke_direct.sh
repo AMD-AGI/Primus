@@ -81,6 +81,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 log() { echo "[run_node_smoke_direct] $*"; }
 die() { echo "[run_node_smoke_direct][ERROR] $*" >&2; exit 1; }
 
+# Invoked indirectly via `trap ... ERR` below; ShellCheck SC2317 cannot
+# follow the trap handler so it flags the body as unreachable -- silence it.
+# shellcheck disable=SC2317
 on_error() {
     local ec=$?
     local line=${1:-?}
