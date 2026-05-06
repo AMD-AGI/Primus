@@ -39,7 +39,7 @@ class SafeWrapper:
 
         self.PRIMUS_REPO = "https://github.com/AMD-AGI/Primus.git"
         self.PRIMUS_TURBO_REPO = "https://github.com/AMD-AGI/Primus-Turbo.git"
-        self.PRIMUS_TURBO_COMMIT = "a4488f6cdb15cfff4383c61af7922bb50803f0ea"
+        self.PRIMUS_TURBO_COMMIT = "28b2666548339e7a692472a0f82d20ee04838f51"
         self.PRIMUS_WORKDIR = os.getenv("PRIMUS_WORKDIR", "")
         self.BENCHMARK_LOG_DIR = os.getenv("BENCHMARK_LOG_DIR", "")
 
