@@ -1,12 +1,17 @@
 {
-  "generated_at": "2026-04-30T05:53:54Z",
+  "generated_at": "2026-05-06T07:15:17Z",
   "summary": {
-    "total_reports": 1,
-    "verified_reports": 1,
-    "total_backends": 1,
-    "latest_report_date": "2026-04-21"
+    "total_reports": 2,
+    "verified_reports": 2,
+    "total_backends": 2,
+    "latest_report_date": "2026-04-30"
   },
   "backends": [
+    {
+      "key": "megatron",
+      "label": "Megatron",
+      "count": 1
+    },
     {
       "key": "torchtitan",
       "label": "TorchTitan",
@@ -14,6 +19,93 @@
     }
   ],
   "reports": [
+    {
+      "id": "megatron-upstream-main-2026-04-30",
+      "title": "Primus Megatron vs upstream main",
+      "backend": {
+        "key": "megatron",
+        "label": "Megatron"
+      },
+      "generated_at": "2026-04-30",
+      "status": "verified",
+      "scope": "Current Megatron-LM bundled in Primus vs upstream NVIDIA/Megatron-LM origin/main.",
+      "local": {
+        "source_path": "third_party/Megatron-LM",
+        "version": "0.16.0rc0",
+        "commit": "d3528a21",
+        "commit_date": "2026-03-06"
+      },
+      "upstream": {
+        "repo": "https://github.com/NVIDIA/Megatron-LM",
+        "ref": "origin/main",
+        "version": "0.18.0",
+        "commit": "0d98cb83",
+        "commit_date": "2026-04-29"
+      },
+      "stats": {
+        "commit_gap": 403,
+        "diff_files": 1300,
+        "insertions": 615916,
+        "deletions": 326835
+      },
+      "integration": {
+        "backend_files": 136,
+        "tracked_files": 365,
+        "integration_model": "third_party/Megatron-LM + Primus outer trainer / adapter / patches"
+      },
+      "highlights": [
+        "Primus pins Megatron Core source version 0.16.0rc0 while upstream main declares 0.18.0.",
+        "Upstream main is 403 commits ahead with broad FSDP, MoE, Hybrid/Mamba, inference, RL, MiMo, and resharding changes.",
+        "Primus has a large Megatron integration layer with direct dependencies on upstream training, distributed, optimizer, MoE, and pipeline internals."
+      ],
+      "dashboard_summary": {
+        "headline": "Megatron is 403 commits behind upstream main, with broad API and capability drift across training, MoE, FSDP, inference, and Hybrid paths.",
+        "recommendation": "plan sync",
+        "why_it_matters": [
+          "Primus pins Megatron Core source version 0.16.0rc0 while upstream main declares 0.18.0.",
+          "The gap spans 1300 changed files, so this is a broad upstream movement.",
+          "Package dependency metadata is mostly unchanged; the main risk is API and capability drift.",
+          "Primus trainer, adapter, optimizer, MoE, and patch layers depend on upstream internals."
+        ],
+        "feature_deltas": [
+          "Megatron-FSDP fixes for mixed precision, MXFP8, uneven DTensor, frozen parameters, and async save",
+          "MoE shared expert overlap, FlexDispatcher support, router score function, and A2A combine backprop overlap",
+          "Hybrid/Mamba model path expansion and Mamba-to-Hybrid naming movement",
+          "Inference CUDA graphs, prefix caching, per-block MoE routing storage, and text generation controller updates",
+          "MiMo, RL, resharding, and broader test coverage updates"
+        ],
+        "dependency_deltas": [
+          "pyproject.toml project dependencies are unchanged in the compared range.",
+          "megatron/core/requirements.txt remains torch and packaging.",
+          "Source-declared Megatron Core version moved from 0.16.0rc0 to 0.18.0.",
+          "Selected workflow and documentation paths changed, but the primary drift is upstream API/capability movement."
+        ],
+        "integration_risks": [
+          "Primus MegatronTrainer imports and wraps megatron.training, checkpointing, initialization, distributed, optimizer, and dataset internals.",
+          "Primus patches Megatron argument parsing, training flow, scheduler, recompute, Muon optimizer, and runtime hooks.",
+          "Primus Turbo paths depend on transformer engine spec provider, MoE token dispatcher, transformer config, and tensor-parallel internals.",
+          "FSDP, MoE/router, inference, and Hybrid/Mamba upstream movement overlap with existing Primus patch surfaces."
+        ]
+      },
+      "artifacts": [
+        {
+          "label": "Detailed Report (PDF)",
+          "path": "./reports/megatron/upstream-main/report.pdf",
+          "format": "pdf",
+          "language": "en",
+          "kind": "detail",
+          "primary": true
+        },
+        {
+          "label": "One-Page Summary (PDF)",
+          "path": "./reports/megatron/upstream-main/summary.pdf",
+          "format": "pdf",
+          "language": "en",
+          "kind": "summary",
+          "primary": false
+        }
+      ]
+    },
     {
       "id": "torchtitan-upstream-main-2026-04-21",
       "title": "Primus TorchTitan vs upstream main",
