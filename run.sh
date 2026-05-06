@@ -52,7 +52,7 @@ if [ "$PRECISION_TYPE" = "FP8" ]; then
     export FP8=hybrid
     export FP8_RECIPE=delayed
   fi
-  # export TE_PRECISION_CONFIG_FILE=examples/megatron/configs/MI355X/lfm2_8B_A1B-FP8-te-precision.yaml
+  export TE_PRECISION_CONFIG_FILE=examples/megatron/configs/MI355X/lfm2_8B_A1B-FP8-te-precision.yaml
 elif [ "$PRECISION_TYPE" = "BF16" ]; then
   if [ "$TURBO_USE_GROUPED_MLP" = "True" ]; then
     export LEGACY_GG=True

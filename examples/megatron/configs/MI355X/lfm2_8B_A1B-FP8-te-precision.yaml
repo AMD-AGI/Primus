@@ -14,3 +14,13 @@ matchers:
     type: "glob"
     pattern: "*.self_attention.linear_proj"
     enabled: true
+  shortconv_in_proj_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.self_attention.in_proj"
+    enabled: true
+  shortconv_out_proj_bf16:
+    config: "bf16"
+    type: "glob"
+    pattern: "*.self_attention.out_proj"
+    enabled: true
