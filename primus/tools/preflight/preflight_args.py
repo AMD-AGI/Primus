@@ -12,18 +12,49 @@ This mirrors the pattern used by `primus.tools.benchmark.*_bench_args`.
 
 import argparse
 
+# Canonical perf-test tokens accepted by --tests.
+PERF_TEST_TOKENS = (
+    "gemm",
+    "intra-allreduce",
+    "intra-alltoall",
+    "inter-allreduce",
+    "inter-alltoall",
+    "inter-p2p",
+    "inter-ring-p2p",
+)
+
+# Names of the "intent-bearing" perf flags. Setting any of these implies perf
+# mode (no need to also pass --perf-test). When mixed with info selectors
+# (--host/--gpu/--network), perf wins and the info selectors are dropped with
+# a warning.
+PERF_INTENT_FLAGS = ("--perf-test", "--tests", "--quick")
+
 
 def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """
     Register arguments for `primus-cli preflight`.
 
+    Mode precedence:
+        1. Any of --perf-test / --tests / --quick is set -> perf mode wins.
+           If info selectors (--host/--gpu/--network) are also set, they are
+           dropped with a warning. Perf-only tuning knobs (--comm-sizes-mb,
+           --intra-group-sizes, etc.) take effect.
+        2. Otherwise, any of --host/--gpu/--network is set -> info-only mode.
+           Perf-only tuning knobs, if set, are inert and a WARN is emitted.
+        3. Otherwise (no flags) -> default: run info AND all perf tests.
+
     Usage:
-        primus-cli preflight                          # Show all info (Host + GPU + Network)
-        primus-cli preflight --host                   # Host only
-        primus-cli preflight --gpu                    # GPU only
-        primus-cli preflight --network                # Network only
-        primus-cli preflight --gpu --network          # GPU + Network
-        primus-cli preflight --perf-test              # Run perf tests ONLY (skip info)
+        primus-cli preflight                          # Default: info + all perf
+        primus-cli preflight --host                   # Host info only
+        primus-cli preflight --gpu                    # GPU info only
+        primus-cli preflight --network                # Network info only
+        primus-cli preflight --gpu --network          # GPU + Network info
+        primus-cli preflight --perf-test              # Perf only, all tests
+        primus-cli preflight --quick                  # Perf only, fast preset
+        primus-cli preflight --tests gemm             # Perf only, GEMM only
+        primus-cli preflight --tests gemm,inter-allreduce \\
+            --comm-sizes-mb 64,1024 \\
+            --inter-group-sizes all
     """
     # Check selection flags
     # Keep --check-* as compatibility aliases.
@@ -54,17 +85,94 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         "--perf-test",
         action="store_true",
         help="Run perf tests ONLY (GEMM, intra/inter node communication). "
-        "This is slower and skips the host/gpu/network info report.",
+        "Skips the host/gpu/network info report. Implied by --tests/--quick.",
     )
 
-    # Performance test specific options (only used with --perf-test)
-    parser.add_argument("--plot", action="store_true", help="Generate plots (only with --perf-test)")
+    # Performance test specific options.
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Generate plots (perf mode only).",
+    )
+
+    # Test selection (CSV). Tokens: gemm,intra-allreduce,intra-alltoall,
+    # inter-allreduce,inter-alltoall,inter-p2p,inter-ring-p2p, or 'all'.
+    parser.add_argument(
+        "--tests",
+        type=str,
+        default=None,
+        help="Comma-separated list of perf tests to run. Tokens: "
+        "gemm, intra-allreduce, intra-alltoall, inter-allreduce, inter-alltoall, "
+        "inter-p2p, inter-ring-p2p, all. Implies --perf-test. "
+        "When unset, runs every test.",
+    )
+
+    # Message size config (CSV in MB) for comm tests.
+    parser.add_argument(
+        "--comm-sizes-mb",
+        type=str,
+        default=None,
+        help="Default message sizes (CSV in MB) used for intra-/inter-node "
+        "allreduce, alltoall, and inter-node p2p tests when no specific override is given. "
+        "Default: 2,4,8,16,32,64,128,256,512,1024.",
+    )
+    parser.add_argument(
+        "--intra-comm-sizes-mb",
+        type=str,
+        default=None,
+        help="Override message sizes (CSV in MB) for intra-node allreduce/alltoall. "
+        "Falls back to --comm-sizes-mb when unset.",
+    )
+    parser.add_argument(
+        "--inter-comm-sizes-mb",
+        type=str,
+        default=None,
+        help="Override message sizes (CSV in MB) for inter-node allreduce/alltoall/p2p. "
+        "Falls back to --comm-sizes-mb when unset.",
+    )
+
+    # Group size config.
+    parser.add_argument(
+        "--intra-group-sizes",
+        type=str,
+        default=None,
+        help="Comma-separated list of intra-node GPU group sizes to test "
+        "(each must divide LOCAL_WORLD_SIZE). Default: 2,4,8.",
+    )
+    parser.add_argument(
+        "--inter-group-sizes",
+        type=str,
+        default=None,
+        help="Comma-separated list of inter-node group sizes to test. Use 'all' for "
+        "the full N-node group. Default: 2,4,all.",
+    )
+
+    # Inter-node ring p2p sizes.
+    parser.add_argument(
+        "--ring-p2p-sizes-mb",
+        type=str,
+        default=None,
+        help="Message sizes (CSV in MB) for the inter-node ring P2P test. " "Default: 10,20,40,80,160.",
+    )
+
+    # Quick preset.
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="Fast pre-launch preset. Implies --perf-test. Selects gemm + "
+        "intra-allreduce + inter-allreduce, uses sizes 64,1024 MB, full "
+        "intra-node group only, full N-node inter-node group only, and lowers "
+        "warmup/iterations. User-supplied flags override.",
+    )
+
+    # Back-compat alias: kept so existing scripts keep working.
+    # Internally it maps to --inter-group-sizes all and disables inter-p2p.
     parser.add_argument(
         "--no-split-nodes-subgroup",
         dest="split_nodes_subgroup",
         action="store_false",
-        help="Skip inter-node comm tests on node subgroups (2-node, 4-node). "
-        "Only run the all-node test.",
+        help="[Deprecated] Skip inter-node comm tests on node subgroups (2-node, 4-node). "
+        "Equivalent to --inter-group-sizes all and dropping inter-p2p.",
     )
 
     # Distributed init timeout (prevents hangs when network/rendezvous is misconfigured)

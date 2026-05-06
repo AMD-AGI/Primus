@@ -5,36 +5,69 @@
 ###############################################################################
 
 import time
+from typing import Iterable, List, Optional, Sequence
 
 import torch
 import torch.distributed as dist
 
 from primus.tools.preflight.global_vars import (
-    ITERATION,
     LOCAL_RANK,
     LOCAL_WORLD_SIZE,
     RANK,
-    WARMUP,
     WORLD_SIZE,
     get_hostnames,
+    get_iteration,
+    get_warmup,
 )
 from primus.tools.preflight.utility import (
     barrier_after_comm_destroy,
     create_dir,
     extract_first_middle_last,
     extract_number,
+    format_int_range,
     log,
 )
 
 
-def run_intra_node_comm(args):
+def run_intra_node_comm(
+    args,
+    enabled_comms: Optional[Iterable[str]] = None,
+    sizes_mb: Optional[Sequence[int]] = None,
+    group_sizes: Optional[Sequence[int]] = None,
+):
+    """Intra-node allreduce / alltoall benchmark.
+
+    Args:
+        args: parsed namespace (must have markdown_file, dump_path, plot, ib_bw).
+        enabled_comms: subset of {"allreduce", "alltoall"} to run. Defaults to both.
+        sizes_mb: message sizes in MB. Defaults to powers of two from 2..1024.
+        group_sizes: GPU group sizes; each must divide LOCAL_WORLD_SIZE.
+            Defaults to [2, 4, 8].
+    """
     device = torch.device(f"cuda:{LOCAL_RANK}")
-    sizes = [2**i * 1024 * 1024 for i in range(1, 11)]
-    # sizes = [2**i * 1024 * 1024 for i in range(1, 5)]
-    cases = {
-        "allreduce": [2, 4, 8],
-        "alltoall": [2, 4, 8],
-    }
+
+    if sizes_mb is None or len(sizes_mb) == 0:
+        sizes_mb = [2**i for i in range(1, 11)]
+    sizes = [int(mb) * 1024 * 1024 for mb in sizes_mb]
+
+    enabled_set = set(enabled_comms) if enabled_comms else {"allreduce", "alltoall"}
+    enabled_set &= {"allreduce", "alltoall"}
+    if not enabled_set:
+        log("Skip intra-node comm benchmark (no enabled comms)")
+        return
+
+    if group_sizes is None or len(group_sizes) == 0:
+        group_sizes = [2, 4, 8]
+    # Filter out invalid group sizes (must divide LOCAL_WORLD_SIZE) and de-dupe.
+    group_sizes = sorted({int(g) for g in group_sizes if int(g) > 0 and LOCAL_WORLD_SIZE % int(g) == 0})
+    if not group_sizes:
+        log(f"Skip intra-node comm benchmark, no valid group sizes for LOCAL_WORLD_SIZE={LOCAL_WORLD_SIZE}")
+        return
+
+    cases = {comm: list(group_sizes) for comm in ("allreduce", "alltoall") if comm in enabled_set}
+
+    warmup = get_warmup()
+    iteration = get_iteration()
 
     if RANK == 0:
         with open(args.markdown_file, "a", encoding="utf-8") as f:
@@ -54,6 +87,9 @@ def run_intra_node_comm(args):
             num_nodes = WORLD_SIZE // LOCAL_WORLD_SIZE
             num_groups_per_node = LOCAL_WORLD_SIZE // num_procs
             group = None
+            # Track which ranks belong to each group so we can render compact rows.
+            all_group_ranks: List[List[int]] = []
+            my_group_index = -1
             for i_node in range(num_nodes):
                 for i_group in range(num_groups_per_node):
                     group_ranks = [
@@ -63,12 +99,15 @@ def run_intra_node_comm(args):
                     if RANK in group_ranks:
                         assert group is None
                         group = tmp_group
+                        my_group_index = len(all_group_ranks)
+                    all_group_ranks.append(group_ranks)
             assert group is not None
+            assert my_group_index >= 0
 
             for size in sizes:
                 tensor = torch.rand(size // 2, dtype=torch.bfloat16, device=device)
                 dist.barrier(group=group, device_ids=[torch.cuda.current_device()])
-                for _ in range(WARMUP):
+                for _ in range(warmup):
                     if "allreduce" == comm:
                         dist.all_reduce(tensor, group=group)
                     elif "alltoall" == comm:
@@ -77,7 +116,7 @@ def run_intra_node_comm(args):
                         assert False
                 torch.cuda.synchronize()
                 start = time.time()
-                for _ in range(ITERATION):
+                for _ in range(iteration):
                     if "allreduce" == comm:
                         dist.all_reduce(tensor, group=group)
                     elif "alltoall" == comm:
@@ -85,7 +124,7 @@ def run_intra_node_comm(args):
                     else:
                         assert False
                 torch.cuda.synchronize()
-                elapsed = (time.time() - start) / ITERATION
+                elapsed = (time.time() - start) / iteration
                 scale = 2 if comm == "allreduce" else 1
                 comm_size = scale * size * (num_procs - 1) / num_procs
                 gb_per_sec = comm_size / elapsed / 1e9
@@ -107,43 +146,58 @@ def run_intra_node_comm(args):
                 keys = sorted(
                     list({k for r in all_bandwidth_results for k in (r or {}).keys()}), key=extract_number
                 )
-                max_len = max(len(s) for s in get_hostnames()) + 2
+                hostnames = get_hostnames()
+
+                # Each row corresponds to one group (group_ranks). Use the first
+                # rank's results since all members observe the same collective.
+                # The Hostname column shows only the leader's host (compact);
+                # use the Node range plus the legend at the top of the report
+                # to look up the rest.
+                def _row_for(group_ranks: List[int], results):
+                    leader = group_ranks[0]
+                    host_str = hostnames[leader]
+                    node_str = format_int_range([r // LOCAL_WORLD_SIZE for r in group_ranks])
+                    rank_str = format_int_range(group_ranks)
+                    return host_str, node_str, rank_str, results[leader]
+
+                formatted_keys = [f"{key:<6}" for key in keys]
+                host_col_label = "Leader hostname"
+                host_col_w = max(20, len(host_col_label) + 2)
+                header_line = (
+                    f"{host_col_label:<{host_col_w}} {'Node':<10} {'Rank':<10} " f"{' '.join(formatted_keys)}"
+                )
 
                 with open(args.markdown_file, "a", encoding="utf-8") as f:
                     f.write(f"=======IntraNodeComm - {case_name} (us)=======\n")
                     log(f"=======IntraNodeComm - {case_name} (us)=======")
+                    log(header_line)
 
-                    f.write(f"| Hostname | Node | Rank | {' | '.join(keys)}|\n")
+                    f.write(f"| {host_col_label} | Node | Rank | {' | '.join(keys)}|\n")
                     f.write(f"|----------|----------|----------{'|----------' * len(keys)}|\n")
-                    formatted_keys = [f"{key:<6}" for key in keys]
-                    log(f"{'Hostname':<{max_len}} {'Node':<5} {'Rank':<5} {' '.join(formatted_keys)}")
-                    for rank, r in enumerate(all_latency_results):
-                        hostname = get_hostnames()[rank]
-                        if rank % num_procs != 0:
-                            continue
-                        node_id = rank // LOCAL_WORLD_SIZE
-
+                    for group_ranks in all_group_ranks:
+                        host_str, node_str, rank_str, r = _row_for(group_ranks, all_latency_results)
                         formatted_values = [f"{r.get(key, 0):<6.2f}" for key in keys]
-                        log(f"{hostname:<{max_len}} {node_id:<5} {rank:<5} {' '.join(formatted_values)}")
-                        f.write(f"| {hostname} | {node_id} | {rank} | {' | '.join(formatted_values)}|\n")
+                        log(
+                            f"{host_str:<{host_col_w}} {node_str:<10} {rank_str:<10} "
+                            f"{' '.join(formatted_values)}"
+                        )
+                        f.write(f"| {host_str} | {node_str} | {rank_str} | {' | '.join(formatted_values)}|\n")
                     f.write(f"\n")
 
                     f.write(f"=======IntraNodeComm - {case_name} (GB/s)=======\n")
                     log(f"=======IntraNodeComm - {case_name} (GB/s)=======")
+                    log(header_line)
 
-                    f.write(f"| Hostname | Node | Rank | {' | '.join(keys)}|\n")
+                    f.write(f"| {host_col_label} | Node | Rank | {' | '.join(keys)}|\n")
                     f.write(f"|----------|----------|----------{'|----------' * len(keys)}|\n")
-                    formatted_keys = [f"{key:<6}" for key in keys]
-                    log(f"{'Hostname':<{max_len}} {'Node':<5} {'Rank':<5} {' '.join(formatted_keys)}")
-                    for rank, r in enumerate(all_bandwidth_results):
-                        hostname = get_hostnames()[rank]
-                        if rank % num_procs != 0:
-                            continue
-                        node_id = rank // LOCAL_WORLD_SIZE
-
+                    for group_ranks in all_group_ranks:
+                        host_str, node_str, rank_str, r = _row_for(group_ranks, all_bandwidth_results)
                         formatted_values = [f"{r.get(key, 0):<6.2f}" for key in keys]
-                        log(f"{hostname:<{max_len}} {node_id:<5} {rank:<5} {' '.join(formatted_values)}")
-                        f.write(f"| {hostname} | {node_id} | {rank} | {' | '.join(formatted_values)}|\n")
+                        log(
+                            f"{host_str:<{host_col_w}} {node_str:<10} {rank_str:<10} "
+                            f"{' '.join(formatted_values)}"
+                        )
+                        f.write(f"| {host_str} | {node_str} | {rank_str} | {' | '.join(formatted_values)}|\n")
                     f.write(f"\n")
 
                     if not args.plot:
@@ -158,9 +212,9 @@ def run_intra_node_comm(args):
                 dump_path = f"{args.dump_path}/{plot_case}"
                 create_dir(dump_path)
                 print_keys = extract_first_middle_last(keys)
-                first_rank_bandwidth_results = [
-                    all_bandwidth_results[i] for i in range(len(all_bandwidth_results)) if i % num_procs == 0
-                ]
+                # Use leader rank of each group for plotting.
+                leader_ranks = [g[0] for g in all_group_ranks]
+                first_rank_bandwidth_results = [all_bandwidth_results[i] for i in leader_ranks]
                 num_print_ranks = len(first_rank_bandwidth_results)
                 for size_key in print_keys:
                     values = [r[size_key] for r in first_rank_bandwidth_results]
@@ -169,7 +223,7 @@ def run_intra_node_comm(args):
                     plt.xlabel(f"RankPair ({num_procs} ranks)")
                     plt.ylabel("Bandwidth")
                     plt.title(f"Intra Node {case_name} bandwidth for {size_key}")
-                    xtick_labels = [f"{i*num_procs}" for i in range(num_print_ranks)]
+                    xtick_labels = [f"{leader_ranks[i]}" for i in range(num_print_ranks)]
                     plt.xticks(range(num_print_ranks), xtick_labels)
                     plt.grid(True, axis="y")
 
