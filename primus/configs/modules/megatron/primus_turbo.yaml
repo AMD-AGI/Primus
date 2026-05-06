@@ -22,8 +22,6 @@ use_turbo_parallel_linear: false
 # ===== Grouped MLP =====
 # operator switch
 use_turbo_grouped_mlp: false
-# temporary switch: disable Turbo GroupedMLP low-precision grouped_gemm path
-disable_turbo_grouped_mlp_low_precision: false
 # fused activation_with_probs to reduce redundant computation
 use_turbo_fused_act_with_probs: false
 
