@@ -78,8 +78,8 @@ jobs:
           fi
       - name: Build and Push Docker Image
         run: |
-          echo "> Login to ROCm Docker Hub"
-          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # echo "> Login to ROCm Docker Hub"
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}"
           echo "> Build dependencies"
@@ -101,7 +101,7 @@ jobs:
           docker tag tasimage/primus:${{env.IMAGE_TAG}} docker.io/tasimage/primus:${{env.IMAGE_TAG}}
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}
-          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           # # Primus v26.2 already includes AINIC under /workspace. Re-enable this
           # # Dockerfile.ainic build only when we need to refresh the tasimage -ainic image.
@@ -141,7 +141,7 @@ jobs:
           docker tag tasimage/primus:${{env.IMAGE_TAG}}-v25.09-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-v25.09-ainic
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-v25.09-ainic
-          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax"
           start_time=$(date +%s)
@@ -162,7 +162,7 @@ jobs:
           docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax
-          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           echo "> Build Docker Image with tag: ${{ env.IMAGE_TAG }}-jax-ainic"
           start_time=$(date +%s)
@@ -181,7 +181,7 @@ jobs:
           docker tag tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic
           docker login -u tasimage -p ${{ secrets.PRIMUS_DOCKER_HUB_TOKEN }}
           docker push docker.io/tasimage/primus:${{env.IMAGE_TAG}}-jax-ainic
-          docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
+          # docker login -u rocmshared -p ${{ secrets.ROCM_DOCKER_HUB_TOKEN }}
 
           # echo "> Docker cleanup local images"
           # docker rmi tasimage/primus:${{env.IMAGE_TAG}}

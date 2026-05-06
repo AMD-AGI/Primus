@@ -3,7 +3,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Callable, List, Optional, Tuple
 
 import primus_turbo.pytorch as primus_turbo_torch
@@ -12,10 +12,13 @@ import torch.distributed as dist
 import torch.nn.functional as F
 import transformer_engine as te
 from megatron.core import tensor_parallel
+from megatron.core.enums import Fp4Recipe, Fp8Recipe
 from megatron.core.extensions.transformer_engine import (
     TEColumnParallelLinear,
     TELayerNormColumnParallelLinear,
     TELinear,
+    TEQuantizationParams,
+    TEQuantizationRecipe,
     TERowParallelLinear,
 )
 from megatron.core.model_parallel_config import ModelParallelConfig
@@ -385,6 +388,91 @@ def primus_turbo_fp4_autocast(
         _call_fp8_autocast_exit(enabled, _graph=_graph)
 
 
+def _get_fp8_autocast_for_quant_recipe(qrecipe: TEQuantizationRecipe):
+    if FP8GlobalStateManager.is_fp8_enabled():
+        if not qrecipe.override_quantized_autocast:
+            return nullcontext()
+    else:
+        if not qrecipe.override_nonquantized_autocast:
+            return nullcontext()
+
+    if qrecipe.fp8_quantization_recipe is None and qrecipe.fp4_quantization_recipe is None:
+        # Force BF16 for this layer and override autocast
+        return primus_turbo_fp8_autocast(enabled=False, enabled_turbo=False)
+    else:
+        if (
+            qrecipe.fp8_quantization_recipe == Fp8Recipe.custom
+            or qrecipe.fp4_quantization_recipe == Fp4Recipe.custom
+        ):
+            assert qrecipe.custom_recipe_factory is not None
+            assert False, "Custom recipe is not supported for Primus-Turbo"
+
+        elif qrecipe.fp8_quantization_recipe is not None:
+            from primus.backends.megatron.core.fp8_utils import (
+                MXFP8_SCALING_BLOCK_SIZE,
+                SCALING_BLOCK_SIZE,
+            )
+
+            if qrecipe.fp8_format == "e4m3":
+                fp8_format = Format.E4M3
+            elif qrecipe.fp8_format == "hybrid":
+                fp8_format = Format.HYBRID
+            else:
+                raise ValueError(f"Unhandled fp8_format {qrecipe.fp8_format}")
+
+            if qrecipe.fp8_quantization_recipe == Fp8Recipe.tensorwise:
+                quant_recipe = PrimusTurboQuantConfig(
+                    granularity=ScalingGranularity.TENSORWISE, format=fp8_format
+                )
+            elif qrecipe.fp8_quantization_recipe == Fp8Recipe.blockwise:
+                quant_recipe = PrimusTurboQuantConfig(
+                    granularity=ScalingGranularity.BLOCKWISE, format=fp8_format, block_size=SCALING_BLOCK_SIZE
+                )
+            elif qrecipe.fp8_quantization_recipe == Fp8Recipe.mxfp8:
+                quant_recipe = PrimusTurboQuantConfig(
+                    granularity=ScalingGranularity.MX_BLOCKWISE,
+                    format=fp8_format,
+                    block_size=MXFP8_SCALING_BLOCK_SIZE,
+                    scale_dtype=ScaleDtype.E8M0,
+                )
+            else:
+                raise ValueError(f"Unhandled fp8 recipe: {qrecipe.fp8_quantization_recipe}")
+
+            return primus_turbo_fp8_autocast(
+                enabled=False, enabled_turbo=True, turbo_quant_config=quant_recipe
+            )
+        else:
+            # Fp4 configured.
+            if qrecipe.fp4_quantization_recipe == Fp4Recipe.nvfp4:
+                assert False, "NVFP4 is not supported for Primus-Turbo"
+            elif qrecipe.fp4_quantization_recipe == Fp4Recipe.mxfp4:
+                from primus.backends.megatron.core.fp4_utils import (
+                    MXFP4_SCALING_BLOCK_SIZE,
+                )
+
+                quant_recipe = PrimusTurboQuantConfig(
+                    granularity=ScalingGranularity.MX_BLOCKWISE,
+                    format=Format.E2M1_X2,
+                    block_size=MXFP4_SCALING_BLOCK_SIZE,
+                    scale_dtype=ScaleDtype.E8M0,
+                )
+            else:
+                raise ValueError(f"Unhandled fp4 recipe: {qrecipe.fp4_quantization_recipe}")
+
+            return primus_turbo_fp4_autocast(
+                enabled=False, enabled_turbo=True, turbo_quant_config=quant_recipe
+            )
+
+
+def _get_fp8_autocast_for_quant_params(qparams: TEQuantizationParams | None, training: bool):
+    if qparams is None:
+        return nullcontext()
+    elif not training and qparams.evaluation_recipe is not None:
+        return _get_fp8_autocast_for_quant_recipe(qparams.evaluation_recipe)
+    else:
+        return _get_fp8_autocast_for_quant_recipe(qparams.training_recipe)
+
+
 class PrimusTurboAttention(te.pytorch.DotProductAttention):
     """
     Wrapper for the Transformer-Engine's `DotProductAttention` layer that also
@@ -669,9 +757,23 @@ class PrimusTurboLinear(TELinear):
             f"out_features={self.out_features}, bias={self.use_bias}, TP={self.tp_size})"
         )
 
-    def forward(
+    def forward(self, x: torch.Tensor):
+        _is_first_microbatch = self.is_first_microbatch
+
+        # Rewrite quant context
+        quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
+
+        with quant_context:
+            out = self.forward_internal(x, _is_first_microbatch)
+
+        self.is_first_microbatch = False
+
+        return out
+
+    def forward_internal(
         self,
         x: torch.Tensor,
+        is_first_microbatch: bool = False,
     ):
         weight = self._parameters["weight"]
         if self.use_bias:
@@ -697,7 +799,7 @@ class PrimusTurboLinear(TELinear):
                     or quant_config.block_scaling()
                 ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
 
-                if self.is_first_microbatch:
+                if is_first_microbatch:
                     weight_dtype = float8_e4m3
                     quant_config_internal = quant_config.data()
 
@@ -728,7 +830,7 @@ class PrimusTurboLinear(TELinear):
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                 assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
 
-                if self.is_first_microbatch:
+                if is_first_microbatch:
                     quant_config_internal = quant_config.data()
                     weight_scaling_recipe = ScalingRecipe(use_2d_block=True)
                     self.quantized_weight_buffer = PrimusTurboQuantizedTensor(
@@ -754,8 +856,6 @@ class PrimusTurboLinear(TELinear):
 
         out = _bridge_weight_grad(out, weight, self.quantized_weight_buffer)
         out = out.view(original_shape[0], original_shape[1], -1)
-
-        self.is_first_microbatch = False
 
         if self.te_return_bias:
             return out, bias_tensor
@@ -818,9 +918,23 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
             f"out_features={self.out_features}, bias={self.use_bias}, TP={self.tp_size})"
         )
 
-    def forward(
+    def forward(self, x: torch.Tensor):
+        _is_first_microbatch = self.is_first_microbatch
+
+        # Rewrite quant context
+        quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
+
+        with quant_context:
+            out = self.forward_internal(x, _is_first_microbatch)
+
+        self.is_first_microbatch = False
+
+        return out
+
+    def forward_internal(
         self,
         x: torch.Tensor,
+        is_first_microbatch: bool = False,
     ):
         weight = self._parameters["weight"]
 
@@ -851,7 +965,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                     or quant_config.block_scaling()
                 ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
 
-                if self.is_first_microbatch:
+                if is_first_microbatch:
                     weight_dtype = float8_e4m3
                     quant_config_internal = quant_config.data()
 
@@ -882,7 +996,7 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                 assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
 
-                if self.is_first_microbatch:
+                if is_first_microbatch:
                     quant_config_internal = quant_config.data()
                     weight_scaling_recipe = ScalingRecipe(use_2d_block=True)
                     self.quantized_weight_buffer = PrimusTurboQuantizedTensor(
@@ -908,8 +1022,6 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
 
         out = _bridge_weight_grad(out, weight, self.quantized_weight_buffer)
         out = out.view(original_shape[0], original_shape[1], -1)
-
-        self.is_first_microbatch = False
 
         if self.te_return_bias:
             return out, bias_tensor
@@ -971,9 +1083,23 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
             f"out_features={self.out_features}, bias={self.use_bias}, TP={self.tp_size})"
         )
 
-    def forward(
+    def forward(self, x: torch.Tensor):
+        _is_first_microbatch = self.is_first_microbatch
+
+        # Rewrite quant context
+        quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
+
+        with quant_context:
+            out = self.forward_internal(x, _is_first_microbatch)
+
+        self.is_first_microbatch = False
+
+        return out
+
+    def forward_internal(
         self,
         x: torch.Tensor,
+        is_first_microbatch: bool = False,
     ):
         weight = self._parameters["weight"]
         if self.use_bias:
@@ -999,7 +1125,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                     or quant_config.block_scaling()
                 ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
 
-                if self.is_first_microbatch:
+                if is_first_microbatch:
                     weight_dtype = float8_e4m3
                     quant_config_internal = quant_config.data()
 
@@ -1030,7 +1156,7 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                 assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
 
-                if self.is_first_microbatch:
+                if is_first_microbatch:
                     quant_config_internal = quant_config.data()
                     weight_scaling_recipe = ScalingRecipe(use_2d_block=True)
                     self.quantized_weight_buffer = PrimusTurboQuantizedTensor(
@@ -1056,8 +1182,6 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
 
         out = _bridge_weight_grad(out, weight, self.quantized_weight_buffer)
         out = out.view(original_shape[0], original_shape[1], -1)
-
-        self.is_first_microbatch = False
 
         if self.te_return_bias:
             return out, bias_tensor
@@ -1125,6 +1249,27 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
         weight: Optional[torch.Tensor] = None,
         runtime_gather_output: Optional[bool] = None,
     ):
+        _is_first_microbatch = self.is_first_microbatch
+
+        # Rewrite quant context
+        quant_context = _get_fp8_autocast_for_quant_params(
+            getattr(self, "te_quant_params", None), self.training
+        )
+
+        with quant_context:
+            out = self.forward_internal(x, weight, runtime_gather_output, _is_first_microbatch)
+
+        self.is_first_microbatch = False
+
+        return out
+
+    def forward_internal(
+        self,
+        x: torch.Tensor,
+        weight: Optional[torch.Tensor] = None,
+        runtime_gather_output: Optional[bool] = None,
+        is_first_microbatch: bool = False,
+    ):
         if weight is None:
             weight = self.weight
 
@@ -1151,7 +1296,7 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
                     or quant_config.block_scaling()
                 ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
 
-                if self.is_first_microbatch:
+                if is_first_microbatch:
                     weight_dtype = float8_e4m3
                     quant_config_internal = quant_config.data()
 
@@ -1182,7 +1327,7 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                 assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
 
-                if self.is_first_microbatch:
+                if is_first_microbatch:
                     quant_config_internal = quant_config.data()
                     weight_scaling_recipe = ScalingRecipe(use_2d_block=True)
                     self.quantized_weight_buffer = PrimusTurboQuantizedTensor(
@@ -1208,8 +1353,6 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
 
         out = _bridge_weight_grad(out, weight, self.quantized_weight_buffer)
         out = out.view(original_shape[0], original_shape[1], -1)
-
-        self.is_first_microbatch = False
 
         return out, bias_tensor
 
@@ -1272,6 +1415,19 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
         )
 
     def forward(self, x):
+        _is_first_microbatch = self.is_first_microbatch
+
+        # Rewrite quant context
+        quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
+
+        with quant_context:
+            out = self.forward_internal(x, _is_first_microbatch)
+
+        self.is_first_microbatch = False
+
+        return out
+
+    def forward_internal(self, x, is_first_microbatch: bool = False):
         """Forward."""
         if self.config.normalization == "LayerNorm":
             norm_out = torch.nn.functional.layer_norm(
@@ -1306,7 +1462,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                     or quant_config.block_scaling()
                 ), "Turbo FP8 is enabled but quant config is not mxfp8, current scaling, or block scaling."
 
-                if self.is_first_microbatch:
+                if is_first_microbatch:
                     weight_dtype = float8_e4m3
                     quant_config_internal = quant_config.data()
 
@@ -1337,7 +1493,7 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                 quant_config = PrimusTurboLowPrecisionGlobalStateManager.get_turbo_quant_config()
                 assert quant_config.mxfp4_scaling(), "Turbo FP4 is enabled but quant config is not mxfp4."
 
-                if self.is_first_microbatch:
+                if is_first_microbatch:
                     quant_config_internal = quant_config.data()
                     weight_scaling_recipe = ScalingRecipe(use_2d_block=True)
                     self.quantized_weight_buffer = PrimusTurboQuantizedTensor(
@@ -1363,8 +1519,6 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
 
         out = _bridge_weight_grad(out, weight, self.quantized_weight_buffer)
         out = out.view(original_shape[0], original_shape[1], -1)
-
-        self.is_first_microbatch = False
 
         if self.te_return_bias:
             return out, bias_tensor
@@ -1428,6 +1582,8 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
 
             self.activation_func_with_probs = _activation_func_with_probs
 
+        self.is_first_microbatch = True
+
     def _stack_grouped_linear_weight(self, module: torch.nn.Module) -> torch.Tensor:
         weights = [getattr(module, f"weight{i}") for i in range(self.num_local_experts)]
         return torch.stack(weights, dim=0).transpose(1, 2).contiguous()
@@ -1438,6 +1594,33 @@ class PrimusTurboGroupedMLP(TEGroupedMLP):
         tokens_per_expert: torch.Tensor,
         permuted_probs: torch.Tensor,
         routing_map: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Forward step of the legacy PrimusTurbo grouped-gemm MLP."""
+        _is_first_microbatch = self.is_first_microbatch
+
+        # Rewrite quant context
+        quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
+
+        with quant_context:
+            out = self.forward_internal(
+                permuted_local_hidden_states,
+                tokens_per_expert,
+                permuted_probs,
+                routing_map,
+                _is_first_microbatch,
+            )
+
+        self.is_first_microbatch = False
+
+        return out
+
+    def forward_internal(
+        self,
+        permuted_local_hidden_states: torch.Tensor,
+        tokens_per_expert: torch.Tensor,
+        permuted_probs: torch.Tensor,
+        routing_map: Optional[torch.Tensor] = None,
+        is_first_microbatch: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward step of the legacy PrimusTurbo grouped-gemm MLP."""
         del routing_map
