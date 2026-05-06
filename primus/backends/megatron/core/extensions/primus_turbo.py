@@ -417,7 +417,7 @@ def _get_fp8_autocast_for_quant_recipe(qrecipe: TEQuantizationRecipe):
                     scale_dtype=ScaleDtype.E8M0,
                 )
             else:
-                raise ValueError(f"Unhandled fp4 recipe: {qrecipe.fp8_quantization_recipe}")
+                raise ValueError(f"Unhandled fp4 recipe: {qrecipe.fp4_quantization_recipe}")
 
             return primus_turbo_fp4_autocast(
                 enabled=False, enabled_turbo=True, turbo_quant_config=quant_recipe
@@ -936,7 +936,6 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
         assert not self.offload, "gemm offload still have some problems"
 
         super().__init__(
-            self,
             input_size=input_size,
             output_size=output_size,
             config=config,
