@@ -71,6 +71,10 @@ class ModelConfig:
     enable_primus_turbo: bool = False
     use_turbo_grouped_mlp: bool = False
     use_turbo_deepep: bool = False  # DeepEP enables async A2A with compute overlap
+    turbo_sync_free_moe_stage: int = 0  # 0=off, 1=fused router, 2=+DeepEP+grouped, 3=+fused act
+
+    # Loss fusion – fuses cross-entropy with output layer avoiding full logits materialisation
+    cross_entropy_loss_fusion: bool = False
 
 
 @dataclass

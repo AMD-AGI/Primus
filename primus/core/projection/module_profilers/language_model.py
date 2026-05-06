@@ -230,6 +230,12 @@ class LanguageModelProfiler(BaseModuleProfiler):
             if gemm_backend is not None and hasattr(out, "set_gemm_backend"):
                 out.set_gemm_backend(gemm_backend)
 
+        # Propagate GEMM backend to loss profiler (needs HBM bandwidth).
+        if "calc_loss" in self.sub_profilers and self.sub_profilers["calc_loss"] is not None:
+            loss_p = self.sub_profilers["calc_loss"]
+            if gemm_backend is not None and hasattr(loss_p, "set_gemm_backend"):
+                loss_p.set_gemm_backend(gemm_backend)
+
     def get_layers_for_rank(
         self,
         global_rank: int,
@@ -687,11 +693,24 @@ class LanguageModelProfiler(BaseModuleProfiler):
                         f"bwd: {out_backward:.2f} ms, "
                         f"act: {out_mem / (1024**2):.2f} MB"
                     )
+
+                loss_profiler = self.sub_profilers["calc_loss"]
+                loss_fwd = loss_profiler.measured_forward_time(batch_size, seq_len)
+                loss_bwd = loss_profiler.measured_backward_time(batch_size, seq_len)
+                loss_mem = loss_profiler.estimated_activation_memory(batch_size, seq_len)
+                if is_rank_0:
+                    fused_label = "(fused – 0)" if loss_fwd == 0.0 else "(unfused)"
+                    print(
+                        f"  Loss {fused_label} -> fwd: {loss_fwd:.2f} ms, "
+                        f"bwd: {loss_bwd:.2f} ms, "
+                        f"act: {loss_mem / (1024**2):.2f} MB"
+                    )
+
                 output_stats = {
                     "type": "output",
-                    "forward_time_ms": out_forward,
-                    "backward_time_ms": out_backward,
-                    "activation_memory_bytes": out_mem,
+                    "forward_time_ms": out_forward + loss_fwd,
+                    "backward_time_ms": out_backward + loss_bwd,
+                    "activation_memory_bytes": out_mem + loss_mem,
                 }
 
         # ==============================================================================

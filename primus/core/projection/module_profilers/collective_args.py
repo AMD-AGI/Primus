@@ -24,7 +24,9 @@ class CollectiveArgs:
     # Topology
     node_size: int = 8  # GPUs per node
     pod_size: int = 64  # GPUs per pod (cluster)
+    num_nodes: int = 1  # Number of nodes
     hp: int = 1  # Horizontal parallelism groups
+    pp: int = 1  # Pipeline parallelism
     cp: int = 1  # Context parallelism
     ep: int = 1  # Expert parallelism
 
@@ -32,7 +34,11 @@ class CollectiveArgs:
     node_bw: float = 1024.0  # Intra-node bandwidth per GPU
     pod_bw: float = 50.0  # Inter-node bandwidth per NIC
     cluster_bw: float = 25.0  # Cluster-level bandwidth
-    bw_eff: float = 0.70  # Bandwidth efficiency factor
+    bw_eff: float = 0.70  # Bandwidth efficiency for collectives (AllReduce, AllToAll)
+    p2p_bw_eff: float = 0.80  # Bandwidth efficiency for point-to-point (SendRecv)
+    # Single-link P2P transfers have less contention and achieve higher
+    # efficiency than full-mesh collectives where all GPUs compete for
+    # aggregate mesh bandwidth simultaneously.
 
     # Latency in microseconds
     node_lat: float = 0.45  # Intra-node latency
@@ -46,24 +52,65 @@ class CollectiveArgs:
     kernel_launch_latency: float = 2.8  # Kernel launch overhead (us)
     vector_flops: float = 3.2e12  # Vector FLOPS (for reduction compute)
 
+    # RCCL fixed overhead per collective call (us)
+    rccl_overhead_us: float = 200.0
+    # Per-collective setup cost covering protocol negotiation, synchronization
+    # barriers, memory registration, and GPU scheduler overhead. Independent
+    # of message size. Calibrated against MI325X preflight measurements.
+
     # Network topology
     switch_topology: bool = True  # Whether using switch-based topology
     node_topology: str = "switch"  # Node topology: "switch" or "mesh" (for mesh derate)
     nics_per_node: Optional[int] = 8  # NICs per node (None = gpus_per_node)
 
+    # Hierarchical AllReduce pipelining
+    ar_overlap_factor: float = 0.9  # Peak overlap between intra-node and inter-node phases (0-1)
+    ar_warmup_chunk_bytes: int = 32 * 1024 * 1024  # 32 MB per-GPU chunk for full pipelining
+    # RCCL pipelines intra/inter phases using fine-grained chunking. The effective
+    # overlap scales with per-GPU chunk size: small chunks can't fill the pipeline,
+    # so overlap is reduced proportionally below ar_warmup_chunk_bytes.
+    # effective_overlap = ar_overlap_factor * min(1, chunk_per_gpu / ar_warmup_chunk_bytes)
+    # Calibrated against MI325X 2-node/4-node preflight measurements.
+    nic_rdma_setup_us: float = 260.0
+    nic_warmup_bytes: int = 32 * 1024 * 1024  # 32 MB per-NIC for peak RDMA throughput
+    # Small RDMA transfers don't achieve peak NIC throughput due to DMA engine
+    # warmup, QP setup, and PCIe round-trip overhead. The penalty decays as
+    # per-NIC data reaches nic_warmup_bytes via a power-law:
+    #   overhead = nic_rdma_setup_us * max(0, 1 - (per_nic_data / nic_warmup_bytes)^2.5)
+    # At 8MB/NIC: ~252us overhead (NIC underutilized)
+    # At 32MB+/NIC: 0us overhead (peak RDMA throughput achieved)
+    # Calibrated against MI325X 2-node preflight AllReduce measurements.
+
     # All-to-all specific
-    a2a_peer_lat: float = 0.45  # Per-peer latency overhead for inter-node a2a
-    a2a_intra_node_peer_lat: float = 28.0  # Per-peer latency overhead for intra-node a2a
-    # Intra-node overhead is higher (~19-28 us) due to:
-    # - P2P scatter/gather scheduling overhead
-    # - RCCL internal synchronization barriers
-    # - Memory copy and buffer management
-    # Note: Preflight measurements for EP=8 intra-node A2A show:
-    #   - Linear extrapolation: ~27.4 us per peer
-    #   - 2MB measurement: ~28.1 us per peer
-    #   - After subtracting bandwidth component: ~19.4 us per peer
-    # Default 28 us matches preflight measurements (middle of range)
-    # Can be overridden via hardware_config for GPU-specific calibration
+    a2a_peer_lat: float = 0.45  # Per-peer latency overhead for inter-node a2a (RDMA setup)
+    a2a_intra_sync_overhead: float = 50.0  # Fixed intra-node A2A sync overhead (us)
+    a2a_intra_node_peer_lat: float = 2.5  # Per-peer scheduling overhead for intra-node a2a (us)
+    # Intra-node A2A overhead model: a2a_intra_sync_overhead + a2a_intra_node_peer_lat * peers
+    # RCCL parallelizes intra-node P2P transfers, so overhead does NOT scale
+    # linearly with peer count. The fixed sync component (barrier, kernel setup)
+    # dominates, with a small per-peer scheduling cost.
+    # Inter-node overhead is per-peer (~0.45 us) due to sequential RDMA QP setup.
+    a2a_mesh_contention: float = 0.12  # Peak BW derate for full-mesh A2A contention
+    # Full-mesh AllToAll saturates all xGMI links simultaneously, causing HBM
+    # controller and xGMI bridge contention that reduces per-link efficiency.
+    # Applied as: effective_bw *= 1 - contention * link_saturation^2
+    #   link_saturation = (gpus - 1) / (node_size - 1)
+    # The quadratic scaling captures that contention grows super-linearly as
+    # the mesh approaches full saturation. Only affects intra-node A2A bandwidth.
+    # Calibrated against MI325X 8-GPU AllToAll preflight measurements.
+    a2a_rccl_overhead_us: float = 150.0  # Fixed A2A kernel/protocol overhead (us)
+    # RCCL AllToAll has a size-independent setup cost (algorithm selection,
+    # communicator state, kernel launch chain) observed as a ~150us floor in
+    # measured A2A times across all configurations (intra and inter-node).
+    # Distinct from rccl_overhead_us (AllReduce) because A2A uses a different
+    # RCCL protocol path with additional per-peer coordination.
+    a2a_remote_contention: float = 0.04  # Per-remote-node inter-node A2A BW derate
+    # In multi-node AllToAll, each GPU sends to (num_nodes-1) * gpus_per_node
+    # remote peers through a single NIC. As the number of remote destinations
+    # grows, the NIC must multiplex between more QPs, causing PFC/switching
+    # overhead and reduced per-flow efficiency. Applied as:
+    #   effective_pod_bw *= 1 - a2a_remote_contention * (num_nodes - 1)
+    # Calibrated: 2N has no derate; 4N has 8% derate matching measured BW drop.
 
 
 def get_default_args(
@@ -108,7 +155,15 @@ def get_default_args(
                         - switch_topology: Whether using switch-based topology (bool)
                         - node_topology: Node topology type ("switch" or "mesh") for mesh derate
                         - nics_per_node: Number of NICs per node (int)
-                        - a2a_peer_lat: Per-peer latency for all-to-all (us)
+                        - p2p_bw_eff: Bandwidth efficiency for P2P SendRecv (0-1)
+                        - rccl_overhead_us: Fixed per-collective RCCL setup overhead (us)
+                        - ar_overlap_factor: Overlap factor for hierarchical AllReduce pipelining (0-1)
+                        - ar_warmup_chunk_bytes: Min per-GPU chunk for full pipeline overlap (bytes)
+                        - nic_rdma_setup_us: Peak NIC RDMA setup overhead for small transfers (us)
+                        - nic_warmup_bytes: Per-NIC data threshold for peak RDMA throughput (bytes)
+                        - a2a_peer_lat: Per-peer latency for inter-node all-to-all (us)
+                        - a2a_intra_sync_overhead: Fixed intra-node A2A sync overhead (us)
+                        - a2a_intra_node_peer_lat: Per-peer scheduling overhead for intra-node A2A (us)
 
     Returns:
         CollectiveArgs configured with specified parameters
@@ -133,7 +188,9 @@ def get_default_args(
     args = CollectiveArgs(
         node_size=gpus_per_node,
         pod_size=total_gpus,
+        num_nodes=num_nodes,
         hp=tp,
+        pp=pp,
         cp=cp,
         ep=ep,
     )
@@ -174,6 +231,10 @@ def get_default_args(
     # Set nics_per_node to gpus_per_node if not explicitly set
     if args.nics_per_node is None:
         args.nics_per_node = gpus_per_node
+
+    # Store raw bandwidths before applying bw_eff (needed for P2P which uses p2p_bw_eff)
+    args._raw_node_bw = args.node_bw
+    args._raw_pod_bw = args.pod_bw
 
     # Apply bw_eff to bandwidth values once at initialization
     args.node_bw = args.node_bw * args.bw_eff

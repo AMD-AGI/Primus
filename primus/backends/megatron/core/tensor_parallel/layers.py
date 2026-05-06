@@ -221,8 +221,29 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             else:
                 grad_weight = None
         else:
-            grad_weight = grad_output.t().matmul(total_input)
-        grad_bias = grad_output.sum(dim=0) if use_bias else None
+            if not wgrad_compute:
+                # We need to compute total_input from input since pre_process is skipped
+                if ctx.sequence_parallel:
+                    world_size = get_tensor_model_parallel_world_size()
+                    _dim_size = list(input.size())
+                    _dim_size[0] = _dim_size[0] * world_size
+                    all_gather_buffer = get_global_memory_buffer().get_tensor(_dim_size, input.dtype, "mpu")
+                    dist_all_gather_func(all_gather_buffer, input, group=get_tensor_model_parallel_group())
+                    total_input = all_gather_buffer
+                else:
+                    total_input = input
+
+            grad_output_reshaped = (
+                grad_output.reshape(-1, grad_output.shape[-1]) if grad_output.dim() > 2 else grad_output
+            )
+            total_input_reshaped = (
+                total_input.reshape(-1, total_input.shape[-1]) if total_input.dim() > 2 else total_input
+            )
+            grad_weight = grad_output_reshaped.t().matmul(total_input_reshaped)
+        if use_bias:
+            grad_bias = grad_output.sum(dim=0) if grad_output.dim() == 2 else grad_output.sum(dim=(0, 1))
+        else:
+            grad_bias = None
 
         if ctx.sequence_parallel:
             if handle is not None:

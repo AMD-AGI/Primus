@@ -6,6 +6,14 @@
 
 """
 Megatron Transformer Engine weight gradient split patches for pipeline parallelism.
+
+Uses TE's native delay_wgrad_compute mechanism with a patched WeightGradStore
+that redirects wgrad closures to Primus's pipeline scheduler, instead of
+monkey-patching TE's entire _Linear / _GroupedLinear autograd Functions.
+
+This approach is TE-version-agnostic: TE's own backward handles all the
+FP8 quantization, communication overlap, and GEMM logic; we only intercept
+the final wgrad closure via WeightGradStore.put().
 """
 
 from primus.core.patches import PatchContext, get_args, register_patch
@@ -16,7 +24,7 @@ from primus.modules.module_utils import log_rank_0
     "megatron.pp.te_wgrad_split",
     backend="megatron",
     phase="before_train",
-    description="Patch Transformer Engine Linear layers for weight gradient splitting",
+    description="Patch TE WeightGradStore to redirect wgrad to Primus pipeline scheduling",
     condition=lambda ctx: (
         getattr(get_args(ctx), "patch_primus_pipeline", False)
         or getattr(get_args(ctx), "patch_zero_bubble", False)
@@ -24,34 +32,17 @@ from primus.modules.module_utils import log_rank_0
 )
 def patch_te_wgrad_split(ctx: PatchContext):
     """
-    Patch Transformer Engine Linear layers to split weight gradient computation.
+    Patch TE's WeightGradStore.put/pop methods so that delayed wgrad closures
+    are forwarded to Primus's WGradRunningCache or zero-bubble WeightGradStore.
 
-    Behavior:
-        - Replace TE _GroupedLinear with _GroupedLinearWithWGradSplit
-        - Replace TE _Linear with _LinearWithWGradSplit
+    Also sets delay_wgrad_compute=True in Megatron's TransformerConfig so that
+    TE layers created later will use the delayed wgrad path.
     """
-    # Patch TE grouped_linear
-    import transformer_engine.pytorch.module.grouped_linear as ori_grouped_linear
-
-    from primus.backends.megatron.core.extensions.te_group_gemm_patch_wgrad import (
-        _GroupedLinearWithWGradSplit,
+    from primus.backends.megatron.core.extensions.te_wgrad_store import (
+        patch_weight_grad_store,
     )
 
-    ori_grouped_linear._GroupedLinear = _GroupedLinearWithWGradSplit
+    patch_weight_grad_store()
     log_rank_0(
-        f"[Patch:megatron.pp.te_wgrad_split]   Patched transformer_engine.pytorch.module.grouped_linear._GroupedLinear "
-        f"-> {_GroupedLinearWithWGradSplit.__name__}"
-    )
-
-    # Patch TE linear
-    import transformer_engine.pytorch.module.linear as ori_linear
-
-    from primus.backends.megatron.core.extensions.te_gemm_patch_wgrad import (
-        _LinearWithWGradSplit,
-    )
-
-    ori_linear._Linear = _LinearWithWGradSplit
-    log_rank_0(
-        f"[Patch:megatron.pp.te_wgrad_split]   Patched transformer_engine.pytorch.module.linear._Linear "
-        f"-> {_LinearWithWGradSplit.__name__}"
+        "[Patch:megatron.pp.te_wgrad_split] " "Patched TE WeightGradStore.put/pop for Primus wgrad scheduling"
     )
