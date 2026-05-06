@@ -1,6 +1,6 @@
 work_group: ${PRIMUS_TEAM:amd}
 user_name: ${PRIMUS_USER:root}
-exp_name: ${PRIMUS_EXP_NAME:zebra_llama_1B_kda_pure-pretrain}
+exp_name: ${PRIMUS_EXP_NAME:zebra_llama_300M_gdn_pure-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
 modules:
@@ -8,14 +8,14 @@ modules:
     framework: megatron
     config: pre_trainer.yaml
 
-    model: zebra_llama_1B_kda_pure.yaml
+    model: zebra_llama_300M_gdn_pure.yaml
     overrides:
-      wandb_project: "Primus_Zebra_Llama_1B_KDA_Pure_Pretrain"
+      wandb_project: "Primus_Zebra_Llama_300M_GDN_Pure_Pretrain"
       stderr_sink_level: DEBUG
 
       eval_iters: 0
 
-      num_workers: 0
+      num_workers: 2
       create_attention_mask_in_dataloader: false
 
       profile: false
@@ -23,13 +23,13 @@ modules:
       log_avg_skip_iterations: 2
       log_avg_reset_interval: 50
 
-      # Training schedule — matched to FLA (4 GPUs):
-      #   batch=16, update=1, gpus=4, context=2048
-      #   global_batch = 16 * 4 = 64, tokens/step = 64 * 2048 = 131,072
-      #   total tokens ~= 76294 * 131072 ≈ 10B
-      train_iters: 76294
-      micro_batch_size: 16
-      global_batch_size: 64
+      # Training schedule — matched to FLA (8 GPUs):
+      #   FLA: per_device_train_batch_size=128, 8 GPUs → global=1024
+      #   tokens/step = 1024 * 2048 = 2,097,152
+      #   total tokens ~= 4768 * 2,097,152 ≈ 10B
+      train_iters: 4768
+      micro_batch_size: 128
+      global_batch_size: 1024
 
       seq_length: 2048
       max_position_embeddings: 2048
@@ -39,23 +39,19 @@ modules:
       #   lr=2e-4, cosine (min_lr_rate=0.1 → min_lr=2e-5)
       #   AdamW, beta1=0.9, beta2=0.95, weight_decay=0.01
       #   max_grad_norm=1.0, warmup_steps=200
-      # Both DeepSpeed ZeRO-2 and Megatron clip on ||avg_grad||.
-      # DeepSpeed pre-divides by dp_size before reduce_scatter(SUM),
-      # so its grad norm is on averaged gradients. Match FLA's 1.0 directly.
       clip_grad: 1.0
       lr: 2.0e-4
       min_lr: 2.0e-5
       lr_warmup_iters: 200
-      lr_decay_iters: 76294
+      lr_decay_iters: 4768
       lr_decay_style: cosine
       weight_decay: 0.01
       adam_beta1: 0.9
       adam_beta2: 0.95
       eod_mask_loss: false
 
-      # Use KDA hybrid spec with hybrid_attention_ratio=0.0 (pure KDA)
-      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'kda_hybrid_stack_spec']
-      use_fla_triton_kda: true
+      # Pure GDN hybrid spec (hybrid_attention_ratio=0.0 → all GDN, no MLA)
+      spec: ['primus.backends.megatron.core.models.hybrid.hybrid_mamba_mla_layer_specs', 'gdn_hybrid_stack_spec']
 
       # Tokenizer
       tokenizer_type: HuggingFaceTokenizer
@@ -72,8 +68,6 @@ modules:
       use_distributed_optimizer: true
 
       # Data — FLA-aligned FineWeb-Edu sample-10BT
-      # Converted from FLA's preprocessed Arrow dataset so both
-      # frameworks see the exact same tokens in the same order.
       mock_data: false
       train_data_path: >
         /home/vanbhati@amd.com/Primus/data/fla_aligned/fla_fineweb_edu_10BT_text_sentence
@@ -84,8 +78,8 @@ modules:
       finetune: false
       auto_continue_train: true
       load: null
-      save: ./output/zebra_llama_1B_kda_pure-pretrain
-      save_interval: 2048
+      save: ./output/zebra_llama_300M_gdn_pure-pretrain
+      save_interval: 1024
       disable_last_saving: false
       ckpt_format: torch
 

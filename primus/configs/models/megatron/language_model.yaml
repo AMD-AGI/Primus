@@ -112,6 +112,7 @@ disable_mamba_mem_eff_path: false
 
 # Gated Delta Net (GDN) configuration
 linear_conv_kernel_dim: null
+use_short_conv: true
 linear_key_head_dim: null
 linear_value_head_dim: null
 linear_num_key_heads: null

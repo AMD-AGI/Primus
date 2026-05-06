@@ -1,0 +1,59 @@
+bases:
+  - mamba_base.yaml
+
+# Pure Gated DeltaNet 300M — matches FLA gated_deltanet_300M_pure.json exactly
+#   ~300M params (tied embeddings)
+#   12 GDN blocks + 12 MLP blocks = 24 Megatron sublayers
+model_type: mamba
+tokenizer_type: HuggingFaceTokenizer
+tokenizer_model: meta-llama/Llama-3.2-1B
+
+# Model dimensions
+num_layers: 24
+hidden_size: 1024
+ffn_hidden_size: 4096
+
+# Pure GDN — no attention layers
+is_hybrid_model: true
+hybrid_attention_ratio: 0.0
+
+# Mamba params kept for base config compatibility (unused in pure GDN)
+mamba_state_dim: 64
+mamba_head_dim: 64
+mamba_num_groups: 8
+
+# GDN parameters — matched to FLA config:
+#   num_heads=4, num_v_heads=8, head_dim=64, expand_v=1.0, conv_size=4
+#   key_dim  = 4  heads x 64 dim = 256
+#   value_dim = 8 heads x 64 dim = 512
+#   Grouped Value Attention: each Q/K head serves 2 V heads
+use_short_conv: true
+linear_conv_kernel_dim: 4
+linear_key_head_dim: 64
+linear_value_head_dim: 64
+linear_num_key_heads: 4
+linear_num_value_heads: 8
+
+# No MLA needed for pure GDN
+group_query_attention: false
+swiglu: true
+num_query_groups: null
+multi_latent_attention: false
+num_attention_heads: 4
+
+# Embedding tying (matches FLA tie_word_embeddings=true)
+untie_embeddings_and_output_weights: false
+
+# All projections bias=False (matches FLA)
+add_bias_linear: false
+
+# Scale-only RMSNorm, no bias (matches FLA norm)
+normalization: RMSNorm
+norm_epsilon: 1.0e-6
+
+# Positional encoding — none for pure GDN (delta rule recurrence)
+rotary_base: 500000
+position_embedding_type: none
+add_position_embedding: true
+use_rotary_position_embeddings: false
+max_position_embeddings: 131072
