@@ -261,9 +261,22 @@ def _collect_gpu_processes(
             if cp.returncode == 0 and cp.stdout.strip():
                 try:
                     doc = json.loads(cp.stdout)
-                    out["per_gpu"] = _flatten_amd_smi_process_json(doc, _annotate)
-                    out["tool"] = "amd-smi process --json"
-                    out["ok"] = True
+                    parsed = _flatten_amd_smi_process_json(doc, _annotate)
+                    if parsed:
+                        # Schema recognized (Shape A/A'/B): trust the result
+                        # even when each per-GPU bucket is empty.
+                        out["per_gpu"] = parsed
+                        out["tool"] = "amd-smi process --json"
+                        out["ok"] = True
+                    else:
+                        # Valid JSON but no recognizable per-GPU entries -- a
+                        # future amd-smi schema we don't speak yet. Fall
+                        # through to text / rocm-smi / lsof rather than
+                        # silently masking the node clean.
+                        out["json_parse_error"] = (
+                            "amd-smi process --json returned no recognizable "
+                            "per-GPU dicts; falling back to text / rocm-smi / lsof"
+                        )
                 except Exception as e:
                     out["json_parse_error"] = str(e)
             else:
@@ -463,6 +476,13 @@ def _flatten_amd_smi_process_json(
             gpu_idx = item.get("gpu")
             if not isinstance(gpu_idx, int):
                 gpu_idx = -1
+            # Register the GPU bucket as soon as we recognize a Shape A
+            # entry, even if its process_list is empty. This makes an
+            # empty return value mean "schema didn't match" rather than
+            # the ambiguous "schema matched but no processes" -- so the
+            # caller can safely fall through to the text / rocm-smi /
+            # lsof fallbacks on a future amd-smi schema.
+            out_by_gpu.setdefault(int(gpu_idx), [])
             for p in plist:
                 if not isinstance(p, dict):
                     continue
