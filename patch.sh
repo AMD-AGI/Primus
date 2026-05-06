@@ -69,11 +69,23 @@ echo ""
 # echo ""
 
 ########################################################################
+# Locate fla package (supports editable installs and site-packages)
+########################################################################
+
+FLA_ROOT=$(python3 -c "import fla, os; print(os.path.dirname(fla.__file__))" 2>/dev/null)
+if [ -z "$FLA_ROOT" ]; then
+    echo "ERROR: Could not locate the fla package. Is flash-linear-attention installed?"
+    exit 1
+fi
+echo "FLA package found at: $FLA_ROOT"
+echo ""
+
+########################################################################
 # Patch 1: chunk_kda_bwd_kernel_intra (fla/ops/kda/chunk_intra.py)
 #   The autotuning tries num_stages in [2, 3, 4]. num_stages >= 3 hangs.
 ########################################################################
 
-INTRA_TARGET="/opt/venv/lib/python3.10/site-packages/fla/ops/kda/chunk_intra.py"
+INTRA_TARGET="$FLA_ROOT/ops/kda/chunk_intra.py"
 
 if [ -f "$INTRA_TARGET" ]; then
     cp "$INTRA_TARGET" "${INTRA_TARGET}.bak"
@@ -498,6 +510,3 @@ echo "Per-rank cache: each GPU rank now uses ~/.triton/cache/rank_\$LOCAL_RANK/"
 echo ""
 echo "To restore originals:"
 echo "  cp ${INTRA_TARGET}.bak $INTRA_TARGET"
-echo "  cp ${TARGET}.bak $TARGET"
-echo "  cp ${FLA_INIT}.bak $FLA_INIT"
-echo "  rm -f $PERRANK_SCRIPT"
