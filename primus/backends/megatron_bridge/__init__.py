@@ -12,11 +12,9 @@ from primus.backends.megatron_bridge.megatron_bridge_posttrain_trainer import (
 )
 from primus.core.backend.backend_registry import BackendRegistry
 
-BackendRegistry.register_path_name("megatron_bridge", "Megatron-Bridge")
-
 # Register adapter
 BackendRegistry.register_adapter("megatron_bridge", MegatronBridgeAdapter)
 
 # Register posttrain trainer as the default trainer
 # Megatron-Bridge is designed for post-training tasks (SFT, instruction tuning, LoRA)
-BackendRegistry.register_trainer_class(MegatronBridgePosttrainTrainer, "megatron_bridge", "sft")
+# BackendRegistry.register_trainer_class(MegatronBridgePosttrainTrainer, "megatron_bridge", "sft")

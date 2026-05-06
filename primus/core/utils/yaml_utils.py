@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 import yaml
 
+from primus.core.config.merge_utils import deep_merge
 from primus.core.config.yaml_loader import parse_yaml as _parse_yaml_core
 
 
@@ -76,30 +77,54 @@ def set_value_by_key(namespace: SimpleNamespace, key: str, value, allow_override
     return setattr(namespace, key, value)
 
 
+def _assign_namespace_from_dict_inplace(namespace: SimpleNamespace, src_dict: dict):
+    """
+    Assign nested dict values into a namespace in place.
+
+    Existing nested SimpleNamespace objects are updated recursively to keep
+    references stable where possible.
+    """
+    for key, value in src_dict.items():
+        if isinstance(value, dict):
+            current = getattr(namespace, key, None)
+            if isinstance(current, SimpleNamespace):
+                _assign_namespace_from_dict_inplace(current, value)
+            else:
+                setattr(namespace, key, dict_to_nested_namespace(value))
+        else:
+            set_value_by_key(namespace, key, dict_to_nested_namespace(value), allow_override=True)
+
+
+def deep_merge_namespace(namespace: SimpleNamespace, override_dict: dict):
+    """
+    Apply dict-style deep merge into namespace in place.
+    """
+    base_dict = nested_namespace_to_dict(namespace)
+    merged_dict = deep_merge(base_dict, override_dict)
+    _assign_namespace_from_dict_inplace(namespace, merged_dict)
+    return namespace
+
+
 def override_namespace(original_ns: SimpleNamespace, overrides_ns: SimpleNamespace):
     if overrides_ns is None:
         return
-
-    for key in vars(overrides_ns):
-        # if not has_key_in_namespace(original_ns, key):
-        #     raise Exception(f"Override namespace failed: can't find key({key}) in namespace {original_ns}")
-        new_value = get_value_by_key(overrides_ns, key)
-        if isinstance(new_value, SimpleNamespace):
-            override_namespace(get_value_by_key(original_ns, key), new_value)
-        else:
-            set_value_by_key(original_ns, key, new_value, allow_override=True)
+    deep_merge_namespace(original_ns, nested_namespace_to_dict(overrides_ns))
 
 
 def merge_namespace(dst: SimpleNamespace, src: SimpleNamespace, allow_override=False, excepts: list = None):
-    src_dict = vars(src)
-    dst_dict = vars(dst)
+    src_dict = nested_namespace_to_dict(src)
+    dst_dict = nested_namespace_to_dict(dst)
+    excepts = set(excepts or [])
+
+    effective_override = {}
     for key, value in src_dict.items():
         if key in excepts:
             continue
         if key in dst_dict and not allow_override:
-            raise ValueError(f"Key '{key}' from {src.name} already exists in {dst.name}.")
-        else:
-            setattr(dst, key, value)
+            continue  # Skip duplicate keys, keep dst value
+        effective_override[key] = value
+
+    deep_merge_namespace(dst, effective_override)
 
 
 def dump_namespace_to_yaml(ns: SimpleNamespace, file_path: str):

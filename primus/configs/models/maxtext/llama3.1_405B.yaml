@@ -1,0 +1,5 @@
+extends:
+  - model_base.yaml
+
+model_name: "llama3.1-405b"
+tokenizer_path: "meta-llama/Llama-3.3-70B-Instruct"

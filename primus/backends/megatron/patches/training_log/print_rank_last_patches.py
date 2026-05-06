@@ -11,6 +11,7 @@ This module contains a focused patch for ``megatron.training.training.print_rank
 to inject additional information into Megatron training logs:
 
     - ROCm/HIP memory stats.
+    - Running average elapsed time per iteration (ms).
     - Running average throughput per GPU (TFLOP/s/GPU).
     - Running average token throughput per GPU (tokens/s/GPU).
 
@@ -21,6 +22,7 @@ Design:
       and return updated log strings.
 """
 
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
@@ -28,6 +30,7 @@ from typing import Any, List, Optional
 import torch
 
 from primus.core.patches import PatchContext, get_args, register_patch
+from primus.core.utils import logger as primus_logger
 from primus.core.utils.rocm_mem_info import get_rocm_smi_mem_info
 from primus.modules.module_utils import log_rank_0, log_rank_all, warning_rank_0
 
@@ -40,6 +43,8 @@ class TrainingLogInfo:
     train_iters: Optional[int] = None
     consumed_samples: Optional[int] = None
     elapsed_ms: Optional[float] = None
+    # Index of the elapsed segment within ``segments``, if present.
+    elapsed_index: Optional[int] = None
     throughput_tflops: Optional[float] = None
     # Index of the throughput segment within ``segments``, if present.
     throughput_index: Optional[int] = None
@@ -94,6 +99,7 @@ def parse_training_log_line(log_string: str) -> TrainingLogInfo:
                 elapsed_match = re.search(r"elapsed time per iteration \(ms\):\s*([0-9.+-eE]+)", seg)
                 if elapsed_match:
                     info.elapsed_ms = float(elapsed_match.group(1))
+                    info.elapsed_index = idx
                 continue
 
             # throughput per GPU (TFLOP/s/GPU): {throughput}
@@ -128,6 +134,63 @@ def render_training_log_line(info: TrainingLogInfo) -> str:
     if not segments:
         return ""
     return " | ".join(segments)
+
+
+def _should_forward_training_log_to_rank_0() -> bool:
+    """
+    Keep single-node training progress visible on the console when torchrun only
+    exposes local rank 0 via ``--local-ranks-filter``.
+    """
+    nnodes = os.getenv("NNODES")
+    if nnodes is not None:
+        try:
+            return int(nnodes) == 1
+        except ValueError:
+            return False
+
+    world_size = os.getenv("WORLD_SIZE")
+    local_world_size = os.getenv("LOCAL_WORLD_SIZE")
+    if world_size is None or local_world_size is None:
+        return False
+    try:
+        return int(world_size) == int(local_world_size)
+    except ValueError:
+        return False
+
+
+def _forward_single_node_training_log(message: str) -> None:
+    """
+    Broadcast the last-rank training log line to rank 0 on single-node runs so
+    the console still shows the progress line while keeping its last-rank label.
+    """
+    dist = getattr(torch, "distributed", None)
+    if dist is None or not hasattr(dist, "is_initialized") or not dist.is_initialized():
+        return
+
+    try:
+        if hasattr(dist, "get_backend") and dist.get_backend() == "fake":
+            return
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+    except Exception:
+        return
+
+    if world_size <= 1:
+        return
+
+    last_rank = world_size - 1
+    payload = [message if rank == last_rank else None]
+
+    try:
+        dist.broadcast_object_list(payload, src=last_rank)
+    except Exception:
+        return
+
+    if rank == 0 and payload[0]:
+        sink_logger = getattr(primus_logger, "_logger", None)
+        if sink_logger is None:
+            return
+        sink_logger.bind(rank=last_rank, world_size=world_size, console_only=True).debug(payload[0])
 
 
 def _touch_log_rank_all_for_tests() -> None:  # pragma: no cover
@@ -193,12 +256,28 @@ class MemoryStatsExtension:
                 local_rank = torch.cuda.current_device()
                 r_total, r_used, r_free = get_rocm_smi_mem_info(local_rank)
                 r_ratio = r_used / r_total
+
+                # When pipeline parallelism (PP) is enabled, memory usage can vary across ranks.
+                # Therefore, we report the maximum ROCm memory usage across all ranks.
+                r_used_tensor = torch.tensor([r_used], device="cuda", dtype=torch.int64)
+                world_size = torch.distributed.get_world_size()
+                gathered_r_used = [torch.zeros_like(r_used_tensor) for _ in range(world_size)]
+                torch.distributed.all_gather(gathered_r_used, r_used_tensor)
+
+                total_r_used = [t.item() for t in gathered_r_used]
+                log_rank_0(f"total_r_used: {[round(r_used / 1024 ** 3, 2) for r_used in total_r_used]}")
+                max_r_used = max(total_r_used)
+                max_rank = total_r_used.index(max_r_used)
+
                 rocm_mem_str = (
                     f" | rocm mem usage/free/total/usage_ratio: "
                     f"{r_used / 1024 ** 3:.2f}GB/"
                     f"{r_free / 1024 ** 3:.2f}GB/"
                     f"{r_total / 1024 ** 3:.2f}GB/"
                     f"{r_ratio * 100:.2f}%"
+                    f" | rank-{max_rank} rocm max mem usage/usage_ratio: "
+                    f"{max_r_used / 1024 ** 3:.2f}GB/"
+                    f"{max_r_used / r_total * 100:.2f}%"
                 )
                 # Cache for reuse on non-sampled iterations
                 self._last_rocm_mem_str = rocm_mem_str
@@ -221,6 +300,66 @@ class MemoryStatsExtension:
         parsed.segments.append(combined.strip())
         # String result is ignored by the main patch when parsed is provided.
         return log_string
+
+
+class ElapsedAverageExtension:
+    """
+    Helper extension to compute and inject running average of elapsed time per
+    iteration (ms) into Megatron training logs.
+
+    Semantics mirror Primus MegatronTrainer (same as ThroughputAverageExtension):
+        - Ignore the first `log_avg_skip_iterations` iterations for averaging.
+        - Maintain a sliding window up to `log_avg_reset_interval` entries.
+    """
+
+    def __init__(self, args: Any):
+        self._args = args
+        self._recent_elapsed_ms: list[float] = []
+        self._log_avg_skip_iterations: int = int(getattr(args, "log_avg_skip_iterations", 0))
+        self._log_avg_reset_interval: int = int(getattr(args, "log_avg_reset_interval", 1000))
+
+        log_rank_0(
+            f"[Patch:megatron.training_log] ElapsedAverageExtension initialized with "
+            f"log_avg_skip_iterations: {self._log_avg_skip_iterations} "
+            f"log_avg_reset_interval: {self._log_avg_reset_interval}"
+        )
+
+    def inject(self, log_string: str, parsed: Optional[TrainingLogInfo] = None) -> str:
+        """
+        Update ``parsed`` with running-average elapsed time per iteration.
+
+        Elapsed time is rendered inline as:
+            elapsed time per iteration (ms): inst/avg
+        """
+        try:
+            if parsed is None or parsed.elapsed_ms is None:
+                return log_string
+
+            iteration = parsed.iteration
+            elapsed_value = float(parsed.elapsed_ms)
+
+            if iteration is not None and (
+                iteration == self._log_avg_skip_iterations + 1
+                or len(self._recent_elapsed_ms) >= self._log_avg_reset_interval
+            ):
+                self._recent_elapsed_ms.clear()
+
+            if iteration is None or iteration > self._log_avg_skip_iterations:
+                self._recent_elapsed_ms.append(elapsed_value)
+
+            if not self._recent_elapsed_ms:
+                return log_string
+
+            avg_elapsed_ms = sum(self._recent_elapsed_ms) / len(self._recent_elapsed_ms)
+            idx = parsed.elapsed_index
+            if idx is not None and 0 <= idx < len(parsed.segments):
+                parsed.segments[idx] = (
+                    f"elapsed time per iteration (ms): " f"{elapsed_value:.1f}/{avg_elapsed_ms:.1f}"
+                )
+
+            return log_string
+        except Exception:
+            return log_string
 
 
 class ThroughputAverageExtension:
@@ -401,11 +540,21 @@ def patch_training_log_unified(ctx: PatchContext):
         # Create helper extensions once so they keep state (ROCm cache, avg windows)
         # across all training_log invocations.
         mem_ext = MemoryStatsExtension(config)
+        elapsed_ext = ElapsedAverageExtension(config)
         throughput_ext = ThroughputAverageExtension(config)
         call_count = 0
         # Capture the original ``print_rank_last`` so we can delegate actual
         # printing back to Megatron after mutating the log string.
         original_print_rank_last = megatron_training.print_rank_last
+        should_forward_to_rank_0 = _should_forward_training_log_to_rank_0()
+        source_prefix = ""
+        if should_forward_to_rank_0:
+            source_prefix = "{}: ".format(
+                primus_logger.module_format(
+                    getattr(original_print_rank_last, "__module__", __name__).split(".")[-1],
+                    getattr(getattr(original_print_rank_last, "__code__", None), "co_firstlineno", 0),
+                )
+            )
 
         def primus_print_rank_last(log_string: str) -> None:
             """
@@ -423,10 +572,11 @@ def patch_training_log_unified(ctx: PatchContext):
                 # Parse the original log string once and share across extensions.
                 parsed = parse_training_log_line(log_string)
 
-                # Inject memory statistics, throughput, and token throughput by
-                # mutating the parsed structure. These calls ignore their string
-                # return value when `parsed` is provided.
+                # Inject memory statistics, elapsed avg, throughput, and token
+                # throughput by mutating the parsed structure. These calls ignore
+                # their string return value when `parsed` is provided.
                 mem_ext.inject(log_string, call_count, parsed)
+                elapsed_ext.inject(log_string, parsed)
                 throughput_ext.inject(log_string, parsed)
 
                 # Render the final line from the parsed structure.
@@ -436,8 +586,13 @@ def patch_training_log_unified(ctx: PatchContext):
                 warning_rank_0(f"[Patch:megatron.training_log] Failed to append training stats: {e}")
                 updated = log_string
 
-            # Delegate actual printing to Megatron's original implementation so
-            # that rank filtering and any other side effects remain unchanged.
+            # Keep the runner's console filtering behavior unchanged for all
+            # other worker output. On single-node runs we additionally forward
+            # the last-rank progress line to rank 0 for console visibility,
+            # while still letting the real last rank emit its original log.
+            if should_forward_to_rank_0:
+                _forward_single_node_training_log(f"{source_prefix}{updated}")
+
             original_print_rank_last(updated)
 
         def primus_training_log(*args, **kwargs):

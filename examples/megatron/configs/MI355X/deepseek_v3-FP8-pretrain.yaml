@@ -3,6 +3,8 @@ user_name: ${PRIMUS_USER:root}
 exp_name: ${PRIMUS_EXP_NAME:deepseek_v3-pretrain}
 workspace: ${PRIMUS_WORKSPACE:./output}
 
+# The config below is tuned for 32N on MI355X
+
 modules:
   pre_trainer:
     framework: megatron
@@ -22,8 +24,8 @@ modules:
 
       # hyper parameters
       train_iters: 50
-      micro_batch_size: 4
-      global_batch_size: 256
+      micro_batch_size: 2
+      global_batch_size: 4096
       seq_length: ${PRIMUS_SEQ_LENGTH:4096}
       max_position_embeddings: ${PRIMUS_MAX_POSITION_EMBEDDINGS:4096}
       lr: 1.0e-5
@@ -40,11 +42,12 @@ modules:
 
       # parallel
       tensor_model_parallel_size: ${PRIMUS_TP:1}
-      pipeline_model_parallel_size: ${PRIMUS_PP:1}
+      pipeline_model_parallel_size: ${PRIMUS_PP:16}
+      pipeline_model_parallel_layout: "Et*1|t*1|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*1,L"
       expert_model_parallel_size: ${PRIMUS_EP:8}
       overlap_grad_reduce: true
       overlap_param_gather: true
-      gradient_accumulation_fusion: false
+      gradient_accumulation_fusion: true
 
       # data
       mock_data: true
@@ -52,9 +55,23 @@ modules:
       valid_data_path: null
       test_data_path: null
 
+      moe_use_legacy_grouped_gemm: true
       # MLA
       multi_latent_attention: true
 
+      # optimizer
+      use_precision_aware_optimizer: true
+      main_grads_dtype: bf16
+      exp_avg_dtype: bf16
+      exp_avg_sq_dtype: bf16
+
+      # rope fusion
+      enable_experimental: true
+      apply_rope_fusion: true
+
+      # recompute
+      recompute_granularity: full
+      recompute_layer_ids: "0,3,4,7,8,11,12,15,19,23,31,32,35,36,39,40,43,44,47,48,51"
 
       # ckpt
       finetune: false
@@ -70,10 +87,27 @@ modules:
       ckpt_format: torch
       eval_iters: 0
 
+      enable_primus_turbo: true
+      use_turbo_attention: false
+      use_turbo_grouped_mlp: false
+      use_turbo_rms_norm: true
+
+      # deepep
+      use_turbo_deepep: true
+      moe_shared_expert_overlap: false
+      moe_router_dtype: fp32
+
+      # 64 or 80 for ep8, 32 for ep16-64 is best practice
+      turbo_deepep_num_cu: 80
+      turbo_deepep_use_comm_stream: false
+
+      # sync-free moe support stage 1-2, 0 means not use sync-free moe
+      # stage 2 is recommended for better performance
+      turbo_sync_free_moe_stage: 1
+
       # Cross entropy flags
-      # cross_entropy_fusion_impl: "te"
-      # cross_entropy_loss_fusion: true
+      cross_entropy_fusion_impl: "te"
+      cross_entropy_loss_fusion: true
 
       # enable fp8 training
       fp8: hybrid
-      moe_use_legacy_grouped_gemm: false

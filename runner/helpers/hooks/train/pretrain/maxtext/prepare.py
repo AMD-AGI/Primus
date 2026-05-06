@@ -9,7 +9,7 @@ MaxText pre-train preparation hook for primus-cli direct.
 
 This script is invoked by:
 
-    runner/helpers/hooks/train/pretrain/prepare_experiment.py
+    runner/helpers/hooks/train/pretrain/prepare_experiment.sh
 
 via:
 
@@ -103,29 +103,6 @@ def prepare_dataset_if_needed(
     return
 
 
-def install_jax_python_dependencies(primus_path: Path) -> None:
-    """
-    Install JAX Python dependencies from requirements-jax.txt.
-
-    This mirrors the original examples/run_pretrain.sh pip install logic
-    for MaxText backend.
-    """
-    log_info("========== Installing JAX Python dependencies ==========")
-
-    requirements_file = primus_path / "requirements-jax.txt"
-    if not requirements_file.exists():
-        log_error_and_exit(f"Requirements file not found: {requirements_file}")
-
-    cmd = ["pip", "install", "-r", str(requirements_file), "--quiet"]
-
-    try:
-        subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as exc:
-        log_error_and_exit(f"Failed to install JAX Python dependencies (exit code {exc.returncode})")
-
-    log_info("========== Installing JAX Python dependencies Done ==========")
-
-
 def install_maxtext_dependencies() -> None:
     """
     Install required system packages for MaxText/JAX on every node.
@@ -141,7 +118,6 @@ def install_maxtext_dependencies() -> None:
     cmd = (
         "apt install iproute2 -y && "
         "apt install -y "
-        'linux-headers-"$(uname -r)" '
         "libelf-dev "
         "gcc make libtool autoconf "
         "librdmacm-dev rdmacm-utils infiniband-diags ibverbs-utils perftest ethtool "
@@ -191,9 +167,6 @@ def main():
 
     dataset_type = pre_trainer_cfg.dataset_type
 
-    # Install JAX Python dependencies first (requirements-jax.txt)
-    install_jax_python_dependencies(primus_path)
-
     # Then install required MaxText/JAX system packages on every node.
     install_maxtext_dependencies()
 
@@ -237,14 +210,19 @@ def main():
     print(f"env.DUMP_HLO_DIR={dump_hlo_dir}")
     print(f"env.DUMP_HLO={dump_hlo}")
     print("env.NVTE_ALLOW_NONDETERMINISTIC_ALGO=1")
-    print("env.XLA_PYTHON_CLIENT_MEM_FRACTION=.97")
+    # set XLA_PYTHON_CLIENT_MEM_FRACTION to 0.93
+    # to avoid HSA_STATUS_ERROR_OUT_OF_RESOURCES error during multi-node training
+    xla_python_client_mem_fraction = os.getenv("XLA_PYTHON_CLIENT_MEM_FRACTION", ".97")
+    print(f"env.XLA_PYTHON_CLIENT_MEM_FRACTION={xla_python_client_mem_fraction}")
     print("env.NVTE_USE_HIPBLASLT=1")
 
-    xla_flags = "--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_graph_level=0 --xla_gpu_enable_latency_hiding_scheduler=True --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=False --xla_gpu_enable_cublaslt=True --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=FALSE"
+    xla_flags = "--xla_gpu_memory_limit_slop_factor=95 --xla_gpu_reduce_scatter_combine_threshold_bytes=8589934592 --xla_gpu_enable_command_buffer='' --xla_gpu_enable_latency_hiding_scheduler=true --xla_gpu_all_gather_combine_threshold_bytes=8589934592 --xla_gpu_enable_triton_gemm=false --xla_gpu_enable_cublaslt=true --xla_gpu_autotune_level=0 --xla_gpu_enable_all_gather_combine_by_dim=false"
     if dump_hlo == "1":
         xla_flags += f" --xla_dump_to={dump_hlo_dir}"
         log_info(f"XLA HLO dumping enabled, output directory: {dump_hlo_dir}")
     print(f"env.XLA_FLAGS={xla_flags}")
+    # set TF_CPP_MIN_LOG_LEVEL=2 to suppress the error messages at the end of JAX/MaxText training
+    print(f"env.TF_CPP_MIN_LOG_LEVEL=2")
 
     # AMD GPU optimizations
     print("env.HIP_FORCE_DEV_KERNARG=1")

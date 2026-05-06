@@ -500,7 +500,7 @@ print_system_info() {
     PRINT_INFO_RANK0 "    Slurm Job: $(is_slurm_job && echo 'Yes' || echo 'No')"
     if command -v rocm-smi &>/dev/null; then
         local gpu_count
-        gpu_count=$(rocm-smi --showid | grep -c "GPU" || echo "0")
+        gpu_count=$(rocm-smi --showid | grep 'GUID' | sort -u | wc -l || echo "0")
         PRINT_INFO_RANK0 "    GPUs: $gpu_count"
         PRINT_DEBUG "ROCm SMI available, GPU count: $gpu_count"
     else

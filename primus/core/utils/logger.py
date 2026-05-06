@@ -125,7 +125,9 @@ def add_file_sink(
             retention=retention,
             encoding=encoding,
             filter=lambda record: (
-                format_level_with_padding(record) and record["level"].no >= logger.level(level.upper()).no
+                format_level_with_padding(record)
+                and not record["extra"].get("console_only", False)
+                and record["level"].no >= logger.level(level.upper()).no
             ),
         )
         return handler_id
@@ -247,6 +249,19 @@ def setup_logger(
     global _logger
     checker.check_true(_logger is None, "logger Must be None at first logger setup.")
     _logger = loguru_logger
+
+
+def update_rank_info(rank: int, world_size: int):
+    """Re-bind rank/world_size on the global logger after distributed init.
+
+    This is needed for JAX/MaxText where ``jax.distributed.initialize()``
+    happens *after* the logger is first created.  Call this once you have
+    the authoritative rank and world_size (e.g. from ``jax.process_index``
+    and ``jax.process_count``).
+    """
+    global _logger
+    if _logger is not None:
+        _logger = _logger.bind(rank=rank, world_size=world_size)
 
 
 def module_format(module_name: str, line: int):

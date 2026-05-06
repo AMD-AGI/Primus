@@ -5,6 +5,8 @@
 # See LICENSE for license information.
 ###############################################################################
 
+set -euo pipefail
+
 print_usage() {
 cat << EOF
 Primus Direct Launcher
@@ -90,7 +92,7 @@ Notes:
 EOF
 }
 
-if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
     print_usage
     exit 0
 fi
@@ -152,24 +154,25 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         --env)
-            if [[ "$2" == *=* ]]; then
+            if [[ "${2:-}" == *=* ]]; then
                 # Inline KEY=VALUE form: export immediately and keep for later so that
                 # direct.env / --env can be re-applied with highest priority.
-                export "${2%%=*}"="${2#*=}"
-                PRE_PARSE_ARGS+=("$1" "$2")
+                _env_val="${2:-}"
+                export "${_env_val%%=*}"="${_env_val#*=}"
+                PRE_PARSE_ARGS+=("$1" "${2:-}")
                 shift 2
             else
                 # Non KEY=VALUE form: treat as env file path and defer sourcing until
                 # after hooks and patches (STEP 9). Use a synthetic --env_file option
                 # so that it is tracked via direct_config[env_file].
-                PRE_PARSE_ARGS+=("--env_file" "$2")
-                LOG_INFO_RANK0 "[direct] CLI: --env_file $2"
+                PRE_PARSE_ARGS+=("--env_file" "${2:-}")
+                LOG_INFO_RANK0 "[direct] CLI: --env_file ${2:-}"
                 shift 2
             fi
             ;;
         --script|--log_file|--patch)
             # Runner options that take a value
-            PRE_PARSE_ARGS+=("$1" "$2")
+            PRE_PARSE_ARGS+=("$1" "${2:-}")
             shift 2
             ;;
         --numa|--no-numa|--single)
@@ -308,6 +311,10 @@ while [[ $# -gt 0 ]]; do
 done
 set -- "${primus_args[@]}"
 
+# Prepend --debug to Python CLI args when debug mode is enabled (CLI or config).
+# Done here so it flows through hooks/patches and matches container/slurm pattern.
+[[ "$DEBUG_MODE" == "1" ]] && set -- --debug "$@"
+
 ###############################################################################
 # STEP 4.5: Process non-cumulative parameters (use last value only)
 ###############################################################################
@@ -325,22 +332,13 @@ done
 ###############################################################################
 # STEP 4.6: Setup log file path
 ###############################################################################
-if [[ -z "${direct_config[log_file]}" ]]; then
+if [[ -z "${direct_config[log_file]:-}" ]]; then
     direct_config[log_file]="logs/log_$(date +%Y%m%d_%H%M%S).txt"
 fi
-mkdir -p "$(dirname "${direct_config[log_file]}")"
-
-
-###############################################################################
-# STEP 5: Install dependencies
-###############################################################################
-# Skip pip install in dry-run mode
-if [[ "$DRY_RUN_MODE" != "1" ]]; then
-    pip install -qq -r requirements.txt
-fi
+mkdir -p "$(dirname "${direct_config[log_file]:-}")"
 
 ###############################################################################
-# STEP 6: Source GPU environment and helper modules
+# STEP 5: Source GPU environment and helper modules
 ###############################################################################
 
 # Source primus-env.sh (it will set its own SCRIPT_DIR, which is fine)
@@ -348,7 +346,7 @@ fi
 source "${RUNNER_DIR}/helpers/envs/primus-env.sh"
 
 ###############################################################################
-# STEP 7: Execute hooks and capture extra arguments / env
+# STEP 6: Execute hooks and capture extra arguments / env
 ###############################################################################
 # Hooks can return:
 #   - Extra Primus CLI arguments by printing lines:  extra.<name>=<value>
@@ -358,7 +356,7 @@ source "${RUNNER_DIR}/helpers/envs/primus-env.sh"
 # shellcheck disable=SC1091
 source "${RUNNER_DIR}/helpers/execute_hooks.sh"
 HOOK_EXTRA_PRIMUS_ARGS=()
-if ! execute_hooks "$1" "$2" "$@"; then
+if ! execute_hooks "${1:-}" "${2:-}" "$@"; then
     LOG_ERROR "[direct] Hooks execution failed"
     exit 1
 fi
@@ -370,10 +368,12 @@ if [[ ${#HOOK_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
 fi
 
 ###############################################################################
-# STEP 8: Execute patch scripts
+# STEP 7: Execute patch scripts
 ###############################################################################
 # Execute patch scripts from config + CLI.
 # Note: direct_config[patch] is stored as a newline-separated list.
+# Initialize so it is defined when no patches run (set -u safe).
+PATCH_EXTRA_PRIMUS_ARGS=()
 if [[ -n "${direct_config[patch]:-}" ]]; then
     # shellcheck disable=SC1091
     source "${RUNNER_DIR}/helpers/execute_patches.sh"
@@ -386,7 +386,7 @@ if [[ -n "${direct_config[patch]:-}" ]]; then
 fi
 
 ###############################################################################
-# STEP 8.5: Apply extra Primus args from patches (extra.* protocol)
+# STEP 7.5: Apply extra Primus args from patches (extra.* protocol)
 ###############################################################################
 if [[ ${#PATCH_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
     set -- "$@" "${PATCH_EXTRA_PRIMUS_ARGS[@]}"
@@ -394,7 +394,7 @@ if [[ ${#PATCH_EXTRA_PRIMUS_ARGS[@]} -gt 0 ]]; then
 fi
 
 ###############################################################################
-# STEP 9: Build and export environment variables (highest priority)
+# STEP 8: Build and export environment variables (highest priority)
 ###############################################################################
 
 # First, source any env files specified via --env <file> (tracked as env_file).
@@ -408,7 +408,7 @@ if [[ -n "${direct_config[env_file]:-}" ]]; then
         # shellcheck disable=SC1090
         source "$env_file"
         LOG_INFO_RANK0 "[direct] Sourced env file (final): $env_file"
-    done <<< "${direct_config[env_file]}"
+    done <<< "${direct_config[env_file]:-}"
 fi
 
 # Then, build primus_env_kv array and export inline KEY=VALUE envs. This happens
@@ -427,23 +427,29 @@ if [[ -n "${direct_config[env]:-}" ]]; then
         primus_env_kv+=("$env_entry")
         export "${env_entry%%=*}"="${env_entry#*=}"
         LOG_INFO_RANK0 "[direct] Exported env (final): ${env_entry%%=*}=${env_entry#*=}"
-    done <<< "${direct_config[env]}"
+    done <<< "${direct_config[env]:-}"
+fi
+
+# HipBLASLt stage-2 offline tuning may request skipping main training launch.
+if [[ "${PRIMUS_SKIP_MAIN_LAUNCH:-0}" == "1" ]]; then
+    LOG_INFO_RANK0 "[direct] PRIMUS_SKIP_MAIN_LAUNCH=1, skip main training launch."
+    exit 0
 fi
 
 ###############################################################################
-# STEP 10: Build launch command
+# STEP 9: Build launch command
 ###############################################################################
 
 # Allow RUN_MODE to be overridden by environment variable
-RUN_MODE="${RUN_MODE:-${direct_config[run_mode]}}"
+RUN_MODE="${RUN_MODE:-${direct_config[run_mode]:-torchrun}}"
 
-CMD="${direct_config[script]} $* 2>&1 | tee ${direct_config[log_file]}"
+CMD="${direct_config[script]:-} $* 2>&1 | tee ${direct_config[log_file]:-}"
 if [[ "$RUN_MODE" == "single" ]]; then
     CMD="python3 ${CMD}"
     LOG_INFO_RANK0 "[direct] Using python launcher (single mode)"
 elif [[ "$RUN_MODE" == "torchrun" ]]; then
     # Step 2: Add NUMA binding prefix if enabled
-    if [[ "${direct_config[numa]}" == "true" ]]; then
+    if [[ "${direct_config[numa]:-}" == "true" ]]; then
         CMD="--no-python ${RUNNER_DIR}/helpers/numa_bind.sh ${CMD}"
         LOG_INFO_RANK0 "[direct] NUMA binding: ENABLED (forced by CLI)"
     else
@@ -458,16 +464,16 @@ elif [[ "$RUN_MODE" == "torchrun" ]]; then
         --master_port "${MASTER_PORT:-1234}"
     )
 
-    LAST_NODE=$((NNODES - 1))
+    LAST_NODE=$((${NNODES:-1} - 1))
     FILTERS=()
     # Add local rank 0 on the first node
-    if [ "$NODE_RANK" -eq 0 ]; then
+    if [ "${NODE_RANK:-0}" -eq 0 ]; then
         FILTERS+=(0)
     fi
 
     # Add the last local rank on the last node
-    if [ "$NODE_RANK" -eq "$LAST_NODE" ]; then
-        FILTERS+=($((GPUS_PER_NODE - 1)))
+    if [ "${NODE_RANK:-0}" -eq "$LAST_NODE" ] && [ "${NNODES:-1}" -ne 1 ]; then
+        FILTERS+=($((${GPUS_PER_NODE:-8} - 1)))
     fi
 
     # Build filter argument (only if FILTERS is non-empty)
@@ -478,11 +484,11 @@ elif [[ "$RUN_MODE" == "torchrun" ]]; then
         FILTER_ARG=()
     fi
 
-    CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS} ${CMD}"
+    CMD="torchrun ${DISTRIBUTED_ARGS[*]} ${FILTER_ARG[*]} ${LOCAL_RANKS:-} ${CMD}"
 fi
 
 ###############################################################################
-# STEP 11: Display configuration (always)
+# STEP 10: Display configuration (always)
 ###############################################################################
 if [[ "$DRY_RUN_MODE" == "1" ]]; then
     print_section "[DRY RUN] Direct Launch Configuration"
@@ -490,13 +496,13 @@ else
     print_section "Primus Direct Launch Configuration"
 fi
 
-PRINT_INFO_RANK0 "  Run Mode        : ${direct_config[run_mode]}"
-PRINT_INFO_RANK0 "  Script Path     : ${direct_config[script]}"
+PRINT_INFO_RANK0 "  Run Mode        : ${direct_config[run_mode]:-}"
+PRINT_INFO_RANK0 "  Script Path     : ${direct_config[script]:-}"
 PRINT_INFO_RANK0 "  Config File     : ${CONFIG_FILE:-<none>}"
-PRINT_INFO_RANK0 "  Log File        : ${direct_config[log_file]}"
-PRINT_INFO_RANK0 "  NUMA Binding    : ${direct_config[numa]}"
+PRINT_INFO_RANK0 "  Log File        : ${direct_config[log_file]:-}"
+PRINT_INFO_RANK0 "  NUMA Binding    : ${direct_config[numa]:-}"
 if [[ -n "${direct_config[patch]:-}" ]]; then
-    PRINT_INFO_RANK0 "  Patch Scripts   : $(echo "${direct_config[patch]}" | tr '\n' ' ')"
+    PRINT_INFO_RANK0 "  Patch Scripts   : $(echo "${direct_config[patch]:-}" | tr '\n' ' ')"
 else
     PRINT_INFO_RANK0 "  Patch Scripts   : <none>"
 fi
@@ -511,7 +517,7 @@ if [[ ${#primus_env_kv[@]} -gt 0 ]]; then
     PRINT_INFO_RANK0 ""
 fi
 
-if [[ "${direct_config[run_mode]}" == "torchrun" ]]; then
+if [[ "${direct_config[run_mode]:-}" == "torchrun" ]]; then
     PRINT_INFO_RANK0 "  Distributed Settings:"
     PRINT_INFO_RANK0 "    NNODES          : ${NNODES:-1}"
     PRINT_INFO_RANK0 "    NODE_RANK       : ${NODE_RANK:-0}"
@@ -540,11 +546,13 @@ fi
 print_section ""
 
 ###############################################################################
-# STEP 12: Execute command
+# STEP 11: Execute command
 ###############################################################################
+# Temporarily allow pipeline to fail so we can capture PIPESTATUS and log it
+set +e
 eval "$CMD"
-exit_code=${PIPESTATUS[0]}
-
+exit_code=$?
+set -e
 # Print result based on exit code
 if [[ $exit_code -ge 128 ]]; then
     LOG_ERROR "[direct] torchrun crashed due to signal $((exit_code - 128))"

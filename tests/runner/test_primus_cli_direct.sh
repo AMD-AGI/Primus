@@ -102,7 +102,7 @@ assert_fail() {
 }
 
 # Print test section header
-print_section() {
+local_print_section() {
     echo ""
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${YELLOW}$1${NC}"
@@ -113,7 +113,7 @@ print_section() {
 # Test 1: Basic dry-run functionality
 # ============================================================================
 test_basic_dry_run() {
-    print_section "Test 1: Basic Dry-Run Functionality"
+    local_print_section "Test 1: Basic Dry-Run Functionality"
 
     # Create a temporary config to avoid pip install
     local test_config="/tmp/test_direct_config_$$.yaml"
@@ -139,7 +139,7 @@ EOF
 # Test 2: Environment variable handling
 # ============================================================================
 test_env_variables() {
-    print_section "Test 2: Environment Variable Handling"
+    local_print_section "Test 2: Environment Variable Handling"
 
     local test_config="/tmp/test_direct_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -163,7 +163,7 @@ EOF
 # Test 3: Script path override
 # ============================================================================
 test_script_override() {
-    print_section "Test 3: Script Path Override"
+    local_print_section "Test 3: Script Path Override"
 
     local test_config="/tmp/test_direct_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -184,7 +184,7 @@ EOF
 # Test 4: NUMA binding options
 # ============================================================================
 test_numa_binding() {
-    print_section "Test 4: NUMA Binding Options"
+    local_print_section "Test 4: NUMA Binding Options"
 
     local test_config="/tmp/test_direct_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -209,7 +209,7 @@ EOF
 # Test 5: Single mode vs torchrun mode
 # ============================================================================
 test_run_modes() {
-    print_section "Test 5: Run Modes (Single vs Torchrun)"
+    local_print_section "Test 5: Run Modes (Single vs Torchrun)"
 
     local test_config="/tmp/test_direct_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -238,7 +238,7 @@ EOF
 # Test 6: Patch scripts handling
 # ============================================================================
 test_patch_scripts() {
-    print_section "Test 6: Patch Scripts Handling"
+    local_print_section "Test 6: Patch Scripts Handling"
 
     local test_config="/tmp/test_direct_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -260,7 +260,7 @@ EOF
 # Test 7: Env file handling via --env <file>
 # ============================================================================
 test_env_file_handling() {
-    print_section "Test 7: Env File Handling via --env <file>"
+    local_print_section "Test 7: Env File Handling via --env <file>"
 
     local test_config="/tmp/test_direct_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -280,7 +280,7 @@ EOF
 # Test 8: Debug mode output
 # ============================================================================
 test_debug_mode() {
-    print_section "Test 8: Debug Mode Output"
+    local_print_section "Test 8: Debug Mode Output"
 
     local test_config="/tmp/test_direct_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -302,7 +302,7 @@ EOF
 # Test 9: Config file priority
 # ============================================================================
 test_config_priority() {
-    print_section "Test 9: Config File Priority (CLI > Config > Default)"
+    local_print_section "Test 9: Config File Priority (CLI > Config > Default)"
 
     local test_config="/tmp/test_direct_config_$$.yaml"
     cat > "$test_config" << 'EOF'
@@ -327,7 +327,7 @@ EOF
 # Test 10: Help output
 # ============================================================================
 test_help_output() {
-    print_section "Test 10: Help Output"
+    local_print_section "Test 10: Help Output"
 
     local output
     output=$(bash "$RUNNER_DIR/primus-cli-direct.sh" --help 2>&1)

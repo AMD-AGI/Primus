@@ -25,6 +25,7 @@ from . import (  # noqa: F401
     moe_layer_freq_patches,
     sequence_parallel_tp1_patches,
     tensorboard_path_patches,
+    validate_args_patches,
     wandb_config_patches,
 )
 
@@ -38,4 +39,5 @@ __all__ = [
     "sequence_parallel_tp1_patches",
     "iterations_to_skip_default_patches",
     "moe_layer_freq_patches",
+    "validate_args_patches",
 ]

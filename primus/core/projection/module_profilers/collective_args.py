@@ -1,0 +1,183 @@
+###############################################################################
+# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+
+"""
+Default configuration for collective communication modeling.
+Hardware parameters can be customized via config file.
+"""
+
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
+
+@dataclass
+class CollectiveArgs:
+    """
+    Hardware and topology configuration for collective communication modeling.
+
+    All parameters can be overridden via configuration file.
+    """
+
+    # Topology
+    node_size: int = 8  # GPUs per node
+    pod_size: int = 64  # GPUs per pod (cluster)
+    hp: int = 1  # Horizontal parallelism groups
+    cp: int = 1  # Context parallelism
+    ep: int = 1  # Expert parallelism
+
+    # Bandwidth in GB/s (bidirectional)
+    node_bw: float = 1024.0  # Intra-node bandwidth per GPU
+    pod_bw: float = 50.0  # Inter-node bandwidth per NIC
+    cluster_bw: float = 25.0  # Cluster-level bandwidth
+    bw_eff: float = 0.70  # Bandwidth efficiency factor
+
+    # Latency in microseconds
+    node_lat: float = 0.45  # Intra-node latency
+    pod_lat: float = 2.0  # Inter-node latency
+    cluster_lat: float = 10.0  # Cluster-level latency
+    hbm_latency: float = 0.09  # HBM access latency
+    write_latency: float = 0.28  # Write operation latency
+    write_resp: float = 0.09  # Write response latency
+
+    # Compute
+    kernel_launch_latency: float = 2.8  # Kernel launch overhead (us)
+    vector_flops: float = 3.2e12  # Vector FLOPS (for reduction compute)
+
+    # Network topology
+    switch_topology: bool = True  # Whether using switch-based topology
+    node_topology: str = "switch"  # Node topology: "switch" or "mesh" (for mesh derate)
+    nics_per_node: Optional[int] = 8  # NICs per node (None = gpus_per_node)
+
+    # All-to-all specific
+    a2a_peer_lat: float = 0.45  # Per-peer latency overhead for inter-node a2a
+    a2a_intra_node_peer_lat: float = 28.0  # Per-peer latency overhead for intra-node a2a
+    # Intra-node overhead is higher (~19-28 us) due to:
+    # - P2P scatter/gather scheduling overhead
+    # - RCCL internal synchronization barriers
+    # - Memory copy and buffer management
+    # Note: Preflight measurements for EP=8 intra-node A2A show:
+    #   - Linear extrapolation: ~27.4 us per peer
+    #   - 2MB measurement: ~28.1 us per peer
+    #   - After subtracting bandwidth component: ~19.4 us per peer
+    # Default 28 us matches preflight measurements (middle of range)
+    # Can be overridden via hardware_config for GPU-specific calibration
+
+
+def get_default_args(
+    num_nodes: int = 1,
+    gpus_per_node: int = 8,
+    tp: int = 1,
+    pp: int = 1,
+    _dp: int = -1,  # Auto-calculated if -1 (currently unused, retained for API compatibility)
+    ep: int = 1,
+    cp: int = 1,
+    hardware_config: Optional[Dict[str, Any]] = None,
+) -> CollectiveArgs:
+    """
+    Get CollectiveArgs with customizable hardware configuration.
+
+    This function creates a CollectiveArgs instance with default values that can be
+    overridden via the hardware_config dictionary. This allows customers to specify
+    their own hardware characteristics through config files.
+
+    Args:
+        num_nodes: Number of nodes in the cluster
+        gpus_per_node: GPUs per node
+        tp: Tensor parallelism size
+        pp: Pipeline parallelism size
+        _dp: Data parallelism size (currently unused, retained for API compatibility)
+        ep: Expert parallelism size
+        cp: Context parallelism size
+        hardware_config: Optional dictionary to override default hardware parameters.
+                        Supported keys:
+                        - node_bw: Intra-node bandwidth (GB/s)
+                        - pod_bw: Inter-node bandwidth (GB/s)
+                        - cluster_bw: Cluster-level bandwidth (GB/s)
+                        - bw_eff: Bandwidth efficiency factor (0-1)
+                        - node_lat: Intra-node latency (us)
+                        - pod_lat: Inter-node latency (us)
+                        - cluster_lat: Cluster-level latency (us)
+                        - hbm_latency: HBM access latency (us)
+                        - write_latency: Write operation latency (us)
+                        - write_resp: Write response latency (us)
+                        - kernel_launch_latency: Kernel launch overhead (us)
+                        - vector_flops: Vector FLOPS for compute
+                        - switch_topology: Whether using switch-based topology (bool)
+                        - node_topology: Node topology type ("switch" or "mesh") for mesh derate
+                        - nics_per_node: Number of NICs per node (int)
+                        - a2a_peer_lat: Per-peer latency for all-to-all (us)
+
+    Returns:
+        CollectiveArgs configured with specified parameters
+
+    Example:
+        >>> # Use default configuration
+        >>> args = get_default_args(num_nodes=4, gpus_per_node=8)
+
+        >>> # Override hardware parameters
+        >>> hw_config = {
+        >>>     'node_bw': 1024.0,  # Higher intra-node bandwidth
+        >>>     'bw_eff': 0.92,     # Better efficiency
+        >>>     'node_lat': 0.45,   # Lower latency
+        >>> }
+        >>> args = get_default_args(num_nodes=4, gpus_per_node=8,
+        >>>                         hardware_config=hw_config)
+    """
+    # Calculate total GPUs
+    total_gpus = num_nodes * gpus_per_node
+
+    # Start with default CollectiveArgs
+    args = CollectiveArgs(
+        node_size=gpus_per_node,
+        pod_size=total_gpus,
+        hp=tp,
+        cp=cp,
+        ep=ep,
+    )
+
+    # Override with hardware_config if provided
+    if hardware_config:
+        for key, value in hardware_config.items():
+            if hasattr(args, key):
+                # Get the expected type from the dataclass field
+                field_type = type(getattr(args, key))
+
+                # Convert value to the expected type if it's a string representation of a number
+                if isinstance(value, str) and field_type in (int, float):
+                    try:
+                        if field_type == int:
+                            # Handle scientific notation for int (e.g., "1e3" -> 1000)
+                            if "e" in value.lower() or "E" in value.lower():
+                                value = int(float(value))
+                            else:
+                                value = int(value)
+                        elif field_type == float:
+                            # Handle scientific notation for float (e.g., "3.2e12" -> 3.2e12)
+                            value = float(value)
+                    except (ValueError, TypeError):
+                        # If conversion fails, keep original value and let it fail later
+                        pass
+                elif field_type == bool and isinstance(value, str):
+                    # Convert string booleans to actual booleans
+                    if value.lower() in ("true", "1", "yes", "on"):
+                        value = True
+                    elif value.lower() in ("false", "0", "no", "off"):
+                        value = False
+
+                setattr(args, key, value)
+            else:
+                print(f"[Primus:WARNING] Unknown hardware parameter '{key}' in config. Skipping.")
+
+    # Set nics_per_node to gpus_per_node if not explicitly set
+    if args.nics_per_node is None:
+        args.nics_per_node = gpus_per_node
+
+    # Apply bw_eff to bandwidth values once at initialization
+    args.node_bw = args.node_bw * args.bw_eff
+    args.pod_bw = args.pod_bw * args.bw_eff
+    args.cluster_bw = args.cluster_bw * args.bw_eff
+
+    return args

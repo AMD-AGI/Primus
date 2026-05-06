@@ -30,9 +30,9 @@ modules:
 
       # Training configuration
       train_iters: 200
-      global_batch_size: 128
-      micro_batch_size: 1
-      seq_length: 2048
+      global_batch_size: 32
+      micro_batch_size: 4
+      seq_length: 8192
       eval_interval: 30
       save_interval: 50
 

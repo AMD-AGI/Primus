@@ -58,12 +58,6 @@ def load_backend_trainer(framework: str):
         from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
 
         return MegatronPretrainTrainer
-    elif framework == "light-megatron":
-        from primus.modules.trainer.lightmegatron.pre_trainer import (
-            LightMegatronPretrainTrainer,
-        )
-
-        return LightMegatronPretrainTrainer
     elif framework == "torchtitan":
         from primus.modules.trainer.torchtitan.pre_trainer import (
             TorchTitanPretrainTrainer,
@@ -106,13 +100,15 @@ def setup_backend_path(framework: str, backend_path=None, verbose: bool = True):
     # 3) Fallback to source tree under third_party
     fallback_name_map = {
         "megatron": "Megatron-LM",
-        "light-megatron": "Megatron-LM",
         "torchtitan": "torchtitan",
         "maxtext": "maxtext",
     }
     mapped_name = fallback_name_map.get(framework, framework)
     default_path = Path(__file__).resolve().parent.parent / "third_party" / mapped_name
-    candidate_paths.append(default_path)
+    if framework == "maxtext" and (default_path / "src").exists():
+        default_path = default_path / "src"
+    candidate_paths.insert(0, str(default_path))
+    print(f"[Primus] candidate_paths: {candidate_paths}")
 
     # Normalize & deduplicate
     candidate_paths = list(dict.fromkeys(os.path.normpath(os.path.abspath(p)) for p in candidate_paths))
