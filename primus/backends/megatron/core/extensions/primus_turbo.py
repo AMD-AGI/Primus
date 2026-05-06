@@ -358,7 +358,7 @@ def _get_fp8_autocast_for_quant_recipe(qrecipe: TEQuantizationRecipe):
 
     if qrecipe.fp8_quantization_recipe is None and qrecipe.fp4_quantization_recipe is None:
         # Force BF16 for this layer and override autocast
-        return primus_turbo_fp8_autocast(enabled=False)
+        return primus_turbo_fp8_autocast(enabled=False, enabled_turbo=False)
     else:
         if (
             qrecipe.fp8_quantization_recipe == Fp8Recipe.custom
@@ -399,7 +399,7 @@ def _get_fp8_autocast_for_quant_recipe(qrecipe: TEQuantizationRecipe):
                 raise ValueError(f"Unhandled fp8 recipe: {qrecipe.fp8_quantization_recipe}")
 
             return primus_turbo_fp8_autocast(
-                enabled=False, enable_turbo=True, turbo_quant_config=quant_recipe
+                enabled=False, enabled_turbo=True, turbo_quant_config=quant_recipe
             )
         else:
             # Fp4 configured.
@@ -420,7 +420,7 @@ def _get_fp8_autocast_for_quant_recipe(qrecipe: TEQuantizationRecipe):
                 raise ValueError(f"Unhandled fp4 recipe: {qrecipe.fp8_quantization_recipe}")
 
             return primus_turbo_fp4_autocast(
-                enabled=False, enable_turbo=True, turbo_quant_config=quant_recipe
+                enabled=False, enabled_turbo=True, turbo_quant_config=quant_recipe
             )
 
 
