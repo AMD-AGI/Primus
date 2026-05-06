@@ -48,7 +48,11 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
 
     def linear(self) -> type:
         """Which linear module TE backend uses"""
-        return PrimusTurboLinear if self.cfg.use_turbo_parallel_linear else TELinear
+        return (
+            PrimusTurboLinear
+            if self.cfg.use_turbo_parallel_linear and self.cfg.lfm_layer_types is None
+            else TELinear
+        )
 
     def column_parallel_linear(self) -> type:
         """Which column parallel linear module TE backend uses"""

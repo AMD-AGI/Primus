@@ -26,7 +26,8 @@ export PRIMUS_EP=8
 export PROFILE=False
 export PRIMUS_DETERMINISTIC=0
 export LEGACY_GG=False
-export TURBO_USE_GROUPED_MLP=False
+export TURBO_USE_GROUPED_MLP=True
+export TURBO_USE_PARALLEL_LINEAR=False
 # Enable NUMA binding for better memory locality (increase stability for large models)
 # export ENABLE_NUMA_BINDING=1
 # export HSA_KERNARG_POOL_SIZE=12582912
@@ -44,12 +45,14 @@ if [ "$PRECISION_TYPE" = "FP8" ]; then
     # export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=CK
     # export PRIMUS_TURBO_GROUPED_GEMM_BACKEND=HIPBLASLT
     export FP8=e4m3
-    export FP8_RECIPE=tensorwise
+    # export FP8_RECIPE=tensorwise
+    export FP8_RECIPE=blockwise
+    export TURBO_USE_PARALLEL_LINEAR=True
   else
     export FP8=hybrid
     export FP8_RECIPE=delayed
   fi
-  export TE_PRECISION_CONFIG_FILE=examples/megatron/configs/MI355X/lfm2_8B_A1B-FP8-te-precision.yaml
+  # export TE_PRECISION_CONFIG_FILE=examples/megatron/configs/MI355X/lfm2_8B_A1B-FP8-te-precision.yaml
 elif [ "$PRECISION_TYPE" = "BF16" ]; then
   if [ "$TURBO_USE_GROUPED_MLP" = "True" ]; then
     export LEGACY_GG=True
@@ -65,7 +68,7 @@ export PRIMUS_TEAM=amd
 PRIMUS_USER="tas-mi325x-$(date +%Y%m%d)"
 export PRIMUS_USER
 export PRIMUS_EXP_NAME=lfm2_8B_A1B_${PRECISION_TYPE}_MBS${MBS}_GBS${GBS}_EP${PRIMUS_EP}_legacygg${LEGACY_GG}_turbogg${TURBO_USE_GROUPED_MLP}_${PRIMUS_TURBO_GROUPED_GEMM_BACKEND}
-# export PRIMUS_EXP_NAME=debug
+export PRIMUS_EXP_NAME=debug
 
 
 mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
@@ -77,6 +80,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --global_batch_size $GBS \
   --expert_model_parallel_size $PRIMUS_EP \
   --use_turbo_grouped_mlp $TURBO_USE_GROUPED_MLP \
+  --use_turbo_parallel_linear $TURBO_USE_PARALLEL_LINEAR \
   --moe_use_legacy_grouped_gemm $LEGACY_GG \
   --fp8 $FP8 \
   --fp8_recipe $FP8_RECIPE \
