@@ -106,7 +106,7 @@ def _per_gpu_body(
         details["hbm_pre_touch_free_bytes"] = int(free_b)
         details["hbm_pre_touch_used_bytes"] = used_b
         details["hbm_pre_touch_used_gib"] = round(used_b / (1 << 30), 3)
-        if used_b > hbm_busy_threshold_bytes:
+        if used_b >= hbm_busy_threshold_bytes:
             return {
                 "gpu": gpu,
                 "status": "FAIL",
