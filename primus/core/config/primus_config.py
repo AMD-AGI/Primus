@@ -43,7 +43,7 @@ def _normalize_module_for_runtime(module_cfg: SimpleNamespace, module_name: str)
     """
     Normalize a legacy module namespace into the runtime shape:
        - Keep a small set of reserved top-level attributes:
-           * name, framework, config, model
+           * name, framework, config, model, launcher
            * (and any existing 'params' if present)
        - Move all other public attributes into a `params` dict:
            module_cfg.params[key] = <original value>
@@ -53,7 +53,7 @@ def _normalize_module_for_runtime(module_cfg: SimpleNamespace, module_name: str)
     if not getattr(normalized, "name", None):
         setattr(normalized, "name", module_name)
 
-    reserved_keys = {"name", "framework", "config", "model", "params"}
+    reserved_keys = {"name", "framework", "config", "model", "params", "launcher"}
     # Start from any existing params dict/namespace if provided.
     existing_params = getattr(normalized, "params", {})
     params = _to_plain_dict(existing_params)
