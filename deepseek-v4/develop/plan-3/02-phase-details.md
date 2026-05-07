@@ -347,7 +347,7 @@ non-TE column / row parallel linear can opt in.
 
 ### Status (2026-05-07)
 
-Done — P21 commit `P21-SHA`.
+Done — P21 commit `a4419ac5`.
 
 * **Strict-build surgery.** `_build_projection` (in
   `deepseek_v4_attention.py` and `deepseek_v4_block.py`),
