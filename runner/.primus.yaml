@@ -37,6 +37,7 @@ container:
     privileged: "true"
     security-opt: "seccomp=unconfined"
     group-add: "video"
+    ulimit: "nofile=1048576:1048576"
 
     # Cumulative options (can be specified multiple times via CLI)
     # Device access (each passed as --device)
