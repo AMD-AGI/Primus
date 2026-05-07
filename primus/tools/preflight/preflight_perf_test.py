@@ -25,6 +25,7 @@ from primus.tools.preflight.network.info import (
 )
 from primus.tools.preflight.square_gemm import run_square_gemm
 from primus.tools.preflight.utility import (
+    barrier_after_comm_destroy,
     gather_hostnames,
     get_first_ib_unidirectional_bandwidth,
     log,
@@ -314,8 +315,16 @@ def run_preflight(args):
         # run tests
         run_square_gemm(args)
         run_intra_node_comm(args)
+        log("[preflight] Inter-test barrier: intra_node_comm -> inter_node_comm")
+        barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
         run_inter_node_comm(args)
-        run_inter_node_comm_p2p(args)
+        if args.split_nodes_subgroup:
+            log("[preflight] Inter-test barrier: inter_node_comm -> inter_node_comm_p2p")
+            barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
+            # p2p test only exercises 2-node pairs; skip when subgroups disabled
+            run_inter_node_comm_p2p(args)
+        log("[preflight] Inter-test barrier: -> inter_node_ring_p2p")
+        barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
         run_inter_node_ring_p2p(args)
 
         if RANK == 0 and args.save_pdf:

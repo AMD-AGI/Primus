@@ -6,7 +6,6 @@
 
 import time
 
-import matplotlib.pyplot as plt
 import torch
 import torch.distributed as dist
 
@@ -20,6 +19,7 @@ from primus.tools.preflight.global_vars import (
     get_hostnames,
 )
 from primus.tools.preflight.utility import (
+    barrier_after_comm_destroy,
     create_dir,
     extract_first_middle_last,
     extract_number,
@@ -41,9 +41,11 @@ def run_inter_node_comm(args):
     # N-node allreduce & alltoall (adjacent pairs)
     # 2-node allreduce, pair nodes: [0, 1], [2, 3], ...
     # 4-node allreduce, pair nodes: [0, 1, 2, 3], [4, 5, 6, 7]...
+    node_counts = [2, 4, num_nodes] if args.split_nodes_subgroup else [num_nodes]
+    node_counts = sorted(set(node_counts))
     cases = {
-        "allreduce": list(set([2, 4] + [num_nodes])),
-        "alltoall": list(set([2, 4] + [num_nodes])),
+        "allreduce": node_counts,
+        "alltoall": node_counts,
     }
 
     if RANK == 0:
@@ -62,19 +64,44 @@ def run_inter_node_comm(args):
             latency_results = {}
             bandwidth_results = {}
 
-            num_procs = adjacent_nodes * LOCAL_WORLD_SIZE
-            num_adjacent_groups = num_nodes // adjacent_nodes
+            num_full_groups = num_nodes // adjacent_nodes
+            remainder_nodes = num_nodes % adjacent_nodes
             adjacent_group = None
-            for i_group in range(num_adjacent_groups):
+            group_leaders = []
+            group_node_counts = []
+
+            for i_group in range(num_full_groups):
+                group_start = i_group * adjacent_nodes * LOCAL_WORLD_SIZE
                 group_ranks = [
-                    i_group * adjacent_nodes * LOCAL_WORLD_SIZE + r
+                    group_start + r
                     for r in range(adjacent_nodes * LOCAL_WORLD_SIZE)
                 ]
                 tmp_group = dist.new_group(ranks=group_ranks)
                 if RANK in group_ranks:
                     assert adjacent_group is None
                     adjacent_group = tmp_group
-            if RANK < num_adjacent_groups * adjacent_nodes * LOCAL_WORLD_SIZE:
+                group_leaders.append(group_start)
+                group_node_counts.append(adjacent_nodes)
+
+            if remainder_nodes >= 2:
+                group_start = num_full_groups * adjacent_nodes * LOCAL_WORLD_SIZE
+                group_ranks = [
+                    group_start + r
+                    for r in range(remainder_nodes * LOCAL_WORLD_SIZE)
+                ]
+                tmp_group = dist.new_group(ranks=group_ranks)
+                if RANK in group_ranks:
+                    assert adjacent_group is None
+                    adjacent_group = tmp_group
+                group_leaders.append(group_start)
+                group_node_counts.append(remainder_nodes)
+
+            num_procs = dist.get_world_size(adjacent_group) if adjacent_group is not None else 0
+
+            total_grouped_ranks = num_full_groups * adjacent_nodes * LOCAL_WORLD_SIZE
+            if remainder_nodes >= 2:
+                total_grouped_ranks += remainder_nodes * LOCAL_WORLD_SIZE
+            if RANK < total_grouped_ranks:
                 assert adjacent_group is not None
 
             for size in sizes:
@@ -110,6 +137,7 @@ def run_inter_node_comm(args):
             dist.barrier(device_ids=[torch.cuda.current_device()])
             if adjacent_group is not None:
                 dist.destroy_process_group(adjacent_group)
+            barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
 
             all_latency_results = [None for _ in range(WORLD_SIZE)]
             all_bandwidth_results = [None for _ in range(WORLD_SIZE)]
@@ -133,7 +161,7 @@ def run_inter_node_comm(args):
                     log(f"{'Hostname':<{max_len}} {'Node':<5} {'Rank':<5} {' '.join(formatted_keys)}")
                     for rank, r in enumerate(all_latency_results):
                         hostname = get_hostnames()[rank]
-                        if rank % num_procs != 0:
+                        if rank not in group_leaders:
                             continue
                         node_id = rank // LOCAL_WORLD_SIZE
 
@@ -151,7 +179,7 @@ def run_inter_node_comm(args):
                     log(f"{'Hostname':<{max_len}} {'Node':<5} {'Rank':<5} {' '.join(formatted_keys)}")
                     for rank, r in enumerate(all_bandwidth_results):
                         hostname = get_hostnames()[rank]
-                        if rank % num_procs != 0:
+                        if rank not in group_leaders:
                             continue
                         node_id = rank // LOCAL_WORLD_SIZE
 
@@ -163,6 +191,8 @@ def run_inter_node_comm(args):
                 if not args.plot:
                     continue
 
+                import matplotlib.pyplot as plt
+
                 log(f"=======Plot IntraNode {case_name} Bandwidth=======")
                 with open(args.markdown_file, "a", encoding="utf-8") as f:
                     f.write(f"=======Plot InterNode {case_name} Bandwidth=======\n")
@@ -171,17 +201,20 @@ def run_inter_node_comm(args):
                 create_dir(dump_path)
                 print_keys = extract_first_middle_last(keys)
                 first_rank_bandwidth_results = [
-                    all_bandwidth_results[i] for i in range(len(all_bandwidth_results)) if i % num_procs == 0
+                    all_bandwidth_results[i] for i in group_leaders
                 ]
                 num_print_ranks = len(first_rank_bandwidth_results)
                 for size_key in print_keys:
                     values = [r[size_key] for r in first_rank_bandwidth_results]
                     plt.figure(figsize=(10, 4))
                     bars = plt.bar(range(num_print_ranks), values)
-                    plt.xlabel(f"RankPair ({num_procs} ranks)")
+                    plt.xlabel(f"Group (starting rank)")
                     plt.ylabel("Bandwidth")
                     plt.title(f"Inter Node {case_name} Bandwidth for {size_key}")
-                    xtick_labels = [f"{i*num_procs}" for i in range(num_print_ranks)]
+                    xtick_labels = [
+                        f"{group_leaders[i]} ({group_node_counts[i]}N)"
+                        for i in range(num_print_ranks)
+                    ]
                     plt.xticks(range(num_print_ranks), xtick_labels)
                     plt.grid(True, axis="y")
 

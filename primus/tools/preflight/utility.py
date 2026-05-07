@@ -6,14 +6,15 @@
 
 import os
 import socket
+import time
 from pathlib import Path
 
-import markdown2
 import torch
 import torch.distributed as dist
-from weasyprint import HTML
 
 from primus.tools.preflight.global_vars import RANK, WORLD_SIZE
+
+DEFAULT_COMM_CLEANUP_DELAY_SEC = 2.0
 
 
 def log(msg):
@@ -48,6 +49,23 @@ def gather_hostnames():
         return None
 
 
+def barrier_after_comm_destroy(delay_sec: float = DEFAULT_COMM_CLEANUP_DELAY_SEC):
+    """Global barrier + sleep after destroying NCCL/RCCL process groups.
+
+    When communicators are destroyed and recreated quickly (e.g. in test loops),
+    the underlying sockets may still be in TIME_WAIT or the remote side may not
+    have fully cleaned up.  This causes "Address already in use" errors on bind.
+
+    This function ensures all ranks have completed destruction (barrier) and then
+    waits a short period for the OS to release ports before the next group creation.
+    """
+    log(f"  barrier_after_comm_destroy: barrier synced, sleeping {delay_sec:.1f}s")
+    dist.barrier(device_ids=[torch.cuda.current_device()])
+    if delay_sec > 0:
+        time.sleep(delay_sec)
+    log(f"  barrier_after_comm_destroy: done (delay={delay_sec:.1f}s)")
+
+
 def remove_file(file_path):
     if RANK == 0:
         if os.path.exists(file_path):
@@ -70,6 +88,9 @@ def extract_first_middle_last(lst):
 
 
 def md_to_pdf(md_path, pdf_path):
+    import markdown2
+    from weasyprint import HTML
+
     with open(md_path, "r", encoding="utf-8") as f:
         markdown_text = f.read()
 

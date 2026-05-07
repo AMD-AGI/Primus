@@ -59,6 +59,13 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
 
     # Performance test specific options (only used with --perf-test)
     parser.add_argument("--plot", action="store_true", help="Generate plots (only with --perf-test)")
+    parser.add_argument(
+        "--no-split-nodes-subgroup",
+        dest="split_nodes_subgroup",
+        action="store_false",
+        help="Skip inter-node comm tests on node subgroups (2-node, 4-node). "
+        "Only run the all-node test.",
+    )
 
     # Distributed init timeout (prevents hangs when network/rendezvous is misconfigured)
     parser.add_argument(
@@ -67,6 +74,17 @@ def add_preflight_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentPa
         default=120,
         help="Timeout (seconds) for torch.distributed process group init. "
         "If init times out, preflight will write the info report and exit with failure.",
+    )
+
+    # Communicator cleanup delay (prevents "Address already in use" from rapid
+    # destroy/recreate cycles in NCCL/RCCL)
+    parser.add_argument(
+        "--comm-cleanup-delay-sec",
+        type=float,
+        default=2.0,
+        help="Delay (seconds) after destroying NCCL/RCCL process groups before "
+        "creating new ones.  Prevents 'Address already in use' errors from "
+        "socket port reuse races. Set to 0 to disable the delay (barrier only).",
     )
 
     # Report output options

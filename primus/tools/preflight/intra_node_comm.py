@@ -6,7 +6,6 @@
 
 import time
 
-import matplotlib.pyplot as plt
 import torch
 import torch.distributed as dist
 
@@ -20,6 +19,7 @@ from primus.tools.preflight.global_vars import (
     get_hostnames,
 )
 from primus.tools.preflight.utility import (
+    barrier_after_comm_destroy,
     create_dir,
     extract_first_middle_last,
     extract_number,
@@ -96,6 +96,7 @@ def run_intra_node_comm(args):
 
             # destroy this parallel group
             dist.destroy_process_group(group)
+            barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
 
             all_latency_results = [None for _ in range(WORLD_SIZE)]
             all_bandwidth_results = [None for _ in range(WORLD_SIZE)]
@@ -147,6 +148,8 @@ def run_intra_node_comm(args):
 
                     if not args.plot:
                         continue
+
+                import matplotlib.pyplot as plt
 
                 log(f"=======Plot IntraNode {case_name} Bandwidth=======")
                 with open(args.markdown_file, "a", encoding="utf-8") as f:

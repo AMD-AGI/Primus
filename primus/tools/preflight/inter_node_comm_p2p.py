@@ -6,7 +6,6 @@
 
 import time
 
-import matplotlib.pyplot as plt
 import torch
 import torch.distributed as dist
 
@@ -20,6 +19,7 @@ from primus.tools.preflight.global_vars import (
     get_hostnames,
 )
 from primus.tools.preflight.utility import (
+    barrier_after_comm_destroy,
     create_dir,
     extract_first_middle_last,
     extract_number,
@@ -49,10 +49,14 @@ def run_inter_node_comm_p2p(args):
     bandwidth_results = {}
 
     num_adjacent_groups = num_nodes // adjacent_nodes
+    num_paired_ranks = num_adjacent_groups * adjacent_nodes * LOCAL_WORLD_SIZE
     p2p_group = None
     is_src_rank = ((RANK // LOCAL_WORLD_SIZE) % 2) == 0
-    peer_rank = RANK + LOCAL_WORLD_SIZE if is_src_rank else RANK - LOCAL_WORLD_SIZE
-    assert peer_rank >= 0 and peer_rank < WORLD_SIZE
+    if RANK < num_paired_ranks:
+        peer_rank = RANK + LOCAL_WORLD_SIZE if is_src_rank else RANK - LOCAL_WORLD_SIZE
+        assert peer_rank >= 0 and peer_rank < WORLD_SIZE
+    else:
+        peer_rank = -1
     for i_group in range(num_adjacent_groups):
         for i_r in range(LOCAL_WORLD_SIZE):
             group_ranks = [
@@ -98,6 +102,7 @@ def run_inter_node_comm_p2p(args):
     dist.barrier(device_ids=[torch.cuda.current_device()])
     if p2p_group is not None:
         dist.destroy_process_group(p2p_group)
+    barrier_after_comm_destroy(args.comm_cleanup_delay_sec)
 
     all_latency_results = [None for _ in range(WORLD_SIZE)]
     all_bandwidth_results = [None for _ in range(WORLD_SIZE)]
@@ -114,6 +119,8 @@ def run_inter_node_comm_p2p(args):
         src_rank_latency_results = []
         src_rank_bandwidth_results = []
         for rank, r in enumerate(all_bandwidth_results):
+            if rank >= num_paired_ranks:
+                continue
             is_src_rank = ((rank // LOCAL_WORLD_SIZE) % 2) == 0
             peer_rank = rank + LOCAL_WORLD_SIZE if is_src_rank else rank - LOCAL_WORLD_SIZE
             assert peer_rank >= 0 and peer_rank < WORLD_SIZE
@@ -162,6 +169,8 @@ def run_inter_node_comm_p2p(args):
 
         if not args.plot:
             return
+
+        import matplotlib.pyplot as plt
 
         log(f"=======Plot InterNode {case_name} Bandwidth=======")
         with open(args.markdown_file, "a", encoding="utf-8") as f:
