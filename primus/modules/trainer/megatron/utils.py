@@ -484,10 +484,14 @@ def validate_args_on_rocm(args):
 
     # PrimusTurboGroupedMLP no longer depends on legacy GroupedMLP; the two
     # flags are mutually exclusive when turbo is enabled.
-    if getattr(args, "use_turbo_grouped_mlp", False) and getattr(args, "moe_use_legacy_grouped_gemm", False):
+    if getattr(args, "use_turbo_grouped_mlp", False):
+        print_rank_last("use_turbo_grouped_mlp is deprecated, please use use_turbo_grouped_gemm instead.")
+    use_turbo_grouped_gemm = getattr(args, "use_turbo_grouped_gemm", False) or getattr(
+        args, "use_turbo_grouped_mlp", False
+    )
+    if use_turbo_grouped_gemm and getattr(args, "moe_use_legacy_grouped_gemm", False):
         raise ValueError(
-            "use_turbo_grouped_mlp=True is incompatible with moe_use_legacy_grouped_gemm=True. "
-            "PrimusTurboGroupedMLP now uses the TEGroupedMLP path; "
+            "use_turbo_grouped_gemm=True or use_turbo_grouped_mlp=True is incompatible with moe_use_legacy_grouped_gemm=True. "
             "please set moe_use_legacy_grouped_gemm=False."
         )
 
