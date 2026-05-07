@@ -109,12 +109,28 @@ def tokenize_text(tokenizer, text: str) -> List[int]:
         ) from exc
 
 
+def _resolve_pad_token_id(tokenizer) -> int:
+    """Best-effort lookup of a pad token id across Megatron/HF tokenizer variants."""
+    for attr in ("pad", "pad_token_id", "eod", "eos_token_id", "eos_id"):
+        value = getattr(tokenizer, attr, None)
+        if isinstance(value, int) and value >= 0:
+            return value
+    return 0
+
+
 def tokenize_formatted_sft_sample(
     formatted_sample: FormattedSFTSample,
     tokenizer,
     max_seq_length: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Tokenize a formatted sample and build its SFT loss mask."""
+    """Tokenize a formatted sample and build its SFT loss mask.
+
+    Returns input_ids/labels/loss_mask all padded to ``max_seq_length`` so that
+    PyTorch's default_collate (used by Megatron's pretrain dataloader) can stack
+    samples whose original token lengths differ across a micro-batch.
+    Padding tokens are masked out via ``loss_mask=0`` so they do not contribute
+    to the SFT loss.
+    """
     text = formatted_sample.text
     token_ids = tokenize_text(tokenizer, text)
     if len(token_ids) > max_seq_length:
@@ -133,6 +149,13 @@ def tokenize_formatted_sft_sample(
             loss_mask[start:min(end, len(token_ids))] = 1
         if start >= len(token_ids):
             break
+
+    seq_len = len(token_ids)
+    if seq_len < max_seq_length:
+        pad_len = max_seq_length - seq_len
+        pad_id = _resolve_pad_token_id(tokenizer)
+        token_ids = list(token_ids) + [pad_id] * pad_len
+        loss_mask = np.concatenate([loss_mask, np.zeros(pad_len, dtype=np.int64)])
 
     input_ids = torch.tensor(token_ids, dtype=torch.int64)
     labels = input_ids.clone()
