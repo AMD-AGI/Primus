@@ -281,21 +281,8 @@ class MegatronPretrainTrainer(MegatronTrainer):
                     )
                 return schedule_plan, partial(self.loss_func, loss_mask)
             else:
-                # Check if model supports loss_mask parameter
-                # MambaModel doesn't accept loss_mask, but GPTModel does
-                # Unwrap the model to get the actual model class
-                unwrapped_model = model
-                while hasattr(unwrapped_model, "module"):
-                    unwrapped_model = unwrapped_model.module
-                model_class_name = unwrapped_model.__class__.__name__
-
-                if "Mamba" in model_class_name:
-                    # MambaModel doesn't accept loss_mask parameter
-                    output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
-                else:
-                    # GPTModel and other models accept loss_mask parameter
-                    output_tensor = model(
-                        tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
-                    )
+                output_tensor = model(
+                    tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+                )
 
         return output_tensor, partial(self.loss_func, loss_mask)
