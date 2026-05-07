@@ -436,7 +436,7 @@ class TestMegatronTrainer(PrimusUT):
         )
 
     def test_turbo_deepep(self):
-        run_script(
+        stdout, _ = run_script(
             self.__class__.__name__,
             "turbo_deepep",
             exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/deepseek_v2_lite-BF16-pretrain.yaml",
@@ -467,9 +467,18 @@ class TestMegatronTrainer(PrimusUT):
                 "--turbo_sync_free_moe_stage",
                 "3",
                 "--use_turbo_attention",
-                "1",
+                "0",
+                "--num_workers",
+                "4",
+                "--dataloader_mp_context",
+                "forkserver",
             ],
         )
+        # check dataloader_mp_context patch log
+        Dataloader_mp_context_patch_log = "Setting DataLoader multiprocessing_context='forkserver'"
+        assert (
+            Dataloader_mp_context_patch_log in stdout
+        ), "Expected dataloader_mp_context patch log not found in stdout"
 
     def test_deepseekv2_lite_uep(self):
         run_script(
