@@ -1,0 +1,91 @@
+---
+description: Per-step decision recipe for the Orchestrator role (the main session = Orchestrator)
+alwaysApply: true
+---
+
+# Orchestrator Decision Loop
+
+You are Pilot's **Orchestrator** (`pilot/README.md` §2.2). Each round must
+follow the five steps below, in order. Do not skip steps; do not merge them.
+
+## Five-step recipe
+
+```
+decide → spawn → apply → checkpoint → trim
+```
+
+### 1. decide
+
+From `pilot/state/tuning_state.yaml`, read:
+- `current_stage`
+- `round_id`
+- `champion_id`
+- `budget_used`
+
+Use the transition table in `@pilot/skills/workflow/state_machine.md` to
+determine `next_stage`. Don't guess, don't skip; follow the table.
+
+### 2. spawn
+
+Use Cursor's **Task tool** to spawn a Stage Worker. The prompt comes from
+this repo:
+
+| next_stage | Worker rule |
+|------------|-------------|
+| `DIAGNOSE` | `@.cursor/rules/30-worker-diagnose.mdc` |
+| `RE_PLAN` | `@.cursor/rules/30-worker-replan.mdc` |
+| `ENV_SWEEP` | `@.cursor/rules/30-worker-envsweep.mdc` |
+| `OBSERVE` | `@.cursor/rules/30-worker-observe.mdc` |
+| `CORRECTNESS_LITE` | `@.cursor/rules/30-worker-correctness.mdc` |
+| `PREFLIGHT` / `PROJECTION` | Worker rule of the same name (add as needed) |
+
+Lightweight stages (`EXECUTE` / `SETTLE` / state-machine bookkeeping)
+**do not spawn** — handle them inline by shelling out to the relevant Tool.
+
+When you spawn, the Worker's input must be **pointers only**:
+`{snapshot_ref, plan_graph_ref, diagnosis_ref, ...}`. Do not inline already-
+parsed payloads.
+
+### 3. apply
+
+The Worker returns a `SubagentResult` (schema: `pilot/README.md` §8.11). You
+read only:
+- `status`
+- `summary.headline` (one line)
+- `suggested_transition`
+- `artifacts[*].ref` (storage references; do not read the contents)
+
+Cross-check against the `on_fail` / `reentry_when` rules in
+`state_machine.md` to determine the final `next_stage`. Don't blindly accept
+`suggested_transition`.
+
+### 4. checkpoint
+
+```bash
+python -m pilot.tools.state checkpoint --session $SESSION_ID --stage $STAGE
+```
+
+Artifacts land under `pilot/state/checkpoints/r$ROUND/`.
+
+### 5. trim
+
+```bash
+python -m pilot.tools.state trim \
+  --keep session_id,current_stage,round_id,champion_id,budget_used,last_decision_summary
+```
+
+After trim, your context should be back under 2K tokens. If still over, fire
+`state.handoff()` (`@.cursor/rules/20-state-hygiene.mdc`).
+
+## Loop exit conditions
+
+After every `apply`, check the three termination conditions
+(`pilot/README.md` §7.7):
+
+- All `TargetVector.constraints` satisfied **and** `primary` no longer
+  improving meaningfully → `REPORT`.
+- `gain < ε_stop` for two consecutive rounds **and** the frontier has no
+  high-priority candidates → `REPORT`.
+- `budget_used > budget.total_gpu_h` or `round_id >= max_rounds` → `REPORT`.
+
+Otherwise: return to step 1, decide.

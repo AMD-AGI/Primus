@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/subagent_result.schema.json",
+  "title": "SubagentResult",
+  "description": "The ONLY structured payload a Stage Worker returns to the Orchestrator. Orchestrator reads only summary + suggested_transition + status. See README.md §8.11 + §13.2.",
+  "x-status": "stub",
+  "type": "object",
+  "required": ["stage", "worker_id", "status", "summary"],
+  "properties": {
+    "stage": {"type": "string"},
+    "worker_id": {"type": "string"},
+    "status": {"type": "string", "enum": ["success", "failed", "escalate"]},
+    "artifacts": {
+      "type": "array",
+      "description": "State-layer references; Orchestrator does NOT read content.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {"type": "string"},
+          "ref":  {"type": "string"},
+          "size_bytes": {"type": "integer"}
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "description": "MUST be < 200 tokens (validation enforces).",
+      "properties": {
+        "headline": {"type": "string", "maxLength": 400},
+        "key_metrics": {"type": "object"}
+      },
+      "required": ["headline"]
+    },
+    "suggested_transition": {
+      "type": "object",
+      "properties": {
+        "to": {"type": "string"},
+        "reason": {"type": "string"}
+      }
+    },
+    "cost": {
+      "type": "object",
+      "properties": {
+        "wallclock_s": {"type": "number"},
+        "tokens_used": {"type": "integer"},
+        "tool_calls": {"type": "integer"}
+      }
+    },
+    "failure": {
+      "type": "object",
+      "description": "Present only when status=failed.",
+      "properties": {
+        "kind": {"type": "string"},
+        "message": {"type": "string"},
+        "escalate_to_orchestrator": {"type": "boolean"}
+      }
+    }
+  }
+}

@@ -1,0 +1,8 @@
+schema_version: "1.0"
+cluster_id: mi355x-localhost
+mode: single
+single:
+  max_local_gpus: 8
+runtime:
+  image_label: mlperf-llama31-2026-04-24
+  notes: "preflight rccl extend test 2026-05-04"

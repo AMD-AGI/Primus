@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/plan_graph.schema.json",
+  "title": "PlanGraph",
+  "description": "Solution-space tree. Backbone of §7 search guarantees. See README.md §7 + §8.9.",
+  "x-status": "stub",
+  "type": "object",
+  "required": ["champion", "nodes", "frontier"],
+  "properties": {
+    "champion": {"type": "string", "description": "plan_id of current baseline"},
+    "champion_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "round": {"type": "integer"},
+          "id": {"type": "string"}
+        }
+      }
+    },
+    "nodes": {
+      "type": "object",
+      "description": "Map plan_id → node record.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "parent": {"type": ["string", "null"]},
+          "status": {"type": "string", "enum": ["completed", "shelved", "dead", "running"]},
+          "tps": {"type": "number"},
+          "bottleneck": {"type": "string"},
+          "champion_at": {"type": "array", "items": {"type": "integer"}},
+          "derived_axis": {"type": "object"},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "frontier": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Currently derivable nodes (champion + shelved)."
+    },
+    "exhausted_neighborhoods": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "around": {"type": "string"},
+          "axis": {"type": "string"},
+          "tried": {"type": "array"}
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "rounds_since_promotion": {"type": "integer"},
+        "rounds_since_explore": {"type": "integer"},
+        "dead_rate_in_subtree": {"type": "object"}
+      }
+    }
+  }
+}

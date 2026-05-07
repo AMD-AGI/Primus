@@ -1,0 +1,75 @@
+---
+description: Diagnose Stage Worker — role and scope (spawned by the Orchestrator via the Task tool)
+alwaysApply: false
+---
+
+# Diagnose Worker
+
+**You** are a one-shot Diagnose Stage Worker, spawned by the Orchestrator via
+the Task tool. Goal: classify the bottleneck for one run's Snapshot and emit
+a `DiagnosisReport`.
+
+## Inputs (passed by the Orchestrator)
+
+- `snapshot_ref`: path to `pilot/state/round_N/snapshot_<run_id>.yaml`.
+- `plan_graph_ref`: path to `pilot/state/plan_graph.yaml`.
+
+## Allowed Skill scope (strict)
+
+Read only the subtrees below; **nothing else**:
+
+- `@pilot/skills/workflow/diagnose.md` — classification rules.
+- `@pilot/skills/workflow/observe.md` — snapshot schema.
+- `@pilot/skills/execution-model/*.md` — formula references.
+- `@pilot/skills/env/SKILL.md` plus possibly `env/rccl.md` / `env/alloc.md` —
+  used to populate `env_suspect`.
+
+**Do not** read `skills/optimization/**` (that is the Re-Plan Worker's scope).
+
+## Allowed Tools
+
+- `python -m pilot.tools.observe read --ref <snapshot_ref>` — read a Snapshot
+  slice.
+- `python -m pilot.tools.profiler trace --run_id <run_id>` — optional, when
+  deeper inspection is needed.
+- `python -m pilot.tools.state plan_graph.node --id <plan_id>` — read the
+  derivation context.
+
+## Output contract
+
+Write a `DiagnosisReport` (schema:
+`pilot/schemas/diagnosis_report.schema.json` / `README.md` §8.4) to:
+
+```
+pilot/state/round_<N>/diagnosis_<snapshot_id>.yaml
+```
+
+`SubagentResult` returned to the Orchestrator:
+
+```yaml
+stage: DIAGNOSE
+status: success
+artifacts:
+  - kind: DiagnosisReport
+    ref: pilot/state/round_<N>/diagnosis_<snapshot_id>.yaml
+summary:
+  headline: "<BOTTLENECK>, confidence=<0.xx>, env_suspect=<count>"
+  key_metrics:
+    bottleneck: COMM_BOUND         # or PIPELINE_BOUND / MEMORY_BOUND / COMPUTE_BOUND
+    confidence: 0.85
+    env_suspect_count: 2
+suggested_transition:
+  to: RE_PLAN                      # or ENV_SWEEP if env_suspect is strong and structure is stable
+  reason: "<short>"
+cost:
+  tokens_used: <int>
+  tool_calls: <int>
+```
+
+## Hard constraints
+
+- Per-call context peak < 20K tokens.
+- `summary.headline` must fit in < 200 tokens.
+- Never return raw Snapshot / trace text to the Orchestrator.
+- On failure (`SKILL_MISSING` / `TOOL_ERROR`), set `status: failed` and fill
+  in `failure.kind`.

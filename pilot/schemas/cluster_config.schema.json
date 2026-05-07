@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/cluster_config.schema.json",
+  "title": "ClusterConfig",
+  "description": "Universal input contract for every Pilot tool (`pilot.tools.*`). Declares the runtime environment Pilot operates inside. Two modes: `single` (a prepared single-node container) or `slurm` (an existing SLURM allocation; the user has already run `salloc`/`sbatch`). Pilot reads this file once per invocation and uses it to derive the LaunchPlan; it never reads ssh hostnames, k8s manifests, or docker run arguments. Anything outside this schema is the user's pre-Pilot prep responsibility. See `skills/workflow/preflight.md` §3 and `AGENTS.md` §X (universal tool contract).",
+  "x-status": "v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "cluster_id",
+    "mode"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "Schema version. Currently only `1.0` is accepted; bumped on breaking changes."
+    },
+    "cluster_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Stable, human-readable identifier of this cluster. Used as the namespace for `state/cluster_profiles/<cluster_id>_*.yaml` and other artifacts. Two cluster.yaml files with the same cluster_id MUST point at the same physical cluster (otherwise caches will collide)."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["single", "slurm"],
+      "description": "Runtime mode. `single`: Pilot runs entirely inside the current container, sees N local GPUs, never spawns peer-node processes. `slurm`: Pilot is allowed to call `srun --jobid=<slurm.job_id>` to fan out to the nodes already allocated by the user; it never calls `salloc`/`sbatch` itself."
+    },
+    "slurm": {
+      "type": "object",
+      "description": "Required when `mode == slurm`. Describes the user's pre-existing SLURM allocation. Pilot only attaches to it via `srun --jobid=...`; it does not create or destroy allocations.",
+      "required": ["job_id"],
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "type": ["integer", "string"],
+          "description": "SLURM job id of the allocation Pilot should attach to. Pilot validates with `scontrol show job <job_id>` and aborts if the job is not in RUNNING state.",
+          "examples": [12345, "12345"]
+        },
+        "nnodes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optional override of node count. When omitted, Pilot reads `NumNodes` from `scontrol show job`. Must match the live allocation; mismatch → `failure.kind=CLUSTER`."
+        },
+        "nodelist": {
+          "type": "string",
+          "description": "Optional override of SLURM nodelist string (e.g. `smc[01-04]`). When omitted, derived from `scontrol show job`. Used to compute the rdzv head node = first hostname in expanded list.",
+          "examples": ["smc[01-04]", "node-1,node-2"]
+        },
+        "partition": {
+          "type": "string",
+          "description": "Optional partition annotation (info only; Pilot does not pass it to srun)."
+        },
+        "rdzv_port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535,
+          "default": 29400,
+          "description": "Port used for torchrun rendezvous on the head node. Must be free on the head node and reachable from peers. Default 29400."
+        }
+      }
+    },
+    "single": {
+      "type": "object",
+      "description": "Optional block when `mode == single`. Currently has no required fields; reserved for future single-node knobs (e.g. local-rank limits).",
+      "additionalProperties": false,
+      "properties": {
+        "max_local_gpus": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Optional cap on number of GPUs Pilot uses on this single node (e.g. when sharing the host with another job). When omitted, all visible GPUs are used. `HIP_VISIBLE_DEVICES`/`CUDA_VISIBLE_DEVICES` still take precedence."
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "description": "Soft annotations describing the container/runtime Pilot is executing inside. None of these fields are required; they are recorded into ClusterProfile metadata and used as human-readable suffixes in cache filenames. They do NOT participate in cache invalidation — that is driven by the auto-collected `runtime_fingerprint` (rocm/torch/rccl versions) inside ClusterProfile.",
+      "additionalProperties": false,
+      "properties": {
+        "image_label": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$",
+          "maxLength": 64,
+          "description": "Short, filesystem-safe label for the container image (e.g. `rocm7.2-torch2.10`). Appears as a suffix in ClusterProfile filenames so humans can tell profiles apart at a glance.",
+          "examples": ["rocm7.2-torch2.10", "mlperf-llama2-2026-04-29"]
+        },
+        "notes": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Free-text human note (e.g. `bring-up cluster, expect 5% degradation`). Surfaced verbatim in ClusterProfile.metadata.cluster_config_notes."
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "slurm" } }, "required": ["mode"] },
+      "then": {
+        "required": ["slurm"],
+        "errorMessage": "When mode=slurm, the `slurm` block (with at least `job_id`) is required."
+      }
+    },
+    {
+      "if": { "properties": { "mode": { "const": "single" } }, "required": ["mode"] },
+      "then": {
+        "not": { "required": ["slurm"] },
+        "errorMessage": "When mode=single, the `slurm` block must be absent."
+      }
+    }
+  ],
+  "examples": [
+    {
+      "schema_version": "1.0",
+      "cluster_id": "mi355x-localhost",
+      "mode": "single",
+      "runtime": {
+        "image_label": "rocm7.2-torch2.10"
+      }
+    },
+    {
+      "schema_version": "1.0",
+      "cluster_id": "mi355x-prod",
+      "mode": "slurm",
+      "slurm": {
+        "job_id": 12345,
+        "nnodes": 4,
+        "nodelist": "smc[01-04]",
+        "rdzv_port": 29400
+      },
+      "runtime": {
+        "image_label": "rocm7.2-torch2.10",
+        "notes": "preflight session 2026-05-01"
+      }
+    }
+  ]
+}

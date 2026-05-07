@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/failure_report.schema.json",
+  "title": "FailureReport",
+  "description": "Output of constraint.diagnose_failure(). Drives §12.2 state-machine failure transitions. See README.md §8.8.",
+  "x-status": "stub",
+  "type": "object",
+  "required": ["failure_kind", "suggested_transition"],
+  "properties": {
+    "run_id": {"type": "string"},
+    "failure_kind": {
+      "type": "string",
+      "enum": [
+        "OOM",
+        "HANG",
+        "INVALID_CONFIG",
+        "NUMERICAL",
+        "CLUSTER",
+        "BUDGET_EXCEEDED",
+        "STRUCTURAL_INVALIDATION",
+        "CONTEXT_OVERFLOW",
+        "SUBAGENT_FAILED",
+        "UNKNOWN"
+      ]
+    },
+    "root_cause": {"type": "string"},
+    "evidence": {"type": "array", "items": {"type": "string"}},
+    "gate_tier": {
+      "type": "string",
+      "enum": ["T0", "T1", "T2"],
+      "description": "Only present for failure_kind=NUMERICAL (§S2.5)."
+    },
+    "tokens_at_failure": {"type": "integer"},
+    "suggested_transition": {
+      "type": "object",
+      "properties": {
+        "to":   {"type": "string"},
+        "hint": {"type": "string"}
+      }
+    },
+    "counts_against_budget": {"type": "boolean"}
+  }
+}

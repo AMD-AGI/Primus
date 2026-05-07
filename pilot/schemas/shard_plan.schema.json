@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/shard_plan.schema.json",
+  "title": "ShardPlan",
+  "description": "Sharded execution layout: K shards × N/K nodes per shard. See README.supplements.md §S3.2.",
+  "x-status": "stub",
+  "type": "object",
+  "required": ["mode", "shards"],
+  "properties": {
+    "mode": {"type": "string", "enum": ["FullScale", "Sharded", "TimeMux"]},
+    "shards": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["shard_id", "plan_id", "nodes"],
+        "properties": {
+          "shard_id": {"type": "string"},
+          "plan_id": {"type": "string"},
+          "nodes": {"type": "array", "items": {"type": "string"}},
+          "leaf_switch": {"type": "string"}
+        }
+      }
+    },
+    "isolation": {"type": "string", "enum": ["node", "rack", "cluster"]},
+    "shard_strategy": {"type": "string"}
+  }
+}

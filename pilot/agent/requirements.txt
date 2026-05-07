@@ -1,0 +1,3 @@
+anthropic>=0.40.0
+pydantic>=2.7
+pyyaml>=6.0

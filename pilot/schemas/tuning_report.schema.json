@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/tuning_report.schema.json",
+  "title": "TuningReport",
+  "description": "Final aggregate artifact of a Pilot tuning session. Composes the inputs (cluster.yaml, base plan), the snapshots produced by upstream stages (PREFLIGHT ClusterProfile, SMOKE RunHandle/RunSnapshot, optionally SCAN_PARALLEL ranking and BASELINE/CORRECTNESS results), and the final recommendation. Persisted at `state/reports/<report_id>.yaml` plus a sibling `<report_id>.md` for humans. Read by no other Pilot tool: this is the deliverable.",
+  "x-status": "v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "report_id",
+    "generated_at",
+    "session",
+    "stages",
+    "verdict"
+  ],
+  "additionalProperties": false,
+  "properties": {
+
+    "schema_version": {"type": "string", "const": "1.0"},
+
+    "report_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Stable identifier for this report; used as the file stem under `state/reports/`."
+    },
+
+    "generated_at": {"type": "string", "format": "date-time"},
+
+    "session": {
+      "type": "object",
+      "description": "What was being tuned and where.",
+      "required": ["plan_ref", "cluster_config_ref"],
+      "additionalProperties": false,
+      "properties": {
+        "plan_ref": {"type": "string", "description": "Absolute path of the user-supplied Primus exp.yaml."},
+        "plan_name": {"type": "string"},
+        "cluster_config_ref": {"type": ["string", "null"]},
+        "cluster_id": {"type": ["string", "null"]},
+        "operator": {"type": ["string", "null"], "description": "Best-effort: who ran this (env var or git config)."},
+        "primus_git_rev": {"type": ["string", "null"]}
+      }
+    },
+
+    "stages": {
+      "type": "object",
+      "description": "One sub-block per stage Pilot has visibility into. Stages absent from this report were not run; do NOT assume they passed.",
+      "additionalProperties": false,
+      "properties": {
+
+        "preflight": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "status":     {"type": "string", "enum": ["pass", "warn", "fail", "skipped"]},
+            "ref":        {"type": "string", "description": "Path to the ClusterProfile yaml."},
+            "summary": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cluster_class":           {"type": ["string", "null"]},
+                "gpus_per_node":           {"type": ["integer", "null"]},
+                "nnodes":                  {"type": ["integer", "null"]},
+                "rccl_ar_256mb_gbs":       {"type": ["number", "null"], "description": "Headline AllReduce@256MB intra_node median bandwidth."},
+                "peak_pct_of_spec_bf16":   {"type": ["number", "null"]},
+                "slow_nodes":              {"type": "array", "items": {"type": "string"}, "description": "Node IDs flagged by intra_node roll_up.slow_nodes_at_max_size."}
+              }
+            },
+            "warnings":   {"type": "array", "items": {"type": "string"}}
+          }
+        },
+
+        "smoke": {
+          "type": ["object", "null"],
+          "description": "Single SMOKE submission outcome. If multiple SMOKE runs were tried, only the *last* one is reported here; the rest live under `stages.smoke_history`.",
+          "additionalProperties": false,
+          "properties": {
+            "status":      {"type": "string", "enum": ["pass", "warn", "fail", "skipped", "in_flight"]},
+            "run_id":      {"type": "string"},
+            "handle_ref":  {"type": "string"},
+            "snapshot_ref": {"type": ["string", "null"]},
+            "summary": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "iters_done":   {"type": ["integer", "null"]},
+                "iters_target": {"type": ["integer", "null"]},
+                "median_iter_time_ms": {"type": ["number", "null"]},
+                "median_tflops":       {"type": ["number", "null"]},
+                "loss_finite":         {"type": ["boolean", "null"]},
+                "wallclock_s":         {"type": ["number", "null"]},
+                "exit_code":           {"type": ["integer", "null"]}
+              }
+            },
+            "symptoms": {
+              "type": "object",
+              "description": "Mirror of RunSnapshot.symptoms (booleans only).",
+              "additionalProperties": {"type": "boolean"}
+            },
+            "warnings":    {"type": "array", "items": {"type": "string"}}
+          }
+        },
+
+        "smoke_history": {
+          "type": "array",
+          "description": "Optional list of earlier SMOKE attempts in the same session (run_id refs only).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["run_id", "status"],
+            "properties": {
+              "run_id":     {"type": "string"},
+              "status":     {"type": "string", "enum": ["pass", "warn", "fail"]},
+              "handle_ref": {"type": ["string", "null"]},
+              "note":       {"type": ["string", "null"]}
+            }
+          }
+        },
+
+        "scan_parallel": {
+          "type": ["object", "null"],
+          "description": "SCAN_PARALLEL outcome (placeholder until the stage ships).",
+          "additionalProperties": false,
+          "properties": {
+            "status":      {"type": "string", "enum": ["pass", "warn", "fail", "skipped"]},
+            "best_config": {"type": ["object", "null"]},
+            "ranking_ref": {"type": ["string", "null"]}
+          }
+        },
+
+        "baseline": {
+          "type": ["object", "null"],
+          "description": "BASELINE / CORRECTNESS gate outcome (placeholder until the stage ships).",
+          "additionalProperties": false,
+          "properties": {
+            "status":         {"type": "string", "enum": ["pass", "warn", "fail", "skipped"]},
+            "reference_ref":  {"type": ["string", "null"]},
+            "loss_delta_pct": {"type": ["number", "null"]},
+            "gate_tier":      {"type": ["string", "null"], "enum": [null, "T0", "T1", "T2"]}
+          }
+        }
+      }
+    },
+
+    "verdict": {
+      "type": "object",
+      "description": "Aggregate decision distilled from the per-stage outcomes.",
+      "required": ["overall", "headline"],
+      "additionalProperties": false,
+      "properties": {
+        "overall": {
+          "type": "string",
+          "enum": ["pass", "warn", "fail", "incomplete"],
+          "description": "`incomplete` means required stages haven't been run (e.g. SMOKE missing) — neither a pass nor a fail."
+        },
+        "headline": {"type": "string", "description": "One-line human summary."},
+        "next_action": {
+          "type": "string",
+          "enum": ["promote", "retune", "rerun_smoke", "rerun_preflight", "diagnose", "wait"]
+        },
+        "blockers": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Outstanding issues that prevent moving forward (each one human-readable)."
+        }
+      }
+    },
+
+    "artifacts": {
+      "type": "array",
+      "description": "All files referenced by this report, listed for archival/transfer purposes.",
+      "items": {
+        "type": "object",
+        "required": ["kind", "ref"],
+        "additionalProperties": false,
+        "properties": {
+          "kind": {"type": "string"},
+          "ref":  {"type": "string"}
+        }
+      }
+    },
+
+    "meta": {
+      "type": "object",
+      "description": "Bookkeeping. Not load-bearing for downstream tools.",
+      "additionalProperties": true,
+      "properties": {
+        "pilot_version": {"type": ["string", "null"]},
+        "host":          {"type": ["string", "null"]},
+        "wallclock_s":   {"type": ["number", "null"]}
+      }
+    }
+  }
+}

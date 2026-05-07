@@ -1,0 +1,85 @@
+---
+description: Pilot Tool invocation conventions (shell or MCP, pick one)
+alwaysApply: true
+---
+
+# Tool Invocation Conventions
+
+Pilot's Tools are exposed at a **process or MCP boundary**, not as Python
+function calls (see `pilot/README.md` § Scope & Positioning, core invariants).
+Cursor has two ways to invoke them.
+
+## Universal environmental input: `cluster.yaml`
+
+**Every** Pilot tool that touches the cluster (preflight / env_probe / submit /
+observe / constraint) reads a single environmental file describing the runtime
+mode (`single` container or existing `slurm` allocation). Pass it via
+`--cluster-config <path>`; if omitted, tools look in `$PRIMUS_PILOT_CLUSTER_CONFIG`,
+then `./cluster.yaml`.
+
+If the file is missing, malformed, or its SLURM job is gone, the tool exits
+immediately with `failure.kind=CLUSTER` (exit 4) — **do not retry**, surface to
+the user and ask them to fix `cluster.yaml`. See `pilot/SETUP.md` for the
+human-facing recipe and `pilot/schemas/cluster_config.schema.json` for the
+schema. Tools that don't talk to the cluster (pure `state.*` / `knowledge.*`)
+do not consume `cluster.yaml`.
+
+## Mode A: Shell (default)
+
+Every Tool corresponds to a `python -m pilot.tools.<name>` subcommand:
+
+| Tool | Example command |
+|------|-----------------|
+| `preflight.run` | `python -m pilot.tools.preflight run --cluster-config cluster.yaml` |
+| `preflight.env_probe` | `python -m pilot.tools.preflight env_probe --cluster-config cluster.yaml` |
+| `preflight.env_sweep` | `python -m pilot.tools.preflight env_sweep --cluster-config cluster.yaml --base-plan <ref> --candidates <json>` |
+| `submit.run` | `python -m pilot.tools.submit run --cluster-config cluster.yaml --plan <ref>` |
+| `submit.cancel` | `python -m pilot.tools.submit cancel --run_id <id>` |
+| `observe.snapshot` | `python -m pilot.tools.observe snapshot --cluster-config cluster.yaml --run_id <id>` |
+| `observe.compare_loss` | `python -m pilot.tools.observe compare_loss --run_id <id> --reference <ref>` |
+| `constraint.check` | `python -m pilot.tools.constraint check --plan <ref>` |
+| `constraint.check_env` | `python -m pilot.tools.constraint check_env --env_diff <json>` |
+| `constraint.estimate_mem` | `python -m pilot.tools.constraint estimate_mem --plan <ref>` |
+| `state.checkpoint` | `python -m pilot.tools.state checkpoint --session <id> --stage <s>` |
+| `state.resume` | `python -m pilot.tools.state resume --session <id>` |
+| `state.trim` | `python -m pilot.tools.state trim --keep <fields>` |
+| `state.handoff` | `python -m pilot.tools.state handoff --session <id> --reason <r>` |
+| `knowledge.write` | `python -m pilot.tools.knowledge write --report <ref> --kind <k>` |
+
+Each command emits JSON on stdout and logs on stderr; parse stdout.
+
+**Output paths**: relative `--out-dir` defaults (`state/cluster_profiles`, etc.)
+are anchored at the **pilot package root**, not your cwd — i.e. they always
+land at `<repo>/pilot/state/...`. Pass an absolute path to override.
+
+## Mode B: MCP (optional)
+
+If `.cursor/mcp.json` is enabled (template:
+`pilot/integrations/cursor/mcp.json.example`), Pilot registers a matching set
+of MCP tools, one-to-one with the shell commands. The MCP path comes with
+parameter schemas, so Cursor performs type validation automatically.
+
+## Which tools you can / cannot call
+
+Scope is defined by your role (see `@.cursor/rules/10-orchestrator-role.mdc`
+and `@.cursor/rules/30-worker-*.mdc`):
+
+| Role | Allowed |
+|------|---------|
+| Orchestrator | only `state.*` plus `subagent.spawn` (= Cursor Task tool) |
+| Diagnose Worker | `observe.*` / `profiler.*` / `state.plan_graph.*` |
+| Re-Plan Worker | `constraint.*` / `state.plan_graph.*` |
+| EnvSweep Worker | `env_probe.sweep` / `constraint.check_env` |
+| Observe Worker | `observe.snapshot` / `observe.compare_loss` |
+| Correctness-Lite | `observe.compare_loss` |
+
+Out-of-scope calls violate `@.cursor/rules/00-pilot-core.mdc` rule 2
+(role separation).
+
+## Common constraints
+
+- Command failures (non-zero exit / non-empty stderr) → handle via
+  FailureReport (§8.8); do not paper over them.
+- Any write into `pilot/state/` **must** be followed by `state.checkpoint()`.
+- Do not mimic Tool behavior with inline Python (e.g. don't compute OOM risk
+  yourself — call `constraint.estimate_mem`).

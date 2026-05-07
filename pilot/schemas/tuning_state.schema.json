@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/tuning_state.schema.json",
+  "title": "TuningState",
+  "description": "Persisted at each stage exit. Primary unit of resume / audit / replay. See README.md §8.7.",
+  "x-status": "stub",
+  "type": "object",
+  "required": ["session_id", "current_stage", "stage_history"],
+  "properties": {
+    "session_id": {"type": "string"},
+    "current_stage": {
+      "type": "string",
+      "description": "State machine locator, e.g. OPTIMIZE_LOOP.OBSERVE."
+    },
+    "stage_history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "stage": {"type": "string"},
+          "exit": {"type": "string"},
+          "round": {"type": "integer"},
+          "at": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    "cluster_profile_ref": {"type": "string"},
+    "target": {"$ref": "target_vector.schema.json"},
+    "baseline": {"$ref": "plan.schema.json"},
+    "history": {
+      "type": "array",
+      "description": "Flat list of attempted plans (legacy / dedup). PlanGraph (separate file) is the authoritative tree.",
+      "items": {"type": "object"}
+    },
+    "budget_used": {
+      "type": "object",
+      "properties": {
+        "gpu_h": {"type": "number"},
+        "rounds": {"type": "integer"},
+        "wallclock_h": {"type": "number"}
+      }
+    },
+    "reentry_log": {"type": "array", "items": {"type": "object"}}
+  }
+}

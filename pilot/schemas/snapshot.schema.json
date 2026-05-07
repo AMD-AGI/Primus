@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/snapshot.schema.json",
+  "title": "Snapshot",
+  "description": "Output of observe.snapshot(). Runtime metrics for one plan. See README.md §8.3.",
+  "x-status": "stub",
+  "type": "object",
+  "required": ["run_id", "plan_id", "metrics", "status"],
+  "properties": {
+    "run_id":  {"type": "string"},
+    "plan_id": {"type": "string"},
+    "collected_at": {"type": "string", "format": "date-time"},
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "tps": {"type": "number"},
+        "step_time_ms": {"type": "number"},
+        "comm_ratio": {"type": "number"},
+        "bubble_ratio": {"type": "number"},
+        "overlap_ratio": {"type": "number"},
+        "mem_peak_gb": {"type": "number"},
+        "gpu_util_avg": {"type": "number"}
+      }
+    },
+    "status": {"type": "string", "enum": ["completed", "early_stopped", "oom", "failed"]},
+    "warnings": {"type": "array", "items": {"type": "string"}}
+  }
+}

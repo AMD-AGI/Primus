@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/blacklist.schema.json",
+  "title": "Blacklist",
+  "description": "Per-cluster bad-node list. Read by preflight.run() at start (excludes from topology), respected by submit.run() shard partitioning. See README.supplements.md §S3.5 and skills/workflow/preflight.md §6.",
+  "x-status": "v1",
+  "type": "object",
+  "required": ["cluster_id", "updated_at", "entries"],
+  "properties": {
+    "cluster_id": {"type": "string"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["node_id", "severity", "reason", "added_at"],
+        "properties": {
+          "node_id": {
+            "type": "string",
+            "description": "Node identifier as used by the cluster scheduler (e.g. SLURM hostname)."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["temporary", "permanent"],
+            "description": "temporary = TTL-based, auto-expires; permanent = hardware fault, requires human removal."
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "compute_peak_low",
+              "hbm_capacity_mismatch",
+              "ib_bw_low",
+              "nccl_hang_repeated",
+              "ecc_uncorrectable",
+              "node_unreachable",
+              "driver_error",
+              "thermal_excursion",
+              "cross_session_failure_rate_high",
+              "human_override"
+            ]
+          },
+          "evidence_ref": {
+            "type": "string",
+            "description": "Path to the artifact (preflight log, FailureReport, dmesg snippet) that triggered this entry."
+          },
+          "severity_count": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Number of independent failures observed before promotion to blacklist."
+          },
+          "added_at": {"type": "string", "format": "date-time"},
+          "added_by": {
+            "type": "string",
+            "enum": ["preflight_auto", "diagnose_auto", "execute_auto", "human"],
+            "description": "Which subsystem proposed the entry."
+          },
+          "expires_at": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "Required when severity=temporary; null for permanent."
+          },
+          "last_rehab_check_at": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "Last time this node was re-tested (for rehab; see §S3.7 false-positive metric)."
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

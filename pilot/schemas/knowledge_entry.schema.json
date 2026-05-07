@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/knowledge_entry.schema.json",
+  "title": "KnowledgeEntry",
+  "description": "Curator-merged entry under skills/knowledge/*.md (YAML front-matter blocks). See README.supplements.md §S4.4.",
+  "x-status": "stub",
+  "type": "object",
+  "required": ["knowledge_id", "title", "applicability", "created_at", "evidence_refs", "status"],
+  "properties": {
+    "knowledge_id": {
+      "type": "string",
+      "description": "Immutable ULID."
+    },
+    "title": {"type": "string"},
+    "applicability": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"}
+    },
+    "not_applicable_when": {"type": "array", "items": {"type": "string"}},
+    "recommendation": {
+      "type": "object",
+      "properties": {
+        "hint": {"type": "string"},
+        "rationale_skill": {"type": "string"}
+      }
+    },
+    "created_at": {"type": "string", "format": "date-time"},
+    "last_confirmed_at": {"type": "string", "format": "date-time"},
+    "confirmation_count": {"type": "integer", "minimum": 1},
+    "evidence_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string"}
+    },
+    "status": {
+      "type": "string",
+      "enum": ["active", "stale", "superseded", "retired", "version_drift"]
+    },
+    "supersedes": {"type": "string"}
+  }
+}

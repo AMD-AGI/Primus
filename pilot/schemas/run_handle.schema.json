@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/run_handle.schema.json",
+  "title": "RunHandle",
+  "description": "Output of `pilot.tools.submit run`. Captures everything needed to (a) re-derive the launched training job, (b) poll its status, (c) cancel it, and (d) replay the exact env diff Pilot applied. Persisted at `state/runs/<run_id>/handle.yaml`. Read by `submit cancel`, `submit status`, and downstream `observe.snapshot`.",
+  "x-status": "v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "created_at",
+    "cluster_config_ref",
+    "plan",
+    "launch",
+    "log",
+    "status"
+  ],
+  "additionalProperties": false,
+  "properties": {
+
+    "schema_version": {
+      "type": "string",
+      "const": "1.0",
+      "description": "RunHandle schema version. Bumped on breaking changes."
+    },
+
+    "run_id": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]*$",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Stable identifier for this submission. Used as the directory name under `state/runs/<run_id>/` and the cache key for observe.snapshot."
+    },
+
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp when submit dispatched the subprocess (not when training started)."
+    },
+
+    "cluster_config_ref": {
+      "type": ["string", "null"],
+      "description": "Absolute path to the cluster.yaml that was used for this submission. Recorded so downstream tools (cancel/status/observe) can replay the same launch contract."
+    },
+
+    "plan": {
+      "type": "object",
+      "description": "What was launched, both as user-supplied baseline and as the effective version after Pilot applied any overrides.",
+      "required": ["base_ref", "effective_ref"],
+      "additionalProperties": false,
+      "properties": {
+        "base_ref": {
+          "type": "string",
+          "description": "Absolute path to the user-supplied Primus exp.yaml passed via `--plan`."
+        },
+        "effective_ref": {
+          "type": "string",
+          "description": "Absolute path to the post-override yaml that was actually fed to Primus via `EXP=...`. Lives at `state/runs/<run_id>/plan.effective.yaml`."
+        },
+        "overrides": {
+          "type": "object",
+          "description": "Map of `<key> -> <value>` patches Pilot applied on top of `base_ref`. Keys target the `modules.pre_trainer.overrides` block of the Primus yaml (so `train_iters` -> `modules.pre_trainer.overrides.train_iters`).",
+          "additionalProperties": true
+        }
+      }
+    },
+
+    "launch": {
+      "type": "object",
+      "description": "Concrete launch parameters derived from cluster.yaml and the LaunchPlan.",
+      "required": ["mode", "nnodes", "gpus_per_node", "cmd"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["single", "slurm"],
+          "description": "Mirrors cluster.yaml `mode`."
+        },
+        "nnodes": {"type": "integer", "minimum": 1},
+        "gpus_per_node": {"type": "integer", "minimum": 1},
+        "master_addr": {"type": "string"},
+        "master_port": {"type": "integer", "minimum": 1024, "maximum": 65535},
+        "cmd": {
+          "type": "string",
+          "description": "Shell command actually executed (single-mode: `bash <PRIMUS>/examples/run_pretrain.sh`; slurm-mode: `srun --jobid=<jid> ... bash run_pretrain.sh`)."
+        },
+        "env_diff": {
+          "type": "object",
+          "description": "Env vars Pilot explicitly set on top of inherited environment. Includes EXP, NNODES, GPUS_PER_NODE, NODE_RANK, MASTER_ADDR, MASTER_PORT, TRAIN_LOG. Recorded for replayability.",
+          "additionalProperties": {"type": "string"}
+        },
+        "pid": {
+          "type": ["integer", "null"],
+          "description": "PID of the parent shell process (single-mode only). Used by `submit cancel` to send SIGTERM."
+        },
+        "slurm_job_id": {"type": ["integer", "null"]},
+        "slurm_step_id": {
+          "type": ["string", "null"],
+          "description": "SLURM step id (e.g. `12345.0`) returned by srun, used by `scancel` to terminate just this submission without releasing the parent allocation."
+        }
+      }
+    },
+
+    "log": {
+      "type": "object",
+      "required": ["stdout"],
+      "additionalProperties": false,
+      "properties": {
+        "stdout": {
+          "type": "string",
+          "description": "Absolute path to the captured stdout/stderr stream (combined)."
+        },
+        "stderr": {
+          "type": ["string", "null"],
+          "description": "Optional separate stderr file. Null when stderr is folded into stdout."
+        },
+        "exit_code_sentinel": {
+          "type": ["string", "null"],
+          "description": "Path to the file the wrapper writes the exit code to once the subprocess terminates. Polled by `submit status` to distinguish `running` from `completed`/`failed`."
+        }
+      }
+    },
+
+    "status": {
+      "type": "string",
+      "enum": ["launching", "running", "completed", "failed", "killed", "unknown"],
+      "description": "Initial status when handle is written. Stays `launching` for the first liveness window (~5s); flips to `running` once subprocess survived liveness; later updates by `submit status` reflect process state."
+    },
+
+    "exit_code": {
+      "type": ["integer", "null"],
+      "description": "Filled by `submit status` (or the foreground path) once the subprocess terminates. Null while `status` is `launching`/`running`/`unknown`."
+    },
+
+    "wallclock_s": {
+      "type": ["number", "null"],
+      "description": "Wallclock seconds between created_at and termination. Filled when status moves to a terminal state."
+    }
+  }
+}

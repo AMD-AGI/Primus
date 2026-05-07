@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/target_vector.schema.json",
+  "title": "TargetVector",
+  "description": "User-supplied multi-objective target. Settle stop = all constraints met AND primary not improving. See README.md §8.6.",
+  "x-status": "stub",
+  "type": "object",
+  "required": ["primary", "constraints", "budget"],
+  "properties": {
+    "primary": {
+      "type": "string",
+      "description": "Primary metric: tps / per_token_cost_usd / time_to_loss / ..."
+    },
+    "constraints": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Hard constraint expressions, e.g. 'mem_peak_gb <= 180'."
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "total_gpu_h": {"type": "number"},
+        "max_rounds": {"type": "integer"},
+        "wallclock_h": {"type": "number"}
+      }
+    },
+    "preferences": {
+      "type": "object",
+      "description": "Soft preferences for tiebreaking."
+    }
+  }
+}

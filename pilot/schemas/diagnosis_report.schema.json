@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/diagnosis_report.schema.json",
+  "title": "DiagnosisReport",
+  "description": "Output of Diagnose worker. Bottleneck classification + env_suspect + candidate_axes. See README.md §8.4.",
+  "x-status": "stub",
+  "type": "object",
+  "required": ["snapshot_id", "bottleneck", "confidence"],
+  "properties": {
+    "snapshot_id": {"type": "string"},
+    "bottleneck": {
+      "type": "string",
+      "enum": ["COMM_BOUND", "PIPELINE_BOUND", "MEMORY_BOUND", "COMPUTE_BOUND"]
+    },
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "evidence": {"type": "array", "items": {"type": "string"}},
+    "recommended_skills": {"type": "array", "items": {"type": "string"}},
+    "env_suspect": {
+      "type": "array",
+      "description": "Suspected env flags; if non-empty, triggers EnvSweep before structural Re-Plan.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "flag": {"type": "string"},
+          "reason": {"type": "string"},
+          "hint": {"type": "string"}
+        }
+      }
+    },
+    "candidate_axes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "axis": {"type": "string"},
+          "type": {"type": "string", "enum": ["structural", "cluster_shared", "weakly_local", "strongly_local"]},
+          "candidates": {"type": "array"}
+        }
+      }
+    },
+    "suggested_strategy": {
+      "type": "string",
+      "enum": ["Champion-Challenger", "Per-Plan", "Successive_Halving"]
+    }
+  }
+}

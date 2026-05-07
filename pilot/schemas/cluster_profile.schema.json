@@ -1,0 +1,285 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/cluster_profile.schema.json",
+  "title": "ClusterProfile",
+  "description": "Output of preflight.run(). Hardware peaks + RCCL baseline curves (3 scopes) + cluster-level env_baseline + blacklist refs. Reused across jobs by version + age. See README.md §8.1, skills/workflow/preflight.md. Schema 2.0 changes: rccl_baseline restructured into {intra_node, inter_node, world} scopes; intra_node uses per-node columnar layout to capture node-level uniformity. Single-node mode populates intra_node only and leaves inter_node/world as null.",
+  "x-status": "v2",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "cluster_id",
+    "version",
+    "collected_at",
+    "status",
+    "nodes_total",
+    "nodes_healthy",
+    "compute",
+    "interconnect",
+    "env_baseline"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "2.0",
+      "description": "ClusterProfile schema version. Bumped to 2.0 when rccl_baseline became scoped (intra_node/inter_node/world)."
+    },
+    "cluster_id": {
+      "type": "string",
+      "description": "Stable cluster identifier; cache key together with version."
+    },
+    "version": {
+      "type": "string",
+      "description": "Auto-incremented on full re-collect; preserved across delta-refresh. E.g. 'mi300x-16node-v4'.",
+      "pattern": "^[a-z0-9_-]+-v\\d+$"
+    },
+    "cluster_class": {
+      "type": "string",
+      "description": "Coarse hardware class for cross-cluster reuse; e.g. 'mi300x_8gpu', 'h100_8gpu'."
+    },
+    "collected_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["validated", "tentative", "stale", "superseded"],
+      "description": "validated = all gates pass; tentative = at least one soft gate fired; stale = age > 7d, awaiting refresh; superseded = a newer version exists."
+    },
+    "supersedes": {
+      "type": ["string", "null"],
+      "description": "Prior version (same cluster_id) that this one replaces; null on first collect."
+    },
+    "nodes_total": {"type": "integer", "minimum": 1},
+    "nodes_healthy": {"type": "integer", "minimum": 0},
+    "nodes_blacklisted": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Node ids excluded due to blacklist hits (read from state/blacklist.yaml)."
+    },
+    "gpus_per_node": {"type": "integer", "minimum": 1},
+
+    "compute": {
+      "type": "object",
+      "required": ["peak_tflops_bf16", "hbm_bandwidth_gbs", "hbm_capacity_gb"],
+      "properties": {
+        "peak_tflops_bf16": {"type": "number", "description": "Measured BF16 GEMM peak (TFLOPS), median across healthy nodes."},
+        "peak_tflops_fp8":  {"type": ["number", "null"], "description": "FP8 peak when hardware supports; null when not measured."},
+        "peak_pct_of_spec_bf16": {"type": ["number", "null"], "description": "Measured / vendor-spec ratio (0..1)."},
+        "hbm_bandwidth_gbs": {"type": ["number", "null"]},
+        "hbm_capacity_gb":   {"type": ["number", "null"]},
+        "per_node_variance_pct": {"type": ["number", "null"], "description": "Coefficient of variation across nodes."},
+        "per_gpu_tflops_bf16": {
+          "type": "array",
+          "items": {"type": "number"},
+          "description": "Per-GPU BF16 GEMM TFLOPs (representative node, single-node mode); used to compute per_node_variance_pct."
+        }
+      }
+    },
+
+    "interconnect": {
+      "type": "object",
+      "required": ["intra_node", "inter_node"],
+      "properties": {
+        "intra_node": {
+          "type": "object",
+          "properties": {
+            "type": {"type": "string", "enum": ["xgmi", "nvlink", "pcie"]},
+            "bandwidth_gbs": {"type": ["number", "null"]},
+            "topology": {"type": "string", "description": "e.g. 'all-to-all-4ring'"}
+          }
+        },
+        "inter_node": {
+          "type": "object",
+          "properties": {
+            "type": {"type": "string", "enum": ["ib", "roce", "tcp"]},
+            "bandwidth_gbs": {"type": ["number", "null"], "description": "Per-GPU effective inter-node BW; null in single-node mode."},
+            "port_count": {"type": "integer"},
+            "uniformity": {"type": "string", "enum": ["uniform", "degraded", "unknown"]}
+          }
+        }
+      }
+    },
+
+    "rccl_baseline": {
+      "type": "object",
+      "description": "RCCL bandwidth curves measured at three scopes. `intra_node` is per-node columnar (each node runs its own local 8-GPU PG; results aggregated to expose per-node uniformity). `inter_node` and `world` are single-ring measurements across the whole allocation. Single-node mode fills `intra_node` only; `inter_node` and `world` are null.",
+      "required": ["intra_node"],
+      "properties": {
+
+        "intra_node": {
+          "type": ["object", "null"],
+          "description": "Within-node 8-GPU collectives (xGMI/NVLink only). Embarrassingly parallel across nodes — each node runs an independent local torchrun. Per-node curves let us spot stragglers without O(N\u00b2) pairwise tests.",
+          "required": ["world_size", "nnodes_measured", "collectives"],
+          "additionalProperties": false,
+          "properties": {
+            "world_size": {"type": "integer", "minimum": 1, "description": "GPUs participating in each per-node PG (== gpus_per_node)."},
+            "nnodes_measured": {"type": "integer", "minimum": 1, "description": "How many nodes we ran the local 8-GPU benchmark on. Should equal nodes_healthy in steady state."},
+            "collectives": {
+              "type": "object",
+              "description": "Per-collective per-node bandwidth/latency curves + roll_up summary stats.",
+              "additionalProperties": {"$ref": "#/$defs/per_node_collective"}
+            }
+          }
+        },
+
+        "inter_node": {
+          "type": ["object", "null"],
+          "description": "1-GPU-per-node ring. Isolates inter-node fabric (RoCE/IB) from xGMI confounder. Single curve across all nodes; null in single-node mode.",
+          "required": ["world_size", "nnodes", "nproc_per_node", "collectives"],
+          "additionalProperties": false,
+          "properties": {
+            "world_size": {"type": "integer", "minimum": 2, "description": "== nnodes for inter_node scope."},
+            "nnodes": {"type": "integer", "minimum": 2},
+            "nproc_per_node": {"type": "integer", "const": 1, "description": "Always 1 for inter_node scope."},
+            "collectives": {
+              "type": "object",
+              "description": "Per-collective single-ring curve.",
+              "additionalProperties": {"$ref": "#/$defs/single_ring_collective"}
+            }
+          }
+        },
+
+        "world": {
+          "type": ["object", "null"],
+          "description": "Full N\u00d7gpus_per_node ring (the actual training topology). Single curve. Null in single-node mode.",
+          "required": ["world_size", "nnodes", "nproc_per_node", "collectives"],
+          "additionalProperties": false,
+          "properties": {
+            "world_size": {"type": "integer", "minimum": 2},
+            "nnodes": {"type": "integer", "minimum": 2},
+            "nproc_per_node": {"type": "integer", "minimum": 1},
+            "collectives": {
+              "type": "object",
+              "description": "Per-collective single-ring curve at the full cluster scope.",
+              "additionalProperties": {"$ref": "#/$defs/single_ring_collective"}
+            }
+          }
+        }
+      }
+    },
+
+    "env_baseline": {
+      "type": "object",
+      "description": "Cluster-level golden default env. Versioned and validated via env_probe 3-tier protocol.",
+      "required": ["version", "status", "source"],
+      "properties": {
+        "version": {
+          "type": "string",
+          "description": "Mirrors top-level version; identical except when delta-refresh changed only this block."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["validated", "tentative", "unsafe_fallback"],
+          "description": "validated = passed all 3 tiers; tentative = passed T1+T2 only; unsafe_fallback = vendor defaults, T1 failed."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["preset", "inherited", "vendor_default", "human_override"],
+          "description": "Origin of the candidate before validation."
+        },
+        "rccl": {
+          "type": "object",
+          "description": "NCCL_* / RCCL_* keys; see skills/env/rccl.md."
+        },
+        "hsa": {
+          "type": "object",
+          "description": "HSA_* / HIP_* / GPU_MAX_HW_QUEUES; see skills/env/hsa.md."
+        },
+        "alloc": {
+          "type": "object",
+          "description": "PYTORCH_HIP_ALLOC_CONF / MALLOC_*; see skills/env/alloc.md."
+        },
+        "threading": {
+          "type": "object",
+          "description": "OMP_*, MKL_*, numactl bindings; see skills/env/threading.md."
+        },
+        "notes": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Human-readable warnings; e.g. 'rccl_underperformance detected, T2 recovered'."
+        },
+        "validated_at": {"type": "string", "format": "date-time"}
+      }
+    },
+
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Cluster-level warnings surfaced for downstream stages; e.g. 'node mi300x-04 thermal margin -5C below median'."
+    },
+
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "rocm_version": {"type": ["string", "null"]},
+        "rccl_version": {"type": ["string", "null"]},
+        "kernel":       {"type": ["string", "null"]},
+        "preflight_wallclock_s": {"type": "number"},
+        "preflight_gpu_h": {"type": "number"}
+      }
+    }
+  },
+  "additionalProperties": false,
+
+  "$defs": {
+
+    "per_node_collective": {
+      "type": "object",
+      "description": "Per-collective curve in `intra_node` scope. Shared `sizes_mb` axis across all nodes; bw/latency stored as per-node arrays aligned to that axis. `roll_up` provides cross-node aggregate stats for fast consumption by PROJECTION.",
+      "required": ["sizes_mb", "per_node_bw_gbs", "roll_up"],
+      "additionalProperties": false,
+      "properties": {
+        "sizes_mb": {
+          "type": "array",
+          "items": {"type": "number", "minimum": 0},
+          "description": "Message sizes (in MiB) sampled. Same axis for all per_node_*/roll_up arrays in this collective."
+        },
+        "per_node_bw_gbs": {
+          "type": "object",
+          "description": "Map: hostname -> bus-bandwidth array aligned to sizes_mb.",
+          "additionalProperties": {
+            "type": "array",
+            "items": {"type": "number", "minimum": 0}
+          }
+        },
+        "per_node_latency_us": {
+          "type": "object",
+          "description": "Map: hostname -> latency array aligned to sizes_mb.",
+          "additionalProperties": {
+            "type": "array",
+            "items": {"type": "number"}
+          }
+        },
+        "roll_up": {
+          "type": "object",
+          "description": "Cross-node aggregates aligned to sizes_mb. PROJECTION should consume `median_bw_gbs` for typical case and `min_bw_gbs` for worst-case bounds.",
+          "required": ["median_bw_gbs", "min_bw_gbs", "max_bw_gbs"],
+          "additionalProperties": false,
+          "properties": {
+            "median_bw_gbs": {"type": "array", "items": {"type": "number", "minimum": 0}},
+            "min_bw_gbs":    {"type": "array", "items": {"type": "number", "minimum": 0}},
+            "max_bw_gbs":    {"type": "array", "items": {"type": "number", "minimum": 0}},
+            "stddev_pct":    {"type": "array", "items": {"type": "number", "minimum": 0}},
+            "slow_nodes_at_max_size": {
+              "type": "array",
+              "items": {"type": "string"},
+              "description": "Hostnames whose bw at the largest sampled size is < median - 2*stddev. Candidates for blacklist proposal."
+            }
+          }
+        }
+      }
+    },
+
+    "single_ring_collective": {
+      "type": "object",
+      "description": "Per-collective curve in single-ring scopes (inter_node, world). Just bw/latency aligned to sizes_mb.",
+      "required": ["sizes_mb", "bw_gbs"],
+      "additionalProperties": false,
+      "properties": {
+        "sizes_mb":   {"type": "array", "items": {"type": "number", "minimum": 0}},
+        "bw_gbs":     {"type": "array", "items": {"type": "number", "minimum": 0}},
+        "latency_us": {"type": "array", "items": {"type": "number"}}
+      }
+    }
+  }
+}

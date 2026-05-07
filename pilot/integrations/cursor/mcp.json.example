@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "pilot-tools": {
+      "command": "python",
+      "args": ["-m", "pilot.tools.mcp_server"],
+      "env": {
+        "PILOT_STATE_DIR": "${workspaceFolder}/pilot/state",
+        "PILOT_SCHEMAS_DIR": "${workspaceFolder}/pilot/schemas"
+      },
+      "description": "Pilot tools (preflight / submit / observe / constraint / state / ...) exposed as MCP."
+    }
+  },
+  "_comment": [
+    "Copy this to .cursor/mcp.json or ~/.cursor/mcp.json to enable MCP tool invocation.",
+    "If absent, the Cursor agent falls back to shell invocation (`python -m pilot.tools.<name> ...`),",
+    "see pilot/integrations/cursor/rules/90-tool-invocation.mdc for the full command list.",
+    "The MCP server module `pilot.tools.mcp_server` is a thin wrapper over the same CLI entry points,",
+    "so the two modes are functionally equivalent."
+  ]
+}

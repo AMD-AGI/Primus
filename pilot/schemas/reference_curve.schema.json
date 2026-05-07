@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/reference_curve.schema.json",
+  "title": "ReferenceCurve",
+  "description": "T0 / T1 reference loss curve (tokens-aligned). Used by correctness gates. See README.supplements.md §S2.5.",
+  "x-status": "stub",
+  "type": "object",
+  "required": ["reference_id", "tier", "binding", "trajectory", "noise"],
+  "properties": {
+    "reference_id": {"type": "string"},
+    "tier": {"type": "string", "enum": ["T0", "T1"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "binding": {
+      "type": "object",
+      "required": ["model_family", "dataset_id", "seed"],
+      "properties": {
+        "model_family": {"type": "string"},
+        "model_size_b": {"type": "number"},
+        "dataset_id": {"type": "string"},
+        "seed": {"type": "integer"},
+        "precision": {"type": "string"}
+      }
+    },
+    "config": {"type": "object"},
+    "trajectory": {
+      "type": "array",
+      "description": "Tokens-aligned NOT step-aligned (§S2.3).",
+      "items": {
+        "type": "object",
+        "required": ["tokens", "loss_per_token"],
+        "properties": {
+          "tokens": {"type": "number"},
+          "loss_per_token": {"type": "number"},
+          "grad_norm": {"type": "number"}
+        }
+      }
+    },
+    "noise": {
+      "type": "object",
+      "description": "Cross-run std measured at build time (3 same-seed runs).",
+      "properties": {
+        "loss_per_token_std_at_1e7_tokens": {"type": "number"},
+        "grad_norm_std_at_1e7_tokens": {"type": "number"}
+      }
+    },
+    "promoted_to_t1": {
+      "type": "array",
+      "description": "T0 → T1 promotion log.",
+      "items": {"type": "object"}
+    }
+  }
+}

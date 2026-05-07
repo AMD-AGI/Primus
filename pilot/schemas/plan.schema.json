@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/plan.schema.json",
+  "title": "Plan",
+  "description": "A configuration to be executed. env stored as diff against env_baseline. See README.md §8.2.",
+  "x-status": "stub",
+  "type": "object",
+  "required": ["plan_id", "parallelism", "runtime"],
+  "properties": {
+    "plan_id": {"type": "string"},
+    "parent_baseline": {"type": ["string", "null"]},
+    "parallelism": {
+      "type": "object",
+      "properties": {
+        "tp": {"type": "integer"},
+        "pp": {"type": "integer"},
+        "dp": {"type": "integer"},
+        "ep": {"type": "integer"},
+        "vpp": {"type": "integer"}
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "properties": {
+        "mbs": {"type": "integer"},
+        "gbs": {"type": "integer"},
+        "recompute": {"type": "string", "enum": ["none", "selective", "full"]}
+      }
+    },
+    "comm": {
+      "type": "object",
+      "properties": {
+        "bucket_size_mb": {"type": "number"},
+        "overlap": {"type": "boolean"}
+      }
+    },
+    "env": {
+      "type": "object",
+      "properties": {
+        "baseline_ref": {"type": "string"},
+        "diff": {"type": "object"}
+      }
+    },
+    "predicted": {
+      "type": "object",
+      "description": "Execution Model estimate (§6 + §S1 calibration).",
+      "properties": {
+        "tps": {"type": "number"},
+        "mem_peak_gb": {"type": "number"},
+        "comm_ratio": {"type": "number"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "generated_by": {
+      "type": "object",
+      "properties": {
+        "bottleneck": {"type": "string"},
+        "strategy": {"type": "string"}
+      }
+    }
+  }
+}

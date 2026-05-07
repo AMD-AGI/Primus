@@ -1,0 +1,150 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/run_snapshot.schema.json",
+  "title": "RunSnapshot",
+  "description": "Output of `pilot.tools.observe snapshot`. A point-in-time view of a training run derived from (a) `submit.status()` for process state and (b) tailing `train.log` for iteration/loss/symptom signals. Persisted at `state/runs/<run_id>/snapshots/<ts>.yaml` and is the primary artifact downstream stages (SMOKE, SCAN_PARALLEL, DIAGNOSE) consume.",
+  "x-status": "v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "snapshot_at",
+    "status",
+    "process",
+    "progress",
+    "metrics",
+    "symptoms",
+    "log"
+  ],
+  "additionalProperties": false,
+  "properties": {
+
+    "schema_version": {"type": "string", "const": "1.0"},
+
+    "run_id": {"type": "string"},
+
+    "snapshot_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "UTC timestamp when this snapshot was produced."
+    },
+
+    "status": {
+      "type": "string",
+      "enum": ["launching", "running", "completed", "failed", "killed", "hung", "unknown"],
+      "description": "Effective status. `hung` is observe-only: derived when process is alive but no new iter line has appeared for `symptoms.hang_threshold_s`. All other values mirror RunHandle.status."
+    },
+
+    "process": {
+      "type": "object",
+      "required": ["alive"],
+      "additionalProperties": false,
+      "properties": {
+        "pid": {"type": ["integer", "null"]},
+        "alive": {"type": "boolean", "description": "True iff pid is in proc table AND not zombie."},
+        "exit_code": {"type": ["integer", "null"]},
+        "wallclock_s": {"type": ["number", "null"]}
+      }
+    },
+
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "current_iter": {"type": ["integer", "null"], "description": "Highest iteration number seen in the log so far."},
+        "total_iters": {"type": ["integer", "null"], "description": "Target iteration count (from Megatron `iteration N/M` log)."},
+        "pct": {"type": ["number", "null"], "minimum": 0, "maximum": 100},
+        "iters_per_min": {"type": ["number", "null"], "description": "Rolling average over the last few iterations (window=5)."},
+        "last_iter_at": {"type": ["string", "null"], "format": "date-time", "description": "Timestamp of the most recent iter line (parsed from Megatron's leading `[YYYY-MM-DD HH:MM:SS.ffffff]`)."},
+        "silent_for_s": {"type": ["number", "null"], "description": "Seconds between last_iter_at and snapshot_at. Null until the first iter line appears."}
+      }
+    },
+
+    "metrics": {
+      "type": "object",
+      "required": ["latest", "loss_finite"],
+      "additionalProperties": false,
+      "properties": {
+        "latest": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "loss":             {"type": ["number", "null"]},
+            "iter_time_ms":     {"type": ["number", "null"]},
+            "tflops":           {"type": ["number", "null"]},
+            "consumed_samples": {"type": ["integer", "null"]},
+            "learning_rate":    {"type": ["number", "null"]},
+            "grad_norm":        {"type": ["number", "null"]}
+          }
+        },
+        "history": {
+          "type": "object",
+          "description": "Per-iter time series (parallel arrays). Capped at the last 50 iters by default to keep snapshots small.",
+          "additionalProperties": false,
+          "properties": {
+            "iters":         {"type": "array", "items": {"type": "integer"}},
+            "loss":          {"type": "array", "items": {"type": ["number", "null"]}},
+            "iter_time_ms":  {"type": "array", "items": {"type": ["number", "null"]}},
+            "tflops":        {"type": "array", "items": {"type": ["number", "null"]}}
+          }
+        },
+        "loss_finite": {"type": "boolean", "description": "False if any parsed loss was NaN/Inf."}
+      }
+    },
+
+    "symptoms": {
+      "type": "object",
+      "required": ["hang_suspected", "oom_detected", "nccl_error", "cuda_error", "python_error", "loss_nan_or_inf"],
+      "additionalProperties": false,
+      "properties": {
+        "hang_suspected":   {"type": "boolean"},
+        "hang_threshold_s": {"type": "number", "description": "Threshold used for hang_suspected."},
+        "oom_detected":     {"type": "boolean"},
+        "nccl_error":       {"type": "boolean", "description": "True iff log matches NCCL/RCCL error or watchdog timeout."},
+        "cuda_error":       {"type": "boolean", "description": "True iff log matches CUDA/HIP runtime error."},
+        "python_error":     {"type": "boolean", "description": "True iff log contains a Python Traceback / unhandled Exception (excluding warnings)."},
+        "loss_nan_or_inf":  {"type": "boolean"},
+        "evidence": {
+          "type": "array",
+          "description": "Up to 16 most-recent matching lines, with classification. Used by DIAGNOSE / for human review.",
+          "items": {
+            "type": "object",
+            "required": ["kind", "line_no", "line"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"type": "string", "enum": ["oom", "nccl", "cuda", "python_error", "loss_nan", "hang_hint"]},
+              "line_no": {"type": "integer", "minimum": 1},
+              "line": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+
+    "log": {
+      "type": "object",
+      "required": ["ref"],
+      "additionalProperties": false,
+      "properties": {
+        "ref":   {"type": "string", "description": "Absolute path to train.log."},
+        "bytes": {"type": ["integer", "null"]},
+        "lines": {"type": ["integer", "null"], "description": "Total line count seen by this snapshot."},
+        "tailed_bytes": {"type": ["integer", "null"], "description": "How many bytes of the tail were actually parsed (capped to keep snapshots cheap)."}
+      }
+    },
+
+    "recommendation": {
+      "type": "object",
+      "description": "What observe thinks the orchestrator should do next. Advisory only; the agent makes the final call.",
+      "additionalProperties": false,
+      "required": ["next", "reason"],
+      "properties": {
+        "next": {
+          "type": "string",
+          "enum": ["continue", "promote", "escalate_diagnose", "cancel_and_diagnose", "wait"]
+        },
+        "reason": {"type": "string"}
+      }
+    }
+  }
+}

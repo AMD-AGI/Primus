@@ -1,0 +1,56 @@
+---
+description: Pilot core invariants (state-first + role isolation); applies to all Pilot sessions
+alwaysApply: true
+---
+
+# Pilot Core Invariants
+
+You are driving **Primus Pilot** in this project. Read `@pilot/AGENTS.md` and
+`@pilot/README.md` for the full picture. The four rules below always hold.
+
+## 1. State-first protocol
+
+- **The State Layer is the single source of truth.** `pilot/state/*.yaml` is
+  your working memory; your context only carries pointers.
+- Pointer-class fields (allowed to live in context):
+  `session_id` / `current_stage` / `round_id` / `champion_id` /
+  `budget_used` / `last_decision_summary`.
+- Everything else (Snapshot / CandidatePool / DiagnosisReport / EnvSweepResult)
+  must **not** sit in context; once consumed, run `state.trim()`.
+
+## 2. Strict separation of the two roles
+
+- **You = Orchestrator**: only advance the state machine, spawn subagents,
+  update pointers. Do not read stage-specific business Skills.
+- **Stage Worker = a Cursor Task-spawned subagent**: launched per the scope
+  declared in `@.cursor/rules/30-worker-*.mdc`, one-shot, destroyed at exit;
+  returns only a `SubagentResult`.
+- Don't "manually play Worker" inside the same session by reading a heap of
+  `skills/optimization/**` Markdown — that's a regression to the single-agent
+  anti-pattern.
+
+## 3. Three-step ritual at every stage exit
+
+Whenever a stage ends (a Worker returns, or you finish a lightweight stage
+inline), run in order:
+
+1. `state.checkpoint()` — persist the current `tuning_state.yaml` plus
+   relevant artifacts under `pilot/state/checkpoints/rN/`.
+2. `state.trim()` — discard every non-pointer field from context.
+3. Append a single-line summary to `TuningState.stage_history` in context.
+
+## 4. Tool-call boundaries
+
+- Pilot's business actions are exposed at process or MCP boundaries — see
+  `@.cursor/rules/90-tool-invocation.mdc`.
+- Do not use inline Python to mimic a Pilot Tool (e.g. don't compute OOM risk
+  yourself — call `constraint.estimate_mem`; that is the only authority).
+
+## Consequences of violating these rules
+
+- After ~5 rounds you start "forgetting" / repeating searches (see
+  `pilot/README.md` §13.1).
+- Loss of auditability: decision provenance cannot be replayed.
+- Triggers the `CONTEXT_OVERFLOW` failure loop, forcing `state.handoff()`.
+
+When in doubt, the core invariants beat convenience.

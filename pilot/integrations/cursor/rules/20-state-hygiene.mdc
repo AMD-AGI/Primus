@@ -1,0 +1,79 @@
+---
+description: Read/write conventions for the State Layer and the handoff protocol
+globs: pilot/state/**/*.yaml,pilot/state/**/*.json
+alwaysApply: false
+---
+
+# State Layer Conventions
+
+`pilot/state/` is Pilot's only working memory. Whether you edit by hand or via
+a Tool, the rules below apply.
+
+## Forbidden actions
+
+- ❌ `cat`/`head`/`tail` the full `tuning_state.yaml` into context.
+- ❌ Drop the entire `candidate_pool.yaml` / `plan_graph.yaml` into the Worker
+  prompt.
+- ❌ Carry raw Snapshot / DiagnosisReport payloads across stages.
+
+## Correct usage
+
+| Goal | Command / pattern |
+|------|------------------|
+| Read the current stage pointers | `python -m pilot.tools.state summary` — returns < 500-token YAML |
+| Read a single PlanGraph node | `python -m pilot.tools.state plan_graph.node --id <plan_id>` |
+| Read the selected CandidatePool entries | `python -m pilot.tools.state candidate_pool.selected` |
+| Hand a full artifact to a Worker | Pass `ref: state/round_3/candidate_pool.yaml`; the Worker reads it itself |
+| Promote a champion | `python -m pilot.tools.state set_champion --id <plan_id>` |
+
+## Checkpoint protocol
+
+At every stage exit:
+
+```bash
+python -m pilot.tools.state checkpoint \
+  --session $SESSION_ID \
+  --stage $STAGE \
+  --round $ROUND
+```
+
+Produces:
+- `pilot/state/checkpoints/r$ROUND/tuning_state.yaml`
+- `pilot/state/checkpoints/r$ROUND/plan_graph.yaml` (if changed)
+- `pilot/state/checkpoints/r$ROUND/candidate_pool.yaml` (if changed)
+
+## Resume protocol
+
+When a new session starts:
+
+```bash
+python -m pilot.tools.state resume \
+  --session $SESSION_ID
+```
+
+Returns the latest checkpoint's `summary`; continue directly from
+`current_stage` — do not redo completed stages.
+
+## Handoff protocol (Cursor-specific)
+
+Cursor has no resident process, so a handoff is "this session exits cleanly
++ the next session resumes from the breakpoint".
+
+Trigger conditions:
+- Orchestrator context > 50% window → handoff is **recommended**.
+- > 75% window → handoff is **mandatory**.
+
+```bash
+python -m pilot.tools.state handoff \
+  --session $SESSION_ID \
+  --reason "context_pressure" \
+  --hint "$PENDING_DECISION"
+```
+
+Writes to `pilot/state/checkpoints/handoff/<session_id>.yaml`. **Tell the user
+to start the next Cursor session with the same session_id**; `state.resume()`
+will pick up the handoff automatically.
+
+## gitignore
+
+The entire `pilot/state/` directory belongs in `.gitignore`. Do not commit it.

@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/knowledge_draft.schema.json",
+  "title": "KnowledgeDraft",
+  "description": "LLM-emitted draft, written ONLY to state/knowledge_drafts/. Curator promotes to KnowledgeEntry via PR. See README.supplements.md §S4.2.",
+  "x-status": "stub",
+  "type": "object",
+  "required": ["draft_id", "draft_kind", "binding", "claim", "evidence"],
+  "properties": {
+    "draft_id": {"type": "string"},
+    "draft_kind": {
+      "type": "string",
+      "enum": ["final_best_case", "failure_pattern", "env_recipe", "model_calibration_drift"]
+    },
+    "created_at": {"type": "string", "format": "date-time"},
+    "created_by": {
+      "type": "object",
+      "properties": {
+        "session_id": {"type": "string"},
+        "agent": {"type": "string"},
+        "pilot_version": {"type": "string"}
+      }
+    },
+    "binding": {
+      "type": "object",
+      "required": ["cluster_class", "model_family", "framework"],
+      "properties": {
+        "cluster_class": {"type": "string"},
+        "model_family": {"type": "string"},
+        "model_size_range": {"type": "array", "items": {"type": "number"}, "maxItems": 2},
+        "framework": {"type": "string"},
+        "framework_version_range": {"type": "array", "items": {"type": "string"}, "maxItems": 2}
+      }
+    },
+    "claim": {
+      "type": "object",
+      "required": ["headline"],
+      "properties": {
+        "headline": {"type": "string", "maxLength": 200},
+        "detail": {"type": "string"},
+        "applicability": {"type": "array", "items": {"type": "string"}},
+        "not_applicable_when": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["kind"],
+        "properties": {
+          "kind": {"type": "string", "enum": ["round_result", "cross_session", "llm_inference"]},
+          "ref": {"type": "string"},
+          "summary": {"type": "string"},
+          "cost_gpu_h": {"type": "number"}
+        }
+      }
+    },
+    "confidence": {
+      "type": "object",
+      "properties": {
+        "self_assessed": {"type": "number"},
+        "signals": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "conflicts_with": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "knowledge_id": {"type": "string"},
+          "note": {"type": "string"}
+        }
+      }
+    },
+    "review_status": {
+      "type": "string",
+      "enum": ["pending", "accepted", "rejected", "superseded"]
+    }
+  }
+}

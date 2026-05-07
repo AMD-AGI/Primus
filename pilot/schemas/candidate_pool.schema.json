@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/candidate_pool.schema.json",
+  "title": "CandidatePool",
+  "description": "Output of Re-Plan worker. Priority-weighted candidates + Strategy Select decision. See README.md §8.10.",
+  "x-status": "stub",
+  "type": "object",
+  "required": ["generated_at", "derived_from", "candidates", "selection"],
+  "properties": {
+    "generated_at": {"type": "string"},
+    "derived_from": {
+      "type": "object",
+      "properties": {
+        "primary": {"type": "string"},
+        "secondary": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "policy": {"type": "string", "enum": ["exploit", "explore", "explore_exploit"]},
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "parent": {"type": "string"},
+          "axis_change": {"type": "object"},
+          "predicted_tps": {"type": "number"},
+          "predicted_gain_pct": {"type": "number"},
+          "confidence": {"type": "number"},
+          "est_cost_gpu_h": {"type": "number"},
+          "novelty_bonus": {"type": "number"},
+          "stability_bonus": {"type": "number"},
+          "priority": {"type": "number"},
+          "tag": {"type": "string"}
+        }
+      }
+    },
+    "selection": {
+      "type": "object",
+      "properties": {
+        "strategy": {"type": "string"},
+        "pick_top_k": {"type": "integer"},
+        "selected": {"type": "array", "items": {"type": "string"}},
+        "rejected": {"type": "array"}
+      }
+    },
+    "priority_formula": {"type": "string"}
+  }
+}

@@ -1,0 +1,5 @@
+# Runtime artifacts: nothing in this directory is committed.
+# The directory itself is kept (via README.md) so the path always resolves.
+*
+!.gitignore
+!README.md

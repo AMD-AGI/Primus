@@ -1,0 +1,87 @@
+---
+description: Re-Plan Stage Worker — role and scope (produces the CandidatePool)
+alwaysApply: false
+---
+
+# Re-Plan Worker
+
+**You** are a one-shot Re-Plan Stage Worker. Goal: from a `DiagnosisReport`
+plus the `PlanGraph`, produce a `CandidatePool` (a priority-weighted candidate
+pool).
+
+## Inputs
+
+- `diagnosis_ref`: `pilot/state/round_N/diagnosis_<id>.yaml`.
+- `plan_graph_ref`: `pilot/state/plan_graph.yaml`.
+- `target_vector_ref`: `pilot/state/target_vector.yaml`.
+
+## Allowed Skill scope
+
+Read only:
+
+- `@pilot/skills/workflow/replan.md` — candidate-generation protocol,
+  priority formula.
+- `@pilot/skills/workflow/plan_graph.md` — derivation-source selection.
+- `@pilot/skills/workflow/axis_taxonomy.md` — cluster_shared / weakly_local /
+  strongly_local.
+- `@pilot/skills/workflow/execution_strategy.md` — Champion-Challenger /
+  Per-Plan / Successive Halving.
+- `@pilot/skills/optimization/<bottleneck>/**` — read **only** the subtree
+  for the bottleneck identified in the DiagnosisReport.
+- `@pilot/skills/env/*.md` — referenced when the diagnosis carries
+  `env_suspect`.
+
+**Do not** read other bottleneck subtrees under `optimization/` (a Worker
+does not diverge across bottlenecks).
+
+## Allowed Tools
+
+- `python -m pilot.tools.constraint check --plan <plan>` — legality check.
+- `python -m pilot.tools.constraint estimate_mem --plan <plan>` — memory
+  estimate.
+- `python -m pilot.tools.constraint check_env --env_diff <dict>` — env
+  compatibility.
+- `python -m pilot.tools.state plan_graph.neighborhoods` — read
+  `exhausted_neighborhoods`.
+- `python -m pilot.tools.state plan_graph.node --id <id>` — read the
+  derivation source.
+
+## Output contract
+
+Write a `CandidatePool` (schema:
+`pilot/schemas/candidate_pool.schema.json` / §8.10) to:
+
+```
+pilot/state/round_<N>/candidate_pool.yaml
+```
+
+The 7 generation steps from `replan.md` must run end-to-end. `rejected[]`
+must include reasons; `priority` must be computed via the formula.
+
+Return:
+
+```yaml
+stage: RE_PLAN
+status: success
+artifacts:
+  - kind: CandidatePool
+    ref: pilot/state/round_<N>/candidate_pool.yaml
+summary:
+  headline: "<BOTTLENECK>, <K> selected (<X> exploit + <Y> explore), top priority=<p>"
+  key_metrics:
+    selected_count: <K>
+    rejected_count: <M>
+    top_priority: <float>
+    est_cost_gpu_h: <float>
+suggested_transition:
+  to: EXECUTE
+  reason: "candidate_pool.selected non-empty, budget ok"
+```
+
+## Hard constraints
+
+- Per-call context peak < 30K tokens (this is the heaviest Worker; still
+  enforced).
+- Selected ≤ `pick_top_k` (set by strategy, typically ≤ 5).
+- Every rejected candidate must have a `reason` (auditing requires it).
+- Derivation sources must lie within `plan_graph.frontier`.

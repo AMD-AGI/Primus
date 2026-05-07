@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://primus.ai/pilot/schemas/calibration_state.schema.json",
+  "title": "CalibrationState",
+  "description": "Online-updated parameters of the Execution Model. Bound to (cluster, model_family, framework). See README.supplements.md §S1.2.",
+  "x-status": "stub",
+  "type": "object",
+  "required": ["calibration_id", "binding", "params"],
+  "properties": {
+    "calibration_id": {"type": "string"},
+    "binding": {
+      "type": "object",
+      "required": ["cluster_id", "model_family", "framework"],
+      "properties": {
+        "cluster_id": {"type": "string"},
+        "cluster_profile_version": {"type": "string"},
+        "model_family": {"type": "string"},
+        "framework": {"type": "string"},
+        "framework_version": {"type": "string"}
+      }
+    },
+    "params": {
+      "type": "object",
+      "properties": {
+        "eta_comp": {"type": "number"},
+        "eta_comm": {"type": "object"},
+        "alpha_overlap": {"type": "number"},
+        "beta_bubble": {"type": "number"},
+        "gamma_act": {"type": "number"},
+        "delta_buffer_gb": {"type": "number"}
+      }
+    },
+    "posterior": {
+      "type": "object",
+      "properties": {
+        "kind": {"type": "string", "enum": ["gaussian", "bootstrap"]},
+        "cov_diag": {"type": "object"},
+        "effective_n": {"type": "number"}
+      }
+    },
+    "residuals": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "properties": {
+          "plan_id": {"type": "string"},
+          "predicted_tps": {"type": "number"},
+          "observed_tps": {"type": "number"},
+          "rel_err": {"type": "number"}
+        }
+      }
+    },
+    "freshness": {
+      "type": "object",
+      "properties": {
+        "last_updated": {"type": "string", "format": "date-time"},
+        "observations_since_reset": {"type": "integer"},
+        "drift_alarm": {"type": "boolean"}
+      }
+    }
+  }
+}
