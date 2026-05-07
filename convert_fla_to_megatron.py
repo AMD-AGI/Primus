@@ -6,6 +6,8 @@ Each FLA 2048-token sequence becomes one "document" in Megatron.
 """
 import struct, time, glob, os
 import numpy as np
+import pyarrow as pa
+import pyarrow.ipc as ipc
 from pathlib import Path
 
 FLA_DATA = "/home/vanbhati@amd.com/flash-linear-attention/legacy/training/data/HuggingFaceFW/fineweb-edu/sample-10BT/train"
@@ -25,6 +27,7 @@ def main():
     bin_path = f"{OUT_PREFIX}.bin"
     idx_path = f"{OUT_PREFIX}.idx"
 
+    # Find all Arrow data shard files (sorted by shard number)
     shard_files = sorted(glob.glob(os.path.join(FLA_DATA, "data-*.arrow")))
     print(f"Found {len(shard_files)} Arrow shard files")
 
@@ -35,21 +38,20 @@ def main():
     with open(bin_path, "wb") as f_bin:
         for i, shard_path in enumerate(shard_files):
             t1 = time.time()
-            # Arrow IPC stream format
-            reader = ipc.open_stream(shard_path)
-            while True:
-                try:
-                    batch = reader.read_next_batch()
-                except StopIteration:
-                    break
-                col = batch.column("input_ids")
-                # col is a ListArray of int32; .values is the flat child
-                flat = col.values.to_numpy(zero_copy_only=False)
+            # Read Arrow IPC stream (HF datasets memory-mapped format)
+            mmap = pa.memory_map(shard_path, "r")
+            table = ipc.open_stream(mmap).read_all()
+            col = table.column("input_ids")
+
+            # Each element is a list of int32. Flatten per-chunk.
+            for chunk in col.chunks:
+                # chunk is a ListArray; .values gives the flat child array
+                flat = chunk.values.to_numpy(zero_copy_only=False)
                 if flat.dtype != np.int32:
                     flat = flat.astype(np.int32)
                 f_bin.write(flat.tobytes())
                 total_tokens += len(flat)
-                num_samples += len(col)
+                num_samples += len(chunk)
 
             elapsed = time.time() - t0
             shard_elapsed = time.time() - t1
@@ -86,10 +88,10 @@ def main():
     print(f"  First 10: {data[:10].tolist()}")
     print(f"  Last 10:  {data[-10:].tolist()}")
 
-    # Cross-check with first shard
-    reader = ipc.open_stream(shard_files[0])
-    batch = reader.read_next_batch()
-    first_sample = batch.column("input_ids")[0].as_py()
+    # Cross-check with first shard (HF datasets writes IPC stream, not IPC file)
+    mmap = pa.memory_map(shard_files[0], "r")
+    tbl = ipc.open_stream(mmap).read_all()
+    first_sample = tbl.column("input_ids")[0].as_py()
     assert data[:10].tolist() == first_sample[:10], "MISMATCH at start!"
     print("  OK — tokens match!")
 

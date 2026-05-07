@@ -87,6 +87,7 @@ class HybridStack(MegatronModule):
         submodules: HybridStackSubmodules,
         residual_in_fp32=False,
         pre_process: bool = True,
+        layer_type_list=None,
         hybrid_attention_ratio: float = 0.0,
         hybrid_mlp_ratio: float = 0.0,
         hybrid_override_pattern: str = None,
@@ -94,6 +95,7 @@ class HybridStack(MegatronModule):
         post_process: bool = True,
         device=None,
         dtype=None,
+        pp_layer_offset: int = 0,
         pg_collection: ProcessGroupCollection = None,
     ) -> None:
         super().__init__(config=config)
@@ -181,6 +183,10 @@ class HybridStack(MegatronModule):
         layer_type_list = []
         num_attention_layers = int(num_layers // 2 * hybrid_attention_ratio)
         num_mamba_layers = num_layers // 2 - num_attention_layers
+
+        if num_attention_layers == 0:
+            return [LayerSymbols.MAMBA, LayerSymbols.MLP] * (num_layers // 2)
+
         num_mamba_per_attention_layer = num_mamba_layers // num_attention_layers
 
         if hybrid_attention_ratio <= 0.5:
@@ -240,6 +246,8 @@ class HybridStack(MegatronModule):
         rotary_pos_emb: Optional[Tensor] = None,
         *,
         inference_params: Optional[BaseInferenceContext] = None,
+        packed_seq_params=None,
+        padding_mask=None,
     ):
         """
         Forward function of the MambaStack class.
