@@ -8,8 +8,10 @@ from megatron.core import tensor_parallel
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     FineGrainedActivationOffloadingInterface as off_interface,
 )
+from megatron.core.transformer.moe.experts import TEGroupedMLP, TEGroupedMLPSubmodules
 from megatron.core.transformer.moe.moe_utils import ProcessGroupCollection
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.typed_torch import apply_module
 from megatron.training.global_vars import get_args
 
 
@@ -50,6 +52,10 @@ class PrimusGroupedMLP(TEGroupedMLP):
                 fused_bias_act_with_probs,
             )
 
+            assert (
+                tokens_per_experts is not None
+            ), "tokens_per_experts is required when `use_turbo_fused_act_with_probs` is True."
+
             if self.activation_func == F.silu and self.config.gated_linear_unit:
                 # dtype is handled inside the fused kernel
                 bias_act_with_probs = fused_bias_act_with_probs(
@@ -88,7 +94,24 @@ class PrimusGroupedMLP(TEGroupedMLP):
         Return:
             output (torch.Tensor): The output of the local experts.
         """
-        permuted_probs = permuted_probs.unsqueeze(-1)
+        assert (
+            tokens_per_expert.device == permuted_local_hidden_states.device
+        ), "tokens_per_expert must be on the same device as permuted_local_hidden_states."
+        # TODO(ruibin): remove extra d2h and h2d by fuse padding into permute kernel
+        if self.config.fp8 or self.config.fp4:
+            tokens_per_expert_cpu: list[int] = tokens_per_expert.tolist()
+            actual_tokens_per_expert_cpu: list[int] = tokens_per_expert_cpu
+            permuted_local_hidden_states, tokens_per_expert = self.quantization_padding(
+                permuted_local_hidden_states, tokens_per_expert_cpu
+            )
+            permuted_probs, _ = self.quantization_padding(
+                permuted_probs.unsqueeze(-1), actual_tokens_per_expert_cpu
+            )
+            tokens_per_expert = torch.tensor(
+                tokens_per_expert_cpu, device=permuted_local_hidden_states.device
+            )
+        else:
+            permuted_probs = permuted_probs.unsqueeze(-1)
 
         if self.config.moe_apply_probs_on_input:
             assert (
@@ -133,6 +156,10 @@ class PrimusGroupedMLP(TEGroupedMLP):
             output = off_interface.group_commit(output, name="moe_act", forced_released_tensors=[fc1_output])
         # NOTE: tokens_per_expert is on GPU, so we need to convert it to a list of ints.
         output = self._apply_bias(output, output_bias, tokens_per_expert.tolist(), permuted_probs)
+
+        # upad and concat the output
+        if self.config.fp8 or self.config.fp4:
+            output = self.quantization_unpadding(output, actual_tokens_per_expert_cpu)
 
         output_bias = None
 

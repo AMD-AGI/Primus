@@ -1550,6 +1550,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
                 # fully sync-free moe
                 permute_max_token_num = num_worst_tokens * config.moe_router_topk
 
+        use_turbo_grouped_gemm = args.use_turbo_grouped_gemm or args.use_turbo_grouped_mlp
         self.deepep_dispatcher = primus_turbo_torch.modules.DeepEPTokenDispatcher(
             num_experts=config.num_moe_experts,
             router_topk=config.moe_router_topk,
@@ -1562,9 +1563,7 @@ class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
             deepep_use_comm_stream=args.turbo_deepep_use_comm_stream,
             deepep_num_use_cu=args.turbo_deepep_num_cu,
             deepep_num_worst_tokens=num_worst_tokens,
-            deepep_use_cuda_num_tokens_per_expert=(
-                args.use_turbo_grouped_mlp and args.moe_use_legacy_grouped_gemm
-            ),
+            deepep_use_cuda_num_tokens_per_expert=use_turbo_grouped_gemm,
             deepep_async_finish=True,
             deepep_allocate_on_comm_stream=True,
         )
