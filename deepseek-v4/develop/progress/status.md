@@ -359,8 +359,8 @@
 | [x] | Smoke B 1×8 BF16 (TP=1 PP=2 EP=4)                                          |        | 2026-05-07 | 10/10 iters; required `pp_tensor_shape` (HC × PP wire packs `[S*K, B, D]`)                                                                                                    |
 | [x] | Smoke C 1×8 BF16 (TP=1 PP=4 EP=2)                                          |        | 2026-05-07 | 10/10 iters; required `pp_tensor_shape` + `pp_token_pre_broadcast` (middle PP stage owns hash-routed layer 2). Log: `p19/smokeC_pp4_ep2_v2.log`                               |
 | [x] | Smoke D 1×8 BF16 (TP=1 PP=2 EP=4 VPP=2)                                    |        | 2026-05-07 | 10/10 iters; VPP-clean. `pp_tensor_shape` also wraps interleaved-1F1B `seq_length`; `pp_token_pre_broadcast` runs all PP broadcasts upfront. Log: `p19/smokeD_pp2_ep4_vpp2_v2_run3.log` |
-| [ ] | Routing snapshot diff = 0 across PP / EP changes (G11)                     |        |            |                                                                                                                                                                               |
-| [ ] | `c10d::allreduce`_ warning gone                                            |        |            |                                                                                                                                                                               |
+| [-] | ~~Routing snapshot diff = 0 across PP / EP changes (G11)~~ | (deferred) | 2026-05-07 | Snapshot dump tooling never landed (would need a hash-router + learned-router dump hook + a cross-config diff script). Defer to a follow-up plan; the P19 smokes (A/B/C/D + EP8 / PP2EP4 profile runs) are the runtime verification of the P15 / P19 patches. |
+| [x] | `c10d::allreduce`\_ warning gone                            |            | 2026-05-07 | Verified absent (zero hits for `c10d::allreduce` / `autograd kernel`) in `p19/smokeC_pp4_ep2_v2.log`, `p19/smokeD_pp2_ep4_vpp2_v2_run3.log`, `p19/profile_ep8.log`, `p19/profile_pp2_ep4.log`. The EP routed-output `all_reduce` fallback in `v4_moe.py` was retired with the dispatcher migration (P14 phase-2) and the `v4_enable_ep_allreduce_fallback` debug gate was deleted in P17 (`e591b893`); P19 confirms no path resurrects the warning at runtime. |
 
 ### Phase 19 patches landed
 
@@ -370,64 +370,12 @@
 | `megatron.deepseek_v4.pp_token_pre_broadcast`  | `primus/backends/megatron/patches/deepseek_v4_get_batch_patches.py`                                               | V4's hash-routed MoE layers (the first `num_hash_layers`) need raw `input_ids` on every PP stage that owns one, but `pretrain_gpt.get_batch` returns `None` on middle PP stages. Two earlier hooks deadlocked under VPP: an in-`DeepseekV4Model.forward` broadcast and a per-call `get_batch` broadcast both raced the interleaved schedule's pre-warmup `recv_forward.wait()`. This patch instead wraps `pp_module.get_forward_backward_func` so each `train_step` first runs **all** `num_microbatches × num_chunks` PP `dist.broadcast` collectives **upfront**, before the schedule's first send/recv, and caches the resulting `(tokens, labels, loss_mask, attention_mask, position_ids, packed_seq_params)` tuples per `(vp_stage, microbatch)`. A companion wrapper around `pretrain_gpt.get_batch` consumes the cache when active and falls back to the original implementation otherwise. Cache is reset in a `finally` after each schedule call. Cost: ~`mbs * seq * 8B` per microbatch (~32 KiB / step on the smoke), dwarfed by the activation P2P. |
 
 
-## Phase 20 (v3) — Convergence / perf gates
-
-> Plan-2 reshuffle (2026-05-01): full V4-Flash numerical alignment
-> (token-0 logits ≤1e-2 vs HF) is **deferred to Phase 22+** along with
-> the HF state-dict adapter. The pre-training release relies on
-> per-module numerical agreement (G2 / G3 / G4 / G5) plus a
-> Megatron-bridge convergence baseline.
-
-
-|     | Task                                                                 | commit | date | note                                                              |
-| --- | -------------------------------------------------------------------- | ------ | ---- | ----------------------------------------------------------------- |
-| [ ] | 200-step convergence vs Megatron-bridge baseline (G12)               |        |      | ±0.05 loss curve match — HF-reference comparison deferred to P22+ |
-| [ ] | TE on/off perf report (G13)                                          |        |      | TFLOPS + HBM delta                                                |
-| [ ] | FP8 follow-up plan scoped                                            |        |      | next plan                                                         |
-| [ ] | Release checklist signed off (G8 / G9 row marked **N/A — deferred**) |        |      | go/no-go                                                          |
-
-
-## Phase 21 (v3) — Docs + handover
-
-> Plan-2 reshuffle (2026-05-01): all dead-code / yaml-comment items
-> moved to Phase 17 so the audit (P18) and release (P20) walk a clean
-> tree. Phase 21 is now docs-only.
-
-
-|     | Task                                                                                      | commit | date | note |
-| --- | ----------------------------------------------------------------------------------------- | ------ | ---- | ---- |
-| [ ] | Refresh techblog (`deepseek-v4/develop/techblog/`) with as-built notes for P13–P20        |        |      |      |
-| [ ] | Refresh `develop/progress/` HTML timeline + `ppt-template-amd.pptx` to plan-2 final state |        |      |      |
-| [ ] | Refresh `develop_deepseek-v4-in-primus.md` with the final on-disk convention              |        |      |      |
-| [ ] | Cross-link the deferred Phase 22+ HF-checkpoint adapter as the entry point for SFT / eval |        |      |      |
-
-
-## Phase 22+ (deferred) — HF state-dict adapter + V4-Flash checkpoint load
-
-> **Status: deferred, not on the pre-training release path.** Plan-2
-> ships from-scratch pre-training; HF-weight loading activates when an
-> SFT or evaluation campaign needs it. Design notes live in
-> `plan-2/02-target-architecture.md` §7 and
-> `plan-2/03-phase-details.md` (P22+ section).
-
-
-|     | Task                                                            | commit | date | note                         |
-| --- | --------------------------------------------------------------- | ------ | ---- | ---------------------------- |
-| [ ] | `DeepSeekV4StateDictAdapter` (HF / inference key map → Primus)  |        |      | from old Phase 17            |
-| [ ] | `scripts/load_v4_flash_check.py` (CPU forward, 64-token prompt) |        |      | from old Phase 17            |
-| [ ] | `tid2eid` loaded as non-trainable buffer                        |        |      | from old Phase 17            |
-| [ ] | Round-trip test (G8)                                            |        |      | from old Phase 17            |
-| [ ] | V4-Flash token-0 logits ≤1e-2 vs HF reference (G9)              |        |      | from old Phase 17 / Phase 20 |
-| [ ] | Numerical alignment report on V4-Flash (G9 extended)            |        |      | from old Phase 20            |
-| [ ] | FP4 / FP8 expert weights documented as out-of-scope             |        |      | from old Phase 17            |
-
-
 ## Blockers / Risks Log
 
 
 | date       | description                                                                                                                       | status                                                 | decision                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 2026-04-28 | PyTorch warns `c10d::allreduce_` autograd kernel is not registered for the EP routed-output allreduce path in `v4_moe.py`         | resolved (`v4_enable_ep_allreduce_fallback` flag gone) | flag removed during P14 phase-2 dispatcher migration; P17 audit confirmed it is no longer in code (only historical docs mention it). Distributed verification that the runtime warning is gone is still tracked into P19.                                                                                                                                                                                                |
+| 2026-04-28 | PyTorch warns `c10d::allreduce_` autograd kernel is not registered for the EP routed-output allreduce path in `v4_moe.py`         | resolved (P14 phase-2 + P17 + P19 runtime verification) | flag removed during P14 phase-2 dispatcher migration; `v4_enable_ep_allreduce_fallback` debug gate deleted in P17 (`e591b893`); P19 smokes (A/B/C/D + EP8 / PP2EP4 profile runs on `mi355-gpu-12`) confirm zero `c10d::allreduce` warnings in stderr — the EP routed-output reduction now flows entirely through `MoEAlltoAllTokenDispatcher` / `MoEFlexTokenDispatcher`. |
 |            | (example) HC 4-stream PP send/recv interface does not directly support 4D tensor                                                  | tracked in plan-2                                      | Plan-2 P15: lift `[S,B,K,D]` to `[S*K,B,D]` for PP P2P; revisit a 4D PP send path in P21                                                                                                                                                                                                                                                                                                                                 |
 | 2026-05-01 | Current attention does not match real V4 (single-latent KV / q_norm / kv_norm / grouped O all missing)                            | open                                                   | Plan-2 P13 rebases on `MLASelfAttention` and lands the missing pieces                                                                                                                                                                                                                                                                                                                                                    |
 | 2026-05-01 | HashRouter has no learnable gate weight; clamped SwiGLU clamps post-mul instead of pre-mul; `w1`/`w3` fused                       | resolved (P14 phase-1)                                 | both routers now share a learnable `weight` Parameter; activation rewritten as pre-multiplication clamp; `ClampedSwiGLUMLP` uses separate `w1` / `w3` Linears (state-dict parity with HF)                                                                                                                                                                                                                                |
