@@ -1,0 +1,76 @@
+{
+  "generated_at": "2026-04-24T09:10:26Z",
+  "summary": {
+    "total_reports": 1,
+    "verified_reports": 1,
+    "total_backends": 1,
+    "latest_report_date": "2026-04-21"
+  },
+  "backends": [
+    {
+      "key": "torchtitan",
+      "label": "TorchTitan",
+      "count": 1
+    }
+  ],
+  "reports": [
+    {
+      "id": "torchtitan-upstream-main-2026-04-21",
+      "title": "Primus TorchTitan vs upstream main",
+      "backend": {
+        "key": "torchtitan",
+        "label": "TorchTitan"
+      },
+      "generated_at": "2026-04-21",
+      "status": "verified",
+      "scope": "Current TorchTitan bundled in Primus vs upstream pytorch/torchtitan origin/main.",
+      "local": {
+        "source_path": "third_party/torchtitan",
+        "version": "0.1.0",
+        "commit": "5fb7cc2e",
+        "commit_date": "2025-10-15"
+      },
+      "upstream": {
+        "repo": "https://github.com/pytorch/torchtitan",
+        "ref": "origin/main",
+        "version": "0.2.2",
+        "commit": "fc54b897",
+        "commit_date": "2026-04-20"
+      },
+      "stats": {
+        "commit_gap": 493,
+        "diff_files": 447,
+        "insertions": 56071,
+        "deletions": 17716
+      },
+      "integration": {
+        "backend_files": 90,
+        "tracked_files": 147,
+        "integration_model": "third_party/torchtitan + Primus outer adapter / trainer / patches"
+      },
+      "highlights": [
+        "Primus bundles TorchTitan 0.1.0 while upstream main is at 0.2.2.",
+        "Upstream main tracks the latest nightly on CUDA cu130 and ROCm 7.1, while the current Primus baseline is centered on cu126.",
+        "Primus has a non-trivial outer integration layer with direct dependencies on upstream internal paths."
+      ],
+      "artifacts": [
+        {
+          "label": "Detailed Report (PDF)",
+          "path": "./reports/torchtitan/upstream-main/report.pdf",
+          "format": "pdf",
+          "language": "en",
+          "kind": "detail",
+          "primary": true
+        },
+        {
+          "label": "One-Page Summary (PDF)",
+          "path": "./reports/torchtitan/upstream-main/summary.pdf",
+          "format": "pdf",
+          "language": "en",
+          "kind": "summary",
+          "primary": false
+        }
+      ]
+    }
+  ]
+}

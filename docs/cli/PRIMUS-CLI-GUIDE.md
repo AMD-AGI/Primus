@@ -97,7 +97,7 @@ Primus CLI supports three execution modes, each suitable for different scenarios
 **Common Options**:
 | Option | Description | Example |
 |--------|-------------|---------|
-| `--image IMAGE` | Specify container image | `--image rocm/primus:v26.1` |
+| `--image IMAGE` | Specify container image | `--image rocm/primus:v26.2` |
 | `--volume PATH[:PATH]` | Mount directory | `--volume /data:/data` |
 | `--cpus N` | Limit CPU cores | `--cpus 16` |
 | `--memory SIZE` | Limit memory size | `--memory 128G` |
@@ -174,7 +174,7 @@ Primus CLI supports three execution modes, each suitable for different scenarios
 ./primus-cli slurm srun -N 4 -- preflight --report-file-name preflight-report-4N
 
 # if you are using AINIC in your cluster, use the appropriate configuration file
-# for preflight test, set docker image to rocm/primus:v26.1 in the configuration file
+# for preflight test, set docker image to rocm/primus:v26.2 in the configuration file
 ./primus-cli --config runner/use_ainic.yaml slurm srun -N 2 -- preflight --report-file-name preflight-report-2N
 ```
 
@@ -215,7 +215,7 @@ slurm:
 
 # Container configuration
 container:
-  image: "rocm/primus:v26.1"
+  image: "rocm/primus:v26.2"
   options:
     cpus: "32"
     memory: "256G"
@@ -645,7 +645,7 @@ Step 4: primus-cli-container.sh (on each node)
   ├─ Load container.* config (image, devices, mounts, etc.)
   ├─ Parse container params: --image rocm/megatron-lm:v25.8_py310
   ├─ Merge config and CLI params
-  │   Config: image=rocm/primus:v26.1
+  │   Config: image=rocm/primus:v26.2
   │   CLI: --image rocm/megatron-lm:v25.8_py310
   │   Result: image=rocm/megatron-lm:v25.8_py310
   ├─ Build container options

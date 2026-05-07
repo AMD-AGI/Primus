@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=docker.io/rocm/primus:v26.1
+ARG BASE_IMAGE=docker.io/rocm/primus:v26.2
 FROM ${BASE_IMAGE}
 
 ARG PRIMUS_TURBO_COMMIT
@@ -22,12 +22,14 @@ RUN rm -rf /var/lib/apt/lists/*
 # ---------------------------------------------------------------------------
 ENV ROCSHMEM_HOME=/opt/rocshmem
 ENV UCX_HOME=/opt/ucx
-ENV MPI_HOME=/opt/ompi
+# ENV MPI_HOME=/opt/ompi
+# Use the system OpenMPI prefix from the v26.2 base image.
+ENV MPI_HOME=/usr/lib/x86_64-linux-gnu/openmpi
 ENV ROCM_HOME=/opt/rocm
 ENV PRIMUS_TURBO_FRAMEWORK=${PRIMUS_TURBO_FRAMEWORK}
 
-ENV PATH="/opt/ompi/bin:/opt/ompi/sbin:${PATH}"
-ENV LD_LIBRARY_PATH="/opt/ompi/lib:${LD_LIBRARY_PATH}"
+# ENV PATH="/opt/ompi/bin:/opt/ompi/sbin:${PATH}"
+# ENV LD_LIBRARY_PATH="/opt/ompi/lib:${LD_LIBRARY_PATH}"
 ENV GPU_ARCHS="gfx942;gfx950"
 ENV PYTORCH_ROCM_ARCH="gfx942;gfx950"
 ENV HCC_AMDGPU_TARGET="gfx942,gfx950"
@@ -57,7 +59,7 @@ RUN pip3 uninstall aiter amd-aiter -y || true && \
     cd aiter && \
     git checkout ${PRIMUS_TURBO_AITER_COMMIT} && \
     git submodule update --init --recursive && \
-    PREBUILD_KERNELS=3 python3 setup.py develop
+    PREBUILD_KERNELS=3 pip install --no-cache-dir --use-pep517 .
 
 RUN cd /opt && \
     git clone https://github.com/AMD-AGI/Primus-Turbo.git && \

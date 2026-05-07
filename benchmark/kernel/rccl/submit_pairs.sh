@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DOCKER_IMAGE="rocm/primus:v26.1"
+DOCKER_IMAGE="rocm/primus:v26.2"
 #DOCKER_IMAGE="docker.gpuperf:5000/aai_2026_training/rocm/primus_megatron:v25.11_gpt_oss_sink"
 #DOCKER_IMAGE="docker.gpuperf:5000/gpuperf/primus:v26.1_sinkfa"
 NNODES=2
@@ -19,13 +19,12 @@ NODELISTS=(
   "smci355-ccs-aus-n05-33,smci355-ccs-aus-n06-25"
   "smci355-ccs-aus-n06-33,smci355-ccs-aus-n10-29"
 )
-``
 
 echo "Submitting ${#NODELISTS[@]} jobs..."
+export DOCKER_IMAGE NNODES
 for nodelist in "${NODELISTS[@]}"; do
   echo ">> $nodelist"
-  DOCKER_IMAGE="$DOCKER_IMAGE" NNODES="$NNODES" \
-    sbatch -N"$NNODES" -w "$nodelist" -p "$PARTITION" "$SCRIPT"
+  sbatch -N "${NNODES}" -w "$nodelist" -p "$PARTITION" "$SCRIPT"
 done
 
 echo "Done."

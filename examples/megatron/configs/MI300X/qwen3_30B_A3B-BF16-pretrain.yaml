@@ -52,7 +52,6 @@ modules:
       test_data_path: null
 
       gradient_accumulation_fusion: true
-      moe_use_legacy_grouped_gemm: true
 
       # ckpt
       finetune: false

@@ -101,6 +101,9 @@ PRIMUS_PATH=$(realpath "$(dirname "$0")/..")
 export DATA_PATH=${DATA_PATH:-"${PRIMUS_PATH}/data"}
 export HF_HOME=${HF_HOME:-"${DATA_PATH}/huggingface"}
 
+# shellcheck disable=SC1091
+source "${PRIMUS_PATH}/runner/helpers/envs/path_utils.sh"
+
 LOG_INFO_RANK0 "Pip installing required packages ..."
 if [ "${BACKEND:-}" != "MaxText" ]; then
     pip install -r "$PRIMUS_PATH/requirements.txt"  --quiet
@@ -166,6 +169,9 @@ LOG_INFO_RANK0 ""
 HIP_VISIBLE_DEVICES=$(seq -s, 0 $((GPUS_PER_NODE - 1)))
 export HIP_VISIBLE_DEVICES
 
+# Keep ROCm libraries ahead of any system-provided HSA runtime.
+ensure_rocm_ld_library_path
+
 # ----------------- NCCL and Network Settings -----------------
 # VERSION, WARN, INFO, DEBUG, TRACE
 export NCCL_DEBUG=${NCCL_DEBUG:-}
@@ -213,26 +219,38 @@ if [ "$USING_AINIC" == "1" ]; then
         export NCCL_PXN_DISABLE=0
         export RCCL_LL128_FORCE_ENABLE=1
 
-        export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib
+        path_append_unique LD_LIBRARY_PATH \
+            /usr/lib/x86_64-linux-gnu \
+            /usr/lib/x86_64-linux-gnu/libibverbs \
+            "${RCCL_HOME_DIR}/build/release" \
+            "${ANP_HOME_DIR}/build" \
+            "${MPI_HOME_DIR}/lib"
     else
-        export ANP_HOME_DIR=${ANP_HOME_DIR:-"/opt/amd-anp"}
-        export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/opt/rccl"}
+        export ANP_HOME_DIR=${ANP_HOME_DIR:-"/workspace/amd-anp"}
+        export RCCL_HOME_DIR=${RCCL_HOME_DIR:-"/workspace/rccl"}
         export MPI_HOME_DIR=${MPI_HOME_DIR:-"/opt/ompi"}
 
         export NCCL_MAX_P2P_CHANNELS=56
         export NCCL_DMABUF_ENABLE=0
         export NCCL_IB_QPS_PER_CONNECTION=1
 
-        export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu/libibverbs:${RCCL_HOME_DIR}/build/release:${ANP_HOME_DIR}/build:${MPI_HOME_DIR}/lib:$LD_LIBRARY_PATH
+        path_append_unique LD_LIBRARY_PATH \
+            /usr/lib/x86_64-linux-gnu \
+            /usr/lib/x86_64-linux-gnu/libibverbs \
+            "${RCCL_HOME_DIR}/build/release" \
+            "${ANP_HOME_DIR}/build" \
+            "${MPI_HOME_DIR}/lib"
     fi
     # Check which NCCL net plugin library is present under ${ANP_HOME_DIR}/build and set accordingly
-    if [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
+    if [ -n "${NCCL_NET_PLUGIN:-}" ]; then
+        export NCCL_NET_PLUGIN
+    elif [ -f "${ANP_HOME_DIR}/build/librccl-anp.so" ]; then
         export NCCL_NET_PLUGIN=librccl-anp.so
     elif [ -f "${ANP_HOME_DIR}/build/librccl-net.so" ]; then
         export NCCL_NET_PLUGIN=librccl-net.so
     else
-        LOG_ERROR "Error: Neither librccl-anp.so nor librccl-net.so found in ${ANP_HOME_DIR}/build."
-        exit 1
+        export NCCL_NET_PLUGIN=librccl-anp.so
+        LOG_INFO_RANK0 "AINIC plugin not found under ${ANP_HOME_DIR}/build; defaulting NCCL_NET_PLUGIN=${NCCL_NET_PLUGIN}."
     fi
 
     LOG_INFO_RANK0 "RCCL_HOME_DIR: $RCCL_HOME_DIR"
@@ -244,7 +262,7 @@ else
 fi
 
 # Disable cross NIC communication for NCCL
-export NCCL_CROSS_NIC=0
+export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}
 
 # Dynamically get InfiniBand Host Channel Adapter index for NCCL if not set
 if [ -z "${NCCL_IB_HCA}" ]; then
