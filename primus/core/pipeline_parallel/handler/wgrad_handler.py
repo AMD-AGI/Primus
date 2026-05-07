@@ -44,6 +44,11 @@ class WGradRunningCache:
             cls.cache[minibatch][chunk][idx] = None  # release memory
 
         del cls.cache[minibatch][chunk]
+        # Drop the empty outer minibatch entry so the class-level ``cache``
+        # dict does not accumulate empty {minibatch: {}} placeholders across
+        # training steps.
+        if not cls.cache[minibatch]:
+            del cls.cache[minibatch]
 
     @classmethod
     def is_empty(cls):

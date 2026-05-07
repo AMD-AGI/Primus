@@ -505,7 +505,12 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
-    def _run_deepseek_v2_lite_zbv_fp8_case(self, tag: str, env_override: dict):
+    def _run_deepseek_v2_lite_zbv_fp8_case(
+        self,
+        tag: str,
+        env_override: dict,
+        extra_args: list[str] = None,
+    ):
         base_env = {
             "BACKEND": "megatron",
             "REBUILD_PRIMUS_TURBO": "0",
@@ -531,6 +536,7 @@ class TestMegatronTrainer(PrimusUT):
             tag,
             exp_path="tests/trainer/test_megatron_trainer_zbv_fp8.yaml",
             env_override=base_env,
+            extra_args=extra_args,
         )
         self.assertIn("Training completed.", stdout)
         return stdout
@@ -578,6 +584,32 @@ class TestMegatronTrainer(PrimusUT):
                 "PRIMUS_USE_TURBO_GROUPED_MLP": "0",
                 "PRIMUS_USE_TURBO_PARALLEL_LINEAR": "0",
             },
+        )
+        self.assertIn("[Patch:megatron.pp.legacy_grouped_mlp_wgrad_split]", stdout)
+
+    def test_deepseek_v2_lite_bf16_lagacy_gg_zbv_formatted(self):
+        stdout = self._run_deepseek_v2_lite_zbv_fp8_case(
+            "deepseek_v2_lite_bf16_lagacy_gg_zbv_formatted",
+            {
+                "MASTER_PORT": "12454",
+                "PRIMUS_ENABLE_TURBO": "0",
+                "PRIMUS_USE_LEGACY_GG": "1",
+                "PRIMUS_USE_TURBO_ATTENTION": "0",
+                "PRIMUS_USE_TURBO_GROUPED_MLP": "0",
+                "PRIMUS_USE_TURBO_PARALLEL_LINEAR": "0",
+            },
+            extra_args=[
+                "--fp8",
+                "false",
+                "--moe_use_legacy_grouped_gemm",
+                "1",
+                "--use_turbo_attention",
+                "0",
+                "--use_turbo_grouped_mlp",
+                "0",
+                "--use_turbo_parallel_linear",
+                "0",
+            ],
         )
         self.assertIn("[Patch:megatron.pp.legacy_grouped_mlp_wgrad_split]", stdout)
 

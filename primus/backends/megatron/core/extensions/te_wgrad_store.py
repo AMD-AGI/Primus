@@ -23,6 +23,7 @@ logic internally; we only intercept the final wgrad closure.
 
 import queue
 
+import torch
 from megatron.training import get_args
 from transformer_engine.pytorch.module._common import WeightGradStore
 
@@ -38,9 +39,35 @@ def _primus_init(self, delay_wgrad_compute=False, ub_bulk_wgrad=False):
     self.enabled = True
 
 
+def _snapshot_for_wgrad(item):
+    """Take an independent storage snapshot so the wgrad closure outlives
+    Megatron fine_grained_callables ``untyped_storage().resize_(0)``.
+
+    TE's call sites pass ``tensor_list`` in a few shapes:
+      - ``[inputmat_total, grad_output]``
+      - ``[ln_out_total, dact]``
+      - ``[inputmats(list), grad_output(list), wgrad_list(list)]``
+    Recursively detach+clone Tensor leaves so that none of them keep a
+    reference to a storage that the schedule node may release after the
+    underlying TE backward returns.
+    """
+    if item is None:
+        return None
+    if isinstance(item, torch.Tensor):
+        return item.detach().clone()
+    if isinstance(item, (list, tuple)):
+        cloned = [_snapshot_for_wgrad(t) for t in item]
+        return type(item)(cloned)
+    # Quantized tensor bases / other opaque objects: pass through. TE
+    # owns their lifetime and clones internally where necessary.
+    return item
+
+
 def _primus_put(self, tensor_list, func):
     """Redirect wgrad closure to Primus pipeline scheduling."""
     args = get_args()
+
+    tensor_list = [_snapshot_for_wgrad(t) for t in tensor_list]
 
     def wgrad_func():
         func(*tensor_list)

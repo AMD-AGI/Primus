@@ -90,25 +90,38 @@ def patch_te_general_gemm_workspace_helper(ctx: PatchContext):
     # in some half-applied state.
     try:
         from primus.backends.transformer_engine.pytorch.module.base import (
-            get_workspace as primus_get_workspace,
+            get_workspace as workspace_helper,
         )
+        helper_source = "Primus"
     except (ImportError, ModuleNotFoundError) as exc:
-        te_ext._get_workspace = None
-        log_rank_0(
-            "[Patch:megatron.te.general_gemm_workspace_helper] "
-            f"Primus workspace helper unavailable ({exc}); disabled workspace injection"
-        )
-        return
+        # The TE-native helper is the upstream fallback Megatron itself uses
+        # when its own optional import succeeds. Reusing it keeps
+        # ``te_general_gemm`` callable even when the Primus extension chain
+        # is unavailable; setting ``_get_workspace`` to None would instead
+        # skip the required ``workspace`` kwarg and crash inside TE.
+        try:
+            from transformer_engine.pytorch.module.base import (
+                get_workspace as workspace_helper,
+            )
+            helper_source = f"TE (Primus helper unavailable: {exc})"
+        except (ImportError, ModuleNotFoundError) as te_exc:
+            te_ext._get_workspace = None
+            log_rank_0(
+                "[Patch:megatron.te.general_gemm_workspace_helper] "
+                f"No workspace helper available (Primus: {exc}; TE: {te_exc}); "
+                "disabled workspace injection"
+            )
+            return
 
-    te_ext._get_workspace = primus_get_workspace
+    te_ext._get_workspace = workspace_helper
 
     if mode == "unknown":
         log_rank_0(
             "[Patch:megatron.te.general_gemm_workspace_helper] "
-            "Could not inspect TE general_gemm signature; rebound workspace helper to Primus get_workspace"
+            f"Could not inspect TE general_gemm signature; rebound workspace helper to {helper_source} get_workspace"
         )
     else:
         log_rank_0(
             "[Patch:megatron.te.general_gemm_workspace_helper] "
-            "Rebound workspace helper for megatron.core.extensions.transformer_engine.te_general_gemm"
+            f"Rebound workspace helper for megatron.core.extensions.transformer_engine.te_general_gemm using {helper_source} get_workspace"
         )

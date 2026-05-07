@@ -22,7 +22,16 @@ from megatron.core.fusions.fused_bias_geglu import bias_geglu_impl
 from megatron.core.fusions.fused_bias_gelu import bias_gelu_impl
 from megatron.core.fusions.fused_bias_swiglu import bias_swiglu_impl
 from megatron.core.jit import jit_fuser
-from megatron.core.process_groups_config import ModelCommProcessGroups
+
+# ``ModelCommProcessGroups`` was renamed to ``ProcessGroupCollection`` upstream.
+# Keep both available so this deprecated module can be used against either
+# pre- or post-rename Megatron, with the legacy name preferred when present.
+try:
+    from megatron.core.process_groups_config import ModelCommProcessGroups
+except ImportError:
+    from megatron.core.process_groups_config import (
+        ProcessGroupCollection as ModelCommProcessGroups,
+    )
 from megatron.core.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
     _initialize_affine_weight_gpu,
@@ -34,7 +43,40 @@ from megatron.core.transformer.mlp import (
     apply_swiglu_sharded_factory,
 )
 from megatron.core.transformer.module import MegatronModule
-from megatron.core.transformer.moe import grouped_gemm_util as gg
+
+# Megatron upstream removed ``megatron.core.transformer.moe.grouped_gemm_util``
+# together with the legacy GroupedMLP class. The old module exposed
+# ``ops``, ``grouped_gemm_is_available`` and ``assert_grouped_gemm_is_available``
+# on top of the standalone ``grouped_gemm`` package, and ``GroupedMLP`` calls
+# both ``gg.assert_grouped_gemm_is_available()`` (in ``__init__``) and
+# ``gg.ops.gmm`` (in the original forward). When the alias is gone we keep
+# this deprecated module functional by binding ``gg`` to a thin shim around
+# the upstream ``grouped_gemm`` package.
+try:
+    from megatron.core.transformer.moe import grouped_gemm_util as gg
+except ImportError:  # pragma: no cover - depends on upstream Megatron version
+    from types import SimpleNamespace
+
+    try:
+        import grouped_gemm as _grouped_gemm
+    except ImportError:
+        _grouped_gemm = None
+
+    def _grouped_gemm_is_available():
+        return _grouped_gemm is not None
+
+    def _assert_grouped_gemm_is_available():
+        assert _grouped_gemm_is_available(), (
+            "Grouped GEMM is not available. Please run "
+            "`pip install git+https://github.com/fanshiqing/grouped_gemm@v1.1.4`."
+        )
+
+    gg = SimpleNamespace(
+        ops=_grouped_gemm.ops if _grouped_gemm_is_available() else None,
+        backend=_grouped_gemm.backend if _grouped_gemm_is_available() else None,
+        grouped_gemm_is_available=_grouped_gemm_is_available,
+        assert_grouped_gemm_is_available=_assert_grouped_gemm_is_available,
+    )
 from megatron.core.transformer.spec_utils import build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_object_for_checkpoint

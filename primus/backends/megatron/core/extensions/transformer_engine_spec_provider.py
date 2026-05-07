@@ -40,6 +40,50 @@ from primus.backends.megatron.core.extensions.primus_turbo import (
 from primus.backends.megatron.training.global_vars import get_primus_args
 
 
+_LEGACY_GROUPED_MLP_CLS = None
+
+
+def _build_legacy_grouped_mlp_class():
+    """Return an adapter class that bridges DeprecatedGroupedMLP into new MoELayer.
+
+    The Megatron upstream (``moe_layer.MoELayer``) calls
+    ``build_module(experts_spec, num_local_experts, config, pg_collection=...)``
+    with the new ``pg_collection`` keyword. The Primus-bundled
+    ``DeprecatedGroupedMLP`` predates that signature and only accepts the
+    legacy ``model_comm_pgs`` keyword, so a thin adapter is needed to keep
+    the constructor calls compatible without forking the deprecated module.
+    """
+    global _LEGACY_GROUPED_MLP_CLS
+    if _LEGACY_GROUPED_MLP_CLS is not None:
+        return _LEGACY_GROUPED_MLP_CLS
+
+    from primus.backends.megatron.core.transformer.moe.deprecated_20251209.experts import (
+        DeprecatedGroupedMLP,
+    )
+
+    class PrimusLegacyGroupedMLP(DeprecatedGroupedMLP):
+        """DeprecatedGroupedMLP shim that accepts the new ``pg_collection`` kwarg."""
+
+        def __init__(
+            self,
+            num_local_experts: int,
+            config,
+            pg_collection=None,
+            model_comm_pgs=None,
+            submodules=None,
+        ):
+            del submodules  # DeprecatedGroupedMLP holds ``weight1`` / ``weight2`` directly.
+            comm_pgs = model_comm_pgs if model_comm_pgs is not None else pg_collection
+            super().__init__(
+                num_local_experts=num_local_experts,
+                config=config,
+                model_comm_pgs=comm_pgs,
+            )
+
+    _LEGACY_GROUPED_MLP_CLS = PrimusLegacyGroupedMLP
+    return PrimusLegacyGroupedMLP
+
+
 class PrimusTurboSpecProvider(BackendSpecProvider):
     """A protocol for providing the submodules used in Spec building."""
 
@@ -118,6 +162,18 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             return PrimusTurboGroupedMLP, TEGroupedMLPSubmodules(
                 linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
             )
+        elif (
+            moe_use_grouped_gemm
+            and moe_use_legacy_grouped_gemm
+            and not self.cfg.use_turbo_grouped_mlp
+        ):
+            # Legacy grouped-GEMM path without PrimusTurbo: Megatron upstream
+            # removed the original ``GroupedMLP`` class, but the Primus
+            # pipeline scheduler still relies on its grouped-gemm wgrad-split
+            # semantics (see legacy_grouped_mlp_wgrad_patches.py). Route this
+            # combination through the bundled DeprecatedGroupedMLP so the
+            # zerobubble delayed wgrad path remains intact.
+            return _build_legacy_grouped_mlp_class(), None
         else:
             if not is_te_min_version("1.7.0.dev0"):
                 warnings.warn(

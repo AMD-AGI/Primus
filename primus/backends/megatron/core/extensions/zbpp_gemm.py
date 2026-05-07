@@ -12,34 +12,75 @@ from typing import Callable, Tuple
 
 import grouped_gemm
 import torch
-from primus_turbo.pytorch.core.backend import BackendType
-from primus_turbo.pytorch.core.low_precision import (
-    Format,
-    ScalingGranularity,
-    float8_e4m3,
-    float8_e5m2,
-)
-from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
-from primus_turbo.pytorch.kernels.gemm.gemm_impl import gemm_impl
-from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
-    grouped_gemm_compute_offs,
-)
-from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
-    grouped_gemm_fp8_impl as _grouped_gemm_fp8_impl,
-)
-from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
-    grouped_gemm_fp8_variable_k_impl,
-)
-from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_impl import (
-    grouped_gemm_impl,
-    grouped_gemm_variable_k_impl,
-)
-from primus_turbo.pytorch.kernels.quantization.quantization_impl import (
-    quant_fp8_blockwise_for_weight_impl,
-    quant_fp8_blockwise_impl,
-    quant_fp8_blockwise_segment_m_impl,
-)
-from primus_turbo.pytorch.ops.quantization import quantize_fp8
+
+# ``primus_turbo`` provides the FP8 GEMM / grouped-GEMM kernels and the
+# ``turbo-gg`` BF16 grouped-GEMM backend used by the FP8 / Turbo split-wgrad
+# autograd Functions below. The ``lagacy-gg`` BF16 backend (used by the legacy
+# GroupedMLP wgrad-split patch) only depends on the standalone ``grouped_gemm``
+# package, so we tolerate primus_turbo being unimportable on environments
+# missing transitive deps such as ``csrc``. Symbols are bound to ``None`` when
+# the import fails; the autograd Functions / dispatcher branches that actually
+# need them raise an explicit error when invoked.
+_PRIMUS_TURBO_IMPORT_ERROR: Exception | None = None
+try:
+    from primus_turbo.pytorch.core.backend import BackendType
+    from primus_turbo.pytorch.core.low_precision import (
+        Format,
+        ScalingGranularity,
+        float8_e4m3,
+        float8_e5m2,
+    )
+    from primus_turbo.pytorch.kernels.gemm.gemm_fp8_impl import gemm_fp8_impl
+    from primus_turbo.pytorch.kernels.gemm.gemm_impl import gemm_impl
+    from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
+        grouped_gemm_compute_offs,
+    )
+    from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
+        grouped_gemm_fp8_impl as _grouped_gemm_fp8_impl,
+    )
+    from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_fp8_impl import (
+        grouped_gemm_fp8_variable_k_impl,
+    )
+    from primus_turbo.pytorch.kernels.grouped_gemm.grouped_gemm_impl import (
+        grouped_gemm_impl,
+        grouped_gemm_variable_k_impl,
+    )
+    from primus_turbo.pytorch.kernels.quantization.quantization_impl import (
+        quant_fp8_blockwise_for_weight_impl,
+        quant_fp8_blockwise_impl,
+        quant_fp8_blockwise_segment_m_impl,
+    )
+    from primus_turbo.pytorch.ops.quantization import quantize_fp8
+except Exception as _e:  # pragma: no cover - depends on environment availability
+    _PRIMUS_TURBO_IMPORT_ERROR = _e
+    BackendType = None
+    Format = None
+    ScalingGranularity = None
+    float8_e4m3 = None
+    float8_e5m2 = None
+    gemm_fp8_impl = None
+    gemm_impl = None
+    grouped_gemm_compute_offs = None
+    _grouped_gemm_fp8_impl = None
+    grouped_gemm_fp8_variable_k_impl = None
+    grouped_gemm_impl = None
+    grouped_gemm_variable_k_impl = None
+    quant_fp8_blockwise_for_weight_impl = None
+    quant_fp8_blockwise_impl = None
+    quant_fp8_blockwise_segment_m_impl = None
+    quantize_fp8 = None
+
+
+def _require_primus_turbo(feature: str) -> None:
+    """Raise a clear error when primus_turbo is needed but unavailable."""
+    if _PRIMUS_TURBO_IMPORT_ERROR is not None:
+        raise ImportError(
+            f"{feature} requires primus_turbo, but importing primus_turbo failed "
+            f"({_PRIMUS_TURBO_IMPORT_ERROR}). Install/repair primus_turbo, or use "
+            f"the 'lagacy-gg' grouped-gemm backend / BF16 path that does not "
+            f"depend on primus_turbo."
+        ) from _PRIMUS_TURBO_IMPORT_ERROR
+
 
 from primus.backends.megatron.core.pipeline_parallel.wgrad_adapter import (
     insert_wgrad_func_into_cache,
@@ -68,6 +109,7 @@ class LinearWithWeightGradientStore(torch.autograd.Function):
         weight: torch.Tensor,
         bias: torch.Tensor,
     ):
+        _require_primus_turbo("LinearWithWeightGradientStore")
         ctx.use_bias = bias is not None
         ctx.save_for_backward(input, weight)
         ctx.weight_main_grad = weight.main_grad
@@ -157,7 +199,21 @@ class GroupedLinearWithWeightGradientStore(torch.autograd.Function):
             weight = weight.view(*weight_reshape_size)
 
         ctx.group_offs = group_offs
-        ctx.save_for_backward(input, weight, group_lens)
+        # Megatron's fine_grained_callables (overlap_moe_expert_parallel_comm)
+        # marks the mlp schedule node with ``free_input=True`` whenever
+        # ``config.fp8 is not None or config.fp4 is not None``. With
+        # ``--fp8 false`` (a Python bool) the fp8 attribute is ``False`` -
+        # not ``None`` - so upstream still treats it as truthy and resizes
+        # the mlp node input storage to 0 right after this forward returns.
+        # That input is the same tensor object we'd otherwise hand to
+        # ``save_for_backward``, so by the time backward runs ``ctx.saved_tensors``
+        # would yield a tensor with ``numel != 0`` but a zero-byte storage and
+        # any further ``clone()``/``view()``/GEMM call hits
+        # ``HIP error: invalid argument``. Snapshot input here while the
+        # storage is still live so the deferred wgrad path owns an
+        # independent storage.
+        input_for_save = input.detach().clone()
+        ctx.save_for_backward(input_for_save, weight, group_lens)
 
         output = group_gemm_backend_func(
             input,
@@ -185,6 +241,18 @@ class GroupedLinearWithWeightGradientStore(torch.autograd.Function):
             trans_b=not ctx.trans_b,
         )
 
+        # The deferred wgrad closure runs later (when WGradRunningCache /
+        # zero-bubble WeightGradStore flushes), well after this backward
+        # returns. With Megatron's overlap_moe_expert_parallel_comm /
+        # fine_grained_callables, ``grad_output`` (the dgrad of the next
+        # node) is released right after this backward returns via
+        # ``g.untyped_storage().resize_(0)``. Snapshot it now while the
+        # storage is still live so the closure owns an independent buffer.
+        # ``input`` was already cloned in forward(), so its storage is
+        # independent of any upstream free_input path - reuse it directly.
+        grad_output_for_wgrad = grad_output.detach().clone()
+        input_for_wgrad = input
+
         def pre_process(_grad_output_, _input_, trans_b, async_op=True):
             # gather from SP region if sequence parallel if needed
             if trans_b:
@@ -207,7 +275,7 @@ class GroupedLinearWithWeightGradientStore(torch.autograd.Function):
 
         insert_wgrad_func_into_cache(
             weight,
-            functools.partial(pre_process, grad_output, input, ctx.trans_b),
+            functools.partial(pre_process, grad_output_for_wgrad, input_for_wgrad, ctx.trans_b),
             functools.partial(process_wgrad, weight, ctx.weight_shape_ori),
         )
 
@@ -225,6 +293,7 @@ def grouped_gemm_with_weight_gradient_store(
     gg_backend: str = "turbo-gg",
 ):
     if gg_backend == "turbo-gg":
+        _require_primus_turbo("grouped_gemm_with_weight_gradient_store(turbo-gg)")
         if group_offs is None:
             group_offs = grouped_gemm_compute_offs(group_lens)
         group_gemm_backend_func = functools.partial(
@@ -274,6 +343,7 @@ class LinearFP8WithWeightGradientStore(torch.autograd.Function):
         weight: torch.Tensor,
         quant_config,
     ):
+        _require_primus_turbo("LinearFP8WithWeightGradientStore")
         granularity = quant_config.granularity
         fwd_dtype = _get_fp8_dtype(quant_config.format, True)
         out_dtype = input.dtype
@@ -495,6 +565,7 @@ class GroupedLinearFP8WithWeightGradientStore(torch.autograd.Function):
         weight_reshape_size: Tuple | None,
         quant_config,
     ):
+        _require_primus_turbo("GroupedLinearFP8WithWeightGradientStore")
         granularity = quant_config.granularity
         fwd_dtype = _get_fp8_dtype(quant_config.format, True)
         out_dtype = input.dtype

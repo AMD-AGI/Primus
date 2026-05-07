@@ -24,6 +24,9 @@ from megatron.training import get_args
 from primus.backends.megatron.core.pipeline_parallel.primuspipe.handlers import (
     megatron_primuspipe_handler_dict,
 )
+from primus.backends.megatron.core.pipeline_parallel.primuspipe.handlers.communication_handler import (
+    reset_pp_comm_caches,
+)
 from primus.core.pipeline_parallel.handler.wgrad_handler import WGradRunningCache
 from primus.core.pipeline_parallel.scheduler.schedule_table_factory import (
     produce_schedule_instance,
@@ -153,6 +156,16 @@ class PrimusPipelineParallelLauncher:
         pg_collection: Optional[ProcessGroupCollection] = None,
         force_all_reduce: Optional[bool] = False,
     ):
+        # Reset per-step state so step N+1 does not inherit GPU-tensor-holding
+        # references from step N. ``forward_data_store`` accumulates loss dicts
+        # on the last pipeline stage; the comm caches (COMMUNICATION_NODE_CACHE
+        # / SEND_NODE_CACHE) may retain SchedulerNode references whose
+        # ``args["send_buffers"]`` / ``args["recv_buffers"]`` pin GPU memory
+        # whenever the previous step early-returned in
+        # ``batch_p2p_communication_handler``.
+        self.forward_data_store.clear()
+        reset_pp_comm_caches()
+
         args = get_args()
         kwargs = {}
         if self.pp_algorithm == "zbv-formatted":

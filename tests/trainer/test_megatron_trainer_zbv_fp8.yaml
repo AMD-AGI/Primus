@@ -50,7 +50,10 @@ modules:
       expert_model_parallel_size: ${PRIMUS_EP:2}
       overlap_grad_reduce: false
       overlap_param_gather: false
-      gradient_accumulation_fusion: false
+      # zerobubble / Primus pipeline delayed-wgrad path requires
+      # gradient_accumulation_fusion=true (WeightGradStore.is_supported returns
+      # False otherwise, which forces immediate wgrad and breaks the schedule).
+      gradient_accumulation_fusion: true
 
       # data
       num_workers: 1
