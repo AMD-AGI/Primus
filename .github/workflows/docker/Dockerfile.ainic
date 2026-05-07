@@ -19,9 +19,9 @@ RUN apt-get update && \
 # ---------------------------------------------------------------------------
 # Enviroment variables
 # ---------------------------------------------------------------------------
-ENV WORKDIR=/opt
+ENV WORKDIR=/workspace
 ENV ROCM_PATH=/opt/rocm
-ENV MPI_PATH=/opt/ompi
+ENV MPI_PATH=/usr/lib/x86_64-linux-gnu/openmpi
 
 # =============================== Build AINIC Driver ===============================
 # WARNING: Please ensure the following environment variables are correctly set:
@@ -30,16 +30,24 @@ ENV MPI_PATH=/opt/ompi
 # WARNING: If these paths are missing, tools and libraries may not function correctly.
 # INFO: Installation completed successfully
 
-COPY ${AINIC_BUNDLE_PATH}/ainic_bundle_1.117.5-a-56.tar.gz ${WORKDIR}
+COPY ${AINIC_BUNDLE_PATH}/ainic_bundle_1.117.5-a-77.tar.gz ${WORKDIR}
 RUN cd ${WORKDIR} && \
+    rm -rf rccl amd-anp && \
     echo "Building ainic bundle... current directory: ${WORKDIR}" && \
-    tar zxf ainic_bundle_1.117.5-a-56.tar.gz && \
-    cd ainic_bundle_1.117.5-a-56 && \
+    tar zxf ainic_bundle_1.117.5-a-77.tar.gz && \
+    cd ainic_bundle_1.117.5-a-77 && \
     tar zxf host_sw_pkg.tar.gz && \
     cd host_sw_pkg && \
-    ./install.sh --domain=user -y 2>&1 | tee log_install.txt && \
-    cd ${WORKDIR} && \
-    apt-get install -y ./amd/ainic/deb-repo/libionic*.deb
+    printf '%s\n' \
+        'Package: libionic1 libionic-dev' \
+        'Pin: version 54.0-187-1' \
+        'Pin-Priority: 1001' \
+        '' \
+        'Package: perftest' \
+        'Pin: version 1:25.04.0.0.84-128-1' \
+        'Pin-Priority: 1001' \
+        > /etc/apt/preferences.d/ainic-a77 && \
+    ./install.sh --domain=user -y 2>&1 | tee log_install.txt
 
 # ---------------------------------------------------------------------------
 # Build rccl
