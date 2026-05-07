@@ -25,6 +25,9 @@ from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import get_num_layers_to_build
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
 
+from primus.backends.megatron.core.extensions.transformer_engine_spec_provider import (
+    DeepSeekV4SpecProvider,
+)
 from primus.backends.megatron.core.models.deepseek_v4.build_context import (
     resolve_v4_provider,
 )

@@ -104,6 +104,19 @@ class DeepseekV4Model(LanguageModule):
             vp_stage=vp_stage,
         )
 
+        # NOTE: The cross-PP broadcast of ``input_ids`` for V4 hash-routed
+        # MoE layers (needed when middle PP stages own a hash-routed layer
+        # but Megatron's ``pretrain_gpt.get_batch`` returns ``None`` tokens
+        # for non-(first|last) PP stages) lives in a Primus patch on
+        # ``pretrain_gpt.get_batch``:
+        #   ``primus/backends/megatron/patches/deepseek_v4_get_batch_patches.py``
+        # That hook runs once per ``forward_step`` (i.e. once per
+        # (chunk, microbatch) for both 1F1B and interleaved-1F1B), which is
+        # VPP-safe. An earlier in-``forward`` broadcast deadlocked the
+        # interleaved schedule because PP rank 0's broadcast wait blocked
+        # before its ``send_forward``, while PP rank 1 was simultaneously
+        # waiting for that ``send_forward`` in ``recv_forward``.
+
         # ----- MTP block ---------------------------------------------------
         # Plan-2 P16/P17: V4 wires multi-token prediction exclusively via
         # the spec-based upstream :class:`MultiTokenPredictionBlock`,
@@ -113,7 +126,11 @@ class DeepseekV4Model(LanguageModule):
         # P17; only the spec-based path remains.
         mtp_num_layers = int(getattr(self.config, "mtp_num_layers", 0) or 0)
         self.mtp_process = False
-        self.mtp = None
+        # NOTE: do NOT pre-assign ``self.mtp = None``. Megatron's
+        # ``set_current_microbatch`` (third_party/Megatron-LM/megatron/core/
+        # transformer/cuda_graphs.py) probes ``hasattr(model, 'mtp')`` and
+        # unconditionally iterates ``model.mtp.layers``. We only create the
+        # attribute when MTP is actually live (matching upstream GPTModel).
 
         if mtp_num_layers > 0:
             self.mtp_block_spec = get_v4_mtp_block_spec(
@@ -216,6 +233,14 @@ class DeepseekV4Model(LanguageModule):
             else:
                 decoder_input = None
 
+        # ``input_ids`` arrives on every PP stage that owns hash-routed MoE
+        # layers because the Primus patch
+        # ``primus/backends/megatron/patches/deepseek_v4_get_batch_patches.py``
+        # broadcasts the source-of-truth tokens from PP rank 0 inside
+        # ``pretrain_gpt.get_batch`` before this ``forward`` runs. So
+        # ``input_ids`` is non-``None`` here on every middle PP stage even
+        # though Megatron's data loader would otherwise feed it ``None``.
+
         hidden_states = self.decoder(
             hidden_states=decoder_input,
             attention_mask=attention_mask,
@@ -227,7 +252,7 @@ class DeepseekV4Model(LanguageModule):
 
         # Run the spec-based MTP block on stages that own MTP layers.
         # Mirrors GPTModel's mtp_in_postprocess gating.
-        if self.mtp_process and self.mtp is not None:
+        if self.mtp_process and getattr(self, "mtp", None) is not None:
             hidden_states = self.mtp(
                 input_ids=input_ids,
                 position_ids=position_ids,
@@ -251,7 +276,7 @@ class DeepseekV4Model(LanguageModule):
         # computes the per-depth MTP loss, and returns the main hidden
         # state for the standard LM-head path below.
         mtp_num_layers = int(getattr(self.config, "mtp_num_layers", 0) or 0)
-        if mtp_num_layers > 0 and self.mtp is not None:
+        if mtp_num_layers > 0 and getattr(self, "mtp", None) is not None:
             cp_group = getattr(self.pg_collection, "cp", None)
             hidden_states = process_mtp_loss(
                 hidden_states=hidden_states,
