@@ -24,6 +24,11 @@ class WGradRunningCache:
         cls.cur_chunk = chunk
 
     @classmethod
+    def clear_current_minibatch_and_chunk(cls):
+        cls.cur_minibatch = None
+        cls.cur_chunk = None
+
+    @classmethod
     def append(cls, wgrad_func: Callable):
         if cls.cur_minibatch is None or cls.cur_chunk is None:
             wgrad_func()

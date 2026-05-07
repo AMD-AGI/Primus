@@ -65,7 +65,7 @@ from megatron.core.num_microbatches_calculator import (
     get_num_microbatches,
     update_num_microbatches,
 )
-from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
+from megatron.core.optimizer import get_megatron_optimizer, get_mup_config_overrides
 from megatron.core.rerun_state_machine import (
     RerunDiagnostic,
     RerunErrorInjector,
@@ -121,6 +121,7 @@ from megatron.training.training import (
     enable_forward_pre_hook,
     evaluate_and_print_results,
     get_model,
+    get_megatron_optimizer_config,
     get_optimizer_param_scheduler,
     num_floating_point_operations,
     post_training_step_callbacks,
@@ -198,6 +199,7 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             "ignore_unknown_args",
             "allow_no_cuda",
             "skip_mpu_initialization",
+            "skip_setup",
         }
 
         invalid_keys = set(kwargs.keys()) - allowed_keys
@@ -329,7 +331,8 @@ class MegatronTrainer(BaseTrainer, BaseModule):
         else:
             self.checkpointing_context = {}
 
-        self.setup()
+        if not kwargs.get("skip_setup", False):
+            self.setup()
 
     def update_primus_config(
         self,
@@ -904,24 +907,29 @@ class MegatronTrainer(BaseTrainer, BaseModule):
 
         unwrapped_model = unwrap_model(model)
 
-        kwargs = {}
+        config, config_overrides = get_megatron_optimizer_config(args)
+        config.timers = timers
+        if getattr(args, "use_mup", False):
+            model_config_source = unwrapped_model[0] if isinstance(unwrapped_model, list) else unwrapped_model
+            model_config = get_model_config(model_config_source)
+            mup_overrides = get_mup_config_overrides(
+                config=config,
+                mup_width_mult=model_config.mup_width_mult,
+                optimizer_type=config.optimizer,
+            )
+            if mup_overrides:
+                config_overrides = {**(config_overrides or {}), **mup_overrides}
 
         if "muon" not in args.optimizer:
-            for f in dataclasses.fields(OptimizerConfig):
-                if hasattr(args, f.name):
-                    kwargs[f.name] = getattr(args, f.name)
-            config = OptimizerConfig(**kwargs)
-            config.timers = timers
-
             optimizer = get_megatron_optimizer(
                 config,
                 model,
-                no_wd_decay_cond,
-                scale_lr_cond,
-                lr_mult,
+                config_overrides=config_overrides,
                 use_gloo_process_groups=args.enable_gloo_process_groups,
+                dump_param_to_param_group_map=getattr(args, "dump_param_to_param_group_map", None),
             )
         else:
+            kwargs = {}
             for f in dataclasses.fields(MounOptimizerConfig):
                 if hasattr(args, f.name):
                     kwargs[f.name] = getattr(args, f.name)
@@ -931,11 +939,10 @@ class MegatronTrainer(BaseTrainer, BaseModule):
             optimizer = get_megatron_muon_optimizer(
                 config,
                 model,
-                no_wd_decay_cond,
-                scale_lr_cond,
-                lr_mult,
+                config_overrides=config_overrides,
                 use_gloo_process_groups=args.enable_gloo_process_groups,
                 layer_wise_distributed_optimizer="dist" in config.optimizer,
+                dump_param_to_param_group_map=getattr(args, "dump_param_to_param_group_map", None),
             )
 
         opt_param_scheduler = get_optimizer_param_scheduler(optimizer)

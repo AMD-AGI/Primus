@@ -2236,6 +2236,8 @@ def _report_simulation_results(sim_results, training_config):
 
 
 def _run_layer_benchmark(primus_config, unknown_overrides):
+    from megatron.core.enums import ModelType
+
     from primus.modules.trainer.megatron.pre_trainer import MegatronPretrainTrainer
 
     module_config = primus_config.get_module_config("pre_trainer")
@@ -2289,10 +2291,18 @@ def _run_layer_benchmark(primus_config, unknown_overrides):
     )
 
     print("[Primus:Performance Projection] Initializing Megatron...")
-    trainer.init()
+    trainer.init(skip_setup=True)
 
     print("[Primus:Performance Projection] Setting up model and optimizer...")
-    trainer.setup()
+    (
+        trainer.model,
+        trainer.optimizer,
+        trainer.opt_param_scheduler,
+    ) = trainer.setup_model_and_optimizer(
+        trainer.model_provider,
+        ModelType.encoder_or_decoder,
+        checkpointing_context=trainer.checkpointing_context,
+    )
 
     print("[Primus:Performance Projection] Building model profiler...")
     model_profiler_spec = get_language_model_profiler_spec(training_config)
