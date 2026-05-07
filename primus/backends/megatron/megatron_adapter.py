@@ -7,6 +7,7 @@
 import primus.backends.megatron.patches  # noqa: F401  # Register patches
 from primus.backends.megatron.argument_builder import MegatronArgBuilder
 from primus.core.backend.backend_adapter import BackendAdapter
+from primus.core.backend.backend_registry import BackendRegistry
 from primus.modules.module_utils import log_rank_0
 
 
@@ -18,16 +19,17 @@ class MegatronAdapter(BackendAdapter):
         self.third_party_dir_name = "Megatron-LM"
 
     def load_trainer_class(self, stage: str = "pretrain"):
-        """Return the Trainer class for the specified training stage."""
-        if stage == "pretrain":
-            from primus.backends.megatron.megatron_pretrain_trainer import (
-                MegatronPretrainTrainer,
-            )
+        """Return the trainer class for the specified training stage."""
+        try:
+            trainer_cls = BackendRegistry.get_trainer_class(self.framework, stage=stage)
+        except (ValueError, AssertionError) as exc:
+            raise RuntimeError(
+                "[Primus:MegatronAdapter] 'megatron' backend trainer not registered. "
+                "Ensure primus.backends.megatron registers trainer classes via BackendRegistry."
+            ) from exc
 
-            log_rank_0(f"[Primus:MegatronAdapter] Loaded trainer class: MegatronPretrainTrainer")
-            return MegatronPretrainTrainer
-        else:
-            raise ValueError(f"Invalid stage: {stage}")
+        log_rank_0(f"[Primus:MegatronAdapter] Loaded trainer class: {trainer_cls.__name__}")
+        return trainer_cls
 
     def detect_backend_version(self) -> str:
         """Detect Megatron-LM version via AST parsing (avoids __init__.py execution)."""
