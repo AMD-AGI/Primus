@@ -284,32 +284,6 @@ def set_manual_pipeline_split_patch(args):
     megatron.core.models.gpt.gpt_layer_specs.get_transformer_layer_offset = get_transformer_layer_offset_patch
 
 
-def pp_warmup(args, config, model, optimizer):
-    for model_chunk in model:
-        with model_chunk.no_sync():
-            if model_chunk.use_forward_hook:
-                model_chunk.disable_forward_pre_hook()
-            dtype = torch.float32
-            if config.bf16:
-                dtype = torch.bfloat16
-            elif config.fp16:
-                dtype = torch.float16
-            seq_len = args.seq_length // args.tensor_model_parallel_size // args.context_parallel_size
-
-            for layer in model_chunk.module.module.decoder.layers:
-                dummy_input = torch.randn(seq_len, 1, config.hidden_size, device="cuda", dtype=dtype)
-                attention_mask = (
-                    torch.tril(torch.ones((seq_len, seq_len), device="cuda")).unsqueeze(0).unsqueeze(0) == 0
-                )
-                dummy_output, _ = layer.forward(hidden_states=dummy_input, attention_mask=attention_mask)
-                dummy_output.backward(torch.ones_like(dummy_output))
-
-            if model_chunk.use_forward_hook:
-                model_chunk.enable_forward_pre_hook()
-            optimizer.zero_grad()
-    torch.cuda.empty_cache()
-
-
 def schedule_wrapper(func):
     def wrapper(*args, **kwargs):
         global _GLOBAL_PP_VIS_EVENTS_PER_ITER
@@ -508,13 +482,22 @@ def validate_args_on_rocm(args):
         args.dump_pp_data = False
         print_rank_last(f"Disable args.dump_pp_data since args.pipeline_model_parallel_size=1")
 
+    # PrimusTurboGroupedMLP no longer depends on legacy GroupedMLP; the two
+    # flags are mutually exclusive when turbo is enabled.
+    if getattr(args, "use_turbo_grouped_mlp", False) and getattr(args, "moe_use_legacy_grouped_gemm", False):
+        raise ValueError(
+            "use_turbo_grouped_mlp=True is incompatible with moe_use_legacy_grouped_gemm=True. "
+            "PrimusTurboGroupedMLP now uses the TEGroupedMLP path; "
+            "please set moe_use_legacy_grouped_gemm=False."
+        )
+
     # sync-free MoE
     if args.turbo_sync_free_moe_stage > 0:
         assert args.enable_primus_turbo, "Please set `enable_primus_turbo=True` to enable sync-free MoE."
 
-        if args.turbo_sync_free_moe_stage > 1 and not args.moe_use_legacy_grouped_gemm:
+        if args.turbo_sync_free_moe_stage > 1 and not args.use_turbo_grouped_mlp:
             raise ValueError(
-                "Sync-Free MoE stage 2 or 3 require PrimusTurboGroupedMLP, please set `moe_use_legacy_grouped_gemm=True`"
+                "Sync-Free MoE stage 2 or 3 require PrimusTurboGroupedMLP, please set `use_turbo_grouped_mlp=True`"
             )
         options = _get_sync_free_moe_options(args.turbo_sync_free_moe_stage)
         print_rank_last(
