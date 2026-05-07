@@ -191,6 +191,44 @@ ints by P18) to label each layer as `dense / hca / csa`.
 * **G16** — `test_deepseek_v4_flops_patches.py` (closed-form match).
 * **G17** — `model_type != deepseek_v4` returns upstream value (byte-for-byte).
 
+### Status (2026-05-07)
+
+✅ **Done.** Patch landed at
+`primus/backends/megatron/patches/deepseek_v4_flops_patches.py`. Two
+non-obvious invariants surfaced during bring-up and are pinned in
+comments:
+
+1. **Direct-import binding** — `primus.modules.trainer.megatron.trainer`
+   imports `num_floating_point_operations` at module load, so a
+   monkey-patch on `megatron.training.training` alone is invisible to
+   the trainer's local copy. The patch now calls
+   `_rebind_trainer_imports()` after wrapping to refresh the trainer's
+   bound name.
+2. **`pretrain()` enum overwrite** — Megatron's `pretrain()` rewrites
+   `args.model_type` from the YAML string `"deepseek_v4"` to a
+   `ModelType` enum at `training.py:1210` *before* `train()` ever calls
+   `num_floating_point_operations`. A naive runtime check
+   (`args.model_type == "deepseek_v4"`) silently falls through to the
+   upstream formula. The wrapper instead captures `dispatch_v4` at
+   install time via the closure; this is gated by the
+   `@register_patch(condition=…)` so install time is the only point
+   where `args.model_type` is still the YAML string.
+
+Smoke verification on `mi355-gpu-12` (`dev_primus_wenx_693`, 8 GPUs,
+`bs=16, S=128, hc_mult=4, L=8, mtp=0`): closed form total = 73.43 TFLOP
+/ global-batch.
+
+| Run        | Last-iter TFLOP/s/GPU | Iter time | Implied / iter | Δ vs closed form |
+| ---------- | --------------------: | --------: | -------------: | ---------------: |
+| EP=8       | 17.9                  | 512.5 ms  | 73.4 TFLOP     | 0.04%            |
+| PP=2 EP=4  | 14.0                  | 655.9 ms  | 73.5 TFLOP     | 0.09%            |
+
+Logs: `deepseek-v4/develop/progress/p20/smoke_ep8_pp1_final.log` /
+`smoke_pp2_ep4_final.log`.
+
+Unit tests: 21/21 green
+(`tests/unit_tests/backends/megatron/test_deepseek_v4_flops_patches.py`).
+
 ---
 
 ## P21 — Strict spec build (no nn-fallback)
