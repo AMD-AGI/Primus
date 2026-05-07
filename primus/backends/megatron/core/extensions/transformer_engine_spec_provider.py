@@ -88,6 +88,43 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             else TERowParallelLinear
         )
 
+    def column_parallel_linear_with_gather_output(self) -> type:
+        """Non-TE column-parallel linear that supports ``gather_output=True``.
+
+        TE / Turbo column-parallel wrappers explicitly raise
+        ``ValueError("Transformer Engine linear layers do not support
+        gather_output = True")`` (see
+        ``third_party/Megatron-LM/megatron/core/extensions/transformer_engine.py:747``
+        and ``:972``).  Callers that need a column-parallel layer
+        whose output dim is gathered back to full width across TP
+        ranks (so downstream math stays TP-agnostic) must use the
+        upstream Megatron-native :class:`ColumnParallelLinear`.
+
+        Plan-3 P21: V4's ``linear_q_up_proj`` is the canonical
+        consumer — it shards ``q_lora_rank -> n_heads * head_dim``
+        across TP and gathers the heads at forward time.
+        """
+        return ColumnParallelLinear
+
+    def row_parallel_linear_with_scatter_input(self) -> type:
+        """Non-TE row-parallel linear that supports ``input_is_parallel=False``.
+
+        TE / Turbo row-parallel wrappers explicitly raise
+        ``ValueError("Transformer Engine linear layers do not support
+        input_is_parallel = False")`` (see
+        ``third_party/Megatron-LM/megatron/core/extensions/transformer_engine.py:1081``).
+        Callers that hand the layer a full-width (non-sharded) input
+        and want it scattered internally + the output all-reduced
+        must use the upstream Megatron-native :class:`RowParallelLinear`.
+
+        Plan-3 P21: V4's grouped-O ``linear_o_b`` is the canonical
+        consumer — after the inner ``[..., n_per_group, o_lora_rank]
+        -> [..., o_groups * o_lora_rank]`` reshape, the input is
+        full-width across TP and the row-parallel layer's
+        weight-sharding + reduce is what produces the correct sum.
+        """
+        return RowParallelLinear
+
     def fuse_layernorm_and_linear(self) -> bool:
         """TE backend chooses a single module for layernorm and linear"""
         return True
@@ -190,18 +227,6 @@ class DeepSeekV4SpecProvider(PrimusTurboSpecProvider):
         BEFORE broadcasting to all query heads.
         """
         return self.layer_norm(rms_norm=True, for_qk=True)
-
-    def v4_attention_sink(self) -> type:
-        """Module class for V4's per-head learnable attention sink.
-
-        Returns the local :class:`AttentionSink` wrapper (TE does not
-        currently expose a fused softmax-with-sink primitive that matches
-        V4's "extra virtual key with zero value" semantics).
-        """
-        # Lazy import to avoid pulling V4 modules at extension import time.
-        from primus.backends.megatron.core.transformer.attn_sink import AttentionSink
-
-        return AttentionSink
 
     def v4_mlp_activation_func(self) -> Optional[type]:
         """Activation-func selection for V4 MLP / shared-expert specs.

@@ -117,12 +117,24 @@ def _build_column_parallel_spec(
     Memory of the projection's weight matrix is sharded across TP ranks
     even at ``gather_output=True``.
 
+    Plan-3 P21: TE / Turbo column-parallel wrappers explicitly reject
+    ``gather_output=True`` (see
+    ``third_party/Megatron-LM/megatron/core/extensions/transformer_engine.py:747/972``).
+    When the caller asks for the gather variant we route to the
+    upstream Megatron-native :class:`ColumnParallelLinear` via
+    ``provider.column_parallel_linear_with_gather_output()``; the
+    standard TE path stays for ``gather_output=False``.
+
     Plan-2 P13 follow-up: this is used for ``linear_q_up_proj``. The
     gather-then-shard variant for full sharded heads is tracked in P14
     once the grouped-O TP plan lands.
     """
+    if gather_output:
+        module_cls = provider.column_parallel_linear_with_gather_output()
+    else:
+        module_cls = provider.column_parallel_linear()
     return ModuleSpec(
-        module=provider.column_parallel_linear(),
+        module=module_cls,
         params={
             "input_size": in_features,
             "output_size": out_features,
@@ -153,9 +165,21 @@ def _build_row_parallel_spec(
     pass a full-width input tensor and get a full-width output tensor.
     Weight memory is sharded across TP ranks. Used for ``linear_o_b``
     and the flat-O fallback ``linear_proj``.
+
+    Plan-3 P21: TE / Turbo row-parallel wrappers explicitly reject
+    ``input_is_parallel=False`` (see
+    ``third_party/Megatron-LM/megatron/core/extensions/transformer_engine.py:1081``).
+    When the caller asks for scatter-input we route to the upstream
+    Megatron-native :class:`RowParallelLinear` via
+    ``provider.row_parallel_linear_with_scatter_input()``; the
+    standard TE path stays for ``input_is_parallel=True``.
     """
+    if not input_is_parallel:
+        module_cls = provider.row_parallel_linear_with_scatter_input()
+    else:
+        module_cls = provider.row_parallel_linear()
     return ModuleSpec(
-        module=provider.row_parallel_linear(),
+        module=module_cls,
         params={
             "input_size": in_features,
             "output_size": out_features,
@@ -196,9 +220,13 @@ def _build_v4_attention_submodules(
       — built as **row-parallel** so its weight is sharded across TP.
     * ``linear_proj``        : flat-O fallback (``o_lora_rank == 0``,
       e.g. unit tests) — also row-parallel.
-    * ``attn_sink``          : per-head learnable scalar
     * ``compressor``         : :class:`Compressor` (compressed branches)
     * ``indexer``            : :class:`Indexer` (CSA branch only)
+
+    The per-head learnable softmax sink lives directly on the attention
+    module as ``self.attn_sink: nn.Parameter`` — there is no separate
+    submodule slot (Plan-3 P21 dropped the ``attn_sink`` field; the
+    inline softmax-with-sink path in ``_attention_forward`` is canonical).
     """
     hidden_size = int(config.hidden_size)
     num_heads = int(config.num_attention_heads)
@@ -235,11 +263,6 @@ def _build_v4_attention_submodules(
         ),
         q_layernorm=ModuleSpec(module=provider.v4_q_layernorm()),
         kv_layernorm=ModuleSpec(module=provider.v4_kv_layernorm()),
-        attn_sink=(
-            ModuleSpec(module=provider.v4_attention_sink())
-            if bool(getattr(config, "attn_sink", False))
-            else None
-        ),
     )
 
     if o_lora_rank > 0:

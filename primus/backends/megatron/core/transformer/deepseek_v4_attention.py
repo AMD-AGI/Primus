@@ -30,11 +30,15 @@ inside a single attention class:
   both paths.
 * Field names mirror MLA's canonical layout (``linear_q_down_proj``,
   ``linear_q_up_proj``, ``q_layernorm``, ``kv_layernorm``) plus the V4
-  extras (``linear_kv``, ``linear_o_a``, ``linear_o_b``, ``attn_sink``,
-  ``compressor``, ``indexer``) so the state-dict adapter (P17) can map
-  the released safetensors keys
+  extras (``linear_kv``, ``linear_o_a``, ``linear_o_b``, ``compressor``,
+  ``indexer``) so the state-dict adapter (P17) can map the released
+  safetensors keys
   (``layers.{i}.attn.{wq_a,wq_b,wkv,q_norm,kv_norm,wo_a,wo_b,attn_sink,
-  compressor.*,indexer.*}``) in one straightforward table.
+  compressor.*,indexer.*}``) in one straightforward table.  The
+  per-head learnable softmax sink lives directly on the attention module
+  as ``self.attn_sink: nn.Parameter`` (no submodule slot — Plan-3 P21
+  dropped the dead ``attn_sink`` field; the inline softmax-with-sink
+  path in :meth:`_attention_forward` is canonical).
 
 Forward signature:
 
@@ -49,7 +53,6 @@ Forward signature:
 
 from __future__ import annotations
 
-import logging
 import math
 from dataclasses import dataclass
 from typing import Optional, Tuple, Union
@@ -72,8 +75,6 @@ from primus.backends.megatron.core.transformer.local_rmsnorm import LocalRMSNorm
 from primus.backends.megatron.core.transformer.sliding_window_kv import (
     sliding_window_causal_mask,
 )
-
-logger = logging.getLogger(__name__)
 
 
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
@@ -103,7 +104,6 @@ class DeepseekV4AttentionSubmodules:
     * ``kv_layernorm``       : RMSNorm on ``head_dim``       (= ``kv_norm``)
     * ``linear_o_a``         : ``(n_heads * head_dim / o_groups) -> o_groups * o_lora_rank``
     * ``linear_o_b``         : ``o_groups * o_lora_rank -> hidden``
-    * ``attn_sink``          : :class:`AttentionSink` (per-head learnable scalar)
     * ``compressor``         : :class:`Compressor` (compress_ratio > 0 only)
     * ``indexer``            : :class:`Indexer`    (compress_ratio == 4 only)
 
@@ -111,6 +111,12 @@ class DeepseekV4AttentionSubmodules:
     ``linear_o_a`` / ``linear_o_b``) the attention falls back to MLA's
     standard flat output projection — useful for unit tests and the
     ``o_lora_rank == 0`` fast-path config.
+
+    Plan-3 P21: there is no ``attn_sink`` submodule slot.  The per-head
+    learnable sink is :class:`torch.nn.Parameter` ``self.attn_sink``
+    on the attention module itself (key ``layers.{i}.attn.attn_sink``
+    in the released checkpoint), and the softmax-with-sink combine is
+    inlined in :meth:`DeepseekV4Attention._attention_forward`.
     """
 
     linear_q_down_proj: Optional[Union[ModuleSpec, type]] = None
@@ -121,7 +127,6 @@ class DeepseekV4AttentionSubmodules:
     linear_proj: Optional[Union[ModuleSpec, type]] = None  # fallback flat O
     q_layernorm: Optional[Union[ModuleSpec, type]] = None
     kv_layernorm: Optional[Union[ModuleSpec, type]] = None
-    attn_sink: Optional[Union[ModuleSpec, type]] = None
     compressor: Optional[Union[ModuleSpec, type]] = None
     indexer: Optional[Union[ModuleSpec, type]] = None
 
@@ -137,24 +142,20 @@ def _build_projection(
     in_features: int,
     out_features: int,
 ) -> nn.Module:
-    """Build a linear projection from a spec submodule with fallback.
+    """Build a linear projection from a spec submodule.
 
-    Megatron's parallel-linear modules accept many keyword arguments that
-    do not exist on plain ``nn.Linear``. If the provider-built module fails
-    to construct (e.g. running outside a TP group on CPU) we fall back to
-    a duplicated ``nn.Linear`` with the same shape so the unit tests can
-    drive the forward pass.
+    When the spec is ``None`` (CPU unit tests that exercise the
+    forward pass without a TP group) we instantiate a plain
+    :class:`nn.Linear` with the same shape.  When a spec is supplied
+    we delegate to :func:`build_module` and let any constructor
+    failure bubble up — Plan-3 P21 retired the ``try/except/return
+    nn.Linear`` fallback because it produced an unsharded model
+    (vanilla ``nn.Linear`` instead of column / row parallel shards)
+    that silently masked spec bugs at TP=1 and would diverge at TP>1.
     """
     if submodule is None:
         return nn.Linear(in_features, out_features, bias=False)
-    try:
-        return build_module(submodule)
-    except Exception as exc:
-        logger.warning(
-            "DeepSeek-V4 attention projection submodule init failed (%s); fallback to nn.Linear.",
-            exc,
-        )
-        return nn.Linear(in_features, out_features, bias=False)
+    return build_module(submodule)
 
 
 def _projection_forward(proj: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -381,32 +382,22 @@ class DeepseekV4Attention(MLASelfAttention):
 
         # ---- attention sink ----
         # The released checkpoint stores ``attn_sink`` as a [num_heads]
-        # learnable parameter directly on the attention module
-        # (key: ``layers.{i}.attn.attn_sink`` — no wrapping submodule).
-        # We register it as ``self.attn_sink`` to match the checkpoint
-        # key exactly, and apply softmax-with-sink inline in
-        # :meth:`_attention_forward`.
+        # learnable parameter directly on the attention module (key
+        # ``layers.{i}.attn.attn_sink`` — no wrapping submodule).
+        # We register it as ``self.attn_sink`` so the state-dict key
+        # matches the released checkpoint exactly; the softmax-with-sink
+        # combine is inlined in :meth:`_attention_forward`.
         #
-        # When ``submodules.attn_sink`` is supplied, the surrounding spec
-        # may want a different module (e.g. a future TE-fused sink). We
-        # build it in addition for forward-compat, but the canonical
-        # parameter still lives on ``self.attn_sink``.
+        # Plan-3 P21 retired the optional ``self.attn_sink_module``
+        # build branch (and the ``submodules.attn_sink`` slot) — the
+        # branch was never exercised in the forward path and its
+        # ``try/except`` masked AttentionSink build failures.  A future
+        # TE-fused sink primitive can land as a new spec field once it
+        # actually replaces the inline path.
         if attn_sink_enabled:
             self.attn_sink = nn.Parameter(torch.zeros(num_heads))
         else:
             self.register_parameter("attn_sink", None)
-        if attn_sink_enabled and submodules.attn_sink is not None:
-            try:
-                self.attn_sink_module = build_module(submodules.attn_sink, num_heads=num_heads)
-            except Exception as exc:
-                logger.warning(
-                    "DeepSeek-V4 attn_sink submodule init failed (%s); "
-                    "using inline softmax-with-sink path.",
-                    exc,
-                )
-                self.attn_sink_module = None
-        else:
-            self.attn_sink_module = None
 
         # ---- compressor / indexer (compressed branches only) ----
         self.compressor: Optional[nn.Module] = None
@@ -428,68 +419,45 @@ class DeepseekV4Attention(MLASelfAttention):
         checkpoint hard-codes ``coff=2`` for overlap (CSA) and ``coff=1``
         for non-overlap (HCA); :class:`Compressor` enforces this through
         its own ``overlap`` argument.
+
+        When the spec is ``None`` (CPU unit tests, ``DeepseekV4Attention``
+        constructed without a layer spec) we instantiate the local
+        :class:`Compressor` directly.  Otherwise we delegate to
+        :func:`build_module` and let any constructor failure bubble up —
+        Plan-3 P21 retired the ``try/except/local Compressor`` fallback
+        because the spec passes the same :class:`Compressor` class and
+        the fallback handler was dead code that masked real spec bugs.
         """
+        kwargs = dict(
+            hidden_size=self.hidden_size,
+            head_dim=self.head_dim,
+            ratio=self.compress_ratio,
+            overlap=(self.compress_ratio == 4),
+        )
         if spec is None:
-            return Compressor(
-                hidden_size=self.hidden_size,
-                head_dim=self.head_dim,
-                ratio=self.compress_ratio,
-                overlap=(self.compress_ratio == 4),
-            )
-        try:
-            return build_module(
-                spec,
-                hidden_size=self.hidden_size,
-                head_dim=self.head_dim,
-                ratio=self.compress_ratio,
-                overlap=(self.compress_ratio == 4),
-            )
-        except Exception as exc:
-            logger.warning(
-                "DeepSeek-V4 compressor submodule init failed (%s); using local Compressor.",
-                exc,
-            )
-            return Compressor(
-                hidden_size=self.hidden_size,
-                head_dim=self.head_dim,
-                ratio=self.compress_ratio,
-                overlap=(self.compress_ratio == 4),
-            )
+            return Compressor(**kwargs)
+        return build_module(spec, **kwargs)
 
     def _build_indexer(self, spec: Optional[Union[ModuleSpec, type]]) -> nn.Module:
-        """Build the V4 :class:`Indexer` for the CSA branch."""
+        """Build the V4 :class:`Indexer` for the CSA branch.
+
+        See :meth:`_build_compressor` for the spec-vs-fallback contract.
+        Plan-3 P21 retired the ``try/except/local Indexer`` fallback for
+        the same reason.
+        """
         index_topk = int(self.config.index_topk)
         index_head_dim = int(self.config.index_head_dim)
         index_n_heads = int(self.config.index_n_heads)
+        kwargs = dict(
+            hidden_size=self.hidden_size,
+            index_head_dim=index_head_dim,
+            index_n_heads=index_n_heads,
+            index_topk=index_topk,
+            compress_ratio=self.compress_ratio,
+        )
         if spec is None:
-            return Indexer(
-                hidden_size=self.hidden_size,
-                index_head_dim=index_head_dim,
-                index_n_heads=index_n_heads,
-                index_topk=index_topk,
-                compress_ratio=self.compress_ratio,
-            )
-        try:
-            return build_module(
-                spec,
-                hidden_size=self.hidden_size,
-                index_head_dim=index_head_dim,
-                index_n_heads=index_n_heads,
-                index_topk=index_topk,
-                compress_ratio=self.compress_ratio,
-            )
-        except Exception as exc:
-            logger.warning(
-                "DeepSeek-V4 indexer submodule init failed (%s); using local Indexer.",
-                exc,
-            )
-            return Indexer(
-                hidden_size=self.hidden_size,
-                index_head_dim=index_head_dim,
-                index_n_heads=index_n_heads,
-                index_topk=index_topk,
-                compress_ratio=self.compress_ratio,
-            )
+            return Indexer(**kwargs)
+        return build_module(spec, **kwargs)
 
     # ------------------------------------------------------------------
     # internals

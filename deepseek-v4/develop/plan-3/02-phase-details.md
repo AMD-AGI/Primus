@@ -343,7 +343,62 @@ non-TE column / row parallel linear can opt in.
 ### Test gates
 
 * **G15** — AST audit: no `try / except / return nn.Linear` patterns under `primus/backends/megatron/core/`.
-* **G15b** — TP=2 vs TP=1 forward-equivalence on a 1L V4 toy.
+* **G15b** — TP=1 build smoke (full TP=2 forward-equivalence runs under P24 on `mi355-gpu-12`).
+
+### Status (2026-05-07)
+
+Done — P21 commit `P21-SHA`.
+
+* **Strict-build surgery.** `_build_projection` (in
+  `deepseek_v4_attention.py` and `deepseek_v4_block.py`),
+  `_build_compressor`, and `_build_indexer` all dropped their
+  `try/except/return nn.Linear|local Compressor|local Indexer` blocks
+  — `build_module` failures now propagate. The dead
+  `attn_sink_module` build branch is gone (along with the
+  `attn_sink` field on `DeepseekV4AttentionSubmodules`, the
+  `provider.v4_attention_sink()` method, and the standalone
+  `primus/backends/megatron/core/transformer/attn_sink.py` whose
+  only consumer was that method); `self.attn_sink: nn.Parameter`
+  remains the canonical per-head sink and lines up with the released
+  V4-Flash checkpoint key `layers.{i}.attn.attn_sink`.
+* **Provider helpers.**
+  `PrimusTurboSpecProvider.column_parallel_linear_with_gather_output()`
+  and `…row_parallel_linear_with_scatter_input()` return the
+  upstream non-TE `ColumnParallelLinear` / `RowParallelLinear` from
+  `megatron.core.tensor_parallel.layers`; the V4 spec helpers
+  (`_build_column_parallel_spec`, `_build_row_parallel_spec`) route
+  through them automatically when the caller asks for
+  `gather_output=True` or `input_is_parallel=False`. The standard TE
+  / Turbo path stays for the other cases.
+* **G15 + G15b.** New
+  `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p21_strict_build.py`
+  ships 13 cases:
+
+  * an AST walker that scans every `.py` under
+    `primus/backends/megatron/core/` and asserts no
+    `try → except → return nn.Linear(...)` patterns remain;
+  * a parameterised string-grep that bans the retired warning
+    strings (`"submodule init failed"`, `"fallback to nn.Linear"`,
+    `"using local Compressor|Indexer"`,
+    `"attn_sink submodule init failed"`);
+  * provider-helper contract tests (`column_parallel_linear_with_gather_output`
+    is the upstream `ColumnParallelLinear`; the row variant mirrors;
+    `provider.v4_attention_sink` is gone);
+  * a dataclass-surface test (`DeepseekV4AttentionSubmodules.attn_sink`
+    is gone; the live slots are intact);
+  * G15b — `_tp1_distributed` initialises a 1-rank `gloo` TP group,
+    builds full V4 attention submodules through
+    `_build_v4_attention_submodules`, instantiates
+    `DeepseekV4Attention`, and asserts every linear is one of
+    `{ColumnParallelLinear, RowParallelLinear, TELinear,
+    PrimusTurboLinear}` — never a bare `nn.Linear`.
+* **Smoke verification.** EP=8 PP=1 and PP=2 EP=4 smokes on
+  `mi355-gpu-12` (`p21/smoke_ep8_pp1.log`,
+  `p21/smoke_pp2_ep4.log`) ran 10/10 iters cleanly with `lm_loss`
+  converging (11.89 → 11.65 / 11.62). `grep -cE` for
+  `submodule init failed|fallback to nn\.Linear|fallback to local|using local Compressor|using local Indexer|attn_sink submodule init`
+  returns `0` on both logs (vs. hundreds on the pre-P21
+  `output/.../log_node_0.txt`).
 
 ---
 

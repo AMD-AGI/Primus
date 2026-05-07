@@ -119,31 +119,34 @@ def _build_projection(
     *,
     config: DeepSeekV4TransformerConfig,
 ) -> nn.Module:
+    """Build a duplicated linear via the V4 provider.
+
+    When ``config`` is ``None`` (CPU unit tests that build the dense
+    SwiGLU MLP without a provider) we instantiate a plain
+    :class:`nn.Linear` with the same shape.  Otherwise we delegate to
+    ``provider.linear()`` and let any constructor failure bubble up —
+    Plan-3 P21 retired the ``try/except/return nn.Linear`` fallback
+    because it produced an unsharded layer that masked real provider
+    bugs at TP=1 and would diverge at TP>1.
+    """
     if config is None:
         return nn.Linear(in_features, out_features, bias=False)
 
     provider = resolve_v4_provider(config)
     linear_module_cls = provider.linear()
     init_method: Callable = config.init_method or _default_init_method
-    try:
-        return linear_module_cls(
-            input_size=in_features,
-            output_size=out_features,
-            parallel_mode="duplicated",
-            config=config,
-            init_method=init_method,
-            bias=False,
-            skip_bias_add=False,
-            skip_weight_param_allocation=False,
-            tp_comm_buffer_name=None,
-            is_expert=False,
-        )
-    except Exception as exc:
-        logger.warning(
-            "DeepSeek-V4 MLP projection provider linear init failed (%s); fallback to nn.Linear.",
-            exc,
-        )
-        return nn.Linear(in_features, out_features, bias=False)
+    return linear_module_cls(
+        input_size=in_features,
+        output_size=out_features,
+        parallel_mode="duplicated",
+        config=config,
+        init_method=init_method,
+        bias=False,
+        skip_bias_add=False,
+        skip_weight_param_allocation=False,
+        tp_comm_buffer_name=None,
+        is_expert=False,
+    )
 
 
 def _projection_forward(proj: nn.Module, x: torch.Tensor) -> torch.Tensor:
