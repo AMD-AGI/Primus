@@ -282,9 +282,18 @@ class DeepseekV4MoE(MegatronModule):
             return "flex"
         if module is MoEAlltoAllTokenDispatcher or module is None:
             return "alltoall"
+        # Plan-3 P23: PrimusTurboDeepEPTokenDispatcher is a "flex"
+        # variant — V4 spec build chose it explicitly when the user
+        # opted into Turbo DeepEP.  We recognise it by class name so
+        # this resolver does not require ``primus_turbo`` to be
+        # importable on hosts that never opt in (CPU unit tests,
+        # Megatron-only consumers).
+        module_name = getattr(module, "__name__", "")
+        if module_name == "PrimusTurboDeepEPTokenDispatcher":
+            return "flex"
         logger.warning(
             "[DeepSeek-V4] unsupported dispatcher module=%s; fallback type to alltoall.",
-            getattr(module, "__name__", str(module)),
+            module_name or str(module),
         )
         return "alltoall"
 

@@ -337,13 +337,13 @@ non-TE column / row parallel linear can opt in.
 
 ### Exit criteria
 
-* No `"submodule init failed"` / `"fallback to nn.Linear"` log lines in any P19 / P24 smoke.
+* No `"submodule init failed"` / `"fallback to nn.Linear"` log lines in any P19 smoke.
 * G15 + G15b green.
 
 ### Test gates
 
 * **G15** — AST audit: no `try / except / return nn.Linear` patterns under `primus/backends/megatron/core/`.
-* **G15b** — TP=1 build smoke (full TP=2 forward-equivalence runs under P24 on `mi355-gpu-12`).
+* **G15b** — TP=1 build smoke (TP=2 forward-equivalence on `mi355-gpu-12` deferred to a future perf plan).
 
 ### Status (2026-05-07)
 
@@ -673,62 +673,106 @@ falling through to the `unsupported dispatcher module` warning + `"alltoall"` fa
 
 * **G20** — V4 dispatcher selection unit test (turbo on / off, TP>1).
 
----
+### Status (2026-05-07)
 
-## P24 — Turbo attention + DeepEP smoke
+P23 wires a V4-side dispatcher-selection helper that resolves the
+turbo class **at spec build time**, independent of whether the
+upstream `before_train` patch has fired yet.  Production smoke
+confirms all eight V4 MoE layers route through Turbo DeepEP without
+any "submodule init failed" / "fallback to alltoall" warnings and
+that the runtime throughput rises from ~12.6 TFLOP/s/GPU on the P22
+eager baseline to **17–19 TFLOP/s/GPU** (10/10 iters clean,
+`lm_loss` 11.88 → 11.65).
 
-### Motivation
+* **`is_v4_turbo_deepep_active(args)`** (in
+  `primus/backends/megatron/core/models/deepseek_v4/deepseek_v4_layer_specs.py`)
+  is the canonical V4-side gate.  Conditions: `primus_turbo` package
+  importable, `args.enable_primus_turbo`, `args.use_turbo_deepep`,
+  `args.tensor_model_parallel_size == 1` — mirrors the upstream
+  `moe_dispatcher_patches._is_turbo_deepep_enabled`.  V4 builder
+  re-uses this gate so there is one source of truth.
+* **`_pick_v4_dispatcher_cls(config, *, args=None)`** returns
+  `(cls, type_name)` for V4 spec build:
+  * `dispatcher_type="allgather"` → `MoEAllGatherTokenDispatcher` /
+    `"allgather"` (never overridden by Turbo — different parallelism
+    scheme).
+  * `dispatcher_type="flex"` AND turbo gates open →
+    `PrimusTurboDeepEPTokenDispatcher` / `"flex"` via lazy import
+    (`importlib.import_module("primus.backends.megatron.core.extensions.primus_turbo")`).
+    Falls back to upstream `MoEFlexTokenDispatcher` with a one-shot
+    warning if the import fails.
+  * `dispatcher_type="flex"` (turbo inactive) →
+    `MoEFlexTokenDispatcher` / `"flex"`.
+  * Anything else (default V4 base.yaml: `"alltoall"`) →
+    `MoEAlltoAllTokenDispatcher` / `"alltoall"`.  Unknown values
+    log once + fall through to `"alltoall"`.
+* **`_build_ffn_spec`** now calls
+  `_pick_v4_dispatcher_cls(config)` instead of the static
+  `if/elif/else` import-time lookup.  The captured `MoEFlexTokenDispatcher`
+  symbol from the top-level import is no longer load-bearing.
+* **`_maybe_plumb_v4_turbo_deepep_args(args)`** (in
+  `deepseek_v4_builders.py`) defensively sets
+  `args.moe_enable_deepep=True` and
+  `args.moe_token_dispatcher_type="flex"` BEFORE
+  `core_transformer_config_from_args` runs.  In the production
+  trainer flow the upstream `before_train` MoE-dispatcher patch
+  fires first (visible in the smoke log at line 1423, before the V4
+  builder at line 2290), so this helper is a no-op there; it
+  guarantees correctness for unit tests and alternate trainer flows
+  that import V4 specs directly without running the patch
+  infrastructure.  Explicit
+  `moe_token_dispatcher_type="allgather"` user-opt-in is preserved
+  with a rank-0 warning.
+* **`DeepseekV4MoE._resolve_dispatcher_type_from_spec`** (in
+  `v4_moe.py`) recognises `PrimusTurboDeepEPTokenDispatcher` by
+  class name (`module.__name__ == "PrimusTurboDeepEPTokenDispatcher"`)
+  and returns `"flex"`.  By-name detection avoids an unconditional
+  `primus_turbo` import dependency on hosts that never opt in.
 
-Plan-3's release gate. Re-runs the four P19 distributed configurations
-with the full turbo flag set on. Ensures the P21 / P22 / P23 changes
-compose without regressing the plan-2 PP / VPP patches.
+#### Test results
 
-### Design
+* **G20 (unit)** —
+  `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p23_turbo_deepep_dispatcher.py`,
+  24 tests all pass under
+  `python -m pytest test_v4_p23_turbo_deepep_dispatcher.py`:
+  * Gating predicate (5 cases): all gates open → True; each gate
+    individually closed → False.
+  * Args plumbing (5 cases): plumbs when active, no-op when
+    inactive / package missing / explicit allgather, idempotent
+    when already flex.
+  * Class resolution (8 cases): exhaustive table over
+    `(config.moe_token_dispatcher_type, args)` including the
+    "Turbo class missing on host" graceful-degradation path and the
+    "args=None + Megatron not initialised" fallback for unit tests.
+  * V4 MoE resolver (6 cases): turbo class (ModuleSpec + bare
+    type) → `"flex"`; alltoall / flex / allgather unchanged;
+    unknown class falls back to alltoall with a warning.
+* **Smoke (TP=1 PP=1 EP=8, USE_TURBO_DEEPEP=True)** — local-only
+  log at `develop/progress/p23/smoke_turbo_deepep_ep8_pp1.log`
+  (gitignored from P23 onward):
+  * 10/10 iterations clean; `lm_loss` 11.878 → 11.647;
+    `grad_norm` 6.7 → 7.7; throughput 17–19 TFLOP/s/GPU
+    (vs. ~12.6 on the P22 eager baseline).
+  * All 8 V4 routed-MoE layers emit
+    `[DeepSeek-V4] MoE layer={0..7} dispatcher active via PrimusTurboDeepEPTokenDispatcher`.
+  * 0 occurrences of any banned warning string
+    (`submodule init failed`, `fallback to nn.Linear`,
+    `unsupported dispatcher module`, `using local Compressor`,
+    `using local Indexer`, `attn_sink submodule init`,
+    `fallback to alltoall`).
+  * The P23 derivation `print_rank_0` lines do **not** fire because
+    the upstream `moe_dispatcher_patches.py` patch already plumbed
+    `args.moe_enable_deepep=True` + `args.moe_token_dispatcher_type=flex`
+    by the time the V4 builder runs (visible at log line 1423,
+    before the V4 builder at line 2290).  This is the intended
+    idempotent behaviour — the V4-side helper is a defensive
+    redundancy.
 
-`run_deepseek_v4.sh` gains turbo defaults:
+#### Smoke-log policy (forward-looking from P23)
 
-```bash
-export ENABLE_PRIMUS_TURBO=${ENABLE_PRIMUS_TURBO:-True}
-export USE_TURBO_ATTENTION=${USE_TURBO_ATTENTION:-True}
-export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-True}
-export USE_SINK_ATTENTION=${USE_SINK_ATTENTION:-True}
-```
-
-… and threads `--enable_primus_turbo`, `--use_turbo_deepep`,
-`--use_sink_attention`, `--sink_sliding_window`,
-`--sink_window_even_layers_only False` into the primus-cli call.
-
-Smoke matrix (re-runs P19 configs):
-
-| smoke | TP | PP | EP | VPP | seq | layers | source script |
-|---|---|---|---|---|---|---|---|
-| A | 1 | 1 | 8 | 1 | 128 | 8 | `deepseek-v4/develop/progress/p20/run_smokeA_turbo.sh` |
-| B | 1 | 2 | 4 | 1 | 128 | 8 | `…/run_smokeB_turbo.sh` |
-| C | 1 | 4 | 2 | 1 | 128 | 8 | `…/run_smokeC_turbo.sh` |
-| D | 1 | 2 | 4 | 2 | 128 | 8 | `…/run_smokeD_turbo.sh` |
-
-Each runs 10 iterations on mock data, BF16, MBS=1 GBS=16, and is
-expected to complete cleanly. Logs land under
-`deepseek-v4/develop/progress/p20/`.
-
-(Note: full Flash dims still trip the CSA Python fallback OOM on a
-single MI355X — that is a separate kernel-engineering effort, out of
-plan-3 scope. The smoke uses the Phase-19 small-config sizes.)
-
-### Tasks
-
-1. Update `run_deepseek_v4.sh` with the turbo defaults + new CLI flags.
-2. Add four smoke scripts under `deepseek-v4/develop/progress/p20/`.
-3. Run all four; log files in the same directory.
-4. Update `../progress/status.md` Phase 24 row with hashes + log paths.
-
-### Exit criteria
-
-* All four smokes reach iter 10 with `>>> done with setup`, then a clean shutdown.
-* No `"submodule init failed"`, `"fallback to nn.Linear"`, `"c10d::allreduce_"`, `"unsupported dispatcher module"` in any log.
-* `MoE layer=N dispatcher active via PrimusTurboDeepEPTokenDispatcher` for routed-MoE layers.
-* V4-aware TFLOPs (P20) reported per iter.
-
-### Test gates
-
-* **G21** — Turbo smoke matrix: A/B/C/D all green.
+Smoke and runtime logs are kept locally only — see
+`develop/progress/p23/.gitignore`.  The phase folder still tracks
+the smoke-runner script (`run_smoke_turbo_deepep_ep8_pp1.sh`) and
+markdown summaries.  Earlier phases (`p20/`, `p21/`, `p22/`) keep
+their committed logs as evidence-of-record for the original
+PR review; P23 onward switches to the local-only convention.

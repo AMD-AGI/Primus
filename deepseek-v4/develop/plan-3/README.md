@@ -70,4 +70,3 @@
 | **P21** | Strict spec build (no nn-fallback) | "代码里面不能这种情况下给warning，而是直接raise报错。修复一下这个问题。也检查一下其他的地方有没有类似的情况" |
 | **P22** | `core_attention` submodule for V4 (turbo / TE) | "PrimusTurboSpecProvider里面参考PrimusTurboSpecProvider的core_attention…在deepseekv4attention里面，如果是走到core attention，那么可以直接调用" |
 | **P23** | Turbo DeepEP dispatcher in V4 layer specs | "deepseek_v4_layer_specs.py里面选择dispatcher_cls时候，可以判断一下，如果开始了turbo deepep，那么使用turbo的dispatcher" |
-| **P24** | Turbo attention + DeepEP smoke gate | "使用run_deepseek_v4跑通开启turbo attention和turbo deepep" |

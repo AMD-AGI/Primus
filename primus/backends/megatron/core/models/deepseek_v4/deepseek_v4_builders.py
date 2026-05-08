@@ -33,6 +33,7 @@ from megatron.training.arguments import core_transformer_config_from_args
 
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_layer_specs import (
     get_deepseek_v4_runtime_decoder_spec,
+    is_v4_turbo_deepep_active,
 )
 from primus.backends.megatron.core.models.deepseek_v4.deepseek_v4_model import (
     DeepseekV4Model,
@@ -138,6 +139,75 @@ def _maybe_plumb_v4_sink_attention_args(args) -> None:
     args.sink_window_even_layers_only = False
 
 
+def _maybe_plumb_v4_turbo_deepep_args(args) -> None:
+    """Plan-3 P23: derive Turbo DeepEP MoE args from V4 config.
+
+    When :func:`is_v4_turbo_deepep_active` returns True, the V4 MoE
+    layers will be built with :class:`PrimusTurboDeepEPTokenDispatcher`
+    (resolved by ``_pick_v4_dispatcher_cls`` in
+    ``deepseek_v4_layer_specs.py``).  Two ``args`` fields control
+    downstream behaviour:
+
+    * ``moe_enable_deepep`` — asserted by
+      :class:`PrimusTurboDeepEPTokenDispatcher.__init__`; without it
+      the Turbo dispatcher refuses to build.
+    * ``moe_token_dispatcher_type`` — read by
+      :class:`DeepseekV4TransformerConfig` to populate the V4 config's
+      ``moe_token_dispatcher_type``.  V4 spec build's
+      ``_pick_v4_dispatcher_cls`` then sees ``"flex"`` and pairs the
+      Turbo class with the right dispatcher-type label so
+      ``DeepseekV4MoE._resolve_dispatcher_type_from_spec`` reports
+      ``"flex"`` (instead of falling through to the
+      ``"unsupported dispatcher module"`` warning + ``"alltoall"``
+      fallback).
+
+    The ``before_train`` Turbo MoE patch
+    (``primus.backends.megatron.patches.turbo.moe_dispatcher_patches``)
+    sets the same two fields, but it fires AFTER ``deepseek_v4_builder``
+    has already built ``config`` from ``args``, so V4 needs to plumb
+    these values BEFORE ``core_transformer_config_from_args`` runs.
+
+    The plumbing is a no-op when:
+
+    * Turbo is not enabled / DeepEP not requested / TP > 1, OR
+    * the user has already set ``args.moe_token_dispatcher_type`` to
+      something other than ``"alltoall"`` (we only override the V4
+      base.yaml default, never an explicit user opt-in like
+      ``"allgather"``).
+    """
+    if not is_v4_turbo_deepep_active(args):
+        return
+
+    if not bool(getattr(args, "moe_enable_deepep", False)):
+        args.moe_enable_deepep = True
+        print_rank_0(
+            "[Primus:DeepSeek-V4][P23] derived args.moe_enable_deepep=True "
+            "from args.use_turbo_deepep=True (Turbo DeepEP dispatcher path)."
+        )
+
+    current = str(getattr(args, "moe_token_dispatcher_type", "") or "").lower()
+    # Only override when the V4 base default ("alltoall") is in effect
+    # or the user already opted into "flex".  Respect explicit
+    # "allgather" — that is a different parallelism scheme (tp+ep
+    # all-gather/scatter), not a deepep flavour.
+    if current in ("", "alltoall", "flex"):
+        if current != "flex":
+            args.moe_token_dispatcher_type = "flex"
+            print_rank_0(
+                f"[Primus:DeepSeek-V4][P23] override "
+                f"args.moe_token_dispatcher_type='{current or 'unset'}' -> "
+                f"'flex' (Turbo DeepEP dispatcher path)."
+            )
+    else:
+        print_rank_0(
+            "[Primus:DeepSeek-V4][P23] WARNING: "
+            f"args.use_turbo_deepep=True but moe_token_dispatcher_type="
+            f"'{current}' (not 'flex' / 'alltoall').  Keeping the user's "
+            "dispatcher type; the Turbo DeepEP path will not engage for V4 "
+            "MoE layers."
+        )
+
+
 def deepseek_v4_builder(
     args,
     pre_process,
@@ -157,6 +227,11 @@ def deepseek_v4_builder(
     # module is constructed (PrimusTurboAttention reads these in
     # ``__init__`` from get_args()).
     _maybe_plumb_v4_sink_attention_args(args)
+    # Plan-3 P23: plumb args.moe_enable_deepep + moe_token_dispatcher_type
+    # for the Turbo DeepEP MoE dispatcher path BEFORE config construction
+    # so the resulting ``config`` carries the right dispatcher type into
+    # ``_pick_v4_dispatcher_cls``.
+    _maybe_plumb_v4_turbo_deepep_args(args)
 
     if config is None:
         config = core_transformer_config_from_args(

@@ -10,8 +10,10 @@ DeepSeek-V4 spec entry points.
 This module only defines DeepSeek-native runtime specs.
 """
 
+import importlib
+import importlib.util
 import logging
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.mlp import MLPSubmodules
@@ -64,6 +66,154 @@ from primus.backends.megatron.core.transformer.moe.v4_topk_router import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Plan-3 P23 — Turbo DeepEP dispatcher gating
+# ---------------------------------------------------------------------------
+#
+# Both ``deepseek_v4_builders._maybe_plumb_v4_turbo_deepep_args`` (which
+# fires BEFORE config construction so the V4 config inherits the right
+# ``moe_token_dispatcher_type`` / ``moe_enable_deepep``) and
+# ``_pick_v4_dispatcher_cls`` below need the same gating predicate.
+# Centralised here so the two stay in sync; mirrors
+# ``primus.backends.megatron.patches.turbo.moe_dispatcher_patches._is_turbo_deepep_enabled``
+# (the patch itself fires too late for V4 spec build, but its gating
+# is the canonical one).
+#
+# ``deepseek_v4_builders.py`` imports this helper, which is one-way
+# (builders → layer_specs); putting the helper in builders would
+# create a circular import because layer_specs would need to call
+# back.
+
+# Public name so unit tests can patch / probe it directly.
+PRIMUS_TURBO_DEEPEP_DISPATCHER_NAME = "PrimusTurboDeepEPTokenDispatcher"
+
+
+def is_v4_turbo_deepep_active(args) -> bool:
+    """Plan-3 P23: V4-side gate for the Turbo DeepEP MoE dispatcher.
+
+    Returns ``True`` only when **all** of the following hold (matches
+    the conditions enforced by the upstream
+    ``megatron.turbo.moe_dispatcher`` patch):
+
+    * ``primus_turbo`` package is importable;
+    * ``args.enable_primus_turbo`` is True;
+    * ``args.use_turbo_deepep`` is True;
+    * ``args.tensor_model_parallel_size == 1``
+      (PrimusTurboDeepEPTokenDispatcher requires TPxEP > 1; we keep
+      TP == 1 here because TP > 1 paths haven't been validated against
+      the Turbo dispatcher and the existing patch enforces the same
+      gate).
+    """
+    if importlib.util.find_spec("primus_turbo") is None:
+        return False
+    if not bool(getattr(args, "enable_primus_turbo", False)):
+        return False
+    if not bool(getattr(args, "use_turbo_deepep", False)):
+        return False
+    tp_size = int(getattr(args, "tensor_model_parallel_size", 1) or 1)
+    if tp_size != 1:
+        return False
+    return True
+
+
+def _import_primus_turbo_deepep_dispatcher_cls():
+    """Plan-3 P23: lazy import of PrimusTurboDeepEPTokenDispatcher.
+
+    Returns ``None`` when the import fails (callers must fall back to
+    the upstream MoEFlexTokenDispatcher in that case + emit a warning).
+    The import is lazy because the wider primus build is allowed to
+    run without ``primus_turbo`` installed (e.g. CPU unit tests for
+    non-Turbo paths).
+    """
+    if importlib.util.find_spec("primus_turbo") is None:
+        return None
+    try:
+        module = importlib.import_module(
+            "primus.backends.megatron.core.extensions.primus_turbo"
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(
+            "[DeepSeek-V4][P23] Failed to import "
+            "primus.backends.megatron.core.extensions.primus_turbo: %s",
+            exc,
+        )
+        return None
+    return getattr(module, PRIMUS_TURBO_DEEPEP_DISPATCHER_NAME, None)
+
+
+def _pick_v4_dispatcher_cls(
+    config: DeepSeekV4TransformerConfig,
+    *,
+    args=None,
+) -> Tuple[type, str]:
+    """Plan-3 P23: pick the MoE token-dispatcher class for V4 spec build.
+
+    Returns ``(dispatcher_cls, dispatcher_type)``.  The
+    ``dispatcher_type`` is the string label V4 stores in its config /
+    annotation (used by ``DeepseekV4MoE._resolve_dispatcher_type_from_spec``);
+    ``dispatcher_cls`` is the class that ``ModuleSpec`` will hand to
+    ``build_module``.
+
+    Selection order:
+
+    1. If ``config.moe_token_dispatcher_type == "allgather"`` →
+       :class:`MoEAllGatherTokenDispatcher` / ``"allgather"``.  This is
+       a different parallelism scheme (TPxEP all-gather/scatter), not
+       a deepep flavour; never overridden by the Turbo path.
+    2. If ``config.moe_token_dispatcher_type == "flex"`` AND
+       :func:`is_v4_turbo_deepep_active` returns True →
+       :class:`PrimusTurboDeepEPTokenDispatcher` / ``"flex"``.  When
+       the package isn't importable we log a one-shot warning and
+       fall back to the upstream :class:`MoEFlexTokenDispatcher`.
+    3. If ``config.moe_token_dispatcher_type == "flex"`` (Turbo
+       inactive) → :class:`MoEFlexTokenDispatcher` / ``"flex"``.
+    4. Anything else (default V4 base.yaml: ``"alltoall"``) →
+       :class:`MoEAlltoAllTokenDispatcher` / ``"alltoall"``.  Unknown
+       values emit a one-shot warning and fall through to alltoall.
+
+    The ``args=`` keyword is for unit tests; production callers pass
+    ``None`` and the helper consults ``megatron.training.get_args()``
+    lazily.  ``args=None`` with no Megatron args available is
+    interpreted as "Turbo not active" (i.e. take the non-turbo
+    branch).  This keeps ``_build_ffn_spec`` callable from CPU unit
+    tests that haven't called ``initialize_megatron``.
+    """
+    dispatcher_type = str(getattr(config, "moe_token_dispatcher_type", None) or "").lower()
+
+    if dispatcher_type == "allgather":
+        return MoEAllGatherTokenDispatcher, "allgather"
+
+    if dispatcher_type == "flex":
+        if args is None:
+            try:
+                from megatron.training import get_args as _megatron_get_args
+
+                args = _megatron_get_args()
+            except Exception:
+                args = None
+        if args is not None and is_v4_turbo_deepep_active(args):
+            turbo_cls = _import_primus_turbo_deepep_dispatcher_cls()
+            if turbo_cls is not None:
+                logger.info(
+                    "[DeepSeek-V4][P23] MoE dispatcher class resolved to "
+                    "PrimusTurboDeepEPTokenDispatcher (Turbo DeepEP path)."
+                )
+                return turbo_cls, "flex"
+            logger.warning(
+                "[DeepSeek-V4][P23] use_turbo_deepep=True but "
+                "PrimusTurboDeepEPTokenDispatcher is not importable; "
+                "falling back to MoEFlexTokenDispatcher."
+            )
+        return MoEFlexTokenDispatcher, "flex"
+
+    if dispatcher_type not in ("", "alltoall"):
+        logger.warning(
+            "[DeepSeek-V4] unsupported moe_token_dispatcher_type=%s; fallback to alltoall.",
+            dispatcher_type,
+        )
+    return MoEAlltoAllTokenDispatcher, "alltoall"
 
 
 def _default_init_method(_weight) -> None:
@@ -360,19 +510,11 @@ def _build_ffn_spec(
         moe_use_grouped_gemm=moe_use_grouped_gemm,
         moe_use_legacy_grouped_gemm=moe_use_legacy_grouped_gemm,
     )
-    dispatcher_type = str(config.moe_token_dispatcher_type).lower()
-    if dispatcher_type == "allgather":
-        dispatcher_cls = MoEAllGatherTokenDispatcher
-    elif dispatcher_type == "flex":
-        dispatcher_cls = MoEFlexTokenDispatcher
-    else:
-        if dispatcher_type != "alltoall":
-            logger.warning(
-                "[DeepSeek-V4] unsupported moe_token_dispatcher_type=%s; fallback to alltoall.",
-                dispatcher_type,
-            )
-        dispatcher_type = "alltoall"
-        dispatcher_cls = MoEAlltoAllTokenDispatcher
+    # Plan-3 P23: V4-side dispatcher selection.  Avoids the module-attr
+    # timing race where ``before_train`` patches the upstream
+    # ``MoEFlexTokenDispatcher`` symbol AFTER V4 spec build has captured
+    # it; by resolving the class locally we always get the right one.
+    dispatcher_cls, dispatcher_type = _pick_v4_dispatcher_cls(config)
 
     assert (
         grouped_mlp_module is not None

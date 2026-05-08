@@ -44,6 +44,35 @@ if [ "$USE_TURBO_ATTENTION" = "True" ] || [ "${USE_TURBO_DEEPEP:-False}" = "True
 fi
 export USE_TURBO_DEEPEP=${USE_TURBO_DEEPEP:-False}
 
+# Plan-3 P23: Turbo DeepEP-related knobs.  Only emit these CLI flags
+# when USE_TURBO_DEEPEP=True so non-deepep runs don't carry unrelated
+# overrides.  Best-practice CU count: 64 (or 80) for EP=8, 32 for
+# EP>=16 — the EP>=16 cap is asserted by
+# `primus/modules/trainer/megatron/utils.py:527`.  DeepEP itself
+# requires `moe_router_dtype=fp32` and forbids
+# `moe_shared_expert_overlap=True` (both are already V4-Flash YAML
+# defaults; we pin them via CLI defensively so a stray YAML override
+# or future config edit cannot flip them out from under the Turbo
+# path mid-run).
+TURBO_DEEPEP_CLI_ARGS=()
+if [ "$USE_TURBO_DEEPEP" = "True" ]; then
+  if [ "${PRIMUS_EP:-1}" -ge 16 ]; then
+    _DEFAULT_TURBO_DEEPEP_NUM_CU=32
+  else
+    _DEFAULT_TURBO_DEEPEP_NUM_CU=80
+  fi
+  export TURBO_DEEPEP_NUM_CU=${TURBO_DEEPEP_NUM_CU:-$_DEFAULT_TURBO_DEEPEP_NUM_CU}
+  export TURBO_DEEPEP_USE_COMM_STREAM=${TURBO_DEEPEP_USE_COMM_STREAM:-False}
+  export MOE_ROUTER_DTYPE=${MOE_ROUTER_DTYPE:-fp32}
+  export MOE_SHARED_EXPERT_OVERLAP=${MOE_SHARED_EXPERT_OVERLAP:-False}
+  TURBO_DEEPEP_CLI_ARGS=(
+    --turbo_deepep_num_cu "$TURBO_DEEPEP_NUM_CU"
+    --turbo_deepep_use_comm_stream "$TURBO_DEEPEP_USE_COMM_STREAM"
+    --moe_router_dtype "$MOE_ROUTER_DTYPE"
+    --moe_shared_expert_overlap "$MOE_SHARED_EXPERT_OVERLAP"
+  )
+fi
+
 export PRECISION_TYPE=${PRECISION_TYPE:-BF16}
 export FP8=null
 export FP8_RECIPE=null
@@ -94,6 +123,7 @@ mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
   --enable_primus_turbo "$ENABLE_PRIMUS_TURBO" \
   --use_turbo_attention "$USE_TURBO_ATTENTION" \
   --use_turbo_deepep "$USE_TURBO_DEEPEP" \
+  "${TURBO_DEEPEP_CLI_ARGS[@]}" \
   --use_turbo_grouped_mlp "$TURBO_USE_GROUPED_MLP" \
   --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
   --fp8 "$FP8" \

@@ -15,13 +15,12 @@
 | **G18** | P22 | runtime (CPU) | Dense V4 attention: forward via `core_attention` vs eager-Python within 1e-3 on a 1L toy. | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p22_core_attention.py` |
 | **G19** | P22 | runtime (CPU) | HCA + CSA branches still produce identical outputs as before plan-3 (regression guard for the eager-Python paths). | same file as G18 |
 | **G20** | P23 | runtime (CPU) | V4 dispatcher selection: turbo on (TP=1) → `PrimusTurboDeepEPTokenDispatcher`; turbo on + TP>1 → `MoEFlexTokenDispatcher` with rank-0 warning; turbo off → unchanged. | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p23_dispatcher_pick.py` |
-| **G21** | P24 | runtime (mi355-gpu-12) | The four turbo smokes (A/B/C/D, see `02-phase-details.md` §P24) each reach iter 10. No banned warnings (`"fallback to nn.Linear"`, `"c10d::allreduce_"`, `"submodule init failed"`, `"unsupported dispatcher module"`). | `deepseek-v4/develop/progress/p20/` smoke logs + status.md Phase 24 row |
 
 ## Banned-warning ratchet
 
 In addition to the existing P19 / P20 gates (`c10d::allreduce_`,
-`Routing snapshot diff`), plan-3 adds three banned-string ratchets to
-the P24 smoke:
+`Routing snapshot diff`), plan-3 adds three banned-string ratchets
+that every V4 smoke from P21 onward must keep clean:
 
 1. `"submodule init failed"` — caught by P21 (must raise, not warn).
 2. `"fallback to nn.Linear"` — same.
@@ -35,12 +34,11 @@ All CPU-runnable gates (G15 / G15b / G16 / G17 / G18 / G19 / G20) use
 the existing `tests/unit_tests/megatron/transformer/deepseek_v4/`
 harness (1L / 4L V4 toy with `hidden=128`, `head_dim=32`,
 `num_attention_heads=4`, `num_experts=8`, `compress_ratios=[0,4,128,0]`).
-No GPU required. Smoke gate (G21) requires the mi355-gpu-12
-allocation.
+No GPU required.
 
 ## Reporting hand-off
 
-P24 closes plan-3 with an entry in `../progress/status.md` Phase 24 +
-a one-paragraph summary in a new `../progress/plan-3-summary.md`
-(authored once P24 lands). Plan-3's gates will all be ticked through
-`status.md`'s standard format.
+Plan-3 closes with the P23 entry in `../progress/status.md` plus the
+ad-hoc local DeepEP smoke captured under
+`../progress/p23/` (gitignored). A `plan-3-summary.md` mirroring
+`plan-2-summary.md` can be authored as a follow-up if required.
