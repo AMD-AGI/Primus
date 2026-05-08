@@ -100,6 +100,29 @@ Each file under `docs/backend-gap/dashboard-data/reports/` should follow this st
     "Upstream main tracks the latest nightly on CUDA cu130 / ROCm 7.1, while the current Primus baseline is centered on cu126.",
     "Primus has a non-trivial outer integration layer that directly depends on upstream internal paths."
   ],
+  "dashboard_summary": {
+    "headline": "TorchTitan is 493 commits behind upstream main, with dependency-channel and Primus integration impact.",
+    "recommendation": "urgent sync",
+    "why_it_matters": [
+      "Primus bundles TorchTitan 0.1.0 while upstream main is at 0.2.2.",
+      "Upstream main moved to nightly cu130 and ROCm 7.1 while the Primus baseline remains centered on cu126.",
+      "The gap includes 447 changed files, so this is not a narrow dependency bump.",
+      "Primus trainer, adapter, and patch layers directly depend on upstream internal paths."
+    ],
+    "feature_deltas": [
+      "GraphTrainer precompile and cudagraph paths",
+      "MoE token dispatcher and DeepEP / HybridEP distributed runtime updates",
+      "Fused QKV GQAttention and FlexAttention context-parallel work"
+    ],
+    "dependency_deltas": [
+      "README nightly channel moved from nightly/cu126 to nightly/cu130.",
+      "ROCm workflow coverage now targets nightly/rocm7.1."
+    ],
+    "integration_risks": [
+      "Primus trainer imports torchtitan.config.job_config.JobConfig and torchtitan.train.Trainer.",
+      "Turbo patches reference upstream model, quantization, and MoE internals."
+    ]
+  },
   "artifacts": [
     {
       "label": "Detailed Report (PDF)",
@@ -133,6 +156,15 @@ Top level:
 - `highlights`
 - `artifacts`
 
+Recommended for dashboard presentation:
+
+- `dashboard_summary.headline`
+- `dashboard_summary.recommendation`
+- `dashboard_summary.why_it_matters`
+- `dashboard_summary.feature_deltas`
+- `dashboard_summary.dependency_deltas`
+- `dashboard_summary.integration_risks`
+
 Each artifact requires:
 
 - `label`
@@ -150,6 +182,8 @@ Each artifact requires:
 - Each artifact `path` should map to an existing markdown source path with the same basename.
 - Keep default artifact labels plain. Add language suffixes only for non-default variants when needed.
 - Prefer marking the most user-facing PDF as `primary: true`.
+- `dashboard_summary` should be short, factual, and derived from the detailed report evidence.
+- Prefer structured `dashboard_summary` fields over making the frontend infer conclusions from Markdown prose.
 
 ## Recommended Report Sections
 
