@@ -428,9 +428,9 @@ def _llama2_lora(
     model_cfg.autocast_dtype = torch.bfloat16
     model_cfg.pipeline_dtype = torch.bfloat16
     # Fusions / CE: TE parallel cross-entropy; grad-acc fusion (not used with Megatron FSDP).
-    model_cfg.cross_entropy_loss_fusion = True
-    model_cfg.cross_entropy_fusion_impl = "te"
-    model_cfg.gradient_accumulation_fusion = True
+    model_cfg.cross_entropy_loss_fusion = False
+    model_cfg.cross_entropy_fusion_impl = "native"
+    model_cfg.gradient_accumulation_fusion = False
     model_cfg.bias_dropout_fusion = True
     model_cfg.fused_single_qkv_rope = False
     model_cfg.apply_rope_fusion = True
@@ -719,8 +719,7 @@ def evaluate(
     non_loss_data_func: Optional[Callable] = None,
 ) -> tuple[Optional[dict[str, torch.Tensor]], Optional[Any], bool]:
     """Evaluation function (from eval_m.py).
-    Validation loss aggregation matches NeMo: mean of per-microbatch means
-    (same as NeMo MaskedTokenLossReduction with validation_step=True, val_drop_last=True).
+    Validation loss aggregation matches NeMo: mean of per-microbatch means.
     """
     _reset_data_iterator(data_iterator)
     wrapped_forward_step = prepare_forward_step_func(forward_step_func, state)
@@ -781,35 +780,55 @@ def evaluate(
             if is_pp_last_stage(pg_collection.pp):
                 # NeMo-style: mean of per-microbatch means (matches NeMo validation loss).
                 # Keep loss_sum / num_tokens on GPU; avoid per-microbatch .item() syncs.
+                # for key in loss_dicts[0].keys():
+                #     if key not in total_loss_dict:
+                #         total_loss_dict[key] = torch.zeros(2, dtype=torch.float32, device="cuda")
+                #     val = [x[key].reshape(-1) for x in loss_dicts]
+                #     if val[0].numel() == 2:
+                #         device = val[0].device
+                #         stacked = torch.stack([v.float() for v in val], dim=0)
+                #         loss_sums = stacked[:, 0]
+                #         num_toks = stacked[:, 1]
+                #         ok = num_toks > 0
+                #         if ok.any():
+                #             sum_means_this_rank = (loss_sums[ok] / num_toks[ok]).sum()
+                #             count_this_rank_t = ok.sum().to(dtype=torch.float32)
+                #         else:
+                #             sum_means_this_rank = torch.zeros((), dtype=torch.float32, device=device)
+                #             count_this_rank_t = torch.zeros((), dtype=torch.float32, device=device)
+                #         torch.distributed.all_reduce(sum_means_this_rank, group=pg_collection.dp_cp)
+                #         torch.distributed.all_reduce(count_this_rank_t, group=pg_collection.dp_cp)
+                #         total_loss_dict[key][0] += sum_means_this_rank
+                #         total_loss_dict[key][1] += count_this_rank_t
+                #     elif val[0].numel() == 1:
+                #         micro_sum = torch.stack([v.float() for v in val], dim=0).sum()
+                #         total_loss_dict[key][0] += micro_sum
+                #         total_loss_dict[key][1] += float(len(loss_dicts))
+                #     else:
+                #         raise ValueError(
+                #             f"Invalid value shape: {val[0].shape} for key {key}"
+                #         )
+
                 for key in loss_dicts[0].keys():
                     if key not in total_loss_dict:
                         total_loss_dict[key] = torch.zeros(2, dtype=torch.float32, device="cuda")
                     val = [x[key].reshape(-1) for x in loss_dicts]
                     if val[0].numel() == 2:
-                        device = val[0].device
-                        stacked = torch.stack([v.float() for v in val], dim=0)
-                        loss_sums = stacked[:, 0]
-                        num_toks = stacked[:, 1]
-                        ok = num_toks > 0
-                        if ok.any():
-                            sum_means_this_rank = (loss_sums[ok] / num_toks[ok]).sum()
-                            count_this_rank_t = ok.sum().to(dtype=torch.float32)
-                        else:
-                            sum_means_this_rank = torch.zeros((), dtype=torch.float32, device=device)
-                            count_this_rank_t = torch.zeros((), dtype=torch.float32, device=device)
-                        torch.distributed.all_reduce(sum_means_this_rank, group=pg_collection.dp_cp)
-                        torch.distributed.all_reduce(count_this_rank_t, group=pg_collection.dp_cp)
-                        total_loss_dict[key][0] += sum_means_this_rank
-                        total_loss_dict[key][1] += count_this_rank_t
+                        # NeMo MLPerf-equivalent: accumulate raw [sum, count] across micros & eval iters.
+                        # Per-micro [sum, count] is already DP/CP-reduced inside
+                        # nemo_loss.MaskedTokenLossReduction.forward, so no extra all_reduce here.
+                        per_iter = torch.vstack([v.float() for v in val]).sum(dim=0)   # [Σ_micro sum, Σ_micro count]
+                        total_loss_dict[key] += per_iter
                     elif val[0].numel() == 1:
+                        # legacy single-scalar branch 
                         micro_sum = torch.stack([v.float() for v in val], dim=0).sum()
                         total_loss_dict[key][0] += micro_sum
                         total_loss_dict[key][1] += float(len(loss_dicts))
                     else:
-                        raise ValueError(
-                            f"Invalid value shape: {val[0].shape} for key {key}"
-                        )
+                        raise ValueError(f"Invalid value shape: {val[0].shape} for key {key}")
+
             state.train_state.consumed_valid_samples += eval_batch_size
+
             if state.cfg.train.exit_duration_in_mins:
                 train_time = (time.time() - state.start_time) / 60.0
                 done_cuda = torch.tensor(
@@ -823,8 +842,7 @@ def evaluate(
                     rerun_state_machine.set_mode(rerun_mode)
                     log_rank_0("Exiting during evaluation, timelimit reached")
                     return None, None, True
-        if state.cfg.train.empty_unused_memory_level >= 1:
-            torch.cuda.empty_cache()
+
         collected_non_loss_data = None
         if non_loss_data_func is not None:
             collected_non_loss_data = non_loss_data_func(model)
@@ -855,11 +873,11 @@ def evaluate(
     for model_module in model:
         model_module.train()
     for key in total_loss_dict:
-        sum_of_means, count = total_loss_dict[key]
-        if count > 0:
-            total_loss_dict[key] = sum_of_means / count
+        val_loss_sum, val_loss_count = total_loss_dict[key]
+        if val_loss_count > 0:
+            total_loss_dict[key] = val_loss_sum / val_loss_count
         else:
-            total_loss_dict[key] = sum_of_means
+            total_loss_dict[key] = val_loss_count
     timers("evaluate").stop()
     timers.log(["evaluate"])
     rerun_state_machine.set_mode(rerun_mode)
