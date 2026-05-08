@@ -80,6 +80,7 @@ from primus.backends.megatron.core.transformer.v4_attention_kernels import (
     eager_v4_attention,
     eager_v4_csa_attention,
     v4_attention,
+    v4_csa_attention,
 )
 
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
@@ -453,6 +454,17 @@ class DeepseekV4Attention(MLASelfAttention):
             # time so a stray run script doesn't silently fall back to
             # eager for the CSA layers (and skew layer-vs-layer perf).
             self._use_v4_triton_attention = False
+
+        # Plan-4 P26: in-tree Primus Triton kernel for cr == 4 (CSA).
+        # Symmetric to ``_use_v4_triton_attention`` above: read the flag
+        # once at __init__, and auto-disable for non-CSA layers so a
+        # stray ``use_v4_triton_csa_attention=True`` does not silently
+        # accelerate the CSA layers only and skew apples-to-apples perf
+        # comparisons. Precedence in ``forward`` (cr == 4 branch) is
+        # ``use_v4_triton_csa_attention > eager``.
+        self._use_v4_triton_csa_attention: bool = bool(getattr(config, "use_v4_triton_csa_attention", False))
+        if self._use_v4_triton_csa_attention and self.compress_ratio != 4:
+            self._use_v4_triton_csa_attention = False
 
         self.core_attention: Optional[nn.Module] = None
         self._use_core_attention: bool = False
@@ -873,6 +885,16 @@ class DeepseekV4Attention(MLASelfAttention):
         ``swa_window`` (same call to
         :func:`sliding_window_causal_mask` as :meth:`_local_mask` makes,
         so the result is bit-identical).
+
+        Plan-4 P26: when ``use_v4_triton_csa_attention=True`` the
+        joint-softmax math is dispatched through the in-tree Triton
+        kernel :func:`v4_csa_attention` instead of the eager reference;
+        both have identical signatures and dtype contracts so this is a
+        1:1 swap. The autograd of ``torch.gather`` (and the
+        ``pool.unsqueeze(1).expand(...)`` broadcast) automatically
+        scatter-adds the kernel's ``dgathered`` output back into the
+        compressed-pool gradient — the kernel does NOT see ``topk_idxs``
+        so the scatter-add lives outside the autograd Function.
         """
         del local_mask  # see docstring
         B, H, S, Dh = q_bh.shape
@@ -889,12 +911,31 @@ class DeepseekV4Attention(MLASelfAttention):
         safe_idx = topk_idxs.clamp(min=0)
 
         # 3) Gather per-query pool slices: [B, S, K, head_dim].
+        # ``gathered`` is broadcast across heads in the kernel / eager
+        # reference (no H dim) — matches the V4 design where the
+        # compressor produces a single-latent pool shared by all heads.
         idx_expand = safe_idx.unsqueeze(-1).expand(B, S, K, Dh)
         pool_expand = pool.unsqueeze(1).expand(B, S, P, Dh)
         gathered = torch.gather(pool_expand, dim=2, index=idx_expand)
         gathered = gathered * valid.unsqueeze(-1).to(gathered.dtype)
         sparse_mask = torch.where(valid, 0.0, float("-inf")).to(dtype)  # [B, S, K]
 
+        # Plan-4 P26 dispatch: precedence ``use_v4_triton_csa_attention >
+        # eager``. The candidate functions share a signature, so this is
+        # a 1:1 swap.
+        if self._use_v4_triton_csa_attention:
+            return v4_csa_attention(
+                q_bh,
+                k_local_bh,
+                v_local_bh,
+                gathered,
+                sink=self.attn_sink,
+                swa_window=int(self.attn_sliding_window),
+                sparse_mask=sparse_mask,
+                attn_dropout=self.attn_dropout,
+                training=self.training,
+                scale=self._attention_scale(),
+            )
         return eager_v4_csa_attention(
             q_bh,
             k_local_bh,
