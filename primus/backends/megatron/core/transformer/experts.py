@@ -57,21 +57,20 @@ class PrimusGroupedMLP(TEGroupedMLP):
             ), "tokens_per_experts is required when `use_turbo_fused_act_with_probs` is True."
 
             if self.activation_func == F.silu and self.config.gated_linear_unit:
-                # dtype is handled inside the fused kernel
-                bias_act_with_probs = fused_bias_act_with_probs(
-                    intermediate_parallel, bias_parallel, permuted_probs, tokens_per_experts, "silu"
-                )
+                activation = "silu"
             elif self.activation_func == F.gelu and self.config.gated_linear_unit:
-                bias_act_with_probs = fused_bias_act_with_probs(
-                    intermediate_parallel, bias_parallel, permuted_probs, tokens_per_experts, "gelu"
-                )
+                activation = "gelu"
             else:
                 raise ValueError(
                     "Only support fusion of swiglu and gelu in PrimusGroupedMLP when `use_turbo_fused_act_with_probs` is True."
                 )
 
-            return bias_act_with_probs(
-                intermediate_parallel, bias_parallel, permuted_probs, tokens_per_experts
+            # `forward()` unsqueeze(-1)'s `permuted_probs` to [tokens, 1] so the non-fused
+            # asserts ndim == 1. Squeeze back to 1D for the fused kernel only.
+            probs_1d = permuted_probs.squeeze(-1) if permuted_probs.dim() == 2 else permuted_probs
+            # dtype is handled inside the fused kernel
+            return fused_bias_act_with_probs(
+                intermediate_parallel, bias_parallel, probs_1d, tokens_per_experts, activation
             )
         else:
             # use the original bias_act_func from TEGroupedMLP, ignore the tokens_per_experts

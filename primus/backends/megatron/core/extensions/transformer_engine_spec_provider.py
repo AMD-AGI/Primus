@@ -106,10 +106,10 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
             # let it raise an error if cfg does not have moe_use_legacy_grouped_gemm
             moe_use_legacy_grouped_gemm = self.cfg.moe_use_legacy_grouped_gemm
 
+        use_turbo_grouped_gemm = self.cfg.use_turbo_grouped_gemm or self.cfg.use_turbo_grouped_mlp
         assert not (
             moe_use_legacy_grouped_gemm and use_turbo_grouped_gemm
         ), "moe_use_legacy_grouped_gemm and use_turbo_grouped_gemm are not compatible."
-        use_turbo_grouped_gemm = self.cfg.use_turbo_grouped_gemm or self.cfg.use_turbo_grouped_mlp
         if moe_use_grouped_gemm and not moe_use_legacy_grouped_gemm:
             # dispatch to turbo grouped gemm or TE grouped gemm
             _GroupedMLP = PrimusGroupedMLP if use_turbo_grouped_gemm else TEGroupedMLP

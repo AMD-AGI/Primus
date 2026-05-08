@@ -106,7 +106,6 @@ def _use_split_wgrad_op():
         "v-min",
     ]:
         enable_split_wgrad_op = True
-        return True
 
     elif args.patch_zero_bubble and args.enable_zero_bubble:
         enable_split_wgrad_op = True
@@ -686,6 +685,10 @@ class PrimusTurboLinear(TELinear):
         symmetric_ar_type: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
+        args = get_args()
+        self.offload = args.offload and "parallel_gemm" in args.offload_ops
+        assert not self.offload, "gemm offload still have some problems"
+
         super().__init__(
             input_size=input_size,
             output_size=output_size,
@@ -1501,7 +1504,7 @@ class PrimusTurboRowParallelGroupedLinear(PrimusTurboGroupedLinear):
         )
 
         tp_size = get_pg_size(self._tp_group)
-        assert tp_size == 1, "PrimusTurboColumnParallelGroupedLinear only supports tensor parallel size = 1"
+        assert tp_size == 1, "PrimusTurboRowParallelGroupedLinear only supports tensor parallel size = 1"
 
 
 class PrimusTurboDeepEPTokenDispatcher(MoETokenDispatcher):
