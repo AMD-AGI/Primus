@@ -93,9 +93,6 @@ class PrimusGroupedMLP(TEGroupedMLP):
         Return:
             output (torch.Tensor): The output of the local experts.
         """
-        assert (
-            tokens_per_expert.device == permuted_local_hidden_states.device
-        ), "tokens_per_expert must be on the same device as permuted_local_hidden_states."
         # TODO(ruibin): remove extra d2h and h2d by fuse padding into permute kernel
         if self.config.fp8 or self.config.fp4:
             tokens_per_expert_cpu: list[int] = tokens_per_expert.tolist()
