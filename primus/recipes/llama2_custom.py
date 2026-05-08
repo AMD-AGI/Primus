@@ -124,6 +124,13 @@ from megatron.bridge.training.train import (
     _maybe_register_fsdp_buffers,
 )
 
+# Importing this module installs a monkey-patch that swaps Megatron-Bridge's
+# default global-token-mean loss for a NeMo MaskedTokenLossReduction-equivalent
+# per-sample-mean loss (see ``primus/recipes/nemo_loss.py``). Required to match
+# NeMo MLPerf Llama2-70B-LoRA training/validation loss numerics.
+# Disable by setting ``PRIMUS_NEMO_LOSS=0``.
+from primus.recipes import nemo_loss as _nemo_loss  # noqa: F401
+
 MLPERF_TARGET_LOSS = 0.925
 
 # Sticky flag: once ``evaluate_and_print_results_custom`` observes an lm-loss
@@ -159,6 +166,11 @@ def bf16_with_mxfp4_mixed() -> MixedPrecisionConfig:
     cfg.fp8 = None
     cfg.fp4 = "e2m1"
     cfg.fp4_recipe = "mxfp4"
+    cfg.fp8_recipe = "delayed"
+    cfg.fp8_amax_history_len = 4
+    cfg.fp8_amax_compute_algo = "most_recent"
+    cfg.fp8_reduce_amax = False
+    cfg.fp8_dot_product_attention = False
     cfg.fp8_param_gather = False
     cfg.grad_reduce_in_fp32 = False
     return cfg
@@ -289,12 +301,6 @@ def llama2_70b_lora_mxfp4_config(**user_kwargs: Unpack[Llama2CustomKwargs]) -> C
     """
     mxfp4_defaults: Llama2CustomKwargs = {
         "precision_config": "bf16_with_mxfp4_mixed",
-        "recompute_granularity": "full",
-        "recompute_method": "block",
-        # MLPerf 6.0 NeMo MI355X FP4 reference: RECOMPUTE_NUM_LAYERS=8.
-        "recompute_num_layers": 0,
-        # MXFP4 path is exercised with FusedAttention (CK / AOTriton); FlashAttention
-        # has not been validated for this recipe on MI355X. User can still override.
         "attention_backend": "fused",
     }
     combined_kwargs: Llama2CustomKwargs = {**mxfp4_defaults, **user_kwargs}
@@ -471,23 +477,56 @@ def _llama2_lora(
     # model_cfg.recompute_num_layers = 1
     # model_cfg.num_query_groups = None
 
-    opt_config, scheduler = distributed_fused_adam_with_cosine_annealing(
-        lr_warmup_iters=lr_warmup_iters,
-        lr_decay_iters=lr_decay_iters,
-        adam_beta1=adam_beta1,
-        adam_beta2=adam_beta2,
-        adam_eps=adam_eps,
-        weight_decay=weight_decay,
-        max_lr=lr,
+    # opt_config, scheduler = distributed_fused_adam_with_cosine_annealing(
+    #     lr_warmup_iters=lr_warmup_iters,
+    #     lr_decay_iters=lr_decay_iters,
+    #     adam_beta1=adam_beta1,
+    #     adam_beta2=adam_beta2,
+    #     adam_eps=adam_eps,
+    #     weight_decay=weight_decay,
+    #     max_lr=lr,
+    #     min_lr=min_lr,
+    #     clip_grad=clip_grad
+    # )
+    # opt_config.use_distributed_optimizer = True
+    # opt_config.overlap_param_gather_with_optimizer_step = True
+    # opt_config.params_dtype = torch.bfloat16
+    # # Avoid L1 timer barriers and per-step zero-grad counting unless debugging.
+    # opt_config.barrier_with_L1_time = False
+    # opt_config.log_num_zeros_in_grad = False
+    from megatron.bridge.training.config import OptimizerConfig, SchedulerConfig
+    opt_config = OptimizerConfig(
+        optimizer="adam",
+        lr=lr,
+        # NeMo CosineAnnealingScheduler(min_lr=0) parity. Megatron's
+        # OptimizerParamScheduler.__init__ does `assert self.min_lr >= 0.0`,
+        # and OptimizerConfig.min_lr defaults to None -- so omitting this
+        # crashes with "'>=' not supported between NoneType and float".
         min_lr=min_lr,
-        clip_grad=clip_grad
+        clip_grad=0.3,
+        weight_decay=0.0001,
+        adam_beta1=0.9,
+        adam_beta2=0.999,
+        adam_eps=1e-08,
+        bf16=True,
+        params_dtype=torch.bfloat16,
+        use_distributed_optimizer=True,
+        overlap_param_gather_with_optimizer_step=True,
+        barrier_with_L1_time=False,
+        log_num_zeros_in_grad=False,
     )
-    opt_config.use_distributed_optimizer = True
-    opt_config.overlap_param_gather_with_optimizer_step = True
-    opt_config.params_dtype = torch.bfloat16
-    # Avoid L1 timer barriers and per-step zero-grad counting unless debugging.
-    opt_config.barrier_with_L1_time = False
-    opt_config.log_num_zeros_in_grad = False
+
+    scheduler = SchedulerConfig(
+        lr_decay_style="cosine",
+        lr_decay_iters=lr_decay_iters,  # same as max_steps in nemo
+        lr_warmup_iters=lr_warmup_iters, # value 0 same as nemo
+        lr_warmup_init=0.0,
+        start_weight_decay=0.0001,
+        end_weight_decay=0.0001, 
+        weight_decay_incr_style="constant",
+        override_opt_param_scheduler=True,
+    )
+
 
     peft_config = LoRA(
         dim=16,
@@ -622,7 +661,7 @@ def _llama2_lora(
             load_optim=False,
             load_rng=False,
         ),
-        rng=RNGConfig(seed=seed),
+        rng=RNGConfig(seed=seed, te_rng_tracker=True),
         rerun_state_machine=RerunStateMachineConfig(
             check_for_nan_in_loss=check_for_nan_in_loss,
         ),
@@ -632,7 +671,7 @@ def _llama2_lora(
         mixed_precision=precision_config,
         peft=peft_config,
         profiling=ProfilingConfig(
-            use_pytorch_profiler=True,
+            use_pytorch_profiler=False,
             profile_step_start=30,
             profile_step_end=32,
             profile_ranks=list(range(8)),  # 1 node × 8 GPUs (unused when profiler off)
