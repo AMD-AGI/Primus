@@ -43,4 +43,6 @@ export PRIMUS_RECOMPUTE_LAYERS=0
   --train_iters=10 \
   --global_batch_size "$GBS" \
   --recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS" \
+  --manual_gc True \
+  --manual_gc_interval 100 \
   2>&1 | tee log.txt
