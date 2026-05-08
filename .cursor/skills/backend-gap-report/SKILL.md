@@ -123,6 +123,7 @@ The metadata must:
 - reference publish artifact paths that can be generated
 - map to markdown source files that exist in the repo
 - include backend identity, refs, stats, highlights, and artifact links
+- include `dashboard_summary` with concise homepage-ready facts when the report has enough evidence
 
 Use the schema and examples in [reference.md](reference.md) and [examples.md](examples.md).
 
@@ -191,6 +192,20 @@ Before finishing:
 - Dashboard source data lives under `docs/backend-gap/dashboard-data/reports/`.
 - `docs/backend-gap/dashboard-data/index.json` is generated, not hand-maintained.
 - Artifact paths in metadata are relative to the standalone published site root.
+- Backend deep-dive cards should render structured `dashboard_summary` fields when present. Do not make the frontend infer important conclusions from Markdown prose.
+
+### Backend Dashboard Summary
+
+When generating backend metadata, add a `dashboard_summary` object whenever the comparison has confirmed facts worth surfacing on the homepage:
+
+- `headline`: one sentence explaining why this backend comparison matters
+- `recommendation`: concise action label such as `monitor`, `plan sync`, or `urgent sync`
+- `why_it_matters`: 3-5 concise facts or risks
+- `feature_deltas`: notable upstream capabilities added since the Primus pin
+- `dependency_deltas`: dependency, runtime, CUDA, ROCm, or package-channel differences
+- `integration_risks`: Primus-specific coupling points or upgrade risks
+
+All `dashboard_summary` content must be derived from the same evidence used in the detailed report. Do not invent features, versions, or risks to make the dashboard look richer.
 
 ## Weekly Engineering Report Integration
 
@@ -239,15 +254,19 @@ combined bundle:
 python3 tools/backend_gap_report/build_site_bundle.py --output-dir /tmp/primus-dashboard-site
 ```
 
-### Presentation rules for weekly reports
+### Presentation rules for the shared dashboard
 
-- The dashboard must keep backend-gap content first-class and add weekly
-  reports as a peer section, not as a decorative widget.
-- Home/hero should surface the latest weekly report id, generation time, and
-  a featured summary (merged PR count, category breakdown, recommendations,
-  key findings, link to the Markdown report).
-- A history list/cards below the featured block shows older weekly reports,
-  newest first.
+- The homepage should lead with the latest weekly engineering snapshot because
+  the weekly report is the broad Primus status view.
+- Backend gap reports should appear as backend deep-dive cards, not as a
+  separate top-level dashboard module or tab.
+- Backend deep-dive cards should be generated from backend metadata records and
+  should automatically expand when new backend reports are added.
+- The backend card should prioritize `dashboard_summary` content: why it
+  matters, new upstream capabilities, dependency shifts, integration risks, and
+  PDF links.
+- Weekly archive/list sections should stay simple. Avoid unnecessary filters or
+  history affordances when there is only one report.
 - Visual style must remain calm, editorial, presentation-ready. No emoji,
   no animations, no decorative gradients beyond the existing header treatment.
 
