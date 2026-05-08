@@ -23,8 +23,3 @@ def pytest_configure(config):
         megatron_path = project_root / "third_party" / "Megatron-LM"
     if str(megatron_path) not in sys.path:
         sys.path.append(str(megatron_path))
-
-    config.addinivalue_line(
-        "markers",
-        "slurm: mark test as requiring a live Slurm cluster (opt-in via BISECT_* env vars)",
-    )

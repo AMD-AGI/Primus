@@ -43,7 +43,7 @@
 #   BISECT_PARTITION="mi355x" \
 #   BISECT_BAD_NODE="chi2879" \
 #   VENV_ACTIVATE="/path/to/venv/bin/activate" \
-#   pytest tests/unit_tests/tools/test_preflight_bisect_slurm.py -v -m slurm
+#   pytest tests/unit_tests/tools/test_preflight_bisect_slurm.py -v
 ###############################################################################
 
 import os
@@ -102,7 +102,6 @@ def _run_bisect(extra_args: list[str], env: dict[str, str], tmp_path: Path, time
     return summary_text
 
 
-@pytest.mark.slurm
 def test_bisect_all_nodes_pass(tmp_path):
     """Run bisect.py with the real preflight runner against a known-healthy nodeset.
 
@@ -136,7 +135,6 @@ def test_bisect_all_nodes_pass(tmp_path):
     )
 
 
-@pytest.mark.slurm
 def test_bisect_identifies_bad_node(tmp_path):
     """Run bisect.py with fake_runner.sh seeding one bad node.
 
