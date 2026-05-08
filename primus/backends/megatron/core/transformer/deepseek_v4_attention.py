@@ -76,7 +76,10 @@ from primus.backends.megatron.core.transformer.local_rmsnorm import LocalRMSNorm
 from primus.backends.megatron.core.transformer.sliding_window_kv import (
     sliding_window_causal_mask,
 )
-
+from primus.backends.megatron.core.transformer.v4_attention_kernels import (
+    eager_v4_attention,
+    eager_v4_csa_attention,
+)
 
 _SUPPORTED_COMPRESS_RATIOS = (0, 4, 128)
 
@@ -627,14 +630,29 @@ class DeepseekV4Attention(MLASelfAttention):
         attn_mask: torch.Tensor,  # [Sq, Sk] additive (broadcasts over B,H)
     ) -> torch.Tensor:
         """Eager scaled-dot-product attention with optional attn_sink
-        for the dense / HCA paths (single key axis)."""
-        scale = self._attention_scale()
-        logits = torch.matmul(q.float(), k.float().transpose(-2, -1)) * scale
-        logits = logits + attn_mask
-        probs = self._append_sink_softmax(logits)
-        if self.attn_dropout > 0.0 and self.training:
-            probs = torch.nn.functional.dropout(probs, p=self.attn_dropout)
-        return torch.matmul(probs.to(v.dtype), v)
+        for the dense / HCA paths (single key axis).
+
+        Plan-4 P24: math lives in
+        :func:`primus...v4_attention_kernels.reference.eager_v4_attention`
+        so the dense / HCA path, the plan-4 Triton kernel (P25), and the
+        plan-4 unit-test harness share one definition. The caller has
+        already pre-built the ``[Sq, Sk]`` additive mask (SWA-causal
+        for dense, ``cat([local_mask, hca_mask])`` for HCA) so we pass
+        ``swa_window=0`` and let the reference op use the supplied
+        ``additive_mask`` directly — bit-identical to the pre-P24
+        inline implementation.
+        """
+        return eager_v4_attention(
+            q,
+            k,
+            v,
+            sink=self.attn_sink,
+            swa_window=0,
+            additive_mask=attn_mask,
+            attn_dropout=self.attn_dropout,
+            training=self.training,
+            scale=self._attention_scale(),
+        )
 
     def _attention_forward_via_core(
         self,
@@ -779,7 +797,7 @@ class DeepseekV4Attention(MLASelfAttention):
         q_bh: torch.Tensor,  # [B, H, S, head_dim]
         k_local_bh: torch.Tensor,  # [B, H, S, head_dim]
         v_local_bh: torch.Tensor,  # [B, H, S, head_dim]
-        local_mask: torch.Tensor,  # [S, S]
+        local_mask: torch.Tensor,  # [S, S] — built by caller; unused here, see below
     ) -> torch.Tensor:
         """CSA (compress_ratio == 4) joint local-SWA + sparse-compressed attention.
 
@@ -787,9 +805,22 @@ class DeepseekV4Attention(MLASelfAttention):
         the indexer picks ``index_topk`` pool positions per query, and
         the attention runs softmax JOINTLY over ``[local_keys, sparse_keys]``
         so the optional ``attn_sink`` is shared across both branches.
+
+        Plan-4 P24: the compressor / indexer / per-query top-K gather
+        stay here (they are V4-specific side-paths that the kernel does
+        not own); the joint-softmax math is delegated to
+        :func:`primus...v4_attention_kernels.reference.eager_v4_csa_attention`
+        so the CSA path, the plan-4 CSA Triton kernel (P26), and the
+        plan-4 unit-test harness share one definition. ``local_mask`` is
+        retained in the signature for back-compat but unused — the
+        reference op rebuilds the local SWA mask deterministically from
+        ``swa_window`` (same call to
+        :func:`sliding_window_causal_mask` as :meth:`_local_mask` makes,
+        so the result is bit-identical).
         """
+        del local_mask  # see docstring
         B, H, S, Dh = q_bh.shape
-        device, dtype = hidden.device, hidden.dtype
+        dtype = hidden.dtype
 
         # 1) Compressed pool with compress-base RoPE.
         pool = self._build_compressed_pool(hidden)  # [B, P, head_dim]
@@ -808,38 +839,18 @@ class DeepseekV4Attention(MLASelfAttention):
         gathered = gathered * valid.unsqueeze(-1).to(gathered.dtype)
         sparse_mask = torch.where(valid, 0.0, float("-inf")).to(dtype)  # [B, S, K]
 
-        scale = self._attention_scale()
-
-        # Local logits over SWA keys: [B, H, S, S].
-        local_logits = torch.matmul(q_bh.float(), k_local_bh.float().transpose(-2, -1)) * scale
-        local_logits = local_logits + local_mask  # [S, S] broadcasts over B, H
-
-        # Sparse logits over per-query top-K: [B, H, S, K].
-        gathered_h = gathered.unsqueeze(1).expand(B, H, S, K, Dh).float()
-        sparse_logits = torch.einsum("bhsd,bhskd->bhsk", q_bh.float(), gathered_h) * scale
-        sparse_logits = sparse_logits + sparse_mask.unsqueeze(1)  # broadcast H
-
-        # Joint softmax-with-sink across [local_keys ++ sparse_keys].
-        joint_logits = torch.cat([local_logits, sparse_logits], dim=-1)  # [B, H, S, S+K]
-        probs = self._append_sink_softmax(joint_logits)  # [B, H, S, S+K]
-
-        if self.attn_dropout > 0.0 and self.training:
-            probs = torch.nn.functional.dropout(probs, p=self.attn_dropout)
-
-        probs_local = probs[..., :S].to(v_local_bh.dtype)  # [B, H, S, S]
-        probs_sparse = probs[..., S:].to(v_local_bh.dtype)  # [B, H, S, K]
-
-        # Local v-weighted sum: standard.
-        out_local = torch.matmul(probs_local, v_local_bh)  # [B, H, S, head_dim]
-
-        # Sparse v-weighted sum: per-query gather -> einsum.
-        out_sparse = torch.einsum(
-            "bhsk,bhskd->bhsd",
-            probs_sparse,
-            gathered_h.to(v_local_bh.dtype),
+        return eager_v4_csa_attention(
+            q_bh,
+            k_local_bh,
+            v_local_bh,
+            gathered,
+            sink=self.attn_sink,
+            swa_window=int(self.attn_sliding_window),
+            sparse_mask=sparse_mask,
+            attn_dropout=self.attn_dropout,
+            training=self.training,
+            scale=self._attention_scale(),
         )
-
-        return out_local + out_sparse
 
     # ------------------------------------------------------------------
     # public forward
