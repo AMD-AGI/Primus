@@ -218,10 +218,22 @@ if [[ "$DRY_RUN_MODE" == "false" ]]; then
 fi
 
 # Validate container runtime (docker/podman)
-if command -v docker >/dev/null 2>&1; then
+# Detection order:
+#   1. Honor pre-set CONTAINER_RUNTIME env var if it points to an available binary
+#   2. Prefer docker only if its daemon is actually reachable
+#   3. Otherwise fall back to podman if available
+#   4. Else mock as "docker" for dry-run
+if [[ -n "${CONTAINER_RUNTIME:-}" ]] && command -v "$CONTAINER_RUNTIME" >/dev/null 2>&1; then
+    LOG_INFO_RANK0 "[container] Using CONTAINER_RUNTIME from environment: $CONTAINER_RUNTIME"
+elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     export CONTAINER_RUNTIME="docker"
 elif command -v podman >/dev/null 2>&1; then
     export CONTAINER_RUNTIME="podman"
+    LOG_INFO_RANK0 "[container] Using podman (docker daemon not reachable or docker not installed)"
+elif command -v docker >/dev/null 2>&1; then
+    # docker binary present but daemon not reachable; try it anyway and let it fail with a clear error
+    export CONTAINER_RUNTIME="docker"
+    LOG_WARN "[container] docker daemon not reachable; proceeding with docker (consider installing podman)"
 else
     # Mock runtime for dry-run testing
     export CONTAINER_RUNTIME="docker"
@@ -384,6 +396,20 @@ if [ -z "${DOCKER_IMAGE:-}" ]; then
     # For single-value options like image, take the last value (CLI overrides config)
     DOCKER_IMAGE=$(echo "${container_config[options.image]}" | tail -n1)
 fi
+
+# Podman requires fully-qualified image names (with a registry component).
+# If the image is a short name (no registry host before the first '/'), prepend
+# docker.io/ to mirror Docker's default behavior.
+if [[ "$CONTAINER_RUNTIME" == "podman" ]]; then
+    img_first_segment="${DOCKER_IMAGE%%/*}"
+    # A registry segment contains '.' or ':' or is literally 'localhost'
+    if [[ "$DOCKER_IMAGE" != *"/"* ]] || \
+       [[ "$img_first_segment" != *"."* && "$img_first_segment" != *":"* && "$img_first_segment" != "localhost" ]]; then
+        LOG_INFO_RANK0 "[container] Podman: qualifying short image name '$DOCKER_IMAGE' as 'docker.io/$DOCKER_IMAGE'"
+        DOCKER_IMAGE="docker.io/$DOCKER_IMAGE"
+    fi
+fi
+
 LOG_INFO_RANK0 "[container] Final image: $DOCKER_IMAGE"
 
 # 2. Build CONTAINER_OPTS from configuration
