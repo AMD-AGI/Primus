@@ -388,78 +388,166 @@ indexer's `topk_idxs`.
 
 ---
 
-## Phase 27 — Dispatch wiring + smoke
+## Phase 27 — Release-tier shape gate + dispatch wiring + smoke
 
 > "使用run_deepseek_v4跑通开启…the plan-4 kernels…" — implicit user
 > request, plan-4 kick-off.
+>
+> "在phase27的计划里面，先添加这两个算子单测里面添加真实的shape信息，
+> 然后保证算子在真实shape的正确性。因为只是算子测试，显存应该不是问题。
+> phase27的其他task放在这个task之后。" — user, plan-4 P26 review.
 
-P27 wires the two switches into `DeepseekV4Attention.forward` and
-through `run_deepseek_v4.sh` to the Megatron training stack, then runs
-a 10-iter smoke at TP=1 PP=1 EP=8 with both kernels engaged. The
-smoke is plan-4's release evidence — once it is green, the plan-4
-hand-off notes record the kernel-vs-eager perf delta and the
-`USE_V4_TRITON_ATTENTION` / `USE_V4_TRITON_CSA_ATTENTION` defaults can be flipped in
-a follow-up plan.
+P27 closes plan-4 with three layered checks:
+
+1. **Real-shape kernel correctness (G28)** — extends the P25 / P26
+   parametrisations with V4-Flash + V4-Pro production-dim entries
+   (real `H`, real `head_dim=512`, real `swa_window`, real `K_topk`)
+   so the kernels are validated at the SMEM stress point that
+   `head_dim=512` actually exercises (the small-tier P25 / P26 shapes
+   used `head_dim=64`, which does NOT exercise the
+   ``head_dim * tile_size`` SMEM corner that plan-4 exists to solve).
+2. **Dispatch wiring (G29)** — wires the two switches into
+   `DeepseekV4Attention.forward` and through `run_deepseek_v4.sh` to
+   the Megatron training stack. (The flag plumbing on the config /
+   yaml / run-script side already landed in P25; P26 wired the
+   `_csa_forward` dispatch. P27 task 2 only documents the precedence
+   and adds the rank-0 startup log line.)
+3. **Smoke (G30)** — runs a 10-iter smoke at TP=1 PP=1 EP=8 with both
+   kernels engaged. The smoke is plan-4's release evidence — once it
+   is green, the plan-4 hand-off notes record the kernel-vs-eager
+   perf delta and the `USE_V4_TRITON_ATTENTION` /
+   `USE_V4_TRITON_CSA_ATTENTION` defaults can be flipped in a
+   follow-up plan.
+
+The order matters: a green G28 means the kernels are *known correct*
+at production dims before the dispatch and smoke layers are added on
+top. If G30 then fails it must be a wiring / pipeline issue, NOT a
+kernel-numerics issue.
 
 ### Tasks
 
-1. **Dispatch precedence** — `DeepseekV4Attention.forward` uses
-   `use_turbo_attention > use_v4_triton_attention > eager` for the dense
-   path, and `use_v4_triton_csa_attention > eager` for CSA. HCA also opts
-   into `use_v4_triton_attention` (it routes through the same kernel).
-   - Document the precedence in `deepseek_v4_attention.py`'s module
+1. **Release-tier shape gate (G28)** — extend the
+   `_BASE_SHAPES` parametrisations in
+   `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p25_v4_attention_fwd.py`,
+   `test_v4_p25_v4_attention_bwd.py`,
+   `test_v4_p26_v4_csa_attention_fwd.py`, and
+   `test_v4_p26_v4_csa_attention_bwd.py` with production-dim entries.
+   Concrete tiers (revisit at implementation time if memory headroom
+   permits a larger `S`):
+
+   ```
+   v4_flash_release: B=1, H=64,  head_dim=512, swa_window=128, S ∈ {512, 1024}, K_topk=512   (cr ∈ {0, 128, 4})
+   v4_pro_release:   B=1, H=128, head_dim=512, swa_window=128, S ∈ {512, 1024}, K_topk=1024  (cr ∈ {0, 128, 4})
+   ```
+
+   The tiers are guarded with `pytest.mark.slow` (and
+   `pytest.mark.gpu` already inherited from the GPU import skip) so
+   default `pytest` runs only the fast tier; `pytest -m slow` runs
+   the release tier. Reuses the existing dtype × sink × kv_layout
+   parameter axes — the only delta vs. the small tier is the shape
+   row.
+2. **Dispatch precedence + startup log** —
+   `DeepseekV4Attention.forward` already follows
+   `use_turbo_attention > use_v4_triton_attention > eager` for the
+   dense path (plan-3 P22 + plan-4 P25) and
+   `use_v4_triton_csa_attention > eager` for CSA (plan-4 P26). P27
+   task 2 only:
+   - Documents the precedence in `deepseek_v4_attention.py`'s module
      docstring.
-   - Emit a single rank-0 startup line per layer kind summarising
+   - Emits a single rank-0 startup line per layer kind summarising
      which kernel each layer is using ("Layer 17: cr=128, kernel =
      v4_attention (Triton)").
-2. **Run script plumbing** — `run_deepseek_v4.sh` exposes
-   `USE_V4_TRITON_ATTENTION` (default `False`) and `USE_V4_TRITON_CSA_ATTENTION`
-   (default `False`) env vars + matching CLI args; both forward into
-   the YAML / config layer where the existing `USE_TURBO_ATTENTION` /
-   `USE_TURBO_DEEPEP` knobs already live.
-3. **Smoke run** — TP=1 PP=1 EP=8, 10 iters, `USE_V4_TRITON_ATTENTION=True
-   USE_V4_TRITON_CSA_ATTENTION=True USE_TURBO_ATTENTION=False
-   USE_TURBO_DEEPEP=True PRIMUS_SEQ_LENGTH=128`. Log lives at
+3. **Run script plumbing** — `run_deepseek_v4.sh` already exposes
+   `USE_V4_TRITON_ATTENTION` (default `False`) and
+   `USE_V4_TRITON_CSA_ATTENTION` (default `False`) env vars + matching
+   CLI args (P25 lit them up). P27 task 3 confirms the help text +
+   adds a TP=1 guard message (Triton kernel does not currently
+   support TP > 1).
+4. **Smoke run** — TP=1 PP=1 EP=8, 10 iters,
+   `USE_V4_TRITON_ATTENTION=True USE_V4_TRITON_CSA_ATTENTION=True
+   USE_TURBO_ATTENTION=False USE_TURBO_DEEPEP=True
+   PRIMUS_SEQ_LENGTH=128`. Log lives at
    `deepseek-v4/develop/progress/p27/` with a `.gitignore` that
    excludes `*.log` / `log_*.txt` / `debug.log` (smoke logs MUST NOT
    land in git, per the user's plan-3 directive).
-4. **Hand-off note** — append a short P27 status box to plan-4's
+5. **Hand-off note** — append a short P27 status box to plan-4's
    `02-phase-details.md` (this file) recording: (a) commit SHAs for
-   P24..P27, (b) the smoke's iter / TFLOP/s / ms-per-iter numbers,
-   (c) the kernel-vs-eager perf delta, and (d) any follow-ups
-   surfaced by the smoke.
+   P24..P27, (b) the G28 release-tier matrix size + pass count,
+   (c) the smoke's iter / TFLOP/s / ms-per-iter numbers, (d) the
+   kernel-vs-eager perf delta, and (e) any follow-ups surfaced by
+   the smoke.
 
 ### Design notes
 
+- **Why release-tier kernel UT belongs in P27, not P25 / P26.** The
+  small-tier shapes in P25 / P26 (`head_dim=64`, `H ∈ {4, 8}`) cover
+  the numerical-contract correctness. They do NOT cover the
+  `head_dim=512` SMEM corner that plan-4 exists to solve — and
+  attaching the release-tier matrix to P25 / P26 directly would have
+  inflated their test runtimes for everyone running the fast suite.
+  Splitting it into a dedicated P27 task keyed on `pytest.mark.slow`
+  is the standard plan-4 pattern (see plan-4 `03-test-strategy.md`
+  GPU-toy harness section).
+- **Why the eager reference fits.** At V4-Flash release-tier
+  (`H=64, head_dim=512, S=1024, K_topk=512`) the eager CSA
+  reference's largest fp32 intermediate is the joint-softmax
+  `probs: [B, H, S, S+K] = [1, 64, 1024, 1536]` at `4 bytes ≈
+  400 MiB`, and the broadcast `gathered_h.to(dtype)` materialisation
+  is `[B, H, S, K, D] = [1, 64, 1024, 512, 512]` at `2 bytes ≈
+  16 GiB` (bf16). Both fit on a 192 GiB MI355X with margin. At
+  V4-Pro release-tier (`H=128, K_topk=1024`) the gathered
+  materialisation grows to ~64 GiB; if memory is tight,
+  implementation-time picks a smaller `S` (e.g., `S=512`) — the
+  shape-correctness contract is per-tile and does not require a
+  particular `S`.
+- **Why we do NOT chase full S=4096.** Beyond 1–2 K seq the eager
+  reference's joint softmax allocations dominate; the kernel-side
+  test gives diminishing returns (the same tile loop is exercised at
+  S=1024 as at S=4096). Full-S=4096 evidence comes from the P27 G30
+  smoke at the model level, not from G28 kernel UT.
+- **Smoke seq length.** The smoke uses `PRIMUS_SEQ_LENGTH=128` by
+  default to fit under EP=8 on `mi355-gpu-12` / `mi355-gpu-14`; a
+  separate full-S=4096 smoke is gated by available memory and is
+  documented as a plan-4 follow-up.
 - The new switches are V4-only — they live on the V4 builder /
   attention class and never affect non-V4 model types. This mirrors
   the plan-3 P22 / P23 contract.
-- The smoke uses the small smoke seq length (`PRIMUS_SEQ_LENGTH=128`)
-  by default to fit in available memory under EP=8 on
-  `mi355-gpu-12`; a separate full-S=4096 smoke is gated by available
-  memory and is documented as a follow-up.
 
 ### Edge cases
 
-- TP > 1 + `use_v4_triton_attention=True` — kernel does not currently support
-  TP-sharded heads; the wrapper raises a clear error if `tp_size > 1`
-  with `use_v4_triton_attention=True`. Same precedent as Turbo's TP=1
-  requirement for DeepEP. P27 documents this in the `run_deepseek_v4.sh`
-  CLI help text.
+- TP > 1 + `use_v4_triton_attention=True` — kernel does not currently
+  support TP-sharded heads; the wrapper raises a clear error if
+  `tp_size > 1` with `use_v4_triton_attention=True`. Same precedent as
+  Turbo's TP=1 requirement for DeepEP. P27 task 3 documents this in
+  the `run_deepseek_v4.sh` CLI help text.
 - bf16 vs. fp32 mismatch — the kernel honors the input dtype so the
   V4 yaml's `bf16: true` runs end-to-end in bf16 with no extra
   conversion. fp32 paths still work for unit tests.
+- G28 long-runtime — release-tier matrix size is roughly
+  `2 variants × {dense, HCA, CSA} × {fp32, bf16} × {sink_on, off} ×
+  {mqa, mha for dense/HCA only} ≈ 60 tests`. Estimated runtime on
+  MI355X is a few minutes (matmul-bound at `head_dim=512`); guarded
+  behind `pytest.mark.slow` so default CI skips it.
 
 ### Risks
 
-- The smoke surfaces an unexpected interaction with PP / VPP / EP
-  collectives that did not show up in the unit tests. Mitigation:
-  the smoke's first 5 iters are run with NCCL P2P logging on;
-  failures get captured as a regression test in P27's hand-off.
+- The G28 release-tier surfaces a kernel-numerics bug at
+  `head_dim=512` that the small-tier did not catch (e.g., a
+  ``BLOCK_DMODEL`` corner). Mitigation: G28 lands BEFORE dispatch
+  wiring + smoke so any kernel fix is localised to the kernel files
+  before the pipeline is touched. The kernel was designed with
+  `head_dim=512` SMEM in mind from the start (see P25 / P26 design
+  notes); G28 is the empirical confirmation.
+- The G30 smoke surfaces an unexpected interaction with PP / VPP /
+  EP collectives that did not show up in the unit tests.
+  Mitigation: the smoke's first 5 iters are run with NCCL P2P
+  logging on; failures get captured as a regression test in P27's
+  hand-off.
 - A regression in the per-head-sink contract (`attn_sink` parameter
-  no longer loadable from V4-Flash checkpoint when `use_v4_triton_attention=True`).
-  Mitigation: the kernel reads `self.attn_sink` directly; the
-  parameter stays on the attention module under the same key, so
-  state-dict load is unaffected. G23 / G27 explicitly test that
+  no longer loadable from V4-Flash checkpoint when
+  `use_v4_triton_attention=True`). Mitigation: the kernel reads
+  `self.attn_sink` directly; the parameter stays on the attention
+  module under the same key, so state-dict load is unaffected. G23 /
+  G27 explicitly test that
   `model.load_state_dict({"attn_sink": ...})` still works after the
   kernel switches are flipped on.

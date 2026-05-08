@@ -17,8 +17,9 @@
 | **G25** | P25 | runtime (GPU) | Determinism: with `attn_dropout == 0.0`, two back-to-back forward calls with the same inputs return bit-identical outputs (fp32) / `atol=1e-5` outputs (bf16, since MQA atomic-add may reorder). | `test_v4_p25_v4_attention_fwd.py::test_determinism` |
 | **G26** | P26 | runtime (GPU) | Forward equivalence: `v4_csa_attention(q, k_local, v_local, gathered, sink, swa_window, sparse_mask)` matches `eager_v4_csa_attention(...)` at every (variant ∈ {flash, pro}) × (compress_ratio == 4) × (S ∈ {small, medium}) × (dtype ∈ {fp32, bf16}) × (sink ∈ {on, off}) shape. | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p26_v4_csa_attention_fwd.py` |
 | **G27** | P26 | runtime (GPU) | Backward equivalence: `dq, dk_local, dv_local, dgathered, dsink` from the kernel match autograd-on-eager within the dtype tolerance budget at every G26 shape. The `dgathered → dpool` scatter-add (done in the wrapper / caller, not the kernel) is included end-to-end so the test exercises the full CSA backward path. | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p26_v4_csa_attention_bwd.py` |
-| **G28** | P27 | static + runtime | Dispatch precedence: with `use_turbo_attention=True use_v4_triton_attention=True` the dense path uses Turbo (precedence honored); with `use_turbo_attention=False use_v4_triton_attention=True` it uses `v4_attention`; with both off it uses eager. CSA path: `use_v4_triton_csa_attention=True` uses `v4_csa_attention`; off → eager. The startup log line is asserted to fire exactly once per layer kind. | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p27_dispatch_precedence.py` |
-| **G29** | P27 | smoke | TP=1 PP=1 EP=8 10-iter smoke with `USE_V4_TRITON_ATTENTION=True USE_V4_TRITON_CSA_ATTENTION=True`. Loss curve stable; no NaN / Inf; no banned warnings. | `deepseek-v4/develop/progress/p27/run_smoke_v4_kernels_ep8_pp1.sh` |
+| **G28** | P27 task 1 | runtime (GPU, `pytest.mark.slow`) | **Release-tier kernel correctness at production V4 dims.** Re-runs G23 / G24 / G26 / G27 with `_BASE_SHAPES` extended by V4-Flash (`H=64, head_dim=512, swa_window=128, K_topk=512`) and V4-Pro (`H=128, head_dim=512, swa_window=128, K_topk=1024`) entries; `S` calibrated so the eager fp32 reference fits MI355X memory (target `S ∈ {512, 1024}` — actual value picked at implementation time). This is the SMEM-stress-point gate that the small-tier shapes (`head_dim=64`) cannot exercise. Lands BEFORE G29 / G30 so any kernel-numerics regression at `head_dim=512` is localised before the dispatch + smoke layers are added on top. | reuses `test_v4_p25_v4_attention_fwd.py`, `test_v4_p25_v4_attention_bwd.py`, `test_v4_p26_v4_csa_attention_fwd.py`, `test_v4_p26_v4_csa_attention_bwd.py` (same files, extended parametrisation guarded with `pytest.mark.slow`) |
+| **G29** | P27 task 2 | static + runtime | Dispatch precedence: with `use_turbo_attention=True use_v4_triton_attention=True` the dense path uses Turbo (precedence honored); with `use_turbo_attention=False use_v4_triton_attention=True` it uses `v4_attention`; with both off it uses eager. CSA path: `use_v4_triton_csa_attention=True` uses `v4_csa_attention`; off → eager. The startup log line is asserted to fire exactly once per layer kind. | `tests/unit_tests/megatron/transformer/deepseek_v4/test_v4_p27_dispatch_precedence.py` |
+| **G30** | P27 task 4 | smoke | TP=1 PP=1 EP=8 10-iter smoke with `USE_V4_TRITON_ATTENTION=True USE_V4_TRITON_CSA_ATTENTION=True`. Loss curve stable; no NaN / Inf; no banned warnings. | `deepseek-v4/develop/progress/p27/run_smoke_v4_kernels_ep8_pp1.sh` |
 
 ## Banned-warning ratchet
 
@@ -36,13 +37,20 @@ Plan-4 inherits the plan-3 ratchet (no `"submodule init failed"` /
 
 ## GPU-toy harness
 
-G23 / G24 / G25 / G26 / G27 require GPU (Triton kernels). The harness:
+G23 / G24 / G25 / G26 / G27 / G28 require GPU (Triton kernels). The
+harness:
 
-- Uses small / medium tier shapes from `v4_attention_shapes.py` so each
-  gate runs in <60 s on a single MI355.
-- Marks large-tier shapes (`S=4096, full V4-Flash dims`) with
-  `pytest.mark.slow` and `pytest.mark.gpu` so they only run when
-  explicitly requested (e.g., release-prep).
+- Uses small / fast tier shapes (`head_dim=64, H ∈ {4, 8}, S=64`) for
+  G23 / G24 / G25 / G26 / G27 so each gate runs in <60 s on a single
+  MI355. These cover the numerical-contract correctness but NOT the
+  `head_dim=512` SMEM corner that plan-4 exists to solve.
+- Adds release-tier shapes for **G28** (`head_dim=512`, real `H`,
+  real `swa_window`, real `K_topk`; `S ∈ {512, 1024}` calibrated so
+  the eager fp32 reference fits MI355X memory) marked with
+  `pytest.mark.slow` so they only run when explicitly requested
+  (`pytest -m slow`). G28 is the empirical confirmation that the
+  kernels survive the production V4 SMEM stress point before P27's
+  dispatch + smoke layers are stacked on top.
 - Skips on machines without CUDA / Triton (`pytest.importorskip("triton")`)
   so plan-4 unit tests do not break CPU-only CI.
 
