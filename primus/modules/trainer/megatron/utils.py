@@ -482,13 +482,22 @@ def validate_args_on_rocm(args):
         args.dump_pp_data = False
         print_rank_last(f"Disable args.dump_pp_data since args.pipeline_model_parallel_size=1")
 
+    # PrimusTurboGroupedMLP no longer depends on legacy GroupedMLP; the two
+    # flags are mutually exclusive when turbo is enabled.
+    if getattr(args, "use_turbo_grouped_mlp", False) and getattr(args, "moe_use_legacy_grouped_gemm", False):
+        raise ValueError(
+            "use_turbo_grouped_mlp=True is incompatible with moe_use_legacy_grouped_gemm=True. "
+            "PrimusTurboGroupedMLP now uses the TEGroupedMLP path; "
+            "please set moe_use_legacy_grouped_gemm=False."
+        )
+
     # sync-free MoE
     if args.turbo_sync_free_moe_stage > 0:
         assert args.enable_primus_turbo, "Please set `enable_primus_turbo=True` to enable sync-free MoE."
 
-        if args.turbo_sync_free_moe_stage > 1 and not args.moe_use_legacy_grouped_gemm:
+        if args.turbo_sync_free_moe_stage > 1 and not args.use_turbo_grouped_mlp:
             raise ValueError(
-                "Sync-Free MoE stage 2 or 3 require PrimusTurboGroupedMLP, please set `moe_use_legacy_grouped_gemm=True`"
+                "Sync-Free MoE stage 2 or 3 require PrimusTurboGroupedMLP, please set `use_turbo_grouped_mlp=True`"
             )
         options = _get_sync_free_moe_options(args.turbo_sync_free_moe_stage)
         print_rank_last(
