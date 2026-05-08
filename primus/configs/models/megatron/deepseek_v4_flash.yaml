@@ -1,0 +1,54 @@
+###############################################################################
+# DeepSeek-V4 Flash (smaller / dense-attention variant).
+#
+# Source: deepseek-v4/deepseek-ai/DeepSeek-V4-Flash/config.json
+###############################################################################
+
+extends:
+  - deepseek_v4_base.yaml
+
+# core shape
+num_layers: 43
+hidden_size: 4096
+num_attention_heads: 64
+num_query_groups: 1
+kv_channels: 512                  # head_dim
+qk_pos_emb_head_dim: 64           # qk_rope_head_dim
+ffn_hidden_size: 18432            # not used by MoE layers; placeholder for shared/dense FFN
+moe_ffn_hidden_size: 2048         # moe_intermediate_size
+moe_shared_expert_intermediate_size: 2048   # n_shared_experts * moe_intermediate_size
+
+# attention low-rank
+q_lora_rank: 1024
+o_lora_rank: 1024
+o_groups: 8
+
+# MoE
+num_experts: 256
+moe_router_topk: 6
+moe_router_topk_scaling_factor: 1.5
+
+# Indexer / Compressor
+index_topk: 512
+
+# Per-layer compression schedule (from config.json:compress_ratios)
+# 0   = uncompressed dense layer (full attention with SWA)
+# 4   = CSA branch (overlap mode; per-query top-K from compressed pool via Indexer)
+# 128 = HCA branch (non-overlap mode; full visibility over compressed pool)
+compress_ratios: "[0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]"
+
+# context
+seq_length: 4096                  # V4 supports up to 1M; default training seq is overridden by training yaml
+max_position_embeddings: 1048576
+
+# vocab
+vocab_size: 129280
+make_vocab_size_divisible_by: 64
+
+# tokenizer
+tokenizer_type: DeepSeekV4Tokenizer
+tokenizer_model: deepseek-ai/DeepSeek-V4-Flash
+trust_remote_code: true
+
+# init
+init_method_std: 0.02
