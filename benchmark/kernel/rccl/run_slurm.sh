@@ -43,7 +43,8 @@ if [[ -z "${DOCKER_IMAGE:-}" ]]; then
 fi
 
 # Keep your original behavior (may be aggressive on shared nodes)
-docker stop $(docker ps -q) >/dev/null 2>&1 || true
+mapfile -t _docker_ids < <(docker ps -q)
+if ((${#_docker_ids[@]})); then docker stop "${_docker_ids[@]}"; fi >/dev/null 2>&1 || true
 
 # Build sbatch overrides from env vars
 SBATCH_OVERRIDES=()
@@ -62,14 +63,16 @@ echo "  OUTPUT_DIR    : ${OUTPUT_DIR}"
 echo "============================================"
 
 # Pre-pull image + stop containers on allocated nodes
+# shellcheck disable=SC2016
 srun -N "${NNODES}" \
      --exclusive \
      --export=ALL \
      --ntasks-per-node=1 \
      "${SBATCH_OVERRIDES[@]}" \
-     bash -c 'docker pull "${DOCKER_IMAGE}"; docker stop $(docker ps -q) >/dev/null 2>&1 || true'
+     bash -c 'docker pull "${DOCKER_IMAGE}"; docker ps -q | xargs -r docker stop >/dev/null 2>&1 || true'
 
 # Run workload on allocated nodes
+# shellcheck disable=SC2016
 srun -N "${NNODES}" \
      --exclusive \
      --export=ALL \

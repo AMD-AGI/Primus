@@ -6,6 +6,7 @@ ARG PRIMUS_TURBO_AITER_COMMIT
 ARG PRIMUS_TURBO_FRAMEWORK
 ARG ROCSHMEM_COMMIT
 ARG UCCL_COMMIT
+ARG TRITON_COMMIT
 # Non-interactive APT
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -70,6 +71,18 @@ RUN cd /opt && \
     pip3 install --no-build-isolation . -v
 
 RUN rm -rf /opt/Primus-Turbo
+
+# ---------------------------------------------------------------------------
+# Install Triton
+# ---------------------------------------------------------------------------
+RUN cd /opt && \
+    git clone -b release/3.7.x https://github.com/triton-lang/triton.git && \
+    cd triton && \
+    git checkout ${TRITON_COMMIT} && \
+    pip3 install ninja cmake && \
+    pip3 install --no-build-isolation -v .
+
+RUN rm -rf /opt/triton
 
 # ---------------------------------------------------------------------------
 # Install UCCL-EP (skip for JAX framework)

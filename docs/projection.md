@@ -662,7 +662,7 @@ Projected Time = (Base Time / DP_scaling_factor) + Communication Overheads
 
 **What it does**: Distributes layers across pipeline stages. Each stage processes microbatches in sequence.
 
-**How it's modeled**: 
+**How it's modeled**:
 - PP is the first dimension reduced during configuration reduction — it is always set to 1 for benchmarking when the config doesn't fit on the available GPUs
 - A **pipeline scheduler simulator** (`simulator.py`) reconstructs the full pipeline schedule for the target PP
 - Simulates the actual 1F1B or zero-bubble schedule with proper send/receive synchronization

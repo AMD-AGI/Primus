@@ -1,0 +1,149 @@
+#!/bin/bash
+###############################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+###############################################################################
+set -x
+
+export HF_TOKEN="${HF_TOKEN:-'your_hf_token'}"  # make it your own hf token
+export WANDB_API_KEY="${WANDB_API_KEY:-'your_wandb_api_key'}"  # make it your own wandb api key
+
+export NNODES=${NNODES:-32}
+
+export TRAIN_ITERS=10
+
+export USING_AINIC=1
+export NCCL_IB_HCA="ionic_0:1,ionic_2:1,ionic_3:1,ionic_4:1,ionic_5:1,ionic_7:1,ionic_8:1,ionic_9:1"
+export GLOO_SOCKET_IFNAME=ens9np0
+export NCCL_SOCKET_IFNAME=ens9np0
+
+export MBS=${MBS:-2}
+export GBS=$((128 * NNODES))
+export PRIMUS_TOTAL_LAYERS=61
+export PRIMUS_MOE_LAYER_FREQ=1
+export PRIMUS_EP=${PRIMUS_EP:-8}
+export PRIMUS_PP=${PRIMUS_PP:-16}
+export PRIMUS_VPP=${PRIMUS_VPP:-2}
+export PRIMUS_RECOMPUTE_LAYERS=${PRIMUS_RECOMPUTE_LAYERS:-2}
+
+export PROFILE=False
+export TURBO_ATTENTION=${TURBO_ATTENTION:-False}
+export TURBO_DEEPEEP=${TURBO_DEEPEEP:-True}
+export LEGACY_GG=${LEGACY_GG:-True}
+export TURBO_GROUPED_MLP=${TURBO_GROUPED_MLP:-False}
+export TURBO_RMS_NORM=${TURBO_RMS_NORM:-True}
+export APPLY_ROPE_FUSION=True
+export HSA_NO_SCRATCH_RECLAIM=1
+export NVTE_CK_USES_BWD_V3=1
+export GPU_MAX_HW_QUEUES=4
+export PRIMUS_TURBO_DEEPEP_TIMEOUT=600
+export PRIMUS_TURBO_AUTO_TUNE=${PRIMUS_TURBO_AUTO_TUNE:-0}
+
+
+# Enable NUMA binding for better memory locality (increase stability for large models)
+export ENABLE_NUMA_BINDING=1
+export HSA_KERNARG_POOL_SIZE=12582912
+
+STAGE=$((PRIMUS_PP * PRIMUS_VPP))
+FEATURE_ARGS=()
+case $STAGE in
+  8)
+    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*7|t*8|t*8|t*8|t*8|t*8|t*7|t*7,L'")
+    ;;
+  16)
+    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*3|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*4|t*2,L'")
+    ;;
+  32)
+    FEATURE_ARGS+=("--pipeline_model_parallel_layout" "'Et*1|t*1|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*2|t*1,L'")
+    ;;
+  *)
+    echo "Unsupported STAGE=${STAGE} (PRIMUS_PP=${PRIMUS_PP}, PRIMUS_VPP=${PRIMUS_VPP}). Supported stages: 8, 16, 32." >&2
+    exit 1
+    ;;
+esac
+
+# Best recompute config for EP8_PP16_VPP2
+# 32N
+# RECOMP_IDS="0,1,2,4,6,8,10,12,14,16,34,36,38,40,50"
+# 64N
+# RECOMP_IDS="0,1,2,4,6,8,10,12,14,16,34,36"
+# 128N
+# RECOMP_IDS="0,1,2,4,6,8,10,12,14"
+
+if [ -n "$RECOMP_IDS" ]; then
+  export RECOMP_IDS
+  RECOMP_ARGS=(--recompute_layer_ids "$RECOMP_IDS" --recompute_granularity full)
+else
+  RECOMP_ARGS=(--recompute_num_layers "$PRIMUS_RECOMPUTE_LAYERS" --recompute_granularity full --recompute_method block)
+fi
+
+export PRETRAIN_TYPE=${PRETRAIN_TYPE:-BF16}
+
+export EXP=examples/megatron/configs/MI355X/deepseek_v3-${PRETRAIN_TYPE}-pretrain.yaml
+PRIMUS_TEAM="amd-$(date +%Y%m%d)"
+export PRIMUS_TEAM
+
+PRIMUS_USER="${WORKLOAD_ID:-tas}"
+export PRIMUS_USER
+export PRIMUS_TOKENIZED_DATA_PATH=/shared_aig/c4/tokenized/c4_en_train_text_document # this is the tokenized data path for the training
+export PRIMUS_EXP_NAME=dsv3-type_$PRETRAIN_TYPE-legacygg_$LEGACY_GG-turbogg_$TURBO_GROUPED_MLP-turbodeepep_$TURBO_DEEPEEP-turboattn_$TURBO_ATTENTION-autotune_$PRIMUS_TURBO_AUTO_TUNE
+
+if [ -n "$DUMP_PP_DATA" ]; then
+  export DUMP_PP_DIR=output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/pp_data
+  DUMP_PP_ARGS=(--dump_pp_data True)
+else
+  DUMP_PP_ARGS=(--dump_pp_data False)
+fi
+
+mkdir -p "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME"
+# ./primus-cli slurm -N $NNODES \
+#   ${SLURM_TIME:+--time="${SLURM_TIME}"} \
+#   ${SLURM_PARTITION:+--partition="${SLURM_PARTITION}"} \
+#   ${SLURM_NODELIST:+--nodelist="${SLURM_NODELIST}"} \
+#   -- --image "docker.io/tasimage/primus:pr-563-ainic" --clean -- --numa \
+
+./primus-cli direct --numa \
+  -- train pretrain --config "$EXP" \
+  --num_layers $PRIMUS_TOTAL_LAYERS \
+  --train_iters $TRAIN_ITERS \
+  --micro_batch_size "$MBS" \
+  --global_batch_size "$GBS" \
+  --use_turbo_attention "$TURBO_ATTENTION" \
+  --use_turbo_deepep "$TURBO_DEEPEEP" \
+  --use_turbo_grouped_mlp "$TURBO_GROUPED_MLP" \
+  --use_turbo_rms_norm "$TURBO_RMS_NORM" \
+  --lr 2.2e-4 \
+  --min_lr 2.2e-5 \
+  --lr_warmup_iters 200 \
+  --lr_decay_iters 5000 \
+  --lr_decay_style cosine \
+  --moe_use_legacy_grouped_gemm "$LEGACY_GG" \
+  --enable_experimental "$APPLY_ROPE_FUSION" \
+  --apply_rope_fusion "$APPLY_ROPE_FUSION" \
+  --pipeline_model_parallel_size "$PRIMUS_PP" \
+  --expert_model_parallel_size "$PRIMUS_EP" \
+  "${FEATURE_ARGS[@]}" \
+  --cross_entropy_fusion_impl "te" \
+  --cross_entropy_loss_fusion True \
+  "${RECOMP_ARGS[@]}" \
+  "${DUMP_PP_ARGS[@]}" \
+  --disable_last_saving True \
+  --moe_layer_freq "$PRIMUS_MOE_LAYER_FREQ" \
+  --mock_data True \
+  --manual_gc True \
+  --manual_gc_interval 1 \
+  --pp_warmup True  \
+  --mtp_num_layers 0 \
+  --profile "$PROFILE" \
+  --use_pytorch_profiler "$PROFILE" \
+  --profile_step_end 7 \
+  --profile_step_start 6 \
+  --disable_wandb True \
+  --disable_tensorboard True \
+  --turbo_deepep_num_cu 80 \
+  --use_precision_aware_optimizer True \
+  --main_grads_dtype bf16 \
+  --exp_avg_dtype bf16 \
+  --exp_avg_sq_dtype bf16 \
+  2>&1 | tee "output/$PRIMUS_TEAM/$PRIMUS_USER/$PRIMUS_EXP_NAME/log_node_${NODE_RANK}.txt"

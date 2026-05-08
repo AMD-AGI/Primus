@@ -6,7 +6,7 @@ on:
     - cron: '0 16 * * *'
 
 env:
-  PRIMUS_TURBO_COMMIT: a4488f6cdb15cfff4383c61af7922bb50803f0ea # feat: update triton impl for mi300 & mi355 (#252)
+  PRIMUS_TURBO_COMMIT: ef5b58ea3de0a2956d57dba518be466b7a092442
   BENCHMARK_ROOT_DIR: /wekafs/primus/benchmark
 
 jobs:

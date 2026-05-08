@@ -14,7 +14,11 @@ import torch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor
-from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
+
+try:
+    from transformer_engine.pytorch.tensor.quantized_tensor import QuantizedTensor
+except ModuleNotFoundError:
+    from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 
 import primus.backends.transformer_engine.pytorch.triton.permutation as triton_permutation
 

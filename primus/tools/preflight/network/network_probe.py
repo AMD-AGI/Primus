@@ -130,7 +130,8 @@ def _device_for_local_ip(host_ip: str) -> Optional[str]:
         if r.returncode != 0:
             return None
         for line in r.stdout.strip().splitlines():
-            if host_ip in line:
+            # Match exact IP with word boundaries to avoid partial matches
+            if re.search(rf"\b{re.escape(host_ip)}\b", line):
                 parts = line.split()
                 if len(parts) > 1:
                     return parts[1]

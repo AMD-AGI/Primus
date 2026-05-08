@@ -36,7 +36,7 @@ except (ImportError, ModuleNotFoundError):
 
 
 SCALING_BLOCK_SIZE = 128
-MX_SCALING_BLOCK_SIZE = 32
+MXFP8_SCALING_BLOCK_SIZE = 32
 
 WARN_ONCE = True
 
@@ -149,7 +149,7 @@ if HAVE_TE and HAVE_TURBO:
             fp8_quant_config = PrimusTurboQuantConfig(
                 granularity=ScalingGranularity.MX_BLOCKWISE,
                 format=te_fp8_format_mapping(fp8_format),
-                block_size=MX_SCALING_BLOCK_SIZE,
+                block_size=MXFP8_SCALING_BLOCK_SIZE,
                 scale_dtype=ScaleDtype.E8M0,
             )
 

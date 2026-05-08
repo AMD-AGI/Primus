@@ -71,6 +71,13 @@ def run_training_script(
     Raises:
         AssertionError: If training did not complete successfully.
     """
+    # Short-circuit Python / torchrun teardown on successful runs to save
+    # ~20s per end-to-end test. The marker we rely on ("Training completed.")
+    # is emitted well before cleanup(), so this does not affect assertions.
+    # Developers can opt out locally via PRIMUS_EXIT_FAST=0.
+    if env is not None:
+        env.setdefault("PRIMUS_EXIT_FAST", "1")
+
     try:
         logger.info(f"[{tag}] Begin run...")
         start = time.time()

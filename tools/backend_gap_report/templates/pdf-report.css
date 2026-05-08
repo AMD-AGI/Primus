@@ -1,0 +1,86 @@
+@page {
+  size: A4;
+  margin: 18mm 16mm 18mm 16mm;
+}
+
+html {
+  color: #111827;
+  font-family: "DejaVu Sans", "Noto Sans CJK SC", "Noto Sans SC", sans-serif;
+  font-size: 11pt;
+  line-height: 1.45;
+}
+
+body {
+  max-width: none;
+}
+
+h1, h2, h3 {
+  color: #111827;
+  margin-top: 1.2em;
+  margin-bottom: 0.4em;
+  line-height: 1.2;
+}
+
+h1 {
+  font-size: 20pt;
+  border-bottom: 2px solid #d1d5db;
+  padding-bottom: 6px;
+}
+
+h2 {
+  font-size: 14pt;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 4px;
+}
+
+h3 {
+  font-size: 12pt;
+}
+
+p, li, blockquote {
+  orphans: 3;
+  widows: 3;
+}
+
+blockquote {
+  margin: 0.8em 0;
+  padding: 0.6em 0.9em;
+  border-left: 4px solid #9ca3af;
+  background: #f9fafb;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.8em 0 1em;
+  table-layout: fixed;
+}
+
+th, td {
+  border: 1px solid #d1d5db;
+  padding: 6px 8px;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+th {
+  background: #f3f4f6;
+  text-align: left;
+}
+
+code {
+  font-family: "DejaVu Sans Mono", "Noto Sans Mono", monospace;
+  font-size: 0.92em;
+}
+
+pre {
+  padding: 10px 12px;
+  border: 1px solid #d1d5db;
+  background: #f9fafb;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+ul, ol {
+  padding-left: 1.3em;
+}

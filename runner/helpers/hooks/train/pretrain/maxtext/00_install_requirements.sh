@@ -44,7 +44,7 @@ if [[ -f "${REQ_JAX_FILE}" ]]; then
   echo "[+] Installing JAX dependencies..."
   pip install --cache-dir="${PIP_CACHE_DIR}" -r "${REQ_JAX_FILE}"
   echo "[OK] JAX dependencies installed"
-else 
+else
   echo "[ERROR] Missing required JAX requirements file: ${REQ_JAX_FILE}" >&2
   exit 1
 fi

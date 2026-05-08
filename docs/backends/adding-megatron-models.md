@@ -54,7 +54,7 @@ For Megatron, there are three layers of YAML config involved:
 
 At runtime:
 
-- `modules.pre_trainer.model: llama3.1_8B.yaml` is resolved as  
+- `modules.pre_trainer.model: llama3.1_8B.yaml` is resolved as
   `primus/configs/models/megatron/llama3.1_8B.yaml`.
 - `extends: - llama3_8B.yaml` further chains into
   `primus/configs/models/megatron/llama3_8B.yaml`, which in turn extends
@@ -206,4 +206,3 @@ You should see in the printed configuration and logs that:
 
 Once these steps are done, your new `tinyllama_1.1B` config behaves like any other
 Megatron model in Primus and can be used in experiments, sweeps, and CI.
-

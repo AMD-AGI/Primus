@@ -99,6 +99,30 @@ class TestMegatronTrainer(PrimusUT):
             ],
         )
 
+    def test_llama3_1_8B_tp2_distributed_dataset_regression(self):
+        run_script(
+            self.__class__.__name__,
+            "llama3.1_8B_tp2_distributed_dataset_regression",
+            exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/llama3.1_8B-BF16-pretrain.yaml",
+            env_override={
+                "GPUS_PER_NODE": "2",
+            },
+            extra_args=[
+                "--num_layers",
+                "2",
+                "--train_iters",
+                "3",
+                "--micro_batch_size",
+                "1",
+                "--global_batch_size",
+                "2",
+                "--tensor_model_parallel_size",
+                "2",
+                "--distributed_timeout_minutes",
+                "3",
+            ],
+        )
+
     def test_llama3_70B(self):
         run_script(
             self.__class__.__name__,
@@ -412,7 +436,7 @@ class TestMegatronTrainer(PrimusUT):
         )
 
     def test_turbo_deepep(self):
-        run_script(
+        stdout, _ = run_script(
             self.__class__.__name__,
             "turbo_deepep",
             exp_path=f"examples/megatron/configs/{GPU_PLATFORM}/deepseek_v2_lite-BF16-pretrain.yaml",
@@ -439,13 +463,22 @@ class TestMegatronTrainer(PrimusUT):
                 "--moe_shared_expert_overlap",
                 "0",
                 "--moe_use_legacy_grouped_gemm",
-                "1",
+                "0",
                 "--turbo_sync_free_moe_stage",
                 "3",
                 "--use_turbo_attention",
-                "1",
+                "0",
+                "--num_workers",
+                "4",
+                "--dataloader_mp_context",
+                "forkserver",
             ],
         )
+        # check dataloader_mp_context patch log
+        Dataloader_mp_context_patch_log = "Setting DataLoader multiprocessing_context='forkserver'"
+        assert (
+            Dataloader_mp_context_patch_log in stdout
+        ), "Expected dataloader_mp_context patch log not found in stdout"
 
     def test_deepseekv2_lite_uep(self):
         run_script(
@@ -475,7 +508,7 @@ class TestMegatronTrainer(PrimusUT):
                 "--moe_shared_expert_overlap",
                 "0",
                 "--moe_use_legacy_grouped_gemm",
-                "1",
+                "0",
                 "--turbo_sync_free_moe_stage",
                 "3",
             ],
