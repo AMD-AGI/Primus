@@ -432,13 +432,13 @@ def _get_sync_free_moe_options(stage: int) -> dict:
             "moe_use_fused_router_with_aux_score": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
-            "use_turbo_grouped_mlp": True,
+            "use_turbo_grouped_gemm": True,
         },
         3: {
             "moe_use_fused_router_with_aux_score": True,
             "use_turbo_deepep": True,
             "moe_permute_fusion": True,
-            "use_turbo_grouped_mlp": True,
+            "use_turbo_grouped_gemm": True,
             "use_turbo_fused_act_with_probs": True,
         },
     }
@@ -484,10 +484,14 @@ def validate_args_on_rocm(args):
 
     # PrimusTurboGroupedMLP no longer depends on legacy GroupedMLP; the two
     # flags are mutually exclusive when turbo is enabled.
-    if getattr(args, "use_turbo_grouped_mlp", False) and getattr(args, "moe_use_legacy_grouped_gemm", False):
+    if getattr(args, "use_turbo_grouped_mlp", False):
+        print_rank_last("use_turbo_grouped_mlp is deprecated, please use use_turbo_grouped_gemm instead.")
+    use_turbo_grouped_gemm = getattr(args, "use_turbo_grouped_gemm", False) or getattr(
+        args, "use_turbo_grouped_mlp", False
+    )
+    if use_turbo_grouped_gemm and getattr(args, "moe_use_legacy_grouped_gemm", False):
         raise ValueError(
-            "use_turbo_grouped_mlp=True is incompatible with moe_use_legacy_grouped_gemm=True. "
-            "PrimusTurboGroupedMLP now uses the TEGroupedMLP path; "
+            "use_turbo_grouped_gemm=True or use_turbo_grouped_mlp=True is incompatible with moe_use_legacy_grouped_gemm=True. "
             "please set moe_use_legacy_grouped_gemm=False."
         )
 
@@ -495,9 +499,9 @@ def validate_args_on_rocm(args):
     if args.turbo_sync_free_moe_stage > 0:
         assert args.enable_primus_turbo, "Please set `enable_primus_turbo=True` to enable sync-free MoE."
 
-        if args.turbo_sync_free_moe_stage > 1 and not args.use_turbo_grouped_mlp:
+        if args.turbo_sync_free_moe_stage > 1 and not use_turbo_grouped_gemm:
             raise ValueError(
-                "Sync-Free MoE stage 2 or 3 require PrimusTurboGroupedMLP, please set `use_turbo_grouped_mlp=True`"
+                "Sync-Free MoE stage 2 or 3 require PrimusTurboGroupedLinear, please set `use_turbo_grouped_gemm=True`"
             )
         options = _get_sync_free_moe_options(args.turbo_sync_free_moe_stage)
         print_rank_last(

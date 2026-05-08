@@ -18,7 +18,6 @@ enable_primus_turbo: true
 use_turbo_attention: false
 use_turbo_parallel_linear: false
 use_turbo_grouped_mlp: false
-disable_turbo_grouped_mlp_low_precision: false
 moe_use_fused_router_with_aux_score: false
 
 # inner features flags
