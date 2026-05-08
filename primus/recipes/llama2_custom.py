@@ -1279,7 +1279,7 @@ def megatron_bridge_train_override(
     # step 0 *only*, we override eval_iters here and restore it before the
     # main loop so interval evals (step 48, 96, ...) keep the configured
     # value. Override controlled by env EVAL_AT_STEP_0_ITERS (default 22).
-    _eval_at_step_0 = os.environ.get("EVAL_AT_STEP_0", "1") not in ("0", "false", "False", "")
+    _eval_at_step_0 = os.environ.get("EVAL_AT_STEP_0", "0") not in ("0", "false", "False", "")
     if (
         _eval_at_step_0
         and global_state.train_state.do_valid
