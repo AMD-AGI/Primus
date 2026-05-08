@@ -10,18 +10,19 @@
 #
 # Required env vars
 # -----------------
-# Both tests:
-#   BISECT_NODELIST   Slurm nodelist expression, e.g. "chi2867,chi2879"
-#   BISECT_PARTITION  Slurm partition, e.g. "mi355x"
+# Both tests require a Slurm nodelist. If BISECT_NODELIST is unset, the tests
+# use SLURM_NODELIST from the current allocation.
 #
 # Test 1 (test_bisect_all_nodes_pass) additionally requires:
 #   VENV_ACTIVATE     Path to the venv activate script used by run_preflight_direct.sh
 #
-# Test 2 (test_bisect_identifies_bad_node) additionally requires:
-#   BISECT_BAD_NODE   Hostname of the node that should appear faulty, e.g. "chi2879"
-#
 # Optional tuning vars
 # --------------------
+#   BISECT_PARTITION       Slurm partition. If unset, SLURM_JOB_PARTITION is used
+#                          when available; otherwise --partition is omitted.
+#   BISECT_BAD_NODE        Hostname of the node that should appear faulty for
+#                          test_bisect_identifies_bad_node. If unset, the last
+#                          hostname from the resolved nodelist is used.
 #   BISECT_TRIAL_TIMEOUT   Timeout per trial in seconds
 #                          (default: 600 for test 1, 30 for test 2)
 #   BISECT_SLURM_TIME      srun -t limit per trial
@@ -30,20 +31,44 @@
 #                          as repeated --preflight-env args, e.g.
 #                          "NCCL_DEBUG=INFO NCCL_IB_GID_INDEX=3"
 #
-# Example usage
-# -------------
-# Test 2 only (fast, no venv needed):
-#   BISECT_NODELIST="chi2867,chi2879" \
-#   BISECT_PARTITION="mi355x" \
-#   BISECT_BAD_NODE="chi2879" \
-#   pytest tests/unit_tests/tools/test_preflight_bisect_slurm.py::test_bisect_identifies_bad_node -v
+# Running from inside a Slurm allocation
+# --------------------------------------
+# Slurm provides SLURM_NODELIST, and nested srun can inherit the current
+# allocation context, so the common case only needs VENV_ACTIVATE:
 #
-# Both tests:
+#   cd ~/Primus
+#   export VENV_ACTIVATE=~/envs/preflight/.venv/bin/activate
+#   python3 -m pytest tests/unit_tests/tools/test_preflight_bisect_slurm.py -v
+#
+# BISECT_NODELIST, BISECT_PARTITION, and BISECT_BAD_NODE are optional overrides.
+# If BISECT_NODELIST is unset, the tests use SLURM_NODELIST. If no partition is
+# provided through BISECT_PARTITION or SLURM_JOB_PARTITION, --partition is
+# omitted. If BISECT_BAD_NODE is unset, test_bisect_identifies_bad_node picks
+# the last hostname from the resolved nodelist and marks only that host as bad.
+#
+# Cluster-specific networking settings are still environment-specific. Export
+# them before running pytest, or pass simple comma-free values through
+# BISECT_PREFLIGHT_ENV:
+#
+#   export NCCL_SOCKET_IFNAME=tw-eth0
+#   export GLOO_SOCKET_IFNAME=tw-eth0
+#   export NCCL_IB_HCA="rdma0:1,rdma1:1,rdma2:1,rdma3:1,rdma4:1,rdma5:1,rdma6:1,rdma7:1"
+#   export BISECT_PREFLIGHT_ENV="USING_AINIC=1 NCCL_IB_GID_INDEX=3 NCCL_CROSS_NIC=0 NCCL_PXN_DISABLE=0"
+#
+# Keep values containing commas, such as NCCL_IB_HCA, as normal exported
+# environment variables. BISECT_PREFLIGHT_ENV is translated into
+# srun --export=ALL,..., where commas split entries.
+#
+# Running from outside an allocation
+# ----------------------------------
+# Provide explicit overrides:
+#
 #   BISECT_NODELIST="chi2867,chi2879" \
 #   BISECT_PARTITION="mi355x" \
 #   BISECT_BAD_NODE="chi2879" \
 #   VENV_ACTIVATE="/path/to/venv/bin/activate" \
 #   pytest tests/unit_tests/tools/test_preflight_bisect_slurm.py -v
+#
 ###############################################################################
 
 import os
@@ -68,6 +93,48 @@ def _require_env(*names: str) -> dict[str, str]:
     return {n: os.environ[n] for n in names}
 
 
+def _resolve_nodelist() -> str:
+    nodelist = os.environ.get("BISECT_NODELIST") or os.environ.get("SLURM_NODELIST")
+    if not nodelist:
+        pytest.skip("Set BISECT_NODELIST or run from inside a Slurm allocation with SLURM_NODELIST set")
+    return nodelist
+
+
+def _resolve_partition() -> str:
+    return os.environ.get("BISECT_PARTITION") or os.environ.get("SLURM_JOB_PARTITION") or ""
+
+
+def _resolve_hosts(nodelist: str) -> list[str]:
+    try:
+        result = subprocess.run(
+            ["scontrol", "show", "hostnames", nodelist],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        pytest.skip("scontrol not found; run this test on a Slurm login/head node")
+    except subprocess.CalledProcessError as exc:
+        pytest.skip(f"scontrol failed to resolve nodelist {nodelist!r}: {exc.stderr.strip()}")
+
+    hosts = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not hosts:
+        pytest.skip(f"scontrol produced no hostnames for nodelist {nodelist!r}")
+    return hosts
+
+
+def _resolve_bad_node(nodelist: str) -> str:
+    return os.environ.get("BISECT_BAD_NODE") or _resolve_hosts(nodelist)[-1]
+
+
+def _resolve_bisect_env() -> dict[str, str]:
+    env = {"BISECT_NODELIST": _resolve_nodelist()}
+    partition = _resolve_partition()
+    if partition:
+        env["BISECT_PARTITION"] = partition
+    return env
+
+
 def _run_bisect(extra_args: list[str], env: dict[str, str], tmp_path: Path, timeout: int) -> str:
     """Invoke bisect.py as a subprocess and return the contents of summary.txt."""
     preflight_env_args: list[str] = []
@@ -78,11 +145,13 @@ def _run_bisect(extra_args: list[str], env: dict[str, str], tmp_path: Path, time
         sys.executable,
         str(BISECT_PY),
         "--nodelist", env["BISECT_NODELIST"],
-        "--partition", env["BISECT_PARTITION"],
         "--output-dir", str(tmp_path),
         *preflight_env_args,
         *extra_args,
     ]
+    if env.get("BISECT_PARTITION"):
+        cmd[4:4] = ["--partition", env["BISECT_PARTITION"]]
+
     result = subprocess.run(
         cmd,
         env={**os.environ, **env},
@@ -105,11 +174,11 @@ def _run_bisect(extra_args: list[str], env: dict[str, str], tmp_path: Path, time
 def test_bisect_all_nodes_pass(tmp_path):
     """Run bisect.py with the real preflight runner against a known-healthy nodeset.
 
-    Requires BISECT_NODELIST, BISECT_PARTITION, and VENV_ACTIVATE to be set.
+    Requires VENV_ACTIVATE and either BISECT_NODELIST or SLURM_NODELIST.
     All nodes are expected to pass the preflight perf-test, so bisect should
     report SUSPECT_NODES: (none).
     """
-    env = _require_env("BISECT_NODELIST", "BISECT_PARTITION", "VENV_ACTIVATE")
+    env = {**_resolve_bisect_env(), **_require_env("VENV_ACTIVATE")}
     trial_timeout = int(os.environ.get("BISECT_TRIAL_TIMEOUT", "600"))
     slurm_time = os.environ.get("BISECT_SLURM_TIME", "00:15:00")
 
@@ -138,12 +207,14 @@ def test_bisect_all_nodes_pass(tmp_path):
 def test_bisect_identifies_bad_node(tmp_path):
     """Run bisect.py with fake_runner.sh seeding one bad node.
 
-    Requires BISECT_NODELIST, BISECT_PARTITION, and BISECT_BAD_NODE to be set.
-    BISECT_BAD_NODE must be one of the nodes in BISECT_NODELIST.
+    Requires either BISECT_NODELIST or SLURM_NODELIST.
+    BISECT_BAD_NODE can override the default bad node, which is the last host in
+    the resolved nodelist.
     bisect.py is expected to identify exactly that node as the sole suspect.
     """
-    env = _require_env("BISECT_NODELIST", "BISECT_PARTITION", "BISECT_BAD_NODE")
-    bad_node = env["BISECT_BAD_NODE"]
+    env = _resolve_bisect_env()
+    bad_node = _resolve_bad_node(env["BISECT_NODELIST"])
+    env["BISECT_BAD_NODE"] = bad_node
     trial_timeout = int(os.environ.get("BISECT_TRIAL_TIMEOUT", "30"))
     slurm_time = os.environ.get("BISECT_SLURM_TIME", "00:02:00")
 
