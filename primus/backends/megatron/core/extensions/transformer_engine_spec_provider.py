@@ -5,7 +5,7 @@
 ###############################################################################
 
 import warnings
-from typing import Optional, Tuple
+from typing import Optional
 
 from megatron.core.extensions.transformer_engine import (
     TEActivationOp,
@@ -29,12 +29,22 @@ from megatron.core.transformer.moe.experts import (
 )
 from megatron.core.utils import get_te_version, is_te_min_version
 
+from primus.backends.megatron.core.transformer.experts import PrimusGroupedMLP
+
+try:
+    from megatron.core.transformer.moe.experts import GroupedMLP
+except ImportError:
+    from primus.backends.megatron.core.transformer.moe.deprecated_2caa681a1.experts import (
+        DeprecatedGroupedMLP as GroupedMLP,
+    )
+
 from primus.backends.megatron.core.extensions.primus_turbo import (
     PrimusTurboAttention,
+    PrimusTurboColumnParallelGroupedLinear,
     PrimusTurboColumnParallelLinear,
-    PrimusTurboGroupedMLP,
     PrimusTurboLayerNormColumnParallelLinear,
     PrimusTurboLinear,
+    PrimusTurboRowParallelGroupedLinear,
     PrimusTurboRowParallelLinear,
 )
 from primus.backends.megatron.training.global_vars import get_primus_args
@@ -131,37 +141,35 @@ class PrimusTurboSpecProvider(BackendSpecProvider):
 
     def grouped_mlp_modules(
         self, moe_use_grouped_gemm: bool, moe_use_legacy_grouped_gemm: Optional[bool] = None
-    ) -> Tuple[type, Optional[MLPSubmodules | TEGroupedMLPSubmodules]]:
+    ) -> tuple[type[TEGroupedMLP], TEGroupedMLPSubmodules] | tuple[type[SequentialMLP], MLPSubmodules]:
         """Which module and submodules to use for grouped mlp"""
         if moe_use_legacy_grouped_gemm is None:
             # Megatron callers only pass ``moe_use_grouped_gemm`` here, so when Primus
             # args do not expose the legacy switch we must match upstream TESpecProvider
             # and prefer TEGroupedMLP by default.
-            moe_use_legacy_grouped_gemm = getattr(self.cfg, "moe_use_legacy_grouped_gemm", False)
+            # let it raise an error if cfg does not have moe_use_legacy_grouped_gemm
+            moe_use_legacy_grouped_gemm = self.cfg.moe_use_legacy_grouped_gemm
 
-        if (
-            moe_use_grouped_gemm
-            and TEColumnParallelGroupedLinear is not None
-            and not moe_use_legacy_grouped_gemm
-        ):
-            assert not self.cfg.use_turbo_grouped_mlp, "PrimusTurbo not support RowParallelGroupedLinear"
-
-            return TEGroupedMLP, TEGroupedMLPSubmodules(
-                linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
+        use_turbo_grouped_gemm = self.cfg.use_turbo_grouped_gemm or self.cfg.use_turbo_grouped_mlp
+        assert not (
+            moe_use_legacy_grouped_gemm and use_turbo_grouped_gemm
+        ), "moe_use_legacy_grouped_gemm and use_turbo_grouped_gemm are not compatible."
+        if moe_use_grouped_gemm and not moe_use_legacy_grouped_gemm:
+            # dispatch to turbo grouped gemm or TE grouped gemm
+            _GroupedMLP = PrimusGroupedMLP if use_turbo_grouped_gemm else TEGroupedMLP
+            GroupedMLPSubmodules = TEGroupedMLPSubmodules(
+                linear_fc1=(
+                    PrimusTurboColumnParallelGroupedLinear
+                    if use_turbo_grouped_gemm
+                    else TEColumnParallelGroupedLinear
+                ),
+                linear_fc2=(
+                    PrimusTurboRowParallelGroupedLinear
+                    if use_turbo_grouped_gemm
+                    else TERowParallelGroupedLinear
+                ),
             )
-        elif (
-            moe_use_grouped_gemm
-            and moe_use_legacy_grouped_gemm
-            and self.cfg.use_turbo_grouped_mlp
-            and TEColumnParallelGroupedLinear is not None
-        ):
-            # ``deprecate GroupedMLP`` removed the old legacy class, but DeepEP
-            # sync-free stage 2/3 still needs the turbo grouped-gemm contract.
-            # Keep a local compatibility implementation until the dispatcher path
-            # is fully migrated off the legacy grouped-gemm semantics.
-            return PrimusTurboGroupedMLP, TEGroupedMLPSubmodules(
-                linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
-            )
+            return _GroupedMLP, GroupedMLPSubmodules
         elif (
             moe_use_grouped_gemm
             and moe_use_legacy_grouped_gemm

@@ -12,7 +12,6 @@ Patches for replacing Transformer Engine TESpecProvider with PrimusTurboSpecProv
 
 import importlib.util
 
-from primus.backends.megatron.patches.te_patches.utils import is_te_min_version
 from primus.core.patches import PatchContext, get_args, register_patch
 from primus.modules.module_utils import log_rank_0
 
@@ -50,8 +49,6 @@ def _is_primus_turbo_enabled(ctx: PatchContext) -> bool:
       - primus_turbo package is installed AND its deep import chain works
       - tensor_model_parallel_size == 1
       - enable_primus_turbo == True
-      - If use_turbo_grouped_mlp is enabled with moe_grouped_gemm,
-        must use legacy grouped gemm (moe_use_legacy_grouped_gemm=True)
     """
     # Check if primus_turbo package is available *and* its deep import chain works.
     # A shallow find_spec is not enough: if a transitive dep (e.g. aiter/csrc) is
@@ -79,17 +76,6 @@ def _is_primus_turbo_enabled(ctx: PatchContext) -> bool:
         log_rank_0("[Patch:megatron.turbo.te_spec_provider] enable_primus_turbo=False; using TE backend...")
         return False
 
-    if (
-        getattr(args, "use_turbo_grouped_mlp", False)
-        and getattr(args, "moe_grouped_gemm", False)
-        and not getattr(args, "moe_use_legacy_grouped_gemm", False)
-        and is_te_min_version("1.9.0")
-    ):
-        log_rank_0(
-            "[Patch:megatron.turbo.te_spec_provider] PrimusTurbo not support TEGroupedMLP (TE>=1.9.0); using TE backend..."
-        )
-        return False
-
     return True
 
 
@@ -100,6 +86,7 @@ def _is_primus_turbo_enabled(ctx: PatchContext) -> bool:
     description="Replace TESpecProvider with PrimusTurboSpecProvider when PrimusTurbo is enabled",
     condition=_is_primus_turbo_enabled,
     backend_versions=["<0.17"],
+    priority=41,
 )
 def patch_te_spec_provider(ctx: PatchContext):
     """
@@ -109,9 +96,7 @@ def patch_te_spec_provider(ctx: PatchContext):
     PrimusTurboSpecProvider to enable PrimusTurbo backend.
     """
     import megatron.core.extensions as meg_ext
-    from megatron.core.extensions import (
-        transformer_engine as transformer_engine_spec_provider,
-    )
+    from megatron.core.extensions import transformer_engine_spec_provider
     from megatron.core.models.gpt import gpt_layer_specs, moe_module_specs
     from megatron.core.transformer import multi_token_prediction
 
