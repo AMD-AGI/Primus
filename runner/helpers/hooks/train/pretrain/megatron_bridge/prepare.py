@@ -5,6 +5,7 @@
 ###############################################################################
 
 import argparse
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
@@ -71,7 +72,7 @@ def build_megatron_helper(bridge_path: Path):
 
 def emit_extra(name: str, value: Any):
     if isinstance(value, (list, tuple)):
-        print(f"extra.{name}={repr(list(value))}")
+        print(f"extra.{name}={shlex.quote(repr(list(value)))}")
     else:
         print(f"extra.{name}={value}")
 
