@@ -57,6 +57,66 @@ from transformer_engine.pytorch.fp8 import DelayedScaling, FP8GlobalStateManager
 
 from primus.core.pipeline_parallel.handler.offload_handler import OFFLOAD_BUFFER
 
+_dummy_wgrads = {}
+
+
+def _get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
+    """Returns a dummy tensor of given shape."""
+    assert len(shape) == 2
+    global _dummy_wgrads
+    if (shape[0], shape[1], dtype) not in _dummy_wgrads:
+        _dummy_wgrads[(shape[0], shape[1], dtype)] = torch.empty(
+            shape,
+            dtype=dtype,
+            device="cuda",
+            requires_grad=False,
+        )
+    if zero:
+        _dummy_wgrads[(shape[0], shape[1], dtype)].fill_(0)
+    return _dummy_wgrads[(shape[0], shape[1], dtype)].detach()
+
+
+def _bridge_weight_grad(x: torch.Tensor, weight: torch.nn.Parameter, weight_buffer: torch.Tensor):
+    """Bridge quantized weight gradient to the original weight's ``main_grad``.
+
+    Must be called **before** the gemm so that in the backward pass the gemm
+    backward fires first (producing the real weight gradient) and then
+    ``_WeightGradBridge.backward`` receives it, writes it into
+    ``weight.main_grad``, and emits a dummy wgrad so that ``weight``'s
+    AccumulateGrad / DDP ``register_grad_ready`` hook fires in the correct
+    order.
+
+    Returns ``(x, quantized_weight)`` ready to be fed into the gemm op.
+    ``quantized_weight`` is ``weight_buffer`` on the quantized path or ``weight``
+    itself on the plain-gemm path.
+    """
+
+    class _WeightGradBridge(torch.autograd.Function):
+
+        @staticmethod
+        def forward(ctx, x, weight, quantized_weight):
+            ctx.save_for_backward(weight)
+            return x, quantized_weight
+
+        @staticmethod
+        def backward(ctx, grad_x, grad_quantized_weight):
+            (weight,) = ctx.saved_tensors
+            assert hasattr(weight, "main_grad"), "weight.main_grad should be set before backward pass."
+            assert hasattr(
+                weight, "grad_added_to_main_grad"
+            ), "weight.grad_added_to_main_grad don't have grad_added_to_main_grad attribute."
+
+            # NOTE: Set weight.grad_added_to_main_grad to True to avoid adding quantized weight gradient to main grad twice.
+            weight.main_grad.add_(grad_quantized_weight)
+            weight.grad_added_to_main_grad = True
+
+            return grad_x, _get_dummy_wgrad(list(weight.shape), weight.dtype), None
+
+    if weight_buffer is not None and weight_buffer.requires_grad:
+        return _WeightGradBridge.apply(x, weight, weight_buffer)
+
+    return _WeightGradBridge.apply(x, weight, weight)
+
 
 def _bridge_weight_grad(
     x: torch.Tensor, weight: torch.nn.Parameter, weight_buffer: torch.Tensor
@@ -818,9 +878,10 @@ class PrimusTurboLinear(TELinear):
                         keep_trans_cache=not self.disable_parameter_transpose_cache,
                     )
 
+                x, quantized_weight = _bridge_weight_grad(x, weight, self.quantized_weight_buffer)
                 out = primus_turbo_torch.ops.gemm_fp8(
                     x,
-                    self.quantized_weight_buffer,
+                    quantized_weight,
                     trans_a=False,
                     trans_b=True,
                     out_dtype=None,
@@ -843,9 +904,10 @@ class PrimusTurboLinear(TELinear):
                         keep_trans_cache=not self.disable_parameter_transpose_cache,
                     )
 
+                x, quantized_weight = _bridge_weight_grad(x, weight, self.quantized_weight_buffer)
                 out = primus_turbo_torch.ops.gemm_fp4(
                     x,
-                    self.quantized_weight_buffer,
+                    quantized_weight,
                     trans_a=False,
                     trans_b=True,
                     out_dtype=None,
@@ -854,8 +916,9 @@ class PrimusTurboLinear(TELinear):
             else:
                 out = primus_turbo_torch.ops.gemm(x, weight, trans_a=False, trans_b=True, out_dtype=None)
 
-        out = _bridge_weight_grad(out, weight, self.quantized_weight_buffer)
         out = out.view(original_shape[0], original_shape[1], -1)
+
+        self.is_first_microbatch = False
 
         if self.te_return_bias:
             return out, bias_tensor
@@ -984,9 +1047,10 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                         keep_trans_cache=not self.disable_parameter_transpose_cache,
                     )
 
+                x, quantized_weight = _bridge_weight_grad(x, weight, self.quantized_weight_buffer)
                 out = primus_turbo_torch.ops.gemm_fp8(
                     x,
-                    self.quantized_weight_buffer,
+                    quantized_weight,
                     trans_a=False,
                     trans_b=True,
                     out_dtype=None,
@@ -1009,9 +1073,10 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
                         keep_trans_cache=not self.disable_parameter_transpose_cache,
                     )
 
+                x, quantized_weight = _bridge_weight_grad(x, weight, self.quantized_weight_buffer)
                 out = primus_turbo_torch.ops.gemm_fp4(
                     x,
-                    self.quantized_weight_buffer,
+                    quantized_weight,
                     trans_a=False,
                     trans_b=True,
                     out_dtype=None,
@@ -1020,8 +1085,9 @@ class PrimusTurboRowParallelLinear(TERowParallelLinear):
             else:
                 out = primus_turbo_torch.ops.gemm(x, weight, trans_a=False, trans_b=True, out_dtype=None)
 
-        out = _bridge_weight_grad(out, weight, self.quantized_weight_buffer)
         out = out.view(original_shape[0], original_shape[1], -1)
+
+        self.is_first_microbatch = False
 
         if self.te_return_bias:
             return out, bias_tensor
@@ -1144,9 +1210,10 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                         keep_trans_cache=not self.disable_parameter_transpose_cache,
                     )
 
+                x, quantized_weight = _bridge_weight_grad(x, weight, self.quantized_weight_buffer)
                 out = primus_turbo_torch.ops.gemm_fp8(
                     x,
-                    self.quantized_weight_buffer,
+                    quantized_weight,
                     trans_a=False,
                     trans_b=True,
                     out_dtype=None,
@@ -1169,9 +1236,10 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
                         keep_trans_cache=not self.disable_parameter_transpose_cache,
                     )
 
+                x, quantized_weight = _bridge_weight_grad(x, weight, self.quantized_weight_buffer)
                 out = primus_turbo_torch.ops.gemm_fp4(
                     x,
-                    self.quantized_weight_buffer,
+                    quantized_weight,
                     trans_a=False,
                     trans_b=True,
                     out_dtype=None,
@@ -1182,6 +1250,8 @@ class PrimusTurboColumnParallelLinear(TEColumnParallelLinear):
 
         out = _bridge_weight_grad(out, weight, self.quantized_weight_buffer)
         out = out.view(original_shape[0], original_shape[1], -1)
+
+        self.is_first_microbatch = False
 
         if self.te_return_bias:
             return out, bias_tensor
@@ -1315,9 +1385,10 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
                         keep_trans_cache=not self.disable_parameter_transpose_cache,
                     )
 
+                x, quantized_weight = _bridge_weight_grad(x, weight, self.quantized_weight_buffer)
                 out = primus_turbo_torch.ops.gemm_fp8(
                     x,
-                    self.quantized_weight_buffer,
+                    quantized_weight,
                     trans_a=False,
                     trans_b=True,
                     out_dtype=None,
@@ -1340,9 +1411,10 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
                         keep_trans_cache=not self.disable_parameter_transpose_cache,
                     )
 
+                x, quantized_weight = _bridge_weight_grad(x, weight, self.quantized_weight_buffer)
                 out = primus_turbo_torch.ops.gemm_fp4(
                     x,
-                    self.quantized_weight_buffer,
+                    quantized_weight,
                     trans_a=False,
                     trans_b=True,
                     out_dtype=None,
@@ -1353,6 +1425,8 @@ class PrimusTurboColumnParallelLinearTorch(ColumnParallelLinear):
 
         out = _bridge_weight_grad(out, weight, self.quantized_weight_buffer)
         out = out.view(original_shape[0], original_shape[1], -1)
+
+        self.is_first_microbatch = False
 
         return out, bias_tensor
 
@@ -1481,9 +1555,10 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                         keep_trans_cache=not self.disable_parameter_transpose_cache,
                     )
 
+                inp, quantized_weight = _bridge_weight_grad(inp, weight, self.quantized_weight_buffer)
                 out = primus_turbo_torch.ops.gemm_fp8(
                     inp,
-                    self.quantized_weight_buffer,
+                    quantized_weight,
                     trans_a=False,
                     trans_b=True,
                     out_dtype=None,
@@ -1506,9 +1581,10 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
                         keep_trans_cache=not self.disable_parameter_transpose_cache,
                     )
 
+                inp, quantized_weight = _bridge_weight_grad(inp, weight, self.quantized_weight_buffer)
                 out = primus_turbo_torch.ops.gemm_fp4(
                     inp,
-                    self.quantized_weight_buffer,
+                    quantized_weight,
                     trans_a=False,
                     trans_b=True,
                     out_dtype=None,
@@ -1517,8 +1593,9 @@ class PrimusTurboLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
             else:
                 out = primus_turbo_torch.ops.gemm(inp, weight, trans_a=False, trans_b=True, out_dtype=None)
 
-        out = _bridge_weight_grad(out, weight, self.quantized_weight_buffer)
         out = out.view(original_shape[0], original_shape[1], -1)
+
+        self.is_first_microbatch = False
 
         if self.te_return_bias:
             return out, bias_tensor
