@@ -37,8 +37,14 @@ The two functions:
 
 Both functions:
 
-* run the ``q @ k`` matmul + softmax in fp32 to match the V4 numerical
-  contract (the released checkpoint was trained on this path);
+* keep every matmul / einsum on tensor cores in the input dtype (bf16
+  in production); the matmul accumulator inside is fp32. The *only*
+  fp32 step is the softmax block (max-subtract + ``exp`` + sum +
+  divide), which :func:`_softmax_with_sink` upcasts internally and
+  returns in fp32; the caller-side ``probs.to(v.dtype)`` puts probs
+  back on the bf16 path before the V-matmul. This matches the
+  FlashAttention / Megatron de-facto layout (bf16 ``Q @ K^T``, fp32
+  softmax, bf16 ``probs @ V``);
 * honor ``attn_dropout`` only when ``training`` is also ``True`` (so
   the eval / inference path is deterministic);
 * return ``[B, H, Sq, head_dim]`` in ``v.dtype`` (or ``v_local.dtype``
@@ -76,27 +82,35 @@ def _softmax_with_sink(
     after softmax. The head can still spend probability mass on the
     sink as a "no attention" fallback.
 
+    **dtype contract.** This is the *only* fp32 step in V4 attention.
+    ``logits`` may arrive in the model dtype (bf16 in production —
+    coming straight out of a tensor-core ``Q @ K^T`` matmul); the
+    softmax block (max-subtract + ``exp`` + sum + divide) is the
+    numerically sensitive part, so we **upcast to fp32 here** and
+    return probabilities in **fp32**. The caller is responsible for
+    ``probs.to(v.dtype)`` before the value matmul so the V-matmul
+    stays on bf16 tensor cores.
+
     Returns probabilities on the *real* keys of the same shape as
-    ``logits``.
-
-    This mirrors :meth:`DeepseekV4Attention._append_sink_softmax`
-    bit-for-bit (the only delta is replacing the bound
-    ``self.num_heads`` sanity reference with ``sink.shape[0]``, which is
-    the same value because :class:`DeepseekV4Attention` registers
-    ``self.attn_sink`` with shape ``[num_heads]``).
+    ``logits`` — but in **fp32** regardless of input dtype.
     """
+    # logits: [B, H, ..., Sk] (any dtype) -> logits_fp32: [B, H, ..., Sk] in fp32
+    logits_fp32 = logits.float()
     if sink is None:
-        logits = logits - logits.amax(dim=-1, keepdim=True).detach()
-        return logits.softmax(dim=-1)
+        logits_fp32 = logits_fp32 - logits_fp32.amax(dim=-1, keepdim=True).detach()
+        return logits_fp32.softmax(dim=-1)
 
-    ndim = logits.dim()
+    # sink: [H] (any dtype) -> sink_col: [B, H, ..., 1] in fp32
+    ndim = logits_fp32.dim()
     num_heads = sink.shape[0]
     view_shape = [1] * ndim
     view_shape[1] = num_heads
     view_shape[-1] = 1
-    target_shape = list(logits.shape[:-1]) + [1]
+    target_shape = list(logits_fp32.shape[:-1]) + [1]
     sink_col = sink.float().view(*view_shape).expand(*target_shape)
-    logits_aug = torch.cat([logits, sink_col], dim=-1)
+    # logits_fp32: [B, H, ..., Sk], sink_col: [B, H, ..., 1]
+    # -> logits_aug: [B, H, ..., Sk+1] in fp32
+    logits_aug = torch.cat([logits_fp32, sink_col], dim=-1)
     logits_aug = logits_aug - logits_aug.amax(dim=-1, keepdim=True).detach()
     probs = logits_aug.softmax(dim=-1)
     return probs[..., :-1]
@@ -145,14 +159,20 @@ def eager_v4_attention(
 ) -> torch.Tensor:
     """Eager-Python V4 dense / HCA attention.
 
-    Math (exactly as :meth:`DeepseekV4Attention._attention_forward`):
+    Math::
 
-    .. code-block:: text
-
-        logits = (q.float() @ k.float().T) * scale + mask
-        probs  = softmax_with_sink(logits, sink)
+        logits = (q @ k.T) * scale + mask        # bf16 tensor-core matmul
+        probs  = softmax_with_sink(logits, sink) # softmax internally upcasts to fp32
         if attn_dropout > 0 and training: probs = dropout(probs, attn_dropout)
-        out    = probs.to(v.dtype) @ v
+        out    = probs.to(v.dtype) @ v           # bf16 tensor-core matmul
+
+    **dtype contract.** All matmuls (``Q @ K^T`` and ``probs @ V``) run
+    on tensor cores in the input dtype (bf16 in production); the
+    accumulator inside the matmul is fp32. The *only* fp32 step is the
+    softmax block, which :func:`_softmax_with_sink` handles internally
+    (input may be bf16, output is fp32). The caller-side
+    ``probs.to(v.dtype)`` puts probs back on the bf16 path before the
+    V-matmul.
 
     Mask resolution:
 
@@ -171,7 +191,7 @@ def eager_v4_attention(
     Sq = q.shape[2]
     Sk = k.shape[2]
 
-    # mask: [Sq, Sk]   (broadcasts over B, H at the addition site below)
+    # mask: [Sq, Sk] in q.dtype   (broadcasts over B, H at the addition site below)
     if additive_mask is None:
         if Sq != Sk:
             raise ValueError(
@@ -180,23 +200,26 @@ def eager_v4_attention(
                 "the compressed pool to the local keys and supply the joint "
                 "additive mask."
             )
-        # _build_local_attention_mask(Sq, swa_window) -> mask: [Sq, Sq] (== [Sq, Sk])
+        # _build_local_attention_mask(Sq, swa_window) -> mask: [Sq, Sq] (== [Sq, Sk]) in q.dtype
         mask = _build_local_attention_mask(Sq, swa_window, device=q.device, dtype=q.dtype)
     else:
-        # additive_mask: [Sq, Sk] -> mask: [Sq, Sk]
+        # additive_mask: [Sq, Sk] -> mask: [Sq, Sk] in caller's dtype
         mask = additive_mask
 
-    # q.float(): [B, H, Sq, D], k.float().transpose(-2,-1): [B, H, D, Sk]
-    # -> matmul(...): [B, H, Sq, Sk] -> * scale: [B, H, Sq, Sk]
-    logits = torch.matmul(q.float(), k.float().transpose(-2, -1)) * scale
-    # logits: [B, H, Sq, Sk], mask: [Sq, Sk] -> logits: [B, H, Sq, Sk]
+    # q: [B, H, Sq, D], k.transpose(-2,-1): [B, H, D, Sk] -> matmul(...): [B, H, Sq, Sk] in q.dtype
+    # bf16 tensor-core matmul (fp32 accumulator inside, output bf16)
+    # * scale: [B, H, Sq, Sk] in q.dtype
+    logits = torch.matmul(q, k.transpose(-2, -1)) * scale
+    # logits: [B, H, Sq, Sk], mask: [Sq, Sk] -> logits: [B, H, Sq, Sk]   (mask broadcasts over B, H)
     logits = logits + mask
-    # logits: [B, H, Sq, Sk], sink: [H] or None -> probs: [B, H, Sq, Sk]
+    # logits: [B, H, Sq, Sk] (bf16), sink: [H] or None -> probs: [B, H, Sq, Sk] in fp32
+    # softmax block internally upcasts logits + sink to fp32 (numerical contract: only step in fp32)
     probs = _softmax_with_sink(logits, sink)
-    # probs: [B, H, Sq, Sk] -> probs: [B, H, Sq, Sk]
+    # probs: [B, H, Sq, Sk] (fp32) -> probs: [B, H, Sq, Sk] (fp32)
     if attn_dropout > 0.0 and training:
         probs = torch.nn.functional.dropout(probs, p=attn_dropout)
-    # probs.to(v.dtype): [B, H, Sq, Sk], v: [B, H, Sk, D] -> out: [B, H, Sq, D]
+    # probs.to(v.dtype): [B, H, Sq, Sk] in v.dtype, v: [B, H, Sk, D] -> out: [B, H, Sq, D] in v.dtype
+    # bf16 tensor-core matmul (fp32 accumulator inside)
     return torch.matmul(probs.to(v.dtype), v)
 
 
@@ -215,21 +238,26 @@ def eager_v4_csa_attention(
 ) -> torch.Tensor:
     """Eager-Python V4 CSA fused attention (joint local SWA + sparse top-K).
 
-    Math (exactly as :meth:`DeepseekV4Attention._csa_forward`):
+    Math::
 
-    .. code-block:: text
-
-        local_logits  = (q.float() @ k_local.float().T) * scale + local_mask
-        sparse_logits = einsum("bhsd,bhskd->bhsk", q.float(), gathered_h) * scale
-                       + sparse_mask.unsqueeze(1)
-        joint_logits  = cat([local_logits, sparse_logits], dim=-1)   # [B, H, Sq, Sq+K]
-        probs         = softmax_with_sink(joint_logits, sink)        # JOINT softmax
+        local_logits  = (q @ k_local.T) * scale + local_mask                # bf16 matmul
+        sparse_logits = einsum("bhsd,bhskd->bhsk", q, gathered_h) * scale
+                       + sparse_mask.unsqueeze(1)                            # bf16 einsum
+        joint_logits  = cat([local_logits, sparse_logits], dim=-1)           # [B, H, Sq, Sq+K]
+        probs         = softmax_with_sink(joint_logits, sink)                # JOINT softmax in fp32
         if attn_dropout > 0 and training: probs = dropout(probs, attn_dropout)
         probs_local, probs_sparse = probs[..., :Sq], probs[..., Sq:]
         out = probs_local @ v_local + einsum("bhsk,bhskd->bhsd", probs_sparse, gathered_h)
+                                                                             # bf16 matmul / einsum
 
     where ``gathered_h = gathered.unsqueeze(1).expand(B, H, Sq, K, D)``
     (heads broadcast across the single compressor output).
+
+    **dtype contract.** Same as :func:`eager_v4_attention`: every
+    matmul / einsum runs on tensor cores in the input dtype (bf16 in
+    production, fp32 accumulator inside); the *only* fp32 step is the
+    joint softmax inside :func:`_softmax_with_sink`. ``probs.to(v.dtype)``
+    puts the per-branch probabilities back on bf16 before the V-stage.
 
     The local SWA mask is built internally from ``swa_window`` (see
     :func:`_build_local_attention_mask`); the caller pre-builds
@@ -242,53 +270,56 @@ def eager_v4_csa_attention(
     B, H, Sq, D = q.shape
     K = gathered.shape[2]
 
-    # _build_local_attention_mask(Sq, swa_window) -> local_mask: [Sq, Sq]
+    # _build_local_attention_mask(Sq, swa_window) -> local_mask: [Sq, Sq] in q.dtype
     local_mask = _build_local_attention_mask(Sq, swa_window, device=q.device, dtype=q.dtype)
 
-    # q.float(): [B, H, Sq, D], k_local.float().transpose(-2,-1): [B, H, D, Sq]
-    # -> matmul(...): [B, H, Sq, Sq] -> * scale: local_logits: [B, H, Sq, Sq]
-    local_logits = torch.matmul(q.float(), k_local.float().transpose(-2, -1)) * scale
+    # q: [B, H, Sq, D], k_local.transpose(-2,-1): [B, H, D, Sq]
+    # -> matmul(...): [B, H, Sq, Sq] in q.dtype   (bf16 tensor core, fp32 accumulator inside)
+    # * scale: local_logits: [B, H, Sq, Sq] in q.dtype
+    local_logits = torch.matmul(q, k_local.transpose(-2, -1)) * scale
     # local_logits: [B, H, Sq, Sq], local_mask: [Sq, Sq]
-    # -> local_logits: [B, H, Sq, Sq]   (mask broadcasts over B, H)
+    # -> local_logits: [B, H, Sq, Sq] in q.dtype   (mask broadcasts over B, H)
     local_logits = local_logits + local_mask
 
     # gathered: [B, Sq, K, D] -> unsqueeze(1): [B, 1, Sq, K, D]
-    # -> expand: gathered_h: [B, H, Sq, K, D] -> .float(): [B, H, Sq, K, D]
-    gathered_h = gathered.unsqueeze(1).expand(B, H, Sq, K, D).float()
-    # q.float(): [B, H, Sq, D], gathered_h: [B, H, Sq, K, D]
-    # -> einsum("bhsd,bhskd->bhsk"): [B, H, Sq, K] -> * scale: sparse_logits: [B, H, Sq, K]
-    sparse_logits = torch.einsum("bhsd,bhskd->bhsk", q.float(), gathered_h) * scale
+    # -> expand: gathered_h: [B, H, Sq, K, D] in gathered.dtype   (view, no copy)
+    gathered_h = gathered.unsqueeze(1).expand(B, H, Sq, K, D)
+    # q: [B, H, Sq, D], gathered_h: [B, H, Sq, K, D]
+    # -> einsum("bhsd,bhskd->bhsk"): [B, H, Sq, K] in q.dtype   (bf16 tensor core)
+    # * scale: sparse_logits: [B, H, Sq, K] in q.dtype
+    sparse_logits = torch.einsum("bhsd,bhskd->bhsk", q, gathered_h) * scale
     # sparse_logits: [B, H, Sq, K], sparse_mask.unsqueeze(1): [B, 1, Sq, K]
-    # -> sparse_logits: [B, H, Sq, K]   (mask broadcasts over H)
+    # -> sparse_logits: [B, H, Sq, K] in q.dtype   (mask broadcasts over H)
     sparse_logits = sparse_logits + sparse_mask.unsqueeze(1)
 
     # local_logits: [B, H, Sq, Sq], sparse_logits: [B, H, Sq, K]
-    # -> joint_logits: [B, H, Sq, Sq+K]
+    # -> joint_logits: [B, H, Sq, Sq+K] in q.dtype
     joint_logits = torch.cat([local_logits, sparse_logits], dim=-1)
-    # joint_logits: [B, H, Sq, Sq+K], sink: [H] or None -> probs: [B, H, Sq, Sq+K]
+    # joint_logits: [B, H, Sq, Sq+K] (bf16), sink: [H] or None -> probs: [B, H, Sq, Sq+K] in fp32
+    # softmax block internally upcasts to fp32 (numerical contract: only step in fp32)
     probs = _softmax_with_sink(joint_logits, sink)
 
-    # probs: [B, H, Sq, Sq+K] -> probs: [B, H, Sq, Sq+K]
+    # probs: [B, H, Sq, Sq+K] (fp32) -> probs: [B, H, Sq, Sq+K] (fp32)
     if attn_dropout > 0.0 and training:
         probs = torch.nn.functional.dropout(probs, p=attn_dropout)
 
-    # probs[..., :Sq]: [B, H, Sq, Sq] -> probs_local: [B, H, Sq, Sq]
+    # probs[..., :Sq]: [B, H, Sq, Sq] in fp32 -> probs_local: [B, H, Sq, Sq] in v_local.dtype
     probs_local = probs[..., :Sq].to(v_local.dtype)
-    # probs[..., Sq:]: [B, H, Sq, K] -> probs_sparse: [B, H, Sq, K]
+    # probs[..., Sq:]: [B, H, Sq, K] in fp32 -> probs_sparse: [B, H, Sq, K] in v_local.dtype
     probs_sparse = probs[..., Sq:].to(v_local.dtype)
 
     # probs_local: [B, H, Sq, Sq], v_local: [B, H, Sq, D]
-    # -> matmul(...): out_local: [B, H, Sq, D]
+    # -> matmul(...): out_local: [B, H, Sq, D] in v_local.dtype   (bf16 tensor core)
     out_local = torch.matmul(probs_local, v_local)
     # probs_sparse: [B, H, Sq, K], gathered_h.to(v_local.dtype): [B, H, Sq, K, D]
-    # -> einsum("bhsk,bhskd->bhsd"): out_sparse: [B, H, Sq, D]
+    # -> einsum("bhsk,bhskd->bhsd"): out_sparse: [B, H, Sq, D] in v_local.dtype   (bf16 tensor core)
     out_sparse = torch.einsum(
         "bhsk,bhskd->bhsd",
         probs_sparse,
         gathered_h.to(v_local.dtype),
     )
 
-    # out_local: [B, H, Sq, D], out_sparse: [B, H, Sq, D] -> out: [B, H, Sq, D]
+    # out_local: [B, H, Sq, D], out_sparse: [B, H, Sq, D] -> out: [B, H, Sq, D] in v_local.dtype
     return out_local + out_sparse
 
 
